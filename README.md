@@ -1,80 +1,233 @@
-# emonk 🐵
+# monkey-bot (emonk)
 
-> An opinionated agent framework built on [LangChain Deep Agents](https://docs.langchain.com/oss/python/deepagents/overview) — with pluggable cloud storage, sandbox execution, and a skills engine.
+> **The production-ready Python framework for building and deploying LLM agents on cloud infrastructure.**
 
-Built by [ez-ai](https://github.com/ez-ai).
+Built on [LangChain](https://github.com/langchain-ai/langchain) and [LangGraph](https://github.com/langchain-ai/langgraph) — monkey-bot handles the infrastructure so you can focus on building your agent.
 
 ---
 
-## What is emonk?
+## What is monkey-bot?
 
-emonk (monkey-bot) is a thin, opinionated layer on top of LangChain's `create_agent`. It adds:
+monkey-bot (`emonk`) is a thin, opinionated framework that takes a LangGraph agent from zero to production in minutes. It provides everything below the agent logic layer — cloud storage, memory persistence, conversation checkpointing, a cron scheduler, a skills engine, voice support, and a Google Chat gateway — all wired together and ready to deploy on GCP Cloud Run (or AWS, or anywhere Docker runs).
 
-- **Cloud storage backends** — Persist skills, memory, and artifacts to GCS (or bring your own backend)
-- **Sandbox execution** — Run shell commands in isolated Modal containers (optional)
-- **Skills engine** — Agent-discoverable SKILL.md files with YAML frontmatter
-- **Session memory** — Automatic session summaries with cross-conversation recall
-- **Job scheduling** — Cloud Scheduler integration for recurring tasks
-- **Google Chat gateway** — Webhook handler with PII filtering
+You write the system prompt, tools, and job handlers. monkey-bot handles the rest.
 
-Everything is optional and pluggable. The framework works with zero cloud dependencies out of the box.
+```
+Your Code               monkey-bot Framework        Cloud Infrastructure
+─────────────           ────────────────────         ────────────────────
+system_prompt.md   →    3-layer prompt engine   →    Vertex AI / Gemini
+tools/skills       →    skills engine           →    GCS memory bucket
+job handlers       →    cron scheduler          →    Cloud Scheduler
+bot.yaml           →    config loader           →    GCP Secret Manager
+                        FastAPI gateway         →    Cloud Run
+                        PII filtering           →    Google Chat
+                        Firestore checkpoints   →    Firestore
+```
 
 ---
 
 ## Features
 
-- 🤖 **LangChain Agent Core** — Built on `create_agent` with middleware support
-- 🎯 **Simple Skill System** — Add custom skills via SKILL.md + Python entry points
-- 💾 **Persistent Memory** — GCS-backed LangGraph Store with keyword search
-- ⏰ **Cloud Scheduler-Ready Jobs** — `/cron/tick` endpoint with metrics and Firestore locking
-- 🔧 **Multi-Provider Model Support** — Google Vertex AI, OpenAI, Anthropic (easy switching)
-- ⚙️ **Centralized Config Management** — Load secrets from GCP Secret Manager or `.env`
-- 📋 **Job Handler Pattern** — Standardized registration for scheduled task handlers
-- 💬 **Modern Google Chat Format** — Workspace Add-on support (+ legacy fallback)
-- 🔒 **Secure Execution** — Allowlist-based command/path validation (optional)
-- 📦 **Pluggable Backends** — Bring your own storage, sandbox, or LLM
-- 📊 **Structured Logging** — JSON logs with trace IDs
+| Feature | Description |
+|---|---|
+| **Deep Agent Core** | Built on `create_deep_agent` with full LangGraph state management |
+| **3-Layer Prompt System** | SOUL, IDENTITY, USER, and INDEX files compose the agent's context automatically |
+| **Persistent Memory** | GCS-backed LangGraph Store with keyword search and session summaries |
+| **Conversation Checkpoints** | InMemory (dev) or Firestore (production) — survives restarts |
+| **Cron Scheduler** | Cloud Scheduler-driven background jobs with JSON or Firestore storage, distributed locking |
+| **Skills Engine** | Add capabilities via `SKILL.md` + Python entry points — no framework changes needed |
+| **Google Chat Gateway** | Full Workspace Add-on support with PII filtering and allowlist auth |
+| **Voice Support** | GCP Speech-to-Text input and Text-to-Speech output (optional) |
+| **LLM Council** | Async post-processor that classifies and indexes raw memory files |
+| **Heartbeat System** | Scheduled agent self-checks with configurable Google Chat reporting |
+| **GCS Filesystem Sync** | Bidirectional memory sync between container and GCS on every startup/shutdown |
+| **Multi-Provider LLMs** | Google Vertex AI, OpenAI, Anthropic — switch with one config line |
+| **Zero-Config Defaults** | Works out of the box locally; production settings added incrementally |
+
+---
+
+## Documentation
+
+| Guide | Description |
+|---|---|
+| [Getting Started](docs/getting-started.md) | Install, configure, and run your first bot in 5 minutes |
+| [Creating an Agent](docs/creating-an-agent.md) | Step-by-step guide to building a production bot |
+| [Prompt & Identity Guide](docs/prompt-and-identity-guide.md) | SOUL, IDENTITY, USER, INDEX, HEARTBEAT — what each file is and when the agent uses it |
+| [Deploy to GCP](docs/deploy-gcp.md) | Deploy to Google Cloud Run with full infrastructure setup |
+| [Deploy to AWS](docs/deploy-aws.md) | AWS deployment guide *(coming soon)* |
+| [Configuration Reference](docs/configuration.md) | Every `bot.yaml` option and environment variable |
+| [Memory System](docs/memory.md) | How GCS memory, session summaries, and the LLM Council work |
+| [Scheduler & Jobs](docs/scheduler.md) | Background jobs, cron expressions, and job handlers |
+| [Skills System](docs/skills.md) | Building and registering agent skills |
+| [Voice](docs/voice.md) | STT/TTS voice integration with GCP |
+| [Integrations](docs/integrations.md) | All supported integrations and configuration |
 
 ---
 
 ## Quick Start
 
-### Using Config Module (Recommended)
+### 1. Install
 
-```python
-from emonk import build_agent
-from emonk.core.config import get_model, load_secrets
-
-# Load secrets (from .env in dev, Secret Manager in prod)
-load_secrets()
-
-# Get configured model (provider set via MODEL_PROVIDER env var)
-model = get_model()
-
-# Build agent
-agent = build_agent(model=model, tools=[])
-
-# Invoke
-result = agent.invoke({
-    "messages": [{"role": "user", "content": "Hello!"}]
-})
-print(result["messages"][-1].content)
+```bash
+pip install emonk
 ```
 
-### Manual Configuration (Advanced)
+Or clone the reference implementation:
+
+```bash
+git clone https://github.com/auriga-os/monkey-bot.git
+cd monkey-bot/test-monkey
+cp .env.example .env
+```
+
+### 2. Configure
+
+Edit `bot.yaml` (non-secret config):
+
+```yaml
+agent:
+  name: my-bot
+  skills_dir: ./skills
+
+model:
+  provider: google_vertexai
+  name: gemini-2.5-flash
+  temperature: 0.7
+
+gateway:
+  allowed_users:
+    - you@yourcompany.com
+```
+
+Edit `.env` (secrets — never committed):
+
+```bash
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
+VERTEX_AI_PROJECT_ID=your-gcp-project
+```
+
+### 3. Write your agent
 
 ```python
-from emonk import build_agent
-from langchain_google_vertexai import ChatVertexAI
+# src/main.py
+from emonk.core.config import load_secrets, get_model
+from emonk.core.deepagent import build_deep_agent
+from emonk.core.scheduler import CronScheduler
+from langchain_core.tools import tool
 
-# Explicit model configuration
-model = ChatVertexAI(model="gemini-2.5-flash")
-agent = build_agent(model=model, tools=[])
+load_secrets()
 
-result = agent.invoke({
-    "messages": [{"role": "user", "content": "Hello!"}]
-})
-print(result["messages"][-1].content)
+@tool
+def say_hello(name: str) -> str:
+    """Say hello to someone."""
+    return f"Hello, {name}!"
+
+model = get_model()
+scheduler = CronScheduler()
+agent = build_deep_agent(
+    model=model,
+    tools=[say_hello],
+    user_system_prompt="You are a friendly assistant.",
+    scheduler=scheduler,
+)
+```
+
+### 4. Run locally
+
+```bash
+python -m src.main
+```
+
+### 5. Deploy
+
+```bash
+./deploy.sh
+```
+
+Done. Your agent is live on Cloud Run.
+
+---
+
+## How It Works
+
+```
+┌──────────────────────────────────────────────────────┐
+│               Gateway  (FastAPI)                     │
+│   POST /webhook    POST /voice    POST /cron/tick    │
+│   GET  /health     GET  /         POST /run          │
+└──────────┬──────────────────────────────┬────────────┘
+           │                              │
+           ▼                              ▼
+┌──────────────────────┐       ┌─────────────────────┐
+│  Agent Core          │       │  Cloud Scheduler     │
+│  (LangGraph)         │       │  POST /cron/tick     │
+│  ─────────────────── │       │  every minute        │
+│  3-Layer Prompt      │       └─────────┬───────────┘
+│  Tool Calling        │                 │
+│  State Management    │                 ▼
+│  Checkpointing       │       ┌─────────────────────┐
+└──┬───────────┬───────┘       │  CronScheduler      │
+   │           │               │  JSON / Firestore   │
+   ▼           ▼               │  Distributed Lock   │
+┌───────┐  ┌────────┐          └─────────────────────┘
+│Skills │  │Memory  │
+│Engine │  │Manager │
+│       │  │        │
+│SKILL.md  │GCSStore│
+│+ Python  │Session │
+│ tools    │Summaries
+└───────┘  │Index   │
+           │Council │
+           └────────┘
+```
+
+---
+
+## Project Structure
+
+```
+monkey-bot/
+├── src/
+│   ├── core/
+│   │   ├── deepagent.py          # build_deep_agent() — primary public API
+│   │   ├── agent.py              # build_agent() — legacy API
+│   │   ├── config.py             # Config loading, secrets, model factory
+│   │   ├── prompt.py             # 3-layer system prompt composition
+│   │   ├── council.py            # LLM Council — async memory post-processor
+│   │   ├── store.py              # GCSStore + search_memory tool
+│   │   ├── filesystem_sync.py    # GCS ↔ local memory sync
+│   │   ├── firestore_checkpointer.py  # Firestore conversation persistence
+│   │   ├── middleware.py         # SessionSummaryMiddleware
+│   │   ├── terminal.py           # Sandboxed subprocess runner
+│   │   └── scheduler/
+│   │       ├── cron.py           # CronScheduler
+│   │       ├── storage.py        # JSONFileStorage + FirestoreStorage
+│   │       └── handlers.py       # HeartbeatHandler
+│   ├── gateway/
+│   │   ├── server.py             # FastAPI app + all endpoints
+│   │   ├── models.py             # Request/response Pydantic models
+│   │   ├── pii_filter.py         # Email hashing, metadata stripping
+│   │   └── interfaces.py         # AgentCoreInterface ABC
+│   ├── skills/
+│   │   ├── loader.py             # SkillLoader
+│   │   └── executor.py           # SkillsEngine
+│   ├── backends/
+│   │   └── gcs.py                # GCS backend
+│   ├── sandbox/
+│   │   └── modal.py              # Modal.com sandbox
+│   └── voice/
+│       └── handler.py            # GCP STT/TTS
+├── skills/                        # Built-in skills
+│   ├── file-ops/
+│   ├── memory/
+│   └── search-web/
+├── docs/                          # Full documentation
+├── tests/
+├── bot.yaml                       # Reference bot config
+├── .env.example                   # Environment variable template
+├── Dockerfile
+├── pyproject.toml
+└── requirements.txt
 ```
 
 ---
@@ -86,568 +239,117 @@ print(result["messages"][-1].content)
 pip install emonk
 
 # With Google Cloud Storage
-pip install emonk[gcs]
+pip install "emonk[gcs]"
 
-# With Modal sandbox
-pip install emonk[modal]
+# With voice (STT/TTS)
+pip install "emonk[voice]"
+
+# With Modal sandbox execution
+pip install "emonk[modal]"
 
 # Everything
-pip install emonk[all]
+pip install "emonk[all]"
 ```
 
----
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────---┐
-│            Gateway (FastAPI)                   │
-│   POST /webhook   POST /cron/tick   GET /health
-└──────────────┬──────────────────────┬──────────┘
-               │                      │
-               │                      ▼
-               │            ┌──────────────────────┐
-               │            │ Cloud Scheduler (GCP)│
-               │            │ Trigger cadence      │
-               │            └──────────────────────┘
-               ▼
-┌─────────────────────────────────────────────┐
-│         Agent Core (LangChain)              │
-│   - create_agent with middleware            │
-│   - Conversation context (last 20 msgs)     │
-│   - LLM integration (Gemini 2.5 Flash)      │
-└──┬──────────────┬──────────────┬────────────┘
-   │              │              │
-   ▼              ▼              ▼
-┌────────┐  ┌──────────┐  ┌──────────┐
-│Skills  │  │Terminal  │  │Memory    │
-│Engine  │  │Executor  │  │Manager   │
-└────────┘  └──────────┘  └──────────┘
-                   │
-                   ▼
-           ┌───────────────────┐
-           │ Cron Scheduler    │
-           │ JSON / Firestore  │
-           └───────────────────┘
-```
-
----
-
-## Configuration
-
-monkey-bot uses environment variables for configuration. See [`.env.example`](.env.example) for all available options.
-
-### Key Configuration Variables
+**Or install the development version directly from source:**
 
 ```bash
-# Model provider (google_vertexai | openai | anthropic)
-MODEL_PROVIDER=google_vertexai
-
-# Model name (provider-specific)
-MODEL_NAME=gemini-2.5-flash
-
-# Generation temperature (0.0-1.0)
-MODEL_TEMPERATURE=0.7
-
-# GCP Project ID (for Vertex AI)
-VERTEX_AI_PROJECT_ID=your-gcp-project-id
-
-# Scheduler storage (json | firestore)
-SCHEDULER_STORAGE=json
-
-# Google Chat response format (workspace_addon | legacy)
-GOOGLE_CHAT_FORMAT=workspace_addon
-```
-
-**For full configuration reference:** See [`.env.example`](.env.example)
-
-**For deployment instructions:** See [`docs/deployment.md`](docs/deployment.md)
-
----
-
-## Usage Examples
-
-### Basic Agent
-
-```python
-from emonk import build_agent
-from emonk.core.config import get_model
-
-# Create agent using config module
-model = get_model()
-agent = build_agent(model=model, tools=[])
-
-# Invoke the agent
-result = agent.invoke({
-    "messages": [{"role": "user", "content": "What's 2+2?"}]
-})
-print(result["messages"][-1].content)
-```
-
-### With Skills
-
-```python
-from emonk import build_agent
-from emonk.skills import SkillLoader, SkillExecutor
-from langchain_google_vertexai import ChatVertexAI
-
-# Load skills from ./skills/ directory
-loader = SkillLoader(skills_dir="./skills")
-skills_metadata = loader.load_skills()
-
-# Create executor and convert to LangChain tools
-executor = SkillExecutor(skills_metadata)
-tools = executor.to_langchain_tools()
-
-# Build agent with skills
-model = ChatVertexAI(model="gemini-2.5-flash")
-agent = build_agent(model=model, tools=tools)
-
-result = agent.invoke({
-    "messages": [{"role": "user", "content": "List files in ./data"}]
-})
-```
-
-### With Cloud Storage
-
-```python
-from emonk import build_agent, GCSStore, create_search_memory_tool
-from langchain_google_vertexai import ChatVertexAI
-
-# Create GCS-backed memory store
-store = GCSStore(
-    bucket_name="my-agent-memory",
-    project_id="my-gcp-project"
-)
-
-# Create search_memory tool
-search_tool = create_search_memory_tool(store)
-
-# Build agent with memory
-model = ChatVertexAI(model="gemini-2.5-flash")
-agent = build_agent(
-    model=model,
-    tools=[search_tool],
-    store=store  # Enables SessionSummaryMiddleware
-)
-
-result = agent.invoke(
-    {"messages": [{"role": "user", "content": "What did we discuss last time?"}]},
-    config={"configurable": {"user_id": "user123", "thread_id": "thread456"}}
-)
-```
-
-### With Sandbox Execution
-
-```python
-from emonk import build_agent
-from emonk.sandbox import ModalSandboxBackend
-from langchain_google_vertexai import ChatVertexAI
-
-# Create Modal sandbox backend
-sandbox = ModalSandboxBackend()
-
-# Create sandbox execution tool
-from langchain_core.tools import tool
-
-@tool
-async def run_code(code: str) -> str:
-    """Execute Python code in isolated sandbox."""
-    result = await sandbox.execute(code)
-    return result.output
-
-# Build agent with sandbox
-model = ChatVertexAI(model="gemini-2.5-flash")
-agent = build_agent(model=model, tools=[run_code])
-
-result = agent.invoke({
-    "messages": [{"role": "user", "content": "Run: print('Hello from sandbox')"}]
-})
-```
-
-### With Memory
-
-```python
-from emonk import GCSStore
-
-# Initialize store
-store = GCSStore(bucket_name="my-memory-bucket")
-
-# Store a session summary
-store.put(
-    namespace=("user123", "session_summaries"),
-    key="thread-456",
-    value={
-        "summary": "User asked about Python best practices",
-        "key_topics": ["python", "coding", "best-practices"],
-        "timestamp": "2026-02-13T10:30:00Z"
-    }
-)
-
-# Search memory by keyword
-results = store.search(
-    namespace=("user123", "session_summaries"),
-    query="python best practices",
-    limit=5
-)
-
-for item in results:
-    print(f"Thread: {item.key}")
-    print(f"Summary: {item.value['summary']}")
-```
-
-### With Scheduling
-
-```python
-from emonk.core.scheduler import CronScheduler
-from emonk.core.scheduler.handlers import register_handler
-from datetime import datetime, timezone, timedelta
-
-# Create scheduler
-scheduler = CronScheduler(agent_state=agent_state)
-
-# Define job handler
-async def handle_reminder(job: dict):
-    """Handle reminder job execution."""
-    print(f"Sending reminder: {job['payload']['message']}")
-    # Your reminder logic here
-
-# Register handler (NEW: standardized pattern)
-register_handler(scheduler, "send_reminder", handle_reminder)
-
-# Or use convenience method
-scheduler.register_handler("send_reminder", handle_reminder)
-
-# Schedule a job
-job_id = await scheduler.schedule_job(
-    job_type="send_reminder",
-    schedule_at=datetime.now(timezone.utc) + timedelta(hours=1),
-    payload={
-        "user_id": "user123",
-        "message": "Don't forget to review the PR!"
-    }
-)
-
-# Start scheduler loop (runs in background)
-await scheduler.start()
-```
-
-### Full Production Setup
-
-```python
-from emonk import build_agent, GCSStore, create_search_memory_tool
-from emonk.skills import SkillLoader, SkillExecutor
-from emonk.sandbox import ModalSandboxBackend
-from emonk.core.scheduler import CronScheduler
-from langchain_google_vertexai import ChatVertexAI
-
-# 1. Load skills
-loader = SkillLoader(skills_dir="./skills")
-executor = SkillExecutor(loader.load_skills())
-skill_tools = executor.to_langchain_tools()
-
-# 2. Setup GCS memory
-store = GCSStore(bucket_name="prod-agent-memory")
-memory_tool = create_search_memory_tool(store)
-
-# 3. Setup sandbox (optional)
-sandbox = ModalSandboxBackend()
-
-# 4. Build agent
-model = ChatVertexAI(model="gemini-2.5-flash")
-agent = build_agent(
-    model=model,
-    tools=[*skill_tools, memory_tool],
-    store=store,
-    user_system_prompt="You are a helpful assistant for software engineers."
-)
-
-# 5. Setup scheduler
-scheduler = CronScheduler(agent_state=agent_state)
-await scheduler.start()
-
-# 6. Use agent
-result = agent.invoke(
-    {"messages": [{"role": "user", "content": "Help me debug this error"}]},
-    config={"configurable": {"user_id": "user123", "thread_id": "thread789"}}
-)
+pip install git+https://github.com/auriga-os/monkey-bot.git@main
 ```
 
 ---
 
-## Creating Skills
+## Integrations
 
-Skills are discovered from the `./skills/` directory. Each skill is a subdirectory containing:
+| Integration | Status | Purpose |
+|---|---|---|
+| **Google Vertex AI** (Gemini) | Production | Primary LLM provider |
+| **Google Cloud Run** | Production | Serverless container hosting |
+| **Google Cloud Storage** | Production | Long-term memory and file sync |
+| **Google Cloud Firestore** | Production | Conversation checkpoints and distributed job locks |
+| **Google Cloud Scheduler** | Production | Cron job triggers |
+| **GCP Secret Manager** | Production | Production secrets management |
+| **Google Chat** | Production | Workspace Add-on interface |
+| **GCP Speech-to-Text** | Production | Voice input |
+| **GCP Text-to-Speech** | Production | Voice output |
+| **OpenAI** | Production | Alternative LLM provider |
+| **Anthropic Claude** | Production | Alternative LLM provider |
+| **Anthropic via Vertex AI** | Production | Claude hosted on Google infrastructure |
+| **LangChain / LangGraph** | Production | Agent orchestration and state |
+| **Modal.com** | Beta | Sandboxed code execution |
+| **AWS Bedrock** | Coming Soon | AWS-native LLM provider |
+| **AWS S3** | Coming Soon | Memory backend for AWS deployments |
+| **AWS Secrets Manager** | Coming Soon | Secrets for AWS deployments |
+| **Azure OpenAI** | Coming Soon | Azure-hosted OpenAI models |
+| **Azure Blob Storage** | Coming Soon | Memory backend for Azure deployments |
+| **Azure Key Vault** | Coming Soon | Secrets for Azure deployments |
+| **Slack** | Coming Soon | Slack bot interface |
+| **Microsoft Teams** | Coming Soon | Teams bot interface |
+| **Telegram** | Coming Soon | Telegram bot interface |
+| **DynamoDB** | Coming Soon | AWS scheduler job storage |
+| **CosmosDB** | Coming Soon | Azure scheduler job storage |
 
-1. **SKILL.md** — Metadata file with YAML frontmatter
-2. **{skill_name}.py** — Python entry point
-
-### SKILL.md Format
-
-```markdown
----
-name: file-ops
-description: Read, write, and list files in the workspace
-version: 1.0.0
-author: ez-ai
----
-
-# File Operations Skill
-
-This skill provides file system operations for the agent.
-
-## Functions
-
-- `read_file(path: str) -> str` — Read file contents
-- `write_file(path: str, content: str) -> None` — Write to file
-- `list_files(directory: str) -> list[str]` — List directory contents
-```
-
-### Directory Structure
-
-```
-skills/
-├── file-ops/
-│   ├── SKILL.md
-│   └── file_ops.py
-├── memory/
-│   ├── SKILL.md
-│   └── memory.py
-└── web-search/
-    ├── SKILL.md
-    └── web_search.py
-```
-
-### Entry Point Example
-
-```python
-# skills/file-ops/file_ops.py
-from pathlib import Path
-from langchain_core.tools import tool
-
-@tool
-def read_file(path: str) -> str:
-    """Read contents of a file.
-    
-    Args:
-        path: Path to file to read
-        
-    Returns:
-        File contents as string
-    """
-    return Path(path).read_text()
-
-@tool
-def write_file(path: str, content: str) -> str:
-    """Write content to a file.
-    
-    Args:
-        path: Path to file to write
-        content: Content to write
-        
-    Returns:
-        Success message
-    """
-    Path(path).write_text(content)
-    return f"Wrote {len(content)} bytes to {path}"
-
-# Export tools
-__all__ = ["read_file", "write_file"]
-```
-
-### How Agent Discovers Skills
-
-1. `SkillLoader` scans `./skills/` for subdirectories
-2. Parses YAML frontmatter from each `SKILL.md`
-3. Imports the Python entry point (`{skill_name}.py`)
-4. Converts functions decorated with `@tool` to LangChain tools
-5. Agent receives tools with descriptions from SKILL.md
+See [integrations docs](docs/integrations.md) for configuration details on all active integrations.
 
 ---
 
-## Configuration
+## Coming Soon
 
-### Environment Variables
+### Platform Support
+- **AWS Deployment** — Full ECS/Fargate and Lambda deployment guides with CDK infrastructure templates
+- **Azure Deployment** — Azure Container Apps deployment with Bicep templates
+- **Kubernetes** — Helm charts for self-hosted deployments
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `GOOGLE_APPLICATION_CREDENTIALS` | Yes | — | Path to GCP service account JSON |
-| `VERTEX_AI_PROJECT_ID` | Yes | — | GCP project ID for Vertex AI |
-| `VERTEX_AI_LOCATION` | No | `us-central1` | Vertex AI region |
-| `GCS_ENABLED` | No | `false` | Enable GCS memory sync |
-| `GCS_MEMORY_BUCKET` | Conditional | — | GCS bucket name (required if `GCS_ENABLED=true`) |
-| `ALLOWED_USERS` | No | — | Comma-separated list of authorized emails |
-| `PORT` | No | `8080` | Server port |
-| `LOG_LEVEL` | No | `INFO` | Log verbosity (DEBUG, INFO, WARNING, ERROR) |
-| `SCHEDULER_STORAGE` | No | `json` | Scheduler storage backend (`json` or `firestore`) |
-| `CRON_SECRET` | No | — | Optional secret for `/cron/tick` endpoint auth |
+### New Interfaces
+- **Slack Bot** — Direct message and channel bot with slash commands
+- **Microsoft Teams** — Teams app integration with adaptive cards
+- **Telegram** — Telegram bot with inline keyboard support
+- **REST API Mode** — Headless operation for programmatic access
 
-### Example `.env` File
+### LLM Providers
+- **AWS Bedrock** — Native Bedrock integration (Claude, Llama, Titan)
+- **Azure OpenAI** — GPT-4o via Azure-hosted endpoints
+- **Groq** — Ultra-low latency inference
+- **Ollama** — Local/self-hosted models
 
-```bash
-# GCP Configuration
-GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
-VERTEX_AI_PROJECT_ID=my-gcp-project
-VERTEX_AI_LOCATION=us-central1
+### Infrastructure
+- **Redis Memory Backend** — High-performance in-memory store option
+- **PostgreSQL Scheduler** — Relational job queue for high-throughput scheduling
+- **Semantic Memory Search** — Vector embedding search (beyond keyword matching)
+- **Multi-Agent Orchestration** — Spawn and coordinate sub-agents from the primary agent
 
-# GCS Memory (optional)
-GCS_ENABLED=true
-GCS_MEMORY_BUCKET=my-agent-memory
-
-# Security
-ALLOWED_USERS=user1@example.com,user2@example.com
-
-# Server
-PORT=8080
-LOG_LEVEL=INFO
-
-# Scheduler
-SCHEDULER_STORAGE=firestore
-CRON_SECRET=your-secret-here
-```
+### Developer Experience
+- **CLI (`emonk new`)** — Scaffold a new bot project in seconds
+- **Hot Reload** — Live agent reloading during local development
+- **Eval Harness** — Built-in evaluation framework for agent quality testing
+- **Dashboard** — Web UI for monitoring agent activity, scheduled jobs, and memory
 
 ---
 
-## API Reference
+## Security
 
-### `build_agent()`
+### Important Considerations
 
-Factory function to create a LangChain agent with middleware and tools.
+The skills system executes Python code from the `./skills/` directory. Only add skills from trusted sources.
 
-```python
-def build_agent(
-    model: BaseChatModel,
-    tools: list[BaseTool],
-    user_system_prompt: str = "",
-    middleware: Optional[list] = None,
-    checkpointer = None,
-    store: Optional[BaseStore] = None,
-    scheduler: Optional[CronScheduler] = None,
-) -> CompiledGraph:
-    """Build a LangChain agent with emonk middleware.
-    
-    Args:
-        model: LangChain chat model (e.g., ChatVertexAI)
-        tools: List of LangChain tools/skills
-        user_system_prompt: Optional custom system prompt
-        middleware: Custom middleware stack (defaults to SummarizationMiddleware)
-        checkpointer: LangGraph checkpointer for conversation persistence
-        store: LangGraph Store for long-term memory (enables SessionSummaryMiddleware)
-        scheduler: Optional CronScheduler for job scheduling
-        
-    Returns:
-        Compiled LangGraph agent ready for invocation
-        
-    Example:
-        >>> from langchain_google_vertexai import ChatVertexAI
-        >>> model = ChatVertexAI(model="gemini-2.5-flash")
-        >>> agent = build_agent(model=model, tools=[])
-        >>> result = agent.invoke({"messages": [...]})
-    """
-```
-
-### Backends
-
-#### `GCSStore`
-
-Google Cloud Storage-backed LangGraph Store for long-term memory.
-
-```python
-class GCSStore(BaseStore):
-    """GCS-backed Store for LangGraph long-term memory.
-    
-    Args:
-        bucket_name: GCS bucket name for storing documents
-        project_id: GCP project ID (optional, uses default credentials)
-        index: Optional index config for semantic search (future)
-    
-    Methods:
-        put(namespace, key, value): Store a document
-        get(namespace, key): Retrieve a document
-        delete(namespace, key): Delete a document
-        search(namespace, query, limit): Search by keyword
-        list(namespace, prefix, limit): List documents in namespace
-    """
-```
-
-#### `ModalSandboxBackend`
-
-Modal-based sandbox for isolated code execution (optional).
-
-```python
-class ModalSandboxBackend:
-    """Modal-based sandbox for isolated code execution.
-    
-    Requires: pip install emonk[modal]
-    
-    Methods:
-        execute(command: str, timeout: int = 60) -> SandboxResult
-            Execute command in isolated Modal container
-    
-    Example:
-        >>> sandbox = ModalSandboxBackend()
-        >>> result = await sandbox.execute("python -c 'print(2+2)'")
-        >>> print(result.output)  # "4"
-    """
-```
-
-### Skills
-
-#### `SkillLoader`
-
-Discover and load skills from filesystem.
-
-```python
-class SkillLoader:
-    """Discover and load skills from ./skills/ directory.
-    
-    Args:
-        skills_dir: Path to skills directory (default: ./skills)
-    
-    Methods:
-        load_skills() -> dict[str, dict]:
-            Scan directory and return skill metadata
-    
-    Example:
-        >>> loader = SkillLoader("./skills")
-        >>> skills = loader.load_skills()
-        >>> print(list(skills.keys()))
-        ['file-ops', 'memory', 'web-search']
-    """
-```
-
-#### `SkillExecutor`
-
-Execute skills and convert to LangChain tools.
-
-```python
-class SkillExecutor:
-    """Execute skills and convert to LangChain tools.
-    
-    Args:
-        skills_metadata: Dict from SkillLoader.load_skills()
-    
-    Methods:
-        to_langchain_tools() -> list[BaseTool]:
-            Convert all skills to LangChain tools
-    
-    Example:
-        >>> executor = SkillExecutor(skills_metadata)
-        >>> tools = executor.to_langchain_tools()
-        >>> agent = build_agent(model=model, tools=tools)
-    """
-```
+**Production Security Checklist:**
+- [ ] Review every skill script before adding to `./skills/`
+- [ ] Use separate GCP projects for dev/production
+- [ ] Limit service account permissions to minimum required (principle of least privilege)
+- [ ] Store all secrets in GCP Secret Manager — never in `bot.yaml` or environment files
+- [ ] Set `ALLOWED_USERS` to restrict who can interact with the bot
+- [ ] Enable GCS bucket encryption at rest
+- [ ] Rotate service account keys every 90 days
+- [ ] Monitor Cloud Run logs for unexpected behavior
 
 ---
 
 ## Development
 
 ```bash
-# Clone
-git clone https://github.com/ez-ai/monkey-bot.git
+# Clone and install with dev dependencies
+git clone https://github.com/auriga-os/monkey-bot.git
 cd monkey-bot
-
-# Install with dev dependencies
 pip install -e ".[dev]"
 
 # Run tests
@@ -655,7 +357,6 @@ pytest
 
 # Run tests with coverage
 pytest --cov=src --cov-report=html
-open htmlcov/index.html
 
 # Lint
 ruff check .
@@ -667,132 +368,30 @@ ruff format .
 mypy src/
 ```
 
-### Project Structure
-
-```
-monkey-bot/
-├── src/
-│   ├── core/
-│   │   ├── agent.py           # build_agent factory
-│   │   ├── store.py           # GCSStore
-│   │   ├── middleware.py      # SessionSummaryMiddleware
-│   │   ├── terminal.py        # TerminalExecutor (optional)
-│   │   ├── interfaces.py      # Shared interfaces
-│   │   └── scheduler/
-│   │       ├── cron.py        # CronScheduler
-│   │       └── storage.py     # JobStorage backends
-│   ├── skills/
-│   │   ├── loader.py          # SkillLoader
-│   │   └── executor.py        # SkillExecutor
-│   ├── sandbox/
-│   │   └── modal.py           # ModalSandboxBackend
-│   └── gateway/
-│       ├── server.py          # FastAPI server
-│       ├── pii_filter.py      # PII filtering
-│       └── models.py          # Request/response models
-├── skills/                     # User skills directory
-├── tests/
-├── pyproject.toml
-└── README.md
-```
-
-### Code Quality Standards
-
-- **Type Hints**: All functions must have type annotations (mypy strict mode)
-- **Docstrings**: All public functions/classes must have Google-style docstrings
-- **Tests**: Minimum 80% code coverage
-- **Linting**: Use ruff for linting and formatting
-- **Logging**: Structured JSON logs with trace IDs
-
----
-
-## Security
-
-### ⚠️ Critical Security Considerations
-
-**Arbitrary Code Execution Risk**
-
-emonk's skill system executes Python scripts from `./skills/` **without validation**. This means:
-
-- ⚠️ Skills can execute arbitrary code with full agent permissions
-- ⚠️ Only add skills from trusted sources
-- ⚠️ Review ALL skill code before deployment
-- ⚠️ Skills have access to: GCS buckets, Vertex AI, Google Chat API, local filesystem
-
-**This is by design** to keep the framework simple and flexible. Security is the **developer's responsibility**.
-
-### Production Security Checklist
-
-- [ ] Review every skill script before adding to `./skills/`
-- [ ] Use separate GCP projects for dev/prod
-- [ ] Limit service account permissions to minimum required
-- [ ] Monitor skill execution logs for unexpected behavior
-- [ ] Use allowlist for authorized user emails (`ALLOWED_USERS`)
-- [ ] Enable GCS encryption at rest
-- [ ] Rotate service account keys every 90 days
-
-### Terminal Executor Security (Optional)
-
-The Terminal Executor uses allowlist-based security:
-
-**Allowed Commands** (default):
-- `cat` — Read files
-- `ls` — List directories
-- `python` — Execute Python scripts
-- `uv` — Package management
-
-**Allowed Paths** (default):
-- `./data/memory/` — Memory storage
-- `./skills/` — Skill scripts
-- `./content/` — User content
-
-Any command or path not explicitly allowed is **blocked**.
-
 ---
 
 ## Contributing
 
-We welcome contributions! Please:
-
 1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Run all checks (tests, type checking, linting)
-4. Commit your changes (`git commit -m 'feat: add amazing feature'`)
-5. Push to the branch (`git push origin feature/amazing-feature`)
-6. Open a Pull Request
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
-
----
-
-## License
-
-MIT License - see [LICENSE](LICENSE) for details.
+2. Create a feature branch: `git checkout -b feature/your-feature`
+3. Run all checks: `pytest && ruff check . && mypy src/`
+4. Commit: `git commit -m "feat: add your feature"`
+5. Open a Pull Request
 
 ---
 
 ## Support
 
-- **Deployment Guide**: [docs/deployment.md](docs/deployment.md)
-- **Configuration Reference**: [.env.example](.env.example)
-- **Example Skills**: [examples/skills/diagnostics/](examples/skills/diagnostics/)
-- **Issues**: [GitHub Issues](https://github.com/ez-ai/monkey-bot/issues)
-- **Documentation**: [GitHub Wiki](https://github.com/ez-ai/monkey-bot/wiki)
-- **Community**: [GitHub Discussions](https://github.com/ez-ai/monkey-bot/discussions)
+- **Issues**: [GitHub Issues](https://github.com/auriga-os/monkey-bot/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/auriga-os/monkey-bot/discussions)
+- **Reference bot**: See [`test-monkey/`](../test-monkey/) for a complete working example
 
 ---
 
-## Acknowledgments
+## License
 
-Built with:
-- [LangChain](https://github.com/langchain-ai/langchain) — LLM abstractions and agent framework
-- [LangGraph](https://github.com/langchain-ai/langgraph) — Agent orchestration and state management
-- [Vertex AI](https://cloud.google.com/vertex-ai) — Gemini models
-- [FastAPI](https://fastapi.tiangolo.com/) — HTTP server
-- [Modal](https://modal.com/) — Serverless sandbox execution (optional)
-- [pytest](https://pytest.org/) — Testing framework
-- [ruff](https://github.com/astral-sh/ruff) — Fast linter/formatter
+MIT License — see [LICENSE](LICENSE) for details.
 
 ---
 
-Made with ❤️ by the ez-ai team
+Built with [LangChain](https://github.com/langchain-ai/langchain) · [LangGraph](https://github.com/langchain-ai/langgraph) · [Vertex AI](https://cloud.google.com/vertex-ai) · [FastAPI](https://fastapi.tiangolo.com)
