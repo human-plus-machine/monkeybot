@@ -41,6 +41,10 @@ DEFAULTS = {
     "SCHEDULER_TIMEZONE": "America/New_York",
     "SECRETS_PROVIDER": "env",
     "GOOGLE_CHAT_FORMAT": "workspace_addon",
+    "HEARTBEAT_NOTIFY_ON_COMPLETE": "true",
+    "HEARTBEAT_NOTIFY_FORMAT":      "standup",
+    "HEARTBEAT_COUNCIL_ENABLED":    "false",
+    "HEARTBEAT_COUNCIL_MODEL":      "gemini-2.0-flash",
 }
 
 
@@ -88,6 +92,11 @@ CONFIG_MAPPING = {
     "heartbeat.active_hours.end":          "HEARTBEAT_ACTIVE_HOURS_END",
     "heartbeat.active_hours.timezone":     "HEARTBEAT_ACTIVE_HOURS_TZ",
     "heartbeat.target":                    "HEARTBEAT_TARGET",
+    "heartbeat.identity_file":             "HEARTBEAT_IDENTITY_FILE",
+    "heartbeat.notify_on_complete":        "HEARTBEAT_NOTIFY_ON_COMPLETE",
+    "heartbeat.notify_report_format":      "HEARTBEAT_NOTIFY_FORMAT",
+    "heartbeat.council.enabled":           "HEARTBEAT_COUNCIL_ENABLED",
+    "heartbeat.council.model":             "HEARTBEAT_COUNCIL_MODEL",
     # Voice
     "voice.enabled":                       "VOICE_ENABLED",
     "voice.speech_to_text.language_code":  "VOICE_STT_LANGUAGE_CODE",
@@ -100,6 +109,35 @@ CONFIG_MAPPING = {
 class ConfigError(Exception):
     """Configuration error with actionable message."""
     pass
+
+
+@dataclass
+class CustomMemoryFolder:
+    """User-defined memory folder registered with the LLM Council classifier.
+
+    Args:
+        name: Folder name under MEMORY_DIR. Lowercase letters, digits, hyphens only.
+        description: One sentence telling the classifier when to route content here.
+
+    Example:
+        CustomMemoryFolder("campaigns", "Active and completed marketing campaign plans.")
+    """
+    name: str
+    description: str
+
+    def __post_init__(self) -> None:
+        import re
+        if not re.match(r'^[a-z0-9-]+$', self.name):
+            raise ConfigError(
+                f"CustomMemoryFolder.name '{self.name}' is invalid. "
+                "Use lowercase letters, digits, and hyphens only."
+            )
+        _RESERVED = {"episodic", "semantic", "procedural", "working", "raw"}
+        if self.name in _RESERVED:
+            raise ConfigError(
+                f"CustomMemoryFolder.name '{self.name}' conflicts with a built-in folder. "
+                f"Reserved names: {sorted(_RESERVED)}"
+            )
 
 
 @dataclass
@@ -122,6 +160,15 @@ class HeartbeatConfig:
     active_hours_timezone: str = "America/New_York"
     target: str = "last_active"
     heartbeat_md_path: str | None = None
+    # New fields — all have defaults for backward compat
+    identity_md_path: str | None = None
+    notify_on_complete: bool = True
+    notify_report_format: str = "standup"
+    council_enabled: bool = False
+    council_model: str = "gemini-2.0-flash"
+    council_memory_dir: str | None = None
+    council_index_path: str | None = None
+    council_custom_folders: list | None = None
 
 
 @dataclass
@@ -785,14 +832,18 @@ def get_system_prompt(prompt_file_path: str | None = None) -> str:
         return ""
 
 
-def load_heartbeat_config() -> HeartbeatConfig | None:
+def load_heartbeat_config(raw_yaml: dict | None = None) -> HeartbeatConfig | None:
     """Return HeartbeatConfig from env vars, or None if HEARTBEAT_ENABLED != 'true'.
-    
+
     Reads from os.environ (populated by load_bot_config()).
-    
+
+    Args:
+        raw_yaml: Optional raw YAML dict (e.g., heartbeat section from bot.yaml).
+            Used to parse custom_folders list.
+
     Returns:
         HeartbeatConfig instance if enabled, None otherwise
-        
+
     Example:
         >>> os.environ["HEARTBEAT_ENABLED"] = "true"
         >>> config = load_heartbeat_config()
@@ -801,6 +852,42 @@ def load_heartbeat_config() -> HeartbeatConfig | None:
     """
     if os.getenv("HEARTBEAT_ENABLED", "false").lower() != "true":
         return None
+
+    notify_on_complete = (
+        os.getenv("HEARTBEAT_NOTIFY_ON_COMPLETE", "true").lower() == "true"
+    )
+    notify_report_format = os.getenv("HEARTBEAT_NOTIFY_FORMAT", "standup")
+
+    _VALID_FORMATS = {"standup", "detailed", "minimal"}
+    if notify_report_format not in _VALID_FORMATS:
+        logger.warning(
+            "Invalid HEARTBEAT_NOTIFY_FORMAT '%s', using 'standup'",
+            notify_report_format,
+        )
+        notify_report_format = "standup"
+
+    council_enabled = (
+        os.getenv("HEARTBEAT_COUNCIL_ENABLED", "false").lower() == "true"
+    )
+    council_model = os.getenv("HEARTBEAT_COUNCIL_MODEL", "gemini-2.0-flash")
+
+    custom_folders: list | None = None
+    if raw_yaml:
+        folders_raw = raw_yaml.get("custom_folders", [])
+        if folders_raw:
+            custom_folders = []
+            for f in folders_raw:
+                try:
+                    custom_folders.append(
+                        CustomMemoryFolder(
+                            name=f["name"], description=f["description"]
+                        )
+                    )
+                except (KeyError, ConfigError) as e:
+                    logger.warning(
+                        "Skipping invalid custom_folder entry: %s", str(e)
+                    )
+
     return HeartbeatConfig(
         enabled=True,
         cron=os.getenv("HEARTBEAT_CRON", "*/30 * * * *"),
@@ -809,6 +896,13 @@ def load_heartbeat_config() -> HeartbeatConfig | None:
         active_hours_timezone=os.getenv("HEARTBEAT_ACTIVE_HOURS_TZ", "America/New_York"),
         target=os.getenv("HEARTBEAT_TARGET", "last_active"),
         heartbeat_md_path=os.getenv("HEARTBEAT_MD_PATH") or None,
+        identity_md_path=os.getenv("HEARTBEAT_IDENTITY_FILE") or None,
+        notify_on_complete=notify_on_complete,
+        notify_report_format=notify_report_format,
+        council_enabled=council_enabled,
+        council_model=council_model,
+        council_memory_dir=os.getenv("MEMORY_DIR") or None,
+        council_custom_folders=custom_folders,
     )
 
 

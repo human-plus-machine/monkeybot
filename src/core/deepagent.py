@@ -52,6 +52,7 @@ def build_deep_agent(
     tools_file: "str | None" = None,
     heartbeat: "object | None" = None,
     voice: "object | None" = None,
+    identity_file: "str | None" = None,
 ):
     """Build a deep agent with monkey-bot's opinionated defaults.
 
@@ -160,16 +161,54 @@ def build_deep_agent(
     user_content = _load_text_file(_user_path, "USER")
     tools_content = _load_text_file(_tools_path, "TOOLS")
 
+    # Resolve IDENTITY.md
+    _identity_path = (
+        Path(identity_file) if identity_file
+        else Path(os.getenv("IDENTITY_FILE", "")) if os.getenv("IDENTITY_FILE")
+        else Path.cwd() / "IDENTITY.md"
+    )
+    identity_content = _load_text_file(_identity_path, "IDENTITY")
+
+    # Load INDEX.md from memory dir (always load — agent needs memory map on every call)
+    _index_path = Path(_memory_dir) / "INDEX.md"
+    index_content = _load_text_file(_index_path, "INDEX")
+
+    # Resolve all key paths to absolute
+    _resolved_memory_dir = str(Path(_memory_dir).resolve())
+    _resolved_skills_dir = str(Path(os.getenv("SKILLS_DIR", "./skills")).resolve())
+    resolved_paths: dict[str, str] = {
+        "MEMORY_DIR": _resolved_memory_dir,
+        "SKILLS_DIR": _resolved_skills_dir,
+        "INDEX_MD": str(_index_path.resolve()),
+        "USER_MD": str((_index_path.parent / "USER.md").resolve()),
+    }
+    if _soul_path.exists():
+        resolved_paths["SOUL_FILE"] = str(_soul_path.resolve())
+    if _identity_path.exists():
+        resolved_paths["IDENTITY_FILE"] = str(_identity_path.resolve())
+
     # Step 3c: Token budget logging and warning
     soul_tokens = _estimate_tokens(soul_content)
     user_tokens = _estimate_tokens(user_content)
     tools_tokens = _estimate_tokens(tools_content)
-    total_new_tokens = soul_tokens + user_tokens + tools_tokens
+    identity_tokens = _estimate_tokens(identity_content)
+    index_tokens = _estimate_tokens(index_content)
+    total_new_tokens = soul_tokens + user_tokens + tools_tokens + identity_tokens + index_tokens
 
     if soul_tokens > 500:
         logger.warning(
             "SOUL.md exceeds token budget",
             extra={"soul_tokens": soul_tokens, "budget": 500}
+        )
+    if identity_tokens > 800:
+        logger.warning(
+            "IDENTITY.md exceeds token budget",
+            extra={"identity_tokens": identity_tokens, "budget": 800}
+        )
+    if index_tokens > 1000:
+        logger.warning(
+            "INDEX.md exceeds token budget",
+            extra={"index_tokens": index_tokens, "budget": 1000}
         )
 
     logger.info(
@@ -178,6 +217,8 @@ def build_deep_agent(
             "soul_tokens": soul_tokens,
             "user_tokens": user_tokens,
             "tools_tokens": tools_tokens,
+            "identity_tokens": identity_tokens,
+            "index_tokens": index_tokens,
             "total_new_tokens": total_new_tokens,
         }
     )
@@ -194,6 +235,10 @@ def build_deep_agent(
         soul_content=soul_content,
         user_content=user_content,
         tools_content=tools_content,
+        identity_content=identity_content,
+        index_content=index_content,
+        resolved_paths=resolved_paths,
+        memory_dir=_resolved_memory_dir,
     )
 
     logger.info(

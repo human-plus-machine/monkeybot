@@ -30,6 +30,7 @@ dependencies = [
     "pydantic>=2.10.0",
     "python-dotenv>=1.0.0",
     "pyyaml>=6.0.2",
+    "httpx>=0.27.0",
 ]
 
 [project.optional-dependencies]
@@ -49,12 +50,16 @@ voice = [
 vertex-anthropic = [
     "anthropic[vertex]>=0.40.0",
 ]
+council = [
+    "emonk[gcs]",
+]
 all = [
     "emonk[gcs]",
     "emonk[firestore]",
     "emonk[modal]",
     "emonk[voice]",
     "emonk[vertex-anthropic]",
+    "emonk[council]",
 ]
 dev = [
     "pytest>=8.3.0",

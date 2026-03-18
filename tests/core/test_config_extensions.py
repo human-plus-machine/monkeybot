@@ -1,6 +1,10 @@
 """Tests for HeartbeatConfig, VoiceConfig dataclasses and loader functions."""
+import pytest
+
 from src.core.config import (
     CONFIG_MAPPING,
+    ConfigError,
+    CustomMemoryFolder,
     HeartbeatConfig,
     VoiceConfig,
     load_bot_config,
@@ -253,3 +257,96 @@ class TestVertexAnthropicProvider:
             assert "model.provider is set to 'vertex_anthropic'" in str(e)
             assert "gcp.project_id is not configured" in str(e)
             assert "Add 'gcp.project_id: your-project-id' to bot.yaml" in str(e)
+
+
+class TestCustomMemoryFolder:
+    def test_valid_name_and_description(self):
+        folder = CustomMemoryFolder("campaigns", "Marketing campaign data")
+        assert folder.name == "campaigns"
+        assert folder.description == "Marketing campaign data"
+
+    def test_invalid_name_raises_config_error(self):
+        with pytest.raises(ConfigError, match="invalid"):
+            CustomMemoryFolder("My Folder", "desc")
+
+    def test_reserved_name_raises_config_error(self):
+        with pytest.raises(ConfigError, match="conflicts"):
+            CustomMemoryFolder("episodic", "desc")
+
+    def test_name_with_hyphens_is_valid(self):
+        folder = CustomMemoryFolder("sprint-goals", "Sprint planning")
+        assert folder.name == "sprint-goals"
+
+    def test_name_with_numbers_is_valid(self):
+        folder = CustomMemoryFolder("q1-2026", "Q1 results")
+        assert folder.name == "q1-2026"
+
+
+class TestHeartbeatConfigNewFields:
+    def test_default_values(self):
+        cfg = HeartbeatConfig()
+        assert cfg.notify_on_complete is True
+        assert cfg.notify_report_format == "standup"
+        assert cfg.council_enabled is False
+        assert cfg.council_model == "gemini-2.0-flash"
+        assert cfg.council_custom_folders is None
+        assert cfg.identity_md_path is None
+
+
+class TestLoadHeartbeatConfigNewEnvVars:
+    def test_notify_on_complete_false(self, monkeypatch):
+        monkeypatch.setenv("HEARTBEAT_ENABLED", "true")
+        monkeypatch.setenv("HEARTBEAT_NOTIFY_ON_COMPLETE", "false")
+        cfg = load_heartbeat_config()
+        assert cfg.notify_on_complete is False
+
+    def test_notify_format_minimal(self, monkeypatch):
+        monkeypatch.setenv("HEARTBEAT_ENABLED", "true")
+        monkeypatch.setenv("HEARTBEAT_NOTIFY_FORMAT", "minimal")
+        cfg = load_heartbeat_config()
+        assert cfg.notify_report_format == "minimal"
+
+    def test_invalid_notify_format_defaults_to_standup(self, monkeypatch):
+        monkeypatch.setenv("HEARTBEAT_ENABLED", "true")
+        monkeypatch.setenv("HEARTBEAT_NOTIFY_FORMAT", "xyz")
+        cfg = load_heartbeat_config()
+        assert cfg.notify_report_format == "standup"
+
+    def test_council_enabled(self, monkeypatch):
+        monkeypatch.setenv("HEARTBEAT_ENABLED", "true")
+        monkeypatch.setenv("HEARTBEAT_COUNCIL_ENABLED", "true")
+        cfg = load_heartbeat_config()
+        assert cfg.council_enabled is True
+
+    def test_council_model_custom(self, monkeypatch):
+        monkeypatch.setenv("HEARTBEAT_ENABLED", "true")
+        monkeypatch.setenv("HEARTBEAT_COUNCIL_MODEL", "gemini-2.0-flash-lite")
+        cfg = load_heartbeat_config()
+        assert cfg.council_model == "gemini-2.0-flash-lite"
+
+
+class TestLoadHeartbeatConfigCustomFolders:
+    def test_parses_custom_folders_from_yaml(self, monkeypatch):
+        monkeypatch.setenv("HEARTBEAT_ENABLED", "true")
+        raw = {"custom_folders": [{"name": "campaigns", "description": "Campaign data"}]}
+        cfg = load_heartbeat_config(raw_yaml=raw)
+        assert cfg.council_custom_folders is not None
+        assert len(cfg.council_custom_folders) == 1
+        assert cfg.council_custom_folders[0].name == "campaigns"
+
+    def test_invalid_folder_entry_skipped(self, monkeypatch):
+        monkeypatch.setenv("HEARTBEAT_ENABLED", "true")
+        raw = {
+            "custom_folders": [
+                {"name": "campaigns", "description": "Good"},
+                {"name": "episodic", "description": "Reserved - should skip"},
+            ]
+        }
+        cfg = load_heartbeat_config(raw_yaml=raw)
+        assert len(cfg.council_custom_folders) == 1
+        assert cfg.council_custom_folders[0].name == "campaigns"
+
+    def test_no_raw_yaml_returns_none_folders(self, monkeypatch):
+        monkeypatch.setenv("HEARTBEAT_ENABLED", "true")
+        cfg = load_heartbeat_config(raw_yaml=None)
+        assert cfg.council_custom_folders is None
