@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir --user -r requirements.txt
 
-# Optional extras (pass --build-arg EMONK_EXTRAS="council voice" to enable)
+# Optional extras (pass --build-arg EMONK_EXTRAS="council voice browser" to enable)
 RUN if echo "$EMONK_EXTRAS" | grep -q "voice"; then \
       pip install --no-cache-dir --user "google-cloud-speech>=2.27.0" "google-cloud-texttospeech>=2.17.0"; \
     fi && \
@@ -31,6 +31,8 @@ RUN if echo "$EMONK_EXTRAS" | grep -q "voice"; then \
 # =============================================================================
 FROM python:3.12-slim
 
+ARG EMONK_EXTRAS=""
+
 WORKDIR /app
 
 # Copy installed packages from builder stage
@@ -38,6 +40,18 @@ COPY --from=builder /root/.local /root/.local
 
 # Add Python user site-packages to PATH
 ENV PATH=/root/.local/bin:$PATH
+
+# Install Node.js + agent-browser when the 'browser' extra is requested.
+# Ordered before COPY directives to maximise Docker layer cache hits.
+RUN if echo "$EMONK_EXTRAS" | grep -q "browser"; then \
+      apt-get update && apt-get install -y --no-install-recommends \
+        nodejs npm \
+        libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
+        libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libasound2 \
+      && rm -rf /var/lib/apt/lists/* \
+      && npm install -g agent-browser \
+      && agent-browser install; \
+    fi
 
 # Copy application code
 COPY src/ src/
