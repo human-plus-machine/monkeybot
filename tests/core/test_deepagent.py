@@ -172,29 +172,51 @@ class TestBuildDeepAgent:
     
     @patch("src.core.deepagent._DEEPAGENTS_AVAILABLE", True)
     @patch("src.core.deepagent.create_deep_agent")
-    @patch("src.core.deepagent.SubAgentMiddleware")
-    def test_adds_subagent_middleware_when_subagents_provided(
-        self, mock_subagent_mw, mock_create
-    ):
-        """Test that SubAgentMiddleware is added when subagents provided."""
+    def test_passes_subagents_to_create_deep_agent(self, mock_create):
+        """Test that subagents are passed through to create_deep_agent() directly.
+
+        SubAgentMiddleware is no longer wired manually in build_deep_agent();
+        create_deep_agent() handles the full middleware stack for subagents.
+        """
         mock_create.return_value = Mock()
-        
+
         subagents = [
-            {"name": "researcher", "prompt": "Research assistant"},
-            {"name": "writer", "prompt": "Content writer"},
+            {
+                "name": "researcher",
+                "description": "Research assistant",
+                "system_prompt": "You are a researcher.",
+                "skills": ["./skills/research/"],
+            },
+            {
+                "name": "writer",
+                "description": "Content writer",
+                "system_prompt": "You are a writer.",
+                "skills": ["./skills/writing/"],
+            },
         ]
-        
-        agent = build_deep_agent(
+
+        build_deep_agent(
             model="gemini-2.5-flash",
             subagents=subagents,
         )
-        
-        # Verify SubAgentMiddleware was created
-        mock_subagent_mw.assert_called_once_with(subagents=subagents)
-        
-        # Verify middleware was added
+
         call_kwargs = mock_create.call_args.kwargs
-        assert len(call_kwargs["middleware"]) == 1  # SubAgentMiddleware only (summarization added by create_deep_agent)
+        # Subagents passed directly — not wrapped in middleware
+        assert call_kwargs["subagents"] == subagents
+        # middleware list must NOT contain any SubAgentMiddleware instance
+        for mw in call_kwargs.get("middleware", []):
+            assert "SubAgentMiddleware" not in type(mw).__name__
+
+    @patch("src.core.deepagent._DEEPAGENTS_AVAILABLE", True)
+    @patch("src.core.deepagent.create_deep_agent")
+    def test_passes_subagents_none_when_not_provided(self, mock_create):
+        """Test that subagents=None is passed when no subagents are configured."""
+        mock_create.return_value = Mock()
+
+        build_deep_agent(model="gemini-2.5-flash")
+
+        call_kwargs = mock_create.call_args.kwargs
+        assert call_kwargs["subagents"] is None
     
     @patch("src.core.deepagent._DEEPAGENTS_AVAILABLE", True)
     @patch("src.core.deepagent.create_deep_agent")
@@ -215,18 +237,73 @@ class TestBuildDeepAgent:
     
     @patch("src.core.deepagent._DEEPAGENTS_AVAILABLE", True)
     @patch("src.core.deepagent.create_deep_agent")
-    def test_passes_backend_and_sandbox(self, mock_create):
-        """Test that backend is passed through."""
+    def test_passes_backend_through_to_create_deep_agent(self, mock_create):
+        """Test that backend is passed through to create_deep_agent()."""
         mock_create.return_value = Mock()
         mock_backend = Mock()
-        
-        agent = build_deep_agent(
+
+        build_deep_agent(
             model="gemini-2.5-flash",
             backend=mock_backend,
         )
-        
+
         call_kwargs = mock_create.call_args.kwargs
         assert call_kwargs["backend"] == mock_backend
+
+    @patch("src.core.deepagent._DEEPAGENTS_AVAILABLE", True)
+    @patch("src.core.deepagent.create_deep_agent")
+    @patch("src.core.deepagent._generate_skills_manifest")
+    def test_passes_skills_through_to_create_deep_agent(
+        self, mock_manifest, mock_create
+    ):
+        """Test that skills dirs are passed to create_deep_agent() for SkillsMiddleware."""
+        mock_create.return_value = Mock()
+        mock_manifest.return_value = "- skill1: desc"
+
+        skills_list = ["./skills/", "/shared/skills/"]
+        build_deep_agent(
+            model="gemini-2.5-flash",
+            skills=skills_list,
+        )
+
+        call_kwargs = mock_create.call_args.kwargs
+        assert call_kwargs["skills"] == skills_list
+
+    @patch("src.core.deepagent._DEEPAGENTS_AVAILABLE", True)
+    @patch("src.core.deepagent.create_deep_agent")
+    def test_passes_skills_none_when_not_provided(self, mock_create):
+        """Test that skills=None is passed when no skills dirs are configured."""
+        mock_create.return_value = Mock()
+
+        build_deep_agent(model="gemini-2.5-flash")
+
+        call_kwargs = mock_create.call_args.kwargs
+        assert call_kwargs["skills"] is None
+
+    @patch("src.core.deepagent._DEEPAGENTS_AVAILABLE", True)
+    @patch("src.core.deepagent.create_deep_agent")
+    def test_subagent_specs_with_skills_passed_correctly(self, mock_create):
+        """Test that subagent dicts containing a 'skills' field pass through unchanged."""
+        mock_create.return_value = Mock()
+
+        subagent_spec = {
+            "name": "analytics",
+            "description": "Query GA4.",
+            "system_prompt": "You are an analytics specialist.",
+            "skills": ["./skills/analytics/"],
+            "model": "gemini-2.0-flash",
+        }
+
+        build_deep_agent(
+            model="gemini-2.5-flash",
+            subagents=[subagent_spec],
+        )
+
+        call_kwargs = mock_create.call_args.kwargs
+        passed = call_kwargs["subagents"]
+        assert len(passed) == 1
+        assert passed[0]["skills"] == ["./skills/analytics/"]
+        assert passed[0]["model"] == "gemini-2.0-flash"
     
     @patch("src.core.deepagent._DEEPAGENTS_AVAILABLE", True)
     @patch("src.core.deepagent.create_deep_agent")

@@ -189,6 +189,33 @@ class VoiceConfig:
     tts_audio_encoding: str = "OGG_OPUS"
 
 
+@dataclass
+class SubagentConfig:
+    """Configuration for a single subagent.
+
+    Subagents are specialised agents with their own skills directory and
+    system prompt.  They share the same backend (filesystem + shell) as
+    the orchestrator and are used purely for context management.
+
+    Attributes:
+        name: Unique identifier for the subagent (used as the ``task`` tool
+            target name).
+        description: One-sentence description used by the orchestrator to
+            decide when to delegate.
+        skills: List of skill directory paths exposed to this subagent via
+            ``SkillsMiddleware``.
+        prompt_file: Optional path to a Markdown file used as the subagent's
+            system prompt.  When omitted a sensible default is generated.
+        model: Optional model override in ``provider:model-name`` format.
+            Defaults to the orchestrator's model when not set.
+    """
+    name: str
+    description: str
+    skills: list[str]
+    prompt_file: str | None = None
+    model: str | None = None
+
+
 def _flatten_yaml_to_env(yaml_dict: Dict[str, Any]) -> Dict[str, str]:
     """Flatten nested YAML dict to flat env var dict using CONFIG_MAPPING.
     
@@ -386,6 +413,11 @@ def _validate_provider_config(config: Dict[str, str]) -> None:
 # Track if config has been loaded to avoid duplicate work
 _config_loaded = False
 
+# Raw YAML dict stored after the last successful load_bot_config() call.
+# Used by get_subagent_configs() to read the top-level `subagents:` section
+# without requiring a second YAML parse.
+_raw_yaml: dict | None = None
+
 
 def load_bot_config(config_path: str | None = None) -> Dict[str, str]:
     """Load bot configuration from bot.yaml file with framework defaults.
@@ -420,7 +452,7 @@ def load_bot_config(config_path: str | None = None) -> Dict[str, str]:
         >>> # Load from explicit path
         >>> config = load_bot_config("/path/to/bot.yaml")
     """
-    global _config_loaded
+    global _config_loaded, _raw_yaml
     
     # If already loaded, just return current env state
     if _config_loaded and not config_path:  # Allow explicit path to override
@@ -451,6 +483,7 @@ def load_bot_config(config_path: str | None = None) -> Dict[str, str]:
             return {k: os.environ.get(k, v) for k, v in DEFAULTS.items()}
         
         logger.info(f"Loaded bot.yaml from {yaml_path.absolute()}")
+        _raw_yaml = yaml_dict
     except yaml.YAMLError as e:
         raise ConfigError(f"Failed to parse bot.yaml: {e}")
     except Exception as e:
@@ -929,3 +962,48 @@ def load_voice_config() -> VoiceConfig | None:
         tts_voice_name=os.getenv("VOICE_TTS_VOICE_NAME", "en-US-Journey-F"),
         tts_audio_encoding=os.getenv("VOICE_TTS_AUDIO_ENCODING", "OGG_OPUS"),
     )
+
+
+def get_subagent_configs() -> list[SubagentConfig]:
+    """Return subagent configurations parsed from the ``subagents:`` section of bot.yaml.
+
+    Relies on ``_raw_yaml`` being populated by a prior call to
+    ``load_bot_config()``.  Returns an empty list when no subagents are
+    configured or when ``load_bot_config()`` has not yet been called.
+
+    Invalid entries (missing ``name`` or ``description``) are skipped with a
+    warning log rather than raising an error, so a single malformed entry does
+    not prevent the rest from loading.
+
+    Returns:
+        List of :class:`SubagentConfig` instances in declaration order.
+
+    Example:
+        >>> load_bot_config()
+        >>> for sa in get_subagent_configs():
+        ...     print(sa.name, sa.skills)
+    """
+    raw_entries = (_raw_yaml or {}).get("subagents", [])
+    if not raw_entries:
+        return []
+
+    configs: list[SubagentConfig] = []
+    for entry in raw_entries:
+        if not isinstance(entry, dict):
+            logger.warning("Skipping non-dict subagent entry: %s", entry)
+            continue
+        if "name" not in entry or "description" not in entry:
+            logger.warning(
+                "Skipping subagent entry missing 'name' or 'description': %s", entry
+            )
+            continue
+        configs.append(
+            SubagentConfig(
+                name=entry["name"],
+                description=entry["description"],
+                skills=entry.get("skills", []),
+                prompt_file=entry.get("prompt_file"),
+                model=entry.get("model"),
+            )
+        )
+    return configs

@@ -126,6 +126,36 @@ gcp:
 # azure:
 #   subscription_id: "..."
 #   resource_group: "..."
+
+# =============================================================================
+# Subagents  (optional — omit for single-agent mode)
+# =============================================================================
+#
+# Subagents give the orchestrator a `task` tool it can use to delegate work to
+# specialised workers, each with its own context window and skills manifest.
+# All subagents share the same filesystem and shell as the orchestrator.
+#
+# Fields per entry:
+#   name        (required) — unique identifier; orchestrator calls task(name, ...)
+#   description (required) — one/two sentences; orchestrator uses this to route
+#   skills      (optional) — list of skill directory paths
+#   prompt_file (optional) — path to a Markdown system prompt file
+#   model       (optional) — model override, e.g. "gemini-2.0-flash"
+#
+# subagents:
+#   - name: content-intel
+#     description: >
+#       Research top-performing content in any domain, extract patterns,
+#       and produce structured intelligence reports.
+#     skills:
+#       - ./skills/content-intelligence/
+#
+#   - name: analytics
+#     description: Query GA4, generate UTMs, and detect regressions.
+#     skills:
+#       - ./skills/analytics/
+#     prompt_file: ./prompts/analytics.md
+#     model: gemini-2.0-flash
 ```
 
 ---

@@ -299,6 +299,54 @@ skills/
 
 ---
 
+## Skills with Subagents
+
+When using [subagents](subagents.md), skills are partitioned into per-subagent directories.  Each subagent's `SkillsMiddleware` is pointed at its own directory, so the model only sees the skills relevant to its specialisation.
+
+**Single-agent layout (default):**
+
+```
+skills/
+├── research-web/         # all skills visible to the single agent
+├── file-ops/
+└── memory/
+```
+
+**Subagent layout:**
+
+```
+skills/                               # orchestrator skills
+├── phase-transition/
+└── gate-check/
+
+skills/content-intelligence/          # subagent: content-intel
+├── research-domain-content/
+└── score-content-engagement/
+
+skills/analytics/                     # subagent: analytics
+├── query-ga4/
+└── generate-utm/
+```
+
+The SKILL.md format is identical in both layouts.  The only difference is which directory each agent is pointed at via `bot.yaml`:
+
+```yaml
+subagents:
+  - name: content-intel
+    description: Research top-performing content.
+    skills:
+      - ./skills/content-intelligence/
+
+  - name: analytics
+    description: Query GA4 and generate UTMs.
+    skills:
+      - ./skills/analytics/
+```
+
+Skills execute the same way regardless of which agent calls them — the agent reads the SKILL.md, then invokes the Python script via `execute`.  The subagent boundary is a context boundary only; all agents share the same filesystem and shell.
+
+---
+
 ## Testing Skills
 
 ```python

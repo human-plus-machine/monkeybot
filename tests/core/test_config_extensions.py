@@ -1,12 +1,15 @@
 """Tests for HeartbeatConfig, VoiceConfig dataclasses and loader functions."""
 import pytest
 
+import src.core.config as config_mod
 from src.core.config import (
     CONFIG_MAPPING,
     ConfigError,
     CustomMemoryFolder,
     HeartbeatConfig,
+    SubagentConfig,
     VoiceConfig,
+    get_subagent_configs,
     load_bot_config,
     load_heartbeat_config,
     load_voice_config,
@@ -350,3 +353,197 @@ class TestLoadHeartbeatConfigCustomFolders:
         monkeypatch.setenv("HEARTBEAT_ENABLED", "true")
         cfg = load_heartbeat_config(raw_yaml=None)
         assert cfg.council_custom_folders is None
+
+
+# ---------------------------------------------------------------------------
+# SubagentConfig dataclass
+# ---------------------------------------------------------------------------
+
+class TestSubagentConfig:
+    def test_required_fields(self):
+        cfg = SubagentConfig(
+            name="content-intel",
+            description="Research top-performing content.",
+            skills=["./skills/content-intelligence/"],
+        )
+        assert cfg.name == "content-intel"
+        assert cfg.description == "Research top-performing content."
+        assert cfg.skills == ["./skills/content-intelligence/"]
+
+    def test_optional_fields_default_to_none(self):
+        cfg = SubagentConfig(
+            name="analytics",
+            description="Query GA4.",
+            skills=[],
+        )
+        assert cfg.prompt_file is None
+        assert cfg.model is None
+
+    def test_optional_fields_can_be_set(self):
+        cfg = SubagentConfig(
+            name="analytics",
+            description="Query GA4.",
+            skills=["./skills/analytics/"],
+            prompt_file="./prompts/analytics.md",
+            model="gemini-2.0-flash",
+        )
+        assert cfg.prompt_file == "./prompts/analytics.md"
+        assert cfg.model == "gemini-2.0-flash"
+
+    def test_multiple_skills_dirs(self):
+        cfg = SubagentConfig(
+            name="writer",
+            description="Generate content.",
+            skills=["./skills/base/", "./skills/content-creation/"],
+        )
+        assert len(cfg.skills) == 2
+
+
+# ---------------------------------------------------------------------------
+# get_subagent_configs()
+# ---------------------------------------------------------------------------
+
+class TestGetSubagentConfigs:
+    def setup_method(self):
+        """Reset module-level state before each test."""
+        config_mod._raw_yaml = None
+        config_mod._config_loaded = False
+
+    def teardown_method(self):
+        config_mod._raw_yaml = None
+        config_mod._config_loaded = False
+
+    def test_returns_empty_list_when_raw_yaml_is_none(self):
+        config_mod._raw_yaml = None
+        assert get_subagent_configs() == []
+
+    def test_returns_empty_list_when_no_subagents_key(self):
+        config_mod._raw_yaml = {"agent": {"name": "test"}}
+        assert get_subagent_configs() == []
+
+    def test_returns_empty_list_when_subagents_is_empty_list(self):
+        config_mod._raw_yaml = {"subagents": []}
+        assert get_subagent_configs() == []
+
+    def test_parses_single_subagent(self):
+        config_mod._raw_yaml = {
+            "subagents": [
+                {
+                    "name": "content-intel",
+                    "description": "Research content.",
+                    "skills": ["./skills/content-intelligence/"],
+                }
+            ]
+        }
+        configs = get_subagent_configs()
+        assert len(configs) == 1
+        assert configs[0].name == "content-intel"
+        assert configs[0].description == "Research content."
+        assert configs[0].skills == ["./skills/content-intelligence/"]
+        assert configs[0].prompt_file is None
+        assert configs[0].model is None
+
+    def test_parses_multiple_subagents(self):
+        config_mod._raw_yaml = {
+            "subagents": [
+                {"name": "agent-a", "description": "A.", "skills": []},
+                {"name": "agent-b", "description": "B.", "skills": ["./skills/b/"]},
+            ]
+        }
+        configs = get_subagent_configs()
+        assert len(configs) == 2
+        assert configs[0].name == "agent-a"
+        assert configs[1].name == "agent-b"
+
+    def test_with_prompt_file_and_model(self):
+        config_mod._raw_yaml = {
+            "subagents": [
+                {
+                    "name": "analytics",
+                    "description": "Query GA4.",
+                    "skills": ["./skills/analytics/"],
+                    "prompt_file": "./prompts/analytics.md",
+                    "model": "gemini-2.0-flash",
+                }
+            ]
+        }
+        cfg = get_subagent_configs()[0]
+        assert cfg.prompt_file == "./prompts/analytics.md"
+        assert cfg.model == "gemini-2.0-flash"
+
+    def test_with_multiple_skills_dirs(self):
+        config_mod._raw_yaml = {
+            "subagents": [
+                {
+                    "name": "writer",
+                    "description": "Write content.",
+                    "skills": ["./skills/base/", "./skills/content-creation/"],
+                }
+            ]
+        }
+        cfg = get_subagent_configs()[0]
+        assert cfg.skills == ["./skills/base/", "./skills/content-creation/"]
+
+    def test_skips_entry_missing_name(self):
+        config_mod._raw_yaml = {
+            "subagents": [
+                {"description": "No name field.", "skills": []},
+                {"name": "valid", "description": "Valid entry.", "skills": []},
+            ]
+        }
+        configs = get_subagent_configs()
+        assert len(configs) == 1
+        assert configs[0].name == "valid"
+
+    def test_skips_entry_missing_description(self):
+        config_mod._raw_yaml = {
+            "subagents": [
+                {"name": "no-desc", "skills": []},
+                {"name": "valid", "description": "Valid.", "skills": []},
+            ]
+        }
+        configs = get_subagent_configs()
+        assert len(configs) == 1
+        assert configs[0].name == "valid"
+
+    def test_skips_non_dict_entry(self):
+        config_mod._raw_yaml = {
+            "subagents": [
+                "not-a-dict",
+                {"name": "valid", "description": "Valid.", "skills": []},
+            ]
+        }
+        configs = get_subagent_configs()
+        assert len(configs) == 1
+
+    def test_skills_defaults_to_empty_list_when_absent(self):
+        config_mod._raw_yaml = {
+            "subagents": [{"name": "sa", "description": "desc."}]
+        }
+        cfg = get_subagent_configs()[0]
+        assert cfg.skills == []
+
+    def test_bot_yaml_with_subagents_section(self, tmp_path, monkeypatch):
+        """End-to-end: write bot.yaml, load config, verify get_subagent_configs()."""
+        bot_yaml = tmp_path / "bot.yaml"
+        bot_yaml.write_text(
+            "agent:\n  name: test\n"
+            "subagents:\n"
+            "  - name: content-intel\n"
+            "    description: Research content.\n"
+            "    skills:\n"
+            "      - ./skills/content-intelligence/\n"
+        )
+        monkeypatch.chdir(tmp_path)
+        config_mod._config_loaded = False
+        config_mod._raw_yaml = None
+
+        load_bot_config()
+        configs = get_subagent_configs()
+
+        assert len(configs) == 1
+        assert configs[0].name == "content-intel"
+        assert configs[0].skills == ["./skills/content-intelligence/"]
+
+        config_mod._config_loaded = False
+        config_mod._raw_yaml = None

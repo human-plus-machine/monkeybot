@@ -26,7 +26,6 @@ logger = logging.getLogger(__name__)
 try:
     from deepagents import create_deep_agent
     from deepagents.backends.protocol import BackendProtocol, SandboxBackendProtocol
-    from deepagents.middleware.subagents import SubAgentMiddleware
 
     _DEEPAGENTS_AVAILABLE = True
 except ImportError:
@@ -261,11 +260,10 @@ def build_deep_agent(
     # summarization_keep parameters are not currently configurable via
     # create_deep_agent API, so we accept them but don't use them for now.
 
-    # Add subagent middleware if subagents provided
-    if subagents:
-        subagent_mw = SubAgentMiddleware(subagents=subagents)
-        middleware.append(subagent_mw)
-        logger.info(f"Added SubAgentMiddleware with {len(subagents)} subagents")
+    # SubAgentMiddleware and SkillsMiddleware are now handled natively by
+    # create_deep_agent() via the `subagents` and `skills` parameters below.
+    # This ensures each subagent gets its own SkillsMiddleware, FilesystemMiddleware,
+    # and SummarizationMiddleware wired correctly by the deepagents package.
 
     if checkpointer is None:
         checkpoint_backend = os.getenv("CHECKPOINT_BACKEND", "memory")
@@ -327,6 +325,8 @@ def build_deep_agent(
         backend=backend,
         store=store,
         checkpointer=checkpointer,
+        skills=skills,       # SkillsMiddleware wired per-agent by deepagents
+        subagents=subagents, # SubAgentMiddleware + per-subagent stacks by deepagents
     )
 
     # Attach fs_sync to agent so callers can run startup sync via FastAPI lifespan

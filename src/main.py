@@ -26,9 +26,11 @@ from google.cloud import aiplatform  # noqa: E402
 from langchain_google_vertexai import ChatVertexAI  # noqa: E402
 from langchain_core.tools import StructuredTool  # noqa: E402
 
+from deepagents.backends.local_shell import LocalShellBackend  # noqa: E402
+
 from src.core.agent import build_agent  # noqa: E402
 from src.core.deepagent import build_deep_agent  # noqa: E402
-from src.core.config import load_bot_config  # noqa: E402
+from src.core.config import load_bot_config, get_subagent_configs  # noqa: E402
 from src.core.store import GCSStore, create_search_memory_tool  # noqa: E402
 from src.core.scheduler import create_storage  # noqa: E402
 from src.core.terminal import TerminalExecutor  # noqa: E402
@@ -133,6 +135,15 @@ def load_skills_as_tools(skills_dir: str, terminal_executor: TerminalExecutor) -
     return tools
 
 
+def _load_prompt_file(path: str) -> str:
+    """Load a system prompt from a file path, returning empty string on miss."""
+    p = Path(path)
+    if p.exists():
+        return p.read_text()
+    logger.warning("Prompt file not found: %s", path)
+    return ""
+
+
 def create_app():
     """Create FastAPI app with LangChain v1 agent.
     
@@ -163,11 +174,17 @@ def create_app():
     )
     logger.info("✅ Chat model created (Gemini 2.5 Flash)")
     
-    # Create Terminal Executor (for legacy subprocess-based skills)
+    # Create Terminal Executor (for legacy subprocess-based skills / fallback path)
     terminal_executor = TerminalExecutor()
     logger.info("✅ Terminal Executor created")
-    
-    # Load skills as LangChain tools
+
+    # Create LocalShellBackend — gives the deep agent native read_file / execute
+    # tools via FilesystemMiddleware.  Inherits the full process environment so
+    # skills can access all credentials already set in os.environ.
+    backend = LocalShellBackend(root_dir=Path.cwd(), inherit_env=True)
+    logger.info("✅ LocalShellBackend created (root_dir=%s)", Path.cwd())
+
+    # Load skills as LangChain tools (kept for the build_agent() fallback path)
     skills_dir = os.getenv("SKILLS_DIR", "./skills")
     tools = load_skills_as_tools(skills_dir, terminal_executor)
     
@@ -219,12 +236,37 @@ def create_app():
         if Path(skills_dir).exists():
             skills_list = [skills_dir]
             logger.info(f"✅ Skills directory found: {skills_dir}")
-        
+
+        # Build subagent specs from bot.yaml `subagents:` section.
+        # Returns None (not an empty list) when no subagents are configured so
+        # create_deep_agent() can distinguish "no subagents" from "zero subagents".
+        subagent_configs = get_subagent_configs()
+        subagent_specs = None
+        if subagent_configs:
+            subagent_specs = []
+            for cfg in subagent_configs:
+                spec: dict = {
+                    "name": cfg.name,
+                    "description": cfg.description,
+                    "system_prompt": (
+                        _load_prompt_file(cfg.prompt_file)
+                        if cfg.prompt_file
+                        else f"You are the {cfg.name} specialist."
+                    ),
+                    "skills": cfg.skills,
+                }
+                if cfg.model:
+                    spec["model"] = cfg.model
+                subagent_specs.append(spec)
+            logger.info("✅ Built %d subagent spec(s)", len(subagent_specs))
+
         agent = build_deep_agent(
             model=model,
             tools=tools,
             system_prompt="",  # Default, can be customized per-deployment
             skills=skills_list,
+            backend=backend,
+            subagents=subagent_specs,
             store=store,
             scheduler=scheduler,
         )

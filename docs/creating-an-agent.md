@@ -229,6 +229,50 @@ Skills are auto-discovered when you set `skills_dir` in `bot.yaml`. You do not n
 
 ---
 
+## Step 4b: Add Subagents (Optional)
+
+Subagents let you partition a large skill set across specialised workers, each with its own focused context window.  The orchestrator delegates to them via the built-in `task` tool.  All agents share the same filesystem and shell.
+
+**When to add subagents:**
+- Your agent has 10+ skills and you notice the model losing focus.
+- Different skill groups serve clearly different specialisations (research vs. writing vs. analytics).
+- You want different models for different roles (e.g. fast model for analytics, capable model for writing).
+
+**When to skip:**
+- Your agent has a small, cohesive skill set (< ~8 skills).
+- All skills are tightly coupled to a single domain.
+
+**Quick setup:**
+
+1. Organise skills into per-subagent subdirectories:
+
+```
+skills/content-intelligence/
+├── research-domain-content/
+│   ├── SKILL.md
+│   └── research_domain_content.py
+└── extract-content-patterns/
+    ├── SKILL.md
+    └── extract_content_patterns.py
+```
+
+2. Add the `subagents:` section to `bot.yaml`:
+
+```yaml
+subagents:
+  - name: content-intel
+    description: >
+      Research top-performing content and extract engagement patterns.
+    skills:
+      - ./skills/content-intelligence/
+```
+
+3. That's it.  The framework wires `SkillsMiddleware` per subagent and adds the `task` tool to the orchestrator automatically.
+
+See the [Subagents](subagents.md) guide for the full configuration reference, skills layout conventions, and prompt-writing guidance.
+
+---
+
 ## Step 5: Wire Up Memory (Optional)
 
 Enable GCS-backed memory for production deployments where you need:
