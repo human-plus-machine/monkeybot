@@ -79,6 +79,8 @@ CONFIG_MAPPING = {
     # GCP-specific
     "gcp.project_id": "GCP_PROJECT_ID",
     "gcp.location": "VERTEX_AI_LOCATION",
+    # Orchestrator LLM Vertex region — when set, overrides ``gcp.location`` for the same env var
+    "model.location": "VERTEX_AI_LOCATION",
     # AWS-specific (future)
     "aws.region": "AWS_REGION",
     "aws.account_id": "AWS_ACCOUNT_ID",
@@ -103,6 +105,8 @@ CONFIG_MAPPING = {
     "voice.speech_to_text.model":          "VOICE_STT_MODEL",
     "voice.text_to_speech.voice_name":     "VOICE_TTS_VOICE_NAME",
     "voice.text_to_speech.audio_encoding": "VOICE_TTS_AUDIO_ENCODING",
+    # Genkit (bundled flows — Vertex media region, often us-central1)
+    "genkit.vertex_location": "GENKIT_VERTEX_AI_LOCATION",
 }
 
 
@@ -208,12 +212,16 @@ class SubagentConfig:
             system prompt.  When omitted a sensible default is generated.
         model: Optional model override in ``provider:model-name`` format.
             Defaults to the orchestrator's model when not set.
+        vertex_location: Optional Vertex region for this subagent's LLM (e.g. ``us-east5``).
+            YAML key may be ``vertex_location`` or ``location``. When omitted, the host
+            app should use the orchestrator default (``VERTEX_AI_LOCATION``).
     """
     name: str
     description: str
     skills: list[str]
     prompt_file: str | None = None
     model: str | None = None
+    vertex_location: str | None = None
 
 
 def _flatten_yaml_to_env(yaml_dict: Dict[str, Any]) -> Dict[str, str]:
@@ -997,6 +1005,9 @@ def get_subagent_configs() -> list[SubagentConfig]:
                 "Skipping subagent entry missing 'name' or 'description': %s", entry
             )
             continue
+        vloc = entry.get("vertex_location")
+        if vloc is None and "location" in entry:
+            vloc = entry.get("location")
         configs.append(
             SubagentConfig(
                 name=entry["name"],
@@ -1004,6 +1015,7 @@ def get_subagent_configs() -> list[SubagentConfig]:
                 skills=entry.get("skills", []),
                 prompt_file=entry.get("prompt_file"),
                 model=entry.get("model"),
+                vertex_location=vloc,
             )
         )
     return configs

@@ -378,6 +378,7 @@ class TestSubagentConfig:
         )
         assert cfg.prompt_file is None
         assert cfg.model is None
+        assert cfg.vertex_location is None
 
     def test_optional_fields_can_be_set(self):
         cfg = SubagentConfig(
@@ -442,6 +443,7 @@ class TestGetSubagentConfigs:
         assert configs[0].skills == ["./skills/content-intelligence/"]
         assert configs[0].prompt_file is None
         assert configs[0].model is None
+        assert configs[0].vertex_location is None
 
     def test_parses_multiple_subagents(self):
         config_mod._raw_yaml = {
@@ -522,6 +524,49 @@ class TestGetSubagentConfigs:
         }
         cfg = get_subagent_configs()[0]
         assert cfg.skills == []
+
+    def test_parses_vertex_location_alias(self):
+        config_mod._raw_yaml = {
+            "subagents": [
+                {
+                    "name": "analytics",
+                    "description": "Query GA4.",
+                    "skills": ["./skills/analytics/"],
+                    "vertex_location": "us-east5",
+                }
+            ]
+        }
+        cfg = get_subagent_configs()[0]
+        assert cfg.vertex_location == "us-east5"
+
+    def test_parses_location_shorthand(self):
+        config_mod._raw_yaml = {
+            "subagents": [
+                {
+                    "name": "writer",
+                    "description": "Write.",
+                    "skills": [],
+                    "location": "us-central1",
+                }
+            ]
+        }
+        cfg = get_subagent_configs()[0]
+        assert cfg.vertex_location == "us-central1"
+
+    def test_vertex_location_wins_over_location_when_both_set(self):
+        config_mod._raw_yaml = {
+            "subagents": [
+                {
+                    "name": "sa",
+                    "description": "d",
+                    "skills": [],
+                    "location": "us-central1",
+                    "vertex_location": "us-east5",
+                }
+            ]
+        }
+        cfg = get_subagent_configs()[0]
+        assert cfg.vertex_location == "us-east5"
 
     def test_bot_yaml_with_subagents_section(self, tmp_path, monkeypatch):
         """End-to-end: write bot.yaml, load config, verify get_subagent_configs()."""
