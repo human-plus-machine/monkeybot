@@ -140,11 +140,16 @@ class DuplicateToolErrorCompactionMiddleware(AgentMiddleware[AgentState[Any], No
         if len(tail_indices) < 2:
             return None
 
-        by_key: dict[tuple[str, str], list[int]] = {}
+        # Include tool_call_id so sequential failures with identical error text
+        # (e.g. repeated edit_file validation) are never collapsed — removing an
+        # older ToolMessage would orphan a prior assistant tool_use (API error).
+        by_key: dict[tuple[str, str, str], list[int]] = {}
         for i in tail_indices:
             m = messages[i]
             assert isinstance(m, ToolMessage)
-            key = _normalize_error_fingerprint(m.name, _tool_content_to_str(m.content))
+            tcid = getattr(m, "tool_call_id", None) or ""
+            fp_name, fp_body = _normalize_error_fingerprint(m.name, _tool_content_to_str(m.content))
+            key = (tcid, fp_name, fp_body)
             by_key.setdefault(key, []).append(i)
 
         remove_ids: list[str] = []
