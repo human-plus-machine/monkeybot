@@ -18,6 +18,7 @@ classifiers = [
 ]
 
 dependencies = [
+    "langchain>=0.3.0",
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
     "deepagents>=0.1.0",

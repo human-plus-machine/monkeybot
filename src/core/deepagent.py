@@ -7,6 +7,7 @@ agents with monkey-bot's opinionated defaults on top of LangChain Deep Agents.
 import logging
 import os
 from collections.abc import Callable, Sequence
+from typing import Any
 from datetime import UTC
 from pathlib import Path
 
@@ -52,6 +53,8 @@ def build_deep_agent(
     heartbeat: "object | None" = None,
     voice: "object | None" = None,
     identity_file: "str | None" = None,
+    extra_middleware: Sequence[Any] | None = None,
+    subagent_middleware: Sequence[Any] | None = None,
 ):
     """Build a deep agent with monkey-bot's opinionated defaults.
 
@@ -75,6 +78,10 @@ def build_deep_agent(
         checkpointer: LangGraph checkpointer for conversation persistence (defaults to InMemorySaver)
         summarization_trigger: When to trigger summarization (type, value)
         summarization_keep: How much context to keep after summarization (type, value)
+        extra_middleware: Additional LangChain ``AgentMiddleware`` instances appended to the
+            orchestrator stack (e.g. tool limits, output guards).
+        subagent_middleware: Same middleware instances merged into each YAML/dict subagent's
+            ``middleware`` list (skipped for compiled subagents with ``runnable``).
 
     Returns:
         Compiled deep agent (LangGraph graph)
@@ -254,6 +261,8 @@ def build_deep_agent(
 
     # Step 5: Configure middleware
     middleware = []
+    if extra_middleware:
+        middleware.extend(list(extra_middleware))
 
     # Note: SummarizationMiddleware is added by default by create_deep_agent,
     # so we don't need to add it manually. The summarization_trigger and
@@ -316,6 +325,19 @@ def build_deep_agent(
             voice_handler = _voice_handler_cls(config=voice)
             logger.info("Created VoiceHandler instance")
 
+    # Step 5d: Merge subagent middleware into each dict subagent (not compiled runnables)
+    merged_subagents = subagents
+    if subagent_middleware and subagents:
+        smw = list(subagent_middleware)
+        merged: list = []
+        for spec in subagents:
+            if isinstance(spec, dict) and "runnable" not in spec:
+                existing = list(spec.get("middleware", []))
+                merged.append({**spec, "middleware": existing + smw})
+            else:
+                merged.append(spec)
+        merged_subagents = merged
+
     # Step 6: Call create_deep_agent with all params
     agent = create_deep_agent(
         model=model,
@@ -325,8 +347,8 @@ def build_deep_agent(
         backend=backend,
         store=store,
         checkpointer=checkpointer,
-        skills=skills,       # SkillsMiddleware wired per-agent by deepagents
-        subagents=subagents, # SubAgentMiddleware + per-subagent stacks by deepagents
+        skills=skills,          # SkillsMiddleware wired per-agent by deepagents
+        subagents=merged_subagents,  # SubAgentMiddleware + per-subagent stacks by deepagents
     )
 
     # Attach fs_sync to agent so callers can run startup sync via FastAPI lifespan

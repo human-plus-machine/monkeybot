@@ -9,6 +9,11 @@ This package contains the core building blocks for monkey-bot:
 """
 
 from .agent import build_agent, create_agent_with_mocks, AgentWrapper
+from .agent_guard_middleware import (
+    DuplicateToolErrorCompactionMiddleware,
+    ToolOutputTruncationMiddleware,
+    build_default_guard_middleware_stack,
+)
 from .deepagent import build_deep_agent
 from .filesystem_sync import GCSFilesystemSync
 from .interfaces import (
@@ -30,6 +35,9 @@ from .terminal import ALLOWED_COMMANDS, ALLOWED_PATHS, TerminalExecutor
 __all__ = [
     # Agent
     "build_deep_agent",
+    "build_default_guard_middleware_stack",
+    "DuplicateToolErrorCompactionMiddleware",
+    "ToolOutputTruncationMiddleware",
     "build_agent",
     "AgentWrapper",
     "create_agent_with_mocks",

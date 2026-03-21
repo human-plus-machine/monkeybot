@@ -1,0 +1,205 @@
+"""Agent middleware: tool output truncation and duplicate tool-error compaction.
+
+Works with LangChain ``AgentMiddleware`` + LangGraph ``add_messages`` (``RemoveMessage``).
+
+Environment (optional overrides)::
+
+    EMONK_THREAD_TOOL_LIMIT   — max tool calls per thread (default 400, 0 = unset)
+    EMONK_RUN_TOOL_LIMIT      — max tool calls per single graph run (default 120, 0 = unset)
+    EMONK_TOOL_OUTPUT_MAX_CHARS — truncate tool result strings (default 8000)
+    EMONK_ERROR_DEDUP_TAIL    — scan last N messages for duplicate errors (default 64)
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import re
+from typing import Any
+
+from collections.abc import Awaitable, Callable
+
+from langchain.agents.middleware.tool_call_limit import ToolCallLimitMiddleware
+from langchain.agents.middleware.types import AgentMiddleware, AgentState
+from langchain_core.messages import ToolMessage
+from langchain_core.messages.modifier import RemoveMessage
+from langgraph.prebuilt.tool_node import ToolCallRequest
+from langgraph.types import Command
+
+logger = logging.getLogger(__name__)
+
+_WS_RE = re.compile(r"\s+")
+
+
+def _tool_content_to_str(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    try:
+        return str(content)
+    except Exception:
+        return ""
+
+
+def _normalize_error_fingerprint(name: str | None, content: str) -> tuple[str, str]:
+    """Key for deduplicating repeated tool failures."""
+    c = _WS_RE.sub(" ", _tool_content_to_str(content).strip().lower())[:800]
+    return (name or "", c)
+
+
+def _is_error_tool_message(msg: ToolMessage) -> bool:
+    status = getattr(msg, "status", None)
+    if status == "error":
+        return True
+    text = _tool_content_to_str(msg.content).lower()
+    if not text:
+        return False
+    needles = (
+        "error invoking tool",
+        "field required",
+        "validation error",
+        "invalid json",
+        "exception",
+        "traceback",
+    )
+    return any(n in text for n in needles)
+
+
+class ToolOutputTruncationMiddleware(AgentMiddleware[AgentState[Any], None, Any]):
+    """Truncate oversized ``ToolMessage`` content to cap checkpoint / context growth."""
+
+    def __init__(self, *, max_chars: int = 8000) -> None:
+        super().__init__()
+        self.max_chars = max(256, int(max_chars))
+        self.tools = []
+
+    def _shrink(self, msg: ToolMessage) -> ToolMessage:
+        raw = _tool_content_to_str(msg.content)
+        if len(raw) <= self.max_chars:
+            return msg
+        truncated = raw[: self.max_chars] + f"\n\n… [truncated {len(raw) - self.max_chars} chars]"
+        kwargs: dict[str, Any] = {
+            "content": truncated,
+            "tool_call_id": msg.tool_call_id,
+            "name": msg.name,
+        }
+        mid = getattr(msg, "id", None)
+        if mid is not None:
+            kwargs["id"] = mid
+        st = getattr(msg, "status", None)
+        if st is not None:
+            kwargs["status"] = st
+        return ToolMessage(**kwargs)
+
+    def wrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], ToolMessage | Command[Any]],
+    ) -> ToolMessage | Command[Any]:
+        result = handler(request)
+        if isinstance(result, ToolMessage):
+            return self._shrink(result)
+        return result
+
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
+    ) -> ToolMessage | Command[Any]:
+        result = await handler(request)
+        if isinstance(result, ToolMessage):
+            return self._shrink(result)
+        return result
+
+
+class DuplicateToolErrorCompactionMiddleware(AgentMiddleware[AgentState[Any], None, Any]):
+    """Remove older duplicate error :class:`~langchain_core.messages.tool.ToolMessage` rows in the tail.
+
+    Uses ``RemoveMessage`` so LangGraph's ``add_messages`` reducer drops the
+    corresponding entries before the next model call.
+    """
+
+    def __init__(self, *, tail_message_scan: int = 64) -> None:
+        super().__init__()
+        self.tail_message_scan = max(8, int(tail_message_scan))
+        self.tools = []
+
+    def before_model(self, state: AgentState[Any], runtime: Any) -> dict[str, Any] | None:
+        messages: list[Any] = list(state.get("messages") or [])
+        if len(messages) < 2:
+            return None
+
+        start = max(0, len(messages) - self.tail_message_scan)
+        tail_indices: list[int] = []
+        for i in range(start, len(messages)):
+            m = messages[i]
+            if isinstance(m, ToolMessage) and _is_error_tool_message(m):
+                tail_indices.append(i)
+
+        if len(tail_indices) < 2:
+            return None
+
+        by_key: dict[tuple[str, str], list[int]] = {}
+        for i in tail_indices:
+            m = messages[i]
+            assert isinstance(m, ToolMessage)
+            key = _normalize_error_fingerprint(m.name, _tool_content_to_str(m.content))
+            by_key.setdefault(key, []).append(i)
+
+        remove_ids: list[str] = []
+        for _key, idxs in by_key.items():
+            if len(idxs) <= 1:
+                continue
+            # Keep newest (largest index); drop older duplicates
+            keep = max(idxs)
+            for i in idxs:
+                if i == keep:
+                    continue
+                msg = messages[i]
+                mid = getattr(msg, "id", None)
+                if mid:
+                    remove_ids.append(mid)
+
+        if not remove_ids:
+            return None
+
+        logger.info(
+            "duplicate_tool_error_compaction",
+            extra={"removed_message_ids": len(remove_ids)},
+        )
+        return {"messages": [RemoveMessage(id=mid) for mid in remove_ids]}
+
+    async def abefore_model(self, state: AgentState[Any], runtime: Any) -> dict[str, Any] | None:
+        return self.before_model(state, runtime)
+
+
+def build_default_guard_middleware_stack() -> list[Any]:
+    """Stack: tool call limits (LangChain), truncation, duplicate error compaction.
+
+    Returns middleware instances to pass as ``extra_middleware`` /
+    ``subagent_middleware`` on :func:`emonk.core.deepagent.build_deep_agent`.
+    """
+    thread_raw = int(os.getenv("EMONK_THREAD_TOOL_LIMIT", "400"))
+    run_raw = int(os.getenv("EMONK_RUN_TOOL_LIMIT", "120"))
+    thread_limit = None if thread_raw <= 0 else thread_raw
+    run_limit = None if run_raw <= 0 else run_raw
+
+    max_chars = int(os.getenv("EMONK_TOOL_OUTPUT_MAX_CHARS", "8000"))
+    tail = int(os.getenv("EMONK_ERROR_DEDUP_TAIL", "64"))
+
+    out: list[Any] = []
+
+    if thread_limit is not None or run_limit is not None:
+        out.append(
+            ToolCallLimitMiddleware(
+                tool_name=None,
+                thread_limit=thread_limit,
+                run_limit=run_limit,
+                exit_behavior="continue",
+            )
+        )
+
+    out.append(ToolOutputTruncationMiddleware(max_chars=max_chars))
+    out.append(DuplicateToolErrorCompactionMiddleware(tail_message_scan=tail))
+    return out
