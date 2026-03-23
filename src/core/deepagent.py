@@ -7,6 +7,7 @@ agents with monkey-bot's opinionated defaults on top of LangChain Deep Agents.
 import logging
 import os
 from collections.abc import Callable, Sequence
+from contextlib import AbstractContextManager
 from typing import Any
 from datetime import UTC
 from pathlib import Path
@@ -20,6 +21,7 @@ from langgraph.store.base import BaseStore
 from .filesystem_sync import GCSFilesystemSync
 from .prompt import compose_system_prompt
 from .store import create_search_memory_tool
+from .task_tool_patches import apply_task_tool_patches
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +57,8 @@ def build_deep_agent(
     identity_file: "str | None" = None,
     extra_middleware: Sequence[Any] | None = None,
     subagent_middleware: Sequence[Any] | None = None,
+    workspace_settings: Any | None = None,
+    subagent_invocation_ctx: Callable[[str], AbstractContextManager[Any]] | None = None,
 ):
     """Build a deep agent with monkey-bot's opinionated defaults.
 
@@ -82,6 +86,10 @@ def build_deep_agent(
             orchestrator stack (e.g. tool limits, output guards).
         subagent_middleware: Same middleware instances merged into each YAML/dict subagent's
             ``middleware`` list (skipped for compiled subagents with ``runnable``).
+        workspace_settings: Optional app settings object; stored on the returned agent as
+            ``agent.workspace_settings`` for FastAPI or other hosts (e.g. workspace file API).
+        subagent_invocation_ctx: Optional context manager factory ``(subagent_name) -> ctx``;
+            passed to the patched ``task`` tool (e.g. for logging which subagent is active).
 
     Returns:
         Compiled deep agent (LangGraph graph)
@@ -117,6 +125,8 @@ def build_deep_agent(
             "deepagents package required: pip install deepagents\n"
             "See: https://github.com/langchain-ai/deepagents"
         )
+
+    apply_task_tool_patches(subagent_invocation_ctx=subagent_invocation_ctx)
 
     # Step 1: Collect all tools
     all_tools = list(tools) if tools else []
@@ -364,6 +374,9 @@ def build_deep_agent(
 
     # Attach voice_handler to agent
     agent.voice_handler = voice_handler
+
+    if workspace_settings is not None:
+        agent.workspace_settings = workspace_settings
 
     logger.info(
         "Deep agent created",
