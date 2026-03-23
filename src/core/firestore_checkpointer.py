@@ -326,7 +326,7 @@ class FirestoreCheckpointSaver(BaseCheckpointSaver):
     ) -> list[tuple[str, str, Any]]:
         """Fetch all pending writes for a checkpoint."""
         writes_col = self._writes_col(thread_id)
-        query = writes_col.where("checkpoint_id", "==", checkpoint_id)
+        query = writes_col.where(filter=FieldFilter("checkpoint_id", "==", checkpoint_id))
         pending: list[tuple[str, str, Any]] = []
         async for doc in query.stream():
             wd = doc.to_dict()
