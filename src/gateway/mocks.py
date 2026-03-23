@@ -10,7 +10,7 @@ Real implementations will be wired in Story 4 (Integration).
 
 from __future__ import annotations
 
-import src.gateway.interfaces as interfaces
+from . import interfaces
 
 
 class MockScheduler:

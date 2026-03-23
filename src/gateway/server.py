@@ -20,16 +20,16 @@ from datetime import UTC, datetime
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import JSONResponse, Response
 
-from src.gateway.interfaces import AgentCoreInterface, AgentError
-from src.gateway.mocks import MockAgentCore
-from src.gateway.models import (
+from .interfaces import AgentCoreInterface, AgentError
+from .mocks import MockAgentCore
+from .models import (
     CronTickResponse,
     GoogleChatResponse,
     GoogleChatWebhook,
     GoogleChatWorkspaceResponse,
     HealthCheckResponse,
 )
-from src.gateway.pii_filter import filter_google_chat_pii
+from .pii_filter import filter_google_chat_pii
 
 # Configure structured JSON logging
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(message)s")

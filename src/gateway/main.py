@@ -2,10 +2,10 @@
 Main entry point for Gateway server.
 
 Run locally with:
-    python -m src.gateway.main
+    python -m emonk.gateway.main
 
 Or with uvicorn:
-    uvicorn src.gateway.server:app --reload --port 8080
+    uvicorn emonk.gateway.server:app --reload --port 8080
 """
 
 import os
@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Import app after loading env vars
-from src.gateway.server import app  # noqa: E402
+from .server import app  # noqa: E402
 
 if __name__ == "__main__":
     import uvicorn
