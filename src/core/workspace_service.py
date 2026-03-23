@@ -21,6 +21,9 @@ class WorkspaceSettings:
     WORKSPACE_GREP_MAX_MATCHES: int = 500
     WORKSPACE_GREP_MAX_FILES: int = 5000
     WORKSPACE_GREP_MAX_FILE_BYTES: int = 512_000
+    # If set (repo-relative POSIX prefix, no leading slash), write_file / replace_in_file
+    # only allow paths under repo_root / this prefix (e.g. sync-backed agent memory).
+    WORKSPACE_WRITE_SCOPE_REL: str | None = None
 
 
 class WorkspaceError(Exception):
@@ -47,6 +50,7 @@ def _coerce_workspace_settings(settings: object | None) -> WorkspaceSettings:
         "WORKSPACE_GREP_MAX_MATCHES",
         "WORKSPACE_GREP_MAX_FILES",
         "WORKSPACE_GREP_MAX_FILE_BYTES",
+        "WORKSPACE_WRITE_SCOPE_REL",
     ):
         val = getattr(settings, field, None)
         if val is not None:
@@ -83,6 +87,27 @@ class WorkspaceFileService:
         if rel is None or not str(rel).strip() or str(rel).strip() in (".", "./"):
             return self._root
         return self._resolve_under_root(str(rel).strip(), label="root")
+
+    def _write_scope_root(self) -> Path | None:
+        rel = self._settings.WORKSPACE_WRITE_SCOPE_REL
+        if rel is None:
+            return None
+        s = str(rel).strip().replace("\\", "/").lstrip("/")
+        if not s or ".." in s:
+            return None
+        return (self._root / s).resolve()
+
+    def _require_under_write_scope(self, fp: Path) -> None:
+        scope_root = self._write_scope_root()
+        if scope_root is None:
+            return
+        try:
+            fp.resolve().relative_to(scope_root)
+        except ValueError:
+            raise WorkspaceError(
+                f"Writes are limited to {self._settings.WORKSPACE_WRITE_SCOPE_REL!r} (repo-relative)",
+                code="write_outside_scope",
+            ) from None
 
     def read_file(
         self,
@@ -142,6 +167,7 @@ class WorkspaceFileService:
                 code="payload_too_large",
             )
         fp = self._resolve_under_root(path)
+        self._require_under_write_scope(fp)
         fp.parent.mkdir(parents=True, exist_ok=True)
         tmp = fp.with_suffix(fp.suffix + ".workspace_tmp")
         try:
@@ -166,6 +192,7 @@ class WorkspaceFileService:
         if new_string is None:
             new_string = ""
         fp = self._resolve_under_root(path)
+        self._require_under_write_scope(fp)
         if not fp.is_file():
             raise WorkspaceError(f"Not a file: {path}", code="not_found")
         text = fp.read_text(encoding="utf-8", errors="replace")

@@ -19,6 +19,7 @@ from langgraph.types import Command
 _SKIP_CONTEXT_PREFIX: tuple[str, ...] = (
     "data/memory/global/",
     "data/memory/campaigns/",  # already scoped; avoid doubling
+    "data/agent-contract/",
     "skills/",
     "config/",
     "src/",
@@ -50,7 +51,7 @@ def resolve_virtual_path(raw: str, *, context_dir: str | None, repo_root: Path) 
 
     - Host-absolute paths that lie under ``repo_root`` become repo-relative POSIX paths
       (what deepagents then normalizes to a leading ``/`` virtual path).
-    - If ``context_dir`` is set, short relative paths (e.g. ``STRATEGY.md``,
+    - If ``context_dir`` is set, short relative paths (e.g. ``strategy/STRATEGY.md``,
       ``research/x.md``) are prefixed with ``context_dir/``.
     - Leaves paths unchanged when they match global/skill roots or already include
       ``data/memory/campaigns/``.

@@ -55,6 +55,7 @@ def build_deep_agent(
     heartbeat: "object | None" = None,
     voice: "object | None" = None,
     identity_file: "str | None" = None,
+    index_file: "str | None" = None,
     extra_middleware: Sequence[Any] | None = None,
     subagent_middleware: Sequence[Any] | None = None,
     workspace_settings: Any | None = None,
@@ -82,6 +83,12 @@ def build_deep_agent(
         checkpointer: LangGraph checkpointer for conversation persistence (defaults to InMemorySaver)
         summarization_trigger: When to trigger summarization (type, value)
         summarization_keep: How much context to keep after summarization (type, value)
+        soul_file: Optional path to ``SOUL.md`` (defaults to cwd / ``SOUL.md``).
+        tools_file: Optional path to ``TOOLS.md`` (defaults to cwd / ``TOOLS.md``).
+        heartbeat: Optional heartbeat handler config.
+        voice: Optional voice / TTS config.
+        identity_file: Optional path to ``IDENTITY.md`` (or ``IDENTITY_FILE`` env).
+        index_file: Optional path to ``INDEX.md``. If omitted, loads ``MEMORY_DIR/INDEX.md``.
         extra_middleware: Additional LangChain ``AgentMiddleware`` instances appended to the
             orchestrator stack (e.g. tool limits, output guards).
         subagent_middleware: Same middleware instances merged into each YAML/dict subagent's
@@ -185,18 +192,19 @@ def build_deep_agent(
     )
     identity_content = _load_text_file(_identity_path, "IDENTITY")
 
-    # Load INDEX.md from memory dir (always load — agent needs memory map on every call)
-    _index_path = Path(_memory_dir) / "INDEX.md"
+    # Load INDEX.md (memory map); default MEMORY_DIR/INDEX.md unless index_file is set
+    _index_path = Path(index_file) if index_file else Path(_memory_dir) / "INDEX.md"
     index_content = _load_text_file(_index_path, "INDEX")
 
     # Resolve all key paths to absolute
     _resolved_memory_dir = str(Path(_memory_dir).resolve())
     _resolved_skills_dir = str(Path(os.getenv("SKILLS_DIR", "./skills")).resolve())
+    _user_md_path = Path(_memory_dir) / "USER.md"
     resolved_paths: dict[str, str] = {
         "MEMORY_DIR": _resolved_memory_dir,
         "SKILLS_DIR": _resolved_skills_dir,
         "INDEX_MD": str(_index_path.resolve()),
-        "USER_MD": str((_index_path.parent / "USER.md").resolve()),
+        "USER_MD": str(_user_md_path.resolve()),
     }
     if _soul_path.exists():
         resolved_paths["SOUL_FILE"] = str(_soul_path.resolve())
