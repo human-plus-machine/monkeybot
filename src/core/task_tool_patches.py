@@ -10,6 +10,7 @@ from typing import Annotated, Any
 import deepagents.middleware.subagents as _deepagents_subagents
 from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.runnables import Runnable
+from langchain_core.runnables.config import RunnableConfig, ensure_config, merge_configs
 from langchain_core.tools import StructuredTool
 from langchain.tools import ToolRuntime
 from langgraph.types import Command
@@ -21,6 +22,16 @@ MAX_SUBAGENT_RETRIES = 5
 
 # Populated when the patched _build_task_tool runs during agent init (retry-wrapped runnables).
 SUBAGENT_RUNNABLES: dict[str, Runnable] = {}
+
+
+def _invoke_config_for_subagent(runtime: ToolRuntime) -> RunnableConfig:
+    """Merge parent RunnableConfig (callbacks, tags, … from context) with tool runtime.config.
+
+    Passing only ``runtime.config`` drops LangGraph-inherited callbacks, so nested subagent LLM
+    calls never reach handlers such as token-usage accumulators on the HTTP run.
+    """
+    rc = getattr(runtime, "config", None)
+    return merge_configs(ensure_config(), rc if rc is not None else None)
 
 
 class _RetrySubagentRunnable(Runnable):
@@ -144,7 +155,7 @@ def _build_task_tool_forwarding_config(  # type: ignore[no-untyped-def]
             return f"We cannot invoke subagent {subagent_type} because it does not exist, the only allowed types are {allowed_types}"
         subagent, subagent_state = _validate_and_prepare_state(subagent_type, description, runtime)
         with ctx_factory(subagent_type):
-            result = subagent.invoke(subagent_state, config=runtime.config)
+            result = subagent.invoke(subagent_state, config=_invoke_config_for_subagent(runtime))
         if not runtime.tool_call_id:
             value_error_msg = "Tool call ID is required for subagent invocation"
             raise ValueError(value_error_msg)
@@ -163,7 +174,7 @@ def _build_task_tool_forwarding_config(  # type: ignore[no-untyped-def]
             return f"We cannot invoke subagent {subagent_type} because it does not exist, the only allowed types are {allowed_types}"
         subagent, subagent_state = _validate_and_prepare_state(subagent_type, description, runtime)
         with ctx_factory(subagent_type):
-            result = await subagent.ainvoke(subagent_state, config=runtime.config)
+            result = await subagent.ainvoke(subagent_state, config=_invoke_config_for_subagent(runtime))
         if not runtime.tool_call_id:
             value_error_msg = "Tool call ID is required for subagent invocation"
             raise ValueError(value_error_msg)
