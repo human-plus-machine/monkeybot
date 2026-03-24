@@ -15,6 +15,7 @@ from typing import Annotated
 import deepagents.middleware.filesystem as _deepagents_fs
 from langchain.tools import ToolRuntime
 from langchain_core.tools import StructuredTool
+from pydantic import Field
 
 _applied = False
 _logger = logging.getLogger(__name__)
@@ -56,8 +57,13 @@ def _create_execute_tool_command_default(self):  # type: ignore[no-untyped-def]
         runtime: ToolRuntime[None, _deepagents_fs.FilesystemState],
         command: Annotated[
             str,
-            "Full shell command (required for real execution). Example: python3 $APP_ROOT/skills/.../script.py --help",
-        ] = "",
+            Field(
+                min_length=1,
+                description=(
+                    "Full shell command (required). Example: python3 $APP_ROOT/skills/.../script.py --help"
+                ),
+            ),
+        ],
     ) -> str:
         if not (command or "").strip():
             return _execute_empty_command_response(command)
@@ -84,8 +90,13 @@ def _create_execute_tool_command_default(self):  # type: ignore[no-untyped-def]
         runtime: ToolRuntime[None, _deepagents_fs.FilesystemState],
         command: Annotated[
             str,
-            "Full shell command (required for real execution). Example: python3 $APP_ROOT/skills/.../script.py --help",
-        ] = "",
+            Field(
+                min_length=1,
+                description=(
+                    "Full shell command (required). Example: python3 $APP_ROOT/skills/.../script.py --help"
+                ),
+            ),
+        ],
     ) -> str:
         if not (command or "").strip():
             return _execute_empty_command_response(command)

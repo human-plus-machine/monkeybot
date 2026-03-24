@@ -8,6 +8,8 @@ Environment (optional overrides)::
     EMONK_RUN_TOOL_LIMIT      — max tool calls per single graph run (default 120, 0 = unset)
     EMONK_TOOL_OUTPUT_MAX_CHARS — truncate tool result strings (default 8000)
     EMONK_ERROR_DEDUP_TAIL    — scan last N messages for duplicate errors (default 64)
+    EMONK_SEQUENTIAL_TOOL_CALLS — if 1 (default), only the first tool call per model turn runs;
+                                  set 0 to allow parallel tool execution again.
 """
 
 from __future__ import annotations
@@ -20,8 +22,14 @@ from typing import Any
 from collections.abc import Awaitable, Callable
 
 from langchain.agents.middleware.tool_call_limit import ToolCallLimitMiddleware
-from langchain.agents.middleware.types import AgentMiddleware, AgentState
-from langchain_core.messages import ToolMessage
+from langchain.agents.middleware.types import (
+    AgentMiddleware,
+    AgentState,
+    ExtendedModelResponse,
+    ModelRequest,
+    ModelResponse,
+)
+from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.messages.modifier import RemoveMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
@@ -179,8 +187,66 @@ class DuplicateToolErrorCompactionMiddleware(AgentMiddleware[AgentState[Any], No
         return self.before_model(state, runtime)
 
 
+class SequentialToolCallsMiddleware(AgentMiddleware[AgentState[Any], None, Any]):
+    """Limit each model turn to a single tool call so tools never run in parallel.
+
+    LangGraph's tool node otherwise executes every tool_use in one assistant message
+    concurrently (e.g. multiple ``task`` delegations), which interleaves subagents
+    and filesystem access. Set ``EMONK_SEQUENTIAL_TOOL_CALLS=0`` to disable.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.tools = []
+
+    def wrap_model_call(self, request: ModelRequest[Any], handler: Callable[..., Any]) -> Any:
+        return self._maybe_trim(handler(request))
+
+    async def awrap_model_call(
+        self,
+        request: ModelRequest[Any],
+        handler: Callable[..., Awaitable[Any]],
+    ) -> Any:
+        return self._maybe_trim(await handler(request))
+
+    def _maybe_trim(self, response: Any) -> Any:
+        raw = (os.getenv("EMONK_SEQUENTIAL_TOOL_CALLS") or "1").strip().lower()
+        if raw in ("0", "false", "no", "off"):
+            return response
+        if isinstance(response, ExtendedModelResponse):
+            return ExtendedModelResponse(
+                model_response=self._trim_model_response(response.model_response),
+                command=response.command,
+            )
+        if isinstance(response, ModelResponse):
+            return self._trim_model_response(response)
+        return response
+
+    def _trim_model_response(self, mr: ModelResponse[Any]) -> ModelResponse[Any]:
+        new_result: list[Any] = []
+        changed = False
+        for m in mr.result:
+            if isinstance(m, AIMessage):
+                tcs = getattr(m, "tool_calls", None) or []
+                if isinstance(tcs, list) and len(tcs) > 1:
+                    new_result.append(m.model_copy(update={"tool_calls": tcs[:1]}))
+                    changed = True
+                    continue
+            new_result.append(m)
+        if not changed:
+            return mr
+        logger.info(
+            "sequential_tool_calls_trim",
+            extra={"event": "sequential_tool_calls_trim", "kept": 1},
+        )
+        return ModelResponse(result=new_result, structured_response=mr.structured_response)
+
+
 def build_default_guard_middleware_stack() -> list[Any]:
     """Stack: tool call limits (LangChain), truncation, duplicate error compaction.
+
+    Appends :class:`SequentialToolCallsMiddleware` last (innermost around the model)
+    so only one tool call runs per assistant turn unless ``EMONK_SEQUENTIAL_TOOL_CALLS=0``.
 
     Returns middleware instances to pass as ``extra_middleware`` /
     ``subagent_middleware`` on :func:`emonk.core.deepagent.build_deep_agent`.
@@ -207,4 +273,5 @@ def build_default_guard_middleware_stack() -> list[Any]:
 
     out.append(ToolOutputTruncationMiddleware(max_chars=max_chars))
     out.append(DuplicateToolErrorCompactionMiddleware(tail_message_scan=tail))
+    out.append(SequentialToolCallsMiddleware())
     return out
