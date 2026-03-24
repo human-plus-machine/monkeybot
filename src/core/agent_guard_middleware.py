@@ -187,6 +187,36 @@ class DuplicateToolErrorCompactionMiddleware(AgentMiddleware[AgentState[Any], No
         return self.before_model(state, runtime)
 
 
+def _filter_ai_content_tool_uses_for_kept_ids(content: Any, kept_tool_call_ids: set[str]) -> Any:
+    """Drop ``tool_use`` blocks from message content that are not in *kept_tool_call_ids*.
+
+    Vertex/Anthropic formatting builds API ``tool_use`` from both ``AIMessage.content``
+    blocks and ``AIMessage.tool_calls``. If we trim ``tool_calls`` to one entry but leave
+    sibling ``tool_use`` blocks in ``content``, those orphans are still sent and the API
+    rejects the next request (missing ``tool_result`` for each ``tool_use``).
+    """
+    if not isinstance(content, list):
+        return content
+    out: list[Any] = []
+    kept_first_tool_use_without_id = False
+    for block in content:
+        if not isinstance(block, dict):
+            out.append(block)
+            continue
+        if block.get("type") != "tool_use":
+            out.append(block)
+            continue
+        bid = block.get("id")
+        if kept_tool_call_ids:
+            if bid is not None and str(bid) in kept_tool_call_ids:
+                out.append(block)
+            continue
+        if not kept_first_tool_use_without_id:
+            out.append(block)
+            kept_first_tool_use_without_id = True
+    return out
+
+
 class SequentialToolCallsMiddleware(AgentMiddleware[AgentState[Any], None, Any]):
     """Limit each model turn to a single tool call so tools never run in parallel.
 
@@ -229,7 +259,16 @@ class SequentialToolCallsMiddleware(AgentMiddleware[AgentState[Any], None, Any])
             if isinstance(m, AIMessage):
                 tcs = getattr(m, "tool_calls", None) or []
                 if isinstance(tcs, list) and len(tcs) > 1:
-                    new_result.append(m.model_copy(update={"tool_calls": tcs[:1]}))
+                    kept = tcs[:1]
+                    kept_ids = {
+                        str(tc["id"])
+                        for tc in kept
+                        if isinstance(tc, dict) and tc.get("id") is not None
+                    }
+                    new_content = _filter_ai_content_tool_uses_for_kept_ids(m.content, kept_ids)
+                    new_result.append(
+                        m.model_copy(update={"tool_calls": kept, "content": new_content})
+                    )
                     changed = True
                     continue
             new_result.append(m)
