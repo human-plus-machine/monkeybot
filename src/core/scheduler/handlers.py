@@ -334,7 +334,7 @@ class HeartbeatHandler:
             location = (
                 os.getenv("VERTEX_AI_LOCATION")
                 or os.getenv("GOOGLE_CLOUD_LOCATION")
-                or "us-east5"
+                or "global"
             )
             council_model = ChatGoogleGenerativeAI(
                 model=council_model_name,

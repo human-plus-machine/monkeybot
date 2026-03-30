@@ -15,6 +15,8 @@ from langchain_core.messages import ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
+from .campaign_context import memory_context_dir_ctx
+
 # Paths that must never get ``memory_context_dir`` prepended (repo-root-relative, POSIX slashes).
 _SKIP_CONTEXT_PREFIX: tuple[str, ...] = (
     "data/memory/global/",
@@ -171,16 +173,28 @@ class MemoryPathMiddleware(AgentMiddleware[AgentState[Any], None, Any]):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], ToolMessage | Command[Any]],
     ) -> ToolMessage | Command[Any]:
-        req = _maybe_rewrite_request(request, self._repo_root)
-        return handler(req)
+        cfg = getattr(request.runtime, "config", None)
+        context_dir = _memory_context_dir_from_config(cfg if isinstance(cfg, dict) else {})
+        token = memory_context_dir_ctx.set(context_dir)
+        try:
+            req = _maybe_rewrite_request(request, self._repo_root)
+            return handler(req)
+        finally:
+            memory_context_dir_ctx.reset(token)
 
     async def awrap_tool_call(
         self,
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command[Any]]],
     ) -> ToolMessage | Command[Any]:
-        req = _maybe_rewrite_request(request, self._repo_root)
-        return await handler(req)
+        cfg = getattr(request.runtime, "config", None)
+        context_dir = _memory_context_dir_from_config(cfg if isinstance(cfg, dict) else {})
+        token = memory_context_dir_ctx.set(context_dir)
+        try:
+            req = _maybe_rewrite_request(request, self._repo_root)
+            return await handler(req)
+        finally:
+            memory_context_dir_ctx.reset(token)
 
 
 # Backward-compatible alias

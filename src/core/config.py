@@ -776,7 +776,7 @@ def get_model(
         location = (
             os.getenv("VERTEX_AI_LOCATION")
             or os.getenv("GOOGLE_CLOUD_LOCATION")
-            or "us-east5"
+            or "global"
         )
         return ChatGoogleGenerativeAI(
             model=model_name,
