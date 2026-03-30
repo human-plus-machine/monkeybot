@@ -36,6 +36,7 @@ DEFAULTS = {
     "ENVIRONMENT": "development",
     "MEMORY_DIR": "./data/memory",
     "MEMORY_BACKEND": "local",
+    "GCS_MEMORY_SYNC_ENABLED": "true",
     "GCS_ENABLED": "false",
     "SCHEDULER_STORAGE": "json",
     "SCHEDULER_TIMEZONE": "America/New_York",
@@ -70,6 +71,7 @@ CONFIG_MAPPING = {
     "memory.dir": "MEMORY_DIR",
     "memory.backend": "MEMORY_BACKEND",
     "memory.bucket": "GCS_MEMORY_BUCKET",
+    "memory.gcs_sync_enabled": "GCS_MEMORY_SYNC_ENABLED",
     # Scheduler
     "scheduler.storage": "SCHEDULER_STORAGE",
     "scheduler.cadence": "SCHEDULER_CADENCE",
@@ -760,17 +762,30 @@ def get_model(
 
     if provider == "google_vertexai":
         try:
-            from langchain_google_vertexai import ChatVertexAI
+            from langchain_google_genai import ChatGoogleGenerativeAI
         except ImportError:
             raise ImportError(
-                "langchain-google-vertexai is required for google_vertexai provider. "
-                "Install with: pip install langchain-google-vertexai"
+                "langchain-google-genai is required for google_vertexai provider. "
+                "Install with: pip install langchain-google-genai"
             )
-        return ChatVertexAI(
-            model_name=model_name,
+        project = (
+            os.getenv("GCP_PROJECT_ID")
+            or os.getenv("VERTEX_AI_PROJECT_ID")
+            or os.getenv("GOOGLE_CLOUD_PROJECT")
+        )
+        location = (
+            os.getenv("VERTEX_AI_LOCATION")
+            or os.getenv("GOOGLE_CLOUD_LOCATION")
+            or "us-east5"
+        )
+        return ChatGoogleGenerativeAI(
+            model=model_name,
             temperature=temperature,
             max_output_tokens=max_tokens,
-            model_kwargs={"thinking_budget": thinking_budget},
+            thinking_budget=thinking_budget,
+            vertexai=True,
+            project=project,
+            location=location,
         )
 
     elif provider == "openai":

@@ -321,12 +321,27 @@ class HeartbeatHandler:
             return
         try:
             from ..council import LLMCouncil
-            from langchain_google_vertexai import ChatVertexAI
+            from langchain_google_genai import ChatGoogleGenerativeAI
 
             council_model_name = getattr(
                 self.config, "council_model", "gemini-2.0-flash"
             )
-            council_model = ChatVertexAI(model_name=council_model_name)
+            project = (
+                os.getenv("GCP_PROJECT_ID")
+                or os.getenv("VERTEX_AI_PROJECT_ID")
+                or os.getenv("GOOGLE_CLOUD_PROJECT")
+            )
+            location = (
+                os.getenv("VERTEX_AI_LOCATION")
+                or os.getenv("GOOGLE_CLOUD_LOCATION")
+                or "us-east5"
+            )
+            council_model = ChatGoogleGenerativeAI(
+                model=council_model_name,
+                vertexai=True,
+                project=project,
+                location=location,
+            )
             memory_dir = Path(
                 getattr(self.config, "council_memory_dir", None)
                 or os.getenv("MEMORY_DIR", "./data/memory")

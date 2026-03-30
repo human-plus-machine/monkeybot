@@ -3,7 +3,7 @@ Main application entry point for Emonk.
 
 Wires all components together with LangChain v1 create_agent:
 - Gateway → build_agent() → LangGraph
-- ChatVertexAI (Gemini 2.5 Flash) → LangChain tools
+- ChatGoogleGenerativeAI on Vertex (Gemini 2.5 Flash) → LangChain tools
 - GCSStore for long-term memory
 
 Run locally:
@@ -23,7 +23,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from google.cloud import aiplatform  # noqa: E402
-from langchain_google_vertexai import ChatVertexAI  # noqa: E402
+from langchain_google_genai import ChatGoogleGenerativeAI  # noqa: E402
 from langchain_core.tools import StructuredTool  # noqa: E402
 
 from deepagents.backends.local_shell import LocalShellBackend  # noqa: E402
@@ -159,18 +159,23 @@ def create_app():
     # Validate configuration
     validate_env_vars()
     
-    # Initialize Vertex AI (must happen before creating ChatVertexAI)
+    # Initialize Vertex AI (must happen before creating the chat model)
     project_id = os.getenv("VERTEX_AI_PROJECT_ID")
     location = os.getenv("VERTEX_AI_LOCATION", "us-central1")
-    
+    thinking_budget = int(os.getenv("MODEL_THINKING_BUDGET", "-1"))
+
     logger.info(f"Initializing Vertex AI: project={project_id}, location={location}")
     aiplatform.init(project=project_id, location=location)
-    
-    # Create Vertex AI chat model (Gemini 2.5 Flash)
-    model = ChatVertexAI(
-        model_name="gemini-2.5-flash",
+
+    # Create Vertex AI chat model (Gemini 2.5 Flash) via langchain-google-genai
+    model = ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash",
         temperature=0.7,
         max_output_tokens=8192,
+        thinking_budget=thinking_budget,
+        vertexai=True,
+        project=project_id,
+        location=location,
     )
     logger.info("✅ Chat model created (Gemini 2.5 Flash)")
     

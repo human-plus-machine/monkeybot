@@ -86,8 +86,8 @@ def test_client_mocked(mock_vertex_ai, monkeypatch, tmp_path):
     
     # Mock Vertex AI client creation BEFORE importing
     monkeypatch.setattr(
-        "langchain_google_vertexai.ChatVertexAI",
-        lambda **kwargs: mock_vertex_ai
+        "langchain_google_genai.ChatGoogleGenerativeAI",
+        lambda **kwargs: mock_vertex_ai,
     )
     
     # Mock aiplatform.init (no real GCP calls)

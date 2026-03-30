@@ -24,6 +24,7 @@ dependencies = [
     "deepagents>=0.1.0",
     "langgraph>=0.2.0",
     "langchain-core>=0.3.0",
+    "langchain-google-genai>=2.0.0",
     "langchain-google-vertexai>=2.0.0",
     "google-cloud-aiplatform>=1.70.0",
     "google-auth>=2.35.0",

@@ -25,6 +25,17 @@ from .task_tool_patches import apply_task_tool_patches
 
 logger = logging.getLogger(__name__)
 
+
+def _gcs_memory_sync_enabled() -> bool:
+    """Whether to attach :class:`GCSFilesystemSync` when ``MEMORY_BACKEND=gcs``.
+
+    ``GCS_MEMORY_SYNC_ENABLED`` defaults to true. Set to ``0``, ``false``, ``no``, or ``off`` to
+    skip bucket↔disk sync while keeping other GCS-backed features (e.g. ``GCSStore``) unchanged.
+    """
+    raw = os.getenv("GCS_MEMORY_SYNC_ENABLED", "true")
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
 # Try to import deep agents
 try:
     from deepagents import create_deep_agent
@@ -106,10 +117,10 @@ def build_deep_agent(
         ValueError: If required dependencies are missing for enabled features
 
     Example:
-        >>> from langchain_google_vertexai import ChatVertexAI
+        >>> from langchain_google_genai import ChatGoogleGenerativeAI
         >>> from langgraph.store.memory import InMemoryStore
         >>>
-        >>> model = ChatVertexAI(model_name="gemini-2.5-flash")
+        >>> model = ChatGoogleGenerativeAI(model="gemini-2.5-flash", vertexai=True)
         >>> store = InMemoryStore()
         >>>
         >>> agent = build_deep_agent(
@@ -158,21 +169,26 @@ def build_deep_agent(
 
     # Step 3: Resolve GCS filesystem sync from env vars (set by load_bot_config from bot.yaml)
     # memory.backend: gcs in bot.yaml → MEMORY_BACKEND=gcs + GCS_MEMORY_BUCKET set
+    # GCS_MEMORY_SYNC_ENABLED=false skips GCSFilesystemSync only (GCSStore is separate).
     fs_sync: GCSFilesystemSync | None = None
-    if os.getenv("MEMORY_BACKEND", "local") == "gcs":
-        memory_bucket = os.getenv("GCS_MEMORY_BUCKET")
-        if memory_bucket:
-            fs_sync = GCSFilesystemSync(
-                bucket_name=memory_bucket,
-                local_dir=os.getenv("MEMORY_DIR", "./data/memory"),
-                project_id=os.getenv("GCP_PROJECT_ID"),
-            )
-            logger.info(f"GCS filesystem sync: configured (bucket={memory_bucket})")
+    _mem_gcs = os.getenv("MEMORY_BACKEND", "local") == "gcs"
+    if _mem_gcs:
+        if _gcs_memory_sync_enabled():
+            memory_bucket = os.getenv("GCS_MEMORY_BUCKET")
+            if memory_bucket:
+                fs_sync = GCSFilesystemSync(
+                    bucket_name=memory_bucket,
+                    local_dir=os.getenv("MEMORY_DIR", "./data/memory"),
+                    project_id=os.getenv("GCP_PROJECT_ID"),
+                )
+                logger.info(f"GCS filesystem sync: configured (bucket={memory_bucket})")
+            else:
+                logger.warning(
+                    "MEMORY_BACKEND=gcs but GCS_MEMORY_BUCKET is not set — "
+                    "filesystem sync disabled"
+                )
         else:
-            logger.warning(
-                "MEMORY_BACKEND=gcs but GCS_MEMORY_BUCKET is not set — "
-                "filesystem sync disabled"
-            )
+            logger.info("GCS filesystem sync: disabled (GCS_MEMORY_SYNC_ENABLED=false)")
 
     # Step 3b: Load Layer 0 identity and context files
     _soul_path = Path(soul_file) if soul_file else Path.cwd() / "SOUL.md"
