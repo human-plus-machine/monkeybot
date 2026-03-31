@@ -98,6 +98,8 @@ class DriveFilesystemSync:
                     q=f"'{parent_id}' in parents and trashed = false",
                     fields=_FIELDS_LIST,
                     pageToken=page_token,
+                    supportsAllDrives=True,
+                    includeItemsFromAllDrives=True,
                 )
                 .execute()
             )
@@ -120,7 +122,9 @@ class DriveFilesystemSync:
         for file_info in files:
             local_path = self.local_dir / file_info["path"]
             local_path.parent.mkdir(parents=True, exist_ok=True)
-            request = service.files().get_media(fileId=file_info["id"])
+            request = service.files().get_media(
+                fileId=file_info["id"], supportsAllDrives=True
+            )
             buf = io.BytesIO()
             downloader = MediaIoBaseDownload(buf, request)
             done = False
@@ -139,6 +143,8 @@ class DriveFilesystemSync:
                     f"and mimeType = '{_DRIVE_FOLDER_MIME}' and trashed = false"
                 ),
                 fields="files(id)",
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
             )
             .execute()
         )
@@ -150,6 +156,7 @@ class DriveFilesystemSync:
             .create(
                 body={"name": name, "mimeType": _DRIVE_FOLDER_MIME, "parents": [parent_id]},
                 fields="id",
+                supportsAllDrives=True,
             )
             .execute()
         )
@@ -165,6 +172,8 @@ class DriveFilesystemSync:
                     f"and mimeType != '{_DRIVE_FOLDER_MIME}' and trashed = false"
                 ),
                 fields="files(id)",
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True,
             )
             .execute()
         )
@@ -193,12 +202,15 @@ class DriveFilesystemSync:
 
             existing_id = self._find_file_id(service, file_name, parent_id)
             if existing_id:
-                service.files().update(fileId=existing_id, media_body=media).execute()
+                service.files().update(
+                    fileId=existing_id, media_body=media, supportsAllDrives=True
+                ).execute()
             else:
                 service.files().create(
                     body={"name": file_name, "parents": [parent_id]},
                     media_body=media,
                     fields="id",
+                    supportsAllDrives=True,
                 ).execute()
             logger.debug("Drive sync: pushed %s", relative)
 
