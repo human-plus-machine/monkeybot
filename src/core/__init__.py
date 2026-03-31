@@ -3,7 +3,10 @@
 This package contains the core building blocks for monkey-bot:
 - build_deep_agent: Factory for creating deep agents (recommended)
 - build_agent: Factory for creating LangChain v1 agents (deprecated)
-- GCSStore: GCS-backed long-term memory
+- FirestoreStore: Firestore-backed long-term memory (default)
+- GCSStore: GCS-backed long-term memory (legacy)
+- DriveFilesystemSync: Google Drive ↔ local filesystem sync
+- GCSFilesystemSync: GCS ↔ local filesystem sync (legacy)
 - SessionSummaryMiddleware: Per-session memory persistence
 - TerminalExecutor: Secure command execution (legacy/optional)
 """
@@ -15,7 +18,9 @@ from .agent_guard_middleware import (
     build_default_guard_middleware_stack,
 )
 from .deepagent import build_deep_agent
+from .drive_filesystem_sync import DriveFilesystemSync
 from .filesystem_sync import GCSFilesystemSync
+from .firestore_store import FirestoreStore
 from .interfaces import (
     AgentCoreInterface,
     AgentError,
@@ -55,9 +60,11 @@ __all__ = [
     "SkillError",
     "SecurityError",
     # Store
+    "FirestoreStore",
     "GCSStore",
     "create_search_memory_tool",
     # Filesystem sync
+    "DriveFilesystemSync",
     "GCSFilesystemSync",
     # Middleware
     "SessionSummaryMiddleware",

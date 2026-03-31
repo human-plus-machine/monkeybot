@@ -18,6 +18,7 @@ from langchain_core.tools import BaseTool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.base import BaseStore
 
+from .drive_filesystem_sync import DriveFilesystemSync
 from .filesystem_sync import GCSFilesystemSync
 from .prompt import compose_system_prompt
 from .store import create_search_memory_tool
@@ -33,6 +34,15 @@ def _gcs_memory_sync_enabled() -> bool:
     skip bucket↔disk sync while keeping other GCS-backed features (e.g. ``GCSStore``) unchanged.
     """
     raw = os.getenv("GCS_MEMORY_SYNC_ENABLED", "true")
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
+def _drive_memory_sync_enabled() -> bool:
+    """Whether to attach :class:`DriveFilesystemSync` when ``MEMORY_BACKEND=drive``.
+
+    ``DRIVE_MEMORY_SYNC_ENABLED`` defaults to true.
+    """
+    raw = os.getenv("DRIVE_MEMORY_SYNC_ENABLED", "true")
     return raw.strip().lower() not in ("0", "false", "no", "off")
 
 
@@ -167,12 +177,30 @@ def build_deep_agent(
         skills_manifest = _generate_skills_manifest(skills)
         logger.info(f"Generated skills manifest from {len(skills)} directories")
 
-    # Step 3: Resolve GCS filesystem sync from env vars (set by load_bot_config from bot.yaml)
-    # memory.backend: gcs in bot.yaml → MEMORY_BACKEND=gcs + GCS_MEMORY_BUCKET set
-    # GCS_MEMORY_SYNC_ENABLED=false skips GCSFilesystemSync only (GCSStore is separate).
-    fs_sync: GCSFilesystemSync | None = None
-    _mem_gcs = os.getenv("MEMORY_BACKEND", "local") == "gcs"
-    if _mem_gcs:
+    # Step 3: Resolve filesystem sync from env vars (set by load_bot_config from bot.yaml).
+    # MEMORY_BACKEND=drive → DriveFilesystemSync (Google Drive ↔ local disk)
+    # MEMORY_BACKEND=gcs   → GCSFilesystemSync (legacy; kept for backwards compat)
+    fs_sync: DriveFilesystemSync | GCSFilesystemSync | None = None
+    _mem_backend = os.getenv("MEMORY_BACKEND", "local")
+
+    if _mem_backend == "drive":
+        if _drive_memory_sync_enabled():
+            drive_folder_id = os.getenv("DRIVE_MEMORY_FOLDER_ID")
+            if drive_folder_id:
+                fs_sync = DriveFilesystemSync(
+                    folder_id=drive_folder_id,
+                    local_dir=os.getenv("MEMORY_DIR", "./data/memory"),
+                )
+                logger.info("Drive filesystem sync: configured (folder=%s)", drive_folder_id)
+            else:
+                logger.warning(
+                    "MEMORY_BACKEND=drive but DRIVE_MEMORY_FOLDER_ID is not set — "
+                    "filesystem sync disabled"
+                )
+        else:
+            logger.info("Drive filesystem sync: disabled (DRIVE_MEMORY_SYNC_ENABLED=false)")
+
+    elif _mem_backend == "gcs":
         if _gcs_memory_sync_enabled():
             memory_bucket = os.getenv("GCS_MEMORY_BUCKET")
             if memory_bucket:
@@ -181,7 +209,7 @@ def build_deep_agent(
                     local_dir=os.getenv("MEMORY_DIR", "./data/memory"),
                     project_id=os.getenv("GCP_PROJECT_ID"),
                 )
-                logger.info(f"GCS filesystem sync: configured (bucket={memory_bucket})")
+                logger.info("GCS filesystem sync: configured (bucket=%s)", memory_bucket)
             else:
                 logger.warning(
                     "MEMORY_BACKEND=gcs but GCS_MEMORY_BUCKET is not set — "
@@ -388,10 +416,12 @@ def build_deep_agent(
     # Attach fs_sync to agent so callers can run startup sync via FastAPI lifespan
     if fs_sync is not None:
         agent.fs_sync = fs_sync
+        backend_label = "Drive" if isinstance(fs_sync, DriveFilesystemSync) else "GCS"
         logger.info(
-            "GCS filesystem sync: attached to agent "
-            "(wire agent.fs_sync.sync_from_gcs() to FastAPI lifespan startup, "
-            "agent.fs_sync.close() to lifespan shutdown)"
+            "%s filesystem sync: attached to agent "
+            "(wire agent.fs_sync.sync() to FastAPI lifespan startup, "
+            "agent.fs_sync.close() to lifespan shutdown)",
+            backend_label,
         )
     else:
         agent.fs_sync = None

@@ -37,6 +37,8 @@ DEFAULTS = {
     "MEMORY_DIR": "./data/memory",
     "MEMORY_BACKEND": "local",
     "GCS_MEMORY_SYNC_ENABLED": "true",
+    "DRIVE_MEMORY_SYNC_ENABLED": "true",
+    "DRIVE_MEMORY_FOLDER_ID": "",
     "GCS_ENABLED": "false",
     "SCHEDULER_STORAGE": "json",
     "SCHEDULER_TIMEZONE": "America/New_York",
@@ -72,6 +74,8 @@ CONFIG_MAPPING = {
     "memory.backend": "MEMORY_BACKEND",
     "memory.bucket": "GCS_MEMORY_BUCKET",
     "memory.gcs_sync_enabled": "GCS_MEMORY_SYNC_ENABLED",
+    "memory.drive_folder_id": "DRIVE_MEMORY_FOLDER_ID",
+    "memory.drive_sync_enabled": "DRIVE_MEMORY_SYNC_ENABLED",
     # Scheduler
     "scheduler.storage": "SCHEDULER_STORAGE",
     "scheduler.cadence": "SCHEDULER_CADENCE",
@@ -277,7 +281,7 @@ def _validate_provider_config(config: Dict[str, str]) -> None:
         ConfigError: If unsupported provider is specified or required config is missing
     """
     # Supported providers for each backend type
-    SUPPORTED_MEMORY_BACKENDS = {"local", "gcs"}
+    SUPPORTED_MEMORY_BACKENDS = {"local", "gcs", "drive"}
     SUPPORTED_SCHEDULER_STORAGE = {"json", "firestore"}
     SUPPORTED_SECRETS_PROVIDERS = {"env", "gcp_secret_manager"}
     SUPPORTED_MODEL_PROVIDERS = {"google_vertexai", "openai", "anthropic", "vertex_anthropic"}
