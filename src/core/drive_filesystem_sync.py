@@ -19,6 +19,7 @@ import asyncio
 import io
 import logging
 import mimetypes
+import os
 import signal
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -147,7 +148,7 @@ class DriveFilesystemSync:
             if local_path.exists():
                 drive_mtime = _parse_drive_time(file_info["modifiedTime"])
                 if drive_mtime <= local_path.stat().st_mtime:
-                    logger.debug("Drive sync: skip pull %s (local is newer or equal)", file_info["path"])
+                    logger.info("Drive sync: skip pull %s (no changes)", file_info["path"])
                     return
             local_path.parent.mkdir(parents=True, exist_ok=True)
             request = svc.files().get_media(fileId=file_info["id"], supportsAllDrives=True)
@@ -157,6 +158,10 @@ class DriveFilesystemSync:
             while not done:
                 _, done = downloader.next_chunk()
             local_path.write_bytes(buf.getvalue())
+            # Preserve Drive's modifiedTime on the local file so the next push
+            # can correctly skip this file if the agent hasn't changed it.
+            drive_mtime = _parse_drive_time(file_info["modifiedTime"])
+            os.utime(local_path, (drive_mtime, drive_mtime))
             logger.debug("Drive sync: pulled %s → %s", file_info["path"], local_path)
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
@@ -265,7 +270,7 @@ class DriveFilesystemSync:
             if drive_entry:
                 drive_mtime = _parse_drive_time(drive_entry["modifiedTime"])
                 if local_path.stat().st_mtime <= drive_mtime:
-                    logger.debug("Drive sync: skip push %s (Drive is newer or equal)", rel_str)
+                    logger.info("Drive sync: skip push %s (no changes)", rel_str)
                     continue
 
             parts = relative.parts
