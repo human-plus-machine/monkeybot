@@ -140,16 +140,27 @@ class DriveFilesystemSync:
         if not files:
             return
 
+        skipped = 0
+        to_download = []
+        for f in files:
+            local_path = self.local_dir / f["path"]
+            if local_path.exists():
+                drive_mtime = _parse_drive_time(f["modifiedTime"])
+                if drive_mtime <= local_path.stat().st_mtime:
+                    skipped += 1
+                    continue
+            to_download.append(f)
+
+        if skipped:
+            print(f"Drive sync: pull skipped {skipped} unchanged file(s)")
+
+        if not to_download:
+            return
+
         def _download(file_info: dict) -> None:
             from googleapiclient.http import MediaIoBaseDownload  # noqa: PLC0415
             svc = self._get_service()
             local_path = self.local_dir / file_info["path"]
-            # Newest-wins: skip if local copy is already up to date
-            if local_path.exists():
-                drive_mtime = _parse_drive_time(file_info["modifiedTime"])
-                if drive_mtime <= local_path.stat().st_mtime:
-                    logger.info("Drive sync: skip pull %s (no changes)", file_info["path"])
-                    return
             local_path.parent.mkdir(parents=True, exist_ok=True)
             request = svc.files().get_media(fileId=file_info["id"], supportsAllDrives=True)
             buf = io.BytesIO()
@@ -165,9 +176,11 @@ class DriveFilesystemSync:
             logger.debug("Drive sync: pulled %s → %s", file_info["path"], local_path)
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
-            futures = {pool.submit(_download, f): f["path"] for f in files}
+            futures = {pool.submit(_download, f): f["path"] for f in to_download}
             for future in as_completed(futures):
                 future.result()  # re-raises any exception into the calling thread
+
+        print(f"Drive sync: pull downloaded {len(to_download)} file(s)")
 
     def _get_or_create_folder(
         self,
@@ -258,6 +271,7 @@ class DriveFilesystemSync:
         # Phase 1: resolve folder IDs + delta check (sequential)
         # upload_tasks: (local_path, file_name, parent_id, existing_drive_id | None)
         upload_tasks: list[tuple[Path, str, str, str | None]] = []
+        skipped = 0
         for local_path in sorted(self.local_dir.rglob("*")):
             if not local_path.is_file():
                 continue
@@ -270,7 +284,7 @@ class DriveFilesystemSync:
             if drive_entry:
                 drive_mtime = _parse_drive_time(drive_entry["modifiedTime"])
                 if local_path.stat().st_mtime <= drive_mtime:
-                    logger.info("Drive sync: skip push %s (no changes)", rel_str)
+                    skipped += 1
                     continue
 
             parts = relative.parts
@@ -279,6 +293,9 @@ class DriveFilesystemSync:
                 parent_id = self._get_or_create_folder(service, folder_name, parent_id, folder_cache)
             existing_id = drive_entry["id"] if drive_entry else None
             upload_tasks.append((local_path, parts[-1], parent_id, existing_id))
+
+        if skipped:
+            print(f"Drive sync: push skipped {skipped} unchanged file(s)")
 
         if not upload_tasks:
             return
@@ -311,6 +328,8 @@ class DriveFilesystemSync:
             }
             for future in as_completed(futures):
                 future.result()  # re-raises any exception into the calling thread
+
+        print(f"Drive sync: push uploaded {len(upload_tasks)} file(s)")
 
     # ------------------------------------------------------------------
     # Public async interface (mirrors GCSFilesystemSync exactly)
