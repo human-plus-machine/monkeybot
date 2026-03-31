@@ -20,6 +20,8 @@ import io
 import logging
 import mimetypes
 import signal
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -27,6 +29,11 @@ logger = logging.getLogger(__name__)
 _DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
 _FIELDS_FILE = "id, name, mimeType, modifiedTime"
 _FIELDS_LIST = f"files({_FIELDS_FILE})"
+
+
+def _parse_drive_time(dt_str: str) -> float:
+    """Convert a Drive ISO 8601 UTC timestamp string to a Unix timestamp float."""
+    return datetime.fromisoformat(dt_str.replace("Z", "+00:00")).timestamp()
 
 
 class DriveFilesystemSync:
@@ -52,16 +59,19 @@ class DriveFilesystemSync:
         folder_id: str,
         local_dir: str | Path = "./data/memory",
         sync_interval: int = 300,
+        max_workers: int = 8,
     ) -> None:
         """
         Args:
             folder_id:      Google Drive folder ID (the root memory folder)
             local_dir:      Local directory to sync (created if missing)
             sync_interval:  Seconds between periodic background syncs (default: 300)
+            max_workers:    Thread pool size for parallel file uploads/downloads (default: 8)
         """
         self.folder_id = folder_id
         self.local_dir = Path(local_dir)
         self.sync_interval = sync_interval
+        self.max_workers = max_workers
         self._sync_task: asyncio.Task | None = None
 
     def _get_service(self):
@@ -108,23 +118,39 @@ class DriveFilesystemSync:
                 if item["mimeType"] == _DRIVE_FOLDER_MIME:
                     self._collect_files(service, item["id"], rel_path + "/", results)
                 else:
-                    results.append({"id": item["id"], "path": rel_path, "mimeType": item["mimeType"]})
+                    results.append({
+                        "id": item["id"],
+                        "path": rel_path,
+                        "mimeType": item["mimeType"],
+                        "modifiedTime": item["modifiedTime"],
+                    })
             page_token = resp.get("nextPageToken")
             if not page_token:
                 break
 
     def _pull_from_drive(self) -> None:
-        """Pull Drive folder → local_dir (blocking, runs in executor)."""
-        from googleapiclient.http import MediaIoBaseDownload
+        """Pull Drive folder → local_dir (blocking, runs in executor).
 
+        Phase 1: list all Drive files (sequential, recursive).
+        Phase 2: download all files in parallel via thread pool.
+        """
         service = self._get_service()
         files = self._list_drive_files(service, self.folder_id)
-        for file_info in files:
+        if not files:
+            return
+
+        def _download(file_info: dict) -> None:
+            from googleapiclient.http import MediaIoBaseDownload  # noqa: PLC0415
+            svc = self._get_service()
             local_path = self.local_dir / file_info["path"]
+            # Newest-wins: skip if local copy is already up to date
+            if local_path.exists():
+                drive_mtime = _parse_drive_time(file_info["modifiedTime"])
+                if drive_mtime <= local_path.stat().st_mtime:
+                    logger.debug("Drive sync: skip pull %s (local is newer or equal)", file_info["path"])
+                    return
             local_path.parent.mkdir(parents=True, exist_ok=True)
-            request = service.files().get_media(
-                fileId=file_info["id"], supportsAllDrives=True
-            )
+            request = svc.files().get_media(fileId=file_info["id"], supportsAllDrives=True)
             buf = io.BytesIO()
             downloader = MediaIoBaseDownload(buf, request)
             done = False
@@ -133,8 +159,26 @@ class DriveFilesystemSync:
             local_path.write_bytes(buf.getvalue())
             logger.debug("Drive sync: pulled %s → %s", file_info["path"], local_path)
 
-    def _get_or_create_folder(self, service, name: str, parent_id: str) -> str:
-        """Return the Drive folder ID for name under parent_id, creating it if needed."""
+        with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
+            futures = {pool.submit(_download, f): f["path"] for f in files}
+            for future in as_completed(futures):
+                future.result()  # re-raises any exception into the calling thread
+
+    def _get_or_create_folder(
+        self,
+        service,
+        name: str,
+        parent_id: str,
+        cache: dict[tuple[str, str], str],
+    ) -> str:
+        """Return the Drive folder ID for name under parent_id, creating it if needed.
+
+        Results are stored in cache (keyed by (name, parent_id)) so repeated calls
+        for the same path segment within a single sync cycle make no API calls.
+        """
+        key = (name, parent_id)
+        if key in cache:
+            return cache[key]
         resp = (
             service.files()
             .list(
@@ -148,19 +192,22 @@ class DriveFilesystemSync:
             )
             .execute()
         )
-        files = resp.get("files", [])
-        if files:
-            return files[0]["id"]
-        folder = (
-            service.files()
-            .create(
-                body={"name": name, "mimeType": _DRIVE_FOLDER_MIME, "parents": [parent_id]},
-                fields="id",
-                supportsAllDrives=True,
+        existing = resp.get("files", [])
+        if existing:
+            folder_id = existing[0]["id"]
+        else:
+            folder = (
+                service.files()
+                .create(
+                    body={"name": name, "mimeType": _DRIVE_FOLDER_MIME, "parents": [parent_id]},
+                    fields="id",
+                    supportsAllDrives=True,
+                )
+                .execute()
             )
-            .execute()
-        )
-        return folder["id"]
+            folder_id = folder["id"]
+        cache[key] = folder_id
+        return folder_id
 
     def _find_file_id(self, service, name: str, parent_id: str) -> str | None:
         """Return the Drive file ID for name under parent_id, or None."""
@@ -181,38 +228,84 @@ class DriveFilesystemSync:
         return files[0]["id"] if files else None
 
     def _push_to_drive(self) -> None:
-        """Push local_dir → Drive folder (blocking, runs in executor)."""
-        from googleapiclient.http import MediaFileUpload
+        """Push local_dir → Drive folder (blocking, runs in executor).
+
+        Phase 1 (sequential): Walk local tree, resolve Drive folder IDs using the
+        folder cache, and build a list of (local_path, file_name, parent_id) upload tasks.
+        Folder creation is kept sequential to prevent duplicate folder creation from
+        concurrent threads.
+
+        Phase 2 (parallel): Upload/update all files via thread pool.
+        Each thread creates its own Drive service instance (not thread-safe to share).
+        """
+        from googleapiclient.http import MediaFileUpload  # noqa: PLC0415
 
         service = self._get_service()
-        for local_path in self.local_dir.rglob("*"):
+
+        # Build a Drive index once: relative path → {id, modifiedTime}
+        # This replaces per-file _find_file_id calls and enables mtime comparison.
+        drive_index: dict[str, dict] = {
+            f["path"]: f for f in self._list_drive_files(service, self.folder_id)
+        }
+
+        folder_cache: dict[tuple[str, str], str] = {}
+
+        # Phase 1: resolve folder IDs + delta check (sequential)
+        # upload_tasks: (local_path, file_name, parent_id, existing_drive_id | None)
+        upload_tasks: list[tuple[Path, str, str, str | None]] = []
+        for local_path in sorted(self.local_dir.rglob("*")):
             if not local_path.is_file():
                 continue
             relative = local_path.relative_to(self.local_dir)
-            parts = relative.parts
+            # Normalize to forward-slash path to match Drive index keys
+            rel_str = "/".join(relative.parts)
+            drive_entry = drive_index.get(rel_str)
 
-            # Walk/create the folder hierarchy in Drive
+            # Newest-wins: skip if Drive copy is already up to date
+            if drive_entry:
+                drive_mtime = _parse_drive_time(drive_entry["modifiedTime"])
+                if local_path.stat().st_mtime <= drive_mtime:
+                    logger.debug("Drive sync: skip push %s (Drive is newer or equal)", rel_str)
+                    continue
+
+            parts = relative.parts
             parent_id = self.folder_id
             for folder_name in parts[:-1]:
-                parent_id = self._get_or_create_folder(service, folder_name, parent_id)
+                parent_id = self._get_or_create_folder(service, folder_name, parent_id, folder_cache)
+            existing_id = drive_entry["id"] if drive_entry else None
+            upload_tasks.append((local_path, parts[-1], parent_id, existing_id))
 
-            file_name = parts[-1]
+        if not upload_tasks:
+            return
+
+        # Phase 2: upload files in parallel
+        def _upload(local_path: Path, file_name: str, parent_id: str, existing_id: str | None) -> None:
+            svc = self._get_service()
             mime_type = mimetypes.guess_type(str(local_path))[0] or "application/octet-stream"
             media = MediaFileUpload(str(local_path), mimetype=mime_type, resumable=False)
-
-            existing_id = self._find_file_id(service, file_name, parent_id)
-            if existing_id:
-                service.files().update(
-                    fileId=existing_id, media_body=media, supportsAllDrives=True
+            # Use the pre-resolved ID from drive_index; fall back to a live lookup only
+            # for new files whose parent folder was just created in Phase 1.
+            file_id = existing_id or self._find_file_id(svc, file_name, parent_id)
+            if file_id:
+                svc.files().update(
+                    fileId=file_id, media_body=media, supportsAllDrives=True
                 ).execute()
             else:
-                service.files().create(
+                svc.files().create(
                     body={"name": file_name, "parents": [parent_id]},
                     media_body=media,
                     fields="id",
                     supportsAllDrives=True,
                 ).execute()
-            logger.debug("Drive sync: pushed %s", relative)
+            logger.debug("Drive sync: pushed %s", local_path.relative_to(self.local_dir))
+
+        with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
+            futures = {
+                pool.submit(_upload, lp, fn, pid, eid): lp
+                for lp, fn, pid, eid in upload_tasks
+            }
+            for future in as_completed(futures):
+                future.result()  # re-raises any exception into the calling thread
 
     # ------------------------------------------------------------------
     # Public async interface (mirrors GCSFilesystemSync exactly)
