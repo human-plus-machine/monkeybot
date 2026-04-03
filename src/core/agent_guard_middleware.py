@@ -4,12 +4,28 @@ Works with LangChain ``AgentMiddleware`` + LangGraph ``add_messages`` (``RemoveM
 
 Environment (optional overrides)::
 
-    EMONK_THREAD_TOOL_LIMIT   — max tool calls per thread (default 400, 0 = unset)
-    EMONK_RUN_TOOL_LIMIT      — max tool calls per single graph run (default 120, 0 = unset)
-    EMONK_TOOL_OUTPUT_MAX_CHARS — truncate tool result strings (default 8000)
-    EMONK_ERROR_DEDUP_TAIL    — scan last N messages for duplicate errors (default 64)
-    EMONK_SEQUENTIAL_TOOL_CALLS — if 1 (default), only the first tool call per model turn runs;
-                                  set 0 to allow parallel tool execution again.
+    EMONK_THREAD_TOOL_LIMIT      — soft max tool calls per thread; model gets error msgs (default 400, 0 = unset)
+    EMONK_RUN_TOOL_LIMIT         — soft max tool calls per run; model gets error msgs (default 120, 0 = unset)
+    EMONK_HARD_THREAD_TOOL_LIMIT — hard ceiling per thread; execution stops immediately (default 600, 0 = unset)
+    EMONK_HARD_RUN_TOOL_LIMIT    — hard ceiling per run; execution stops immediately (default 200, 0 = unset)
+    EMONK_TOOL_OUTPUT_MAX_CHARS  — truncate tool result strings (default 8000)
+    EMONK_ERROR_DEDUP_TAIL       — scan last N messages for duplicate errors (default 64)
+    EMONK_SEQUENTIAL_TOOL_CALLS  — if 1 (default), only the first tool call per model turn runs;
+                                   set 0 to allow parallel tool execution again.
+
+Two-tier tool-call limiting
+---------------------------
+The soft limits (``EMONK_*_TOOL_LIMIT``) use ``exit_behavior="continue"``: the agent
+receives error messages and can decide to stop on its own.  When a bot enters an
+unrecoverable loop and ignores those errors, the hard limits
+(``EMONK_HARD_*_TOOL_LIMIT``) kick in with ``exit_behavior="end"``, terminating
+execution immediately regardless of model output.
+
+Defaults keep headroom above the soft limits so the hard ceiling only triggers
+during genuine loop conditions::
+
+    soft run  = 120  →  hard run  = 200
+    soft thread = 400 →  hard thread = 600
 """
 
 from __future__ import annotations
@@ -287,6 +303,16 @@ def build_default_guard_middleware_stack() -> list[Any]:
     Appends :class:`SequentialToolCallsMiddleware` last (innermost around the model)
     so only one tool call runs per assistant turn unless ``EMONK_SEQUENTIAL_TOOL_CALLS=0``.
 
+    Two :class:`~langchain.agents.middleware.tool_call_limit.ToolCallLimitMiddleware`
+    instances are added when limits are configured:
+
+    * **Soft** (``exit_behavior="continue"``): sends the model an error message so it
+      can self-correct.  Controlled by ``EMONK_THREAD_TOOL_LIMIT`` /
+      ``EMONK_RUN_TOOL_LIMIT``.
+    * **Hard** (``exit_behavior="end"``): terminates execution immediately when the
+      agent cannot recover from a loop.  Controlled by
+      ``EMONK_HARD_THREAD_TOOL_LIMIT`` / ``EMONK_HARD_RUN_TOOL_LIMIT``.
+
     Returns middleware instances to pass as ``extra_middleware`` /
     ``subagent_middleware`` on :func:`emonk.core.deepagent.build_deep_agent`.
     """
@@ -294,6 +320,11 @@ def build_default_guard_middleware_stack() -> list[Any]:
     run_raw = int(os.getenv("EMONK_RUN_TOOL_LIMIT", "120"))
     thread_limit = None if thread_raw <= 0 else thread_raw
     run_limit = None if run_raw <= 0 else run_raw
+
+    hard_thread_raw = int(os.getenv("EMONK_HARD_THREAD_TOOL_LIMIT", "600"))
+    hard_run_raw = int(os.getenv("EMONK_HARD_RUN_TOOL_LIMIT", "200"))
+    hard_thread_limit = None if hard_thread_raw <= 0 else hard_thread_raw
+    hard_run_limit = None if hard_run_raw <= 0 else hard_run_raw
 
     max_chars = int(os.getenv("EMONK_TOOL_OUTPUT_MAX_CHARS", "8000"))
     tail = int(os.getenv("EMONK_ERROR_DEDUP_TAIL", "64"))
@@ -307,6 +338,16 @@ def build_default_guard_middleware_stack() -> list[Any]:
                 thread_limit=thread_limit,
                 run_limit=run_limit,
                 exit_behavior="continue",
+            )
+        )
+
+    if hard_thread_limit is not None or hard_run_limit is not None:
+        out.append(
+            ToolCallLimitMiddleware(
+                tool_name=None,
+                thread_limit=hard_thread_limit,
+                run_limit=hard_run_limit,
+                exit_behavior="end",
             )
         )
 
