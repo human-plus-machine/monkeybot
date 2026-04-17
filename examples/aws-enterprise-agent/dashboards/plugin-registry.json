@@ -1,0 +1,29 @@
+{
+  "__comment": "Minimal Grafana stub dashboard for the Agent Harness plugin registry. Operators extend this with panels for plugin.discovered / plugin.collision events, per-kind counts, and source breakdowns. See docs/extending-the-harness.md (Story 9) for the full dashboard spec.",
+  "title": "Harness: Plugin Registry",
+  "schemaVersion": 38,
+  "version": 1,
+  "tags": ["emonk", "harness", "plugins"],
+  "timezone": "browser",
+  "refresh": "1m",
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Plugins Registered",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "sum(emonk_plugin_registered_total)",
+          "legendFormat": "registered"
+        }
+      ],
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 0},
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"]}
+      }
+    }
+  ],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"}
+}

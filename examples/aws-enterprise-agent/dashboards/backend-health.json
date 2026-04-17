@@ -1,0 +1,26 @@
+{
+  "__comment": "Stub Grafana dashboard for backend-health signals. Extend with Postgres pool in-use, Mongo replica-set status, S3 put/get latency, and Bedrock first-token latency panels per 1C §4.2.",
+  "title": "Harness: Backend Health",
+  "schemaVersion": 38,
+  "version": 1,
+  "tags": ["emonk", "harness", "health"],
+  "timezone": "browser",
+  "refresh": "1m",
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Postgres Pool In-Use Ratio",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "emonk_postgres_pool_in_use / clamp_min(emonk_postgres_pool_max_size, 1)",
+          "legendFormat": "in_use_ratio"
+        }
+      ],
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 0}
+    }
+  ],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"}
+}

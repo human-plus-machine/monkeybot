@@ -1,0 +1,43 @@
+# Agent Harness — coding-bot reference config (pre-feature snapshot).
+#
+# This file is preserved verbatim as the "legacy" GCP deployment shape used by
+# the harness-extensibility regression gate (Story 10). It must contain **zero**
+# fields introduced by the extensibility feature, so the assembler's default
+# resolution paths (Firestore checkpointer, Vertex model provider, Firestore
+# memory store) are exercised without any opt-in configuration.
+#
+# Concretely, this means no top-level entries for:
+#   * checkpointer
+#   * memory_store
+#   * job_storage
+#   * identity_source
+#   * secret_resolver
+#   * model_provider
+
+version: "1"
+
+agent:
+  name: coding-bot
+  model: gemini-2.5-pro
+  provider: google_vertexai
+  temperature: 0.2
+  max_output_tokens: 8192
+
+identity:
+  dir: ./examples/coding-bot/data/memory
+  enforce_rules: true
+
+sandbox:
+  backend: local_shell
+
+scheduler:
+  storage: firestore
+  cadence: "*/5 * * * *"
+
+observability:
+  run_package:
+    writer: gcs
+    sink_uri: gs://coding-bot-runs/runpackages/
+
+security:
+  principal_required: true

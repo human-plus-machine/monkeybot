@@ -1,0 +1,65 @@
+# Agent Harness — AWS enterprise reference config.
+#
+# Deploys the seven-pillar harness onto Bedrock AgentCore with:
+#   * PostgresCheckpointer      (RDS Postgres 15)
+#   * S3MemoryStore             (SSE-KMS; bucket + prefix owned by the consumer)
+#   * PostgresJobStorage        (same DSN as the checkpointer, shared pool)
+#   * S3IdentitySource          (immutable identity pack under identity/)
+#   * CompositeSecretResolver   (AWS Secrets Manager with an env-var fallback)
+#   * BedrockProvider           (Claude 3.5 Sonnet via the Converse API)
+#   * S3 RunPackage sink        (runpackages/ prefix in the same bucket)
+#
+# Environment variables are interpolated at startup by the consumer's main.py
+# using ``os.path.expandvars``; the harness does not perform shell expansion
+# on YAML input. The placeholders below are the canonical names the shipped
+# Dockerfile.aws-enterprise relies on:
+#
+#   CKPT_DSN   -> Postgres DSN (resolved from Secrets Manager in prod)
+#   S3_BUCKET  -> S3 bucket for memory + identity + run packages
+#   KMS_KEY_ID -> CMK alias or key-id for SSE-KMS encryption
+
+version: "1"
+
+agent:
+  name: aws-enterprise-agent
+  model: anthropic.claude-3-5-sonnet-20241022-v2:0
+  provider: bedrock
+  temperature: 0.3
+  max_output_tokens: 4096
+
+checkpointer:
+  backend: postgres
+  dsn_env: CKPT_DSN
+  schema_name: emonk_ckpt
+
+memory_store:
+  backend: s3
+  bucket: ${S3_BUCKET}
+  prefix: memory/
+  sse: aws:kms
+  kms_key_id: ${KMS_KEY_ID}
+
+job_storage:
+  backend: postgres
+  dsn_env: CKPT_DSN
+  schema_name: emonk_scheduler
+
+identity_source:
+  backend: s3
+  bucket: ${S3_BUCKET}
+  prefix: identity/
+  sse: aws:kms
+
+secret_resolver:
+  backend: composite
+  chain: [aws_secrets_manager, env]
+
+model_provider:
+  backend: bedrock
+  region: us-east-1
+  model_id: anthropic.claude-3-5-sonnet-20241022-v2:0
+
+observability:
+  run_package:
+    writer: s3
+    sink_uri: s3://${S3_BUCKET}/runpackages/

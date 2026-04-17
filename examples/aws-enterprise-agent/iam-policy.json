@@ -1,0 +1,77 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "BedrockInvokeClaude",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream",
+        "bedrock:Converse",
+        "bedrock:ConverseStream"
+      ],
+      "Resource": [
+        "arn:aws:bedrock:${AWS_REGION}::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0",
+        "arn:aws:bedrock:${AWS_REGION}::foundation-model/anthropic.claude-3-5-haiku-20241022-v1:0"
+      ]
+    },
+    {
+      "Sid": "BedrockListFoundationModels",
+      "Effect": "Allow",
+      "Action": ["bedrock:ListFoundationModels"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "S3BucketRead",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": "arn:aws:s3:::${S3_BUCKET}"
+    },
+    {
+      "Sid": "S3ObjectReadWrite",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::${S3_BUCKET}/memory/*",
+        "arn:aws:s3:::${S3_BUCKET}/identity/*",
+        "arn:aws:s3:::${S3_BUCKET}/runpackages/*"
+      ]
+    },
+    {
+      "Sid": "SecretsManagerReadScoped",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:DescribeSecret"
+      ],
+      "Resource": [
+        "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:${PROJECT_NAME}/ckpt-dsn-*",
+        "arn:aws:secretsmanager:${AWS_REGION}:${AWS_ACCOUNT_ID}:secret:${PROJECT_NAME}/app-*"
+      ]
+    },
+    {
+      "Sid": "KmsCmkOperations",
+      "Effect": "Allow",
+      "Action": [
+        "kms:Decrypt",
+        "kms:Encrypt",
+        "kms:GenerateDataKey",
+        "kms:DescribeKey"
+      ],
+      "Resource": "arn:aws:kms:${AWS_REGION}:${AWS_ACCOUNT_ID}:key/${KMS_KEY_ID}"
+    },
+    {
+      "Sid": "StsWhoAmI",
+      "Effect": "Allow",
+      "Action": ["sts:GetCallerIdentity"],
+      "Resource": "*"
+    }
+  ]
+}

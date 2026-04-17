@@ -1,0 +1,26 @@
+{
+  "__comment": "Stub Grafana dashboard for identity-cache signals. Extend with panels for size, hit rate, eviction breakdown, and latency percentiles per 1C §4.2.",
+  "title": "Harness: Identity Cache",
+  "schemaVersion": 38,
+  "version": 1,
+  "tags": ["emonk", "harness", "identity"],
+  "timezone": "browser",
+  "refresh": "1m",
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Identity Cache Hit Rate",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "rate(emonk_identity_cache_hits_total[5m]) / clamp_min(rate(emonk_identity_cache_lookups_total[5m]), 1)",
+          "legendFormat": "hit_rate"
+        }
+      ],
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 0}
+    }
+  ],
+  "templating": {"list": []},
+  "time": {"from": "now-1h", "to": "now"}
+}

@@ -4,7 +4,7 @@ version = "1.0.0"
 description = "An opinionated agent framework built on LangChain Deep Agents — with pluggable cloud storage, sandbox execution, and a skills engine."
 requires-python = ">=3.11"
 authors = [
-    {name = "ez-ai"}
+    {name = "human+machine"}
 ]
 readme = "README.md"
 license = {text = "MIT"}
@@ -55,6 +55,22 @@ vertex-anthropic = [
 council = [
     "emonk[gcs]",
 ]
+mcp = [
+    "langchain-mcp-adapters>=0.1.0",
+]
+aws = [
+    "boto3>=1.34.0",
+]
+harness = [
+    "emonk[mcp]",
+]
+harness-full = [
+    "emonk[harness]",
+    "emonk[firestore]",
+    "emonk[gcs]",
+    "emonk[modal]",
+    "emonk[aws]",
+]
 all = [
     "emonk[gcs]",
     "emonk[firestore]",
@@ -62,6 +78,8 @@ all = [
     "emonk[voice]",
     "emonk[vertex-anthropic]",
     "emonk[council]",
+    "emonk[mcp]",
+    "emonk[aws]",
 ]
 dev = [
     "pytest>=8.3.0",
@@ -72,12 +90,75 @@ dev = [
     "httpx>=0.27.0",
     "types-pyyaml>=6.0.12",
 ]
+# BEGIN harness-extensibility story 2
+checkpointer-postgres = ["asyncpg>=0.29", "orjson>=3.9"]
+checkpointer-mongo = ["motor>=3.3", "orjson>=3.9"]
+# END harness-extensibility story 2
+# BEGIN harness-extensibility story 3
+memory-store-s3 = ["aioboto3>=12.0", "orjson>=3.9"]
+memory-store-postgres = ["asyncpg>=0.29", "orjson>=3.9"]
+memory-store-mongo = ["motor>=3.3", "orjson>=3.9"]
+memory-store-pgvector = ["pgvector>=0.2"]
+# END harness-extensibility story 3
+# BEGIN harness-extensibility story 4
+job-storage-postgres = ["asyncpg>=0.29", "orjson>=3.9"]
+job-storage-mongo = ["motor>=3.3", "orjson>=3.9"]
+job-storage-json = ["filelock>=3.13"]
+# END harness-extensibility story 4
+# BEGIN harness-extensibility story 5
+identity-source-s3 = ["aioboto3>=12.0"]
+identity-source-gcs = ["google-cloud-storage>=2.13"]
+identity-source-postgres = ["asyncpg>=0.29"]
+identity-source-mongo = ["motor>=3.3"]
+# END harness-extensibility story 5
+# BEGIN harness-extensibility story 6
+secret-resolver-aws = ["aioboto3>=12.0"]
+secret-resolver-gcp = ["google-cloud-secret-manager>=2.16"]
+# END harness-extensibility story 6
+# BEGIN harness-extensibility story 7
+model-provider-bedrock = ["langchain-aws>=0.2", "boto3>=1.34"]
+model-provider-openai = ["langchain-openai>=0.2"]
+model-provider-anthropic = ["langchain-anthropic>=0.2"]
+model-provider-ollama = ["langchain-ollama>=0.2"]
+# END harness-extensibility story 7
+# BEGIN harness-extensibility story 8
+# Convenience bundle for the examples/aws-enterprise-agent reference deployment.
+# Installing ``emonk[aws-enterprise]`` pulls every AWS-targeted backend at once
+# (Postgres checkpointer + job storage, S3 memory + identity, AWS Secrets
+# Manager resolver, Bedrock provider, plus the base boto3 extra).
+aws-enterprise = [
+    "emonk[aws]",
+    "emonk[checkpointer-postgres]",
+    "emonk[memory-store-s3]",
+    "emonk[job-storage-postgres]",
+    "emonk[identity-source-s3]",
+    "emonk[secret-resolver-aws]",
+    "emonk[model-provider-bedrock]",
+]
+# END harness-extensibility story 8
 
 [project.urls]
-Homepage = "https://github.com/ez-ai/monkey-bot"
-Documentation = "https://github.com/ez-ai/monkey-bot#readme"
-Repository = "https://github.com/ez-ai/monkey-bot"
-Issues = "https://github.com/ez-ai/monkey-bot/issues"
+Homepage = "https://github.com/human-and-machine/monkey-bot"
+Documentation = "https://github.com/human-and-machine/monkey-bot#readme"
+Repository = "https://github.com/human-and-machine/monkey-bot"
+Issues = "https://github.com/human-and-machine/monkey-bot/issues"
+
+[project.scripts]
+emonk-harness = "emonk.core.harness.linter:main"
+
+# BEGIN harness-extensibility story 1
+[project.entry-points."emonk.checkpointers"]
+
+[project.entry-points."emonk.memory_stores"]
+
+[project.entry-points."emonk.job_storage"]
+
+[project.entry-points."emonk.identity_sources"]
+
+[project.entry-points."emonk.secret_resolvers"]
+
+[project.entry-points."emonk.model_providers"]
+# END harness-extensibility story 1
 
 [build-system]
 requires = ["setuptools>=68.0.0", "wheel"]
@@ -88,6 +169,35 @@ packages = [
     "emonk",
     "emonk.core",
     "emonk.core.scheduler",
+    "emonk.core.harness",
+    "emonk.core.harness.middleware",
+    "emonk.core.harness.sandbox",
+    "emonk.core.harness.hitl",
+    # BEGIN harness-extensibility story 1
+    "emonk.core.harness.extensions",
+    "emonk.core.harness.extensions.specs",
+    "emonk.core.harness.extensions.testing",
+    # END harness-extensibility story 1
+    # BEGIN harness-extensibility story 2
+    "emonk.core.harness.extensions.checkpointers",
+    "emonk.core.harness.extensions.migrations",
+    "emonk.core.harness.extensions.migrations.postgres",
+    # END harness-extensibility story 2
+    # BEGIN harness-extensibility story 3
+    "emonk.core.harness.extensions.memory_stores",
+    # END harness-extensibility story 3
+    # BEGIN harness-extensibility story 4
+    "emonk.core.harness.extensions.job_storage",
+    # END harness-extensibility story 4
+    # BEGIN harness-extensibility story 5
+    "emonk.core.harness.extensions.identity_sources",
+    # END harness-extensibility story 5
+    # BEGIN harness-extensibility story 6
+    "emonk.core.harness.extensions.secret_resolvers",
+    # END harness-extensibility story 6
+    # BEGIN harness-extensibility story 7
+    "emonk.core.harness.extensions.model_providers",
+    # END harness-extensibility story 7
     "emonk.backends",
     "emonk.gateway",
     "emonk.sandbox",

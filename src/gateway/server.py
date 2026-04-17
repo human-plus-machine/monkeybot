@@ -66,6 +66,48 @@ app = FastAPI(
 # Story 4 (Integration) will wire real Agent Core implementation
 agent_core: AgentCoreInterface = MockAgentCore()
 
+# === HARNESS:STORY-11+12 ===
+# Agent Harness routes (control plane + AgentCore invocation adapter).
+# These mount unconditionally; the routes are inert unless the consumer's main.py
+# populates app.state.compiled_agent / session_registry / run_package_writer /
+# approval_channel. See docs/agent-harness.md.
+try:
+    from .agentcore_routes import router as _agentcore_router
+    from .harness_routes import router as _harness_router
+
+    app.include_router(_harness_router)
+    app.include_router(_agentcore_router)
+except Exception as _exc:  # pragma: no cover
+    logger.warning("harness routes not mounted: %s", _exc)
+# === END HARNESS:STORY-11+12 ===
+
+# BEGIN harness-extensibility story 5
+try:
+    from .harness_identity_routes import router as _harness_identity_router
+
+    app.include_router(_harness_identity_router)
+except Exception as _exc:  # pragma: no cover
+    logger.warning("harness identity routes not mounted: %s", _exc)
+# END harness-extensibility story 5
+
+# BEGIN harness-extensibility story 6
+try:
+    from .harness_secrets_routes import router as _harness_secrets_router
+
+    app.include_router(_harness_secrets_router)
+except Exception as _exc:  # pragma: no cover
+    logger.warning("harness secrets routes not mounted: %s", _exc)
+# END harness-extensibility story 6
+
+# BEGIN harness-extensibility story 8
+try:
+    from .harness_aws_routes import router as _harness_aws_router
+
+    app.include_router(_harness_aws_router)
+except Exception as _exc:  # pragma: no cover
+    logger.warning("harness aws routes not mounted: %s", _exc)
+# END harness-extensibility story 8
+
 SUPPORTED_VOICE_MIME_TYPES = {"audio/ogg", "audio/webm", "audio/mp4"}
 _VOICE_MAX_AUDIO_BYTES = int(os.getenv("VOICE_MAX_AUDIO_BYTES", str(10 * 1024 * 1024)))
 

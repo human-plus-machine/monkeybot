@@ -1,0 +1,65 @@
+# syntax=docker/dockerfile:1.7
+# =============================================================================
+# Dockerfile.extension-template
+# -----------------------------------------------------------------------------
+# Canonical image template for a consumer that ships monkey-bot **plus** one or
+# more harness extension packages as installable wheels. The template bakes in
+# three supply-chain guarantees (see 1c-operations.md §6 R-11):
+#
+#   1. ``HARNESS_PLUGINS_FROM_ENTRY_POINTS=1`` — entry-point discovery is opt-in
+#      (defaults to OFF in the framework). Setting it at the image level is a
+#      deliberate acknowledgement that this build is trusted to load declared
+#      plugins.
+#   2. ``pip install --require-hashes`` — the lockfile MUST contain a sha256
+#      for every wheel, so a compromised mirror cannot swap a package body.
+#      Generate with ``pip-compile --generate-hashes`` or ``uv pip compile
+#      --generate-hashes``.
+#   3. Minimal base image (``python:3.11-slim``) + non-root user — reduces the
+#      attack surface and aligns with AgentCore's hardening recommendations.
+#
+# Copy this file into your consumer repo alongside ``requirements.lock.txt``,
+# ``app/`` (your agent code), and ``harness.yaml`` (your HarnessConfig). Build
+# with ``docker build -t my-extension-agent .``.
+# =============================================================================
+
+FROM python:3.11-slim AS base
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    HARNESS_PLUGINS_FROM_ENTRY_POINTS=1 \
+    HARNESS_CONFIG=/app/harness.yaml
+
+# System deps: only what's needed to install wheels and run at runtime.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        tini \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# --- Dependency install layer -------------------------------------------------
+# COPY the lockfile FIRST so Docker caches this layer when only app code
+# changes. The lockfile MUST declare monkey-bot (emonk), every extension
+# package, and their transitive deps with sha256 hashes.
+COPY requirements.lock.txt ./requirements.lock.txt
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock.txt
+
+# --- Application layer --------------------------------------------------------
+COPY app/ ./app/
+COPY harness.yaml ./harness.yaml
+
+# Drop to a non-root user — the runtime does not need write access to /app
+# after install.
+RUN useradd --create-home --shell /bin/bash emonk \
+ && chown -R emonk:emonk /app
+USER emonk
+
+EXPOSE 8080
+
+# tini is PID 1; it reaps zombies and forwards signals so SIGTERM from Cloud
+# Run / AgentCore cleanly shuts down the uvicorn worker.
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["python", "-m", "app.main"]

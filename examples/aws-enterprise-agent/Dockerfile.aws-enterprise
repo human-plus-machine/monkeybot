@@ -1,0 +1,28 @@
+# syntax=docker/dockerfile:1.6
+#
+# Reproducible container image for the Agent Harness AWS enterprise
+# reference stack. Hashes are pinned via ``requirements.lock.txt`` (generated
+# out-of-band with ``pip-compile --generate-hashes``) and entry-point plugin
+# discovery is locked off so the runtime resolves registries deterministically
+# from the installed builtins only.
+FROM python:3.11-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    HARNESS_PLUGINS_FROM_ENTRY_POINTS=0
+
+WORKDIR /app
+
+COPY requirements.lock.txt .
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock.txt
+
+COPY src/ ./src/
+COPY data/ ./data/
+COPY skills/ ./skills/
+COPY harness.yaml .
+
+ENV HARNESS_CONFIG=/app/harness.yaml
+EXPOSE 8080
+
+CMD ["python", "-m", "src.main"]

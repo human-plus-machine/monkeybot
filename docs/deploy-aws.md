@@ -96,7 +96,7 @@ Internet / Slack / Teams / API
 
 ## Get Notified
 
-Watch this repository for updates: [GitHub](https://github.com/auriga-os/monkey-bot)
+Watch this repository for updates: [GitHub](https://github.com/human-and-machine/monkey-bot)
 
 In the meantime, you can deploy monkey-bot on AWS today using the GCP-native features with your own AWS infrastructure, or use the [GCP deployment guide](deploy-gcp.md) while we build out AWS support.
 
@@ -128,4 +128,4 @@ Mount your GCP service account key as an ECS secret and set `GOOGLE_APPLICATION_
 
 Have specific AWS infrastructure requirements? Open an issue or discussion on GitHub so we can prioritize the right components.
 
-[Open a GitHub Issue](https://github.com/auriga-os/monkey-bot/issues/new?labels=aws&title=AWS+deployment+feedback)
+[Open a GitHub Issue](https://github.com/human-and-machine/monkey-bot/issues/new?labels=aws&title=AWS+deployment+feedback)

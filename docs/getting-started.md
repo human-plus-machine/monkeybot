@@ -23,7 +23,7 @@ The fastest path. `test-monkey` is a complete, working bot that shows every fram
 
 ```bash
 # Clone the repo
-git clone https://github.com/auriga-os/monkey-bot.git
+git clone https://github.com/human-and-machine/monkey-bot.git
 cd monkey-bot/test-monkey
 
 # Create your secrets file

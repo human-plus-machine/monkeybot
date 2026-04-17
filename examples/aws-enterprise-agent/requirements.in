@@ -1,0 +1,9 @@
+# Source-of-truth dependency set for the AWS enterprise reference stack.
+# Compile with:
+#   pip-compile --generate-hashes --output-file=requirements.lock.txt requirements.in
+#
+# The lockfile (``requirements.lock.txt``) is the artifact consumed by
+# ``Dockerfile.aws-enterprise`` via ``pip install --require-hashes``. Regenerate
+# it whenever this file changes; commit both files together.
+
+emonk[checkpointer-postgres,memory-store-s3,job-storage-postgres,identity-source-s3,secret-resolver-aws,model-provider-bedrock,aws-enterprise] @ file://../..

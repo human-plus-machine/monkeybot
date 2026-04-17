@@ -1,10 +1,1 @@
-{
-  "version": "1.0",
-  "facts": {
-    "test_key": {
-      "value": "test_value",
-      "created_at": "2026-02-11T14:55:40.449315",
-      "updated_at": "2026-02-11T22:07:08.204973"
-    }
-  }
-}
+{"version":"1.0","facts":{}}
