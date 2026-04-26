@@ -138,10 +138,10 @@ aws-enterprise = [
 # END harness-extensibility story 8
 
 [project.urls]
-Homepage = "https://github.com/human-and-machine/monkey-bot"
-Documentation = "https://github.com/human-and-machine/monkey-bot#readme"
-Repository = "https://github.com/human-and-machine/monkey-bot"
-Issues = "https://github.com/human-and-machine/monkey-bot/issues"
+Homepage = "https://github.com/auriga-os/monkey-bot"
+Documentation = "https://github.com/auriga-os/monkey-bot#readme"
+Repository = "https://github.com/auriga-os/monkey-bot"
+Issues = "https://github.com/auriga-os/monkey-bot/issues"
 
 [project.scripts]
 emonk-harness = "emonk.core.harness.linter:main"
@@ -202,6 +202,7 @@ packages = [
     "emonk.gateway",
     "emonk.sandbox",
     "emonk.skills",
+    "emonk.voice",
 ]
 package-dir = {"emonk" = "src"}
 

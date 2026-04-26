@@ -71,13 +71,14 @@ bot.yaml           →    config loader           →    GCP Secret Manager
 ### 1. Install
 
 ```bash
-pip install emonk
+uv venv
+uv pip install emonk
 ```
 
 Or clone the reference implementation:
 
 ```bash
-git clone https://github.com/human-and-machine/monkey-bot.git
+git clone https://github.com/auriga-os/monkey-bot.git
 cd monkey-bot/test-monkey
 cp .env.example .env
 ```
@@ -238,25 +239,28 @@ monkey-bot/
 
 ```bash
 # Core framework
-pip install emonk
+uv pip install emonk
 
 # With Google Cloud Storage
-pip install "emonk[gcs]"
+uv pip install "emonk[gcs]"
 
 # With voice (STT/TTS)
-pip install "emonk[voice]"
+uv pip install "emonk[voice]"
 
 # With Modal sandbox execution
-pip install "emonk[modal]"
+uv pip install "emonk[modal]"
+
+# Harness with cloud extension surfaces
+uv pip install "emonk[harness-full]"
 
 # Everything
-pip install "emonk[all]"
+uv pip install "emonk[all]"
 ```
 
 **Or install the development version directly from source:**
 
 ```bash
-pip install git+https://github.com/human-and-machine/monkey-bot.git@main
+uv pip install git+https://github.com/auriga-os/monkey-bot.git@main
 ```
 
 ---
@@ -382,24 +386,45 @@ The skills system executes Python code from the `./skills/` directory. Only add 
 
 ```bash
 # Clone and install with dev dependencies
-git clone https://github.com/human-and-machine/monkey-bot.git
+git clone https://github.com/auriga-os/monkey-bot.git
 cd monkey-bot
-pip install -e ".[dev]"
+uv sync --extra dev
 
 # Run tests
-pytest
+uv run pytest
 
 # Run tests with coverage
-pytest --cov=src --cov-report=html
+uv run pytest --cov=src --cov-report=html
 
 # Lint
-ruff check .
+uv run ruff check .
 
 # Format
-ruff format .
+uv run ruff format .
 
 # Type check
-mypy src/
+uv run mypy src/
+```
+
+### Publishing
+
+Releases publish to PyPI from GitHub Actions when a `v*` tag is pushed. The
+PyPI project must have a Trusted Publisher configured for repository
+`auriga-os/monkey-bot`, workflow `publish.yml`, and environment `pypi`.
+
+```bash
+# Local build check before tagging
+uv build --no-sources
+
+# Set, commit, and tag the release version
+VERSION=1.0.1
+uv version "$VERSION"
+git commit -am "chore: release v$VERSION"
+git tag "v$VERSION"
+git push origin main --tags
+
+# Emergency local publish only, if Trusted Publishing is unavailable
+uv publish
 ```
 
 ---
@@ -416,8 +441,8 @@ mypy src/
 
 ## Support
 
-- **Issues**: [GitHub Issues](https://github.com/human-and-machine/monkey-bot/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/human-and-machine/monkey-bot/discussions)
+- **Issues**: [GitHub Issues](https://github.com/auriga-os/monkey-bot/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/auriga-os/monkey-bot/discussions)
 - **Reference bot**: See [`test-monkey/`](test-monkey/) for a complete working example
 
 ---

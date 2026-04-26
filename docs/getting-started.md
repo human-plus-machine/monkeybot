@@ -8,8 +8,8 @@ Get a monkey-bot agent running locally in under 5 minutes, then deploy to produc
 
 | Requirement | Version | Notes |
 |---|---|---|
-| Python | 3.12+ | Required |
-| pip | Latest | Package management |
+| Python | 3.11+ | Required |
+| uv | Latest | Package and virtual environment management |
 | Google Cloud account | — | For Vertex AI (Gemini) |
 | gcloud CLI | Latest | For GCP operations |
 
@@ -23,7 +23,7 @@ The fastest path. `test-monkey` is a complete, working bot that shows every fram
 
 ```bash
 # Clone the repo
-git clone https://github.com/human-and-machine/monkey-bot.git
+git clone https://github.com/auriga-os/monkey-bot.git
 cd monkey-bot/test-monkey
 
 # Create your secrets file
@@ -40,7 +40,8 @@ VERTEX_AI_PROJECT_ID=your-gcp-project-id
 Install dependencies:
 
 ```bash
-pip install -r requirements.txt
+uv venv
+uv pip install -r requirements.txt
 ```
 
 Run:
@@ -75,9 +76,12 @@ Use this when you're building a new bot and want full control over the project s
 ### 1. Install emonk
 
 ```bash
-pip install emonk
+uv venv
+uv pip install emonk
 # or with GCS memory support:
-pip install "emonk[gcs]"
+uv pip install "emonk[gcs]"
+# or with the full harness extension set:
+uv pip install "emonk[harness-full]"
 ```
 
 ### 2. Create project structure

@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib
 import logging
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
@@ -277,6 +278,13 @@ def _build_memory_store(cfg: HarnessConfig) -> Any | None:
         return None
 
 
+def _build_langgraph_store(memory_store: Any | None) -> Any | None:
+    """Adapt a harness MemoryStore for DeepAgents/LangGraph."""
+    if memory_store is None:
+        return None
+    return memory_store.as_langgraph_store()
+
+
 def _build_job_storage(cfg: HarnessConfig) -> Any | None:
     """Resolve ``cfg.job_storage`` into a :class:`JobStorage` instance."""
     spec = getattr(cfg, "job_storage", None)
@@ -458,6 +466,7 @@ def build_universal_agent(
 
     # BEGIN harness-extensibility phase 6
     memory_store = _build_memory_store(harness)
+    langgraph_store = _build_langgraph_store(memory_store)
     job_storage = _build_job_storage(harness)
     checkpointer_ext = _build_extensions_checkpointer(harness)
     # END harness-extensibility phase 6
@@ -498,6 +507,7 @@ def build_universal_agent(
         sandbox=sandbox,
         extra_tools=extra_tools,
         model=model,
+        store=langgraph_store,
     )
 
     return CompiledAgent(
@@ -543,6 +553,7 @@ def _build_deep_agent(
     sandbox: SandboxBackend,
     extra_tools: Sequence[BaseTool] | None,
     model: BaseChatModel | str | None,
+    store: Any | None = None,
 ) -> Any:
     """Wire the harness into ``build_deep_agent`` from the existing monkey-bot core.
 
@@ -553,6 +564,7 @@ def _build_deep_agent(
     tools = list(_materialize_tools(harness))
     if extra_tools:
         tools.extend(extra_tools)
+    subagents = _build_subagent_specs(harness)
 
     try:
         from ..deepagent import build_deep_agent
@@ -562,10 +574,41 @@ def _build_deep_agent(
             tools=tools,
             system_prompt=system_prompt,
             skills=list(harness.skills.dirs),
+            store=store,
+            subagents=subagents,
         )
     except Exception as exc:  # noqa: BLE001
         log.warning("build_deep_agent unavailable, falling back to stub agent: %s", exc)
         return _StubAgent(system_prompt=system_prompt, tools=tools)
+
+
+def _build_subagent_specs(harness: HarnessConfig) -> list[dict[str, Any]] | None:
+    """Convert harness subagent specs into DeepAgents subagent dictionaries."""
+    specs: list[dict[str, Any]] = []
+    for subagent in harness.subagents:
+        spec: dict[str, Any] = {
+            "name": subagent.name,
+            "description": subagent.description,
+            "system_prompt": (
+                _load_prompt_file(subagent.prompt_file)
+                if subagent.prompt_file
+                else f"You are the {subagent.name} specialist."
+            ),
+            "skills": list(subagent.skills),
+        }
+        if subagent.model:
+            spec["model"] = subagent.model
+        specs.append(spec)
+    return specs or None
+
+
+def _load_prompt_file(path: str) -> str:
+    """Load a subagent system prompt, matching the legacy bot.yaml path."""
+    prompt_path = Path(path)
+    if prompt_path.exists():
+        return prompt_path.read_text(encoding="utf-8")
+    log.warning("Prompt file not found: %s", path)
+    return ""
 
 
 class _StubAgent:
