@@ -57,6 +57,7 @@ from .runpackage_writers import (
 )
 from .sandbox.local_shell import LocalShellSandbox
 from .sandbox.modal_backend import ModalSandbox
+from .sandbox.policy import Policy
 from .sandbox.protocol import SandboxBackend
 from .specs import HarnessConfig
 from .versioning import HARNESS_SCHEMA_VERSION
@@ -568,12 +569,21 @@ def _build_deep_agent(
 
     try:
         from ..deepagent import build_deep_agent
+        from .sandbox.deepagents_backend import HarnessDeepAgentsSandbox
 
+        backend = HarnessDeepAgentsSandbox(
+            sandbox,
+            Policy.from_spec(
+                harness.sandbox.policy,
+                timeout_seconds=harness.sandbox.timeout_seconds,
+            ),
+        )
         return build_deep_agent(
             model or _build_model(harness),
             tools=tools,
             system_prompt=system_prompt,
             skills=list(harness.skills.dirs),
+            backend=backend,
             store=store,
             subagents=subagents,
         )

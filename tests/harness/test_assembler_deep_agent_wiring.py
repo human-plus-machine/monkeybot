@@ -46,6 +46,8 @@ def test_subagents_are_forwarded_to_build_deep_agent(
 
     build_universal_agent(cfg, model="fake-model")
 
+    assert captured["backend"] is not None
+    assert captured["backend"].id.startswith("local_shell-")
     assert captured["subagents"] == [
         {
             "name": "researcher",
