@@ -61,3 +61,34 @@ async def test_writer_index(tmp_path: Path) -> None:
     refs = await writer.index()
     ids = {r.run_id for r in refs}
     assert {"r1", "r2"}.issubset(ids)
+
+
+@pytest.mark.asyncio
+async def test_nested_subagent_roundtrip_json() -> None:
+    now = datetime.now(UTC)
+    inner = RunPackage(
+        run_id="run_inner",
+        session_id="s1",
+        principal=Principal(kind="user", id="alice"),
+        versions=VersionTriple(harness="1", deep_agents="0.1", model="gemini-2.5-flash"),
+        started_at=now,
+        ended_at=now,
+        inputs=[{"role": "user", "content": "inner"}],
+        outputs=[{"role": "assistant", "content": "inner-out"}],
+    )
+    outer = RunPackage(
+        run_id="run_outer",
+        session_id="s1",
+        principal=Principal(kind="user", id="alice"),
+        versions=VersionTriple(harness="1", deep_agents="0.1", model="gemini-2.5-flash"),
+        started_at=now,
+        ended_at=now,
+        inputs=[{"role": "user", "content": "outer"}],
+        outputs=[{"role": "assistant", "content": "outer-out"}],
+        subagent_runs=[inner],
+    )
+    raw = outer.model_dump_json()
+    parsed = RunPackage.model_validate_json(raw)
+    assert parsed == outer
+    assert len(parsed.subagent_runs) == 1
+    assert parsed.subagent_runs[0].run_id == "run_inner"
