@@ -72,7 +72,7 @@ class _RetrySubagentRunnable(Runnable):
             except Exception as exc:
                 last_error = exc
                 try:
-                    from src.core.harness.run_package_accumulator import record_subagent_attempt
+                    from .harness.run_package_accumulator import record_subagent_attempt
 
                     record_subagent_attempt(attempt, str(exc), "unexpected")
                 except Exception:  # noqa: BLE001
@@ -103,7 +103,7 @@ class _RetrySubagentRunnable(Runnable):
             except Exception as exc:
                 last_error = exc
                 try:
-                    from src.core.harness.run_package_accumulator import record_subagent_attempt
+                    from .harness.run_package_accumulator import record_subagent_attempt
 
                     record_subagent_attempt(attempt, str(exc), "unexpected")
                 except Exception:  # noqa: BLE001
@@ -184,13 +184,13 @@ def _build_task_tool_forwarding_config(  # type: ignore[no-untyped-def]
         subagent_type: Annotated[str, "The type of subagent to use. Must be one of the available agent types listed in the tool description."],
         runtime: ToolRuntime,
     ) -> str | Command:
-        from src.core.harness.errors import RecursionBudgetExceeded
-        from src.core.harness.middleware.principal_propagation import (
+        from .harness.errors import RecursionBudgetExceeded
+        from .harness.middleware.principal_propagation import (
             current_principal,
             current_run_id,
             current_session_id,
         )
-        from src.core.harness.run_package_accumulator import (
+        from .harness.run_package_accumulator import (
             ACTIVE_SUBAGENT_HOOKS,
             event_parent_run_id_for_spawn,
             subagent_attempts_reset,
@@ -280,13 +280,13 @@ def _build_task_tool_forwarding_config(  # type: ignore[no-untyped-def]
         subagent_type: Annotated[str, "The type of subagent to use. Must be one of the available agent types listed in the tool description."],
         runtime: ToolRuntime,
     ) -> str | Command:
-        from src.core.harness.errors import RecursionBudgetExceeded
-        from src.core.harness.middleware.principal_propagation import (
+        from .harness.errors import RecursionBudgetExceeded
+        from .harness.middleware.principal_propagation import (
             current_principal,
             current_run_id,
             current_session_id,
         )
-        from src.core.harness.run_package_accumulator import (
+        from .harness.run_package_accumulator import (
             ACTIVE_SUBAGENT_HOOKS,
             event_parent_run_id_for_spawn,
             subagent_attempts_reset,
