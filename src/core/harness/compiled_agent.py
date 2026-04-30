@@ -37,6 +37,12 @@ from .extensions.base import JobStorage, MemoryStore
 # isort: on
 from .hitl.protocol import ApprovalChannel
 from .middleware.principal_propagation import PrincipalPropagationMW
+from .run_package_accumulator import (
+    RunPackageAccumulator,
+    SubagentInvocationHooks,
+    reset_active_subagent_hooks,
+    set_active_subagent_hooks,
+)
 from .runpackage import RunPackage
 from .runpackage_writers import RunPackageWriter
 from .sandbox.protocol import SandboxBackend
@@ -74,6 +80,8 @@ class CompiledAgent:
     job_storage: JobStorage | None = None
     checkpointer_ext: ExtensionsCheckpointer | None = None
     # END harness-extensibility phase 6
+    accumulator: RunPackageAccumulator | None = None
+    subagent_hooks: SubagentInvocationHooks | None = None
 
     @property
     def checkpointer(self) -> Any:
@@ -115,7 +123,12 @@ class CompiledAgent:
         outcome = "pass"
         inputs = [dict(m) for m in messages]
         outputs: list[dict] = []
+        hooks_tok: Any = None
         with self.principal_mw.scope(principal=state.principal, run_id=run_id, session_id=sid):
+            if self.accumulator is not None:
+                self.accumulator.begin_root(run_id, sid, state.principal, self.versions, started, inputs)
+                if self.subagent_hooks is not None:
+                    hooks_tok = set_active_subagent_hooks(self.subagent_hooks)
             await self.event_bus.publish(
                 HarnessEvent(
                     run_id=run_id,
@@ -158,17 +171,21 @@ class CompiledAgent:
                     )
                 )
                 try:
-                    pkg = RunPackage(
-                        run_id=run_id,
-                        session_id=sid,
-                        principal=state.principal,
-                        versions=self.versions,
-                        started_at=started,
-                        ended_at=ended,
-                        inputs=inputs,
-                        outputs=outputs,
-                        outcome=outcome,  # type: ignore[arg-type]
-                    )
+                    if self.accumulator is not None:
+                        await self.accumulator.flush_deferred_events(self.event_bus)
+                        pkg = self.accumulator.complete_root(outputs, outcome, ended)
+                    else:
+                        pkg = RunPackage(
+                            run_id=run_id,
+                            session_id=sid,
+                            principal=state.principal,
+                            versions=self.versions,
+                            started_at=started,
+                            ended_at=ended,
+                            inputs=inputs,
+                            outputs=outputs,
+                            outcome=outcome,  # type: ignore[arg-type]
+                        )
                     await self.run_package_writer.write(pkg)
                     await self.event_bus.publish(
                         HarnessEvent(
@@ -183,6 +200,8 @@ class CompiledAgent:
                     )
                 except Exception:  # pragma: no cover
                     pass
+                if hooks_tok is not None:
+                    reset_active_subagent_hooks(hooks_tok)
             return {"run_id": run_id, "session_id": sid, "messages": outputs, "outcome": outcome}
 
     async def _invoke_agent(self, messages: Sequence[dict]) -> Any:

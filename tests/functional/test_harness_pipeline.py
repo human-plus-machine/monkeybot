@@ -11,8 +11,10 @@ from src.core.harness import (
     ApprovalDenied,
     EventKind,
     HarnessConfig,
+    HarnessEvent,
     IdentitySpec,
     ObservabilitySpec,
+    RunPackage,
     RunPackageSpec,
     SandboxSpec,
     SecuritySpec,
@@ -108,3 +110,51 @@ async def test_hitl_wired_with_disabled_channel(tmp_path: Path) -> None:
         )
     )
     assert decision.decision == "approved"
+
+
+@pytest.mark.asyncio
+async def test_run_package_records_tool_calls_from_event_bus(tmp_path: Path) -> None:
+    compiled = build_universal_agent(_mk_cfg(tmp_path))
+
+    class _Inject:
+        name = "inject_tool_bus"
+
+        def __init__(self, compiled_agent: object) -> None:
+            self._compiled = compiled_agent
+
+        async def handle(self, event: HarnessEvent) -> None:
+            if event.kind != EventKind.AGENT_START:
+                return
+            bus = self._compiled.event_bus  # type: ignore[attr-defined]
+            await bus.publish(
+                HarnessEvent(
+                    run_id=event.run_id,
+                    session_id=event.session_id,
+                    principal=event.principal,
+                    versions=event.versions,
+                    ts=event.ts,
+                    kind=EventKind.TOOL_CALL,
+                    payload={"call_id": "inj1", "name": "list_dir", "args_redacted": {}},
+                )
+            )
+            await bus.publish(
+                HarnessEvent(
+                    run_id=event.run_id,
+                    session_id=event.session_id,
+                    principal=event.principal,
+                    versions=event.versions,
+                    ts=event.ts,
+                    kind=EventKind.TOOL_RESULT,
+                    payload={"call_id": "inj1", "result_summary": "files", "latency_ms": 2, "success": True},
+                )
+            )
+
+    compiled.event_bus.subscribe(_Inject(compiled))
+    await compiled.ainvoke(
+        [{"role": "user", "content": "ping"}],
+        principal=make_user_principal(user_id="inject-user"),
+    )
+    written = list((tmp_path / "runs").rglob("*.json"))
+    assert written
+    pkg = RunPackage.model_validate_json(written[-1].read_text(encoding="utf-8"))
+    assert any(tc.name == "list_dir" for tc in pkg.tool_calls)

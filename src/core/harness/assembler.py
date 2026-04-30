@@ -27,7 +27,7 @@ from .compiled_agent import CompiledAgent
 from .control import SessionRegistry
 from .errors import HarnessConfigError
 from .event_bus import EventBus
-from .events import VersionTriple
+from .events import EventKind, VersionTriple
 from .hitl.google_chat import GoogleChatApprovalChannel
 from .hitl.protocol import ApprovalChannel
 from .hitl.webhook import WebhookApprovalChannel
@@ -45,9 +45,11 @@ from .middleware.principal_propagation import PrincipalPropagationMW
 from .middleware.recovery import RecoveryMW
 from .middleware.redaction import RedactionMW
 from .middleware.rules import RulesEnforcementMW
+from .middleware.run_package_aggregator import RunPackageAggregatorMW
 from .middleware.subagent_recursion import SubagentRecursionMW
 from .middleware.tool_output_offload import ToolOutputOffloadMW
 from .redaction import Redactor
+from .run_package_accumulator import RunPackageAccumulator, SubagentInvocationHooks
 from .runpackage_writers import (
     DisabledRunPackageWriter,
     GCSRunPackageWriter,
@@ -500,6 +502,39 @@ def build_universal_agent(
     if extra_middleware:
         middleware.extend(extra_middleware)
 
+    accumulator = RunPackageAccumulator()
+    recursion_mw = next((m for m in middleware if isinstance(m, SubagentRecursionMW)), None)
+    if recursion_mw is None:
+        recursion_mw = SubagentRecursionMW(depth_limit=3)
+    subagent_hooks = SubagentInvocationHooks(
+        accumulator,
+        event_bus,
+        recursion_mw,
+        versions=versions,
+    )
+    _run_pkg_agg_kinds = frozenset(
+        {
+            EventKind.LLM_RESULT,
+            EventKind.TOOL_CALL,
+            EventKind.TOOL_RESULT,
+            EventKind.APPROVAL_DECISION,
+            EventKind.APPROVAL_REQUEST,
+            EventKind.CONTEXT_SUMMARIZE,
+            EventKind.CONTEXT_RESET,
+            EventKind.CONTEXT_OFFLOAD,
+            EventKind.RULE_VETO,
+            EventKind.BUDGET_UTILIZATION,
+            EventKind.SUBAGENT_SPAWN,
+            EventKind.SUBAGENT_RETURN,
+            EventKind.LLM_CALL,
+        }
+    )
+    event_bus.subscribe(
+        RunPackageAggregatorMW(accumulator),
+        kinds=_run_pkg_agg_kinds,
+        timeout_s=1.0,
+    )
+
     session_registry = SessionRegistry(checkpointer=ckpt, event_bus=event_bus)
 
     agent = _build_deep_agent(
@@ -535,6 +570,8 @@ def build_universal_agent(
         job_storage=job_storage,
         checkpointer_ext=checkpointer_ext,
         # END harness-extensibility phase 6
+        accumulator=accumulator,
+        subagent_hooks=subagent_hooks,
     )
 
 

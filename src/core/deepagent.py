@@ -8,9 +8,9 @@ import logging
 import os
 from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
-from typing import Any
 from datetime import UTC
 from pathlib import Path
+from typing import Any
 
 import yaml
 from langchain_core.language_models import BaseChatModel
@@ -22,7 +22,7 @@ from .drive_filesystem_sync import DriveFilesystemSync
 from .filesystem_sync import GCSFilesystemSync
 from .prompt import compose_system_prompt
 from .store import create_search_memory_tool
-from .task_tool_patches import apply_task_tool_patches
+from .task_tool_patches import apply_task_tool_patches, subagent_invocation_ctx_scope
 
 logger = logging.getLogger(__name__)
 
@@ -401,17 +401,18 @@ def build_deep_agent(
         merged_subagents = merged
 
     # Step 6: Call create_deep_agent with all params
-    agent = create_deep_agent(
-        model=model,
-        tools=all_tools,
-        system_prompt=full_system_prompt,
-        middleware=middleware,
-        backend=backend,
-        store=store,
-        checkpointer=checkpointer,
-        skills=skills,          # SkillsMiddleware wired per-agent by deepagents
-        subagents=merged_subagents,  # SubAgentMiddleware + per-subagent stacks by deepagents
-    )
+    with subagent_invocation_ctx_scope(subagent_invocation_ctx):
+        agent = create_deep_agent(
+            model=model,
+            tools=all_tools,
+            system_prompt=full_system_prompt,
+            middleware=middleware,
+            backend=backend,
+            store=store,
+            checkpointer=checkpointer,
+            skills=skills,  # SkillsMiddleware wired per-agent by deepagents
+            subagents=merged_subagents,  # SubAgentMiddleware + per-subagent stacks by deepagents
+        )
 
     # Attach fs_sync to agent so callers can run startup sync via FastAPI lifespan
     if fs_sync is not None:
