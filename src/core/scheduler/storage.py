@@ -35,6 +35,18 @@ class JobStorage(ABC):
         """
         pass
 
+    async def save_job(self, job: dict[str, Any]) -> None:
+        """Create or update a single job without replacing unrelated jobs."""
+        job_id = job["id"]
+        jobs = await self.load_jobs()
+        for index, existing in enumerate(jobs):
+            if existing.get("id") == job_id:
+                jobs[index] = job
+                break
+        else:
+            jobs.append(job)
+        await self.save_jobs(jobs)
+
     @abstractmethod
     async def claim_job(self, job_id: str, lease_duration_seconds: int = 300) -> bool:
         """Attempt to claim a job for execution with a lease.
@@ -88,6 +100,18 @@ class JSONFileStorage(JobStorage):
         """Save jobs to JSON file."""
         self.jobs_file.parent.mkdir(parents=True, exist_ok=True)
         self.jobs_file.write_text(json.dumps(jobs, indent=2))
+
+    async def save_job(self, job: dict[str, Any]) -> None:
+        """Create or replace one JSON-backed job."""
+        job_id = job["id"]
+        jobs = await self.load_jobs()
+        for index, existing in enumerate(jobs):
+            if existing.get("id") == job_id:
+                jobs[index] = job
+                break
+        else:
+            jobs.append(job)
+        await self.save_jobs(jobs)
 
     async def claim_job(self, job_id: str, lease_duration_seconds: int = 300) -> bool:
         """Claim job (no-op for JSON storage - no distributed locking)."""
@@ -154,6 +178,18 @@ class FirestoreStorage(JobStorage):
         
         batch.commit()
         logger.info(f"Saved {len(jobs)} jobs to Firestore")
+
+    async def save_job(self, job: dict[str, Any]) -> None:
+        """Merge one job document without touching lease ownership fields."""
+        job_id = job["id"]
+        doc_ref = self.collection.document(job_id)
+        job_data = {
+            k: v
+            for k, v in job.items()
+            if not k.startswith("_") and k not in {"lease_until", "lease_claimed_at"}
+        }
+        doc_ref.set(job_data, merge=True)
+        logger.info(f"Saved job {job_id} to Firestore")
 
     async def claim_job(self, job_id: str, lease_duration_seconds: int = 300) -> bool:
         """Attempt to claim a job with distributed locking.

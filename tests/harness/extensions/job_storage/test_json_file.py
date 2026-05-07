@@ -89,6 +89,24 @@ async def test_save_jobs_replaces_list(tmp_path: Path) -> None:
     assert {job["job_id"] for job in loaded} == {"new"}
 
 
+async def test_save_job_preserves_list(tmp_path: Path) -> None:
+    """``save_job`` upserts one job without dropping unrelated jobs."""
+    storage = JSONFileJobStorage(tmp_path / "jobs.json")
+    await storage.save_jobs([
+        {"job_id": "old", "payload": {"n": 1}, "status": "pending"},
+        {"job_id": "kept", "payload": {"n": 2}, "status": "pending"},
+    ])
+
+    await storage.save_job({"job_id": "old", "payload": {"n": 3}, "status": "completed"})
+    loaded = await storage.load_jobs()
+    by_id = {job["job_id"]: job for job in loaded}
+
+    assert set(by_id) == {"old", "kept"}
+    assert by_id["old"]["payload"] == {"n": 3}
+    assert by_id["old"]["status"] == "completed"
+    assert by_id["kept"]["payload"] == {"n": 2}
+
+
 async def test_get_job_returns_none_for_missing(tmp_path: Path) -> None:
     """``get_job`` returns ``None`` when the id is not persisted."""
     storage = JSONFileJobStorage(tmp_path / "jobs.json")

@@ -5,7 +5,6 @@ at specified times. Jobs are persisted to disk and survive agent restarts.
 """
 
 import asyncio
-import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -106,7 +105,7 @@ class CronScheduler:
         }
 
         self.jobs.append(job)
-        await self._save_jobs()
+        await self._save_job(job)
 
         # Calculate time until execution for logging
         now_utc = datetime.now(timezone.utc)
@@ -335,7 +334,7 @@ class CronScheduler:
         try:
             job["status"] = "running"
             job["started_at"] = datetime.now(timezone.utc).isoformat()
-            await self._save_jobs()
+            await self._save_job(job)
 
             # Look up handler from registry
             handler = self._job_handlers.get(job_type)
@@ -382,7 +381,7 @@ class CronScheduler:
         finally:
             # Ensure agent state is cleaned up before saving
             job.pop("_agent_state", None)
-            await self._save_jobs()
+            await self._save_job(job)
 
     async def _load_jobs(self):
         """Load jobs from storage backend."""
@@ -392,6 +391,10 @@ class CronScheduler:
     async def _save_jobs(self):
         """Save jobs to storage backend."""
         await self.storage.save_jobs(self.jobs)
+
+    async def _save_job(self, job: dict[str, Any]):
+        """Save one job without replacing unrelated storage state."""
+        await self.storage.save_job(job)
 
     def get_pending_jobs(self) -> list[dict[str, Any]]:
         """Get all pending jobs.

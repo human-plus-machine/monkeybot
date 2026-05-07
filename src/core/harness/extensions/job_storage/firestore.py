@@ -108,6 +108,18 @@ class FirestoreJobStorage(JobStorage):
 
         await asyncio.to_thread(_write)
 
+    async def save_job(self, job: Mapping[str, Any]) -> None:
+        """Merge one job document while preserving lease ownership fields."""
+        new_job = dict(job)
+        jid = self._job_id(new_job)
+        for field in (_LEASE_UNTIL_KEY, _LEASE_TOKEN_KEY):
+            new_job.pop(field, None)
+
+        def _write_one() -> None:
+            self._collection().document(jid).set(new_job, merge=True)
+
+        await asyncio.to_thread(_write_one)
+
     async def claim_job(
         self, job_id: str, lease_duration_seconds: int = 300
     ) -> bool:

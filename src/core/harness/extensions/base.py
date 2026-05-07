@@ -149,6 +149,18 @@ class JobStorage(ABC):
     async def save_jobs(self, jobs: Sequence[Mapping[str, Any]]) -> None:
         """Replace the job list with ``jobs``."""
 
+    async def save_job(self, job: Mapping[str, Any]) -> None:
+        """Create or update a single job document without replacing the full job list."""
+        job_id = _job_id(job)
+        jobs = [dict(existing) for existing in await self.load_jobs()]
+        for index, existing in enumerate(jobs):
+            if _job_id(existing) == job_id:
+                jobs[index] = dict(job)
+                break
+        else:
+            jobs.append(dict(job))
+        await self.save_jobs(jobs)
+
     @abstractmethod
     async def claim_job(self, job_id: str, lease_duration_seconds: int = 300) -> bool:
         """Attempt to claim ``job_id`` for ``lease_duration_seconds``.
@@ -236,3 +248,11 @@ __all__ = [
     "ModelProvider",
     "SecretResolver",
 ]
+
+
+def _job_id(job: Mapping[str, Any]) -> str:
+    if "job_id" in job:
+        return str(job["job_id"])
+    if "id" in job:
+        return str(job["id"])
+    raise KeyError("job must contain 'job_id' or 'id'")

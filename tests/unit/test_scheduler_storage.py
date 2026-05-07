@@ -1,15 +1,13 @@
 """Unit tests for scheduler storage backends."""
 
-import json
 from datetime import datetime, timedelta
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from src.core.scheduler.storage import (
-    JSONFileStorage,
     FirestoreStorage,
+    JSONFileStorage,
     create_storage,
 )
 
@@ -52,6 +50,21 @@ class TestJSONFileStorage:
         assert len(loaded_jobs) == 2
         assert loaded_jobs[0]["id"] == "job1"
         assert loaded_jobs[1]["id"] == "job2"
+
+    @pytest.mark.asyncio
+    async def test_save_job_updates_one_job(self, storage):
+        """Test saving one job preserves unrelated jobs."""
+        await storage.save_jobs([
+            {"id": "job1", "status": "pending"},
+            {"id": "job2", "status": "pending"},
+        ])
+
+        await storage.save_job({"id": "job1", "status": "completed"})
+        loaded_jobs = await storage.load_jobs()
+        by_id = {job["id"]: job for job in loaded_jobs}
+
+        assert by_id["job1"]["status"] == "completed"
+        assert by_id["job2"]["status"] == "pending"
     
     @pytest.mark.asyncio
     async def test_claim_job_always_succeeds(self, storage):
@@ -144,6 +157,25 @@ class TestFirestoreStorage:
         # Should create batch and commit
         mock_firestore.batch.assert_called_once()
         mock_batch.commit.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_save_job_to_firestore_preserves_lease_fields(self, storage, mock_firestore):
+        """Single-job saves should not overwrite lease fields owned by claim/release."""
+        mock_doc_ref = MagicMock()
+        mock_firestore.collection.return_value.document.return_value = mock_doc_ref
+
+        await storage.save_job({
+            "id": "job1",
+            "status": "running",
+            "lease_until": "stale",
+            "lease_claimed_at": "stale",
+        })
+
+        mock_firestore.collection.return_value.document.assert_called_once_with("job1")
+        mock_doc_ref.set.assert_called_once()
+        saved_payload = mock_doc_ref.set.call_args.args[0]
+        assert saved_payload == {"id": "job1", "status": "running"}
+        assert mock_doc_ref.set.call_args.kwargs == {"merge": True}
     
     @pytest.mark.asyncio
     async def test_claim_job_success(self, storage, mock_firestore):

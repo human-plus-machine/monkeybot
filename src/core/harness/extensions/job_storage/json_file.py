@@ -128,6 +128,27 @@ class JSONFileJobStorage(JobStorage):
         async with self._async_lock:
             await asyncio.to_thread(_write)
 
+    async def save_job(self, job: Mapping[str, Any]) -> None:
+        """Create or replace one persisted job without rewriting callers' stale list."""
+        new_job = dict(job)
+        job_id = self._job_id(new_job)
+
+        def _write_one() -> None:
+            filelock_cls = self._get_filelock_cls()
+            lock = filelock_cls(self._lock_path, timeout=self._lock_timeout)
+            with lock:
+                jobs = self._load_sync()
+                for index, existing in enumerate(jobs):
+                    if self._job_id(existing) == job_id:
+                        jobs[index] = new_job
+                        break
+                else:
+                    jobs.append(new_job)
+                self._save_sync(jobs)
+
+        async with self._async_lock:
+            await asyncio.to_thread(_write_one)
+
     async def claim_job(self, job_id: str, lease_duration_seconds: int = 300) -> bool:
         """Atomically claim ``job_id`` if no unexpired lease exists."""
 

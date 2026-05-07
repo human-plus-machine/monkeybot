@@ -2,16 +2,17 @@
 
 import asyncio
 import json
-import pytest
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock
-import sys
+
+import pytest
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from core.scheduler.cron import CronScheduler
+from core.scheduler.storage import JobStorage
 
 
 class MockAgentState:
@@ -20,6 +21,38 @@ class MockAgentState:
     def __init__(self, tmp_path: Path):
         self.memory_dir = tmp_path / "data" / "memory"
         self.memory_dir.mkdir(parents=True, exist_ok=True)
+
+
+class TrackingStorage(JobStorage):
+    """Storage that records whether scheduler execution uses bulk replacement."""
+
+    def __init__(self):
+        self.jobs = []
+        self.save_jobs_calls = 0
+        self.save_job_calls = 0
+
+    async def load_jobs(self):
+        return self.jobs
+
+    async def save_jobs(self, jobs):
+        self.save_jobs_calls += 1
+        self.jobs = list(jobs)
+
+    async def save_job(self, job):
+        self.save_job_calls += 1
+        job_id = job["id"]
+        for index, existing in enumerate(self.jobs):
+            if existing.get("id") == job_id:
+                self.jobs[index] = dict(job)
+                break
+        else:
+            self.jobs.append(dict(job))
+
+    async def claim_job(self, job_id, lease_duration_seconds=300):
+        return True
+
+    async def release_job(self, job_id):
+        pass
 
 
 @pytest.fixture
@@ -273,3 +306,28 @@ class TestCronScheduler:
         # Verify job marked as failed
         assert job["status"] == "failed"
         assert "No handler registered for job type" in job["error"]
+
+    @pytest.mark.asyncio
+    async def test_run_tick_uses_single_job_saves(self, mock_agent_state):
+        """Due-job execution should not bulk-replace scheduler storage."""
+        storage = TrackingStorage()
+        scheduler = CronScheduler(mock_agent_state, check_interval_seconds=1, storage=storage)
+
+        async def mock_handler(job):
+            job["payload"]["handled"] = True
+
+        scheduler.register_handler("post_content", mock_handler)
+        await scheduler.schedule_job(
+            job_type="post_content",
+            schedule_at=datetime.now(timezone.utc),
+            payload={"platform": "x"},
+        )
+        storage.save_jobs_calls = 0
+
+        result = await scheduler.run_tick()
+
+        assert result["jobs_executed"] == 1
+        assert result["jobs_succeeded"] == 1
+        assert storage.save_jobs_calls == 0
+        assert storage.save_job_calls >= 2
+        assert storage.jobs[0]["status"] == "completed"

@@ -101,6 +101,18 @@ class MongoJobStorage(JobStorage):
             payloads.append(doc)
         await collection.insert_many(payloads)
 
+    async def save_job(self, job: Mapping[str, Any]) -> None:
+        """Upsert one job document without changing lease ownership fields."""
+        new_job = dict(job)
+        jid = self._job_id(new_job)
+        doc = {
+            k: v
+            for k, v in new_job.items()
+            if k not in {"job_id", "id", "_id", _LEASE_UNTIL_KEY, _LEASE_TOKEN_KEY}
+        }
+        collection = await self._ensure_collection()
+        await collection.update_one({"_id": jid}, {"$set": doc}, upsert=True)
+
     async def claim_job(
         self, job_id: str, lease_duration_seconds: int = 300
     ) -> bool:

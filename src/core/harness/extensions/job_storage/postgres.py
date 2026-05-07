@@ -158,6 +158,36 @@ class PostgresJobStorage(JobStorage):
                 status = str(job.get("status", "pending"))
                 await conn.execute(insert_sql, jid, payload, status)
 
+    async def save_job(self, job: Mapping[str, Any]) -> None:
+        """Upsert one job payload/status without touching lease columns."""
+        jid = self._job_id(job)
+        payload = self._dumps(
+            {
+                k: v
+                for k, v in job.items()
+                if k
+                not in {
+                    "id",
+                    "job_id",
+                    "status",
+                    "leased_until",
+                    "lease_token",
+                }
+            }
+        )
+        status = str(job.get("status", "pending"))
+        pool = await self._ensure_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                f'INSERT INTO "{self.schema_name}".jobs (id, payload, status) '
+                f"VALUES ($1, $2::jsonb, $3) "
+                f"ON CONFLICT (id) DO UPDATE SET "
+                f"payload = EXCLUDED.payload, status = EXCLUDED.status, updated_at = now()",
+                jid,
+                payload,
+                status,
+            )
+
     async def claim_job(
         self, job_id: str, lease_duration_seconds: int = 300
     ) -> bool:

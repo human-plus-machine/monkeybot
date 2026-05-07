@@ -60,3 +60,24 @@ async def test_job_c_04_save_then_load_round_trip(
     loaded = await storage.load_jobs()
     ids = {job["job_id"] for job in loaded}
     assert ids == {"a", "b"}
+
+
+async def test_save_job_preserves_unrelated_jobs(
+    job_storage_factory: Callable[[], JobStorage],
+) -> None:
+    """Single-job saves must not replace the whole persisted job list."""
+    storage = job_storage_factory()
+    await storage.save_jobs([
+        {"job_id": "a", "payload": {"n": 1}, "status": "pending"},
+        {"job_id": "b", "payload": {"n": 2}, "status": "pending"},
+    ])
+
+    await storage.save_job({"job_id": "a", "payload": {"n": 3}, "status": "completed"})
+    loaded = await storage.load_jobs()
+    by_id = {job["job_id"]: job for job in loaded}
+
+    assert set(by_id) == {"a", "b"}
+    assert by_id["a"]["payload"] == {"n": 3}
+    assert by_id["a"]["status"] == "completed"
+    assert by_id["b"]["payload"] == {"n": 2}
+    assert by_id["b"]["status"] == "pending"
