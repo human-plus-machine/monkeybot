@@ -1,7 +1,0 @@
-#!/usr/bin/env bash
-set -euo pipefail
-
-BOT_DIR=${1:-./bots/example-bot}
-SESSION=${2:-cli}
-
-uv run monkeybot run --bot-dir "$BOT_DIR" --session "$SESSION"

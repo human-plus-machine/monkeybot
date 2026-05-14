@@ -1,0 +1,224 @@
+{
+  "feature_name": "monkeybot-v2-e1",
+  "current_phase": "completed",
+  "phase_status": {
+    "design_1a": "completed",
+    "design_1b": "completed",
+    "design_1c": "completed",
+    "user_stories": "completed",
+    "code_spec": "completed",
+    "implementation": "completed",
+    "verification": "completed",
+    "integration": "completed"
+  },
+  "artifacts": {
+    "design_docs": {
+      "1a_discovery": ".monkeymode/monkeybot-v2-e1/design/1a-discovery.md",
+      "1b_contracts": ".monkeymode/monkeybot-v2-e1/design/1b-contracts.md",
+      "1c_operations": ".monkeymode/monkeybot-v2-e1/design/1c-operations.md"
+    },
+    "user_stories_doc": ".monkeymode/monkeybot-v2-e1/user_stories.md",
+    "qa_log": ".monkeymode/monkeybot-v2-e1/qa-log.md"
+  },
+  "stories": {
+    "story-1-core-types-and-protocols": {
+      "title": "Core Types & Protocols",
+      "status": "integrated",
+      "batch": 1,
+      "code_spec_path": ".monkeymode/monkeybot-v2-e1/code_specs/story-1-spec.md",
+      "assigned_to": null,
+      "current_task": null,
+      "files_to_create": [
+        "src/monkeybot/core/events.py",
+        "src/monkeybot/core/context.py",
+        "src/monkeybot/core/provider.py",
+        "src/monkeybot/core/inspector.py",
+        "tests/unit/test_events.py",
+        "tests/unit/test_context.py"
+      ],
+      "files_to_modify": [],
+      "blocked_by_rework": null,
+      "verification": {
+        "result": "pass",
+        "rework_attempts": 0,
+        "rework_summary": null,
+        "escalated_issues": [],
+        "last_checked_at": "2026-05-13T19:43:00Z"
+      },
+      "last_updated": "2026-05-13T19:46:00Z"
+    },
+    "story-2-persistence-layer": {
+      "title": "Persistence Layer",
+      "status": "integrated",
+      "batch": 1,
+      "code_spec_path": ".monkeymode/monkeybot-v2-e1/code_specs/story-2-spec.md",
+      "assigned_to": null,
+      "current_task": null,
+      "files_to_create": [
+        "src/monkeybot/core/history.py",
+        "src/monkeybot/core/memory.py",
+        "tests/unit/test_history.py",
+        "tests/unit/test_memory.py"
+      ],
+      "files_to_modify": [],
+      "blocked_by_rework": null,
+      "verification": {
+        "result": "pass-with-warnings",
+        "rework_attempts": 0,
+        "rework_summary": null,
+        "escalated_issues": [],
+        "warnings": ["test_search_highest_score_first uses stable sort tie-breaking rather than true score differentiation — passes but fragile"],
+        "last_checked_at": "2026-05-13T19:43:00Z"
+      },
+      "last_updated": "2026-05-13T19:46:00Z"
+    },
+    "story-3-tools-layer": {
+      "title": "Tools Layer",
+      "status": "integrated",
+      "batch": 1,
+      "code_spec_path": ".monkeymode/monkeybot-v2-e1/code_specs/story-3-spec.md",
+      "assigned_to": null,
+      "current_task": null,
+      "files_to_create": [
+        "src/monkeybot/tools/run_command.py",
+        "src/monkeybot/tools/file_ops.py",
+        "src/monkeybot/tools/memory_ops.py",
+        "src/monkeybot/tools/skill_ops.py",
+        "tests/unit/test_tools.py"
+      ],
+      "files_to_modify": [],
+      "blocked_by_rework": null,
+      "verification": {
+        "result": "pass",
+        "rework_attempts": 0,
+        "rework_summary": null,
+        "escalated_issues": [],
+        "last_checked_at": "2026-05-13T19:44:00Z"
+      },
+      "last_updated": "2026-05-13T19:46:00Z"
+    },
+    "story-4-infrastructure-and-bot-template": {
+      "title": "Infrastructure & Bot Template",
+      "status": "integrated",
+      "batch": 1,
+      "code_spec_path": ".monkeymode/monkeybot-v2-e1/code_specs/story-4-spec.md",
+      "assigned_to": null,
+      "current_task": null,
+      "files_to_create": [
+        "bots/example-bot/AGENT.md",
+        "bots/example-bot/config.yaml",
+        "bots/example-bot/MEMORY.md",
+        ".env.example"
+      ],
+      "files_to_modify": [
+        "scripts/bootstrap",
+        "scripts/run",
+        "scripts/test",
+        "src/monkeybot/__init__.py"
+      ],
+      "blocked_by_rework": null,
+      "verification": {
+        "result": "pass",
+        "rework_attempts": 0,
+        "rework_summary": null,
+        "escalated_issues": [],
+        "last_checked_at": "2026-05-13T19:43:00Z"
+      },
+      "last_updated": "2026-05-13T19:46:00Z"
+    },
+    "story-5-gemini-provider": {
+      "title": "Gemini Provider",
+      "status": "integrated",
+      "batch": 2,
+      "code_spec_path": ".monkeymode/monkeybot-v2-e1/code_specs/story-5-spec.md",
+      "assigned_to": null,
+      "current_task": null,
+      "files_to_create": [
+        "src/monkeybot/providers/gemini.py",
+        "tests/integration/test_gemini_provider.py"
+      ],
+      "files_to_modify": [],
+      "blocked_by_rework": null,
+      "verification": {
+        "result": "pass",
+        "rework_attempts": 0,
+        "rework_summary": null,
+        "escalated_issues": [],
+        "warnings": ["test_lazy_import measures uv subprocess wall-clock time — could be flaky on slow CI"],
+        "last_checked_at": "2026-05-13T19:45:00Z"
+      },
+      "last_updated": "2026-05-13T19:46:00Z"
+    },
+    "story-6-agent-loop-gateway-and-cli": {
+      "title": "Agent Loop, Gateway & CLI",
+      "status": "integrated",
+      "batch": 2,
+      "code_spec_path": ".monkeymode/monkeybot-v2-e1/code_specs/story-6-spec.md",
+      "assigned_to": null,
+      "current_task": null,
+      "files_to_create": [
+        "src/monkeybot/core/loop.py",
+        "src/monkeybot/gateway/cli.py",
+        "src/monkeybot/cli.py",
+        "tests/unit/test_loop.py",
+        "tests/test_cold_start.py"
+      ],
+      "files_to_modify": [],
+      "blocked_by_rework": null,
+      "verification": {
+        "result": "pass-with-warnings",
+        "rework_attempts": 0,
+        "rework_summary": null,
+        "escalated_issues": [],
+        "warnings": ["python -m monkeybot fails (no __main__.py) — not a spec requirement; uv run monkeybot works correctly"],
+        "last_checked_at": "2026-05-13T19:46:00Z"
+      },
+      "last_updated": "2026-05-13T19:46:00Z"
+    }
+  },
+  "parallel_execution": {
+    "enabled": true,
+    "max_concurrent": 4,
+    "current_batch": null,
+    "batches": [
+      {
+        "batch_number": 1,
+        "stories": ["story-1-core-types-and-protocols", "story-2-persistence-layer", "story-3-tools-layer", "story-4-infrastructure-and-bot-template"],
+        "status": "completed",
+        "started_at": "2026-05-13T19:24:00Z",
+        "completed_at": "2026-05-13T19:30:00Z",
+        "results": {
+          "story-1-core-types-and-protocols": "implementation_complete",
+          "story-2-persistence-layer": "implementation_complete",
+          "story-3-tools-layer": "implementation_complete",
+          "story-4-infrastructure-and-bot-template": "implementation_complete"
+        }
+      },
+      {
+        "batch_number": 2,
+        "stories": ["story-5-gemini-provider", "story-6-agent-loop-gateway-and-cli"],
+        "status": "completed",
+        "started_at": "2026-05-13T19:30:00Z",
+        "completed_at": "2026-05-13T19:38:00Z",
+        "results": {
+          "story-5-gemini-provider": "implementation_complete",
+          "story-6-agent-loop-gateway-and-cli": "implementation_complete"
+        }
+      }
+    ]
+  },
+  "rework_history": [],
+  "integration": {
+    "status": "completed",
+    "shared_files_merged": ["src/monkeybot/__init__.py"],
+    "code_deduplication": ["src/monkeybot/tools/memory_ops.py -> delegates to core/memory.py"],
+    "integration_tests_added": 6,
+    "integration_test_file": "tests/integration/test_e2e.py",
+    "completed_at": "2026-05-13T19:55:00Z"
+  },
+  "context": {
+    "save_qa_log": true,
+    "source_prt": ".prt/monkeybot-v2/epics/e1-core-harness.md"
+  },
+  "last_updated": "2026-05-13T19:55:00Z"
+}

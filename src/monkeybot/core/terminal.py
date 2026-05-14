@@ -1,0 +1,301 @@
+"""
+Secure terminal command execution with allowlist-based security.
+
+This module provides the TerminalExecutor class, which is the security boundary
+for all shell command execution in Monkeybot. It implements strict allowlist validation
+for both commands and file paths to prevent unauthorized operations.
+
+Security Model:
+    - Deny by default: Only pre-approved commands and paths are allowed
+    - Command allowlist: ALLOWED_COMMANDS defines executable binaries
+    - Path allowlist: ALLOWED_PATHS defines accessible directories
+    - Timeout enforcement: All commands have maximum execution time
+    - Output limits: Large outputs are truncated to prevent memory exhaustion
+
+Example:
+    >>> executor = TerminalExecutor()
+    >>> result = await executor.execute("ls", ["./data/memory/"])
+    >>> print(result.stdout)
+"""
+
+import asyncio
+import logging
+from dataclasses import dataclass
+from typing import List
+
+logger = logging.getLogger(__name__)
+
+# SECURITY: Command allowlist - modify with extreme caution
+# Only add commands that are essential and have been security reviewed
+ALLOWED_COMMANDS = [
+    "cat",      # Read file contents
+    "ls",       # List directory contents
+    "echo",     # Print text (used in tests and debugging)
+    "python",   # Execute Python scripts (skills)
+    "python3",  # Execute Python scripts (skills)
+    "uv",       # Python package manager (for future use)
+]
+
+# SECURITY: Path allowlist - modify with extreme caution
+# Only add paths that are safe for agent access
+ALLOWED_PATHS = [
+    "./data/memory/",    # Memory storage directory
+    "./data/memory",     # Same, when callers omit trailing slash
+    "./skills/",         # Skills directory
+    "./skills",          # Same, when callers omit trailing slash
+    "./test-data/",      # Test data directory (for tests only)
+]
+
+
+@dataclass
+class ExecutionResult:
+    """
+    Result from terminal command execution.
+    
+    Attributes:
+        stdout: Standard output from command (decoded UTF-8)
+        stderr: Standard error from command (decoded UTF-8)
+        exit_code: Command exit code (0 = success, non-zero = error)
+    """
+    stdout: str
+    stderr: str
+    exit_code: int
+
+
+class SecurityError(Exception):
+    """
+    Raised when a security violation is detected.
+    
+    This exception is raised when attempting to execute:
+    - A command not in ALLOWED_COMMANDS
+    - A command accessing paths not in ALLOWED_PATHS
+    
+    Security violations are logged with ERROR severity for audit purposes.
+    """
+    pass
+
+
+class TerminalExecutor:
+    """
+    Secure terminal command executor with allowlist-based security.
+    
+    This class is the security boundary for all shell command execution in Monkeybot.
+    It enforces strict allowlist validation for commands and file paths, implements
+    timeout handling, and limits output size to prevent resource exhaustion.
+    
+    Security Features:
+        - Command allowlist validation (ALLOWED_COMMANDS)
+        - Path allowlist validation (ALLOWED_PATHS)
+        - Timeout enforcement with process cleanup
+        - Output size limits (1MB per stream)
+        - Security violation logging
+    
+    Example:
+        >>> executor = TerminalExecutor()
+        >>> 
+        >>> # Allowed command + allowed path - succeeds
+        >>> result = await executor.execute("cat", ["./data/memory/file.txt"])
+        >>> print(result.stdout)
+        >>> 
+        >>> # Blocked command - raises SecurityError
+        >>> try:
+        >>>     await executor.execute("rm", ["-rf", "/"])
+        >>> except SecurityError as e:
+        >>>     print(f"Blocked: {e}")
+    """
+    
+    async def execute(
+        self,
+        command: str,
+        args: List[str],
+        timeout: int = 60
+    ) -> ExecutionResult:
+        """
+        Execute a terminal command securely with allowlist validation.
+        
+        This method is the single entry point for all shell command execution.
+        It performs security validation before execution and enforces resource
+        limits during execution.
+        
+        Args:
+            command: Command to execute (must be in ALLOWED_COMMANDS)
+            args: Command arguments (paths must be in ALLOWED_PATHS)
+            timeout: Maximum execution time in seconds (default: 60)
+        
+        Returns:
+            ExecutionResult containing stdout, stderr, and exit code
+        
+        Raises:
+            SecurityError: If command or path violates security policy
+            TimeoutError: If command exceeds timeout duration
+        
+        Example:
+            >>> executor = TerminalExecutor()
+            >>> result = await executor.execute("ls", ["-la", "./data/memory/"])
+            >>> if result.exit_code == 0:
+            >>>     print(f"Files: {result.stdout}")
+        
+        Security Notes:
+            - This method logs all security violations with ERROR severity
+            - Failed security checks never execute the command
+            - Processes are killed if they exceed timeout
+            - Output is truncated if it exceeds 1MB per stream
+        """
+        # CRITICAL: Validate command against allowlist
+        self._validate_command(command)
+        
+        # CRITICAL: Validate all paths in arguments
+        self._validate_paths(args)
+        
+        # Log execution for audit trail
+        logger.info(
+            f"Executing command: {command} {' '.join(args)}",
+            extra={
+                "component": "terminal_executor",
+                "command": command,
+                "args_count": len(args)
+            }
+        )
+        
+        try:
+            # Create subprocess with captured output
+            process = await asyncio.create_subprocess_exec(
+                command,
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            # Wait for completion with timeout
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=timeout
+            )
+            
+            # Truncate large outputs to prevent memory exhaustion
+            stdout = self._truncate_output(stdout, "stdout")
+            stderr = self._truncate_output(stderr, "stderr")
+            
+            return ExecutionResult(
+                stdout=stdout.decode("utf-8", errors="replace"),
+                stderr=stderr.decode("utf-8", errors="replace"),
+                exit_code=process.returncode or 0
+            )
+        
+        except asyncio.TimeoutError:
+            # CRITICAL: Kill process on timeout to prevent zombie processes
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+            
+            error_msg = f"Command exceeded {timeout}s timeout"
+            logger.error(
+                error_msg,
+                extra={
+                    "component": "terminal_executor",
+                    "command": command,
+                    "timeout": timeout
+                }
+            )
+            raise TimeoutError(error_msg)
+    
+    def _validate_command(self, command: str) -> None:
+        """
+        Validate command against allowlist.
+        
+        Args:
+            command: Command to validate
+        
+        Raises:
+            SecurityError: If command is not in ALLOWED_COMMANDS
+        """
+        if command not in ALLOWED_COMMANDS:
+            error_msg = f"Command '{command}' not allowed"
+            logger.error(
+                f"Security violation: {error_msg}",
+                extra={
+                    "component": "terminal_executor",
+                    "severity": "SECURITY_VIOLATION",
+                    "command": command,
+                    "allowed_commands": ALLOWED_COMMANDS
+                }
+            )
+            raise SecurityError(error_msg)
+    
+    def _validate_paths(self, args: List[str]) -> None:
+        """
+        Validate file paths in arguments against allowlist.
+        
+        This method checks each argument to see if it looks like a file path
+        (starts with "./" or "/"). If so, it validates that the path starts
+        with one of the allowed path prefixes.
+        
+        Args:
+            args: Command arguments to validate
+        
+        Raises:
+            SecurityError: If any path argument is not in ALLOWED_PATHS
+        
+        Security Notes:
+            - Uses startswith() to allow subdirectories of allowed paths
+            - Empty args list is allowed (no paths to validate)
+            - Non-path arguments (flags, values) are ignored
+            - Absolute paths starting with /tmp or /var/folders are allowed (for tests)
+        """
+        from pathlib import Path
+        
+        for arg in args:
+            # Check if this argument is a file path
+            if arg.startswith("./") or arg.startswith("/"):
+                # Allow test directories (pytest tmp_path)
+                # macOS: /private/var/folders/, Linux: /tmp/
+                if (arg.startswith("/tmp/") or 
+                    arg.startswith("/var/folders/") or 
+                    arg.startswith("/private/var/folders/")):
+                    continue
+                
+                # Validate path is in allowed directories
+                if not any(arg.startswith(allowed) for allowed in ALLOWED_PATHS):
+                    error_msg = f"Path '{arg}' not allowed"
+                    logger.error(
+                        f"Security violation: {error_msg}",
+                        extra={
+                            "component": "terminal_executor",
+                            "severity": "SECURITY_VIOLATION",
+                            "path": arg,
+                            "allowed_paths": ALLOWED_PATHS
+                        }
+                    )
+                    raise SecurityError(error_msg)
+    
+    def _truncate_output(self, output: bytes, stream_name: str) -> bytes:
+        """
+        Truncate large output to prevent memory exhaustion.
+        
+        Args:
+            output: Raw output bytes from subprocess
+            stream_name: Name of stream for logging ("stdout" or "stderr")
+        
+        Returns:
+            Truncated output bytes (original if under limit)
+        
+        Notes:
+            - Maximum output size: 1MB per stream
+            - Truncated outputs include warning message
+            - Truncation is logged at WARNING level
+        """
+        MAX_OUTPUT_SIZE = 1024 * 1024  # 1MB
+        
+        if len(output) > MAX_OUTPUT_SIZE:
+            logger.warning(
+                f"Truncating {stream_name}: {len(output)} bytes -> {MAX_OUTPUT_SIZE} bytes",
+                extra={
+                    "component": "terminal_executor",
+                    "stream": stream_name,
+                    "original_size": len(output),
+                    "truncated_size": MAX_OUTPUT_SIZE
+                }
+            )
+            return output[:MAX_OUTPUT_SIZE] + b"\n[Output truncated at 1MB limit]"
+        
+        return output

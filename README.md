@@ -1,0 +1,359 @@
+# monkey-bot (monkeybot)
+
+> **The production-ready Python framework for building and deploying LLM agents on cloud infrastructure.**
+
+Built on [LangChain](https://github.com/langchain-ai/langchain) ecosystem libraries (for example `langchain-core` and provider integrations) plus a **native Gemini** path in the SSE gateway — `monkeybot` handles sessions, tools, and persistence so you can focus on the agent.
+
+---
+
+## What is monkey-bot?
+
+monkey-bot (`monkeybot`) is a thin framework for running **tool-using LLM agents** with a **FastAPI SSE gateway**, **SQLite** conversation and usage storage, **MCP** tool servers, and optional **GCS** / skills / council workflows — wired for local dev and deployable on GCP Cloud Run (or anywhere Docker runs).
+
+You write **AGENT.md**, tools, and memory layout. `monkeybot` runs the loop, records history, and streams events to clients.
+
+```
+Your code               monkeybot framework              Runtime / cloud
+─────────────           ─────────────────            ─────────────────
+AGENT.md + tools   →    FastAPI SSE gateway    →    Vertex AI / Gemini
+SKILL.md + skills  →    Owned agent + loop     →    Optional GCS (extras)
+MCP + config       →    SQLite history + usage →    GCP when deployed
+```
+
+---
+
+## Features
+
+| Feature | Description |
+|---|---|
+| **Agent loop** | Streaming provider integration, tool execution, inspectors; SQLite-backed turns |
+| **AGENT.md + context** | System prompt from file plus optional memory index and skill list per turn |
+| **Persistent memory (optional)** | Markdown under `MEMORY_PATH`, council extras |
+| **Conversation history** | SQLite via `DB_URL` for gateway sessions |
+| **Skills** | `SKILL.md` + `run.py` / `main.py` discovery under `SKILLS_PATH` |
+| **MCP** | Stdio and streamable HTTP MCP servers; tools exposed as `server__tool` |
+| **LLM Council (optional)** | Async post-processor for classifying and indexing memory files |
+| **Multi-provider (library path)** | Vertex / Google GenAI, OpenAI, Anthropic via LangChain chat models in `get_model()` |
+| **Zero-config playground** | `playground/agent` + `playground/chat-ui` for local SSE chat |
+
+---
+
+## Documentation (v2)
+
+| Guide | Description |
+|---|---|
+| [Getting Started](docs/getting-started.md) | Install, configure the SSE gateway, and exercise sessions + SSE from the command line |
+| [Skills](docs/skills.md) | Skill directory layout, `SKILL.md`, and `run.py` / `main.py` discovery under `SKILLS_PATH` |
+
+Configuration details for local and cloud runs live in **`.env.example`** at the repository root.
+
+---
+
+## Playground: frontend and backend
+
+The repo includes a minimal **SSE gateway** (Python) and **chat UI** (Vite + React) under `playground/`. Run both for a browser session against your local `AGENT.md` and SQLite.
+
+**1. Backend (gateway)** — from the repository root:
+
+```bash
+cd playground/agent
+cp .env.example .env   # first time only; edit MODEL_PROVIDER, keys, paths as needed
+uv sync                # installs deps including editable monkeybot from repo root
+./run.sh
+```
+
+The default dev port in `playground/agent/.env.example` is **8787**. Equivalent without the script:
+
+```bash
+cd playground/agent && uv run --env-file .env -m monkeybot.gateway.main
+```
+
+**2. Frontend (chat UI)** — second terminal, from the repository root:
+
+```bash
+cd playground/chat-ui
+npm install            # first time only
+npm run dev
+```
+
+Open the URL Vite prints (usually `http://localhost:5173`). The UI proxies API calls to the gateway via `/__mb_gateway`; by default the dev server targets **`http://127.0.0.1:8787`**. If your gateway runs elsewhere, set `VITE_GATEWAY_TARGET` in `playground/chat-ui/.env.local` (see `env.local.sample`).
+
+More detail: [Getting Started](docs/getting-started.md).
+
+---
+
+## Quick Start
+
+### 1. Install
+
+```bash
+pip install monkeybot
+```
+
+Or clone the reference implementation:
+
+```bash
+git clone https://github.com/human-and-machine/monkey-bot.git
+cd monkey-bot/test-monkey
+cp .env.example .env
+```
+
+### 2. Configure
+
+Edit `bot.yaml` (non-secret config):
+
+```yaml
+agent:
+  name: my-bot
+  skills_dir: ./skills
+
+model:
+  provider: google_vertexai
+  name: gemini-2.5-flash
+  temperature: 0.7
+
+gateway:
+  allowed_users:
+    - you@yourcompany.com
+```
+
+Edit `.env` (secrets — never committed):
+
+```bash
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
+VERTEX_AI_PROJECT_ID=your-gcp-project
+```
+
+### 3. Use the LangChain model helper (optional)
+
+```python
+from monkeybot.core.config import load_secrets, get_model
+
+load_secrets()
+# google_vertexai | openai | anthropic | vertex_anthropic — see src/core/config.py
+model = get_model(provider="google_vertexai", model_name="gemini-2.5-flash")
+```
+
+Wire `model` into your own app, or use the **SSE gateway** and `playground/` UI (see [Getting Started](docs/getting-started.md)) for sessions over HTTP.
+
+### 4. Run locally
+
+```bash
+python -m src.main
+```
+
+### 5. Deploy
+
+```bash
+./deploy.sh
+```
+
+Done. Your agent is live on Cloud Run.
+
+---
+
+## How It Works
+
+```
+┌──────────────────────────────────────────────────────┐
+│               Gateway  (FastAPI)                     │
+│   GET /health     SSE sessions + reply API           │
+└──────────┬─────────────────────────────────────────────┘
+           │
+           ▼
+┌──────────────────────┐
+│  Agent loop          │
+│  (monkeybot.core.loop)  │
+│  ─────────────────── │
+│  Provider stream     │
+│  Tool calls + exec   │
+│  History append      │
+└──┬───────────┬───────┘
+   │           │
+   ▼           ▼
+┌───────┐  ┌────────┐
+│Skills │  │Memory  │
+│       │  │        │
+│SKILL.md  │SQLite +│
+│+ runner  │markdown │
+│          │INDEX   │
+└───────┘  └────────┘
+```
+
+---
+
+## Project Structure
+
+```
+monkey-bot/
+├── src/
+│   ├── core/                    # Agent loop, context, providers (e.g. Gemini), MCP, usage
+│   ├── gateway/
+│   │   ├── main.py              # Uvicorn entry
+│   │   └── sse/                 # FastAPI SSE app, routes, session bus
+│   └── skills/                  # Skill loader utilities
+├── playground/
+│   ├── agent/                   # Sample .env + run.sh for local gateway
+│   └── chat-ui/                 # Vite + React dev client
+├── docs/
+├── tests/
+├── pyproject.toml
+├── Dockerfile
+└── .env.example
+```
+
+---
+
+## Installation
+
+```bash
+# Core framework
+pip install monkeybot
+
+# With Google Cloud Storage
+pip install "monkeybot[gcs]"
+
+# Everything
+pip install "monkeybot[all]"
+```
+
+**Or install the development version directly from source:**
+
+```bash
+pip install git+https://github.com/human-and-machine/monkey-bot.git@main
+```
+
+---
+
+## Integrations
+
+| Integration | Status | Purpose |
+|---|---|---|
+| **Google Vertex AI** (Gemini) | Production | Primary LLM provider (gateway native path + LangChain helpers) |
+| **Google Cloud Run** | Production | Serverless container hosting |
+| **SQLite** | Default (SSE gateway) | Session history and per-turn usage |
+| **Google Cloud Storage** | Optional (`monkeybot[gcs]`) | Long-term memory and file sync |
+| **GCP Secret Manager** | Production | Production secrets management |
+| **Google Chat** | Optional | Workspace Add-on interface (when deployed) |
+| **OpenAI** | Supported | Via `langchain-openai` in `get_model()` |
+| **Anthropic Claude** | Supported | Via `langchain-anthropic` in `get_model()` |
+| **Anthropic via Vertex AI** | Supported | Claude hosted on Google infrastructure |
+| **LangChain** | Supported | Chat models and tool helpers (`langchain-core`, provider integrations) |
+| **AWS Bedrock** | Production | Model provider via Agent Harness (`ModelProvider` / `BedrockProvider`) |
+| **AWS S3** | Production | Memory store backend via Agent Harness |
+| **AWS Secrets Manager** | Production | Secret resolver via Agent Harness |
+| **Azure OpenAI** | Coming Soon | Azure-hosted OpenAI models |
+| **Azure Blob Storage** | Coming Soon | Memory backend for Azure deployments |
+| **Azure Key Vault** | Coming Soon | Secrets for Azure deployments |
+| **Slack** | Coming Soon | Slack bot interface |
+| **Microsoft Teams** | Coming Soon | Teams bot interface |
+| **Telegram** | Coming Soon | Telegram bot interface |
+| **DynamoDB** | Extension | Checkpointer / job storage via custom harness plugins (see `examples/extension-dynamodb-checkpointer/`) |
+| **CosmosDB** | Coming Soon | Azure-native persistence options |
+
+For provider and cloud wiring, start from **`.env.example`** and the integration table below; older standalone integration pages were removed with the v2 doc cutover.
+
+---
+
+## Coming Soon
+
+### Platform Support
+- **AWS Deployment** — Full ECS/Fargate and Lambda deployment guides with CDK infrastructure templates
+- **Azure Deployment** — Azure Container Apps deployment with Bicep templates
+- **Kubernetes** — Helm charts for self-hosted deployments
+
+### New Interfaces
+- **Slack Bot** — Direct message and channel bot with slash commands
+- **Microsoft Teams** — Teams app integration with adaptive cards
+- **Telegram** — Telegram bot with inline keyboard support
+- **REST API Mode** — Headless operation for programmatic access
+
+### LLM Providers
+- **AWS Bedrock** — Native Bedrock integration (Claude, Llama, Titan)
+- **Azure OpenAI** — GPT-4o via Azure-hosted endpoints
+- **Groq** — Ultra-low latency inference
+- **Ollama** — Local/self-hosted models
+
+### Infrastructure
+- **Redis Memory Backend** — High-performance in-memory store option
+- **PostgreSQL Scheduler** — Relational job queue for high-throughput scheduling
+- **Semantic Memory Search** — Vector embedding search (beyond keyword matching)
+- **Multi-Agent Orchestration** — Spawn and coordinate sub-agents from the primary agent
+
+### Developer Experience
+- **CLI (`monkeybot new`)** — Scaffold a new bot project in seconds
+- **Hot Reload** — Live agent reloading during local development
+- **Eval Harness** — Built-in evaluation framework for agent quality testing
+- **Dashboard** — Web UI for monitoring agent activity, scheduled jobs, and memory
+
+---
+
+## Security
+
+### Important Considerations
+
+The skills system executes Python code from the `./skills/` directory. Only add skills from trusted sources.
+
+**Production Security Checklist:**
+- [ ] Review every skill script before adding to `./skills/`
+- [ ] Use separate GCP projects for dev/production
+- [ ] Limit service account permissions to minimum required (principle of least privilege)
+- [ ] Store all secrets in GCP Secret Manager — never in `bot.yaml` or environment files
+- [ ] Set `ALLOWED_USERS` to restrict who can interact with the bot
+- [ ] Enable GCS bucket encryption at rest
+- [ ] Rotate service account keys every 90 days
+- [ ] Monitor Cloud Run logs for unexpected behavior
+
+---
+
+## Development
+
+```bash
+# Clone and install with dev dependencies
+git clone https://github.com/human-and-machine/monkey-bot.git
+cd monkey-bot
+pip install -e ".[dev]"
+
+# Run tests
+pytest
+
+# Run tests with coverage
+pytest --cov=src --cov-report=html
+
+# Lint
+ruff check .
+
+# Format
+ruff format .
+
+# Type check
+mypy src/
+```
+
+---
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch: `git checkout -b feature/your-feature`
+3. Run all checks: `pytest && ruff check . && mypy src/`
+4. Commit: `git commit -m "feat: add your feature"`
+5. Open a Pull Request
+
+---
+
+## Support
+
+- **Issues**: [GitHub Issues](https://github.com/human-and-machine/monkey-bot/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/human-and-machine/monkey-bot/discussions)
+- **Reference bot**: See [`test-monkey/`](test-monkey/) for a complete working example
+
+---
+
+## License
+
+MIT License — see [LICENSE](LICENSE) for details.
+
+---
+
+Built with [LangChain](https://github.com/langchain-ai/langchain) · [Vertex AI](https://cloud.google.com/vertex-ai) · [FastAPI](https://fastapi.tiangolo.com)

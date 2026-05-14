@@ -1,0 +1,174 @@
+{
+  "feature_name": "monkeybot-v2-e4",
+  "current_phase": "completed",
+  "phase_status": {
+    "design_1a": "completed",
+    "design_1b": "completed",
+    "design_1c": "completed",
+    "user_stories": "completed",
+    "code_spec": "completed",
+    "implementation": "completed",
+    "verification": "completed",
+    "integration": "completed"
+  },
+  "artifacts": {
+    "design_docs": {
+      "1a_discovery": ".monkeymode/monkeybot-v2-e4/design/1a-discovery.md",
+      "1b_contracts": ".monkeymode/monkeybot-v2-e4/design/1b-contracts.md",
+      "1c_operations": ".monkeymode/monkeybot-v2-e4/design/1c-operations.md"
+    },
+    "user_stories_doc": ".monkeymode/monkeybot-v2-e4/user_stories.md",
+    "qa_log": ".monkeymode/monkeybot-v2-e4/qa-log.md"
+  },
+  "stories": {
+    "story-1-subagent-protocol": {
+      "title": "Subagent Protocol & Scratch Dirs",
+      "status": "integrated",
+      "code_spec_path": ".monkeymode/monkeybot-v2-e4/code_specs/story-1-spec.md",
+      "assigned_to": null,
+      "current_task": null,
+      "files_to_create": [
+        "src/monkeybot/core/subagent_proto.py",
+        "src/monkeybot/core/runs.py",
+        "subagents/researcher.py",
+        "tests/unit/test_subagent_proto.py",
+        "tests/fixtures/echo_agent.py"
+      ],
+      "files_to_modify": [],
+      "blocked_by_rework": null,
+      "verification": {
+        "result": "pending",
+        "rework_attempts": 0,
+        "rework_summary": null,
+        "escalated_issues": [],
+        "last_checked_at": null
+      },
+      "last_updated": "2026-05-13T23:30:00Z"
+    },
+    "story-2-subagent-registry": {
+      "title": "Subagent Registry",
+      "status": "integrated",
+      "code_spec_path": ".monkeymode/monkeybot-v2-e4/code_specs/story-2-spec.md",
+      "assigned_to": null,
+      "current_task": null,
+      "files_to_create": [
+        "src/monkeybot/core/subagent_registry.py",
+        "tests/unit/test_subagent_registry.py"
+      ],
+      "files_to_modify": [
+        "bots/example-bot/config.yaml"
+      ],
+      "blocked_by_rework": null,
+      "verification": {
+        "result": "pending",
+        "rework_attempts": 0,
+        "rework_summary": null,
+        "escalated_issues": [],
+        "last_checked_at": null
+      },
+      "last_updated": "2026-05-13T23:30:00Z"
+    },
+    "story-3-durable-run-store": {
+      "title": "Durable Run Store",
+      "status": "integrated",
+      "code_spec_path": ".monkeymode/monkeybot-v2-e4/code_specs/story-3-spec.md",
+      "assigned_to": null,
+      "current_task": null,
+      "files_to_create": [
+        "src/monkeybot/core/durable_runs.py",
+        "tests/unit/test_durable_runs.py"
+      ],
+      "files_to_modify": [],
+      "blocked_by_rework": null,
+      "verification": {
+        "result": "pending",
+        "rework_attempts": 0,
+        "rework_summary": null,
+        "escalated_issues": [],
+        "last_checked_at": null
+      },
+      "last_updated": "2026-05-13T23:30:00Z"
+    },
+    "story-4-llm-council": {
+      "title": "LLM Council & Session Memory",
+      "status": "integrated",
+      "code_spec_path": ".monkeymode/monkeybot-v2-e4/code_specs/story-4-spec.md",
+      "assigned_to": null,
+      "current_task": null,
+      "files_to_create": [
+        "src/monkeybot/core/council.py",
+        "tests/unit/test_council.py",
+        "tests/unit/test_council_timer.py"
+      ],
+      "files_to_modify": [
+        "src/monkeybot/cli.py",
+        "bots/example-bot/config.yaml"
+      ],
+      "blocked_by_rework": null,
+      "verification": {
+        "result": "pass",
+        "rework_attempts": 1,
+        "rework_summary": "Fixed: MANAGED_CATEGORIES list→tuple; 'council' key added to config dict in _run_async/_serve_async",
+        "escalated_issues": [],
+        "last_checked_at": "2026-05-13T23:57:00Z"
+      },
+      "last_updated": "2026-05-13T23:30:00Z"
+    }
+  },
+  "parallel_execution": {
+    "enabled": true,
+    "max_concurrent": 4,
+    "current_batch": null,
+    "batches": [
+      {
+        "batch_number": 2,
+        "stories": ["story-2-subagent-registry"],
+        "status": "completed",
+        "started_at": "2026-05-13T23:44:00Z",
+        "completed_at": "2026-05-13T23:47:00Z",
+        "results": {
+          "story-2-subagent-registry": "implementation_complete"
+        }
+      },
+      {
+        "batch_number": 1,
+        "stories": ["story-1-subagent-protocol", "story-3-durable-run-store", "story-4-llm-council"],
+        "status": "completed",
+        "started_at": "2026-05-13T23:32:00Z",
+        "completed_at": "2026-05-13T23:43:00Z",
+        "results": {
+          "story-1-subagent-protocol": "implementation_complete",
+          "story-3-durable-run-store": "implementation_complete",
+          "story-4-llm-council": "implementation_complete"
+        }
+      }
+    ],
+    "current_batch_plan": {
+      "batch_2": ["story-2-subagent-registry"]
+    }
+  },
+  "rework_history": [],
+  "integration": {
+    "status": "completed",
+    "shared_files_merged": [
+      "src/monkeybot/core/loop.py",
+      "src/monkeybot/cli.py"
+    ],
+    "cross_story_wiring": [
+      "AgentLoop → SubagentRegistry (prompt injection + tool dispatch)",
+      "AgentLoop → DurableRunStore (run lifecycle tracking)",
+      "cli.py → SubagentRegistry + DurableRunStore (construction + init)",
+      "cli.py → cleanup_old_runs (startup housekeeping)"
+    ],
+    "integration_tests_added": 5,
+    "integration_test_file": "tests/integration/test_pipeline.py",
+    "final_test_count": "211 passed, 1 skipped",
+    "completed_at": "2026-05-14T00:10:00Z"
+  },
+  "context": {
+    "save_qa_log": true,
+    "source_prt": ".prt/monkeybot-v2/epics/e4-subagents-council.md",
+    "depends_on": ["monkeybot-v2-e1", "monkeybot-v2-e2", "monkeybot-v2-e3"]
+  },
+  "last_updated": "2026-05-14T00:10:00Z"
+}

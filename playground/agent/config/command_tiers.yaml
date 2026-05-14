@@ -1,0 +1,6 @@
+# Permissive tiers for local playground (allow all shell patterns the stub may surface).
+tier_order:
+  - name: all
+    action: allow
+    patterns: ['.*']
+default: allow

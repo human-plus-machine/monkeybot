@@ -1,0 +1,282 @@
+"""Per-turn context assembly: AGENT.md, memory index, skills, and tool definitions."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+from monkeybot.core.ports_mcp import MCPClientPort
+from monkeybot.core.types_tools import ToolDef
+
+
+@dataclass(frozen=True)
+class SkillRef:
+    """Discovered skill metadata for prompting and listing.
+
+    Attributes:
+        name: Directory name under the skills root.
+        description: First instructional line from SKILL.md (after optional frontmatter).
+        entry_point: POSIX path relative to skills root (e.g. ``research/run.py``).
+    """
+
+    name: str
+    description: str
+    entry_point: str
+
+
+@dataclass(frozen=True)
+class TurnContext:
+    """Immutable bundle of everything needed for one agent turn."""
+
+    thread_id: str
+    request_id: str
+    agent_md: str
+    memory_index: list[str]
+    skills: list[SkillRef]
+    tools: list[ToolDef]
+    user_id: str | None
+    parent_run_id: str | None
+    model: str
+
+
+def _core_tool_defs(*, include_task_tool: bool = True) -> list[ToolDef]:
+    """Static core tools always available before MCP extensions."""
+    read_schema: dict[str, object] = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Repo-relative path under the workspace root."},
+            "offset": {"type": "integer", "description": "1-based start line (optional)."},
+            "limit": {"type": "integer", "description": "Max lines to return (optional)."},
+        },
+        "required": ["path"],
+    }
+    write_schema: dict[str, object] = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "content": {"type": "string", "description": "Full file contents (may be empty)."},
+        },
+        "required": ["path"],
+    }
+    search_schema: dict[str, object] = {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "q": {"type": "string"},
+            "max_hits": {"type": "integer"},
+        },
+        "required": [],
+    }
+    run_schema: dict[str, object] = {
+        "type": "object",
+        "properties": {
+            "argv": {"type": "array", "items": {"type": "string"}},
+            "command": {"type": "string"},
+            "args": {"type": "array", "items": {"type": "string"}},
+            "arguments": {"type": "array", "items": {"type": "string"}},
+            "shell": {"type": "string"},
+            "script": {"type": "string"},
+            "timeout": {"type": "integer"},
+        },
+        "required": [],
+    }
+    mcp_add_schema: dict[str, object] = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "server_name": {"type": "string"},
+            "command": {"type": "string"},
+            "args": {"type": "array", "items": {"type": "string"}},
+            "env": {"type": "object"},
+        },
+        "required": [],
+    }
+    mcp_rm_schema: dict[str, object] = {
+        "type": "object",
+        "properties": {"name": {"type": "string"}, "server_name": {"type": "string"}},
+        "required": [],
+    }
+    list_skills_schema: dict[str, object] = {"type": "object", "properties": {}}
+    task_schema: dict[str, object] = {
+        "type": "object",
+        "properties": {
+            "task": {
+                "type": "string",
+                "description": "Focused objective or question for the subagent to complete.",
+            },
+            "context": {
+                "type": "string",
+                "description": "Optional background the parent already gathered (constraints, paths, prior tool output).",
+            },
+        },
+        "required": ["task"],
+    }
+    tools: list[ToolDef] = [
+        ToolDef(
+            "run_command",
+            "Run an allowlisted shell command with repo-scoped path checks (see TerminalExecutor).",
+            run_schema,
+        ),
+        ToolDef(
+            "read_file",
+            "Read a UTF-8 text file from the workspace with path validation.",
+            read_schema,
+        ),
+        ToolDef(
+            "write_file",
+            "Write or replace a UTF-8 text file under the workspace root.",
+            write_schema,
+        ),
+        ToolDef(
+            "search_memory",
+            "Search markdown/text under the memory directory for a keyword or phrase.",
+            search_schema,
+        ),
+        ToolDef(
+            "list_skills",
+            "List installed skills with names, descriptions, and entry points.",
+            list_skills_schema,
+        ),
+    ]
+    if include_task_tool:
+        tools.append(
+            ToolDef(
+                "task",
+                "Spawn a subprocess subagent with the same workspace, memory, and MCP configuration "
+                "to work on a delegated objective. Returns JSON with the subagent's streamed answer summary, "
+                "errors, and usage. Nested task calls are disabled inside the subagent.",
+                task_schema,
+            ),
+        )
+    tools.extend(
+        [
+            ToolDef(
+                "add_mcp_server",
+                "Connect an MCP stdio server by name; tools appear as name__tool on later turns.",
+                mcp_add_schema,
+            ),
+            ToolDef(
+                "remove_mcp_server",
+                "Disconnect an MCP server by name and drop its tools.",
+                mcp_rm_schema,
+            ),
+        ]
+    )
+    return tools
+
+
+def _parse_skill_description(body: str, skill_name: str) -> str:
+    """Return first instructional line from SKILL.md, skipping optional YAML frontmatter."""
+    lines = body.splitlines()
+    i = 0
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+    if i >= len(lines):
+        return f"Skill {skill_name}"
+    if lines[i].strip() == "---":
+        i += 1
+        while i < len(lines) and lines[i].strip() != "---":
+            i += 1
+        if i < len(lines) and lines[i].strip() == "---":
+            i += 1
+        while i < len(lines) and not lines[i].strip():
+            i += 1
+    else:
+        return lines[i].strip()
+    if i >= len(lines):
+        return f"Skill {skill_name}"
+    return lines[i].strip()
+
+
+def _discover_skills(skills_path: Path) -> list[SkillRef]:
+    """List skills as immediate subdirectories containing SKILL.md and run.py or main.py."""
+    if not skills_path.is_dir():
+        return []
+
+    result: list[SkillRef] = []
+    for child in sorted(skills_path.iterdir(), key=lambda p: p.name):
+        if not child.is_dir():
+            continue
+        skill_md = child / "SKILL.md"
+        if not skill_md.is_file():
+            continue
+        entry: str | None = None
+        if (child / "run.py").is_file():
+            entry = f"{child.name}/run.py"
+        elif (child / "main.py").is_file():
+            entry = f"{child.name}/main.py"
+        if entry is None:
+            continue
+        text = skill_md.read_text(encoding="utf-8")
+        desc = _parse_skill_description(text, child.name)
+        result.append(SkillRef(name=child.name, description=desc, entry_point=entry))
+    return result
+
+
+def _load_memory_index(memory_path: Path) -> list[str]:
+    """Load INDEX.md lines as stripped non-empty summary lines."""
+    index_file = memory_path / "INDEX.md"
+    if not index_file.is_file():
+        return []
+    text = index_file.read_text(encoding="utf-8")
+    return [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+
+def _load_agent_md(agent_md_path: Path) -> str:
+    """Read AGENT.md; trailing newlines stripped; fail if blank."""
+    raw = agent_md_path.read_text(encoding="utf-8")
+    content = raw.rstrip("\n")
+    if not content.strip():
+        raise ValueError(f"AGENT.md is empty or whitespace-only: {agent_md_path}")
+    return content
+
+
+async def build_context(
+    thread_id: str,
+    request_id: str,
+    *,
+    agent_md_path: Path,
+    memory_path: Path,
+    skills_path: Path,
+    mcp_client: MCPClientPort,
+    user_id: str | None = None,
+    parent_run_id: str | None = None,
+    model: str = "gemini-2.5-flash",
+    include_task_tool: bool = True,
+) -> TurnContext:
+    """Assemble a TurnContext from filesystem paths and the MCP client snapshot.
+
+    Args:
+        thread_id: Conversation thread id.
+        request_id: Per-request correlation id.
+        agent_md_path: Path to AGENT.md (must be non-empty).
+        memory_path: Root directory; ``memory_path / INDEX.md`` optional.
+        skills_path: Root directory for skill folders (SKILL.md + run.py or main.py).
+        mcp_client: Client exposing ``all_tools()`` for MCP-registered tools.
+        user_id: Optional authenticated user.
+        parent_run_id: Optional parent run for subagent linkage.
+        model: Model id for this turn.
+        include_task_tool: When False, omit the ``task`` tool (used by the subagent worker).
+
+    Returns:
+        Frozen :class:`TurnContext`.
+
+    Raises:
+        ValueError: When AGENT.md is missing or empty after normalization.
+    """
+    agent_md = _load_agent_md(agent_md_path)
+    memory_index = _load_memory_index(memory_path)
+    skills = _discover_skills(skills_path)
+    tools = list(_core_tool_defs(include_task_tool=include_task_tool))
+    tools.extend(mcp_client.all_tools())
+    return TurnContext(
+        thread_id=thread_id,
+        request_id=request_id,
+        agent_md=agent_md,
+        memory_index=memory_index,
+        skills=skills,
+        tools=tools,
+        user_id=user_id,
+        parent_run_id=parent_run_id,
+        model=model,
+    )

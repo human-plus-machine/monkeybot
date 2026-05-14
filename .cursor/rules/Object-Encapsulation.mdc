@@ -1,0 +1,5 @@
+---
+alwaysApply: true
+---
+
+When a function takes the same object or dict as its first argument more than once, or when 2+ functions share the same state, convert to a class. Data + the behavior that operates on it belong together. Prefer agent.run() over run_agent(agent_config).

@@ -1,0 +1,48 @@
+safety:
+  command_tiers:
+    pre_approved:
+      - read_file
+      - list_skills
+      - search_memory
+    requires_approval:
+      - write_file
+    denied:
+      - run_command
+  denied_patterns:
+    - "rm -rf"
+    - "/etc/passwd"
+    - "DROP TABLE"
+
+model:
+  default: "gemini-2.0-flash"
+  max_tokens: 8192
+
+# Scheduler — optional, long-running deployments only.
+# Requires monkeybot[scheduler] for cron expressions: pip install "monkeybot[scheduler]"
+# NOTE: incompatible with serverless/ephemeral compute (Lambda, AgentCore, Agent Engine).
+# For serverless, use EventBridge / Cloud Scheduler to POST to /webhook instead.
+#
+# scheduler:
+#   poll_interval: 30   # seconds
+#   jobs:
+#     daily-summary:
+#       cron: "0 9 * * *"        # every day at 09:00 UTC
+#       callable: "bots.example_bot.jobs:daily_summary"
+#       enabled: false           # set to true to activate
+
+# --- Subagent registry (E4) ---
+# subagents:
+#   timeout_seconds: 300
+#   registry:
+#     researcher:
+#       script: "subagents/researcher.py"
+#       description: "Searches the web and summarizes findings on a given topic."
+#       skills_path: ".agents/skills/research"  # optional
+#       model: "gemini-2.0-pro"                 # optional
+#       timeout_seconds: 120                    # optional
+
+# --- LLM Council (E4) ---
+# council:
+#   enabled: false          # set to true to enable session memory consolidation
+#   idle_seconds: 300       # seconds of inactivity before council fires; min 60
+#   model: "gemini-2.0-flash"  # optional; falls back to model.default

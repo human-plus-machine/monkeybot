@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "Installing dependencies..."
+uv sync --extra gemini --extra dev
+
+echo "Setting up environment..."
+if [ ! -f .env ]; then
+    cp .env.example .env
+    echo "→ Created .env from .env.example"
+    echo "→ Edit .env and set GEMINI_API_KEY before running"
+else
+    echo "→ .env already exists, skipping"
+fi
+
+echo "Creating data directories..."
+mkdir -p data/memory
+
+echo ""
+echo "Bootstrap complete."
+echo "Next steps:"
+echo "  1. Edit .env and set GEMINI_API_KEY"
+echo "  2. Run: scripts/run"

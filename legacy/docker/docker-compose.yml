@@ -1,0 +1,19 @@
+version: "3.9"
+services:
+  monkeybot:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - ../bots/example-bot:/bot:ro
+      - monkeybot_data:/app/data
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - MODEL_PROVIDER=${MODEL_PROVIDER:-gemini}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET:-}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+
+volumes:
+  monkeybot_data:

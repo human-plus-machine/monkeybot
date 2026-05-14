@@ -1,0 +1,1 @@
+"""Diagnostics skill example."""

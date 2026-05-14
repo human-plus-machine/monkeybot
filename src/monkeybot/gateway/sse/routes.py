@@ -1,0 +1,285 @@
+"""
+FastAPI routes and app factory for the v2 SSE gateway.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+import uuid
+from collections.abc import AsyncIterator
+from typing import Any
+
+from fastapi import APIRouter, Depends, FastAPI, Request, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, StreamingResponse
+
+from .loop_port import LoopPort, UsagePort
+from .models import (
+    APIError,
+    CancelRequest,
+    CreateSessionRequest,
+    CreateSessionResponse,
+    HealthResponse,
+    ReplyRequest,
+    ReplyResponse,
+    SessionUsageResponse,
+    error_payload_dict,
+)
+from .session_bus import SessionAlreadyExistsError, SessionBus, SessionRegistry
+from .sse import format_active_requests, format_ping
+
+
+def get_registry(request: Request) -> SessionRegistry:
+    """FastAPI dependency returning the process-local session registry."""
+    return request.app.state.registry
+
+
+def _default_loop_port(registry: SessionRegistry) -> LoopPort:
+    """Fallback loop that only clears busy state (no events); wire a real LoopPort in production."""
+
+    class _DefaultLoop:
+        async def start_turn(
+            self,
+            session_id: str,
+            request_id: str,
+            message: str,
+        ) -> None:
+            _ = (request_id, message)
+            bus = registry.get(session_id)
+            if bus is not None:
+                bus.current_request_id = None
+
+    return _DefaultLoop()
+
+
+class _StaticUsagePort:
+    """UsagePort that returns zeroed aggregates (Story 7 placeholder)."""
+
+    async def session_usage(
+        self,
+        session_id: str,
+        *,
+        since: str | None,
+    ) -> dict[str, Any]:
+        _ = since
+        return {
+            "session_id": session_id,
+            "turns": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cached_tokens": 0,
+            "cost_usd": 0.0,
+            "period_start": 0,
+            "period_end": 0,
+        }
+
+
+async def _ping_loop(bus: SessionBus) -> None:
+    """Emit `: ping N` heartbeats every 0.5s until cancelled."""
+    n = 0
+    try:
+        while True:
+            await asyncio.sleep(0.5)
+            n += 1
+            await bus.publish_comment(format_ping(n))
+    except asyncio.CancelledError:
+        raise
+
+
+def _parse_last_event_id(request: Request) -> int | None:
+    raw = request.headers.get("last-event-id")
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def create_app(
+    *,
+    loop_port: LoopPort | None = None,
+    usage_port: UsagePort | None = None,
+    registry: SessionRegistry | None = None,
+) -> FastAPI:
+    """
+    Build a FastAPI app with v2 SSE routes.
+
+    For tests, pass FakeLoopPort / custom UsagePort. Story 8 wires the real loop.
+    """
+    reg = registry or SessionRegistry()
+    loop = loop_port or _default_loop_port(reg)
+    usage = usage_port or _StaticUsagePort()
+
+    app = FastAPI(
+        title="MonkeyBot v2 Gateway",
+        version="2.0.0",
+    )
+    app.state.registry = reg
+    app.state.loop = loop
+    app.state.usage = usage
+
+    @app.exception_handler(APIError)
+    async def api_error_handler(_request: Request, exc: APIError) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=error_payload_dict(exc.code, exc.message, exc.request_id),
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:
+        rid = uuid.uuid4().hex
+        errors = exc.errors()
+        message = "; ".join(str(e.get("msg", "")) for e in errors) or "Validation error"
+        return JSONResponse(
+            status_code=400,
+            content=error_payload_dict("BAD_REQUEST", message, rid),
+        )
+
+    api = APIRouter()
+
+    @api.post("/sessions", status_code=201, response_model=CreateSessionResponse)
+    async def create_session(
+        body: CreateSessionRequest,
+        reg_dep: SessionRegistry = Depends(get_registry),
+    ) -> CreateSessionResponse:
+        """Create a session and its event bus."""
+        created_at_ms = int(time.time() * 1000)
+        sid = body.session_id or str(uuid.uuid4())
+        try:
+            reg_dep.create(sid, agent_md=body.agent_md, created_at_ms=created_at_ms)
+        except SessionAlreadyExistsError:
+            raise APIError(
+                409,
+                "SESSION_ALREADY_EXISTS",
+                f"Session {sid} already exists",
+                uuid.uuid4().hex,
+            ) from None
+        return CreateSessionResponse(session_id=sid, created_at=created_at_ms)
+
+    @api.post("/sessions/{session_id}/reply", response_model=ReplyResponse)
+    async def post_reply(
+        session_id: str,
+        body: ReplyRequest,
+        request: Request,
+        reg_dep: SessionRegistry = Depends(get_registry),
+    ) -> ReplyResponse:
+        """Accept a user message and schedule the agent loop in the background."""
+        bus = reg_dep.get(session_id)
+        if bus is None:
+            raise APIError(
+                404,
+                "SESSION_NOT_FOUND",
+                "Unknown session",
+                uuid.uuid4().hex,
+            )
+        if bus.current_request_id is not None:
+            raise APIError(
+                409,
+                "SESSION_BUSY",
+                "Session already processing a request",
+                uuid.uuid4().hex,
+            )
+        loop_ref: LoopPort = request.app.state.loop
+        bus.current_request_id = body.request_id
+
+        async def _turn() -> None:
+            try:
+                await loop_ref.start_turn(session_id, body.request_id, body.message)
+            finally:
+                bus.current_request_id = None
+
+        asyncio.create_task(_turn())
+        return ReplyResponse(request_id=body.request_id)
+
+    @api.get("/sessions/{session_id}/events")
+    async def stream_events(
+        session_id: str,
+        request: Request,
+        reg_dep: SessionRegistry = Depends(get_registry),
+    ) -> StreamingResponse:
+        """SSE stream with replay, ActiveRequests snapshot, and ping heartbeats."""
+        bus = reg_dep.get(session_id)
+        if bus is None:
+            raise APIError(
+                404,
+                "SESSION_NOT_FOUND",
+                "Unknown session",
+                uuid.uuid4().hex,
+            )
+        last_id = _parse_last_event_id(request)
+
+        async def gen() -> AsyncIterator[bytes]:
+            replay, q = await bus.subscribe(last_id)
+            ping_task = asyncio.create_task(_ping_loop(bus))
+            try:
+                for frame in replay:
+                    yield frame.encode("utf-8")
+                active_ids = [bus.current_request_id] if bus.current_request_id else []
+                yield format_active_requests(active_ids).encode("utf-8")
+                while True:
+                    frame = await q.get()
+                    yield frame.encode("utf-8")
+            except asyncio.CancelledError:
+                raise
+            finally:
+                ping_task.cancel()
+                try:
+                    await ping_task
+                except asyncio.CancelledError:
+                    pass
+                await bus.unsubscribe(q)
+
+        headers = {
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+        return StreamingResponse(gen(), media_type="text/event-stream", headers=headers)
+
+    @api.post("/sessions/{session_id}/cancel", status_code=200)
+    async def post_cancel(
+        session_id: str,
+        body: CancelRequest,
+        reg_dep: SessionRegistry = Depends(get_registry),
+    ) -> Response:
+        """Record cancel intent for the agent loop (integration in a later story)."""
+        bus = reg_dep.get(session_id)
+        if bus is None:
+            raise APIError(
+                404,
+                "SESSION_NOT_FOUND",
+                "Unknown session",
+                uuid.uuid4().hex,
+            )
+        bus.cancel_requested_for = body.request_id
+        return Response(status_code=200)
+
+    @api.get("/sessions/{session_id}/usage", response_model=SessionUsageResponse)
+    async def get_usage(
+        session_id: str,
+        request: Request,
+        since: str | None = None,
+        reg_dep: SessionRegistry = Depends(get_registry),
+    ) -> SessionUsageResponse:
+        """Return token/cost aggregates for the session (UsagePort backend)."""
+        if reg_dep.get(session_id) is None:
+            raise APIError(
+                404,
+                "SESSION_NOT_FOUND",
+                "Unknown session",
+                uuid.uuid4().hex,
+            )
+        usage_ref: UsagePort = request.app.state.usage
+        raw = await usage_ref.session_usage(session_id, since=since)
+        return SessionUsageResponse.model_validate(raw)
+
+    app.include_router(api)
+
+    @app.get("/health", response_model=HealthResponse)
+    async def health() -> HealthResponse:
+        """Liveness probe without authentication."""
+        return HealthResponse(status="ok", version="2.0.0")
+
+    return app

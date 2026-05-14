@@ -1,0 +1,114 @@
+{
+  "feature_name": "monkeybot-v2-e3",
+  "current_phase": "completed",
+  "phase_status": {
+    "design_1a": "completed",
+    "design_1b": "completed",
+    "design_1c": "completed",
+    "user_stories": "completed",
+    "code_spec": "completed",
+    "implementation": "completed",
+    "verification": "completed",
+    "integration": "completed"
+  },
+  "artifacts": {
+    "design_docs": {
+      "1a_discovery": ".monkeymode/monkeybot-v2-e3/design/1a-discovery.md",
+      "1b_contracts": ".monkeymode/monkeybot-v2-e3/design/1b-contracts.md",
+      "1c_operations": ".monkeymode/monkeybot-v2-e3/design/1c-operations.md"
+    },
+    "user_stories_doc": ".monkeymode/monkeybot-v2-e3/user_stories.md",
+    "qa_log": ".monkeymode/monkeybot-v2-e3/qa-log.md"
+  },
+  "stories": {
+    "story-1-usage-recording-and-cli": {
+      "title": "Usage Recording & CLI",
+      "status": "integrated",
+      "code_spec_path": ".monkeymode/monkeybot-v2-e3/code_specs/story-1-spec.md",
+      "assigned_to": null,
+      "current_task": null,
+      "files_to_create": [
+        "src/monkeybot/core/usage.py",
+        "tests/unit/test_usage.py"
+      ],
+      "files_to_modify": [
+        "src/monkeybot/cli.py",
+        "src/monkeybot/core/loop.py"
+      ],
+      "blocked_by_rework": null,
+      "verification": {
+        "result": "pass",
+        "rework_attempts": 0,
+        "rework_summary": null,
+        "escalated_issues": [],
+        "last_checked_at": "2026-05-13T22:09:00Z"
+      },
+      "last_updated": "2026-05-13T22:15:00Z"
+    },
+    "story-2-scheduler": {
+      "title": "Scheduler",
+      "status": "integrated",
+      "code_spec_path": ".monkeymode/monkeybot-v2-e3/code_specs/story-2-spec.md",
+      "assigned_to": null,
+      "current_task": null,
+      "files_to_create": [
+        "src/monkeybot/core/scheduler.py",
+        "tests/unit/test_scheduler.py"
+      ],
+      "files_to_modify": [
+        "src/monkeybot/cli.py",
+        "bots/example-bot/config.yaml"
+      ],
+      "blocked_by_rework": null,
+      "verification": {
+        "result": "pass",
+        "rework_attempts": 0,
+        "rework_summary": null,
+        "escalated_issues": [],
+        "warnings": ["start() idempotency verified by code inspection only — no dedicated test"],
+        "last_checked_at": "2026-05-13T22:09:00Z"
+      },
+      "last_updated": "2026-05-13T22:15:00Z"
+    }
+  },
+  "parallel_execution": {
+    "enabled": true,
+    "max_concurrent": 4,
+    "current_batch": null,
+    "batches": [
+      {
+        "batch_number": 1,
+        "stories": ["story-1-usage-recording-and-cli"],
+        "status": "completed",
+        "started_at": "2026-05-13T21:58:00Z",
+        "completed_at": "2026-05-13T22:02:00Z",
+        "results": {
+          "story-1-usage-recording-and-cli": "implementation_complete"
+        }
+      },
+      {
+        "batch_number": 2,
+        "stories": ["story-2-scheduler"],
+        "status": "completed",
+        "started_at": "2026-05-13T22:02:00Z",
+        "completed_at": "2026-05-13T22:07:00Z",
+        "results": {
+          "story-2-scheduler": "implementation_complete"
+        }
+      }
+    ]
+  },
+  "rework_history": [],
+  "integration": {
+    "status": "completed",
+    "shared_files_merged": ["src/monkeybot/cli.py"],
+    "integration_tests_added": 6,
+    "completed_at": "2026-05-13T22:15:00Z"
+  },
+  "context": {
+    "save_qa_log": true,
+    "source_prt": ".prt/monkeybot-v2/epics/e3-observability-scheduling.md",
+    "depends_on": ["monkeybot-v2-e1", "monkeybot-v2-e2"]
+  },
+  "last_updated": "2026-05-13T22:15:00Z"
+}

@@ -1,0 +1,192 @@
+"""Tests for TurnContext assembly and MCP tool merging."""
+
+from pathlib import Path
+
+import pytest
+from monkeybot.core.context import build_context
+from monkeybot.core.types_tools import ToolDef
+
+
+class FakeMCPClient:
+    """Test double implementing :class:`~monkeybot.core.ports_mcp.MCPClientPort`."""
+
+    def __init__(self, tools: list[ToolDef]) -> None:
+        self._tools = tools
+
+    async def connect(
+        self,
+        name: str,
+        command: str,
+        args: list[str],
+        env: dict[str, str],
+    ) -> list[ToolDef]:
+        del name, command, args, env
+        return []
+
+    async def connect_streamable_http(
+        self,
+        name: str,
+        url: str,
+        headers: dict[str, str] | None = None,
+    ) -> list[ToolDef]:
+        del name, url, headers
+        return []
+
+    async def disconnect(self, name: str) -> None:
+        del name
+
+    async def call_tool(
+        self,
+        server_name: str,
+        tool_name: str,
+        args: dict[str, object],
+    ) -> str:
+        del server_name, tool_name, args
+        return ""
+
+    def all_tools(self) -> list[ToolDef]:
+        return list(self._tools)
+
+    def split_prefixed_tool(self, prefixed_name: str) -> tuple[str, str] | None:
+        del prefixed_name
+        return None
+
+    async def load_from_config(self, path: Path) -> None:
+        del path
+
+
+@pytest.mark.asyncio
+async def test_build_context_merges_core_and_mcp_tools(tmp_path: Path) -> None:
+    agent_path = tmp_path / "AGENT.md"
+    agent_path.write_text("You are a helpful assistant.\n", encoding="utf-8")
+
+    mem = tmp_path / "memory"
+    mem.mkdir()
+    (mem / "INDEX.md").write_text("alpha summary\nbeta summary\n", encoding="utf-8")
+
+    skills = tmp_path / "skills"
+    research = skills / "research"
+    research.mkdir(parents=True)
+    (research / "SKILL.md").write_text("Do research tasks.\n\nMore body.\n", encoding="utf-8")
+    (research / "run.py").write_text("# entry\n", encoding="utf-8")
+
+    mcp_tools = [
+        ToolDef("db__query", "Query database.", {}),
+        ToolDef("wiki__search", "Search wiki.", {}),
+    ]
+    ctx = await build_context(
+        "thread-1",
+        "req-1",
+        agent_md_path=agent_path,
+        memory_path=mem,
+        skills_path=skills,
+        mcp_client=FakeMCPClient(mcp_tools),
+    )
+
+    assert ctx.agent_md == "You are a helpful assistant."
+    assert ctx.memory_index == ["alpha summary", "beta summary"]
+    assert len(ctx.skills) == 1
+    assert ctx.skills[0].name == "research"
+    assert ctx.skills[0].description == "Do research tasks."
+    assert ctx.skills[0].entry_point == "research/run.py"
+
+    names = [t.name for t in ctx.tools]
+    core_names = {
+        "run_command",
+        "read_file",
+        "write_file",
+        "search_memory",
+        "list_skills",
+        "task",
+        "add_mcp_server",
+        "remove_mcp_server",
+    }
+    assert core_names.issubset(set(names))
+    assert "db__query" in names
+    assert "wiki__search" in names
+    assert len(ctx.tools) == 8 + 2
+    for t in ctx.tools:
+        assert t.description.strip()
+
+
+@pytest.mark.asyncio
+async def test_build_context_include_task_tool_false(tmp_path: Path) -> None:
+    agent_path = tmp_path / "AGENT.md"
+    agent_path.write_text("ok\n", encoding="utf-8")
+    mem = tmp_path / "memory"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+
+    ctx = await build_context(
+        "t",
+        "r",
+        agent_md_path=agent_path,
+        memory_path=mem,
+        skills_path=skills,
+        mcp_client=FakeMCPClient([]),
+        include_task_tool=False,
+    )
+    assert "task" not in [t.name for t in ctx.tools]
+
+
+@pytest.mark.asyncio
+async def test_build_context_missing_index_yields_empty_memory(tmp_path: Path) -> None:
+    agent_path = tmp_path / "AGENT.md"
+    agent_path.write_text("ok\n", encoding="utf-8")
+    mem = tmp_path / "memory"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+
+    ctx = await build_context(
+        "t",
+        "r",
+        agent_md_path=agent_path,
+        memory_path=mem,
+        skills_path=skills,
+        mcp_client=FakeMCPClient([]),
+    )
+    assert ctx.memory_index == []
+
+
+@pytest.mark.asyncio
+async def test_build_context_empty_agent_md_raises(tmp_path: Path) -> None:
+    agent_path = tmp_path / "AGENT.md"
+    agent_path.write_text("   \n", encoding="utf-8")
+    mem = tmp_path / "memory"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+
+    with pytest.raises(ValueError, match=str(agent_path)):
+        await build_context(
+            "t",
+            "r",
+            agent_md_path=agent_path,
+            memory_path=mem,
+            skills_path=skills,
+            mcp_client=FakeMCPClient([]),
+        )
+
+
+@pytest.mark.asyncio
+async def test_build_context_skips_skill_without_runner(tmp_path: Path) -> None:
+    agent_path = tmp_path / "AGENT.md"
+    agent_path.write_text("ok\n", encoding="utf-8")
+    mem = tmp_path / "memory"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    orphan = skills / "orphan"
+    orphan.mkdir(parents=True)
+    (orphan / "SKILL.md").write_text("Only docs.\n", encoding="utf-8")
+
+    ctx = await build_context(
+        "t",
+        "r",
+        agent_md_path=agent_path,
+        memory_path=mem,
+        skills_path=skills,
+        mcp_client=FakeMCPClient([]),
+    )
+    assert ctx.skills == []

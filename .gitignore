@@ -40,3 +40,6 @@ htmlcov/
 
 # Docker
 docker/data/
+
+# Planning Documents
+.prt/
