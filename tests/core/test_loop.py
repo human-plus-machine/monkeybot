@@ -562,3 +562,95 @@ async def test_run_no_context_summarize_events_when_under_cap(tmp_path: Path) ->
     assert "ContextSummarized" not in kinds
     assert prov.stream_calls == 1
     assert hist.reset_calls == []
+
+
+@pytest.mark.asyncio
+async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> None:
+    mem = tmp_path / "memory"
+    mem.mkdir()
+    (mem / "INDEX.md").write_text("initial line\n", encoding="utf-8")
+
+    class CaptureFakeProvider:
+        def __init__(self, scripted: list[list[object]]) -> None:
+            self._scripted = scripted
+            self.stream_calls = 0
+            self.captured_messages: list[list[Message]] = []
+
+        @property
+        def name(self) -> str:
+            return "fake"
+
+        @property
+        def supports_streaming(self) -> bool:
+            return True
+
+        async def stream(
+            self,
+            messages: Sequence[Message],
+            tools: Sequence[ToolDef],
+            *,
+            model: str,
+        ) -> AsyncIterator[TextDelta | ToolCall | UsageEvent | Done]:
+            self.captured_messages.append(list(messages))
+            del tools, model
+            idx = self.stream_calls
+            self.stream_calls += 1
+            if idx >= len(self._scripted):
+                return
+            for ev in self._scripted[idx]:
+                yield ev  # type: ignore[misc]
+
+    class BumpIndexExecutor(RecordingExecutor):
+        def __init__(self, memory_dir: Path) -> None:
+            super().__init__()
+            self._memory_dir = memory_dir
+
+        async def execute(self, *, call: ToolCall, ctx: TurnContext) -> tuple[str | None, str | None]:
+            del call, ctx
+            (self._memory_dir / "INDEX.md").write_text(
+                "initial line\nnew memory from tool\n",
+                encoding="utf-8",
+            )
+            return ("ok", None)
+
+    prov = CaptureFakeProvider(
+        [
+            [
+                ToolCall(call_id="c1", name="run_command", args={"command": "noop"}),
+                Done(),
+            ],
+            [TextDelta(text="done"), Done()],
+        ]
+    )
+    hist = FakeHistory()
+    exe = BumpIndexExecutor(mem)
+    ctx = TurnContext(
+        thread_id="t1",
+        request_id="r1",
+        agent_md="# Agent",
+        memory_index=["initial line"],
+        skills=[],
+        tools=[ToolDef("run_command", "Run shell", {})],
+        user_id=None,
+        parent_run_id=None,
+        model="gemini-2.5-flash",
+        memory_path=mem,
+    )
+    async for e in run(
+        "hello",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[AllowInspector()],
+        tool_executor=exe,
+        max_turns=5,
+    ):
+        if isinstance(e, TurnComplete):
+            break
+
+    assert len(prov.captured_messages) == 2
+    sys1 = prov.captured_messages[0][0].content
+    sys2 = prov.captured_messages[1][0].content
+    assert "initial line" in sys1
+    assert "new memory from tool" not in sys1
+    assert "new memory from tool" in sys2

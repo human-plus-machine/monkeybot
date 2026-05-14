@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -44,6 +46,11 @@ class TurnContext:
     """Max input context for pre-flight checks; summarization triggers near this cap."""
     workspace_root: Path | None = None
     """Workspace root for spill cleanup; optional for tests / minimal harness."""
+    memory_path: Path | None = None
+    """Memory root for mid-turn index refresh via :func:`refresh_memory_index`."""
+
+
+_log = logging.getLogger(__name__)
 
 
 def _core_tool_defs(*, include_task_tool: bool = True) -> list[ToolDef]:
@@ -295,4 +302,25 @@ async def build_context(
         cancelled=cancelled,
         context_window_tokens=context_window_tokens,
         workspace_root=workspace_root,
+        memory_path=memory_path,
     )
+
+
+async def refresh_memory_index(ctx: TurnContext) -> TurnContext:
+    """Re-read ``INDEX.md`` under ``ctx.memory_path``; on failure return ``ctx`` unchanged."""
+    if ctx.memory_path is None:
+        return ctx
+    from monkeybot.core import memory as memory_mod
+
+    try:
+        fresh = await memory_mod.load_index(ctx.memory_path)
+        return dataclasses.replace(ctx, memory_index=fresh)
+    except Exception as exc:
+        _log.warning(
+            "[MEMORY] Index refresh FAILED — serving stale index. "
+            "thread_id=%s memory_path=%s error=%r",
+            ctx.thread_id,
+            ctx.memory_path,
+            exc,
+        )
+        return ctx

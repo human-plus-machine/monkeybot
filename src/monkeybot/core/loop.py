@@ -11,7 +11,7 @@ from contextlib import aclosing
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from monkeybot.core.context import TurnContext
+from monkeybot.core.context import TurnContext, refresh_memory_index
 from monkeybot.core.harness_prompt import harness_fixed_context
 from monkeybot.core.events import (
     AgentEvent,
@@ -287,6 +287,7 @@ async def _run_inner(
             break
 
         chat_messages = await history.load(ctx.thread_id)
+        ctx = await refresh_memory_index(ctx)
         system = _system_message(ctx)
         provider_messages = _messages_for_provider(system, chat_messages)
 

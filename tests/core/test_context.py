@@ -1,9 +1,11 @@
 """Tests for TurnContext assembly and MCP tool merging."""
 
+import dataclasses
+import logging
 from pathlib import Path
 
 import pytest
-from monkeybot.core.context import build_context
+from monkeybot.core.context import build_context, refresh_memory_index
 from monkeybot.core.types_tools import ToolDef
 
 
@@ -190,3 +192,137 @@ async def test_build_context_skips_skill_without_runner(tmp_path: Path) -> None:
         mcp_client=FakeMCPClient([]),
     )
     assert ctx.skills == []
+
+
+@pytest.mark.asyncio
+async def test_build_context_populates_memory_path(tmp_path: Path) -> None:
+    agent_path = tmp_path / "AGENT.md"
+    agent_path.write_text("ok\n", encoding="utf-8")
+    mem = tmp_path / "memory"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+
+    ctx = await build_context(
+        "t",
+        "r",
+        agent_md_path=agent_path,
+        memory_path=mem,
+        skills_path=skills,
+        mcp_client=FakeMCPClient([]),
+    )
+    assert ctx.memory_path == mem
+
+
+@pytest.mark.asyncio
+async def test_refresh_memory_index_no_path_returns_same_ctx(tmp_path: Path) -> None:
+    agent_path = tmp_path / "AGENT.md"
+    agent_path.write_text("ok\n", encoding="utf-8")
+    mem = tmp_path / "memory"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+
+    ctx = await build_context(
+        "t",
+        "r",
+        agent_md_path=agent_path,
+        memory_path=mem,
+        skills_path=skills,
+        mcp_client=FakeMCPClient([]),
+    )
+    ctx_no_mem = dataclasses.replace(ctx, memory_path=None)
+    out = await refresh_memory_index(ctx_no_mem)
+    assert out is ctx_no_mem
+
+
+@pytest.mark.asyncio
+async def test_refresh_memory_index_picks_up_new_entries(tmp_path: Path) -> None:
+    agent_path = tmp_path / "AGENT.md"
+    agent_path.write_text("ok\n", encoding="utf-8")
+    mem = tmp_path / "memory"
+    mem.mkdir()
+    (mem / "INDEX.md").write_text("first line\n", encoding="utf-8")
+    skills = tmp_path / "skills"
+    skills.mkdir()
+
+    ctx = await build_context(
+        "t",
+        "r",
+        agent_md_path=agent_path,
+        memory_path=mem,
+        skills_path=skills,
+        mcp_client=FakeMCPClient([]),
+    )
+    assert ctx.memory_index == ["first line"]
+
+    (mem / "INDEX.md").write_text("first line\nsecond line\n", encoding="utf-8")
+    refreshed = await refresh_memory_index(ctx)
+    assert refreshed.memory_index == ["first line", "second line"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_memory_index_silent_fail_on_unicode_error(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    agent_path = tmp_path / "AGENT.md"
+    agent_path.write_text("ok\n", encoding="utf-8")
+    mem = tmp_path / "memory"
+    mem.mkdir()
+    (mem / "INDEX.md").write_text("valid line\n", encoding="utf-8")
+    skills = tmp_path / "skills"
+    skills.mkdir()
+
+    ctx = await build_context(
+        "t",
+        "r",
+        agent_md_path=agent_path,
+        memory_path=mem,
+        skills_path=skills,
+        mcp_client=FakeMCPClient([]),
+    )
+    (mem / "INDEX.md").write_bytes(b"\xff\xfe")
+
+    with caplog.at_level(logging.WARNING, logger="monkeybot.core.context"):
+        out = await refresh_memory_index(ctx)
+
+    assert out is ctx
+    assert ctx.memory_index == ["valid line"]
+    assert any("[MEMORY]" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_refresh_memory_index_silent_fail_on_os_error(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent_path = tmp_path / "AGENT.md"
+    agent_path.write_text("ok\n", encoding="utf-8")
+    mem = tmp_path / "memory"
+    mem.mkdir()
+    (mem / "INDEX.md").write_text("stable\n", encoding="utf-8")
+    skills = tmp_path / "skills"
+    skills.mkdir()
+
+    ctx = await build_context(
+        "t",
+        "r",
+        agent_md_path=agent_path,
+        memory_path=mem,
+        skills_path=skills,
+        mcp_client=FakeMCPClient([]),
+    )
+
+    async def boom(_path: Path) -> list[str]:
+        raise OSError("simulated read failure")
+
+    monkeypatch.setattr("monkeybot.core.memory.load_index", boom)
+
+    with caplog.at_level(logging.WARNING, logger="monkeybot.core.context"):
+        out = await refresh_memory_index(ctx)
+
+    assert out is ctx
+    assert ctx.memory_index == ["stable"]
+    assert any("[MEMORY]" in r.message for r in caplog.records)

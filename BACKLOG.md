@@ -31,9 +31,9 @@ Tasks are split into two parallel tracks. **Do not edit files outside your track
 
 ---
 
-#### Branch: `feat/memory-index-refresh`
+#### Branch: `feat/memory-index-refresh` *(implemented)*
 
-- **Fix memory index stale mid-turn** — `memory/INDEX.md` is snapshotted once at `build_context()` time; fix by adding a lightweight index refresh in `context.py` before each provider call. *(No changes to `memory.py` needed — just re-call the existing `load_index()` API.)*
+- **Fix memory index stale mid-turn** — `memory/INDEX.md` is snapshotted once at `build_context()` time; fixed by `refresh_memory_index()` in `context.py` + `memory_path` on `TurnContext`, invoked before each main `provider.stream` in `loop.py` (`load_index()` API; no `memory.py` changes).
 
 ---
 
@@ -103,6 +103,7 @@ langfuse? deepeval other?
 
 ### Runtime / Safety
 
+- **Memory index refresh after summarization (optional)** — After summarization, `_run_inner` rebuilds `provider_messages` with the same `system` built before `_summarize_history`; low risk today (summarize path does not touch `INDEX.md`) but consider `ctx = await refresh_memory_index(ctx)` plus `_system_message(ctx)` before that rebuild for consistency and future hooks (`loop.py`).
 - **Configurable summarization model** — history compression in `loop.py` currently uses the same `ctx.model` as the agent; allow a separate model id (env or `TurnContext`) for the summarization-only `provider.stream` call.
 - **HITL completion** — ApprovalRequest/Response loop (inspector `approve` path).
 - **DurableRunStore wiring** — persist `task` / subagent runs in `core_tool_executor.py` for crash recovery.
