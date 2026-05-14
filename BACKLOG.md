@@ -13,8 +13,15 @@ Focus: make the core agent harness the best it can be.
 - **Actively evolving system prompt** — system prompt should update dynamically as the agent learns/runs (e.g. injecting memory, context, available skills at runtime); AGENT.md should stay focused on bot identity, not harness internals.
 - **Dedicated harness system prompt** — separate the built-in tool/skill descriptions from the per-bot AGENT.md; harness injects its own context so bot authors don't have to re-document internals.
 - **Memory accuracy verification** — add ability to verify that saved memories are accurate and surface discrepancies (hallucinated or stale memories).
-- **save_memory tool review** — decide: keep `save_memory` as a dedicated tool, or route through `write_file`? Goal is to keep the tool surface minimal and not overload the agent. Lean toward fewer, more deliberate tools.
+- **save_memory tool** — add a dedicated `save_memory` tool for writing facts to the memory dir and updating `INDEX.md`; see Under Discussion for open questions. *(discussion needed)*
 - **File-op tool audit** — evaluate removing `write_file` in favor of `create_file` + `find_and_replace` (research what Claude Code uses as a reference).
+- **History summarization** — conversation history grows unbounded; implement a summarization pass (rolling window or threshold-triggered) so long-running tasks don't blow the context window.
+- **Token counting before provider calls** — check estimated token count against model context window before each `provider.stream()` call; truncate or summarize history proactively rather than hitting a hard API error.
+- **Fix unbounded tool results** — tool results (e.g. `read_file` on a large file) are appended to history at full length; cap or truncate large results before writing to SQLite/history.
+- **Fix memory index stale mid-turn** — `memory/INDEX.md` is snapshotted once at `build_context()` time; if the agent writes to it during a turn the update is invisible until the next user message; fix by re-reading index before each provider call or adding a lightweight refresh path.
+- **Fix parallel subagent result ordering** — concurrent `task` calls append to history as they finish, not in `call_id` order; this can confuse the model on the next turn; collect all results then append in deterministic order.
+- **Fix subagent cancellation propagation** — when the parent's `cancelled` event is set, child subprocesses keep running until the 600s timeout; send `SIGTERM` to child PIDs on cancellation.
+- **Custom subagents** — allow operators to pre-configure named subagent profiles (own AGENT.md, restricted skill set, specific MCP servers); parent model can delegate to a named profile rather than a generic subprocess.
 
 ### Maintenance
 - **Documentation cleanup** — update README and any other docs to reflect the current codebase layout; remove stale references to legacy paths.
