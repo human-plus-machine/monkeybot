@@ -10,7 +10,7 @@ Tasks are split into two parallel tracks. **Do not edit files outside your track
 
 ---
 
-### Track A — Loop & History
+### Track A — Loop & History (John)
 > **Owns:** `core/loop.py`, `core/history.py`, `core/context.py`
 
 - **Bug: Agent loop stops after tool call** — loop exits prematurely after the first tool execution; investigate and fix in `_run_inner`.
@@ -19,10 +19,11 @@ Tasks are split into two parallel tracks. **Do not edit files outside your track
 - **Fix unbounded tool results** — tool results (e.g. `read_file` on a large file) are appended to history at full length; cap or truncate large results at the point they are written to history in `loop.py`.
 - **Fix parallel subagent result ordering** — concurrent `task` calls append to history as they finish, not in `call_id` order; collect all results then append in deterministic order (`loop.py` ~line 393).
 - **Fix memory index stale mid-turn** — `memory/INDEX.md` is snapshotted once at `build_context()` time; fix by adding a lightweight index refresh in `context.py` before each provider call. *(No changes to `memory.py` needed — just re-call the existing `load_index()` API.)*
+- **? Lazy loading** — import providers/skills/tools only when invoked to improve cold-start speed and avoid loading unused dependencies; needs profiling to confirm it's worth the complexity.
 
 ---
 
-### Track B — Memory, Prompts, Tool Executor & Providers
+### Track B — Memory, Prompts, Tool Executor & Providers (Karthik)
 > **Owns:** `core/memory.py`, `core/prompt.py`, `core/core_tool_executor.py`, `core/workspace_tools.py`, `core/subagent_proto.py`, `core/subagent_worker.py`, `core/config.py`, `core/council.py`, `core/interfaces.py`, `providers/`, `README`
 
 - **Actively evolving system prompt** — `compose_system_prompt()` in `prompt.py` should inject memory, context, and available skills at runtime; AGENT.md stays focused on bot identity, not harness internals.
@@ -73,6 +74,10 @@ Focus: plug the harness into real messaging surfaces and cloud runtimes.
 - **AWS server** — EC2 / ECS deployment option.
 - **Docker image** — align Dockerfile with current layout (`pyproject.toml`, `python -m monkeybot.gateway.main`, `.agents/skills/`); currently references old `requirements.txt` / `skills/` / `src.main` paths.
 
+### Infra
+
+- **Postgres** — swap SQLite for history/usage where needed.
+
 ---
 
 ## Backlog (Unscheduled)
@@ -82,33 +87,6 @@ Focus: plug the harness into real messaging surfaces and cloud runtimes.
 - **HITL completion** — ApprovalRequest/Response loop (inspector `approve` path).
 - **DurableRunStore wiring** — persist `task` / subagent runs in `core_tool_executor.py` for crash recovery.
 
-### Providers
-
-- **LiteLLM** — evaluate replacing per-provider implementations with LiteLLM as a unified gateway; reduces maintenance surface and adds model portability.
-- **AWS Bedrock** — implement `providers/bedrock.py`; `[project.optional-dependencies] bedrock` is a placeholder in `pyproject.toml`.
-
-### Infra
-
-- **Postgres** — swap SQLite for history/usage where needed.
-
-### Product / Memory
-
-- **Council** — merge legacy fixed categories with `INDEX.md` classification from Karthik's council.
-
 ### MCP + Distro
 
 - **MCP distro linkage** — confirm `bots/example-bot/` env (`MCP_CONFIG`, `SKILLS_PATH`) matches deployment; smoke-test MCP load against real servers beyond the bundled LangChain docs URL.
-
-### Maintenance
-
-- **Playground lock file** — regenerate `playground/agent/uv.lock` after dependency renames (`uv lock` in that directory).
-
----
-
-## Under Discussion
-
-> Items marked `?` — worth tracking but no decision yet.
-
-- **? Remove LangChain** — replace LangChain with direct provider calls like the legacy codebase did; reduces dependency weight and gives us full control, but is a significant refactor.
-- **? Lazy loading** — import providers/skills/tools only when invoked to improve cold-start speed and avoid loading unused dependencies; needs profiling to confirm it's worth the complexity.
-
