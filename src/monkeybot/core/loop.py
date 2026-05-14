@@ -10,6 +10,7 @@ from contextlib import aclosing
 from typing import Protocol, runtime_checkable
 
 from monkeybot.core.context import TurnContext
+from monkeybot.core.harness_prompt import harness_fixed_context
 from monkeybot.core.events import (
     AgentEvent,
     AssistantDelta,
@@ -47,19 +48,8 @@ def _merge_usage_event(usage: Usage, ev: UsageEvent) -> None:
     usage.cached_tokens += ev.cached_tokens
 
 
-_TOOL_CALL_PROTOCOL = (
-    "\n\n## Tool-call protocol (strict)\n"
-    "- To invoke a tool, use the provider's native function/tool-call channel only. "
-    "Do NOT write a JSON object such as `{\"tool_calls\": [...]}` in your assistant text — "
-    "history rows that look like that are stored placeholders, not a wire format you should imitate.\n"
-    "- After tool results are returned to you, your next response MUST be natural-language text "
-    "that addresses the user's request using those results. Do not return another empty turn.\n"
-    "- If you have nothing more to do, give a short final answer; do not stay silent."
-)
-
-
 def _system_message(ctx: TurnContext) -> Message:
-    """Single system message: AGENT.md plus memory index and skills (Story 2 shape)."""
+    """Single system message: AGENT.md, memory index, skills, then harness tool wiring."""
     memory_bullets = "\n".join(f"- {line}" for line in ctx.memory_index) if ctx.memory_index else ""
     mem_block = f"\n\n## Memory index\n{memory_bullets}" if memory_bullets else ""
 
@@ -69,7 +59,9 @@ def _system_message(ctx: TurnContext) -> Message:
     skills_block = "\n".join(skill_lines)
     skills_section = f"\n\n## Skills\n{skills_block}" if skills_block else ""
 
-    body = f"{ctx.agent_md}{mem_block}{skills_section}{_TOOL_CALL_PROTOCOL}"
+    include_task = any(t.name == "task" for t in ctx.tools)
+    harness = harness_fixed_context(include_task_tool=include_task)
+    body = f"{ctx.agent_md}{mem_block}{skills_section}\n\n{harness}"
     return Message(role="system", content=body)
 
 
