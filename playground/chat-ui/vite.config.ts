@@ -14,7 +14,11 @@ export default defineConfig(({ mode }) => {
         '/__mb_gateway': {
           target,
           changeOrigin: true,
-          rewrite: (path) => path.replace(/^\/__mb_gateway/, ''),
+          configure: (proxy) => {
+            proxy.on('proxyReq', (proxyReq) => {
+              proxyReq.path = proxyReq.path.replace(/^\/__mb_gateway/, '') || '/'
+            })
+          },
         },
       },
     },

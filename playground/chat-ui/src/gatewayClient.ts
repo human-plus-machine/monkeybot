@@ -1,6 +1,6 @@
 /** Browser client for MonkeyBot v2 SSE gateway (see `monkeybot.gateway.sse.routes`). */
 
-export const GATEWAY_BASE = '/__mb_gateway'
+export const GATEWAY_BASE = 'http://localhost:8787'
 
 export type GatewayJsonEvent = {
   type: string

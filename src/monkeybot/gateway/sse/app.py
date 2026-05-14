@@ -36,6 +36,7 @@ from monkeybot.gateway.sse.loop_port import UsagePort
 from monkeybot.gateway.sse.routes import create_app as build_sse_app
 from monkeybot.gateway.sse.session_bus import SessionBus, SessionRegistry
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -341,6 +342,12 @@ app = build_sse_app(
     registry=_registry,
     loop_port=GatewayLoopPort(_registry),
     usage_port=_StaticUsagePortZeros(),
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
