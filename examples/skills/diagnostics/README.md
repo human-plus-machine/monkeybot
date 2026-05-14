@@ -1,6 +1,6 @@
 # Diagnostics Skill Example
 
-This example demonstrates how to create a LangChain skill for monkey-bot.
+This example demonstrates how to create an async skill entry point for monkey-bot.
 
 ## What It Does
 
@@ -22,51 +22,32 @@ cp -r examples/skills/diagnostics/ ./skills/
 ### 2. Import in Your Agent
 
 ```python
-from monkeybot import build_deep_agent
-from monkeybot.skills import SkillLoader, SkillExecutor
+from skills.diagnostics.diagnostics import run_diagnostics
 
-# Load skills from directory
-loader = SkillLoader(skills_dir="./skills")
-executor = SkillExecutor(loader.load_skills())
-skill_tools = executor.to_langchain_tools()
-
-# Build agent with diagnostics skill
-agent = build_deep_agent(
-    model="gemini-2.5-flash",
-    tools=skill_tools
-)
-
-# The agent can now use run_diagnostics tool
-result = await agent.ainvoke({
-    "messages": [{"role": "user", "content": "Run diagnostics"}]
-})
+result = await run_diagnostics(check_type="full")
+print(result)
 ```
 
-### 3. Test the Skill
+Wire skills through the **SSE gateway** and harness tool surface described in `docs/getting-started.md` (this README focuses on the skill module itself).
 
-```python
-from skills.diagnostics import run_diagnostics
+Example JSON shape:
 
-# Run full diagnostics
-result = await run_diagnostics.ainvoke({"check_type": "full"})
-print(result)
-
-# Expected output:
-# {
-#   "timestamp": "2026-02-16T20:00:00Z",
-#   "status": "healthy",
-#   "issues": [],
-#   "python_version": "3.12.0",
-#   "os_info": "Linux-5.10.0",
-#   "cwd": "/app",
-#   "env_check": {
-#     "AGENT_NAME": "set",
-#     "MODEL_PROVIDER": "set",
-#     "VERTEX_AI_PROJECT_ID": "set",
-#     "SKILLS_DIR": "set"
-#   },
-#   "computation_check": "pass"
-# }
+```json
+{
+  "timestamp": "2026-02-16T20:00:00Z",
+  "status": "healthy",
+  "issues": [],
+  "python_version": "3.12.0",
+  "os_info": "Linux-5.10.0",
+  "cwd": "/app",
+  "env_check": {
+    "AGENT_NAME": "set",
+    "MODEL_PROVIDER": "set",
+    "VERTEX_AI_PROJECT_ID": "set",
+    "SKILLS_DIR": "set"
+  },
+  "computation_check": "pass"
+}
 ```
 
 ## How to Adapt
@@ -82,7 +63,7 @@ cp skills/diagnostics/diagnostics.py skills/my-skill/my-skill.py
 ### 2. Modify the @tool Function
 
 ```python
-from langchain_core.tools import tool
+from monkeybot.core.workspace_tools import tool
 
 @tool
 async def my_custom_tool(param1: str, param2: int = 10) -> str:
@@ -117,15 +98,9 @@ Make your docstring clear and specific!
 ```python
 from skills.my_skill.my_skill import my_custom_tool
 
-# Test directly
-result = await my_custom_tool.ainvoke({"param1": "test", "param2": 5})
+# Test directly (async entry point)
+result = await my_custom_tool(param1="test", param2=5)
 print(result)
-
-# Test with agent
-agent = build_deep_agent(model="gemini-2.5-flash", tools=[my_custom_tool])
-result = await agent.ainvoke({
-    "messages": [{"role": "user", "content": "Use my custom tool on 'hello'"}]
-})
 ```
 
 ## Key Patterns Demonstrated
@@ -133,7 +108,7 @@ result = await agent.ainvoke({
 ### 1. Using @tool Decorator
 
 ```python
-from langchain_core.tools import tool
+from monkeybot.core.workspace_tools import tool
 
 @tool
 async def my_tool(param: str) -> str:
@@ -142,9 +117,8 @@ async def my_tool(param: str) -> str:
 ```
 
 The `@tool` decorator:
-- Registers the function as a LangChain tool
-- Makes it discoverable by the agent
-- Handles schema generation from type hints
+- Marks the function for tooling-style discovery in simple orchestrators
+- Preserves the original name and docstring for documentation
 
 ### 2. Async Execution
 
@@ -263,13 +237,13 @@ from skills.my_skill.my_skill import my_custom_tool
 @pytest.mark.asyncio
 async def test_my_tool_success():
     """Test successful execution."""
-    result = await my_custom_tool.ainvoke({"param1": "test"})
+    result = await my_custom_tool(param1="test")
     assert "test" in result
 
 @pytest.mark.asyncio
 async def test_my_tool_error_handling():
     """Test error handling."""
-    result = await my_custom_tool.ainvoke({"param1": ""})
+    result = await my_custom_tool(param1="")
     assert "Error" in result
 ```
 

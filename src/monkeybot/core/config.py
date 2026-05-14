@@ -3,7 +3,7 @@
 Provides utilities for loading secrets and configuring models:
 - load_bot_config(): Load bot.yaml config file with defaults
 - load_secrets(): Load from GCP Secret Manager (prod) or .env (dev)
-- get_model(): Get configured LangChain model
+- get_provider_config(): Resolve native :class:`~monkeybot.core.provider.Provider` + model id
 - get_system_prompt(): Load custom system prompt from file
 
 This module handles environment detection and secret loading for deployments.
@@ -15,13 +15,16 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict
+from typing import Any, Dict
 
 import yaml
 from dotenv import load_dotenv
 
-if TYPE_CHECKING:
-    from langchain_core.language_models import BaseChatModel
+from monkeybot.core.provider import Provider
+from monkeybot.core.providers.gemini import GeminiProvider
+from monkeybot.providers.claude import ClaudeProvider
+from monkeybot.providers.openai import OpenAIProvider
+from monkeybot.providers.vertex_claude import VertexClaudeProvider
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +102,7 @@ class ConfigError(Exception):
 
 @dataclass
 class CustomMemoryFolder:
-    """User-defined memory folder registered with the LLM Council classifier.
+    """User-defined memory folder registered with the memory organizer classifier.
 
     Args:
         name: Folder name under MEMORY_DIR. Lowercase letters, digits, hyphens only.
@@ -276,18 +279,18 @@ def _validate_provider_config(config: Dict[str, str]) -> None:
             raise ConfigError(
                 f"model.provider is set to 'aws_bedrock' but AWS Bedrock is not yet supported.\n\n"
                 f"To add AWS Bedrock support, the following are needed:\n"
-                f"  - Add aws_bedrock case to get_model() in monkeybot/core/config.py\n"
+                f"  - Add aws_bedrock case to get_provider_config() in monkeybot/core/config.py\n"
                 f"  - Add aws.region to bot.yaml\n"
-                f"  - pip install langchain-aws\n\n"
+                f"  - pip install boto3\n\n"
                 f"Currently supported providers: {supported}"
             )
         elif model_provider == "azure_openai":
             raise ConfigError(
                 f"model.provider is set to 'azure_openai' but Azure OpenAI is not yet supported.\n\n"
                 f"To add Azure OpenAI support, the following are needed:\n"
-                f"  - Add azure_openai case to get_model() in monkeybot/core/config.py\n"
+                f"  - Add azure_openai case to get_provider_config() in monkeybot/core/config.py\n"
                 f"  - Add azure.subscription_id to bot.yaml\n"
-                f"  - pip install langchain-openai\n\n"
+                f"  - pip install openai\n\n"
                 f"Currently supported providers: {supported}"
             )
         else:
@@ -584,62 +587,39 @@ def _load_secrets_from_env() -> Dict[str, str]:
     return {}
 
 
-def get_model(
+@dataclass(frozen=True)
+class ProviderConfig:
+    """Native streaming :class:`~monkeybot.core.provider.Provider` plus model id."""
+
+    provider: Provider
+    model: str
+
+
+def get_provider_config(
     provider: str | None = None,
     model_name: str | None = None,
     temperature: float | None = None,
     max_tokens: int | None = None,
     thinking_budget: int | None = None,
-) -> BaseChatModel:
-    """Get configured chat model from environment or explicit parameters.
+) -> ProviderConfig:
+    """Resolve a :class:`Provider` and model id from environment or explicit parameters.
 
-    Supports any LangChain-compatible model via provider parameter or
-    MODEL_PROVIDER env var. Parameters override environment variables.
+    Supported ``MODEL_PROVIDER`` / ``provider`` values:
+    - ``google_vertexai`` — :class:`~monkeybot.core.providers.gemini.GeminiProvider` (Vertex / ``google-genai``)
+    - ``openai`` — :class:`~monkeybot.providers.openai.OpenAIProvider`
+    - ``anthropic`` — :class:`~monkeybot.providers.claude.ClaudeProvider`
+    - ``vertex_anthropic`` — :class:`~monkeybot.providers.vertex_claude.VertexClaudeProvider` on Vertex (ADC)
 
-    Supported providers:
-    - google_vertexai: Google Vertex AI (Gemini models)
-    - openai: OpenAI (GPT models)
-    - anthropic: Anthropic (Claude models)
-    - vertex_anthropic: Anthropic Claude via Google Vertex AI Model Garden
-
-    Args:
-        provider: Model provider override (default: from MODEL_PROVIDER env var)
-        model_name: Model name override (default: from MODEL_NAME env var)
-        temperature: Temperature override (default: from MODEL_TEMPERATURE env var)
-        max_tokens: Max tokens override (default: from MODEL_MAX_TOKENS env var)
-        thinking_budget: Gemini thinking token budget (-1=dynamic, 0=off, 1-24576=cap).
-            Only applies to google_vertexai provider. Default: -1 (model auto-decides).
-
-    Returns:
-        Configured BaseChatModel instance
+    ``temperature``, ``max_tokens``, and ``thinking_budget`` override env for
+    :class:`~monkeybot.core.providers.gemini.GeminiProvider` only; other providers read
+    generation limits from environment at :meth:`~monkeybot.core.provider.Provider.stream` time
+    where applicable.
 
     Raises:
-        ValueError: If unsupported model provider is specified
-        ImportError: If required model provider package is not installed
-
-    Environment Variables:
-        MODEL_PROVIDER: Provider name (google_vertexai, openai, anthropic)
-        MODEL_NAME: Model name/identifier
-        MODEL_TEMPERATURE: Temperature for generation (0.0-1.0)
-        MODEL_MAX_TOKENS: Maximum output tokens
-        MODEL_THINKING_BUDGET: Gemini thinking budget (-1, 0, or 1-24576)
-
-    Example:
-        >>> # Use environment variables
-        >>> os.environ["MODEL_PROVIDER"] = "google_vertexai"
-        >>> os.environ["MODEL_NAME"] = "gemini-2.5-flash"
-        >>> model = get_model()
-
-        >>> # Override with explicit parameters
-        >>> model = get_model(
-        ...     provider="openai",
-        ...     model_name="gpt-4",
-        ...     temperature=0.3
-        ... )
+        ValueError: Unsupported provider or missing required configuration
     """
-    # Use parameters if provided, else fall back to env vars with defaults
-    provider = provider or os.getenv("MODEL_PROVIDER", "google_vertexai")
-    model_name = model_name or os.getenv("MODEL_NAME", "gemini-2.5-flash")
+    provider_key = provider or os.getenv("MODEL_PROVIDER", "google_vertexai")
+    resolved_model = model_name or os.getenv("MODEL_NAME", "gemini-2.5-flash")
     temperature = temperature if temperature is not None else float(
         os.getenv("MODEL_TEMPERATURE", "0.7")
     )
@@ -651,94 +631,51 @@ def get_model(
     )
 
     logger.info(
-        f"Initializing model: provider={provider}, "
-        f"model={model_name}, temp={temperature}, max_tokens={max_tokens}, "
-        f"thinking_budget={thinking_budget}"
+        "Initializing provider: provider=%s model=%s temp=%s max_tokens=%s thinking_budget=%s",
+        provider_key,
+        resolved_model,
+        temperature,
+        max_tokens,
+        thinking_budget,
     )
 
-    if provider == "google_vertexai":
-        try:
-            from langchain_google_genai import ChatGoogleGenerativeAI
-        except ImportError:
-            raise ImportError(
-                "langchain-google-genai is required for google_vertexai provider. "
-                "Install with: pip install langchain-google-genai"
-            )
-        project = (
-            os.getenv("GCP_PROJECT_ID")
-            or os.getenv("VERTEX_AI_PROJECT_ID")
-            or os.getenv("GOOGLE_CLOUD_PROJECT")
-        )
-        location = (
-            os.getenv("VERTEX_AI_LOCATION")
-            or os.getenv("GOOGLE_CLOUD_LOCATION")
-            or "global"
-        )
-        return ChatGoogleGenerativeAI(
-            model=model_name,
-            temperature=temperature,
-            max_output_tokens=max_tokens,
-            thinking_budget=thinking_budget,
-            vertexai=True,
-            project=project,
-            location=location,
+    if provider_key == "google_vertexai":
+        return ProviderConfig(
+            GeminiProvider(
+                temperature=temperature,
+                max_output_tokens=max_tokens,
+                thinking_budget=thinking_budget,
+            ),
+            resolved_model,
         )
 
-    elif provider == "openai":
-        try:
-            from langchain_openai import ChatOpenAI
-        except ImportError:
-            raise ImportError(
-                "langchain-openai is required for the openai provider. "
-                "Install with: pip install langchain-openai"
-            )
-        return ChatOpenAI(
-            model=model_name,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+    if provider_key == "openai":
+        return ProviderConfig(OpenAIProvider(), resolved_model)
 
-    elif provider == "anthropic":
-        try:
-            from langchain_anthropic import ChatAnthropic
-        except ImportError:
-            raise ImportError(
-                "langchain-anthropic is required for the anthropic provider. "
-                "Install with: pip install langchain-anthropic"
-            )
-        return ChatAnthropic(
-            model=model_name,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
+    if provider_key == "anthropic":
+        return ProviderConfig(ClaudeProvider(), resolved_model)
 
-    elif provider == "vertex_anthropic":
-        try:
-            from langchain_google_vertexai.model_garden import ChatAnthropicVertex
-        except ImportError:
-            raise ImportError(
-                "anthropic[vertex] is required for vertex_anthropic provider. "
-                "Install with: pip install 'anthropic[vertex]'"
-            )
+    if provider_key == "vertex_anthropic":
         project = os.getenv("GCP_PROJECT_ID") or os.getenv("VERTEX_AI_PROJECT_ID")
         if not project:
             raise ValueError(
                 "vertex_anthropic provider requires GCP_PROJECT_ID or VERTEX_AI_PROJECT_ID. "
                 "Set gcp.project_id in bot.yaml or GCP_PROJECT_ID env var."
             )
-        return ChatAnthropicVertex(
-            model_name=model_name,
-            project=project,
-            location=os.getenv("VERTEX_AI_LOCATION", "us-east5"),
-            temperature=temperature,
-            max_tokens=max_tokens,
+        region = (
+            os.getenv("VERTEX_AI_LOCATION")
+            or os.getenv("ANTHROPIC_VERTEX_REGION")
+            or "us-east5"
+        )
+        return ProviderConfig(
+            VertexClaudeProvider(project_id=project, region=region),
+            resolved_model,
         )
 
-    else:
-        raise ValueError(
-            f"Unsupported model provider: {provider}. "
-            f"Supported providers: google_vertexai, openai, anthropic, vertex_anthropic"
-        )
+    raise ValueError(
+        f"Unsupported model provider: {provider_key}. "
+        "Supported providers: google_vertexai, openai, anthropic, vertex_anthropic"
+    )
 
 
 def get_system_prompt(prompt_file_path: str | None = None) -> str:

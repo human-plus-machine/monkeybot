@@ -206,7 +206,7 @@ class MockVertexAI:
         - Fast test execution (no network calls)
         - Predictable responses for testing
 
-    Story 4 replaces this with real ChatVertexAI from langchain-google-vertexai.
+    Story 4 replaces this with real Vertex Gemini via ``google-genai``.
 
     Note:
         This mock mimics the interface of LangChain's ChatVertexAI but returns

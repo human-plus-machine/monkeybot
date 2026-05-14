@@ -710,6 +710,7 @@ source = { editable = "../../" }
 dependencies = [
     { name = "aiosqlite" },
     { name = "fastapi" },
+    { name = "google-genai" },
     { name = "httpx" },
     { name = "mcp" },
     { name = "pydantic" },
@@ -737,14 +738,10 @@ requires-dist = [
     { name = "google-auth", marker = "extra == 'vertex'", specifier = ">=2.35.0" },
     { name = "google-cloud-storage", marker = "extra == 'council'", specifier = ">=2.18.0" },
     { name = "google-cloud-storage", marker = "extra == 'gcs'", specifier = ">=2.18.0" },
+    { name = "google-genai", specifier = ">=1.0.0" },
     { name = "google-genai", marker = "extra == 'gemini'", specifier = ">=1.0.0" },
     { name = "google-genai", marker = "extra == 'vertex'", specifier = ">=1.0.0" },
     { name = "httpx", specifier = ">=0.27.0" },
-    { name = "langchain-anthropic", marker = "extra == 'langchain'", specifier = ">=0.3.0" },
-    { name = "langchain-core", marker = "extra == 'langchain'", specifier = ">=0.3.0" },
-    { name = "langchain-google-genai", marker = "extra == 'langchain'", specifier = ">=2.0.0" },
-    { name = "langchain-google-vertexai", marker = "extra == 'langchain'", specifier = ">=2.0.0" },
-    { name = "langchain-openai", marker = "extra == 'langchain'", specifier = ">=0.3.0" },
     { name = "mcp", specifier = ">=1.0.0" },
     { name = "openai", marker = "extra == 'openai'", specifier = ">=1.0" },
     { name = "pydantic", specifier = ">=2.10.0" },
@@ -753,7 +750,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32.0" },
 ]
-provides-extras = ["gemini", "vertex", "claude", "vertex-claude", "bedrock", "openai", "scheduler", "langchain", "gcs", "council"]
+provides-extras = ["gemini", "vertex", "claude", "vertex-claude", "bedrock", "openai", "scheduler", "gcs", "council"]
 
 [package.metadata.requires-dev]
 dev = [

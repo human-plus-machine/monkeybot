@@ -184,7 +184,7 @@ Success criteria: memory is accessible across process restarts without re-prompt
 | Skills discovery & loader | `tests/skills/test_loader.py` | Covered |
 | Skills execution (file-ops) | `tests/integration/test_skills_integration.py` | Covered |
 | Memory search (INDEX.md) | `tests/core/test_memory.py` | Covered |
-| Council run + index update | `tests/core/test_council.py` | Covered |
+| Memory organizer run + index update | `tests/core/test_memory_organizer.py` | Covered |
 | save_memory tool (write path) | bench.py §3 + BACKLOG | Broken |
 | Cross-session memory persistence | — | Gap — no test |
 | Gateway SSE sessions | `tests/integration/test_mb_e2e_simple_reply.py` | Covered |

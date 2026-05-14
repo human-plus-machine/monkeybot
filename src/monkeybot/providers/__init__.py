@@ -1,6 +1,7 @@
-"""Optional Anthropic providers (lazy-import inside ``stream()``).
+"""Optional LLM providers (lazy-import heavy SDKs inside ``stream()``)."""
 
-Import concrete classes from submodules, e.g. ``from monkeybot.providers.claude import ClaudeProvider``.
-"""
+from monkeybot.providers.claude import ClaudeProvider
+from monkeybot.providers.openai import OpenAIProvider
+from monkeybot.providers.vertex_claude import VertexClaudeProvider
 
-__all__: list[str] = []
+__all__ = ["ClaudeProvider", "OpenAIProvider", "VertexClaudeProvider"]

@@ -246,8 +246,18 @@ def _usage_from_response(um: Any) -> UsageEvent | None:
 class GeminiProvider:
     """Vertex Gemini streaming using ``google.genai.Client`` (vertexai mode)."""
 
-    def __init__(self, *, supports_streaming: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        supports_streaming: bool = True,
+        temperature: float | None = None,
+        max_output_tokens: int | None = None,
+        thinking_budget: int | None = None,
+    ) -> None:
         self._supports_streaming = supports_streaming
+        self._temperature = temperature
+        self._max_output_tokens = max_output_tokens
+        self._thinking_budget = thinking_budget
 
     @property
     def name(self) -> str:
@@ -264,6 +274,8 @@ class GeminiProvider:
         *,
         model: str,
     ) -> AsyncIterator[ProviderEvent]:
+        model_param = _normalize_vertex_model(model)
+        project, location = _vertex_project_and_location(model_param)
         try:
             from google import genai
             from google.genai import types
@@ -272,11 +284,21 @@ class GeminiProvider:
                 "google-genai is required for GeminiProvider. Install with: uv sync (monkeybot dependencies)."
             ) from exc
 
-        model_param = _normalize_vertex_model(model)
-        project, location = _vertex_project_and_location(model_param)
-        temperature = float(os.environ.get("MODEL_TEMPERATURE", "0.7"))
-        max_tokens = int(os.environ.get("MODEL_MAX_TOKENS", "60000"))
-        thinking_budget = int(os.environ.get("MODEL_THINKING_BUDGET", "-1"))
+        temperature = (
+            float(self._temperature)
+            if self._temperature is not None
+            else float(os.environ.get("MODEL_TEMPERATURE", "0.7"))
+        )
+        max_tokens = (
+            int(self._max_output_tokens)
+            if self._max_output_tokens is not None
+            else int(os.environ.get("MODEL_MAX_TOKENS", "60000"))
+        )
+        thinking_budget = (
+            int(self._thinking_budget)
+            if self._thinking_budget is not None
+            else int(os.environ.get("MODEL_THINKING_BUDGET", "-1"))
+        )
 
         system_instruction, rest = _split_system_and_rest(messages)
         rest = _enrich_tool_messages(rest)

@@ -69,7 +69,7 @@ const featureRows: [string, string, string][] = [
   ["Skills discovery & YAML loader", "tests/skills/test_loader.py", "Covered"],
   ["Skills execution (file-ops)", "tests/integration/test_skills_integration.py", "Covered"],
   ["Memory search (INDEX.md)", "tests/core/test_memory.py", "Covered"],
-  ["Council run + index update", "tests/core/test_council.py", "Covered"],
+  ["Memory organizer run + index update", "tests/core/test_memory_organizer.py", "Covered"],
   ["Gateway SSE sessions", "tests/integration/test_mb_e2e_simple_reply.py", "Covered"],
   ["SQLite history per thread", "tests/core/test_history.py", "Covered"],
   ["save_memory tool (write path)", "bench.py §3 — API mismatch", "Broken"],

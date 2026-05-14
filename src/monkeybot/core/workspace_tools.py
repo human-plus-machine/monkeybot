@@ -1,19 +1,26 @@
-"""LangChain tools wrapping WorkspaceFileService (same logic as /workspace/v1 HTTP API)."""
+"""LangChain-free tools wrapping WorkspaceFileService (same logic as /workspace/v1 HTTP API)."""
 
 from __future__ import annotations
 
+import functools
 import json
+from collections.abc import Callable
 from pathlib import Path
-
-try:
-    from langchain_core.tools import tool
-except ImportError:
-
-    def tool(fn):  # type: ignore[no-untyped-def]
-        return fn
-
+from typing import Any, TypeVar, cast
 
 from .workspace_service import WorkspaceError, WorkspaceFileService
+
+F = TypeVar("F", bound=Callable[..., Any])
+
+
+def tool(fn: F) -> F:
+    """Lightweight stand-in for ``langchain_core.tools.tool`` — preserves docstrings and name."""
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        return fn(*args, **kwargs)
+
+    return cast(F, wrapper)
 
 
 def _j(data: dict) -> str:

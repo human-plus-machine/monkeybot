@@ -24,17 +24,16 @@ Tasks are split into two parallel tracks. **Do not edit files outside your track
 ---
 
 ### Track B — Memory, Prompts, Tool Executor & Providers (Karthik)
-> **Owns:** `core/memory.py`, `core/prompt.py`, `core/core_tool_executor.py`, `core/workspace_tools.py`, `core/subagent_proto.py`, `core/subagent_worker.py`, `core/config.py`, `core/council.py`, `core/interfaces.py`, `providers/`, `README`
+> **Owns:** `core/memory.py`, `core/prompt.py`, `core/core_tool_executor.py`, `core/workspace_tools.py`, `core/subagent_proto.py`, `core/subagent_worker.py`, `core/config.py`, `core/memory_organizer.py`, `core/interfaces.py`, `providers/`, `README`
 
 - **Actively evolving system prompt** — `compose_system_prompt()` in `prompt.py` should inject memory, context, and available skills at runtime; AGENT.md stays focused on bot identity, not harness internals.
 - **Dedicated harness system prompt** — separate built-in tool/skill descriptions from the per-bot AGENT.md in `prompt.py`; harness injects its own context for fixed tools so bot authors don't re-document internals.
 - **Memory accuracy verification** — add ability to verify saved memories are accurate and surface discrepancies (hallucinated or stale) in `memory.py`.
 - **save_memory tool** — add `_tool_save_memory` to `core_tool_executor.py` for writing facts to the memory dir and updating `INDEX.md`; decide vs routing through `write_file` to keep tool surface minimal. *(discussion needed)*
-- **Memory summarization approach** — prefer a lightweight LLM for summarization over a heavy council-style flow in `memory.py`.
+- **Memory summarization approach** — prefer a lightweight LLM for summarization over a heavy multi-pass organizer flow in `memory.py`.
 - **File-op tool audit** — evaluate removing `write_file` in favor of `create_file` + `find_and_replace` in `core_tool_executor.py` and `workspace_tools.py` (reference: Claude Code patterns).
 - **Fix subagent cancellation propagation** — when the parent's `cancelled` event is set, child subprocesses keep running until timeout; send `SIGTERM` to child PIDs on cancellation in `_tool_task` inside `core_tool_executor.py`.
 - **Custom subagents** — allow operators to pre-configure named subagent profiles (own AGENT.md, restricted skill set, specific MCP servers) in `core_tool_executor.py`, `subagent_proto.py`, and `subagent_worker.py`.
-- **Remove LangChain / complete provider migration** — drop all `langchain-*` dependencies and replace with native provider classes. **Do not replace with LiteLLM** — it is 37 MB vs the ~5 MB total LangChain stack, trading one heavy dependency for a heavier one. The codebase already has `providers/claude.py`, `providers/vertex_claude.py`, and `providers/gemini.py`; finish the migration by: (1) replacing `BaseChatModel` type hints in `config.py`, `council.py`, and `interfaces.py` with the existing `Provider` protocol; (2) replacing the `@tool` decorator import from `langchain_core.tools` in `workspace_tools.py` with a lightweight custom decorator; (3) routing all model instantiation in `config.py` through the existing provider classes; (4) removing all `langchain-*` entries from `pyproject.toml`. For Vertex and Bedrock, use native SDKs (`google-cloud-aiplatform`, `boto3`) directly inside the provider classes.
 - **Documentation cleanup** — update README to reflect current codebase layout; remove stale references to legacy paths.
 
 ---

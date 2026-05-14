@@ -11,7 +11,7 @@ Example skills demonstrating the skill pattern:
 #### [Diagnostics Skill](skills/diagnostics/)
 
 A complete reference implementation showing:
-- Using `@tool` decorator for LangChain integration
+- Using the lightweight ``@tool`` decorator from ``monkeybot.core.workspace_tools``
 - Async execution patterns
 - Structured output (JSON)
 - Environment variable checks
@@ -34,20 +34,10 @@ cp -r examples/skills/diagnostics/ ./skills/
 ### Import in Your Code
 
 ```python
-from monkeybot import build_deep_agent
-from skills.diagnostics import run_diagnostics
+from skills.diagnostics.diagnostics import run_diagnostics
 
-# Use directly
-result = await run_diagnostics.ainvoke({"check_type": "full"})
-
-# Or load via SkillLoader
-from monkeybot.skills import SkillLoader, SkillExecutor
-
-loader = SkillLoader(skills_dir="./skills")
-executor = SkillExecutor(loader.load_skills())
-tools = executor.to_langchain_tools()
-
-agent = build_deep_agent(model="gemini-2.5-flash", tools=tools)
+# Invoke the async skill entry point directly (or load via SkillLoader per docs)
+result = await run_diagnostics(check_type="full")
 ```
 
 ## Creating Your Own Examples

@@ -79,7 +79,7 @@ class ClaudeProvider:
 
     def _convert_tools(self, tools: Sequence[ToolDef]) -> list[dict[str, Any]]:
         return [
-            {"name": t.name, "description": t.description, "input_schema": t.parameters}
+            {"name": t.name, "description": t.description, "input_schema": t.input_schema}
             for t in tools
         ]
 

@@ -32,114 +32,62 @@ class TestConfigMappingBasics:
 
 
 class TestVertexAnthropicProvider:
-    """Tests for vertex_anthropic provider support."""
+    """Tests for vertex_anthropic native VertexClaudeProvider wiring."""
 
-    def test_get_model_vertex_anthropic_happy_path(self, monkeypatch):
-        """Test successful initialization of ChatAnthropicVertex with all required env vars."""
+    def test_get_provider_config_vertex_anthropic_happy_path(self, monkeypatch):
         from unittest.mock import MagicMock, patch
 
-        from monkeybot.core.config import get_model
+        from monkeybot.core.config import get_provider_config
 
-        # Set up environment
         monkeypatch.setenv("GCP_PROJECT_ID", "test-project")
         monkeypatch.setenv("VERTEX_AI_LOCATION", "us-central1")
 
-        # Mock the ChatAnthropicVertex class
-        mock_chat_anthropic = MagicMock()
+        mock_instance = MagicMock()
         with patch(
-            "langchain_google_vertexai.model_garden.ChatAnthropicVertex",
-            return_value=mock_chat_anthropic,
-        ) as mock_class:
-            model = get_model(
+            "monkeybot.core.config.VertexClaudeProvider",
+            return_value=mock_instance,
+        ) as mock_cls:
+            cfg = get_provider_config(
                 provider="vertex_anthropic",
                 model_name="claude-3-5-sonnet@20240620",
-                temperature=0.5,
-                max_tokens=4096,
             )
 
-            # Verify the model was created
-            assert model == mock_chat_anthropic
+            assert cfg.provider is mock_instance
+            assert cfg.model == "claude-3-5-sonnet@20240620"
+            mock_cls.assert_called_once_with(project_id="test-project", region="us-central1")
 
-            # Verify constructor was called with correct args
-            mock_class.assert_called_once_with(
-                model_name="claude-3-5-sonnet@20240620",
-                project="test-project",
-                location="us-central1",
-                temperature=0.5,
-                max_tokens=4096,
-            )
+    def test_get_provider_config_vertex_anthropic_missing_project(self, monkeypatch):
+        from monkeybot.core.config import get_provider_config
 
-    def test_get_model_vertex_anthropic_missing_project(self, monkeypatch):
-        """Test that ValueError is raised when GCP_PROJECT_ID is not set."""
-        from monkeybot.core.config import get_model
-
-        # Clear any project env vars
         monkeypatch.delenv("GCP_PROJECT_ID", raising=False)
         monkeypatch.delenv("VERTEX_AI_PROJECT_ID", raising=False)
 
-        # Mock the import to succeed
-        from unittest.mock import MagicMock, patch
-
-        with patch("langchain_google_vertexai.model_garden.ChatAnthropicVertex", MagicMock()):
-            try:
-                get_model(provider="vertex_anthropic", model_name="claude-3-5-sonnet@20240620")
-                assert False, "Expected ValueError to be raised"
-            except ValueError as e:
-                assert "vertex_anthropic provider requires GCP_PROJECT_ID" in str(e)
-                assert "Set gcp.project_id in bot.yaml" in str(e)
-
-    def test_get_model_vertex_anthropic_missing_import(self, monkeypatch):
-        """Test that ImportError is raised when anthropic[vertex] is not installed."""
-        from monkeybot.core.config import get_model
-
-        monkeypatch.setenv("GCP_PROJECT_ID", "test-project")
-
-        # Mock the import to fail
-        from unittest.mock import patch
-
-        with patch.dict("sys.modules", {"langchain_google_vertexai.model_garden": None}):
-            with patch(
-                "builtins.__import__",
-                side_effect=ImportError("No module named 'langchain_google_vertexai'"),
-            ):
-                try:
-                    get_model(provider="vertex_anthropic", model_name="claude-3-5-sonnet@20240620")
-                    assert False, "Expected ImportError to be raised"
-                except ImportError as e:
-                    assert "anthropic[vertex] is required" in str(e)
-                    assert "pip install 'anthropic[vertex]'" in str(e)
-
-    def test_get_model_vertex_anthropic_default_location(self, monkeypatch):
-        """Test that us-east5 is used as default location when VERTEX_AI_LOCATION is not set."""
-        from unittest.mock import MagicMock, patch
-
-        from monkeybot.core.config import get_model
-
-        # Set up environment with project but no location
-        monkeypatch.setenv("GCP_PROJECT_ID", "test-project")
-        monkeypatch.delenv("VERTEX_AI_LOCATION", raising=False)
-
-        # Mock the ChatAnthropicVertex class
-        mock_chat_anthropic = MagicMock()
-        with patch(
-            "langchain_google_vertexai.model_garden.ChatAnthropicVertex",
-            return_value=mock_chat_anthropic,
-        ) as mock_class:
-            get_model(
+        with pytest.raises(ValueError, match="vertex_anthropic provider requires"):
+            get_provider_config(
                 provider="vertex_anthropic",
                 model_name="claude-3-5-sonnet@20240620",
-                temperature=0.7,
-                max_tokens=8192,
             )
 
-            # Verify default location was used
-            mock_class.assert_called_once_with(
+    def test_get_provider_config_vertex_anthropic_default_location(self, monkeypatch):
+        from unittest.mock import MagicMock, patch
+
+        from monkeybot.core.config import get_provider_config
+
+        monkeypatch.setenv("GCP_PROJECT_ID", "test-project")
+        monkeypatch.delenv("VERTEX_AI_LOCATION", raising=False)
+        monkeypatch.delenv("ANTHROPIC_VERTEX_REGION", raising=False)
+
+        mock_instance = MagicMock()
+        with patch(
+            "monkeybot.core.config.VertexClaudeProvider",
+            return_value=mock_instance,
+        ) as mock_cls:
+            get_provider_config(
+                provider="vertex_anthropic",
                 model_name="claude-3-5-sonnet@20240620",
-                project="test-project",
-                location="us-east5",
-                temperature=0.7,
-                max_tokens=8192,
             )
+
+            mock_cls.assert_called_once_with(project_id="test-project", region="us-east5")
 
     def test_validate_provider_config_vertex_anthropic_accepted(self, monkeypatch):
         """Test that vertex_anthropic is accepted as a valid provider."""

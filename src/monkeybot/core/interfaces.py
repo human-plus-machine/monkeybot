@@ -1,10 +1,9 @@
 """Shared interfaces for monkey-bot agent components.
 
-This file defines interfaces and data structures used across the project.
-Integrations use **LangChain**-style primitives where helpful (for example
-``BaseChatModel`` from ``langchain_core``); the default **SSE gateway** agent
-path uses the native Gemini provider and SQLite-backed history rather than
-a separate graph-based orchestration runtime.
+This module defines interfaces and data structures used across the project.
+The default **SSE gateway** path uses native :class:`~monkeybot.core.provider.Provider`
+implementations and SQLite-backed history rather than a separate graph-based
+orchestration runtime.
 
 Remaining interfaces support backward compatibility and the skills system.
 """
@@ -103,8 +102,8 @@ class LLMError(MonkeybotError):
         - Model unavailable (503)
         - Invalid API credentials
         
-    Note: With LangChain v1, most LLM errors are handled by the framework,
-    but this exception is kept for explicit error handling when needed.
+    Note: Provider-level LLM errors are handled by the streaming adapter; this
+    exception is kept for explicit error handling when needed.
     """
 
     pass
@@ -199,9 +198,8 @@ class SkillsEngineInterface(ABC):
     This interface defines how the agent interacts with the skills system.
     Implemented by SkillsEngine in src/skills/executor.py.
     
-    Note: With LangChain v1, skills should be converted to @tool decorated
-    functions. This interface remains for backward compatibility with the
-    subprocess-based skill execution model.
+    Note: Skills are exposed as MCP or harness tools; this interface remains
+    for backward compatibility with the subprocess-based skill execution model.
 
     Key responsibilities:
         - Execute skills by name

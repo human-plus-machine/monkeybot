@@ -30,11 +30,23 @@ class VertexClaudeProvider:
     def supports_streaming(self) -> bool:
         return True
 
-    def __init__(self) -> None:
-        self._project_id = os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID", "")
-        self._region = os.environ.get("ANTHROPIC_VERTEX_REGION", "global")
+    def __init__(
+        self,
+        *,
+        project_id: str | None = None,
+        region: str | None = None,
+    ) -> None:
+        self._project_id = (
+            (project_id or "").strip()
+            or os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID", "").strip()
+        )
+        self._region = (
+            (region or "").strip()
+            or os.environ.get("ANTHROPIC_VERTEX_REGION", "").strip()
+            or "global"
+        )
         if not self._project_id:
-            raise ValueError("ANTHROPIC_VERTEX_PROJECT_ID is not set")
+            raise ValueError("ANTHROPIC_VERTEX_PROJECT_ID is not set (or pass project_id=)")
 
     def _convert_messages(self, messages: Sequence[Message]) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []

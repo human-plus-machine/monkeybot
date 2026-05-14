@@ -2,13 +2,13 @@
 
 > **The production-ready Python framework for building and deploying LLM agents on cloud infrastructure.**
 
-Built on [LangChain](https://github.com/langchain-ai/langchain) ecosystem libraries (for example `langchain-core` and provider integrations) plus a **native Gemini** path in the SSE gateway — `monkeybot` handles sessions, tools, and persistence so you can focus on the agent.
+Built on **native provider adapters** (Gemini via `google-genai`, Anthropic/OpenAI SDKs) behind a small streaming protocol — `monkeybot` handles sessions, tools, and persistence so you can focus on the agent.
 
 ---
 
 ## What is monkey-bot?
 
-monkey-bot (`monkeybot`) is a thin framework for running **tool-using LLM agents** with a **FastAPI SSE gateway**, **SQLite** conversation and usage storage, **MCP** tool servers, and optional **GCS** / skills / council workflows — wired for local dev and deployable on GCP Cloud Run (or anywhere Docker runs).
+monkey-bot (`monkeybot`) is a thin framework for running **tool-using LLM agents** with a **FastAPI SSE gateway**, **SQLite** conversation and usage storage, **MCP** tool servers, and optional **GCS** / skills / memory-organization workflows — wired for local dev and deployable on GCP Cloud Run (or anywhere Docker runs).
 
 You write **AGENT.md**, tools, and memory layout. `monkeybot` runs the loop, records history, and streams events to clients.
 
@@ -28,12 +28,12 @@ MCP + config       →    SQLite history + usage →    GCP when deployed
 |---|---|
 | **Agent loop** | Streaming provider integration, tool execution, inspectors; SQLite-backed turns |
 | **AGENT.md + context** | System prompt from file plus optional memory index and skill list per turn |
-| **Persistent memory (optional)** | Markdown under `MEMORY_PATH`, council extras |
+| **Persistent memory (optional)** | Markdown under `MEMORY_PATH`, optional GCS extra |
 | **Conversation history** | SQLite via `DB_URL` for gateway sessions |
 | **Skills** | `SKILL.md` + `run.py` / `main.py` discovery under `SKILLS_PATH` |
 | **MCP** | Stdio and streamable HTTP MCP servers; tools exposed as `server__tool` |
-| **LLM Council (optional)** | Async post-processor for classifying and indexing memory files |
-| **Multi-provider (library path)** | Vertex / Google GenAI, OpenAI, Anthropic via LangChain chat models in `get_model()` |
+| **Memory organizer (optional)** | Async post-processor for classifying and indexing memory files |
+| **Multi-provider (library path)** | Vertex Gemini, OpenAI, Anthropic, Vertex Claude via `get_provider_config()` |
 | **Zero-config playground** | `playground/agent` + `playground/chat-ui` for local SSE chat |
 
 ---
@@ -118,17 +118,16 @@ VERTEX_AI_PROJECT_ID=your-gcp-project
 
 Full configuration reference: **`.env.example`** at the repository root.
 
-### 3. Use the LangChain model helper (optional)
+### 3. Use the provider helper (optional)
 
 ```python
-from monkeybot.core.config import load_secrets, get_model
+from monkeybot.core.config import load_secrets, get_provider_config
 
 load_secrets()
-# google_vertexai | openai | anthropic | vertex_anthropic — see src/core/config.py
-model = get_model(provider="google_vertexai", model_name="gemini-2.5-flash")
+# google_vertexai | openai | anthropic | vertex_anthropic — see monkeybot/core/config.py
+binding = get_provider_config(provider="google_vertexai", model_name="gemini-2.5-flash")
+# binding.provider.stream(...); binding.model is the model id string
 ```
-
-Wire `model` into your own app, or use the **SSE gateway** and `playground/` UI (see [Getting Started](docs/getting-started.md)) for sessions over HTTP.
 
 ### 4. Run locally
 
@@ -227,16 +226,15 @@ pip install git+https://github.com/human-and-machine/monkey-bot.git@main
 
 | Integration | Status | Purpose |
 |---|---|---|
-| **Google Vertex AI** (Gemini) | Production | Primary LLM provider (gateway native path + LangChain helpers) |
+| **Google Vertex AI** (Gemini) | Production | Primary LLM provider (gateway + `GeminiProvider`) |
 | **Google Cloud Run** | Production | Serverless container hosting |
 | **SQLite** | Default (SSE gateway) | Session history and per-turn usage |
 | **Google Cloud Storage** | Optional (`monkeybot[gcs]`) | Long-term memory and file sync |
 | **GCP Secret Manager** | Production | Production secrets management |
 | **Google Chat** | Optional | Workspace Add-on interface (when deployed) |
-| **OpenAI** | Supported | Via `langchain-openai` in `get_model()` |
-| **Anthropic Claude** | Supported | Via `langchain-anthropic` in `get_model()` |
-| **Anthropic via Vertex AI** | Supported | Claude hosted on Google infrastructure |
-| **LangChain** | Supported | Chat models and tool helpers (`langchain-core`, provider integrations) |
+| **OpenAI** | Supported | `OpenAIProvider` (`monkeybot[openai]`) via `get_provider_config()` |
+| **Anthropic Claude** | Supported | `ClaudeProvider` (`monkeybot[claude]`) via `get_provider_config()` |
+| **Anthropic via Vertex AI** | Supported | `VertexClaudeProvider` (`anthropic[vertex]`) |
 | **AWS Bedrock** | Planned | `providers/bedrock.py` stub; `[bedrock]` extra in `pyproject.toml` |
 | **AWS S3** | Planned | Memory store backend |
 | **AWS Secrets Manager** | Planned | Secret resolver |
@@ -353,4 +351,4 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 ---
 
-Built with [LangChain](https://github.com/langchain-ai/langchain) · [Vertex AI](https://cloud.google.com/vertex-ai) · [FastAPI](https://fastapi.tiangolo.com)
+Built with [Vertex AI](https://cloud.google.com/vertex-ai) · [FastAPI](https://fastapi.tiangolo.com)
