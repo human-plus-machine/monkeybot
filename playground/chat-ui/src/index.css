@@ -203,6 +203,11 @@ code {
   color: var(--accent);
 }
 
+.btn.stop {
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+  color: var(--danger);
+}
+
 .pill {
   font-size: 0.8rem;
   padding: 4px 10px;
@@ -316,6 +321,14 @@ code {
   gap: 8px;
 }
 
+.composer-actions {
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+  align-items: center;
+  flex-shrink: 0;
+}
+
 @media (min-width: 640px) {
   .composer {
     flex-direction: row;
@@ -326,7 +339,7 @@ code {
     flex: 1;
   }
 
-  .send {
+  .composer-actions .send {
     flex-shrink: 0;
   }
 }

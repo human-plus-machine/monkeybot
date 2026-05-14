@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -37,6 +38,8 @@ class TurnContext:
     user_id: str | None
     parent_run_id: str | None
     model: str
+    cancelled: asyncio.Event | None = None
+    """When set by the parent run (e.g. gateway Stop), tool code may stop side effects early."""
 
 
 def _core_tool_defs(*, include_task_tool: bool = True) -> list[ToolDef]:
@@ -243,6 +246,7 @@ async def build_context(
     parent_run_id: str | None = None,
     model: str = "gemini-2.5-flash",
     include_task_tool: bool = True,
+    cancelled: asyncio.Event | None = None,
 ) -> TurnContext:
     """Assemble a TurnContext from filesystem paths and the MCP client snapshot.
 
@@ -257,6 +261,7 @@ async def build_context(
         parent_run_id: Optional parent run for subagent linkage.
         model: Model id for this turn.
         include_task_tool: When False, omit the ``task`` tool (used by the subagent worker).
+        cancelled: Optional cooperative-cancel handle for the parent turn (gateway / CLI).
 
     Returns:
         Frozen :class:`TurnContext`.
@@ -279,4 +284,5 @@ async def build_context(
         user_id=user_id,
         parent_run_id=parent_run_id,
         model=model,
+        cancelled=cancelled,
     )

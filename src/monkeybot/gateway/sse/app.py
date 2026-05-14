@@ -285,6 +285,7 @@ class GatewayLoopPort:
                     skills_path=_skills_path(),
                     mcp_client=mcp,
                     model=model_name,
+                    cancelled=cancel_event,
                 )
             except Exception as exc:
                 logger.exception("build_context failed")

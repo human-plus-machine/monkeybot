@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -22,6 +23,25 @@ from monkeybot.core.terminal import SecurityError, TerminalExecutor
 from monkeybot.core.workspace_service import WorkspaceError, WorkspaceFileService
 
 logger = logging.getLogger(__name__)
+
+_PARENT_CANCEL_TASK_ERR = "task: cancelled (parent)"
+
+
+async def _stop_subagent_process(proc: asyncio.subprocess.Process | None) -> None:
+    """SIGTERM then reap; SIGKILL if still alive after a short wait."""
+    if proc is None or proc.returncode is not None:
+        return
+    try:
+        proc.terminate()
+    except ProcessLookupError:
+        return
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=8.0)
+    except TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        with contextlib.suppress(ProcessLookupError):
+            await proc.wait()
 
 
 def _j(data: object) -> str:
@@ -303,18 +323,21 @@ class CoreToolExecutor(ToolExecutorPort):
         tool_call_count = 0
         tool_results: list[dict[str, str]] = []
         turn_complete: TurnComplete | None = None
+        proc_holder: list[asyncio.subprocess.Process | None] = [None]
 
         async def _subprocess_exec(*cmd: str | bytes) -> asyncio.subprocess.Process:
             env = dict(os.environ)
             env.update(child_env)
             env["PYTHONUNBUFFERED"] = "1"
-            return await asyncio.create_subprocess_exec(
+            p = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
                 env=env,
             )
+            proc_holder[0] = p
+            return p
 
         async def _drain() -> None:
             nonlocal turn_complete, tool_call_count
@@ -338,10 +361,59 @@ class CoreToolExecutor(ToolExecutorPort):
                 elif isinstance(evt, TurnComplete):
                     turn_complete = evt
 
+        drain_task = asyncio.create_task(_drain())
+        cancel_wait = asyncio.create_task(ctx.cancelled.wait()) if ctx.cancelled is not None else None
+
         try:
-            await asyncio.wait_for(_drain(), timeout=timeout)
-        except asyncio.TimeoutError:
-            errors.append(f"task: subagent exceeded {timeout:g}s timeout")
+            if cancel_wait is None:
+                try:
+                    await asyncio.wait_for(drain_task, timeout=timeout)
+                except asyncio.TimeoutError:
+                    errors.append(f"task: subagent exceeded {timeout:g}s timeout")
+                    await _stop_subagent_process(proc_holder[0])
+                    if not drain_task.done():
+                        drain_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await drain_task
+            else:
+                done, _ = await asyncio.wait(
+                    {drain_task, cancel_wait},
+                    timeout=timeout,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    errors.append(f"task: subagent exceeded {timeout:g}s timeout")
+                    await _stop_subagent_process(proc_holder[0])
+                    cancel_wait.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await cancel_wait
+                    if not drain_task.done():
+                        drain_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await drain_task
+                elif drain_task in done:
+                    if not cancel_wait.done():
+                        cancel_wait.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await cancel_wait
+                    try:
+                        drain_task.result()
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception as exc:
+                        errors.append(str(exc))
+                else:
+                    errors.append(_PARENT_CANCEL_TASK_ERR)
+                    await _stop_subagent_process(proc_holder[0])
+                    if not drain_task.done():
+                        drain_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await drain_task
+        finally:
+            if cancel_wait is not None and not cancel_wait.done():
+                cancel_wait.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await cancel_wait
 
         usage_payload = None
         if turn_complete is not None:

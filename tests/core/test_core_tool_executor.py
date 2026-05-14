@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import json
 from pathlib import Path
 
@@ -258,6 +260,66 @@ async def test_task_tool_aggregates_subagent_stream(tmp_path: Path, monkeypatch:
     assert payload["tool_call_count"] == 1
     assert payload["tool_results"] == [{"tool": "search", "snippet": "hit one"}]
     assert payload["usage"]["input_tokens"] == 3
+
+
+@pytest.mark.asyncio
+async def test_task_tool_parent_cancel_stops_hanging_subagent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    hang = asyncio.Event()
+
+    async def fake_spawn(
+        script: str,
+        envelope: object,
+        *,
+        scratch_dir: object,
+        subprocess_exec: object | None = None,
+        on_event: object | None = None,
+    ):
+        del script, scratch_dir, subprocess_exec, on_event
+        await hang.wait()
+        if False:
+            yield  # pragma: no cover
+
+    monkeypatch.setattr("monkeybot.core.core_tool_executor.spawn_subagent", fake_spawn)
+
+    root = tmp_path
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    worker = root / "subagent_worker.py"
+    worker.write_text("# placeholder\n", encoding="utf-8")
+    monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
+
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory_path=mem,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    parent_cancel = asyncio.Event()
+    ctx = dataclasses.replace(_ctx(), cancelled=parent_cancel)
+
+    exec_task = asyncio.create_task(
+        ex.execute(
+            call=ToolCall(
+                call_id="c1",
+                name="task",
+                args={"task": "never finishes", "context": ""},
+            ),
+            ctx=ctx,
+        )
+    )
+    await asyncio.sleep(0.05)
+    parent_cancel.set()
+    try:
+        out, err = await asyncio.wait_for(exec_task, timeout=5.0)
+    finally:
+        hang.set()
+
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert payload["ok"] is False
+    assert any("cancelled (parent)" in e for e in payload["errors"])
 
 
 def test_last_clean_assistant_text_strips_tool_call_echo() -> None:

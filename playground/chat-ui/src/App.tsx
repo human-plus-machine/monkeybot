@@ -4,6 +4,7 @@ import {
   createSession,
   fetchSessionUsage,
   openEventsStream,
+  postCancel,
   postReply,
   type GatewayJsonEvent,
   type SessionUsageResponse,
@@ -347,6 +348,24 @@ export default function App() {
     }
   }
 
+  const stopTurn = async () => {
+    const sid = sessionId
+    const rid = activeRequestId
+    if (!sid || !rid || status !== 'connected') return
+    try {
+      await postCancel(sid, rid)
+    } catch (e) {
+      setMessages((m) => [
+        ...m,
+        {
+          id: `e-${newRequestId()}`,
+          role: 'system',
+          content: e instanceof Error ? e.message : String(e),
+        },
+      ])
+    }
+  }
+
   const busy = activeRequestId !== null
 
   return (
@@ -450,14 +469,21 @@ export default function App() {
             placeholder="Message… (Enter to send, Shift+Enter newline)"
             disabled={status !== 'connected' || busy}
           />
-          <button
-            type="button"
-            className="btn primary send"
-            onClick={() => void send()}
-            disabled={status !== 'connected' || busy || !draft.trim()}
-          >
-            Send
-          </button>
+          <div className="composer-actions">
+            {busy ? (
+              <button type="button" className="btn stop" onClick={() => void stopTurn()}>
+                Stop
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className="btn primary send"
+              onClick={() => void send()}
+              disabled={status !== 'connected' || busy || !draft.trim()}
+            >
+              Send
+            </button>
+          </div>
         </div>
       </main>
     </div>

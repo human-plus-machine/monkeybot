@@ -163,6 +163,26 @@ export async function postReply(
   }
 }
 
+export async function postCancel(
+  sessionId: string,
+  requestId: string,
+  init?: RequestInit,
+): Promise<void> {
+  const res = await fetch(`${GATEWAY_BASE}/sessions/${encodeURIComponent(sessionId)}/cancel`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(init?.headers as Record<string, string>),
+    },
+    body: JSON.stringify({ request_id: requestId }),
+    signal: init?.signal,
+  })
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`cancel failed: ${res.status} ${text}`)
+  }
+}
+
 export function openEventsStream(sessionId: string, signal: AbortSignal): Promise<Response> {
   return fetch(`${GATEWAY_BASE}/sessions/${encodeURIComponent(sessionId)}/events`, {
     method: 'GET',
