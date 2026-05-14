@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Final
 
 import aiosqlite
@@ -100,6 +101,8 @@ async def apply_schema(conn: aiosqlite.Connection) -> None:
 async def open_connection(db_url: str | None = None) -> aiosqlite.Connection:
     """Open aiosqlite connection, configure WAL, return ready connection."""
     path = sqlite_path_from_db_url(db_url)
+    if path != ":memory:":
+        Path(path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
     conn = await aiosqlite.connect(path)
     await configure_connection(conn)
     return conn

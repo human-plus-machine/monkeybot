@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Sample agent (prompt + paths) using the monkeybot package — run as the backend beside playground/chat-ui."
 requires-python = ">=3.11"
 dependencies = [
-    "monkeybot",
+    "monkeybot[vertex]",
     "anthropic[vertex]>=0.40.0",
 ]
 
