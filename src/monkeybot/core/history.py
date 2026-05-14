@@ -89,3 +89,28 @@ class ConversationHistory:
             (thread_id,),
         )
         await self._conn.commit()
+
+    async def reset(self, thread_id: str, messages: list[ChatMessage]) -> None:
+        """Replace all rows for ``thread_id`` with ``messages`` in order."""
+        await self._conn.execute(
+            "DELETE FROM conversation_history WHERE thread_id = ?",
+            (thread_id,),
+        )
+        for message in messages:
+            self._validate_message(message)
+            created_at = int(time.time() * 1000)
+            await self._conn.execute(
+                """
+                INSERT INTO conversation_history(thread_id, role, content, tool_call_id, tool_name, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    thread_id,
+                    message.role,
+                    message.content,
+                    message.tool_call_id,
+                    message.tool_name,
+                    created_at,
+                ),
+            )
+        await self._conn.commit()

@@ -13,12 +13,32 @@ Tasks are split into two parallel tracks. **Do not edit files outside your track
 ### Track A — Loop & History (John)
 > **Owns:** `core/loop.py`, `core/history.py`, `core/context.py`
 
+---
+
+#### Branch: `bugs/loop-correctness`
+
 - **Bug: Agent loop stops after tool call** — loop exits prematurely after the first tool execution; investigate and fix in `_run_inner`.
-- **History summarization** — conversation history grows unbounded; implement a summarization pass (rolling window or threshold-triggered) in the `loop.py` turn cycle so long-running tasks don't blow the context window.
-- **Token counting before provider calls** — check estimated token count against model context window before each `provider.stream()` call in `loop.py`; truncate or summarize history proactively rather than hitting a hard API error.
-- **Fix unbounded tool results** — tool results (e.g. `read_file` on a large file) are appended to history at full length; cap or truncate large results at the point they are written to history in `loop.py`.
 - **Fix parallel subagent result ordering** — concurrent `task` calls append to history as they finish, not in `call_id` order; collect all results then append in deterministic order (`loop.py` ~line 393).
+
+---
+
+#### Branch: `feat/context-window-safety` *(implemented)*
+
+- **Fix unbounded tool results** — large tool returns spill to `.monkeybot/spill/{thread_id}/{call_id}.txt` with capped in-history text + path hint; spill dir cleaned at next `run()` start when `workspace_root` is set (`core_tool_executor.py`, `loop.py`).
+- **Token counting before provider calls** — `_estimate_tokens` on full provider payload vs `TurnContext.context_window_tokens` (default 200k; gateway passes `MODEL_CONTEXT_WINDOW`); trigger at 85% (`loop.py`, `context.py`).
+- **History summarization** — sync summarization via extra `provider.stream` call, `history.reset()`, and UI events `ContextSummarizing` / `ContextSummarized` (`loop.py`, `history.py`, `events.py`).
+- **`.monkeybot` write scope** — paths under `.monkeybot` bypass `WORKSPACE_WRITE_SCOPE_REL` so spill and harness files remain writable (`workspace_service.py`).
+
+---
+
+#### Branch: `feat/memory-index-refresh`
+
 - **Fix memory index stale mid-turn** — `memory/INDEX.md` is snapshotted once at `build_context()` time; fix by adding a lightweight index refresh in `context.py` before each provider call. *(No changes to `memory.py` needed — just re-call the existing `load_index()` API.)*
+
+---
+
+#### Branch: `feat/lazy-loading` *(optional — needs profiling first)*
+
 - **? Lazy loading** — import providers/skills/tools only when invoked to improve cold-start speed and avoid loading unused dependencies; needs profiling to confirm it's worth the complexity.
 
 ---
@@ -83,6 +103,7 @@ langfuse? deepeval other?
 
 ### Runtime / Safety
 
+- **Configurable summarization model** — history compression in `loop.py` currently uses the same `ctx.model` as the agent; allow a separate model id (env or `TurnContext`) for the summarization-only `provider.stream` call.
 - **HITL completion** — ApprovalRequest/Response loop (inspector `approve` path).
 - **DurableRunStore wiring** — persist `task` / subagent runs in `core_tool_executor.py` for crash recovery.
 

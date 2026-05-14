@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Sequence
+from pathlib import Path
 
 import pytest
 from monkeybot.core.context import TurnContext
 from monkeybot.core.events import (
     AssistantDelta,
+    ContextSummarized,
+    ContextSummarizing,
     Error,
     Thinking,
     TurnComplete,
@@ -19,7 +22,11 @@ from monkeybot.core.provider import Done, Message, TextDelta, ToolCall, UsageEve
 from monkeybot.core.types_tools import ToolDef
 
 
-def _ctx() -> TurnContext:
+def _ctx(
+    *,
+    workspace_root: Path | None = None,
+    context_window_tokens: int = 200_000,
+) -> TurnContext:
     return TurnContext(
         thread_id="t1",
         request_id="r1",
@@ -30,10 +37,16 @@ def _ctx() -> TurnContext:
         user_id=None,
         parent_run_id=None,
         model="gemini-2.5-flash",
+        workspace_root=workspace_root,
+        context_window_tokens=context_window_tokens,
     )
 
 
-def _ctx_with_task() -> TurnContext:
+def _ctx_with_task(
+    *,
+    workspace_root: Path | None = None,
+    context_window_tokens: int = 200_000,
+) -> TurnContext:
     return TurnContext(
         thread_id="t1",
         request_id="r1",
@@ -47,12 +60,15 @@ def _ctx_with_task() -> TurnContext:
         user_id=None,
         parent_run_id=None,
         model="gemini-2.5-flash",
+        workspace_root=workspace_root,
+        context_window_tokens=context_window_tokens,
     )
 
 
 class FakeHistory:
-    def __init__(self) -> None:
-        self.rows: list[Message] = []
+    def __init__(self, preload: list[Message] | None = None) -> None:
+        self.rows: list[Message] = list(preload) if preload is not None else []
+        self.reset_calls: list[tuple[str, list[Message]]] = []
 
     async def load(self, thread_id: str, limit: int = 100) -> list[Message]:
         del thread_id, limit
@@ -61,6 +77,10 @@ class FakeHistory:
     async def append(self, thread_id: str, message: Message) -> None:
         del thread_id
         self.rows.append(message)
+
+    async def reset(self, thread_id: str, messages: list[Message]) -> None:
+        self.reset_calls.append((thread_id, list(messages)))
+        self.rows = list(messages)
 
 
 class FakeProvider:
@@ -463,3 +483,82 @@ async def test_run_provider_raises_wrapped_as_error() -> None:
     assert isinstance(events[1], Error)
     assert "boom" in events[1].error
     assert isinstance(events[2], TurnComplete)
+
+
+@pytest.mark.asyncio
+async def test_run_cleanup_spill_at_start(tmp_path: Path) -> None:
+    spill = tmp_path / ".monkeybot" / "spill" / "t1"
+    spill.mkdir(parents=True)
+    (spill / "prev.txt").write_text("stale", encoding="utf-8")
+    prov = FakeProvider([[TextDelta(text="ok"), Done()]])
+    hist = FakeHistory()
+    ctx = _ctx(workspace_root=tmp_path)
+    async for _ in run(
+        "hi",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        max_turns=3,
+    ):
+        pass
+    assert not spill.exists()
+
+
+@pytest.mark.asyncio
+async def test_run_emits_context_summarize_events_when_over_cap(tmp_path: Path) -> None:
+    preload = [
+        Message(role="user" if i % 2 == 0 else "assistant", content="z" * 600) for i in range(8)
+    ]
+    hist = FakeHistory(preload)
+    prov = FakeProvider(
+        [
+            [TextDelta(text=" compressed summary "), Done()],
+            [TextDelta(text="final"), Done()],
+        ]
+    )
+    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=800)
+    events = []
+    async for e in run(
+        "hello",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        max_turns=4,
+    ):
+        events.append(e)
+    kinds = [type(x).__name__ for x in events]
+    assert "ContextSummarizing" in kinds
+    assert "ContextSummarized" in kinds
+    assert prov.stream_calls == 2
+    assert len(hist.reset_calls) == 1
+    assert any("[Context Summary]" in m.content for m in hist.rows)
+
+
+@pytest.mark.asyncio
+async def test_run_no_context_summarize_events_when_under_cap(tmp_path: Path) -> None:
+    preload = [
+        Message(role="user" if i % 2 == 0 else "assistant", content="z" * 600) for i in range(8)
+    ]
+    hist = FakeHistory(preload)
+    prov = FakeProvider([[TextDelta(text="final"), Done()]])
+    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=2_000_000)
+    events = []
+    async for e in run(
+        "hello",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        max_turns=4,
+    ):
+        events.append(e)
+    kinds = [type(x).__name__ for x in events]
+    assert "ContextSummarizing" not in kinds
+    assert "ContextSummarized" not in kinds
+    assert prov.stream_calls == 1
+    assert hist.reset_calls == []

@@ -26,6 +26,51 @@ logger = logging.getLogger(__name__)
 
 _PARENT_CANCEL_TASK_ERR = "task: cancelled (parent)"
 
+_SPILL_DIR = ".monkeybot/spill"
+_SPILL_MAX_CHARS = 20_000
+_SPILL_READ_LIMIT = 500
+
+
+def _safe_spill_filename(call_id: str) -> str:
+    safe = "".join(c for c in call_id if c.isalnum() or c in "-_")[:200]
+    return safe or "call"
+
+
+def _write_spill_and_cap(
+    text: str,
+    workspace_root: Path,
+    thread_id: str,
+    call_id: str,
+) -> str:
+    """Write full ``text`` to spill file; return capped body with path hint."""
+    rel = f"{_SPILL_DIR}/{thread_id}/{_safe_spill_filename(call_id)}.txt"
+    out_path = (Path(workspace_root) / rel).resolve()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(text, encoding="utf-8")
+    prefix = text[:_SPILL_MAX_CHARS]
+    note = (
+        f"\n[Result truncated — {len(text)} total chars. Full output at: {rel} — "
+        "use read_file with offset/limit to page through it.]"
+    )
+    return prefix + note
+
+
+def _is_under_spill_path(workspace_root: Path, rel_path: str) -> bool:
+    s = str(rel_path).strip().replace("\\", "/").lstrip("/")
+    if not s or ".." in s or s.startswith("~"):
+        return False
+    try:
+        resolved = (Path(workspace_root) / s).resolve()
+        resolved.relative_to(Path(workspace_root).resolve())
+    except ValueError:
+        return False
+    spill_root = (Path(workspace_root).resolve() / _SPILL_DIR).resolve()
+    try:
+        resolved.relative_to(spill_root)
+        return True
+    except ValueError:
+        return False
+
 
 async def _stop_subagent_process(proc: asyncio.subprocess.Process | None) -> None:
     """SIGTERM then reap; SIGKILL if still alive after a short wait."""
@@ -182,44 +227,52 @@ class CoreToolExecutor(ToolExecutorPort):
     async def execute(self, *, call: ToolCall, ctx: TurnContext) -> tuple[str | None, str | None]:
         name = call.name
         args: dict[str, Any] = dict(call.args)
+        result_text: str | None = None
+        err_text: str | None = None
 
         try:
             if name == "read_file":
-                return self._tool_read_file(args)
-            if name == "write_file":
-                return self._tool_write_file(args)
-            if name == "search_memory":
-                return await self._tool_search_memory(args)
-            if name == "list_skills":
-                return self._tool_list_skills(ctx)
-            if name == "task":
-                return await self._tool_task(call, ctx)
-            if name == "run_command":
-                return await self._tool_run_command(args)
-            if name == "add_mcp_server":
-                return await self._tool_add_mcp_server(args)
-            if name == "remove_mcp_server":
-                return await self._tool_remove_mcp_server(args)
-
-            mcp_pair = self._mcp.split_prefixed_tool(name)
-            if mcp_pair is not None:
-                server_name, tool_name = mcp_pair
-                try:
-                    text = await self._mcp.call_tool(server_name, tool_name, args)
-                    return (text, None)
-                except MCPServerNotConnectedError as exc:
-                    return (None, str(exc))
-
-            return (None, f"unknown tool: {name}")
+                result_text, err_text = self._tool_read_file(args)
+            elif name == "write_file":
+                result_text, err_text = self._tool_write_file(args)
+            elif name == "search_memory":
+                result_text, err_text = await self._tool_search_memory(args)
+            elif name == "list_skills":
+                result_text, err_text = self._tool_list_skills(ctx)
+            elif name == "task":
+                result_text, err_text = await self._tool_task(call, ctx)
+            elif name == "run_command":
+                result_text, err_text = await self._tool_run_command(args)
+            elif name == "add_mcp_server":
+                result_text, err_text = await self._tool_add_mcp_server(args)
+            elif name == "remove_mcp_server":
+                result_text, err_text = await self._tool_remove_mcp_server(args)
+            else:
+                mcp_pair = self._mcp.split_prefixed_tool(name)
+                if mcp_pair is not None:
+                    server_name, tool_name = mcp_pair
+                    try:
+                        text = await self._mcp.call_tool(server_name, tool_name, args)
+                        result_text, err_text = text, None
+                    except MCPServerNotConnectedError as exc:
+                        result_text, err_text = None, str(exc)
+                else:
+                    result_text, err_text = None, f"unknown tool: {name}"
         except WorkspaceError as exc:
-            return (None, str(exc))
+            result_text, err_text = None, str(exc)
         except MCPConnectionError as exc:
-            return (None, str(exc))
+            result_text, err_text = None, str(exc)
         except (SecurityError, TimeoutError, ValueError, TypeError, OSError) as exc:
-            return (None, str(exc))
+            result_text, err_text = None, str(exc)
         except Exception as exc:
             logger.exception("tool %s failed", name)
-            return (None, str(exc))
+            result_text, err_text = None, str(exc)
+
+        if err_text is None and result_text is not None and len(result_text) > _SPILL_MAX_CHARS:
+            result_text = _write_spill_and_cap(
+                result_text, self._workspace.repo_root, ctx.thread_id, call.call_id
+            )
+        return result_text, err_text
 
     def _tool_read_file(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
         path = _str_arg(args, "path", "file_path", "file")
@@ -227,6 +280,8 @@ class CoreToolExecutor(ToolExecutorPort):
             return (None, "read_file requires path")
         offset = _coerce_int(args.get("offset"), 1) or 1
         limit = _coerce_int(args.get("limit"), None)
+        if _is_under_spill_path(self._workspace.repo_root, path):
+            limit = min(limit or _SPILL_READ_LIMIT, _SPILL_READ_LIMIT)
         try:
             payload = self._workspace.read_file(path, offset=offset, limit=limit)
             return (_j(payload), None)

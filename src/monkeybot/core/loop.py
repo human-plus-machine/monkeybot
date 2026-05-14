@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 from collections.abc import AsyncIterator, Sequence
 from contextlib import aclosing
+from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from monkeybot.core.context import TurnContext
@@ -14,6 +16,8 @@ from monkeybot.core.harness_prompt import harness_fixed_context
 from monkeybot.core.events import (
     AgentEvent,
     AssistantDelta,
+    ContextSummarized,
+    ContextSummarizing,
     Error,
     Thinking,
     ToolCallResult,
@@ -85,6 +89,78 @@ def _assistant_tool_placeholder(text: str, calls: Sequence[ToolCall]) -> str:
 # Max concurrent ``task`` (subagent) subprocesses per single model tool batch.
 _MAX_CONCURRENT_SUBAGENTS = 10
 
+_SPILL_REL = Path(".monkeybot") / "spill"
+_SUMMARY_TRIGGER_RATIO = 0.85
+_SUMMARY_KEEP_HEAD = 1
+_SUMMARY_KEEP_TAIL = 6
+
+
+def _estimate_tokens(messages: Sequence[Message]) -> int:
+    return sum(len(m.content) for m in messages) // 4
+
+
+def _cleanup_spill_files(workspace_root: Path, thread_id: str) -> None:
+    spill_path = Path(workspace_root).resolve() / _SPILL_REL / thread_id
+    if spill_path.exists():
+        shutil.rmtree(spill_path, ignore_errors=True)
+
+
+def _summarization_viable(messages: Sequence[Message]) -> bool:
+    return len(messages) > _SUMMARY_KEEP_HEAD + _SUMMARY_KEEP_TAIL
+
+
+async def _summarize_history(
+    thread_id: str,
+    messages: list[Message],
+    history: ConversationHistoryPort,
+    provider: Provider,
+    model: str,
+) -> int:
+    """Compress middle history into one assistant summary row. Returns middle row count."""
+    if not _summarization_viable(messages):
+        return 0
+    head = messages[:_SUMMARY_KEEP_HEAD]
+    tail = messages[-_SUMMARY_KEEP_TAIL :]
+    middle = messages[_SUMMARY_KEEP_HEAD : -_SUMMARY_KEEP_TAIL]
+    if not middle:
+        return 0
+    lines: list[str] = []
+    for m in middle:
+        label = m.role
+        if m.tool_name:
+            label = f"{m.role} tool={m.tool_name}"
+        lines.append(f"[{label}]\n{m.content}")
+    blob = "\n\n---\n\n".join(lines)
+    summarize_messages = [
+        Message(
+            role="system",
+            content=(
+                "You compress prior agent conversation turns into one dense factual summary. "
+                "Preserve decisions, file paths, errors, tool outcomes, and open tasks. "
+                "Output prose only, no markdown headings unless essential."
+            ),
+        ),
+        Message(
+            role="user",
+            content="Summarize the following conversation segment:\n\n" + blob,
+        ),
+    ]
+    summary_text = ""
+    async with aclosing(provider.stream(summarize_messages, [], model=model)) as stream:
+        async for ev in stream:
+            if isinstance(ev, TextDelta):
+                summary_text += ev.text
+            elif isinstance(ev, Done):
+                break
+    summary_text = summary_text.strip() or "(empty summary)"
+    merged = [
+        *head,
+        Message(role="assistant", content=f"[Context Summary]: {summary_text}"),
+        *tail,
+    ]
+    await history.reset(thread_id, merged)
+    return len(middle)
+
 
 def _chunk_tool_calls(ordered: Sequence[ToolCall]) -> list[list[ToolCall]]:
     """Split into maximal runs of consecutive ``task`` tools vs single non-``task`` tools.
@@ -114,6 +190,8 @@ class ConversationHistoryPort(Protocol):
     async def load(self, thread_id: str, limit: int = 100) -> list[Message]: ...
 
     async def append(self, thread_id: str, message: Message) -> None: ...
+
+    async def reset(self, thread_id: str, messages: list[Message]) -> None: ...
 
 
 @runtime_checkable
@@ -187,6 +265,8 @@ async def _run_inner(
 ) -> AsyncIterator[AgentEvent]:
     effective_max = _effective_max_turns(max_turns)
     _ = await history.load(ctx.thread_id)
+    if ctx.workspace_root is not None:
+        _cleanup_spill_files(ctx.workspace_root, ctx.thread_id)
     await history.append(ctx.thread_id, Message(role="user", content=message))
 
     turn_index = 0
@@ -209,6 +289,31 @@ async def _run_inner(
         chat_messages = await history.load(ctx.thread_id)
         system = _system_message(ctx)
         provider_messages = _messages_for_provider(system, chat_messages)
+
+        estimated = _estimate_tokens(provider_messages)
+        cap = max(1, int(ctx.context_window_tokens * _SUMMARY_TRIGGER_RATIO))
+        if estimated >= cap and _summarization_viable(chat_messages):
+            yield ContextSummarizing(
+                request_id=ctx.request_id,
+                estimated_tokens=estimated,
+                context_window_tokens=ctx.context_window_tokens,
+            )
+            try:
+                turns_summarized = await _summarize_history(
+                    ctx.thread_id,
+                    chat_messages,
+                    history,
+                    provider,
+                    ctx.model,
+                )
+            except Exception:
+                turns_summarized = 0
+            yield ContextSummarized(
+                request_id=ctx.request_id,
+                turns_summarized=turns_summarized,
+            )
+            chat_messages = await history.load(ctx.thread_id)
+            provider_messages = _messages_for_provider(system, chat_messages)
 
         pending: dict[str, ToolCall] = {}
         assistant_text = ""

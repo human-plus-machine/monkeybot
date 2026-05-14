@@ -77,8 +77,30 @@ class Error:
     error: str = ""
 
 
+@dataclass(frozen=True)
+class ContextSummarizing:
+    kind: Literal["ContextSummarizing"] = "ContextSummarizing"
+    request_id: str = ""
+    estimated_tokens: int = 0
+    context_window_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class ContextSummarized:
+    kind: Literal["ContextSummarized"] = "ContextSummarized"
+    request_id: str = ""
+    turns_summarized: int = 0
+
+
 AgentEvent: TypeAlias = (
-    Thinking | AssistantDelta | ToolCallStarted | ToolCallResult | TurnComplete | Error
+    Thinking
+    | AssistantDelta
+    | ToolCallStarted
+    | ToolCallResult
+    | TurnComplete
+    | Error
+    | ContextSummarizing
+    | ContextSummarized
 )
 
 
@@ -136,6 +158,14 @@ def event_to_json(event: AgentEvent) -> str:
         }
     elif isinstance(event, Error):
         payload = {**base, "error": event.error}
+    elif isinstance(event, ContextSummarizing):
+        payload = {
+            **base,
+            "estimated_tokens": event.estimated_tokens,
+            "context_window_tokens": event.context_window_tokens,
+        }
+    elif isinstance(event, ContextSummarized):
+        payload = {**base, "turns_summarized": event.turns_summarized}
     else:
         raise EventDecodeError(f"Unsupported AgentEvent variant: {type(event).__name__}")
     try:
@@ -195,4 +225,16 @@ def event_from_json(raw: str) -> AgentEvent:
         err_raw = payload.get("error", "")
         err = err_raw if isinstance(err_raw, str) else ""
         return Error(request_id=rid, error=err)
+    if t == "ContextSummarizing":
+        et_raw = payload.get("estimated_tokens", 0)
+        cwt_raw = payload.get("context_window_tokens", 0)
+        et = int(et_raw) if isinstance(et_raw, (int, float)) else 0
+        cwt = int(cwt_raw) if isinstance(cwt_raw, (int, float)) else 0
+        return ContextSummarizing(
+            request_id=rid, estimated_tokens=et, context_window_tokens=cwt
+        )
+    if t == "ContextSummarized":
+        ts_raw = payload.get("turns_summarized", 0)
+        ts = int(ts_raw) if isinstance(ts_raw, (int, float)) else 0
+        return ContextSummarized(request_id=rid, turns_summarized=ts)
     raise EventDecodeError(f"unknown AgentEvent type: {t!r}")

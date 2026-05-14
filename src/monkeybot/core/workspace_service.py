@@ -152,6 +152,12 @@ class WorkspaceFileService:
         scope_root = self._write_scope_root()
         if scope_root is None:
             return
+        monkeybot_root = (self._root / ".monkeybot").resolve()
+        try:
+            fp.resolve().relative_to(monkeybot_root)
+            return
+        except ValueError:
+            pass
         try:
             fp.resolve().relative_to(scope_root)
         except ValueError:

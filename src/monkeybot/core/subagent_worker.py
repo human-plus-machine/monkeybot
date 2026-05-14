@@ -57,6 +57,20 @@ class _HistoryAdapter:
             ),
         )
 
+    async def reset(self, thread_id: str, messages: list[Message]) -> None:
+        await self._inner.reset(
+            thread_id,
+            [
+                ChatMessage(
+                    role=m.role,  # type: ignore[arg-type]
+                    content=m.content,
+                    tool_call_id=m.tool_call_id,
+                    tool_name=m.tool_name,
+                )
+                for m in messages
+            ],
+        )
+
 
 def _resolve_provider() -> GeminiProvider | ScriptedFakeProvider:
     mode = os.environ.get("MODEL_PROVIDER", "gemini").lower().strip()
@@ -168,6 +182,12 @@ async def _async_main() -> None:
         thread_id = f"subagent:{envelope.parent_run_id}:{uuid.uuid4().hex[:10]}"
         request_id = f"sub-{uuid.uuid4().hex[:12]}"
 
+        cap_raw = os.environ.get("MODEL_CONTEXT_WINDOW", "200000").strip()
+        try:
+            context_window_tokens = max(1, int(cap_raw))
+        except ValueError:
+            context_window_tokens = 200_000
+
         ctx = await build_context(
             thread_id,
             request_id,
@@ -178,6 +198,8 @@ async def _async_main() -> None:
             parent_run_id=envelope.parent_run_id,
             model=envelope.model,
             include_task_tool=False,
+            workspace_root=ws,
+            context_window_tokens=context_window_tokens,
         )
 
         executor = CoreToolExecutor(

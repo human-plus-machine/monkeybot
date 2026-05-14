@@ -322,6 +322,106 @@ async def test_task_tool_parent_cancel_stops_hanging_subagent(tmp_path: Path, mo
     assert any("cancelled (parent)" in e for e in payload["errors"])
 
 
+@pytest.mark.asyncio
+async def test_write_spill_and_cap_writes_full_payload(tmp_path: Path) -> None:
+    from monkeybot.core.core_tool_executor import _write_spill_and_cap
+
+    body = "x" * 25_000
+    out = _write_spill_and_cap(body, tmp_path, "th1", "call-1")
+    spill = tmp_path / ".monkeybot" / "spill" / "th1" / "call-1.txt"
+    assert spill.read_text(encoding="utf-8") == body
+    assert len(out) < len(body)
+    assert "Full output at:" in out
+    assert ".monkeybot/spill/th1/call-1.txt" in out
+
+
+@pytest.mark.asyncio
+async def test_list_skills_spills_large_json(tmp_path: Path) -> None:
+    root = tmp_path
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    big_skills = [
+        SkillRef(name=f"s{i}", description="d" * 400, entry_point=f"s{i}/run.py") for i in range(80)
+    ]
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory_path=mem,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    ctx = _ctx(skills=big_skills)
+    out, err = await ex.execute(call=ToolCall(call_id="c-spill", name="list_skills", args={}), ctx=ctx)
+    assert err is None and out is not None
+    assert len(out) <= 20_500
+    spill = root / ".monkeybot" / "spill" / "t" / "c-spill.txt"
+    assert spill.is_file()
+    raw = spill.read_text(encoding="utf-8")
+    assert len(raw) > 20_000
+
+
+@pytest.mark.asyncio
+async def test_list_skills_small_no_spill(tmp_path: Path) -> None:
+    root = tmp_path
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(workspace_root=root, memory_path=mem, skills_path=skills, mcp=_NoMCP())
+    ctx = _ctx()
+    out, err = await ex.execute(call=ToolCall(call_id="c1", name="list_skills", args={}), ctx=ctx)
+    assert err is None and out is not None
+    assert not (root / ".monkeybot" / "spill").exists()
+
+
+@pytest.mark.asyncio
+async def test_read_file_spill_path_caps_limit(tmp_path: Path) -> None:
+    root = tmp_path
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    spill = root / ".monkeybot" / "spill" / "t" / "big.txt"
+    spill.parent.mkdir(parents=True)
+    spill.write_text("\n".join(f"line{i}" for i in range(600)), encoding="utf-8")
+    ex = CoreToolExecutor(workspace_root=root, memory_path=mem, skills_path=skills, mcp=_NoMCP())
+    ctx = _ctx()
+    out, err = await ex.execute(
+        call=ToolCall(
+            call_id="r1",
+            name="read_file",
+            args={"path": ".monkeybot/spill/t/big.txt", "offset": 1, "limit": 10_000},
+        ),
+        ctx=ctx,
+    )
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert payload["ok"] is True
+    assert payload["end_line"] - payload["start_line"] + 1 <= 500
+
+
+@pytest.mark.asyncio
+async def test_read_file_non_spill_uses_workspace_defaults(tmp_path: Path) -> None:
+    root = tmp_path
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    p = root / "wide.txt"
+    p.write_text("\n".join(f"L{i}" for i in range(400)), encoding="utf-8")
+    ex = CoreToolExecutor(workspace_root=root, memory_path=mem, skills_path=skills, mcp=_NoMCP())
+    ctx = _ctx()
+    out, err = await ex.execute(
+        call=ToolCall(call_id="r2", name="read_file", args={"path": "wide.txt"}),
+        ctx=ctx,
+    )
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert payload["ok"] is True
+    assert payload["end_line"] - payload["start_line"] + 1 <= 200
+
+
 def test_last_clean_assistant_text_strips_tool_call_echo() -> None:
     from monkeybot.core.core_tool_executor import _last_clean_assistant_text
 

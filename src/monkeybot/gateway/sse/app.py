@@ -92,6 +92,20 @@ class _HistoryAdapter:
             ),
         )
 
+    async def reset(self, thread_id: str, messages: list[Message]) -> None:
+        await self._inner.reset(
+            thread_id,
+            [
+                ChatMessage(
+                    role=m.role,  # type: ignore[arg-type]
+                    content=m.content,
+                    tool_call_id=m.tool_call_id,
+                    tool_name=m.tool_name,
+                )
+                for m in messages
+            ],
+        )
+
 
 def _resolved_workspace_paths() -> tuple[Path, Path, Path]:
     """Resolve workspace, memory, and skills roots relative to the process cwd."""
@@ -276,6 +290,8 @@ class GatewayLoopPort:
             model_name = os.environ.get("MODEL_NAME", "gemini-2.5-flash")
             agent_path = _default_agent_path(bus)
 
+            workspace_root, memory_resolved, skills_resolved = _resolved_workspace_paths()
+
             try:
                 ctx = await build_context(
                     session_id,
@@ -286,6 +302,8 @@ class GatewayLoopPort:
                     mcp_client=mcp,
                     model=model_name,
                     cancelled=cancel_event,
+                    context_window_tokens=_env_context_window_tokens(),
+                    workspace_root=workspace_root,
                 )
             except Exception as exc:
                 logger.exception("build_context failed")
@@ -297,7 +315,6 @@ class GatewayLoopPort:
                 )
                 return
 
-            workspace_root, memory_resolved, skills_resolved = _resolved_workspace_paths()
             executor = CoreToolExecutor(
                 workspace_root=workspace_root,
                 memory_path=memory_resolved,

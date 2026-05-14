@@ -40,6 +40,10 @@ class TurnContext:
     model: str
     cancelled: asyncio.Event | None = None
     """When set by the parent run (e.g. gateway Stop), tool code may stop side effects early."""
+    context_window_tokens: int = 200_000
+    """Max input context for pre-flight checks; summarization triggers near this cap."""
+    workspace_root: Path | None = None
+    """Workspace root for spill cleanup; optional for tests / minimal harness."""
 
 
 def _core_tool_defs(*, include_task_tool: bool = True) -> list[ToolDef]:
@@ -247,6 +251,8 @@ async def build_context(
     model: str = "gemini-2.5-flash",
     include_task_tool: bool = True,
     cancelled: asyncio.Event | None = None,
+    context_window_tokens: int = 200_000,
+    workspace_root: Path | None = None,
 ) -> TurnContext:
     """Assemble a TurnContext from filesystem paths and the MCP client snapshot.
 
@@ -262,6 +268,8 @@ async def build_context(
         model: Model id for this turn.
         include_task_tool: When False, omit the ``task`` tool (used by the subagent worker).
         cancelled: Optional cooperative-cancel handle for the parent turn (gateway / CLI).
+        context_window_tokens: Model context budget for pre-flight and summarization triggers.
+        workspace_root: Optional workspace root for spill directory cleanup at run start.
 
     Returns:
         Frozen :class:`TurnContext`.
@@ -285,4 +293,6 @@ async def build_context(
         parent_run_id=parent_run_id,
         model=model,
         cancelled=cancelled,
+        context_window_tokens=context_window_tokens,
+        workspace_root=workspace_root,
     )

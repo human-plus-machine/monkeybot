@@ -59,6 +59,22 @@ def test_agent_event_roundtrip_error() -> None:
     assert event_from_json(event_to_json(ev)) == ev
 
 
+def test_agent_event_roundtrip_context_summarizing() -> None:
+    from monkeybot.core.events import ContextSummarizing
+
+    ev = ContextSummarizing(
+        request_id="r1", estimated_tokens=170_000, context_window_tokens=200_000
+    )
+    assert event_from_json(event_to_json(ev)) == ev
+
+
+def test_agent_event_roundtrip_context_summarized() -> None:
+    from monkeybot.core.events import ContextSummarized
+
+    ev = ContextSummarized(request_id="r1", turns_summarized=12)
+    assert event_from_json(event_to_json(ev)) == ev
+
+
 def test_agent_event_turn_complete_numeric_cost_usd_int() -> None:
     payload = '{"type":"TurnComplete","request_id":"r","usage":{"cost_usd":0}}'
     out = event_from_json(payload)

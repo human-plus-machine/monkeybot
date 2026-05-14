@@ -54,6 +54,36 @@ def test_replace_rejected_outside_scope() -> None:
         assert exc.value.code == "write_outside_scope"
 
 
+def test_write_to_monkeybot_bypasses_write_scope() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "data" / "memory").mkdir(parents=True)
+        (root / ".monkeybot" / "spill").mkdir(parents=True)
+        svc = WorkspaceFileService(
+            root,
+            settings=WorkspaceSettings(WORKSPACE_WRITE_SCOPE_REL="data/memory"),
+        )
+        out = svc.write_file(".monkeybot/spill/x.txt", "allowed")
+        assert out["ok"] is True
+        assert (root / ".monkeybot" / "spill" / "x.txt").read_text() == "allowed"
+
+
+def test_replace_in_monkeybot_bypasses_write_scope() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "data" / "memory").mkdir(parents=True)
+        p = root / ".monkeybot" / "note.txt"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("old", encoding="utf-8")
+        svc = WorkspaceFileService(
+            root,
+            settings=WorkspaceSettings(WORKSPACE_WRITE_SCOPE_REL="data/memory"),
+        )
+        out = svc.replace_in_file(".monkeybot/note.txt", "old", "new")
+        assert out["ok"] is True
+        assert p.read_text() == "new"
+
+
 def test_no_scope_allows_anywhere_under_repo() -> None:
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)

@@ -90,6 +90,49 @@ async def test_history_load_respects_limit(history_db) -> None:
 
 
 @pytest.mark.asyncio
+async def test_history_reset_replaces_all_messages(history_db) -> None:
+    _conn, history = history_db
+    thread_id = "t-reset"
+    for i in range(5):
+        await history.append(thread_id, ChatMessage(role="user", content=f"m{i}"))
+    await history.reset(
+        thread_id,
+        [
+            ChatMessage(role="user", content="a"),
+            ChatMessage(role="assistant", content="b"),
+        ],
+    )
+    loaded = await history.load(thread_id)
+    assert len(loaded) == 2
+    assert [m.content for m in loaded] == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_history_reset_preserves_order(history_db) -> None:
+    _conn, history = history_db
+    thread_id = "t-order"
+    await history.append(thread_id, ChatMessage(role="user", content="old"))
+    rows = [
+        ChatMessage(role="user", content="u1"),
+        ChatMessage(role="assistant", content="a1"),
+        ChatMessage(role="tool", content="t1", tool_call_id="1", tool_name="x"),
+    ]
+    await history.reset(thread_id, rows)
+    loaded = await history.load(thread_id)
+    assert [m.role for m in loaded] == ["user", "assistant", "tool"]
+    assert loaded[2].tool_call_id == "1"
+
+
+@pytest.mark.asyncio
+async def test_history_reset_with_empty_clears_thread(history_db) -> None:
+    _conn, history = history_db
+    thread_id = "t-empty"
+    await history.append(thread_id, ChatMessage(role="user", content="x"))
+    await history.reset(thread_id, [])
+    assert await history.load(thread_id) == []
+
+
+@pytest.mark.asyncio
 async def test_history_clear_removes_thread_only(history_db) -> None:
     _conn, history = history_db
     await history.append("t1", ChatMessage(role="user", content="a"))
