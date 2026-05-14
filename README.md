@@ -94,35 +94,29 @@ Or clone the reference implementation:
 
 ```bash
 git clone https://github.com/human-and-machine/monkey-bot.git
-cd monkey-bot/test-monkey
+cd monkey-bot
 cp .env.example .env
 ```
 
 ### 2. Configure
 
-Edit `bot.yaml` (non-secret config):
-
-```yaml
-agent:
-  name: my-bot
-  skills_dir: ./skills
-
-model:
-  provider: google_vertexai
-  name: gemini-2.5-flash
-  temperature: 0.7
-
-gateway:
-  allowed_users:
-    - you@yourcompany.com
-```
-
-Edit `.env` (secrets — never committed):
+Copy `.env.example` to `.env` and fill in your values:
 
 ```bash
+MODEL_PROVIDER=gemini
+MODEL_NAME=gemini-2.5-flash
+
+DB_URL=sqlite:///data/monkeybot.db
+MEMORY_PATH=./data/memory
+SKILLS_PATH=./.agents/skills
+AGENT_MD=./bots/example-bot/AGENT.md
+
+# Gemini / Vertex
 GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
 VERTEX_AI_PROJECT_ID=your-gcp-project
 ```
+
+Full configuration reference: **`.env.example`** at the repository root.
 
 ### 3. Use the LangChain model helper (optional)
 
@@ -139,7 +133,7 @@ Wire `model` into your own app, or use the **SSE gateway** and `playground/` UI 
 ### 4. Run locally
 
 ```bash
-python -m src.main
+python -m monkeybot.gateway.main
 ```
 
 ### 5. Deploy
@@ -187,13 +181,17 @@ Done. Your agent is live on Cloud Run.
 ```
 monkey-bot/
 ├── src/
-│   ├── core/                    # Agent loop, context, providers (e.g. Gemini), MCP, usage
-│   ├── gateway/
-│   │   ├── main.py              # Uvicorn entry
-│   │   └── sse/                 # FastAPI SSE app, routes, session bus
-│   └── skills/                  # Skill loader utilities
+│   └── monkeybot/
+│       ├── core/                # Agent loop, context, MCP, usage
+│       ├── gateway/
+│       │   ├── main.py          # Uvicorn entry
+│       │   └── sse/             # FastAPI SSE app, routes, session bus
+│       ├── providers/           # LLM provider adapters (Gemini, OpenAI, Anthropic…)
+│       └── skills/              # Skill loader utilities
+├── bots/
+│   └── example-bot/             # Reference bot: AGENT.md, config.yaml, MEMORY.md
 ├── playground/
-│   ├── agent/                   # Sample .env + run.sh for local gateway
+│   ├── agent/                   # Local gateway runner (.env + run.sh)
 │   └── chat-ui/                 # Vite + React dev client
 ├── docs/
 ├── tests/
@@ -239,16 +237,16 @@ pip install git+https://github.com/human-and-machine/monkey-bot.git@main
 | **Anthropic Claude** | Supported | Via `langchain-anthropic` in `get_model()` |
 | **Anthropic via Vertex AI** | Supported | Claude hosted on Google infrastructure |
 | **LangChain** | Supported | Chat models and tool helpers (`langchain-core`, provider integrations) |
-| **AWS Bedrock** | Production | Model provider via Agent Harness (`ModelProvider` / `BedrockProvider`) |
-| **AWS S3** | Production | Memory store backend via Agent Harness |
-| **AWS Secrets Manager** | Production | Secret resolver via Agent Harness |
+| **AWS Bedrock** | Planned | `providers/bedrock.py` stub; `[bedrock]` extra in `pyproject.toml` |
+| **AWS S3** | Planned | Memory store backend |
+| **AWS Secrets Manager** | Planned | Secret resolver |
 | **Azure OpenAI** | Coming Soon | Azure-hosted OpenAI models |
 | **Azure Blob Storage** | Coming Soon | Memory backend for Azure deployments |
 | **Azure Key Vault** | Coming Soon | Secrets for Azure deployments |
 | **Slack** | Coming Soon | Slack bot interface |
 | **Microsoft Teams** | Coming Soon | Teams bot interface |
 | **Telegram** | Coming Soon | Telegram bot interface |
-| **DynamoDB** | Extension | Checkpointer / job storage via custom harness plugins (see `examples/extension-dynamodb-checkpointer/`) |
+| **DynamoDB** | Planned | Checkpointer / job storage |
 | **CosmosDB** | Coming Soon | Azure-native persistence options |
 
 For provider and cloud wiring, start from **`.env.example`** and the integration table below; older standalone integration pages were removed with the v2 doc cutover.
@@ -269,7 +267,6 @@ For provider and cloud wiring, start from **`.env.example`** and the integration
 - **REST API Mode** — Headless operation for programmatic access
 
 ### LLM Providers
-- **AWS Bedrock** — Native Bedrock integration (Claude, Llama, Titan)
 - **Azure OpenAI** — GPT-4o via Azure-hosted endpoints
 - **Groq** — Ultra-low latency inference
 - **Ollama** — Local/self-hosted models
@@ -318,7 +315,7 @@ pip install -e ".[dev]"
 pytest
 
 # Run tests with coverage
-pytest --cov=src --cov-report=html
+pytest --cov=src/monkeybot --cov-report=html
 
 # Lint
 ruff check .
@@ -346,7 +343,7 @@ mypy src/
 
 - **Issues**: [GitHub Issues](https://github.com/human-and-machine/monkey-bot/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/human-and-machine/monkey-bot/discussions)
-- **Reference bot**: See [`test-monkey/`](test-monkey/) for a complete working example
+- **Reference bot**: See [`bots/example-bot/`](bots/example-bot/) for a complete working example
 
 ---
 
