@@ -20,6 +20,7 @@ from starlette.testclient import TestClient
 from monkeybot.gateway.sse.routes import create_app
 from monkeybot.gateway.sse.session_bus import SessionRegistry
 from monkeybot.gateway.sse.sse import agent_event_to_wire_dict, json_dumps_wire
+from monkeybot.core.events import AssistantDelta, Thinking, TurnComplete, UsageTotals
 
 
 class FakeLoopPort:
@@ -39,29 +40,28 @@ class FakeLoopPort:
         if bus is None:
             return
         await bus.publish_data(
-            json_dumps_wire(agent_event_to_wire_dict({"kind": "Thinking", "request_id": request_id}))
+            json_dumps_wire(agent_event_to_wire_dict(Thinking(request_id=request_id)))
         )
         await bus.publish_data(
             json_dumps_wire(
                 agent_event_to_wire_dict(
-                    {"kind": "AssistantDelta", "request_id": request_id, "delta": "hi"},
+                    AssistantDelta(request_id=request_id, delta="hi"),
                 )
             )
         )
         await bus.publish_data(
             json_dumps_wire(
                 agent_event_to_wire_dict(
-                    {
-                        "kind": "TurnComplete",
-                        "request_id": request_id,
-                        "usage": {
-                            "input_tokens": 1,
-                            "output_tokens": 2,
-                            "cached_tokens": 0,
-                            "cost_usd": 0.0,
-                            "duration_ms": 1,
-                        },
-                    },
+                    TurnComplete(
+                        request_id=request_id,
+                        usage=UsageTotals(
+                            input_tokens=1,
+                            output_tokens=2,
+                            cached_tokens=0,
+                            cost_usd=0.0,
+                            duration_ms=1,
+                        ),
+                    ),
                 )
             )
         )

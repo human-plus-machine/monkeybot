@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any
 
 import aiosqlite
 
@@ -18,6 +17,20 @@ class Usage:
     cached_tokens: int = 0
     cost_usd: float = 0.0
     duration_ms: int = 0
+
+
+@dataclass(frozen=True)
+class UsageSummary:
+    """Aggregated totals returned by :meth:`UsageStore.summary`."""
+
+    turns: int
+    input_tokens: int
+    output_tokens: int
+    cached_tokens: int
+    cost_usd: float
+    period_start_ms: int | None
+    period_end_ms: int | None
+    last_prompt_tokens: int
 
 
 class UsageStore:
@@ -65,10 +78,10 @@ class UsageStore:
         self,
         thread_id: str | None = None,
         since_ms: int | None = None,
-    ) -> dict[str, Any]:
+    ) -> UsageSummary:
         """Aggregate totals over matching rows."""
         clauses: list[str] = []
-        params: list[Any] = []
+        params: list[object] = []
         if thread_id is not None:
             clauses.append("thread_id = ?")
             params.append(thread_id)
@@ -100,33 +113,23 @@ class UsageStore:
 
         turns = int(row[0])
         if turns == 0:
-            return {
-                "turns": 0,
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "cached_tokens": 0,
-                "cost_usd": 0.0,
-                "period_start_ms": None,
-                "period_end_ms": None,
-                "last_prompt_tokens": 0,
-            }
+            return UsageSummary(
+                turns=0,
+                input_tokens=0,
+                output_tokens=0,
+                cached_tokens=0,
+                cost_usd=0.0,
+                period_start_ms=None,
+                period_end_ms=None,
+                last_prompt_tokens=0,
+            )
 
         period_start = row[5]
         period_end = row[6]
-        out: dict[str, Any] = {
-            "turns": turns,
-            "input_tokens": int(row[1]),
-            "output_tokens": int(row[2]),
-            "cached_tokens": int(row[3]),
-            "cost_usd": float(row[4]),
-            "period_start_ms": int(period_start) if period_start is not None else None,
-            "period_end_ms": int(period_end) if period_end is not None else None,
-        }
-
         last_pt = 0
         if thread_id is not None:
             lp_clauses: list[str] = ["thread_id = ?"]
-            lp_params: list[Any] = [thread_id]
+            lp_params: list[object] = [thread_id]
             if since_ms is not None:
                 lp_clauses.append("created_at >= ?")
                 lp_params.append(since_ms)
@@ -144,5 +147,13 @@ class UsageStore:
             await cur2.close()
             if row2 is not None:
                 last_pt = int(row2[0])
-        out["last_prompt_tokens"] = last_pt
-        return out
+        return UsageSummary(
+            turns=turns,
+            input_tokens=int(row[1]),
+            output_tokens=int(row[2]),
+            cached_tokens=int(row[3]),
+            cost_usd=float(row[4]),
+            period_start_ms=int(period_start) if period_start is not None else None,
+            period_end_ms=int(period_end) if period_end is not None else None,
+            last_prompt_tokens=last_pt,
+        )

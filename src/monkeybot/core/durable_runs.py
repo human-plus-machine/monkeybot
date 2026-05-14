@@ -23,6 +23,22 @@ _SUBAGENT_COLUMNS: tuple[str, ...] = (
 )
 
 
+@dataclass(frozen=True)
+class SubagentRunRow:
+    """One row from the ``subagent_runs`` table."""
+
+    run_id: str
+    parent_run_id: str | None
+    script: str
+    envelope_json: str
+    status: str
+    result_json: str | None
+    error_json: str | None
+    started_at: int
+    finished_at: int | None
+    scratch_dir: str
+
+
 @dataclass
 class SubagentEnvelope:
     """Minimal envelope persisted with each subagent run."""
@@ -65,8 +81,20 @@ class SubagentEnvelope:
         )
 
 
-def _tuple_to_run_dict(row: tuple[object, ...]) -> dict[str, object]:
-    return dict(zip(_SUBAGENT_COLUMNS, row, strict=True))
+def _tuple_to_run_row(row: tuple[object, ...]) -> SubagentRunRow:
+    d = dict(zip(_SUBAGENT_COLUMNS, row, strict=True))
+    return SubagentRunRow(
+        run_id=str(d["run_id"]),
+        parent_run_id=str(d["parent_run_id"]) if d["parent_run_id"] is not None else None,
+        script=str(d["script"]),
+        envelope_json=str(d["envelope_json"]),
+        status=str(d["status"]),
+        result_json=str(d["result_json"]) if d["result_json"] is not None else None,
+        error_json=str(d["error_json"]) if d["error_json"] is not None else None,
+        started_at=int(d["started_at"]),  # type: ignore[arg-type]
+        finished_at=int(d["finished_at"]) if d["finished_at"] is not None else None,  # type: ignore[arg-type]
+        scratch_dir=str(d["scratch_dir"]),
+    )
 
 
 class DurableRunStore:
@@ -136,7 +164,7 @@ class DurableRunStore:
         )
         await self._conn.commit()
 
-    async def pending_runs(self) -> list[dict[str, object]]:
+    async def pending_runs(self) -> list[SubagentRunRow]:
         """Runs stuck in ``pending`` or ``running``."""
         columns = ", ".join(_SUBAGENT_COLUMNS)
         cursor = await self._conn.execute(
@@ -148,10 +176,10 @@ class DurableRunStore:
         )
         rows = await cursor.fetchall()
         await cursor.close()
-        return [_tuple_to_run_dict(tuple(row)) for row in rows]
+        return [_tuple_to_run_row(tuple(row)) for row in rows]
 
-    async def get_run(self, run_id: str) -> dict[str, object] | None:
-        """Return full row dict or ``None``."""
+    async def get_run(self, run_id: str) -> SubagentRunRow | None:
+        """Return full row or ``None``."""
         columns = ", ".join(_SUBAGENT_COLUMNS)
         cursor = await self._conn.execute(
             f"SELECT {columns} FROM subagent_runs WHERE run_id = ?",
@@ -161,4 +189,4 @@ class DurableRunStore:
         await cursor.close()
         if row is None:
             return None
-        return _tuple_to_run_dict(tuple(row))
+        return _tuple_to_run_row(tuple(row))

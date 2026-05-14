@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 from monkeybot.core.db import apply_schema, open_connection
-from monkeybot.core.durable_runs import DurableRunStore, SubagentEnvelope
+from monkeybot.core.durable_runs import DurableRunStore, SubagentEnvelope, SubagentRunRow
 
 
 def _repo_root() -> Path:
@@ -48,8 +48,9 @@ async def test_pending_runs_includes_unfinished_running(durable_conn) -> None:
     )
     pending = await store.pending_runs()
     assert len(pending) == 1
-    assert pending[0]["status"] == "running"
-    assert pending[0]["run_id"] == "run-1"
+    assert isinstance(pending[0], SubagentRunRow)
+    assert pending[0].status == "running"
+    assert pending[0].run_id == "run-1"
 
 
 @pytest.mark.asyncio
@@ -92,8 +93,9 @@ async def test_get_run_round_trip(durable_conn) -> None:
     )
     row = await store.get_run("run-3")
     assert row is not None
-    assert row["envelope_json"] == envelope.to_json()
-    assert row["scratch_dir"] == str(scratch)
+    assert isinstance(row, SubagentRunRow)
+    assert row.envelope_json == envelope.to_json()
+    assert row.scratch_dir == str(scratch)
 
 
 @pytest.mark.asyncio
@@ -115,9 +117,10 @@ async def test_record_failed_sets_status(durable_conn) -> None:
     await store.record_failed("run-4", "boom")
     row = await store.get_run("run-4")
     assert row is not None
-    assert row["status"] == "failed"
-    assert row["error_json"]
-    assert "boom" in str(row["error_json"])
+    assert isinstance(row, SubagentRunRow)
+    assert row.status == "failed"
+    assert row.error_json
+    assert "boom" in str(row.error_json)
 
 
 @pytest.mark.integration

@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import pytest_asyncio
 from monkeybot.core.db import apply_schema, open_connection
-from monkeybot.core.usage import Usage, UsageStore
+from monkeybot.core.usage import Usage, UsageStore, UsageSummary
 
 
 async def _apply_schema(conn) -> None:
@@ -44,12 +44,13 @@ async def test_usage_summary_aggregates_with_since_ms(usage_conn) -> None:
     await usage_conn.commit()
 
     summary = await store.summary(thread_id="t", since_ms=cutoff)
-    assert summary["turns"] == 1
-    assert summary["input_tokens"] == 1
-    assert summary["cost_usd"] == pytest.approx(0.4)
-    assert summary["period_start_ms"] == 1100
-    assert summary["period_end_ms"] == 1100
-    assert summary["last_prompt_tokens"] == 1
+    assert isinstance(summary, UsageSummary)
+    assert summary.turns == 1
+    assert summary.input_tokens == 1
+    assert summary.cost_usd == pytest.approx(0.4)
+    assert summary.period_start_ms == 1100
+    assert summary.period_end_ms == 1100
+    assert summary.last_prompt_tokens == 1
 
 
 @pytest.mark.asyncio
@@ -69,9 +70,10 @@ async def test_usage_summary_all_threads(usage_conn) -> None:
         )
     await usage_conn.commit()
     summary = await store.summary(thread_id=None)
-    assert summary["turns"] == 2
-    assert summary["cost_usd"] == pytest.approx(0.2)
-    assert summary["last_prompt_tokens"] == 0
+    assert isinstance(summary, UsageSummary)
+    assert summary.turns == 2
+    assert summary.cost_usd == pytest.approx(0.2)
+    assert summary.last_prompt_tokens == 0
 
 
 @pytest.mark.asyncio
@@ -111,5 +113,6 @@ async def test_usage_summary_last_prompt_tokens_most_recent(usage_conn) -> None:
         )
     await usage_conn.commit()
     summary = await store.summary(thread_id="thr")
-    assert summary["turns"] == 3
-    assert summary["last_prompt_tokens"] == 99
+    assert isinstance(summary, UsageSummary)
+    assert summary.turns == 3
+    assert summary.last_prompt_tokens == 99

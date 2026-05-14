@@ -118,19 +118,17 @@ class _UsageStoreAdapter(UsagePort):
         if since is not None and since.isdigit():
             since_ms = int(since)
         s = await self._store.summary(thread_id=session_id, since_ms=since_ms)
-        ps = s.get("period_start_ms")
-        pe = s.get("period_end_ms")
         context_window_tokens = _env_context_window_tokens()
         return {
             "session_id": session_id,
-            "turns": int(s["turns"]),
-            "input_tokens": int(s["input_tokens"]),
-            "output_tokens": int(s["output_tokens"]),
-            "cached_tokens": int(s["cached_tokens"]),
-            "cost_usd": float(s["cost_usd"]),
-            "period_start": int(ps) if ps is not None else 0,
-            "period_end": int(pe) if pe is not None else 0,
-            "last_prompt_tokens": int(s.get("last_prompt_tokens", 0)),
+            "turns": s.turns,
+            "input_tokens": s.input_tokens,
+            "output_tokens": s.output_tokens,
+            "cached_tokens": s.cached_tokens,
+            "cost_usd": s.cost_usd,
+            "period_start": s.period_start_ms if s.period_start_ms is not None else 0,
+            "period_end": s.period_end_ms if s.period_end_ms is not None else 0,
+            "last_prompt_tokens": s.last_prompt_tokens,
             "context_window_tokens": context_window_tokens,
         }
 

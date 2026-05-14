@@ -6,6 +6,8 @@ import json
 from dataclasses import fields as dc_fields
 from typing import Any
 
+from monkeybot.core.events import AgentEvent
+
 
 def format_data_event(seq: int, data: str) -> str:
     """Build one SSE data event with an `id` line (stored in replay buffer)."""
@@ -23,23 +25,14 @@ def format_active_requests(request_ids: list[str]) -> str:
     return f"data: {payload}\n\n"
 
 
-def agent_event_to_wire_dict(event: object) -> dict[str, Any]:
-    """Map AgentEvent.kind (or dict with kind) to SSE JSON with type + chat_request_id."""
-    if isinstance(event, dict):
-        raw = event
-        kind = str(raw["kind"])
-        payload = {k: v for k, v in raw.items() if k != "kind"}
-    else:
-        kind = str(getattr(event, "kind"))
-        dcfs = getattr(event, "__dataclass_fields__", None)
-        if dcfs:
-            payload = {
-                f.name: getattr(event, f.name)
-                for f in dc_fields(event)
-                if f.name != "kind"
-            }
-        else:
-            payload = {k: v for k, v in vars(event).items() if k != "kind"}
+def agent_event_to_wire_dict(event: AgentEvent) -> dict[str, Any]:
+    """Map an AgentEvent to an SSE JSON dict with ``type`` + ``chat_request_id``."""
+    kind = str(getattr(event, "kind"))
+    payload = {
+        f.name: getattr(event, f.name)
+        for f in dc_fields(event)  # type: ignore[arg-type]
+        if f.name != "kind"
+    }
     rid = str(payload.get("request_id", ""))
     out: dict[str, Any] = {"type": kind, "request_id": rid, "chat_request_id": rid}
     for key, val in payload.items():

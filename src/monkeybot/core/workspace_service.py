@@ -7,6 +7,57 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypedDict
+
+
+class ReadFileResult(TypedDict):
+    ok: bool
+    path: str
+    content: str
+    start_line: int
+    end_line: int
+    total_lines: int
+    truncated: bool
+
+
+class WriteFileResult(TypedDict):
+    ok: bool
+    path: str
+    bytes: int
+
+
+class ReplaceResult(TypedDict):
+    ok: bool
+    path: str
+    replacements: int
+    bytes: int
+
+
+class GrepMatch(TypedDict):
+    path: str
+    line: int
+    text: str
+
+
+class GlobResult(TypedDict):
+    ok: bool
+    root: str
+    pattern: str
+    paths: list[str]
+    count: int
+    truncated: bool
+    duration_ms: int
+
+
+class GrepResult(TypedDict):
+    ok: bool
+    root: str
+    pattern: str
+    matches: list[GrepMatch]
+    match_count: int
+    files_scanned: int
+    truncated: bool
+    duration_ms: int
 
 
 @dataclass
@@ -115,7 +166,7 @@ class WorkspaceFileService:
         *,
         offset: int = 1,
         limit: int | None = None,
-    ) -> dict:
+    ) -> ReadFileResult:
         if offset < 1:
             raise WorkspaceError("offset must be >= 1", code="invalid_offset")
         max_lines = self._settings.WORKSPACE_READ_MAX_LINES
@@ -157,7 +208,7 @@ class WorkspaceFileService:
             "truncated": end_idx < total,
         }
 
-    def write_file(self, path: str, content: str) -> dict:
+    def write_file(self, path: str, content: str) -> WriteFileResult:
         if content is None:
             content = ""
         raw = content.encode("utf-8")
@@ -186,7 +237,7 @@ class WorkspaceFileService:
             "bytes": len(raw),
         }
 
-    def replace_in_file(self, path: str, old_string: str, new_string: str) -> dict:
+    def replace_in_file(self, path: str, old_string: str, new_string: str) -> ReplaceResult:
         if old_string is None:
             old_string = ""
         if new_string is None:
@@ -229,7 +280,7 @@ class WorkspaceFileService:
             "bytes": len(raw),
         }
 
-    def glob_paths(self, pattern: str, root: str | None = None) -> dict:
+    def glob_paths(self, pattern: str, root: str | None = None) -> GlobResult:
         if not pattern or not pattern.strip():
             raise WorkspaceError("pattern is required", code="missing_pattern")
         pattern = pattern.strip()
@@ -278,7 +329,7 @@ class WorkspaceFileService:
         ignore_case: bool = False,
         file_glob: str | None = None,
         max_matches: int | None = None,
-    ) -> dict:
+    ) -> GrepResult:
         if not pattern or not str(pattern).strip():
             raise WorkspaceError("pattern is required", code="missing_pattern")
         flags = re.IGNORECASE if ignore_case else 0
@@ -290,7 +341,7 @@ class WorkspaceFileService:
         max_m = max_matches if max_matches is not None else self._settings.WORKSPACE_GREP_MAX_MATCHES
         max_files = self._settings.WORKSPACE_GREP_MAX_FILES
         max_file_bytes = self._settings.WORKSPACE_GREP_MAX_FILE_BYTES
-        matches: list[dict] = []
+        matches: list[GrepMatch] = []
         files_scanned = 0
         truncated = False
         t0 = time.monotonic()

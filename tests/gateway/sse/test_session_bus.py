@@ -8,6 +8,7 @@ import pytest
 
 from monkeybot.gateway.sse.session_bus import SessionBus
 from monkeybot.gateway.sse.sse import agent_event_to_wire_dict, format_active_requests
+from monkeybot.core.events import Thinking
 
 
 @pytest.mark.asyncio
@@ -55,7 +56,7 @@ async def test_live_queue_receives_after_replay() -> None:
 
 
 def test_agent_event_dict_maps_kind_to_type() -> None:
-    out = agent_event_to_wire_dict({"kind": "Thinking", "request_id": "u1"})
+    out = agent_event_to_wire_dict(Thinking(request_id="u1"))
     assert out["type"] == "Thinking"
     assert out["request_id"] == "u1"
     assert out["chat_request_id"] == "u1"
