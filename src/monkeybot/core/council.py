@@ -10,10 +10,12 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-
-from langchain_core.language_models import BaseChatModel
+from typing import TYPE_CHECKING
 
 from .interfaces import MonkeybotError
+
+if TYPE_CHECKING:
+    from langchain_core.language_models import BaseChatModel
 
 logger = logging.getLogger(__name__)
 

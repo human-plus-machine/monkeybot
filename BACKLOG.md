@@ -26,6 +26,7 @@ Focus: make the core agent harness the best it can be.
 Focus: plug the harness into real messaging surfaces and cloud runtimes.
 
 ### Connectors
+- **Scheduler gateway wiring** — wire `Scheduler` into the FastAPI lifespan as an optional background task when `config.yaml` has `scheduler.jobs` (reference: `legacy/src/monkeybot/core/scheduler.py`; copy or reintroduce module from legacy when implementing).
 - **Google Chat gateway** — incoming webhook + event handler for Google Chat spaces.
 - **Slack gateway** — Slack Events API / socket mode integration.
 - **CLI gateway** — interactive stdin/stdout (reference: `legacy/src/monkeybot/gateway/cli.py`).

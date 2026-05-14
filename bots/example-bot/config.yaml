@@ -35,7 +35,7 @@ model:
 #   timeout_seconds: 300
 #   registry:
 #     researcher:
-#       script: "subagents/researcher.py"
+#       script: "legacy/subagents/researcher.py"   # example only; copy to repo root to activate
 #       description: "Searches the web and summarizes findings on a given topic."
 #       skills_path: ".agents/skills/research"  # optional
 #       model: "gemini-2.0-pro"                 # optional

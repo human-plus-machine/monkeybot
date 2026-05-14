@@ -9,15 +9,19 @@ Provides utilities for loading secrets and configuring models:
 This module handles environment detection and secret loading for deployments.
 """
 
+from __future__ import annotations
+
 import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Any
+from typing import TYPE_CHECKING, Any, Dict
 
 import yaml
 from dotenv import load_dotenv
-from langchain_core.language_models import BaseChatModel
+
+if TYPE_CHECKING:
+    from langchain_core.language_models import BaseChatModel
 
 logger = logging.getLogger(__name__)
 

@@ -5,7 +5,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from langchain_core.tools import tool
+try:
+    from langchain_core.tools import tool
+except ImportError:
+
+    def tool(fn):  # type: ignore[no-untyped-def]
+        return fn
+
 
 from .workspace_service import WorkspaceError, WorkspaceFileService
 
