@@ -1,0 +1,17 @@
+model:
+  default: "claude-sonnet-4-6@default"
+  max_tokens: 8192
+
+safety:
+  command_tiers:
+    pre_approved:
+      - read_file
+      - list_skills
+      - search_memory
+      - write_file
+    requires_approval: []
+    denied: []
+  denied_patterns:
+    - "rm -rf /"
+    - "/etc/passwd"
+    - "DROP TABLE"
