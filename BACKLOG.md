@@ -78,6 +78,9 @@ Focus: plug the harness into real messaging surfaces and cloud runtimes.
 
 - **Postgres** — swap SQLite for history/usage where needed.
 
+### Traceability / Observability / Evals
+
+langfuse? deepeval other?
 ---
 
 ## Backlog (Unscheduled)
