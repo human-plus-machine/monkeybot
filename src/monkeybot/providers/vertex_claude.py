@@ -17,6 +17,7 @@ from monkeybot.core.provider import (
     ToolDef,
     UsageEvent,
 )
+from monkeybot.providers._utils import build_anthropic_messages
 
 _log = logging.getLogger(__name__)
 class VertexClaudeProvider:
@@ -48,49 +49,6 @@ class VertexClaudeProvider:
         if not self._project_id:
             raise ValueError("ANTHROPIC_VERTEX_PROJECT_ID is not set (or pass project_id=)")
 
-    def _convert_messages(self, messages: Sequence[Message]) -> list[dict[str, Any]]:
-        result: list[dict[str, Any]] = []
-        i = 0
-        msgs = list(messages)
-        while i < len(msgs):
-            m = msgs[i]
-            if m.role == "tool":
-                result.append(
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": m.tool_call_id,
-                                "content": m.content,
-                            }
-                        ],
-                    }
-                )
-            elif m.role == "assistant" and m.tool_call_id:
-                tool_name = ""
-                if i + 1 < len(msgs) and msgs[i + 1].role == "tool":
-                    tool_name = msgs[i + 1].tool_name or ""
-                result.append(
-                    {
-                        "role": "assistant",
-                        "content": [
-                            {
-                                "type": "tool_use",
-                                "id": m.tool_call_id,
-                                "name": tool_name,
-                                "input": {},
-                            }
-                        ],
-                    }
-                )
-            elif m.role == "assistant":
-                result.append({"role": "assistant", "content": m.content})
-            else:
-                result.append({"role": "user", "content": m.content})
-            i += 1
-        return result
-
     def _convert_tools(self, tools: Sequence[ToolDef]) -> list[dict[str, Any]]:
         return [
             {"name": t.name, "description": t.description, "input_schema": t.input_schema}
@@ -113,7 +71,7 @@ class VertexClaudeProvider:
             system = msgs[0].content
             msgs = msgs[1:]
 
-        converted_messages = self._convert_messages(msgs)
+        converted_messages = build_anthropic_messages(msgs)
         client = AsyncAnthropicVertex(project_id=self._project_id, region=self._region)
         converted_tools = self._convert_tools(tools) if tools else anthropic.NOT_GIVEN
 
@@ -159,6 +117,7 @@ class VertexClaudeProvider:
                                 input_tokens = event.message.usage.input_tokens or 0
         except Exception as exc:
             _log.warning("Vertex Claude stream error: %s", exc)
+            raise
 
         yield UsageEvent(
             input_tokens=input_tokens,
