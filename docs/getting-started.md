@@ -33,22 +33,25 @@ Copy the example env file and set paths for the agent (and model credentials whe
 cp .env.example .env
 ```
 
-Important variables (see `.env.example` for the full list):
+Important variables (see `.env.example` for the full list — values below are what the shipped `.env.example` uses):
 
 | Variable | Purpose |
 |---|---|
-| `AGENT_MD` | Path to your system prompt file (default `./AGENT.md`). |
-| `MEMORY_PATH` | Directory for long-term markdown memory (default `./data/memory`). Optional `INDEX.md` there is surfaced as a memory index in the system prompt. |
-| `SKILLS_PATH` | Root directory for skill bundles (default `./skills`). |
-| `DB_URL` | SQLite URL for conversation + usage tables (default `sqlite:////data/monkeybot.db`). |
-| `MODEL_PROVIDER` | `gemini` (default) or `fake` for tests without LLM calls. |
-| `MODEL_NAME` | Model id when using Gemini (e.g. `gemini-2.5-flash`). |
+| `AGENT_MD` | Path to your system prompt file (`./bots/example-bot/AGENT.md`). |
+| `MEMORY_PATH` | Directory for long-term markdown memory (`./data/memory`). Optional `INDEX.md` there is surfaced as a memory index in the system prompt. |
+| `SKILLS_PATH` | Root directory for skill bundles (`./.agents/skills`). |
+| `DB_URL` | SQLite URL for conversation + usage tables (`sqlite:///data/monkeybot.db`). |
+| `MCP_CONFIG` | Optional MCP server map (`./config/mcp.json`). |
+| `COMMAND_TIERS_CONFIG` | Optional command-tier policy file (`./config/command_tiers.yaml`). |
+| `MODEL_PROVIDER` | `google_vertexai` (default), `openai`, `anthropic`, or `vertex_anthropic`. |
+| `MODEL_NAME` | Model id (e.g. `gemini-2.5-flash`). |
+| `PORT` | Gateway port (`.env.example` uses `8080`; gateway falls back to `8000` if unset). |
 
 ---
 
 ## 3. Author AGENT.md
 
-Create `AGENT.md` in the repo root (or point `AGENT_MD` elsewhere). It must be **non-empty**; its contents become the base system message for each turn (plus optional memory index and skill list). See [Skills](skills.md) for adding capabilities under `SKILLS_PATH`.
+Point `AGENT_MD` at a non-empty Markdown file (the repo ships `bots/example-bot/AGENT.md`). Its contents become the base system message for each turn, plus the optional memory index and skill list. See [Skills](skills.md) for adding capabilities under `SKILLS_PATH`.
 
 ---
 
@@ -58,7 +61,7 @@ Create `AGENT.md` in the repo root (or point `AGENT_MD` elsewhere). It must be *
 uv run python -m monkeybot.gateway.main
 ```
 
-By default the app listens on port **8080** if `PORT=8080`, or **8000** when `PORT` is unset (see `monkeybot.gateway.main`).
+The gateway reads `PORT` (falls back to `GATEWAY_PORT`, then `8000`). The shipped `.env.example` sets `PORT=8080`, so examples below use `8080`.
 
 ---
 

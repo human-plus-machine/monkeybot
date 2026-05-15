@@ -84,32 +84,34 @@ More detail: [Getting Started](docs/getting-started.md).
 
 ## Quick Start
 
-### 1. Install
+> `monkeybot` is not on PyPI yet — install from source.
 
-```bash
-pip install monkeybot
-```
-
-Or clone the reference implementation:
+### 1. Clone and install
 
 ```bash
 git clone https://github.com/human-and-machine/monkey-bot.git
 cd monkey-bot
+uv sync
 cp .env.example .env
 ```
 
+`uv sync` installs runtime deps plus the `dev` dependency group (`pytest`, `mypy`, `ruff`).
+
 ### 2. Configure
 
-Copy `.env.example` to `.env` and fill in your values:
+Edit `.env` (the shipped defaults match the bundled example bot):
 
 ```bash
-MODEL_PROVIDER=gemini
+MODEL_PROVIDER=google_vertexai
 MODEL_NAME=gemini-2.5-flash
 
 DB_URL=sqlite:///data/monkeybot.db
 MEMORY_PATH=./data/memory
 SKILLS_PATH=./.agents/skills
 AGENT_MD=./bots/example-bot/AGENT.md
+
+MCP_CONFIG=./config/mcp.json
+COMMAND_TIERS_CONFIG=./config/command_tiers.yaml
 
 # Gemini / Vertex
 GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
@@ -124,24 +126,26 @@ Full configuration reference: **`.env.example`** at the repository root.
 from monkeybot.core.config import load_secrets, get_provider_config
 
 load_secrets()
-# google_vertexai | openai | anthropic | vertex_anthropic — see monkeybot/core/config.py
-binding = get_provider_config(provider="google_vertexai", model_name="gemini-2.5-flash")
-# binding.provider.stream(...); binding.model is the model id string
+# google_vertexai | openai | anthropic | vertex_anthropic — see src/monkeybot/core/config.py
+cfg = get_provider_config(provider="google_vertexai", model_name="gemini-2.5-flash")
+# cfg.provider.stream(...); cfg.model is the model id string
 ```
 
 ### 4. Run locally
 
 ```bash
-python -m monkeybot.gateway.main
+uv run python -m monkeybot.gateway.main
 ```
 
-### 5. Deploy
+Defaults to port `8000`; set `PORT` (the shipped `.env.example` uses `8080`).
+
+### 5. Deploy to Cloud Run
 
 ```bash
-./deploy.sh
+./deploy.sh --project your-gcp-project
 ```
 
-Done. Your agent is live on Cloud Run.
+See `deploy.sh --help`-style options at the top of the script. The script builds via Cloud Build using `docker/Dockerfile`, then deploys to Cloud Run.
 
 ---
 
@@ -179,46 +183,51 @@ Done. Your agent is live on Cloud Run.
 
 ```
 monkey-bot/
-├── src/
-│   └── monkeybot/
-│       ├── core/                # Agent loop, context, MCP, usage
-│       ├── gateway/
-│       │   ├── main.py          # Uvicorn entry
-│       │   └── sse/             # FastAPI SSE app, routes, session bus
-│       ├── providers/           # LLM provider adapters (Gemini, OpenAI, Anthropic…)
-│       └── skills/              # Skill loader utilities
-├── bots/
-│   └── example-bot/             # Reference bot: AGENT.md, config.yaml, MEMORY.md
+├── src/monkeybot/
+│   ├── core/                    # Agent loop, context, history, memory, MCP,
+│   │   │                        #   subagents, tools, hooks, usage, prompt
+│   │   └── providers/gemini.py  # Native Vertex / google-genai adapter
+│   ├── gateway/
+│   │   ├── main.py              # Uvicorn entry (PORT env)
+│   │   └── sse/                 # FastAPI SSE app: app, routes, session_bus
+│   ├── providers/               # OpenAI, Anthropic, Vertex-Anthropic adapters
+│   └── skills/                  # Skill loader / executor utilities
+├── bots/example-bot/            # Reference bot: AGENT.md, MEMORY.md, config.yaml
+├── .agents/skills/              # Default SKILLS_PATH (file-ops, memory-search,
+│                                #   search-web, self-improve)
+├── config/                      # mcp.json, command_tiers.yaml
 ├── playground/
 │   ├── agent/                   # Local gateway runner (.env + run.sh)
 │   └── chat-ui/                 # Vite + React dev client
-├── docs/
-├── tests/
-├── pyproject.toml
-├── Dockerfile
-└── .env.example
+├── examples/skills/             # Sample skills you can copy into .agents/skills
+├── docs/                        # getting-started.md, skills.md
+├── tests/                       # pytest suite (see pytest.ini)
+├── testing/                     # Bench harness (bench.py) + devbot fixture
+├── scripts/                     # Operational helpers (e.g. verify_memory.py)
+├── docker/Dockerfile            # Container image
+├── deploy.sh                    # Cloud Run deploy helper
+├── pyproject.toml               # uv / hatchling project config
+└── .env.example                 # Canonical env reference
 ```
 
 ---
 
 ## Installation
 
-```bash
-# Core framework
-pip install monkeybot
-
-# With Google Cloud Storage
-pip install "monkeybot[gcs]"
-
-# Everything
-pip install "monkeybot[all]"
-```
-
-**Or install the development version directly from source:**
+Install from source with `uv`:
 
 ```bash
-pip install git+https://github.com/human-and-machine/monkey-bot.git@main
+git clone https://github.com/human-and-machine/monkey-bot.git
+cd monkey-bot
+uv sync                           # runtime + dev deps
+uv sync --extra gemini            # add a provider extra (gemini already in core deps)
+uv sync --extra claude            # Anthropic SDK
+uv sync --extra openai            # OpenAI SDK
+uv sync --extra vertex-claude     # Anthropic-on-Vertex
+uv sync --extra gcs               # Google Cloud Storage backend
 ```
+
+`monkeybot` is not currently published on PyPI.
 
 ---
 
@@ -287,10 +296,10 @@ For provider and cloud wiring, start from **`.env.example`** and the integration
 
 ### Important Considerations
 
-The skills system executes Python code from the `./skills/` directory. Only add skills from trusted sources.
+The skills system executes Python code from `SKILLS_PATH` (default `./.agents/skills/`). Only add skills from trusted sources.
 
 **Production Security Checklist:**
-- [ ] Review every skill script before adding to `./skills/`
+- [ ] Review every skill script before adding to `SKILLS_PATH`
 - [ ] Use separate GCP projects for dev/production
 - [ ] Limit service account permissions to minimum required (principle of least privilege)
 - [ ] Store all secrets in GCP Secret Manager — never in `bot.yaml` or environment files
@@ -304,25 +313,15 @@ The skills system executes Python code from the `./skills/` directory. Only add 
 ## Development
 
 ```bash
-# Clone and install with dev dependencies
 git clone https://github.com/human-and-machine/monkey-bot.git
 cd monkey-bot
-pip install -e ".[dev]"
+uv sync                                          # installs dev group automatically
 
-# Run tests
-pytest
-
-# Run tests with coverage
-pytest --cov=src/monkeybot --cov-report=html
-
-# Lint
-ruff check .
-
-# Format
-ruff format .
-
-# Type check
-mypy src/
+uv run pytest                                    # full test suite
+uv run pytest --cov=src/monkeybot --cov-report=html
+uv run ruff check .
+uv run ruff format .
+uv run mypy src/
 ```
 
 ---
@@ -331,7 +330,7 @@ mypy src/
 
 1. Fork the repository
 2. Create a feature branch: `git checkout -b feature/your-feature`
-3. Run all checks: `pytest && ruff check . && mypy src/`
+3. Run all checks: `uv run pytest && uv run ruff check . && uv run mypy src/`
 4. Commit: `git commit -m "feat: add your feature"`
 5. Open a Pull Request
 

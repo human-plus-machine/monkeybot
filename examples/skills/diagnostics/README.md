@@ -15,8 +15,8 @@ The diagnostics skill runs system health checks including:
 ### 1. Copy to Your Deployment
 
 ```bash
-# Copy the skill to your deployment's skills directory
-cp -r examples/skills/diagnostics/ ./skills/
+# Copy the skill into the default SKILLS_PATH
+cp -r examples/skills/diagnostics/ ./.agents/skills/
 ```
 
 ### 2. Import in Your Agent

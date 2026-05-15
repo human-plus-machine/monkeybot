@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import shutil
+from contextlib import aclosing
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 INDEX_FILENAME = "INDEX.md"
+
+# Matches  [[folder/filename.md]]  inside an INDEX.md entry line.
+_INDEX_LINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 
 
 class MemoryPromotionError(RuntimeError):

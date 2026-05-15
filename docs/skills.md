@@ -1,6 +1,6 @@
 # Skills (MonkeyBot v2)
 
-Skills are **directories** under `SKILLS_PATH` (default `./skills`). The gateway discovers them at context-build time and lists **name, description, and entry point** in the system prompt so the model knows what is available.
+Skills are **directories** under `SKILLS_PATH` (default `./.agents/skills`). The gateway discovers them at context-build time and lists **name, description, and entry point** in the system prompt so the model knows what is available.
 
 ---
 
@@ -16,7 +16,7 @@ Each skill is a **folder** (one level under `SKILLS_PATH`) containing:
 Example:
 
 ```
-skills/
+.agents/skills/
 └── diagnostics/
     ├── SKILL.md
     └── run.py
@@ -37,7 +37,7 @@ Use the body of `SKILL.md` for detailed procedures, constraints, and examples fo
 Discovery is implemented in `monkeybot.core.context._discover_skills`:
 
 - Only **immediate subdirectories** of `SKILLS_PATH` are scanned.
-- A directory is a skill only if it contains **`SKILL.md`** and **`run.py` or `main.py`** (not both required; `run.py` is preferred when both exist in code path order: `run.py` first).
+- A directory is a skill only if it contains **`SKILL.md`** and **`run.py` or `main.py`**. When both entry points are present, `run.py` wins.
 - Skills are sorted by folder name for stable ordering.
 
 ---

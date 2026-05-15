@@ -25,8 +25,8 @@ A complete reference implementation showing:
 ### Copy to Your Deployment
 
 ```bash
-# Copy an example skill to your deployment
-cp -r examples/skills/diagnostics/ ./skills/
+# Copy an example skill into the default SKILLS_PATH
+cp -r examples/skills/diagnostics/ ./.agents/skills/
 
 # The skill is now available to your agent
 ```
