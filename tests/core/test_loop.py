@@ -14,6 +14,7 @@ from monkeybot.core.events import (
     ContextSummarizing,
     Error,
     Thinking,
+    ToolCallResult,
     TurnComplete,
 )
 from monkeybot.core.inspector import Decision
@@ -654,3 +655,60 @@ async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> N
     assert "initial line" in sys1
     assert "new memory from tool" not in sys1
     assert "new memory from tool" in sys2
+
+
+@pytest.mark.asyncio
+async def test_parallel_task_results_appended_in_call_id_order() -> None:
+    """Parallel task calls must append to history in call_id order regardless of completion order.
+
+    The executor finishes b1 first, then a1, then c1 (reverse alphabetical).
+    History and ToolCallResult events must still appear in sorted call_id order: a1, b1, c1.
+    This guards against regressions where appends happen inside the async task (completion order)
+    instead of after asyncio.gather (submission/call_id order).
+    """
+    # Reverse-alphabetical finish order: b1 (0.01s) → a1 (0.02s) → c1 (0.05s)
+    delays = {"c1": 0.05, "a1": 0.02, "b1": 0.01}
+
+    class SlowExecutor:
+        async def execute(self, *, call: ToolCall, ctx: TurnContext) -> tuple[str | None, str | None]:
+            del ctx
+            await asyncio.sleep(delays.get(call.call_id, 0.01))
+            return (f"result:{call.call_id}", None)
+
+    prov = FakeProvider(
+        [
+            [
+                ToolCall(call_id="c1", name="task", args={"task": "C"}),
+                ToolCall(call_id="a1", name="task", args={"task": "A"}),
+                ToolCall(call_id="b1", name="task", args={"task": "B"}),
+                Done(),
+            ],
+            [TextDelta(text="done"), Done()],
+        ]
+    )
+    hist = FakeHistory()
+    ctx = _ctx_with_task()
+    events: list[object] = []
+    async for e in run(
+        "go",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[AllowInspector()],
+        tool_executor=SlowExecutor(),
+        max_turns=4,
+    ):
+        events.append(e)
+
+    tool_msgs = [m for m in hist.rows if m.role == "tool"]
+    assert [m.tool_call_id for m in tool_msgs] == ["a1", "b1", "c1"], (
+        "tool result messages must be in call_id order, not completion order"
+    )
+
+    result_events = [e for e in events if isinstance(e, ToolCallResult)]
+    assert [e.tool for e in result_events] == ["task", "task", "task"]
+    # Results must contain the correct payloads tied to call_ids
+    result_bodies = [e.result for e in result_events]
+    assert result_bodies == ["result:a1", "result:b1", "result:c1"], (
+        "ToolCallResult events must be emitted in call_id order"
+    )

@@ -17,8 +17,8 @@ Tasks are split into two parallel tracks. **Do not edit files outside your track
 
 #### Branch: `bugs/loop-correctness`
 
-- **Bug: Agent loop stops after tool call** — loop exits prematurely after the first tool execution; investigate and fix in `_run_inner`.
-- **Fix parallel subagent result ordering** — concurrent `task` calls append to history as they finish, not in `call_id` order; collect all results then append in deterministic order (`loop.py` ~line 393).
+- **Bug: Agent loop stops after tool call** — loop exits prematurely after the first tool execution; investigate and fix in `_run_inner`. *(pending — awaiting logs to reproduce)*
+- **Fix parallel subagent result ordering** — *(verified fixed, 2026-05-14)* `asyncio.gather` + `enumerate(outcomes)` in the parallel `task` path already appends history in `call_id` order regardless of completion order. Regression test added: `test_parallel_task_results_appended_in_call_id_order` in `tests/core/test_loop.py`.
 
 ---
 
@@ -37,9 +37,9 @@ Tasks are split into two parallel tracks. **Do not edit files outside your track
 
 ---
 
-#### Branch: `feat/lazy-loading` *(optional — needs profiling first)*
+#### ~~Branch: `feat/lazy-loading`~~ *(cancelled — profiled 2026-05-14)*
 
-- **? Lazy loading** — import providers/skills/tools only when invoked to improve cold-start speed and avoid loading unused dependencies; needs profiling to confirm it's worth the complexity.
+- **Lazy loading** — ~~import providers/skills/tools only when invoked to improve cold-start speed and avoid loading unused dependencies.~~ **Not needed.** Profiling confirmed heavy SDKs (`anthropic`, `openai`, `google-genai`) are already deferred inside `stream()`. Total monkeybot-owned import cost is ~13ms; remaining ~53ms is fastapi/pydantic/starlette and is not addressable with lazy loading.
 
 ---
 
