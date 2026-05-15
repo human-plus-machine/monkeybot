@@ -25,9 +25,12 @@ from monkeybot.core.db import apply_schema, open_connection
 from monkeybot.core.events import Error as AgentError
 from monkeybot.core.events import TurnComplete, UsageTotals, event_to_json
 from monkeybot.core.history import ConversationHistory
+from monkeybot.core.hooks import HookManager
 from monkeybot.core.inspector import CommandTierInspector, RulesInspector, ToolInspector
 from monkeybot.core.loop import run as run_loop
 from monkeybot.core.mcp_client import MCPClient
+from monkeybot.core.memory_hook import MemoryHook
+from monkeybot.core.memory_organizer import MemoryOrganizer
 from monkeybot.core.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.provider import (
     Done,
@@ -58,9 +61,17 @@ class _GatewayDeps:
     inspectors: list[ToolInspector] = field(default_factory=list)
     provider: Provider | None = None
     usage_conn: aiosqlite.Connection | None = None
+    hook_manager: HookManager | None = None
+    memory_hook: MemoryHook | None = None
 
 
 _deps = _GatewayDeps()
+
+
+def _memory_enabled() -> bool:
+    """Default on; explicit off via ``MONKEYBOT_MEMORY_HOOK_ENABLED=false``."""
+    raw = os.environ.get("MONKEYBOT_MEMORY_HOOK_ENABLED", "true").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
 
 
 def _env_context_window_tokens() -> int:
@@ -312,6 +323,7 @@ class GatewayLoopPort:
                 tool_executor=executor,
                 run_id=request_id,
                 cancelled=cancel_event,
+                hook_manager=_deps.hook_manager,
             ):
                 if isinstance(evt, TurnComplete):
                     u = evt.usage
@@ -397,6 +409,43 @@ async def _startup() -> None:
     await _ensure_schema(usage_conn)
     _deps.usage_conn = usage_conn
     app.state.usage = _UsageStoreAdapter(UsageStore(usage_conn))
+
+    if _memory_enabled():
+        try:
+            _, memory_resolved, _ = _resolved_workspace_paths()
+            mgr = HookManager()
+            model_name = os.environ.get("MODEL_NAME", "gemini-2.5-flash")
+            organizer = MemoryOrganizer(
+                provider=_deps.provider,
+                model=model_name,
+                memory_dir=memory_resolved,
+            )
+            hook = MemoryHook(
+                memory_path=memory_resolved,
+                organizer_runner=organizer.run,
+            )
+            hook.register(mgr)
+            _deps.hook_manager = mgr
+            _deps.memory_hook = hook
+            logger.info("memory hook enabled (memory_path=%s)", memory_resolved)
+            # Lever 5: best-effort GC of organizer's processed/ pile on startup.
+            try:
+                gc_stats = await hook.gc_processed()
+                if gc_stats["deleted"] or gc_stats["errors"]:
+                    logger.info(
+                        "memory gc: scanned=%d deleted=%d errors=%d",
+                        gc_stats["scanned"],
+                        gc_stats["deleted"],
+                        gc_stats["errors"],
+                    )
+            except Exception as gc_exc:
+                logger.warning("memory gc on startup failed: %r", gc_exc)
+        except Exception as exc:
+            logger.warning("memory hook setup failed; continuing without: %r", exc)
+            _deps.hook_manager = None
+            _deps.memory_hook = None
+    else:
+        logger.info("memory hook disabled via MONKEYBOT_MEMORY_HOOK_ENABLED")
 
 
 @app.on_event("shutdown")

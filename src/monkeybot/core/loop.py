@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import os
 import shutil
@@ -39,6 +40,7 @@ from monkeybot.core.events import (
     TurnComplete,
     UsageTotals,
 )
+from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
 from monkeybot.core.inspector import InspectorToolCall, ToolInspector
 from monkeybot.core.prompt import compose_system_prompt, latest_user_message_text
 from monkeybot.core.provider import (
@@ -96,6 +98,59 @@ def _system_message(
 
 def _messages_for_provider(system: Message, history: Sequence[Message]) -> list[Message]:
     return [system, *list(history)]
+
+
+_HOOK_READ_TIMEOUT_S = 2.0
+_HOOK_PRE_TOOL_TIMEOUT_S = 1.5
+
+
+async def _fire_hook(
+    hook_manager: HookManager | None,
+    *,
+    event: HookEvent,
+    ctx: TurnContext,
+    timeout_s: float,
+    user_message: str | None = None,
+    tool_name: str | None = None,
+    tool_args: dict[str, Any] | None = None,
+    tool_result: str | None = None,
+    tool_error: str | None = None,
+) -> HookPayload | None:
+    """Construct + fire a payload when ``hook_manager`` is configured; else return ``None``."""
+    if hook_manager is None:
+        return None
+    payload = HookPayload(
+        event=event,
+        thread_id=ctx.thread_id,
+        request_id=ctx.request_id,
+        ctx=ctx,
+        user_message=user_message,
+        tool_name=tool_name,
+        tool_args=tool_args,
+        tool_result=tool_result,
+        tool_error=tool_error,
+    )
+    return await hook_manager.fire(payload, timeout_s=timeout_s)
+
+
+def _append_extra_system_text(system: Message, extra: str | None) -> Message:
+    """Return a new system Message with ``extra`` appended in a ``<memory>`` block.
+
+    When ``extra`` is empty/None the original message is returned unchanged.
+    """
+    if not extra:
+        return system
+    base = "".join(b.text for b in system.content if isinstance(b, Text))
+    wrapped = f"{base}\n\n<memory>\n{extra}\n</memory>"
+    return Message(role="system", content=[Text(text=wrapped)])
+
+
+def _combine_extras(*parts: str | None) -> str | None:
+    """Join non-empty hook-injected fragments with blank lines; ``None`` if all empty."""
+    kept = [p.strip() for p in parts if p and p.strip()]
+    if not kept:
+        return None
+    return "\n\n".join(kept)
 
 
 # Max concurrent ``task`` (subagent) subprocesses per single model tool batch.
@@ -299,6 +354,7 @@ async def run(
     run_id: str | None = None,
     cancelled: asyncio.Event | None = None,
     max_turns: int | None = None,
+    hook_manager: HookManager | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Stream agent events for one user message; ends with ``TurnComplete`` (never raises).
 
@@ -321,6 +377,7 @@ async def run(
             cancelled=cancelled,
             max_turns=max_turns,
             usage=usage,
+            hook_manager=hook_manager,
         ):
             yield evt
     except asyncio.CancelledError:
@@ -348,6 +405,7 @@ async def _run_inner(
     cancelled: asyncio.Event | None,
     max_turns: int | None,
     usage: Usage,
+    hook_manager: HookManager | None = None,
 ) -> AsyncIterator[AgentEvent]:
     effective_max = _effective_max_turns(max_turns)
     _ = await history.load(ctx.thread_id)
@@ -355,11 +413,21 @@ async def _run_inner(
         _cleanup_spill_files(ctx.workspace_root, ctx.thread_id)
     await history.append(ctx.thread_id, Message.text("user", message))
 
+    await _fire_hook(
+        hook_manager,
+        event=HookEvent.USER_MESSAGE,
+        ctx=ctx,
+        timeout_s=0,
+        user_message=message,
+    )
+
     turn_index = 0
     needs_followup_after_tools = False
     curated_injection = False
     curated_mem: list[str] = []
     curated_sks: list[SkillRef] = []
+    pre_turn_extra: str | None = None
+    pre_tool_extra_next: str | None = None
 
     while turn_index < effective_max:
         if cancelled is not None and cancelled.is_set():
@@ -377,6 +445,26 @@ async def _run_inner(
 
         chat_messages = await history.load(ctx.thread_id)
         ctx = await refresh_memory_index(ctx)
+
+        if turn_index == 1:
+            pre_turn_payload = await _fire_hook(
+                hook_manager,
+                event=HookEvent.PRE_TURN,
+                ctx=ctx,
+                timeout_s=_HOOK_READ_TIMEOUT_S,
+                user_message=message,
+            )
+            if pre_turn_payload is not None:
+                pre_turn_extra = pre_turn_payload.inject_text
+                if pre_turn_payload.inject_memory_lines:
+                    ctx = dataclasses.replace(
+                        ctx,
+                        memory_index=[
+                            *ctx.memory_index,
+                            *pre_turn_payload.inject_memory_lines,
+                        ],
+                    )
+
         if (
             turn_index == 1
             and ctx.context_curation_enabled
@@ -405,6 +493,9 @@ async def _run_inner(
             curated_memory_index=curated_mem,
             curated_skills=curated_sks,
         )
+        combined_extra = _combine_extras(pre_turn_extra, pre_tool_extra_next)
+        system = _append_extra_system_text(system, combined_extra)
+        pre_tool_extra_next = None
         provider_messages = _messages_for_provider(system, chat_messages)
 
         estimated = _estimate_tokens(provider_messages)
@@ -438,6 +529,7 @@ async def _run_inner(
                 curated_memory_index=curated_mem,
                 curated_skills=curated_sks,
             )
+            system = _append_extra_system_text(system, pre_turn_extra)
             provider_messages = _messages_for_provider(system, chat_messages)
 
         yield SystemPromptSnapshot(
@@ -649,6 +741,18 @@ async def _run_inner(
 
             if not parallel_tasks:
                 call = allowed_exec[0]
+                pre_tool_payload = await _fire_hook(
+                    hook_manager,
+                    event=HookEvent.PRE_TOOL,
+                    ctx=ctx,
+                    timeout_s=_HOOK_PRE_TOOL_TIMEOUT_S,
+                    tool_name=call.name,
+                    tool_args=dict(call.args),
+                )
+                if pre_tool_payload is not None and pre_tool_payload.inject_text:
+                    pre_tool_extra_next = _combine_extras(
+                        pre_tool_extra_next, pre_tool_payload.inject_text
+                    )
                 try:
                     result_text, err_text = await tool_executor.execute(call=call, ctx=ctx)
                 except asyncio.CancelledError:
@@ -658,6 +762,17 @@ async def _run_inner(
                 except Exception as exc:
                     err_text = str(exc)
                     result_text = None
+
+                await _fire_hook(
+                    hook_manager,
+                    event=HookEvent.POST_TOOL,
+                    ctx=ctx,
+                    timeout_s=0,
+                    tool_name=call.name,
+                    tool_args=dict(call.args),
+                    tool_result=result_text,
+                    tool_error=err_text,
+                )
 
                 if err_text is not None:
                     yield ToolCallResult(
@@ -708,6 +823,20 @@ async def _run_inner(
                     needs_followup_after_tools = False
                     return
 
+                for c in allowed_exec:
+                    pre_tool_payload = await _fire_hook(
+                        hook_manager,
+                        event=HookEvent.PRE_TOOL,
+                        ctx=ctx,
+                        timeout_s=_HOOK_PRE_TOOL_TIMEOUT_S,
+                        tool_name=c.name,
+                        tool_args=dict(c.args),
+                    )
+                    if pre_tool_payload is not None and pre_tool_payload.inject_text:
+                        pre_tool_extra_next = _combine_extras(
+                            pre_tool_extra_next, pre_tool_payload.inject_text
+                        )
+
                 sem = asyncio.Semaphore(_MAX_CONCURRENT_SUBAGENTS)
 
                 async def _run_task(
@@ -748,6 +877,17 @@ async def _run_inner(
                         _, result_text, err_text = cast(
                             tuple[ToolCall, str | None, str | None], outcome
                         )
+
+                    await _fire_hook(
+                        hook_manager,
+                        event=HookEvent.POST_TOOL,
+                        ctx=ctx,
+                        timeout_s=0,
+                        tool_name=call.name,
+                        tool_args=dict(call.args),
+                        tool_result=result_text,
+                        tool_error=err_text,
+                    )
 
                     if err_text is not None:
                         yield ToolCallResult(
@@ -795,3 +935,10 @@ async def _run_inner(
 
     if needs_followup_after_tools:
         yield Error(request_id=ctx.request_id, error="Max turns exceeded")
+
+    await _fire_hook(
+        hook_manager,
+        event=HookEvent.POST_TURN,
+        ctx=ctx,
+        timeout_s=0,
+    )

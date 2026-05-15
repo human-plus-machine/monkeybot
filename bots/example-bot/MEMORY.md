@@ -1,5 +1,5 @@
 # ExampleBot Memory
 
 This bot was initialized on first run.
-Use write_file to add memory files to the memory directory.
-Use search_memory to find information from past sessions.
+Past observations are captured automatically and surfaced in the system prompt
+as a memory index; use `search_memory` for explicit lookup when needed.

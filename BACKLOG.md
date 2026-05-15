@@ -47,7 +47,7 @@ Tasks are split into two parallel tracks. **Do not edit files outside your track
 > **Owns:** `core/memory.py`, `core/harness_prompt.py`, `core/core_tool_executor.py`, `core/workspace_tools.py`, `core/subagent_proto.py`, `core/subagent_worker.py`, `core/config.py`, `core/memory_organizer.py`, `core/interfaces.py`, `providers/`, `README`
 
 - **Memory accuracy verification** — add ability to verify saved memories are accurate and surface discrepancies (hallucinated or stale) in `memory.py`.
-- **save_memory tool** — add `_tool_save_memory` to `core_tool_executor.py` for writing facts to the memory dir and updating `INDEX.md`; decide vs routing through `write_file` to keep tool surface minimal. *(discussion needed)*
+- **INDEX.md size cap (Lever 4)** — *(deferred 2026-05-15)* `MemoryOrganizer` appends to `INDEX.md` without bound. Today this is bounded indirectly by `ContextCurator` (LLM-side selection over the full index) at `>8` entries, which is acceptable for now. When indices grow large enough that even reading `INDEX.md` from disk is wasteful, cap with a sliding window (e.g. keep last N=200, archive older lines to `INDEX.archive.md`) in `core/memory_organizer.py`.
 - **File-op tool audit** — evaluate removing `write_file` in favor of `create_file` + `find_and_replace` in `core_tool_executor.py` and `workspace_tools.py` (reference: Claude Code patterns).
 - **Custom subagents** — allow operators to pre-configure named subagent profiles (own AGENT.md, restricted skill set, specific MCP servers) in `core_tool_executor.py`, `subagent_proto.py`, and `subagent_worker.py`.
 - **Documentation cleanup** — update README to reflect current codebase layout; remove stale references to legacy paths.

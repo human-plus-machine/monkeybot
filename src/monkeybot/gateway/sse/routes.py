@@ -224,7 +224,12 @@ def create_app(
                 active_ids = [bus.current_request_id] if bus.current_request_id else []
                 yield format_active_requests(active_ids).encode("utf-8")
                 while True:
-                    frame = await q.get()
+                    if await request.is_disconnected():
+                        break
+                    try:
+                        frame = await asyncio.wait_for(q.get(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        continue
                     yield frame.encode("utf-8")
             except asyncio.CancelledError:
                 raise
