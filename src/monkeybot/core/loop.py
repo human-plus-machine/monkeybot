@@ -9,24 +9,47 @@ import shutil
 from collections.abc import AsyncIterator, Sequence
 from contextlib import aclosing
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
-from monkeybot.core.context import TurnContext, refresh_memory_index
-from monkeybot.core.harness_prompt import harness_fixed_context
+from monkeybot.core.content_blocks import (
+    ContentBlock,
+    Text,
+    ToolRequest,
+    ToolResponse,
+)
+from monkeybot.core.content_blocks import Thinking as ThinkingBlock
+from monkeybot.core.context import SkillRef, TurnContext, refresh_memory_index
+from monkeybot.core.context_curator import (
+    curation_enabled_from_env,
+    curation_threshold_met,
+    curator_model_id,
+    run_context_curator,
+)
 from monkeybot.core.events import (
     AgentEvent,
     AssistantDelta,
     ContextSummarized,
     ContextSummarizing,
     Error,
+    SystemPromptSnapshot,
     Thinking,
     ToolCallResult,
     ToolCallStarted,
+    ToolConfirmationRequestEvent,
     TurnComplete,
     UsageTotals,
 )
 from monkeybot.core.inspector import InspectorToolCall, ToolInspector
-from monkeybot.core.provider import Done, Message, Provider, TextDelta, ToolCall, UsageEvent
+from monkeybot.core.prompt import compose_system_prompt, latest_user_message_text
+from monkeybot.core.provider import (
+    Done,
+    Message,
+    Provider,
+    TextDelta,
+    ThinkingDelta,
+    ToolCall,
+    UsageEvent,
+)
 from monkeybot.core.usage import Usage
 
 
@@ -52,38 +75,27 @@ def _merge_usage_event(usage: Usage, ev: UsageEvent) -> None:
     usage.cached_tokens += ev.cached_tokens
 
 
-def _system_message(ctx: TurnContext) -> Message:
-    """Single system message: AGENT.md, memory index, skills, then harness tool wiring."""
-    memory_bullets = "\n".join(f"- {line}" for line in ctx.memory_index) if ctx.memory_index else ""
-    mem_block = f"\n\n## Memory index\n{memory_bullets}" if memory_bullets else ""
-
-    skill_lines = []
-    for s in ctx.skills:
-        skill_lines.append(f"- {s.name}: {s.description} (entry: {s.entry_point})")
-    skills_block = "\n".join(skill_lines)
-    skills_section = f"\n\n## Skills\n{skills_block}" if skills_block else ""
-
-    include_task = any(t.name == "task" for t in ctx.tools)
-    harness = harness_fixed_context(include_task_tool=include_task)
-    body = f"{ctx.agent_md}{mem_block}{skills_section}\n\n{harness}"
-    return Message(role="system", content=body)
+def _system_message(
+    ctx: TurnContext,
+    chat_messages: Sequence[Message],
+    *,
+    curated_memory_skills: bool = False,
+    curated_memory_index: list[str] | None = None,
+    curated_skills: list[SkillRef] | None = None,
+) -> Message:
+    """System message: AGENT.md base plus runtime memory, skills, harness, and task anchor."""
+    body = compose_system_prompt(
+        ctx,
+        chat_messages=chat_messages,
+        curated_memory_skills=curated_memory_skills,
+        curated_memory_index=curated_memory_index,
+        curated_skills=curated_skills,
+    )
+    return Message(role="system", content=[Text(text=body)])
 
 
 def _messages_for_provider(system: Message, history: Sequence[Message]) -> list[Message]:
     return [system, *list(history)]
-
-
-def _assistant_tool_placeholder(text: str, calls: Sequence[ToolCall]) -> str:
-    """Stable, parseable assistant row when the model requested tools (batched until Done)."""
-    payload = {
-        "tool_calls": [
-            {"call_id": c.call_id, "name": c.name, "args": c.args} for c in calls
-        ]
-    }
-    tail = json.dumps(payload, ensure_ascii=False)
-    if text:
-        return f"{text}\n{tail}"
-    return tail
 
 
 # Max concurrent ``task`` (subagent) subprocesses per single model tool batch.
@@ -95,8 +107,76 @@ _SUMMARY_KEEP_HEAD = 1
 _SUMMARY_KEEP_TAIL = 6
 
 
+async def _await_user_response_any(
+    bus: object,
+    fut: asyncio.Future[Any],
+    pending_key: str,
+    *,
+    timeout_sec: float | None = None,
+) -> dict[str, Any]:
+    """Wait for POST/resolve on ``fut`` with optional bus timeout bookkeeping.
+
+    Used by the gateway :func:`_await_user_response` and the inspector confirm path.
+    """
+    t = timeout_sec if timeout_sec is not None else float(os.environ.get("PENDING_RESPONSE_TIMEOUT_SEC", "300"))
+    try:
+        return await asyncio.wait_for(asyncio.shield(fut), timeout=t)
+    except TimeoutError:
+        ap = getattr(bus, "abandon_pending_timeout", None)
+        if callable(ap):
+            ap(pending_key)
+        return {"_timeout": True}
+
+
+def _char_estimate_blocks(blocks: Sequence[ContentBlock]) -> int:
+    """Rough character count for token heuristics (Story 4 block-native history)."""
+    total = 0
+    for b in blocks:
+        if isinstance(b, Text):
+            total += len(b.text)
+        elif isinstance(b, ToolRequest):
+            total += len(b.id) + len(b.name) + len(json.dumps(b.args, sort_keys=True))
+        elif isinstance(b, ToolResponse):
+            total += len(b.id) + len(b.tool_name) + _char_estimate_blocks(b.result)
+        else:
+            total += len(json.dumps(b.to_dict(), sort_keys=True))
+    return total
+
+
+def _flatten_tool_result_for_summary(resp: ToolResponse) -> str:
+    parts: list[str] = []
+    for b in resp.result:
+        if isinstance(b, Text):
+            parts.append(b.text)
+        else:
+            parts.append(json.dumps(b.to_dict(), sort_keys=True))
+    return "".join(parts) or "(empty)"
+
+
+def _summary_line_for_message(m: Message) -> str:
+    pieces: list[str] = []
+    for b in m.content:
+        if isinstance(b, Text):
+            pieces.append(b.text)
+        elif isinstance(b, ToolRequest):
+            pieces.append(f"[tool_call: {b.name}({json.dumps(b.args, sort_keys=True)})]")
+        elif isinstance(b, ToolResponse):
+            body = _flatten_tool_result_for_summary(b)
+            tag = "tool_error" if b.is_error else "tool_result"
+            pieces.append(f"[{tag} {b.tool_name}: {body}]")
+        else:
+            pieces.append(f"[{type(b).__name__}]")
+    joined = " ".join(pieces) if pieces else "(empty)"
+    return f"{m.role}: {joined}"
+
+
+def _system_prompt_snapshot_text(system: Message) -> str:
+    """Plain string for :class:`SystemPromptSnapshot` (composed prompt lives in Text blocks)."""
+    return "".join(b.text for b in system.content if isinstance(b, Text))
+
+
 def _estimate_tokens(messages: Sequence[Message]) -> int:
-    return sum(len(m.content) for m in messages) // 4
+    return sum(_char_estimate_blocks(m.content) for m in messages) // 4
 
 
 def _cleanup_spill_files(workspace_root: Path, thread_id: str) -> None:
@@ -124,29 +204,32 @@ async def _summarize_history(
     middle = messages[_SUMMARY_KEEP_HEAD : -_SUMMARY_KEEP_TAIL]
     if not middle:
         return 0
-    lines: list[str] = []
-    for m in middle:
-        label = m.role
-        if m.tool_name:
-            label = f"{m.role} tool={m.tool_name}"
-        lines.append(f"[{label}]\n{m.content}")
+    lines = [_summary_line_for_message(m) for m in middle]
     blob = "\n\n---\n\n".join(lines)
     summarize_messages = [
         Message(
             role="system",
-            content=(
-                "You compress prior agent conversation turns into one dense factual summary. "
-                "Preserve decisions, file paths, errors, tool outcomes, and open tasks. "
-                "Output prose only, no markdown headings unless essential."
-            ),
+            content=[
+                Text(
+                    text=(
+                        "You compress prior agent conversation turns into one dense factual summary. "
+                        "Preserve decisions, file paths, errors, tool outcomes, and open tasks. "
+                        "Output prose only, no markdown headings unless essential."
+                    )
+                )
+            ],
         ),
         Message(
             role="user",
-            content="Summarize the following conversation segment:\n\n" + blob,
+            content=[
+                Text(text="Summarize the following conversation segment:\n\n" + blob)
+            ],
         ),
     ]
     summary_text = ""
-    async with aclosing(provider.stream(summarize_messages, [], model=model)) as stream:
+    async with aclosing(
+        cast(Any, provider.stream(summarize_messages, [], model=model))
+    ) as stream:
         async for ev in stream:
             if isinstance(ev, TextDelta):
                 summary_text += ev.text
@@ -155,7 +238,10 @@ async def _summarize_history(
     summary_text = summary_text.strip() or "(empty summary)"
     merged = [
         *head,
-        Message(role="assistant", content=f"[Context Summary]: {summary_text}"),
+        Message(
+            role="assistant",
+            content=[Text(text=f"[Context Summary]: {summary_text}")],
+        ),
         *tail,
     ]
     await history.reset(thread_id, merged)
@@ -267,10 +353,13 @@ async def _run_inner(
     _ = await history.load(ctx.thread_id)
     if ctx.workspace_root is not None:
         _cleanup_spill_files(ctx.workspace_root, ctx.thread_id)
-    await history.append(ctx.thread_id, Message(role="user", content=message))
+    await history.append(ctx.thread_id, Message.text("user", message))
 
     turn_index = 0
     needs_followup_after_tools = False
+    curated_injection = False
+    curated_mem: list[str] = []
+    curated_sks: list[SkillRef] = []
 
     while turn_index < effective_max:
         if cancelled is not None and cancelled.is_set():
@@ -288,7 +377,34 @@ async def _run_inner(
 
         chat_messages = await history.load(ctx.thread_id)
         ctx = await refresh_memory_index(ctx)
-        system = _system_message(ctx)
+        if (
+            turn_index == 1
+            and ctx.context_curation_enabled
+            and curation_enabled_from_env()
+            and curation_threshold_met(ctx)
+        ):
+            curated_injection = True
+            u = latest_user_message_text(chat_messages) or ""
+            parts = await run_context_curator(
+                ctx=ctx,
+                provider=provider,
+                curator_model=curator_model_id(ctx),
+                user_message=u,
+            )
+            if parts.success:
+                curated_mem = list(parts.memory_lines)
+                curated_sks = list(parts.skills)
+            else:
+                curated_mem = []
+                curated_sks = []
+
+        system = _system_message(
+            ctx,
+            chat_messages,
+            curated_memory_skills=curated_injection,
+            curated_memory_index=curated_mem,
+            curated_skills=curated_sks,
+        )
         provider_messages = _messages_for_provider(system, chat_messages)
 
         estimated = _estimate_tokens(provider_messages)
@@ -314,18 +430,40 @@ async def _run_inner(
                 turns_summarized=turns_summarized,
             )
             chat_messages = await history.load(ctx.thread_id)
+            ctx = await refresh_memory_index(ctx)
+            system = _system_message(
+                ctx,
+                chat_messages,
+                curated_memory_skills=curated_injection,
+                curated_memory_index=curated_mem,
+                curated_skills=curated_sks,
+            )
             provider_messages = _messages_for_provider(system, chat_messages)
+
+        yield SystemPromptSnapshot(
+            request_id=ctx.request_id,
+            inner_turn=turn_index,
+            text=_system_prompt_snapshot_text(system),
+        )
 
         pending: dict[str, ToolCall] = {}
         assistant_text = ""
+        thinking_text = ""
+        thinking_signature: str | None = None
 
         try:
-            async with aclosing(provider.stream(provider_messages, ctx.tools, model=ctx.model)) as stream:
+            async with aclosing(
+                cast(Any, provider.stream(provider_messages, ctx.tools, model=ctx.model))
+            ) as stream:
                 async for ev in stream:
                     if isinstance(ev, TextDelta):
                         assistant_text += ev.text
                         if ev.text:
                             yield AssistantDelta(request_id=ctx.request_id, delta=ev.text)
+                    elif isinstance(ev, ThinkingDelta):
+                        thinking_text += ev.text
+                        if ev.signature:
+                            thinking_signature = ev.signature
                     elif isinstance(ev, UsageEvent):
                         _merge_usage_event(usage, ev)
                     elif isinstance(ev, ToolCall):
@@ -347,10 +485,11 @@ async def _run_inner(
             break
 
         if not pending:
-            if assistant_text.strip():
+            cleaned_text = (assistant_text or "").strip()
+            if cleaned_text:
                 await history.append(
                     ctx.thread_id,
-                    Message(role="assistant", content=assistant_text),
+                    Message(role="assistant", content=[Text(text=cleaned_text)]),
                 )
                 needs_followup_after_tools = False
                 break
@@ -358,7 +497,9 @@ async def _run_inner(
             # provider round the user sees tools then silence — retry until turn budget.
             rows = await history.load(ctx.thread_id)
             owes_tool_followup = needs_followup_after_tools or (
-                bool(rows) and rows[-1].role == "tool"
+                bool(rows)
+                and rows[-1].role == "user"
+                and any(isinstance(b, ToolResponse) for b in rows[-1].content)
             )
             if owes_tool_followup and turn_index < effective_max:
                 continue
@@ -366,9 +507,26 @@ async def _run_inner(
             break
 
         ordered = sorted(pending.values(), key=lambda c: c.call_id)
+        assist_blocks: list[ContentBlock] = []
+        if thinking_text.strip():
+            assist_blocks.append(
+                ThinkingBlock(thinking=thinking_text, signature=thinking_signature or "")
+            )
+        prose = (assistant_text or "").strip()
+        if prose:
+            assist_blocks.append(Text(text=prose))
+        for c in ordered:
+            assist_blocks.append(
+                ToolRequest(
+                    id=c.call_id,
+                    name=c.name,
+                    args=dict(c.args),
+                    metadata=dict(c.metadata) if c.metadata else None,
+                )
+            )
         await history.append(
             ctx.thread_id,
-            Message(role="assistant", content=_assistant_tool_placeholder(assistant_text, ordered)),
+            Message(role="assistant", content=assist_blocks),
         )
 
         needs_followup_after_tools = True
@@ -381,23 +539,72 @@ async def _run_inner(
 
             allowed_exec: list[ToolCall] = []
 
-            for call in chunk:
+            chunk_requests: list[ToolRequest] = [
+                ToolRequest(id=c.call_id, name=c.name, args=dict(c.args)) for c in chunk
+            ]
+
+            for block, call in zip(chunk_requests, chunk, strict=True):
                 if cancelled is not None and cancelled.is_set():
                     yield Error(request_id=ctx.request_id, error="Request cancelled")
                     needs_followup_after_tools = False
                     return
 
                 inspector_call = InspectorToolCall(
-                    call_id=call.call_id, name=call.name, args=call.args
+                    call_id=block.id, name=block.name, args=dict(block.args)
                 )
                 allowed = True
                 denial_message: str | None = None
                 for insp in inspectors:
                     decision = await insp.check(inspector_call, ctx)
-                    if decision.kind == "deny":
-                        allowed = False
-                        denial_message = decision.message
-                        break
+                    match decision.kind:
+                        case "allow":
+                            pass
+                        case "deny":
+                            allowed = False
+                            denial_message = decision.message
+                            break
+                        case "confirm":
+                            if ctx.sse_bus is None:
+                                allowed = False
+                                denial_message = (
+                                    decision.message
+                                    or "Confirmation required but no SSE session is available"
+                                )
+                                break
+                            bus = ctx.sse_bus
+                            fut = bus.register_pending(block.id)
+                            yield ToolConfirmationRequestEvent(
+                                request_id=ctx.request_id,
+                                tool_call_id=block.id,
+                                tool_name=block.name,
+                                arguments=dict(block.args),
+                                prompt=decision.message,
+                            )
+                            try:
+                                payload = await _await_user_response_any(
+                                    bus, fut, block.id, timeout_sec=None
+                                )
+                            except asyncio.CancelledError:
+                                allowed = False
+                                denial_message = "cancelled by user"
+                                break
+                            if payload.get("_timeout"):
+                                allowed = False
+                                to = int(
+                                    float(os.environ.get("PENDING_RESPONSE_TIMEOUT_SEC", "300"))
+                                )
+                                denial_message = f"user did not respond within {to}s"
+                                break
+                            if payload.get("approved"):
+                                allowed = True
+                            else:
+                                allowed = False
+                                reason_raw = payload.get("reason")
+                                denial_message = (
+                                    (reason_raw if isinstance(reason_raw, str) else None)
+                                    or "denied by user"
+                                )
+                            break
 
                 label = call.name
                 args_obj: dict[str, object] = dict(call.args)
@@ -414,10 +621,15 @@ async def _run_inner(
                     await history.append(
                         ctx.thread_id,
                         Message(
-                            role="tool",
-                            content=msg,
-                            tool_name=call.name,
-                            tool_call_id=call.call_id,
+                            role="user",
+                            content=[
+                                ToolResponse(
+                                    id=call.call_id,
+                                    tool_name=call.name,
+                                    result=[Text(text=msg)],
+                                    is_error=True,
+                                )
+                            ],
                         ),
                     )
                     continue
@@ -457,10 +669,15 @@ async def _run_inner(
                     await history.append(
                         ctx.thread_id,
                         Message(
-                            role="tool",
-                            content=err_text,
-                            tool_name=call.name,
-                            tool_call_id=call.call_id,
+                            role="user",
+                            content=[
+                                ToolResponse(
+                                    id=call.call_id,
+                                    tool_name=call.name,
+                                    result=[Text(text=err_text)],
+                                    is_error=True,
+                                )
+                            ],
                         ),
                     )
                 else:
@@ -474,10 +691,15 @@ async def _run_inner(
                     await history.append(
                         ctx.thread_id,
                         Message(
-                            role="tool",
-                            content=body,
-                            tool_name=call.name,
-                            tool_call_id=call.call_id,
+                            role="user",
+                            content=[
+                                ToolResponse(
+                                    id=call.call_id,
+                                    tool_name=call.name,
+                                    result=[Text(text=body)],
+                                    is_error=False,
+                                )
+                            ],
                         ),
                     )
             else:
@@ -488,10 +710,15 @@ async def _run_inner(
 
                 sem = asyncio.Semaphore(_MAX_CONCURRENT_SUBAGENTS)
 
-                async def _run_task(call: ToolCall) -> tuple[ToolCall, str | None, str | None]:
-                    async with sem:
+                async def _run_task(
+                    call: ToolCall,
+                    *,
+                    _sem: asyncio.Semaphore = sem,
+                    _ctx: TurnContext = ctx,
+                ) -> tuple[ToolCall, str | None, str | None]:
+                    async with _sem:
                         try:
-                            rt, et = await tool_executor.execute(call=call, ctx=ctx)
+                            rt, et = await tool_executor.execute(call=call, ctx=_ctx)
                             return (call, rt, et)
                         except asyncio.CancelledError:
                             raise
@@ -518,7 +745,9 @@ async def _run_inner(
                         err_text = str(outcome)
                         result_text = None
                     else:
-                        _, result_text, err_text = outcome
+                        _, result_text, err_text = cast(
+                            tuple[ToolCall, str | None, str | None], outcome
+                        )
 
                     if err_text is not None:
                         yield ToolCallResult(
@@ -530,10 +759,15 @@ async def _run_inner(
                         await history.append(
                             ctx.thread_id,
                             Message(
-                                role="tool",
-                                content=err_text,
-                                tool_name=call.name,
-                                tool_call_id=call.call_id,
+                                role="user",
+                                content=[
+                                    ToolResponse(
+                                        id=call.call_id,
+                                        tool_name=call.name,
+                                        result=[Text(text=err_text)],
+                                        is_error=True,
+                                    )
+                                ],
                             ),
                         )
                     else:
@@ -547,10 +781,15 @@ async def _run_inner(
                         await history.append(
                             ctx.thread_id,
                             Message(
-                                role="tool",
-                                content=body,
-                                tool_name=call.name,
-                                tool_call_id=call.call_id,
+                                role="user",
+                                content=[
+                                    ToolResponse(
+                                        id=call.call_id,
+                                        tool_name=call.name,
+                                        result=[Text(text=body)],
+                                        is_error=False,
+                                    )
+                                ],
                             ),
                         )
 

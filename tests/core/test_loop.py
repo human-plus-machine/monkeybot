@@ -3,24 +3,33 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import json
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
+from monkeybot.core.content_blocks import Text, ToolRequest, ToolResponse
 from monkeybot.core.context import TurnContext
 from monkeybot.core.events import (
     AssistantDelta,
     ContextSummarized,
     ContextSummarizing,
     Error,
+    SystemPromptSnapshot,
     Thinking,
     ToolCallResult,
     TurnComplete,
 )
 from monkeybot.core.inspector import Decision
 from monkeybot.core.loop import _chunk_tool_calls, run
-from monkeybot.core.provider import Done, Message, TextDelta, ToolCall, UsageEvent
+from monkeybot.core.provider import Done, Message, ProviderEvent, TextDelta, ToolCall, UsageEvent
 from monkeybot.core.types_tools import ToolDef
+
+
+def _flatten_text_from_message(m: Message) -> str:
+    return "".join(b.text for b in m.content if isinstance(b, Text))
 
 
 def _ctx(
@@ -103,7 +112,7 @@ class FakeProvider:
         tools: Sequence[ToolDef],
         *,
         model: str,
-    ) -> AsyncIterator[TextDelta | ToolCall | UsageEvent | Done]:
+    ) -> AsyncIterator[ProviderEvent]:
         del messages, tools, model
         idx = self.stream_calls
         self.stream_calls += 1
@@ -134,6 +143,35 @@ class AllowInspector:
     async def check(self, call, ctx):
         del call, ctx
         return Decision(kind="allow")
+
+
+class OrderRecordingInspector:
+    def __init__(self) -> None:
+        self.seen_call_ids: list[str] = []
+
+    async def check(self, call, ctx):
+        del ctx
+        self.seen_call_ids.append(call.call_id)
+        return Decision(kind="allow")
+
+
+class ConfirmInspector:
+    async def check(self, call, ctx):
+        del call, ctx
+        return Decision(kind="confirm", message=None)
+
+
+class PresetPendingBus:
+    """Registers pending futures with optional pre-resolved payloads (Story 5 loop tests)."""
+
+    def __init__(self, preset: dict[str, Any]) -> None:
+        self._preset = preset
+
+    def register_pending(self, key: str) -> asyncio.Future[Any]:
+        fut = asyncio.get_running_loop().create_future()
+        if key in self._preset:
+            fut.set_result(self._preset[key])
+        return fut
 
 
 @pytest.mark.asyncio
@@ -186,6 +224,7 @@ async def test_run_usage_defaults_when_missing_usage_events() -> None:
         max_turns=3,
     ):
         events.append(e)
+    assert not any(isinstance(e, Error) for e in events)
     tc = events[-1]
     assert isinstance(tc, TurnComplete)
     assert tc.usage.input_tokens == 0
@@ -462,7 +501,7 @@ async def test_run_provider_raises_wrapped_as_error() -> None:
             tools: Sequence[ToolDef],
             *,
             model: str,
-        ) -> AsyncIterator[TextDelta]:
+        ) -> AsyncIterator[ProviderEvent]:
             del messages, tools, model
             raise RuntimeError("boom")
             yield  # pragma: no cover
@@ -481,9 +520,10 @@ async def test_run_provider_raises_wrapped_as_error() -> None:
     ):
         events.append(e)
     assert isinstance(events[0], Thinking)
-    assert isinstance(events[1], Error)
-    assert "boom" in events[1].error
-    assert isinstance(events[2], TurnComplete)
+    assert isinstance(events[1], SystemPromptSnapshot)
+    assert isinstance(events[2], Error)
+    assert "boom" in events[2].error
+    assert isinstance(events[3], TurnComplete)
 
 
 @pytest.mark.asyncio
@@ -510,7 +550,11 @@ async def test_run_cleanup_spill_at_start(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_run_emits_context_summarize_events_when_over_cap(tmp_path: Path) -> None:
     preload = [
-        Message(role="user" if i % 2 == 0 else "assistant", content="z" * 600) for i in range(8)
+        Message(
+            role="user" if i % 2 == 0 else "assistant",
+            content=[Text(text="z" * 600)],
+        )
+        for i in range(8)
     ]
     hist = FakeHistory(preload)
     prov = FakeProvider(
@@ -536,13 +580,21 @@ async def test_run_emits_context_summarize_events_when_over_cap(tmp_path: Path) 
     assert "ContextSummarized" in kinds
     assert prov.stream_calls == 2
     assert len(hist.reset_calls) == 1
-    assert any("[Context Summary]" in m.content for m in hist.rows)
+    assert any(
+        isinstance(x, Text) and "[Context Summary]" in x.text
+        for m in hist.rows
+        for x in m.content
+    )
 
 
 @pytest.mark.asyncio
 async def test_run_no_context_summarize_events_when_under_cap(tmp_path: Path) -> None:
     preload = [
-        Message(role="user" if i % 2 == 0 else "assistant", content="z" * 600) for i in range(8)
+        Message(
+            role="user" if i % 2 == 0 else "assistant",
+            content=[Text(text="z" * 600)],
+        )
+        for i in range(8)
     ]
     hist = FakeHistory(preload)
     prov = FakeProvider([[TextDelta(text="final"), Done()]])
@@ -591,7 +643,7 @@ async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> N
             tools: Sequence[ToolDef],
             *,
             model: str,
-        ) -> AsyncIterator[TextDelta | ToolCall | UsageEvent | Done]:
+        ) -> AsyncIterator[ProviderEvent]:
             self.captured_messages.append(list(messages))
             del tools, model
             idx = self.stream_calls
@@ -650,8 +702,8 @@ async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> N
             break
 
     assert len(prov.captured_messages) == 2
-    sys1 = prov.captured_messages[0][0].content
-    sys2 = prov.captured_messages[1][0].content
+    sys1 = _flatten_text_from_message(prov.captured_messages[0][0])
+    sys2 = _flatten_text_from_message(prov.captured_messages[1][0])
     assert "initial line" in sys1
     assert "new memory from tool" not in sys1
     assert "new memory from tool" in sys2
@@ -700,8 +752,14 @@ async def test_parallel_task_results_appended_in_call_id_order() -> None:
     ):
         events.append(e)
 
-    tool_msgs = [m for m in hist.rows if m.role == "tool"]
-    assert [m.tool_call_id for m in tool_msgs] == ["a1", "b1", "c1"], (
+    tool_resp_first = [
+        m
+        for m in hist.rows
+        if m.role == "user"
+        and m.content
+        and isinstance(m.content[0], ToolResponse)
+    ]
+    assert [m.content[0].id for m in tool_resp_first] == ["a1", "b1", "c1"], (
         "tool result messages must be in call_id order, not completion order"
     )
 
@@ -711,4 +769,445 @@ async def test_parallel_task_results_appended_in_call_id_order() -> None:
     result_bodies = [e.result for e in result_events]
     assert result_bodies == ["result:a1", "result:b1", "result:c1"], (
         "ToolCallResult events must be emitted in call_id order"
+    )
+
+
+@pytest.mark.asyncio
+async def test_loop_tool_only_assistant_history_no_placeholder_json() -> None:
+    prov = FakeProvider(
+        [
+            [
+                ToolCall(
+                    call_id="c1",
+                    name="run_command",
+                    args={"command": "python skills/foo/run.py"},
+                ),
+                Done(),
+            ],
+            [TextDelta(text="x"), Done()],
+        ]
+    )
+    hist = FakeHistory()
+    ctx = _ctx()
+    async for _ in run(
+        "u",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(),
+        max_turns=4,
+    ):
+        pass
+    tool_only_assistant = next(
+        m
+        for m in hist.rows
+        if m.role == "assistant"
+        and len(m.content) == 1
+        and isinstance(m.content[0], ToolRequest)
+    )
+    assert not any(isinstance(b, Text) for b in tool_only_assistant.content)
+    serialized = json.dumps([b.to_dict() for b in tool_only_assistant.content])
+    assert 'tool_calls"' not in serialized
+
+
+@pytest.mark.asyncio
+async def test_loop_mixed_text_and_tools_assistant_order() -> None:
+    prov = FakeProvider(
+        [
+            [
+                TextDelta(text="ok"),
+                ToolCall(
+                    call_id="c1",
+                    name="run_command",
+                    args={"command": "python skills/foo/run.py"},
+                ),
+                Done(),
+            ],
+            [TextDelta(text="tail"), Done()],
+        ]
+    )
+    hist = FakeHistory()
+    ctx = _ctx()
+    async for _ in run(
+        "u",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(),
+        max_turns=4,
+    ):
+        pass
+    mixed = next(
+        m
+        for m in hist.rows
+        if m.role == "assistant"
+        and len(m.content) >= 2
+        and isinstance(m.content[0], Text)
+        and isinstance(m.content[1], ToolRequest)
+    )
+    assert mixed.content[0].text == "ok"
+    assert mixed.content[1].id == "c1"
+
+
+@pytest.mark.asyncio
+async def test_loop_tool_success_user_row_shape() -> None:
+    prov = FakeProvider(
+        [
+            [
+                ToolCall(
+                    call_id="x1",
+                    name="run_command",
+                    args={"command": "python skills/foo/run.py"},
+                ),
+                Done(),
+            ],
+            [TextDelta(text="k"), Done()],
+        ]
+    )
+    hist = FakeHistory()
+    exe = RecordingExecutor(("tool-output-ok", None))
+    ctx = _ctx()
+    async for _ in run(
+        "u",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[AllowInspector()],
+        tool_executor=exe,
+        max_turns=4,
+    ):
+        pass
+    block = next(
+        b
+        for m in hist.rows
+        for b in m.content
+        if isinstance(b, ToolResponse) and b.id == "x1"
+    )
+    assert block.tool_name == "run_command"
+    assert block.is_error is False
+    assert len(block.result) == 1
+    assert isinstance(block.result[0], Text)
+    assert block.result[0].text == "tool-output-ok"
+
+
+@pytest.mark.asyncio
+async def test_loop_tool_error_user_row_shape() -> None:
+    prov = FakeProvider(
+        [
+            [
+                ToolCall(
+                    call_id="e1",
+                    name="run_command",
+                    args={"command": "python skills/foo/run.py"},
+                ),
+                Done(),
+            ],
+            [TextDelta(text="k"), Done()],
+        ]
+    )
+    hist = FakeHistory()
+    exe = RecordingExecutor((None, "executor err line"))
+    ctx = _ctx()
+    async for _ in run(
+        "u",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[AllowInspector()],
+        tool_executor=exe,
+        max_turns=4,
+    ):
+        pass
+    block = next(
+        b
+        for m in hist.rows
+        for b in m.content
+        if isinstance(b, ToolResponse) and b.id == "e1"
+    )
+    assert block.is_error is True
+    assert len(block.result) == 1
+    assert isinstance(block.result[0], Text)
+    assert block.result[0].text == "executor err line"
+
+
+@pytest.mark.asyncio
+async def test_loop_inspector_deny_user_row_shape() -> None:
+    prov = FakeProvider(
+        [
+            [
+                ToolCall(
+                    call_id="d1",
+                    name="run_command",
+                    args={"command": "python skills/foo/run.py"},
+                ),
+                Done(),
+            ],
+            [TextDelta(text="after"), Done()],
+        ]
+    )
+    hist = FakeHistory()
+    ctx = _ctx()
+    async for _ in run(
+        "u",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[DenyingInspector()],
+        tool_executor=RecordingExecutor(),
+        max_turns=4,
+    ):
+        pass
+    block = next(
+        b
+        for m in hist.rows
+        for b in m.content
+        if isinstance(b, ToolResponse) and b.id == "d1"
+    )
+    assert block.is_error is True
+    assert len(block.result) == 1
+    assert isinstance(block.result[0], Text)
+    assert "deny" in block.result[0].text.lower()
+
+
+@pytest.mark.asyncio
+async def test_loop_follow_up_after_tool_uses_tool_response_detection() -> None:
+    prov = FakeProvider(
+        [
+            [
+                ToolCall(
+                    call_id="c1",
+                    name="run_command",
+                    args={"command": "python skills/foo/run.py"},
+                ),
+                Done(),
+            ],
+            [Done()],
+            [TextDelta(text="summary"), Done()],
+        ]
+    )
+    hist = FakeHistory()
+    exe = RecordingExecutor()
+    ctx = _ctx()
+    events = []
+    async for e in run(
+        "u",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[AllowInspector()],
+        tool_executor=exe,
+        max_turns=6,
+    ):
+        events.append(e)
+    assert prov.stream_calls == 3
+    deltas = [e.delta for e in events if isinstance(e, AssistantDelta)]
+    assert deltas == ["summary"]
+    assert any(
+        m.role == "user" and any(isinstance(b, ToolResponse) for b in m.content)
+        for m in hist.rows
+    )
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_snapshot_still_plain_string_event() -> None:
+    prov = FakeProvider([[TextDelta(text="hi"), Done()]])
+    hist = FakeHistory()
+    ctx = _ctx()
+    events = []
+    async for e in run(
+        "hello",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        max_turns=3,
+    ):
+        events.append(e)
+    snaps = [e for e in events if isinstance(e, SystemPromptSnapshot)]
+    assert snaps
+    assert isinstance(snaps[0].text, str)
+    assert len(snaps[0].text) > 0
+
+
+@pytest.mark.asyncio
+async def test_inspector_dispatches_per_tool_request_block_order() -> None:
+    insp = OrderRecordingInspector()
+    prov = FakeProvider(
+        [
+            [
+                ToolCall(
+                    call_id="z9",
+                    name="run_command",
+                    args={"command": "python skills/foo/run.py"},
+                ),
+                ToolCall(
+                    call_id="a1",
+                    name="run_command",
+                    args={"command": "python skills/foo/run.py"},
+                ),
+                ToolCall(
+                    call_id="m2",
+                    name="run_command",
+                    args={"command": "python skills/foo/run.py"},
+                ),
+                Done(),
+            ],
+            [TextDelta(text="tail"), Done()],
+        ]
+    )
+    hist = FakeHistory()
+    ctx = _ctx()
+    async for _ in run(
+        "u",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[insp],
+        tool_executor=RecordingExecutor(),
+        max_turns=4,
+    ):
+        pass
+    assert insp.seen_call_ids == ["a1", "m2", "z9"]
+
+
+@pytest.mark.asyncio
+async def test_loop_confirm_decision_raises_if_produced() -> None:
+    prov = FakeProvider(
+        [
+            [
+                ToolCall(
+                    call_id="c1",
+                    name="run_command",
+                    args={"command": "python skills/foo/run.py"},
+                ),
+                Done(),
+            ],
+        ]
+    )
+    hist = FakeHistory()
+    ctx = _ctx()
+    events = []
+    async for e in run(
+        "u",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[ConfirmInspector()],
+        tool_executor=RecordingExecutor(),
+        max_turns=3,
+    ):
+        events.append(e)
+    err_blob = " ".join(e.error for e in events if isinstance(e, Error)).lower()
+    assert "confirm" in err_blob or "reserved" in err_blob
+
+
+@pytest.mark.asyncio
+async def test_loop_confirm_approve_executes_executor() -> None:
+    prov = FakeProvider(
+        [
+            [
+                ToolCall(
+                    call_id="c1",
+                    name="run_command",
+                    args={"command": "true"},
+                ),
+                Done(),
+            ],
+        ]
+    )
+    hist = FakeHistory()
+    exe = RecordingExecutor()
+    ctx = dataclasses.replace(
+        _ctx(),
+        sse_bus=PresetPendingBus({"c1": {"approved": True}}),
+    )
+    async for _ in run(
+        "u",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[ConfirmInspector()],
+        tool_executor=exe,
+        max_turns=3,
+    ):
+        pass
+    assert exe.calls
+    assert any(
+        isinstance(b, ToolResponse) and not b.is_error
+        for row in hist.rows
+        if row.role == "user"
+        for b in row.content
+    )
+
+
+@pytest.mark.asyncio
+async def test_loop_confirm_deny_appends_error_response() -> None:
+    prov = FakeProvider(
+        [
+            [
+                ToolCall(call_id="c1", name="run_command", args={}),
+                Done(),
+            ],
+        ]
+    )
+    hist = FakeHistory()
+    ctx = dataclasses.replace(
+        _ctx(),
+        sse_bus=PresetPendingBus({"c1": {"approved": False, "reason": "no"}}),
+    )
+    async for _ in run(
+        "u",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[ConfirmInspector()],
+        tool_executor=RecordingExecutor(),
+        max_turns=3,
+    ):
+        pass
+    assert any(
+        isinstance(b, ToolResponse)
+        and b.is_error
+        and any(isinstance(x, Text) and x.text == "no" for x in b.result)
+        for row in hist.rows
+        if row.role == "user"
+        for b in row.content
+    )
+
+
+@pytest.mark.asyncio
+async def test_loop_confirm_timeout_synthetic_response() -> None:
+    prov = FakeProvider(
+        [
+            [
+                ToolCall(call_id="c1", name="run_command", args={}),
+                Done(),
+            ],
+        ]
+    )
+    hist = FakeHistory()
+    ctx = dataclasses.replace(
+        _ctx(),
+        sse_bus=PresetPendingBus({"c1": {"_timeout": True}}),
+    )
+    async for _ in run(
+        "u",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[ConfirmInspector()],
+        tool_executor=RecordingExecutor(),
+        max_turns=3,
+    ):
+        pass
+    assert any(
+        isinstance(b, ToolResponse)
+        and b.is_error
+        and any(isinstance(x, Text) and "did not respond" in x.text for x in b.result)
+        for row in hist.rows
+        if row.role == "user"
+        for b in row.content
     )

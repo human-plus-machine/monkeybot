@@ -3,27 +3,30 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 import pytest_asyncio
+
+from monkeybot.core.content_blocks import Text, ToolRequest, ToolResponse
 from monkeybot.core.db import SCHEMA_DDLS, apply_schema, open_connection, sqlite_path_from_db_url
-from monkeybot.core.history import ChatMessage, ConversationHistory
+from monkeybot.core.history import ConversationHistory
+from monkeybot.core.provider import Message
+
+# Legacy ChatMessage + tool_* columns removed in story-2-persistence; see design 1B §7.8.
 
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-async def _apply_schema(conn) -> None:
-    await apply_schema(conn)
-
-
 @pytest_asyncio.fixture
 async def history_db():
     conn = await open_connection("sqlite:///:memory:")
-    await _apply_schema(conn)
+    await apply_schema(conn)
     history = ConversationHistory(conn)
     yield conn, history
     await conn.close()
@@ -64,110 +67,246 @@ def test_schema_ddls_cover_all_tables() -> None:
 
 
 @pytest.mark.asyncio
-async def test_history_append_load_roundtrip_ordering(history_db) -> None:
+async def test_apply_schema_creates_only_expected_history_columns() -> None:
+    conn = await open_connection("sqlite:///:memory:")
+    try:
+        await apply_schema(conn)
+        cursor = await conn.execute("PRAGMA table_info(conversation_history)")
+        rows = await cursor.fetchall()
+        await cursor.close()
+        names = {str(r[1]) for r in rows}
+        assert names == {"id", "thread_id", "role", "content", "created_at"}
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_apply_schema_raises_when_legacy_tool_columns_present() -> None:
+    conn = await open_connection("sqlite:///:memory:")
+    try:
+        await conn.execute("DROP TABLE IF EXISTS conversation_history")
+        await conn.execute(
+            """CREATE TABLE conversation_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                tool_call_id TEXT,
+                tool_name TEXT,
+                created_at INTEGER NOT NULL
+            )"""
+        )
+        await conn.commit()
+        with pytest.raises(RuntimeError) as excinfo:
+            await apply_schema(conn)
+        msg = str(excinfo.value)
+        assert "Legacy conversation_history schema detected" in msg
+        assert "rm -f playground/agent/data/monkeybot.db" in msg
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_apply_schema_succeeds_after_wipe_simulated(tmp_path: Path) -> None:
+    db_file = tmp_path / "wipe_me.db"
+    conn = await open_connection(f"sqlite:///{db_file.as_posix()}")
+    try:
+        await conn.execute("DROP TABLE IF EXISTS conversation_history")
+        await conn.execute(
+            """CREATE TABLE conversation_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                tool_call_id TEXT,
+                tool_name TEXT,
+                created_at INTEGER NOT NULL
+            )"""
+        )
+        await conn.commit()
+        with pytest.raises(RuntimeError, match="Legacy conversation_history schema detected"):
+            await apply_schema(conn)
+    finally:
+        await conn.close()
+
+    db_file.unlink(missing_ok=True)
+    for suffix in "-shm", "-wal":
+        p = Path(str(db_file) + suffix)
+        p.unlink(missing_ok=True)
+
+    conn2 = await open_connection(f"sqlite:///{db_file.as_posix()}")
+    try:
+        await apply_schema(conn2)
+        cursor = await conn2.execute("PRAGMA table_info(conversation_history)")
+        rows = await cursor.fetchall()
+        await cursor.close()
+        names = {str(r[1]) for r in rows}
+        assert names == {"id", "thread_id", "role", "content", "created_at"}
+    finally:
+        await conn2.close()
+
+
+@pytest.mark.asyncio
+async def test_history_text_message_roundtrip(history_db) -> None:
     _conn, history = history_db
-    thread_id = "t1"
-    await history.append(thread_id, ChatMessage(role="user", content="U1"))
-    await history.append(thread_id, ChatMessage(role="assistant", content="A1"))
-    await history.append(thread_id, ChatMessage(role="user", content="U2"))
+    thread_id = "t-text-rt"
+    original = Message.text("user", "hi")
+    await history.append(thread_id, original)
     loaded = await history.load(thread_id)
-    assert [m.content for m in loaded] == ["U1", "A1", "U2"]
-    assert [m.role for m in loaded] == ["user", "assistant", "user"]
-    times = [m.created_at_ms for m in loaded]
-    assert times == sorted(times)
+    assert loaded == [original]
 
 
 @pytest.mark.asyncio
-async def test_history_load_respects_limit(history_db) -> None:
+async def test_history_tool_response_roundtrip(history_db) -> None:
     _conn, history = history_db
-    thread_id = "t-limit"
-    for i in range(150):
-        await history.append(thread_id, ChatMessage(role="user", content=f"m{i}"))
-    loaded = await history.load(thread_id, limit=100)
-    assert len(loaded) == 100
-    assert loaded[0].content == "m50"
-    assert loaded[-1].content == "m149"
+    thread_id = "t-tool-resp-rt"
+    original = Message(
+        role="user",
+        content=[ToolResponse(id="x", tool_name="echo", result=[Text(text="ok")])],
+    )
+    await history.append(thread_id, original)
+    loaded = await history.load(thread_id)
+    assert loaded == [original]
 
 
 @pytest.mark.asyncio
-async def test_history_reset_replaces_all_messages(history_db) -> None:
+async def test_history_mixed_blocks_roundtrip(history_db) -> None:
     _conn, history = history_db
-    thread_id = "t-reset"
-    for i in range(5):
-        await history.append(thread_id, ChatMessage(role="user", content=f"m{i}"))
-    await history.reset(
-        thread_id,
-        [
-            ChatMessage(role="user", content="a"),
-            ChatMessage(role="assistant", content="b"),
+    thread_id = "t-mixed-rt"
+    original = Message(
+        role="assistant",
+        content=[
+            Text(text="a"),
+            ToolRequest(id="c1", name="echo", args={"x": 1}),
         ],
     )
+    await history.append(thread_id, original)
     loaded = await history.load(thread_id)
-    assert len(loaded) == 2
-    assert [m.content for m in loaded] == ["a", "b"]
+    assert loaded == [original]
 
 
 @pytest.mark.asyncio
-async def test_history_reset_preserves_order(history_db) -> None:
+async def test_history_empty_content_roundtrip(history_db) -> None:
     _conn, history = history_db
-    thread_id = "t-order"
-    await history.append(thread_id, ChatMessage(role="user", content="old"))
-    rows = [
-        ChatMessage(role="user", content="u1"),
-        ChatMessage(role="assistant", content="a1"),
-        ChatMessage(role="tool", content="t1", tool_call_id="1", tool_name="x"),
-    ]
-    await history.reset(thread_id, rows)
+    thread_id = "t-empty-content"
+    original = Message(role="assistant", content=[])
+    await history.append(thread_id, original)
     loaded = await history.load(thread_id)
-    assert [m.role for m in loaded] == ["user", "assistant", "tool"]
-    assert loaded[2].tool_call_id == "1"
+    assert loaded == [original]
 
 
 @pytest.mark.asyncio
-async def test_history_reset_with_empty_clears_thread(history_db) -> None:
+async def test_history_append_rejects_tool_role(history_db) -> None:
     _conn, history = history_db
-    thread_id = "t-empty"
-    await history.append(thread_id, ChatMessage(role="user", content="x"))
-    await history.reset(thread_id, [])
-    assert await history.load(thread_id) == []
 
+    class _ToolRole:
+        role = "tool"
+        content: list[Any] = []
 
-@pytest.mark.asyncio
-async def test_history_clear_removes_thread_only(history_db) -> None:
-    _conn, history = history_db
-    await history.append("t1", ChatMessage(role="user", content="a"))
-    await history.append("t2", ChatMessage(role="user", content="b"))
-    await history.clear("t1")
-    assert await history.load("t1") == []
-    t2 = await history.load("t2")
-    assert len(t2) == 1
-    assert t2[0].content == "b"
-
-
-@pytest.mark.asyncio
-async def test_history_tool_name_roundtrip(history_db) -> None:
-    _conn, history = history_db
-    thread_id = "t-tool"
-    await history.append(thread_id, ChatMessage(role="user", content="hi"))
-    await history.append(
-        thread_id,
-        ChatMessage(
-            role="tool",
-            content='{"ok":true}',
-            tool_call_id="call-1",
-            tool_name="my_fn",
-        ),
-    )
-    loaded = await history.load(thread_id)
-    assert loaded[1].tool_call_id == "call-1"
-    assert loaded[1].tool_name == "my_fn"
-
-
-@pytest.mark.asyncio
-async def test_history_invalid_role_raises(history_db) -> None:
-    _conn, history = history_db
     with pytest.raises(ValueError):
-        await history.append("t1", ChatMessage(role="system", content="x"))  # type: ignore[arg-type]
+        await history.append("t1", cast(Message, _ToolRole()))
+
+
+@pytest.mark.asyncio
+async def test_history_rejects_invalid_role(history_db) -> None:
+    _conn, history = history_db
+
+    class _BadRole:
+        role = "nope"
+        content: list[Any] = []
+
+    with pytest.raises(ValueError):
+        await history.append("t1", cast(Message, _BadRole()))
+
+
+@pytest.mark.asyncio
+async def test_history_load_malformed_json_logs_and_raises(history_db, caplog: pytest.LogCaptureFixture) -> None:
+    conn, history = history_db
+    thread_id = "t-bad-json"
+    await conn.execute(
+        """
+        INSERT INTO conversation_history(thread_id, role, content, created_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (thread_id, "user", "not-json", 1),
+    )
+    await conn.commit()
+    with caplog.at_level(logging.ERROR, logger="monkeybot.core.history"):
+        with pytest.raises(ValueError, match=r"history row \d+ unparseable"):
+            await history.load(thread_id)
+    joined = " ".join(r.getMessage() for r in caplog.records)
+    assert "not-json" not in joined
+
+
+@pytest.mark.asyncio
+async def test_history_content_sqlite_json_extract(history_db) -> None:
+    conn, history = history_db
+    thread_id = "t-json-extract"
+    msg = Message(
+        role="assistant",
+        content=[
+            Text(text="x"),
+            ToolRequest(id="r1", name="echo", args={}),
+        ],
+    )
+    await history.append(thread_id, msg)
+    cursor = await conn.execute(
+        "SELECT json_extract(content, '$[0].type') FROM conversation_history WHERE thread_id = ?",
+        (thread_id,),
+    )
+    row = await cursor.fetchone()
+    await cursor.close()
+    assert row is not None
+    assert row[0] == "text"
+
+
+@pytest.mark.asyncio
+async def test_history_append_load_ordering_limit_clear_reset(history_db) -> None:
+    conn, history = history_db
+    thread_order = "t-ordering"
+    await history.append(thread_order, Message.text("user", "U1"))
+    await history.append(thread_order, Message.text("assistant", "A1"))
+    await history.append(thread_order, Message.text("user", "U2"))
+    loaded = await history.load(thread_order)
+    assert [m.role for m in loaded] == ["user", "assistant", "user"]
+    flat = [b.text for m in loaded for b in m.content if isinstance(b, Text)]
+    assert flat == ["U1", "A1", "U2"]
+
+    thread_limit = "t-limit"
+    for i in range(150):
+        await history.append(thread_limit, Message.text("user", f"m{i}"))
+    limited = await history.load(thread_limit, limit=100)
+    assert len(limited) == 100
+    lim_texts = [b.text for m in limited for b in m.content if isinstance(b, Text)]
+    assert lim_texts[0] == "m50"
+    assert lim_texts[-1] == "m149"
+
+    thread_reset = "t-reset"
+    for i in range(5):
+        await history.append(thread_reset, Message.text("user", f"m{i}"))
+    await history.reset(
+        thread_reset,
+        [
+            Message.text("user", "a"),
+            Message.text("assistant", "b"),
+        ],
+    )
+    after_reset = await history.load(thread_reset)
+    assert len(after_reset) == 2
+    assert [b.text for m in after_reset for b in m.content if isinstance(b, Text)] == ["a", "b"]
+
+    thread_empty_reset = "t-empty-reset"
+    await history.append(thread_empty_reset, Message.text("user", "x"))
+    await history.reset(thread_empty_reset, [])
+    assert await history.load(thread_empty_reset) == []
+
+    await history.append("cle1", Message.text("user", "a"))
+    await history.append("cle2", Message.text("user", "b"))
+    await history.clear("cle1")
+    assert await history.load("cle1") == []
+    t2 = await history.load("cle2")
+    assert len(t2) == 1
+    assert t2[0] == Message.text("user", "b")
 
 
 def test_sqlite_persistence_source_has_no_google_cloud() -> None:

@@ -4,7 +4,6 @@ Provides utilities for loading secrets and configuring models:
 - load_bot_config(): Load bot.yaml config file with defaults
 - load_secrets(): Load from GCP Secret Manager (prod) or .env (dev)
 - get_provider_config(): Resolve native :class:`~monkeybot.core.provider.Provider` + model id
-- get_system_prompt(): Load custom system prompt from file
 
 This module handles environment detection and secret loading for deployments.
 """
@@ -174,15 +173,15 @@ def _flatten_yaml_to_env(yaml_dict: Dict[str, Any]) -> Dict[str, str]:
         >>> _flatten_yaml_to_env(yaml_dict)
         {"AGENT_NAME": "test", "ALLOWED_USERS": "a@b.com"}
     """
-    result = {}
-    
+    result: dict[str, str] = {}
+
     # Walk through CONFIG_MAPPING to extract values from nested yaml_dict
     for yaml_path, env_var in CONFIG_MAPPING.items():
         # Split path into parts (e.g., "agent.name" -> ["agent", "name"])
         parts = yaml_path.split(".")
-        
+
         # Navigate nested dict
-        value = yaml_dict
+        value: Any = yaml_dict
         for part in parts:
             if isinstance(value, dict) and part in value:
                 value = value[part]
@@ -325,7 +324,7 @@ _config_loaded = False
 # Raw YAML dict stored after the last successful load_bot_config() call.
 # Used by get_subagent_configs() to read the top-level `subagents:` section
 # without requiring a second YAML parse.
-_raw_yaml: dict | None = None
+_raw_yaml: dict[str, Any] | None = None
 
 
 def load_bot_config(config_path: str | None = None) -> Dict[str, str]:
@@ -619,7 +618,7 @@ def get_provider_config(
         ValueError: Unsupported provider or missing required configuration
     """
     provider_key = provider or os.getenv("MODEL_PROVIDER", "google_vertexai")
-    resolved_model = model_name or os.getenv("MODEL_NAME", "gemini-2.5-flash")
+    resolved_model = str(model_name or os.getenv("MODEL_NAME") or "gemini-2.5-flash")
     temperature = temperature if temperature is not None else float(
         os.getenv("MODEL_TEMPERATURE", "0.7")
     )
@@ -676,49 +675,6 @@ def get_provider_config(
         f"Unsupported model provider: {provider_key}. "
         "Supported providers: google_vertexai, openai, anthropic, vertex_anthropic"
     )
-
-
-def get_system_prompt(prompt_file_path: str | None = None) -> str:
-    """Load system prompt from file.
-
-    Args:
-        prompt_file_path: Path to system prompt file.
-            If not provided, uses SYSTEM_PROMPT_FILE env var.
-            If neither provided, returns empty string.
-
-    Returns:
-        System prompt string from file, or empty string if file not found
-
-    Environment Variables:
-        SYSTEM_PROMPT_FILE: Optional path to system prompt file
-
-    Example:
-        >>> # Load from env var
-        >>> os.environ["SYSTEM_PROMPT_FILE"] = "/app/prompts/bot-prompt.txt"
-        >>> prompt = get_system_prompt()
-
-        >>> # Load from explicit path
-        >>> prompt = get_system_prompt("/app/prompts/custom-prompt.txt")
-    """
-    prompt_file = prompt_file_path or os.getenv("SYSTEM_PROMPT_FILE")
-
-    if not prompt_file:
-        logger.debug("No system prompt file specified (SYSTEM_PROMPT_FILE not set)")
-        return ""
-
-    prompt_path = Path(prompt_file)
-    if not prompt_path.exists():
-        logger.warning(f"System prompt file not found: {prompt_file}")
-        return ""
-
-    try:
-        with open(prompt_path) as f:
-            content = f.read()
-        logger.info(f"✅ Loaded system prompt from {prompt_file}")
-        return content
-    except Exception as e:
-        logger.error(f"❌ Failed to load system prompt from {prompt_file}: {e}")
-        return ""
 
 
 def get_subagent_configs() -> list[SubagentConfig]:

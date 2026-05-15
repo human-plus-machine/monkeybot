@@ -43,3 +43,7 @@ docker/data/
 
 # Planning Documents
 .prt/
+.monkeymode/
+
+# Reference clones (read-only)
+code/

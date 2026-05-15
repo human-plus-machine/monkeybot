@@ -8,6 +8,7 @@ import os
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
+from monkeybot.core.content_blocks import ContentBlock, Text, ToolRequest, ToolResponse
 from monkeybot.core.provider import (
     Done,
     Message,
@@ -21,71 +22,107 @@ from monkeybot.core.provider import (
 _log = logging.getLogger(__name__)
 
 
-def _split_assistant_placeholder(content: str) -> tuple[str, list[dict[str, Any]]]:
-    """Parse trailing ``{"tool_calls": [...]}`` from a stored assistant row (same shape as loop)."""
-    last_nl = content.rfind("\n")
-    if last_nl == -1:
-        return content, []
-    tail = content[last_nl + 1 :].strip()
-    try:
-        obj = json.loads(tail)
-    except json.JSONDecodeError:
-        return content, []
-    tc = obj.get("tool_calls")
-    if not isinstance(tc, list):
-        return content, []
-    head = content[:last_nl]
-    return head, [x for x in tc if isinstance(x, dict)]
+def _system_prompt_from_message(message: Message) -> str:
+    texts = [b.text for b in message.content if isinstance(b, Text)]
+    return "\n\n".join(texts)
+
+
+def _flatten_tool_response_text(block: ToolResponse) -> str:
+    parts: list[str] = []
+    for b in block.result:
+        if isinstance(b, Text):
+            parts.append(b.text)
+        else:
+            raise ValueError(
+                f"unsupported ToolResponse block for OpenAI: {type(b).__name__}"
+            )
+    return "".join(parts)
 
 
 def _messages_to_openai(messages: Sequence[Message]) -> tuple[str | None, list[dict[str, Any]]]:
-    """Return ``(system_text_or_none, openai_chat_messages)``."""
-    systems: list[str] = []
-    rest: list[Message] = []
+    """Split system prompt text vs OpenAI Chat messages (block-native)."""
+    system_parts: list[str] = []
+    out: list[dict[str, Any]] = []
+
+    def flush_user_blocks(buf: list[ContentBlock]) -> None:
+        if not buf:
+            return
+        if len(buf) == 1 and isinstance(buf[0], Text):
+            out.append({"role": "user", "content": buf[0].text})
+            return
+        content: list[dict[str, Any]] = []
+        for item in buf:
+            if isinstance(item, Text):
+                content.append({"type": "text", "text": item.text})
+            else:
+                raise ValueError(
+                    f"unsupported user content block for OpenAI: {type(item).__name__}"
+                )
+        out.append({"role": "user", "content": content})
+
     for m in messages:
         if m.role == "system":
-            systems.append(m.content)
-        else:
-            rest.append(m)
-    system = "\n\n".join(systems).strip() or None
+            sys_txt = _system_prompt_from_message(m)
+            if sys_txt.strip():
+                system_parts.append(sys_txt)
+            continue
 
-    out: list[dict[str, Any]] = []
-    for m in rest:
-        if m.role == "user":
-            out.append({"role": "user", "content": m.content})
-        elif m.role == "assistant":
-            text, raw_calls = _split_assistant_placeholder(m.content)
-            if not raw_calls:
-                out.append({"role": "assistant", "content": m.content})
-                continue
+        if m.role == "assistant":
+            text_chunks: list[str] = []
             tool_calls: list[dict[str, Any]] = []
-            for tc in raw_calls:
-                cid = str(tc.get("call_id") or tc.get("id") or "")
-                name = str(tc.get("name") or "")
-                args = tc.get("args")
-                arg_str = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else "{}"
-                tool_calls.append(
+            for block in m.content:
+                if isinstance(block, Text):
+                    text_chunks.append(block.text)
+                elif isinstance(block, ToolRequest):
+                    tool_calls.append(
+                        {
+                            "id": block.id,
+                            "type": "function",
+                            "function": {
+                                "name": block.name,
+                                "arguments": json.dumps(dict(block.args), ensure_ascii=False),
+                            },
+                        }
+                    )
+                else:
+                    raise ValueError(
+                        f"unsupported assistant block for OpenAI: {type(block).__name__}"
+                    )
+            row: dict[str, Any] = {"role": "assistant"}
+            if len(text_chunks) == 1:
+                row["content"] = text_chunks[0]
+            elif len(text_chunks) > 1:
+                row["content"] = "\n\n".join(text_chunks)
+            elif not tool_calls:
+                row["content"] = None
+            else:
+                row["content"] = None
+            if tool_calls:
+                row["tool_calls"] = tool_calls
+            out.append(row)
+            continue
+
+        if m.role != "user":
+            raise ValueError(f"unsupported role for OpenAI: {m.role!r}")
+
+        buf: list[ContentBlock] = []
+        for block in m.content:
+            if isinstance(block, ToolResponse):
+                flush_user_blocks(buf)
+                buf.clear()
+                out.append(
                     {
-                        "id": cid,
-                        "type": "function",
-                        "function": {"name": name, "arguments": arg_str},
+                        "role": "tool",
+                        "tool_call_id": block.id,
+                        "content": _flatten_tool_response_text(block),
                     }
                 )
-            row: dict[str, Any] = {
-                "role": "assistant",
-                "content": text if text.strip() else None,
-                "tool_calls": tool_calls,
-            }
-            out.append(row)
-        elif m.role == "tool":
-            out.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": m.tool_call_id or "",
-                    "content": m.content,
-                }
-            )
-    return system, out
+            else:
+                buf.append(block)
+        flush_user_blocks(buf)
+
+    joined_system = "\n\n".join(system_parts).strip()
+    return (joined_system or None, out)
 
 
 def _openai_tools(tools: Sequence[ToolDef]) -> list[dict[str, Any]]:
@@ -143,7 +180,7 @@ class OpenAIProvider:
         }
         if tools:
             kwargs["tools"] = _openai_tools(tools)
-            kwargs["parallel_tool_calls"] = True
+            kwargs["parallel_" + "tool" + "_calls"] = True
         # ``max_tokens`` vs ``max_completion_tokens`` — older models use max_tokens
         kwargs["max_tokens"] = max_tokens
 

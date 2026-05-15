@@ -7,8 +7,11 @@ from __future__ import annotations
 import asyncio
 import os
 from collections import deque
+from typing import Any, Literal
 
 from .sse import format_data_event
+
+PENDING_RESPONSE_TIMEOUT_SEC: float = float(os.environ.get("PENDING_RESPONSE_TIMEOUT_SEC", "300"))
 
 
 def _replay_maxlen_from_env() -> int:
@@ -43,6 +46,44 @@ class SessionBus:
         self._replay: deque[tuple[int, str]] = deque(maxlen=maxlen)
         self._subscribers: set[asyncio.Queue[str]] = set()
         self._lock = asyncio.Lock()
+        self.pending_responses: dict[str, asyncio.Future[Any]] = {}
+        self.terminated_pending_keys: deque[str] = deque(maxlen=256)
+
+    def register_pending(self, pending_key: str) -> asyncio.Future[Any]:
+        fut = asyncio.get_running_loop().create_future()
+        self.pending_responses[pending_key] = fut
+        return fut
+
+    def resolve_pending(self, pending_key: str, payload: Any) -> bool:
+        fut = self.pending_responses.get(pending_key)
+        if fut is None or fut.done():
+            return False
+        fut.set_result(payload)
+        self.pending_responses.pop(pending_key, None)
+        self.terminated_pending_keys.append(pending_key)
+        return True
+
+    def abandon_pending_timeout(self, pending_key: str) -> None:
+        fut = self.pending_responses.pop(pending_key, None)
+        if fut is None:
+            return
+        if not fut.done():
+            fut.cancel()
+        self.terminated_pending_keys.append(pending_key)
+
+    def abandon_pending_cancel_all(self) -> None:
+        for pending_key in list(self.pending_responses.keys()):
+            fut = self.pending_responses.pop(pending_key, None)
+            if fut is not None and not fut.done():
+                fut.cancel()
+            self.terminated_pending_keys.append(pending_key)
+
+    def is_pending_or_terminal(self, pending_key: str) -> Literal["pending", "terminated", "unknown"]:
+        if pending_key in self.pending_responses:
+            return "pending"
+        if pending_key in self.terminated_pending_keys:
+            return "terminated"
+        return "unknown"
 
     async def publish_data(self, data_json: str) -> int:
         """Buffer and broadcast one JSON data event; returns monotonic sequence id."""
@@ -82,6 +123,27 @@ class SessionBus:
         """Remove a subscriber queue (call from SSE disconnect finally)."""
         async with self._lock:
             self._subscribers.discard(queue)
+
+
+async def _await_user_response(
+    bus: SessionBus,
+    *,
+    pending_key: str,
+    timeout_sec: float | None = None,
+) -> dict[str, Any]:
+    """Block until POST resolves *pending_key*, timeout, cancel, or disconnect policy.
+
+    Returns:
+        Normal POST payloads (structure depends on flow).
+        On timeout: ``{"_timeout": True}`` (sentinel).
+
+    Raises:
+        asyncio.CancelledError: When the backing Future was cancelled (Stop button path).
+    """
+    from monkeybot.core.loop import _await_user_response_any
+
+    fut = bus.pending_responses[pending_key]
+    return await _await_user_response_any(bus, fut, pending_key, timeout_sec=timeout_sec)
 
 
 class SessionRegistry:

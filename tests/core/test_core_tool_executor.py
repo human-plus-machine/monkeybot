@@ -422,17 +422,4 @@ async def test_read_file_non_spill_uses_workspace_defaults(tmp_path: Path) -> No
     assert payload["end_line"] - payload["start_line"] + 1 <= 200
 
 
-def test_last_clean_assistant_text_strips_tool_call_echo() -> None:
-    from monkeybot.core.core_tool_executor import _last_clean_assistant_text
-
-    text = (
-        "Here is what I found.\n"
-        '{"tool_calls": [{"call_id": "x", "name": "y", "args": {}}]}'
-    )
-    assert _last_clean_assistant_text(text) == "Here is what I found."
-
-    only_payload = '{"tool_calls": [{"call_id": "x", "name": "y", "args": {}}]}'
-    assert _last_clean_assistant_text(only_payload) == ""
-
-    plain = "just words"
-    assert _last_clean_assistant_text(plain) == "just words"
+# Removed in story-3-providers-and-snapshots: helper deleted

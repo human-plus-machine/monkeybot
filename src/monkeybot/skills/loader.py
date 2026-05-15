@@ -13,7 +13,7 @@ Example:
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 
 import yaml
 
@@ -57,9 +57,9 @@ class SkillLoader:
             skills_dir: Path to skills directory (default: ./skills)
         """
         self.skills_dir = Path(skills_dir)
-        self.skills: Dict[str, dict] = {}
+        self.skills: dict[str, dict[str, Any]] = {}
 
-    def load_skills(self) -> Dict[str, dict]:
+    def load_skills(self) -> dict[str, dict[str, Any]]:
         """
         Discover all skills in skills directory.
 
@@ -216,7 +216,7 @@ class SkillLoader:
 
         return tool_schemas
 
-    def _parse_skill_md(self, skill_md_path: Path) -> Optional[dict]:
+    def _parse_skill_md(self, skill_md_path: Path) -> Optional[dict[str, Any]]:
         """
         Parse SKILL.md file and extract YAML frontmatter.
 
@@ -267,7 +267,7 @@ class SkillLoader:
             frontmatter = parts[1].strip()
             metadata = yaml.safe_load(frontmatter)
 
-            return metadata
+            return cast(dict[str, Any], metadata)
 
         except yaml.YAMLError as e:
             logger.error(

@@ -8,6 +8,7 @@ import os
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
+from monkeybot.core.content_blocks import Text
 from monkeybot.core.provider import (
     Done,
     Message,
@@ -20,6 +21,8 @@ from monkeybot.core.provider import (
 from monkeybot.providers._utils import build_anthropic_messages
 
 _log = logging.getLogger(__name__)
+
+
 class ClaudeProvider:
     """Anthropic Claude using the ``anthropic`` SDK."""
 
@@ -53,7 +56,8 @@ class ClaudeProvider:
         msgs = list(messages)
         system = ""
         if msgs and msgs[0].role == "system":
-            system = msgs[0].content
+            sys_msg = msgs[0]
+            system = "\n\n".join(b.text for b in sys_msg.content if isinstance(b, Text))
             msgs = msgs[1:]
 
         converted_messages = build_anthropic_messages(msgs)

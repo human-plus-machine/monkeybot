@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from monkeybot.core.context import TurnContext
+from monkeybot.core.memory import search_memory_files
 from monkeybot.core.events import AssistantDelta, Error, ToolCallResult, ToolCallStarted, TurnComplete
 from monkeybot.core.loop import ToolExecutorPort
 from monkeybot.core.mcp_client import MCPConnectionError, MCPServerNotConnectedError
@@ -147,64 +148,6 @@ def _parse_run_command(args: dict[str, Any]) -> tuple[str, list[str]]:
     )
 
 
-def _last_clean_assistant_text(text: str) -> str:
-    """Return the model's natural-language reply, stripping ``{"tool_calls":...}`` placeholder echoes.
-
-    The owned loop stores assistant turns that requested tools as ``"<text>\\n<json>"`` rows; some
-    models then imitate that shape in their text stream. Drop trailing JSON-only segments so the
-    parent surfaces the real prose instead of an internal-looking blob.
-    """
-    body = (text or "").strip()
-    if not body:
-        return ""
-    last_nl = body.rfind("\n")
-    if last_nl == -1:
-        candidate = body
-        rest = ""
-    else:
-        candidate = body[last_nl + 1 :].strip()
-        rest = body[:last_nl].rstrip()
-    if candidate.startswith("{") and '"tool_calls"' in candidate:
-        try:
-            json.loads(candidate)
-            return rest
-        except json.JSONDecodeError:
-            return body
-    return body
-
-
-def _search_memory_disk(memory_root: Path, query: str, *, max_hits: int = 40) -> dict[str, Any]:
-    q = query.lower().strip()
-    if not q:
-        return {"ok": True, "query": query, "hits": [], "note": "empty query"}
-    if not memory_root.exists():
-        return {"ok": True, "query": query, "hits": [], "note": f"missing directory: {memory_root}"}
-
-    hits: list[dict[str, Any]] = []
-    suffixes = {".md", ".txt", ".markdown"}
-    for path in sorted(memory_root.rglob("*")):
-        if len(hits) >= max_hits:
-            break
-        if not path.is_file() or path.suffix.lower() not in suffixes:
-            continue
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        lower = text.lower()
-        pos = lower.find(q)
-        if pos < 0:
-            continue
-        try:
-            rel = str(path.relative_to(memory_root))
-        except ValueError:
-            rel = path.name
-        start = max(0, pos - 60)
-        end = min(len(text), pos + len(q) + 80)
-        snippet = text[start:end].replace("\n", " ")
-        hits.append({"path": rel, "snippet": snippet, "match_offset": pos})
-    return {"ok": True, "query": query, "hits": hits, "truncated": len(hits) >= max_hits}
-
 
 class CoreToolExecutor(ToolExecutorPort):
     """Executes built-in tools and delegates ``server__tool`` calls to :class:`MCPClient`."""
@@ -308,7 +251,7 @@ class CoreToolExecutor(ToolExecutorPort):
         if not query:
             return (None, "search_memory requires query (or q / keyword / phrase)")
         max_hits = _coerce_int(args.get("max_hits"), 40) or 40
-        payload = await asyncio.to_thread(_search_memory_disk, self._memory_path, query, max_hits=max_hits)
+        payload = await asyncio.to_thread(search_memory_files, self._memory_path, query, max_hits=max_hits)
         return (_j(payload), None)
 
     def _tool_list_skills(self, ctx: TurnContext) -> tuple[str | None, str | None]:
@@ -482,7 +425,7 @@ class CoreToolExecutor(ToolExecutorPort):
             }
 
         full_text = "".join(deltas).strip()
-        final_text = _last_clean_assistant_text(full_text)
+        final_text = full_text
 
         payload = {
             "ok": len(errors) == 0,

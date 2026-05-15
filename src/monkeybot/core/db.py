@@ -2,13 +2,29 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Final
 
 import aiosqlite
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_DB_URL: Final[str] = "sqlite:///data/monkeybot.db"
+
+_LEGACY_SCHEMA_MESSAGE = """Legacy conversation_history schema detected (tool_name and/or
+tool_call_id columns present). The on-disk format changed in the
+typed-message-content release. Choose one:
+
+  Dev / playground:
+    rm -f playground/agent/data/monkeybot.db
+    rm -f playground/agent/data/monkeybot.db-shm
+    rm -f playground/agent/data/monkeybot.db-wal
+
+  Other deployments: there is no automated migration. The legacy format is
+  a JSON tail inside a TEXT column; transcribing it to typed blocks must
+  be done by the operator. See docs/migrations/typed-message-content.md."""
 
 SCHEMA_DDLS: Final[tuple[str, ...]] = (
     """CREATE TABLE IF NOT EXISTS conversation_history (
@@ -16,8 +32,6 @@ SCHEMA_DDLS: Final[tuple[str, ...]] = (
     thread_id TEXT NOT NULL,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
-    tool_call_id TEXT,
-    tool_name TEXT,
     created_at INTEGER NOT NULL
 )""",
     """CREATE TABLE IF NOT EXISTS subagent_runs (
@@ -84,18 +98,38 @@ async def configure_connection(conn: aiosqlite.Connection) -> None:
     await conn.execute("PRAGMA synchronous=NORMAL")
 
 
+async def _connection_db_path(conn: aiosqlite.Connection) -> str:
+    """Resolve main DB path for logging (``:memory:`` when no file path)."""
+    cursor = await conn.execute("PRAGMA database_list")
+    rows = await cursor.fetchall()
+    await cursor.close()
+    for row in rows:
+        if len(row) >= 3 and str(row[1]) == "main":
+            file_col = row[2]
+            return ":memory:" if not file_col else str(file_col)
+    return ":memory:"
+
+
+async def _log_legacy_schema_error(conn: aiosqlite.Connection) -> None:
+    path = await _connection_db_path(conn)
+    logger.error("Legacy conversation_history schema detected; db=%s", path)
+
+
 async def apply_schema(conn: aiosqlite.Connection) -> None:
-    """Create tables and migrate ``conversation_history`` when ``tool_name`` is missing."""
+    """Create tables/indexes; refuse legacy conversation_history shapes."""
     for ddl in SCHEMA_DDLS:
         await conn.execute(ddl)
     await conn.commit()
     cursor = await conn.execute("PRAGMA table_info(conversation_history)")
     rows = await cursor.fetchall()
     await cursor.close()
-    col_names = [r[1] for r in rows]
-    if "tool_name" not in col_names:
-        await conn.execute("ALTER TABLE conversation_history ADD COLUMN tool_name TEXT")
-        await conn.commit()
+    col_names = {str(r[1]) for r in rows}
+    if "tool_name" in col_names or "tool_call_id" in col_names:
+        await _log_legacy_schema_error(conn)
+        raise RuntimeError(_LEGACY_SCHEMA_MESSAGE)
+
+
+_ensure_schema = apply_schema
 
 
 async def open_connection(db_url: str | None = None) -> aiosqlite.Connection:

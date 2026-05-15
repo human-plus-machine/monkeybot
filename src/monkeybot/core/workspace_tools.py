@@ -23,7 +23,7 @@ def tool(fn: F) -> F:
     return cast(F, wrapper)
 
 
-def _j(data: dict) -> str:
+def _j(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False)
 
 
@@ -31,7 +31,7 @@ def create_workspace_file_tools(
     repo_root: Path,
     *,
     settings: object | None = None,
-) -> list:
+) -> list[Any]:
     """Return five tool instances registered with the orchestrator."""
     root = Path(repo_root).resolve()
     svc = WorkspaceFileService(root, settings=settings)

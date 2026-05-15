@@ -10,7 +10,7 @@ from __future__ import annotations
 from . import interfaces
 
 
-class MockAgentCore(interfaces.AgentCoreInterface):  # type: ignore[misc]
+class MockAgentCore(interfaces.AgentCoreInterface):
     """Minimal agent core for gateway tests (echo + trace_id)."""
 
     async def process_message(self, user_id: str, content: str, trace_id: str) -> str:

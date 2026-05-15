@@ -153,7 +153,7 @@ async def bench_harness() -> None:
     from monkeybot.core.context import TurnContext
     from monkeybot.core.db import apply_schema, open_connection
     from monkeybot.core.events import AssistantDelta, TurnComplete
-    from monkeybot.core.history import ChatMessage, ConversationHistory
+    from monkeybot.core.history import ConversationHistory
     from monkeybot.core.loop import run
     from monkeybot.core.provider import Done, TextDelta, UsageEvent
     from monkeybot.core.types_tools import ToolDef
@@ -301,7 +301,8 @@ async def bench_history() -> None:
     section("4. CONVERSATION HISTORY (SQLite)")
 
     from monkeybot.core.db import apply_schema, open_connection
-    from monkeybot.core.history import ChatMessage, ConversationHistory
+    from monkeybot.core.history import ConversationHistory
+    from monkeybot.core.provider import Message
 
     import tempfile
 
@@ -314,7 +315,10 @@ async def bench_history() -> None:
         t = time.monotonic()
         for i in range(20):
             role = "user" if i % 2 == 0 else "assistant"
-            await db.append("bench-session", ChatMessage(role=role, content=f"message {i}"))  # type: ignore[arg-type]
+            await db.append(
+                "bench-session",
+                Message.text(role, f"message {i}"),
+            )
         save_ms = (time.monotonic() - t) * 1000
         record("save 20 messages (SQLite)", save_ms, limit_ms=500)
 

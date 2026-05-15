@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from monkeybot.core.content_blocks import Text
 from monkeybot.core.interfaces import LLMError
 from monkeybot.core.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.provider import Done, Message, ProviderEvent, TextDelta
@@ -125,7 +126,11 @@ async def test_gemini_stream_requires_vertex_project_env() -> None:
     saved = {k: os.environ.pop(k, None) for k in keys}
     try:
         with pytest.raises(LLMError, match="VERTEX_AI_PROJECT_ID|GOOGLE_CLOUD_PROJECT|GCP_PROJECT_ID"):
-            async for _ in p.stream([Message(role="user", content="hi")], [tool], model="gemini-2.5-flash"):
+            async for _ in p.stream(
+                [Message(role="user", content=[Text(text="hi")])],
+                [tool],
+                model="gemini-2.5-flash",
+            ):
                 pass
     finally:
         for k, v in saved.items():

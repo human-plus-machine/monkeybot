@@ -1,4 +1,4 @@
-"""Per-turn context assembly: AGENT.md, memory index, skills, and tool definitions."""
+"""Per-turn context assembly: base prompt file (AGENT.md), memory index, skills, tools."""
 
 from __future__ import annotations
 
@@ -7,9 +7,27 @@ import dataclasses
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Literal, Protocol, runtime_checkable
 
 from monkeybot.core.ports_mcp import MCPClientPort
 from monkeybot.core.types_tools import ToolDef
+
+
+@runtime_checkable
+class PendingResponseBusPort(Protocol):
+    """Minimal gateway bus surface for Story 5 pending UI responses (keeps core free of gateway imports)."""
+
+    pending_responses: dict[str, asyncio.Future[Any]]
+
+    def register_pending(self, pending_key: str) -> asyncio.Future[Any]: ...
+
+    def resolve_pending(self, pending_key: str, payload: Any) -> bool: ...
+
+    def is_pending_or_terminal(self, pending_key: str) -> Literal["pending", "terminated", "unknown"]: ...
+
+    def abandon_pending_timeout(self, pending_key: str) -> None: ...
+
+    def abandon_pending_cancel_all(self) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -48,6 +66,10 @@ class TurnContext:
     """Workspace root for spill cleanup; optional for tests / minimal harness."""
     memory_path: Path | None = None
     """Memory root for mid-turn index refresh via :func:`refresh_memory_index`."""
+    context_curation_enabled: bool = True
+    """When True (parent agent), optional LLM curation may narrow memory/skills in the system prompt."""
+    sse_bus: PendingResponseBusPort | None = None
+    """Gateway session bus for Story 5 pending UI responses; None for CLI / harness."""
 
 
 _log = logging.getLogger(__name__)
@@ -260,6 +282,8 @@ async def build_context(
     cancelled: asyncio.Event | None = None,
     context_window_tokens: int = 200_000,
     workspace_root: Path | None = None,
+    enable_context_curation: bool = True,
+    sse_bus: PendingResponseBusPort | None = None,
 ) -> TurnContext:
     """Assemble a TurnContext from filesystem paths and the MCP client snapshot.
 
@@ -277,6 +301,7 @@ async def build_context(
         cancelled: Optional cooperative-cancel handle for the parent turn (gateway / CLI).
         context_window_tokens: Model context budget for pre-flight and summarization triggers.
         workspace_root: Optional workspace root for spill directory cleanup at run start.
+        enable_context_curation: When False (e.g. subagent), skip LLM context curation for prompts.
 
     Returns:
         Frozen :class:`TurnContext`.
@@ -303,6 +328,8 @@ async def build_context(
         context_window_tokens=context_window_tokens,
         workspace_root=workspace_root,
         memory_path=memory_path,
+        context_curation_enabled=enable_context_curation,
+        sse_bus=sse_bus,
     )
 
 

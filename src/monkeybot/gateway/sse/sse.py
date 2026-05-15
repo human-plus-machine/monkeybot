@@ -4,7 +4,7 @@ SSE wire framing and mapping from agent events (kind) to SSE JSON (type).
 
 import json
 from dataclasses import fields as dc_fields
-from typing import Any
+from typing import Any, cast
 
 from monkeybot.core.events import AgentEvent
 
@@ -30,7 +30,7 @@ def agent_event_to_wire_dict(event: AgentEvent) -> dict[str, Any]:
     kind = str(getattr(event, "kind"))
     payload = {
         f.name: getattr(event, f.name)
-        for f in dc_fields(event)  # type: ignore[arg-type]
+        for f in dc_fields(cast(Any, event))
         if f.name != "kind"
     }
     rid = str(payload.get("request_id", ""))

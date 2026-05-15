@@ -8,11 +8,13 @@ import asyncio
 import time
 import uuid
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
+
+from monkeybot.core.content_blocks import ContentBlock
 
 from .loop_port import LoopPort, UsagePort
 from .models import (
@@ -20,10 +22,13 @@ from .models import (
     CancelRequest,
     CreateSessionRequest,
     CreateSessionResponse,
+    ElicitationPOST,
+    FrontendToolResultPOST,
     HealthResponse,
     ReplyRequest,
     ReplyResponse,
     SessionUsageResponse,
+    ToolConfirmationPOST,
     error_payload_dict,
 )
 from .session_bus import SessionAlreadyExistsError, SessionBus, SessionRegistry
@@ -32,7 +37,7 @@ from .sse import format_active_requests, format_ping
 
 def get_registry(request: Request) -> SessionRegistry:
     """FastAPI dependency returning the process-local session registry."""
-    return request.app.state.registry
+    return cast(SessionRegistry, request.app.state.registry)
 
 
 def _default_loop_port(registry: SessionRegistry) -> LoopPort:
@@ -254,7 +259,136 @@ def create_app(
                 uuid.uuid4().hex,
             )
         bus.cancel_requested_for = body.request_id
+        for fut in list(bus.pending_responses.values()):
+            if not fut.done():
+                fut.cancel()
+        bus.abandon_pending_cancel_all()
         return Response(status_code=200)
+
+    @api.post(
+        "/sessions/{session_id}/tool-confirmations/{tool_call_id}",
+        status_code=202,
+    )
+    async def post_tool_confirmation(
+        session_id: str,
+        tool_call_id: str,
+        body: ToolConfirmationPOST,
+        reg_dep: SessionRegistry = Depends(get_registry),
+    ) -> dict[str, bool]:
+        rid = uuid.uuid4().hex
+        bus = reg_dep.get(session_id)
+        if bus is None:
+            raise APIError(404, "SESSION_NOT_FOUND", "Unknown session", rid)
+        state = bus.is_pending_or_terminal(tool_call_id)
+        if state == "unknown":
+            raise APIError(
+                404,
+                "PENDING_UNKNOWN",
+                "Pending response id is not registered for this session",
+                rid,
+            )
+        if state == "terminated":
+            raise APIError(
+                409,
+                "STALE_PENDING_RESPONSE",
+                "This pending response was already resolved, cancelled, or timed out",
+                rid,
+            )
+        payload: dict[str, Any] = {"approved": body.approved}
+        if body.reason is not None:
+            payload["reason"] = body.reason
+        if not bus.resolve_pending(tool_call_id, payload):
+            raise APIError(
+                409,
+                "STALE_PENDING_RESPONSE",
+                "This pending response was already resolved, cancelled, or timed out",
+                rid,
+            )
+        return {"ok": True}
+
+    @api.post("/sessions/{session_id}/elicitations/{elicitation_id}", status_code=202)
+    async def post_elicitation(
+        session_id: str,
+        elicitation_id: str,
+        body: ElicitationPOST,
+        reg_dep: SessionRegistry = Depends(get_registry),
+    ) -> dict[str, bool]:
+        rid = uuid.uuid4().hex
+        bus = reg_dep.get(session_id)
+        if bus is None:
+            raise APIError(404, "SESSION_NOT_FOUND", "Unknown session", rid)
+        state = bus.is_pending_or_terminal(elicitation_id)
+        if state == "unknown":
+            raise APIError(
+                404,
+                "PENDING_UNKNOWN",
+                "Pending response id is not registered for this session",
+                rid,
+            )
+        if state == "terminated":
+            raise APIError(
+                409,
+                "STALE_PENDING_RESPONSE",
+                "This pending response was already resolved, cancelled, or timed out",
+                rid,
+            )
+        payload = {"user_data": body.user_data}
+        if not bus.resolve_pending(elicitation_id, payload):
+            raise APIError(
+                409,
+                "STALE_PENDING_RESPONSE",
+                "This pending response was already resolved, cancelled, or timed out",
+                rid,
+            )
+        return {"ok": True}
+
+    @api.post(
+        "/sessions/{session_id}/frontend-tool-results/{tool_call_id}",
+        status_code=202,
+    )
+    async def post_frontend_tool_result(
+        session_id: str,
+        tool_call_id: str,
+        body: FrontendToolResultPOST,
+        reg_dep: SessionRegistry = Depends(get_registry),
+    ) -> dict[str, bool]:
+        rid = uuid.uuid4().hex
+        bus = reg_dep.get(session_id)
+        if bus is None:
+            raise APIError(404, "SESSION_NOT_FOUND", "Unknown session", rid)
+        state = bus.is_pending_or_terminal(tool_call_id)
+        if state == "unknown":
+            raise APIError(
+                404,
+                "PENDING_UNKNOWN",
+                "Pending response id is not registered for this session",
+                rid,
+            )
+        if state == "terminated":
+            raise APIError(
+                409,
+                "STALE_PENDING_RESPONSE",
+                "This pending response was already resolved, cancelled, or timed out",
+                rid,
+            )
+        parsed: list[ContentBlock] = []
+        for item in body.result:
+            try:
+                parsed.append(ContentBlock.from_dict(item))
+            except ValueError as exc:
+                raise APIError(400, "BAD_REQUEST", str(exc), rid) from exc
+        payload = {
+            "result": [b.to_dict() for b in parsed],
+            "is_error": body.is_error,
+        }
+        if not bus.resolve_pending(tool_call_id, payload):
+            raise APIError(
+                409,
+                "STALE_PENDING_RESPONSE",
+                "This pending response was already resolved, cancelled, or timed out",
+                rid,
+            )
+        return {"ok": True}
 
     @api.get("/sessions/{session_id}/usage", response_model=SessionUsageResponse)
     async def get_usage(

@@ -69,6 +69,26 @@ class CancelRequest(BaseModel):
     request_id: str
 
 
+class ToolConfirmationPOST(BaseModel):
+    """POST /sessions/{id}/tool-confirmations/{tool_call_id} body."""
+
+    approved: bool
+    reason: str | None = None
+
+
+class ElicitationPOST(BaseModel):
+    """POST /sessions/{id}/elicitations/{id} body."""
+
+    user_data: Any | None = None
+
+
+class FrontendToolResultPOST(BaseModel):
+    """POST /sessions/{id}/frontend-tool-results/{tool_call_id} body."""
+
+    result: list[dict[str, Any]]
+    is_error: bool
+
+
 class HealthResponse(BaseModel):
     """GET /health response."""
 

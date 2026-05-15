@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
 from typing import Any
 
+from monkeybot.core.content_blocks import (
+    ContentBlock,
+    Image,
+    RedactedThinking,
+    Text,
+    Thinking,
+    ToolRequest,
+    ToolResponse,
+)
 from monkeybot.core.provider import Message
 
 
@@ -20,75 +28,109 @@ def estimate_cost(
     return (input_tokens * rates[0] + output_tokens * rates[1]) / 1_000_000
 
 
-def _parse_tool_placeholder(content: str) -> tuple[str, list[dict[str, Any]] | None]:
-    """Split assistant content into optional pre-text and ``tool_calls`` list if present."""
-    segments: list[tuple[str, str]] = []
-    last_nl = content.rfind("\n")
-    if last_nl >= 0:
-        segments.append((content[:last_nl], content[last_nl + 1 :]))
-    segments.append(("", content))
-    for pre_text, json_part in segments:
-        try:
-            parsed = json.loads(json_part)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        if not isinstance(parsed, dict):
-            continue
-        raw_calls = parsed.get("tool_calls")
-        if not isinstance(raw_calls, list) or not raw_calls:
-            continue
-        calls: list[dict[str, Any]] = []
-        for c in raw_calls:
-            if not isinstance(c, dict) or "call_id" not in c or "name" not in c:
-                calls = []
-                break
-            calls.append(c)
-        if calls:
-            return pre_text, calls
-    return content, None
+def _anthropic_tool_result_content(result: list[ContentBlock]) -> list[dict[str, Any]]:
+    """Map ``ToolResponse.result`` blocks to Anthropic ``tool_result`` content list."""
+    out: list[dict[str, Any]] = []
+    for block in result:
+        if isinstance(block, Text):
+            out.append({"type": "text", "text": block.text})
+        elif isinstance(block, Image):
+            out.append(
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": block.mime_type,
+                        "data": block.data,
+                    },
+                }
+            )
+        else:
+            raise ValueError(
+                f"unsupported ToolResponse block for Anthropic: {type(block).__name__}"
+            )
+    return out
+
+
+def _anthropic_user_block(block: ContentBlock) -> dict[str, Any]:
+    if isinstance(block, Text):
+        return {"type": "text", "text": block.text}
+    if isinstance(block, Image):
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": block.mime_type,
+                "data": block.data,
+            },
+        }
+    if isinstance(block, ToolResponse):
+        return {
+            "type": "tool_result",
+            "tool_use_id": block.id,
+            "content": _anthropic_tool_result_content(block.result),
+        }
+    raise ValueError(f"unsupported user content block for Anthropic: {type(block).__name__}")
+
+
+def _anthropic_assistant_block(block: ContentBlock) -> dict[str, Any]:
+    if isinstance(block, Text):
+        return {"type": "text", "text": block.text}
+    if isinstance(block, ToolRequest):
+        return {
+            "type": "tool_use",
+            "id": block.id,
+            "name": block.name,
+            "input": dict(block.args),
+        }
+    if isinstance(block, Thinking):
+        return {
+            "type": "thinking",
+            "thinking": block.thinking,
+            "signature": block.signature,
+        }
+    if isinstance(block, RedactedThinking):
+        return {"type": "redacted_thinking", "data": block.data}
+    raise ValueError(
+        f"unsupported assistant content block for Anthropic: {type(block).__name__}"
+    )
 
 
 def build_anthropic_messages(messages: Sequence[Message]) -> list[dict[str, Any]]:
-    """Convert harness :class:`Message` rows to Anthropic ``messages`` API shape."""
-    result: list[dict[str, Any]] = []
+    """Convert harness messages to Anthropic ``messages`` API shape (no string parsing)."""
+    out: list[dict[str, Any]] = []
     for m in messages:
-        if m.role == "tool":
-            result.append(
+        role = getattr(m, "role", None)
+        if role == "tool":
+            raise ValueError('disallowed role "tool"; use user messages with ToolResponse blocks')
+        if role not in ("user", "assistant"):
+            raise ValueError(f"unsupported role for Anthropic messages: {role!r}")
+
+        blocks = list(m.content)
+
+        if role == "user":
+            if len(blocks) == 1 and isinstance(blocks[0], Text):
+                out.append({"role": "user", "content": blocks[0].text})
+                continue
+            out.append(
                 {
                     "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": m.tool_call_id,
-                            "content": m.content,
-                        }
-                    ],
+                    "content": [_anthropic_user_block(b) for b in blocks],
                 }
             )
-        elif m.role == "assistant":
-            pre_text, tool_calls = _parse_tool_placeholder(m.content)
-            if tool_calls is not None:
-                blocks: list[dict[str, Any]] = []
-                if pre_text:
-                    blocks.append({"type": "text", "text": pre_text})
-                for tc in tool_calls:
-                    args = tc.get("args", {})
-                    if not isinstance(args, dict):
-                        args = {}
-                    blocks.append(
-                        {
-                            "type": "tool_use",
-                            "id": str(tc["call_id"]),
-                            "name": str(tc["name"]),
-                            "input": args,
-                        }
-                    )
-                result.append({"role": "assistant", "content": blocks})
-            else:
-                result.append({"role": "assistant", "content": m.content})
-        else:
-            result.append({"role": "user", "content": m.content})
-    return result
+            continue
+
+        # assistant
+        if len(blocks) == 1 and isinstance(blocks[0], Text):
+            out.append({"role": "assistant", "content": blocks[0].text})
+            continue
+        out.append(
+            {
+                "role": "assistant",
+                "content": [_anthropic_assistant_block(b) for b in blocks],
+            }
+        )
+    return out
 
 
-__all__ = ["build_anthropic_messages", "estimate_cost", "_parse_tool_placeholder"]
+__all__ = ["build_anthropic_messages", "estimate_cost"]

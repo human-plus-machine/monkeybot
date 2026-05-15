@@ -16,27 +16,35 @@ from pathlib import Path
 from typing import Any
 
 import aiosqlite
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from monkeybot.core.context import build_context
 from monkeybot.core.core_tool_executor import CoreToolExecutor
 from monkeybot.core.db import apply_schema, open_connection
 from monkeybot.core.events import Error as AgentError
 from monkeybot.core.events import TurnComplete, UsageTotals, event_to_json
-from monkeybot.core.history import ChatMessage, ConversationHistory
+from monkeybot.core.history import ConversationHistory
 from monkeybot.core.inspector import CommandTierInspector, RulesInspector, ToolInspector
 from monkeybot.core.loop import run as run_loop
 from monkeybot.core.mcp_client import MCPClient
 from monkeybot.core.mocks_provider import ScriptedFakeProvider
-from monkeybot.core.provider import Done, Message, Provider, TextDelta, ToolCall, UsageEvent
+from monkeybot.core.provider import (
+    Done,
+    Message,
+    Provider,
+    ProviderEvent,
+    TextDelta,
+    ToolCall,
+    UsageEvent,
+)
 from monkeybot.core.providers.gemini import GeminiProvider
-from monkeybot.providers.vertex_claude import VertexClaudeProvider
 from monkeybot.core.usage import Usage as UsageRecord
 from monkeybot.core.usage import UsageStore
 from monkeybot.gateway.sse.loop_port import UsagePort
 from monkeybot.gateway.sse.routes import create_app as build_sse_app
 from monkeybot.gateway.sse.session_bus import SessionBus, SessionRegistry
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+from monkeybot.providers.vertex_claude import VertexClaudeProvider
 
 logger = logging.getLogger(__name__)
 
@@ -70,41 +78,13 @@ class _HistoryAdapter:
         self._inner = inner
 
     async def load(self, thread_id: str, limit: int = 100) -> list[Message]:
-        rows = await self._inner.load(thread_id, limit=limit)
-        return [
-            Message(
-                role=r.role,
-                content=r.content,
-                tool_name=r.tool_name,
-                tool_call_id=r.tool_call_id,
-            )
-            for r in rows
-        ]
+        return await self._inner.load(thread_id, limit=limit)
 
     async def append(self, thread_id: str, message: Message) -> None:
-        await self._inner.append(
-            thread_id,
-            ChatMessage(
-                role=message.role,
-                content=message.content,
-                tool_call_id=message.tool_call_id,
-                tool_name=message.tool_name,
-            ),
-        )
+        await self._inner.append(thread_id, message)
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None:
-        await self._inner.reset(
-            thread_id,
-            [
-                ChatMessage(
-                    role=m.role,  # type: ignore[arg-type]
-                    content=m.content,
-                    tool_call_id=m.tool_call_id,
-                    tool_name=m.tool_name,
-                )
-                for m in messages
-            ],
-        )
+        await self._inner.reset(thread_id, messages)
 
 
 def _resolved_workspace_paths() -> tuple[Path, Path, Path]:
@@ -207,9 +187,9 @@ def _resolve_provider() -> Provider:
         )
 
     decoded = json.loads(raw)
-    turns: list[list[object]] = []
+    turns: list[list[ProviderEvent]] = []
     for turn in decoded:
-        events: list[object] = []
+        events: list[ProviderEvent] = []
         if not isinstance(turn, list):
             continue
         for item in turn:
@@ -240,7 +220,8 @@ def _resolve_provider() -> Provider:
             turns.append(events)
     if not turns:
         turns = [[TextDelta(text="hello"), Done()]]
-    return ScriptedFakeProvider(turns)
+    flat: list[ProviderEvent] = [ev for turn in turns for ev in turn]
+    return ScriptedFakeProvider(flat)
 
 
 class GatewayLoopPort:
@@ -304,6 +285,7 @@ class GatewayLoopPort:
                     cancelled=cancel_event,
                     context_window_tokens=_env_context_window_tokens(),
                     workspace_root=workspace_root,
+                    sse_bus=bus,
                 )
             except Exception as exc:
                 logger.exception("build_context failed")

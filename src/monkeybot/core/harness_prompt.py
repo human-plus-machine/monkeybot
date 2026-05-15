@@ -1,12 +1,12 @@
 """Runtime-owned harness prompt fragment.
 
-The agent loop appends :func:`harness_fixed_context` after AGENT.md so per-bot
-files stay persona-only and tool/MCP wiring lives here.
+The agent loop appends :func:`harness_fixed_context` after the operator-authored
+base prompt (AGENT.md) so tool/MCP protocol text lives in code, not in the bot file.
 """
 
 HARNESS_TOOL_CALL_PROTOCOL = """
 ### Tool-call protocol (strict)
-- To invoke a tool, use the provider's native function/tool-call channel only. Do NOT write a JSON object such as `{"tool_calls": [...]}` in your assistant text — history rows that look like that are stored placeholders, not a wire format you should imitate.
+- Invoke tools only through the provider's native function-call channel. Never emit tool invocations as JSON or pseudo-XML inside your assistant text; any such text is treated as a normal message and no tool will run.
 - After tool results are returned to you, your next response MUST be natural-language text that addresses the user's request using those results. Do not return another empty turn.
 - If you have nothing more to do, give a short final answer; do not stay silent."""
 
@@ -17,11 +17,15 @@ This block is injected by the host every turn. Prefer the **active tool list** t
 
 ### Core built-in tools (when present in the active tool list)
 - `read_file` / `write_file` — paths are **workspace-relative** (repository root the process uses).
-- `search_memory` — keyword search under the configured memory directory; open files when you need exact text.
+- `search_memory` — keyword search under the configured memory directory; prefer this over shell commands for any memory lookup.
 - `list_skills` — lists installed skills; read each skill's `SKILL.md` under the skills root for procedure.
-- `run_command` — allowlisted shell with optional `timeout` (seconds).
+- `run_command` — allowlisted shell with optional `timeout` (seconds). Shell starts in **workspace root**; use the paths listed under Runtime paths below — do NOT guess directory names.
 - `add_mcp_server` / `remove_mcp_server` — register or drop MCP stdio servers; new tools appear on later turns.
 {task_line}
+### Runtime paths
+- workspace root: `{workspace_root}`
+- memory directory: `{memory_path}` — always use `search_memory` to query; only use this path directly in `run_command` for low-level inspection.
+
 ### MCP tools
 - Names look like `server__tool` (double underscore).
 
@@ -35,10 +39,20 @@ _TASK_LINE = (
 )
 
 
-def harness_fixed_context(*, include_task_tool: bool) -> str:
-    """Runtime-owned description of core tools, MCP naming, and strict tool-call rules.
+def harness_fixed_context(
+    *,
+    include_task_tool: bool,
+    workspace_root: str = "(not set)",
+    memory_path: str = "(not set)",
+) -> str:
+    """Runtime-owned description of core tools, paths, MCP naming, and strict tool-call rules.
 
-    ``include_task_tool`` should match whether ``task`` is in the active tool list for this turn.
+    ``workspace_root`` and ``memory_path`` are resolved absolute paths injected once at
+    context-build time so the model always uses correct paths in shell commands.
     """
-    body = _HARNESS_BODY.format(task_line=_TASK_LINE if include_task_tool else "")
+    body = _HARNESS_BODY.format(
+        task_line=_TASK_LINE if include_task_tool else "",
+        workspace_root=workspace_root,
+        memory_path=memory_path,
+    )
     return body.rstrip() + HARNESS_TOOL_CALL_PROTOCOL

@@ -10,7 +10,8 @@ def test_harness_includes_core_tools_and_protocol() -> None:
     assert "`run_command`" in out
     assert "`task` —" not in out
     assert "### Tool-call protocol (strict)" in out
-    assert '{"tool_calls":' in out
+    assert "native function-call channel" in out
+    assert '{"tool_calls":' not in out
 
 
 def test_harness_adds_task_line_when_enabled() -> None:
@@ -22,3 +23,18 @@ def test_harness_adds_task_line_when_enabled() -> None:
 def test_harness_protocol_is_appended_verbatim() -> None:
     out = harness_fixed_context(include_task_tool=False)
     assert out.endswith(HARNESS_TOOL_CALL_PROTOCOL)
+
+
+def test_harness_injects_runtime_paths() -> None:
+    out = harness_fixed_context(
+        include_task_tool=False,
+        workspace_root="/srv/bot",
+        memory_path="/srv/bot/data/memory",
+    )
+    assert "`/srv/bot`" in out
+    assert "`/srv/bot/data/memory`" in out
+
+
+def test_harness_default_paths_shown_when_not_provided() -> None:
+    out = harness_fixed_context(include_task_tool=False)
+    assert "(not set)" in out

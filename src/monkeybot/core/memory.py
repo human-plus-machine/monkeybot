@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 from pathlib import Path
+from typing import Any
 
 INDEX_FILENAME = "INDEX.md"
 
@@ -58,6 +59,44 @@ async def search_memory(query: str, memory_path: Path, top_k: int = 5) -> list[s
             if len(matches) >= top_k:
                 break
     return matches
+
+
+def search_memory_files(memory_root: Path, query: str, *, max_hits: int = 40) -> dict[str, Any]:
+    """Scan memory tree for UTF-8 text files containing ``query`` (case-insensitive substring).
+
+    Used by the ``search_memory`` tool and by context curation. Runs synchronously; call
+    from ``asyncio.to_thread`` in async code.
+    """
+    q = query.lower().strip()
+    if not q:
+        return {"ok": True, "query": query, "hits": [], "note": "empty query"}
+    if not memory_root.exists():
+        return {"ok": True, "query": query, "hits": [], "note": f"missing directory: {memory_root}"}
+
+    hits: list[dict[str, Any]] = []
+    suffixes = {".md", ".txt", ".markdown"}
+    for path in sorted(memory_root.rglob("*")):
+        if len(hits) >= max_hits:
+            break
+        if not path.is_file() or path.suffix.lower() not in suffixes:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        lower = text.lower()
+        pos = lower.find(q)
+        if pos < 0:
+            continue
+        try:
+            rel = str(path.relative_to(memory_root))
+        except ValueError:
+            rel = path.name
+        start = max(0, pos - 60)
+        end = min(len(text), pos + len(q) + 80)
+        snippet = text[start:end].replace("\n", " ")
+        hits.append({"path": rel, "snippet": snippet, "match_offset": pos})
+    return {"ok": True, "query": query, "hits": hits, "truncated": len(hits) >= max_hits}
 
 
 def _promote_move(src: Path, dest: Path) -> None:

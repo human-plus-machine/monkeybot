@@ -46,7 +46,6 @@ Tasks are split into two parallel tracks. **Do not edit files outside your track
 ### Track B — Memory, Prompts, Tool Executor & Providers (Karthik)
 > **Owns:** `core/memory.py`, `core/harness_prompt.py`, `core/core_tool_executor.py`, `core/workspace_tools.py`, `core/subagent_proto.py`, `core/subagent_worker.py`, `core/config.py`, `core/memory_organizer.py`, `core/interfaces.py`, `providers/`, `README`
 
-- **Actively evolving system prompt** — `compose_system_prompt()` in `prompt.py` should inject memory, context, and available skills at runtime; AGENT.md stays focused on bot identity, not harness internals.
 - **Memory accuracy verification** — add ability to verify saved memories are accurate and surface discrepancies (hallucinated or stale) in `memory.py`.
 - **save_memory tool** — add `_tool_save_memory` to `core_tool_executor.py` for writing facts to the memory dir and updating `INDEX.md`; decide vs routing through `write_file` to keep tool surface minimal. *(discussion needed)*
 - **File-op tool audit** — evaluate removing `write_file` in favor of `create_file` + `find_and_replace` in `core_tool_executor.py` and `workspace_tools.py` (reference: Claude Code patterns).

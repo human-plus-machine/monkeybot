@@ -12,7 +12,7 @@ from monkeybot.core.context import TurnContext
 from monkeybot.core.interfaces import MonkeybotError
 
 
-class CommandTierConfigError(MonkeybotError):  # type: ignore[misc]
+class CommandTierConfigError(MonkeybotError):
     """Invalid or unloadable command tier policy."""
 
     def __init__(self, path: Path, reason: str) -> None:
@@ -23,9 +23,12 @@ class CommandTierConfigError(MonkeybotError):  # type: ignore[misc]
 
 @dataclass(frozen=True)
 class Decision:
-    """Allow or deny outcome from a tool inspector."""
+    """Allow or deny outcome from a tool inspector.
 
-    kind: Literal["allow", "deny"]
+    ``confirm`` is reserved for Story 5; no inspector should return it until then.
+    """
+
+    kind: Literal["allow", "deny", "confirm"]
     message: str | None = None
 
 

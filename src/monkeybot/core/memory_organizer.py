@@ -7,10 +7,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Sequence
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Protocol, cast
 
+
+class _CustomMemoryFolderLike(Protocol):
+    name: str
+    description: str
+
+from .content_blocks import Text
 from .interfaces import MonkeybotError
 from .provider import Done, Message, Provider, TextDelta
 
@@ -66,7 +74,7 @@ async def _complete_text(
     """Single-turn text completion (no tools) from streaming deltas."""
     parts: list[str] = []
     async with aclosing(
-        provider.stream([Message(role="user", content=prompt)], [], model=model)
+        cast(Any, provider.stream([Message(role="user", content=[Text(text=prompt)])], [], model=model))
     ) as stream:
         async for ev in stream:
             if isinstance(ev, TextDelta):
@@ -84,7 +92,7 @@ class MemoryOrganizer:
         provider: Provider,
         model: str,
         memory_dir: Path,
-        custom_folders: list | None = None,
+        custom_folders: Sequence[_CustomMemoryFolderLike] | None = None,
         index_path: Path | None = None,
     ) -> None:
         self._provider = provider

@@ -6,6 +6,7 @@ import json
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import cast
 
 import aiosqlite
 
@@ -91,8 +92,8 @@ def _tuple_to_run_row(row: tuple[object, ...]) -> SubagentRunRow:
         status=str(d["status"]),
         result_json=str(d["result_json"]) if d["result_json"] is not None else None,
         error_json=str(d["error_json"]) if d["error_json"] is not None else None,
-        started_at=int(d["started_at"]),  # type: ignore[arg-type]
-        finished_at=int(d["finished_at"]) if d["finished_at"] is not None else None,  # type: ignore[arg-type]
+        started_at=int(cast(int, d["started_at"])),
+        finished_at=int(cast(int, d["finished_at"])) if d["finished_at"] is not None else None,
         scratch_dir=str(d["scratch_dir"]),
     )
 

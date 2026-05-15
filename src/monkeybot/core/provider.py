@@ -2,21 +2,56 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol, TypeAlias
 
+from monkeybot.core.content_blocks import ContentBlock, Text, ToolRequest, ToolResponse
 from monkeybot.core.types_tools import ToolDef
 
+Role: TypeAlias = Literal["user", "assistant", "system"]
 
-@dataclass(frozen=True)
+
+@dataclass(frozen=True, kw_only=True)
 class Message:
-    """Single turn message for tool-calling capable chat models."""
+    """Single turn for tool-calling chat models (typed content blocks)."""
 
-    role: Literal["user", "assistant", "system", "tool"]
-    content: str
-    tool_name: str | None = None
-    tool_call_id: str | None = None
+    role: Role
+    content: list[ContentBlock]
+
+    def __post_init__(self) -> None:
+        if self.role not in ("user", "assistant", "system"):
+            raise ValueError(f"invalid role: {self.role!r}")
+        for i, block in enumerate(self.content):
+            if not isinstance(block, ContentBlock):
+                raise ValueError(
+                    f"content[{i}] must be ContentBlock, got {type(block).__name__}"
+                )
+
+    def to_dict(self) -> dict[str, object]:
+        return {"role": self.role, "content": [b.to_dict() for b in self.content]}
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, object]) -> Message:
+        role = d.get("role")
+        if role not in ("user", "assistant", "system"):
+            raise ValueError(f"invalid role: {role!r}")
+        raw_blocks = d.get("content", [])
+        if raw_blocks is None:
+            raw_blocks = []
+        if not isinstance(raw_blocks, list):
+            raise ValueError("content must be a list")
+        blocks: list[ContentBlock] = []
+        for item in raw_blocks:
+            if not isinstance(item, dict):
+                raise ValueError("content list elements must be JSON objects")
+            blocks.append(ContentBlock.from_dict(item))
+        return cls(role=role, content=blocks)
+
+    @classmethod
+    def text(cls, role: Role, text: str) -> Message:
+        """Build a message whose content is a single :class:`Text` block."""
+        return cls(role=role, content=[Text(text=text)])
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -26,11 +61,21 @@ class TextDelta:
 
 
 @dataclass(frozen=True, kw_only=True)
+class ThinkingDelta:
+    """Incremental thinking/reasoning chunk from a streaming provider."""
+
+    kind: Literal["thinking_delta"] = "thinking_delta"
+    text: str
+    signature: str | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
 class ToolCall:
     kind: Literal["tool_call"] = "tool_call"
     call_id: str
     name: str
     args: dict[str, object]
+    metadata: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -46,7 +91,7 @@ class Done:
     kind: Literal["done"] = "done"
 
 
-ProviderEvent: TypeAlias = TextDelta | ToolCall | UsageEvent | Done
+ProviderEvent: TypeAlias = TextDelta | ThinkingDelta | ToolCall | UsageEvent | Done
 
 
 class Provider(Protocol):
@@ -54,6 +99,10 @@ class Provider(Protocol):
 
     Exactly one consumer should iterate a given ``stream`` at a time; concurrent
     overlapping calls on the same instance are intentionally undefined.
+
+    ``stream`` is annotated as a synchronous method returning :class:`AsyncIterator`
+    so async-generator implementations match under strict mypy (``async def``
+    with ``yield`` is *not* typed as returning ``Coroutine[..., AsyncIterator]``).
     """
 
     @property
@@ -64,7 +113,7 @@ class Provider(Protocol):
     def supports_streaming(self) -> bool:
         """Whether partial output is exposed as incremental deltas."""
 
-    async def stream(
+    def stream(
         self,
         messages: Sequence[Message],
         tools: Sequence[ToolDef],
@@ -79,7 +128,13 @@ __all__ = [
     "Message",
     "Provider",
     "ProviderEvent",
+    "Role",
+    "Text",
     "TextDelta",
+    "ThinkingDelta",
     "ToolCall",
+    "ToolDef",
+    "ToolRequest",
+    "ToolResponse",
     "UsageEvent",
 ]

@@ -8,6 +8,7 @@ from monkeybot.core.context import TurnContext
 from monkeybot.core.inspector import (
     CommandTierConfigError,
     CommandTierInspector,
+    Decision,
     InspectorToolCall,
 )
 
@@ -100,6 +101,12 @@ def test_inspector_missing_tier_order_raises(tmp_path: Path) -> None:
     path.write_text(yaml.safe_dump({}), encoding="utf-8")
     with pytest.raises(CommandTierConfigError, match="tier_order"):
         CommandTierInspector(path)
+
+
+def test_decision_confirm_variant_constructible() -> None:
+    d = Decision(kind="confirm", message=None)
+    assert d.kind == "confirm"
+    assert d.message is None
 
 
 def test_inspector_missing_default_raises(tmp_path: Path) -> None:

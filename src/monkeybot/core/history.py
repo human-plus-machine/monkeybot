@@ -2,26 +2,26 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import time
-from dataclasses import dataclass
-from typing import Literal, cast
+from typing import cast
 
 import aiosqlite
 
-Role = Literal["user", "assistant", "tool"]
+from monkeybot.core.content_blocks import ContentBlock
+from monkeybot.core.provider import Message, Role
 
-_VALID_ROLES: frozenset[str] = frozenset({"user", "assistant", "tool"})
+logger = logging.getLogger(__name__)
+
+_VALID_ROLES: tuple[str, ...] = ("user", "assistant", "system")
 
 
-@dataclass(frozen=True)
-class ChatMessage:
-    """Single persisted chat row."""
-
-    role: Role
-    content: str
-    tool_call_id: str | None = None
-    tool_name: str | None = None
-    created_at_ms: int = 0
+def _validate_message(message: Message) -> None:
+    """Reject persisted shapes that SQLite/provider contracts disallow."""
+    role = message.role
+    if role not in _VALID_ROLES:
+        raise ValueError(f"invalid role: {role!r}")
 
 
 class ConversationHistory:
@@ -30,37 +30,29 @@ class ConversationHistory:
     def __init__(self, conn: aiosqlite.Connection) -> None:
         self._conn = conn
 
-    def _validate_message(self, message: ChatMessage) -> None:
-        if message.role not in _VALID_ROLES:
-            raise ValueError(f"Invalid message role: {message.role!r}")
-
-    async def append(self, thread_id: str, message: ChatMessage) -> None:
-        """Insert a history row with server-side ``created_at`` timestamp."""
-        self._validate_message(message)
+    async def append(self, thread_id: str, message: Message) -> None:
+        """Validate ``message``, JSON-encode content blocks, insert one row."""
+        _validate_message(message)
+        payload = json.dumps(
+            [b.to_dict() for b in message.content],
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
         created_at = int(time.time() * 1000)
         await self._conn.execute(
             """
-            INSERT INTO conversation_history(thread_id, role, content, tool_call_id, tool_name, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO conversation_history(thread_id, role, content, created_at)
+            VALUES (?, ?, ?, ?)
             """,
-            (
-                thread_id,
-                message.role,
-                message.content,
-                message.tool_call_id,
-                message.tool_name,
-                created_at,
-            ),
+            (thread_id, message.role, payload, created_at),
         )
         await self._conn.commit()
 
-    async def load(self, thread_id: str, limit: int = 100) -> list[ChatMessage]:
-        """Return up to ``limit`` most recent messages in chronological order."""
-        if limit < 0:
-            raise ValueError("limit must be non-negative")
+    async def load(self, thread_id: str, limit: int = 100) -> list[Message]:
+        """Return up to ``limit`` messages for ``thread_id``, oldest first."""
         cursor = await self._conn.execute(
             """
-            SELECT role, content, tool_call_id, tool_name, created_at
+            SELECT id, role, content, created_at
             FROM conversation_history
             WHERE thread_id = ?
             ORDER BY created_at DESC, id DESC
@@ -68,49 +60,46 @@ class ConversationHistory:
             """,
             (thread_id, limit),
         )
-        rows = list(await cursor.fetchall())
+        rows = await cursor.fetchall()
         await cursor.close()
-        chronological = list(reversed(rows))
-        return [
-            ChatMessage(
-                role=cast(Role, row[0]),
-                content=row[1],
-                tool_call_id=row[2],
-                tool_name=row[3],
-                created_at_ms=int(row[4]),
-            )
-            for row in chronological
-        ]
+        rows_chrono = list(reversed(list(rows)))
+        out: list[Message] = []
+        for row in rows_chrono:
+            row_id = int(row[0])
+            role = row[1]
+            content_blob = row[2]
+            try:
+                raw = json.loads(content_blob)
+                if not isinstance(raw, list):
+                    raise ValueError("stored content must be a JSON array")
+                blocks = [ContentBlock.from_dict(b) for b in raw]
+            except (json.JSONDecodeError, ValueError, TypeError) as exc:
+                logger.error(
+                    "Unparseable history row id=%s thread_id=%s",
+                    row_id,
+                    thread_id,
+                    exc_info=True,
+                )
+                raise ValueError(f"history row {row_id} unparseable: {exc}") from exc
+            if role not in _VALID_ROLES:
+                raise ValueError(f"history row {row_id} has invalid role: {role!r}")
+            out.append(Message(role=cast(Role, role), content=blocks))
+        return out
 
     async def clear(self, thread_id: str) -> None:
-        """Delete all rows for ``thread_id``."""
+        """Delete every stored message for ``thread_id``."""
+
         await self._conn.execute(
-            "DELETE FROM conversation_history WHERE thread_id = ?",
-            (thread_id,),
+            "DELETE FROM conversation_history WHERE thread_id = ?", (thread_id,)
         )
         await self._conn.commit()
 
-    async def reset(self, thread_id: str, messages: list[ChatMessage]) -> None:
-        """Replace all rows for ``thread_id`` with ``messages`` in order."""
+    async def reset(self, thread_id: str, messages: list[Message]) -> None:
+        """Replace the thread transcript with ``messages`` (validated like ``append``)."""
+
         await self._conn.execute(
-            "DELETE FROM conversation_history WHERE thread_id = ?",
-            (thread_id,),
+            "DELETE FROM conversation_history WHERE thread_id = ?", (thread_id,)
         )
-        for message in messages:
-            self._validate_message(message)
-            created_at = int(time.time() * 1000)
-            await self._conn.execute(
-                """
-                INSERT INTO conversation_history(thread_id, role, content, tool_call_id, tool_name, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    thread_id,
-                    message.role,
-                    message.content,
-                    message.tool_call_id,
-                    message.tool_name,
-                    created_at,
-                ),
-            )
         await self._conn.commit()
+        for msg in messages:
+            await self.append(thread_id, msg)

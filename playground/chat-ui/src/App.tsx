@@ -1,4 +1,11 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import ImageBlockBubble from './blocks/ImageBlockBubble'
+import ElicitationForm from './blocks/ElicitationForm'
+import FrontendToolHandler from './blocks/FrontendToolHandler'
+import RedactedThinkingPlaceholder from './blocks/RedactedThinkingPlaceholder'
+import SystemNotificationToast from './blocks/SystemNotificationToast'
+import ThinkingPanel from './blocks/ThinkingPanel'
+import ToolConfirmationModal from './blocks/ToolConfirmationModal'
 import {
   consumeSseJson,
   createSession,
@@ -9,12 +16,77 @@ import {
   type GatewayJsonEvent,
   type SessionUsageResponse,
 } from './gatewayClient'
+import type { ToastItem } from './blocks/SystemNotificationToast'
 
-type ChatMessage = {
-  id: string
-  role: 'user' | 'assistant' | 'system' | 'tool'
-  content: string
-}
+export type PendingWidget =
+  | {
+      kind: 'toolConfirmation'
+      tool_call_id: string
+      tool_name: string
+      arguments: Record<string, unknown>
+      prompt?: string
+      request_id?: string
+    }
+  | {
+      kind: 'elicitation'
+      id: string
+      message: string
+      /** Raw schema object from the gateway payload — keys as emitted (expect JSON-Schema-ish map). */
+      requested_schema: Record<string, unknown>
+      request_id?: string
+    }
+  | {
+      kind: 'frontendTool'
+      tool_call_id: string
+      name: string
+      args: Record<string, unknown>
+      request_id?: string
+    }
+
+export type ChatFeedItem =
+  | {
+      kind: 'userText'
+      id: string
+      text: string
+    }
+  | {
+      kind: 'assistantText'
+      id: string
+      text: string
+    }
+  | {
+      kind: 'toolTranscript'
+      id: string
+      direction: 'started' | 'result'
+      /** Preformatted body — keep existing helper strings. */
+      text: string
+    }
+  | {
+      kind: 'systemNotice'
+      id: string
+      text: string
+    }
+  | {
+      kind: 'image'
+      id: string
+      request_id?: string
+      mime_type: string
+      data: string
+    }
+  | {
+      kind: 'thinking'
+      id: string
+      request_id: string
+      text: string
+      phase: 'streaming' | 'complete'
+      signature?: string
+    }
+  | {
+      kind: 'redactedThinking'
+      id: string
+      request_id?: string
+      data: string
+    }
 
 function newRequestId(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -65,6 +137,47 @@ function formatTokens(n: number): string {
 
 const DEFAULT_CONTEXT_WINDOW = 1_000_000
 
+function IconRefresh() {
+  return (
+    <svg
+      className="btn-icon-svg"
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.85"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 3" />
+      <path d="M21 3v5h-5" />
+      <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 21" />
+      <path d="M3 21v-5h5" />
+    </svg>
+  )
+}
+
+function IconX() {
+  return (
+    <svg
+      className="btn-icon-svg"
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M18 6 6 18M6 6l12 12" />
+    </svg>
+  )
+}
+
 function ContextUsageRing({
   lastPromptTokens,
   contextWindowTokens,
@@ -75,8 +188,8 @@ function ContextUsageRing({
   const cap = Math.max(1, contextWindowTokens)
   const frac = Math.min(1, Math.max(0, lastPromptTokens / cap))
   const pct = Math.round(frac * 100)
-  const r = 13
-  const stroke = 2.75
+  const r = 11
+  const stroke = 2.35
   const c = 2 * Math.PI * r
   const dash = frac * c
   const strokeColor = pct >= 92 ? 'var(--danger)' : pct >= 75 ? '#ca8a04' : '#4ade80'
@@ -117,7 +230,9 @@ export default function App() {
     'disconnected',
   )
   const [statusNote, setStatusNote] = useState('')
-  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [feed, setFeed] = useState<ChatFeedItem[]>([])
+  const [pendingWidgets, setPendingWidgets] = useState<PendingWidget[]>([])
+  const [toasts, setToasts] = useState<ToastItem[]>([])
   const [draft, setDraft] = useState('')
   const [streamingText, setStreamingText] = useState('')
   const [activeRequestId, setActiveRequestId] = useState<string | null>(null)
@@ -125,10 +240,17 @@ export default function App() {
 
   const [sessionUsage, setSessionUsage] = useState<SessionUsageResponse | null>(null)
   const [usageNote, setUsageNote] = useState('')
+  const [systemPromptSnap, setSystemPromptSnap] = useState<{
+    requestId: string
+    innerTurn: number
+    text: string
+  } | null>(null)
 
   const streamAbortRef = useRef<AbortController | null>(null)
   const streamBufRef = useRef('')
   const messagesScrollRef = useRef<HTMLDivElement | null>(null)
+  const chatSurfaceRef = useRef<HTMLDivElement | null>(null)
+  const overlayRef = useRef<HTMLDivElement | null>(null)
   /** When true, new content scrolls the message list to the bottom. Set false if the user scrolls up. */
   const stickToBottomRef = useRef(true)
 
@@ -158,7 +280,7 @@ export default function App() {
     const el = messagesScrollRef.current
     if (!el || !stickToBottomRef.current) return
     el.scrollTop = el.scrollHeight
-  }, [messages, streamingText, toolHint])
+  }, [feed, streamingText, toolHint])
 
   useEffect(() => {
     const el = messagesScrollRef.current
@@ -168,6 +290,26 @@ export default function App() {
       el.scrollTop = el.scrollHeight
     })
     ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  useLayoutEffect(() => {
+    const surface = chatSurfaceRef.current
+    const overlay = overlayRef.current
+    if (!surface || !overlay) return
+
+    const syncOverlayPad = () => {
+      const h = Math.ceil(overlay.getBoundingClientRect().height)
+      surface.style.setProperty('--chat-overlay-pad', `${h}px`)
+      const msg = messagesScrollRef.current
+      if (msg && stickToBottomRef.current) {
+        msg.scrollTop = msg.scrollHeight
+      }
+    }
+
+    syncOverlayPad()
+    const ro = new ResizeObserver(syncOverlayPad)
+    ro.observe(overlay)
     return () => ro.disconnect()
   }, [])
 
@@ -187,12 +329,13 @@ export default function App() {
           const label = typeof evt.label === 'string' ? evt.label : undefined
           const args = evt.args && typeof evt.args === 'object' ? (evt.args as Record<string, unknown>) : undefined
           setToolHint(null)
-          setMessages((m) => [
+          setFeed((m) => [
             ...m,
             {
               id: `ts-${rid}-${tool}-${Date.now()}`,
-              role: 'tool',
-              content: buildToolStartedChatBody(tool, label, args),
+              kind: 'toolTranscript',
+              direction: 'started',
+              text: buildToolStartedChatBody(tool, label, args),
             },
           ])
           break
@@ -203,12 +346,13 @@ export default function App() {
           const preview = resultRaw.length > 2000 ? `${resultRaw.slice(0, 2000)}…` : resultRaw
           const err = typeof evt.error === 'string' && evt.error ? evt.error : undefined
           setToolHint(null)
-          setMessages((m) => [
+          setFeed((m) => [
             ...m,
             {
               id: `tr-${rid}-${tool}-${Date.now()}`,
-              role: 'tool',
-              content: buildToolResultChatBody(tool, err, preview),
+              kind: 'toolTranscript',
+              direction: 'result',
+              text: buildToolResultChatBody(tool, err, preview),
             },
           ])
           break
@@ -222,7 +366,7 @@ export default function App() {
             streamBufRef.current = ''
             setStreamingText('')
             if (text.trim()) {
-              setMessages((m) => [...m, { id: `a-${rid || newRequestId()}`, role: 'assistant', content: text }])
+              setFeed((m) => [...m, { id: `a-${rid || newRequestId()}`, kind: 'assistantText', text }])
             }
           }
           break
@@ -233,7 +377,7 @@ export default function App() {
           setActiveRequestId(null)
           streamBufRef.current = ''
           setStreamingText('')
-          setMessages((m) => [...m, { id: `e-${newRequestId()}`, role: 'system', content: err }])
+          setFeed((m) => [...m, { id: `e-${newRequestId()}`, kind: 'systemNotice', text: err }])
           void refreshSessionUsage()
           break
         }
@@ -241,6 +385,177 @@ export default function App() {
           setToolHint('Thinking…')
           break
         }
+        case 'SystemPromptSnapshot': {
+          const tid = typeof evt.request_id === 'string' ? evt.request_id : ''
+          const it = evt.inner_turn
+          const innerTurn = typeof it === 'number' && Number.isFinite(it) ? it : 0
+          const body = typeof evt.text === 'string' ? evt.text : ''
+          setSystemPromptSnap({ requestId: tid, innerTurn, text: body })
+          break
+        }
+        case 'ImageBlock': {
+          const mime = typeof evt.mime_type === 'string' ? evt.mime_type : 'application/octet-stream'
+          const b64 = typeof evt.data === 'string' ? evt.data : ''
+          if (!b64) break
+          setFeed((f) => [
+            ...f,
+            {
+              kind: 'image',
+              id: `img-${typeof evt.request_id === 'string' ? evt.request_id : newRequestId()}`,
+              request_id: typeof evt.request_id === 'string' ? evt.request_id : undefined,
+              mime_type: mime,
+              data: b64,
+            },
+          ])
+          break
+        }
+        case 'ThinkingBlockDelta': {
+          const thRid = typeof evt.request_id === 'string' ? evt.request_id : ''
+          if (!thRid) break
+          const delta = typeof evt.text === 'string' ? evt.text : ''
+          const sig = typeof evt.signature === 'string' ? evt.signature : undefined
+          setFeed((f) => {
+            const i = f.findIndex((x) => x.kind === 'thinking' && x.request_id === thRid && x.phase === 'streaming')
+            if (i === -1) {
+              return [
+                ...f,
+                {
+                  kind: 'thinking',
+                  id: `th-${thRid}`,
+                  request_id: thRid,
+                  text: delta,
+                  phase: 'streaming',
+                  signature: sig,
+                },
+              ]
+            }
+            const cur = f[i] as Extract<ChatFeedItem, { kind: 'thinking' }>
+            const next = { ...cur, text: cur.text + delta, signature: sig ?? cur.signature }
+            return f.map((x, j) => (j === i ? next : x))
+          })
+          break
+        }
+        case 'ThinkingBlockComplete': {
+          const thRid = typeof evt.request_id === 'string' ? evt.request_id : ''
+          if (!thRid) break
+          const sig = typeof evt.signature === 'string' ? evt.signature : ''
+          setFeed((f) => {
+            const i = f.findIndex((x) => x.kind === 'thinking' && x.request_id === thRid)
+            if (i === -1) {
+              return [
+                ...f,
+                {
+                  kind: 'thinking',
+                  id: `th-${thRid}`,
+                  request_id: thRid,
+                  text: '',
+                  phase: 'complete',
+                  signature: sig,
+                },
+              ]
+            }
+            const cur = f[i] as Extract<ChatFeedItem, { kind: 'thinking' }>
+            const next: Extract<ChatFeedItem, { kind: 'thinking' }> = {
+              ...cur,
+              phase: 'complete',
+              signature: sig || cur.signature,
+            }
+            return f.map((x, j) => (j === i ? next : x))
+          })
+          break
+        }
+        case 'RedactedThinkingBlock': {
+          const b64 = typeof evt.data === 'string' ? evt.data : ''
+          setFeed((f) => [
+            ...f,
+            {
+              kind: 'redactedThinking',
+              id: `rth-${typeof evt.request_id === 'string' ? evt.request_id : newRequestId()}`,
+              request_id: typeof evt.request_id === 'string' ? evt.request_id : undefined,
+              data: b64,
+            },
+          ])
+          break
+        }
+        case 'ToolConfirmationRequest': {
+          const callId = typeof evt.tool_call_id === 'string' ? evt.tool_call_id : ''
+          if (!callId) break
+          setPendingWidgets((w) => [
+            ...w,
+            {
+              kind: 'toolConfirmation',
+              tool_call_id: callId,
+              tool_name: typeof evt.tool_name === 'string' ? evt.tool_name : 'tool',
+              arguments: evt.arguments && typeof evt.arguments === 'object' ? (evt.arguments as Record<string, unknown>) : {},
+              prompt: typeof evt.prompt === 'string' ? evt.prompt : undefined,
+              request_id: typeof evt.request_id === 'string' ? evt.request_id : undefined,
+            },
+          ])
+          break
+        }
+        case 'ActionRequiredEvent': {
+          if (evt.action_type !== 'elicitation') {
+            setFeed((f) => [
+              ...f,
+              {
+                kind: 'systemNotice',
+                id: `ar-${newRequestId()}`,
+                text: `[ActionRequired:${String(evt.action_type)}] ${JSON.stringify(evt.payload ?? {})}`,
+              },
+            ])
+            break
+          }
+          const eid = typeof evt.id === 'string' ? evt.id : ''
+          if (!eid) break
+          const payload = evt.payload && typeof evt.payload === 'object' ? (evt.payload as Record<string, unknown>) : {}
+          const message = typeof payload.message === 'string' ? payload.message : ''
+          const schemaRaw = payload.requested_schema ?? payload.requestedSchema
+          const requested_schema =
+            schemaRaw && typeof schemaRaw === 'object' ? (schemaRaw as Record<string, unknown>) : {}
+          setPendingWidgets((w) => [
+            ...w,
+            {
+              kind: 'elicitation',
+              id: eid,
+              message,
+              requested_schema,
+              request_id: typeof evt.request_id === 'string' ? evt.request_id : undefined,
+            },
+          ])
+          break
+        }
+        case 'FrontendToolRequest': {
+          const callId = typeof evt.tool_call_id === 'string' ? evt.tool_call_id : ''
+          const name = typeof evt.name === 'string' ? evt.name : ''
+          if (!callId || !name) break
+          setPendingWidgets((w) => [
+            ...w,
+            {
+              kind: 'frontendTool',
+              tool_call_id: callId,
+              name,
+              args: evt.args && typeof evt.args === 'object' ? (evt.args as Record<string, unknown>) : {},
+              request_id: typeof evt.request_id === 'string' ? evt.request_id : undefined,
+            },
+          ])
+          break
+        }
+        case 'SystemNotificationEvent': {
+          const msg = typeof evt.msg === 'string' ? evt.msg : ''
+          if (!msg) break
+          setToasts((t) => [
+            ...t,
+            {
+              id: `sn-${typeof evt.request_id === 'string' ? evt.request_id : newRequestId()}`,
+              notification_type: typeof evt.notification_type === 'string' ? evt.notification_type : 'inlineMessage',
+              msg,
+            },
+          ])
+          break
+        }
+        case 'ContextSummarizing':
+        case 'ContextSummarized':
+          break
         default:
           break
       }
@@ -267,6 +582,10 @@ export default function App() {
         if (cancelled || ac.signal.aborted) return
         setStatus('error')
         setStatusNote(e instanceof Error ? e.message : String(e))
+      } finally {
+        if (!cancelled) {
+          setPendingWidgets([])
+        }
       }
     })()
 
@@ -286,12 +605,15 @@ export default function App() {
     stickToBottomRef.current = true
     setStatus('connecting')
     setStatusNote('')
-    setMessages([])
+    setFeed([])
+    setPendingWidgets([])
+    setToasts([])
     streamBufRef.current = ''
     setStreamingText('')
     setActiveRequestId(null)
     setSessionUsage(null)
     setUsageNote('')
+    setSystemPromptSnap(null)
     try {
       const { session_id } = await createSession()
       setSessionId(session_id)
@@ -309,13 +631,15 @@ export default function App() {
     setSessionId(null)
     setStatus('disconnected')
     setStatusNote('')
-    setMessages([])
+    setFeed([])
+    setPendingWidgets([])
     streamBufRef.current = ''
     setStreamingText('')
     setActiveRequestId(null)
     setToolHint(null)
     setSessionUsage(null)
     setUsageNote('')
+    setSystemPromptSnap(null)
   }
 
   const send = async () => {
@@ -329,7 +653,7 @@ export default function App() {
     setStreamingText('')
     setActiveRequestId(rid)
     setToolHint(null)
-    setMessages((m) => [...m, { id: `u-${rid}`, role: 'user', content: text }])
+    setFeed((m) => [...m, { id: `u-${rid}`, kind: 'userText', text }])
 
     try {
       await postReply(sid, rid, text)
@@ -337,12 +661,12 @@ export default function App() {
       setActiveRequestId(null)
       streamBufRef.current = ''
       setStreamingText('')
-      setMessages((m) => [
+      setFeed((m) => [
         ...m,
         {
           id: `e-${rid}`,
-          role: 'system',
-          content: e instanceof Error ? e.message : String(e),
+          kind: 'systemNotice',
+          text: e instanceof Error ? e.message : String(e),
         },
       ])
     }
@@ -354,13 +678,14 @@ export default function App() {
     if (!sid || !rid || status !== 'connected') return
     try {
       await postCancel(sid, rid)
+      setPendingWidgets([])
     } catch (e) {
-      setMessages((m) => [
+      setFeed((m) => [
         ...m,
         {
           id: `e-${newRequestId()}`,
-          role: 'system',
-          content: e instanceof Error ? e.message : String(e),
+          kind: 'systemNotice',
+          text: e instanceof Error ? e.message : String(e),
         },
       ])
     }
@@ -368,90 +693,217 @@ export default function App() {
 
   const busy = activeRequestId !== null
 
+  const dismissToast = useCallback((id: string) => {
+    setToasts((t) => t.filter((x) => x.id !== id))
+  }, [])
+
+  const dequeuePending = useCallback(() => {
+    setPendingWidgets((w) => w.slice(1))
+  }, [])
+
+  const headPending = pendingWidgets[0]
+
   return (
-    <div className="app">
-      <section className="panel controls" aria-label="Connection and session usage">
-        <div className="row">
-          {status !== 'connected' ? (
-            <button type="button" className="btn primary" onClick={connect} disabled={status === 'connecting'}>
-              {status === 'connecting' ? 'Connecting…' : 'New session'}
-            </button>
-          ) : (
-            <button type="button" className="btn" onClick={disconnect} disabled={busy}>
-              End session
-            </button>
-          )}
-          <span className={`pill ${status}`} aria-live="polite">
-            {status}
-            {sessionId ? ` · ${sessionId.slice(0, 8)}…` : ''}
-          </span>
-          {status === 'connected' && sessionId ? (
-            <button type="button" className="btn" onClick={() => void refreshSessionUsage()} disabled={busy}>
-              Refresh usage
-            </button>
-          ) : null}
-        </div>
-        {status === 'connected' && sessionId ? (
-          <div className="usage-row">
-            <ContextUsageRing
-              lastPromptTokens={sessionUsage?.last_prompt_tokens ?? 0}
-              contextWindowTokens={sessionUsage?.context_window_tokens ?? DEFAULT_CONTEXT_WINDOW}
-            />
-            <div className="usage-strip" aria-label="Session token usage">
-              {sessionUsage ? (
-                <>
-                  <span className="usage-item">
-                    <span className="usage-label">Turns</span>
-                    <span className="usage-value">{sessionUsage.turns}</span>
-                  </span>
-                  <span className="usage-sep" aria-hidden>
-                    ·
-                  </span>
-                  <span className="usage-item">
-                    <span className="usage-label">In</span>
-                    <span className="usage-value">{formatTokens(sessionUsage.input_tokens)}</span>
-                  </span>
-                  <span className="usage-sep" aria-hidden>
-                    ·
-                  </span>
-                  <span className="usage-item">
-                    <span className="usage-label">Out</span>
-                    <span className="usage-value">{formatTokens(sessionUsage.output_tokens)}</span>
-                  </span>
-                </>
+    <div className="app app--split">
+      <main className="panel chat" aria-label="Chat">
+        <div className="chat-surface" ref={chatSurfaceRef}>
+          <div
+            ref={messagesScrollRef}
+            className="messages"
+            role="log"
+            aria-relevant="additions"
+            onScroll={handleMessagesScroll}
+          >
+            {feed.map((item) => {
+              if (item.kind === 'userText') {
+                return (
+                  <article key={item.id} className="bubble user">
+                    <div className="bubble-meta">user</div>
+                    <div className="bubble-body">{item.text}</div>
+                  </article>
+                )
+              }
+              if (item.kind === 'assistantText') {
+                return (
+                  <article key={item.id} className="bubble assistant">
+                    <div className="bubble-meta">assistant</div>
+                    <div className="bubble-body">{item.text}</div>
+                  </article>
+                )
+              }
+              if (item.kind === 'toolTranscript') {
+                return (
+                  <article key={item.id} className="bubble tool">
+                    <div className="bubble-meta">tool call</div>
+                    <div className="bubble-body">{item.text}</div>
+                  </article>
+                )
+              }
+              if (item.kind === 'systemNotice') {
+                return (
+                  <article key={item.id} className="bubble system">
+                    <div className="bubble-meta">system</div>
+                    <div className="bubble-body">{item.text}</div>
+                  </article>
+                )
+              }
+              if (item.kind === 'image') {
+                return (
+                  <article key={item.id} className="bubble assistant assistant-image-inline">
+                    <div className="bubble-meta">assistant</div>
+                    <div className="bubble-body">
+                      <ImageBlockBubble mime_type={item.mime_type} data={item.data} />
+                    </div>
+                  </article>
+                )
+              }
+              if (item.kind === 'thinking') {
+                return (
+                  <article key={item.id} className="bubble assistant thinking-feed-item">
+                    <div className="bubble-meta">thinking</div>
+                    <div className="bubble-body">
+                      <ThinkingPanel
+                        request_id={item.request_id}
+                        text={item.text}
+                        phase={item.phase}
+                        signature={item.signature}
+                      />
+                    </div>
+                  </article>
+                )
+              }
+              if (item.kind === 'redactedThinking') {
+                return (
+                  <article key={item.id} className="bubble assistant">
+                    <div className="bubble-meta">thinking</div>
+                    <div className="bubble-body">
+                      <RedactedThinkingPlaceholder data={item.data} />
+                    </div>
+                  </article>
+                )
+              }
+              return null
+            })}
+            {(streamingText || toolHint) && (
+              <article className="bubble assistant streaming" aria-busy={busy}>
+                <div className="bubble-meta">assistant</div>
+                <div className="bubble-body">
+                  {toolHint ? <div className="hint">{toolHint}</div> : null}
+                  {streamingText ? <div className="stream">{streamingText}</div> : null}
+                </div>
+              </article>
+            )}
+          </div>
+
+          <SystemNotificationToast toasts={toasts} onDismiss={dismissToast} />
+
+          {sessionId && headPending ? (
+            <div className="pending-widgets-root">
+              {headPending.kind === 'toolConfirmation' ? (
+                <ToolConfirmationModal
+                  sessionId={sessionId}
+                  widget={headPending}
+                  onResolved={dequeuePending}
+                  onError={() => {}}
+                />
+              ) : headPending.kind === 'elicitation' ? (
+                <ElicitationForm
+                  sessionId={sessionId}
+                  widget={headPending}
+                  onResolved={dequeuePending}
+                  onError={() => {}}
+                />
               ) : (
-                <span className="muted">Usage appears after your first completed reply.</span>
+                <FrontendToolHandler
+                  sessionId={sessionId}
+                  widget={headPending}
+                  onResolved={dequeuePending}
+                  onError={() => {}}
+                />
               )}
             </div>
-          </div>
-        ) : null}
-        {usageNote ? <p className="error usage-error">{usageNote}</p> : null}
-        {statusNote ? <p className="error">{statusNote}</p> : null}
-      </section>
+          ) : null}
 
-      <main className="panel chat" aria-label="Chat">
-        <div
-          ref={messagesScrollRef}
-          className="messages"
-          role="log"
-          aria-relevant="additions"
-          onScroll={handleMessagesScroll}
-        >
-          {messages.map((m) => (
-            <article key={m.id} className={`bubble ${m.role}`}>
-              <div className="bubble-meta">{m.role === 'tool' ? 'tool call' : m.role}</div>
-              <div className="bubble-body">{m.content}</div>
-            </article>
-          ))}
-          {(streamingText || toolHint) && (
-            <article className="bubble assistant streaming" aria-busy={busy}>
-              <div className="bubble-meta">assistant</div>
-              <div className="bubble-body">
-                {toolHint ? <div className="hint">{toolHint}</div> : null}
-                {streamingText ? <div className="stream">{streamingText}</div> : null}
+          <div ref={overlayRef} className="chat-controls-overlay" role="region" aria-label="Connection and session usage">
+            <div className="chat-controls-bar">
+              <div className="chat-controls-leading row">
+                <span className={`pill ${status}`} aria-live="polite">
+                  {status}
+                  {sessionId ? ` · ${sessionId.slice(0, 8)}…` : ''}
+                </span>
+                {status === 'connected' && sessionId ? (
+                  <div className="usage-row usage-row--toolbar">
+                    <ContextUsageRing
+                      lastPromptTokens={sessionUsage?.last_prompt_tokens ?? 0}
+                      contextWindowTokens={sessionUsage?.context_window_tokens ?? DEFAULT_CONTEXT_WINDOW}
+                    />
+                    <div className="usage-strip" aria-label="Session token usage">
+                      {sessionUsage ? (
+                        <>
+                          <span className="usage-item">
+                            <span className="usage-label">Turns</span>
+                            <span className="usage-value">{sessionUsage.turns}</span>
+                          </span>
+                          <span className="usage-sep" aria-hidden>
+                            ·
+                          </span>
+                          <span className="usage-item">
+                            <span className="usage-label">In</span>
+                            <span className="usage-value">{formatTokens(sessionUsage.input_tokens)}</span>
+                          </span>
+                          <span className="usage-sep" aria-hidden>
+                            ·
+                          </span>
+                          <span className="usage-item">
+                            <span className="usage-label">Out</span>
+                            <span className="usage-value">{formatTokens(sessionUsage.output_tokens)}</span>
+                          </span>
+                        </>
+                      ) : (
+                        <span className="muted">Usage appears after your first completed reply.</span>
+                      )}
+                    </div>
+                  </div>
+                ) : null}
               </div>
-            </article>
-          )}
+              <div className="chat-controls-trailing row">
+                {status === 'connected' && sessionId ? (
+                  <>
+                    <button
+                      type="button"
+                      className="btn btn-icon"
+                      aria-label="Refresh usage"
+                      title="Refresh usage"
+                      onClick={() => void refreshSessionUsage()}
+                      disabled={busy}
+                    >
+                      <IconRefresh />
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-icon btn-icon-danger"
+                      aria-label="End session"
+                      title="End session"
+                      onClick={disconnect}
+                      disabled={busy}
+                    >
+                      <IconX />
+                    </button>
+                  </>
+                ) : (
+                  <button type="button" className="btn primary" onClick={connect} disabled={status === 'connecting'}>
+                    {status === 'connecting' ? 'Connecting…' : 'New session'}
+                  </button>
+                )}
+              </div>
+            </div>
+            {usageNote || statusNote ? (
+              <div className="chat-controls-notes">
+                {usageNote ? <p className="error usage-error">{usageNote}</p> : null}
+                {statusNote ? <p className="error">{statusNote}</p> : null}
+              </div>
+            ) : null}
+          </div>
         </div>
 
         <div className="composer">
@@ -486,6 +938,30 @@ export default function App() {
           </div>
         </div>
       </main>
+
+      <aside className="panel system-prompt-panel" aria-label="System prompt sent to the model">
+        <h2 className="panel-heading">System prompt</h2>
+        <p className="system-prompt-meta">
+          {systemPromptSnap ? (
+            <>
+              Request <span title={systemPromptSnap.requestId}>{systemPromptSnap.requestId.slice(0, 10)}…</span>
+              {' · '}
+              inner turn {systemPromptSnap.innerTurn}
+              {' · '}
+              {systemPromptSnap.text.length.toLocaleString()} chars
+            </>
+          ) : (
+            <>Updates on each model call (after curation). Connect and send a message to see the composed prompt.</>
+          )}
+        </p>
+        <div className="system-prompt-scroll" tabIndex={0}>
+          {systemPromptSnap ? (
+            <pre className="system-prompt-pre">{systemPromptSnap.text}</pre>
+          ) : (
+            <p className="system-prompt-empty">No snapshot yet.</p>
+          )}
+        </div>
+      </aside>
     </div>
   )
 }

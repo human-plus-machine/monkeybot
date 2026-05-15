@@ -13,6 +13,21 @@ export type GatewayJsonEvent = {
   result?: string
   args?: Record<string, unknown>
   usage?: Record<string, unknown>
+  inner_turn?: number
+  text?: string
+  mime_type?: string
+  data?: string | null
+  signature?: string | null
+  tool_call_id?: string
+  tool_name?: string
+  arguments?: Record<string, unknown>
+  prompt?: string
+  action_type?: string
+  id?: string
+  payload?: Record<string, unknown>
+  name?: string
+  notification_type?: string
+  msg?: string
 }
 
 export type SessionUsageResponse = {
@@ -209,4 +224,76 @@ export async function fetchSessionUsage(
     throw new Error(`usage failed: ${res.status} ${text}`)
   }
   return res.json() as Promise<SessionUsageResponse>
+}
+
+export async function postToolConfirmation(
+  sessionId: string,
+  toolCallId: string,
+  body: { approved: boolean; reason?: string },
+  init?: RequestInit,
+): Promise<void> {
+  const res = await fetch(
+    `${GATEWAY_BASE}/sessions/${encodeURIComponent(sessionId)}/tool-confirmations/${encodeURIComponent(toolCallId)}`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(init?.headers as Record<string, string>),
+      },
+      body: JSON.stringify(body),
+      signal: init?.signal,
+    },
+  )
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`tool confirmation failed: ${res.status} ${text}`)
+  }
+}
+
+export async function postElicitation(
+  sessionId: string,
+  id: string,
+  body: { user_data: unknown },
+  init?: RequestInit,
+): Promise<void> {
+  const res = await fetch(
+    `${GATEWAY_BASE}/sessions/${encodeURIComponent(sessionId)}/elicitations/${encodeURIComponent(id)}`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(init?.headers as Record<string, string>),
+      },
+      body: JSON.stringify(body),
+      signal: init?.signal,
+    },
+  )
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`elicitation failed: ${res.status} ${text}`)
+  }
+}
+
+export async function postFrontendToolResult(
+  sessionId: string,
+  toolCallId: string,
+  body: { result: unknown[]; is_error: boolean },
+  init?: RequestInit,
+): Promise<void> {
+  const res = await fetch(
+    `${GATEWAY_BASE}/sessions/${encodeURIComponent(sessionId)}/frontend-tool-results/${encodeURIComponent(toolCallId)}`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(init?.headers as Record<string, string>),
+      },
+      body: JSON.stringify(body),
+      signal: init?.signal,
+    },
+  )
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`frontend tool result failed: ${res.status} ${text}`)
+  }
 }
