@@ -86,6 +86,37 @@ def _vertex_project_and_location(model_param: str) -> tuple[str, str]:
     return str(project).strip(), "us-central1"
 
 
+_THINKING_DISABLED = 0
+"""Sentinel passed as ``thinking_budget`` to explicitly disable Gemini extended thinking.
+
+Distinct from ``-1`` (the "omit ThinkingConfig" default) so auxiliary calls can
+send ``ThinkingConfig(thinking_budget=0)`` to the API, which instructs the server
+not to think rather than leaving it to the server's default for the model.
+"""
+
+
+def _suppress_thinking_for_auxiliary_call(
+    messages: Sequence[Message],
+    tools: Sequence[ToolDef],
+) -> bool:
+    """True when this call is a known auxiliary job that must not use extended thinking.
+
+    Context curation and history summarization use ``tools=()`` and a fixed 2-message
+    shape. Extended thinking on preview models can stall the stream for 10s+ with no
+    visible output, burning the curator timeout before ``Done`` is received.
+    """
+    if tools:
+        return False
+    if len(messages) != 2 or messages[0].role != "system":
+        return False
+    sys_txt = "".join(b.text for b in messages[0].content if isinstance(b, Text))
+    markers = (
+        "You narrow context for another assistant",
+        "You compress prior agent conversation turns",
+    )
+    return any(m in sys_txt for m in markers)
+
+
 def _split_system_and_rest(messages: Sequence[Message]) -> tuple[str, list[Message]]:
     systems: list[str] = []
     rest: list[Message] = []
@@ -341,6 +372,8 @@ class GeminiProvider:
             if self._thinking_budget is not None
             else int(os.environ.get("MODEL_THINKING_BUDGET", "-1"))
         )
+        if _suppress_thinking_for_auxiliary_call(messages, tools):
+            thinking_budget = _THINKING_DISABLED
 
         system_instruction, rest = _split_system_and_rest(messages)
         contents = _messages_to_contents(rest)
@@ -351,6 +384,9 @@ class GeminiProvider:
         }
         if system_instruction:
             cfg_kwargs["system_instruction"] = system_instruction
+        # -1 means "omit ThinkingConfig entirely" (model default).
+        # 0 means explicitly disable thinking (sent to API).
+        # Any other positive value sets a token budget.
         if thinking_budget != -1:
             cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=thinking_budget)
 

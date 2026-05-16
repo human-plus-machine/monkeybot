@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import time
 from contextlib import aclosing
 from dataclasses import dataclass
 from pathlib import Path
@@ -83,7 +84,13 @@ async def _gather_search_pool_lines(memory_path: Path | None, user_text: str, *,
         return []
     root = Path(memory_path).resolve()
     q = user_text.strip()[:400]
-    payload = await asyncio.to_thread(search_memory_files, root, q, max_hits=max_hits)
+    payload = await asyncio.to_thread(
+        search_memory_files,
+        root,
+        q,
+        max_hits=max_hits,
+        skip_relative_prefixes=("raw",),
+    )
     hits = payload.get("hits") or []
     lines: list[str] = []
     if not isinstance(hits, list):
@@ -135,17 +142,27 @@ async def run_context_curator(
     provider: Provider,
     curator_model: str,
     user_message: str,
+    curator_provider: Provider | None = None,
 ) -> CuratedPromptParts:
-    """Call a small JSON-only completion to pick verbatim memory lines and skill names."""
+    """Call a small JSON-only completion to pick verbatim memory lines and skill names.
+
+    ``curator_provider`` is an optional dedicated provider instance tuned for this
+    auxiliary call (e.g. ``thinking_budget=0, max_output_tokens=1024``). Falls back
+    to ``provider`` when not supplied.
+    """
+    _provider = curator_provider if curator_provider is not None else provider
     max_mem = max(1, _env_int("CONTEXT_CURATION_MAX_MEMORY_LINES", 12))
     max_sk = max(1, _env_int("CONTEXT_CURATION_MAX_SKILLS", 5))
     search_hits = max(1, _env_int("CONTEXT_CURATION_SEARCH_MAX_HITS", 8))
-    timeout_sec = max(1.0, _env_float("CONTEXT_CURATION_TIMEOUT_SEC", 12.0))
+    timeout_sec = max(1.0, _env_float("CONTEXT_CURATION_TIMEOUT_SEC", 10.0))
 
     index_lines = list(ctx.memory_index)
     search_lines: list[str] = []
+    memory_scan_sec = 0.0
     if ctx.memory_path is not None:
+        t_scan = time.monotonic()
         search_lines = await _gather_search_pool_lines(ctx.memory_path, user_message, max_hits=search_hits)
+        memory_scan_sec = time.monotonic() - t_scan
 
     allowed_memory: set[str] = set(index_lines) | set(search_lines)
     by_skill = {s.name: s for s in ctx.skills}
@@ -178,12 +195,14 @@ async def run_context_curator(
             )
         ],
     )
-    user = Message(role="user", content=[Text(text="\n".join(catalog_user))])
+    catalog_text = "\n".join(catalog_user)
+    catalog_chars = len(catalog_text)
+    user = Message(role="user", content=[Text(text=catalog_text)])
 
     async def _stream_once() -> str:
         buf: list[str] = []
         async with aclosing(
-            cast(Any, provider.stream([system, user], [], model=curator_model))
+            cast(Any, _provider.stream([system, user], [], model=curator_model))
         ) as stream:
             async for ev in stream:
                 if isinstance(ev, TextDelta):
@@ -200,7 +219,18 @@ async def run_context_curator(
     try:
         raw = await asyncio.wait_for(_stream_once(), timeout=timeout_sec)
     except TimeoutError:
-        _log.warning("[curation] timed out after %ss", timeout_sec)
+        _log.warning(
+            "[curation] provider stream exceeded %ss without Done (curator_model=%r "
+            "index_lines=%d search_pool_lines=%d skills=%d catalog_user_chars=%d "
+            "memory_tree_scan=%.2fs; timeout applies only to the LLM stream, not local prep)",
+            timeout_sec,
+            curator_model,
+            len(index_lines),
+            len(search_lines),
+            len(by_skill),
+            catalog_chars,
+            memory_scan_sec,
+        )
         return CuratedPromptParts([], [], success=False)
     except Exception as exc:
         _log.warning("[curation] provider error: %s", exc)
@@ -225,5 +255,21 @@ async def run_context_curator(
     if proposed and not mem_out and not sk_out:
         _log.warning("[curation] model proposed memory/skills but none matched the allowed pool")
         return CuratedPromptParts([], [], success=False)
+
+    skill_names = [sk.name for sk in sk_out]
+    _log.info(
+        "[curation] selected %d/%d memory lines, %d/%d skills (model=%s) | mem=%s skills=%s",
+        len(mem_out), len(index_lines) + len(search_lines),
+        len(sk_out), len(by_skill),
+        curator_model,
+        [ln.split("|")[-1].strip()[:60] if "|" in ln else ln[:60] for ln in mem_out],
+        skill_names,
+    )
+    if mem_out:
+        for line in mem_out:
+            _log.debug("[curation] memory → %s", line)
+    if sk_out:
+        for sk in sk_out:
+            _log.debug("[curation] skill  → %s", sk.name)
 
     return CuratedPromptParts(mem_out, sk_out, success=True)

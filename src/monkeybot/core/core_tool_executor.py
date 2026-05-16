@@ -20,7 +20,12 @@ from monkeybot.core.mcp_client import MCPConnectionError, MCPServerNotConnectedE
 from monkeybot.core.ports_mcp import MCPClientPort
 from monkeybot.core.provider import ToolCall
 from monkeybot.core.subagent_proto import SubagentEnvelope, spawn_subagent
-from monkeybot.core.terminal import SecurityError, TerminalExecutor
+from monkeybot.core.terminal import (
+    ALLOWED_COMMANDS,
+    ALLOWED_PATHS,
+    SecurityError,
+    TerminalExecutor,
+)
 from monkeybot.core.workspace_service import WorkspaceError, WorkspaceFileService
 
 logger = logging.getLogger(__name__)
@@ -92,6 +97,89 @@ async def _stop_subagent_process(proc: asyncio.subprocess.Process | None) -> Non
 
 def _j(data: object) -> str:
     return json.dumps(data, ensure_ascii=False)
+
+
+def _built_in_tool_error(
+    error_kind: str,
+    message: str,
+    hint: str,
+    details: dict[str, Any] | None = None,
+) -> str:
+    """JSON tool-error body for built-in tools (helps the model recover without MCP wrapping)."""
+    payload: dict[str, Any] = {
+        "ok": False,
+        "error_kind": error_kind,
+        "message": message,
+        "hint": hint,
+    }
+    if details:
+        payload["details"] = details
+    return _j(payload)
+
+
+def _workspace_error_envelope(exc: WorkspaceError) -> str:
+    code = getattr(exc, "code", "workspace_error")
+    msg = str(exc)
+    if code == "path_escape":
+        hint = (
+            "Use a path relative to the workspace root with no `..` or `~` "
+            '(e.g. {"path": "README.md"}).'
+        )
+    elif code == "invalid_path":
+        hint = "Remove `..`, `~`, and leading `/`; use a repo-relative path."
+    elif code == "missing_path":
+        hint = 'Include a non-empty "path" argument (workspace-relative).'
+    elif code == "write_outside_scope":
+        hint = "Write only under the configured write scope, or ask the operator to adjust policy."
+    elif code == "not_found":
+        hint = "Create the file with write_file first, or fix the path spelling."
+    elif code == "invalid_offset":
+        hint = 'Use "offset" as a positive integer (1 = first line).'
+    elif code in ("write_failed", "glob_failed"):
+        hint = "Check disk permissions and path; retry after fixing the underlying issue."
+    else:
+        hint = "Fix the path or arguments per read_file/write_file rules, then retry once."
+    return _built_in_tool_error("validation", msg, hint, {"code": code})
+
+
+def _run_command_security_envelope(exc: SecurityError) -> str:
+    raw = str(exc)
+    if raw.startswith("Command '") and "not allowed" in raw:
+        return _built_in_tool_error(
+            "policy",
+            raw,
+            "Pick a binary from the harness allowlist (run_command); do not retry the same command name.",
+            {
+                "example_argv": ["git", "--version"],
+                "allowed_commands": list(ALLOWED_COMMANDS),
+            },
+        )
+    if raw.startswith("Path '") and "not allowed" in raw:
+        return _built_in_tool_error(
+            "policy",
+            raw,
+            "Arguments starting with ./ or / must use an allowed prefix (see harness Runtime paths / run_command); change the path, then retry.",
+            {
+                "example_argv": ["grep", "pattern", "./skills/SKILL.md"],
+                "allowed_path_prefixes": list(ALLOWED_PATHS),
+            },
+        )
+    return _built_in_tool_error(
+        "policy",
+        raw,
+        "Adjust the shell invocation to satisfy run_command policy (see harness), then retry once.",
+        {},
+    )
+
+
+def _run_command_parse_envelope(exc: ValueError) -> str:
+    return _built_in_tool_error(
+        "validation",
+        str(exc),
+        'Use a non-empty argv list, e.g. {"argv": ["git", "--version"]} '
+        'or {"command": "git", "args": ["--version"]}.',
+        {"example": {"argv": ["git", "--version"]}},
+    )
 
 
 def _coerce_int(val: object | None, default: int | None = None) -> int | None:
@@ -200,16 +288,33 @@ class CoreToolExecutor(ToolExecutorPort):
                     except MCPServerNotConnectedError as exc:
                         result_text, err_text = None, str(exc)
                 else:
-                    result_text, err_text = None, f"unknown tool: {name}"
+                    result_text, err_text = None, _built_in_tool_error(
+                        "runtime",
+                        f"unknown tool: {name}",
+                        "Use a tool from the active tool list for this turn.",
+                        {"tool": name},
+                    )
         except WorkspaceError as exc:
-            result_text, err_text = None, str(exc)
+            result_text, err_text = None, _workspace_error_envelope(exc)
         except MCPConnectionError as exc:
             result_text, err_text = None, str(exc)
-        except (SecurityError, TimeoutError, ValueError, TypeError, OSError) as exc:
-            result_text, err_text = None, str(exc)
+        except SecurityError as exc:
+            result_text, err_text = None, _run_command_security_envelope(exc)
+        except (TimeoutError, ValueError, TypeError, OSError) as exc:
+            result_text, err_text = None, _built_in_tool_error(
+                "runtime",
+                str(exc),
+                "Fix the underlying issue described in message, then retry once if appropriate.",
+                {"tool": name},
+            )
         except Exception as exc:
             logger.exception("tool %s failed", name)
-            result_text, err_text = None, str(exc)
+            result_text, err_text = None, _built_in_tool_error(
+                "runtime",
+                str(exc),
+                "If this persists, stop retrying the same tool call and report the error.",
+                {"tool": name},
+            )
 
         if err_text is None and result_text is not None and len(result_text) > _SPILL_MAX_CHARS:
             result_text = _write_spill_and_cap(
@@ -220,7 +325,15 @@ class CoreToolExecutor(ToolExecutorPort):
     def _tool_read_file(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
         path = _str_arg(args, "path", "file_path", "file")
         if not path:
-            return (None, "read_file requires path")
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "read_file requires a path argument.",
+                    'Pass a workspace-relative path, e.g. {"path": "README.md"}.',
+                    {"field": "path", "example": {"path": "README.md"}},
+                ),
+            )
         offset = _coerce_int(args.get("offset"), 1) or 1
         limit = _coerce_int(args.get("limit"), None)
         if _is_under_spill_path(self._workspace.repo_root, path):
@@ -229,12 +342,20 @@ class CoreToolExecutor(ToolExecutorPort):
             payload = self._workspace.read_file(path, offset=offset, limit=limit)
             return (_j(payload), None)
         except WorkspaceError as exc:
-            return (None, str(exc))
+            return (None, _workspace_error_envelope(exc))
 
     def _tool_write_file(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
         path = _str_arg(args, "path", "file_path", "file")
         if not path:
-            return (None, "write_file requires path")
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "write_file requires a path argument.",
+                    'Pass path and content, e.g. {"path": "README.md", "content": "..."}.',
+                    {"field": "path", "example": {"path": "README.md", "content": ""}},
+                ),
+            )
         content = args.get("content")
         if content is None:
             content = args.get("body", "")
@@ -244,12 +365,20 @@ class CoreToolExecutor(ToolExecutorPort):
             payload = self._workspace.write_file(path, content)
             return (_j(payload), None)
         except WorkspaceError as exc:
-            return (None, str(exc))
+            return (None, _workspace_error_envelope(exc))
 
     async def _tool_search_memory(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
         query = _str_arg(args, "query", "q", "keyword", "phrase")
         if not query:
-            return (None, "search_memory requires query (or q / keyword / phrase)")
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "search_memory requires a non-empty query.",
+                    'Use query (or q / keyword / phrase), e.g. {"query": "deployment"}.',
+                    {"field": "query", "example": {"query": "keyword"}},
+                ),
+            )
         max_hits = _coerce_int(args.get("max_hits"), 40) or 40
         payload = await asyncio.to_thread(search_memory_files, self._memory_path, query, max_hits=max_hits)
         return (_j(payload), None)
@@ -274,7 +403,15 @@ class CoreToolExecutor(ToolExecutorPort):
         args = dict(call.args)
         task = _str_arg(args, "task", "instructions", "prompt", "objective")
         if not task:
-            return None, "task requires a non-empty string argument 'task'"
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "task requires a non-empty string in the task (or instructions / prompt / objective) field.",
+                    'Example: {"task": "Summarize the open issue and propose a fix."}.',
+                    {"field": "task", "example": {"task": "Do the thing"}},
+                ),
+            )
 
         context_val = args.get("context") or args.get("background") or ""
         if not isinstance(context_val, str):
@@ -287,7 +424,15 @@ class CoreToolExecutor(ToolExecutorPort):
             )
         ).resolve()
         if not script.is_file():
-            return None, f"task: worker script missing at {script}"
+            return (
+                None,
+                _built_in_tool_error(
+                    "runtime",
+                    f"task: worker script missing at {script}",
+                    "Set MONKEYBOT_SUBAGENT_SCRIPT to a valid subagent_worker.py path.",
+                    {"path": str(script)},
+                ),
+            )
 
         parent_label = f"{ctx.request_id}:{call.call_id}"
         envelope = SubagentEnvelope(
@@ -440,9 +585,25 @@ class CoreToolExecutor(ToolExecutorPort):
         return (_j(payload), None)
 
     async def _tool_run_command(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
-        cmd, argv = _parse_run_command(args)
+        try:
+            cmd, argv = _parse_run_command(args)
+        except ValueError as exc:
+            return None, _run_command_parse_envelope(exc)
         timeout = _coerce_int(args.get("timeout"), 60) or 60
-        result = await self._terminal.execute(cmd, argv, timeout=timeout)
+        try:
+            result = await self._terminal.execute(cmd, argv, timeout=timeout)
+        except SecurityError as exc:
+            return None, _run_command_security_envelope(exc)
+        except TimeoutError as exc:
+            return (
+                None,
+                _built_in_tool_error(
+                    "runtime",
+                    str(exc),
+                    "Increase run_command timeout (seconds) or use a shorter command, then retry once.",
+                    {"example": {"argv": ["git", "--version"], "timeout": 120}},
+                ),
+            )
         return (
             _j(
                 {

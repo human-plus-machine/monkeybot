@@ -89,7 +89,11 @@ async def test_read_file_and_write_file(tmp_path: Path) -> None:
         call=ToolCall(call_id="1", name="read_file", args={"path": "hello.txt"}),
         ctx=ctx,
     )
-    assert e1 is not None and "Not a file" in e1
+    assert e1 is not None
+    err1 = json.loads(e1)
+    assert err1["ok"] is False
+    assert err1["error_kind"] == "validation"
+    assert "Not a file" in err1["message"]
 
     w, ew = await ex.execute(
         call=ToolCall(
@@ -180,6 +184,94 @@ async def test_run_command_cat_under_memory(tmp_path: Path, monkeypatch: pytest.
 
 
 @pytest.mark.asyncio
+async def test_run_command_blocked_command_returns_policy_envelope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data" / "memory").mkdir(parents=True)
+    mem = tmp_path / "data" / "memory"
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory_path=mem,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    out, err = await ex.execute(
+        call=ToolCall(
+            call_id="1",
+            name="run_command",
+            args={"argv": ["curl", "http://example.com"]},
+        ),
+        ctx=_ctx(),
+    )
+    assert out is None and err is not None
+    payload = json.loads(err)
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "policy"
+    assert "curl" in payload["message"].lower() or "not allowed" in payload["message"].lower()
+    assert "example_argv" in payload["details"]
+    assert "allowed_commands" in payload["details"]
+
+
+@pytest.mark.asyncio
+async def test_run_command_blocked_path_returns_policy_envelope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data" / "memory").mkdir(parents=True)
+    mem = tmp_path / "data" / "memory"
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory_path=mem,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    out, err = await ex.execute(
+        call=ToolCall(
+            call_id="1",
+            name="run_command",
+            args={"argv": ["cat", "./forbidden/x.txt"]},
+        ),
+        ctx=_ctx(),
+    )
+    assert out is None and err is not None
+    payload = json.loads(err)
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "policy"
+    assert "allowed_path_prefixes" in payload["details"]
+
+
+@pytest.mark.asyncio
+async def test_run_command_malformed_args_returns_validation_envelope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory_path=mem,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    out, err = await ex.execute(
+        call=ToolCall(call_id="1", name="run_command", args={}),
+        ctx=_ctx(),
+    )
+    assert out is None and err is not None
+    payload = json.loads(err)
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "validation"
+    assert "example" in payload["details"]
+
+
+@pytest.mark.asyncio
 async def test_unknown_tool(tmp_path: Path) -> None:
     ex = CoreToolExecutor(
         workspace_root=tmp_path,
@@ -193,7 +285,11 @@ async def test_unknown_tool(tmp_path: Path) -> None:
         call=ToolCall(call_id="1", name="not_a_real_tool", args={}),
         ctx=_ctx(),
     )
-    assert out is None and err is not None and "unknown tool" in err
+    assert out is None and err is not None
+    err_obj = json.loads(err)
+    assert err_obj["ok"] is False
+    assert err_obj["error_kind"] == "runtime"
+    assert "unknown tool" in err_obj["message"]
 
 
 @pytest.mark.asyncio

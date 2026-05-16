@@ -19,9 +19,14 @@ This block is injected by the host every turn. Prefer the **active tool list** t
 - `read_file` / `write_file` — paths are **workspace-relative** (repository root the process uses).
 - `search_memory` — keyword search under the configured memory directory; prefer this over shell commands for any memory lookup.
 - `list_skills` — lists installed skills; read each skill's `SKILL.md` under the skills root for procedure.
-- `run_command` — allowlisted shell with optional `timeout` (seconds). Shell starts in **workspace root**; use the paths listed under Runtime paths below — do NOT guess directory names.
+- `run_command` — allowlisted shell with optional `timeout` (seconds). Shell starts in **workspace root**; use the paths listed under Runtime paths below — do NOT guess directory names. `cd` is a shell builtin and cannot be used as a bare command; use `bash -c "cd <dir> && <cmd>"` instead.
 - `add_mcp_server` / `remove_mcp_server` — register or drop MCP stdio servers; new tools appear on later turns.
 {task_line}
+### Built-in tool errors (recovery)
+- Failed built-in tools often return **JSON** with `ok: false`, `error_kind` (`policy` | `validation` | `runtime`), `message`, and `hint`.
+- If `error_kind` is **policy** (e.g. `run_command` blocked), **do not** retry the identical call; change the command or path per `hint` and the lists in `details`, then retry **once** after a single fix.
+- If `error_kind` is **validation**, fix the argument shape (see `details.example`), then retry once.
+
 ### Runtime paths
 - workspace root: `{workspace_root}`
 - memory directory: `{memory_path}` — always use `search_memory` to query; only use this path directly in `run_command` for low-level inspection.

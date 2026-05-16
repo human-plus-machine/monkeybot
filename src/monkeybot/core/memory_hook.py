@@ -373,7 +373,11 @@ class MemoryHook:
     async def _search(self, query: str) -> list[dict[str, Any]]:
         try:
             result = await asyncio.to_thread(
-                search_memory_files, self._memory, query, max_hits=self._max_hits * 2
+                search_memory_files,
+                self._memory,
+                query,
+                max_hits=self._max_hits * 2,
+                skip_relative_prefixes=("raw",),
             )
         except Exception as exc:
             logger.warning("memory search failed for %r: %r", query, exc)

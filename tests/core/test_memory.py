@@ -11,6 +11,7 @@ from monkeybot.core.memory import (
     load_index,
     promote_to_memory,
     search_memory,
+    search_memory_files,
 )
 
 
@@ -110,6 +111,47 @@ async def test_search_memory_non_positive_top_k_returns_empty(tmp_path: Path) ->
     got = await search_memory("x", memory, top_k=0)
 
     assert got == []
+
+
+def test_search_memory_files_includes_raw_by_default(tmp_path: Path) -> None:
+    memory = tmp_path / "memory"
+    raw = memory / "raw"
+    raw.mkdir(parents=True)
+    (raw / "post.md").write_text('echo "git -C app status"\n', encoding="utf-8")
+
+    got = search_memory_files(memory, "git -C app status", max_hits=10)
+
+    assert len(got["hits"]) == 1
+    assert got["hits"][0]["path"].replace("\\", "/") == "raw/post.md"
+
+
+def test_search_memory_files_can_skip_raw_tree(tmp_path: Path) -> None:
+    memory = tmp_path / "memory"
+    semantic = memory / "semantic"
+    semantic.mkdir(parents=True)
+    (semantic / "note.md").write_text(
+        "Run `git -C app remote -v` to list remotes for the app checkout.\n", encoding="utf-8"
+    )
+    raw = memory / "raw"
+    raw.mkdir(parents=True)
+    (raw / "post.md").write_text(
+        'tool: run_command\n```json\n{"command": "git -C app remote -v"}\n```\n',
+        encoding="utf-8",
+    )
+
+    all_hits = search_memory_files(memory, "git -C app remote -v", max_hits=10)
+    paths_all = {h["path"].replace("\\", "/") for h in all_hits["hits"]}
+    assert "raw/post.md" in paths_all
+    assert "semantic/note.md" in paths_all
+
+    filtered = search_memory_files(
+        memory,
+        "git -C app remote -v",
+        max_hits=10,
+        skip_relative_prefixes=("raw",),
+    )
+    paths_f = [h["path"].replace("\\", "/") for h in filtered["hits"]]
+    assert paths_f == ["semantic/note.md"]
 
 
 @pytest.mark.asyncio

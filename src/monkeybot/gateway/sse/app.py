@@ -60,6 +60,7 @@ class _GatewayDeps:
     mcp: MCPClient | None = None
     inspectors: list[ToolInspector] = field(default_factory=list)
     provider: Provider | None = None
+    curator_provider: Provider | None = None
     usage_conn: aiosqlite.Connection | None = None
     hook_manager: HookManager | None = None
     memory_hook: MemoryHook | None = None
@@ -186,6 +187,22 @@ def _resolve_provider() -> Provider:
         return VertexClaudeProvider()
     if mode != "fake":
         return GeminiProvider()
+
+
+def _resolve_curator_provider(main_provider: Provider) -> Provider:
+    """Dedicated provider for context curation with thinking and token cap overrides.
+
+    Uses a small ``max_output_tokens`` (the curator only needs ~50 JSON tokens) and
+    ``thinking_budget=0`` to explicitly disable extended thinking, which can stall
+    preview models for 10s+ on a short JSON-only completion.
+
+    Fake / vertex-claude modes reuse ``main_provider`` — curation is no-op in tests
+    and vertex-claude has no thinking budget concept.
+    """
+    mode = os.environ.get("MODEL_PROVIDER", "gemini").lower().strip()
+    if mode == "fake" or mode == "vertex-claude":
+        return main_provider
+    return GeminiProvider(thinking_budget=0, max_output_tokens=1024)
 
     raw = os.environ.get("MONKEYBOT_FAKE_PROVIDER_EVENTS", "")
     if not raw:
@@ -324,6 +341,7 @@ class GatewayLoopPort:
                 run_id=request_id,
                 cancelled=cancel_event,
                 hook_manager=_deps.hook_manager,
+                curator_provider=_deps.curator_provider,
             ):
                 if isinstance(evt, TurnComplete):
                     u = evt.usage
@@ -404,6 +422,7 @@ async def _startup() -> None:
     _deps.inspectors = inspectors
 
     _deps.provider = _resolve_provider()
+    _deps.curator_provider = _resolve_curator_provider(_deps.provider)
 
     usage_conn = await open_connection(db_url)
     await _ensure_schema(usage_conn)

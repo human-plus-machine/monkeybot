@@ -8,11 +8,20 @@ Run locally with:
 
 from __future__ import annotations
 
+import logging
 import os
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(levelname)s:%(name)s:%(message)s",
+)
+# Suppress chatty third-party loggers regardless of LOG_LEVEL.
+for _noisy in ("httpx", "httpcore", "urllib3", "google_genai", "google.auth"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 
 from monkeybot.gateway.sse.app import app  # noqa: E402
 

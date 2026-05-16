@@ -134,14 +134,16 @@ async def _fire_hook(
 
 
 def _append_extra_system_text(system: Message, extra: str | None) -> Message:
-    """Return a new system Message with ``extra`` appended in a ``<memory>`` block.
+    """Return a new system Message with ``extra`` under a ``## Runtime notes`` section.
 
-    When ``extra`` is empty/None the original message is returned unchanged.
+    Uses the same markdown heading style as the rest of the composed system prompt
+    (``## Memory index``, harness sections). When ``extra`` is empty/None the original
+    message is returned unchanged.
     """
     if not extra:
         return system
     base = "".join(b.text for b in system.content if isinstance(b, Text))
-    wrapped = f"{base}\n\n<memory>\n{extra}\n</memory>"
+    wrapped = f"{base}\n\n## Runtime notes\n\n{extra.strip()}\n"
     return Message(role="system", content=[Text(text=wrapped)])
 
 
@@ -355,6 +357,7 @@ async def run(
     cancelled: asyncio.Event | None = None,
     max_turns: int | None = None,
     hook_manager: HookManager | None = None,
+    curator_provider: Provider | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Stream agent events for one user message; ends with ``TurnComplete`` (never raises).
 
@@ -363,6 +366,9 @@ async def run(
 
     Consecutive ``task`` tool calls in one batch run concurrently (at most 10 at a time);
     other tools run one chunk at a time in order.
+
+    ``curator_provider`` is an optional dedicated provider for context curation (e.g. with
+    ``thinking_budget=0``). Falls back to ``provider`` when not supplied.
     """
     del run_id  # reserved for durable runs / gateway wiring
     usage = Usage()
@@ -378,6 +384,7 @@ async def run(
             max_turns=max_turns,
             usage=usage,
             hook_manager=hook_manager,
+            curator_provider=curator_provider,
         ):
             yield evt
     except asyncio.CancelledError:
@@ -406,6 +413,7 @@ async def _run_inner(
     max_turns: int | None,
     usage: Usage,
     hook_manager: HookManager | None = None,
+    curator_provider: Provider | None = None,
 ) -> AsyncIterator[AgentEvent]:
     effective_max = _effective_max_turns(max_turns)
     _ = await history.load(ctx.thread_id)
@@ -478,6 +486,7 @@ async def _run_inner(
                 provider=provider,
                 curator_model=curator_model_id(ctx),
                 user_message=u,
+                curator_provider=curator_provider,
             )
             if parts.success:
                 curated_mem = list(parts.memory_lines)

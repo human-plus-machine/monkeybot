@@ -37,6 +37,7 @@ ALLOWED_COMMANDS = [
     "uv",       # Python package manager (for future use)
     "git",      # Version control (clone, branch, commit, push, etc.)
     "gh",       # GitHub CLI (e.g. gh pr create)
+    "bash",     # Shell interpreter — use for builtins (cd, &&, pipes) via bash -c "..."
 ]
 
 # SECURITY: Path allowlist - modify with extreme caution

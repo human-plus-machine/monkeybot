@@ -9,6 +9,8 @@ def test_harness_includes_core_tools_and_protocol() -> None:
     assert "`read_file`" in out
     assert "`run_command`" in out
     assert "`task` —" not in out
+    assert "### Built-in tool errors (recovery)" in out
+    assert "error_kind" in out
     assert "### Tool-call protocol (strict)" in out
     assert "native function-call channel" in out
     assert '{"tool_calls":' not in out

@@ -86,6 +86,27 @@ def test_normalize_vertex_model_strips_models_prefix() -> None:
     assert gemini_mod._normalize_vertex_model("models/gemini-2.0-flash") == "gemini-2.0-flash"
 
 
+def test_suppress_thinking_curator_and_summarize_shapes() -> None:
+    cur_sys = Message(
+        role="system",
+        content=[Text(text="You narrow context for another assistant. Reply with ONLY a JSON object.")],
+    )
+    cur_user = Message(role="user", content=[Text(text="x")])
+    assert gemini_mod._suppress_thinking_for_auxiliary_call([cur_sys, cur_user], []) is True
+
+    sum_sys = Message(
+        role="system",
+        content=[Text(text="You compress prior agent conversation turns into one dense factual summary.")],
+    )
+    sum_user = Message(role="user", content=[Text(text="blob")])
+    assert gemini_mod._suppress_thinking_for_auxiliary_call([sum_sys, sum_user], []) is True
+
+    tool = ToolDef(name="t", description="d", input_schema={})
+    assert gemini_mod._suppress_thinking_for_auxiliary_call([cur_sys, cur_user], [tool]) is False
+
+    assert gemini_mod._suppress_thinking_for_auxiliary_call([cur_user], []) is False
+
+
 def test_vertex_location_preview_defaults_to_global(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("VERTEX_AI_LOCATION", raising=False)
     monkeypatch.delenv("GOOGLE_CLOUD_LOCATION", raising=False)

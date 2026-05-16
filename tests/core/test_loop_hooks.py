@@ -131,7 +131,7 @@ async def test_no_hook_manager_keeps_behavior_unchanged() -> None:
         )
     ]
     assert any(getattr(e, "kind", None) == "TurnComplete" for e in events)
-    assert prov.system_texts and "<memory>" not in prov.system_texts[0]
+    assert prov.system_texts and "## Runtime notes" not in prov.system_texts[0]
 
 
 @pytest.mark.asyncio
@@ -224,7 +224,7 @@ async def test_pre_turn_inject_text_lands_in_system_prompt() -> None:
         pass
 
     assert prov.system_texts, "provider.stream was never called"
-    assert "<memory>" in prov.system_texts[0]
+    assert "## Runtime notes" in prov.system_texts[0]
     assert "REMEMBER: user is Karthik." in prov.system_texts[0]
 
 

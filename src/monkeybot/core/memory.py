@@ -46,6 +46,19 @@ def _matches_query(line_lower: str, tokens: list[str]) -> bool:
     return all(tok in line_lower for tok in tokens)
 
 
+def _memory_rel_skipped(rel_posix: str, skip_relative_prefixes: tuple[str, ...]) -> bool:
+    """True when ``rel_posix`` is exactly a skipped prefix or lives under it."""
+    if not skip_relative_prefixes:
+        return False
+    for raw_p in skip_relative_prefixes:
+        p = raw_p.replace("\\", "/").strip("/")
+        if not p:
+            continue
+        if rel_posix == p or rel_posix.startswith(p + "/"):
+            return True
+    return False
+
+
 async def search_memory(query: str, memory_path: Path, top_k: int = 5) -> list[str]:
     """Return up to ``top_k`` index lines matching all whitespace-separated tokens (case-insensitive)."""
     if top_k <= 0:
@@ -67,11 +80,23 @@ async def search_memory(query: str, memory_path: Path, top_k: int = 5) -> list[s
     return matches
 
 
-def search_memory_files(memory_root: Path, query: str, *, max_hits: int = 40) -> dict[str, Any]:
+def search_memory_files(
+    memory_root: Path,
+    query: str,
+    *,
+    max_hits: int = 40,
+    skip_relative_prefixes: tuple[str, ...] = (),
+) -> dict[str, Any]:
     """Scan memory tree for UTF-8 text files containing ``query`` (case-insensitive substring).
 
     Used by the ``search_memory`` tool and by context curation. Runs synchronously; call
     from ``asyncio.to_thread`` in async code.
+
+    ``skip_relative_prefixes`` drops hits whose path relative to ``memory_root`` is that
+    directory or a file under it (POSIX-style, case-sensitive). Hooks pass ``("raw",)``
+    so ``PRE_TOOL`` / curation do not surface ``memory/raw/`` post-tool telemetry as
+    pseudo-memory; the ``search_memory`` tool omits this argument so operators can still
+    search the full tree.
     """
     q = query.lower().strip()
     if not q:
@@ -98,6 +123,9 @@ def search_memory_files(memory_root: Path, query: str, *, max_hits: int = 40) ->
             rel = str(path.relative_to(memory_root))
         except ValueError:
             rel = path.name
+        rel_posix = rel.replace("\\", "/")
+        if _memory_rel_skipped(rel_posix, skip_relative_prefixes):
+            continue
         start = max(0, pos - 60)
         end = min(len(text), pos + len(q) + 80)
         snippet = text[start:end].replace("\n", " ")
