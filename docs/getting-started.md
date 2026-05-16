@@ -115,4 +115,4 @@ curl -sS "http://127.0.0.1:8080/health"
 
 ## Next steps
 
-- [Skills](skills.md) — layout under `SKILLS_PATH`, `SKILL.md`, and `run.py` / `main.py`.
+- [Skills](skills.md) — layout under `SKILLS_PATH` and `SKILL.md` per skill folder.

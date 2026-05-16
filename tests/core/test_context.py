@@ -70,7 +70,6 @@ async def test_build_context_merges_core_and_mcp_tools(tmp_path: Path) -> None:
     research = skills / "research"
     research.mkdir(parents=True)
     (research / "SKILL.md").write_text("Do research tasks.\n\nMore body.\n", encoding="utf-8")
-    (research / "run.py").write_text("# entry\n", encoding="utf-8")
 
     mcp_tools = [
         ToolDef("db__query", "Query database.", {}),
@@ -90,7 +89,6 @@ async def test_build_context_merges_core_and_mcp_tools(tmp_path: Path) -> None:
     assert len(ctx.skills) == 1
     assert ctx.skills[0].name == "research"
     assert ctx.skills[0].description == "Do research tasks."
-    assert ctx.skills[0].entry_point == "research/run.py"
 
     names = [t.name for t in ctx.tools]
     core_names = {
@@ -173,7 +171,7 @@ async def test_build_context_empty_agent_md_raises(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_build_context_skips_skill_without_runner(tmp_path: Path) -> None:
+async def test_build_context_discovers_doc_only_skill_without_runner(tmp_path: Path) -> None:
     agent_path = tmp_path / "AGENT.md"
     agent_path.write_text("ok\n", encoding="utf-8")
     mem = tmp_path / "memory"
@@ -191,7 +189,8 @@ async def test_build_context_skips_skill_without_runner(tmp_path: Path) -> None:
         skills_path=skills,
         mcp_client=FakeMCPClient([]),
     )
-    assert ctx.skills == []
+    assert len(ctx.skills) == 1
+    assert ctx.skills[0].name == "orphan"
 
 
 @pytest.mark.asyncio

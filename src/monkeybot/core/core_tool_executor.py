@@ -429,7 +429,7 @@ class CoreToolExecutor(ToolExecutorPort):
 
     def _tool_list_skills(self, ctx: TurnContext) -> tuple[str | None, str | None]:
         rows = [
-            {"name": s.name, "description": s.description, "entry_point": s.entry_point}
+            {"name": s.name, "description": s.description}
             for s in ctx.skills
         ]
         return (

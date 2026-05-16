@@ -51,8 +51,8 @@ async def test_curator_accepts_verbatim_memory_and_skills() -> None:
         '{"memory_lines": ["alpha note"], "highlighted_skills": ["skill-a"]}',
     )
     skills = [
-        SkillRef(name="skill-a", description="A", entry_point="skill-a/run.py"),
-        SkillRef(name="skill-b", description="B", entry_point="skill-b/run.py"),
+        SkillRef(name="skill-a", description="A"),
+        SkillRef(name="skill-b", description="B"),
     ]
     ctx = _ctx(memory=["alpha note", "beta note"], skills=skills)
     out = await run_context_curator(
@@ -73,7 +73,7 @@ async def test_curator_invalid_selection_fails_empty() -> None:
     prov = _FakeCuratorProvider(
         '{"memory_lines": ["not in index"], "highlighted_skills": ["nope"]}',
     )
-    ctx = _ctx(memory=["real"], skills=[SkillRef("skill-a", "A", "skill-a/run.py")])
+    ctx = _ctx(memory=["real"], skills=[SkillRef("skill-a", "A")])
     out = await run_context_curator(
         ctx=ctx,
         provider=prov,

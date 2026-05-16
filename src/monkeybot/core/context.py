@@ -64,12 +64,10 @@ class SkillRef:
     Attributes:
         name: Directory name under the skills root.
         description: First instructional line from SKILL.md (after optional frontmatter).
-        entry_point: POSIX path relative to skills root (e.g. ``research/run.py``).
     """
 
     name: str
     description: str
-    entry_point: str
 
 
 @dataclass(frozen=True)
@@ -252,7 +250,7 @@ def _parse_skill_description(body: str, skill_name: str) -> str:
 
 
 def _discover_skills(skills_path: Path) -> list[SkillRef]:
-    """List skills as immediate subdirectories containing SKILL.md and run.py or main.py."""
+    """List skills as immediate subdirectories containing ``SKILL.md``."""
     if not skills_path.is_dir():
         return []
 
@@ -263,16 +261,9 @@ def _discover_skills(skills_path: Path) -> list[SkillRef]:
         skill_md = child / "SKILL.md"
         if not skill_md.is_file():
             continue
-        entry: str | None = None
-        if (child / "run.py").is_file():
-            entry = f"{child.name}/run.py"
-        elif (child / "main.py").is_file():
-            entry = f"{child.name}/main.py"
-        if entry is None:
-            continue
         text = skill_md.read_text(encoding="utf-8")
         desc = _parse_skill_description(text, child.name)
-        result.append(SkillRef(name=child.name, description=desc, entry_point=entry))
+        result.append(SkillRef(name=child.name, description=desc))
     return result
 
 
@@ -320,7 +311,7 @@ async def build_context(
         request_id: Per-request correlation id.
         agent_md_path: Path to AGENT.md (must be non-empty).
         memory_path: Root directory; ``memory_path / INDEX.md`` optional.
-        skills_path: Root directory for skill folders (SKILL.md + run.py or main.py).
+        skills_path: Root directory for skill folders (each with ``SKILL.md``).
         mcp_client: Client exposing ``all_tools()`` for MCP-registered tools.
         user_id: Optional authenticated user.
         parent_run_id: Optional parent run for subagent linkage.

@@ -30,7 +30,7 @@ MCP + config       →    SQLite history + usage →    GCP when deployed
 | **AGENT.md + context** | System prompt from file plus optional memory index and skill list per turn |
 | **Persistent memory (optional)** | Markdown under `MEMORY_PATH`, optional GCS extra |
 | **Conversation history** | SQLite via `DB_URL` for gateway sessions |
-| **Skills** | `SKILL.md` + `run.py` / `main.py` discovery under `SKILLS_PATH` |
+| **Skills** | `SKILL.md` discovery under `SKILLS_PATH` (one folder per skill) |
 | **MCP** | Stdio and streamable HTTP MCP servers; tools exposed as `server__tool` |
 | **Memory organizer (optional)** | Async post-processor for classifying and indexing memory files |
 | **Multi-provider (library path)** | Vertex Gemini, OpenAI, Anthropic, Vertex Claude via `get_provider_config()` |
@@ -43,7 +43,7 @@ MCP + config       →    SQLite history + usage →    GCP when deployed
 | Guide | Description |
 |---|---|
 | [Getting Started](docs/getting-started.md) | Install, configure the SSE gateway (`monkeybot_config/monkeybot.example.yaml`, optional `.env`), and exercise sessions + SSE from the command line |
-| [Skills](docs/skills.md) | Skill directory layout, `SKILL.md`, and `run.py` / `main.py` discovery under `SKILLS_PATH` |
+| [Skills](docs/skills.md) | Skill directory layout and `SKILL.md` discovery under `SKILLS_PATH` |
 
 Harness defaults and comments: **`monkeybot_config/monkeybot.example.yaml`** (copy to `monkeybot.yaml`). Optional **`.env`** in the repo root for secrets — see the header of that YAML file for common variable names.
 

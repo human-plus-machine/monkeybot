@@ -149,13 +149,14 @@ async def test_list_skills_uses_context(tmp_path: Path) -> None:
         skills_path=skills,
         mcp=_NoMCP(),
     )
-    sk = [SkillRef(name="n", description="d", entry_point="n/run.py")]
+    sk = [SkillRef(name="n", description="d")]
     out, err = await ex.execute(
         call=ToolCall(call_id="1", name="list_skills", args={}),
         ctx=_ctx(skills=sk),
     )
     assert err is None and out is not None
-    assert "n/run.py" in out
+    payload = json.loads(out)
+    assert payload["skills"] == [{"name": "n", "description": "d"}]
 
 
 @pytest.mark.asyncio
@@ -439,7 +440,7 @@ async def test_list_skills_spills_large_json(tmp_path: Path) -> None:
     skills = tmp_path / "skills"
     skills.mkdir()
     big_skills = [
-        SkillRef(name=f"s{i}", description="d" * 400, entry_point=f"s{i}/run.py") for i in range(80)
+        SkillRef(name=f"s{i}", description="d" * 400) for i in range(80)
     ]
     ex = CoreToolExecutor(
         workspace_root=root,

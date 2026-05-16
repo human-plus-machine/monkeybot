@@ -37,7 +37,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
   servers loaded from `MCP_CONFIG`; tools exposed as `server__tool`.
 - **Skills** (`monkeybot.core.context._discover_skills`,
   `monkeybot.skills.{loader,executor}`) — folder-based skills under
-  `SKILLS_PATH` with `SKILL.md` plus `run.py` or `main.py`.
+  `SKILLS_PATH` with `SKILL.md` per skill.
 - **Workspace tools** (`workspace_tools.py`, `workspace_service.py`) —
   read/write/edit/find under a configurable workspace scope; paths under
   `.monkeybot` bypass `WORKSPACE_WRITE_SCOPE_REL` so spill and harness files

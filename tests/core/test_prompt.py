@@ -33,15 +33,15 @@ def test_compose_curated_omits_unlisted_memory_and_skills() -> None:
     ctx = _minimal_ctx(
         memory_index=["a", "b"],
         skills=[
-            SkillRef(name="s1", description="d1", entry_point="s1/run.py"),
-            SkillRef(name="s2", description="d2", entry_point="s2/run.py"),
+            SkillRef(name="s1", description="d1"),
+            SkillRef(name="s2", description="d2"),
         ],
     )
     out = compose_system_prompt(
         ctx,
         curated_memory_skills=True,
         curated_memory_index=["a"],
-        curated_skills=[SkillRef(name="s2", description="d2", entry_point="s2/run.py")],
+        curated_skills=[SkillRef(name="s2", description="d2")],
     )
     assert "- a" in out
     assert "- b" not in out
@@ -92,13 +92,13 @@ def test_compose_injects_current_request_after_tool_round() -> None:
 def test_memory_and_skills_sections() -> None:
     ctx = _minimal_ctx(
         memory_index=["Note A"],
-        skills=[SkillRef(name="s1", description="d1", entry_point="s1/run.py")],
+        skills=[SkillRef(name="s1", description="d1")],
     )
     out = compose_system_prompt(ctx)
     assert "## Memory index" in out
     assert "- Note A" in out
     assert "## Skills" in out
-    assert "s1" in out
+    assert "- s1: d1" in out
 
 
 def test_task_truncation() -> None:

@@ -101,7 +101,7 @@ def compose_system_prompt(
     memory_bullets = "\n".join(f"- {line}" for line in mem_lines) if mem_lines else ""
     mem_block = f"\n\n## Memory index\n{memory_bullets}" if memory_bullets else ""
 
-    skill_lines = [f"- {s.name}: {s.description} (entry: {s.entry_point})" for s in skill_refs]
+    skill_lines = [f"- {s.name}: {s.description}" for s in skill_refs]
     skills_block = "\n".join(skill_lines)
     skills_section = f"\n\n## Skills\n{skills_block}" if skills_block else ""
 
