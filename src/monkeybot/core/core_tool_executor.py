@@ -248,12 +248,16 @@ class CoreToolExecutor(ToolExecutorPort):
         skills_path: Path,
         mcp: MCPClientPort,
         terminal: TerminalExecutor | None = None,
+        extra_tools: list | None = None,
     ) -> None:
         self._workspace = WorkspaceFileService(Path(workspace_root).resolve())
         self._memory_path = Path(memory_path).resolve()
         self._skills_path = Path(skills_path).resolve()
         self._mcp = mcp
         self._terminal = terminal if terminal is not None else TerminalExecutor()
+        self._extra_tools: dict[str, Any] = {
+            ct.tool_def.name: ct for ct in (extra_tools or [])
+        }
 
     async def execute(self, *, call: ToolCall, ctx: TurnContext) -> tuple[str | None, str | None]:
         name = call.name
@@ -278,6 +282,17 @@ class CoreToolExecutor(ToolExecutorPort):
                 result_text, err_text = await self._tool_add_mcp_server(args)
             elif name == "remove_mcp_server":
                 result_text, err_text = await self._tool_remove_mcp_server(args)
+            elif name in self._extra_tools:
+                try:
+                    result_text = await self._extra_tools[name].execute(args)
+                    err_text = None
+                except Exception as exc:
+                    result_text, err_text = None, _built_in_tool_error(
+                        "runtime",
+                        str(exc),
+                        "Fix the underlying issue described in message, then retry once if appropriate.",
+                        {"tool": name},
+                    )
             else:
                 mcp_pair = self._mcp.split_prefixed_tool(name)
                 if mcp_pair is not None:

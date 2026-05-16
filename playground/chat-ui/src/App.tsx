@@ -6,6 +6,7 @@ import RedactedThinkingPlaceholder from './blocks/RedactedThinkingPlaceholder'
 import SystemNotificationToast from './blocks/SystemNotificationToast'
 import ThinkingPanel from './blocks/ThinkingPanel'
 import ToolConfirmationModal from './blocks/ToolConfirmationModal'
+import ToolInvocationCard, { MAX_RESULT_CHARS } from './blocks/ToolInvocationCard'
 import {
   consumeSseJson,
   createSession,
@@ -55,11 +56,16 @@ export type ChatFeedItem =
       text: string
     }
   | {
-      kind: 'toolTranscript'
+      kind: 'toolInvocation'
       id: string
-      direction: 'started' | 'result'
-      /** Preformatted body — keep existing helper strings. */
-      text: string
+      request_id: string
+      tool: string
+      label?: string
+      args?: Record<string, unknown>
+      phase: 'running' | 'complete'
+      error?: string
+      resultRaw?: string
+      resultTruncated?: boolean
     }
   | {
       kind: 'systemNotice'
@@ -100,35 +106,6 @@ const BOTTOM_SLACK_PX = 72
 
 function distanceFromBottom(el: HTMLElement): number {
   return el.scrollHeight - el.scrollTop - el.clientHeight
-}
-
-function summarizeToolArgs(args: Record<string, unknown> | undefined, maxLen = 360): string {
-  if (!args || typeof args !== 'object' || Object.keys(args).length === 0) {
-    return '(no arguments)'
-  }
-  try {
-    const s = JSON.stringify(args)
-    return s.length > maxLen ? `${s.slice(0, maxLen)}…` : s
-  } catch {
-    return '(unserializable arguments)'
-  }
-}
-
-function buildToolStartedChatBody(
-  tool: string,
-  label: string | undefined,
-  args: Record<string, unknown> | undefined,
-): string {
-  const head = label && label !== tool ? `${tool} — ${label}` : tool
-  return `→ ${head}\n\n${summarizeToolArgs(args)}`
-}
-
-function buildToolResultChatBody(tool: string, err: string | undefined, preview: string): string {
-  if (err) {
-    return `✗ ${tool}\n\n${err}`
-  }
-  const body = preview.trim() ? preview : '(empty result)'
-  return `← ${tool}\n\n${body}`
 }
 
 function formatTokens(n: number): string {
@@ -326,35 +303,70 @@ export default function App() {
         }
         case 'ToolCallStarted': {
           const tool = typeof evt.tool === 'string' ? evt.tool : 'tool'
-          const label = typeof evt.label === 'string' ? evt.label : undefined
+          const labelRaw = typeof evt.label === 'string' ? evt.label : ''
+          const label = labelRaw.trim() ? labelRaw : undefined
           const args = evt.args && typeof evt.args === 'object' ? (evt.args as Record<string, unknown>) : undefined
           setToolHint(null)
           setFeed((m) => [
             ...m,
             {
-              id: `ts-${rid}-${tool}-${Date.now()}`,
-              kind: 'toolTranscript',
-              direction: 'started',
-              text: buildToolStartedChatBody(tool, label, args),
+              id: `ti-${rid}-${tool}-${Date.now()}`,
+              kind: 'toolInvocation',
+              request_id: rid,
+              tool,
+              label,
+              args,
+              phase: 'running',
             },
           ])
           break
         }
         case 'ToolCallResult': {
           const tool = typeof evt.tool === 'string' ? evt.tool : 'tool'
-          const resultRaw = typeof evt.result === 'string' ? evt.result : ''
-          const preview = resultRaw.length > 2000 ? `${resultRaw.slice(0, 2000)}…` : resultRaw
+          const resultFull = typeof evt.result === 'string' ? evt.result : ''
+          const resultTruncated = resultFull.length > MAX_RESULT_CHARS
+          const resultRaw = resultTruncated ? resultFull.slice(0, MAX_RESULT_CHARS) : resultFull
           const err = typeof evt.error === 'string' && evt.error ? evt.error : undefined
           setToolHint(null)
-          setFeed((m) => [
-            ...m,
-            {
-              id: `tr-${rid}-${tool}-${Date.now()}`,
-              kind: 'toolTranscript',
-              direction: 'result',
-              text: buildToolResultChatBody(tool, err, preview),
-            },
-          ])
+          setFeed((m) => {
+            let idx = -1
+            for (let i = m.length - 1; i >= 0; i--) {
+              const x = m[i]
+              if (
+                x.kind === 'toolInvocation' &&
+                x.request_id === rid &&
+                x.tool === tool &&
+                x.phase === 'running'
+              ) {
+                idx = i
+                break
+              }
+            }
+            if (idx === -1) {
+              return [
+                ...m,
+                {
+                  id: `ti-orphan-${rid}-${tool}-${Date.now()}`,
+                  kind: 'toolInvocation',
+                  request_id: rid,
+                  tool,
+                  phase: 'complete',
+                  error: err,
+                  resultRaw,
+                  resultTruncated,
+                },
+              ]
+            }
+            const cur = m[idx] as Extract<ChatFeedItem, { kind: 'toolInvocation' }>
+            const next: Extract<ChatFeedItem, { kind: 'toolInvocation' }> = {
+              ...cur,
+              phase: 'complete',
+              error: err,
+              resultRaw,
+              resultTruncated,
+            }
+            return m.map((x, i) => (i === idx ? next : x))
+          })
           break
         }
         case 'TurnComplete': {
@@ -731,11 +743,21 @@ export default function App() {
                   </article>
                 )
               }
-              if (item.kind === 'toolTranscript') {
+              if (item.kind === 'toolInvocation') {
                 return (
                   <article key={item.id} className="bubble tool">
-                    <div className="bubble-meta">tool call</div>
-                    <div className="bubble-body">{item.text}</div>
+                    <div className="bubble-meta">tool</div>
+                    <div className="bubble-body bubble-body--tool-card">
+                      <ToolInvocationCard
+                        tool={item.tool}
+                        label={item.label}
+                        args={item.args}
+                        phase={item.phase}
+                        error={item.error}
+                        resultRaw={item.resultRaw}
+                        resultTruncated={item.resultTruncated}
+                      />
+                    </div>
                   </article>
                 )
               }

@@ -106,8 +106,10 @@ def compose_system_prompt(
     skills_section = f"\n\n## Skills\n{skills_block}" if skills_block else ""
 
     include_task = any(t.name == "task" for t in ctx.tools)
+    include_web_search = any(t.name == "web_search" for t in ctx.tools)
     harness = harness_fixed_context(
         include_task_tool=include_task,
+        include_web_search=include_web_search,
         workspace_root=str(ctx.workspace_root) if ctx.workspace_root is not None else "(not set)",
         memory_path=str(ctx.memory_path) if ctx.memory_path is not None else "(not set)",
     )

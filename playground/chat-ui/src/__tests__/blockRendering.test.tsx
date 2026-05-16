@@ -201,6 +201,55 @@ describe('blockRendering integration', () => {
     expect(wrap.className).toContain('image-block-inline')
   })
 
+  it('test_tool_invocation_merges_started_and_result_into_one_card_with_pretty_json', async () => {
+    await renderConnected()
+    const rid = 'tool-req-1'
+    await act(async () => {
+      sseFeed.emit({
+        type: 'ToolCallStarted',
+        request_id: rid,
+        tool: 'run_command',
+        label: 'run_command',
+        args: { command: 'ls' },
+      })
+    })
+
+    const cards = await screen.findAllByTestId('tool-invocation-card')
+    expect(cards).toHaveLength(1)
+    expect(screen.getByText('run_command')).toBeInTheDocument()
+    expect(screen.getByText(/^Running$/i)).toBeInTheDocument()
+
+    await act(async () => {
+      sseFeed.emit({
+        type: 'ToolCallResult',
+        request_id: rid,
+        tool: 'run_command',
+        result: JSON.stringify({ ok: true, stdout: 'a\nb', stderr: '', exit_code: 0 }),
+      })
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText(/^Done$/i)).toBeInTheDocument()
+    })
+    expect(screen.queryByText(/^Running$/i)).not.toBeInTheDocument()
+    expect(screen.getAllByTestId('tool-invocation-card')).toHaveLength(1)
+
+    const card = screen.getByTestId('tool-invocation-card')
+    const details = card.querySelector('details')
+    expect(details).not.toBeNull()
+    expect(details).not.toHaveAttribute('open')
+    expect(within(card).getByText('ls')).toBeInTheDocument()
+
+    const summary = card.querySelector('summary')
+    expect(summary).not.toBeNull()
+    fireEvent.click(summary!)
+    expect(details).toHaveAttribute('open')
+
+    expect(card.textContent).toContain('"command"')
+    expect(card.textContent).toContain('"stdout"')
+    expect(card.textContent).toContain('a')
+  })
+
   it('test_thinking_complete_collapses_to_one_line_summary_click_re_expands', async () => {
     await renderConnected()
     const rid = 't-req'

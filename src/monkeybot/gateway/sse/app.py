@@ -21,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from monkeybot.core.context import build_context
 from monkeybot.core.core_tool_executor import CoreToolExecutor
+from monkeybot.web_search import WebSearchTool, build_backend as _build_web_search_backend
 from monkeybot.core.db import apply_schema, open_connection
 from monkeybot.core.events import Error as AgentError
 from monkeybot.core.events import TurnComplete, UsageTotals, event_to_json
@@ -64,6 +65,7 @@ class _GatewayDeps:
     usage_conn: aiosqlite.Connection | None = None
     hook_manager: HookManager | None = None
     memory_hook: MemoryHook | None = None
+    web_search_tool: WebSearchTool | None = None
 
 
 _deps = _GatewayDeps()
@@ -301,6 +303,8 @@ class GatewayLoopPort:
 
             workspace_root, memory_resolved, skills_resolved = _resolved_workspace_paths()
 
+            extra_tools = [_deps.web_search_tool] if _deps.web_search_tool is not None else []
+
             try:
                 ctx = await build_context(
                     session_id,
@@ -314,6 +318,7 @@ class GatewayLoopPort:
                     context_window_tokens=_env_context_window_tokens(),
                     workspace_root=workspace_root,
                     sse_bus=bus,
+                    extra_tools=extra_tools,
                 )
             except Exception as exc:
                 logger.exception("build_context failed")
@@ -330,6 +335,7 @@ class GatewayLoopPort:
                 memory_path=memory_resolved,
                 skills_path=skills_resolved,
                 mcp=mcp,
+                extra_tools=extra_tools,
             )
             async for evt in run_loop(
                 message,
@@ -423,6 +429,17 @@ async def _startup() -> None:
 
     _deps.provider = _resolve_provider()
     _deps.curator_provider = _resolve_curator_provider(_deps.provider)
+
+    try:
+        backend = _build_web_search_backend()
+        _deps.web_search_tool = WebSearchTool(backend) if backend is not None else None
+        if _deps.web_search_tool is not None:
+            logger.info("web search enabled: backend=%s", backend.name)
+        else:
+            logger.info("web search disabled (WEB_SEARCH_BACKEND=none)")
+    except Exception as exc:
+        logger.warning("web search backend init failed — disabling: %s", exc)
+        _deps.web_search_tool = None
 
     usage_conn = await open_connection(db_url)
     await _ensure_schema(usage_conn)

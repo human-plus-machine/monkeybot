@@ -14,6 +14,33 @@ from monkeybot.core.types_tools import ToolDef
 
 
 @runtime_checkable
+class CustomTool(Protocol):
+    """Protocol for lightweight in-process tools added by framework users.
+
+    Implement this to add any tool that doesn't warrant a full MCP server.
+    The ``tool_def`` is advertised to the model; ``execute`` is called by
+    :class:`~monkeybot.core.core_tool_executor.CoreToolExecutor` when the
+    model invokes the tool by name.
+
+    Example::
+
+        class MyTool:
+            tool_def = ToolDef(
+                "my_lookup",
+                "Look up something.",
+                {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+            )
+
+            async def execute(self, args: dict) -> str:
+                return f"result for {args['query']}"
+    """
+
+    tool_def: ToolDef
+
+    async def execute(self, args: dict[str, object]) -> str: ...
+
+
+@runtime_checkable
 class PendingResponseBusPort(Protocol):
     """Minimal gateway bus surface for Story 5 pending UI responses (keeps core free of gateway imports)."""
 
@@ -284,6 +311,7 @@ async def build_context(
     workspace_root: Path | None = None,
     enable_context_curation: bool = True,
     sse_bus: PendingResponseBusPort | None = None,
+    extra_tools: list[CustomTool] | None = None,
 ) -> TurnContext:
     """Assemble a TurnContext from filesystem paths and the MCP client snapshot.
 
@@ -302,6 +330,9 @@ async def build_context(
         context_window_tokens: Model context budget for pre-flight and summarization triggers.
         workspace_root: Optional workspace root for spill directory cleanup at run start.
         enable_context_curation: When False (e.g. subagent), skip LLM context curation for prompts.
+        extra_tools: Optional list of in-process :class:`CustomTool` implementations.
+            Their ``tool_def`` is appended to the tool list advertised to the model and
+            their ``execute`` method is dispatched by :class:`CoreToolExecutor`.
 
     Returns:
         Frozen :class:`TurnContext`.
@@ -314,6 +345,8 @@ async def build_context(
     skills = _discover_skills(skills_path)
     tools = list(_core_tool_defs(include_task_tool=include_task_tool))
     tools.extend(mcp_client.all_tools())
+    for ct in extra_tools or []:
+        tools.append(ct.tool_def)
     return TurnContext(
         thread_id=thread_id,
         request_id=request_id,

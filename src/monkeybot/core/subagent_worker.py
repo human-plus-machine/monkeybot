@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 
 from monkeybot.core.context import build_context
 from monkeybot.core.core_tool_executor import CoreToolExecutor
+from monkeybot.web_search import WebSearchTool, build_backend as _build_web_search_backend
 from monkeybot.core.db import apply_schema, open_connection
 from monkeybot.core.events import Error, event_to_json
 from monkeybot.core.history import ConversationHistory
@@ -161,6 +162,14 @@ async def _async_main() -> None:
         except ValueError:
             context_window_tokens = 200_000
 
+        try:
+            _ws_backend = _build_web_search_backend()
+            _ws_tool: WebSearchTool | None = WebSearchTool(_ws_backend) if _ws_backend is not None else None
+        except Exception:
+            _ws_tool = None
+
+        extra_tools = [_ws_tool] if _ws_tool is not None else []
+
         ctx = await build_context(
             thread_id,
             request_id,
@@ -174,6 +183,7 @@ async def _async_main() -> None:
             workspace_root=ws,
             context_window_tokens=context_window_tokens,
             enable_context_curation=False,
+            extra_tools=extra_tools,
         )
 
         executor = CoreToolExecutor(
@@ -181,6 +191,7 @@ async def _async_main() -> None:
             memory_path=mem,
             skills_path=skills,
             mcp=mcp,
+            extra_tools=extra_tools,
         )
         history = _HistoryAdapter(ConversationHistory(conn))
 

@@ -21,7 +21,7 @@ This block is injected by the host every turn. Prefer the **active tool list** t
 - `list_skills` — lists installed skills; read each skill's `SKILL.md` under the skills root for procedure.
 - `run_command` — allowlisted shell with optional `timeout` (seconds). Shell starts in **workspace root**; use the paths listed under Runtime paths below — do NOT guess directory names. `cd` is a shell builtin and cannot be used as a bare command; use `bash -c "cd <dir> && <cmd>"` instead.
 - `add_mcp_server` / `remove_mcp_server` — register or drop MCP stdio servers; new tools appear on later turns.
-{task_line}
+{web_search_line}{task_line}
 ### Built-in tool errors (recovery)
 - Failed built-in tools often return **JSON** with `ok: false`, `error_kind` (`policy` | `validation` | `runtime`), `message`, and `hint`.
 - If `error_kind` is **policy** (e.g. `run_command` blocked), **do not** retry the identical call; change the command or path per `hint` and the lists in `details`, then retry **once** after a single fix.
@@ -43,10 +43,16 @@ _TASK_LINE = (
     "returns JSON (summary, errors, usage). Nested `task` is disabled inside a subagent.\n"
 )
 
+_WEB_SEARCH_LINE = (
+    "- `web_search` — search the web for current information; "
+    "returns titles, URLs, and text snippets.\n"
+)
+
 
 def harness_fixed_context(
     *,
     include_task_tool: bool,
+    include_web_search: bool = False,
     workspace_root: str = "(not set)",
     memory_path: str = "(not set)",
 ) -> str:
@@ -54,8 +60,10 @@ def harness_fixed_context(
 
     ``workspace_root`` and ``memory_path`` are resolved absolute paths injected once at
     context-build time so the model always uses correct paths in shell commands.
+    ``include_web_search`` should be True when a web search backend is active.
     """
     body = _HARNESS_BODY.format(
+        web_search_line=_WEB_SEARCH_LINE if include_web_search else "",
         task_line=_TASK_LINE if include_task_tool else "",
         workspace_root=workspace_root,
         memory_path=memory_path,
