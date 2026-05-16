@@ -17,6 +17,7 @@ import {
   type GatewayJsonEvent,
   type SessionUsageResponse,
 } from './gatewayClient'
+import WorkspaceBrowser from './WorkspaceBrowser'
 import type { ToastItem } from './blocks/SystemNotificationToast'
 
 export type PendingWidget =
@@ -155,6 +156,25 @@ function IconX() {
   )
 }
 
+function IconPlus() {
+  return (
+    <svg
+      className="btn-icon-svg"
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M12 5v14M5 12h14" />
+    </svg>
+  )
+}
+
 function ContextUsageRing({
   lastPromptTokens,
   contextWindowTokens,
@@ -222,6 +242,7 @@ export default function App() {
     innerTurn: number
     text: string
   } | null>(null)
+  const [rightTab, setRightTab] = useState<'prompt' | 'workspace'>('prompt')
 
   const streamAbortRef = useRef<AbortController | null>(null)
   const streamBufRef = useRef('')
@@ -626,6 +647,7 @@ export default function App() {
     setSessionUsage(null)
     setUsageNote('')
     setSystemPromptSnap(null)
+    setRightTab('prompt')
     try {
       const { session_id } = await createSession()
       setSessionId(session_id)
@@ -652,6 +674,7 @@ export default function App() {
     setSessionUsage(null)
     setUsageNote('')
     setSystemPromptSnap(null)
+    setRightTab('prompt')
   }
 
   const send = async () => {
@@ -913,8 +936,16 @@ export default function App() {
                     </button>
                   </>
                 ) : (
-                  <button type="button" className="btn primary" onClick={connect} disabled={status === 'connecting'}>
-                    {status === 'connecting' ? 'Connecting…' : 'New session'}
+                  <button
+                    type="button"
+                    className="btn btn-icon primary"
+                    onClick={connect}
+                    disabled={status === 'connecting'}
+                    aria-busy={status === 'connecting'}
+                    aria-label={status === 'connecting' ? 'Connecting…' : 'New session'}
+                    title={status === 'connecting' ? 'Connecting…' : 'New session'}
+                  >
+                    <IconPlus />
                   </button>
                 )}
               </div>
@@ -961,28 +992,58 @@ export default function App() {
         </div>
       </main>
 
-      <aside className="panel system-prompt-panel" aria-label="System prompt sent to the model">
-        <h2 className="panel-heading">System prompt</h2>
-        <p className="system-prompt-meta">
-          {systemPromptSnap ? (
-            <>
-              Request <span title={systemPromptSnap.requestId}>{systemPromptSnap.requestId.slice(0, 10)}…</span>
-              {' · '}
-              inner turn {systemPromptSnap.innerTurn}
-              {' · '}
-              {systemPromptSnap.text.length.toLocaleString()} chars
-            </>
-          ) : (
-            <>Updates on each model call (after curation). Connect and send a message to see the composed prompt.</>
-          )}
-        </p>
-        <div className="system-prompt-scroll" tabIndex={0}>
-          {systemPromptSnap ? (
-            <pre className="system-prompt-pre">{systemPromptSnap.text}</pre>
-          ) : (
-            <p className="system-prompt-empty">No snapshot yet.</p>
-          )}
+      <aside className="panel right-side-panel" aria-label="Session context">
+        <div className="right-panel-tabs" role="tablist" aria-label="Side panel">
+          <button
+            type="button"
+            role="tab"
+            className="right-panel-tab"
+            aria-selected={rightTab === 'prompt'}
+            onClick={() => setRightTab('prompt')}
+          >
+            System prompt
+          </button>
+          <button
+            type="button"
+            role="tab"
+            className="right-panel-tab"
+            aria-selected={rightTab === 'workspace'}
+            onClick={() => setRightTab('workspace')}
+          >
+            Workspace
+          </button>
         </div>
+        {rightTab === 'prompt' ? (
+          <div className="right-panel-pane system-prompt-pane" role="tabpanel">
+            <h2 className="panel-heading">System prompt</h2>
+            <p className="system-prompt-meta">
+              {systemPromptSnap ? (
+                <>
+                  Request <span title={systemPromptSnap.requestId}>{systemPromptSnap.requestId.slice(0, 10)}…</span>
+                  {' · '}
+                  inner turn {systemPromptSnap.innerTurn}
+                  {' · '}
+                  {systemPromptSnap.text.length.toLocaleString()} chars
+                </>
+              ) : (
+                <>
+                  Updates on each model call (after curation). Connect and send a message to see the composed prompt.
+                </>
+              )}
+            </p>
+            <div className="system-prompt-scroll" tabIndex={0}>
+              {systemPromptSnap ? (
+                <pre className="system-prompt-pre">{systemPromptSnap.text}</pre>
+              ) : (
+                <p className="system-prompt-empty">No snapshot yet.</p>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="right-panel-pane workspace-pane" role="tabpanel" aria-label="Workspace files">
+            <WorkspaceBrowser />
+          </div>
+        )}
       </aside>
     </div>
   )

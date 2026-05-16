@@ -181,7 +181,7 @@ code {
   min-height: 0;
 }
 
-.system-prompt-panel {
+.right-side-panel {
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -189,7 +189,46 @@ code {
   overflow: hidden;
 }
 
-.system-prompt-panel .panel-heading {
+.right-panel-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+  flex-shrink: 0;
+}
+
+.right-panel-tab {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #0a0a0a;
+  color: var(--muted);
+  font-family: var(--sans);
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.right-panel-tab:hover {
+  color: var(--text);
+  border-color: var(--accent-dim);
+}
+
+.right-panel-tab[aria-selected='true'] {
+  color: var(--text);
+  border-color: var(--accent-dim);
+  background: #141414;
+}
+
+.right-panel-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.right-side-panel .panel-heading {
   flex-shrink: 0;
   font-size: 0.72rem;
   text-transform: uppercase;
@@ -232,6 +271,205 @@ code {
   font-size: 0.85rem;
   color: var(--muted);
   font-style: italic;
+}
+
+.workspace-pane {
+  min-height: 0;
+}
+
+.workspace-browser {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  gap: 8px;
+}
+
+.workspace-browser-intro {
+  margin: 0;
+  font-size: 0.72rem;
+  line-height: 1.35;
+  flex-shrink: 0;
+}
+
+.workspace-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.workspace-cwd {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--accent);
+  background: #080808;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.btn-compact {
+  padding: 6px 10px;
+  font-size: 0.78rem;
+}
+
+.workspace-error {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--danger);
+  flex-shrink: 0;
+}
+
+.workspace-error--tight {
+  margin-top: 4px;
+}
+
+.workspace-split {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  gap: 10px;
+}
+
+@media (min-width: 520px) {
+  .workspace-split {
+    flex-direction: row;
+    align-items: stretch;
+  }
+}
+
+.workspace-list-pane,
+.workspace-file-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.workspace-list-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #080808;
+  padding: 4px 0;
+}
+
+.btn.btn-icon.workspace-toolbar-back {
+  min-width: 26px;
+  min-height: 26px;
+  padding: 3px;
+}
+
+.btn.btn-icon.workspace-toolbar-back .btn-icon-svg {
+  width: 14px;
+  height: 14px;
+}
+
+.workspace-file-pane {
+  gap: 6px;
+}
+
+.workspace-file-header {
+  flex-shrink: 0;
+  min-height: 1.5rem;
+}
+
+.workspace-file-path {
+  display: block;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-file-meta {
+  margin: 0;
+  font-size: 0.7rem;
+  flex-shrink: 0;
+}
+
+.workspace-file-scroll {
+  flex: 1;
+  min-height: 120px;
+  overflow: auto;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #080808;
+  padding: 10px 12px;
+}
+
+.workspace-file-pre {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+}
+
+.workspace-placeholder {
+  margin: 10px 12px;
+  font-size: 0.82rem;
+}
+
+.workspace-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+  padding: 6px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.workspace-row:hover {
+  background: #121212;
+}
+
+.workspace-row--active {
+  background: #1a1a1a;
+}
+
+.workspace-kind {
+  flex-shrink: 0;
+  width: 0.75rem;
+  color: var(--accent-dim);
+  user-select: none;
+}
+
+.workspace-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .panel {

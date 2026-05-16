@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from monkeybot.core.content_blocks import Text
 from monkeybot.core.context import SkillRef, TurnContext
 from monkeybot.core.harness_prompt import harness_fixed_context
+from monkeybot.core.sandbox_executor import SandboxConfig
 from monkeybot.core.provider import Message
 
 # Cap injected user text so long pastes do not dominate the context window.
@@ -112,6 +113,7 @@ def compose_system_prompt(
         include_web_search=include_web_search,
         workspace_root=str(ctx.workspace_root) if ctx.workspace_root is not None else "(not set)",
         memory_path=str(ctx.memory_path) if ctx.memory_path is not None else "(not set)",
+        run_command_opensandbox=SandboxConfig.from_env().enabled,
     )
 
     return f"{ctx.agent_md}{task}{mem_block}{skills_section}\n\n{harness}"

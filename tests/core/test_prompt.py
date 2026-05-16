@@ -113,6 +113,17 @@ def test_task_truncation() -> None:
     assert len(out) < len(long_user) + 5000
 
 
+def test_compose_harness_reflects_sandbox_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SANDBOX_ENABLED", raising=False)
+    ctx = _minimal_ctx()
+    out = compose_system_prompt(ctx)
+    assert "gateway host" in out
+
+    monkeypatch.setenv("SANDBOX_ENABLED", "true")
+    out_s = compose_system_prompt(ctx)
+    assert "OpenSandbox" in out_s
+
+
 @pytest.mark.parametrize("include_task", [True, False])
 def test_harness_task_line_matches_tools(include_task: bool) -> None:
     tools: list[ToolDef] = []

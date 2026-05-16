@@ -1,6 +1,15 @@
 /** Browser client for MonkeyBot v2 SSE gateway (see `monkeybot.gateway.sse.routes`). */
 
-export const GATEWAY_BASE = 'http://localhost:8787'
+function resolveGatewayBase(): string {
+  if (import.meta.env.DEV) {
+    return '/__mb_gateway'
+  }
+  const fromEnv = (import.meta.env.VITE_GATEWAY_TARGET as string | undefined)?.trim()
+  if (fromEnv) return fromEnv.replace(/\/$/, '')
+  return 'http://127.0.0.1:8787'
+}
+
+export const GATEWAY_BASE = resolveGatewayBase()
 
 export type GatewayJsonEvent = {
   type: string
@@ -51,6 +60,26 @@ export type UsageSnapshot = {
   cached_tokens: number
   cost_usd: number
   duration_ms: number
+}
+
+export type WorkspaceTreeEntry = {
+  name: string
+  path: string
+  kind: 'dir' | 'file'
+}
+
+export type WorkspaceTreeResponse = {
+  path: string
+  entries: WorkspaceTreeEntry[]
+}
+
+export type WorkspaceFileResponse = {
+  path: string
+  content: string
+  start_line: number
+  end_line: number
+  total_lines: number
+  truncated: boolean
 }
 
 const USAGE_ZERO: UsageSnapshot = {
@@ -136,6 +165,56 @@ export async function consumeSseJson(
       onEvent(e)
     }
   }
+}
+
+function gatewayErrorDetail(status: number, bodyText: string): string {
+  try {
+    const j = JSON.parse(bodyText) as { error?: { message?: string } }
+    if (j?.error?.message) return `${status}: ${j.error.message}`
+  } catch {
+    /* ignore */
+  }
+  return `${status} ${bodyText}`.trim()
+}
+
+export async function fetchWorkspaceTree(
+  relPath?: string,
+  init?: RequestInit,
+): Promise<WorkspaceTreeResponse> {
+  const q =
+    relPath != null && relPath !== '' && relPath !== '.'
+      ? `?path=${encodeURIComponent(relPath)}`
+      : ''
+  const res = await fetch(`${GATEWAY_BASE}/api/playground/workspace/tree${q}`, {
+    method: 'GET',
+    headers: { ...(init?.headers as Record<string, string>) },
+    signal: init?.signal,
+  })
+  const text = await res.text()
+  if (!res.ok) {
+    throw new Error(`workspace tree: ${gatewayErrorDetail(res.status, text)}`)
+  }
+  return JSON.parse(text) as WorkspaceTreeResponse
+}
+
+export async function fetchWorkspaceFile(
+  path: string,
+  opts?: { offset?: number; limit?: number },
+  init?: RequestInit,
+): Promise<WorkspaceFileResponse> {
+  const params = new URLSearchParams({ path })
+  if (opts?.offset != null) params.set('offset', String(opts.offset))
+  if (opts?.limit != null) params.set('limit', String(opts.limit))
+  const res = await fetch(`${GATEWAY_BASE}/api/playground/workspace/file?${params.toString()}`, {
+    method: 'GET',
+    headers: { ...(init?.headers as Record<string, string>) },
+    signal: init?.signal,
+  })
+  const text = await res.text()
+  if (!res.ok) {
+    throw new Error(`workspace file: ${gatewayErrorDetail(res.status, text)}`)
+  }
+  return JSON.parse(text) as WorkspaceFileResponse
 }
 
 export async function createSession(

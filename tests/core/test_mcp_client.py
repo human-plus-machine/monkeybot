@@ -145,6 +145,30 @@ async def test_disconnect_removes_tools() -> None:
 
 
 @pytest.mark.asyncio
+async def test_disconnect_suppresses_anyio_cancel_scope_teardown_noise() -> None:
+    """Ctrl+C / uvicorn shutdown can trigger MCP streamable_http + AnyIO teardown races."""
+    listing = SimpleNamespace(
+        tools=[SimpleNamespace(name="only", description="x", inputSchema={"type": "object"})]
+    )
+    sess = SimpleNamespace()
+    sess.initialize = AsyncMock()
+    sess.list_tools = AsyncMock(return_value=listing)
+
+    client = MCPClient(hooks=_stub_hooks(sess))
+    await client.connect("fs", "python", [], {})
+    rec = client._servers["fs"]
+
+    async def _noisy_aclose() -> None:
+        raise RuntimeError(
+            "Attempted to exit cancel scope in a different task than it was entered in"
+        )
+
+    rec.stack.aclose = _noisy_aclose  # type: ignore[method-assign]
+    await client.disconnect("fs")
+    assert client.all_tools() == []
+
+
+@pytest.mark.asyncio
 async def test_load_from_config_streamable_http_url(tmp_path: Path) -> None:
     """``url`` entries call :meth:`MCPClient.connect_streamable_http` (no subprocess)."""
     cfg = tmp_path / "mcp.json"

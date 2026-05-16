@@ -5,9 +5,11 @@ FastAPI routes and app factory for the v2 SSE gateway.
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 import uuid
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any, cast
 
 from fastapi import APIRouter, Depends, FastAPI, Request, Response
@@ -15,6 +17,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from monkeybot.core.content_blocks import ContentBlock
+from monkeybot.core.workspace_service import WorkspaceError, WorkspaceFileService
 
 from .loop_port import LoopPort, UsagePort
 from .models import (
@@ -100,6 +103,24 @@ def _parse_last_event_id(request: Request) -> int | None:
         return int(raw)
     except ValueError:
         return None
+
+
+def _playground_workspace_api_enabled() -> bool:
+    """Opt out with ``MONKEYBOT_PLAYGROUND_WORKSPACE_API=0`` (or ``false`` / ``no`` / ``off``)."""
+    v = os.environ.get("MONKEYBOT_PLAYGROUND_WORKSPACE_API", "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def _playground_workspace_root() -> Path:
+    """Workspace root for listing/reads; matches gateway process cwd (see ``sse.app`` paths)."""
+    return Path.cwd().resolve()
+
+
+def _workspace_exc_to_api(exc: WorkspaceError) -> APIError:
+    rid = uuid.uuid4().hex
+    if exc.code == "not_found":
+        return APIError(404, "NOT_FOUND", str(exc), rid)
+    return APIError(400, "BAD_REQUEST", str(exc), rid)
 
 
 def create_app(
@@ -413,6 +434,62 @@ def create_app(
         usage_ref: UsagePort = request.app.state.usage
         raw = await usage_ref.session_usage(session_id, since=since)
         return SessionUsageResponse.model_validate(raw)
+
+    @api.get("/api/playground/workspace/tree")
+    async def playground_workspace_tree(
+        path: str | None = None,
+    ) -> dict[str, Any]:
+        """List one directory under the gateway workspace (repo-relative ``path``)."""
+        if not _playground_workspace_api_enabled():
+            raise APIError(
+                404,
+                "NOT_FOUND",
+                "Playground workspace API is disabled",
+                uuid.uuid4().hex,
+            )
+        rel = path.strip() if path and path.strip() else None
+        ws = WorkspaceFileService(_playground_workspace_root())
+        try:
+            entries = ws.list_directory(rel)
+        except WorkspaceError as exc:
+            raise _workspace_exc_to_api(exc) from exc
+        display = rel if rel else "."
+        return {"path": display, "entries": entries}
+
+    @api.get("/api/playground/workspace/file")
+    async def playground_workspace_file(
+        path: str,
+        offset: int = 1,
+        limit: int | None = 200,
+    ) -> dict[str, Any]:
+        """Read a text slice from a file under the gateway workspace (numbered lines)."""
+        if not _playground_workspace_api_enabled():
+            raise APIError(
+                404,
+                "NOT_FOUND",
+                "Playground workspace API is disabled",
+                uuid.uuid4().hex,
+            )
+        if not path or not str(path).strip():
+            raise APIError(
+                400,
+                "BAD_REQUEST",
+                "path query parameter is required",
+                uuid.uuid4().hex,
+            )
+        ws = WorkspaceFileService(_playground_workspace_root())
+        try:
+            result = ws.read_file(path.strip(), offset=offset, limit=limit)
+        except WorkspaceError as exc:
+            raise _workspace_exc_to_api(exc) from exc
+        return {
+            "path": result["path"],
+            "content": result["content"],
+            "start_line": result["start_line"],
+            "end_line": result["end_line"],
+            "total_lines": result["total_lines"],
+            "truncated": result["truncated"],
+        }
 
     app.include_router(api)
 

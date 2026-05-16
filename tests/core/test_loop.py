@@ -752,15 +752,22 @@ async def test_parallel_task_results_appended_in_call_id_order() -> None:
     ):
         events.append(e)
 
-    tool_resp_first = [
+    # All three parallel task responses must be batched into a single user
+    # Message so that Gemini sees one functionResponse turn matching one
+    # functionCall turn (enforced by 400 INVALID_ARGUMENT otherwise).
+    tool_resp_messages = [
         m
         for m in hist.rows
         if m.role == "user"
         and m.content
         and isinstance(m.content[0], ToolResponse)
     ]
-    assert [m.content[0].id for m in tool_resp_first] == ["a1", "b1", "c1"], (
-        "tool result messages must be in call_id order, not completion order"
+    assert len(tool_resp_messages) == 1, (
+        "parallel task responses must be consolidated into one user Message"
+    )
+    consolidated = tool_resp_messages[0].content
+    assert [b.id for b in consolidated] == ["a1", "b1", "c1"], (
+        "tool result blocks must be in call_id order within the consolidated message"
     )
 
     result_events = [e for e in events if isinstance(e, ToolCallResult)]

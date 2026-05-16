@@ -14,11 +14,14 @@ lazily on the first execute() call so there is zero overhead when run_command
 is never invoked.
 
 Configuration (all via env vars or bot.yaml sandbox.*):
-    SANDBOX_ENABLED      - "true" to activate (default: "false")
-    SANDBOX_SERVER_URL   - OpenSandbox server URL (default: http://localhost:8080)
-    SANDBOX_IMAGE        - Container image to run (default: python:3.12)
-    SANDBOX_API_KEY      - API key for the server (env-only, optional)
-    SANDBOX_TTL_SECONDS  - Sandbox lifetime in seconds (env-only, default: 1800)
+    SANDBOX_ENABLED            - "true" to activate (default: "false")
+    SANDBOX_SERVER_URL         - OpenSandbox server URL (default: http://localhost:8080)
+    SANDBOX_IMAGE              - Container image to run (default: python:3.12)
+    SANDBOX_API_KEY            - API key for the server (env-only, optional)
+    SANDBOX_TTL_SECONDS        - Sandbox lifetime in seconds (env-only, default: 1800)
+    SANDBOX_USE_SERVER_PROXY   - default "true": route health/exec via OpenSandbox HTTP API
+      (required for Docker Desktop when the server runs in a container). "false" if the SDK
+      host can reach sandbox ports directly.
 """
 
 from __future__ import annotations
@@ -50,6 +53,7 @@ class SandboxConfig:
     api_key: str | None
     image: str
     ttl_seconds: int
+    use_server_proxy: bool = True
 
     @classmethod
     def from_env(cls) -> "SandboxConfig":
@@ -61,12 +65,15 @@ class SandboxConfig:
                 f"SANDBOX_TTL_SECONDS must be an integer, got: {raw_ttl!r}"
             )
         api_key = os.getenv("SANDBOX_API_KEY") or None
+        proxy_raw = os.getenv("SANDBOX_USE_SERVER_PROXY", "true").strip().lower()
+        use_server_proxy = proxy_raw not in ("0", "false", "no", "off")
         return cls(
             enabled=os.getenv("SANDBOX_ENABLED", "false").lower() == "true",
             server_url=os.getenv("SANDBOX_SERVER_URL", "http://localhost:8080"),
             api_key=api_key,
             image=os.getenv("SANDBOX_IMAGE", "python:3.12"),
             ttl_seconds=ttl,
+            use_server_proxy=use_server_proxy,
         )
 
 
@@ -144,6 +151,7 @@ class SandboxExecutor:
             domain=domain,
             api_key=self._config.api_key,
             protocol=protocol,
+            use_server_proxy=self._config.use_server_proxy,
         )
 
         # Derive a DNS-safe volume name from the workspace path (max 63 chars).
@@ -185,7 +193,12 @@ class SandboxExecutor:
         full_cmd = " ".join([command] + [shlex.quote(a) for a in args])
         logger.info("Sandbox execute: %s", full_cmd)
 
-        execution = await self._sandbox.commands.run(full_cmd, timeout=timeout)  # type: ignore[union-attr]
+        from opensandbox.models.execd import RunCommandOpts  # type: ignore[import]
+
+        execution = await self._sandbox.commands.run(  # type: ignore[union-attr]
+            full_cmd,
+            opts=RunCommandOpts(timeout=timedelta(seconds=timeout)),
+        )
 
         stdout_entries = execution.logs.stdout or []
         stderr_entries = execution.logs.stderr or []

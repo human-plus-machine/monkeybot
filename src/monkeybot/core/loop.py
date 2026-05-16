@@ -305,6 +305,35 @@ async def _summarize_history(
     return len(middle)
 
 
+def _tool_outcome(
+    call: ToolCall,
+    request_id: str,
+    result_text: str | None,
+    err_text: str | None,
+) -> tuple[ToolCallResult, ToolResponse]:
+    """Build the (event, history block) pair for a finished tool call.
+
+    Used by both the sequential and parallel ``task`` dispatch paths so that
+    result formatting stays in one place.
+    """
+    is_error = err_text is not None
+    body = "" if is_error else (result_text or "")
+    text = err_text if is_error else body
+    event = ToolCallResult(
+        request_id=request_id,
+        tool=call.name,
+        result=body,
+        error=err_text,
+    )
+    response = ToolResponse(
+        id=call.call_id,
+        tool_name=call.name,
+        result=[Text(text=text or "")],
+        is_error=is_error,
+    )
+    return event, response
+
+
 def _chunk_tool_calls(ordered: Sequence[ToolCall]) -> list[list[ToolCall]]:
     """Split into maximal runs of consecutive ``task`` tools vs single non-``task`` tools.
 
@@ -639,19 +668,21 @@ async def _run_inner(
                 return
 
             allowed_exec: list[ToolCall] = []
+            # Collect all ToolResponse blocks for this chunk so they can be
+            # appended in a single user Message. Gemini requires that the number
+            # of functionResponse parts equals the number of functionCall parts
+            # in the preceding model turn — splitting them across separate
+            # Message rows produces a 400 INVALID_ARGUMENT error.
+            chunk_responses: list[ToolResponse] = []
 
-            chunk_requests: list[ToolRequest] = [
-                ToolRequest(id=c.call_id, name=c.name, args=dict(c.args)) for c in chunk
-            ]
-
-            for block, call in zip(chunk_requests, chunk, strict=True):
+            for call in chunk:
                 if cancelled is not None and cancelled.is_set():
                     yield Error(request_id=ctx.request_id, error="Request cancelled")
                     needs_followup_after_tools = False
                     return
 
                 inspector_call = InspectorToolCall(
-                    call_id=block.id, name=block.name, args=dict(block.args)
+                    call_id=call.call_id, name=call.name, args=dict(call.args)
                 )
                 allowed = True
                 denial_message: str | None = None
@@ -673,17 +704,17 @@ async def _run_inner(
                                 )
                                 break
                             bus = ctx.sse_bus
-                            fut = bus.register_pending(block.id)
+                            fut = bus.register_pending(call.call_id)
                             yield ToolConfirmationRequestEvent(
                                 request_id=ctx.request_id,
-                                tool_call_id=block.id,
-                                tool_name=block.name,
-                                arguments=dict(block.args),
+                                tool_call_id=call.call_id,
+                                tool_name=call.name,
+                                arguments=dict(call.args),
                                 prompt=decision.message,
                             )
                             try:
                                 payload = await _await_user_response_any(
-                                    bus, fut, block.id, timeout_sec=None
+                                    bus, fut, call.call_id, timeout_sec=None
                                 )
                             except asyncio.CancelledError:
                                 allowed = False
@@ -707,43 +738,39 @@ async def _run_inner(
                                 )
                             break
 
-                label = call.name
-                args_obj: dict[str, object] = dict(call.args)
-
                 if not allowed:
                     msg = denial_message or "tool call denied"
                     yield ToolCallStarted(
                         request_id=ctx.request_id,
                         tool=call.name,
-                        label=label,
-                        args=args_obj,
+                        label=call.name,
+                        args=dict(call.args),
                     )
                     yield Error(request_id=ctx.request_id, error=msg)
-                    await history.append(
-                        ctx.thread_id,
-                        Message(
-                            role="user",
-                            content=[
-                                ToolResponse(
-                                    id=call.call_id,
-                                    tool_name=call.name,
-                                    result=[Text(text=msg)],
-                                    is_error=True,
-                                )
-                            ],
-                        ),
+                    chunk_responses.append(
+                        ToolResponse(
+                            id=call.call_id,
+                            tool_name=call.name,
+                            result=[Text(text=msg)],
+                            is_error=True,
+                        )
                     )
                     continue
 
                 yield ToolCallStarted(
                     request_id=ctx.request_id,
                     tool=call.name,
-                    label=label,
-                    args=args_obj,
+                    label=call.name,
+                    args=dict(call.args),
                 )
                 allowed_exec.append(call)
 
             if not allowed_exec:
+                if chunk_responses:
+                    await history.append(
+                        ctx.thread_id,
+                        Message(role="user", content=chunk_responses),
+                    )
                 continue
 
             parallel_tasks = all(c.name == "task" for c in allowed_exec)
@@ -783,49 +810,11 @@ async def _run_inner(
                     tool_error=err_text,
                 )
 
-                if err_text is not None:
-                    yield ToolCallResult(
-                        request_id=ctx.request_id,
-                        tool=call.name,
-                        result="",
-                        error=err_text,
-                    )
-                    await history.append(
-                        ctx.thread_id,
-                        Message(
-                            role="user",
-                            content=[
-                                ToolResponse(
-                                    id=call.call_id,
-                                    tool_name=call.name,
-                                    result=[Text(text=err_text)],
-                                    is_error=True,
-                                )
-                            ],
-                        ),
-                    )
-                else:
-                    body = result_text or ""
-                    yield ToolCallResult(
-                        request_id=ctx.request_id,
-                        tool=call.name,
-                        result=body,
-                        error=None,
-                    )
-                    await history.append(
-                        ctx.thread_id,
-                        Message(
-                            role="user",
-                            content=[
-                                ToolResponse(
-                                    id=call.call_id,
-                                    tool_name=call.name,
-                                    result=[Text(text=body)],
-                                    is_error=False,
-                                )
-                            ],
-                        ),
-                    )
+                event, response = _tool_outcome(
+                    call, ctx.request_id, result_text, err_text
+                )
+                yield event
+                chunk_responses.append(response)
             else:
                 if cancelled is not None and cancelled.is_set():
                     yield Error(request_id=ctx.request_id, error="Request cancelled")
@@ -898,49 +887,17 @@ async def _run_inner(
                         tool_error=err_text,
                     )
 
-                    if err_text is not None:
-                        yield ToolCallResult(
-                            request_id=ctx.request_id,
-                            tool=call.name,
-                            result="",
-                            error=err_text,
-                        )
-                        await history.append(
-                            ctx.thread_id,
-                            Message(
-                                role="user",
-                                content=[
-                                    ToolResponse(
-                                        id=call.call_id,
-                                        tool_name=call.name,
-                                        result=[Text(text=err_text)],
-                                        is_error=True,
-                                    )
-                                ],
-                            ),
-                        )
-                    else:
-                        body = result_text or ""
-                        yield ToolCallResult(
-                            request_id=ctx.request_id,
-                            tool=call.name,
-                            result=body,
-                            error=None,
-                        )
-                        await history.append(
-                            ctx.thread_id,
-                            Message(
-                                role="user",
-                                content=[
-                                    ToolResponse(
-                                        id=call.call_id,
-                                        tool_name=call.name,
-                                        result=[Text(text=body)],
-                                        is_error=False,
-                                    )
-                                ],
-                            ),
-                        )
+                    event, response = _tool_outcome(
+                        call, ctx.request_id, result_text, err_text
+                    )
+                    yield event
+                    chunk_responses.append(response)
+
+            if chunk_responses:
+                await history.append(
+                    ctx.thread_id,
+                    Message(role="user", content=chunk_responses),
+                )
 
     if needs_followup_after_tools:
         yield Error(request_id=ctx.request_id, error="Max turns exceeded")

@@ -166,6 +166,38 @@ class WorkspaceFileService:
                 code="write_outside_scope",
             ) from None
 
+    def list_directory(self, path: str | None) -> list[dict[str, str]]:
+        """List immediate children of a repo-relative directory (dirs first, then files).
+
+        ``path`` may be ``None``, empty, or ``"."`` for the workspace root.
+        """
+        base = self._resolve_root_dir(path)
+        if not base.is_dir():
+            raise WorkspaceError(f"Not a directory: {path or '.'}", code="not_found")
+        try:
+            children = list(base.iterdir())
+        except OSError as e:
+            raise WorkspaceError(f"List failed: {e}", code="list_failed") from e
+
+        def sort_key(p: Path) -> tuple[int, str]:
+            return (0 if p.is_dir() else 1, p.name.lower())
+
+        out: list[dict[str, str]] = []
+        for ch in sorted(children, key=sort_key):
+            if ch.name in (".", ".."):
+                continue
+            try:
+                resolved = ch.resolve()
+                resolved.relative_to(self._root)
+            except ValueError:
+                continue
+            except OSError:
+                continue
+            rel_p = self._as_repo_rel(resolved)
+            kind = "dir" if resolved.is_dir() else "file"
+            out.append({"name": ch.name, "path": rel_p, "kind": kind})
+        return out
+
     def read_file(
         self,
         path: str,

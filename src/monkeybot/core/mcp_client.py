@@ -23,6 +23,35 @@ from monkeybot.core.types_tools import ToolDef
 logger = logging.getLogger(__name__)
 
 
+def _exception_group_leaves(exc: BaseException) -> list[BaseException]:
+    """Flatten nested :class:`BaseExceptionGroup` leaves (Python 3.11+)."""
+    if isinstance(exc, BaseExceptionGroup):
+        return [leaf for sub in exc.exceptions for leaf in _exception_group_leaves(sub)]
+    return [exc]
+
+
+def _mcp_runtime_teardown_noise(exc: BaseException) -> bool:
+    """True for known AnyIO/MCP streamable-HTTP races during forced shutdown (e.g. Ctrl+C)."""
+    if isinstance(exc, RuntimeError):
+        msg = str(exc).lower()
+        return "cancel scope" in msg or "different task" in msg
+    return False
+
+
+def _mcp_disconnect_teardown_noise(exc: BaseException) -> bool:
+    """Whether ``exc`` is only teardown noise from the MCP SDK (safe to log and ignore)."""
+    if _mcp_runtime_teardown_noise(exc):
+        return True
+    if type(exc) is GeneratorExit:
+        return True
+    if isinstance(exc, BaseExceptionGroup):
+        leaves = _exception_group_leaves(exc)
+        return bool(leaves) and all(
+            _mcp_runtime_teardown_noise(leaf) or type(leaf) is GeneratorExit for leaf in leaves
+        )
+    return False
+
+
 class MCPConnectionError(Exception):
     """Connecting or handshaking with an MCP server failed."""
 
@@ -325,7 +354,20 @@ class MCPClient:
         rec = self._servers.pop(name, None)
         if rec is None:
             return
-        await rec.stack.aclose()
+        try:
+            await rec.stack.aclose()
+        except BaseException as exc:
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+            if _mcp_disconnect_teardown_noise(exc):
+                logger.debug(
+                    "mcp disconnect %s: suppressed SDK teardown noise (%s)",
+                    name,
+                    exc.__class__.__name__,
+                    exc_info=True,
+                )
+                return
+            raise
 
     async def call_tool(
         self,

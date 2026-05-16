@@ -526,6 +526,7 @@ async def test_read_file_non_spill_uses_workspace_defaults(tmp_path: Path) -> No
 # ---------------------------------------------------------------------------
 
 import sys
+from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from monkeybot.core.sandbox_executor import SandboxConfig, SandboxExecutor
@@ -579,6 +580,29 @@ def _make_opensandbox_module(mock_cls):
     mod.models.sandboxes = MagicMock()
     mod.models.sandboxes.Volume = _Volume
     mod.models.sandboxes.Host = _Host
+
+    execd_mod = ModuleType("opensandbox.models.execd")
+
+    class _RunCommandOpts:
+        def __init__(
+            self,
+            *,
+            timeout=None,
+            background=False,
+            working_directory=None,
+            uid=None,
+            gid=None,
+            envs=None,
+        ):
+            self.timeout = timeout
+            self.background = background
+            self.working_directory = working_directory
+            self.uid = uid
+            self.gid = gid
+            self.envs = envs
+
+    execd_mod.RunCommandOpts = _RunCommandOpts
+    mod.models.execd = execd_mod
     return mod
 
 
@@ -588,6 +612,7 @@ def _osb_patches(mock_cls):
         "opensandbox": osb,
         "opensandbox.config": osb.config,
         "opensandbox.models.sandboxes": osb.models.sandboxes,
+        "opensandbox.models.execd": osb.models.execd,
     }
 
 

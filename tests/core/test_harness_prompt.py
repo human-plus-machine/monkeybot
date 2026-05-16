@@ -40,3 +40,15 @@ def test_harness_injects_runtime_paths() -> None:
 def test_harness_default_paths_shown_when_not_provided() -> None:
     out = harness_fixed_context(include_task_tool=False)
     assert "(not set)" in out
+
+
+def test_harness_run_command_host_execution_by_default() -> None:
+    out = harness_fixed_context(include_task_tool=False, run_command_opensandbox=False)
+    assert "gateway host" in out
+    assert "no OpenSandbox" in out
+
+
+def test_harness_run_command_opensandbox_execution_when_enabled() -> None:
+    out = harness_fixed_context(include_task_tool=False, run_command_opensandbox=True)
+    assert "OpenSandbox" in out
+    assert "bind-mounted" in out

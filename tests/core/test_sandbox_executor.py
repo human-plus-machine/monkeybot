@@ -81,7 +81,40 @@ def _make_opensandbox_module(mock_cls):
     mod.models.sandboxes = MagicMock()
     mod.models.sandboxes.Volume = _Volume
     mod.models.sandboxes.Host = _Host
+
+    # execute() imports RunCommandOpts from opensandbox.models.execd
+    execd_mod = ModuleType("opensandbox.models.execd")
+
+    class _RunCommandOpts:
+        def __init__(
+            self,
+            *,
+            timeout=None,
+            background=False,
+            working_directory=None,
+            uid=None,
+            gid=None,
+            envs=None,
+        ):
+            self.timeout = timeout
+            self.background = background
+            self.working_directory = working_directory
+            self.uid = uid
+            self.gid = gid
+            self.envs = envs
+
+    execd_mod.RunCommandOpts = _RunCommandOpts
+    mod.models.execd = execd_mod
     return mod
+
+
+def _opensandbox_sys_modules(osb):
+    return {
+        "opensandbox": osb,
+        "opensandbox.config": osb.config,
+        "opensandbox.models.sandboxes": osb.models.sandboxes,
+        "opensandbox.models.execd": osb.models.execd,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +124,7 @@ def _make_opensandbox_module(mock_cls):
 class TestSandboxConfigFromEnv:
     def test_defaults_when_no_env_vars_set(self, monkeypatch):
         for key in ("SANDBOX_ENABLED", "SANDBOX_SERVER_URL", "SANDBOX_IMAGE",
-                    "SANDBOX_API_KEY", "SANDBOX_TTL_SECONDS"):
+                    "SANDBOX_API_KEY", "SANDBOX_TTL_SECONDS", "SANDBOX_USE_SERVER_PROXY"):
             monkeypatch.delenv(key, raising=False)
 
         cfg = SandboxConfig.from_env()
@@ -101,6 +134,14 @@ class TestSandboxConfigFromEnv:
         assert cfg.image == "python:3.12"
         assert cfg.api_key is None
         assert cfg.ttl_seconds == 1800
+        assert cfg.use_server_proxy is True
+
+    def test_use_server_proxy_false_when_env_disabled(self, monkeypatch):
+        for key in ("SANDBOX_ENABLED", "SANDBOX_SERVER_URL", "SANDBOX_IMAGE",
+                    "SANDBOX_API_KEY", "SANDBOX_TTL_SECONDS"):
+            monkeypatch.delenv(key, raising=False)
+        monkeypatch.setenv("SANDBOX_USE_SERVER_PROXY", "false")
+        assert SandboxConfig.from_env().use_server_proxy is False
 
     def test_enabled_true_lowercase(self, monkeypatch):
         monkeypatch.setenv("SANDBOX_ENABLED", "true")
@@ -171,7 +212,7 @@ class TestSandboxExecutorAllowlist:
         mock_cls, _ = _make_create_mock()
         osb = _make_opensandbox_module(mock_cls)
 
-        with patch.dict(sys.modules, {"opensandbox": osb, "opensandbox.config": osb.config, "opensandbox.models.sandboxes": osb.models.sandboxes}):
+        with patch.dict(sys.modules, _opensandbox_sys_modules(osb)):
             with pytest.raises(SecurityError, match="not allowed"):
                 await executor.execute("rm", ["-rf", "/"])
 
@@ -184,7 +225,7 @@ class TestSandboxExecutorAllowlist:
         mock_cls, sandbox = _make_create_mock(_mock_sandbox(_make_execution(stdout_text="hi")))
         osb = _make_opensandbox_module(mock_cls)
 
-        with patch.dict(sys.modules, {"opensandbox": osb, "opensandbox.config": osb.config, "opensandbox.models.sandboxes": osb.models.sandboxes}):
+        with patch.dict(sys.modules, _opensandbox_sys_modules(osb)):
             result = await executor.execute("echo", ["hi"])
 
         assert result.stdout == "hi"
@@ -196,7 +237,7 @@ class TestSandboxExecutorAllowlist:
         mock_cls, _ = _make_create_mock()
         osb = _make_opensandbox_module(mock_cls)
 
-        with patch.dict(sys.modules, {"opensandbox": osb, "opensandbox.config": osb.config, "opensandbox.models.sandboxes": osb.models.sandboxes}):
+        with patch.dict(sys.modules, _opensandbox_sys_modules(osb)):
             with pytest.raises(SecurityError):
                 await executor.execute("curl", ["https://example.com"])
 
@@ -208,7 +249,7 @@ class TestSandboxExecutorAllowlist:
         mock_cls, _ = _make_create_mock()
         osb = _make_opensandbox_module(mock_cls)
 
-        with patch.dict(sys.modules, {"opensandbox": osb, "opensandbox.config": osb.config, "opensandbox.models.sandboxes": osb.models.sandboxes}):
+        with patch.dict(sys.modules, _opensandbox_sys_modules(osb)):
             with pytest.raises(SecurityError):
                 await executor.execute("wget", ["https://example.com"])
 
@@ -233,7 +274,7 @@ class TestSandboxExecutorLazyCreation:
         mock_cls, _ = _make_create_mock()
         osb = _make_opensandbox_module(mock_cls)
 
-        with patch.dict(sys.modules, {"opensandbox": osb, "opensandbox.config": osb.config, "opensandbox.models.sandboxes": osb.models.sandboxes}):
+        with patch.dict(sys.modules, _opensandbox_sys_modules(osb)):
             await executor.execute("echo", ["hello"])
 
         mock_cls.create.assert_called_once()
@@ -244,7 +285,7 @@ class TestSandboxExecutorLazyCreation:
         mock_cls, _ = _make_create_mock()
         osb = _make_opensandbox_module(mock_cls)
 
-        with patch.dict(sys.modules, {"opensandbox": osb, "opensandbox.config": osb.config, "opensandbox.models.sandboxes": osb.models.sandboxes}):
+        with patch.dict(sys.modules, _opensandbox_sys_modules(osb)):
             await executor.execute("echo", ["first"])
             await executor.execute("echo", ["second"])
 
@@ -257,7 +298,7 @@ class TestSandboxExecutorLazyCreation:
         mock_cls, _ = _make_create_mock()
         osb = _make_opensandbox_module(mock_cls)
 
-        with patch.dict(sys.modules, {"opensandbox": osb, "opensandbox.config": osb.config, "opensandbox.models.sandboxes": osb.models.sandboxes}):
+        with patch.dict(sys.modules, _opensandbox_sys_modules(osb)):
             await executor.aclose()  # no sandbox yet — must not raise
 
         mock_cls.create.assert_not_called()
@@ -281,6 +322,7 @@ class TestSandboxExecutorSdkNotInstalled:
             "opensandbox": None,
             "opensandbox.config": None,
             "opensandbox.models.sandboxes": None,
+            "opensandbox.models.execd": None,
         }):
             with pytest.raises(RuntimeError) as exc_info:
                 await executor.execute("echo", ["hello"])
@@ -309,7 +351,7 @@ class TestSandboxExecutorResultMapping:
         mock_cls, _ = _make_create_mock(_mock_sandbox(execution))
         osb = _make_opensandbox_module(mock_cls)
 
-        with patch.dict(sys.modules, {"opensandbox": osb, "opensandbox.config": osb.config, "opensandbox.models.sandboxes": osb.models.sandboxes}):
+        with patch.dict(sys.modules, _opensandbox_sys_modules(osb)):
             result = await executor.execute("echo", ["hello"])
 
         assert isinstance(result, ExecutionResult)
@@ -326,7 +368,7 @@ class TestSandboxExecutorResultMapping:
         mock_cls, _ = _make_create_mock(_mock_sandbox(execution))
         osb = _make_opensandbox_module(mock_cls)
 
-        with patch.dict(sys.modules, {"opensandbox": osb, "opensandbox.config": osb.config, "opensandbox.models.sandboxes": osb.models.sandboxes}):
+        with patch.dict(sys.modules, _opensandbox_sys_modules(osb)):
             result = await executor.execute("python3", ["-c", "exit(1)"])
 
         assert result.exit_code == 1
@@ -339,7 +381,7 @@ class TestSandboxExecutorResultMapping:
         mock_cls, _ = _make_create_mock(_mock_sandbox(execution))
         osb = _make_opensandbox_module(mock_cls)
 
-        with patch.dict(sys.modules, {"opensandbox": osb, "opensandbox.config": osb.config, "opensandbox.models.sandboxes": osb.models.sandboxes}):
+        with patch.dict(sys.modules, _opensandbox_sys_modules(osb)):
             result = await executor.execute("echo", [])
 
         assert result.stdout == ""
@@ -353,7 +395,7 @@ class TestSandboxExecutorResultMapping:
         mock_cls, _ = _make_create_mock(_mock_sandbox(execution))
         osb = _make_opensandbox_module(mock_cls)
 
-        with patch.dict(sys.modules, {"opensandbox": osb, "opensandbox.config": osb.config, "opensandbox.models.sandboxes": osb.models.sandboxes}):
+        with patch.dict(sys.modules, _opensandbox_sys_modules(osb)):
             result = await executor.execute("echo", [])
 
         assert result.exit_code == 0
@@ -365,7 +407,7 @@ class TestSandboxExecutorResultMapping:
         mock_cls, _ = _make_create_mock(_mock_sandbox(execution))
         osb = _make_opensandbox_module(mock_cls)
 
-        with patch.dict(sys.modules, {"opensandbox": osb, "opensandbox.config": osb.config, "opensandbox.models.sandboxes": osb.models.sandboxes}):
+        with patch.dict(sys.modules, _opensandbox_sys_modules(osb)):
             result = await executor.execute("python3", ["-c", "pass"])
 
         assert result.stdout == "out"
@@ -391,7 +433,7 @@ class TestSandboxExecutorCleanup:
         mock_cls, _ = _make_create_mock(sandbox)
         osb = _make_opensandbox_module(mock_cls)
 
-        with patch.dict(sys.modules, {"opensandbox": osb, "opensandbox.config": osb.config, "opensandbox.models.sandboxes": osb.models.sandboxes}):
+        with patch.dict(sys.modules, _opensandbox_sys_modules(osb)):
             await executor.execute("echo", [])
             await executor.aclose()
 
@@ -407,7 +449,7 @@ class TestSandboxExecutorCleanup:
         mock_cls, _ = _make_create_mock(sandbox)
         osb = _make_opensandbox_module(mock_cls)
 
-        with patch.dict(sys.modules, {"opensandbox": osb, "opensandbox.config": osb.config, "opensandbox.models.sandboxes": osb.models.sandboxes}):
+        with patch.dict(sys.modules, _opensandbox_sys_modules(osb)):
             await executor.execute("echo", [])
             await executor.aclose()
             await executor.aclose()  # second call — must be a no-op
@@ -424,7 +466,7 @@ class TestSandboxExecutorCleanup:
         mock_cls, _ = _make_create_mock(sandbox)
         osb = _make_opensandbox_module(mock_cls)
 
-        with patch.dict(sys.modules, {"opensandbox": osb, "opensandbox.config": osb.config, "opensandbox.models.sandboxes": osb.models.sandboxes}):
+        with patch.dict(sys.modules, _opensandbox_sys_modules(osb)):
             await executor.execute("echo", [])
             await executor.aclose()  # must not raise even though kill() failed
 
@@ -438,11 +480,7 @@ class TestSandboxExecutorCleanup:
 class TestSandboxExecutorWorkspaceMount:
     def _patch_modules(self, mock_cls):
         osb = _make_opensandbox_module(mock_cls)
-        return osb, {
-            "opensandbox": osb,
-            "opensandbox.config": osb.config,
-            "opensandbox.models.sandboxes": osb.models.sandboxes,
-        }
+        return osb, _opensandbox_sys_modules(osb)
 
     @pytest.mark.asyncio
     async def test_absolute_workspace_path_in_volume(self, tmp_path):
@@ -507,6 +545,7 @@ class TestSandboxExecutorWorkspaceMount:
         _, cc_kwargs = osb.config.ConnectionConfig.call_args
         assert cc_kwargs.get("domain") == "custom-server:9999"
         assert cc_kwargs.get("protocol") == "http"
+        assert cc_kwargs.get("use_server_proxy") is True
 
     @pytest.mark.asyncio
     async def test_https_server_url_forwarded_correctly(self, tmp_path):
@@ -524,6 +563,7 @@ class TestSandboxExecutorWorkspaceMount:
         _, cc_kwargs = osb.config.ConnectionConfig.call_args
         assert cc_kwargs.get("domain") == "secure-server:443"
         assert cc_kwargs.get("protocol") == "https"
+        assert cc_kwargs.get("use_server_proxy") is True
 
     @pytest.mark.asyncio
     async def test_invalid_server_url_raises_value_error(self, tmp_path):
@@ -554,6 +594,7 @@ class TestSandboxExecutorWorkspaceMount:
 
         _, cc_kwargs = osb.config.ConnectionConfig.call_args
         assert cc_kwargs.get("api_key") == "mykey"
+        assert cc_kwargs.get("use_server_proxy") is True
 
     @pytest.mark.asyncio
     async def test_api_key_none_when_not_set(self, tmp_path):
@@ -570,3 +611,4 @@ class TestSandboxExecutorWorkspaceMount:
 
         _, cc_kwargs = osb.config.ConnectionConfig.call_args
         assert cc_kwargs.get("api_key") is None
+        assert cc_kwargs.get("use_server_proxy") is True

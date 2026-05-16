@@ -197,3 +197,67 @@ async def test_get_usage_404_for_unknown_session(client: AsyncClient) -> None:
     r = await client.get("/sessions/missing-session/usage")
     assert r.status_code == 404
     assert r.json()["error"]["code"] == "SESSION_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_playground_workspace_tree_and_file(
+    registry: SessionRegistry,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "hello.txt").write_text("alpha\nbeta\n", encoding="utf-8")
+    sub = tmp_path / "nested"
+    sub.mkdir()
+    (sub / "inner.txt").write_text("inside", encoding="utf-8")
+
+    app = create_app(loop_port=FakeLoopPort(registry), registry=registry)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        r = await client.get("/api/playground/workspace/tree")
+        assert r.status_code == 200
+        root = r.json()
+        assert root["path"] == "."
+        names = {e["name"] for e in root["entries"]}
+        assert "hello.txt" in names
+        assert "nested" in names
+
+        r2 = await client.get("/api/playground/workspace/tree", params={"path": "nested"})
+        assert r2.status_code == 200
+        assert {e["name"] for e in r2.json()["entries"]} == {"inner.txt"}
+
+        rf = await client.get("/api/playground/workspace/file", params={"path": "hello.txt"})
+        assert rf.status_code == 200
+        body = rf.json()
+        assert body["path"] == "hello.txt"
+        assert body["total_lines"] == 2
+        assert "alpha" in body["content"]
+
+        r404 = await client.get("/api/playground/workspace/tree", params={"path": "missing-dir"})
+        assert r404.status_code == 404
+
+        r_bad = await client.get("/api/playground/workspace/tree", params={"path": ".."})
+        assert r_bad.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_playground_workspace_disabled_returns_404(
+    registry: SessionRegistry,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MONKEYBOT_PLAYGROUND_WORKSPACE_API", "0")
+    app = create_app(loop_port=FakeLoopPort(registry), registry=registry)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        r = await client.get("/api/playground/workspace/tree")
+        assert r.status_code == 404
+        assert r.json()["error"]["code"] == "NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_playground_workspace_file_requires_path(registry: SessionRegistry, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+    app = create_app(loop_port=FakeLoopPort(registry), registry=registry)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        r = await client.get("/api/playground/workspace/file", params={"path": "  "})
+        assert r.status_code == 400
