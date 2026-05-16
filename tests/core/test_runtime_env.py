@@ -78,6 +78,32 @@ def test_includes_merge_overrides_base(tmp_path: Path, monkeypatch: pytest.Monke
     assert os.environ.get("MODEL_NAME") == "from-include"
 
 
+def test_gateway_cors_allow_origins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    (cfg_dir / "monkeybot.yaml").write_text(
+        "gateway:\n  cors_allow_origins: \"http://a.example,http://b.example\"\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("MONKEYBOT_CORS_ALLOW_ORIGINS", raising=False)
+    runtime_env.apply_monkeybot_runtime_env()
+    assert os.environ.get("MONKEYBOT_CORS_ALLOW_ORIGINS") == "http://a.example,http://b.example"
+
+
+def test_paths_workspace_root_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    (cfg_dir / "monkeybot.yaml").write_text(
+        "paths:\n  workspace_root: ./agent-ws\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("MONKEYBOT_WORKSPACE_ROOT", raising=False)
+    runtime_env.apply_monkeybot_runtime_env()
+    assert os.environ.get("MONKEYBOT_WORKSPACE_ROOT") == "./agent-ws"
+
+
 def test_denied_patterns_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     cfg_dir = tmp_path / "monkeybot_config"

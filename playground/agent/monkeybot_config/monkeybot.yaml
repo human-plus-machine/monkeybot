@@ -1,6 +1,9 @@
 # Playground defaults when ``uv run`` cwd is ``playground/agent/``.
 # Template with comments: monkeybot.example.yaml in this directory.
 # Override with .env or environment variables as needed.
+#
+# Agent-facing files live under ``./workspace`` (``data/``, ``skills/``); harness config stays
+# in ``./monkeybot_config/``. The playground workspace API lists only ``workspace/``.
 
 runtime:
   log_level: INFO
@@ -8,9 +11,9 @@ runtime:
 
 paths:
   agent_md: ./monkeybot_config/AGENT.md
-  memory_path: ./data/memory
-  skills_path: ./skills
-  db_url: sqlite:///./data/monkeybot.db
+  memory_path: ./workspace/data/memory
+  skills_path: ./workspace/skills
+  db_url: sqlite:///./workspace/data/monkeybot.db
   mcp_config: ./monkeybot_config/mcp.json
   command_allowlist_config: ./monkeybot_config/command_allowlist.yaml
 
@@ -22,6 +25,8 @@ gateway:
   pending_response_timeout_sec: 300
   sse_replay_max: 256
   graceful_shutdown_timeout_sec: 5
+  # Sets MONKEYBOT_CORS_ALLOW_ORIGINS (comma-separated, or "*"). Env overrides; Vite dev is localhost:5173.
+  cors_allow_origins: "http://localhost:5173,http://127.0.0.1:5173"
 
 context_curation:
   enabled: true

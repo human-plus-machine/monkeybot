@@ -11,7 +11,7 @@
 #   OPENAI_API_KEY, ANTHROPIC_API_KEY,
 #   ANTHROPIC_VERTEX_PROJECT_ID, ANTHROPIC_VERTEX_REGION,
 #   TAVILY_API_KEY, FIRECRAWL_API_KEY, SANDBOX_API_KEY,
-#   MONKEYBOT_TOOL_DENIED_PATTERNS, MONKEYBOT_CONFIG, …
+#   MONKEYBOT_TOOL_DENIED_PATTERNS, MONKEYBOT_CORS_ALLOW_ORIGINS, MONKEYBOT_CONFIG, …
 #
 # Optional fragments: add top-level ``includes: [includes/extra.yaml]`` (paths relative
 # to this file’s directory); later files deep-merge over earlier ones.
@@ -32,6 +32,9 @@ paths:
   db_url: sqlite:///data/monkeybot.db
   mcp_config: ./monkeybot_config/mcp.json
   command_allowlist_config: ./monkeybot_config/command_allowlist.yaml
+  # Optional: agent workspace root for tools + playground file API (env MONKEYBOT_WORKSPACE_ROOT).
+  # If unset and ``./workspace`` exists under cwd, that directory is used (playground layout).
+  # workspace_root: ./workspace
 
 model:
   # gemini | openai | anthropic | vertex-claude | fake
@@ -58,6 +61,9 @@ gateway:
   pending_response_timeout_sec: 300
   sse_replay_max: 256
   graceful_shutdown_timeout_sec: 5
+  # FastAPI CORS allow_origins (comma-separated, or "*" for any origin). Sets MONKEYBOT_CORS_ALLOW_ORIGINS.
+  # Default in code when unset: http://localhost:5173 (Vite dev). Add http://127.0.0.1:5173 if needed.
+  cors_allow_origins: "http://localhost:5173"
 
 context_curation:
   # When false, curation is skipped (env: CONTEXT_CURATION_ENABLED)

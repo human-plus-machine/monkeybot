@@ -17,7 +17,7 @@ paths:
 
 model:
   provider: gemini
-  name: gemini-3-flash
+  name: gemini-3-flash-preview
   temperature: 0.7
   max_tokens: 60000
   thinking_budget: -1
@@ -28,6 +28,8 @@ gateway:
   pending_response_timeout_sec: 300
   sse_replay_max: 256
   graceful_shutdown_timeout_sec: 5
+  # Sets MONKEYBOT_CORS_ALLOW_ORIGINS (comma-separated origins, or "*"). Env overrides this file.
+  cors_allow_origins: "http://localhost:5173"
 
 context_curation:
   enabled: true

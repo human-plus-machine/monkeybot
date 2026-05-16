@@ -240,6 +240,29 @@ async def test_playground_workspace_tree_and_file(
 
 
 @pytest.mark.asyncio
+async def test_playground_workspace_prefers_workspace_subdirectory(
+    registry: SessionRegistry,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """When ``<cwd>/workspace`` exists, file API is rooted there (sibling harness dirs stay hidden)."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "monkeybot_config").mkdir()
+    (tmp_path / "monkeybot_config" / "secret.yaml").write_text("nope", encoding="utf-8")
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    (ws / "hello.txt").write_text("in-workspace", encoding="utf-8")
+
+    app = create_app(loop_port=FakeLoopPort(registry), registry=registry)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        r = await client.get("/api/playground/workspace/tree")
+        assert r.status_code == 200
+        names = {e["name"] for e in r.json()["entries"]}
+        assert "hello.txt" in names
+        assert "monkeybot_config" not in names
+
+
+@pytest.mark.asyncio
 async def test_playground_workspace_disabled_returns_404(
     registry: SessionRegistry,
     monkeypatch: pytest.MonkeyPatch,

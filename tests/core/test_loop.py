@@ -262,7 +262,15 @@ async def test_run_inspector_deny_then_second_turn_completes() -> None:
     assert exe.calls == []
     kinds = [type(e).__name__ for e in events]
     assert "ToolCallStarted" in kinds
-    assert any(isinstance(e, Error) and "tier deny" in e.error for e in events)
+    assert "ToolCallResult" in kinds
+    assert not any(isinstance(e, Error) for e in events)
+    assert any(
+        isinstance(e, ToolCallResult)
+        and e.tool == "run_command"
+        and isinstance(e.error, str)
+        and "tier deny" in e.error
+        for e in events
+    )
     assert any(isinstance(e, AssistantDelta) and e.delta == "after deny" for e in events)
     assert isinstance(events[-1], TurnComplete)
 
@@ -1107,7 +1115,11 @@ async def test_loop_confirm_decision_raises_if_produced() -> None:
         max_turns=3,
     ):
         events.append(e)
-    err_blob = " ".join(e.error for e in events if isinstance(e, Error)).lower()
+    err_blob = " ".join(
+        (e.error or "")
+        for e in events
+        if isinstance(e, ToolCallResult) and isinstance(e.error, str)
+    ).lower()
     assert "confirm" in err_blob or "reserved" in err_blob
 
 

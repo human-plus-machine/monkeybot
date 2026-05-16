@@ -47,6 +47,7 @@ from monkeybot.core.llm.usage import Usage as UsageRecord
 from monkeybot.core.llm.usage import UsageStore
 from monkeybot.gateway.sse.loop_port import UsagePort
 from monkeybot.gateway.sse.routes import create_app as build_sse_app
+from monkeybot.gateway.sse.workspace_layout import resolve_agent_workspace_root
 from monkeybot.gateway.sse.session_bus import SessionBus, SessionRegistry
 from monkeybot.providers.vertex_claude import VertexClaudeProvider
 from monkeybot.web_search import WebSearchTool
@@ -106,12 +107,18 @@ class _HistoryAdapter:
 
 
 def _resolved_workspace_paths() -> tuple[Path, Path, Path]:
-    """Resolve workspace, memory, and skills roots relative to the process cwd."""
-    root = Path.cwd().resolve()
+    """Resolve agent workspace root, memory dir, and skills dir.
+
+    Workspace root is :func:`resolve_agent_workspace_root` (``MONKEYBOT_WORKSPACE_ROOT`` or
+    ``./workspace`` when present). Memory and skills paths are resolved against **process cwd**
+    so ``paths`` in ``monkeybot.yaml`` can stay relative to the gateway working directory.
+    """
+    root = resolve_agent_workspace_root()
+    cwd = Path.cwd().resolve()
     mem = Path(os.environ.get("MEMORY_PATH", "data/memory"))
     skills = Path(os.environ.get("SKILLS_PATH", "skills"))
-    mem_p = mem.resolve() if mem.is_absolute() else (root / mem).resolve()
-    skills_p = skills.resolve() if skills.is_absolute() else (root / skills).resolve()
+    mem_p = mem.resolve() if mem.is_absolute() else (cwd / mem).resolve()
+    skills_p = skills.resolve() if skills.is_absolute() else (cwd / skills).resolve()
     return root, mem_p, skills_p
 
 
@@ -384,6 +391,24 @@ class GatewayLoopPort:
                 await conn.close()
 
 
+def _cors_allow_origins() -> list[str]:
+    """Browser origins allowed for cross-origin API calls (SSE, JSON).
+
+    Comma-separated ``MONKEYBOT_CORS_ALLOW_ORIGINS`` overrides the dev default
+    (``http://localhost:5173``). Use when the chat UI is hosted on another origin
+    and talks to the gateway directly (without a same-origin dev proxy).
+
+    Set to ``*`` to allow any origin (credentials disabled by Starlette rules for ``*``).
+    """
+    raw = os.environ.get("MONKEYBOT_CORS_ALLOW_ORIGINS", "").strip()
+    if not raw:
+        return ["http://localhost:5173"]
+    if raw == "*":
+        return ["*"]
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    return parts if parts else ["http://localhost:5173"]
+
+
 _registry = SessionRegistry()
 app = build_sse_app(
     registry=_registry,
@@ -392,7 +417,7 @@ app = build_sse_app(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=_cors_allow_origins(),
     allow_methods=["*"],
     allow_headers=["*"],
 )

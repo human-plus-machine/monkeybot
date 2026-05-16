@@ -18,6 +18,10 @@ tool_call_id columns present). The on-disk format changed in the
 typed-message-content release. Choose one:
 
   Dev / playground:
+    rm -f playground/agent/workspace/data/monkeybot.db
+    rm -f playground/agent/workspace/data/monkeybot.db-shm
+    rm -f playground/agent/workspace/data/monkeybot.db-wal
+    # (legacy path, if still present)
     rm -f playground/agent/data/monkeybot.db
     rm -f playground/agent/data/monkeybot.db-shm
     rm -f playground/agent/data/monkeybot.db-wal

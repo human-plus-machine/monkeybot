@@ -192,7 +192,9 @@ ensure_opensandbox
 
 # Wipe SQLite state on every launch so schema migrations / typed-block changes
 # never leave the playground stuck on a stale DB.
-rm -f ./data/monkeybot.db ./data/monkeybot.db-wal ./data/monkeybot.db-shm
+rm -f \
+  ./workspace/data/monkeybot.db ./workspace/data/monkeybot.db-wal ./workspace/data/monkeybot.db-shm \
+  ./data/monkeybot.db ./data/monkeybot.db-wal ./data/monkeybot.db-shm
 
 exit_code=0
 if [[ -f .env ]]; then

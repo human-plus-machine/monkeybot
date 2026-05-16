@@ -746,15 +746,9 @@ async def _run_inner(
                         label=call.name,
                         args=dict(call.args),
                     )
-                    yield Error(request_id=ctx.request_id, error=msg)
-                    chunk_responses.append(
-                        ToolResponse(
-                            id=call.call_id,
-                            tool_name=call.name,
-                            result=[Text(text=msg)],
-                            is_error=True,
-                        )
-                    )
+                    result_evt, tool_resp = _tool_outcome(call, ctx.request_id, None, msg)
+                    yield result_evt
+                    chunk_responses.append(tool_resp)
                     continue
 
                 yield ToolCallStarted(

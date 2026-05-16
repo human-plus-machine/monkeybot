@@ -36,6 +36,7 @@ from .models import (
 )
 from .session_bus import SessionAlreadyExistsError, SessionBus, SessionRegistry
 from .sse import format_active_requests, format_ping
+from .workspace_layout import resolve_agent_workspace_root
 
 
 def get_registry(request: Request) -> SessionRegistry:
@@ -112,8 +113,8 @@ def _playground_workspace_api_enabled() -> bool:
 
 
 def _playground_workspace_root() -> Path:
-    """Workspace root for listing/reads; matches gateway process cwd (see ``sse.app`` paths)."""
-    return Path.cwd().resolve()
+    """Workspace root for listing/reads; aligned with :func:`resolve_agent_workspace_root`."""
+    return resolve_agent_workspace_root()
 
 
 def _workspace_exc_to_api(exc: WorkspaceError) -> APIError:
