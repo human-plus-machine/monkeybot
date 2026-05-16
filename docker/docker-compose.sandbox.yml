@@ -1,0 +1,26 @@
+# Compose override — adds OpenSandbox as a sidecar for sandbox-enabled deployments.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker/docker-compose.sandbox.yml up
+#
+# This file does NOT replace docker-compose.yml; it overlays only what changes:
+#   - Adds the opensandbox-server service
+#   - Rebuilds monkeybot with the [sandbox] extra included
+#   - Injects SANDBOX_ENABLED and SANDBOX_SERVER_URL into monkeybot
+
+services:
+  opensandbox-server:
+    image: opensandbox/server:latest
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
+  monkeybot:
+    build:
+      args:
+        EXTRAS: "gemini,sandbox"
+    environment:
+      - SANDBOX_ENABLED=true
+      - SANDBOX_SERVER_URL=http://opensandbox-server:8080
+    depends_on:
+      - opensandbox-server

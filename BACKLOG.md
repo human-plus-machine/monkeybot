@@ -18,28 +18,6 @@ Tasks are split into two parallel tracks. **Do not edit files outside your track
 #### Branch: `bugs/loop-correctness`
 
 - **Bug: Agent loop stops after tool call** — loop exits prematurely after the first tool execution; investigate and fix in `_run_inner`. *(pending — awaiting logs to reproduce)*
-- **Fix parallel subagent result ordering** — *(verified fixed, 2026-05-14)* `asyncio.gather` + `enumerate(outcomes)` in the parallel `task` path already appends history in `call_id` order regardless of completion order. Regression test added: `test_parallel_task_results_appended_in_call_id_order` in `tests/core/test_loop.py`.
-
----
-
-#### Branch: `feat/context-window-safety` *(implemented)*
-
-- **Fix unbounded tool results** — large tool returns spill to `.monkeybot/spill/{thread_id}/{call_id}.txt` with capped in-history text + path hint; spill dir cleaned at next `run()` start when `workspace_root` is set (`core_tool_executor.py`, `loop.py`).
-- **Token counting before provider calls** — `_estimate_tokens` on full provider payload vs `TurnContext.context_window_tokens` (default 200k; gateway passes `MODEL_CONTEXT_WINDOW`); trigger at 85% (`loop.py`, `context.py`).
-- **History summarization** — sync summarization via extra `provider.stream` call, `history.reset()`, and UI events `ContextSummarizing` / `ContextSummarized` (`loop.py`, `history.py`, `events.py`).
-- **`.monkeybot` write scope** — paths under `.monkeybot` bypass `WORKSPACE_WRITE_SCOPE_REL` so spill and harness files remain writable (`workspace_service.py`).
-
----
-
-#### Branch: `feat/memory-index-refresh` *(implemented)*
-
-- **Fix memory index stale mid-turn** — `memory/INDEX.md` is snapshotted once at `build_context()` time; fixed by `refresh_memory_index()` in `context.py` + `memory_path` on `TurnContext`, invoked before each main `provider.stream` in `loop.py` (`load_index()` API; no `memory.py` changes).
-
----
-
-#### ~~Branch: `feat/lazy-loading`~~ *(cancelled — profiled 2026-05-14)*
-
-- **Lazy loading** — ~~import providers/skills/tools only when invoked to improve cold-start speed and avoid loading unused dependencies.~~ **Not needed.** Profiling confirmed heavy SDKs (`anthropic`, `openai`, `google-genai`) are already deferred inside `stream()`. Total monkeybot-owned import cost is ~13ms; remaining ~53ms is fastapi/pydantic/starlette and is not addressable with lazy loading.
 
 ---
 
@@ -52,7 +30,7 @@ Tasks are split into two parallel tracks. **Do not edit files outside your track
 
 ### ⚠️ Interface Contract
 
-Track A calls into Track B's modules but does **not** modify them. Track B must keep these signatures stable (new params must be additive/optional):
+Track A calls into Track B’s modules but does **not** modify them. Track B must keep these signatures stable (new params must be additive/optional):
 
 | Owned by Track B | Called by Track A |
 |---|---|
@@ -92,13 +70,15 @@ Focus: plug the harness into real messaging surfaces and cloud runtimes.
 ### Traceability / Observability / Evals
 
 langfuse? deepeval other?
+
 ---
 
 ## Backlog (Unscheduled)
 
 ### Runtime / Safety
 
-- **Execution sandbox for `run_command` / clones** — Today shell is allowlisted binaries + path-prefix checks on `./`/`/` args, same OS user as the gateway (no container/VM). For “clone arbitrary repos and run code” stress tests, add an explicit isolation layer (e.g. Docker/Firecracker, disposable VM, or strict user+fs namespace) and optionally route risky tools only through that path; document in harness when ready.
+- **Execution sandbox for `run_command` / clones** *(implemented — `feat/sandbox-executor`)* — OpenSandbox-backed container, Option B scoped rw-mount. Workspace mounted read-write at the same absolute path so writes persist across turns and sessions. Session-scoped, opt-in via `SANDBOX_ENABLED=true` + `[sandbox]` pip extra. See `core/sandbox_executor.py`, `docker/docker-compose.sandbox.yml`.
+- **Sandbox workspace protection** *(unscheduled — depends on sandbox above)* — After sandbox ships, add a hard-coded deny layer inside `SandboxExecutor` that blocks `run_command` from targeting harness-owned paths: `.monkeybot/`, `bot.yaml`, `*.env`, `.agents/`, `config/`. Path-level policy at the executor (different from `command_tiers.yaml` which is command-level). Prevents the agent from clobbering memory index or harness config via shell while allowing free rw access to `./code/`, `./data/`, etc.
 - **Memory index refresh after summarization (optional)** — After summarization, `_run_inner` rebuilds `provider_messages` with the same `system` built before `_summarize_history`; low risk today (summarize path does not touch `INDEX.md`) but consider `ctx = await refresh_memory_index(ctx)` plus `_system_message(ctx)` before that rebuild for consistency and future hooks (`loop.py`).
 - **Configurable summarization model** — history compression in `loop.py` currently uses the same `ctx.model` as the agent; allow a separate model id (env or `TurnContext`) for the summarization-only `provider.stream` call.
 - **HITL completion** — ApprovalRequest/Response loop (inspector `approve` path).

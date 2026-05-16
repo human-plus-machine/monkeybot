@@ -48,6 +48,9 @@ DEFAULTS = {
     "GCS_ENABLED": "false",
     "SECRETS_PROVIDER": "env",
     "GOOGLE_CHAT_FORMAT": "workspace_addon",
+    "SANDBOX_ENABLED":    "false",
+    "SANDBOX_SERVER_URL": "http://localhost:8080",
+    "SANDBOX_IMAGE":      "python:3.12",
 }
 
 
@@ -83,6 +86,10 @@ CONFIG_MAPPING = {
     "gcp.location": "VERTEX_AI_LOCATION",
     # Orchestrator LLM Vertex region — when set, overrides ``gcp.location`` for the same env var
     "model.location": "VERTEX_AI_LOCATION",
+    # Sandbox execution (optional — requires [sandbox] extra)
+    "sandbox.enabled":    "SANDBOX_ENABLED",
+    "sandbox.server_url": "SANDBOX_SERVER_URL",
+    "sandbox.image":      "SANDBOX_IMAGE",
     # AWS-specific (future)
     "aws.region": "AWS_REGION",
     "aws.account_id": "AWS_ACCOUNT_ID",

@@ -382,3 +382,88 @@ class TestGetSubagentConfigs:
 
         config_mod._config_loaded = False
         config_mod._raw_yaml = None
+
+class TestSandboxConfigMapping:
+    """Verify sandbox.* keys are wired in CONFIG_MAPPING and DEFAULTS."""
+
+    def test_sandbox_keys_in_config_mapping(self):
+        assert CONFIG_MAPPING["sandbox.enabled"] == "SANDBOX_ENABLED"
+        assert CONFIG_MAPPING["sandbox.server_url"] == "SANDBOX_SERVER_URL"
+        assert CONFIG_MAPPING["sandbox.image"] == "SANDBOX_IMAGE"
+
+    def test_sandbox_defaults_are_safe(self):
+        from monkeybot.core.config import DEFAULTS
+
+        assert DEFAULTS["SANDBOX_ENABLED"] == "false"
+        assert DEFAULTS["SANDBOX_SERVER_URL"] == "http://localhost:8080"
+        assert DEFAULTS["SANDBOX_IMAGE"] == "python:3.12"
+
+    def test_bot_yaml_sandbox_section_sets_env_vars(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ):
+        bot_yaml = tmp_path / "bot.yaml"
+        bot_yaml.write_text(
+            "agent:\n  name: testbot\n"
+            "model:\n  provider: google_vertexai\n"
+            "sandbox:\n"
+            "  enabled: true\n"
+            "  server_url: http://myserver:9090\n"
+            "  image: python:3.11\n"
+        )
+        monkeypatch.chdir(tmp_path)
+        for key in ("SANDBOX_ENABLED", "SANDBOX_SERVER_URL", "SANDBOX_IMAGE"):
+            monkeypatch.delenv(key, raising=False)
+        config_mod._config_loaded = False
+
+        load_bot_config()
+
+        # YAML `true` becomes Python `True` → str() → "True"; SandboxConfig.from_env()
+        # handles this via .lower() == "true", so either casing is correct.
+        assert os.environ.get("SANDBOX_ENABLED", "").lower() == "true"
+        assert os.environ.get("SANDBOX_SERVER_URL") == "http://myserver:9090"
+        assert os.environ.get("SANDBOX_IMAGE") == "python:3.11"
+
+        config_mod._config_loaded = False
+
+    def test_bot_yaml_without_sandbox_section_uses_defaults(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ):
+        bot_yaml = tmp_path / "bot.yaml"
+        bot_yaml.write_text(
+            "agent:\n  name: testbot\n"
+            "model:\n  provider: google_vertexai\n"
+        )
+        monkeypatch.chdir(tmp_path)
+        for key in ("SANDBOX_ENABLED", "SANDBOX_SERVER_URL", "SANDBOX_IMAGE"):
+            monkeypatch.delenv(key, raising=False)
+        config_mod._config_loaded = False
+
+        load_bot_config()
+
+        assert os.environ.get("SANDBOX_ENABLED") == "false"
+        assert os.environ.get("SANDBOX_SERVER_URL") == "http://localhost:8080"
+
+        config_mod._config_loaded = False
+
+    def test_existing_env_var_not_overridden_by_bot_yaml(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ):
+        # Deployment env vars (e.g. set in Cloud Run) must win over bot.yaml.
+        # If this regresses, a production override would be silently ignored.
+        bot_yaml = tmp_path / "bot.yaml"
+        bot_yaml.write_text(
+            "agent:\n  name: testbot\n"
+            "model:\n  provider: google_vertexai\n"
+            "sandbox:\n  enabled: true\n  server_url: http://from-yaml:8080\n"
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("SANDBOX_ENABLED", "false")
+        monkeypatch.setenv("SANDBOX_SERVER_URL", "http://from-env:9999")
+        config_mod._config_loaded = False
+
+        load_bot_config()
+
+        assert os.environ.get("SANDBOX_ENABLED") == "false"
+        assert os.environ.get("SANDBOX_SERVER_URL") == "http://from-env:9999"
+
+        config_mod._config_loaded = False

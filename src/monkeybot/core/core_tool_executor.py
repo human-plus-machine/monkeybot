@@ -254,10 +254,22 @@ class CoreToolExecutor(ToolExecutorPort):
         self._memory_path = Path(memory_path).resolve()
         self._skills_path = Path(skills_path).resolve()
         self._mcp = mcp
-        self._terminal = terminal if terminal is not None else TerminalExecutor()
+        if terminal is not None:
+            self._terminal = terminal
+        else:
+            from monkeybot.core.sandbox_executor import SandboxConfig, SandboxExecutor
+
+            _scfg = SandboxConfig.from_env()
+            self._terminal = (
+                SandboxExecutor(_scfg, workspace_root) if _scfg.enabled else TerminalExecutor()
+            )
         self._extra_tools: dict[str, Any] = {
             ct.tool_def.name: ct for ct in (extra_tools or [])
         }
+
+    async def aclose(self) -> None:
+        """Release resources held by the terminal executor for this session."""
+        await self._terminal.aclose()
 
     async def execute(self, *, call: ToolCall, ctx: TurnContext) -> tuple[str | None, str | None]:
         name = call.name

@@ -14,7 +14,8 @@ COPY src ./src
 COPY .agents ./.agents
 COPY config ./config
 
-RUN pip install --no-cache-dir ".[gemini]"
+ARG EXTRAS=gemini
+RUN pip install --no-cache-dir ".[$EXTRAS]"
 
 EXPOSE 8080
 

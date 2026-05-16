@@ -365,6 +365,7 @@ class GatewayLoopPort:
                     )
                 await bus.publish_data(event_to_json(evt))
         finally:
+            await executor.aclose()
             watcher.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await watcher

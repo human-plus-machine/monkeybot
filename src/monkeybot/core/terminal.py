@@ -110,6 +110,9 @@ class TerminalExecutor:
         >>>     print(f"Blocked: {e}")
     """
     
+    async def aclose(self) -> None:
+        """No-op — TerminalExecutor holds no persistent resources."""
+
     async def execute(
         self,
         command: str,

@@ -218,6 +218,7 @@ async def _async_main() -> None:
         ):
             print(event_to_json(evt), flush=True)
     finally:
+        await executor.aclose()
         if mcp is not None:
             for name in list(getattr(mcp, "_servers", {}).keys()):
                 await mcp.disconnect(name)

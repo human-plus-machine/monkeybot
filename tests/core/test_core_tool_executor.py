@@ -519,3 +519,231 @@ async def test_read_file_non_spill_uses_workspace_defaults(tmp_path: Path) -> No
 
 
 # Removed in story-3-providers-and-snapshots: helper deleted
+
+# ---------------------------------------------------------------------------
+# Sandbox executor selection and aclose() lifecycle
+# ---------------------------------------------------------------------------
+
+import sys
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from monkeybot.core.sandbox_executor import SandboxConfig, SandboxExecutor
+from monkeybot.core.terminal import TerminalExecutor
+
+
+def _make_executor(tmp_path: Path) -> CoreToolExecutor:
+    mem = tmp_path / "mem"
+    mem.mkdir(exist_ok=True)
+    skills = tmp_path / "skills"
+    skills.mkdir(exist_ok=True)
+    return CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory_path=mem,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+
+
+def _make_mock_sandbox_cls():
+    sandbox = MagicMock()
+    sandbox.id = "s1"
+    sandbox.commands.run = AsyncMock(
+        return_value=MagicMock(
+            exit_code=0,
+            logs=MagicMock(stdout=[], stderr=[]),
+        )
+    )
+    sandbox.kill = AsyncMock()
+    mock_cls = MagicMock()
+    mock_cls.create = AsyncMock(return_value=sandbox)
+    return mock_cls, sandbox
+
+
+def _make_opensandbox_module(mock_cls):
+    """Build a minimal opensandbox mock that satisfies all _ensure_sandbox imports."""
+    mod = MagicMock()
+    mod.Sandbox = mock_cls
+    mod.config = MagicMock()
+    mod.config.ConnectionConfig = MagicMock(side_effect=lambda **kw: MagicMock(**kw))
+
+    class _Volume:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    class _Host:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    mod.models = MagicMock()
+    mod.models.sandboxes = MagicMock()
+    mod.models.sandboxes.Volume = _Volume
+    mod.models.sandboxes.Host = _Host
+    return mod
+
+
+def _osb_patches(mock_cls):
+    osb = _make_opensandbox_module(mock_cls)
+    return osb, {
+        "opensandbox": osb,
+        "opensandbox.config": osb.config,
+        "opensandbox.models.sandboxes": osb.models.sandboxes,
+    }
+
+
+class TestCoreToolExecutorSandboxSelection:
+    """Verify that the correct executor type is chosen at init time."""
+
+    def test_default_no_env_uses_terminal_executor(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SANDBOX_ENABLED", raising=False)
+        ex = _make_executor(tmp_path)
+        assert isinstance(ex._terminal, TerminalExecutor)
+
+    def test_sandbox_enabled_false_uses_terminal_executor(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SANDBOX_ENABLED", "false")
+        ex = _make_executor(tmp_path)
+        assert isinstance(ex._terminal, TerminalExecutor)
+
+    def test_sandbox_enabled_true_uses_sandbox_executor(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SANDBOX_ENABLED", "true")
+        ex = _make_executor(tmp_path)
+        assert isinstance(ex._terminal, SandboxExecutor)
+
+    def test_explicit_terminal_injection_bypasses_sandbox_env(self, tmp_path, monkeypatch):
+        # Tests that inject a terminal= override must still work regardless of env.
+        monkeypatch.setenv("SANDBOX_ENABLED", "true")
+        injected = TerminalExecutor()
+        mem = tmp_path / "mem"
+        mem.mkdir()
+        skills = tmp_path / "skills"
+        skills.mkdir()
+        ex = CoreToolExecutor(
+            workspace_root=tmp_path,
+            memory_path=mem,
+            skills_path=skills,
+            mcp=_NoMCP(),
+            terminal=injected,
+        )
+        assert ex._terminal is injected
+
+
+class TestCoreToolExecutorAclose:
+    """Verify aclose() lifecycle — no-op for TerminalExecutor, cleanup for SandboxExecutor."""
+
+    @pytest.mark.asyncio
+    async def test_aclose_with_terminal_executor_is_noop(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SANDBOX_ENABLED", raising=False)
+        ex = _make_executor(tmp_path)
+        await ex.aclose()  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_aclose_with_sandbox_executor_calls_sandbox_aclose(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("SANDBOX_ENABLED", "true")
+        mock_cls, sandbox = _make_mock_sandbox_cls()
+        _, patches = _osb_patches(mock_cls)
+
+        with patch.dict(sys.modules, patches):
+            ex = _make_executor(tmp_path)
+            # Trigger sandbox creation by running a command
+            await ex.execute(
+                call=ToolCall(
+                    call_id="1",
+                    name="run_command",
+                    args={"command": "echo hello", "argv": ["echo", "hello"]},
+                ),
+                ctx=_ctx(),
+            )
+            await ex.aclose()
+
+        sandbox.kill.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_aclose_twice_is_idempotent(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SANDBOX_ENABLED", "true")
+        mock_cls, sandbox = _make_mock_sandbox_cls()
+        _, patches = _osb_patches(mock_cls)
+
+        with patch.dict(sys.modules, patches):
+            ex = _make_executor(tmp_path)
+            await ex.execute(
+                call=ToolCall(
+                    call_id="1",
+                    name="run_command",
+                    args={"argv": ["echo", "hello"]},
+                ),
+                ctx=_ctx(),
+            )
+            await ex.aclose()
+            await ex.aclose()  # second call — must be a no-op
+
+        sandbox.kill.assert_called_once()
+
+
+class TestCoreToolExecutorRunCommandWithSandbox:
+    """Verify run_command tool behaviour when sandbox executor is active."""
+
+    @pytest.mark.asyncio
+    async def test_sandbox_run_command_success_returns_ok_true(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("SANDBOX_ENABLED", "true")
+        stdout_entry = MagicMock()
+        stdout_entry.text = "hello"
+        mock_execution = MagicMock(
+            exit_code=0,
+            logs=MagicMock(stdout=[stdout_entry], stderr=[]),
+        )
+        sandbox = MagicMock()
+        sandbox.id = "s1"
+        sandbox.commands.run = AsyncMock(return_value=mock_execution)
+        sandbox.kill = AsyncMock()
+        mock_cls = MagicMock()
+        mock_cls.create = AsyncMock(return_value=sandbox)
+        _, patches = _osb_patches(mock_cls)
+
+        with patch.dict(sys.modules, patches):
+            ex = _make_executor(tmp_path)
+            out, err = await ex.execute(
+                call=ToolCall(
+                    call_id="1",
+                    name="run_command",
+                    args={"argv": ["echo", "hello"]},
+                ),
+                ctx=_ctx(),
+            )
+
+        assert err is None
+        payload = json.loads(out)
+        assert payload["ok"] is True
+        assert "hello" in payload["stdout"]
+
+    @pytest.mark.asyncio
+    async def test_sandbox_blocked_command_returns_error_envelope(
+        self, tmp_path, monkeypatch
+    ):
+        # A blocked command must return a tool error envelope, NOT raise an
+        # uncaught exception into the loop. Regression guard for the security
+        # error -> error envelope path.
+        monkeypatch.setenv("SANDBOX_ENABLED", "true")
+        mock_cls = MagicMock()
+        mock_cls.create = AsyncMock()  # should never be called
+        _, patches = _osb_patches(mock_cls)
+
+        with patch.dict(sys.modules, patches):
+            ex = _make_executor(tmp_path)
+            out, err = await ex.execute(
+                call=ToolCall(
+                    call_id="1",
+                    name="run_command",
+                    args={"argv": ["rm", "-rf", "/"]},
+                ),
+                ctx=_ctx(),
+            )
+
+        # Must be an error envelope, not a successful result
+        assert out is None
+        assert err is not None
+        payload = json.loads(err)
+        assert payload.get("ok") is False or "error" in payload or "denied" in str(payload).lower()
+        mock_cls.create.assert_not_called()
