@@ -1,4 +1,4 @@
-"""Unit tests for monkeybot.core.loop."""
+"""Unit tests for monkeybot.core.runtime.loop."""
 
 from __future__ import annotations
 
@@ -10,9 +10,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from monkeybot.core.content_blocks import Text, ToolRequest, ToolResponse
+from monkeybot.core.types.content_blocks import Text, ToolRequest, ToolResponse
 from monkeybot.core.context import TurnContext
-from monkeybot.core.events import (
+from monkeybot.core.runtime.events import (
     AssistantDelta,
     ContextSummarized,
     ContextSummarizing,
@@ -22,10 +22,10 @@ from monkeybot.core.events import (
     ToolCallResult,
     TurnComplete,
 )
-from monkeybot.core.inspector import Decision
-from monkeybot.core.loop import _chunk_tool_calls, run
-from monkeybot.core.provider import Done, Message, ProviderEvent, TextDelta, ToolCall, UsageEvent
-from monkeybot.core.types_tools import ToolDef
+from monkeybot.core.tools.inspector import Decision
+from monkeybot.core.runtime.loop import _chunk_tool_calls, run
+from monkeybot.core.llm.provider import Done, Message, ProviderEvent, TextDelta, ToolCall, UsageEvent
+from monkeybot.core.types.types_tools import ToolDef
 
 
 def _flatten_text_from_message(m: Message) -> str:

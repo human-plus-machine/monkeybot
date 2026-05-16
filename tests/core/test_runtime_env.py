@@ -1,4 +1,4 @@
-"""Tests for ``monkeybot.core.runtime_env``."""
+"""Tests for ``monkeybot.core.config.runtime_env``."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from monkeybot.core import runtime_env
+from monkeybot.core.config import runtime_env
 
 
 @pytest.fixture(autouse=True)

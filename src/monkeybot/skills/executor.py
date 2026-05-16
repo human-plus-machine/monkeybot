@@ -8,8 +8,8 @@ Terminal Executor with proper security validation.
 import logging
 from typing import Dict, Any, List
 
-from monkeybot.core.interfaces import SkillsEngineInterface, SkillResult
-from monkeybot.core.terminal import TerminalExecutor, SecurityError
+from monkeybot.core.types.interfaces import SkillsEngineInterface, SkillResult
+from monkeybot.core.tools.terminal import TerminalExecutor, SecurityError
 from monkeybot.skills.loader import SkillLoader
 
 logger = logging.getLogger(__name__)

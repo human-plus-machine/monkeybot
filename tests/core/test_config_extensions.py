@@ -5,6 +5,7 @@ import os
 import pytest
 
 import monkeybot.core.config as config_mod
+import monkeybot.core.config.settings as config_state
 from monkeybot.core.config import (
     CONFIG_MAPPING,
     ConfigError,
@@ -25,10 +26,10 @@ class TestConfigMappingBasics:
         monkeypatch.chdir(tmp_path)
         # bot.yaml only applies when env does not already set the key; clear leaked shell env.
         monkeypatch.delenv("MODEL_PROVIDER", raising=False)
-        config_mod._config_loaded = False
+        config_state._config_loaded = False
         load_bot_config()
         assert os.environ.get("AGENT_NAME") == "test"
-        config_mod._config_loaded = False
+        config_state._config_loaded = False
 
 
 class TestVertexAnthropicProvider:
@@ -44,7 +45,7 @@ class TestVertexAnthropicProvider:
 
         mock_instance = MagicMock()
         with patch(
-            "monkeybot.core.config.VertexClaudeProvider",
+            "monkeybot.core.config.settings.VertexClaudeProvider",
             return_value=mock_instance,
         ) as mock_cls:
             cfg = get_provider_config(
@@ -79,7 +80,7 @@ class TestVertexAnthropicProvider:
 
         mock_instance = MagicMock()
         with patch(
-            "monkeybot.core.config.VertexClaudeProvider",
+            "monkeybot.core.config.settings.VertexClaudeProvider",
             return_value=mock_instance,
         ) as mock_cls:
             get_provider_config(
@@ -197,27 +198,27 @@ class TestSubagentConfig:
 class TestGetSubagentConfigs:
     def setup_method(self):
         """Reset module-level state before each test."""
-        config_mod._raw_yaml = None
-        config_mod._config_loaded = False
+        config_state._raw_yaml = None
+        config_state._config_loaded = False
 
     def teardown_method(self):
-        config_mod._raw_yaml = None
-        config_mod._config_loaded = False
+        config_state._raw_yaml = None
+        config_state._config_loaded = False
 
     def test_returns_empty_list_when_raw_yaml_is_none(self):
-        config_mod._raw_yaml = None
+        config_state._raw_yaml = None
         assert get_subagent_configs() == []
 
     def test_returns_empty_list_when_no_subagents_key(self):
-        config_mod._raw_yaml = {"agent": {"name": "test"}}
+        config_state._raw_yaml = {"agent": {"name": "test"}}
         assert get_subagent_configs() == []
 
     def test_returns_empty_list_when_subagents_is_empty_list(self):
-        config_mod._raw_yaml = {"subagents": []}
+        config_state._raw_yaml = {"subagents": []}
         assert get_subagent_configs() == []
 
     def test_parses_single_subagent(self):
-        config_mod._raw_yaml = {
+        config_state._raw_yaml = {
             "subagents": [
                 {
                     "name": "content-intel",
@@ -236,7 +237,7 @@ class TestGetSubagentConfigs:
         assert configs[0].vertex_location is None
 
     def test_parses_multiple_subagents(self):
-        config_mod._raw_yaml = {
+        config_state._raw_yaml = {
             "subagents": [
                 {"name": "agent-a", "description": "A.", "skills": []},
                 {"name": "agent-b", "description": "B.", "skills": ["./skills/b/"]},
@@ -248,7 +249,7 @@ class TestGetSubagentConfigs:
         assert configs[1].name == "agent-b"
 
     def test_with_prompt_file_and_model(self):
-        config_mod._raw_yaml = {
+        config_state._raw_yaml = {
             "subagents": [
                 {
                     "name": "analytics",
@@ -264,7 +265,7 @@ class TestGetSubagentConfigs:
         assert cfg.model == "gemini-2.0-flash"
 
     def test_with_multiple_skills_dirs(self):
-        config_mod._raw_yaml = {
+        config_state._raw_yaml = {
             "subagents": [
                 {
                     "name": "writer",
@@ -277,7 +278,7 @@ class TestGetSubagentConfigs:
         assert cfg.skills == ["./skills/base/", "./skills/content-creation/"]
 
     def test_skips_entry_missing_name(self):
-        config_mod._raw_yaml = {
+        config_state._raw_yaml = {
             "subagents": [
                 {"description": "No name field.", "skills": []},
                 {"name": "valid", "description": "Valid entry.", "skills": []},
@@ -288,7 +289,7 @@ class TestGetSubagentConfigs:
         assert configs[0].name == "valid"
 
     def test_skips_entry_missing_description(self):
-        config_mod._raw_yaml = {
+        config_state._raw_yaml = {
             "subagents": [
                 {"name": "no-desc", "skills": []},
                 {"name": "valid", "description": "Valid.", "skills": []},
@@ -299,7 +300,7 @@ class TestGetSubagentConfigs:
         assert configs[0].name == "valid"
 
     def test_skips_non_dict_entry(self):
-        config_mod._raw_yaml = {
+        config_state._raw_yaml = {
             "subagents": [
                 "not-a-dict",
                 {"name": "valid", "description": "Valid.", "skills": []},
@@ -309,14 +310,14 @@ class TestGetSubagentConfigs:
         assert len(configs) == 1
 
     def test_skills_defaults_to_empty_list_when_absent(self):
-        config_mod._raw_yaml = {
+        config_state._raw_yaml = {
             "subagents": [{"name": "sa", "description": "desc."}]
         }
         cfg = get_subagent_configs()[0]
         assert cfg.skills == []
 
     def test_parses_vertex_location_alias(self):
-        config_mod._raw_yaml = {
+        config_state._raw_yaml = {
             "subagents": [
                 {
                     "name": "analytics",
@@ -330,7 +331,7 @@ class TestGetSubagentConfigs:
         assert cfg.vertex_location == "us-east5"
 
     def test_parses_location_shorthand(self):
-        config_mod._raw_yaml = {
+        config_state._raw_yaml = {
             "subagents": [
                 {
                     "name": "writer",
@@ -344,7 +345,7 @@ class TestGetSubagentConfigs:
         assert cfg.vertex_location == "us-central1"
 
     def test_vertex_location_wins_over_location_when_both_set(self):
-        config_mod._raw_yaml = {
+        config_state._raw_yaml = {
             "subagents": [
                 {
                     "name": "sa",
@@ -370,8 +371,8 @@ class TestGetSubagentConfigs:
             "      - ./skills/content-intelligence/\n"
         )
         monkeypatch.chdir(tmp_path)
-        config_mod._config_loaded = False
-        config_mod._raw_yaml = None
+        config_state._config_loaded = False
+        config_state._raw_yaml = None
 
         load_bot_config()
         configs = get_subagent_configs()
@@ -380,8 +381,8 @@ class TestGetSubagentConfigs:
         assert configs[0].name == "content-intel"
         assert configs[0].skills == ["./skills/content-intelligence/"]
 
-        config_mod._config_loaded = False
-        config_mod._raw_yaml = None
+        config_state._config_loaded = False
+        config_state._raw_yaml = None
 
 class TestSandboxConfigMapping:
     """Verify sandbox.* keys are wired in CONFIG_MAPPING and DEFAULTS."""
@@ -413,7 +414,7 @@ class TestSandboxConfigMapping:
         monkeypatch.chdir(tmp_path)
         for key in ("SANDBOX_ENABLED", "SANDBOX_SERVER_URL", "SANDBOX_IMAGE"):
             monkeypatch.delenv(key, raising=False)
-        config_mod._config_loaded = False
+        config_state._config_loaded = False
 
         load_bot_config()
 
@@ -423,7 +424,7 @@ class TestSandboxConfigMapping:
         assert os.environ.get("SANDBOX_SERVER_URL") == "http://myserver:9090"
         assert os.environ.get("SANDBOX_IMAGE") == "python:3.11"
 
-        config_mod._config_loaded = False
+        config_state._config_loaded = False
 
     def test_bot_yaml_without_sandbox_section_uses_defaults(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch
@@ -436,14 +437,14 @@ class TestSandboxConfigMapping:
         monkeypatch.chdir(tmp_path)
         for key in ("SANDBOX_ENABLED", "SANDBOX_SERVER_URL", "SANDBOX_IMAGE"):
             monkeypatch.delenv(key, raising=False)
-        config_mod._config_loaded = False
+        config_state._config_loaded = False
 
         load_bot_config()
 
         assert os.environ.get("SANDBOX_ENABLED") == "false"
         assert os.environ.get("SANDBOX_SERVER_URL") == "http://localhost:8080"
 
-        config_mod._config_loaded = False
+        config_state._config_loaded = False
 
     def test_existing_env_var_not_overridden_by_bot_yaml(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch
@@ -459,11 +460,11 @@ class TestSandboxConfigMapping:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("SANDBOX_ENABLED", "false")
         monkeypatch.setenv("SANDBOX_SERVER_URL", "http://from-env:9999")
-        config_mod._config_loaded = False
+        config_state._config_loaded = False
 
         load_bot_config()
 
         assert os.environ.get("SANDBOX_ENABLED") == "false"
         assert os.environ.get("SANDBOX_SERVER_URL") == "http://from-env:9999"
 
-        config_mod._config_loaded = False
+        config_state._config_loaded = False

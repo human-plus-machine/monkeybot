@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
-from monkeybot.core.db import apply_schema, open_connection
-from monkeybot.core.durable_runs import DurableRunStore, SubagentEnvelope, SubagentRunRow
+from monkeybot.core.persistence.db import apply_schema, open_connection
+from monkeybot.core.persistence.durable_runs import DurableRunStore, SubagentEnvelope, SubagentRunRow
 
 
 def _repo_root() -> Path:

@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from monkeybot.core.workspace_tools import tool
+from monkeybot.core.tools.workspace_tools import tool
 
 logger = logging.getLogger(__name__)
 

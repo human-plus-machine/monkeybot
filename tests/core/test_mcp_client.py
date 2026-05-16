@@ -1,4 +1,4 @@
-"""Tests for ``monkeybot.core.mcp_client``. Uses injectable hooks; no real ``mcp`` subprocess."""
+"""Tests for ``monkeybot.core.mcp.mcp_client``. Uses injectable hooks; no real ``mcp`` subprocess."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ from types import MethodType, SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from monkeybot.core import mcp_client as mc
-from monkeybot.core.mcp_client import MCPClient, MCPConnectionError
+from monkeybot.core.mcp import mcp_client as mc
+from monkeybot.core.mcp.mcp_client import MCPClient, MCPConnectionError
 
 
 class _SessionACM:
@@ -273,7 +273,7 @@ async def test_load_from_config_logs_and_continues_on_one_bad_server(
 
     hooked.connect = MethodType(patched_connect, hooked)  # type: ignore[method-assign]
 
-    with caplog.at_level(logging.ERROR, logger="monkeybot.core.mcp_client"):
+    with caplog.at_level(logging.ERROR, logger="monkeybot.core.mcp.mcp_client"):
         await hooked.load_from_config(cfg)
 
     assert len(caplog.records) >= 1

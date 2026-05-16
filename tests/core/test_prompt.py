@@ -1,12 +1,12 @@
-"""Tests for :mod:`monkeybot.core.prompt`."""
+"""Tests for :mod:`monkeybot.core.prompts.prompt`."""
 
 import pytest
 
-from monkeybot.core.content_blocks import Text, ToolRequest, ToolResponse
+from monkeybot.core.types.content_blocks import Text, ToolRequest, ToolResponse
 from monkeybot.core.context import SkillRef, TurnContext
-from monkeybot.core.prompt import compose_system_prompt
-from monkeybot.core.provider import Message
-from monkeybot.core.types_tools import ToolDef
+from monkeybot.core.prompts.prompt import compose_system_prompt
+from monkeybot.core.llm.provider import Message
+from monkeybot.core.types.types_tools import ToolDef
 
 
 def _minimal_ctx(

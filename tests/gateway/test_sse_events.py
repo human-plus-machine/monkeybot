@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from monkeybot.core.events import (
+from monkeybot.core.runtime.events import (
     ActionRequiredEvent,
     FrontendToolRequestEvent,
     ImageBlock,

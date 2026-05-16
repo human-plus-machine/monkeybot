@@ -13,7 +13,7 @@ import pytest
 from pathlib import Path
 
 from monkeybot.skills.executor import SkillsEngine
-from monkeybot.core.terminal import TerminalExecutor, SecurityError
+from monkeybot.core.tools.terminal import TerminalExecutor, SecurityError
 
 
 @pytest.fixture

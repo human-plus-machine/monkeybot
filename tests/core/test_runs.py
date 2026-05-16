@@ -1,4 +1,4 @@
-"""Tests for ``monkeybot.core.runs``."""
+"""Tests for ``monkeybot.core.persistence.runs``."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 import pytest
-from monkeybot.core.runs import cleanup_old_runs, create_scratch_dir, make_run_id
+from monkeybot.core.persistence.runs import cleanup_old_runs, create_scratch_dir, make_run_id
 
 
 def test_make_run_id_length_and_charset() -> None:

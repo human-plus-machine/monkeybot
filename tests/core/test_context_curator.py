@@ -1,12 +1,12 @@
-"""Tests for :mod:`monkeybot.core.context_curator`."""
+"""Tests for :mod:`monkeybot.core.context.curator`."""
 
 from __future__ import annotations
 
 import pytest
 from monkeybot.core.context import SkillRef, TurnContext
-from monkeybot.core.context_curator import CuratedPromptParts, run_context_curator
-from monkeybot.core.provider import Done, TextDelta
-from monkeybot.core.types_tools import ToolDef
+from monkeybot.core.context.curator import CuratedPromptParts, run_context_curator
+from monkeybot.core.llm.provider import Done, TextDelta
+from monkeybot.core.types.types_tools import ToolDef
 
 
 class _FakeCuratorProvider:

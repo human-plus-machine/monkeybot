@@ -63,7 +63,7 @@ cp skills/diagnostics/diagnostics.py skills/my-skill/my-skill.py
 ### 2. Modify the @tool Function
 
 ```python
-from monkeybot.core.workspace_tools import tool
+from monkeybot.core.tools.workspace_tools import tool
 
 @tool
 async def my_custom_tool(param1: str, param2: int = 10) -> str:
@@ -108,7 +108,7 @@ print(result)
 ### 1. Using @tool Decorator
 
 ```python
-from monkeybot.core.workspace_tools import tool
+from monkeybot.core.tools.workspace_tools import tool
 
 @tool
 async def my_tool(param: str) -> str:

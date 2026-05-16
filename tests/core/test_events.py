@@ -1,4 +1,4 @@
-"""Tests for :mod:`monkeybot.core.events`."""
+"""Tests for :mod:`monkeybot.core.runtime.events`."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import json
 from typing import Literal, cast
 
 import pytest
-from monkeybot.core.events import (
+from monkeybot.core.runtime.events import (
     ActionRequiredEvent,
     AssistantDelta,
     Error,
@@ -69,7 +69,7 @@ def test_agent_event_roundtrip_error() -> None:
 
 
 def test_agent_event_roundtrip_context_summarizing() -> None:
-    from monkeybot.core.events import ContextSummarizing
+    from monkeybot.core.runtime.events import ContextSummarizing
 
     ev = ContextSummarizing(
         request_id="r1", estimated_tokens=170_000, context_window_tokens=200_000
@@ -78,14 +78,14 @@ def test_agent_event_roundtrip_context_summarizing() -> None:
 
 
 def test_agent_event_roundtrip_context_summarized() -> None:
-    from monkeybot.core.events import ContextSummarized
+    from monkeybot.core.runtime.events import ContextSummarized
 
     ev = ContextSummarized(request_id="r1", turns_summarized=12)
     assert event_from_json(event_to_json(ev)) == ev
 
 
 def test_agent_event_roundtrip_system_prompt_snapshot() -> None:
-    from monkeybot.core.events import SystemPromptSnapshot
+    from monkeybot.core.runtime.events import SystemPromptSnapshot
 
     ev = SystemPromptSnapshot(request_id="r1", inner_turn=2, text="## Agent\n\nHello")
     assert event_from_json(event_to_json(ev)) == ev

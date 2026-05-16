@@ -122,7 +122,7 @@ def bench_cold_start() -> None:
         record("monkeybot --help (uv)", cli_ms, limit_ms=5000, note="includes uv startup")
 
     # 1c. Submodule import: core only
-    core_code = "from monkeybot.core.loop import AgentLoop"
+    core_code = "from monkeybot.core.runtime.loop import AgentLoop"
     start = time.monotonic()
     subprocess.run(
         [sys.executable, "-c", core_code],
@@ -151,12 +151,12 @@ async def bench_harness() -> None:
     section("2. HARNESS OVERHEAD (fake provider, no LLM)")
 
     from monkeybot.core.context import TurnContext
-    from monkeybot.core.db import apply_schema, open_connection
-    from monkeybot.core.events import AssistantDelta, TurnComplete
-    from monkeybot.core.history import ConversationHistory
-    from monkeybot.core.loop import run
-    from monkeybot.core.provider import Done, TextDelta, UsageEvent
-    from monkeybot.core.types_tools import ToolDef
+    from monkeybot.core.persistence.db import apply_schema, open_connection
+    from monkeybot.core.runtime.events import AssistantDelta, TurnComplete
+    from monkeybot.core.persistence.history import ConversationHistory
+    from monkeybot.core.runtime.loop import run
+    from monkeybot.core.llm.provider import Done, TextDelta, UsageEvent
+    from monkeybot.core.types.types_tools import ToolDef
 
     class FakeProvider:
         name = "fake"
@@ -300,9 +300,9 @@ async def bench_memory() -> None:
 async def bench_history() -> None:
     section("4. CONVERSATION HISTORY (SQLite)")
 
-    from monkeybot.core.db import apply_schema, open_connection
-    from monkeybot.core.history import ConversationHistory
-    from monkeybot.core.provider import Message
+    from monkeybot.core.persistence.db import apply_schema, open_connection
+    from monkeybot.core.persistence.history import ConversationHistory
+    from monkeybot.core.llm.provider import Message
 
     import tempfile
 
@@ -374,10 +374,10 @@ async def bench_live() -> None:
         return
 
     from monkeybot.core.context import TurnContext
-    from monkeybot.core.db import apply_schema, open_connection
-    from monkeybot.core.events import AssistantDelta, Error, TurnComplete
-    from monkeybot.core.history import ConversationHistory
-    from monkeybot.core.loop import run
+    from monkeybot.core.persistence.db import apply_schema, open_connection
+    from monkeybot.core.runtime.events import AssistantDelta, Error, TurnComplete
+    from monkeybot.core.persistence.history import ConversationHistory
+    from monkeybot.core.runtime.loop import run
 
     class NoopExecutor:
         async def execute(self, *, call: Any, ctx: Any) -> tuple[str | None, str | None]:

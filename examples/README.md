@@ -11,7 +11,7 @@ Example skills demonstrating the skill pattern:
 #### [Diagnostics Skill](skills/diagnostics/)
 
 A complete reference implementation showing:
-- Using the lightweight ``@tool`` decorator from ``monkeybot.core.workspace_tools``
+- Using the lightweight ``@tool`` decorator from ``monkeybot.core.tools.workspace_tools``
 - Async execution patterns
 - Structured output (JSON)
 - Environment variable checks

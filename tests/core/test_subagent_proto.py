@@ -1,4 +1,4 @@
-"""Unit tests for monkeybot.core.subagent_proto."""
+"""Unit tests for monkeybot.core.subagents.subagent_proto."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
-from monkeybot.core.events import AssistantDelta, Error, Thinking, event_to_json
-from monkeybot.core.subagent_proto import SubagentEnvelope, spawn_subagent
+from monkeybot.core.runtime.events import AssistantDelta, Error, Thinking, event_to_json
+from monkeybot.core.subagents.subagent_proto import SubagentEnvelope, spawn_subagent
 
 
 class FakeStdin:

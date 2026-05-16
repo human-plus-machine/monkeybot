@@ -3,7 +3,7 @@
 Usage
 -----
 Call :func:`build_backend` once at startup (reads env vars).  Pass the
-returned backend to :class:`~monkeybot.core.core_tool_executor.CoreToolExecutor`
+returned backend to :class:`~monkeybot.core.tools.core_tool_executor.CoreToolExecutor`
 via ``extra_tools``.  ``None`` means web search is disabled.
 
 Bring-your-own backend

@@ -6,7 +6,7 @@ import json
 from dataclasses import fields as dc_fields
 from typing import Any, cast
 
-from monkeybot.core.events import AgentEvent
+from monkeybot.core.runtime.events import AgentEvent
 
 
 def format_data_event(seq: int, data: str) -> str:

@@ -1,4 +1,4 @@
-"""Tests for HookManager integration in :mod:`monkeybot.core.loop`.
+"""Tests for HookManager integration in :mod:`monkeybot.core.runtime.loop`.
 
 Verifies that:
 
@@ -17,14 +17,14 @@ from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 import pytest
-from monkeybot.core.content_blocks import Text, ToolResponse
+from monkeybot.core.types.content_blocks import Text, ToolResponse
 from monkeybot.core.context import TurnContext
-from monkeybot.core.events import SystemPromptSnapshot
+from monkeybot.core.runtime.events import SystemPromptSnapshot
 from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
-from monkeybot.core.inspector import Decision
-from monkeybot.core.loop import run
-from monkeybot.core.provider import Done, Message, ProviderEvent, TextDelta, ToolCall, UsageEvent
-from monkeybot.core.types_tools import ToolDef
+from monkeybot.core.tools.inspector import Decision
+from monkeybot.core.runtime.loop import run
+from monkeybot.core.llm.provider import Done, Message, ProviderEvent, TextDelta, ToolCall, UsageEvent
+from monkeybot.core.types.types_tools import ToolDef
 
 
 def _ctx() -> TurnContext:

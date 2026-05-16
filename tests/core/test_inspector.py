@@ -6,7 +6,7 @@ import pytest
 import yaml
 
 from monkeybot.core.context import TurnContext
-from monkeybot.core.inspector import (
+from monkeybot.core.tools.inspector import (
     CommandTierConfigError,
     CommandTierInspector,
     Decision,
@@ -129,7 +129,7 @@ def test_decision_confirm_variant_constructible() -> None:
 
 
 def test_load_policy_omitted_allowlists_use_terminal_defaults(tmp_path: Path) -> None:
-    from monkeybot.core.terminal import ALLOWED_COMMANDS, ALLOWED_PATHS
+    from monkeybot.core.tools.terminal import ALLOWED_COMMANDS, ALLOWED_PATHS
 
     path = tmp_path / "t.yaml"
     path.write_text("deny_patterns: []\n", encoding="utf-8")

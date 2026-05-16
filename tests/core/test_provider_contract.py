@@ -10,13 +10,13 @@ import sys
 from pathlib import Path
 
 import pytest
-from monkeybot.core.content_blocks import Text
-from monkeybot.core.interfaces import LLMError
-from monkeybot.core.mocks_provider import ScriptedFakeProvider
-from monkeybot.core.provider import Done, Message, ProviderEvent, TextDelta
-from monkeybot.core.providers import gemini as gemini_mod
-from monkeybot.core.providers.gemini import GeminiProvider
-from monkeybot.core.types_tools import ToolDef
+from monkeybot.core.types.content_blocks import Text
+from monkeybot.core.types.interfaces import LLMError
+from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
+from monkeybot.core.llm.provider import Done, Message, ProviderEvent, TextDelta
+from monkeybot.providers import gemini as gemini_mod
+from monkeybot.providers.gemini import GeminiProvider
+from monkeybot.core.types.types_tools import ToolDef
 
 
 async def _collect_fake(scripted: ScriptedFakeProvider) -> list[ProviderEvent]:
@@ -67,7 +67,7 @@ _monkeybot = importlib.util.module_from_spec(_spec)
 sys.modules["monkeybot"] = _monkeybot
 _spec.loader.exec_module(_monkeybot)
 
-import monkeybot.core.providers.gemini  # noqa: E402 — after manual package bootstrap
+import monkeybot.providers.gemini  # noqa: E402 — after manual package bootstrap
 
 assert "google.genai" not in sys.modules
 assert "google.generativeai" not in sys.modules

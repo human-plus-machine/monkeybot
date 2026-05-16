@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 
-from monkeybot.core.content_blocks import Text, ToolRequest, ToolResponse
-from monkeybot.core.provider import Message
+from monkeybot.core.types.content_blocks import Text, ToolRequest, ToolResponse
+from monkeybot.core.llm.provider import Message
 from monkeybot.providers.openai import _messages_to_openai
 
 from tests.providers.conftest import typed_messages_four_turn, typed_messages_turn_2b_tool_only

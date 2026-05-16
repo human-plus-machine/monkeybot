@@ -11,10 +11,10 @@ from typing import Any, cast
 import pytest
 import pytest_asyncio
 
-from monkeybot.core.content_blocks import Text, ToolRequest, ToolResponse
-from monkeybot.core.db import SCHEMA_DDLS, apply_schema, open_connection, sqlite_path_from_db_url
-from monkeybot.core.history import ConversationHistory
-from monkeybot.core.provider import Message
+from monkeybot.core.types.content_blocks import Text, ToolRequest, ToolResponse
+from monkeybot.core.persistence.db import SCHEMA_DDLS, apply_schema, open_connection, sqlite_path_from_db_url
+from monkeybot.core.persistence.history import ConversationHistory
+from monkeybot.core.llm.provider import Message
 
 # Legacy ChatMessage + tool_* columns removed in story-2-persistence; see design 1B §7.8.
 
@@ -231,7 +231,7 @@ async def test_history_load_malformed_json_logs_and_raises(history_db, caplog: p
         (thread_id, "user", "not-json", 1),
     )
     await conn.commit()
-    with caplog.at_level(logging.ERROR, logger="monkeybot.core.history"):
+    with caplog.at_level(logging.ERROR, logger="monkeybot.core.persistence.history"):
         with pytest.raises(ValueError, match=r"history row \d+ unparseable"):
             await history.load(thread_id)
     joined = " ".join(r.getMessage() for r in caplog.records)
@@ -312,10 +312,10 @@ async def test_history_append_load_ordering_limit_clear_reset(history_db) -> Non
 def test_sqlite_persistence_source_has_no_google_cloud() -> None:
     root = _repo_root()
     paths = [
-        root / "src/monkeybot/core/db.py",
-        root / "src/monkeybot/core/history.py",
-        root / "src/monkeybot/core/durable_runs.py",
-        root / "src/monkeybot/core/usage.py",
+        root / "src/monkeybot/core/persistence/db.py",
+        root / "src/monkeybot/core/persistence/history.py",
+        root / "src/monkeybot/core/persistence/durable_runs.py",
+        root / "src/monkeybot/core/llm/usage.py",
     ]
     for path in paths:
         text = path.read_text(encoding="utf-8")
@@ -326,7 +326,7 @@ def test_sqlite_persistence_source_has_no_google_cloud() -> None:
 def test_importing_db_does_not_import_google_cloud() -> None:
     """Load ``db.py`` in isolation so package ``__init__`` side effects are avoided."""
     root = _repo_root()
-    db_path = root / "src/monkeybot/core/db.py"
+    db_path = root / "src/monkeybot/core/persistence/db.py"
     before = {k for k in sys.modules if k.startswith("google.cloud")}
     module_name = "_monkeybot_sqlite_db_standalone_test"
     spec = importlib.util.spec_from_file_location(module_name, db_path)

@@ -4,12 +4,12 @@ from __future__ import annotations
 import pytest
 from pathlib import Path
 
-from monkeybot.core.memory_organizer import (
+from monkeybot.core.memory.organizer import (
     MemoryOrganizer,
     BUILT_IN_FOLDERS,
     IndexEntry,
 )
-from monkeybot.core.provider import Done, TextDelta, UsageEvent
+from monkeybot.core.llm.provider import Done, TextDelta, UsageEvent
 
 
 class FakeProvider:

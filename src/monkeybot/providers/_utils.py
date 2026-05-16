@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from monkeybot.core.content_blocks import (
+from monkeybot.core.types.content_blocks import (
     ContentBlock,
     Image,
     RedactedThinking,
@@ -14,7 +14,7 @@ from monkeybot.core.content_blocks import (
     ToolRequest,
     ToolResponse,
 )
-from monkeybot.core.provider import Message
+from monkeybot.core.llm.provider import Message
 
 
 def estimate_cost(

@@ -20,7 +20,7 @@ from starlette.testclient import TestClient
 from monkeybot.gateway.sse.routes import create_app
 from monkeybot.gateway.sse.session_bus import SessionRegistry
 from monkeybot.gateway.sse.sse import agent_event_to_wire_dict, json_dumps_wire
-from monkeybot.core.events import AssistantDelta, Thinking, TurnComplete, UsageTotals
+from monkeybot.core.runtime.events import AssistantDelta, Thinking, TurnComplete, UsageTotals
 
 
 class FakeLoopPort:

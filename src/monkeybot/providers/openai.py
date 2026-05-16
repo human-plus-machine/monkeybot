@@ -8,14 +8,14 @@ import os
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
-from monkeybot.core.content_blocks import ContentBlock, Text, ToolRequest, ToolResponse
-from monkeybot.core.provider import (
+from monkeybot.core.types.content_blocks import ContentBlock, Text, ToolRequest, ToolResponse
+from monkeybot.core.types.types_tools import ToolDef
+from monkeybot.core.llm.provider import (
     Done,
     Message,
     ProviderEvent,
     TextDelta,
     ToolCall,
-    ToolDef,
     UsageEvent,
 )
 

@@ -10,19 +10,19 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 - **FastAPI SSE gateway** (`monkeybot.gateway.sse`) — `POST /sessions`,
   `GET /sessions/{id}/events` (SSE stream with `Last-Event-ID` resume),
   `POST /sessions/{id}/reply`, `GET /health`. SQLite-backed session bus.
-- **Owned agent loop** (`monkeybot.core.loop`) with streaming provider integration,
+- **Owned agent loop** (`monkeybot.core.runtime.loop`) with streaming provider integration,
   tool execution, history append, and inspector hooks. Per-turn usage recorded.
-- **Harness fixed prompt** (`monkeybot.core.harness_prompt`) — non-overridable
+- **Harness fixed prompt** (`monkeybot.core.prompts.harness_prompt`) — non-overridable
   system block describing tool names, paths, MCP naming, and skill usage,
   appended after the bot's `AGENT.md`.
 - **Memory** (`monkeybot.core.memory`) — markdown files under `MEMORY_PATH`
   with optional `INDEX.md` snapshotted into context; `search_memory` for
   on-demand lookup; mid-turn refresh via `refresh_memory_index()` in
   `monkeybot.core.context`.
-- **Memory organizer** (`monkeybot.core.memory_organizer`) — async
+- **Memory organizer** (`monkeybot.core.memory.organizer`) — async
   post-turn classifier that updates `INDEX.md` and routes new entries to the
   right markdown file.
-- **Context curator** (`monkeybot.core.context_curator`) — optional secondary
+- **Context curator** (`monkeybot.core.context.curator`) — optional secondary
   LLM pass that narrows skills + memory snippets injected into the system
   prompt; main-loop only, never runs in subagents. Configured via
   `CONTEXT_CURATION_*` env vars.
@@ -42,7 +42,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
   read/write/edit/find under a configurable workspace scope; paths under
   `.monkeybot` bypass `WORKSPACE_WRITE_SCOPE_REL` so spill and harness files
   remain writable.
-- **Provider adapters** — Vertex / Gemini (`core/providers/gemini.py`),
+- **Provider adapters** — Vertex / Gemini (`providers/gemini.py`),
   OpenAI (`providers/openai.py`), Anthropic (`providers/claude.py`),
   Anthropic-on-Vertex (`providers/vertex_claude.py`). Resolved via
   `monkeybot.core.config.get_provider_config()` returning a `ProviderConfig`.

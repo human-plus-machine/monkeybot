@@ -1,4 +1,4 @@
-"""Tests for :mod:`monkeybot.core.memory_hook`."""
+"""Tests for :mod:`monkeybot.core.memory.hook`."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 from monkeybot.core.context import TurnContext
 from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
-from monkeybot.core.memory_hook import MemoryHook
+from monkeybot.core.memory.hook import MemoryHook
 
 
 def _ctx() -> TurnContext:

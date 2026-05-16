@@ -10,9 +10,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from monkeybot.core.context import CustomTool, build_context
-from monkeybot.core.core_tool_executor import CoreToolExecutor
-from monkeybot.core.provider import ToolCall
-from monkeybot.core.types_tools import ToolDef
+from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
+from monkeybot.core.llm.provider import ToolCall
+from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.web_search import build_backend
 from monkeybot.web_search.protocol import SearchResult
 from monkeybot.web_search.tool import WebSearchTool

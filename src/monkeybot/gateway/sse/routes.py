@@ -16,8 +16,8 @@ from fastapi import APIRouter, Depends, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from monkeybot.core.content_blocks import ContentBlock
-from monkeybot.core.workspace_service import WorkspaceError, WorkspaceFileService
+from monkeybot.core.types.content_blocks import ContentBlock
+from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService
 
 from .loop_port import LoopPort, UsagePort
 from .models import (

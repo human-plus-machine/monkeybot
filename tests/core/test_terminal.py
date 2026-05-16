@@ -16,7 +16,7 @@ import asyncio
 import pytest
 from pathlib import Path
 
-from monkeybot.core.terminal import (
+from monkeybot.core.tools.terminal import (
     TerminalExecutor,
     ExecutionResult,
     SecurityError,

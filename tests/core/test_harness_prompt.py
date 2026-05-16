@@ -1,6 +1,6 @@
 """Tests for the runtime harness prompt fragment."""
 
-from monkeybot.core.harness_prompt import HARNESS_TOOL_CALL_PROTOCOL, harness_fixed_context
+from monkeybot.core.prompts.harness_prompt import HARNESS_TOOL_CALL_PROTOCOL, harness_fixed_context
 
 
 def test_harness_includes_core_tools_and_protocol() -> None:

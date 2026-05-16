@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from monkeybot.core.content_blocks import Text, ToolRequest, ToolResponse
-from monkeybot.core.provider import Message
-from monkeybot.core.types_tools import ToolDef
+from monkeybot.core.types.content_blocks import Text, ToolRequest, ToolResponse
+from monkeybot.core.llm.provider import Message
+from monkeybot.core.types.types_tools import ToolDef
 
 CANONICAL_TOOL_DEFS: tuple[ToolDef, ...] = (
     ToolDef(

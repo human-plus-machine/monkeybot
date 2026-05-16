@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 
-from monkeybot.core.types_tools import ToolDef
+from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.web_search.protocol import WebSearchBackend
 
 _WEB_SEARCH_SCHEMA: dict[str, object] = {

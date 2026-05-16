@@ -8,7 +8,7 @@ import os
 import sqlite3
 import sys
 
-from monkeybot.core.db import (
+from monkeybot.core.persistence.db import (
     _LEGACY_SCHEMA_MESSAGE,
     SCHEMA_DDLS,
     sqlite_path_from_db_url,

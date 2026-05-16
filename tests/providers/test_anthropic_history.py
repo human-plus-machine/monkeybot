@@ -7,8 +7,8 @@ from typing import cast
 import pytest
 from types import SimpleNamespace
 
-from monkeybot.core.content_blocks import Text, Thinking, ToolRequest, ToolResponse
-from monkeybot.core.provider import Message
+from monkeybot.core.types.content_blocks import Text, Thinking, ToolRequest, ToolResponse
+from monkeybot.core.llm.provider import Message
 from monkeybot.providers._utils import build_anthropic_messages
 
 

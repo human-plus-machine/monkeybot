@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from monkeybot.core.content_blocks import (
+from monkeybot.core.types.content_blocks import (
     ActionRequired,
     ContentBlock,
     ElicitationAction,
@@ -27,7 +27,7 @@ from monkeybot.core.content_blocks import (
     ToolRequest,
     ToolResponse,
 )
-from monkeybot.core.provider import Message
+from monkeybot.core.llm.provider import Message
 
 
 def test_text_roundtrip() -> None:

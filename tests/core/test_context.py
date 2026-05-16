@@ -6,11 +6,11 @@ from pathlib import Path
 
 import pytest
 from monkeybot.core.context import build_context, refresh_memory_index
-from monkeybot.core.types_tools import ToolDef
+from monkeybot.core.types.types_tools import ToolDef
 
 
 class FakeMCPClient:
-    """Test double implementing :class:`~monkeybot.core.ports_mcp.MCPClientPort`."""
+    """Test double implementing :class:`~monkeybot.core.mcp.ports_mcp.MCPClientPort`."""
 
     def __init__(self, tools: list[ToolDef]) -> None:
         self._tools = tools

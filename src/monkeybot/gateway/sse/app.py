@@ -1,6 +1,6 @@
 """Production FastAPI application wiring for the SSE gateway (Story 8).
 
-Bootstraps SQLite, MCP, command tiers, and a real :func:`monkeybot.core.loop.run` driver;
+Bootstraps SQLite, MCP, command tiers, and a real :func:`monkeybot.core.runtime.loop.run` driver;
 exposes module-level ``app`` for ``uvicorn monkeybot.gateway.sse.app:app``.
 """
 
@@ -21,19 +21,19 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import monkeybot.gateway.load_env  # noqa: F401 — side effect: dotenv + monkeybot.yaml
 from monkeybot.core.context import build_context
-from monkeybot.core.core_tool_executor import CoreToolExecutor
-from monkeybot.core.db import apply_schema, open_connection
-from monkeybot.core.events import Error as AgentError
-from monkeybot.core.events import TurnComplete, UsageTotals, event_to_json
-from monkeybot.core.history import ConversationHistory
+from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
+from monkeybot.core.persistence.db import apply_schema, open_connection
+from monkeybot.core.runtime.events import Error as AgentError
+from monkeybot.core.runtime.events import TurnComplete, UsageTotals, event_to_json
+from monkeybot.core.persistence.history import ConversationHistory
 from monkeybot.core.hooks import HookManager
-from monkeybot.core.inspector import CommandTierInspector, RulesInspector, ToolInspector
-from monkeybot.core.loop import run as run_loop
-from monkeybot.core.mcp_client import MCPClient
-from monkeybot.core.memory_hook import MemoryHook
-from monkeybot.core.memory_organizer import MemoryOrganizer
-from monkeybot.core.mocks_provider import ScriptedFakeProvider
-from monkeybot.core.provider import (
+from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector, ToolInspector
+from monkeybot.core.runtime.loop import run as run_loop
+from monkeybot.core.mcp.mcp_client import MCPClient
+from monkeybot.core.memory.hook import MemoryHook
+from monkeybot.core.memory.organizer import MemoryOrganizer
+from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
+from monkeybot.core.llm.provider import (
     Done,
     Message,
     Provider,
@@ -42,9 +42,9 @@ from monkeybot.core.provider import (
     ToolCall,
     UsageEvent,
 )
-from monkeybot.core.providers.gemini import GeminiProvider
-from monkeybot.core.usage import Usage as UsageRecord
-from monkeybot.core.usage import UsageStore
+from monkeybot.providers.gemini import GeminiProvider
+from monkeybot.core.llm.usage import Usage as UsageRecord
+from monkeybot.core.llm.usage import UsageStore
 from monkeybot.gateway.sse.loop_port import UsagePort
 from monkeybot.gateway.sse.routes import create_app as build_sse_app
 from monkeybot.gateway.sse.session_bus import SessionBus, SessionRegistry
@@ -263,7 +263,7 @@ def _resolve_curator_provider(main_provider: Provider) -> Provider:
 
 
 class GatewayLoopPort:
-    """Schedules :func:`~monkeybot.core.loop.run` and forwards events to the session bus."""
+    """Schedules :func:`~monkeybot.core.runtime.loop.run` and forwards events to the session bus."""
 
     def __init__(self, registry: SessionRegistry) -> None:
         self._registry = registry

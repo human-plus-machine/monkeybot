@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 import pytest_asyncio
-from monkeybot.core.db import apply_schema, open_connection
-from monkeybot.core.usage import Usage, UsageStore, UsageSummary
+from monkeybot.core.persistence.db import apply_schema, open_connection
+from monkeybot.core.llm.usage import Usage, UsageStore, UsageSummary
 
 
 async def _apply_schema(conn) -> None:

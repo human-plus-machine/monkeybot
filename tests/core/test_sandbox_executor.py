@@ -20,8 +20,8 @@ from unittest.mock import AsyncMock, MagicMock, patch, call
 
 import pytest
 
-from monkeybot.core.sandbox_executor import SandboxConfig, SandboxExecutor
-from monkeybot.core.terminal import ExecutionResult, SecurityError
+from monkeybot.core.tools.sandbox_executor import SandboxConfig, SandboxExecutor
+from monkeybot.core.tools.terminal import ExecutionResult, SecurityError
 
 
 # ---------------------------------------------------------------------------

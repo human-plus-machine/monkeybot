@@ -164,7 +164,7 @@ See `deploy.sh --help`-style options at the top of the script. The script builds
            ▼
 ┌──────────────────────┐
 │  Agent loop          │
-│  (monkeybot.core.loop)  │
+│  (monkeybot.core.runtime.loop)  │
 │  ─────────────────── │
 │  Provider stream     │
 │  Tool calls + exec   │
@@ -189,13 +189,12 @@ See `deploy.sh --help`-style options at the top of the script. The script builds
 monkey-bot/
 ├── src/monkeybot/
 │   ├── core/                    # Agent loop, context, history, memory, MCP,
-│   │   │                        #   subagents, tools, hooks, usage, prompt
-│   │   └── providers/gemini.py  # Native Vertex / google-genai adapter
+│   │   │                        #   llm (protocol + usage), subagents, tools, hooks, prompt
 │   ├── gateway/
 │   │   ├── main.py              # Uvicorn entry (PORT env)
 │   │   └── sse/                 # FastAPI SSE app: app, routes, session_bus
 │   ├── cli/                     # init_config scaffold (monkeybot-init-config)
-│   ├── providers/               # OpenAI, Anthropic, Vertex-Anthropic adapters
+│   ├── providers/               # LLM adapters: Gemini (Vertex), OpenAI, Anthropic, …
 │   └── skills/                  # Skill loader / executor utilities
 ├── bots/example-bot/            # Reference bot: MEMORY.md, config.yaml
 ├── monkeybot_config/            # monkeybot.yaml, monkeybot.example.yaml, AGENT.md, mcp.json, …
