@@ -30,10 +30,13 @@ logger = logging.getLogger(__name__)
 ALLOWED_COMMANDS = [
     "cat",      # Read file contents
     "ls",       # List directory contents
+    "grep",     # Search file contents (line-oriented)
     "echo",     # Print text (used in tests and debugging)
     "python",   # Execute Python scripts (skills)
     "python3",  # Execute Python scripts (skills)
     "uv",       # Python package manager (for future use)
+    "git",      # Version control (clone, branch, commit, push, etc.)
+    "gh",       # GitHub CLI (e.g. gh pr create)
 ]
 
 # SECURITY: Path allowlist - modify with extreme caution
@@ -44,6 +47,8 @@ ALLOWED_PATHS = [
     "./skills/",         # Skills directory
     "./skills",          # Same, when callers omit trailing slash
     "./test-data/",      # Test data directory (for tests only)
+    "./code/",           # Reference / cloned repos (explicit ./ paths in argv)
+    "./code",            # Same, when callers omit trailing slash
 ]
 
 

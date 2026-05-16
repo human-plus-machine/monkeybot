@@ -98,6 +98,7 @@ langfuse? deepeval other?
 
 ### Runtime / Safety
 
+- **Execution sandbox for `run_command` / clones** — Today shell is allowlisted binaries + path-prefix checks on `./`/`/` args, same OS user as the gateway (no container/VM). For “clone arbitrary repos and run code” stress tests, add an explicit isolation layer (e.g. Docker/Firecracker, disposable VM, or strict user+fs namespace) and optionally route risky tools only through that path; document in harness when ready.
 - **Memory index refresh after summarization (optional)** — After summarization, `_run_inner` rebuilds `provider_messages` with the same `system` built before `_summarize_history`; low risk today (summarize path does not touch `INDEX.md`) but consider `ctx = await refresh_memory_index(ctx)` plus `_system_message(ctx)` before that rebuild for consistency and future hooks (`loop.py`).
 - **Configurable summarization model** — history compression in `loop.py` currently uses the same `ctx.model` as the agent; allow a separate model id (env or `TurnContext`) for the summarization-only `provider.stream` call.
 - **HITL completion** — ApprovalRequest/Response loop (inspector `approve` path).

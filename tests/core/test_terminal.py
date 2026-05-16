@@ -161,6 +161,20 @@ class TestTerminalExecutorSecurity:
         
         assert result.exit_code == 0
 
+    @pytest.mark.asyncio
+    async def test_git_allowed_and_version_runs(self, executor):
+        """SECURITY: git is on the allowlist and runs (requires git in PATH)."""
+        result = await executor.execute("git", ["--version"])
+        assert result.exit_code == 0
+        assert "git version" in result.stdout.lower()
+
+    @pytest.mark.asyncio
+    async def test_gh_allowed_and_version_runs(self, executor):
+        """SECURITY: gh is on the allowlist and runs (requires GitHub CLI in PATH)."""
+        result = await executor.execute("gh", ["--version"])
+        assert result.exit_code == 0
+        assert "gh version" in result.stdout.lower()
+
 
 class TestTerminalExecutorExecution:
     """
@@ -370,7 +384,7 @@ class TestTerminalExecutorConstants:
     def test_allowed_commands_list(self):
         """Test that ALLOWED_COMMANDS contains expected commands."""
         # Document expected commands
-        expected_commands = ["cat", "ls", "echo", "python", "python3", "uv"]
+        expected_commands = ["cat", "ls", "grep", "echo", "python", "python3", "uv", "git", "gh"]
         
         for cmd in expected_commands:
             assert cmd in ALLOWED_COMMANDS, f"Expected command '{cmd}' not in ALLOWED_COMMANDS"
@@ -384,6 +398,8 @@ class TestTerminalExecutorConstants:
             "./skills/",
             "./skills",
             "./test-data/",
+            "./code/",
+            "./code",
         ]
         
         for path in expected_paths:
