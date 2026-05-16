@@ -11,7 +11,7 @@ Run the **SSE gateway** locally: FastAPI, SQLite conversation history, optional 
 | Python | 3.11+ (3.12 recommended) |
 | [uv](https://docs.astral.sh/uv/) | Used in this repo for installs and `uv run` |
 
-For **Gemini / Vertex**, you also need Google Cloud credentials and a project (see `.env.example`).
+For **Gemini / Vertex**, you need Google Cloud credentials and a project. Put values in a **`.env`** file in the repo root (optional) or export them in the shell — see the header of **`monkeybot_config/monkeybot.example.yaml`** for common variable names.
 
 ---
 
@@ -27,31 +27,39 @@ uv sync
 
 ## 2. Configure
 
-Copy the example env file and set paths for the agent (and model credentials when using Gemini):
+**Option A — scaffold defaults** (from the repo root; skips files that already exist; add `--force` to overwrite):
 
 ```bash
-cp .env.example .env
+uv run monkeybot-init-config
 ```
 
-Important variables (see `.env.example` for the full list — values below are what the shipped `.env.example` uses):
+**Option B — manual copy** of the harness template (paths, model, gateway, curation, web search, sandbox — everything non-secret):
 
-| Variable | Purpose |
+```bash
+cp monkeybot_config/monkeybot.example.yaml monkeybot_config/monkeybot.yaml
+```
+
+If you used **Option A**, `monkeybot.yaml` is already created from the same template. Edit `monkeybot_config/monkeybot.yaml` for your layout. Create a **`.env`** in the repo root only when you need API keys, `GOOGLE_APPLICATION_CREDENTIALS`, or other secrets / machine-local overrides (variable names are listed in the header of `monkeybot.example.yaml`).
+
+The gateway loads `.env` first, then applies `monkeybot_config/monkeybot.yaml` for any environment variable that is **still unset**. Use `MONKEYBOT_CONFIG` to point at a different YAML file. Optional **`includes:`** in that file lists extra YAML fragments (paths relative to the primary file’s directory) merged in order.
+
+Important knobs (see **`monkeybot_config/monkeybot.example.yaml`** for all sections and comments):
+
+| YAML section | Purpose |
 |---|---|
-| `AGENT_MD` | Path to your system prompt file (`./bots/example-bot/AGENT.md`). |
-| `MEMORY_PATH` | Directory for long-term markdown memory (`./data/memory`). Optional `INDEX.md` there is surfaced as a memory index in the system prompt. |
-| `SKILLS_PATH` | Root directory for skill bundles (`./.agents/skills`). |
-| `DB_URL` | SQLite URL for conversation + usage tables (`sqlite:///data/monkeybot.db`). |
-| `MCP_CONFIG` | Optional MCP server map (`./config/mcp.json`). |
-| `COMMAND_TIERS_CONFIG` | Optional command-tier policy file (`./config/command_tiers.yaml`). |
-| `MODEL_PROVIDER` | `google_vertexai` (default), `openai`, `anthropic`, or `vertex_anthropic`. |
-| `MODEL_NAME` | Model id (e.g. `gemini-2.5-flash`). |
-| `PORT` | Gateway port (`.env.example` uses `8080`; gateway falls back to `8000` if unset). |
+| `paths.agent_md` | System prompt file (default `./monkeybot_config/AGENT.md`). |
+| `paths.memory_path` | Markdown memory root; optional `INDEX.md` is surfaced in the prompt. |
+| `paths.skills_path` | Skill bundle root. |
+| `paths.db_url` | SQLite URL for conversation + usage. |
+| `paths.mcp_config` / `paths.command_allowlist_config` | MCP map and run_command allowlist policy path. |
+| `model.provider` / `model.name` | Provider and model id (`gemini`, `openai`, `fake`, …). |
+| `runtime.port` | Gateway listen port. |
 
 ---
 
 ## 3. Author AGENT.md
 
-Point `AGENT_MD` at a non-empty Markdown file (the repo ships `bots/example-bot/AGENT.md`). Its contents become the base system message for each turn, plus the optional memory index and skill list. See [Skills](skills.md) for adding capabilities under `SKILLS_PATH`.
+Point `paths.agent_md` in `monkeybot_config/monkeybot.yaml` at a non-empty Markdown file (the repo ships `monkeybot_config/AGENT.md`). Its contents become the base system message for each turn, plus the optional memory index and skill list. See [Skills](skills.md) for adding capabilities under `paths.skills_path`.
 
 ---
 
@@ -61,7 +69,7 @@ Point `AGENT_MD` at a non-empty Markdown file (the repo ships `bots/example-bot/
 uv run python -m monkeybot.gateway.main
 ```
 
-The gateway reads `PORT` (falls back to `GATEWAY_PORT`, then `8000`). The shipped `.env.example` sets `PORT=8080`, so examples below use `8080`.
+The gateway reads `PORT` (falls back to `GATEWAY_PORT`, then `8000`). The shipped `monkeybot_config/monkeybot.yaml` sets `runtime.port` to `8080`, so examples below use `8080`.
 
 ---
 
@@ -108,4 +116,3 @@ curl -sS "http://127.0.0.1:8080/health"
 ## Next steps
 
 - [Skills](skills.md) — layout under `SKILLS_PATH`, `SKILL.md`, and `run.py` / `main.py`.
-- Repository **`.env.example`** — optional MCP, command tiers, and Cloud Run-related variables.

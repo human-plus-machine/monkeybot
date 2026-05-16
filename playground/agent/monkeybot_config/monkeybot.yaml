@@ -1,0 +1,51 @@
+# Playground defaults when ``uv run`` cwd is ``playground/agent/``.
+# Template with comments: monkeybot.example.yaml in this directory.
+# Override with .env or environment variables as needed.
+
+runtime:
+  log_level: INFO
+  port: 8787
+
+paths:
+  agent_md: ./monkeybot_config/AGENT.md
+  memory_path: ./data/memory
+  skills_path: ./skills
+  db_url: sqlite:///./data/monkeybot.db
+  mcp_config: ./monkeybot_config/mcp.json
+  command_allowlist_config: ./monkeybot_config/command_allowlist.yaml
+
+model:
+  provider: gemini
+  name: gemini-3-flash-preview
+
+gateway:
+  pending_response_timeout_sec: 300
+  sse_replay_max: 256
+  graceful_shutdown_timeout_sec: 5
+
+context_curation:
+  enabled: true
+  skill_threshold: 4
+  memory_threshold: 8
+  curator_model: gemini-3-flash-preview
+  timeout_sec: 10
+  max_memory_lines: 12
+  max_skills: 5
+  search_max_hits: 8
+
+memory_hook:
+  enabled: true
+
+subagent:
+  timeout_sec: 600
+  max_turns: 25
+
+web_search:
+  backend: duckduckgo
+  max_results: 5
+
+sandbox:
+  enabled: false
+  server_url: http://localhost:8080
+  image: python:3.12
+  ttl_seconds: 1800

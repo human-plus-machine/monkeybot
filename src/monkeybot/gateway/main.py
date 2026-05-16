@@ -11,9 +11,9 @@ from __future__ import annotations
 import logging
 import os
 
-from dotenv import load_dotenv
+from monkeybot.gateway.bootstrap import ensure_gateway_runtime_env
 
-load_dotenv()
+ensure_gateway_runtime_env()
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),

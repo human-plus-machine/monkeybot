@@ -369,6 +369,8 @@ class MCPClient:
                     mcp_json_path,
                 )
                 continue
+            if spec.get("enabled") is False:
+                continue
             url = spec.get("url")
             if isinstance(url, str) and url.strip():
                 headers_any = spec.get("headers") or {}

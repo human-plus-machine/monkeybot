@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "example-stdio-server": {
+      "enabled": false,
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/path/to/workspace-readable-by-this-server"
+      ],
+      "env": {
+        "NODE_ENV": "production",
+        "EXAMPLE_SECRET": ""
+      }
+    },
+    "example-streamable-http-server": {
+      "enabled": false,
+      "url": "https://your-mcp-host.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer REPLACE_ME"
+      }
+    }
+  }
+}

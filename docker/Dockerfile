@@ -12,7 +12,7 @@ RUN pip install --no-cache-dir --upgrade pip
 COPY pyproject.toml README.md ./
 COPY src ./src
 COPY .agents ./.agents
-COPY config ./config
+COPY monkeybot_config ./monkeybot_config
 
 ARG EXTRAS=gemini
 RUN pip install --no-cache-dir ".[$EXTRAS]"

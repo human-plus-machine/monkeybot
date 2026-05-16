@@ -19,9 +19,9 @@ import aiosqlite
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+import monkeybot.gateway.load_env  # noqa: F401 — side effect: dotenv + monkeybot.yaml
 from monkeybot.core.context import build_context
 from monkeybot.core.core_tool_executor import CoreToolExecutor
-from monkeybot.web_search import WebSearchTool, build_backend as _build_web_search_backend
 from monkeybot.core.db import apply_schema, open_connection
 from monkeybot.core.events import Error as AgentError
 from monkeybot.core.events import TurnComplete, UsageTotals, event_to_json
@@ -49,6 +49,8 @@ from monkeybot.gateway.sse.loop_port import UsagePort
 from monkeybot.gateway.sse.routes import create_app as build_sse_app
 from monkeybot.gateway.sse.session_bus import SessionBus, SessionRegistry
 from monkeybot.providers.vertex_claude import VertexClaudeProvider
+from monkeybot.web_search import WebSearchTool
+from monkeybot.web_search import build_backend as _build_web_search_backend
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +68,8 @@ class _GatewayDeps:
     hook_manager: HookManager | None = None
     memory_hook: MemoryHook | None = None
     web_search_tool: WebSearchTool | None = None
+    run_command_allowed_commands: list[str] | None = None
+    run_command_allowed_path_prefixes: list[str] | None = None
 
 
 _deps = _GatewayDeps()
@@ -183,29 +187,8 @@ def _skills_path() -> Path:
     return Path(os.environ.get("SKILLS_PATH", "skills"))
 
 
-def _resolve_provider() -> Provider:
-    mode = os.environ.get("MODEL_PROVIDER", "gemini").lower().strip()
-    if mode == "vertex-claude":
-        return VertexClaudeProvider()
-    if mode != "fake":
-        return GeminiProvider()
-
-
-def _resolve_curator_provider(main_provider: Provider) -> Provider:
-    """Dedicated provider for context curation with thinking and token cap overrides.
-
-    Uses a small ``max_output_tokens`` (the curator only needs ~50 JSON tokens) and
-    ``thinking_budget=0`` to explicitly disable extended thinking, which can stall
-    preview models for 10s+ on a short JSON-only completion.
-
-    Fake / vertex-claude modes reuse ``main_provider`` — curation is no-op in tests
-    and vertex-claude has no thinking budget concept.
-    """
-    mode = os.environ.get("MODEL_PROVIDER", "gemini").lower().strip()
-    if mode == "fake" or mode == "vertex-claude":
-        return main_provider
-    return GeminiProvider(thinking_budget=0, max_output_tokens=1024)
-
+def _scripted_fake_provider() -> Provider:
+    """Deterministic provider for ``MODEL_PROVIDER=fake`` (tests and playground)."""
     raw = os.environ.get("MONKEYBOT_FAKE_PROVIDER_EVENTS", "")
     if not raw:
         return ScriptedFakeProvider(
@@ -252,6 +235,31 @@ def _resolve_curator_provider(main_provider: Provider) -> Provider:
         turns = [[TextDelta(text="hello"), Done()]]
     flat: list[ProviderEvent] = [ev for turn in turns for ev in turn]
     return ScriptedFakeProvider(flat)
+
+
+def _resolve_provider() -> Provider:
+    mode = os.environ.get("MODEL_PROVIDER", "gemini").lower().strip()
+    if mode == "vertex-claude":
+        return VertexClaudeProvider()
+    if mode == "fake":
+        return _scripted_fake_provider()
+    return GeminiProvider()
+
+
+def _resolve_curator_provider(main_provider: Provider) -> Provider:
+    """Dedicated provider for context curation with thinking and token cap overrides.
+
+    Uses a small ``max_output_tokens`` (the curator only needs ~50 JSON tokens) and
+    ``thinking_budget=0`` to explicitly disable extended thinking, which can stall
+    preview models for 10s+ on a short JSON-only completion.
+
+    Fake / vertex-claude modes reuse ``main_provider`` — curation is no-op in tests
+    and vertex-claude has no thinking budget concept.
+    """
+    mode = os.environ.get("MODEL_PROVIDER", "gemini").lower().strip()
+    if mode == "fake" or mode == "vertex-claude":
+        return main_provider
+    return GeminiProvider(thinking_budget=0, max_output_tokens=1024)
 
 
 class GatewayLoopPort:
@@ -336,6 +344,8 @@ class GatewayLoopPort:
                 skills_path=skills_resolved,
                 mcp=mcp,
                 extra_tools=extra_tools,
+                run_command_allowed_commands=_deps.run_command_allowed_commands,
+                run_command_allowed_path_prefixes=_deps.run_command_allowed_path_prefixes,
             )
             async for evt in run_loop(
                 message,
@@ -408,16 +418,23 @@ async def _startup() -> None:
 
     mcp = MCPClient()
     _deps.mcp = mcp
-    mcp_config = Path(os.environ.get("MCP_CONFIG", "/app/mcp.json"))
+    mcp_config = Path(os.environ.get("MCP_CONFIG", "/app/monkeybot_config/mcp.json"))
     try:
         await mcp.load_from_config(mcp_config)
     except OSError as exc:
         logger.info("MCP config skipped (%s): %s", mcp_config, exc)
 
-    tiers_path = Path(os.environ.get("COMMAND_TIERS_CONFIG", "/app/config/command_tiers.yaml"))
+    tiers_path = Path(
+        os.environ.get("COMMAND_ALLOWLIST_CONFIG", "/app/monkeybot_config/command_allowlist.yaml")
+    )
+    _deps.run_command_allowed_commands = None
+    _deps.run_command_allowed_path_prefixes = None
     inspectors: list[ToolInspector] = []
     try:
-        inspectors.append(CommandTierInspector(tiers_path))
+        tier_insp = CommandTierInspector(tiers_path)
+        inspectors.append(tier_insp)
+        _deps.run_command_allowed_commands = list(tier_insp.allowed_commands)
+        _deps.run_command_allowed_path_prefixes = list(tier_insp.allowed_path_prefixes)
     except FileNotFoundError:
         logger.info("command tiers missing (%s); allowing all tool calls", tiers_path)
     except Exception as exc:

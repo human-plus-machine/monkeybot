@@ -56,6 +56,6 @@ Have a great example to share? We'd love to see it!
 ## Additional Resources
 
 - [Getting Started (v2 gateway)](../docs/getting-started.md)
-- [Configuration reference](../.env.example)
+- [Harness template](../monkeybot_config/monkeybot.example.yaml)
 - [Architecture overview](../README.md)
 - HTTP API: `monkeybot.gateway.sse.routes` (`POST /sessions`, `GET /sessions/{id}/events`, `POST /sessions/{id}/reply`, `GET /health`)

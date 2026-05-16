@@ -18,14 +18,9 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 
-def _tier_allow_yaml() -> str:
-    return (
-        "tier_order:\n"
-        "  - name: all\n"
-        "    action: allow\n"
-        "    patterns: ['.*']\n"
-        "default: allow\n"
-    )
+def _tier_policy_yaml() -> str:
+    """Minimal valid run_command policy (defaults + no deny-regex layer)."""
+    return "deny_patterns: []\n"
 
 
 def _parse_sse_data_lines(body: str) -> list[dict[str, object]]:
@@ -54,9 +49,9 @@ async def gateway_client(
     monkeypatch.setenv("DB_URL", f"sqlite:///{db_file}")
     monkeypatch.setenv("MODEL_PROVIDER", "fake")
     monkeypatch.setenv("MCP_CONFIG", str(tmp_path / "no_mcp.json"))
-    tiers = tmp_path / "command_tiers.yaml"
-    tiers.write_text(_tier_allow_yaml(), encoding="utf-8")
-    monkeypatch.setenv("COMMAND_TIERS_CONFIG", str(tiers))
+    policy_file = tmp_path / "command_allowlist.yaml"
+    policy_file.write_text(_tier_policy_yaml(), encoding="utf-8")
+    monkeypatch.setenv("COMMAND_ALLOWLIST_CONFIG", str(policy_file))
     agent = tmp_path / "AGENT.md"
     agent.write_text("# Test agent\nYou are a test assistant.\n", encoding="utf-8")
     monkeypatch.setenv("AGENT_MD", str(agent))

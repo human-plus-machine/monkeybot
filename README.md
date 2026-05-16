@@ -42,31 +42,35 @@ MCP + config       →    SQLite history + usage →    GCP when deployed
 
 | Guide | Description |
 |---|---|
-| [Getting Started](docs/getting-started.md) | Install, configure the SSE gateway, and exercise sessions + SSE from the command line |
+| [Getting Started](docs/getting-started.md) | Install, configure the SSE gateway (`monkeybot_config/monkeybot.example.yaml`, optional `.env`), and exercise sessions + SSE from the command line |
 | [Skills](docs/skills.md) | Skill directory layout, `SKILL.md`, and `run.py` / `main.py` discovery under `SKILLS_PATH` |
 
-Configuration details for local and cloud runs live in **`.env.example`** at the repository root.
+Harness defaults and comments: **`monkeybot_config/monkeybot.example.yaml`** (copy to `monkeybot.yaml`). Optional **`.env`** in the repo root for secrets — see the header of that YAML file for common variable names.
 
 ---
 
 ## Playground: frontend and backend
 
-The repo includes a minimal **SSE gateway** (Python) and **chat UI** (Vite + React) under `playground/`. Run both for a browser session against your local `AGENT.md` and SQLite.
+The repo includes a minimal **SSE gateway** (Python) and **chat UI** (Vite + React) under `playground/`. Run both for a browser session against your local prompt and SQLite.
 
 **1. Backend (gateway)** — from the repository root:
 
 ```bash
 cd playground/agent
-cp .env.example .env   # first time only; edit MODEL_PROVIDER, keys, paths as needed
-uv sync                # installs deps including editable monkeybot from repo root
+uv run monkeybot-init-config --dest .   # optional; or cp monkeybot_config/monkeybot.example.yaml …
+uv sync
 ./run.sh
 ```
 
-The default dev port in `playground/agent/.env.example` is **8787**. Equivalent without the script:
+Add **`playground/agent/.env`** when you need secrets (`run.sh` uses `--env-file` only if that file exists). The default dev port in `playground/agent/monkeybot_config/monkeybot.yaml` is **8787**. Without `run.sh`:
 
 ```bash
-cd playground/agent && uv run --env-file .env -m monkeybot.gateway.main
+cd playground/agent
+uv run -m monkeybot.gateway.main
+# or, if you use .env: uv run --env-file .env -m monkeybot.gateway.main
 ```
+
+Non-secret defaults are also read from `playground/agent/monkeybot_config/monkeybot.yaml` when environment variables are unset (after `.env` is loaded).
 
 **2. Frontend (chat UI)** — second terminal, from the repository root:
 
@@ -84,41 +88,41 @@ More detail: [Getting Started](docs/getting-started.md).
 
 ## Quick Start
 
-> `monkeybot` is not on PyPI yet — install from source.
+> **`monkeybot` is not on PyPI yet** — install from a clone of this repository (`uv` or `pip`).
 
-### 1. Clone and install
+### 1. Clone and install dependencies
 
 ```bash
 git clone https://github.com/human-and-machine/monkey-bot.git
 cd monkey-bot
 uv sync
-cp .env.example .env
+uv run monkeybot-init-config   # optional: scaffold monkeybot_config/ + data/memory + .agents/skills
 ```
 
-`uv sync` installs runtime deps plus the `dev` dependency group (`pytest`, `mypy`, `ruff`).
-
-### 2. Configure
-
-Edit `.env` (the shipped defaults match the bundled example bot):
+Equivalent with **pip** (from the repo root, with extras as needed):
 
 ```bash
-MODEL_PROVIDER=google_vertexai
-MODEL_NAME=gemini-2.5-flash
-
-DB_URL=sqlite:///data/monkeybot.db
-MEMORY_PATH=./data/memory
-SKILLS_PATH=./.agents/skills
-AGENT_MD=./bots/example-bot/AGENT.md
-
-MCP_CONFIG=./config/mcp.json
-COMMAND_TIERS_CONFIG=./config/command_tiers.yaml
-
-# Gemini / Vertex
-GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
-VERTEX_AI_PROJECT_ID=your-gcp-project
+pip install -e .
+# e.g. pip install -e ".[gemini,openai,claude]"
 ```
 
-Full configuration reference: **`.env.example`** at the repository root.
+`uv sync` also pulls the `dev` group (`pytest`, `mypy`, `ruff`).
+
+### 2. After installation — wire the harness
+
+Do the following from the directory that will be your **gateway process working directory** (usually the repo root). Relative paths in YAML resolve against that cwd unless you use absolute paths or set **`MONKEYBOT_CONFIG`** to a specific `monkeybot.yaml` file.
+
+| Step | What to do |
+|------|----------------|
+| **0. Quick scaffold (optional)** | From the repo root: **`uv run monkeybot-init-config`** (same as **`uv run python -m monkeybot.cli.init_config`**). Creates **`monkeybot_config/`** with **`monkeybot.yaml`**, **`monkeybot.example.yaml`**, **`mcp.json`**, **`command_allowlist.yaml`**, **`AGENT.md`**, and ensures **`data/memory/`** (with a starter **`INDEX.md`**) and **`.agents/skills/`**. Existing files are left untouched; use **`--force`** to overwrite. Use **`--dest PATH`** to scaffold somewhere other than the current directory (e.g. **`playground/agent`**). |
+| **1. Config file** | If you skipped step 0: **`cp monkeybot_config/monkeybot.example.yaml monkeybot_config/monkeybot.yaml`**, then edit **`monkeybot_config/monkeybot.yaml`**. All non-secret tuning lives here (`paths.*`, `model.*`, gateway, curation, web search, sandbox, …). |
+| **2. Secrets (optional)** | Create a **`.env`** in the same cwd only when you need API keys, `GOOGLE_APPLICATION_CREDENTIALS`, or other overrides. Variable names are listed in the header of **`monkeybot_config/monkeybot.example.yaml`**. If you use `model.provider: fake`, you can skip `.env` until you call a real provider. |
+| **3. Prompt** | Ensure the file at **`paths.agent_md`** exists (the repo defaults to **`monkeybot_config/AGENT.md`**). |
+| **4. MCP / policy (optional)** | Adjust **`monkeybot_config/mcp.json`** and **`command_allowlist.yaml`** if you use them; paths are set under `paths` in YAML (`command_allowlist_config`). |
+| **5. Run** | `uv run python -m monkeybot.gateway.main` (or `python -m monkeybot.gateway.main` from an activated venv). |
+| **6. Playground UI (optional)** | Use the **Playground** section below (`playground/agent` + `playground/chat-ui`). |
+
+Full commented template: **`monkeybot_config/monkeybot.example.yaml`**. Step-by-step API checks: **[Getting Started](docs/getting-started.md)**.
 
 ### 3. Use the provider helper (optional)
 
@@ -137,7 +141,7 @@ cfg = get_provider_config(provider="google_vertexai", model_name="gemini-2.5-fla
 uv run python -m monkeybot.gateway.main
 ```
 
-Defaults to port `8000`; set `PORT` (the shipped `.env.example` uses `8080`).
+The gateway listens on **`runtime.port`** from `monkeybot_config/monkeybot.yaml` (the shipped file uses **8080**); if unset, the process falls back to **`PORT` / `GATEWAY_PORT`**, then **8000**.
 
 ### 5. Deploy to Cloud Run
 
@@ -190,12 +194,13 @@ monkey-bot/
 │   ├── gateway/
 │   │   ├── main.py              # Uvicorn entry (PORT env)
 │   │   └── sse/                 # FastAPI SSE app: app, routes, session_bus
+│   ├── cli/                     # init_config scaffold (monkeybot-init-config)
 │   ├── providers/               # OpenAI, Anthropic, Vertex-Anthropic adapters
 │   └── skills/                  # Skill loader / executor utilities
-├── bots/example-bot/            # Reference bot: AGENT.md, MEMORY.md, config.yaml
+├── bots/example-bot/            # Reference bot: MEMORY.md, config.yaml
+├── monkeybot_config/            # monkeybot.yaml, monkeybot.example.yaml, AGENT.md, mcp.json, …
 ├── .agents/skills/              # Default SKILLS_PATH (file-ops, memory-search,
 │                                #   search-web, self-improve)
-├── config/                      # mcp.json, command_tiers.yaml
 ├── playground/
 │   ├── agent/                   # Local gateway runner (.env + run.sh)
 │   └── chat-ui/                 # Vite + React dev client
@@ -207,7 +212,6 @@ monkey-bot/
 ├── docker/Dockerfile            # Container image
 ├── deploy.sh                    # Cloud Run deploy helper
 ├── pyproject.toml               # uv / hatchling project config
-└── .env.example                 # Canonical env reference
 ```
 
 ---
@@ -256,7 +260,7 @@ uv sync --extra gcs               # Google Cloud Storage backend
 | **DynamoDB** | Planned | Checkpointer / job storage |
 | **CosmosDB** | Coming Soon | Azure-native persistence options |
 
-For provider and cloud wiring, start from **`.env.example`** and the integration table below; older standalone integration pages were removed with the v2 doc cutover.
+For provider and cloud wiring, start from **`monkeybot_config/monkeybot.example.yaml`** and the integration table below; older standalone integration pages were removed with the v2 doc cutover.
 
 ---
 
@@ -340,7 +344,7 @@ uv run mypy src/
 
 - **Issues**: [GitHub Issues](https://github.com/human-and-machine/monkey-bot/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/human-and-machine/monkey-bot/discussions)
-- **Reference bot**: See [`bots/example-bot/`](bots/example-bot/) for a complete working example
+- **Reference bot**: See [`bots/example-bot/`](bots/example-bot/) for example memory layout; the default system prompt lives in [`monkeybot_config/AGENT.md`](monkeybot_config/AGENT.md).
 
 ---
 

@@ -142,36 +142,6 @@ def _workspace_error_envelope(exc: WorkspaceError) -> str:
     return _built_in_tool_error("validation", msg, hint, {"code": code})
 
 
-def _run_command_security_envelope(exc: SecurityError) -> str:
-    raw = str(exc)
-    if raw.startswith("Command '") and "not allowed" in raw:
-        return _built_in_tool_error(
-            "policy",
-            raw,
-            "Pick a binary from the harness allowlist (run_command); do not retry the same command name.",
-            {
-                "example_argv": ["git", "--version"],
-                "allowed_commands": list(ALLOWED_COMMANDS),
-            },
-        )
-    if raw.startswith("Path '") and "not allowed" in raw:
-        return _built_in_tool_error(
-            "policy",
-            raw,
-            "Arguments starting with ./ or / must use an allowed prefix (see harness Runtime paths / run_command); change the path, then retry.",
-            {
-                "example_argv": ["grep", "pattern", "./skills/SKILL.md"],
-                "allowed_path_prefixes": list(ALLOWED_PATHS),
-            },
-        )
-    return _built_in_tool_error(
-        "policy",
-        raw,
-        "Adjust the shell invocation to satisfy run_command policy (see harness), then retry once.",
-        {},
-    )
-
-
 def _run_command_parse_envelope(exc: ValueError) -> str:
     return _built_in_tool_error(
         "validation",
@@ -249,6 +219,8 @@ class CoreToolExecutor(ToolExecutorPort):
         mcp: MCPClientPort,
         terminal: TerminalExecutor | None = None,
         extra_tools: list | None = None,
+        run_command_allowed_commands: list[str] | tuple[str, ...] | None = None,
+        run_command_allowed_path_prefixes: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         self._workspace = WorkspaceFileService(Path(workspace_root).resolve())
         self._memory_path = Path(memory_path).resolve()
@@ -256,16 +228,61 @@ class CoreToolExecutor(ToolExecutorPort):
         self._mcp = mcp
         if terminal is not None:
             self._terminal = terminal
+            self._run_cmd_allowed_commands = tuple(terminal.allowed_commands)
+            self._run_cmd_allowed_paths = tuple(terminal.allowed_path_prefixes)
         else:
+            cmds = (
+                tuple(run_command_allowed_commands)
+                if run_command_allowed_commands is not None
+                else tuple(ALLOWED_COMMANDS)
+            )
+            paths = (
+                tuple(run_command_allowed_path_prefixes)
+                if run_command_allowed_path_prefixes is not None
+                else tuple(ALLOWED_PATHS)
+            )
+            self._run_cmd_allowed_commands = cmds
+            self._run_cmd_allowed_paths = paths
             from monkeybot.core.sandbox_executor import SandboxConfig, SandboxExecutor
 
             _scfg = SandboxConfig.from_env()
             self._terminal = (
-                SandboxExecutor(_scfg, workspace_root) if _scfg.enabled else TerminalExecutor()
+                SandboxExecutor(_scfg, workspace_root, allowed_commands=cmds)
+                if _scfg.enabled
+                else TerminalExecutor(allowed_commands=cmds, allowed_path_prefixes=paths)
             )
         self._extra_tools: dict[str, Any] = {
             ct.tool_def.name: ct for ct in (extra_tools or [])
         }
+
+    def _run_command_security_envelope(self, exc: SecurityError) -> str:
+        raw = str(exc)
+        if raw.startswith("Command '") and "not allowed" in raw:
+            return _built_in_tool_error(
+                "policy",
+                raw,
+                "Pick a binary from the harness allowlist (run_command); do not retry the same command name.",
+                {
+                    "example_argv": ["git", "--version"],
+                    "allowed_commands": list(self._run_cmd_allowed_commands),
+                },
+            )
+        if raw.startswith("Path '") and "not allowed" in raw:
+            return _built_in_tool_error(
+                "policy",
+                raw,
+                "Arguments starting with ./ or / must use an allowed prefix (see harness Runtime paths / run_command); change the path, then retry.",
+                {
+                    "example_argv": ["grep", "pattern", "./skills/SKILL.md"],
+                    "allowed_path_prefixes": list(self._run_cmd_allowed_paths),
+                },
+            )
+        return _built_in_tool_error(
+            "policy",
+            raw,
+            "Adjust the shell invocation to satisfy run_command policy (see harness), then retry once.",
+            {},
+        )
 
     async def aclose(self) -> None:
         """Release resources held by the terminal executor for this session."""
@@ -326,7 +343,7 @@ class CoreToolExecutor(ToolExecutorPort):
         except MCPConnectionError as exc:
             result_text, err_text = None, str(exc)
         except SecurityError as exc:
-            result_text, err_text = None, _run_command_security_envelope(exc)
+            result_text, err_text = None, self._run_command_security_envelope(exc)
         except (TimeoutError, ValueError, TypeError, OSError) as exc:
             result_text, err_text = None, _built_in_tool_error(
                 "runtime",
@@ -620,7 +637,7 @@ class CoreToolExecutor(ToolExecutorPort):
         try:
             result = await self._terminal.execute(cmd, argv, timeout=timeout)
         except SecurityError as exc:
-            return None, _run_command_security_envelope(exc)
+            return None, self._run_command_security_envelope(exc)
         except TimeoutError as exc:
             return (
                 None,

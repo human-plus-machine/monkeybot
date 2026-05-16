@@ -119,7 +119,7 @@ if [[ "$SKIP_CONFIRM" != "true" ]]; then
     echo "   - allowed-users"
     echo "2. Have you tested all features locally?"
     echo "3. Have you committed all changes to git?"
-    echo "4. Is your .env.example up to date?"
+    echo "4. Is monkeybot_config/monkeybot.example.yaml / monkeybot.yaml documentation up to date?"
     echo ""
     read -p "Continue with deployment? (y/n) " -n 1 -r
     echo
@@ -248,5 +248,5 @@ echo -e "   gcloud logging read 'resource.type=cloud_run_revision AND resource.l
 echo ""
 echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
-echo -e "${GREEN}For detailed documentation, see docs/getting-started.md and .env.example${NC}"
+echo -e "${GREEN}For detailed documentation, see docs/getting-started.md and monkeybot_config/monkeybot.example.yaml${NC}"
 echo ""

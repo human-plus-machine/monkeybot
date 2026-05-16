@@ -22,6 +22,9 @@ dependencies = [
     "google-genai>=1.0.0",
 ]
 
+[project.scripts]
+monkeybot-init-config = "monkeybot.cli.init_config:main"
+
 [project.optional-dependencies]
 gemini = ["google-genai>=1.0.0"]
 vertex = [
@@ -67,6 +70,8 @@ ignore = ["E501"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["monkeybot"]
+# Gateway must load dotenv + monkeybot.yaml before other monkeybot imports read os.environ.
+force-to-top = ["monkeybot.gateway.load_env"]
 
 [tool.mypy]
 python_version = "3.11"

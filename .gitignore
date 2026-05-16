@@ -1,10 +1,9 @@
 # Environment
 .env
 .env.*
-!.env.example
 
 # Playground MCP (may contain PATs; untrack with git rm --cached if already committed)
-playground/agent/config/mcp.json
+playground/agent/monkeybot_config/mcp.json
 
 # Python
 __pycache__/

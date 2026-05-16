@@ -1,0 +1,20 @@
+allowed_commands:
+  - cat
+  - ls
+  - grep
+  - echo
+  - python
+  - python3
+  - uv
+  - git
+  - gh
+  - bash
+
+allowed_path_prefixes:
+  - ./data/memory/
+  - ./data/memory
+  - ./skills/
+  - ./skills
+  - ./test-data/
+  - ./code/
+  - ./code

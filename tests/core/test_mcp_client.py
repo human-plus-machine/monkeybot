@@ -167,6 +167,37 @@ async def test_load_from_config_streamable_http_url(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_load_from_config_skips_enabled_false_servers(tmp_path: Path) -> None:
+    """Servers with ``enabled: false`` are ignored (template examples stay inert)."""
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "off": {
+                        "enabled": False,
+                        "command": "npx",
+                        "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+                        "env": {"FOO": "1"},
+                    },
+                    "on": {"command": "python", "args": ["x.py"], "env": {}},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    sess = SimpleNamespace()
+    sess.initialize = AsyncMock()
+    sess.list_tools = AsyncMock(return_value=SimpleNamespace(tools=[]))
+
+    client = MCPClient(hooks=_stub_hooks(sess))
+    await client.load_from_config(cfg)
+    assert "off" not in client._servers
+    assert "on" in client._servers
+
+
+@pytest.mark.asyncio
 async def test_load_from_config_missing_file_noop(tmp_path: Path) -> None:
     """Missing config paths do nothing."""
     bogus = tmp_path / "no_such.json"

@@ -1002,13 +1002,14 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "mcp", specifier = ">=1.0.0" },
     { name = "openai", marker = "extra == 'openai'", specifier = ">=1.0" },
+    { name = "opensandbox", marker = "extra == 'sandbox'", specifier = ">=0.1.7" },
     { name = "pydantic", specifier = ">=2.10.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "python-ulid", specifier = ">=2.0.0" },
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32.0" },
 ]
-provides-extras = ["gemini", "vertex", "claude", "vertex-claude", "bedrock", "openai", "scheduler", "gcs", "council", "web-search"]
+provides-extras = ["gemini", "vertex", "claude", "vertex-claude", "bedrock", "openai", "sandbox", "scheduler", "gcs", "council", "web-search"]
 
 [package.metadata.requires-dev]
 dev = [

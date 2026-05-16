@@ -27,11 +27,12 @@ import logging
 import os
 import re
 import shlex
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 
-from monkeybot.core.terminal import ALLOWED_COMMANDS, ExecutionResult, SecurityError
+from monkeybot.core.terminal import ALLOWED_PATHS, ALLOWED_COMMANDS, ExecutionResult, SecurityError
 
 logger = logging.getLogger(__name__)
 
@@ -85,10 +86,28 @@ class SandboxExecutor:
     ttl_seconds automatically.
     """
 
-    def __init__(self, config: SandboxConfig, workspace_root: Path) -> None:
+    def __init__(
+        self,
+        config: SandboxConfig,
+        workspace_root: Path,
+        *,
+        allowed_commands: Sequence[str] | None = None,
+    ) -> None:
         self._config = config
         self._workspace_root = Path(workspace_root).resolve()
         self._sandbox: object | None = None
+        self._allowed_commands: tuple[str, ...] = (
+            tuple(allowed_commands) if allowed_commands is not None else tuple(ALLOWED_COMMANDS)
+        )
+
+    @property
+    def allowed_commands(self) -> tuple[str, ...]:
+        return self._allowed_commands
+
+    @property
+    def allowed_path_prefixes(self) -> tuple[str, ...]:
+        """Path prefixes allowed for ``run_command`` error hints (host uses :class:`TerminalExecutor`)."""
+        return tuple(ALLOWED_PATHS)
 
     async def _ensure_sandbox(self) -> None:
         if self._sandbox is not None:
@@ -158,7 +177,7 @@ class SandboxExecutor:
         is created or contacted. A blocked command raises SecurityError without
         ever touching the OpenSandbox server.
         """
-        if command not in ALLOWED_COMMANDS:
+        if command not in self._allowed_commands:
             raise SecurityError(f"Command '{command}' not allowed")
 
         await self._ensure_sandbox()

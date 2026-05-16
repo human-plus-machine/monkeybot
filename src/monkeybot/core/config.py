@@ -575,7 +575,7 @@ def _load_secrets_from_gcp(required_secrets: list[str] | None = None) -> Dict[st
     if missing_secrets:
         raise RuntimeError(
             f"Failed to load required secrets: {', '.join(missing_secrets)}\n"
-            f"See .env.example and docs/getting-started.md for setup instructions."
+            f"See docs/getting-started.md and monkeybot_config/monkeybot.example.yaml for setup instructions."
         )
 
     logger.info(f"✅ Loaded {len(loaded_secrets)} secrets from GCP Secret Manager")

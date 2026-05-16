@@ -39,7 +39,7 @@ import time
 os.environ.setdefault("DB_URL", "sqlite:///:memory:")
 os.environ.setdefault("MODEL_PROVIDER", "fake")
 os.environ.setdefault("MCP_CONFIG", "/nonexistent/mcp.json")
-os.environ.setdefault("COMMAND_TIERS_CONFIG", "/nonexistent/tiers.yaml")
+os.environ.setdefault("COMMAND_ALLOWLIST_CONFIG", "/nonexistent/command_allowlist.yaml")
 
 async def run():
     from asgi_lifespan import LifespanManager

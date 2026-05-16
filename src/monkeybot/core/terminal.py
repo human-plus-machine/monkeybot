@@ -20,6 +20,7 @@ Example:
 
 import asyncio
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import List
 
@@ -109,7 +110,30 @@ class TerminalExecutor:
         >>> except SecurityError as e:
         >>>     print(f"Blocked: {e}")
     """
-    
+
+    def __init__(
+        self,
+        *,
+        allowed_commands: Sequence[str] | None = None,
+        allowed_path_prefixes: Sequence[str] | None = None,
+    ) -> None:
+        self._allowed_commands: tuple[str, ...] = (
+            tuple(allowed_commands) if allowed_commands is not None else tuple(ALLOWED_COMMANDS)
+        )
+        self._allowed_path_prefixes: tuple[str, ...] = (
+            tuple(allowed_path_prefixes)
+            if allowed_path_prefixes is not None
+            else tuple(ALLOWED_PATHS)
+        )
+
+    @property
+    def allowed_commands(self) -> tuple[str, ...]:
+        return self._allowed_commands
+
+    @property
+    def allowed_path_prefixes(self) -> tuple[str, ...]:
+        return self._allowed_path_prefixes
+
     async def aclose(self) -> None:
         """No-op — TerminalExecutor holds no persistent resources."""
 
@@ -218,7 +242,7 @@ class TerminalExecutor:
         Raises:
             SecurityError: If command is not in ALLOWED_COMMANDS
         """
-        if command not in ALLOWED_COMMANDS:
+        if command not in self._allowed_commands:
             error_msg = f"Command '{command}' not allowed"
             logger.error(
                 f"Security violation: {error_msg}",
@@ -226,8 +250,8 @@ class TerminalExecutor:
                     "component": "terminal_executor",
                     "severity": "SECURITY_VIOLATION",
                     "command": command,
-                    "allowed_commands": ALLOWED_COMMANDS
-                }
+                    "allowed_commands": list(self._allowed_commands),
+                },
             )
             raise SecurityError(error_msg)
     
@@ -264,7 +288,7 @@ class TerminalExecutor:
                     continue
                 
                 # Validate path is in allowed directories
-                if not any(arg.startswith(allowed) for allowed in ALLOWED_PATHS):
+                if not any(arg.startswith(allowed) for allowed in self._allowed_path_prefixes):
                     error_msg = f"Path '{arg}' not allowed"
                     logger.error(
                         f"Security violation: {error_msg}",
@@ -272,8 +296,8 @@ class TerminalExecutor:
                             "component": "terminal_executor",
                             "severity": "SECURITY_VIOLATION",
                             "path": arg,
-                            "allowed_paths": ALLOWED_PATHS
-                        }
+                            "allowed_paths": list(self._allowed_path_prefixes),
+                        },
                     )
                     raise SecurityError(error_msg)
     

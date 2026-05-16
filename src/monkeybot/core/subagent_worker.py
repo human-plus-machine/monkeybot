@@ -14,17 +14,18 @@ from dotenv import load_dotenv
 
 from monkeybot.core.context import build_context
 from monkeybot.core.core_tool_executor import CoreToolExecutor
-from monkeybot.web_search import WebSearchTool, build_backend as _build_web_search_backend
 from monkeybot.core.db import apply_schema, open_connection
 from monkeybot.core.events import Error, event_to_json
 from monkeybot.core.history import ConversationHistory
 from monkeybot.core.inspector import CommandTierInspector, RulesInspector, ToolInspector
 from monkeybot.core.loop import run as run_loop
 from monkeybot.core.mcp_client import MCPClient
+from monkeybot.core.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.provider import Done, Message, ProviderEvent, TextDelta, ToolCall, UsageEvent
 from monkeybot.core.providers.gemini import GeminiProvider
-from monkeybot.core.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.subagent_proto import SubagentEnvelope
+from monkeybot.web_search import WebSearchTool
+from monkeybot.web_search import build_backend as _build_web_search_backend
 
 logger = logging.getLogger(__name__)
 
@@ -129,16 +130,23 @@ async def _async_main() -> None:
         await apply_schema(conn)
 
         mcp = MCPClient()
-        mcp_config = Path(os.environ.get("MCP_CONFIG", "mcp.json"))
+        mcp_config = Path(os.environ.get("MCP_CONFIG", "monkeybot_config/mcp.json"))
         try:
             await mcp.load_from_config(mcp_config)
         except OSError as exc:
             logger.info("MCP config skipped (%s): %s", mcp_config, exc)
 
         inspectors: list[ToolInspector] = []
-        tiers_path = Path(os.environ.get("COMMAND_TIERS_CONFIG", "config/command_tiers.yaml"))
+        run_allow_cmds: list[str] | None = None
+        run_allow_paths: list[str] | None = None
+        tiers_path = Path(
+            os.environ.get("COMMAND_ALLOWLIST_CONFIG", "monkeybot_config/command_allowlist.yaml")
+        )
         try:
-            inspectors.append(CommandTierInspector(tiers_path))
+            tier_insp = CommandTierInspector(tiers_path)
+            inspectors.append(tier_insp)
+            run_allow_cmds = list(tier_insp.allowed_commands)
+            run_allow_paths = list(tier_insp.allowed_path_prefixes)
         except FileNotFoundError:
             logger.info("command tiers missing (%s); allowing all tool calls", tiers_path)
         except Exception:
@@ -192,6 +200,8 @@ async def _async_main() -> None:
             skills_path=skills,
             mcp=mcp,
             extra_tools=extra_tools,
+            run_command_allowed_commands=run_allow_cmds,
+            run_command_allowed_path_prefixes=run_allow_paths,
         )
         history = _HistoryAdapter(ConversationHistory(conn))
 
