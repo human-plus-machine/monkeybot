@@ -1,6 +1,0 @@
----
-description: 
-alwaysApply: true
----
-
-Define success criteria. Loop until verified. Don't say what steps to follow, tell it what success looks like and let it iterate.

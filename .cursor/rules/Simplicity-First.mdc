@@ -1,8 +1,0 @@
----
-description: 
-alwaysApply: true
----
-
-Minimum code that solves the problem. No speculative features. No abstractions for single-use code. If a senior engineer would call it overcomplicated — simplify.
-
-Exception: classes are appropriate when managing lifecycle, state across calls, or when 3+ methods naturally belong to the same entity.
