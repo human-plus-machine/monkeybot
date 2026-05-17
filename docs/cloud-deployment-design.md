@@ -1,6 +1,6 @@
 # MonkeyBot Cloud Deployment Design
 
-**Status:** In progress — Steps **1**, **1.5**, **2**, and **3** (Docker baseline + compose) are implemented in code; later steps (deployment guides, harness-as-library hardening) remain.  
+**Status:** In progress — Steps **1**, **1.5**, **2**, **3**, and **4** are complete; Step 5 (harness-as-library hardening + examples) remains.  
 **Purpose:** Single source of truth for the multi-cloud deployment work. Open this in any new chat before starting a step to ensure nothing in that step breaks a later one.
 
 ---
@@ -482,13 +482,13 @@ Step 3: Docker Artifacts
   - Remove root deploy.sh and docker/Dockerfile.playground from tracked tree            DONE
 
 Step 4: Deployment Guides (three pattern guides + per-target addenda)
-  - docs/deploy-pattern-a-container.md
+  - docs/deploy-pattern-a-container.md                           DONE
       Addenda: Cloud Run, GKE, GCE, ECS, EKS, EC2,
                Azure Container Apps/AKS/VM, NVIDIA/other
-  - docs/deploy-pattern-b-serverless.md
+  - docs/deploy-pattern-b-serverless.md                          DONE
       Addenda: AWS Lambda, GCP Cloud Functions,
                Azure Functions, Cloudflare (status note)
-  - docs/deploy-pattern-c-agent-platform.md
+  - docs/deploy-pattern-c-agent-platform.md                      DONE
       Addenda: AWS Bedrock AgentCore, GCP Agent Engine
 
 Step 5: Harness-as-Library
