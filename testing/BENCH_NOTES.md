@@ -182,7 +182,7 @@ Success criteria: memory is accessible across process restarts without re-prompt
 | Feature | Test File | Status |
 |---|---|---|
 | Skills discovery & loader | `tests/skills/test_loader.py` | Covered |
-| Skills execution (file-ops) | `tests/integration/test_skills_integration.py` | Covered |
+| Skills execution (terminal + loader) | `tests/core/test_terminal.py`, `tests/skills/test_loader.py` | Covered |
 | Memory search (INDEX.md) | `tests/core/test_memory.py` | Covered |
 | Memory organizer run + index update | `tests/core/test_memory_organizer.py` | Covered |
 | save_memory tool (write path) | bench.py §3 + BACKLOG | Broken |

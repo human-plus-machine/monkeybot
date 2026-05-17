@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
-from monkeybot.core.persistence.db import apply_schema, open_connection
-from monkeybot.core.persistence.durable_runs import DurableRunStore, SubagentEnvelope, SubagentRunRow
+from monkeybot.core.persistence.sqlite import apply_schema, open_connection
+from monkeybot.core.persistence.durable_runs import SQLiteRunStore, SubagentEnvelope, SubagentRunRow
 
 
 def _repo_root() -> Path:
@@ -32,7 +32,7 @@ async def durable_conn():
 
 @pytest.mark.asyncio
 async def test_pending_runs_includes_unfinished_running(durable_conn) -> None:
-    store = DurableRunStore(durable_conn)
+    store = SQLiteRunStore(durable_conn)
     envelope = SubagentEnvelope(
         task="t",
         context="c",
@@ -55,7 +55,7 @@ async def test_pending_runs_includes_unfinished_running(durable_conn) -> None:
 
 @pytest.mark.asyncio
 async def test_pending_runs_excludes_completed(durable_conn) -> None:
-    store = DurableRunStore(durable_conn)
+    store = SQLiteRunStore(durable_conn)
     envelope = SubagentEnvelope(
         task="t",
         context="c",
@@ -75,7 +75,7 @@ async def test_pending_runs_excludes_completed(durable_conn) -> None:
 
 @pytest.mark.asyncio
 async def test_get_run_round_trip(durable_conn) -> None:
-    store = DurableRunStore(durable_conn)
+    store = SQLiteRunStore(durable_conn)
     envelope = SubagentEnvelope(
         task="task-a",
         context="ctx",
@@ -100,7 +100,7 @@ async def test_get_run_round_trip(durable_conn) -> None:
 
 @pytest.mark.asyncio
 async def test_record_failed_sets_status(durable_conn) -> None:
-    store = DurableRunStore(durable_conn)
+    store = SQLiteRunStore(durable_conn)
     envelope = SubagentEnvelope(
         task="t",
         context="c",

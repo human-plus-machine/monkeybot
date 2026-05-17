@@ -15,8 +15,18 @@ from monkeybot.core.config import runtime_env
 def _reset_runtime_env(monkeypatch: pytest.MonkeyPatch) -> None:
     runtime_env.reset_runtime_env_state_for_tests()
     monkeypatch.delenv("MONKEYBOT_CONFIG", raising=False)
+    # Snapshot all env vars that apply_monkeybot_runtime_env() may set so we can
+    # restore them after the test. monkeypatch.delenv is a no-op (no undo registered)
+    # when the key is absent, so direct os.environ writes inside the tested function
+    # would otherwise leak across tests.
+    env_before = {k: os.environ.get(k) for k in runtime_env._ENV_MAP.values()}
     yield
     runtime_env.reset_runtime_env_state_for_tests()
+    for key, before_val in env_before.items():
+        if before_val is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = before_val
 
 
 def test_yaml_applies_when_env_unset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

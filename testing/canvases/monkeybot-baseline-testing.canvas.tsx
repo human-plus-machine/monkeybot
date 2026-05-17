@@ -67,7 +67,7 @@ const dockerRows: BenchRow[] = [
 
 const featureRows: [string, string, string][] = [
   ["Skills discovery & YAML loader", "tests/skills/test_loader.py", "Covered"],
-  ["Skills execution (file-ops)", "tests/integration/test_skills_integration.py", "Covered"],
+  ["Skills execution (terminal + loader)", "tests/core/test_terminal.py, tests/skills/test_loader.py", "Covered"],
   ["Memory search (INDEX.md)", "tests/core/test_memory.py", "Covered"],
   ["Memory organizer run + index update", "tests/core/test_memory_organizer.py", "Covered"],
   ["Gateway SSE sessions", "tests/integration/test_mb_e2e_simple_reply.py", "Covered"],

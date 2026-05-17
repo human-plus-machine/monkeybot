@@ -1,6 +1,6 @@
 """Production FastAPI application wiring for the SSE gateway (Story 8).
 
-Bootstraps SQLite, MCP, command tiers, and a real :func:`monkeybot.core.runtime.loop.run` driver;
+Bootstraps storage backend, MCP, command tiers, and a real :func:`monkeybot.core.runtime.loop.run` driver;
 exposes module-level ``app`` for ``uvicorn monkeybot.gateway.sse.app:app``.
 """
 
@@ -15,17 +15,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import aiosqlite
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 import monkeybot.gateway.load_env  # noqa: F401 — side effect: dotenv + monkeybot.yaml
 from monkeybot.core.context import build_context
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
-from monkeybot.core.persistence.db import apply_schema, open_connection
+from monkeybot.core.persistence.backends import (
+    StorageBackend,
+    UsageStore,
+    create_storage_backend,
+)
 from monkeybot.core.runtime.events import Error as AgentError
 from monkeybot.core.runtime.events import TurnComplete, UsageTotals, event_to_json
-from monkeybot.core.persistence.history import ConversationHistory
 from monkeybot.core.hooks import HookManager
 from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector, ToolInspector
 from monkeybot.core.runtime.loop import SUMMARY_TRIGGER_RATIO
@@ -45,7 +47,6 @@ from monkeybot.core.llm.provider import (
 )
 from monkeybot.providers.gemini import GeminiProvider
 from monkeybot.core.llm.usage import Usage as UsageRecord
-from monkeybot.core.llm.usage import UsageStore
 from monkeybot.gateway.sse.loop_port import UsagePort
 from monkeybot.gateway.sse.routes import create_app as build_sse_app
 from monkeybot.gateway.sse.workspace_layout import resolve_agent_workspace_root
@@ -61,12 +62,10 @@ logger = logging.getLogger(__name__)
 class _GatewayDeps:
     """Process-level deps populated on startup (mutable module singleton)."""
 
-    db_url: str | None = None
     mcp: MCPClient | None = None
     inspectors: list[ToolInspector] = field(default_factory=list)
     provider: Provider | None = None
     curator_provider: Provider | None = None
-    usage_conn: aiosqlite.Connection | None = None
     hook_manager: HookManager | None = None
     memory_hook: MemoryHook | None = None
     web_search_tool: WebSearchTool | None = None
@@ -91,22 +90,6 @@ def _env_context_window_tokens() -> int:
         return 200_000
 
 
-class _HistoryAdapter:
-    """SQLite-backed :class:`ConversationHistory` exposed as the loop history port."""
-
-    def __init__(self, inner: ConversationHistory) -> None:
-        self._inner = inner
-
-    async def load(self, thread_id: str, limit: int = 100) -> list[Message]:
-        return await self._inner.load(thread_id, limit=limit)
-
-    async def append(self, thread_id: str, message: Message) -> None:
-        await self._inner.append(thread_id, message)
-
-    async def reset(self, thread_id: str, messages: list[Message]) -> None:
-        await self._inner.reset(thread_id, messages)
-
-
 def _resolved_workspace_paths() -> tuple[Path, Path, Path]:
     """Resolve agent workspace root, memory dir, and skills dir.
 
@@ -124,7 +107,7 @@ def _resolved_workspace_paths() -> tuple[Path, Path, Path]:
 
 
 class _UsageStoreAdapter(UsagePort):
-    """GET /usage backed by :class:`UsageStore` (summary connection opened at startup)."""
+    """GET /usage backed by the UsageStore returned from the storage backend."""
 
     def __init__(self, store: UsageStore) -> None:
         self._store = store
@@ -287,12 +270,11 @@ class GatewayLoopPort:
         if bus is None:
             return
 
-        db_url = _deps.db_url
         mcp = _deps.mcp
         inspectors = _deps.inspectors
         provider = _deps.provider
 
-        if not db_url or mcp is None or provider is None:
+        if mcp is None or provider is None:
             logger.error("gateway deps not initialized")
             await bus.publish_data(
                 event_to_json(AgentError(request_id=request_id, error="gateway_not_ready"))
@@ -302,7 +284,10 @@ class GatewayLoopPort:
             )
             return
 
-        conn: aiosqlite.Connection | None = None
+        backend: StorageBackend = app.state.storage
+        history = backend.history()
+        usage_store = backend.usage()
+
         cancel_event = asyncio.Event()
 
         async def _watch_cancel() -> None:
@@ -314,12 +299,8 @@ class GatewayLoopPort:
 
         watcher = asyncio.create_task(_watch_cancel())
 
+        executor: CoreToolExecutor | None = None
         try:
-            conn = await open_connection(db_url)
-            await _ensure_schema(conn)
-            history = _HistoryAdapter(ConversationHistory(conn))
-            usage_store = UsageStore(conn)
-
             model_name = os.environ.get("MODEL_NAME", "gemini-2.5-flash")
             agent_path = _default_agent_path(bus)
 
@@ -390,13 +371,12 @@ class GatewayLoopPort:
                     )
                 await bus.publish_data(event_to_json(evt))
         finally:
-            await executor.aclose()
+            if executor is not None:
+                await executor.aclose()
             watcher.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await watcher
             bus.cancel_requested_for = None
-            if conn is not None:
-                await conn.close()
 
 
 def _cors_allow_origins() -> list[str]:
@@ -431,10 +411,6 @@ app.add_middleware(
 )
 
 
-async def _ensure_schema(conn: aiosqlite.Connection) -> None:
-    await apply_schema(conn)
-
-
 def _tool_denied_patterns() -> list[str]:
     """Substring deny list for :class:`RulesInspector`. Empty ``MONKEYBOT_TOOL_DENIED_PATTERNS`` disables."""
     raw = os.environ.get("MONKEYBOT_TOOL_DENIED_PATTERNS")
@@ -445,9 +421,13 @@ def _tool_denied_patterns() -> list[str]:
 
 @app.on_event("startup")
 async def _startup() -> None:
-    """Wire MCP, SQLite usage reader, inspectors, and provider."""
+    """Wire storage backend, MCP, inspectors, and provider."""
     db_url = os.environ.get("DB_URL", "sqlite:///data/monkeybot.db")
-    _deps.db_url = db_url
+
+    backend = create_storage_backend(db_url)
+    await backend.open()
+    app.state.storage = backend
+    app.state.usage = _UsageStoreAdapter(backend.usage())
 
     mcp = MCPClient()
     _deps.mcp = mcp
@@ -482,20 +462,15 @@ async def _startup() -> None:
     _deps.curator_provider = _resolve_curator_provider(_deps.provider)
 
     try:
-        backend = _build_web_search_backend()
-        _deps.web_search_tool = WebSearchTool(backend) if backend is not None else None
+        backend_ws = _build_web_search_backend()
+        _deps.web_search_tool = WebSearchTool(backend_ws) if backend_ws is not None else None
         if _deps.web_search_tool is not None:
-            logger.info("web search enabled: backend=%s", backend.name)
+            logger.info("web search enabled: backend=%s", backend_ws.name)
         else:
             logger.info("web search disabled (WEB_SEARCH_BACKEND=none)")
     except Exception as exc:
         logger.warning("web search backend init failed — disabling: %s", exc)
         _deps.web_search_tool = None
-
-    usage_conn = await open_connection(db_url)
-    await _ensure_schema(usage_conn)
-    _deps.usage_conn = usage_conn
-    app.state.usage = _UsageStoreAdapter(UsageStore(usage_conn))
 
     if _memory_enabled():
         try:
@@ -515,7 +490,6 @@ async def _startup() -> None:
             _deps.hook_manager = mgr
             _deps.memory_hook = hook
             logger.info("memory hook enabled (memory_path=%s)", memory_resolved)
-            # Lever 5: best-effort GC of organizer's processed/ pile on startup.
             try:
                 gc_stats = await hook.gc_processed()
                 if gc_stats["deleted"] or gc_stats["errors"]:
@@ -537,15 +511,15 @@ async def _startup() -> None:
 
 @app.on_event("shutdown")
 async def _shutdown() -> None:
-    """Tear down MCP sessions and SQLite usage connection."""
+    """Tear down MCP sessions and storage backend."""
     mcp = _deps.mcp
     if mcp is not None:
         for name in list(getattr(mcp, "_servers", {}).keys()):
             await mcp.disconnect(name)
 
-    if _deps.usage_conn is not None:
-        await _deps.usage_conn.close()
-        _deps.usage_conn = None
+    storage: StorageBackend | None = getattr(app.state, "storage", None)
+    if storage is not None:
+        await storage.close()
 
 
 def create_app() -> FastAPI:

@@ -98,7 +98,7 @@ def _tuple_to_run_row(row: tuple[object, ...]) -> SubagentRunRow:
     )
 
 
-class DurableRunStore:
+class SQLiteRunStore:
     """Persist lifecycle rows for subprocess subagents."""
 
     def __init__(self, conn: aiosqlite.Connection) -> None:
@@ -191,3 +191,7 @@ class DurableRunStore:
         if row is None:
             return None
         return _tuple_to_run_row(tuple(row))
+
+
+# Backwards-compat alias — DurableRunStore was renamed to SQLiteRunStore in Step 1.5.
+DurableRunStore = SQLiteRunStore

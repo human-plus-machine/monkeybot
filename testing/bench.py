@@ -152,9 +152,9 @@ async def bench_harness() -> None:
 
     from monkeybot.core.context import TurnContext
     from monkeybot.core.runtime.events import AssistantDelta, TurnComplete
-    from monkeybot.core.persistence.db import apply_schema, open_connection
+    from monkeybot.core.persistence.sqlite import apply_schema, open_connection
     from monkeybot.core.testing.mocks_provider import fake_provider_prompt_tokens
-    from monkeybot.core.persistence.history import ConversationHistory
+    from monkeybot.core.persistence.history import SQLiteHistoryStore
     from monkeybot.core.runtime.loop import run
     from monkeybot.core.llm.provider import Done, TextDelta, UsageEvent
     from monkeybot.core.types.types_tools import ToolDef
@@ -191,7 +191,7 @@ async def bench_harness() -> None:
 
         conn = await open_connection(f"sqlite:///{tmp_path}/bench.db")
         await apply_schema(conn)
-        history = ConversationHistory(conn)
+        history = SQLiteHistoryStore(conn)
         executor = NoopExecutor()
 
         def _ctx(request_id: str) -> TurnContext:
@@ -305,8 +305,8 @@ async def bench_memory() -> None:
 async def bench_history() -> None:
     section("4. CONVERSATION HISTORY (SQLite)")
 
-    from monkeybot.core.persistence.db import apply_schema, open_connection
-    from monkeybot.core.persistence.history import ConversationHistory
+    from monkeybot.core.persistence.sqlite import apply_schema, open_connection
+    from monkeybot.core.persistence.history import SQLiteHistoryStore
     from monkeybot.core.llm.provider import Message
 
     import tempfile
@@ -314,7 +314,7 @@ async def bench_history() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         conn = await open_connection(f"sqlite:///{tmp}/history.db")
         await apply_schema(conn)
-        db = ConversationHistory(conn)
+        db = SQLiteHistoryStore(conn)
 
         # 4a. Append 20 messages
         t = time.monotonic()
@@ -379,9 +379,9 @@ async def bench_live() -> None:
         return
 
     from monkeybot.core.context import TurnContext
-    from monkeybot.core.persistence.db import apply_schema, open_connection
+    from monkeybot.core.persistence.sqlite import apply_schema, open_connection
     from monkeybot.core.runtime.events import AssistantDelta, Error, TurnComplete
-    from monkeybot.core.persistence.history import ConversationHistory
+    from monkeybot.core.persistence.history import SQLiteHistoryStore
     from monkeybot.core.runtime.loop import run
 
     class NoopExecutor:
@@ -394,7 +394,7 @@ async def bench_live() -> None:
         tmp_path = Path(tmp)
         conn = await open_connection(f"sqlite:///{tmp_path}/live.db")
         await apply_schema(conn)
-        history = ConversationHistory(conn)
+        history = SQLiteHistoryStore(conn)
         executor = NoopExecutor()
 
         def _ctx(request_id: str) -> TurnContext:

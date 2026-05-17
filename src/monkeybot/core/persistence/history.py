@@ -24,7 +24,7 @@ def _validate_message(message: Message) -> None:
         raise ValueError(f"invalid role: {role!r}")
 
 
-class ConversationHistory:
+class SQLiteHistoryStore:
     """Append/read conversation rows keyed by ``thread_id``."""
 
     def __init__(self, conn: aiosqlite.Connection) -> None:
@@ -88,7 +88,6 @@ class ConversationHistory:
 
     async def clear(self, thread_id: str) -> None:
         """Delete every stored message for ``thread_id``."""
-
         await self._conn.execute(
             "DELETE FROM conversation_history WHERE thread_id = ?", (thread_id,)
         )
@@ -96,10 +95,13 @@ class ConversationHistory:
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None:
         """Replace the thread transcript with ``messages`` (validated like ``append``)."""
-
         await self._conn.execute(
             "DELETE FROM conversation_history WHERE thread_id = ?", (thread_id,)
         )
         await self._conn.commit()
         for msg in messages:
             await self.append(thread_id, msg)
+
+
+# Backwards-compat alias — remove once all call sites are updated.
+ConversationHistory = SQLiteHistoryStore

@@ -9,14 +9,12 @@ import sys
 import uuid
 from pathlib import Path
 
-import aiosqlite
 from dotenv import load_dotenv
 
 from monkeybot.core.context import build_context
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
-from monkeybot.core.persistence.db import apply_schema, open_connection
+from monkeybot.core.persistence.backends import create_storage_backend
 from monkeybot.core.runtime.events import Error, event_to_json
-from monkeybot.core.persistence.history import ConversationHistory
 from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector, ToolInspector
 from monkeybot.core.runtime.loop import run as run_loop
 from monkeybot.core.mcp.mcp_client import MCPClient
@@ -28,22 +26,6 @@ from monkeybot.web_search import WebSearchTool
 from monkeybot.web_search import build_backend as _build_web_search_backend
 
 logger = logging.getLogger(__name__)
-
-
-class _HistoryAdapter:
-    """SQLite-backed :class:`ConversationHistory` as the loop history port."""
-
-    def __init__(self, inner: ConversationHistory) -> None:
-        self._inner = inner
-
-    async def load(self, thread_id: str, limit: int = 100) -> list[Message]:
-        return await self._inner.load(thread_id, limit=limit)
-
-    async def append(self, thread_id: str, message: Message) -> None:
-        await self._inner.append(thread_id, message)
-
-    async def reset(self, thread_id: str, messages: list[Message]) -> None:
-        await self._inner.reset(thread_id, messages)
 
 
 def _resolve_provider() -> GeminiProvider | ScriptedFakeProvider:
@@ -122,12 +104,12 @@ async def _async_main() -> None:
         agent_md_path = (ws / agent_md_path).resolve()
 
     db_url = os.environ.get("DB_URL", "sqlite:///data/monkeybot.db")
-    conn: aiosqlite.Connection | None = None
+    backend = create_storage_backend(db_url)
     mcp: MCPClient | None = None
+    executor: CoreToolExecutor | None = None
 
     try:
-        conn = await open_connection(db_url)
-        await apply_schema(conn)
+        await backend.open()
 
         mcp = MCPClient()
         mcp_config = Path(os.environ.get("MCP_CONFIG", "monkeybot_config/mcp.json"))
@@ -203,7 +185,7 @@ async def _async_main() -> None:
             run_command_allowed_commands=run_allow_cmds,
             run_command_allowed_path_prefixes=run_allow_paths,
         )
-        history = _HistoryAdapter(ConversationHistory(conn))
+        history = backend.history()
 
         body = envelope.task.strip()
         if envelope.context.strip():
@@ -228,12 +210,12 @@ async def _async_main() -> None:
         ):
             print(event_to_json(evt), flush=True)
     finally:
-        await executor.aclose()
+        if executor is not None:
+            await executor.aclose()
         if mcp is not None:
             for name in list(getattr(mcp, "_servers", {}).keys()):
                 await mcp.disconnect(name)
-        if conn is not None:
-            await conn.close()
+        await backend.close()
 
 
 def main() -> None:

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import pytest
 import pytest_asyncio
-from monkeybot.core.persistence.db import apply_schema, open_connection
-from monkeybot.core.llm.usage import Usage, UsageStore, UsageSummary
+from monkeybot.core.persistence.sqlite import apply_schema, open_connection
+from monkeybot.core.llm.usage import Usage, UsageSummary
+from monkeybot.core.persistence.usage import SQLiteUsageStore
 
 
 async def _apply_schema(conn) -> None:
@@ -22,7 +23,7 @@ async def usage_conn():
 
 @pytest.mark.asyncio
 async def test_usage_summary_aggregates_with_since_ms(usage_conn) -> None:
-    store = UsageStore(usage_conn)
+    store = SQLiteUsageStore(usage_conn)
     cutoff = 1_000
     rows = [
         ("t", None, "gemini", 1, 1, 0, 0.1, 1, 500, None),
@@ -56,7 +57,7 @@ async def test_usage_summary_aggregates_with_since_ms(usage_conn) -> None:
 
 @pytest.mark.asyncio
 async def test_usage_summary_all_threads(usage_conn) -> None:
-    store = UsageStore(usage_conn)
+    store = SQLiteUsageStore(usage_conn)
     for tid, cost in [("a", 0.05), ("b", 0.15)]:
         await usage_conn.execute(
             """
@@ -80,7 +81,7 @@ async def test_usage_summary_all_threads(usage_conn) -> None:
 
 @pytest.mark.asyncio
 async def test_usage_record_preserves_context_json(usage_conn) -> None:
-    store = UsageStore(usage_conn)
+    store = SQLiteUsageStore(usage_conn)
     ctx = '{"tool":"run_command"}'
     await store.record(
         "thr",
@@ -100,7 +101,7 @@ async def test_usage_record_preserves_context_json(usage_conn) -> None:
 
 @pytest.mark.asyncio
 async def test_usage_record_stores_estimated_prompt_tokens(usage_conn) -> None:
-    store = UsageStore(usage_conn)
+    store = SQLiteUsageStore(usage_conn)
     await store.record(
         "thr",
         "gemini",
@@ -122,7 +123,7 @@ async def test_usage_record_stores_estimated_prompt_tokens(usage_conn) -> None:
     assert row is not None
     assert int(row[0]) == 4242
 async def test_usage_summary_last_estimated_prompt_tokens_most_recent(usage_conn) -> None:
-    store = UsageStore(usage_conn)
+    store = SQLiteUsageStore(usage_conn)
     for created_at, inp, est in [(1000, 50, 500), (2000, 120, 1200), (3000, 99, 999)]:
         await usage_conn.execute(
             """
@@ -144,7 +145,7 @@ async def test_usage_summary_last_estimated_prompt_tokens_most_recent(usage_conn
 
 @pytest.mark.asyncio
 async def test_usage_summary_last_prompt_tokens_most_recent(usage_conn) -> None:
-    store = UsageStore(usage_conn)
+    store = SQLiteUsageStore(usage_conn)
     for created_at, inp in [(1000, 50), (2000, 120), (3000, 99)]:
         await usage_conn.execute(
             """
