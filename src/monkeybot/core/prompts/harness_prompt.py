@@ -39,7 +39,7 @@ This block is injected by the host every turn. Prefer the **active tool list** t
 
 ### Runtime paths
 - workspace root: `{workspace_root}`
-- memory directory: `{memory_path}` — always use `search_memory` to query; only use this path directly in `run_command` for low-level inspection.
+- memory storage: `{memory_storage_uri}` — always use `search_memory` to query; only use this URI/path directly in `run_command` for low-level inspection.
 
 ### MCP tools
 - Names look like `server__tool` (double underscore).
@@ -66,12 +66,12 @@ def harness_fixed_context(
     include_task_tool: bool,
     include_web_search: bool = False,
     workspace_root: str = "(not set)",
-    memory_path: str = "(not set)",
+    memory_storage_uri: str = "(not set)",
     run_command_opensandbox: bool = False,
 ) -> str:
     """Runtime-owned description of core tools, paths, MCP naming, and strict tool-call rules.
 
-    ``workspace_root`` and ``memory_path`` are resolved absolute paths injected once at
+    ``workspace_root`` and ``memory_storage_uri`` are injected once at
     context-build time so the model always uses correct paths in shell commands.
     ``include_web_search`` should be True when a web search backend is active.
     ``run_command_opensandbox`` should match whether ``run_command`` is routed through
@@ -83,6 +83,6 @@ def harness_fixed_context(
         web_search_line=_WEB_SEARCH_LINE if include_web_search else "",
         task_line=_TASK_LINE if include_task_tool else "",
         workspace_root=workspace_root,
-        memory_path=memory_path,
+        memory_storage_uri=memory_storage_uri,
     )
     return body.rstrip() + HARNESS_TOOL_CALL_PROTOCOL

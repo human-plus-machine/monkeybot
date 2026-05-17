@@ -12,6 +12,8 @@ from typing import Any
 import pytest
 
 from monkeybot.core.context import TurnContext
+from monkeybot.core.memory.subsystem import MemorySubsystem
+from monkeybot.core.workspace import create_workspace_storage
 from monkeybot.core.llm.provider import (
     Done,
     Message,
@@ -839,6 +841,13 @@ async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> N
             [TextDelta(text="done"), Done()],
         ]
     )
+    uri = "local://" + str(mem.resolve())
+    mem_sys = MemorySubsystem(
+        storage=create_workspace_storage(uri),
+        provider=prov,
+        model="gemini-2.5-flash",
+        memory_uri=uri,
+    )
     hist = FakeHistory()
     exe = BumpIndexExecutor(mem)
     ctx = TurnContext(
@@ -851,7 +860,7 @@ async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> N
         user_id=None,
         parent_run_id=None,
         model="gemini-2.5-flash",
-        memory_path=mem,
+        memory=mem_sys,
     )
     async for e in run(
         "hello",

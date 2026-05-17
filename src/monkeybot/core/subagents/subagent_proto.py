@@ -20,7 +20,7 @@ class SubagentEnvelope:
 
     task: str
     context: str
-    memory_path: str
+    memory_storage_uri: str
     parent_run_id: str
     model: str = "gemini-2.5-flash"
 
@@ -29,7 +29,7 @@ class SubagentEnvelope:
         payload = {
             "task": self.task,
             "context": self.context,
-            "memory_path": self.memory_path,
+            "memory_storage_uri": self.memory_storage_uri,
             "parent_run_id": self.parent_run_id,
             "model": self.model,
         }
@@ -44,10 +44,21 @@ class SubagentEnvelope:
             raise ValueError("envelope: invalid JSON") from exc
         if not isinstance(decoded, dict):
             raise ValueError("envelope: root must be an object")
+        uri = decoded.get("memory_storage_uri")
+        if not isinstance(uri, str) or not uri.strip():
+            legacy = decoded.get("memory_path")
+            if isinstance(legacy, str) and legacy.strip():
+                lp = legacy.strip()
+                if lp.startswith("gcs://") or lp.startswith("s3://") or lp.startswith("local://"):
+                    uri = lp
+                else:
+                    uri = "local://" + lp
+            else:
+                raise ValueError("envelope: 'memory_storage_uri' must be a non-empty string")
         return cls(
             task=_req_str(decoded, "task"),
             context=_req_str(decoded, "context"),
-            memory_path=_req_str(decoded, "memory_path"),
+            memory_storage_uri=uri.strip(),
             parent_run_id=_req_str(decoded, "parent_run_id"),
             model=_opt_model(decoded),
         )

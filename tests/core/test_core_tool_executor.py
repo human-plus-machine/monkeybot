@@ -10,7 +10,25 @@ from pathlib import Path
 import pytest
 from monkeybot.core.context import SkillRef, TurnContext
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
-from monkeybot.core.llm.provider import ToolCall
+from monkeybot.core.llm.provider import Done, TextDelta, ToolCall, UsageEvent
+from monkeybot.core.memory.subsystem import MemorySubsystem
+from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
+from monkeybot.core.workspace import create_workspace_storage
+
+
+def _mem_sub(root: Path) -> MemorySubsystem:
+    p = Path(root)
+    p.mkdir(exist_ok=True)
+    uri = "local://" + str(p.resolve())
+    fake = ScriptedFakeProvider(
+        [TextDelta(text="x"), UsageEvent(input_tokens=1, output_tokens=1, cached_tokens=0), Done()]
+    )
+    return MemorySubsystem(
+        storage=create_workspace_storage(uri),
+        provider=fake,
+        model="gemini-2.5-flash",
+        memory_uri=uri,
+    )
 from monkeybot.core.types.types_tools import ToolDef
 
 
@@ -80,7 +98,7 @@ async def test_read_file_and_write_file(tmp_path: Path) -> None:
     skills.mkdir()
     ex = CoreToolExecutor(
         workspace_root=root,
-        memory_path=mem,
+        memory=_mem_sub(mem),
         skills_path=skills,
         mcp=_NoMCP(),
     )
@@ -122,7 +140,7 @@ async def test_search_memory(tmp_path: Path) -> None:
     skills.mkdir()
     ex = CoreToolExecutor(
         workspace_root=root,
-        memory_path=mem,
+        memory=_mem_sub(mem),
         skills_path=skills,
         mcp=_NoMCP(),
     )
@@ -145,7 +163,7 @@ async def test_list_skills_uses_context(tmp_path: Path) -> None:
     skills.mkdir()
     ex = CoreToolExecutor(
         workspace_root=root,
-        memory_path=mem,
+        memory=_mem_sub(mem),
         skills_path=skills,
         mcp=_NoMCP(),
     )
@@ -169,7 +187,7 @@ async def test_run_command_cat_under_memory(tmp_path: Path, monkeypatch: pytest.
     skills.mkdir()
     ex = CoreToolExecutor(
         workspace_root=tmp_path,
-        memory_path=mem,
+        memory=_mem_sub(mem),
         skills_path=skills,
         mcp=_NoMCP(),
     )
@@ -195,7 +213,7 @@ async def test_run_command_blocked_command_returns_policy_envelope(
     skills.mkdir()
     ex = CoreToolExecutor(
         workspace_root=tmp_path,
-        memory_path=mem,
+        memory=_mem_sub(mem),
         skills_path=skills,
         mcp=_NoMCP(),
     )
@@ -227,7 +245,7 @@ async def test_run_command_blocked_path_returns_policy_envelope(
     skills.mkdir()
     ex = CoreToolExecutor(
         workspace_root=tmp_path,
-        memory_path=mem,
+        memory=_mem_sub(mem),
         skills_path=skills,
         mcp=_NoMCP(),
     )
@@ -257,7 +275,7 @@ async def test_run_command_malformed_args_returns_validation_envelope(
     skills.mkdir()
     ex = CoreToolExecutor(
         workspace_root=tmp_path,
-        memory_path=mem,
+        memory=_mem_sub(mem),
         skills_path=skills,
         mcp=_NoMCP(),
     )
@@ -276,12 +294,11 @@ async def test_run_command_malformed_args_returns_validation_envelope(
 async def test_unknown_tool(tmp_path: Path) -> None:
     ex = CoreToolExecutor(
         workspace_root=tmp_path,
-        memory_path=tmp_path / "m",
+        memory=_mem_sub(tmp_path / "m"),
         skills_path=tmp_path / "s",
         mcp=_NoMCP(),
     )
-    (tmp_path / "m").mkdir()
-    (tmp_path / "s").mkdir()
+    (tmp_path / "s").mkdir(exist_ok=True)
     out, err = await ex.execute(
         call=ToolCall(call_id="1", name="not_a_real_tool", args={}),
         ctx=_ctx(),
@@ -314,6 +331,7 @@ async def test_task_tool_aggregates_subagent_stream(tmp_path: Path, monkeypatch:
         del script, scratch_dir, subprocess_exec, on_event
         assert envelope.task == "do the thing"
         assert "ctx line" in envelope.context
+        assert envelope.memory_storage_uri.startswith("local://")
         yield ToolCallStarted(request_id="r", tool="search", label="search", args={})
         yield ToolCallResult(request_id="r", tool="search", result="hit one", error=None)
         yield AssistantDelta(request_id="r", delta="partial")
@@ -338,7 +356,7 @@ async def test_task_tool_aggregates_subagent_stream(tmp_path: Path, monkeypatch:
 
     ex = CoreToolExecutor(
         workspace_root=root,
-        memory_path=mem,
+        memory=_mem_sub(mem),
         skills_path=skills,
         mcp=_NoMCP(),
     )
@@ -391,7 +409,7 @@ async def test_task_tool_parent_cancel_stops_hanging_subagent(tmp_path: Path, mo
 
     ex = CoreToolExecutor(
         workspace_root=root,
-        memory_path=mem,
+        memory=_mem_sub(mem),
         skills_path=skills,
         mcp=_NoMCP(),
     )
@@ -446,7 +464,7 @@ async def test_list_skills_spills_large_json(tmp_path: Path) -> None:
     ]
     ex = CoreToolExecutor(
         workspace_root=root,
-        memory_path=mem,
+        memory=_mem_sub(mem),
         skills_path=skills,
         mcp=_NoMCP(),
     )
@@ -467,7 +485,7 @@ async def test_list_skills_small_no_spill(tmp_path: Path) -> None:
     mem.mkdir()
     skills = tmp_path / "skills"
     skills.mkdir()
-    ex = CoreToolExecutor(workspace_root=root, memory_path=mem, skills_path=skills, mcp=_NoMCP())
+    ex = CoreToolExecutor(workspace_root=root, memory=_mem_sub(mem), skills_path=skills, mcp=_NoMCP())
     ctx = _ctx()
     out, err = await ex.execute(call=ToolCall(call_id="c1", name="list_skills", args={}), ctx=ctx)
     assert err is None and out is not None
@@ -484,7 +502,7 @@ async def test_read_file_spill_path_caps_limit(tmp_path: Path) -> None:
     spill = root / ".monkeybot" / "spill" / "t" / "big.txt"
     spill.parent.mkdir(parents=True)
     spill.write_text("\n".join(f"line{i}" for i in range(600)), encoding="utf-8")
-    ex = CoreToolExecutor(workspace_root=root, memory_path=mem, skills_path=skills, mcp=_NoMCP())
+    ex = CoreToolExecutor(workspace_root=root, memory=_mem_sub(mem), skills_path=skills, mcp=_NoMCP())
     ctx = _ctx()
     out, err = await ex.execute(
         call=ToolCall(
@@ -509,7 +527,7 @@ async def test_read_file_non_spill_uses_workspace_defaults(tmp_path: Path) -> No
     skills.mkdir()
     p = root / "wide.txt"
     p.write_text("\n".join(f"L{i}" for i in range(400)), encoding="utf-8")
-    ex = CoreToolExecutor(workspace_root=root, memory_path=mem, skills_path=skills, mcp=_NoMCP())
+    ex = CoreToolExecutor(workspace_root=root, memory=_mem_sub(mem), skills_path=skills, mcp=_NoMCP())
     ctx = _ctx()
     out, err = await ex.execute(
         call=ToolCall(call_id="r2", name="read_file", args={"path": "wide.txt"}),
@@ -542,7 +560,7 @@ def _make_executor(tmp_path: Path) -> CoreToolExecutor:
     skills.mkdir(exist_ok=True)
     return CoreToolExecutor(
         workspace_root=tmp_path,
-        memory_path=mem,
+        memory=_mem_sub(mem),
         skills_path=skills,
         mcp=_NoMCP(),
     )
@@ -646,7 +664,7 @@ class TestCoreToolExecutorSandboxSelection:
         skills.mkdir()
         ex = CoreToolExecutor(
             workspace_root=tmp_path,
-            memory_path=mem,
+            memory=_mem_sub(mem),
             skills_path=skills,
             mcp=_NoMCP(),
             terminal=injected,

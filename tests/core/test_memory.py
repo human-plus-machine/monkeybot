@@ -1,18 +1,24 @@
-"""Tests for ``monkeybot.core.memory``."""
+"""Tests for ``monkeybot.core.memory`` storage operations."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 import pytest
+
 from monkeybot.core.memory import (
     INDEX_FILENAME,
     MemoryPromotionError,
-    load_index,
-    promote_to_memory,
-    search_memory,
-    search_memory_files,
+    async_load_index,
+    async_promote_to_memory,
+    async_search_memory_files,
 )
+from monkeybot.core.memory.storage_ops import async_search_memory
+from monkeybot.core.workspace import create_workspace_storage
+
+
+def _st(root: Path):
+    return create_workspace_storage("local://" + str(root.resolve()))
 
 
 @pytest.mark.asyncio
@@ -21,7 +27,7 @@ async def test_load_index_returns_lines_for_valid_file(tmp_path: Path) -> None:
     memory.mkdir()
     (memory / INDEX_FILENAME).write_text("a\n b\n", encoding="utf-8")
 
-    lines = await load_index(memory)
+    lines = await async_load_index(_st(memory))
 
     assert lines == ["a", "b"]
 
@@ -30,7 +36,7 @@ async def test_load_index_returns_lines_for_valid_file(tmp_path: Path) -> None:
 async def test_load_index_returns_empty_when_memory_path_missing(tmp_path: Path) -> None:
     missing = tmp_path / "nosuch"
 
-    lines = await load_index(missing)
+    lines = await async_load_index(_st(missing))
 
     assert lines == []
 
@@ -40,7 +46,7 @@ async def test_load_index_returns_empty_when_index_missing(tmp_path: Path) -> No
     memory = tmp_path / "memory"
     memory.mkdir()
 
-    lines = await load_index(memory)
+    lines = await async_load_index(_st(memory))
 
     assert lines == []
 
@@ -52,7 +58,7 @@ async def test_load_index_unicode_strict_raises_on_invalid_utf8(tmp_path: Path) 
     (memory / INDEX_FILENAME).write_bytes(b"\xff\xfe")
 
     with pytest.raises(UnicodeDecodeError):
-        await load_index(memory)
+        await async_load_index(_st(memory))
 
 
 @pytest.mark.asyncio
@@ -61,7 +67,7 @@ async def test_search_memory_deterministic_case_insensitive(tmp_path: Path) -> N
     memory.mkdir()
     (memory / INDEX_FILENAME).write_text("Alpha\nbeta\nAlpha beta\n", encoding="utf-8")
 
-    result = await search_memory("alpha", memory, top_k=5)
+    result = await async_search_memory("alpha", _st(memory), top_k=5)
 
     assert result == ["Alpha", "Alpha beta"]
 
@@ -72,7 +78,7 @@ async def test_search_memory_multi_token_and(tmp_path: Path) -> None:
     memory.mkdir()
     (memory / INDEX_FILENAME).write_text("foo bar\nfoo\nbar\n", encoding="utf-8")
 
-    result = await search_memory("foo bar", memory)
+    result = await async_search_memory("foo bar", _st(memory))
 
     assert result == ["foo bar"]
 
@@ -86,7 +92,7 @@ async def test_search_memory_respects_top_k_in_file_order(tmp_path: Path) -> Non
     )
     (memory / INDEX_FILENAME).write_text(content, encoding="utf-8")
 
-    got = await search_memory("match", memory, top_k=2)
+    got = await async_search_memory("match", _st(memory), top_k=2)
 
     assert got == ["match one", "match two"]
 
@@ -97,7 +103,7 @@ async def test_search_memory_empty_query_returns_empty(tmp_path: Path) -> None:
     memory.mkdir()
     (memory / INDEX_FILENAME).write_text("anything\n", encoding="utf-8")
 
-    got = await search_memory("", memory)
+    got = await async_search_memory("", _st(memory))
 
     assert got == []
 
@@ -108,24 +114,26 @@ async def test_search_memory_non_positive_top_k_returns_empty(tmp_path: Path) ->
     memory.mkdir()
     (memory / INDEX_FILENAME).write_text("x\n", encoding="utf-8")
 
-    got = await search_memory("x", memory, top_k=0)
+    got = await async_search_memory("x", _st(memory), top_k=0)
 
     assert got == []
 
 
-def test_search_memory_files_includes_raw_by_default(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_search_memory_files_includes_raw_by_default(tmp_path: Path) -> None:
     memory = tmp_path / "memory"
     raw = memory / "raw"
     raw.mkdir(parents=True)
     (raw / "post.md").write_text('echo "git -C app status"\n', encoding="utf-8")
 
-    got = search_memory_files(memory, "git -C app status", max_hits=10)
+    got = await async_search_memory_files(_st(memory), "git -C app status", max_hits=10)
 
     assert len(got["hits"]) == 1
     assert got["hits"][0]["path"].replace("\\", "/") == "raw/post.md"
 
 
-def test_search_memory_files_can_skip_raw_tree(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_search_memory_files_can_skip_raw_tree(tmp_path: Path) -> None:
     memory = tmp_path / "memory"
     semantic = memory / "semantic"
     semantic.mkdir(parents=True)
@@ -139,13 +147,14 @@ def test_search_memory_files_can_skip_raw_tree(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    all_hits = search_memory_files(memory, "git -C app remote -v", max_hits=10)
+    st = _st(memory)
+    all_hits = await async_search_memory_files(st, "git -C app remote -v", max_hits=10)
     paths_all = {h["path"].replace("\\", "/") for h in all_hits["hits"]}
     assert "raw/post.md" in paths_all
     assert "semantic/note.md" in paths_all
 
-    filtered = search_memory_files(
-        memory,
+    filtered = await async_search_memory_files(
+        st,
         "git -C app remote -v",
         max_hits=10,
         skip_relative_prefixes=("raw",),
@@ -163,8 +172,9 @@ async def test_promote_to_memory_moves_into_semantic(tmp_path: Path) -> None:
     src = promos / "x.md"
     src.write_text("body", encoding="utf-8")
     memory = tmp_path / "memory_root"
+    memory.mkdir()
 
-    await promote_to_memory(run_id, src, memory)
+    await async_promote_to_memory(run_id, src, _st(memory))
 
     dest = memory / "semantic" / "x.md"
     assert dest.is_file()
@@ -179,7 +189,7 @@ async def test_promote_to_memory_rejects_file_outside_run_id(tmp_path: Path) -> 
     foreign.write_text("", encoding="utf-8")
 
     with pytest.raises(MemoryPromotionError):
-        await promote_to_memory("01TEST", foreign, tmp_path / "memory")
+        await async_promote_to_memory("01TEST", foreign, _st(tmp_path / "memory"))
 
 
 @pytest.mark.asyncio
@@ -189,4 +199,4 @@ async def test_promote_to_memory_rejects_non_file(tmp_path: Path) -> None:
     d.mkdir(parents=True)
 
     with pytest.raises(MemoryPromotionError):
-        await promote_to_memory(run_id, d, tmp_path / "memory")
+        await async_promote_to_memory(run_id, d, _st(tmp_path / "memory"))

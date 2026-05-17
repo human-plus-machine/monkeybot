@@ -5,7 +5,7 @@ events. It implements both halves of the memory lifecycle:
 
 **Write path** (cheap, fire-and-forget, no LLM in the hot path)
 
-* ``USER_MESSAGE`` → append the user's prompt to ``memory/raw/<ts>_user_message.md``.
+* ``USER_MESSAGE`` → append the user's prompt to ``memory/chat_log.md``.
 * ``POST_TOOL`` → append the tool name, args, and a truncated result/error to
   ``memory/raw/<ts>_post_tool.md``.
 * ``POST_TURN`` → schedule the organizer (debounced; at most one pending run at
@@ -36,11 +36,11 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
-from monkeybot.core.memory import search_memory_files
+from monkeybot.core.memory.storage_ops import async_search_memory_files
+from monkeybot.core.workspace.protocol import WorkspaceStorage
 
 logger = logging.getLogger(__name__)
 
@@ -59,10 +59,7 @@ _CHAT_LOG_FILENAME = "chat_log.md"
 """User messages append here as one line each; the organizer never reads it."""
 
 _CHAT_LOG_HEADER = "# Chat Log\n\nAppend-only log of user messages, newest at bottom.\n"
-"""Written once on first append so search_memory_files has context."""
-
-_PROCESSED_GC_MAX_AGE_SEC = 7 * 24 * 60 * 60
-"""Default 7-day retention for raw/processed/ files."""
+"""Written once on first append so search has context."""
 
 OrganizerRunner = Callable[[], Awaitable[Any]]
 """Async callable that runs the memory organizer once. Result is ignored."""
@@ -191,9 +188,7 @@ class MemoryHook:
     """Wire memory writes/reads to :class:`HookManager` events.
 
     Args:
-        memory_path: Bot memory root (``{bot}/data/memory``). Raw observations
-            land in ``memory_path/raw/``; the organizer reads from there and
-            writes ``INDEX.md`` plus the typed subfolders.
+        storage: Pluggable memory tree backend.
         organizer_runner: Async callable that runs the organizer once. Injected
             so tests can supply a no-op. In production this is
             ``MemoryOrganizer.run``.
@@ -204,13 +199,12 @@ class MemoryHook:
     def __init__(
         self,
         *,
-        memory_path: Path,
+        storage: WorkspaceStorage,
         organizer_runner: OrganizerRunner | None = None,
         max_retrieval_hits: int = 3,
         dedup_ttl_sec: float = _DEDUP_TTL_SEC,
     ) -> None:
-        self._memory = Path(memory_path).resolve()
-        self._raw = self._memory / "raw"
+        self._storage = storage
         self._organizer_runner = organizer_runner
         self._max_hits = max(0, int(max_retrieval_hits))
         self._lock = asyncio.Lock()
@@ -234,7 +228,7 @@ class MemoryHook:
 
         User messages are high-volume and low-signal per message, so they
         bypass the organizer entirely. They land in a flat, append-only log
-        that ``search_memory_files`` can still scan when context is needed.
+        that search can still scan when context is needed.
         """
         if not payload.user_message:
             return
@@ -245,30 +239,21 @@ class MemoryHook:
 
     async def _append_chat_log(self, payload: HookPayload, text: str) -> None:
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        # Collapse newlines so each entry is one line — easier to scan.
         flat = " ".join(text.split())
         line = f"- [{ts}] [{payload.thread_id}] {flat}\n"
         async with self._lock:
             try:
-                self._memory.mkdir(parents=True, exist_ok=True)
-                target = self._memory / _CHAT_LOG_FILENAME
-                if not target.exists():
-                    target.write_text(_CHAT_LOG_HEADER, encoding="utf-8")
-                with target.open("a", encoding="utf-8") as fh:
-                    fh.write(line)
+                if not await self._storage.exists(_CHAT_LOG_FILENAME):
+                    await self._storage.write_text(_CHAT_LOG_FILENAME, _CHAT_LOG_HEADER)
+                await self._storage.append_text(_CHAT_LOG_FILENAME, line)
             except OSError as exc:
                 logger.warning("memory: failed appending chat_log: %r", exc)
 
     async def on_post_tool(self, payload: HookPayload) -> None:
         if not payload.tool_name:
             return
-        # Lever 1: skip noisy read-only tools when they succeeded; errors are
-        # always captured because they're high signal.
         if payload.tool_error is None and payload.tool_name in _POST_TOOL_SKIP_ON_SUCCESS:
             return
-        # Lever 2: SHA-256 dedup over (tool, args) within a 5-min window.
-        # Errors include the error text in the key so a recurring failure
-        # surfaces once per distinct error.
         dedup_key = self._dedup.hash(
             payload.tool_name,
             {
@@ -372,9 +357,8 @@ class MemoryHook:
 
     async def _search(self, query: str) -> list[dict[str, Any]]:
         try:
-            result = await asyncio.to_thread(
-                search_memory_files,
-                self._memory,
+            result = await async_search_memory_files(
+                self._storage,
                 query,
                 max_hits=self._max_hits * 2,
                 skip_relative_prefixes=("raw",),
@@ -388,44 +372,13 @@ class MemoryHook:
     async def _write_raw(self, kind: str, thread_id: str, body: str) -> None:
         async with self._lock:
             try:
-                await asyncio.to_thread(self._raw.mkdir, parents=True, exist_ok=True)
-                fname = f"{int(time.time() * 1000)}_{_safe_segment(thread_id, 20)}_{kind}_{uuid.uuid4().hex[:8]}.md"
-                path = self._raw / fname
-                await asyncio.to_thread(path.write_text, body, encoding="utf-8")
+                fname = (
+                    f"raw/{int(time.time() * 1000)}_{_safe_segment(thread_id, 20)}_{kind}_"
+                    f"{uuid.uuid4().hex[:8]}.md"
+                )
+                await self._storage.write_text(fname, body)
             except Exception as exc:
                 logger.warning("memory raw write failed (%s): %r", kind, exc)
-
-    async def gc_processed(
-        self, *, max_age_sec: float = _PROCESSED_GC_MAX_AGE_SEC
-    ) -> dict[str, int]:
-        """Delete files under ``raw/processed/`` older than ``max_age_sec``.
-
-        Returns counts so the caller can log them. Safe to call before any
-        memory directory exists.
-        """
-        processed = self._raw / "processed"
-        result = {"scanned": 0, "deleted": 0, "errors": 0}
-        if not await asyncio.to_thread(processed.exists):
-            return result
-
-        cutoff = time.time() - float(max_age_sec)
-
-        def _sweep() -> dict[str, int]:
-            counts = {"scanned": 0, "deleted": 0, "errors": 0}
-            for path in processed.iterdir():
-                if not path.is_file():
-                    continue
-                counts["scanned"] += 1
-                try:
-                    if path.stat().st_mtime < cutoff:
-                        path.unlink()
-                        counts["deleted"] += 1
-                except OSError as exc:
-                    counts["errors"] += 1
-                    logger.debug("gc_processed: skip %s (%r)", path.name, exc)
-            return counts
-
-        return await asyncio.to_thread(_sweep)
 
     def _schedule_organizer(self) -> None:
         runner = self._organizer_runner

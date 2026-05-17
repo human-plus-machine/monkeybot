@@ -11,6 +11,11 @@ import pytest
 from monkeybot.core.context import TurnContext
 from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
 from monkeybot.core.memory.hook import MemoryHook
+from monkeybot.core.workspace import create_workspace_storage
+
+
+def _local_st(root: Path):
+    return create_workspace_storage("local://" + str(root.resolve()))
 
 
 def _ctx() -> TurnContext:
@@ -38,7 +43,7 @@ def _payload(event: HookEvent, **kw: Any) -> HookPayload:
 async def test_user_message_appends_to_chat_log_not_raw(tmp_path: Path) -> None:
     """Lever 3: user messages go to chat_log.md, never to raw/."""
     mem = tmp_path / "memory"
-    hook = MemoryHook(memory_path=mem)
+    hook = MemoryHook(storage=_local_st(mem))
     await hook.on_user_message(_payload(HookEvent.USER_MESSAGE, user_message="Hi, I am Karthik"))
 
     assert not (mem / "raw").exists(), "user messages must not enter the organizer queue"
@@ -53,7 +58,7 @@ async def test_user_message_appends_to_chat_log_not_raw(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_user_message_chat_log_appends_one_line_per_message(tmp_path: Path) -> None:
     mem = tmp_path / "memory"
-    hook = MemoryHook(memory_path=mem)
+    hook = MemoryHook(storage=_local_st(mem))
     for msg in ("first", "second\nwith newline", "third"):
         await hook.on_user_message(_payload(HookEvent.USER_MESSAGE, user_message=msg))
 
@@ -64,7 +69,7 @@ async def test_user_message_chat_log_appends_one_line_per_message(tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_user_message_empty_or_whitespace_writes_nothing(tmp_path: Path) -> None:
-    hook = MemoryHook(memory_path=tmp_path / "memory")
+    hook = MemoryHook(storage=_local_st(tmp_path / "memory"))
     await hook.on_user_message(_payload(HookEvent.USER_MESSAGE, user_message=None))
     await hook.on_user_message(_payload(HookEvent.USER_MESSAGE, user_message="   \n  "))
     assert not (tmp_path / "memory" / "chat_log.md").exists()
@@ -73,7 +78,7 @@ async def test_user_message_empty_or_whitespace_writes_nothing(tmp_path: Path) -
 
 @pytest.mark.asyncio
 async def test_post_tool_writes_truncated_result_and_error(tmp_path: Path) -> None:
-    hook = MemoryHook(memory_path=tmp_path / "memory")
+    hook = MemoryHook(storage=_local_st(tmp_path / "memory"))
     long_result = "x" * 6000
     await hook.on_post_tool(
         _payload(
@@ -95,7 +100,7 @@ async def test_post_tool_writes_truncated_result_and_error(tmp_path: Path) -> No
 
 @pytest.mark.asyncio
 async def test_post_tool_without_tool_name_writes_nothing(tmp_path: Path) -> None:
-    hook = MemoryHook(memory_path=tmp_path / "memory")
+    hook = MemoryHook(storage=_local_st(tmp_path / "memory"))
     await hook.on_post_tool(_payload(HookEvent.POST_TOOL, tool_name=None))
     assert not (tmp_path / "memory" / "raw").exists()
 
@@ -103,7 +108,7 @@ async def test_post_tool_without_tool_name_writes_nothing(tmp_path: Path) -> Non
 @pytest.mark.asyncio
 async def test_post_tool_skips_read_only_tools_on_success(tmp_path: Path) -> None:
     """read_file / search_memory / list_skills successes are not captured."""
-    hook = MemoryHook(memory_path=tmp_path / "memory")
+    hook = MemoryHook(storage=_local_st(tmp_path / "memory"))
     for name in ("read_file", "search_memory", "list_skills"):
         await hook.on_post_tool(
             _payload(
@@ -120,7 +125,7 @@ async def test_post_tool_skips_read_only_tools_on_success(tmp_path: Path) -> Non
 @pytest.mark.asyncio
 async def test_post_tool_captures_read_only_tool_errors(tmp_path: Path) -> None:
     """Errors on read-only tools are signal; they MUST be captured."""
-    hook = MemoryHook(memory_path=tmp_path / "memory")
+    hook = MemoryHook(storage=_local_st(tmp_path / "memory"))
     await hook.on_post_tool(
         _payload(
             HookEvent.POST_TOOL,
@@ -138,7 +143,7 @@ async def test_post_tool_captures_read_only_tool_errors(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_post_tool_dedups_identical_calls_within_ttl(tmp_path: Path) -> None:
-    hook = MemoryHook(memory_path=tmp_path / "memory")
+    hook = MemoryHook(storage=_local_st(tmp_path / "memory"))
     args = {"command": "echo hi"}
     for _ in range(5):
         await hook.on_post_tool(
@@ -155,7 +160,7 @@ async def test_post_tool_dedups_identical_calls_within_ttl(tmp_path: Path) -> No
 
 @pytest.mark.asyncio
 async def test_post_tool_different_args_are_not_deduped(tmp_path: Path) -> None:
-    hook = MemoryHook(memory_path=tmp_path / "memory")
+    hook = MemoryHook(storage=_local_st(tmp_path / "memory"))
     for cmd in ("ls", "pwd", "date"):
         await hook.on_post_tool(
             _payload(
@@ -172,7 +177,7 @@ async def test_post_tool_different_args_are_not_deduped(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_post_tool_dedup_expires_after_ttl(tmp_path: Path) -> None:
     """With a near-zero TTL, the second identical call is no longer a duplicate."""
-    hook = MemoryHook(memory_path=tmp_path / "memory", dedup_ttl_sec=0.0)
+    hook = MemoryHook(storage=_local_st(tmp_path / "memory"), dedup_ttl_sec=0.0)
     args = {"command": "echo hi"}
     for _ in range(3):
         await hook.on_post_tool(
@@ -190,7 +195,7 @@ async def test_post_tool_dedup_expires_after_ttl(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_post_tool_dedup_keys_separate_success_and_error(tmp_path: Path) -> None:
     """Same (tool, args): one success then one error must each produce a file."""
-    hook = MemoryHook(memory_path=tmp_path / "memory")
+    hook = MemoryHook(storage=_local_st(tmp_path / "memory"))
     args = {"command": "flaky"}
     await hook.on_post_tool(
         _payload(
@@ -225,7 +230,7 @@ async def test_post_turn_schedules_organizer_once_and_debounces(tmp_path: Path) 
         started.set()
         await release.wait()
 
-    hook = MemoryHook(memory_path=tmp_path / "memory", organizer_runner=fake_organizer)
+    hook = MemoryHook(storage=_local_st(tmp_path / "memory"), organizer_runner=fake_organizer)
 
     # Three POST_TURN events back-to-back; while the first organizer is running
     # the rest must be no-ops (debounce).
@@ -259,7 +264,7 @@ async def test_post_turn_schedules_organizer_once_and_debounces(tmp_path: Path) 
 
 @pytest.mark.asyncio
 async def test_post_turn_without_runner_is_noop(tmp_path: Path) -> None:
-    hook = MemoryHook(memory_path=tmp_path / "memory", organizer_runner=None)
+    hook = MemoryHook(storage=_local_st(tmp_path / "memory"), organizer_runner=None)
     await hook.on_post_turn(_payload(HookEvent.POST_TURN))
 
 
@@ -270,7 +275,7 @@ async def test_session_end_runs_organizer_synchronously(tmp_path: Path) -> None:
     async def runner() -> None:
         calls["n"] += 1
 
-    hook = MemoryHook(memory_path=tmp_path / "memory", organizer_runner=runner)
+    hook = MemoryHook(storage=_local_st(tmp_path / "memory"), organizer_runner=runner)
     await hook.on_session_end(_payload(HookEvent.SESSION_END))
     assert calls["n"] == 1
 
@@ -280,7 +285,7 @@ async def test_organizer_failure_is_swallowed(tmp_path: Path) -> None:
     async def boom() -> None:
         raise RuntimeError("organizer-broken")
 
-    hook = MemoryHook(memory_path=tmp_path / "memory", organizer_runner=boom)
+    hook = MemoryHook(storage=_local_st(tmp_path / "memory"), organizer_runner=boom)
     await hook.on_session_end(_payload(HookEvent.SESSION_END))  # must not raise
 
 
@@ -295,7 +300,7 @@ async def test_pre_turn_injects_memory_lines_for_keyword_hits(tmp_path: Path) ->
         "Name: Karthik\nPreferred language: Python\n", encoding="utf-8"
     )
 
-    hook = MemoryHook(memory_path=mem)
+    hook = MemoryHook(storage=_local_st(mem))
     p = _payload(HookEvent.PRE_TURN, user_message="Hi, can you remind me of my name?")
     await hook.on_pre_turn(p)
 
@@ -304,7 +309,7 @@ async def test_pre_turn_injects_memory_lines_for_keyword_hits(tmp_path: Path) ->
 
 @pytest.mark.asyncio
 async def test_pre_turn_with_no_keywords_does_nothing(tmp_path: Path) -> None:
-    hook = MemoryHook(memory_path=tmp_path / "memory")
+    hook = MemoryHook(storage=_local_st(tmp_path / "memory"))
     p = _payload(HookEvent.PRE_TURN, user_message="hi")
     await hook.on_pre_turn(p)
     assert p.inject_memory_lines == []
@@ -318,7 +323,7 @@ async def test_pre_turn_caps_at_max_hits(tmp_path: Path) -> None:
     for i in range(10):
         (mem / f"f{i}.md").write_text(f"Python fact {i}\n", encoding="utf-8")
 
-    hook = MemoryHook(memory_path=mem, max_retrieval_hits=2)
+    hook = MemoryHook(storage=_local_st(mem), max_retrieval_hits=2)
     p = _payload(HookEvent.PRE_TURN, user_message="Tell me about python preferences")
     await hook.on_pre_turn(p)
     assert len(p.inject_memory_lines) == 2
@@ -332,7 +337,7 @@ async def test_pre_tool_injects_inject_text_for_relevant_tool(tmp_path: Path) ->
         "src/middleware/auth.ts uses jose for Edge runtime.\n", encoding="utf-8"
     )
 
-    hook = MemoryHook(memory_path=mem)
+    hook = MemoryHook(storage=_local_st(mem))
     p = _payload(
         HookEvent.PRE_TOOL,
         tool_name="read_file",
@@ -345,7 +350,7 @@ async def test_pre_tool_injects_inject_text_for_relevant_tool(tmp_path: Path) ->
 
 @pytest.mark.asyncio
 async def test_pre_tool_skips_unknown_tool(tmp_path: Path) -> None:
-    hook = MemoryHook(memory_path=tmp_path / "memory")
+    hook = MemoryHook(storage=_local_st(tmp_path / "memory"))
     p = _payload(HookEvent.PRE_TOOL, tool_name="list_skills", tool_args={})
     await hook.on_pre_tool(p)
     assert p.inject_text is None
@@ -353,7 +358,7 @@ async def test_pre_tool_skips_unknown_tool(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_pre_tool_without_relevant_args_does_nothing(tmp_path: Path) -> None:
-    hook = MemoryHook(memory_path=tmp_path / "memory")
+    hook = MemoryHook(storage=_local_st(tmp_path / "memory"))
     p = _payload(HookEvent.PRE_TOOL, tool_name="read_file", tool_args={"offset": 1})
     await hook.on_pre_tool(p)
     assert p.inject_text is None
@@ -364,8 +369,8 @@ async def test_pre_tool_without_relevant_args_does_nothing(tmp_path: Path) -> No
 
 @pytest.mark.asyncio
 async def test_gc_processed_noop_when_directory_missing(tmp_path: Path) -> None:
-    hook = MemoryHook(memory_path=tmp_path / "memory")
-    stats = await hook.gc_processed()
+    storage = _local_st(tmp_path / "memory")
+    stats = await storage.gc_prefix("raw/processed/", 7 * 24 * 60 * 60)
     assert stats == {"scanned": 0, "deleted": 0, "errors": 0}
 
 
@@ -385,8 +390,8 @@ async def test_gc_processed_deletes_only_old_files(tmp_path: Path) -> None:
     old_mtime = time.time() - (10 * 24 * 60 * 60)
     _os.utime(stale, (old_mtime, old_mtime))
 
-    hook = MemoryHook(memory_path=mem)
-    stats = await hook.gc_processed()
+    storage = _local_st(mem)
+    stats = await storage.gc_prefix("raw/processed/", 7 * 24 * 60 * 60)
 
     assert stats["scanned"] == 2
     assert stats["deleted"] == 1
@@ -398,7 +403,7 @@ async def test_gc_processed_deletes_only_old_files(tmp_path: Path) -> None:
 async def test_register_attaches_all_events_and_e2e(tmp_path: Path) -> None:
     mem = tmp_path / "memory"
     mgr = HookManager()
-    hook = MemoryHook(memory_path=mem)
+    hook = MemoryHook(storage=_local_st(mem))
     hook.register(mgr)
 
     await mgr.fire(_payload(HookEvent.USER_MESSAGE, user_message="hello"))

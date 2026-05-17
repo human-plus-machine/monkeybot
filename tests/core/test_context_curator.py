@@ -40,7 +40,7 @@ def _ctx(*, memory: list[str], skills: list[SkillRef]) -> TurnContext:
         user_id=None,
         parent_run_id=None,
         model="gemini-2.5-flash",
-        memory_path=None,
+        memory=None,
         context_curation_enabled=True,
     )
 

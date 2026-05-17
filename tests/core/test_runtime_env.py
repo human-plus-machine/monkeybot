@@ -127,6 +127,36 @@ def test_model_summarization_model_env(tmp_path: Path, monkeypatch: pytest.Monke
     assert os.environ.get("CONTEXT_SUMMARIZATION_MODEL") == "flash-lite"
 
 
+def test_memory_storage_uri_sets_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    (cfg_dir / "monkeybot.yaml").write_text(
+        "paths:\n  memory_storage_uri: gcs://my-bucket/mem\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("MEMORY_STORAGE_URI", raising=False)
+    runtime_env.apply_monkeybot_runtime_env()
+    assert os.environ.get("MEMORY_STORAGE_URI") == "gcs://my-bucket/mem"
+
+
+def test_legacy_memory_path_still_sets_memory_path_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    (cfg_dir / "monkeybot.yaml").write_text(
+        "paths:\n  memory_path: ./legacy/mem\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("MEMORY_PATH", raising=False)
+    monkeypatch.delenv("MEMORY_STORAGE_URI", raising=False)
+    runtime_env.apply_monkeybot_runtime_env()
+    assert os.environ.get("MEMORY_PATH") == "./legacy/mem"
+    assert os.environ.get("MEMORY_STORAGE_URI") is None
+
+
 def test_denied_patterns_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     cfg_dir = tmp_path / "monkeybot_config"

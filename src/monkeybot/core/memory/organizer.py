@@ -1,8 +1,9 @@
 """Memory organizer — async post-processor for agent memory.
 
-Reads raw observation files from ``{memory_dir}/raw/``, summarizes each,
+Reads raw observation files from ``raw/``, summarizes each,
 classifies into a typed folder, and updates INDEX.md for deterministic retrieval.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -13,14 +14,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, cast
 
-
-class _CustomMemoryFolderLike(Protocol):
-    name: str
-    description: str
-
+from monkeybot.core.memory.storage_ops import INDEX_FILENAME
 from monkeybot.core.types.content_blocks import Text
 from monkeybot.core.types.interfaces import MonkeybotError
 from monkeybot.core.llm.provider import Done, Message, Provider, TextDelta
+from monkeybot.core.workspace.protocol import WorkspaceStorage
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +41,11 @@ _INDEX_ENTRY_PROMPT = (
     "tags: <comma_separated>\nsummary: <one_sentence>\n\n"
     "File: {filename}\nContent: {summary}\n\nEntry:"
 )
+
+
+class _CustomMemoryFolderLike(Protocol):
+    name: str
+    description: str
 
 
 class MemoryOrganizerError(MonkeybotError):
@@ -91,16 +94,12 @@ class MemoryOrganizer:
         self,
         provider: Provider,
         model: str,
-        memory_dir: Path,
+        storage: WorkspaceStorage,
         custom_folders: Sequence[_CustomMemoryFolderLike] | None = None,
-        index_path: Path | None = None,
     ) -> None:
         self._provider = provider
         self._model = model
-        self.memory_dir = Path(memory_dir)
-        self.raw_dir = self.memory_dir / "raw"
-        self.processed_dir = self.raw_dir / "processed"
-        self.index_path = index_path or (self.memory_dir / "INDEX.md")
+        self._storage = storage
         self._all_folders: list[str] = BUILT_IN_FOLDERS + [
             cf.name for cf in (custom_folders or [])
         ]
@@ -109,54 +108,52 @@ class MemoryOrganizer:
         }
 
     async def run(self) -> MemoryOrganizerResult:
-        """Process all unprocessed raw .md files in raw_dir.
+        """Process all unprocessed raw .md files directly under ``raw/``.
 
-        Returns immediately with zeros if raw_dir is missing or empty.
+        Returns immediately with zeros if ``raw/`` is missing or empty.
         Per-file errors are captured in MemoryOrganizerResult.errors, not propagated.
         """
-        if not self.raw_dir.exists():
-            return MemoryOrganizerResult(0, 0, False)
-
+        all_under_raw = await self._storage.list_files("raw/")
         raw_files = [
-            f for f in self.raw_dir.glob("*.md")
-            if f.parent == self.raw_dir  # exclude processed/ subdir
+            p
+            for p in all_under_raw
+            if p.startswith("raw/")
+            and p.endswith(".md")
+            and not p.startswith("raw/processed/")
+            and p.count("/") == 1
         ]
         if not raw_files:
             return MemoryOrganizerResult(0, 0, False)
-
-        loop = asyncio.get_event_loop()
-        self.processed_dir.mkdir(parents=True, exist_ok=True)
 
         entries: list[IndexEntry] = []
         files_written = 0
         errors: list[str] = []
 
-        for raw_file in raw_files:
+        for raw_rel in sorted(raw_files):
+            raw_name = Path(raw_rel).name
             try:
-                content = await loop.run_in_executor(None, raw_file.read_text)
+                content = await self._storage.read_text(raw_rel)
                 summary = await self._summarize(content)
                 folder = await self._classify(summary)
-                filename = self._generate_filename(raw_file.name, folder)
+                filename = self._generate_filename(raw_name, folder)
 
-                dest_dir = self.memory_dir / folder
-                dest_dir.mkdir(parents=True, exist_ok=True)
-                dest_path = dest_dir / filename
-                await loop.run_in_executor(None, dest_path.write_text, summary)
+                dest_path = f"{folder}/{filename}"
+                await self._storage.write_text(dest_path, summary)
 
                 entries.append(
                     IndexEntry(folder=folder, filename=filename, tags="", summary=summary)
                 )
 
-                processed_path = self.processed_dir / raw_file.name
-                await loop.run_in_executor(None, raw_file.rename, processed_path)
+                processed_rel = f"raw/processed/{raw_name}"
+                await self._storage.move(raw_rel, processed_rel)
 
                 files_written += 1
 
             except Exception as e:
                 logger.warning(
-                    "Memory organizer failed to process %s: %s", raw_file.name, str(e)
+                    "Memory organizer failed to process %s: %s", raw_name, str(e)
                 )
-                errors.append(raw_file.name)
+                errors.append(raw_name)
 
         if entries:
             await self._update_index(entries)
@@ -169,17 +166,11 @@ class MemoryOrganizer:
         )
 
     def _generate_filename(self, raw_name: str, folder: str) -> str:
-        """Derive typed memory filename from raw filename."""
+        del folder
         stem = Path(raw_name).stem
         return f"{stem}.md"
 
     async def _summarize(self, raw_content: str) -> str:
-        """Summarize raw observation via LLM.
-
-        Raises:
-            Exception: Propagates LLM errors so the per-file handler in run()
-                can capture them as processing errors.
-        """
         return await _complete_text(
             self._provider,
             model=self._model,
@@ -187,7 +178,6 @@ class MemoryOrganizer:
         )
 
     async def _classify(self, summary: str) -> str:
-        """Classify summary into a folder name. Falls back to 'episodic' on unknown folder."""
         folder_list = "\n".join(
             f"- {f}: {self._custom_folder_descriptions.get(f, f)}"
             for f in self._all_folders
@@ -206,19 +196,10 @@ class MemoryOrganizer:
         return folder
 
     async def _update_index(self, entries: list[IndexEntry]) -> None:
-        """Merge entries into INDEX.md, creating or appending sections as needed.
-
-        Raises:
-            MemoryOrganizerError: If INDEX.md cannot be written.
-        """
-        loop = asyncio.get_event_loop()
-
         existing_content = ""
-        if self.index_path.exists():
+        if await self._storage.exists(INDEX_FILENAME):
             try:
-                existing_content = await loop.run_in_executor(
-                    None, self.index_path.read_text
-                )
+                existing_content = await self._storage.read_text(INDEX_FILENAME)
             except Exception:
                 existing_content = ""
 
@@ -245,8 +226,8 @@ class MemoryOrganizer:
 
                 entry.tags = tags
                 entry.summary = summary_line
-            except Exception:
-                pass  # use defaults already set
+            except Exception as exc:
+                logger.debug("index entry LLM call failed for %s: %r", entry.filename, exc)
 
             formatted = (
                 f"- [[{entry.folder}/{entry.filename}]]"
@@ -276,7 +257,6 @@ class MemoryOrganizer:
                 )
 
         try:
-            self.index_path.parent.mkdir(parents=True, exist_ok=True)
-            await loop.run_in_executor(None, self.index_path.write_text, existing_content)
+            await self._storage.write_text(INDEX_FILENAME, existing_content)
         except Exception as e:
             raise MemoryOrganizerError(f"Failed to write INDEX.md: {e}") from e

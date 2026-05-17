@@ -12,6 +12,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from monkeybot.core.context import build_context
+from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.persistence.backends import create_storage_backend
 from monkeybot.core.runtime.events import Error, event_to_json
@@ -22,6 +23,7 @@ from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.llm.provider import Done, Message, ProviderEvent, TextDelta, ToolCall, UsageEvent
 from monkeybot.providers.gemini import GeminiProvider
 from monkeybot.core.subagents.subagent_proto import SubagentEnvelope
+from monkeybot.core.workspace import create_workspace_storage
 from monkeybot.web_search import WebSearchTool
 from monkeybot.web_search import build_backend as _build_web_search_backend
 
@@ -95,7 +97,14 @@ async def _async_main() -> None:
     os.chdir(ws)
     load_dotenv()
 
-    mem = Path(os.environ["MONKEYBOT_SUBAGENT_MEMORY_PATH"]).resolve()
+    mem_uri = os.environ.get("MEMORY_STORAGE_URI", "").strip() or envelope.memory_storage_uri.strip()
+    if not mem_uri:
+        print(
+            event_to_json(Error(request_id="", error="subagent_worker: MEMORY_STORAGE_URI is not set")),
+            flush=True,
+        )
+        raise SystemExit(1)
+
     skills = Path(os.environ["MONKEYBOT_SUBAGENT_SKILLS_PATH"]).resolve()
 
     agent_raw = os.environ.get("MONKEYBOT_SUBAGENT_AGENT_MD") or os.environ.get("AGENT_MD", "AGENT.md")
@@ -160,11 +169,19 @@ async def _async_main() -> None:
 
         extra_tools = [_ws_tool] if _ws_tool is not None else []
 
+        storage = create_workspace_storage(mem_uri)
+        memory = MemorySubsystem(
+            storage=storage,
+            provider=provider,
+            model=envelope.model,
+            memory_uri=mem_uri,
+        )
+
         ctx = await build_context(
             thread_id,
             request_id,
             agent_md_path=agent_md_path,
-            memory_path=mem,
+            memory=memory,
             skills_path=skills,
             mcp_client=mcp,
             parent_run_id=envelope.parent_run_id,
@@ -178,7 +195,7 @@ async def _async_main() -> None:
 
         executor = CoreToolExecutor(
             workspace_root=ws,
-            memory_path=mem,
+            memory=memory,
             skills_path=skills,
             mcp=mcp,
             extra_tools=extra_tools,
@@ -197,6 +214,9 @@ async def _async_main() -> None:
         else:
             max_turns = max(1, int(os.environ.get("MAX_TURNS", "25")))
 
+        # Subagents read memory (index, search_memory) via MemorySubsystem but do not
+        # register memory hooks — chat_log / raw / organizer writes stay on the parent
+        # gateway to avoid duplicate or conflicting durable memory updates.
         async for evt in run_loop(
             body,
             ctx,

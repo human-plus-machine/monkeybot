@@ -31,10 +31,10 @@ def test_harness_injects_runtime_paths() -> None:
     out = harness_fixed_context(
         include_task_tool=False,
         workspace_root="/srv/bot",
-        memory_path="/srv/bot/data/memory",
+        memory_storage_uri="local:///srv/bot/data/memory",
     )
     assert "`/srv/bot`" in out
-    assert "`/srv/bot/data/memory`" in out
+    assert "local:///srv/bot/data/memory" in out
 
 
 def test_harness_default_paths_shown_when_not_provided() -> None:

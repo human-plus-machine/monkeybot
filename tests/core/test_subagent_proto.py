@@ -58,7 +58,7 @@ def test_subagent_envelope_roundtrip() -> None:
     env = SubagentEnvelope(
         task="do thing",
         context="ctx",
-        memory_path="/tmp/m",
+        memory_storage_uri="local:///tmp/m",
         parent_run_id="p1",
         model="m1",
     )
@@ -83,7 +83,7 @@ async def test_spawn_subagent_writes_progress_and_streams_events(tmp_scratch: Pa
     env = SubagentEnvelope(
         task="t",
         context="c",
-        memory_path="m",
+        memory_storage_uri="local://m",
         parent_run_id="p",
     )
 
@@ -122,7 +122,7 @@ async def test_spawn_subagent_writes_progress_and_streams_events(tmp_scratch: Pa
 async def test_spawn_subagent_on_event_called(tmp_scratch: Path) -> None:
     rid = "r"
     lines = [event_to_json(AssistantDelta(request_id=rid, delta="one"))]
-    env = SubagentEnvelope(task="a", context="", memory_path="m", parent_run_id="p")
+    env = SubagentEnvelope(task="a", context="", memory_storage_uri="local://m", parent_run_id="p")
 
     async def subprocess_exec(*_a: object, **_k: object) -> FakeProcess:
         return FakeProcess(lines, exit_code=0)
@@ -146,7 +146,7 @@ async def test_spawn_subagent_malformed_line_emits_error_continues(tmp_scratch: 
     rid = "r"
     good = event_to_json(AssistantDelta(request_id=rid, delta="ok"))
     lines = ["not-json", good]
-    env = SubagentEnvelope(task="a", context="", memory_path="m", parent_run_id="p")
+    env = SubagentEnvelope(task="a", context="", memory_storage_uri="local://m", parent_run_id="p")
 
     async def subprocess_exec(*_a: object, **_k: object) -> FakeProcess:
         return FakeProcess(lines, exit_code=0)

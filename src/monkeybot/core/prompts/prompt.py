@@ -112,7 +112,7 @@ def compose_system_prompt(
         include_task_tool=include_task,
         include_web_search=include_web_search,
         workspace_root=str(ctx.workspace_root) if ctx.workspace_root is not None else "(not set)",
-        memory_path=str(ctx.memory_path) if ctx.memory_path is not None else "(not set)",
+        memory_storage_uri=ctx.memory.uri if ctx.memory is not None else "(not set)",
         run_command_opensandbox=SandboxConfig.from_env().enabled,
     )
 

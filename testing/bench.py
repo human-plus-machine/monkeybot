@@ -272,7 +272,8 @@ async def bench_harness() -> None:
 async def bench_memory() -> None:
     section("3. MEMORY OPS")
 
-    from monkeybot.core.memory import search_memory
+    from monkeybot.core.memory import async_search_memory_files
+    from monkeybot.core.workspace import create_workspace_storage
 
     import tempfile
 
@@ -288,11 +289,13 @@ async def bench_memory() -> None:
         record(f"write {WRITE_N} memory files", write_ms, limit_ms=200, note=f"{write_ms/WRITE_N:.1f}ms each")
 
         # 3b. Keyword search over all files
+        storage = create_workspace_storage("local://" + str(tmp_path.resolve()))
         t = time.monotonic()
-        results = await search_memory("Content for note 5", tmp_path)
+        payload = await async_search_memory_files(storage, "Content for note 5", max_hits=20)
+        results = [h.get("path", "") for h in payload.get("hits", []) if isinstance(h, dict)]
         search_ms = (time.monotonic() - t) * 1000
         found = any("note-5" in r for r in results)
-        record("search_memory (10 files)", search_ms, limit_ms=50, note=f"{'hit' if found else 'miss'}")
+        record("search_memory_files (10 files)", search_ms, limit_ms=50, note=f"{'hit' if found else 'miss'}")
 
         # 3c. Direct file read (baseline for read_file tool)
         t = time.monotonic()

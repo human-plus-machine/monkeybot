@@ -36,7 +36,7 @@ async def test_pending_runs_includes_unfinished_running(durable_conn) -> None:
     envelope = SubagentEnvelope(
         task="t",
         context="c",
-        memory_path="/m",
+        memory_storage_uri="local:///m",
         parent_run_id="p1",
     )
     await store.record_started(
@@ -59,7 +59,7 @@ async def test_pending_runs_excludes_completed(durable_conn) -> None:
     envelope = SubagentEnvelope(
         task="t",
         context="c",
-        memory_path="/m",
+        memory_storage_uri="local:///m",
         parent_run_id="p1",
     )
     await store.record_started(
@@ -79,7 +79,7 @@ async def test_get_run_round_trip(durable_conn) -> None:
     envelope = SubagentEnvelope(
         task="task-a",
         context="ctx",
-        memory_path="/mem",
+        memory_storage_uri="local:///mem",
         parent_run_id="parent",
         model="gemini-2.5-flash",
     )
@@ -104,7 +104,7 @@ async def test_record_failed_sets_status(durable_conn) -> None:
     envelope = SubagentEnvelope(
         task="t",
         context="c",
-        memory_path="/m",
+        memory_storage_uri="local:///m",
         parent_run_id="p1",
     )
     await store.record_started(

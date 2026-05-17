@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from monkeybot.core.context import TurnContext
-from monkeybot.core.memory import search_memory_files
+from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.runtime.events import AssistantDelta, Error, ToolCallResult, ToolCallStarted, TurnComplete
 from monkeybot.core.runtime.loop import ToolExecutorPort
 from monkeybot.core.mcp.mcp_client import MCPConnectionError, MCPServerNotConnectedError
@@ -214,7 +214,7 @@ class CoreToolExecutor(ToolExecutorPort):
         self,
         *,
         workspace_root: Path,
-        memory_path: Path,
+        memory: MemorySubsystem | None,
         skills_path: Path,
         mcp: MCPClientPort,
         terminal: TerminalExecutor | None = None,
@@ -223,7 +223,7 @@ class CoreToolExecutor(ToolExecutorPort):
         run_command_allowed_path_prefixes: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         self._workspace = WorkspaceFileService(Path(workspace_root).resolve())
-        self._memory_path = Path(memory_path).resolve()
+        self._memory = memory
         self._skills_path = Path(skills_path).resolve()
         self._mcp = mcp
         if terminal is not None:
@@ -424,7 +424,17 @@ class CoreToolExecutor(ToolExecutorPort):
                 ),
             )
         max_hits = _coerce_int(args.get("max_hits"), 40) or 40
-        payload = await asyncio.to_thread(search_memory_files, self._memory_path, query, max_hits=max_hits)
+        if self._memory is None:
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "search_memory requires memory to be configured.",
+                    "Enable the memory hook and set paths.memory_storage_uri in monkeybot.yaml.",
+                    {"field": "memory"},
+                ),
+            )
+        payload = await self._memory.search_files(query, max_hits=max_hits, skip_raw=False)
         return (_j(payload), None)
 
     def _tool_list_skills(self, ctx: TurnContext) -> tuple[str | None, str | None]:
@@ -461,6 +471,17 @@ class CoreToolExecutor(ToolExecutorPort):
         if not isinstance(context_val, str):
             context_val = str(context_val)
 
+        if self._memory is None:
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "task tool requires memory to be configured for the subagent worker.",
+                    "Enable the memory hook and set paths.memory_storage_uri in monkeybot.yaml.",
+                    {"field": "memory"},
+                ),
+            )
+
         script = Path(
             os.environ.get(
                 "MONKEYBOT_SUBAGENT_SCRIPT",
@@ -482,7 +503,7 @@ class CoreToolExecutor(ToolExecutorPort):
         envelope = SubagentEnvelope(
             task=task,
             context=context_val,
-            memory_path=str(self._memory_path),
+            memory_storage_uri=self._memory.uri,
             parent_run_id=parent_label,
             model=ctx.model,
         )
@@ -492,7 +513,7 @@ class CoreToolExecutor(ToolExecutorPort):
 
         child_env = {
             "MONKEYBOT_SUBAGENT_WORKSPACE": str(self._workspace.repo_root),
-            "MONKEYBOT_SUBAGENT_MEMORY_PATH": str(self._memory_path),
+            "MEMORY_STORAGE_URI": self._memory.uri,
             "MONKEYBOT_SUBAGENT_SKILLS_PATH": str(self._skills_path),
         }
         agent_md = os.environ.get("AGENT_MD")

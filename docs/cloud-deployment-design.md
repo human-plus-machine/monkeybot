@@ -1,6 +1,6 @@
 # MonkeyBot Cloud Deployment Design
 
-**Status:** In progress — Steps **1** (storage abstraction) and **1.5** (run store) are implemented in code; later steps (workspace storage, Docker baseline, deployment guides, harness-as-library hardening) remain.  
+**Status:** In progress — Steps **1**, **1.5**, and **2** (workspace / memory storage) are implemented in code; later steps (Docker baseline, deployment guides, harness-as-library hardening) remain.  
 **Purpose:** Single source of truth for the multi-cloud deployment work. Open this in any new chat before starting a step to ensure nothing in that step breaks a later one.
 
 ---
@@ -215,53 +215,38 @@ Update `subagent_worker.py` to use `backend.runs()` instead of passing the raw c
 
 ## Step 2: Workspace / Memory Storage Abstraction
 
-**Goal:** Make memory storage pluggable (local FS, GCS, S3) via a single env var. Zero extra dependencies for local FS users.
+**Goal:** Pluggable durable memory (`WorkspaceStorage`: local FS, GCS, S3) with a single façade (`MemorySubsystem`) injected into the harness. **Primary config is YAML** (`paths.memory_storage_uri`); the gateway mirrors that into internal env `MEMORY_STORAGE_URI` for subprocess workers — not a user-facing “set this env” requirement for local dev.
 
-### What changes
+### What shipped
 
-Define a `WorkspaceStorage` protocol in `monkeybot.core.workspace`:
-
-- `read_text(path: str) → str`
-- `write_text(path: str, content: str) → None`
-- `list_files(prefix: str) → list[str]`
-- `delete_file(path: str) → None`
-- `exists(path: str) → bool`
-
-Implementations:
-- `LocalWorkspaceStorage` — wraps `pathlib.Path`, zero new deps, default
-- `GCSWorkspaceStorage` — wraps `google-cloud-storage`, gated behind `[gcs]` extra
-- `S3WorkspaceStorage` — wraps `boto3`, gated behind `[aws]` extra
-
-Factory `create_workspace_storage(uri: str) → WorkspaceStorage`:
-- `uri` is `local://<abs-path>` or just a bare path → `LocalWorkspaceStorage`
-- `uri` is `gcs://bucket/prefix` → `GCSWorkspaceStorage`
-- `uri` is `s3://bucket/prefix` → `S3WorkspaceStorage`
-
-The `MEMORY_PATH` env var is replaced by `MEMORY_STORAGE_URI` (with backwards-compat fallback: if `MEMORY_PATH` is set and no URI, treat it as `local://MEMORY_PATH`).
-
-### Skills vs Memory
-
-- **Skills** are read-only at runtime. They can stay baked into the Docker image OR loaded from cloud storage. For the initial implementation, skills continue to be baked in. The `SKILLS_PATH` env var stays as-is. Cloud storage for skills is a separate future task.
-- **Memory** (INDEX.md, memory fragments) is read/write and MUST be durable on any ephemeral deployment. This is the only thing `WorkspaceStorage` needs to back on day one.
+- **`WorkspaceStorage`** protocol (`read_text`, `write_text`, `append_text`, `exists`, `list_files`, `delete`, `move`, `gc_prefix`) under `monkeybot.core.workspace`.
+- **`LocalWorkspaceStorage`** — `pathlib` + `asyncio.to_thread`; `gc_prefix` performs the old processed-file sweep (non-recursive under the prefix directory).
+- **`GCSWorkspaceStorage`** / **`S3WorkspaceStorage`** — sync SDKs in worker threads; `append_text` is read-merge-write (safe only under the shared memory asyncio lock); `gc_prefix` returns zeros with logs pointing to bucket lifecycle rules.
+- **`create_workspace_storage(uri)`** — `local://`, bare path, `gcs://`, `s3://`; lazy imports with explicit `ImportError` messages for missing extras.
+- **`MemorySubsystem`** — owns storage, constructs `MemoryHook` + `MemoryOrganizer` internally; exposes `uri`, `load_index`, `search_files`, `promote`, `gc_processed`, `register_hooks`. Call sites use `memory: MemorySubsystem | None` on `TurnContext` and `CoreToolExecutor` (not raw paths).
+- **Runtime env** — `paths.memory_storage_uri` → `MEMORY_STORAGE_URI`; legacy `paths.memory_path` → `MEMORY_PATH`. Gateway `_memory_storage_uri()` prefers `MEMORY_STORAGE_URI`, else wraps `MEMORY_PATH` as `local://…` (INFO log when that legacy fallback is used).
+- **Subagents** — envelope field `memory_storage_uri`; worker reads `MEMORY_STORAGE_URI` and rebuilds storage.
 
 ### What does NOT change
 
-- `MemoryHook` and `MemoryOrganizer` internals stay the same — they get injected a `WorkspaceStorage` instead of a raw `Path`. Their logic doesn't change.
-- Sandbox workspace (`CoreToolExecutor`'s file ops on the agent's code/data workspace) is separate from memory storage and is NOT abstracted here. That workspace is managed by the agent inside the sandbox container.
+- **Skills** stay path-based / image-baked for now; not part of `WorkspaceStorage`.
+- **Sandbox workspace** (agent code + data inside the sandbox) remains separate from durable memory.
 
 ### Image impact
 
-- Default (local FS): zero new packages.
-- GCS: `google-cloud-storage` added only when user installs `[gcs]` extra.
-- S3: `boto3` added only when user installs `[aws]` extra.
+Unchanged from prior plan: default image has no cloud SDKs; `[gcs]` / `[aws]` extras add provider clients.
+
+### Watch-outs (Step 2)
+
+1. **Lock** — `MemoryHook` owns an `asyncio.Lock`; cloud `append_text` is not atomic; hook + organizer must share the same storage instance constructed by `MemorySubsystem`.
+2. **`list_files` contract** — keys are POSIX relative paths; filtering in `search_files` / organizer assumes consistent prefixes (e.g. `raw/processed/`).
+3. **Subagent URI** — prefer `MEMORY_STORAGE_URI` only; avoid leaving duplicate legacy env vars in worker startup.
+4. **Cloud `move`** — copy+delete may leave duplicates on partial failure; organizer may re-process; log at WARNING if delete fails after copy.
+5. **`[gcs]` extra** — shared with other features; keep version pins compatible.
 
 ### What this unlocks
 
-Cloud Run users can set `MEMORY_STORAGE_URI=gcs://my-bucket/monkeybot-memory` and get durable memory without a persistent volume. ECS users can use `s3://my-bucket/monkeybot-memory`.
-
-### Watch out for in subsequent steps
-
-GCS and S3 backends are async at the protocol level but the underlying SDKs may be sync. Use `asyncio.to_thread()` for blocking SDK calls. Do not introduce a hard `asyncio` loop dependency in the storage implementation itself — Lambda creates its own event loop.
+Cloud Run / ECS can point YAML at `memory_storage_uri: gcs://…` or `s3://…` for durable memory without a PVC.
 
 ---
 
@@ -465,14 +450,15 @@ Step 1.5: Run Store Abstraction
   - Tests: both backends against RunStore protocol       DONE
 
 Step 2: Workspace / Memory Storage Abstraction
-  - Define WorkspaceStorage protocol
-  - Implement LocalWorkspaceStorage (no new deps)
-  - Implement GCSWorkspaceStorage ([gcs] extra)
-  - Implement S3WorkspaceStorage ([aws] extra)
-  - Factory: create_workspace_storage(uri)
-  - Wire into MemoryHook + gateway lifespan
-  - Backwards-compat: MEMORY_PATH env still works as local:// URI
-  - Tests: all backends against same interface
+  - Define WorkspaceStorage protocol                               DONE
+  - Implement LocalWorkspaceStorage (no new deps)                  DONE
+  - Implement GCSWorkspaceStorage ([gcs] extra)                    DONE
+  - Implement S3WorkspaceStorage ([aws] extra)                     DONE
+  - Factory: create_workspace_storage(uri)                         DONE
+  - MemorySubsystem façade + harness wiring                        DONE
+  - YAML paths.memory_storage_uri (+ runtime env mirror)           DONE
+  - Backwards-compat: MEMORY_PATH → local:// URI                   DONE
+  - Tests: local + factory + protocol contract + memory fakes      DONE
 
 Step 3: Docker Artifacts
   - Consolidate Dockerfile (after Step 1+2 land)

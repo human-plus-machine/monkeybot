@@ -1,4 +1,5 @@
 """Tests for MemoryOrganizer memory post-processor."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -12,6 +13,7 @@ from monkeybot.core.memory.organizer import (
     MemoryOrganizer,
 )
 from monkeybot.core.testing.mocks_provider import fake_provider_prompt_tokens
+from monkeybot.core.workspace import create_workspace_storage
 
 
 class FakeProvider:
@@ -40,22 +42,25 @@ def make_organizer(
     provider: FakeProvider | None = None,
     model: str = "gemini-2.0-flash",
     custom_folders=None,
-) -> MemoryOrganizer:
-    memory_dir = tmp_path / "memory"
-    memory_dir.mkdir(exist_ok=True)
-    return MemoryOrganizer(
+) -> tuple[MemoryOrganizer, Path]:
+    memory_root = tmp_path / "memory"
+    memory_root.mkdir(exist_ok=True)
+    uri = "local://" + str(memory_root.resolve())
+    storage = create_workspace_storage(uri)
+    org = MemoryOrganizer(
         provider=provider or FakeProvider([]),
         model=model,
-        memory_dir=memory_dir,
+        storage=storage,
         custom_folders=custom_folders,
     )
+    return org, memory_root
 
 
 class TestMemoryOrganizerRunEmpty:
     @pytest.mark.asyncio
     async def test_empty_raw_dir_returns_zero_result(self, tmp_path):
-        organizer = make_organizer(tmp_path, provider=FakeProvider([]))
-        organizer.raw_dir.mkdir(parents=True)
+        organizer, root = make_organizer(tmp_path, provider=FakeProvider([]))
+        (root / "raw").mkdir(parents=True)
         result = await organizer.run()
         assert result.files_processed == 0
         assert result.files_written == 0
@@ -64,7 +69,7 @@ class TestMemoryOrganizerRunEmpty:
 
     @pytest.mark.asyncio
     async def test_missing_raw_dir_returns_zero_result(self, tmp_path):
-        organizer = make_organizer(tmp_path, provider=FakeProvider([]))
+        organizer, _root = make_organizer(tmp_path, provider=FakeProvider([]))
         result = await organizer.run()
         assert result.files_processed == 0
         assert result.files_written == 0
@@ -74,7 +79,7 @@ class TestMemoryOrganizerRunEmpty:
 class TestMemoryOrganizerRunProcessing:
     @pytest.mark.asyncio
     async def test_processes_raw_file_and_moves_to_processed(self, tmp_path):
-        organizer = make_organizer(
+        organizer, root = make_organizer(
             tmp_path,
             provider=FakeProvider([
                 "Summary text.",
@@ -82,8 +87,9 @@ class TestMemoryOrganizerRunProcessing:
                 "tags: event\nsummary: Test event happened",
             ]),
         )
-        organizer.raw_dir.mkdir(parents=True)
-        raw_file = organizer.raw_dir / "2026-03-18-run.md"
+        raw = root / "raw"
+        raw.mkdir(parents=True)
+        raw_file = raw / "2026-03-18-run.md"
         raw_file.write_text("Agent did something today.")
 
         result = await organizer.run()
@@ -92,27 +98,29 @@ class TestMemoryOrganizerRunProcessing:
         assert result.files_written == 1
         assert result.index_updated is True
         assert not raw_file.exists()
-        assert (organizer.processed_dir / raw_file.name).exists()
-        assert any((organizer.memory_dir / "episodic").glob("*.md"))
+        assert (root / "raw" / "processed" / raw_file.name).exists()
+        assert any((root / "episodic").glob("*.md"))
 
     @pytest.mark.asyncio
     async def test_invalid_classify_falls_back_to_episodic(self, tmp_path):
-        organizer = make_organizer(
+        organizer, root = make_organizer(
             tmp_path,
             provider=FakeProvider(["Summary.", "UNKNOWN_FOLDER", "tags: x\nsummary: y"]),
         )
-        organizer.raw_dir.mkdir(parents=True)
-        (organizer.raw_dir / "test.md").write_text("content")
+        raw = root / "raw"
+        raw.mkdir(parents=True)
+        (raw / "test.md").write_text("content")
         result = await organizer.run()
         assert result.files_written == 1
         assert result.errors == []
-        assert any((organizer.memory_dir / "episodic").glob("*.md"))
+        assert any((root / "episodic").glob("*.md"))
 
     @pytest.mark.asyncio
     async def test_file_error_captured_not_raised(self, tmp_path):
-        organizer = make_organizer(tmp_path, provider=FakeProvider([]))
-        organizer.raw_dir.mkdir(parents=True)
-        (organizer.raw_dir / "test.md").write_text("content")
+        organizer, root = make_organizer(tmp_path, provider=FakeProvider([]))
+        raw = root / "raw"
+        raw.mkdir(parents=True)
+        (raw / "test.md").write_text("content")
         result = await organizer.run()
         assert result.files_processed == 1
         assert result.files_written == 0
@@ -123,10 +131,11 @@ class TestMemoryOrganizerRunProcessing:
         responses: list[str] = []
         for _ in range(2):
             responses.extend(["Summary.", "episodic", "tags: x\nsummary: y"])
-        organizer = make_organizer(tmp_path, provider=FakeProvider(responses))
-        organizer.raw_dir.mkdir(parents=True)
-        (organizer.raw_dir / "a.md").write_text("content a")
-        (organizer.raw_dir / "b.md").write_text("content b")
+        organizer, root = make_organizer(tmp_path, provider=FakeProvider(responses))
+        raw = root / "raw"
+        raw.mkdir(parents=True)
+        (raw / "a.md").write_text("content a")
+        (raw / "b.md").write_text("content b")
         result = await organizer.run()
         assert result.files_processed == 2
         assert result.files_written == 2
@@ -138,24 +147,25 @@ class TestMemoryOrganizerCustomFolders:
         from monkeybot.core.config import CustomMemoryFolder
 
         custom = [CustomMemoryFolder("campaigns", "Marketing campaign data")]
-        organizer = make_organizer(
+        organizer, root = make_organizer(
             tmp_path,
             provider=FakeProvider(
                 ["Campaign summary.", "campaigns", "tags: campaign\nsummary: Q1 launch"]
             ),
             custom_folders=custom,
         )
-        organizer.raw_dir.mkdir(parents=True)
-        (organizer.raw_dir / "test.md").write_text("campaign content")
+        raw = root / "raw"
+        raw.mkdir(parents=True)
+        (raw / "test.md").write_text("campaign content")
         result = await organizer.run()
         assert result.files_written == 1
-        assert any((organizer.memory_dir / "campaigns").glob("*.md"))
+        assert any((root / "campaigns").glob("*.md"))
 
     def test_all_folders_includes_custom(self, tmp_path):
         from monkeybot.core.config import CustomMemoryFolder
 
         custom = [CustomMemoryFolder("sprints", "Sprint goals")]
-        organizer = make_organizer(tmp_path, provider=FakeProvider([]), custom_folders=custom)
+        organizer, _root = make_organizer(tmp_path, provider=FakeProvider([]), custom_folders=custom)
         assert "sprints" in organizer._all_folders
         assert all(f in organizer._all_folders for f in BUILT_IN_FOLDERS)
 
@@ -163,41 +173,44 @@ class TestMemoryOrganizerCustomFolders:
 class TestUpdateIndex:
     @pytest.mark.asyncio
     async def test_creates_index_if_missing(self, tmp_path):
-        organizer = make_organizer(
+        organizer, root = make_organizer(
             tmp_path,
             provider=FakeProvider(["tags: event\nsummary: Test event happened"]),
         )
         entries = [IndexEntry("episodic", "2026-03-18-event.md", "test", "Test event")]
         await organizer._update_index(entries)
-        assert organizer.index_path.exists()
-        content = organizer.index_path.read_text()
+        index_path = root / "INDEX.md"
+        assert index_path.exists()
+        content = index_path.read_text()
         assert "## episodic/" in content
         assert "2026-03-18-event.md" in content
 
     @pytest.mark.asyncio
     async def test_appends_to_existing_section(self, tmp_path):
-        organizer = make_organizer(
+        organizer, root = make_organizer(
             tmp_path,
             provider=FakeProvider(["tags: new\nsummary: New event"]),
         )
-        organizer.index_path.write_text(
+        index_path = root / "INDEX.md"
+        index_path.write_text(
             "# Memory Index\n\n## episodic/\n- [[episodic/old.md]] | tags: old | Old event\n"
         )
         entries = [IndexEntry("episodic", "new.md", "new", "New event")]
         await organizer._update_index(entries)
-        content = organizer.index_path.read_text()
+        content = index_path.read_text()
         assert "old.md" in content
         assert "new.md" in content
 
     @pytest.mark.asyncio
     async def test_creates_new_section_if_missing(self, tmp_path):
-        organizer = make_organizer(
+        organizer, root = make_organizer(
             tmp_path,
             provider=FakeProvider(["tags: data\nsummary: Campaign result"]),
         )
-        organizer.index_path.write_text("# Memory Index\n\n## episodic/\n")
+        index_path = root / "INDEX.md"
+        index_path.write_text("# Memory Index\n\n## episodic/\n")
         entries = [IndexEntry("semantic", "fact.md", "data", "Campaign result")]
         await organizer._update_index(entries)
-        content = organizer.index_path.read_text()
+        content = index_path.read_text()
         assert "## semantic/" in content
         assert "fact.md" in content

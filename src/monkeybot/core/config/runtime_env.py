@@ -26,6 +26,7 @@ _ENV_MAP: dict[tuple[str, str], str] = {
     ("runtime", "gateway_port"): "GATEWAY_PORT",
     ("paths", "agent_md"): "AGENT_MD",
     ("paths", "memory_path"): "MEMORY_PATH",
+    ("paths", "memory_storage_uri"): "MEMORY_STORAGE_URI",
     ("paths", "skills_path"): "SKILLS_PATH",
     ("paths", "db_url"): "DB_URL",
     ("paths", "mcp_config"): "MCP_CONFIG",

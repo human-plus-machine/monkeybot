@@ -48,7 +48,7 @@ Important knobs (see **`monkeybot_config/monkeybot.example.yaml`** for all secti
 | YAML section | Purpose |
 |---|---|
 | `paths.agent_md` | System prompt file (default `./monkeybot_config/AGENT.md`). |
-| `paths.memory_path` | Markdown memory root; optional `INDEX.md` is surfaced in the prompt. |
+| `paths.memory_storage_uri` | Durable markdown memory root (`local://…`, `gcs://…`, `s3://…`); optional `INDEX.md` is surfaced in the prompt. Legacy `paths.memory_path` still maps to `MEMORY_PATH`. |
 | `paths.skills_path` | Skill bundle root. |
 | `paths.db_url` | SQLite URL for conversation + usage. |
 | `paths.mcp_config` / `paths.command_allowlist_config` | MCP map and run_command allowlist policy path. |

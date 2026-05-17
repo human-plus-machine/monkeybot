@@ -46,7 +46,7 @@ class SubagentEnvelope:
 
     task: str
     context: str
-    memory_path: str
+    memory_storage_uri: str
     parent_run_id: str
     model: str = "gemini-2.5-flash"
 
@@ -63,20 +63,31 @@ class SubagentEnvelope:
             raise ValueError("Invalid envelope JSON") from exc
         if not isinstance(data, dict):
             raise ValueError("Envelope JSON must be an object")
-        required = {"task", "context", "memory_path", "parent_run_id"}
-        missing = required - data.keys()
+        base_required = {"task", "context", "parent_run_id"}
+        missing = base_required - data.keys()
         if missing:
             raise ValueError(f"Envelope missing fields: {sorted(missing)}")
+        uri = data.get("memory_storage_uri")
+        if not isinstance(uri, str) or not uri.strip():
+            legacy = data.get("memory_path")
+            if isinstance(legacy, str) and legacy.strip():
+                lp = legacy.strip()
+                if lp.startswith("gcs://") or lp.startswith("s3://") or lp.startswith("local://"):
+                    uri = lp
+                else:
+                    uri = "local://" + lp
+            else:
+                raise ValueError("Envelope missing memory_storage_uri or legacy memory_path")
         model = data.get("model", "gemini-2.5-flash")
         if not isinstance(model, str):
             raise ValueError("model must be a string when present")
-        for key in required:
+        for key in ("task", "context", "parent_run_id"):
             if not isinstance(data[key], str):
                 raise ValueError(f"{key} must be a string")
         return cls(
             task=data["task"],
             context=data["context"],
-            memory_path=data["memory_path"],
+            memory_storage_uri=uri.strip(),
             parent_run_id=data["parent_run_id"],
             model=model,
         )

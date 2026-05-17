@@ -10,9 +10,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from monkeybot.core.context import CustomTool, build_context
+from monkeybot.core.llm.provider import Done, TextDelta, ToolCall, UsageEvent
+from monkeybot.core.memory.subsystem import MemorySubsystem
+from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
-from monkeybot.core.llm.provider import ToolCall
 from monkeybot.core.types.types_tools import ToolDef
+from monkeybot.core.workspace import create_workspace_storage
 from monkeybot.web_search import build_backend
 from monkeybot.web_search.protocol import SearchResult
 from monkeybot.web_search.tool import WebSearchTool
@@ -46,14 +49,28 @@ class _FakeMCP:
         pass
 
 
+def _mem_sub(root: Path) -> MemorySubsystem:
+    p = Path(root)
+    p.mkdir(exist_ok=True)
+    uri = "local://" + str(p.resolve())
+    fake = ScriptedFakeProvider(
+        [TextDelta(text="x"), UsageEvent(input_tokens=1, output_tokens=1, cached_tokens=0), Done()]
+    )
+    return MemorySubsystem(
+        storage=create_workspace_storage(uri),
+        provider=fake,
+        model="gemini-2.5-flash",
+        memory_uri=uri,
+    )
+
+
 def _make_executor(tmp_path: Path, extra_tools: list | None = None) -> CoreToolExecutor:
     mem = tmp_path / "mem"
-    mem.mkdir(exist_ok=True)
     skills = tmp_path / "skills"
     skills.mkdir(exist_ok=True)
     return CoreToolExecutor(
         workspace_root=tmp_path,
-        memory_path=mem,
+        memory=_mem_sub(mem),
         skills_path=skills,
         mcp=_FakeMCP(),
         extra_tools=extra_tools,
@@ -169,13 +186,13 @@ async def test_web_search_tool_empty_query() -> None:
 
 
 @pytest.mark.asyncio
-async def test_web_search_tool_backend_error() -> None:
+async def test_web_search_tool_backend_error(tmp_path: Path) -> None:
     fake_backend = MagicMock()
     fake_backend.name = "fake"
     fake_backend.search = AsyncMock(side_effect=RuntimeError("network error"))
     tool = WebSearchTool(fake_backend)
 
-    executor = _make_executor(Path("/tmp"), extra_tools=[tool])
+    executor = _make_executor(tmp_path, extra_tools=[tool])
     ctx = _ctx_stub()
     call = ToolCall(call_id="c1", name="web_search", args={"query": "oops"})
     result, err = await executor.execute(call=call, ctx=ctx)
@@ -246,7 +263,7 @@ async def test_build_context_includes_extra_tool_defs(tmp_path: Path) -> None:
         "t",
         "r",
         agent_md_path=agent_path,
-        memory_path=mem,
+        memory=_mem_sub(mem),
         skills_path=skills,
         mcp_client=_FakeMCP(),
         extra_tools=[_MyTool()],
@@ -268,7 +285,7 @@ async def test_build_context_no_extra_tools_unchanged(tmp_path: Path) -> None:
         "t",
         "r",
         agent_md_path=agent_path,
-        memory_path=mem,
+        memory=_mem_sub(mem),
         skills_path=skills,
         mcp_client=_FakeMCP(),
     )

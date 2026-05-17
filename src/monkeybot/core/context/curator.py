@@ -10,12 +10,11 @@ import re
 import time
 from contextlib import aclosing
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, cast
 
 from monkeybot.core.types.content_blocks import Text
 from monkeybot.core.context import SkillRef, TurnContext
-from monkeybot.core.memory import search_memory_files
+from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.llm.provider import Done, Message, Provider, TextDelta, ToolCall, UsageEvent
 
 _log = logging.getLogger(__name__)
@@ -79,18 +78,13 @@ def _parse_json_object(text: str) -> dict[str, object] | None:
     return out if isinstance(out, dict) else None
 
 
-async def _gather_search_pool_lines(memory_path: Path | None, user_text: str, *, max_hits: int) -> list[str]:
-    if memory_path is None or not user_text.strip():
+async def _gather_search_pool_lines(
+    memory: MemorySubsystem | None, user_text: str, *, max_hits: int
+) -> list[str]:
+    if memory is None or not user_text.strip():
         return []
-    root = Path(memory_path).resolve()
     q = user_text.strip()[:400]
-    payload = await asyncio.to_thread(
-        search_memory_files,
-        root,
-        q,
-        max_hits=max_hits,
-        skip_relative_prefixes=("raw",),
-    )
+    payload = await memory.search_files(q, max_hits=max_hits, skip_raw=True)
     hits = payload.get("hits") or []
     lines: list[str] = []
     if not isinstance(hits, list):
@@ -159,9 +153,9 @@ async def run_context_curator(
     index_lines = list(ctx.memory_index)
     search_lines: list[str] = []
     memory_scan_sec = 0.0
-    if ctx.memory_path is not None:
+    if ctx.memory is not None:
         t_scan = time.monotonic()
-        search_lines = await _gather_search_pool_lines(ctx.memory_path, user_message, max_hits=search_hits)
+        search_lines = await _gather_search_pool_lines(ctx.memory, user_message, max_hits=search_hits)
         memory_scan_sec = time.monotonic() - t_scan
 
     allowed_memory: set[str] = set(index_lines) | set(search_lines)

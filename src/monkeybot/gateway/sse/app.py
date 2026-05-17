@@ -26,6 +26,7 @@ from monkeybot.core.persistence.backends import (
     UsageStore,
     create_storage_backend,
 )
+from monkeybot.core.workspace import create_workspace_storage
 from monkeybot.core.runtime.events import Error as AgentError
 from monkeybot.core.runtime.events import TurnComplete, UsageTotals, event_to_json
 from monkeybot.core.hooks import HookManager
@@ -33,8 +34,7 @@ from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector,
 from monkeybot.core.runtime.loop import SUMMARY_TRIGGER_RATIO
 from monkeybot.core.runtime.loop import run as run_loop
 from monkeybot.core.mcp.mcp_client import MCPClient
-from monkeybot.core.memory.hook import MemoryHook
-from monkeybot.core.memory.organizer import MemoryOrganizer
+from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.llm.provider import (
     Done,
@@ -67,7 +67,7 @@ class _GatewayDeps:
     provider: Provider | None = None
     curator_provider: Provider | None = None
     hook_manager: HookManager | None = None
-    memory_hook: MemoryHook | None = None
+    memory: MemorySubsystem | None = None
     web_search_tool: WebSearchTool | None = None
     run_command_allowed_commands: list[str] | None = None
     run_command_allowed_path_prefixes: list[str] | None = None
@@ -90,20 +90,29 @@ def _env_context_window_tokens() -> int:
         return 200_000
 
 
-def _resolved_workspace_paths() -> tuple[Path, Path, Path]:
-    """Resolve agent workspace root, memory dir, and skills dir.
-
-    Workspace root is :func:`resolve_agent_workspace_root` (``MONKEYBOT_WORKSPACE_ROOT`` or
-    ``./workspace`` when present). Memory and skills paths are resolved against **process cwd**
-    so ``paths`` in ``monkeybot.yaml`` can stay relative to the gateway working directory.
-    """
+def _resolved_workspace_paths() -> tuple[Path, Path]:
+    """Resolve agent workspace root and skills dir (relative paths use process ``cwd``)."""
     root = resolve_agent_workspace_root()
     cwd = Path.cwd().resolve()
-    mem = Path(os.environ.get("MEMORY_PATH", "data/memory"))
     skills = Path(os.environ.get("SKILLS_PATH", "skills"))
-    mem_p = mem.resolve() if mem.is_absolute() else (cwd / mem).resolve()
     skills_p = skills.resolve() if skills.is_absolute() else (cwd / skills).resolve()
-    return root, mem_p, skills_p
+    return root, skills_p
+
+
+def _memory_storage_uri() -> str:
+    """Effective memory storage URI (``MEMORY_STORAGE_URI`` or legacy ``MEMORY_PATH``)."""
+    uri = os.environ.get("MEMORY_STORAGE_URI", "").strip()
+    if uri:
+        return uri
+    raw_mp = os.environ.get("MEMORY_PATH")
+    if raw_mp is not None:
+        logger.info(
+            "memory: deriving storage URI from MEMORY_PATH; prefer paths.memory_storage_uri in monkeybot.yaml"
+        )
+    legacy = (raw_mp or "data/memory").strip()
+    mem = Path(legacy)
+    resolved = mem.resolve() if mem.is_absolute() else (Path.cwd().resolve() / mem).resolve()
+    return f"local://{resolved}"
 
 
 class _UsageStoreAdapter(UsagePort):
@@ -174,14 +183,6 @@ def _default_agent_path(bus: SessionBus) -> Path:
     if not env:
         raise RuntimeError("AGENT_MD must be set when session has no agent_md path")
     return Path(env)
-
-
-def _memory_path() -> Path:
-    return Path(os.environ.get("MEMORY_PATH", "data/memory"))
-
-
-def _skills_path() -> Path:
-    return Path(os.environ.get("SKILLS_PATH", "skills"))
 
 
 def _scripted_fake_provider() -> Provider:
@@ -304,7 +305,7 @@ class GatewayLoopPort:
             model_name = os.environ.get("MODEL_NAME", "gemini-2.5-flash")
             agent_path = _default_agent_path(bus)
 
-            workspace_root, memory_resolved, skills_resolved = _resolved_workspace_paths()
+            workspace_root, skills_resolved = _resolved_workspace_paths()
 
             extra_tools = [_deps.web_search_tool] if _deps.web_search_tool is not None else []
 
@@ -313,8 +314,8 @@ class GatewayLoopPort:
                     session_id,
                     request_id,
                     agent_md_path=agent_path,
-                    memory_path=_memory_path(),
-                    skills_path=_skills_path(),
+                    memory=getattr(app.state, "memory", None),
+                    skills_path=skills_resolved,
                     mcp_client=mcp,
                     model=model_name,
                     cancelled=cancel_event,
@@ -335,7 +336,7 @@ class GatewayLoopPort:
 
             executor = CoreToolExecutor(
                 workspace_root=workspace_root,
-                memory_path=memory_resolved,
+                memory=getattr(app.state, "memory", None),
                 skills_path=skills_resolved,
                 mcp=mcp,
                 extra_tools=extra_tools,
@@ -474,24 +475,23 @@ async def _startup() -> None:
 
     if _memory_enabled():
         try:
-            _, memory_resolved, _ = _resolved_workspace_paths()
+            mem_uri = _memory_storage_uri()
+            storage = create_workspace_storage(mem_uri)
             mgr = HookManager()
             model_name = os.environ.get("MODEL_NAME", "gemini-2.5-flash")
-            organizer = MemoryOrganizer(
+            memory = MemorySubsystem(
+                storage=storage,
                 provider=_deps.provider,
                 model=model_name,
-                memory_dir=memory_resolved,
+                memory_uri=mem_uri,
             )
-            hook = MemoryHook(
-                memory_path=memory_resolved,
-                organizer_runner=organizer.run,
-            )
-            hook.register(mgr)
+            memory.register_hooks(mgr)
             _deps.hook_manager = mgr
-            _deps.memory_hook = hook
-            logger.info("memory hook enabled (memory_path=%s)", memory_resolved)
+            _deps.memory = memory
+            app.state.memory = memory
+            logger.info("memory hook enabled (memory_storage_uri=%s)", mem_uri)
             try:
-                gc_stats = await hook.gc_processed()
+                gc_stats = await memory.gc_processed()
                 if gc_stats["deleted"] or gc_stats["errors"]:
                     logger.info(
                         "memory gc: scanned=%d deleted=%d errors=%d",
@@ -504,9 +504,11 @@ async def _startup() -> None:
         except Exception as exc:
             logger.warning("memory hook setup failed; continuing without: %r", exc)
             _deps.hook_manager = None
-            _deps.memory_hook = None
+            _deps.memory = None
+            app.state.memory = None
     else:
         logger.info("memory hook disabled via MONKEYBOT_MEMORY_HOOK_ENABLED")
+        app.state.memory = None
 
 
 @app.on_event("shutdown")

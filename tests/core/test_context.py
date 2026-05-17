@@ -1,12 +1,28 @@
 """Tests for TurnContext assembly and MCP tool merging."""
 
-import dataclasses
 import logging
 from pathlib import Path
 
 import pytest
 from monkeybot.core.context import build_context, refresh_memory_index
+from monkeybot.core.llm.provider import Done, TextDelta, UsageEvent
+from monkeybot.core.memory.subsystem import MemorySubsystem
+from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.types.types_tools import ToolDef
+from monkeybot.core.workspace import create_workspace_storage
+
+
+def _memory_subsystem(mem_root: Path) -> MemorySubsystem:
+    uri = "local://" + str(mem_root.resolve())
+    fake = ScriptedFakeProvider(
+        [TextDelta(text="x"), UsageEvent(input_tokens=1, output_tokens=1, cached_tokens=0), Done()]
+    )
+    return MemorySubsystem(
+        storage=create_workspace_storage(uri),
+        provider=fake,
+        model="gemini-2.5-flash",
+        memory_uri=uri,
+    )
 
 
 class FakeMCPClient:
@@ -79,7 +95,7 @@ async def test_build_context_merges_core_and_mcp_tools(tmp_path: Path) -> None:
         "thread-1",
         "req-1",
         agent_md_path=agent_path,
-        memory_path=mem,
+        memory=_memory_subsystem(mem),
         skills_path=skills,
         mcp_client=FakeMCPClient(mcp_tools),
     )
@@ -122,7 +138,7 @@ async def test_build_context_include_task_tool_false(tmp_path: Path) -> None:
         "t",
         "r",
         agent_md_path=agent_path,
-        memory_path=mem,
+        memory=_memory_subsystem(mem),
         skills_path=skills,
         mcp_client=FakeMCPClient([]),
         include_task_tool=False,
@@ -143,7 +159,7 @@ async def test_build_context_missing_index_yields_empty_memory(tmp_path: Path) -
         "t",
         "r",
         agent_md_path=agent_path,
-        memory_path=mem,
+        memory=_memory_subsystem(mem),
         skills_path=skills,
         mcp_client=FakeMCPClient([]),
     )
@@ -164,7 +180,7 @@ async def test_build_context_empty_agent_md_raises(tmp_path: Path) -> None:
             "t",
             "r",
             agent_md_path=agent_path,
-            memory_path=mem,
+            memory=_memory_subsystem(mem),
             skills_path=skills,
             mcp_client=FakeMCPClient([]),
         )
@@ -185,7 +201,7 @@ async def test_build_context_discovers_doc_only_skill_without_runner(tmp_path: P
         "t",
         "r",
         agent_md_path=agent_path,
-        memory_path=mem,
+        memory=_memory_subsystem(mem),
         skills_path=skills,
         mcp_client=FakeMCPClient([]),
     )
@@ -194,7 +210,7 @@ async def test_build_context_discovers_doc_only_skill_without_runner(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_build_context_populates_memory_path(tmp_path: Path) -> None:
+async def test_build_context_sets_memory_subsystem(tmp_path: Path) -> None:
     agent_path = tmp_path / "AGENT.md"
     agent_path.write_text("ok\n", encoding="utf-8")
     mem = tmp_path / "memory"
@@ -206,19 +222,18 @@ async def test_build_context_populates_memory_path(tmp_path: Path) -> None:
         "t",
         "r",
         agent_md_path=agent_path,
-        memory_path=mem,
+        memory=_memory_subsystem(mem),
         skills_path=skills,
         mcp_client=FakeMCPClient([]),
     )
-    assert ctx.memory_path == mem
+    assert ctx.memory is not None
+    assert "local://" in ctx.memory.uri
 
 
 @pytest.mark.asyncio
 async def test_refresh_memory_index_no_path_returns_same_ctx(tmp_path: Path) -> None:
     agent_path = tmp_path / "AGENT.md"
     agent_path.write_text("ok\n", encoding="utf-8")
-    mem = tmp_path / "memory"
-    mem.mkdir()
     skills = tmp_path / "skills"
     skills.mkdir()
 
@@ -226,13 +241,12 @@ async def test_refresh_memory_index_no_path_returns_same_ctx(tmp_path: Path) -> 
         "t",
         "r",
         agent_md_path=agent_path,
-        memory_path=mem,
+        memory=None,
         skills_path=skills,
         mcp_client=FakeMCPClient([]),
     )
-    ctx_no_mem = dataclasses.replace(ctx, memory_path=None)
-    out = await refresh_memory_index(ctx_no_mem)
-    assert out is ctx_no_mem
+    out = await refresh_memory_index(ctx)
+    assert out is ctx
 
 
 @pytest.mark.asyncio
@@ -249,7 +263,7 @@ async def test_refresh_memory_index_picks_up_new_entries(tmp_path: Path) -> None
         "t",
         "r",
         agent_md_path=agent_path,
-        memory_path=mem,
+        memory=_memory_subsystem(mem),
         skills_path=skills,
         mcp_client=FakeMCPClient([]),
     )
@@ -277,7 +291,7 @@ async def test_refresh_memory_index_silent_fail_on_unicode_error(
         "t",
         "r",
         agent_md_path=agent_path,
-        memory_path=mem,
+        memory=_memory_subsystem(mem),
         skills_path=skills,
         mcp_client=FakeMCPClient([]),
     )
@@ -309,15 +323,15 @@ async def test_refresh_memory_index_silent_fail_on_os_error(
         "t",
         "r",
         agent_md_path=agent_path,
-        memory_path=mem,
+        memory=_memory_subsystem(mem),
         skills_path=skills,
         mcp_client=FakeMCPClient([]),
     )
 
-    async def boom(_path: Path) -> list[str]:
+    async def boom(storage):
         raise OSError("simulated read failure")
 
-    monkeypatch.setattr("monkeybot.core.memory.load_index", boom)
+    monkeypatch.setattr("monkeybot.core.memory.subsystem.async_load_index", boom)
 
     with caplog.at_level(logging.WARNING, logger="monkeybot.core.context"):
         out = await refresh_memory_index(ctx)

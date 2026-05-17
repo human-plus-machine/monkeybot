@@ -32,7 +32,7 @@ def _make_envelope(task: str = "do something", parent_run_id: str = "p1") -> Sub
     return SubagentEnvelope(
         task=task,
         context="ctx",
-        memory_path="/mem",
+        memory_storage_uri="local:///mem",
         parent_run_id=parent_run_id,
     )
 

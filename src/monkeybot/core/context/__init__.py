@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from monkeybot.core.mcp.ports_mcp import MCPClientPort
+from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.types.types_tools import ToolDef
 
 
@@ -91,8 +92,8 @@ class TurnContext:
     """Max input context for pre-flight checks; summarization triggers near this cap."""
     workspace_root: Path | None = None
     """Workspace root for spill cleanup; optional for tests / minimal harness."""
-    memory_path: Path | None = None
-    """Memory root for mid-turn index refresh via :func:`refresh_memory_index`."""
+    memory: MemorySubsystem | None = None
+    """Memory subsystem for index refresh and search; optional when memory is disabled."""
     context_curation_enabled: bool = True
     """When True (parent agent), optional LLM curation may narrow memory/skills in the system prompt."""
     sse_bus: PendingResponseBusPort | None = None
@@ -269,15 +270,6 @@ def _discover_skills(skills_path: Path) -> list[SkillRef]:
     return result
 
 
-def _load_memory_index(memory_path: Path) -> list[str]:
-    """Load INDEX.md lines as stripped non-empty summary lines."""
-    index_file = memory_path / "INDEX.md"
-    if not index_file.is_file():
-        return []
-    text = index_file.read_text(encoding="utf-8")
-    return [ln.strip() for ln in text.splitlines() if ln.strip()]
-
-
 def _load_agent_md(agent_md_path: Path) -> str:
     """Read AGENT.md; trailing newlines stripped; fail if blank."""
     raw = agent_md_path.read_text(encoding="utf-8")
@@ -292,7 +284,7 @@ async def build_context(
     request_id: str,
     *,
     agent_md_path: Path,
-    memory_path: Path,
+    memory: MemorySubsystem | None,
     skills_path: Path,
     mcp_client: MCPClientPort,
     user_id: str | None = None,
@@ -313,7 +305,7 @@ async def build_context(
         thread_id: Conversation thread id.
         request_id: Per-request correlation id.
         agent_md_path: Path to AGENT.md (must be non-empty).
-        memory_path: Root directory; ``memory_path / INDEX.md`` optional.
+        memory: Optional memory subsystem; when set, ``INDEX.md`` is loaded via storage.
         skills_path: Root directory for skill folders (each with ``SKILL.md``).
         mcp_client: Client exposing ``all_tools()`` for MCP-registered tools.
         user_id: Optional authenticated user.
@@ -337,7 +329,7 @@ async def build_context(
         ValueError: When AGENT.md is missing or empty after normalization.
     """
     agent_md = _load_agent_md(agent_md_path)
-    memory_index = _load_memory_index(memory_path)
+    memory_index = await memory.load_index() if memory is not None else []
     skills = _discover_skills(skills_path)
     tools = list(_core_tool_defs(include_task_tool=include_task_tool))
     tools.extend(mcp_client.all_tools())
@@ -357,27 +349,26 @@ async def build_context(
         cancelled=cancelled,
         context_window_tokens=context_window_tokens,
         workspace_root=workspace_root,
-        memory_path=memory_path,
+        memory=memory,
         context_curation_enabled=enable_context_curation,
         sse_bus=sse_bus,
     )
 
 
 async def refresh_memory_index(ctx: TurnContext) -> TurnContext:
-    """Re-read ``INDEX.md`` under ``ctx.memory_path``; on failure return ``ctx`` unchanged."""
-    if ctx.memory_path is None:
+    """Re-read ``INDEX.md`` via ``ctx.memory``; on failure return ``ctx`` unchanged."""
+    if ctx.memory is None:
         return ctx
-    from monkeybot.core import memory as memory_mod
 
     try:
-        fresh = await memory_mod.load_index(ctx.memory_path)
+        fresh = await ctx.memory.load_index()
         return dataclasses.replace(ctx, memory_index=fresh)
     except Exception as exc:
         _log.warning(
             "[MEMORY] Index refresh FAILED — serving stale index. "
-            "thread_id=%s memory_path=%s error=%r",
+            "thread_id=%s memory_uri=%s error=%r",
             ctx.thread_id,
-            ctx.memory_path,
+            ctx.memory.uri,
             exc,
         )
         return ctx
