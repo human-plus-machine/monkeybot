@@ -1,15 +1,17 @@
 """Tests for MemoryOrganizer memory post-processor."""
 from __future__ import annotations
 
-import pytest
 from pathlib import Path
 
+import pytest
+
+from monkeybot.core.llm.provider import Done, TextDelta, UsageEvent
 from monkeybot.core.memory.organizer import (
-    MemoryOrganizer,
     BUILT_IN_FOLDERS,
     IndexEntry,
+    MemoryOrganizer,
 )
-from monkeybot.core.llm.provider import Done, TextDelta, UsageEvent
+from monkeybot.core.testing.mocks_provider import fake_provider_prompt_tokens
 
 
 class FakeProvider:
@@ -26,6 +28,10 @@ class FakeProvider:
         yield TextDelta(text=text)
         yield UsageEvent(input_tokens=1, output_tokens=1, cached_tokens=0)
         yield Done()
+
+    async def count_input_tokens(self, messages, tools, *, model: str):
+        del model
+        return fake_provider_prompt_tokens(messages, tools)
 
 
 def make_organizer(

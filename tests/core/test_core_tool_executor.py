@@ -320,7 +320,9 @@ async def test_task_tool_aggregates_subagent_stream(tmp_path: Path, monkeypatch:
         yield AssistantDelta(request_id="r", delta=" answer")
         yield TurnComplete(
             request_id="r",
-            usage=UsageTotals(input_tokens=3, output_tokens=2, cached_tokens=0, cost_usd=0.0, duration_ms=10),
+            usage=UsageTotals(
+                input_tokens=3, output_tokens=2, cached_tokens=0, cost_usd=0.0, duration_ms=10, estimated_prompt_tokens=0
+            ),
         )
 
     monkeypatch.setattr("monkeybot.core.tools.core_tool_executor.spawn_subagent", fake_spawn)

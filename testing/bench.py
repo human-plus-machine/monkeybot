@@ -151,8 +151,9 @@ async def bench_harness() -> None:
     section("2. HARNESS OVERHEAD (fake provider, no LLM)")
 
     from monkeybot.core.context import TurnContext
-    from monkeybot.core.persistence.db import apply_schema, open_connection
     from monkeybot.core.runtime.events import AssistantDelta, TurnComplete
+    from monkeybot.core.persistence.db import apply_schema, open_connection
+    from monkeybot.core.testing.mocks_provider import fake_provider_prompt_tokens
     from monkeybot.core.persistence.history import ConversationHistory
     from monkeybot.core.runtime.loop import run
     from monkeybot.core.llm.provider import Done, TextDelta, UsageEvent
@@ -168,6 +169,10 @@ async def bench_harness() -> None:
         async def stream(self, messages: Any, tools: Any, *, model: str) -> Any:  # type: ignore[override]
             for ev in self._events:
                 yield ev
+
+        async def count_input_tokens(self, messages: Any, tools: Any, *, model: str) -> int:
+            del model
+            return fake_provider_prompt_tokens(messages, tools)
 
     class NoopExecutor:
         async def execute(self, *, call: Any, ctx: Any) -> tuple[str | None, str | None]:

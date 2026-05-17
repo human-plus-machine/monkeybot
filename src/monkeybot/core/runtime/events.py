@@ -30,6 +30,7 @@ class UsageTotals:
     cached_tokens: int = 0
     cost_usd: float = 0.0
     duration_ms: int = 0
+    estimated_prompt_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,7 @@ class ContextSummarizing:
     kind: Literal["ContextSummarizing"] = "ContextSummarizing"
     request_id: str = ""
     estimated_tokens: int = 0
+    """Pre-stream input token count that tripped the summarization threshold (same basis as ``estimated_prompt_tokens`` on usage)."""
     context_window_tokens: int = 0
 
 
@@ -203,12 +205,14 @@ def _usage_from_obj(raw: object | None) -> UsageTotals:
     cost_raw = d.get("cost_usd", 0.0)
     cost = float(cost_raw) if isinstance(cost_raw, (int, float)) else 0.0
     dur = int(d.get("duration_ms", 0))
+    ept = int(d.get("estimated_prompt_tokens", 0))
     return UsageTotals(
         input_tokens=it,
         output_tokens=ot,
         cached_tokens=ct,
         cost_usd=cost,
         duration_ms=dur,
+        estimated_prompt_tokens=ept,
     )
 
 
@@ -284,6 +288,7 @@ def event_to_json(event: AgentEvent) -> str:
                 "cached_tokens": u.cached_tokens,
                 "cost_usd": u.cost_usd,
                 "duration_ms": u.duration_ms,
+                "estimated_prompt_tokens": u.estimated_prompt_tokens,
             },
         }
     elif isinstance(event, Error):

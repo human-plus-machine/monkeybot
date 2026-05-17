@@ -104,6 +104,19 @@ def test_paths_workspace_root_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert os.environ.get("MONKEYBOT_WORKSPACE_ROOT") == "./agent-ws"
 
 
+def test_model_summarization_model_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    (cfg_dir / "monkeybot.yaml").write_text(
+        "model:\n  summarization_model: flash-lite\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("CONTEXT_SUMMARIZATION_MODEL", raising=False)
+    runtime_env.apply_monkeybot_runtime_env()
+    assert os.environ.get("CONTEXT_SUMMARIZATION_MODEL") == "flash-lite"
+
+
 def test_denied_patterns_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     cfg_dir = tmp_path / "monkeybot_config"

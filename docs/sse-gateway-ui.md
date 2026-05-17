@@ -46,7 +46,7 @@ Errors use a common envelope:
 | `POST` | `/sessions` | Create a session. Body (optional): `{ "session_id"?: string, "agent_md"?: string }`. **201** → `{ "session_id", "created_at" }` (`created_at` is Unix ms). **409** `SESSION_ALREADY_EXISTS` if you reuse an existing `session_id`. |
 | `POST` | `/sessions/{session_id}/reply` | Start a user turn. Body: `{ "request_id": string, "message": string }` (message max 32000 chars). **200** → `{ "request_id" }`. **404** `SESSION_NOT_FOUND`. **409** `SESSION_BUSY` if a turn is already in progress. The agent runs asynchronously; progress arrives on the events stream. |
 | `POST` | `/sessions/{session_id}/cancel` | Request cancellation for a turn. Body: `{ "request_id": string }`. **200** empty body on success. |
-| `GET` | `/sessions/{session_id}/usage` | Aggregated usage for the session. Optional query: `since`. |
+| `GET` | `/sessions/{session_id}/usage` | Session aggregates and **last-turn** context hints (see [Session usage endpoint](#session-usage-endpoint)). Optional query: `since` (Unix ms). |
 | `POST` | `/sessions/{session_id}/tool-confirmations/{tool_call_id}` | Approve/deny a tool. Body: `{ "approved": boolean, "reason"?: string }`. **202** `{ "ok": true }`. |
 | `POST` | `/sessions/{session_id}/elicitations/{elicitation_id}` | Answer an elicitation. Body: `{ "user_data": any }`. **202** `{ "ok": true }`. |
 | `POST` | `/sessions/{session_id}/frontend-tool-results/{tool_call_id}` | Return a frontend tool result. Body: `{ "result": ContentBlock[], "is_error": boolean }` (blocks are JSON objects matching `ContentBlock` schema). **202** `{ "ok": true }`. |
@@ -100,7 +100,7 @@ Common types you will handle in a chat UI:
 | `Thinking` | Optional “thinking started” signal. |
 | `AssistantDelta` | Incremental assistant text in `delta`. |
 | `ToolCallStarted` / `ToolCallResult` | Tool name, args, result text / error. |
-| `TurnComplete` | Turn finished; includes `usage` (tokens, cost, duration). |
+| `TurnComplete` | Turn finished; includes `usage` (`input_tokens`, `output_tokens`, `cached_tokens`, `cost_usd`, `duration_ms`, `estimated_prompt_tokens` — see [Session usage endpoint](#session-usage-endpoint)). |
 | `Error` | Recoverable stream error string in `error`. |
 | `ImageBlock` | Inline image (`mime_type`, base64 `data`). |
 | `ThinkingBlockDelta` / `ThinkingBlockComplete` / `RedactedThinkingBlock` | Extended thinking blocks where the model exposes them. |
@@ -123,10 +123,46 @@ The canonical definitions are the `@dataclass` types in `src/monkeybot/core/runt
 4. **Render** — Append user message locally; merge `AssistantDelta` into a streaming buffer; on `TurnComplete`, finalize the assistant message and clear “busy” state.
 5. **Stop** — `POST /sessions/{session_id}/cancel` with the active `request_id` (playground “stop” button).
 6. **Human-in-the-loop** — When you see `ToolConfirmationRequest`, `ActionRequiredEvent` (elicitation), or `FrontendToolRequest`, show UI and call the matching POST endpoint; the agent continues and new events flow on the same SSE connection.
+7. **Usage / context meter** — After `TurnComplete`, call `GET /sessions/{session_id}/usage` (the playground refreshes automatically) to update totals and the **pre-flight prompt token count** vs **summarization threshold** (see [Session usage endpoint](#session-usage-endpoint)).
 
 **Concurrency rule**
 
 - Only **one** active `/reply` turn per session at a time (`SESSION_BUSY` otherwise). Keep `request_id` stable for that turn across cancel, confirmations, and streamed events.
+
+---
+
+<a id="session-usage-endpoint"></a>
+
+## Session usage endpoint
+
+`GET /sessions/{session_id}/usage`
+
+**Purpose**
+
+- Return **cumulative** token/cost totals for the session (optionally since `since`), plus fields that help a UI show **how full the conversation is** relative to the configured context window and the **same bar** the agent loop uses before **sync history summarization** (provider pre-flight input tokens).
+
+**Query**
+
+- `since` (optional): non-negative integer string, Unix **milliseconds**. When set, aggregates and “last turn” fields consider only `turn_usage` rows with `created_at >= since`.
+
+**Response** (`SessionUsageResponse` in `src/monkeybot/gateway/sse/models.py`)
+
+| Field | Meaning |
+|--------|---------|
+| `session_id` | Session id. |
+| `turns` | Count of completed usage rows in scope. |
+| `input_tokens` / `output_tokens` / `cached_tokens` | Sums of provider-reported tokens in scope. |
+| `cost_usd` | Sum of `cost_usd` in scope. |
+| `period_start` / `period_end` | Min/max `created_at` (ms) in scope (`0` when empty). |
+| `last_prompt_tokens` | **Provider** `input_tokens` for the **most recent** completed turn (post-call usage on that request). |
+| `estimated_prompt_tokens` | Peak **pre-stream** prompt input tokens for the latest turn: `Provider.count_input_tokens(messages, tools, model=…)` (Vertex **countTokens**, Anthropic **count_tokens**, OpenAI **tiktoken** on the Chat Completions-shaped payload). Updated whenever the loop builds the outbound bundle—including after an in-turn summarization rebuild. Same check as `ContextSummarizing` / `ContextSummarized`. |
+| `summarization_threshold_tokens` | `floor(context_window_tokens × 0.85)` — same ratio as `SUMMARY_TRIGGER_RATIO` in `src/monkeybot/core/runtime/loop.py`. When `estimated_prompt_tokens` approaches or exceeds this, the user turn is near the **sync summarization** threshold (subject to history length and viability rules in the loop). |
+| `context_window_tokens` | From gateway env `MODEL_CONTEXT_WINDOW` (YAML → runtime env). Denominator for “% of window” style UIs. |
+
+**Notes**
+
+- **`estimated_prompt_tokens` vs `last_prompt_tokens`**: `estimated_prompt_tokens` is the **pre-call** prompt size used for summarization and context meters; `last_prompt_tokens` is **post-call** provider-reported prompt usage for that completed request (billing-style). They are usually close but can differ (cache, multimodal, or API accounting). If `estimated_prompt_tokens` is `0` (e.g. old `turn_usage` rows before this was recorded), a UI may fall back to `last_prompt_tokens` for a meter.
+- **Threshold is not a guarantee**: summarization also requires enough messages to compress and only runs at the start of an inner loop iteration when the estimate is ≥ threshold; see `src/monkeybot/core/runtime/loop.py`.
 
 ---
 
@@ -140,6 +176,8 @@ curl -sS http://127.0.0.1:8787/health
 curl -sS -N -H 'Accept: text/event-stream' \
   http://127.0.0.1:8787/sessions/$(curl -sS -X POST http://127.0.0.1:8787/sessions \
   -H 'Content-Type: application/json' -d '{}' | jq -r .session_id)/events | head -n 20
+# Usage JSON (replace SID; meaningful after at least one completed turn)
+curl -sS "http://127.0.0.1:8787/sessions/SID/usage" | jq .
 ```
 
 For a full scripted walkthrough of sessions and tools from the shell, see [Getting Started](getting-started.md).

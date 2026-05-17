@@ -37,6 +37,7 @@ _ENV_MAP: dict[tuple[str, str], str] = {
     ("model", "max_tokens"): "MODEL_MAX_TOKENS",
     ("model", "thinking_budget"): "MODEL_THINKING_BUDGET",
     ("model", "context_window"): "MODEL_CONTEXT_WINDOW",
+    ("model", "summarization_model"): "CONTEXT_SUMMARIZATION_MODEL",
     ("model", "max_turns"): "MAX_TURNS",
     ("gcp", "project_id"): "VERTEX_AI_PROJECT_ID",
     ("gcp", "location"): "VERTEX_AI_LOCATION",

@@ -28,20 +28,6 @@ Tasks are split into two parallel tracks. **Do not edit files outside your track
 
 ---
 
-### ⚠️ Interface Contract
-
-Track A calls into Track B’s modules but does **not** modify them. Track B must keep these signatures stable (new params must be additive/optional):
-
-| Owned by Track B | Called by Track A |
-|---|---|
-| `memory.load_index(memory_path)` | `context.py` refresh before each provider call |
-| `memory.search_memory(query, memory_path)` | `context.py` / `loop.py` context building |
-| `harness_prompt.harness_fixed_context(*, include_task_tool)` | `loop.py` `_system_message()` |
-
-If Track B needs to change any of these signatures, coordinate with Track A before merging.
-
----
-
 ## Next Week — Connectors & Deployments (May 19–23)
 
 Focus: plug the harness into real messaging surfaces and cloud runtimes.
@@ -57,7 +43,6 @@ Focus: plug the harness into real messaging surfaces and cloud runtimes.
 
 ### Cloud Deployments
 
-- **GCP serverless** — Cloud Run deployment guide + config.
 - **GCP server** — GCE / GKE deployment option.
 - **AWS serverless** — Lambda + API Gateway deployment.
 - **AWS server** — EC2 / ECS deployment option.
@@ -76,11 +61,8 @@ langfuse? deepeval other?
 ## Backlog (Unscheduled)
 
 ### Runtime / Safety
-
-- **Execution sandbox for `run_command` / clones** *(implemented — `feat/sandbox-executor`)* — OpenSandbox-backed container, Option B scoped rw-mount. Workspace mounted read-write at the same absolute path so writes persist across turns and sessions. Session-scoped, opt-in via `SANDBOX_ENABLED=true` + `[sandbox]` pip extra. See `core/sandbox_executor.py`, `docker/docker-compose.sandbox.yml`.
 - **Sandbox workspace protection** *(unscheduled — depends on sandbox above)* — After sandbox ships, add a hard-coded deny layer inside `SandboxExecutor` that blocks `run_command` from targeting harness-owned paths: `.monkeybot/`, `bot.yaml`, `*.env`, `.agents/`, `config/`. Path-level policy at the executor (different from `command_allowlist.yaml` which is command-level). Prevents the agent from clobbering memory index or harness config via shell while allowing free rw access to `./code/`, `./data/`, etc.
 - **Memory index refresh after summarization (optional)** — After summarization, `_run_inner` rebuilds `provider_messages` with the same `system` built before `_summarize_history`; low risk today (summarize path does not touch `INDEX.md`) but consider `ctx = await refresh_memory_index(ctx)` plus `_system_message(ctx)` before that rebuild for consistency and future hooks (`loop.py`).
-- **Configurable summarization model** — history compression in `loop.py` currently uses the same `ctx.model` as the agent; allow a separate model id (env or `TurnContext`) for the summarization-only `provider.stream` call.
 - **HITL completion** — ApprovalRequest/Response loop (inspector `approve` path).
 - **DurableRunStore wiring** — persist `task` / subagent runs in `core_tool_executor.py` for crash recovery.
 

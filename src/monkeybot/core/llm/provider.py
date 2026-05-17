@@ -122,6 +122,20 @@ class Provider(Protocol):
     ) -> AsyncIterator[ProviderEvent]:
         """Yield provider events for one model request."""
 
+    async def count_input_tokens(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[ToolDef],
+        *,
+        model: str,
+    ) -> int:
+        """Return the provider-aligned input (prompt) token count for one outbound request.
+
+        Must reflect the same payload shape as :meth:`stream` (messages, tools, model),
+        typically via the vendor's tokenizer or count API — not post-hoc usage from a
+        prior response.
+        """
+
 
 __all__ = [
     "Done",

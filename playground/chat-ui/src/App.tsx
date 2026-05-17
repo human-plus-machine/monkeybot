@@ -113,7 +113,7 @@ function formatTokens(n: number): string {
   return n.toLocaleString(undefined, { maximumFractionDigits: 0 })
 }
 
-const DEFAULT_CONTEXT_WINDOW = 1_000_000
+const DEFAULT_CONTEXT_WINDOW = 200_000
 
 function IconRefresh() {
   return (
@@ -176,29 +176,38 @@ function IconPlus() {
 }
 
 function ContextUsageRing({
+  estimatedPromptTokens,
   lastPromptTokens,
   contextWindowTokens,
+  summarizationThresholdTokens,
 }: {
+  estimatedPromptTokens: number
   lastPromptTokens: number
   contextWindowTokens: number
+  summarizationThresholdTokens: number
 }) {
   const cap = Math.max(1, contextWindowTokens)
-  const frac = Math.min(1, Math.max(0, lastPromptTokens / cap))
-  const pct = Math.round(frac * 100)
+  const ringNumerator =
+    estimatedPromptTokens > 0 ? estimatedPromptTokens : lastPromptTokens
+  const thresh = Math.max(
+    1,
+    summarizationThresholdTokens > 0
+      ? summarizationThresholdTokens
+      : Math.floor(cap * 0.85),
+  )
+  const fracUsed = Math.min(1, Math.max(0, ringNumerator / cap))
+  const pctUsed = Math.round(fracUsed * 100)
   const r = 11
   const stroke = 2.35
   const c = 2 * Math.PI * r
-  const dash = frac * c
-  const strokeColor = pct >= 92 ? 'var(--danger)' : pct >= 75 ? '#ca8a04' : '#4ade80'
-  const tip = `Last completed model request: about ${formatTokens(lastPromptTokens)} prompt tokens of ${formatTokens(cap)} context window (${pct}%). Set MODEL_CONTEXT_WINDOW on the gateway to match your model. This UI does not trigger summarization automatically.`
+  const dash = fracUsed * c
+  const strokeColor =
+    ringNumerator >= thresh ? 'var(--danger)' : ringNumerator >= thresh * 0.75 ? '#ca8a04' : '#4ade80'
+  const detail = `${formatTokens(ringNumerator)} / ${formatTokens(cap)} · ${pctUsed}%`
+  const tip = `Context usage: ${formatTokens(ringNumerator)} of ${formatTokens(cap)} pre-flight prompt tokens (${pctUsed}%). Sync summarization typically runs near ${formatTokens(thresh)} (same ratio as the agent loop).`
 
   return (
-    <div
-      className="context-ring-wrap"
-      role="img"
-      aria-label={tip}
-      title={tip}
-    >
+    <div className="context-ring-wrap" tabIndex={0} aria-label={tip}>
       <svg className="context-ring-svg" viewBox="0 0 32 32" aria-hidden>
         <circle className="context-ring-track" cx="16" cy="16" r={r} fill="none" strokeWidth={stroke} />
         <circle
@@ -214,8 +223,12 @@ function ContextUsageRing({
         />
       </svg>
       <span className="context-ring-label" aria-hidden>
-        {pct}%
+        {pctUsed}%
       </span>
+      <div className="context-ring-tooltip" aria-hidden>
+        <div className="context-ring-tooltip-title">Context usage</div>
+        <div className="context-ring-tooltip-detail">{detail}</div>
+      </div>
     </div>
   )
 }
@@ -879,8 +892,13 @@ export default function App() {
                 {status === 'connected' && sessionId ? (
                   <div className="usage-row usage-row--toolbar">
                     <ContextUsageRing
+                      estimatedPromptTokens={sessionUsage?.estimated_prompt_tokens ?? 0}
                       lastPromptTokens={sessionUsage?.last_prompt_tokens ?? 0}
                       contextWindowTokens={sessionUsage?.context_window_tokens ?? DEFAULT_CONTEXT_WINDOW}
+                      summarizationThresholdTokens={
+                        sessionUsage?.summarization_threshold_tokens ??
+                        Math.max(1, Math.floor(DEFAULT_CONTEXT_WINDOW * 0.85))
+                      }
                     />
                     <div className="usage-strip" aria-label="Session token usage">
                       {sessionUsage ? (

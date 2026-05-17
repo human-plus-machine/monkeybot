@@ -8,8 +8,6 @@ import os
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
-from monkeybot.core.types.content_blocks import ContentBlock, Text, ToolRequest, ToolResponse
-from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.core.llm.provider import (
     Done,
     Message,
@@ -18,6 +16,8 @@ from monkeybot.core.llm.provider import (
     ToolCall,
     UsageEvent,
 )
+from monkeybot.core.types.content_blocks import ContentBlock, Text, ToolRequest, ToolResponse
+from monkeybot.core.types.types_tools import ToolDef
 
 _log = logging.getLogger(__name__)
 
@@ -139,6 +139,33 @@ def _openai_tools(tools: Sequence[ToolDef]) -> list[dict[str, Any]]:
     ]
 
 
+def _openai_messages_token_count(encoding: Any, oai_messages: list[dict[str, Any]]) -> int:
+    """tiktoken-based estimate for Chat Completions-shaped message dicts."""
+    total = 0
+    for m in oai_messages:
+        total += 4
+        for key, val in m.items():
+            if val is None:
+                continue
+            if key == "tool_calls" and isinstance(val, list):
+                for tc in val:
+                    total += len(
+                        encoding.encode(json.dumps(tc, ensure_ascii=False, default=str))
+                    )
+            elif isinstance(val, str):
+                total += len(encoding.encode(val))
+            else:
+                total += len(encoding.encode(json.dumps(val, ensure_ascii=False, default=str)))
+    total += 2
+    return total
+
+
+def _openai_tools_token_count(encoding: Any, tools: list[dict[str, Any]]) -> int:
+    if not tools:
+        return 0
+    return len(encoding.encode(json.dumps(tools, ensure_ascii=False, default=str)))
+
+
 class OpenAIProvider:
     """OpenAI chat models using the official ``openai`` async client."""
 
@@ -153,6 +180,26 @@ class OpenAIProvider:
     def __init__(self) -> None:
         if not os.environ.get("OPENAI_API_KEY"):
             raise ValueError("OPENAI_API_KEY is not set")
+
+    async def count_input_tokens(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[ToolDef],
+        *,
+        model: str,
+    ) -> int:
+        import tiktoken  # noqa: PLC0415
+
+        msgs = list(messages)
+        system, oai_messages = _messages_to_openai(msgs)
+        if system:
+            oai_messages = [{"role": "system", "content": system}, *oai_messages]
+        tool_defs = _openai_tools(tools) if tools else []
+        try:
+            enc = tiktoken.encoding_for_model(model)
+        except KeyError:
+            enc = tiktoken.get_encoding("cl100k_base")
+        return _openai_messages_token_count(enc, oai_messages) + _openai_tools_token_count(enc, tool_defs)
 
     async def stream(
         self,

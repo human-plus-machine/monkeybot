@@ -20,6 +20,7 @@ paths:
 model:
   provider: gemini
   name: gemini-3-flash-preview
+  # summarization_model: gemini-3-flash-preview  # optional; env CONTEXT_SUMMARIZATION_MODEL overrides
 
 gateway:
   pending_response_timeout_sec: 300

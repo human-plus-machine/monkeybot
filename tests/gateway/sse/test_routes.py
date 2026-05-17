@@ -60,6 +60,7 @@ class FakeLoopPort:
                             cached_tokens=0,
                             cost_usd=0.0,
                             duration_ms=1,
+                            estimated_prompt_tokens=0,
                         ),
                     ),
                 )
@@ -188,6 +189,9 @@ async def test_get_usage_returns_json_for_existing_session(
     assert body["session_id"] == sid
     assert body["turns"] == 0
     assert body["last_prompt_tokens"] == 0
+    assert body["estimated_prompt_tokens"] == 0
+    assert isinstance(body["summarization_threshold_tokens"], int)
+    assert body["summarization_threshold_tokens"] >= 1
     assert isinstance(body["context_window_tokens"], int)
     assert body["context_window_tokens"] >= 1
 

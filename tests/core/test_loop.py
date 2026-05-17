@@ -10,21 +10,28 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from monkeybot.core.types.content_blocks import Text, ToolRequest, ToolResponse
+
 from monkeybot.core.context import TurnContext
+from monkeybot.core.llm.provider import (
+    Done,
+    Message,
+    ProviderEvent,
+    TextDelta,
+    ToolCall,
+    UsageEvent,
+)
 from monkeybot.core.runtime.events import (
     AssistantDelta,
-    ContextSummarized,
-    ContextSummarizing,
     Error,
     SystemPromptSnapshot,
     Thinking,
     ToolCallResult,
     TurnComplete,
 )
-from monkeybot.core.tools.inspector import Decision
 from monkeybot.core.runtime.loop import _chunk_tool_calls, run
-from monkeybot.core.llm.provider import Done, Message, ProviderEvent, TextDelta, ToolCall, UsageEvent
+from monkeybot.core.testing.mocks_provider import fake_provider_prompt_tokens
+from monkeybot.core.tools.inspector import Decision
+from monkeybot.core.types.content_blocks import Text, ToolRequest, ToolResponse
 from monkeybot.core.types.types_tools import ToolDef
 
 
@@ -36,6 +43,8 @@ def _ctx(
     *,
     workspace_root: Path | None = None,
     context_window_tokens: int = 200_000,
+    model: str = "gemini-2.5-flash",
+    summarization_model: str | None = None,
 ) -> TurnContext:
     return TurnContext(
         thread_id="t1",
@@ -46,7 +55,8 @@ def _ctx(
         tools=[ToolDef("run_command", "Run shell", {})],
         user_id=None,
         parent_run_id=None,
-        model="gemini-2.5-flash",
+        model=model,
+        summarization_model=summarization_model,
         workspace_root=workspace_root,
         context_window_tokens=context_window_tokens,
     )
@@ -56,6 +66,8 @@ def _ctx_with_task(
     *,
     workspace_root: Path | None = None,
     context_window_tokens: int = 200_000,
+    model: str = "gemini-2.5-flash",
+    summarization_model: str | None = None,
 ) -> TurnContext:
     return TurnContext(
         thread_id="t1",
@@ -69,7 +81,8 @@ def _ctx_with_task(
         ],
         user_id=None,
         parent_run_id=None,
-        model="gemini-2.5-flash",
+        model=model,
+        summarization_model=summarization_model,
         workspace_root=workspace_root,
         context_window_tokens=context_window_tokens,
     )
@@ -97,6 +110,7 @@ class FakeProvider:
     def __init__(self, scripted: list[list[object]]) -> None:
         self._scripted = scripted
         self.stream_calls = 0
+        self.stream_models: list[str] = []
 
     @property
     def name(self) -> str:
@@ -113,13 +127,24 @@ class FakeProvider:
         *,
         model: str,
     ) -> AsyncIterator[ProviderEvent]:
-        del messages, tools, model
+        del messages, tools
+        self.stream_models.append(model)
         idx = self.stream_calls
         self.stream_calls += 1
         if idx >= len(self._scripted):
             return
         for ev in self._scripted[idx]:
             yield ev  # type: ignore[misc]
+
+    async def count_input_tokens(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[ToolDef],
+        *,
+        model: str,
+    ) -> int:
+        del model
+        return fake_provider_prompt_tokens(messages, tools)
 
 
 class RecordingExecutor:
@@ -514,6 +539,16 @@ async def test_run_provider_raises_wrapped_as_error() -> None:
             raise RuntimeError("boom")
             yield  # pragma: no cover
 
+        async def count_input_tokens(
+            self,
+            messages: Sequence[Message],
+            tools: Sequence[ToolDef],
+            *,
+            model: str,
+        ) -> int:
+            del messages, tools, model
+            return 0
+
     hist = FakeHistory()
     ctx = _ctx()
     events = []
@@ -556,7 +591,10 @@ async def test_run_cleanup_spill_at_start(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_emits_context_summarize_events_when_over_cap(tmp_path: Path) -> None:
+async def test_run_emits_context_summarize_events_when_over_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CONTEXT_SUMMARIZATION_MODEL", raising=False)
     preload = [
         Message(
             role="user" if i % 2 == 0 else "assistant",
@@ -587,12 +625,120 @@ async def test_run_emits_context_summarize_events_when_over_cap(tmp_path: Path) 
     assert "ContextSummarizing" in kinds
     assert "ContextSummarized" in kinds
     assert prov.stream_calls == 2
+    assert prov.stream_models == ["gemini-2.5-flash", "gemini-2.5-flash"]
     assert len(hist.reset_calls) == 1
     assert any(
         isinstance(x, Text) and "[Context Summary]" in x.text
         for m in hist.rows
         for x in m.content
     )
+
+
+@pytest.mark.asyncio
+async def test_run_summarization_uses_context_summarization_model_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CONTEXT_SUMMARIZATION_MODEL", "summarizer-model-x")
+    preload = [
+        Message(
+            role="user" if i % 2 == 0 else "assistant",
+            content=[Text(text="z" * 600)],
+        )
+        for i in range(8)
+    ]
+    hist = FakeHistory(preload)
+    prov = FakeProvider(
+        [
+            [TextDelta(text=" compressed summary "), Done()],
+            [TextDelta(text="final"), Done()],
+        ]
+    )
+    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=800)
+    async for _ in run(
+        "hello",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        max_turns=4,
+    ):
+        pass
+    assert prov.stream_models == ["summarizer-model-x", "gemini-2.5-flash"]
+
+
+@pytest.mark.asyncio
+async def test_run_summarization_uses_turn_context_when_env_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CONTEXT_SUMMARIZATION_MODEL", raising=False)
+    preload = [
+        Message(
+            role="user" if i % 2 == 0 else "assistant",
+            content=[Text(text="z" * 600)],
+        )
+        for i in range(8)
+    ]
+    hist = FakeHistory(preload)
+    prov = FakeProvider(
+        [
+            [TextDelta(text=" compressed summary "), Done()],
+            [TextDelta(text="final"), Done()],
+        ]
+    )
+    ctx = _ctx(
+        workspace_root=tmp_path,
+        context_window_tokens=800,
+        summarization_model="ctx-summ-model",
+    )
+    async for _ in run(
+        "hello",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        max_turns=4,
+    ):
+        pass
+    assert prov.stream_models == ["ctx-summ-model", "gemini-2.5-flash"]
+
+
+@pytest.mark.asyncio
+async def test_run_summarization_env_overrides_turn_context_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CONTEXT_SUMMARIZATION_MODEL", "env-wins")
+    preload = [
+        Message(
+            role="user" if i % 2 == 0 else "assistant",
+            content=[Text(text="z" * 600)],
+        )
+        for i in range(8)
+    ]
+    hist = FakeHistory(preload)
+    prov = FakeProvider(
+        [
+            [TextDelta(text=" compressed summary "), Done()],
+            [TextDelta(text="final"), Done()],
+        ]
+    )
+    ctx = _ctx(
+        workspace_root=tmp_path,
+        context_window_tokens=800,
+        summarization_model="should-not-use",
+    )
+    async for _ in run(
+        "hello",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        max_turns=4,
+    ):
+        pass
+    assert prov.stream_models == ["env-wins", "gemini-2.5-flash"]
 
 
 @pytest.mark.asyncio
@@ -660,6 +806,16 @@ async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> N
                 return
             for ev in self._scripted[idx]:
                 yield ev  # type: ignore[misc]
+
+        async def count_input_tokens(
+            self,
+            messages: Sequence[Message],
+            tools: Sequence[ToolDef],
+            *,
+            model: str,
+        ) -> int:
+            del model
+            return fake_provider_prompt_tokens(messages, tools)
 
     class BumpIndexExecutor(RecordingExecutor):
         def __init__(self, memory_dir: Path) -> None:

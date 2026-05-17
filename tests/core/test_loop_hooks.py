@@ -17,13 +17,20 @@ from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 import pytest
-from monkeybot.core.types.content_blocks import Text, ToolResponse
+
 from monkeybot.core.context import TurnContext
-from monkeybot.core.runtime.events import SystemPromptSnapshot
 from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
-from monkeybot.core.tools.inspector import Decision
+from monkeybot.core.llm.provider import (
+    Done,
+    Message,
+    ProviderEvent,
+    TextDelta,
+    ToolCall,
+)
 from monkeybot.core.runtime.loop import run
-from monkeybot.core.llm.provider import Done, Message, ProviderEvent, TextDelta, ToolCall, UsageEvent
+from monkeybot.core.testing.mocks_provider import fake_provider_prompt_tokens
+from monkeybot.core.tools.inspector import Decision
+from monkeybot.core.types.content_blocks import Text, ToolResponse
 from monkeybot.core.types.types_tools import ToolDef
 
 
@@ -93,6 +100,16 @@ class CapturingProvider:
             return
         for ev in self._scripted[idx]:
             yield ev
+
+    async def count_input_tokens(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[ToolDef],
+        *,
+        model: str,
+    ) -> int:
+        del model
+        return fake_provider_prompt_tokens(messages, tools)
 
 
 class RecordingExecutor:

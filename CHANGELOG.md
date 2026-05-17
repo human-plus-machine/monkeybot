@@ -6,7 +6,13 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- **Pre-flight prompt tokens** — Summarization threshold and `estimated_prompt_tokens` (usage DB, SSE, `GET /usage`) use each provider's tokenizer / count API (`Provider.count_input_tokens`): Vertex Gemini `countTokens`, Anthropic `messages.count_tokens`, OpenAI `tiktoken` on the Chat Completions payload. OpenAI installs should include the `openai` extra (adds `tiktoken`).
+
 ### Added
+- **Configurable history summarization model** — `CONTEXT_SUMMARIZATION_MODEL` and optional
+  `model.summarization_model` in `monkeybot.yaml` (via runtime env) or `TurnContext.summarization_model`
+  select the model id for sync context compression; main turn still uses `ctx.model`.
 - **FastAPI SSE gateway** (`monkeybot.gateway.sse`) — `POST /sessions`,
   `GET /sessions/{id}/events` (SSE stream with `Last-Event-ID` resume),
   `POST /sessions/{id}/reply`, `GET /health`. SQLite-backed session bus.
@@ -26,7 +32,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
   LLM pass that narrows skills + memory snippets injected into the system
   prompt; main-loop only, never runs in subagents. Configured via
   `CONTEXT_CURATION_*` env vars.
-- **Context-window safety** — pre-call token estimation against
+- **Context-window safety** — pre-call token counting against
   `MODEL_CONTEXT_WINDOW`, sync history summarization at threshold, and tool-result
   spill to `.monkeybot/spill/{thread_id}/{call_id}.txt` with capped in-history
   text + path hint. Spill dir cleaned at next `run()` start.

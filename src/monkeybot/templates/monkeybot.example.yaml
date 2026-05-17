@@ -47,6 +47,8 @@ model:
   # Summarisation trigger (tokens)
   context_window: 1000000
   max_turns: 50
+  # Optional cheaper model for sync history summarization (env: CONTEXT_SUMMARIZATION_MODEL); omit = main model
+  # summarization_model: gemini-3-flash
 
 # Non-secret GCP identifiers (prefer .env for secrets / ADC path).
 # gcp:

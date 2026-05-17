@@ -8,8 +8,6 @@ import os
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
-from monkeybot.core.types.content_blocks import Text
-from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.core.llm.provider import (
     Done,
     Message,
@@ -18,6 +16,8 @@ from monkeybot.core.llm.provider import (
     ToolCall,
     UsageEvent,
 )
+from monkeybot.core.types.content_blocks import Text
+from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._utils import build_anthropic_messages
 
 _log = logging.getLogger(__name__)
@@ -43,6 +43,34 @@ class ClaudeProvider:
             {"name": t.name, "description": t.description, "input_schema": t.input_schema}
             for t in tools
         ]
+
+    async def count_input_tokens(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[ToolDef],
+        *,
+        model: str,
+    ) -> int:
+        import anthropic  # noqa: PLC0415
+
+        msgs = list(messages)
+        system = ""
+        if msgs and msgs[0].role == "system":
+            sys_msg = msgs[0]
+            system = "\n\n".join(b.text for b in sys_msg.content if isinstance(b, Text))
+            msgs = msgs[1:]
+
+        converted_messages = build_anthropic_messages(msgs)
+        converted_tools = self._convert_tools(tools) if tools else anthropic.NOT_GIVEN
+
+        client = anthropic.AsyncAnthropic()
+        resp = await client.messages.count_tokens(
+            model=model,
+            system=system or anthropic.NOT_GIVEN,
+            messages=converted_messages,
+            tools=converted_tools,
+        )
+        return int(resp.input_tokens)
 
     async def stream(
         self,

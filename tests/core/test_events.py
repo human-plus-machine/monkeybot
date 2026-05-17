@@ -59,7 +59,7 @@ def test_agent_event_roundtrip_tool_call_result_with_error() -> None:
 
 
 def test_agent_event_roundtrip_turn_complete() -> None:
-    ev = TurnComplete(request_id="r1", usage=UsageTotals(1, 2, 3, 0.5, 99))
+    ev = TurnComplete(request_id="r1", usage=UsageTotals(1, 2, 3, 0.5, 99, 42))
     assert event_from_json(event_to_json(ev)) == ev
 
 

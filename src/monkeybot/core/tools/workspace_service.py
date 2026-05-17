@@ -120,24 +120,46 @@ class WorkspaceFileService:
     def repo_root(self) -> Path:
         return self._root
 
+    @staticmethod
+    def _normalize_rel_segments(rel: str, *, label: str) -> tuple[str, ...]:
+        """Split a repo-relative path, normalize ``.`` / ``..``, forbid absolute paths."""
+        stack: list[str] = []
+        for part in rel.replace("\\", "/").split("/"):
+            if not part or part == ".":
+                continue
+            if part == "..":
+                if not stack:
+                    raise WorkspaceError(
+                        f"Invalid {label}: path escapes workspace root",
+                        code="invalid_path",
+                    )
+                stack.pop()
+            else:
+                stack.append(part)
+        return tuple(stack)
+
+    def _join_under_root(self, segments: tuple[str, ...]) -> Path:
+        return self._root.joinpath(*segments) if segments else self._root
+
     def _resolve_under_root(self, rel: str, *, label: str = "path") -> Path:
         if rel is None or not str(rel).strip():
             raise WorkspaceError(f"{label} is required", code="missing_path")
         s = str(rel).strip().replace("\\", "/")
-        if ".." in s or s.startswith("~"):
-            raise WorkspaceError(f"Invalid {label}: traversal or home not allowed", code="invalid_path")
-        s = s.lstrip("/")
-        candidate = (self._root / s).resolve()
-        try:
-            candidate.relative_to(self._root)
-        except ValueError:
-            raise WorkspaceError(f"{label} escapes workspace root", code="path_escape") from None
-        return candidate
+        if s.startswith("~") or s.startswith("/"):
+            raise WorkspaceError(f"Invalid {label}: absolute or home not allowed", code="invalid_path")
+        segs = self._normalize_rel_segments(s.lstrip("/"), label=label)
+        # Lexical join (no final .resolve()) so symlinks under the workspace may point outside
+        # the physical root — same layout as the playground ``workspace/data`` → ``../data`` links.
+        return self._join_under_root(segs)
 
     def _resolve_root_dir(self, rel: str | None) -> Path:
         if rel is None or not str(rel).strip() or str(rel).strip() in (".", "./"):
             return self._root
-        return self._resolve_under_root(str(rel).strip(), label="root")
+        s = str(rel).strip().replace("\\", "/")
+        if s.startswith("~") or s.startswith("/"):
+            raise WorkspaceError("Invalid root: absolute or home not allowed", code="invalid_path")
+        segs = self._normalize_rel_segments(s.lstrip("/"), label="root")
+        return self._join_under_root(segs)
 
     def _write_scope_root(self) -> Path | None:
         rel = self._settings.WORKSPACE_WRITE_SCOPE_REL
@@ -186,15 +208,15 @@ class WorkspaceFileService:
         for ch in sorted(children, key=sort_key):
             if ch.name in (".", ".."):
                 continue
+            full = base / ch.name
             try:
-                resolved = ch.resolve()
-                resolved.relative_to(self._root)
+                rel_p = full.relative_to(self._root).as_posix()
             except ValueError:
                 continue
+            try:
+                kind = "dir" if full.is_dir() else "file"
             except OSError:
                 continue
-            rel_p = self._as_repo_rel(resolved)
-            kind = "dir" if resolved.is_dir() else "file"
             out.append({"name": ch.name, "path": rel_p, "kind": kind})
         return out
 
@@ -440,5 +462,11 @@ class WorkspaceFileService:
         }
 
     def _as_repo_rel(self, p: Path) -> str:
-        rel = p.resolve().relative_to(self._root)
-        return rel.as_posix()
+        try:
+            return p.relative_to(self._root).as_posix()
+        except ValueError:
+            pass
+        try:
+            return p.resolve().relative_to(self._root).as_posix()
+        except ValueError as e:
+            raise WorkspaceError("path escapes workspace root", code="path_escape") from e

@@ -12,13 +12,6 @@ from contextlib import aclosing
 from pathlib import Path
 from typing import Any, Protocol, cast, runtime_checkable
 
-from monkeybot.core.types.content_blocks import (
-    ContentBlock,
-    Text,
-    ToolRequest,
-    ToolResponse,
-)
-from monkeybot.core.types.content_blocks import Thinking as ThinkingBlock
 from monkeybot.core.context import SkillRef, TurnContext, refresh_memory_index
 from monkeybot.core.context.curator import (
     curation_enabled_from_env,
@@ -26,6 +19,28 @@ from monkeybot.core.context.curator import (
     curator_model_id,
     run_context_curator,
 )
+from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
+from monkeybot.core.llm.provider import (
+    Done,
+    Message,
+    Provider,
+    TextDelta,
+    ThinkingDelta,
+    ToolCall,
+    UsageEvent,
+)
+from monkeybot.core.llm.usage import Usage
+from monkeybot.core.prompts.prompt import compose_system_prompt, latest_user_message_text
+from monkeybot.core.tools.inspector import InspectorToolCall, ToolInspector
+from monkeybot.core.types.content_blocks import (
+    ContentBlock,
+    Text,
+    ToolRequest,
+    ToolResponse,
+)
+from monkeybot.core.types.content_blocks import Thinking as ThinkingBlock
+from monkeybot.core.types.types_tools import ToolDef
+
 from .events import (
     AgentEvent,
     AssistantDelta,
@@ -40,19 +55,6 @@ from .events import (
     TurnComplete,
     UsageTotals,
 )
-from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
-from monkeybot.core.tools.inspector import InspectorToolCall, ToolInspector
-from monkeybot.core.prompts.prompt import compose_system_prompt, latest_user_message_text
-from monkeybot.core.llm.provider import (
-    Done,
-    Message,
-    Provider,
-    TextDelta,
-    ThinkingDelta,
-    ToolCall,
-    UsageEvent,
-)
-from monkeybot.core.llm.usage import Usage
 
 
 def _effective_max_turns(max_turns: int | None) -> int:
@@ -68,6 +70,7 @@ def _usage_to_totals(u: Usage) -> UsageTotals:
         cached_tokens=u.cached_tokens,
         cost_usd=u.cost_usd,
         duration_ms=u.duration_ms,
+        estimated_prompt_tokens=u.estimated_prompt_tokens,
     )
 
 
@@ -159,7 +162,9 @@ def _combine_extras(*parts: str | None) -> str | None:
 _MAX_CONCURRENT_SUBAGENTS = 10
 
 _SPILL_REL = Path(".monkeybot") / "spill"
-_SUMMARY_TRIGGER_RATIO = 0.85
+SUMMARY_TRIGGER_RATIO = 0.95
+"""Same ratio as pre-stream summarization check (``preflight_prompt_tokens >= cap``)."""
+_SUMMARY_TRIGGER_RATIO = SUMMARY_TRIGGER_RATIO
 _SUMMARY_KEEP_HEAD = 1
 _SUMMARY_KEEP_TAIL = 6
 
@@ -183,21 +188,6 @@ async def _await_user_response_any(
         if callable(ap):
             ap(pending_key)
         return {"_timeout": True}
-
-
-def _char_estimate_blocks(blocks: Sequence[ContentBlock]) -> int:
-    """Rough character count for token heuristics (Story 4 block-native history)."""
-    total = 0
-    for b in blocks:
-        if isinstance(b, Text):
-            total += len(b.text)
-        elif isinstance(b, ToolRequest):
-            total += len(b.id) + len(b.name) + len(json.dumps(b.args, sort_keys=True))
-        elif isinstance(b, ToolResponse):
-            total += len(b.id) + len(b.tool_name) + _char_estimate_blocks(b.result)
-        else:
-            total += len(json.dumps(b.to_dict(), sort_keys=True))
-    return total
 
 
 def _flatten_tool_result_for_summary(resp: ToolResponse) -> str:
@@ -232,8 +222,14 @@ def _system_prompt_snapshot_text(system: Message) -> str:
     return "".join(b.text for b in system.content if isinstance(b, Text))
 
 
-def _estimate_tokens(messages: Sequence[Message]) -> int:
-    return sum(_char_estimate_blocks(m.content) for m in messages) // 4
+async def _provider_prompt_input_tokens(
+    provider: Provider,
+    messages: Sequence[Message],
+    tools: Sequence[ToolDef],
+    *,
+    model: str,
+) -> int:
+    return await provider.count_input_tokens(messages, tools, model=model)
 
 
 def _cleanup_spill_files(workspace_root: Path, thread_id: str) -> None:
@@ -244,6 +240,17 @@ def _cleanup_spill_files(workspace_root: Path, thread_id: str) -> None:
 
 def _summarization_viable(messages: Sequence[Message]) -> bool:
     return len(messages) > _SUMMARY_KEEP_HEAD + _SUMMARY_KEEP_TAIL
+
+
+def _summarization_model_id(ctx: TurnContext) -> str:
+    """Model id for history compression; env overrides ``ctx.summarization_model``, then ``ctx.model``."""
+    from_env = os.getenv("CONTEXT_SUMMARIZATION_MODEL", "").strip()
+    if from_env:
+        return from_env
+    ctx_sm = (ctx.summarization_model or "").strip()
+    if ctx_sm:
+        return ctx_sm
+    return ctx.model
 
 
 async def _summarize_history(
@@ -536,12 +543,15 @@ async def _run_inner(
         pre_tool_extra_next = None
         provider_messages = _messages_for_provider(system, chat_messages)
 
-        estimated = _estimate_tokens(provider_messages)
+        preflight = await _provider_prompt_input_tokens(
+            provider, provider_messages, ctx.tools, model=ctx.model
+        )
+        usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, preflight)
         cap = max(1, int(ctx.context_window_tokens * _SUMMARY_TRIGGER_RATIO))
-        if estimated >= cap and _summarization_viable(chat_messages):
+        if preflight >= cap and _summarization_viable(chat_messages):
             yield ContextSummarizing(
                 request_id=ctx.request_id,
-                estimated_tokens=estimated,
+                estimated_tokens=preflight,
                 context_window_tokens=ctx.context_window_tokens,
             )
             try:
@@ -550,7 +560,7 @@ async def _run_inner(
                     chat_messages,
                     history,
                     provider,
-                    ctx.model,
+                    _summarization_model_id(ctx),
                 )
             except Exception:
                 turns_summarized = 0
@@ -569,6 +579,10 @@ async def _run_inner(
             )
             system = _append_extra_system_text(system, pre_turn_extra)
             provider_messages = _messages_for_provider(system, chat_messages)
+            post = await _provider_prompt_input_tokens(
+                provider, provider_messages, ctx.tools, model=ctx.model
+            )
+            usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, post)
 
         yield SystemPromptSnapshot(
             request_id=ctx.request_id,

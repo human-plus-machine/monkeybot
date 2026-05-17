@@ -1010,6 +1010,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "python-ulid", specifier = ">=2.0.0" },
     { name = "pyyaml", specifier = ">=6.0.2" },
+    { name = "tiktoken", marker = "extra == 'openai'", specifier = ">=0.7.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32.0" },
 ]
 provides-extras = ["gemini", "vertex", "claude", "vertex-claude", "bedrock", "openai", "sandbox", "scheduler", "gcs", "council", "web-search"]
@@ -1022,6 +1023,7 @@ dev = [
     { name = "pytest-asyncio", specifier = ">=0.24.0" },
     { name = "pytest-cov", specifier = ">=6.0.0" },
     { name = "ruff", specifier = ">=0.8.0" },
+    { name = "tiktoken", specifier = ">=0.7.0" },
     { name = "types-pyyaml", specifier = ">=6.0.12" },
 ]
 

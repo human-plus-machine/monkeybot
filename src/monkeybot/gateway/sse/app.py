@@ -28,6 +28,7 @@ from monkeybot.core.runtime.events import TurnComplete, UsageTotals, event_to_js
 from monkeybot.core.persistence.history import ConversationHistory
 from monkeybot.core.hooks import HookManager
 from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector, ToolInspector
+from monkeybot.core.runtime.loop import SUMMARY_TRIGGER_RATIO
 from monkeybot.core.runtime.loop import run as run_loop
 from monkeybot.core.mcp.mcp_client import MCPClient
 from monkeybot.core.memory.hook import MemoryHook
@@ -83,11 +84,11 @@ def _memory_enabled() -> bool:
 
 
 def _env_context_window_tokens() -> int:
-    cap_raw = os.environ.get("MODEL_CONTEXT_WINDOW", "1000000").strip()
+    cap_raw = os.environ.get("MODEL_CONTEXT_WINDOW", "200000").strip()
     try:
         return max(1, int(cap_raw))
     except ValueError:
-        return 1_000_000
+        return 200_000
 
 
 class _HistoryAdapter:
@@ -139,6 +140,7 @@ class _UsageStoreAdapter(UsagePort):
             since_ms = int(since)
         s = await self._store.summary(thread_id=session_id, since_ms=since_ms)
         context_window_tokens = _env_context_window_tokens()
+        summarization_threshold_tokens = max(1, int(context_window_tokens * SUMMARY_TRIGGER_RATIO))
         return {
             "session_id": session_id,
             "turns": s.turns,
@@ -149,6 +151,8 @@ class _UsageStoreAdapter(UsagePort):
             "period_start": s.period_start_ms if s.period_start_ms is not None else 0,
             "period_end": s.period_end_ms if s.period_end_ms is not None else 0,
             "last_prompt_tokens": s.last_prompt_tokens,
+            "estimated_prompt_tokens": s.last_estimated_prompt_tokens,
+            "summarization_threshold_tokens": summarization_threshold_tokens,
             "context_window_tokens": context_window_tokens,
         }
 
@@ -163,6 +167,7 @@ class _StaticUsagePortZeros(UsagePort):
         since: str | None,
     ) -> dict[str, Any]:
         del since
+        cw = _env_context_window_tokens()
         return {
             "session_id": session_id,
             "turns": 0,
@@ -173,7 +178,9 @@ class _StaticUsagePortZeros(UsagePort):
             "period_start": 0,
             "period_end": 0,
             "last_prompt_tokens": 0,
-            "context_window_tokens": _env_context_window_tokens(),
+            "estimated_prompt_tokens": 0,
+            "summarization_threshold_tokens": max(1, int(cw * SUMMARY_TRIGGER_RATIO)),
+            "context_window_tokens": cw,
         }
 
 
@@ -377,6 +384,7 @@ class GatewayLoopPort:
                             cached_tokens=u.cached_tokens,
                             cost_usd=u.cost_usd,
                             duration_ms=u.duration_ms,
+                            estimated_prompt_tokens=u.estimated_prompt_tokens,
                         ),
                         run_id=request_id,
                     )

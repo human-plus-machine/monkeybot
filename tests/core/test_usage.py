@@ -51,6 +51,7 @@ async def test_usage_summary_aggregates_with_since_ms(usage_conn) -> None:
     assert summary.period_start_ms == 1100
     assert summary.period_end_ms == 1100
     assert summary.last_prompt_tokens == 1
+    assert summary.last_estimated_prompt_tokens == 0
 
 
 @pytest.mark.asyncio
@@ -74,6 +75,7 @@ async def test_usage_summary_all_threads(usage_conn) -> None:
     assert summary.turns == 2
     assert summary.cost_usd == pytest.approx(0.2)
     assert summary.last_prompt_tokens == 0
+    assert summary.last_estimated_prompt_tokens == 0
 
 
 @pytest.mark.asyncio
@@ -97,6 +99,50 @@ async def test_usage_record_preserves_context_json(usage_conn) -> None:
 
 
 @pytest.mark.asyncio
+async def test_usage_record_stores_estimated_prompt_tokens(usage_conn) -> None:
+    store = UsageStore(usage_conn)
+    await store.record(
+        "thr",
+        "gemini",
+        Usage(
+            input_tokens=10,
+            output_tokens=1,
+            cached_tokens=0,
+            cost_usd=0.0,
+            duration_ms=1,
+            estimated_prompt_tokens=4242,
+        ),
+    )
+    cur = await usage_conn.execute(
+        "SELECT estimated_prompt_tokens FROM turn_usage WHERE thread_id = ?",
+        ("thr",),
+    )
+    row = await cur.fetchone()
+    await cur.close()
+    assert row is not None
+    assert int(row[0]) == 4242
+async def test_usage_summary_last_estimated_prompt_tokens_most_recent(usage_conn) -> None:
+    store = UsageStore(usage_conn)
+    for created_at, inp, est in [(1000, 50, 500), (2000, 120, 1200), (3000, 99, 999)]:
+        await usage_conn.execute(
+            """
+            INSERT INTO turn_usage(
+                thread_id, run_id, model,
+                input_tokens, output_tokens, cached_tokens,
+                cost_usd, duration_ms, created_at, context_json,
+                estimated_prompt_tokens
+            )
+            VALUES ('est1', NULL, 'gemini', ?, 1, 0, 0.0, 1, ?, NULL, ?)
+            """,
+            (inp, created_at, est),
+        )
+    await usage_conn.commit()
+    summary = await store.summary(thread_id="est1")
+    assert summary.last_prompt_tokens == 99
+    assert summary.last_estimated_prompt_tokens == 999
+
+
+@pytest.mark.asyncio
 async def test_usage_summary_last_prompt_tokens_most_recent(usage_conn) -> None:
     store = UsageStore(usage_conn)
     for created_at, inp in [(1000, 50), (2000, 120), (3000, 99)]:
@@ -116,3 +162,4 @@ async def test_usage_summary_last_prompt_tokens_most_recent(usage_conn) -> None:
     assert isinstance(summary, UsageSummary)
     assert summary.turns == 3
     assert summary.last_prompt_tokens == 99
+    assert summary.last_estimated_prompt_tokens == 0

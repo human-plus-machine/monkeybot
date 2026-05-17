@@ -83,6 +83,8 @@ class TurnContext:
     user_id: str | None
     parent_run_id: str | None
     model: str
+    summarization_model: str | None = None
+    """Optional model id for history compression; env ``CONTEXT_SUMMARIZATION_MODEL`` overrides when set."""
     cancelled: asyncio.Event | None = None
     """When set by the parent run (e.g. gateway Stop), tool code may stop side effects early."""
     context_window_tokens: int = 200_000
@@ -296,6 +298,7 @@ async def build_context(
     user_id: str | None = None,
     parent_run_id: str | None = None,
     model: str = "gemini-2.5-flash",
+    summarization_model: str | None = None,
     include_task_tool: bool = True,
     cancelled: asyncio.Event | None = None,
     context_window_tokens: int = 200_000,
@@ -316,6 +319,8 @@ async def build_context(
         user_id: Optional authenticated user.
         parent_run_id: Optional parent run for subagent linkage.
         model: Model id for this turn.
+        summarization_model: Optional model id for sync history summarization; overridden by
+            ``CONTEXT_SUMMARIZATION_MODEL`` when that env var is non-empty.
         include_task_tool: When False, omit the ``task`` tool (used by the subagent worker).
         cancelled: Optional cooperative-cancel handle for the parent turn (gateway / CLI).
         context_window_tokens: Model context budget for pre-flight and summarization triggers.
@@ -348,6 +353,7 @@ async def build_context(
         user_id=user_id,
         parent_run_id=parent_run_id,
         model=model,
+        summarization_model=summarization_model,
         cancelled=cancelled,
         context_window_tokens=context_window_tokens,
         workspace_root=workspace_root,

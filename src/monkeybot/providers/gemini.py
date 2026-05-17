@@ -7,8 +7,6 @@ import os
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
-from monkeybot.core.types.content_blocks import Text, Thinking, ToolRequest, ToolResponse
-from monkeybot.core.types.interfaces import LLMError
 from monkeybot.core.llm.provider import (
     Done,
     Message,
@@ -18,6 +16,8 @@ from monkeybot.core.llm.provider import (
     ToolCall,
     UsageEvent,
 )
+from monkeybot.core.types.content_blocks import Text, Thinking, ToolRequest, ToolResponse
+from monkeybot.core.types.interfaces import LLMError
 from monkeybot.core.types.types_tools import ToolDef
 
 THOUGHT_SIGNATURE_KEY = "thoughtSignature"
@@ -339,6 +339,68 @@ class GeminiProvider:
     @property
     def supports_streaming(self) -> bool:
         return self._supports_streaming
+
+    async def count_input_tokens(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[ToolDef],
+        *,
+        model: str,
+    ) -> int:
+        model_param = _normalize_vertex_model(model)
+        project, location = _vertex_project_and_location(model_param)
+        try:
+            from google import genai
+            from google.genai import types
+        except ImportError as exc:
+            raise LLMError(
+                "google-genai is required for GeminiProvider. Install with: uv sync (monkeybot dependencies)."
+            ) from exc
+
+        temperature = (
+            float(self._temperature)
+            if self._temperature is not None
+            else float(os.environ.get("MODEL_TEMPERATURE", "0.7"))
+        )
+        max_tokens = (
+            int(self._max_output_tokens)
+            if self._max_output_tokens is not None
+            else int(os.environ.get("MODEL_MAX_TOKENS", "60000"))
+        )
+        thinking_budget = (
+            int(self._thinking_budget)
+            if self._thinking_budget is not None
+            else int(os.environ.get("MODEL_THINKING_BUDGET", "-1"))
+        )
+        if _suppress_thinking_for_auxiliary_call(messages, tools):
+            thinking_budget = _THINKING_DISABLED
+
+        system_instruction, rest = _split_system_and_rest(messages)
+        contents = _messages_to_contents(rest)
+        decls = _tool_defs_to_declarations(tools)
+
+        count_cfg_kwargs: dict[str, Any] = {}
+        if system_instruction:
+            count_cfg_kwargs["system_instruction"] = system_instruction
+        if decls:
+            count_cfg_kwargs["tools"] = [types.Tool(function_declarations=decls)]
+
+        gen_cfg_kwargs: dict[str, Any] = {
+            "temperature": temperature,
+            "max_output_tokens": max_tokens,
+        }
+        if thinking_budget != -1:
+            gen_cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=thinking_budget)
+        count_cfg_kwargs["generation_config"] = types.GenerationConfig(**gen_cfg_kwargs)
+
+        ct_cfg = types.CountTokensConfig(**count_cfg_kwargs)
+        client = genai.Client(vertexai=True, project=project, location=location)
+        resp = await client.aio.models.count_tokens(
+            model=model_param,
+            contents=contents,
+            config=ct_cfg,
+        )
+        return int(resp.total_tokens or 0)
 
     async def stream(
         self,

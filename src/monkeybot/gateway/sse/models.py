@@ -111,6 +111,14 @@ class SessionUsageResponse(BaseModel):
         0,
         description="Input (prompt) tokens reported for the most recent completed turn in this session.",
     )
+    estimated_prompt_tokens: int = Field(
+        0,
+        description="Peak pre-stream prompt input token count for the latest turn (provider count_tokens / OpenAI tiktoken); aligns with summarization checks.",
+    )
+    summarization_threshold_tokens: int = Field(
+        0,
+        description="``floor(MODEL_CONTEXT_WINDOW * 0.85)`` — same bar as sync summarization in the agent loop.",
+    )
     context_window_tokens: int = Field(
         1_000_000,
         description="Configured model context window cap used for UI fill estimates (see MODEL_CONTEXT_WINDOW).",

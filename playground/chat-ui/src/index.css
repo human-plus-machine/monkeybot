@@ -74,6 +74,66 @@ body {
   width: clamp(28px, 5vw, 34px);
   height: clamp(28px, 5vw, 34px);
   flex-shrink: 0;
+  cursor: help;
+}
+
+.context-ring-wrap:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 50%;
+}
+
+.context-ring-tooltip {
+  position: absolute;
+  top: calc(100% + 10px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: min(320px, 85vw);
+  padding: 8px 10px;
+  background: #262626;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.75rem;
+  line-height: 1.35;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity 0.12s ease,
+    visibility 0.12s ease;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  text-align: center;
+}
+
+.context-ring-tooltip-title {
+  font-weight: 700;
+  color: var(--fg);
+}
+
+.context-ring-tooltip-detail {
+  font-weight: 600;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .context-ring-tooltip {
+    transition: none;
+  }
+}
+
+.context-ring-wrap:hover .context-ring-tooltip,
+.context-ring-wrap:focus-visible .context-ring-tooltip {
+  opacity: 1;
+  visibility: visible;
 }
 
 .context-ring-svg {

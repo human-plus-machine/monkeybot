@@ -48,9 +48,13 @@ export type SessionUsageResponse = {
   cost_usd: number
   period_start: number
   period_end: number
-  /** Prompt tokens from the provider for the latest completed turn (approx. current context pressure). */
+  /** Provider input tokens for the latest completed turn. */
   last_prompt_tokens: number
-  /** Cap from gateway `MODEL_CONTEXT_WINDOW` (default 1_000_000). */
+  /** Peak chars/4 estimate for latest turn (Monkeybot summarization heuristic). */
+  estimated_prompt_tokens: number
+  /** Same threshold as the agent loop before sync summarization (≈85% of window). */
+  summarization_threshold_tokens: number
+  /** Cap from gateway `MODEL_CONTEXT_WINDOW`. */
   context_window_tokens: number
 }
 

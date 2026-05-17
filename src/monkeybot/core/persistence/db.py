@@ -61,7 +61,8 @@ SCHEMA_DDLS: Final[tuple[str, ...]] = (
     cost_usd REAL NOT NULL,
     duration_ms INTEGER NOT NULL,
     created_at INTEGER NOT NULL,
-    context_json TEXT
+    context_json TEXT,
+    estimated_prompt_tokens INTEGER NOT NULL DEFAULT 0
 )""",
     "CREATE INDEX IF NOT EXISTS idx_history_thread ON conversation_history(thread_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_runs_parent ON subagent_runs(parent_run_id)",
@@ -124,6 +125,7 @@ async def apply_schema(conn: aiosqlite.Connection) -> None:
     for ddl in SCHEMA_DDLS:
         await conn.execute(ddl)
     await conn.commit()
+    await _ensure_turn_usage_estimated_column(conn)
     cursor = await conn.execute("PRAGMA table_info(conversation_history)")
     rows = await cursor.fetchall()
     await cursor.close()
@@ -131,6 +133,20 @@ async def apply_schema(conn: aiosqlite.Connection) -> None:
     if "tool_name" in col_names or "tool_call_id" in col_names:
         await _log_legacy_schema_error(conn)
         raise RuntimeError(_LEGACY_SCHEMA_MESSAGE)
+
+
+async def _ensure_turn_usage_estimated_column(conn: aiosqlite.Connection) -> None:
+    """Add ``estimated_prompt_tokens`` when upgrading an existing DB."""
+    cur = await conn.execute("PRAGMA table_info(turn_usage)")
+    rows = await cur.fetchall()
+    await cur.close()
+    names = {str(r[1]) for r in rows}
+    if "estimated_prompt_tokens" in names:
+        return
+    await conn.execute(
+        "ALTER TABLE turn_usage ADD COLUMN estimated_prompt_tokens INTEGER NOT NULL DEFAULT 0"
+    )
+    await conn.commit()
 
 
 _ensure_schema = apply_schema

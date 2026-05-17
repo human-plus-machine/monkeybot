@@ -17,6 +17,12 @@ class Usage:
     cached_tokens: int = 0
     cost_usd: float = 0.0
     duration_ms: int = 0
+    estimated_prompt_tokens: int = 0
+    """Peak pre-stream input token count for this user turn (``Provider.count_input_tokens``).
+
+    Same payload as each outbound ``stream`` call (messages + tools), using the
+    vendor count API or tokenizer where implemented.
+    """
 
 
 @dataclass(frozen=True)
@@ -31,6 +37,7 @@ class UsageSummary:
     period_start_ms: int | None
     period_end_ms: int | None
     last_prompt_tokens: int
+    last_estimated_prompt_tokens: int
 
 
 class UsageStore:
@@ -55,9 +62,10 @@ class UsageStore:
             INSERT INTO turn_usage(
                 thread_id, run_id, model,
                 input_tokens, output_tokens, cached_tokens,
-                cost_usd, duration_ms, created_at, context_json
+                cost_usd, duration_ms, created_at, context_json,
+                estimated_prompt_tokens
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 thread_id,
@@ -70,6 +78,7 @@ class UsageStore:
                 usage.duration_ms,
                 now_ms,
                 context_json,
+                usage.estimated_prompt_tokens,
             ),
         )
         await self._conn.commit()
@@ -122,11 +131,13 @@ class UsageStore:
                 period_start_ms=None,
                 period_end_ms=None,
                 last_prompt_tokens=0,
+                last_estimated_prompt_tokens=0,
             )
 
         period_start = row[5]
         period_end = row[6]
         last_pt = 0
+        last_est = 0
         if thread_id is not None:
             lp_clauses: list[str] = ["thread_id = ?"]
             lp_params: list[object] = [thread_id]
@@ -136,7 +147,7 @@ class UsageStore:
             lp_where = "WHERE " + " AND ".join(lp_clauses)
             cur2 = await self._conn.execute(
                 f"""
-                SELECT input_tokens FROM turn_usage
+                SELECT input_tokens, estimated_prompt_tokens FROM turn_usage
                 {lp_where}
                 ORDER BY created_at DESC
                 LIMIT 1
@@ -147,6 +158,7 @@ class UsageStore:
             await cur2.close()
             if row2 is not None:
                 last_pt = int(row2[0])
+                last_est = int(row2[1])
         return UsageSummary(
             turns=turns,
             input_tokens=int(row[1]),
@@ -156,4 +168,5 @@ class UsageStore:
             period_start_ms=int(period_start) if period_start is not None else None,
             period_end_ms=int(period_end) if period_end is not None else None,
             last_prompt_tokens=last_pt,
+            last_estimated_prompt_tokens=last_est,
         )

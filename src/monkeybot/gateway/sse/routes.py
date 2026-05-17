@@ -72,6 +72,12 @@ class _StaticUsagePort:
         since: str | None,
     ) -> dict[str, Any]:
         _ = since
+        cap_raw = os.environ.get("MODEL_CONTEXT_WINDOW", "200000").strip()
+        try:
+            cw = max(1, int(cap_raw))
+        except ValueError:
+            cw = 200_000
+        st = max(1, int(cw * 0.85))
         return {
             "session_id": session_id,
             "turns": 0,
@@ -81,6 +87,10 @@ class _StaticUsagePort:
             "cost_usd": 0.0,
             "period_start": 0,
             "period_end": 0,
+            "last_prompt_tokens": 0,
+            "estimated_prompt_tokens": 0,
+            "summarization_threshold_tokens": st,
+            "context_window_tokens": cw,
         }
 
 

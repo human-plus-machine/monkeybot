@@ -71,6 +71,8 @@ const usageFixture: gw.SessionUsageResponse = {
   period_start: 0,
   period_end: 0,
   last_prompt_tokens: 0,
+  estimated_prompt_tokens: 0,
+  summarization_threshold_tokens: 850_000,
   context_window_tokens: 1_000_000,
 }
 

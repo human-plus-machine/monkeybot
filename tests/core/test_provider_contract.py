@@ -48,6 +48,17 @@ async def test_fake_provider_supports_streaming_false() -> None:
     assert len(out) == 3
 
 
+@pytest.mark.asyncio
+async def test_fake_provider_count_input_tokens_non_negative() -> None:
+    p = ScriptedFakeProvider([Done()])
+    n = await p.count_input_tokens(
+        [Message(role="user", content=[Text(text="hello")])],
+        [],
+        model="x",
+    )
+    assert n >= 0
+
+
 def test_gemini_module_import_does_not_load_google_genai() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     code = f"""
