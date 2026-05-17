@@ -8,11 +8,12 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 - **Pre-flight prompt tokens** — Summarization threshold and `estimated_prompt_tokens` (usage DB, SSE, `GET /usage`) use each provider's tokenizer / count API (`Provider.count_input_tokens`): Vertex Gemini `countTokens`, Anthropic `messages.count_tokens`, OpenAI `tiktoken` on the Chat Completions payload. OpenAI installs should include the `openai` extra (adds `tiktoken`).
-
-### Added
 - **Configurable history summarization model** — `CONTEXT_SUMMARIZATION_MODEL` and optional
   `model.summarization_model` in `monkeybot.yaml` (via runtime env) or `TurnContext.summarization_model`
   select the model id for sync context compression; main turn still uses `ctx.model`.
+
+### Added
+- **Docker baseline (Step 3)** — Root [`docker-compose.yml`](docker-compose.yml), default OpenSandbox config [`docker/opensandbox.docker.toml`](docker/opensandbox.docker.toml), [`.env.example`](.env.example); [`docker/Dockerfile`](docker/Dockerfile) adds `HEALTHCHECK`, drops `PYTHONPATH` to `src/`, ensures `/app/data` and `/app/skills`. Auriga-only playground/Cloud Run scripts under `internal/` (see [`docs/cloud-deployment-design.md`](docs/cloud-deployment-design.md) Step 3; remove before open-sourcing).
 - **FastAPI SSE gateway** (`monkeybot.gateway.sse`) — `POST /sessions`,
   `GET /sessions/{id}/events` (SSE stream with `Last-Event-ID` resume),
   `POST /sessions/{id}/reply`, `GET /health`. SQLite-backed session bus.
@@ -58,8 +59,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
   `config.yaml`).
 - **Default skills** under `.agents/skills/` (`file-ops`, `memory-search`,
   `search-web`, `self-improve`).
-- **Cloud Run deploy helper** (`deploy.sh`) using Cloud Build +
-  `docker/Dockerfile`.
+- **Cloud Run deploy helper** — previously `deploy.sh` + Cloud Build + `docker/Dockerfile`; Auriga copies now under `internal/`; public baseline is `docker-compose.yml` + design doc Step 3.
 - **Docs (v2)**: `docs/getting-started.md` and `docs/skills.md`. Configuration
   reference lives in root `.env.example`.
 - **Test + bench infra**: `tests/` (pytest + pytest-asyncio) and

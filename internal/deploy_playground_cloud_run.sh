@@ -35,7 +35,7 @@ IMAGE="${IMAGE:-gcr.io/${PROJECT}/${SERVICE}:${REPO_ROOT_TAG}}"
 echo "Building and pushing $IMAGE ($DOCKER_PLATFORM) from $ROOT ..."
 docker buildx build \
   --platform "$DOCKER_PLATFORM" \
-  -f "$ROOT/docker/Dockerfile.playground" \
+  -f "$ROOT/internal/Dockerfile.auriga" \
   -t "$IMAGE" \
   --push \
   "$ROOT"

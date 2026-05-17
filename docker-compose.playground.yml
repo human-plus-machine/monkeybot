@@ -1,0 +1,30 @@
+# Compose file for the Auriga playground agent (local Docker smoke test).
+#
+# Usage (from repo root):
+#   docker compose --env-file playground/agent/.env -f docker-compose.playground.yml up --build
+#
+# playground/agent/.env must contain:
+#   GCP_AUTH_FILE=/path/to/gcp_service_account.json   (used for the volume mount source)
+#   GOOGLE_CLOUD_PROJECT=your-gcp-project
+#   VERTEX_AI_PROJECT_ID=your-gcp-project
+#   MODEL_PROVIDER=vertex
+#
+# GOOGLE_APPLICATION_CREDENTIALS is set inside the container to /run/secrets/gcp_auth.json.
+# GCP_AUTH_FILE and GOOGLE_APPLICATION_CREDENTIALS can point to the same file on the host;
+# keeping them separate means `docker compose down` works without the --env-file flag.
+
+services:
+  monkeybot:
+    build:
+      context: .
+      dockerfile: internal/Dockerfile.auriga
+    ports:
+      - "8080:8080"
+    env_file:
+      - path: playground/agent/.env
+        required: true
+    volumes:
+      - ${GCP_AUTH_FILE:-/dev/null}:/run/secrets/gcp_auth.json:ro
+    environment:
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcp_auth.json
+    restart: unless-stopped

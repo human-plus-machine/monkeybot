@@ -46,7 +46,7 @@ Focus: plug the harness into real messaging surfaces and cloud runtimes.
 - **GCP server** — GCE / GKE deployment option.
 - **AWS serverless** — Lambda + API Gateway deployment.
 - **AWS server** — EC2 / ECS deployment option.
-- **Docker image** — align Dockerfile with current layout (`pyproject.toml`, `python -m monkeybot.gateway.main`, `.agents/skills/`); currently references old `requirements.txt` / `skills/` / `src.main` paths.
+- **Docker image** — baseline aligned with `pyproject.toml` + `python -m monkeybot.gateway.main` (see Step 3 in `docs/cloud-deployment-design.md`); remaining: optional polish / CI image matrix.
 
 ### Infra
 

@@ -1,6 +1,6 @@
 # MonkeyBot Cloud Deployment Design
 
-**Status:** In progress — Steps **1**, **1.5**, and **2** (workspace / memory storage) are implemented in code; later steps (Docker baseline, deployment guides, harness-as-library hardening) remain.  
+**Status:** In progress — Steps **1**, **1.5**, **2**, and **3** (Docker baseline + compose) are implemented in code; later steps (deployment guides, harness-as-library hardening) remain.  
 **Purpose:** Single source of truth for the multi-cloud deployment work. Open this in any new chat before starting a step to ensure nothing in that step breaks a later one.
 
 ---
@@ -252,38 +252,52 @@ Cloud Run / ECS can point YAML at `memory_storage_uri: gcs://…` or `s3://…` 
 
 ## Step 3: Docker Artifacts
 
-**Goal:** Clean up the existing Docker inconsistencies and establish a working baseline for all server-based deployments.
+**Goal:** One public container image + compose baseline for Pattern A; Auriga-only build/deploy scripts live under `internal/` (tracked in the private repo; strip or re-ignore before open-sourcing) so day-to-day Auriga deploys stay separate from the public `docker/` baseline.
 
-### Current problems
+**Status:** Implemented (see checklist at end of this doc).
 
-1. No base `docker-compose.yml` exists — the sandbox overlay (`docker-compose.sandbox.yml`) references one that isn't there.
-2. `deploy.sh` builds from the root `Dockerfile` but should use `Dockerfile.playground` for Cloud Run (the playground Dockerfile has the correct workspace layout).
-3. Two Dockerfiles with diverging layouts — likely collapse into one once storage/workspace are env-var driven (which they will be after Steps 1 and 2).
-4. `Dockerfile` still references old comments about `requirements.txt` and old paths (noted in BACKLOG).
+### Public surface (users + CI)
 
-### What changes
+| Artifact | Role |
+|---|---|
+| [`docker/Dockerfile`](../docker/Dockerfile) | Single production-style image: `WORKDIR /app`, baked-in `monkeybot_config/`, optional `EXTRAS` at build time. No `PYTHONPATH` to `src/` — runtime uses the installed package only. Creates `/app/data` and `/app/skills`; `HEALTHCHECK` hits `/health`. |
+| [`docker-compose.yml`](../docker-compose.yml) | Baseline **monkeybot** service: build `docker/Dockerfile`, `EXTRAS` from host env (default `gemini`), bind-mount `./data` → `/app/data`, optional `.env` (`required: false`), port `${PORT:-8080}:8080`. No duplicate inline `environment:` — defaults come from baked-in `monkeybot_config/monkeybot.yaml` (paths already use `./data/...`). |
+| [`.env.example`](../.env.example) | Documents secrets and common overrides for Docker users (`GEMINI_API_KEY`, `EXTRAS`, `OPENSANDBOX_CONFIG`, optional `DB_URL` / `MEMORY_STORAGE_URI`). |
+| [`docker/opensandbox.docker.toml`](../docker/opensandbox.docker.toml) | Default OpenSandbox server config for the compose overlay; **`allowed_host_paths = ["/tmp"]`** only (safe default). Broader paths (e.g. repo on home volume) → set `OPENSANDBOX_CONFIG` to your own file (e.g. `playground/agent/monkeybot_config/opensandbox.docker.toml`). |
+| [`docker/docker-compose.sandbox.yml`](../docker/docker-compose.sandbox.yml) | Overlay: **opensandbox-server** sidecar + rebuild monkeybot with `EXTRAS=gemini,sandbox` + `SANDBOX_*` env. Mount: `${OPENSANDBOX_CONFIG:-./docker/opensandbox.docker.toml}` → `/etc/opensandbox/config.toml`. |
 
-After Steps 1 and 2, the Docker image needs no cloud-SDK deps baked in by default. The build arg `EXTRAS` handles everything:
+**Build arg `EXTRAS`** (unchanged contract):
 
-- `EXTRAS=gemini` → default, no cloud SDKs
-- `EXTRAS=gemini,gcs` → adds GCS memory support
-- `EXTRAS=gemini,postgres` → adds Postgres storage support
-- `EXTRAS=vertex,gcs,postgres` → full Cloud Run / GKE production setup
+- `EXTRAS=gemini` — default, no cloud object-store SDKs
+- `EXTRAS=gemini,gcs` — GCS memory (`[gcs]`)
+- `EXTRAS=gemini,postgres` — Postgres storage (`[postgres]`)
+- `EXTRAS=vertex,gcs,postgres` — typical managed GCP stack (adjust per `pyproject.toml` extras)
 
-Create a base `docker-compose.yml` in the repo root:
-- `monkeybot` service with env file support and a local volume for `data/`
-- `DB_URL` defaults to SQLite
-- `MEMORY_STORAGE_URI` defaults to local
+### Auriga-internal (`internal/`)
 
-The sandbox overlay stays as-is (it already works conceptually, just needs a base to overlay on).
+These files are **committed in the private Auriga repo** for team QA and playground Cloud Run. **Before open-sourcing**, delete `internal/` or add `internal/` back to `.gitignore` and stop shipping it—public users should follow Step 4 guides, not Auriga project defaults.
 
-### Regarding `deploy.sh`
+| Path | Role |
+|---|---|
+| `internal/README.md` | Explains internal vs public layout. |
+| `internal/Dockerfile.auriga` | Former `docker/Dockerfile.playground`: `/app/workspace` + `/app/.harness` layout, playground `monkeybot_config` + skills, `MEMORY_STORAGE_URI` (replaces legacy `MEMORY_PATH`). |
+| `internal/deploy_cloud_run.sh` | Former root `deploy.sh` — Cloud Build + Cloud Run for `aurigaos`-style defaults. |
+| `internal/deploy_playground_cloud_run.sh` | Former `scripts/deploy_playground_cloud_run.sh` — local `docker buildx` using `internal/Dockerfile.auriga`. |
 
-The current `deploy.sh` is for internal Auriga use and deploys to the `aurigaos` project. When the repo is open-sourced, this should become a **deployment guide** (Markdown), not a script. The guide covers the same steps: build image, push to registry, deploy to Cloud Run with the right env vars and secrets. Users adapt it to their own project. Remove `deploy.sh` from the repo (or move it to `internal/`) before open-sourcing.
+**Note:** Root `deploy.sh` and `docker/Dockerfile.playground` are **removed** from the tracked tree; capability lives only under `internal/` for the team.
+
+### Regarding Cloud Run scripts vs guides
+
+End state for open source: **Pattern A guide** (Step 4) documents build/push/deploy with user-owned GCP projects. `internal/deploy_cloud_run.sh` is a convenience copy of the old script for Auriga until that guide exists; it is not part of the public contract.
 
 ### What this unlocks
 
-A working local Docker Compose baseline that users can run on their laptop, then adapt for ECS task definitions or Cloud Run without changes to the image.
+`docker compose up` on a laptop matches the same `docker/Dockerfile` image users push to a registry for ECS / Cloud Run / GKE — only `EXTRAS` and runtime env differ.
+
+### What does NOT change
+
+- Harness still receives storage/workspace via injection; Docker only sets process env + files on disk.
+- Skills remain path-based / image-baked; not part of `WorkspaceStorage`.
 
 ---
 
@@ -340,9 +354,9 @@ There is one model: opensandbox runs as a service, monkeybot points at it via `S
 
 Authentication: network-layer (VPC/private subnet) by default. If opensandbox must be reachable across a network boundary, set `SANDBOX_AUTH_TOKEN` in monkeybot's env; monkeybot forwards it as `Authorization: Bearer <token>`. Configure opensandbox to require it on its end.
 
-### Regarding `deploy.sh`
+### Regarding Auriga Cloud Run scripts
 
-The current `deploy.sh` targets the internal `aurigaos` GCP project. Before open-sourcing, remove it from the repo (or move to `internal/`). Its content becomes the per-target addendum in the Cloud Run section of the Pattern A guide.
+Former root `deploy.sh` content now lives under **`internal/`**. Its content becomes the per-target addendum in the Cloud Run section of the Pattern A guide (Step 4). Remove `internal/` before open-sourcing or replace with the guide alone.
 
 ---
 
@@ -405,7 +419,7 @@ An AgentCore or AgentEngine handler follows the same pattern with its own reques
 | Question | Decision |
 |---|---|
 | Google Drive memory backend? | Out of scope. Not worth the complexity for the use case. |
-| `deploy.sh` in open-source repo? | No. Replace with a deployment guide (Markdown). Move to `internal/` or remove before open-sourcing. |
+| `deploy.sh` / Auriga Cloud Run scripts in open-source repo? | No. Replace with a deployment guide (Markdown). Team copies live under `internal/` in the private repo; **delete `internal/` or re-ignore it** before open-sourcing. |
 | Single Dockerfile vs two? | Collapse to one after Steps 1+2. `EXTRAS` build arg handles provider and backend selection. |
 | OpenSandbox auth? | Network-layer (VPC) by default. Optional `SANDBOX_AUTH_TOKEN` env var for Bearer token. |
 | DynamoDB / Firestore storage backends? | Out of scope for initial design. Postgres covers the managed DB need on both clouds. Add later if there's demand. |
@@ -461,10 +475,11 @@ Step 2: Workspace / Memory Storage Abstraction
   - Tests: local + factory + protocol contract + memory fakes      DONE
 
 Step 3: Docker Artifacts
-  - Consolidate Dockerfile (after Step 1+2 land)
-  - Create base docker-compose.yml
-  - Remove internal deploy.sh or move to internal/
-  - Verify sandbox overlay still works against new base
+  - Single public docker/Dockerfile (no PYTHONPATH src, HEALTHCHECK, data/skills dirs)   DONE
+  - Base docker-compose.yml + .env.example                                              DONE
+  - Sandbox overlay: OPENSANDBOX_CONFIG + docker/opensandbox.docker.toml               DONE
+  - Auriga internal/: Dockerfile.auriga, deploy_cloud_run.sh, deploy_playground_cloud_run.sh (tracked; strip before open source) DONE
+  - Remove root deploy.sh and docker/Dockerfile.playground from tracked tree            DONE
 
 Step 4: Deployment Guides (three pattern guides + per-target addenda)
   - docs/deploy-pattern-a-container.md

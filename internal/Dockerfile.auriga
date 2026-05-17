@@ -1,6 +1,6 @@
-# Playground agent gateway for GCP Cloud Run (and local smoke tests).
+# Auriga playground gateway image for GCP Cloud Run (and local smoke tests).
 # Build from the repository root:
-#   docker buildx build --platform linux/amd64 -f docker/Dockerfile.playground -t TAG --push .
+#   docker buildx build --platform linux/amd64 -f internal/Dockerfile.auriga -t TAG --push .
 #
 # Layout:
 #   /app/workspace/     — only ``data/`` and ``skills/`` (agent-facing cwd + workspace API)
@@ -32,7 +32,7 @@ ENV PYTHONUNBUFFERED=1 \
     SANDBOX_ENABLED=false \
     MONKEYBOT_CONFIG=/app/.harness/monkeybot_config/monkeybot.yaml \
     AGENT_MD=/app/.harness/monkeybot_config/AGENT.md \
-    MEMORY_PATH=/app/workspace/data/memory \
+    MEMORY_STORAGE_URI=local:///app/workspace/data/memory \
     SKILLS_PATH=/app/workspace/skills \
     DB_URL=sqlite:////app/workspace/data/monkeybot.db \
     MCP_CONFIG=/app/.harness/monkeybot_config/mcp.json \

@@ -144,14 +144,25 @@ uv run python -m monkeybot.gateway.main
 
 The gateway listens on **`runtime.port`** from `monkeybot_config/monkeybot.yaml` (the shipped file uses **8080**); if unset, the process falls back to **`PORT` / `GATEWAY_PORT`**, then **8000**.
 
-### 5. Deploy to Cloud Run
+### 5. Run with Docker (optional)
 
 ```bash
-./deploy.sh --project your-gcp-project
+cp .env.example .env   # add GEMINI_API_KEY at minimum
+docker compose up --build
+# gateway listening at http://localhost:8080
 ```
 
-See `deploy.sh --help`-style options at the top of the script. The script builds via Cloud Build using `docker/Dockerfile`, then deploys to Cloud Run.
+With OpenSandbox as a sidecar (isolated code execution inside the agent):
 
+```bash
+docker compose -f docker-compose.yml -f docker/docker-compose.sandbox.yml up --build
+```
+
+The sandbox overlay mounts the agent workspace at `/tmp/monkeybot-workspace` — a path visible to both the container and the host Docker daemon (required for OpenSandbox bind-mounts). The default `docker/opensandbox.docker.toml` restricts sandbox containers to `/tmp`; to allow broader host mounts (e.g. your repo under `$HOME`) set `OPENSANDBOX_CONFIG=./path/to/your/opensandbox.toml` in `.env`.
+
+Managed deploy (Cloud Run, ECS, etc.): see **[Cloud deployment design](docs/cloud-deployment-design.md)** (Step 4 guides when added). Build arg **`EXTRAS`** selects pip extras in `docker/Dockerfile` (same image for laptop and cloud).
+
+**Auriga-only:** playground Cloud Run / split workspace layout scripts are described under **Step 3** in that doc; they live in **`internal/`** (tracked in this repo; remove before open-sourcing per that doc).
 ---
 
 ## How It Works
@@ -208,9 +219,13 @@ monkey-bot/
 ├── docs/                        # getting-started.md, skills.md
 ├── tests/                       # pytest suite (see pytest.ini)
 ├── testing/                     # Bench harness (bench.py) + devbot fixture
+├── docker/
+│   ├── Dockerfile               # Container image (Pattern A baseline)
+│   ├── docker-compose.sandbox.yml  # Compose overlay (+ OpenSandbox sidecar)
+│   └── opensandbox.docker.toml     # Default OpenSandbox server config (compose)
+├── docker-compose.yml           # Local baseline: monkeybot + ./data volume
+├── .env.example                 # Env template for Docker / local secrets
 ├── scripts/                     # Operational helpers (e.g. verify_memory.py)
-├── docker/Dockerfile            # Container image
-├── deploy.sh                    # Cloud Run deploy helper
 ├── pyproject.toml               # uv / hatchling project config
 ```
 

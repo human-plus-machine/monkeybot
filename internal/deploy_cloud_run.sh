@@ -1,5 +1,5 @@
 #!/bin/bash
-# deploy.sh - Deploy monkey-bot agent to GCP Cloud Run
+# internal/deploy_cloud_run.sh - Deploy monkey-bot agent to GCP Cloud Run (Auriga internal)
 #
 # This script handles the complete deployment lifecycle:
 # - Service account creation with proper IAM roles
@@ -8,7 +8,7 @@
 # - Verification and health checks
 #
 # Usage:
-#   ./deploy.sh [options]
+#   ./internal/deploy_cloud_run.sh [options]
 #
 # Options:
 #   --project PROJECT_ID      GCP project ID (default: aurigaos)
@@ -22,7 +22,7 @@
 #   --storage-backend TYPE    Scheduler storage backend: json|firestore (default: json)
 #
 # Example:
-#   ./deploy.sh --project my-project --service my-bot --memory 1Gi
+#   ./internal/deploy_cloud_run.sh --project my-project --service my-bot --memory 1Gi
 
 set -e  # Exit on error
 
@@ -78,7 +78,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         *)
             echo "Unknown option: $1"
-            echo "Run './deploy.sh --help' for usage"
+            echo "Run './internal/deploy_cloud_run.sh --help' for usage"
             exit 1
             ;;
     esac

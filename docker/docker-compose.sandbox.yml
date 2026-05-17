@@ -1,20 +1,31 @@
 # Compose override — adds OpenSandbox as a sidecar for sandbox-enabled deployments.
 #
 # Usage:
-#   docker compose -f docker-compose.yml -f docker/docker-compose.sandbox.yml up
+#   docker compose -f docker-compose.yml -f docker/docker-compose.sandbox.yml up --build
 #
-# This file does NOT replace docker-compose.yml; it overlays only what changes:
-#   - Adds the opensandbox-server service
-#   - Rebuilds monkeybot with the [sandbox] extra included
-#   - Injects SANDBOX_ENABLED and SANDBOX_SERVER_URL into monkeybot
+# OpenSandbox server config: set OPENSANDBOX_CONFIG in .env to override the default.
+# Default config (docker/opensandbox.docker.toml) allows bind-mounts under /tmp only.
+#
+# Why /tmp/monkeybot-workspace:
+#   OpenSandbox bind-mounts the agent workspace path on the HOST Docker daemon.
+#   /app/workspace only exists inside the monkeybot container, not on the host.
+#   Using /tmp means the same path is mounted into the container AND accessible
+#   to the host daemon. The default opensandbox config already allows /tmp.
+#
+# This file overlays only what changes from docker-compose.yml:
+#   - Adds the opensandbox-server sidecar
+#   - Rebuilds monkeybot with [sandbox] extra
+#   - Sets workspace to /tmp/monkeybot-workspace (host-accessible path)
+#   - Enables sandbox and points it at the sidecar
 
 services:
   opensandbox-server:
     image: opensandbox/server:latest
+    environment:
+      - OPENSANDBOX_INSECURE_SERVER=YES
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      # Without this mount the image defaults to allowed_host_paths=[] (deny-all) and sandbox create fails.
-      - ../playground/agent/monkeybot_config/opensandbox.docker.toml:/etc/opensandbox/config.toml:ro
+      - ${OPENSANDBOX_CONFIG:-./docker/opensandbox.docker.toml}:/etc/opensandbox/config.toml:ro
     restart: unless-stopped
 
   monkeybot:
@@ -24,5 +35,15 @@ services:
     environment:
       - SANDBOX_ENABLED=true
       - SANDBOX_SERVER_URL=http://opensandbox-server:8080
+      - MONKEYBOT_WORKSPACE_ROOT=/tmp/monkeybot-workspace
+      - SKILLS_PATH=/tmp/monkeybot-workspace/skills
+      - DB_URL=sqlite:////tmp/monkeybot-workspace/data/monkeybot.db
+      - MEMORY_STORAGE_URI=local:///tmp/monkeybot-workspace/data/memory
+    volumes:
+      - /tmp/monkeybot-workspace:/tmp/monkeybot-workspace
+    command: >
+      sh -c "mkdir -p /tmp/monkeybot-workspace/skills /tmp/monkeybot-workspace/data/memory &&
+             cp -rn /app/.agents/skills/. /tmp/monkeybot-workspace/skills/ 2>/dev/null || true &&
+             python -m monkeybot.gateway.main"
     depends_on:
       - opensandbox-server
