@@ -7,7 +7,11 @@ from pathlib import Path
 
 import pytest
 
-from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService, WorkspaceSettings
+from monkeybot.core.tools.workspace_service import (
+    WorkspaceError,
+    WorkspaceFileService,
+    WorkspaceSettings,
+)
 
 
 def test_write_allowed_inside_scope() -> None:

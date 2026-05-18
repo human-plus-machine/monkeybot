@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
+
 from monkeybot.core.runtime.events import AssistantDelta, Error, Thinking, event_to_json
 from monkeybot.core.subagents.subagent_proto import SubagentEnvelope, spawn_subagent
 
@@ -64,6 +66,48 @@ def test_subagent_envelope_roundtrip() -> None:
     )
     restored = SubagentEnvelope.from_json(env.to_json())
     assert restored == env
+
+
+def test_subagent_envelope_roundtrip_with_traceparent() -> None:
+    traceparent = "00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+    env = SubagentEnvelope(
+        task="do thing",
+        context="ctx",
+        memory_storage_uri="local:///tmp/m",
+        parent_run_id="p1",
+        model="m1",
+        traceparent=traceparent,
+    )
+    restored = SubagentEnvelope.from_json(env.to_json())
+    assert restored == env
+    assert restored.traceparent == traceparent
+
+
+def test_subagent_envelope_roundtrip_without_traceparent() -> None:
+    env = SubagentEnvelope(
+        task="do thing",
+        context="ctx",
+        memory_storage_uri="local:///tmp/m",
+        parent_run_id="p1",
+    )
+    payload = json.loads(env.to_json())
+    assert "traceparent" not in payload
+    restored = SubagentEnvelope.from_json(env.to_json())
+    assert restored.traceparent is None
+
+
+def test_subagent_envelope_rejects_non_string_traceparent() -> None:
+    raw = json.dumps(
+        {
+            "task": "t",
+            "context": "",
+            "memory_storage_uri": "local://m",
+            "parent_run_id": "p",
+            "traceparent": 1,
+        }
+    )
+    with pytest.raises(ValueError, match="traceparent"):
+        SubagentEnvelope.from_json(raw)
 
 
 @pytest.fixture

@@ -7,6 +7,7 @@ import logging
 from typing import Any
 
 import pytest
+
 from monkeybot.core.context import TurnContext
 from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
 

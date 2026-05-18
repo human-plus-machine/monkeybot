@@ -17,6 +17,7 @@ import {
   type GatewayJsonEvent,
   type SessionUsageResponse,
 } from './gatewayClient'
+import ObservabilityPanel from './ObservabilityPanel'
 import WorkspaceBrowser from './WorkspaceBrowser'
 import type { ToastItem } from './blocks/SystemNotificationToast'
 
@@ -255,7 +256,8 @@ export default function App() {
     innerTurn: number
     text: string
   } | null>(null)
-  const [rightTab, setRightTab] = useState<'prompt' | 'workspace'>('prompt')
+  const [rightTab, setRightTab] = useState<'prompt' | 'workspace' | 'observability'>('prompt')
+  const [lastTraceId, setLastTraceId] = useState<string | null>(null)
 
   const streamAbortRef = useRef<AbortController | null>(null)
   const streamBufRef = useRef('')
@@ -404,6 +406,9 @@ export default function App() {
           break
         }
         case 'TurnComplete': {
+          const traceId =
+            typeof evt.trace_id === 'string' && evt.trace_id.length > 0 ? evt.trace_id : null
+          setLastTraceId(traceId)
           setToolHint(null)
           setActiveRequestId(null)
           void refreshSessionUsage()
@@ -660,6 +665,7 @@ export default function App() {
     setSessionUsage(null)
     setUsageNote('')
     setSystemPromptSnap(null)
+    setLastTraceId(null)
     setRightTab('prompt')
     try {
       const { session_id } = await createSession()
@@ -687,6 +693,7 @@ export default function App() {
     setSessionUsage(null)
     setUsageNote('')
     setSystemPromptSnap(null)
+    setLastTraceId(null)
     setRightTab('prompt')
   }
 
@@ -1030,6 +1037,15 @@ export default function App() {
           >
             Workspace
           </button>
+          <button
+            type="button"
+            role="tab"
+            className="right-panel-tab"
+            aria-selected={rightTab === 'observability'}
+            onClick={() => setRightTab('observability')}
+          >
+            Observability
+          </button>
         </div>
         {rightTab === 'prompt' ? (
           <div className="right-panel-pane system-prompt-pane" role="tabpanel">
@@ -1057,9 +1073,16 @@ export default function App() {
               )}
             </div>
           </div>
-        ) : (
+        ) : rightTab === 'workspace' ? (
           <div className="right-panel-pane workspace-pane" role="tabpanel" aria-label="Workspace files">
             <WorkspaceBrowser />
+          </div>
+        ) : (
+          <div className="right-panel-pane observability-pane-wrap" role="tabpanel" aria-label="Observability">
+            <ObservabilityPanel
+              lastTraceId={lastTraceId}
+              observabilityEnabled={lastTraceId != null}
+            />
           </div>
         )}
       </aside>

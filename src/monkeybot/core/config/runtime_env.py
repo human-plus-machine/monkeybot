@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 _RUNTIME_ENV_APPLIED = False
 
 # (section, key) -> os.environ name
+# YAML gcp/anthropic_vertex project ids map here; prefer GOOGLE_CLOUD_PROJECT when set in .env.
+_GCP_PROJECT_ENV_KEYS = frozenset({"VERTEX_AI_PROJECT_ID", "ANTHROPIC_VERTEX_PROJECT_ID"})
+
 _ENV_MAP: dict[tuple[str, str], str] = {
     ("runtime", "log_level"): "LOG_LEVEL",
     ("runtime", "port"): "PORT",
@@ -202,10 +205,18 @@ def apply_monkeybot_runtime_env() -> Path | None:
         raise
 
     _RUNTIME_ENV_APPLIED = True
+    google_cloud_project = (os.environ.get("GOOGLE_CLOUD_PROJECT") or "").strip()
     for env_key, env_val in flat.items():
-        if env_key not in os.environ:
-            os.environ[env_key] = env_val
-            logger.debug("Set from monkeybot.yaml: %s=%s", env_key, env_val)
+        if env_key in os.environ:
+            continue
+        if env_key in _GCP_PROJECT_ENV_KEYS and google_cloud_project:
+            os.environ[env_key] = google_cloud_project
+            logger.debug(
+                "Set from GOOGLE_CLOUD_PROJECT: %s=%s", env_key, google_cloud_project
+            )
+            continue
+        os.environ[env_key] = env_val
+        logger.debug("Set from monkeybot.yaml: %s=%s", env_key, env_val)
 
     logger.info("Applied runtime config from %s (%d keys)", path, len(flat))
     return path

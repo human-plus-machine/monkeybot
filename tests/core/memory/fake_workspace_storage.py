@@ -34,9 +34,7 @@ class FakeWorkspaceStorage:
             pre = pre + "/"
         out: list[str] = []
         for k in sorted(self.files):
-            if not pre:
-                out.append(k)
-            elif k.startswith(pre):
+            if not pre or k.startswith(pre):
                 out.append(k)
         return out
 

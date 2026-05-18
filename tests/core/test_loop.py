@@ -12,8 +12,6 @@ from typing import Any
 import pytest
 
 from monkeybot.core.context import TurnContext
-from monkeybot.core.memory.subsystem import MemorySubsystem
-from monkeybot.core.workspace import create_workspace_storage
 from monkeybot.core.llm.provider import (
     Done,
     Message,
@@ -22,6 +20,7 @@ from monkeybot.core.llm.provider import (
     ToolCall,
     UsageEvent,
 )
+from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.runtime.events import (
     AssistantDelta,
     Error,
@@ -35,6 +34,7 @@ from monkeybot.core.testing.mocks_provider import fake_provider_prompt_tokens
 from monkeybot.core.tools.inspector import Decision
 from monkeybot.core.types.content_blocks import Text, ToolRequest, ToolResponse
 from monkeybot.core.types.types_tools import ToolDef
+from monkeybot.core.workspace import create_workspace_storage
 
 
 def _flatten_text_from_message(m: Message) -> str:

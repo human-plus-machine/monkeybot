@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from monkeybot.providers._utils import build_anthropic_messages
-
 from tests.providers.conftest import typed_messages_four_turn
 
 

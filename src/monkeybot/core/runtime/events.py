@@ -69,6 +69,7 @@ class TurnComplete:
     kind: Literal["TurnComplete"] = "TurnComplete"
     request_id: str = ""
     usage: UsageTotals = field(default_factory=UsageTotals)
+    trace_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -280,7 +281,7 @@ def event_to_json(event: AgentEvent) -> str:
         payload = {**base, "tool": event.tool, "result": event.result, "error": event.error}
     elif isinstance(event, TurnComplete):
         u = event.usage
-        payload = {
+        payload: dict[str, object] = {
             **base,
             "usage": {
                 "input_tokens": u.input_tokens,
@@ -291,6 +292,8 @@ def event_to_json(event: AgentEvent) -> str:
                 "estimated_prompt_tokens": u.estimated_prompt_tokens,
             },
         }
+        if event.trace_id:
+            payload["trace_id"] = event.trace_id
     elif isinstance(event, Error):
         payload = {**base, "error": event.error}
     elif isinstance(event, ContextSummarizing):
@@ -371,7 +374,15 @@ def event_from_json(raw: str) -> AgentEvent:
         return ToolCallResult(request_id=rid, tool=tool, result=result, error=err)
     if t == "TurnComplete":
         usage = _usage_from_obj(payload.get("usage"))
-        return TurnComplete(request_id=rid, usage=usage)
+        trace_id_raw = payload.get("trace_id")
+        trace_id: str | None
+        if trace_id_raw is None:
+            trace_id = None
+        elif isinstance(trace_id_raw, str) and trace_id_raw:
+            trace_id = trace_id_raw
+        else:
+            raise EventDecodeError("TurnComplete trace_id must be a non-empty string")
+        return TurnComplete(request_id=rid, usage=usage, trace_id=trace_id)
     if t == "Error":
         err_raw = payload.get("error", "")
         err = err_raw if isinstance(err_raw, str) else ""

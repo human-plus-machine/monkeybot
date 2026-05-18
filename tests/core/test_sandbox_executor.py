@@ -16,13 +16,12 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from types import ModuleType
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from monkeybot.core.tools.sandbox_executor import SandboxConfig, SandboxExecutor
 from monkeybot.core.tools.terminal import ExecutionResult, SecurityError
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -323,9 +322,8 @@ class TestSandboxExecutorSdkNotInstalled:
             "opensandbox.config": None,
             "opensandbox.models.sandboxes": None,
             "opensandbox.models.execd": None,
-        }):
-            with pytest.raises(RuntimeError) as exc_info:
-                await executor.execute("echo", ["hello"])
+        }), pytest.raises(RuntimeError) as exc_info:
+            await executor.execute("echo", ["hello"])
 
         msg = str(exc_info.value)
         assert "pip install" in msg

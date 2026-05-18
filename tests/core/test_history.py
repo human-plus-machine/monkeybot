@@ -11,10 +11,15 @@ from typing import Any, cast
 import pytest
 import pytest_asyncio
 
-from monkeybot.core.types.content_blocks import Text, ToolRequest, ToolResponse
-from monkeybot.core.persistence.sqlite import SCHEMA_DDLS, apply_schema, open_connection, sqlite_path_from_db_url
-from monkeybot.core.persistence.history import SQLiteHistoryStore
 from monkeybot.core.llm.provider import Message
+from monkeybot.core.persistence.history import SQLiteHistoryStore
+from monkeybot.core.persistence.sqlite import (
+    SCHEMA_DDLS,
+    apply_schema,
+    open_connection,
+    sqlite_path_from_db_url,
+)
+from monkeybot.core.types.content_blocks import Text, ToolRequest, ToolResponse
 
 # Legacy ChatMessage + tool_* columns removed in story-2-persistence; see design 1B §7.8.
 

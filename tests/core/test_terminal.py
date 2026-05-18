@@ -12,16 +12,14 @@ Terminal Executor, including:
 Security tests are marked with SECURITY comment for easy identification.
 """
 
-import asyncio
 import pytest
-from pathlib import Path
 
 from monkeybot.core.tools.terminal import (
-    TerminalExecutor,
+    ALLOWED_COMMANDS,
+    ALLOWED_PATHS,
     ExecutionResult,
     SecurityError,
-    ALLOWED_COMMANDS,
-    ALLOWED_PATHS
+    TerminalExecutor,
 )
 
 
@@ -44,11 +42,11 @@ def test_data_dir(tmp_path):
     """
     data_dir = tmp_path / "data" / "memory"
     data_dir.mkdir(parents=True)
-    
+
     # Create a test file
     test_file = data_dir / "test.txt"
     test_file.write_text("Hello from test file")
-    
+
     return tmp_path
 
 
@@ -59,29 +57,29 @@ class TestTerminalExecutorSecurity:
     These tests verify that the security boundary is properly enforced.
     ALL tests in this class must pass for the system to be secure.
     """
-    
+
     @pytest.mark.asyncio
     async def test_allowed_command_succeeds(self, executor):
         """SECURITY: Test that allowed command executes successfully."""
         result = await executor.execute("echo", ["Hello World"])
-        
+
         assert isinstance(result, ExecutionResult)
         assert result.exit_code == 0
         assert "Hello World" in result.stdout
         assert result.stderr == ""
-    
+
     @pytest.mark.asyncio
     async def test_blocked_command_raises_security_error(self, executor):
         """SECURITY: Test that blocked command raises SecurityError."""
         # Test various dangerous commands
         dangerous_commands = ["rm", "curl", "wget", "sudo", "chmod", "chown"]
-        
+
         for cmd in dangerous_commands:
             with pytest.raises(SecurityError) as exc_info:
                 await executor.execute(cmd, ["-rf", "/"])
-            
+
             assert "not allowed" in str(exc_info.value).lower()
-    
+
     @pytest.mark.asyncio
     async def test_allowed_path_succeeds(self, executor, test_data_dir):
         """SECURITY: Test that command with allowed path succeeds."""
@@ -89,12 +87,12 @@ class TestTerminalExecutorSecurity:
         test_file = test_data_dir / "test-data" / "test.txt"
         test_file.parent.mkdir(parents=True, exist_ok=True)
         test_file.write_text("Hello from allowed path")
-        
+
         result = await executor.execute("cat", [str(test_file)])
-        
+
         assert result.exit_code == 0
         assert "Hello from allowed path" in result.stdout
-    
+
     @pytest.mark.asyncio
     async def test_blocked_path_raises_security_error(self, executor):
         """SECURITY: Test that command with blocked path raises SecurityError."""
@@ -106,13 +104,13 @@ class TestTerminalExecutorSecurity:
             "/var/log/system.log",
             "./unauthorized/path/file.txt"
         ]
-        
+
         for path in dangerous_paths:
             with pytest.raises(SecurityError) as exc_info:
                 await executor.execute("cat", [path])
-            
+
             assert "not allowed" in str(exc_info.value).lower()
-    
+
     @pytest.mark.asyncio
     async def test_path_traversal_blocked(self, executor):
         """SECURITY: Test that path traversal attempts are blocked."""
@@ -122,14 +120,14 @@ class TestTerminalExecutorSecurity:
             "./unauthorized/path/file.txt",  # Not in allowed paths
             "/etc/passwd",                     # System file
         ]
-        
+
         # These should be blocked by the allowlist check
         for path in traversal_attempts:
             with pytest.raises(SecurityError) as exc_info:
                 await executor.execute("cat", [path])
-            
+
             assert "not allowed" in str(exc_info.value).lower()
-    
+
     @pytest.mark.asyncio
     async def test_subdirectory_of_allowed_path_succeeds(self, executor, test_data_dir):
         """SECURITY: Test that subdirectories of allowed paths are accessible."""
@@ -138,27 +136,27 @@ class TestTerminalExecutorSecurity:
         nested_dir.mkdir(parents=True, exist_ok=True)
         nested_file = nested_dir / "file.txt"
         nested_file.write_text("Deep nested file")
-        
+
         result = await executor.execute("cat", [str(nested_file)])
-        
+
         assert result.exit_code == 0
         assert "Deep nested file" in result.stdout
-    
+
     @pytest.mark.asyncio
     async def test_command_with_no_path_arguments_succeeds(self, executor):
         """SECURITY: Test that commands with no path arguments work."""
         # Commands with only flags/values (no paths) should work
         result = await executor.execute("python3", ["--version"])
-        
+
         assert result.exit_code == 0
         assert "Python" in result.stdout or "Python" in result.stderr
-    
+
     @pytest.mark.asyncio
     async def test_empty_arguments_succeeds(self, executor):
         """SECURITY: Test that commands with empty arguments work."""
         # ls with no arguments should work (doesn't access filesystem via args)
         result = await executor.execute("ls", [])
-        
+
         assert result.exit_code == 0
 
     @pytest.mark.asyncio
@@ -182,16 +180,16 @@ class TestTerminalExecutorExecution:
     
     These tests verify correct execution behavior for valid commands.
     """
-    
+
     @pytest.mark.asyncio
     async def test_successful_command_returns_output(self, executor):
         """Test that successful command returns stdout."""
         result = await executor.execute("echo", ["Hello World"])
-        
+
         assert result.exit_code == 0
         assert "Hello World" in result.stdout
         assert result.stderr == ""
-    
+
     @pytest.mark.asyncio
     async def test_failed_command_returns_error(self, executor):
         """Test that failed command returns non-zero exit code."""
@@ -200,9 +198,9 @@ class TestTerminalExecutorExecution:
             "python3",
             ["-c", "import sys; sys.exit(1)"]
         )
-        
+
         assert result.exit_code == 1
-    
+
     @pytest.mark.asyncio
     async def test_command_with_stderr(self, executor):
         """Test that command writing to stderr is captured."""
@@ -210,9 +208,9 @@ class TestTerminalExecutorExecution:
             "python3",
             ["-c", "import sys; sys.stderr.write('Error message\\n')"]
         )
-        
+
         assert "Error message" in result.stderr
-    
+
     @pytest.mark.asyncio
     async def test_command_with_multiple_arguments(self, executor):
         """Test that commands with multiple arguments work."""
@@ -220,7 +218,7 @@ class TestTerminalExecutorExecution:
             "python3",
             ["-c", "import sys; print('arg1'); print('arg2')"]
         )
-        
+
         assert result.exit_code == 0
         assert "arg1" in result.stdout
         assert "arg2" in result.stdout
@@ -232,7 +230,7 @@ class TestTerminalExecutorTimeout:
     
     These tests verify that long-running processes are properly killed.
     """
-    
+
     @pytest.mark.asyncio
     async def test_timeout_kills_process(self, executor):
         """Test that timeout kills long-running process."""
@@ -242,9 +240,9 @@ class TestTerminalExecutorTimeout:
                 ["-c", "import time; time.sleep(60)"],
                 timeout=1
             )
-        
+
         assert "timeout" in str(exc_info.value).lower()
-    
+
     @pytest.mark.asyncio
     async def test_fast_command_does_not_timeout(self, executor):
         """Test that fast commands complete before timeout."""
@@ -254,10 +252,10 @@ class TestTerminalExecutorTimeout:
             ["Fast command"],
             timeout=5
         )
-        
+
         assert result.exit_code == 0
         assert "Fast command" in result.stdout
-    
+
     @pytest.mark.asyncio
     async def test_custom_timeout_value(self, executor):
         """Test that custom timeout values are respected."""
@@ -267,7 +265,7 @@ class TestTerminalExecutorTimeout:
             ["-c", "import time; time.sleep(2); print('Done')"],
             timeout=3
         )
-        
+
         assert result.exit_code == 0
         assert "Done" in result.stdout
 
@@ -278,7 +276,7 @@ class TestTerminalExecutorOutputTruncation:
     
     These tests verify that large outputs don't cause memory issues.
     """
-    
+
     @pytest.mark.asyncio
     async def test_large_stdout_truncated(self, executor):
         """Test that large stdout is truncated to 1MB."""
@@ -287,11 +285,11 @@ class TestTerminalExecutorOutputTruncation:
             "python3",
             ["-c", "print('x' * (2 * 1024 * 1024))"]
         )
-        
+
         # Should be truncated to ~1MB
         assert len(result.stdout) <= 1024 * 1024 + 200  # Small buffer for message
         assert "[Output truncated" in result.stdout
-    
+
     @pytest.mark.asyncio
     async def test_large_stderr_truncated(self, executor):
         """Test that large stderr is truncated to 1MB."""
@@ -300,11 +298,11 @@ class TestTerminalExecutorOutputTruncation:
             "python3",
             ["-c", "import sys; sys.stderr.write('x' * (2 * 1024 * 1024))"]
         )
-        
+
         # Should be truncated to ~1MB
         assert len(result.stderr) <= 1024 * 1024 + 200  # Small buffer for message
         assert "[Output truncated" in result.stderr
-    
+
     @pytest.mark.asyncio
     async def test_small_output_not_truncated(self, executor):
         """Test that small outputs are not truncated."""
@@ -312,7 +310,7 @@ class TestTerminalExecutorOutputTruncation:
             "echo",
             ["Small output"]
         )
-        
+
         assert result.exit_code == 0
         assert "Small output" in result.stdout
         assert "[Output truncated" not in result.stdout
@@ -324,7 +322,7 @@ class TestTerminalExecutorEdgeCases:
     
     These tests verify handling of unusual but valid inputs.
     """
-    
+
     @pytest.mark.asyncio
     async def test_command_with_special_characters_in_output(self, executor):
         """Test that special characters in output are handled correctly."""
@@ -332,10 +330,10 @@ class TestTerminalExecutorEdgeCases:
             "echo",
             ["Special chars: !@#$%^&*()[]{}"]
         )
-        
+
         assert result.exit_code == 0
         assert "Special chars" in result.stdout
-    
+
     @pytest.mark.asyncio
     async def test_command_with_unicode_output(self, executor):
         """Test that unicode output is decoded correctly."""
@@ -343,11 +341,11 @@ class TestTerminalExecutorEdgeCases:
             "python3",
             ["-c", "print('Unicode: 你好世界 🚀')"]
         )
-        
+
         assert result.exit_code == 0
         # Unicode should be in output (or replaced if not valid UTF-8)
         assert "Unicode" in result.stdout
-    
+
     @pytest.mark.asyncio
     async def test_command_with_empty_output(self, executor):
         """Test that commands with no output work correctly."""
@@ -355,16 +353,16 @@ class TestTerminalExecutorEdgeCases:
             "python3",
             ["-c", "pass"]
         )
-        
+
         assert result.exit_code == 0
         assert result.stdout == ""
         assert result.stderr == ""
-    
+
     @pytest.mark.asyncio
     async def test_execution_result_dataclass(self, executor):
         """Test that ExecutionResult is a proper dataclass."""
         result = await executor.execute("echo", ["test"])
-        
+
         # Test dataclass properties
         assert hasattr(result, "stdout")
         assert hasattr(result, "stderr")
@@ -380,15 +378,15 @@ class TestTerminalExecutorConstants:
     
     These tests document and verify the security configuration.
     """
-    
+
     def test_allowed_commands_list(self):
         """Test that ALLOWED_COMMANDS contains expected commands."""
         # Document expected commands
         expected_commands = ["cat", "ls", "grep", "echo", "python", "python3", "uv", "git", "gh"]
-        
+
         for cmd in expected_commands:
             assert cmd in ALLOWED_COMMANDS, f"Expected command '{cmd}' not in ALLOWED_COMMANDS"
-    
+
     def test_allowed_paths_list(self):
         """Test that ALLOWED_PATHS contains expected paths."""
         # Document expected paths
@@ -401,10 +399,10 @@ class TestTerminalExecutorConstants:
             "./code/",
             "./code",
         ]
-        
+
         for path in expected_paths:
             assert path in ALLOWED_PATHS, f"Expected path '{path}' not in ALLOWED_PATHS"
-    
+
     def test_no_dangerous_commands_in_allowlist(self):
         """Test that dangerous commands are not in allowlist."""
         dangerous_commands = [
@@ -415,6 +413,6 @@ class TestTerminalExecutorConstants:
             "kill", "killall",      # Process manipulation
             "eval", "exec",         # Code execution
         ]
-        
+
         for cmd in dangerous_commands:
             assert cmd not in ALLOWED_COMMANDS, f"Dangerous command '{cmd}' found in ALLOWED_COMMANDS!"

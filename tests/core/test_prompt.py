@@ -2,10 +2,10 @@
 
 import pytest
 
-from monkeybot.core.types.content_blocks import Text, ToolRequest, ToolResponse
 from monkeybot.core.context import SkillRef, TurnContext
-from monkeybot.core.prompts.prompt import compose_system_prompt
 from monkeybot.core.llm.provider import Message
+from monkeybot.core.prompts.prompt import compose_system_prompt
+from monkeybot.core.types.content_blocks import Text, ToolRequest, ToolResponse
 from monkeybot.core.types.types_tools import ToolDef
 
 

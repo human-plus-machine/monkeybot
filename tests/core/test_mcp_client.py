@@ -10,6 +10,7 @@ from types import MethodType, SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+
 from monkeybot.core.mcp import mcp_client as mc
 from monkeybot.core.mcp.mcp_client import MCPClient, MCPConnectionError
 

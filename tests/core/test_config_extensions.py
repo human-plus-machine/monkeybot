@@ -4,7 +4,6 @@ import os
 
 import pytest
 
-import monkeybot.core.config as config_mod
 import monkeybot.core.config.settings as config_state
 from monkeybot.core.config import (
     CONFIG_MAPPING,

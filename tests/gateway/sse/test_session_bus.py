@@ -6,9 +6,9 @@ import asyncio
 
 import pytest
 
+from monkeybot.core.runtime.events import Thinking
 from monkeybot.gateway.sse.session_bus import SessionBus
 from monkeybot.gateway.sse.sse import agent_event_to_wire_dict, format_active_requests
-from monkeybot.core.runtime.events import Thinking
 
 
 @pytest.mark.asyncio

@@ -10,13 +10,14 @@ import sys
 from pathlib import Path
 
 import pytest
+
+from monkeybot.core.llm.provider import Done, Message, ProviderEvent, TextDelta
+from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.types.content_blocks import Text
 from monkeybot.core.types.interfaces import LLMError
-from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
-from monkeybot.core.llm.provider import Done, Message, ProviderEvent, TextDelta
+from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers import gemini as gemini_mod
 from monkeybot.providers.gemini import GeminiProvider
-from monkeybot.core.types.types_tools import ToolDef
 
 
 async def _collect_fake(scripted: ScriptedFakeProvider) -> list[ProviderEvent]:

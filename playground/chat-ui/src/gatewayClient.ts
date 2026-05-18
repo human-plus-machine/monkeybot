@@ -22,6 +22,7 @@ export type GatewayJsonEvent = {
   result?: string
   args?: Record<string, unknown>
   usage?: Record<string, unknown>
+  trace_id?: string
   inner_turn?: number
   text?: string
   mime_type?: string

@@ -24,11 +24,11 @@ model:
   # name: claude-sonnet-4-6
   # summarization_model: gemini-3-flash-preview  # optional; env CONTEXT_SUMMARIZATION_MODEL overrides
 
-gcp:
-  project_id: your-gcp-project-id
+# GCP project: set GOOGLE_CLOUD_PROJECT (+ GOOGLE_APPLICATION_CREDENTIALS) in .env.
+# Do not put project_id here unless you are not using .env — yaml fills VERTEX_AI_PROJECT_ID
+# and overrides GOOGLE_CLOUD_PROJECT when both are present.
 
 anthropic_vertex:
-  project_id: your-gcp-project-id
   region: global
 
 gateway:

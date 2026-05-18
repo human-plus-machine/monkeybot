@@ -2,6 +2,13 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+if [[ -f .env ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+fi
+
 # OpenSandbox API (matches monkeybot_config/monkeybot.yaml sandbox.server_url default).
 # Set SKIP_OPENSANDBOX=1 to skip. Requires Docker; sandboxes need the host socket.
 SANDBOX_CONTAINER="${SANDBOX_CONTAINER:-monkeybot-playground-opensandbox}"
@@ -121,8 +128,122 @@ _run_sh_cleanup() {
   fi
 }
 
-# Stops OpenSandbox when the gateway exits (including Ctrl+C ending uv run).
-trap '_run_sh_cleanup' EXIT
+# Observability stack (Phoenix + Langfuse + OTel Collector). Set SKIP_OBSERVABILITY=1 to skip.
+OBS_LANGFUSE_COMPOSE="${OBS_LANGFUSE_COMPOSE:-$(pwd)/docker-compose.langfuse.yml}"
+OBS_STACK_COMPOSE="${OBS_STACK_COMPOSE:-$(pwd)/docker-compose.observability.yml}"
+OBS_COLLECTOR_CONFIG_PHOENIX="${OBS_COLLECTOR_CONFIG_PHOENIX:-$(pwd)/monkeybot_config/otel-collector.playground.yaml}"
+OBS_COLLECTOR_CONFIG_DUAL="${OBS_COLLECTOR_CONFIG_DUAL:-$(pwd)/monkeybot_config/otel-collector.playground-dual.yaml}"
+# How long to block gateway startup waiting for Phoenix + OTLP collector (not Langfuse).
+OBS_HEALTH_WAIT_SECS="${OBS_HEALTH_WAIT_SECS:-45}"
+# Langfuse migrations can take several minutes; we never block the gateway on this.
+OBS_LANGFUSE_WAIT_SECS="${OBS_LANGFUSE_WAIT_SECS:-300}"
+
+_obs_compose() {
+  docker compose -f "${OBS_LANGFUSE_COMPOSE}" -f "${OBS_STACK_COMPOSE}" "$@"
+}
+
+_phoenix_health_ok() {
+  command -v curl >/dev/null 2>&1 || return 0
+  local code
+  code=$(curl -4sS -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 5 "http://127.0.0.1:6006/" 2>/dev/null || echo "000")
+  [[ "$code" =~ ^[23] ]]
+}
+
+_langfuse_health_ok() {
+  command -v curl >/dev/null 2>&1 || return 0
+  local code
+  code=$(curl -4sS -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 8 "http://127.0.0.1:3000/api/public/health" 2>/dev/null || echo "000")
+  [[ "$code" == "200" ]]
+}
+
+_collector_port_open() {
+  command -v curl >/dev/null 2>&1 || return 0
+  curl -4sS --connect-timeout 1 --max-time 2 "http://127.0.0.1:4318/" >/dev/null 2>&1
+  return 0
+}
+
+wait_observability_ready() {
+  local max=$((OBS_HEALTH_WAIT_SECS * 2))
+  local i
+  local last_log=0
+  for ((i = 1; i <= max; i++)); do
+    if _phoenix_health_ok && _collector_port_open; then
+      echo "run.sh: Phoenix + OTLP collector ready (:6006, :4318)"
+      if _langfuse_health_ok; then
+        echo "run.sh: Langfuse ready at http://localhost:3000"
+      else
+        echo "run.sh: Langfuse still starting (gateway will start now; UI may take a few minutes)"
+        echo "run.sh: Check http://localhost:3000 — first boot often needs ${OBS_LANGFUSE_WAIT_SECS}s+"
+      fi
+      return 0
+    fi
+    if (( i - last_log >= 20 )); then
+      echo "run.sh: waiting for Phoenix/OTLP collector… (Langfuse containers may still be migrating)"
+      last_log=$i
+    fi
+    sleep 0.5
+  done
+  echo "run.sh: WARNING — Phoenix/OTLP not ready within ${OBS_HEALTH_WAIT_SECS}s; starting gateway anyway."
+  echo "run.sh: Phoenix: $(_phoenix_health_ok && echo OK || echo pending)"
+  echo "run.sh: OTLP :4318: $(_collector_port_open && echo reachable || echo pending)"
+  echo "run.sh: Langfuse: $(_langfuse_health_ok && echo OK || echo pending)"
+  return 0
+}
+
+_observability_cleanup() {
+  if [[ "${PRESERVE_OBSERVABILITY:-}" == "1" ]] || [[ "${SKIP_OBSERVABILITY:-}" == "1" ]]; then
+    return 0
+  fi
+  command -v docker >/dev/null 2>&1 || return 0
+  docker info >/dev/null 2>&1 || return 0
+  echo "run.sh: stopping observability stack (Phoenix, Langfuse, collector)"
+  _obs_compose down >/dev/null 2>&1 || true
+}
+
+ensure_observability_stack() {
+  if [[ "${SKIP_OBSERVABILITY:-}" == "1" ]]; then
+    return 0
+  fi
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "run.sh: docker not found; skipping observability stack (SKIP_OBSERVABILITY=1 to silence)."
+    return 0
+  fi
+  if ! docker info >/dev/null 2>&1; then
+    echo "run.sh: Docker daemon not reachable; skipping observability stack."
+    echo "run.sh: Start Docker Desktop (or the daemon), then re-run."
+    return 0
+  fi
+  if [[ ! -f "${OBS_LANGFUSE_COMPOSE}" ]] || [[ ! -f "${OBS_STACK_COMPOSE}" ]]; then
+    echo "run.sh: missing observability compose files; skipping."
+    return 0
+  fi
+
+  local collector_cfg="${OBS_COLLECTOR_CONFIG_PHOENIX}"
+  if [[ -n "${LANGFUSE_OTEL_BASIC_AUTH:-}" ]] && [[ -f "${OBS_COLLECTOR_CONFIG_DUAL}" ]]; then
+    collector_cfg="${OBS_COLLECTOR_CONFIG_DUAL}"
+    echo "run.sh: OTel collector dual export (Phoenix + Langfuse)"
+  else
+    echo "run.sh: OTel collector → Phoenix only (set LANGFUSE_OTEL_BASIC_AUTH for Langfuse export)"
+  fi
+  export OTEL_COLLECTOR_CONFIG_HOST="${collector_cfg}"
+
+  echo "run.sh: starting observability stack (Langfuse may take a few minutes on first run)…"
+  if ! _obs_compose up -d; then
+    echo "run.sh: docker compose up failed for observability (ports 3000/4318/6006 may be in use)."
+    return 0
+  fi
+  wait_observability_ready
+
+  export MONKEYBOT_OTEL_ENABLED="${MONKEYBOT_OTEL_ENABLED:-true}"
+  export OTEL_TRACES_EXPORTER="${OTEL_TRACES_EXPORTER:-otlp}"
+  export OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-http://127.0.0.1:4318}"
+  export OTEL_METRICS_EXPORTER="${OTEL_METRICS_EXPORTER:-none}"
+  export OTEL_LOGS_EXPORTER="${OTEL_LOGS_EXPORTER:-none}"
+  export OTEL_SERVICE_NAME="${OTEL_SERVICE_NAME:-monkeybot-gateway}"
+}
+
+# Stops OpenSandbox and observability when the gateway exits (including Ctrl+C ending uv run).
+trap '_run_sh_cleanup; _observability_cleanup' EXIT
 
 ensure_opensandbox() {
   if [[ "${SKIP_OPENSANDBOX:-}" == "1" ]]; then
@@ -189,6 +310,7 @@ ensure_opensandbox() {
 }
 
 ensure_opensandbox
+ensure_observability_stack
 
 # Wipe SQLite state on every launch so schema migrations / typed-block changes
 # never leave the playground stuck on a stale DB.
@@ -196,6 +318,7 @@ rm -f \
   ./workspace/data/monkeybot.db ./workspace/data/monkeybot.db-wal ./workspace/data/monkeybot.db-shm \
   ./data/monkeybot.db ./data/monkeybot.db-wal ./data/monkeybot.db-shm
 
+echo "run.sh: starting MonkeyBot gateway…"
 exit_code=0
 if [[ -f .env ]]; then
   uv run --env-file .env -m monkeybot.gateway.main || exit_code=$?
