@@ -21,37 +21,36 @@ from fastapi.middleware.cors import CORSMiddleware
 import monkeybot.gateway.load_env  # noqa: F401 — side effect: dotenv + monkeybot.yaml
 from monkeybot.core.config.settings import get_provider_config, normalize_model_provider
 from monkeybot.core.context import build_context
-from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
-from monkeybot.core.persistence.backends import (
-    StorageBackend,
-    UsageStore,
-    create_storage_backend,
-)
-from monkeybot.core.workspace import create_workspace_storage
-from monkeybot.core.runtime.events import Error as AgentError
-from monkeybot.core.runtime.events import TurnComplete, UsageTotals, event_to_json
 from monkeybot.core.hooks import HookManager
-from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector, ToolInspector
-from monkeybot.core.runtime.loop import SUMMARY_TRIGGER_RATIO
-from monkeybot.core.runtime.loop import run as run_loop
-from monkeybot.core.mcp.mcp_client import MCPClient
-from monkeybot.core.memory.subsystem import MemorySubsystem
-from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.llm.provider import (
     Done,
-    Message,
     Provider,
     ProviderEvent,
     TextDelta,
     ToolCall,
     UsageEvent,
 )
-from monkeybot.providers.gemini import GeminiProvider
 from monkeybot.core.llm.usage import Usage as UsageRecord
+from monkeybot.core.mcp.mcp_client import MCPClient
+from monkeybot.core.memory.subsystem import MemorySubsystem
+from monkeybot.core.persistence.backends import (
+    StorageBackend,
+    UsageStore,
+    create_storage_backend,
+)
+from monkeybot.core.runtime.events import Error as AgentError
+from monkeybot.core.runtime.events import TurnComplete, UsageTotals, event_to_json
+from monkeybot.core.runtime.loop import SUMMARY_TRIGGER_RATIO
+from monkeybot.core.runtime.loop import run as run_loop
+from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
+from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
+from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector, ToolInspector
+from monkeybot.core.workspace import create_workspace_storage
 from monkeybot.gateway.sse.loop_port import UsagePort
 from monkeybot.gateway.sse.routes import create_app as build_sse_app
-from monkeybot.gateway.sse.workspace_layout import resolve_agent_workspace_root
 from monkeybot.gateway.sse.session_bus import SessionBus, SessionRegistry
+from monkeybot.gateway.sse.workspace_layout import resolve_agent_workspace_root
+from monkeybot.providers.gemini import GeminiProvider
 from monkeybot.web_search import WebSearchTool
 from monkeybot.web_search import build_backend as _build_web_search_backend
 
@@ -421,6 +420,14 @@ def _tool_denied_patterns() -> list[str]:
 @app.on_event("startup")
 async def _startup() -> None:
     """Wire storage backend, MCP, inspectors, and provider."""
+    from monkeybot.observability import init_observability
+
+    otel_enabled = init_observability()
+    if otel_enabled:
+        logger.info("OpenTelemetry tracing initialized")
+    else:
+        logger.info("OpenTelemetry tracing not enabled")
+
     db_url = os.environ.get("DB_URL", "sqlite:///data/monkeybot.db")
 
     backend = create_storage_backend(db_url)
@@ -508,10 +515,22 @@ async def _startup() -> None:
         logger.info("memory hook disabled via MONKEYBOT_MEMORY_HOOK_ENABLED")
         app.state.memory = None
 
+    if otel_enabled:
+        from monkeybot.observability.instrumentation import instrument_fastapi_app
+
+        instrument_fastapi_app(app)
+
 
 @app.on_event("shutdown")
 async def _shutdown() -> None:
     """Tear down MCP sessions and storage backend."""
+    from monkeybot.observability import shutdown_observability
+
+    try:
+        shutdown_observability()
+    except Exception as exc:
+        logger.warning("observability shutdown failed: %s", exc)
+
     mcp = _deps.mcp
     if mcp is not None:
         for name in list(getattr(mcp, "_servers", {}).keys()):

@@ -44,6 +44,25 @@ def test_yaml_applies_when_env_unset(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert os.environ.get("MODEL_NAME") == "test-model-x"
 
 
+def test_google_cloud_project_wins_over_yaml_gcp_project_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    (cfg_dir / "monkeybot.yaml").write_text(
+        "gcp:\n  project_id: yaml-placeholder\n"
+        "anthropic_vertex:\n  project_id: yaml-placeholder\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "from-env")
+    monkeypatch.delenv("VERTEX_AI_PROJECT_ID", raising=False)
+    monkeypatch.delenv("ANTHROPIC_VERTEX_PROJECT_ID", raising=False)
+    runtime_env.apply_monkeybot_runtime_env()
+    assert os.environ.get("VERTEX_AI_PROJECT_ID") == "from-env"
+    assert os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID") == "from-env"
+
+
 def test_existing_env_wins_over_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     cfg_dir = tmp_path / "monkeybot_config"

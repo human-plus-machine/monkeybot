@@ -62,8 +62,9 @@ async def gateway_client(
     monkeypatch.setenv("MEMORY_PATH", str(memory))
     monkeypatch.setenv("SKILLS_PATH", str(skills))
 
-    from monkeybot.gateway.sse.app import app
     from asgi_lifespan import LifespanManager
+
+    from monkeybot.gateway.sse.app import app
 
     async with LifespanManager(app):
         transport = ASGITransport(app=app)

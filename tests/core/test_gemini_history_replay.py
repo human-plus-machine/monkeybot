@@ -6,16 +6,15 @@ import types
 
 import pytest
 
+from monkeybot.core.llm.provider import Message
 from monkeybot.core.types.content_blocks import Text, Thinking, ToolRequest, ToolResponse
 from monkeybot.core.types.interfaces import LLMError
-from monkeybot.core.llm.provider import Message
 from monkeybot.providers.gemini import (
     SYNTHETIC_THOUGHT_SIGNATURE,
     THOUGHT_SIGNATURE_KEY,
     _merge_function_call_args,
     _messages_to_contents,
 )
-
 from tests.providers.conftest import typed_messages_four_turn, typed_messages_turn_2b_tool_only
 
 

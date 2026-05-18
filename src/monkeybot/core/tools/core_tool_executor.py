@@ -13,12 +13,18 @@ from pathlib import Path
 from typing import Any
 
 from monkeybot.core.context import TurnContext
-from monkeybot.core.memory.subsystem import MemorySubsystem
-from monkeybot.core.runtime.events import AssistantDelta, Error, ToolCallResult, ToolCallStarted, TurnComplete
-from monkeybot.core.runtime.loop import ToolExecutorPort
+from monkeybot.core.llm.provider import ToolCall
 from monkeybot.core.mcp.mcp_client import MCPConnectionError, MCPServerNotConnectedError
 from monkeybot.core.mcp.ports_mcp import MCPClientPort
-from monkeybot.core.llm.provider import ToolCall
+from monkeybot.core.memory.subsystem import MemorySubsystem
+from monkeybot.core.runtime.events import (
+    AssistantDelta,
+    Error,
+    ToolCallResult,
+    ToolCallStarted,
+    TurnComplete,
+)
+from monkeybot.core.runtime.loop import ToolExecutorPort
 from monkeybot.core.subagents.subagent_proto import SubagentEnvelope, spawn_subagent
 from monkeybot.core.tools.terminal import (
     ALLOWED_COMMANDS,
@@ -29,6 +35,8 @@ from monkeybot.core.tools.terminal import (
 from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService
 
 logger = logging.getLogger(__name__)
+
+_SUBAGENT_OTEL_SERVICE_NAME = "monkeybot-subagent"
 
 _PARENT_CANCEL_TASK_ERR = "task: cancelled (parent)"
 
@@ -166,6 +174,16 @@ def _coerce_int(val: object | None, default: int | None = None) -> int | None:
         if s.lstrip("-").isdigit():
             return int(s)
     return default
+
+
+def _inject_subagent_traceparent() -> str | None:
+    try:
+        from monkeybot.observability.propagation import inject_traceparent
+    except ImportError:
+        return None
+    carrier: dict[str, str] = {}
+    inject_traceparent(carrier)
+    return carrier.get("traceparent")
 
 
 def _str_arg(args: dict[str, Any], *keys: str) -> str | None:
@@ -500,12 +518,14 @@ class CoreToolExecutor(ToolExecutorPort):
             )
 
         parent_label = f"{ctx.request_id}:{call.call_id}"
+        traceparent = _inject_subagent_traceparent()
         envelope = SubagentEnvelope(
             task=task,
             context=context_val,
             memory_storage_uri=self._memory.uri,
             parent_run_id=parent_label,
             model=ctx.model,
+            traceparent=traceparent,
         )
 
         scratch = (self._workspace.repo_root / ".monkeybot" / "subagent-runs" / uuid.uuid4().hex)
@@ -515,6 +535,7 @@ class CoreToolExecutor(ToolExecutorPort):
             "MONKEYBOT_SUBAGENT_WORKSPACE": str(self._workspace.repo_root),
             "MEMORY_STORAGE_URI": self._memory.uri,
             "MONKEYBOT_SUBAGENT_SKILLS_PATH": str(self._skills_path),
+            "OTEL_SERVICE_NAME": _SUBAGENT_OTEL_SERVICE_NAME,
         }
         agent_md = os.environ.get("AGENT_MD")
         if agent_md:
@@ -576,7 +597,7 @@ class CoreToolExecutor(ToolExecutorPort):
             if cancel_wait is None:
                 try:
                     await asyncio.wait_for(drain_task, timeout=timeout)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     errors.append(f"task: subagent exceeded {timeout:g}s timeout")
                     await _stop_subagent_process(proc_holder[0])
                     if not drain_task.done():

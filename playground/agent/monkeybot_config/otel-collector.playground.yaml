@@ -1,0 +1,22 @@
+# Playground OTel Collector — Phoenix only (Langfuse needs LANGFUSE_OTEL_BASIC_AUTH).
+# MonkeyBot: OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+
+exporters:
+  otlphttp/phoenix:
+    endpoint: http://phoenix:6006
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/phoenix]

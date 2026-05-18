@@ -1,0 +1,29 @@
+# Playground OTel Collector — Phoenix + Langfuse (set LANGFUSE_OTEL_BASIC_AUTH in .env).
+# Create Langfuse API keys at http://localhost:3000 → project settings → API keys.
+# Value: Basic base64(public_key:secret_key)
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+
+exporters:
+  otlphttp/phoenix:
+    # otlphttp appends /v1/traces — do not include it in endpoint
+    endpoint: http://phoenix:6006
+
+  otlphttp/langfuse:
+    endpoint: http://langfuse-web:3000/api/public/otel
+    headers:
+      Authorization: ${env:LANGFUSE_OTEL_BASIC_AUTH}
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/phoenix, otlphttp/langfuse]

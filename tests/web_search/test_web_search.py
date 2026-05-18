@@ -20,7 +20,6 @@ from monkeybot.web_search import build_backend
 from monkeybot.web_search.protocol import SearchResult
 from monkeybot.web_search.tool import WebSearchTool
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

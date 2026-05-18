@@ -6,6 +6,7 @@ import json
 from typing import Literal, cast
 
 import pytest
+
 from monkeybot.core.runtime.events import (
     ActionRequiredEvent,
     AssistantDelta,

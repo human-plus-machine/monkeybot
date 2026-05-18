@@ -11,7 +11,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from monkeybot.core.runtime.events import AgentEvent, Error, EventDecodeError, event_from_json, event_to_json
+from monkeybot.core.runtime.events import (
+    AgentEvent,
+    Error,
+    EventDecodeError,
+    event_from_json,
+    event_to_json,
+)
 
 
 @dataclass(frozen=True)
@@ -23,16 +29,19 @@ class SubagentEnvelope:
     memory_storage_uri: str
     parent_run_id: str
     model: str = "gemini-2.5-flash"
+    traceparent: str | None = None
 
     def to_json(self) -> str:
         """Serialize to a compact JSON object for stdin (UTF-8)."""
-        payload = {
+        payload: dict[str, str] = {
             "task": self.task,
             "context": self.context,
             "memory_storage_uri": self.memory_storage_uri,
             "parent_run_id": self.parent_run_id,
             "model": self.model,
         }
+        if self.traceparent is not None:
+            payload["traceparent"] = self.traceparent
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
     @classmethod
@@ -61,6 +70,7 @@ class SubagentEnvelope:
             memory_storage_uri=uri.strip(),
             parent_run_id=_req_str(decoded, "parent_run_id"),
             model=_opt_model(decoded),
+            traceparent=_opt_traceparent(decoded),
         )
 
 
@@ -69,6 +79,16 @@ def _req_str(data: dict[str, Any], key: str) -> str:
     if not isinstance(val, str):
         raise ValueError(f"envelope: {key!r} must be a string")
     return val
+
+
+def _opt_traceparent(data: dict[str, Any]) -> str | None:
+    if "traceparent" not in data:
+        return None
+    val = data.get("traceparent")
+    if not isinstance(val, str):
+        raise ValueError("envelope: 'traceparent' must be a string")
+    stripped = val.strip()
+    return stripped or None
 
 
 def _opt_model(data: dict[str, Any]) -> str:

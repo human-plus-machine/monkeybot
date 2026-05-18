@@ -4,8 +4,9 @@ Tests for Skills Loader.
 Verifies skill discovery, SKILL.md parsing, and error handling.
 """
 
-import pytest
 from pathlib import Path
+
+import pytest
 
 from monkeybot.skills.loader import SkillLoader
 
