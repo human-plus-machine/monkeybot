@@ -162,7 +162,7 @@ The sandbox overlay mounts the agent workspace at `/tmp/monkeybot-workspace` —
 
 Managed deploy (Cloud Run, ECS, etc.): see **[Cloud deployment design](docs/cloud-deployment-design.md)** (Step 4 guides when added). Build arg **`EXTRAS`** selects pip extras in `docker/Dockerfile` (same image for laptop and cloud).
 
-**Auriga-only:** playground Cloud Run / split workspace layout scripts are described under **Step 3** in that doc; they live in **`internal/`** (tracked in this repo; remove before open-sourcing per that doc).
+**Playground Docker:** local smoke test with harness + workspace paths — `docker-compose.playground.yml` + [`docker/Dockerfile.playground`](docker/Dockerfile.playground). Optional Cloud Run helpers may live in gitignored `internal/` for private forks; see **Step 3** in that doc.
 ---
 
 ## How It Works

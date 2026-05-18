@@ -1,17 +1,10 @@
 # MonkeyBot — Baseline Testing Guide
 
-## Cursor Canvas
+## Cursor Canvas (optional)
 
-A visual version of this guide is at `testing/canvases/monkeybot-baseline-testing.canvas.tsx`.
-To open it in Cursor, copy it to your local canvas directory:
-
-```bash
-WORKSPACE=$(ls ~/.cursor/projects/ | grep "$(echo $HOME | sed 's|/Users/||')" | head -1)
-cp testing/canvases/monkeybot-baseline-testing.canvas.tsx \
-  ~/.cursor/projects/$WORKSPACE/canvases/
-```
-
-Or manually copy it to: `~/.cursor/projects/<your-workspace-hash>/canvases/`
+The public repo does not ship a baseline canvas file. If you maintain a private
+`internal/` tree (gitignored), copy `internal/canvases/monkeybot-baseline-testing.canvas.tsx`
+into `~/.cursor/projects/<your-workspace-hash>/canvases/` to open it in Cursor.
 
 ---
 
@@ -26,8 +19,6 @@ testing/
 │       ├── AGENT.md
 │       ├── MEMORY.md
 │       └── config.yaml
-├── canvases/
-│   └── monkeybot-baseline-testing.canvas.tsx  # Cursor visual guide
 └── (future: test data, fixtures, recorded runs)
 
 tests/                      # pytest suite
@@ -225,8 +216,8 @@ Success criteria: memory is accessible across process restarts without re-prompt
 2. Copy the new numbers into the tables above (Offline, Live LLM, Docker/HTTP sections)
 3. Update the date in the Offline section header
 4. Run `uv run pytest tests/ -v` and note the pass/fail count
-5. Update `testing/canvases/monkeybot-baseline-testing.canvas.tsx` to match (or ask Cursor to regenerate it)
-6. Commit both files together: `git add testing/ && git commit -m "update baseline YYYY-MM-DD"`
+5. If you use the optional baseline canvas under `internal/canvases/`, update it to match (or ask Cursor to regenerate it)
+6. Commit changes: `git add testing/ && git commit -m "update baseline YYYY-MM-DD"`
 
 Trigger a baseline update when:
 - A provider is changed or upgraded

@@ -1,3 +1,6 @@
+# Internal (not shipped in OSS)
+internal/
+
 # Environment
 .env
 .env.*

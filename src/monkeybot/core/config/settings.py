@@ -546,7 +546,11 @@ def _load_secrets_from_gcp(required_secrets: list[str] | None = None) -> Dict[st
             "Install with: pip install google-cloud-secret-manager"
         )
 
-    project_id = os.getenv("GCP_PROJECT_ID", "aurigaos")
+    project_id = os.getenv("GCP_PROJECT_ID", "")
+    if not project_id:
+        raise RuntimeError(
+            "GCP_PROJECT_ID environment variable is required for Secret Manager"
+        )
     client = secretmanager.SecretManagerServiceClient()
 
     # If no required secrets specified, just log warning and return empty dict

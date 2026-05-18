@@ -1,13 +1,13 @@
-# Auriga playground gateway image for GCP Cloud Run (and local smoke tests).
+# Playground gateway image (local Docker smoke test + Cloud Run–style layout).
 # Build from the repository root:
-#   docker buildx build --platform linux/amd64 -f internal/Dockerfile.auriga -t TAG --push .
+#   docker buildx build --platform linux/amd64 -f docker/Dockerfile.playground -t TAG --push .
 #
 # Layout:
 #   /app/workspace/     — only ``data/`` and ``skills/`` (agent-facing cwd + workspace API)
 #   /app/.harness/      — ``monkeybot_config/`` (not listed by playground workspace routes)
 #
-# Vertex: set GOOGLE_CLOUD_PROJECT / VERTEX_AI_PROJECT_ID on the Cloud Run service (deploy script).
-# ADC comes from the Cloud Run service account — do not bake API keys into the image.
+# Vertex: set GOOGLE_CLOUD_PROJECT / VERTEX_AI_PROJECT_ID on the service. ADC comes from the
+# runtime service account — do not bake API keys into the image.
 # OpenSandbox is off via SANDBOX_ENABLED=false; Cloud Run cannot run playground/agent/run.sh.
 
 FROM python:3.12-slim

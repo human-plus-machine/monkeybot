@@ -1,4 +1,4 @@
-# Compose file for the Auriga playground agent (local Docker smoke test).
+# Compose file for the playground agent (local Docker smoke test).
 #
 # Usage (from repo root):
 #   docker compose --env-file playground/agent/.env -f docker-compose.playground.yml up --build
@@ -17,7 +17,7 @@ services:
   monkeybot:
     build:
       context: .
-      dockerfile: internal/Dockerfile.auriga
+      dockerfile: docker/Dockerfile.playground
     ports:
       - "8080:8080"
     env_file:

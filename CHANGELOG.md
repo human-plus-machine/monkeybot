@@ -13,7 +13,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
   select the model id for sync context compression; main turn still uses `ctx.model`.
 
 ### Added
-- **Docker baseline (Step 3)** — Root [`docker-compose.yml`](docker-compose.yml), default OpenSandbox config [`docker/opensandbox.docker.toml`](docker/opensandbox.docker.toml), [`.env.example`](.env.example); [`docker/Dockerfile`](docker/Dockerfile) adds `HEALTHCHECK`, drops `PYTHONPATH` to `src/`, ensures `/app/data` and `/app/skills`. Auriga-only playground/Cloud Run scripts under `internal/` (see [`docs/cloud-deployment-design.md`](docs/cloud-deployment-design.md) Step 3; remove before open-sourcing).
+- **Docker baseline (Step 3)** — Root [`docker-compose.yml`](docker-compose.yml), default OpenSandbox config [`docker/opensandbox.docker.toml`](docker/opensandbox.docker.toml), [`.env.example`](.env.example); [`docker/Dockerfile`](docker/Dockerfile) adds `HEALTHCHECK`, drops `PYTHONPATH` to `src/`, ensures `/app/data` and `/app/skills`. Optional private deploy helpers live under `internal/` (gitignored; not shipped in the public OSS tree). See [`docs/cloud-deployment-design.md`](docs/cloud-deployment-design.md) Step 3.
 - **FastAPI SSE gateway** (`monkeybot.gateway.sse`) — `POST /sessions`,
   `GET /sessions/{id}/events` (SSE stream with `Last-Event-ID` resume),
   `POST /sessions/{id}/reply`, `GET /health`. SQLite-backed session bus.
@@ -59,7 +59,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
   `config.yaml`).
 - **Default skills** under `.agents/skills/` (`file-ops`, `memory-search`,
   `search-web`, `self-improve`).
-- **Cloud Run deploy helper** — previously `deploy.sh` + Cloud Build + `docker/Dockerfile`; Auriga copies now under `internal/`; public baseline is `docker-compose.yml` + design doc Step 3.
+- **Cloud Run deploy helper** — previously `deploy.sh` + Cloud Build + `docker/Dockerfile`; optional copies under gitignored `internal/`; public baseline is `docker-compose.yml` + design doc Step 3.
 - **Docs (v2)**: `docs/getting-started.md` and `docs/skills.md`. Configuration
   reference lives in root `.env.example`.
 - **Test + bench infra**: `tests/` (pytest + pytest-asyncio) and

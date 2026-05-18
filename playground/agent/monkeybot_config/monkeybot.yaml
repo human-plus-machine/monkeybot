@@ -25,10 +25,10 @@ model:
   # summarization_model: gemini-3-flash-preview  # optional; env CONTEXT_SUMMARIZATION_MODEL overrides
 
 gcp:
-  project_id: aurigaos-qa-a7ccc
+  project_id: your-gcp-project-id
 
 anthropic_vertex:
-  project_id: aurigaos-qa-a7ccc
+  project_id: your-gcp-project-id
   region: global
 
 gateway:
