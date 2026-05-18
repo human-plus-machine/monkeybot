@@ -19,6 +19,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 import monkeybot.gateway.load_env  # noqa: F401 — side effect: dotenv + monkeybot.yaml
+from monkeybot.core.config.settings import get_provider_config, normalize_model_provider
 from monkeybot.core.context import build_context
 from monkeybot.core.hooks import HookManager
 from monkeybot.core.llm.provider import (
@@ -50,7 +51,6 @@ from monkeybot.gateway.sse.routes import create_app as build_sse_app
 from monkeybot.gateway.sse.session_bus import SessionBus, SessionRegistry
 from monkeybot.gateway.sse.workspace_layout import resolve_agent_workspace_root
 from monkeybot.providers.gemini import GeminiProvider
-from monkeybot.providers.vertex_claude import VertexClaudeProvider
 from monkeybot.web_search import WebSearchTool
 from monkeybot.web_search import build_backend as _build_web_search_backend
 
@@ -235,12 +235,10 @@ def _scripted_fake_provider() -> Provider:
 
 
 def _resolve_provider() -> Provider:
-    mode = os.environ.get("MODEL_PROVIDER", "gemini").lower().strip()
-    if mode == "vertex-claude":
-        return VertexClaudeProvider()
+    mode = normalize_model_provider(os.environ.get("MODEL_PROVIDER", "google_vertexai"))
     if mode == "fake":
         return _scripted_fake_provider()
-    return GeminiProvider()
+    return get_provider_config(provider=mode).provider
 
 
 def _resolve_curator_provider(main_provider: Provider) -> Provider:
@@ -250,11 +248,11 @@ def _resolve_curator_provider(main_provider: Provider) -> Provider:
     ``thinking_budget=0`` to explicitly disable extended thinking, which can stall
     preview models for 10s+ on a short JSON-only completion.
 
-    Fake / vertex-claude modes reuse ``main_provider`` — curation is no-op in tests
+    Fake / vertex_anthropic modes reuse ``main_provider`` — curation is no-op in tests
     and vertex-claude has no thinking budget concept.
     """
-    mode = os.environ.get("MODEL_PROVIDER", "gemini").lower().strip()
-    if mode == "fake" or mode == "vertex-claude":
+    mode = normalize_model_provider(os.environ.get("MODEL_PROVIDER", "google_vertexai"))
+    if mode in ("fake", "vertex_anthropic"):
         return main_provider
     return GeminiProvider(thinking_budget=0, max_output_tokens=1024)
 
