@@ -35,6 +35,20 @@ class TestConfigMappingBasics:
 class TestVertexAnthropicProvider:
     """Tests for vertex_anthropic native VertexClaudeProvider wiring."""
 
+    def test_normalize_model_provider_vertex_alias(self) -> None:
+        from monkeybot.core.config import normalize_model_provider
+
+        assert normalize_model_provider("vertex") == "google_vertexai"
+        assert normalize_model_provider("vertex-claude") == "vertex_anthropic"
+
+    def test_get_provider_config_huggingface(self, monkeypatch):
+        from monkeybot.core.config import get_provider_config
+
+        monkeypatch.setenv("HF_TOKEN", "hf_test")
+        cfg = get_provider_config(provider="huggingface", model_name="meta-llama/Llama-3.1-8B-Instruct")
+        assert cfg.provider.name == "huggingface"
+        assert cfg.model == "meta-llama/Llama-3.1-8B-Instruct"
+
     def test_get_provider_config_vertex_anthropic_happy_path(self, monkeypatch):
         from unittest.mock import MagicMock, patch
 

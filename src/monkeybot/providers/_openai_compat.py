@@ -1,7 +1,6 @@
 """Shared helpers for OpenAI-compatible Chat Completions providers.
 
-Used by OpenAIProvider, OllamaProvider, and HuggingFaceProvider — all of which
-speak the same wire format but differ in base URL, auth, and initialisation.
+Used by OpenAIProvider and HuggingFaceProvider — same wire format, different auth/URLs.
 """
 
 from __future__ import annotations
@@ -9,7 +8,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import AsyncIterator, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from monkeybot.core.llm.provider import (
     Done,
@@ -21,9 +20,6 @@ from monkeybot.core.llm.provider import (
 )
 from monkeybot.core.types.content_blocks import ContentBlock, Text, ToolRequest, ToolResponse
 from monkeybot.core.types.types_tools import ToolDef
-
-if TYPE_CHECKING:
-    pass
 
 _log = logging.getLogger(__name__)
 

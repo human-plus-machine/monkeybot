@@ -28,6 +28,21 @@ from monkeybot.providers.vertex_claude import VertexClaudeProvider
 
 logger = logging.getLogger(__name__)
 
+# Friendly YAML / gateway aliases → canonical ``MODEL_PROVIDER`` keys.
+_MODEL_PROVIDER_ALIASES: dict[str, str] = {
+    "gemini": "google_vertexai",
+    "vertex": "google_vertexai",
+    "google-vertexai": "google_vertexai",
+    "vertex-claude": "vertex_anthropic",
+    "vertex_claude": "vertex_anthropic",
+}
+
+
+def normalize_model_provider(provider: str) -> str:
+    """Map config aliases (e.g. ``gemini``, ``vertex-claude``) to canonical provider ids."""
+    key = provider.strip().lower()
+    return _MODEL_PROVIDER_ALIASES.get(key, key)
+
 
 # Framework defaults (zero-config local dev)
 DEFAULTS = {
@@ -220,7 +235,14 @@ def _validate_provider_config(config: Dict[str, str]) -> None:
     # Supported providers for each backend type
     SUPPORTED_MEMORY_BACKENDS = {"local", "gcs", "drive"}
     SUPPORTED_SECRETS_PROVIDERS = {"env", "gcp_secret_manager"}
-    SUPPORTED_MODEL_PROVIDERS = {"google_vertexai", "openai", "anthropic", "vertex_anthropic", "huggingface"}
+    SUPPORTED_MODEL_PROVIDERS = {
+        "google_vertexai",
+        "openai",
+        "anthropic",
+        "vertex_anthropic",
+        "huggingface",
+        "fake",
+    }
     
     # Validate memory backend
     memory_backend = config.get("MEMORY_BACKEND", "local")
@@ -279,7 +301,9 @@ def _validate_provider_config(config: Dict[str, str]) -> None:
             )
     
     # Validate model provider
-    model_provider = config.get("MODEL_PROVIDER", "google_vertexai")
+    model_provider = normalize_model_provider(
+        config.get("MODEL_PROVIDER", "google_vertexai")
+    )
     if model_provider not in SUPPORTED_MODEL_PROVIDERS:
         supported = ", ".join(SUPPORTED_MODEL_PROVIDERS)
         if model_provider == "aws_bedrock":
@@ -626,6 +650,11 @@ def get_provider_config(
     - ``openai`` — :class:`~monkeybot.providers.openai.OpenAIProvider`
     - ``anthropic`` — :class:`~monkeybot.providers.claude.ClaudeProvider`
     - ``vertex_anthropic`` — :class:`~monkeybot.providers.vertex_claude.VertexClaudeProvider` on Vertex (ADC)
+    - ``huggingface`` — :class:`~monkeybot.providers.huggingface.HuggingFaceProvider` (HF router / Inference Endpoints)
+    - ``fake`` — deterministic scripted provider (tests / playground only)
+
+    Aliases such as ``gemini``, ``vertex``, and ``vertex-claude`` are normalized via
+    :func:`normalize_model_provider`.
 
     ``temperature``, ``max_tokens``, and ``thinking_budget`` override env for
     :class:`~monkeybot.providers.gemini.GeminiProvider` only; other providers read
@@ -635,7 +664,13 @@ def get_provider_config(
     Raises:
         ValueError: Unsupported provider or missing required configuration
     """
-    provider_key = provider or os.getenv("MODEL_PROVIDER", "google_vertexai")
+    raw_provider = provider or os.getenv("MODEL_PROVIDER", "google_vertexai")
+    provider_key = normalize_model_provider(raw_provider)
+    if provider_key == "fake":
+        raise ValueError(
+            "MODEL_PROVIDER=fake is for gateway/tests only; inject ScriptedFakeProvider directly "
+            "or use the gateway fake provider path."
+        )
     resolved_model = str(model_name or os.getenv("MODEL_NAME") or "gemini-2.5-flash")
     temperature = temperature if temperature is not None else float(
         os.getenv("MODEL_TEMPERATURE", "0.7")

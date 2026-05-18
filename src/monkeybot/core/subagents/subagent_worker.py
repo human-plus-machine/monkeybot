@@ -11,6 +11,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from monkeybot.core.config.settings import get_provider_config, normalize_model_provider
 from monkeybot.core.context import build_context
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
@@ -20,8 +21,15 @@ from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector,
 from monkeybot.core.runtime.loop import run as run_loop
 from monkeybot.core.mcp.mcp_client import MCPClient
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
-from monkeybot.core.llm.provider import Done, Message, ProviderEvent, TextDelta, ToolCall, UsageEvent
-from monkeybot.providers.gemini import GeminiProvider
+from monkeybot.core.llm.provider import (
+    Done,
+    Message,
+    Provider,
+    ProviderEvent,
+    TextDelta,
+    ToolCall,
+    UsageEvent,
+)
 from monkeybot.core.subagents.subagent_proto import SubagentEnvelope
 from monkeybot.core.workspace import create_workspace_storage
 from monkeybot.web_search import WebSearchTool
@@ -30,10 +38,10 @@ from monkeybot.web_search import build_backend as _build_web_search_backend
 logger = logging.getLogger(__name__)
 
 
-def _resolve_provider() -> GeminiProvider | ScriptedFakeProvider:
-    mode = os.environ.get("MODEL_PROVIDER", "gemini").lower().strip()
+def _resolve_provider() -> Provider:
+    mode = normalize_model_provider(os.environ.get("MODEL_PROVIDER", "google_vertexai"))
     if mode != "fake":
-        return GeminiProvider()
+        return get_provider_config(provider=mode).provider
 
     import json
 

@@ -1387,6 +1387,7 @@ gemini = [
 ]
 huggingface = [
     { name = "openai" },
+    { name = "tiktoken" },
 ]
 openai = [
     { name = "openai" },
@@ -1451,6 +1452,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "python-ulid", specifier = ">=2.0.0" },
     { name = "pyyaml", specifier = ">=6.0.2" },
+    { name = "tiktoken", marker = "extra == 'huggingface'", specifier = ">=0.7.0" },
     { name = "tiktoken", marker = "extra == 'openai'", specifier = ">=0.7.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32.0" },
 ]
