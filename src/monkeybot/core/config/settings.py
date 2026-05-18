@@ -20,8 +20,9 @@ import yaml
 from dotenv import load_dotenv
 
 from monkeybot.core.llm.provider import Provider
-from monkeybot.providers.gemini import GeminiProvider
 from monkeybot.providers.claude import ClaudeProvider
+from monkeybot.providers.gemini import GeminiProvider
+from monkeybot.providers.huggingface import HuggingFaceProvider
 from monkeybot.providers.openai import OpenAIProvider
 from monkeybot.providers.vertex_claude import VertexClaudeProvider
 
@@ -219,7 +220,7 @@ def _validate_provider_config(config: Dict[str, str]) -> None:
     # Supported providers for each backend type
     SUPPORTED_MEMORY_BACKENDS = {"local", "gcs", "drive"}
     SUPPORTED_SECRETS_PROVIDERS = {"env", "gcp_secret_manager"}
-    SUPPORTED_MODEL_PROVIDERS = {"google_vertexai", "openai", "anthropic", "vertex_anthropic"}
+    SUPPORTED_MODEL_PROVIDERS = {"google_vertexai", "openai", "anthropic", "vertex_anthropic", "huggingface"}
     
     # Validate memory backend
     memory_backend = config.get("MEMORY_BACKEND", "local")
@@ -688,9 +689,12 @@ def get_provider_config(
             resolved_model,
         )
 
+    if provider_key == "huggingface":
+        return ProviderConfig(HuggingFaceProvider(), resolved_model)
+
     raise ValueError(
         f"Unsupported model provider: {provider_key}. "
-        "Supported providers: google_vertexai, openai, anthropic, vertex_anthropic"
+        "Supported providers: google_vertexai, openai, anthropic, vertex_anthropic, huggingface"
     )
 
 
