@@ -350,6 +350,12 @@ def load_bot_config(config_path: str | None = None) -> Dict[str, str]:
     
     This function can be called multiple times safely - it will only load once.
     
+    After the first successful load, config is cached in ``_config_loaded``;
+    subsequent calls with no ``config_path`` return the cached env state.
+    Warm Lambda/Cloud Functions containers reuse this as intended. In tests,
+    reset with ``monkeybot.core.config.settings._config_loaded = False`` before
+    reloading from a different path.
+    
     Args:
         config_path: Optional explicit path to bot.yaml file.
             If not provided, looks for bot.yaml in current directory.

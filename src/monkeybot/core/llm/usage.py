@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from monkeybot.core.runtime.events import UsageTotals
+
 
 @dataclass
 class Usage:
@@ -20,6 +22,18 @@ class Usage:
     Same payload as each outbound ``stream`` call (messages + tools), using the
     vendor count API or tokenizer where implemented.
     """
+
+
+def usage_from_totals(t: UsageTotals) -> Usage:
+    """Build a :class:`Usage` row from :class:`~monkeybot.core.runtime.events.UsageTotals` (e.g. ``TurnComplete.usage``)."""
+    return Usage(
+        input_tokens=t.input_tokens,
+        output_tokens=t.output_tokens,
+        cached_tokens=t.cached_tokens,
+        cost_usd=t.cost_usd,
+        duration_ms=t.duration_ms,
+        estimated_prompt_tokens=t.estimated_prompt_tokens,
+    )
 
 
 @dataclass(frozen=True)

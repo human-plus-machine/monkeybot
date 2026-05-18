@@ -133,6 +133,10 @@ class HookManager:
             * ``== 0``: the handler is scheduled as a background task; this
               method returns immediately without awaiting completion. Use for
               write-side events where the agent should not wait on memory.
+              Detached tasks may not finish before the process exits; in
+              short-lived handlers (Lambda, Cloud Functions) pass
+              ``hook_manager=None`` or use ``timeout_s > 0`` so hooks complete
+              before returning.
 
         Hooks may not recursively trigger this method; nested calls return
         ``payload`` unchanged (after a single debug log line).

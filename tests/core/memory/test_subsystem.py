@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
 
-from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
 from monkeybot.core.context import TurnContext
+from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
 from monkeybot.core.llm.provider import Done, TextDelta, UsageEvent
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
@@ -103,3 +104,50 @@ async def test_register_hooks_wires_memory_hook_events() -> None:
     )
     await mgr.fire(payload, timeout_s=5.0)
     assert any("chat_log.md" in k for k in st.files)
+
+
+@pytest.mark.asyncio
+async def test_flush_delegates_to_hook() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_organizer() -> None:
+        started.set()
+        await release.wait()
+
+    st = FakeWorkspaceStorage()
+    sub = MemorySubsystem(
+        storage=st,
+        provider=ScriptedFakeProvider(
+            [TextDelta(text="x"), UsageEvent(input_tokens=1, output_tokens=1, cached_tokens=0), Done()]
+        ),
+        model="m",
+        memory_uri="fake://mem",
+    )
+    # Replace organizer runner on the internal hook (same pattern as test_post_turn_schedules...).
+    sub._hook._organizer_runner = fake_organizer  # type: ignore[assignment]
+
+    await sub._hook.on_post_turn(  # noqa: SLF001 — exercise hook path used by POST_TURN
+        HookPayload(
+            event=HookEvent.POST_TURN,
+            thread_id="t",
+            request_id="r",
+            ctx=_ctx(),
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    flushed = asyncio.Event()
+    entering_flush = asyncio.Event()
+
+    async def do_flush() -> None:
+        entering_flush.set()
+        await sub.flush()
+        flushed.set()
+
+    t = asyncio.create_task(do_flush())
+    await asyncio.wait_for(entering_flush.wait(), timeout=1.0)
+    assert not flushed.is_set()
+    release.set()
+    await asyncio.wait_for(flushed.wait(), timeout=1.0)
+    await t

@@ -369,6 +369,11 @@ class MCPClient:
                 return
             raise
 
+    async def disconnect_all(self) -> None:
+        """Disconnect every connected MCP server."""
+        for name in list(self._servers.keys()):
+            await self.disconnect(name)
+
     async def call_tool(
         self,
         server_name: str,

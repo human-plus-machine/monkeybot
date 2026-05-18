@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
 from monkeybot.core.context import TurnContext
 from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
 from monkeybot.core.memory.hook import MemoryHook
@@ -424,3 +425,49 @@ async def test_register_attaches_all_events_and_e2e(tmp_path: Path) -> None:
     kinds = [p.name for p in raw]
     assert any("post_tool_run_command" in n for n in kinds)
     assert not any("user_message" in n for n in kinds)
+
+
+@pytest.mark.asyncio
+async def test_flush_noop_when_no_task(tmp_path: Path) -> None:
+    hook = MemoryHook(storage=_local_st(tmp_path / "memory"), organizer_runner=None)
+    await hook.flush()
+
+
+@pytest.mark.asyncio
+async def test_flush_awaits_running_task(tmp_path: Path) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_organizer() -> None:
+        started.set()
+        await release.wait()
+
+    hook = MemoryHook(storage=_local_st(tmp_path / "memory"), organizer_runner=fake_organizer)
+    await hook.on_post_turn(_payload(HookEvent.POST_TURN))
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+
+    flushed = asyncio.Event()
+    entering_flush = asyncio.Event()
+
+    async def do_flush() -> None:
+        entering_flush.set()
+        await hook.flush()
+        flushed.set()
+
+    t = asyncio.create_task(do_flush())
+    await asyncio.wait_for(entering_flush.wait(), timeout=1.0)
+    assert not flushed.is_set()
+    release.set()
+    await asyncio.wait_for(flushed.wait(), timeout=1.0)
+    await t
+
+
+@pytest.mark.asyncio
+async def test_flush_noop_when_task_already_done(tmp_path: Path) -> None:
+    async def fake_organizer() -> None:
+        return
+
+    hook = MemoryHook(storage=_local_st(tmp_path / "memory"), organizer_runner=fake_organizer)
+    await hook.on_post_turn(_payload(HookEvent.POST_TURN))
+    await hook.flush()
+    await hook.flush()

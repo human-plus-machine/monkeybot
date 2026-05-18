@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import pytest
 import pytest_asyncio
+
+from monkeybot.core.llm.usage import Usage, UsageSummary, usage_from_totals
 from monkeybot.core.persistence.sqlite import apply_schema, open_connection
-from monkeybot.core.llm.usage import Usage, UsageSummary
 from monkeybot.core.persistence.usage import SQLiteUsageStore
+from monkeybot.core.runtime.events import UsageTotals
 
 
 async def _apply_schema(conn) -> None:
@@ -164,3 +166,23 @@ async def test_usage_summary_last_prompt_tokens_most_recent(usage_conn) -> None:
     assert summary.turns == 3
     assert summary.last_prompt_tokens == 99
     assert summary.last_estimated_prompt_tokens == 0
+
+
+def test_usage_from_totals_maps_turn_complete_fields() -> None:
+    u = usage_from_totals(
+        UsageTotals(
+            input_tokens=1,
+            output_tokens=2,
+            cached_tokens=3,
+            cost_usd=0.5,
+            duration_ms=100,
+            estimated_prompt_tokens=99,
+        )
+    )
+    assert isinstance(u, Usage)
+    assert u.input_tokens == 1
+    assert u.output_tokens == 2
+    assert u.cached_tokens == 3
+    assert u.cost_usd == 0.5
+    assert u.duration_ms == 100
+    assert u.estimated_prompt_tokens == 99

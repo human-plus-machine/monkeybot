@@ -83,5 +83,9 @@ class MemorySubsystem:
     async def gc_processed(self, *, max_age_sec: float = 7 * 24 * 60 * 60) -> dict[str, int]:
         return await self._storage.gc_prefix("raw/processed/", max_age_sec)
 
+    async def flush(self) -> None:
+        """Await pending memory organizer task. See :meth:`MemoryHook.flush`."""
+        await self._hook.flush()
+
 
 __all__ = ["MemorySubsystem"]

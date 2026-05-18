@@ -399,5 +399,15 @@ class MemoryHook:
 
         self._organizer_task = asyncio.create_task(_run())
 
+    async def flush(self) -> None:
+        """Await the pending organizer task if one is running.
+
+        Call before returning from a short-lived handler (Lambda, Cloud Functions)
+        so the organizer finishes. The FastAPI gateway does not need this.
+        """
+        t = self._organizer_task
+        if t is not None and not t.done():
+            await t
+
 
 __all__ = ["MemoryHook", "OrganizerRunner"]

@@ -1,6 +1,6 @@
 # MonkeyBot Cloud Deployment Design
 
-**Status:** In progress — Steps **1**, **1.5**, **2**, **3**, and **4** are complete; Step 5 (harness-as-library hardening + examples) remains.  
+**Status:** Complete — Steps **1**, **1.5**, **2**, **3**, **4**, and **5** are done.  
 **Purpose:** Single source of truth for the multi-cloud deployment work. Open this in any new chat before starting a step to ensure nothing in that step breaks a later one.
 
 ---
@@ -364,37 +364,40 @@ Former root `deploy.sh` content now lives under **`internal/`**. Its content bec
 
 **Goal:** Users who want to deploy on Lambda, AgentCore, or AgentEngine can import `monkeybot.core` directly and wire their own gateway handler. No FastAPI required.
 
+**Status:** Implemented (see checklist at end of this doc).
+
 ### What this means for the harness
 
-After Steps 1 and 2, the harness receives `StorageBackend` and `WorkspaceStorage` as injected arguments. `build_context()` and `run_loop()` have no implicit I/O dependencies. This means they're already callable from any entry point.
+After Steps 1 and 2, the harness receives `StorageBackend` and `MemorySubsystem` (workspace-backed) as injected arguments. `build_context()` and `run_loop()` have no implicit I/O dependencies. This means they're already callable from any entry point.
 
-What needs to be documented (and potentially cleaned up):
+Rules (unchanged from design intent):
 
 1. `build_context()` and `run_loop()` must not start background tasks internally.
-2. The memory GC that currently runs in the gateway's startup event stays in the gateway — it must not be called from the harness itself.
+2. The memory GC that runs in the gateway's startup event stays in the gateway — it must not be called from the harness itself.
 3. No module-level code in `monkeybot.core.*` may have side effects (no auto-connecting, no auto-loading config on import).
+
+### Short-lived processes (Lambda / Functions)
+
+- **Memory organizer:** `MemoryHook` schedules the organizer with `asyncio.create_task`. Call `await memory.flush()` (via `MemorySubsystem.flush()`) before returning from a FaaS handler so the organizer finishes.
+- **Hooks:** `HookManager.fire(..., timeout_s=0)` schedules detached tasks. Pattern B/C examples use `hook_manager=None` or document using `timeout_s > 0` when hooks are required (see `HookManager.fire` docstring).
+- **Bootstrap:** `monkeybot.core.bootstrap.create_harness_deps` opens `StorageBackend`, optionally builds `MemorySubsystem`, constructs `MCPClient`, and resolves the LLM via `get_provider_config`. `HarnessDeps.close()` closes storage and calls `MCPClient.disconnect_all()`.
 
 ### What users write
 
-A Lambda handler looks like:
+A Lambda handler pattern (see `examples/lambda/handler.py`):
 
 ```
-cold start:
-  backend = create_storage_backend(os.environ["DB_URL"])
-  await backend.open()
-  workspace = create_workspace_storage(os.environ["MEMORY_STORAGE_URI"])
-  mcp = MCPClient(); await mcp.load_from_config(...)
-  provider = GeminiProvider()
+cold start (module or first request):
+  deps = await create_harness_deps(os.environ["DB_URL"], os.environ.get("MEMORY_STORAGE_URI"), open_mcp=False)
 
 per-invocation:
-  ctx = await build_context(session_id, request_id, ..., storage=backend, workspace=workspace)
-  events = []
-  async for evt in run_loop(message, ctx, provider=provider, ...):
-      events.append(evt)
-  return events  # caller formats response as needed
+  ctx = await build_context(thread_id, request_id, agent_md_path=..., memory=deps.memory, skills_path=..., mcp_client=deps.mcp, ...)
+  async for evt in run_loop(message, ctx, provider=deps.provider, history=deps.storage.history(), ...):
+      ...
+  await deps.memory.flush()  # if memory enabled
 ```
 
-An AgentCore or AgentEngine handler follows the same pattern with its own request/response wrapping.
+An AgentCore or AgentEngine handler follows the same pattern with its own request/response wrapping (`examples/agentcore/handler.py`, `examples/agentengine/handler.py`).
 
 ### What we provide
 
@@ -404,13 +407,20 @@ An AgentCore or AgentEngine handler follows the same pattern with its own reques
   - `examples/agentcore/handler.py` — AWS Bedrock AgentCore (Pattern C)
   - `examples/agentengine/handler.py` — GCP Vertex AI Agent Engine (Pattern C)
 - Documentation via the three pattern guides (Step 4)
-- A `monkeybot.core.bootstrap` helper (optional) that takes a config dict and returns `(StorageBackend, WorkspaceStorage, MCPClient, Provider)` — reduces boilerplate in user handlers while keeping the harness itself clean
+- `monkeybot.core.bootstrap` — `HarnessDeps`, `create_harness_deps(...)`, and shared `run_pattern_bc_turn(...)` for Pattern B/C examples (optional; callers may wire factories themselves). Test seam: `_provider_override` for unit tests only.
+- `monkeybot.core.llm.usage.usage_from_totals` — maps `TurnComplete.usage` (`UsageTotals`) to `Usage` for usage-store rows.
 
 ### Constraints that Step 5 enforces on all prior steps
 
 - Steps 1 and 2 must not assume an event loop exists at import time
 - StorageBackend and WorkspaceStorage must be usable in short-lived processes (open → use → close in one handler invocation, e.g. Lambda)
 - No `asyncio.create_task()` calls in harness-layer code (background tasks break in Lambda)
+
+### Tests
+
+- `tests/core/test_memory_hook.py` — `MemoryHook.flush()` (no-op, awaits running task, second flush)
+- `tests/core/memory/test_subsystem.py` — `MemorySubsystem.flush()` delegates to the hook
+- `tests/core/test_bootstrap.py` — `create_harness_deps` (including partial-init `close` on failure, `open_mcp` paths), `HarnessDeps.close`, `run_pattern_bc_turn` smoke, `_provider_override`
 
 ---
 
@@ -492,10 +502,12 @@ Step 4: Deployment Guides (three pattern guides + per-target addenda)
       Addenda: AWS Bedrock AgentCore, GCP Agent Engine
 
 Step 5: Harness-as-Library
-  - Audit core/* for global singletons and background tasks
-  - Add optional monkeybot.core.bootstrap helper
-  - examples/lambda/handler.py           (Pattern B)
-  - examples/cloud-functions/main.py     (Pattern B)
-  - examples/agentcore/handler.py        (Pattern C)
-  - examples/agentengine/handler.py      (Pattern C)
+  - Audit core/* for global singletons and background tasks          DONE (documented; MemoryHook.flush for FaaS)
+  - Add optional monkeybot.core.bootstrap helper                     DONE
+  - MCPClient.disconnect_all for HarnessDeps.close                   DONE
+  - examples/lambda/handler.py           (Pattern B)                 DONE
+  - examples/cloud-functions/main.py     (Pattern B)                 DONE
+  - examples/agentcore/handler.py        (Pattern C)                 DONE
+  - examples/agentengine/handler.py      (Pattern C)                 DONE
+  - Unit tests: test_memory_hook flush, test_subsystem flush, test_bootstrap  DONE
 ```
