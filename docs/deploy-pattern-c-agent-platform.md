@@ -51,7 +51,13 @@ No `[sandbox]` extra needed. Use only the storage extras appropriate for your pl
 
 ### AWS Bedrock AgentCore
 
-AWS Bedrock AgentCore manages session routing and invokes your handler per agent turn. The platform provides the session ID and user message; your handler returns a response object in AgentCore's schema.
+AWS Bedrock AgentCore can invoke a **Lambda/action-group** handler or a **managed HTTP container** (port 8080, `/ping`, `/invocations`). MonkeyBot examples:
+
+| Artifact | Use case |
+|---|---|
+| `examples/agentcore/handler.py` | Lambda / action-group JSON event |
+| `examples/agentcore/runtime_app.py` | Container HTTP runtime |
+| `docs/deploy-aws-agentcore.md` | CLI pitfalls, arm64, base64 payload, env files |
 
 **IAM — execution role permissions:**
 
@@ -62,78 +68,46 @@ AWS Bedrock AgentCore manages session routing and invokes your handler per agent
 | `bedrock:InvokeModel` | Call Bedrock-hosted models (if using Bedrock provider) |
 | `rds-db:connect` | RDS IAM auth (optional) |
 
-**Handler (`handler.py`):**
+**Handler (bootstrap — see `examples/agentcore/handler.py`):**
 
 ```python
-import asyncio, os
-from monkeybot.core.persistence import create_storage_backend
-from monkeybot.core.workspace import create_workspace_storage
-from monkeybot.core.providers.gemini import GeminiProvider
-from monkeybot.core.harness import build_context, run_loop
+from pathlib import Path
+from monkeybot.core.bootstrap import create_harness_deps, run_pattern_bc_turn
 
-# Cold start
-_backend = create_storage_backend(os.environ["DB_URL"])
-asyncio.get_event_loop().run_until_complete(_backend.open())
-_workspace = create_workspace_storage(os.environ["MEMORY_STORAGE_URI"])
-_provider = GeminiProvider()
+_deps = None
 
+async def _ensure_deps():
+    global _deps
+    if _deps is None:
+        _deps = await create_harness_deps(os.environ["DB_URL"], os.environ.get("MEMORY_STORAGE_URI"))
+    return _deps
 
-def handler(event, context):
-    """
-    AgentCore invokes this once per agent turn.
-    `event` contains the AgentCore session ID and the user's input text.
-    Adjust field names to match the AgentCore runtime contract for your API version.
-    """
-    session_id = event["sessionId"]
-    message = event["inputText"]
-
-    async def _run():
-        ctx = await build_context(
-            session_id=session_id,
-            storage=_backend,
-            workspace=_workspace,
-        )
-        events = []
-        async for evt in run_loop(message, ctx, provider=_provider):
-            events.append(evt)
-        return events
-
-    events = asyncio.get_event_loop().run_until_complete(_run())
-
-    # Collect the final assistant message to return as the AgentCore response.
-    # AgentCore expects a plain text response in `actionGroupOutput.text` for
-    # inline agents, or a structured response for action groups.
-    assistant_messages = [
-        e.content for e in events
-        if hasattr(e, "role") and e.role == "assistant"
-    ]
-    response_text = assistant_messages[-1] if assistant_messages else ""
-
-    return {
-        "messageVersion": "1.0",
-        "response": {
-            "actionGroup": event.get("actionGroup"),
-            "apiPath": event.get("apiPath"),
-            "httpMethod": event.get("httpMethod"),
-            "httpStatusCode": 200,
-            "responseBody": {
-                "application/json": {
-                    "body": response_text
-                }
-            },
-        },
-    }
+async def _run_turn(event):
+    deps = await _ensure_deps()
+    return await run_pattern_bc_turn(
+        deps,
+        event["inputText"],
+        session_id=event["sessionId"],
+        request_id=event.get("request_id", "req-1"),
+        agent_md_path=Path(os.environ["AGENT_MD_PATH"]),
+        skills_path=Path(os.environ["SKILLS_PATH"]),
+        workspace_root=Path(os.environ["WORKSPACE_ROOT"]),
+    )
 ```
+
+`run_pattern_bc_turn` raises `PatternBcTurnError` on loop failures (instead of returning empty text).
 
 **Environment variables:**
 
 ```
 DB_URL             = postgresql://user:pass@rds-proxy:5432/monkeybot?sslmode=require
 MEMORY_STORAGE_URI = s3://my-bucket/monkeybot-memory
-GEMINI_API_KEY     = (from Secrets Manager)
+AGENT_MD_PATH      = /app/monkeybot_config/AGENT.md
+SKILLS_PATH        = /app/.agents/skills
+WORKSPACE_ROOT     = /app
+MODEL_PROVIDER     = aws_bedrock
+MODEL_NAME         = (your Bedrock model id)
 ```
-
-**AgentCore registration:** Register this handler as a Lambda function backing an AgentCore action group, or as an inline agent Lambda. Refer to the [Bedrock AgentCore documentation](https://docs.aws.amazon.com/bedrock/latest/userguide/agents-core.html) for the exact registration API — the request/response envelope above follows the v1 action group contract but may evolve.
 
 **Session continuity:** AgentCore manages session routing externally. The `sessionId` it provides maps directly to MonkeyBot's `session_id` — history and memory are keyed on it. You do not need to implement session management yourself.
 

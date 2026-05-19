@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from typing import Any
 
@@ -133,4 +134,26 @@ def build_anthropic_messages(messages: Sequence[Message]) -> list[dict[str, Any]
     return out
 
 
-__all__ = ["build_anthropic_messages", "estimate_cost"]
+def estimate_anthropic_input_tokens(
+    *,
+    system: str,
+    messages: Sequence[dict[str, Any]],
+    tools: Sequence[dict[str, Any]] | None,
+) -> int:
+    """Rough prompt token estimate when provider ``count_tokens`` is unavailable (e.g. Bedrock)."""
+    parts: list[str] = [system]
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            parts.append(json.dumps(content, ensure_ascii=False))
+        else:
+            parts.append(str(content))
+    if tools:
+        parts.append(json.dumps(list(tools), ensure_ascii=False))
+    char_count = sum(len(p) for p in parts)
+    return max(1, char_count // 4)
+
+
+__all__ = ["build_anthropic_messages", "estimate_anthropic_input_tokens", "estimate_cost"]

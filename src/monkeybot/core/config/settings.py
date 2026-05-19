@@ -242,6 +242,7 @@ def _validate_provider_config(config: Dict[str, str]) -> None:
         "vertex_anthropic",
         "huggingface",
         "fake",
+        "aws_bedrock",
     }
     
     # Validate memory backend
@@ -306,16 +307,7 @@ def _validate_provider_config(config: Dict[str, str]) -> None:
     )
     if model_provider not in SUPPORTED_MODEL_PROVIDERS:
         supported = ", ".join(SUPPORTED_MODEL_PROVIDERS)
-        if model_provider == "aws_bedrock":
-            raise ConfigError(
-                f"model.provider is set to 'aws_bedrock' but AWS Bedrock is not yet supported.\n\n"
-                f"To add AWS Bedrock support, the following are needed:\n"
-                f"  - Add aws_bedrock case to get_provider_config() in monkeybot/core/config.py\n"
-                f"  - Add aws.region to bot.yaml\n"
-                f"  - pip install boto3\n\n"
-                f"Currently supported providers: {supported}"
-            )
-        elif model_provider == "azure_openai":
+        if model_provider == "azure_openai":
             raise ConfigError(
                 f"model.provider is set to 'azure_openai' but Azure OpenAI is not yet supported.\n\n"
                 f"To add Azure OpenAI support, the following are needed:\n"
@@ -652,6 +644,7 @@ def get_provider_config(
     - ``vertex_anthropic`` — :class:`~monkeybot.providers.vertex_claude.VertexClaudeProvider` on Vertex (ADC)
     - ``huggingface`` — :class:`~monkeybot.providers.huggingface.HuggingFaceProvider` (HF router / Inference Endpoints)
     - ``fake`` — deterministic scripted provider (tests / playground only)
+    - ``aws_bedrock`` — :class:`~monkeybot.providers.bedrock.BedrockClaudeProvider` (``monkeybot[bedrock]``)
 
     Aliases such as ``gemini``, ``vertex``, and ``vertex-claude`` are normalized via
     :func:`normalize_model_provider`.
@@ -727,9 +720,16 @@ def get_provider_config(
     if provider_key == "huggingface":
         return ProviderConfig(HuggingFaceProvider(), resolved_model)
 
+    if provider_key == "aws_bedrock":
+        from monkeybot.providers.bedrock import BedrockClaudeProvider  # noqa: PLC0415
+
+        region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
+        return ProviderConfig(BedrockClaudeProvider(aws_region=region), resolved_model)
+
     raise ValueError(
         f"Unsupported model provider: {provider_key}. "
-        "Supported providers: google_vertexai, openai, anthropic, vertex_anthropic, huggingface"
+        "Supported providers: google_vertexai, openai, anthropic, vertex_anthropic, "
+        "huggingface, aws_bedrock"
     )
 
 

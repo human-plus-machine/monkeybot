@@ -11,12 +11,13 @@ from __future__ import annotations
 import logging
 import os
 
+from monkeybot.core.logging_utils import normalize_log_level
 from monkeybot.gateway.bootstrap import ensure_gateway_runtime_env
 
 ensure_gateway_runtime_env()
 
 logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    level=normalize_log_level(os.getenv("LOG_LEVEL")),
     format="%(levelname)s:%(name)s:%(message)s",
 )
 # Suppress chatty third-party loggers regardless of LOG_LEVEL.

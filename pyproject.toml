@@ -34,7 +34,7 @@ vertex = [
 ]
 claude = ["anthropic>=0.40.0"]
 vertex-claude = ["anthropic[vertex]>=0.40.0"]
-bedrock = []
+bedrock = ["anthropic[bedrock]>=0.40.0", "boto3>=1.34.0"]
 openai = ["openai>=1.0", "tiktoken>=0.7.0"]
 huggingface = ["openai>=1.0", "tiktoken>=0.7.0"]
 sandbox = ["opensandbox>=0.1.7"]

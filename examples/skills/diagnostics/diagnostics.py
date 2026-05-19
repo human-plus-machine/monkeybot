@@ -117,3 +117,14 @@ async def run_diagnostics(
     logger.info(f"Diagnostics complete: status={result.status}, issues={len(issues)}")
 
     return json.dumps(output, indent=2)
+
+
+def main() -> None:
+    """CLI entry for ``run_command argv=["python3", "<workspace-relative>/diagnostics.py"]``."""
+    import asyncio
+
+    print(asyncio.run(run_diagnostics(check_type="full")))
+
+
+if __name__ == "__main__":
+    main()
