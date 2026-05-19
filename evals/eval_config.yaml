@@ -1,0 +1,5 @@
+# Judge model for deepeval scoring.
+# By default the evals service reads model.provider and model.name from the
+# mounted monkeybot.yaml (same source the agent uses). Uncomment to override:
+# judge_provider: openai
+# judge_model: gpt-4o-mini

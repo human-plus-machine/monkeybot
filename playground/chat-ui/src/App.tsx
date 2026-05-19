@@ -17,6 +17,7 @@ import {
   type GatewayJsonEvent,
   type SessionUsageResponse,
 } from './gatewayClient'
+import EvalsPanel from './EvalsPanel'
 import ObservabilityPanel from './ObservabilityPanel'
 import WorkspaceBrowser from './WorkspaceBrowser'
 import type { ToastItem } from './blocks/SystemNotificationToast'
@@ -256,7 +257,7 @@ export default function App() {
     innerTurn: number
     text: string
   } | null>(null)
-  const [rightTab, setRightTab] = useState<'prompt' | 'workspace' | 'observability'>('prompt')
+  const [rightTab, setRightTab] = useState<'prompt' | 'workspace' | 'observability' | 'evals'>('prompt')
   const [lastTraceId, setLastTraceId] = useState<string | null>(null)
 
   const streamAbortRef = useRef<AbortController | null>(null)
@@ -1046,6 +1047,15 @@ export default function App() {
           >
             Observability
           </button>
+          <button
+            type="button"
+            role="tab"
+            className="right-panel-tab"
+            aria-selected={rightTab === 'evals'}
+            onClick={() => setRightTab('evals')}
+          >
+            Evals
+          </button>
         </div>
         {rightTab === 'prompt' ? (
           <div className="right-panel-pane system-prompt-pane" role="tabpanel">
@@ -1077,12 +1087,16 @@ export default function App() {
           <div className="right-panel-pane workspace-pane" role="tabpanel" aria-label="Workspace files">
             <WorkspaceBrowser />
           </div>
-        ) : (
+        ) : rightTab === 'observability' ? (
           <div className="right-panel-pane observability-pane-wrap" role="tabpanel" aria-label="Observability">
             <ObservabilityPanel
               lastTraceId={lastTraceId}
               observabilityEnabled={lastTraceId != null}
             />
+          </div>
+        ) : (
+          <div className="right-panel-pane evals-pane-wrap" role="tabpanel" aria-label="Quality evals">
+            <EvalsPanel />
           </div>
         )}
       </aside>

@@ -1,0 +1,257 @@
+.evals-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  padding: 0 12px 12px;
+  gap: 10px;
+}
+
+.evals-pane-wrap {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.evals-intro {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.evals-subtabs {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+}
+
+.evals-subtab {
+  font-size: 0.75rem;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: #0a0a0a;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.evals-subtab[aria-selected='true'] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.evals-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.ev-section-title {
+  margin: 0 0 8px;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.ev-scenario-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  background: #0a0a0a;
+}
+
+.ev-scenario-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.ev-scenario-id {
+  margin: 0 0 4px;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+}
+
+.ev-scenario-desc {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.ev-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.ev-tag {
+  font-size: 0.65rem;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.ev-badge-builtin {
+  font-size: 0.65rem;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #052e16;
+  color: #4ade80;
+  font-weight: 600;
+}
+
+.ev-badge-operator {
+  font-size: 0.65rem;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #1e1b4b;
+  color: #a5b4fc;
+  font-weight: 600;
+}
+
+.ev-btn-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.ev-btn {
+  font-size: 0.75rem;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: #111;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.ev-btn-primary {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.ev-textarea {
+  width: 100%;
+  min-height: 140px;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  padding: 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: #050505;
+  color: var(--text);
+  resize: vertical;
+}
+
+.ev-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.75rem;
+}
+
+.ev-table th,
+.ev-table td {
+  text-align: left;
+  padding: 8px 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.ev-table tr {
+  cursor: pointer;
+}
+
+.ev-table tr:hover td {
+  background: #0d0d0d;
+}
+
+.ev-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-weight: 600;
+  font-size: 0.68rem;
+}
+
+.ev-pill-running {
+  color: #fbbf24;
+  border: 1px solid #854d0e;
+  background: #1c1917;
+}
+
+.ev-pill-done {
+  color: #4ade80;
+  border: 1px solid #166534;
+  background: #052e16;
+}
+
+.ev-pill-fail {
+  color: #f87171;
+  border: 1px solid #991b1b;
+  background: #450a0a;
+}
+
+.ev-detail {
+  margin-top: 8px;
+  padding: 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: #080808;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ev-live-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 10px;
+  background: #0a0a0a;
+}
+
+.ev-live-label {
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.ev-live-body {
+  font-size: 0.78rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ev-score-chip {
+  display: inline-block;
+  margin-top: 6px;
+  margin-right: 6px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.68rem;
+  border: 1px solid var(--border);
+  color: var(--accent);
+}
+
+.ev-muted {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.ev-link {
+  color: var(--accent);
+  font-size: 0.72rem;
+}
