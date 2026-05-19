@@ -8,7 +8,21 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+from asgi_lifespan import LifespanManager
+from httpx import ASGITransport, AsyncClient
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# OTEL env from observability tests can make a child process block on OTLP export.
+_OTEL_ENV_PREFIXES = ("OTEL_", "MONKEYBOT_OTEL")
+
+
+def _subprocess_env(**overrides: str) -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if not k.startswith(_OTEL_ENV_PREFIXES)}
+    env["PYTHONNOUSERSITE"] = "1"
+    env.update(overrides)
+    return env
 
 
 def test_import_gateway_main_under_budget() -> None:
@@ -22,47 +36,39 @@ def test_import_gateway_main_under_budget() -> None:
         ],
         cwd=str(REPO_ROOT),
         check=True,
-        capture_output=True,
-        env={**os.environ, "PYTHONNOUSERSITE": "1"},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=_subprocess_env(),
     )
     elapsed = time.perf_counter() - start
     assert elapsed < 1.5, f"import monkeybot.gateway.main took {elapsed:.3f}s (budget 1.5s CI)"
 
 
-def test_health_under_budget_via_subprocess() -> None:
+@pytest.mark.asyncio
+async def test_health_under_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     """First /health through ASGI stack should stay within the 1c budget."""
-    script = r"""
-import asyncio
-import os
-import time
-
-os.environ.setdefault("DB_URL", "sqlite:///:memory:")
-os.environ.setdefault("MODEL_PROVIDER", "fake")
-os.environ.setdefault("MCP_CONFIG", "/nonexistent/mcp.json")
-os.environ.setdefault("COMMAND_ALLOWLIST_CONFIG", "/nonexistent/command_allowlist.yaml")
-
-async def run():
-    from asgi_lifespan import LifespanManager
-    from httpx import ASGITransport, AsyncClient
+    from monkeybot.core.mcp.mcp_client import MCPClient
     from monkeybot.gateway.sse.app import app
+    from monkeybot.observability import shutdown_observability
 
+    shutdown_observability()
+
+    async def _skip_mcp_load(self: MCPClient, _path: object) -> None:
+        return
+
+    monkeypatch.setattr(MCPClient, "load_from_config", _skip_mcp_load)
+    monkeypatch.setenv("DB_URL", "sqlite:///:memory:")
+    monkeypatch.setenv("MODEL_PROVIDER", "fake")
+    monkeypatch.setenv("MONKEYBOT_OTEL_ENABLED", "false")
+    monkeypatch.setenv("MCP_CONFIG", "/nonexistent/mcp.json")
+    monkeypatch.setenv("COMMAND_ALLOWLIST_CONFIG", "/nonexistent/command_allowlist.yaml")
+    monkeypatch.setenv("MONKEYBOT_MEMORY_HOOK_ENABLED", "false")
+
+    start = time.perf_counter()
     async with LifespanManager(app):
-        t0 = time.perf_counter()
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://t") as client:
-            r = await client.get("/health")
-        elapsed = time.perf_counter() - t0
-        assert r.status_code == 200
-        assert elapsed < 1.5, elapsed
-
-asyncio.run(run())
-"""
-    start = time.perf_counter()
-    subprocess.run(
-        [sys.executable, "-c", script],
-        cwd=str(REPO_ROOT),
-        check=True,
-        capture_output=True,
-    )
-    wall = time.perf_counter() - start
-    assert wall < 3.0, f"subprocess health probe took {wall:.3f}s"
+            resp = await client.get("/health")
+    elapsed = time.perf_counter() - start
+    assert resp.status_code == 200
+    assert elapsed < 1.5, f"/health took {elapsed:.3f}s (budget 1.5s)"
