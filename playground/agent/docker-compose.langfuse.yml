@@ -1,5 +1,9 @@
 # Langfuse v3 self-hosted stack for playground (from upstream docker-compose.yml).
-# UI: http://localhost:3000 — create a project and API keys for OTEL dual export.
+# UI: http://localhost:${LANGFUSE_UI_HOST_PORT:-3000} — create a project and API keys for OTEL dual export.
+# If host port 3000 is already in use (e.g. `lsof -iTCP:3000 -sTCP:LISTEN`), set in your compose env-file:
+#   LANGFUSE_UI_HOST_PORT=3010
+#   NEXTAUTH_URL=http://localhost:3010
+# Point the chat UI at the same URL via VITE_LANGFUSE_URL when building/running chat-ui.
 
 services:
   langfuse-worker:
@@ -53,7 +57,7 @@ services:
     restart: unless-stopped
     depends_on: *langfuse-depends-on
     ports:
-      - 3000:3000
+      - 127.0.0.1:${LANGFUSE_UI_HOST_PORT:-3000}:3000
     environment:
       <<: *langfuse-worker-env
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-playground-nextauth-secret}
@@ -86,8 +90,8 @@ services:
       test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
       interval: 5s
       timeout: 5s
-      retries: 10
-      start_period: 5s
+      retries: 30
+      start_period: 90s
 
   minio:
     image: cgr.dev/chainguard/minio

@@ -1,0 +1,17 @@
+description: "Past-event query triggers search_memory tool"
+user_message: "What did we do yesterday?"
+scripted_turns:
+  - - type: tool_call
+      call_id: c1
+      name: search_memory
+      args:
+        query: "yesterday"
+    - type: done
+  - - type: text_delta
+      text: "Yesterday we..."
+    - type: done
+assertions:
+  tool_categories_used:
+    - memory
+  turn_completed: true
+  max_turns: 3

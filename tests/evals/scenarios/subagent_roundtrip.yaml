@@ -1,0 +1,17 @@
+description: "task tool call is recorded and turn completes"
+user_message: "Run a background analysis"
+scripted_turns:
+  - - type: tool_call
+      call_id: c1
+      name: task
+      args:
+        task: "analyse"
+    - type: done
+  - - type: text_delta
+      text: "Analysis complete."
+    - type: done
+assertions:
+  tool_categories_used:
+    - subagent
+  turn_completed: true
+  max_turns: 3

@@ -1,0 +1,12 @@
+description: "Known memory line appears in injected context"
+user_message: "Tell me about project-alpha"
+memory_index:
+  - "project-alpha is the main initiative for Q3"
+scripted_turns:
+  - - type: text_delta
+      text: "project-alpha is..."
+    - type: done
+assertions:
+  memory_injected: true
+  turn_completed: true
+  max_turns: 2

@@ -1,0 +1,17 @@
+description: "File query triggers a read-category tool"
+user_message: "What is in README.md?"
+scripted_turns:
+  - - type: tool_call
+      call_id: c1
+      name: read_file
+      args:
+        path: "README.md"
+    - type: done
+  - - type: text_delta
+      text: "Here is the content."
+    - type: done
+assertions:
+  tool_categories_used:
+    - read
+  turn_completed: true
+  max_turns: 3

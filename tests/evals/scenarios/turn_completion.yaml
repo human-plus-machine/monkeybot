@@ -1,0 +1,10 @@
+description: "Basic task reaches TurnComplete without errors"
+user_message: "Say hello"
+scripted_turns:
+  - - type: text_delta
+      text: "Hello!"
+    - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  max_turns: 2

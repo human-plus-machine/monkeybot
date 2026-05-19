@@ -1,0 +1,14 @@
+description: "Large memory_index does not prevent turn completion"
+user_message: "Summarise everything"
+memory_index:
+  - "line 1"
+  - "line 2"
+  - "... 50 more lines ..."
+scripted_turns:
+  - - type: text_delta
+      text: "Here is a summary."
+    - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  max_turns: 2

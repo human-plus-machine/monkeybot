@@ -6,6 +6,7 @@ import { defineConfig } from 'vite'
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   const target = env.VITE_GATEWAY_TARGET || 'http://127.0.0.1:8787'
+  const evalsTarget = env.VITE_EVALS_TARGET || 'http://127.0.0.1:8001'
 
   return {
     plugins: [react()],
@@ -24,6 +25,15 @@ export default defineConfig(({ mode }) => {
           configure: (proxy) => {
             proxy.on('proxyReq', (proxyReq) => {
               proxyReq.path = proxyReq.path.replace(/^\/__mb_gateway/, '') || '/'
+            })
+          },
+        },
+        '/__mb_evals': {
+          target: evalsTarget,
+          changeOrigin: true,
+          configure: (proxy) => {
+            proxy.on('proxyReq', (proxyReq) => {
+              proxyReq.path = proxyReq.path.replace(/^\/__mb_evals/, '') || '/'
             })
           },
         },
