@@ -20,7 +20,12 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from monkeybot.core.bootstrap import HarnessDeps, create_harness_deps, run_pattern_bc_turn
+from monkeybot.core.bootstrap import (
+    HarnessDeps,
+    PatternBcTurnError,
+    create_harness_deps,
+    run_pattern_bc_turn,
+)
 
 _deps: HarnessDeps | None = None
 
@@ -62,16 +67,33 @@ async def _run_turn(event: dict[str, Any]) -> dict[str, Any]:
     skills = Path(os.environ["SKILLS_PATH"])
     workspace_root = Path(os.environ["WORKSPACE_ROOT"])
 
-    text = await run_pattern_bc_turn(
-        deps,
-        message,
-        session_id=session_id,
-        request_id=request_id,
-        agent_md_path=agent_md,
-        skills_path=skills,
-        workspace_root=workspace_root,
-        hook_manager=None,
-    )
+    try:
+        text = await run_pattern_bc_turn(
+            deps,
+            message,
+            session_id=session_id,
+            request_id=request_id,
+            agent_md_path=agent_md,
+            skills_path=skills,
+            workspace_root=workspace_root,
+            hook_manager=None,
+        )
+    except PatternBcTurnError as exc:
+        return {
+            "messageVersion": "1.0",
+            "response": {
+                "actionGroup": event.get("actionGroup"),
+                "apiPath": event.get("apiPath"),
+                "httpStatusCode": 500,
+                "responseBody": {
+                    "TEXT": {
+                        "body": json.dumps(
+                            {"ok": False, "error": str(exc), "request_id": exc.request_id}
+                        )
+                    }
+                },
+            },
+        }
     return {
         "messageVersion": "1.0",
         "response": {

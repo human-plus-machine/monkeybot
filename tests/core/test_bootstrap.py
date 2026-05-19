@@ -7,10 +7,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from monkeybot.core.bootstrap import create_harness_deps, run_pattern_bc_turn
+from monkeybot.core.bootstrap import (
+    PatternBcTurnError,
+    create_harness_deps,
+    run_pattern_bc_turn,
+)
 from monkeybot.core.llm.provider import Done, TextDelta, UsageEvent
 from monkeybot.core.memory.subsystem import MemorySubsystem
+from monkeybot.core.runtime.events import Error, TurnComplete, UsageTotals
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
+from monkeybot.core.tools.terminal import ALLOWED_COMMANDS
 
 
 def _fake() -> ScriptedFakeProvider:
@@ -194,3 +200,81 @@ async def test_run_pattern_bc_turn_smoke(tmp_path: Path) -> None:
         assert text == "x"
     finally:
         await deps.close()
+
+
+@pytest.mark.asyncio
+async def test_run_pattern_bc_turn_raises_on_error_event(tmp_path: Path) -> None:
+    (tmp_path / "skills").mkdir()
+    agent = tmp_path / "AGENT.md"
+    agent.write_text("# Agent\n\nNon-empty.", encoding="utf-8")
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+
+    async def _error_loop(*_args, **_kwargs):
+        yield Error(request_id="rid", error="provider blew up")
+        yield TurnComplete(request_id="rid", usage=UsageTotals())
+
+    deps = await create_harness_deps(
+        "sqlite:///:memory:",
+        None,
+        open_mcp=False,
+        provider_override=_fake(),
+    )
+    try:
+        with (
+            patch("monkeybot.core.bootstrap.run_loop", _error_loop),
+            pytest.raises(PatternBcTurnError, match="provider blew up") as excinfo,
+        ):
+            await run_pattern_bc_turn(
+                deps,
+                "hello",
+                session_id="sid",
+                request_id="rid",
+                agent_md_path=agent,
+                skills_path=tmp_path / "skills",
+                workspace_root=ws,
+            )
+        assert excinfo.value.request_id == "rid"
+    finally:
+        await deps.close()
+
+
+@pytest.mark.asyncio
+async def test_run_pattern_bc_turn_default_run_command_allowlist(tmp_path: Path, monkeypatch) -> None:
+    """Bootstrap must not pass an empty allowlist (issue #7)."""
+    monkeypatch.delenv("COMMAND_ALLOWLIST_CONFIG", raising=False)
+    (tmp_path / "skills").mkdir()
+    agent = tmp_path / "AGENT.md"
+    agent.write_text("# Agent\n\nNon-empty.", encoding="utf-8")
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    deps = await create_harness_deps(
+        "sqlite:///:memory:",
+        None,
+        open_mcp=False,
+        provider_override=_fake(),
+    )
+    captured: list = []
+
+    async def _capture_run_loop(*args, **kwargs):
+        captured.append(kwargs.get("tool_executor"))
+        if False:
+            yield  # pragma: no cover — makes this an async generator
+
+    with patch("monkeybot.core.bootstrap.run_loop", _capture_run_loop):
+        try:
+            await run_pattern_bc_turn(
+                deps,
+                "hi",
+                session_id="sid",
+                request_id="rid",
+                agent_md_path=agent,
+                skills_path=tmp_path / "skills",
+                workspace_root=ws,
+            )
+        finally:
+            await deps.close()
+
+    assert len(captured) == 1
+    executor = captured[0]
+    assert tuple(executor._run_cmd_allowed_commands) == tuple(ALLOWED_COMMANDS)

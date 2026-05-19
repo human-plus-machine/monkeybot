@@ -263,7 +263,7 @@ uv sync --extra gcs               # Google Cloud Storage backend
 | **OpenAI** | Supported | `OpenAIProvider` (`monkeybot[openai]`) via `get_provider_config()` |
 | **Anthropic Claude** | Supported | `ClaudeProvider` (`monkeybot[claude]`) via `get_provider_config()` |
 | **Anthropic via Vertex AI** | Supported | `VertexClaudeProvider` (`anthropic[vertex]`) |
-| **AWS Bedrock** | Planned | `providers/bedrock.py` stub; `[bedrock]` extra in `pyproject.toml` |
+| **AWS Bedrock** | Supported | `BedrockClaudeProvider` (`monkeybot[bedrock]`); `MODEL_PROVIDER=aws_bedrock` |
 | **AWS S3** | Planned | Memory store backend |
 | **AWS Secrets Manager** | Planned | Secret resolver |
 | **Azure OpenAI** | Coming Soon | Azure-hosted OpenAI models |

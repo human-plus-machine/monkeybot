@@ -11,7 +11,9 @@ Example skills demonstrating the skill pattern:
 #### [Diagnostics Skill](skills/diagnostics/)
 
 A complete reference implementation showing:
-- Using the lightweight ``@tool`` decorator from ``monkeybot.core.tools.workspace_tools``
+- ``SKILL.md`` for harness discovery (required for ``list_skills``)
+- ``python3`` via ``run_command`` with workspace-relative ``argv`` (see ``SKILL.md``)
+- Optional ``@tool`` decorator for direct Python imports
 - Async execution patterns
 - Structured output (JSON)
 - Environment variable checks

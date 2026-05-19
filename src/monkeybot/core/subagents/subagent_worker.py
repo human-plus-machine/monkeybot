@@ -364,7 +364,9 @@ async def _async_main() -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "WARNING"))
+    from monkeybot.core.logging_utils import normalize_log_level
+
+    logging.basicConfig(level=normalize_log_level(os.environ.get("LOG_LEVEL"), default="WARNING"))
     try:
         asyncio.run(_async_main())
     except SystemExit:

@@ -8,6 +8,8 @@ and a :class:`~monkeybot.core.llm.provider.Provider` themselves.
 
 from __future__ import annotations
 
+import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,10 +21,21 @@ from monkeybot.core.llm.usage import usage_from_totals
 from monkeybot.core.mcp.mcp_client import MCPClient
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.persistence.backends import StorageBackend, create_storage_backend
-from monkeybot.core.runtime.events import AssistantDelta, TurnComplete
+from monkeybot.core.runtime.events import AssistantDelta, Error, TurnComplete
 from monkeybot.core.runtime.loop import run as run_loop
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
+from monkeybot.core.tools.inspector import load_command_tier_policy
 from monkeybot.core.workspace import create_workspace_storage
+
+logger = logging.getLogger(__name__)
+
+
+class PatternBcTurnError(RuntimeError):
+    """Raised when :func:`run_pattern_bc_turn` receives an :class:`~monkeybot.core.runtime.events.Error` event."""
+
+    def __init__(self, message: str, *, request_id: str = "") -> None:
+        super().__init__(message)
+        self.request_id = request_id
 
 
 @dataclass
@@ -46,6 +59,23 @@ class HarnessDeps:
         await self.mcp.disconnect_all()
 
 
+def _resolve_run_command_allowlists() -> tuple[list[str] | None, list[str] | None]:
+    """Load allowlists from ``COMMAND_ALLOWLIST_CONFIG`` when present; else executor defaults."""
+    path_str = os.environ.get("COMMAND_ALLOWLIST_CONFIG", "").strip()
+    if not path_str:
+        return None, None
+    path = Path(path_str)
+    if not path.is_file():
+        logger.info("command allowlist missing (%s); using CoreToolExecutor defaults", path)
+        return None, None
+    try:
+        policy = load_command_tier_policy(path)
+        return list(policy.allowed_commands), list(policy.allowed_path_prefixes)
+    except Exception as exc:
+        logger.warning("command allowlist load failed (%s): %s", path, exc)
+        return None, None
+
+
 async def create_harness_deps(
     db_url: str,
     memory_storage_uri: str | None = None,
@@ -54,6 +84,7 @@ async def create_harness_deps(
     provider: str | None = None,
     model: str | None = None,
     open_mcp: bool = True,
+    provider_override: Provider | None = None,
     _provider_override: Provider | None = None,
 ) -> HarnessDeps:
     """Open storage, optional memory, MCP, and resolve the LLM provider.
@@ -67,13 +98,15 @@ async def create_harness_deps(
         provider: ``MODEL_PROVIDER`` override for :func:`~monkeybot.core.config.settings.get_provider_config`.
         model: Model id override for :func:`~monkeybot.core.config.settings.get_provider_config`.
         open_mcp: When False, MCP is not loaded from disk (typical for Lambda).
-        _provider_override: Test-only injection of a fake provider; skips ``get_provider_config``.
+        provider_override: Inject a custom :class:`~monkeybot.core.llm.provider.Provider` (skips config lookup).
+        _provider_override: Deprecated alias for ``provider_override`` (tests).
     """
+    override = provider_override if provider_override is not None else _provider_override
     backend = create_storage_backend(db_url)
     await backend.open()
     try:
-        if _provider_override is not None:
-            prov = _provider_override
+        if override is not None:
+            prov = override
             model_str = str(model or "test-model")
         else:
             pc = get_provider_config(provider=provider, model_name=model)
@@ -129,6 +162,9 @@ async def run_pattern_bc_turn(
 
     Returns:
         Concatenated assistant text from :class:`~monkeybot.core.runtime.events.AssistantDelta` events.
+
+    Raises:
+        PatternBcTurnError: When the loop emits an :class:`~monkeybot.core.runtime.events.Error` event.
     """
     ctx = await build_context(
         session_id,
@@ -143,12 +179,14 @@ async def run_pattern_bc_turn(
         workspace_root=workspace_root,
     )
 
+    run_cmds, run_paths = _resolve_run_command_allowlists()
     executor = CoreToolExecutor(
         workspace_root=workspace_root,
         memory=deps.memory,
         skills_path=skills_path,
         mcp=deps.mcp,
-        run_command_allowed_commands=(),
+        run_command_allowed_commands=run_cmds,
+        run_command_allowed_path_prefixes=run_paths,
     )
 
     parts: list[str] = []
@@ -162,6 +200,13 @@ async def run_pattern_bc_turn(
             tool_executor=executor,
             hook_manager=hook_manager,
         ):
+            if isinstance(evt, Error):
+                logger.error(
+                    "run_pattern_bc_turn failed request_id=%s: %s",
+                    evt.request_id or request_id,
+                    evt.error,
+                )
+                raise PatternBcTurnError(evt.error, request_id=evt.request_id or request_id)
             if isinstance(evt, AssistantDelta) and evt.delta:
                 parts.append(evt.delta)
             if isinstance(evt, TurnComplete):
@@ -179,4 +224,9 @@ async def run_pattern_bc_turn(
     return "".join(parts)
 
 
-__all__ = ["HarnessDeps", "create_harness_deps", "run_pattern_bc_turn"]
+__all__ = [
+    "HarnessDeps",
+    "PatternBcTurnError",
+    "create_harness_deps",
+    "run_pattern_bc_turn",
+]
