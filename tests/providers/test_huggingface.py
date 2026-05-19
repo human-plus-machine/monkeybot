@@ -36,22 +36,24 @@ def test_huggingface_provider_requires_token(monkeypatch: pytest.MonkeyPatch) ->
 
 def test_is_tool_unsupported_error_openai_status() -> None:
     try:
+        import httpx
         from openai import APIStatusError
     except ImportError:
         pytest.skip("openai not installed")
 
-    exc = APIStatusError(
+    def _status_error(status: int, message: str, body: object) -> APIStatusError:
+        request = httpx.Request("POST", "https://router.huggingface.co/v1/chat/completions")
+        response = httpx.Response(status, request=request)
+        return APIStatusError(message, response=response, body=body)
+
+    exc = _status_error(
+        400,
         "tools not supported",
-        response=type("R", (), {"status_code": 400})(),
-        body={"error": "tools not supported for this model"},
+        {"error": "tools not supported for this model"},
     )
     assert _is_tool_unsupported_error(exc) is True
 
-    auth_exc = APIStatusError(
-        "unauthorized",
-        response=type("R", (), {"status_code": 401})(),
-        body={"error": "invalid token"},
-    )
+    auth_exc = _status_error(401, "unauthorized", {"error": "invalid token"})
     assert _is_tool_unsupported_error(auth_exc) is False
 
 
