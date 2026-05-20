@@ -28,6 +28,8 @@ class MCPClientPort(Protocol):
         name: str,
         url: str,
         headers: dict[str, str] | None = None,
+        *,
+        auth: object | None = None,
     ) -> list[ToolDef]:
         """Connect a remote MCP server over Streamable HTTP (``url`` in mcp.json)."""
         ...
@@ -53,6 +55,8 @@ class MCPClientPort(Protocol):
         """If ``prefixed_name`` belongs to a connected server, return ``(server_name, tool_name)``."""
         ...
 
-    async def load_from_config(self, path: Path) -> None:
+    async def load_from_config(
+        self, path: Path, *, raise_on_error: bool = False
+    ) -> None:
         """Load mcp.json if present; no-op when path is missing (Story 5 semantics)."""
         ...

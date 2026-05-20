@@ -62,7 +62,7 @@ class _NoMCP:
     def split_prefixed_tool(self, *_a: object) -> None:
         return None
 
-    async def load_from_config(self, *_a: object) -> None:
+    async def load_from_config(self, *_a: object, **_kw: object) -> None:
         return None
 
 

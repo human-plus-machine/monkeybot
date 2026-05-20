@@ -438,8 +438,9 @@ async def _startup() -> None:
     mcp = MCPClient()
     _deps.mcp = mcp
     mcp_config = Path(os.environ.get("MCP_CONFIG", "/app/monkeybot_config/mcp.json"))
+    strict = os.environ.get("MCP_STRICT_LOAD", "").strip().lower() in ("1", "true", "yes")
     try:
-        await mcp.load_from_config(mcp_config)
+        await mcp.load_from_config(mcp_config, raise_on_error=strict)
     except OSError as exc:
         logger.info("MCP config skipped (%s): %s", mcp_config, exc)
 

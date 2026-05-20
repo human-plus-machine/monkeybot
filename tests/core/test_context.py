@@ -70,7 +70,7 @@ class FakeMCPClient:
         del prefixed_name
         return None
 
-    async def load_from_config(self, path: Path) -> None:
+    async def load_from_config(self, path: Path, *, raise_on_error: bool = False) -> None:
         del path
 
 

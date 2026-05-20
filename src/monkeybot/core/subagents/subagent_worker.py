@@ -13,7 +13,14 @@ from dotenv import load_dotenv
 
 from monkeybot.core.config.settings import get_provider_config, normalize_model_provider
 from monkeybot.core.context import build_context
-from monkeybot.core.llm.provider import Done, Provider, ProviderEvent, TextDelta, ToolCall, UsageEvent
+from monkeybot.core.llm.provider import (
+    Done,
+    Provider,
+    ProviderEvent,
+    TextDelta,
+    ToolCall,
+    UsageEvent,
+)
 from monkeybot.core.mcp.mcp_client import MCPClient
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.persistence.backends import create_storage_backend
@@ -150,7 +157,9 @@ def _resolve_provider() -> Provider:
     if not raw:
         return ScriptedFakeProvider(
             [
-                TextDelta(text="subagent fake provider: set MONKEYBOT_FAKE_PROVIDER_EVENTS for scripted tools."),
+                TextDelta(
+                    text="subagent fake provider: set MONKEYBOT_FAKE_PROVIDER_EVENTS for scripted tools."
+                ),
                 UsageEvent(input_tokens=1, output_tokens=1, cached_tokens=0),
                 Done(),
             ]
@@ -208,17 +217,23 @@ async def _async_main() -> None:
     os.chdir(ws)
     load_dotenv()
 
-    mem_uri = os.environ.get("MEMORY_STORAGE_URI", "").strip() or envelope.memory_storage_uri.strip()
+    mem_uri = (
+        os.environ.get("MEMORY_STORAGE_URI", "").strip() or envelope.memory_storage_uri.strip()
+    )
     if not mem_uri:
         print(
-            event_to_json(Error(request_id="", error="subagent_worker: MEMORY_STORAGE_URI is not set")),
+            event_to_json(
+                Error(request_id="", error="subagent_worker: MEMORY_STORAGE_URI is not set")
+            ),
             flush=True,
         )
         raise SystemExit(1)
 
     skills = Path(os.environ["MONKEYBOT_SUBAGENT_SKILLS_PATH"]).resolve()
 
-    agent_raw = os.environ.get("MONKEYBOT_SUBAGENT_AGENT_MD") or os.environ.get("AGENT_MD", "AGENT.md")
+    agent_raw = os.environ.get("MONKEYBOT_SUBAGENT_AGENT_MD") or os.environ.get(
+        "AGENT_MD", "AGENT.md"
+    )
     agent_md_path = Path(agent_raw)
     if not agent_md_path.is_absolute():
         agent_md_path = (ws / agent_md_path).resolve()
@@ -233,8 +248,9 @@ async def _async_main() -> None:
 
         mcp = MCPClient()
         mcp_config = Path(os.environ.get("MCP_CONFIG", "monkeybot_config/mcp.json"))
+        strict = os.environ.get("MCP_STRICT_LOAD", "").strip().lower() in ("1", "true", "yes")
         try:
-            await mcp.load_from_config(mcp_config)
+            await mcp.load_from_config(mcp_config, raise_on_error=strict)
         except OSError as exc:
             logger.info("MCP config skipped (%s): %s", mcp_config, exc)
 
@@ -274,7 +290,9 @@ async def _async_main() -> None:
 
         try:
             _ws_backend = _build_web_search_backend()
-            _ws_tool: WebSearchTool | None = WebSearchTool(_ws_backend) if _ws_backend is not None else None
+            _ws_tool: WebSearchTool | None = (
+                WebSearchTool(_ws_backend) if _ws_backend is not None else None
+            )
         except Exception:
             _ws_tool = None
 

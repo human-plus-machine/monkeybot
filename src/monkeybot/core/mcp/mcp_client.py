@@ -10,9 +10,13 @@ whose ``type`` is ``text``. Any other block is JSON-serialized via ``model_dump`
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-from collections.abc import Mapping
+import os
+import re
+import time
+from collections.abc import AsyncGenerator, Mapping
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -69,6 +73,271 @@ class MCPServerNotConnectedError(Exception):
         """Attach the unresolved ``server_name``."""
         self.server_name = server_name
         super().__init__(f"MCP server not connected: {server_name!r}")
+
+
+class MCPDiagnosticError(Exception):
+    """User-actionable MCP configuration or connectivity failure."""
+
+    def __init__(
+        self,
+        server_name: str,
+        message: str,
+        *,
+        remedy: str | None = None,
+    ) -> None:
+        self.server_name = server_name
+        self.remedy = remedy
+        super().__init__(message)
+
+
+class MCPAuthError(MCPDiagnosticError):
+    """OAuth/token acquisition failed for an MCP HTTP server."""
+
+    pass
+
+
+class MCPConnectivityError(MCPDiagnosticError):
+    """MCP HTTP endpoint rejected the session or could not be reached."""
+
+    pass
+
+
+_ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
+
+
+def interpolate_env_vars(value: Any) -> Any:
+    """Replace ``${VAR_NAME}`` substrings with ``os.environ`` values (missing → empty string)."""
+
+    if isinstance(value, str):
+
+        def _sub(match: re.Match[str]) -> str:
+            return os.environ.get(match.group(1), "")
+
+        return _ENV_VAR_PATTERN.sub(_sub, value)
+    if isinstance(value, dict):
+        return {str(k): interpolate_env_vars(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [interpolate_env_vars(item) for item in value]
+    return value
+
+
+def log_mcp_startup_diagnostic(
+    exc: BaseException,
+    *,
+    server_name: str,
+    mcp_json_path: Path,
+) -> None:
+    """Log a high-signal multi-line banner for MCP startup failures."""
+    lines = [
+        "",
+        "=" * 70,
+        "[MCP_STARTUP_FAILURE_DIAGNOSTIC]",
+        "=" * 70,
+        f"Config file: {mcp_json_path}",
+        f"Server name: {server_name}",
+        f"Exception:   {exc.__class__.__name__}: {exc}",
+    ]
+    if isinstance(exc, MCPDiagnosticError) and exc.remedy:
+        lines.append(f"Remedy:      {exc.remedy}")
+    lines.append("=" * 70)
+    logger.error("\n".join(lines))
+
+
+_MCP_AUTH_HANDLER_CLS: type | None = None
+
+
+def _mcp_auth_handler_cls() -> Any:
+    """Lazily define :class:`httpx.Auth` subclass so importing this module stays light."""
+    global _MCP_AUTH_HANDLER_CLS
+    if _MCP_AUTH_HANDLER_CLS is not None:
+        return _MCP_AUTH_HANDLER_CLS
+
+    import httpx
+
+    class MCPAuthHandler(httpx.Auth):
+        """OAuth2 token acquisition for Streamable HTTP MCP (client_credentials / password)."""
+
+        requires_request_body = False
+        requires_response_body = False
+
+        def __init__(self, server_name: str, auth_config: Mapping[str, Any]) -> None:
+            self.server_name = server_name
+            self.config = dict(auth_config)
+            self.access_token: str | None = None
+            self.expires_at: float = 0.0
+            self._lock = asyncio.Lock()
+
+        def _remedy_for_oauth_error(self, error_code: str | None) -> str | None:
+            if error_code == "invalid_client":
+                return (
+                    "Verify client_id and client_secret (or Basic-auth client credentials) "
+                    "against your identity provider."
+                )
+            if error_code == "invalid_scope":
+                return "The requested scope is not allowed for this client; adjust `scope`."
+            if error_code in {"invalid_grant", "unauthorized_client"}:
+                return "The token server rejected this grant; check username/password or client policy."
+            return None
+
+        async def _refresh_token_locked(self) -> None:
+            import httpx
+
+            flow_raw = self.config.get("flow")
+            flow = flow_raw if isinstance(flow_raw, str) else ""
+            flow = flow.strip().lower()
+            token_url_raw = self.config.get("token_url")
+            if not isinstance(token_url_raw, str) or not token_url_raw.strip():
+                raise MCPAuthError(
+                    self.server_name,
+                    "auth.token_url is required and must be a non-empty string.",
+                    remedy="Set `token_url` to your OAuth2 token endpoint in mcp.json.",
+                )
+            token_url = token_url_raw.strip()
+
+            data: dict[str, str] = {}
+            if flow == "client_credentials":
+                data["grant_type"] = "client_credentials"
+                cid = self.config.get("client_id")
+                csec = self.config.get("client_secret", "")
+                if (self.config.get("client_auth_method") or "body").lower() != "basic":
+                    data["client_id"] = "" if cid is None else str(cid)
+                    data["client_secret"] = "" if csec is None else str(csec)
+            elif flow == "password":
+                data["grant_type"] = "password"
+                user = self.config.get("username")
+                pwd = self.config.get("password")
+                if not isinstance(user, str) or not user:
+                    raise MCPAuthError(
+                        self.server_name,
+                        "auth.username is required for flow=password.",
+                        remedy="Set `username` (and `password`) under `auth` in mcp.json.",
+                    )
+                data["username"] = user
+                data["password"] = "" if pwd is None else str(pwd)
+                cid = self.config.get("client_id")
+                if cid is not None:
+                    data["client_id"] = str(cid)
+                csec = self.config.get("client_secret")
+                if csec is not None:
+                    data["client_secret"] = str(csec)
+            else:
+                raise MCPAuthError(
+                    self.server_name,
+                    f"Unsupported auth.flow {flow_raw!r}; use 'client_credentials' or 'password'.",
+                    remedy="Set `flow` to `client_credentials` or `password`.",
+                )
+
+            scope = self.config.get("scope")
+            if scope is not None and str(scope).strip():
+                data["scope"] = str(scope).strip()
+            for key in ("audience", "resource"):
+                val = self.config.get(key)
+                if val is not None and str(val).strip():
+                    data[key] = str(val).strip()
+
+            extra = self.config.get("extra")
+            if isinstance(extra, dict):
+                for k, v in extra.items():
+                    if v is None:
+                        continue
+                    data[str(k)] = str(v)
+
+            headers = {"Content-Type": "application/x-www-form-urlencoded"}
+            basic: httpx.Auth | None = None
+            if (self.config.get("client_auth_method") or "body").lower() == "basic":
+                cid = self.config.get("client_id")
+                csec = self.config.get("client_secret", "")
+                if cid is None or not str(cid):
+                    raise MCPAuthError(
+                        self.server_name,
+                        "client_id is required when client_auth_method=basic.",
+                        remedy="Set `client_id` (and `client_secret`) for HTTP Basic on the token URL.",
+                    )
+                basic = httpx.BasicAuth(str(cid), str(csec))
+
+            timeout = httpx.Timeout(30.0)
+            try:
+                async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+                    resp = await client.post(token_url, data=data, headers=headers, auth=basic)
+            except httpx.RequestError as exc:
+                raise MCPAuthError(
+                    self.server_name,
+                    f"Could not reach token_url ({token_url}): {exc}",
+                    remedy="Check network, VPN, DNS, and that token_url is correct.",
+                ) from exc
+
+            ct = (resp.headers.get("content-type") or "").lower()
+            body: dict[str, Any] = {}
+            if "json" in ct or resp.text.strip().startswith("{"):
+                try:
+                    parsed = resp.json()
+                    if isinstance(parsed, dict):
+                        body = parsed
+                except json.JSONDecodeError:
+                    body = {}
+            if resp.status_code >= 400:
+                err = body.get("error") if isinstance(body.get("error"), str) else None
+                desc = body.get("error_description")
+                desc_s = desc if isinstance(desc, str) else None
+                detail = desc_s or resp.text or f"HTTP {resp.status_code}"
+                remedy = self._remedy_for_oauth_error(err)
+                raise MCPAuthError(
+                    self.server_name,
+                    f"Token endpoint returned {resp.status_code} ({err or 'no_error_code'}): {detail}",
+                    remedy=remedy,
+                )
+
+            token = body.get("access_token")
+            if not isinstance(token, str) or not token:
+                raise MCPAuthError(
+                    self.server_name,
+                    "Token response did not include a usable access_token string.",
+                    remedy="Inspect the token server response format; monkeybot expects OAuth2 JSON.",
+                )
+            self.access_token = token
+            expires_in = body.get("expires_in", 3600)
+            try:
+                ttl = float(expires_in)
+            except (TypeError, ValueError):
+                ttl = 3600.0
+            self.expires_at = time.time() + max(30.0, ttl)
+
+        async def _get_token(self) -> str:
+            async with self._lock:
+                now = time.time()
+                if self.access_token and now < self.expires_at - 60:
+                    return self.access_token
+                await self._refresh_token_locked()
+                if not self.access_token:
+                    raise MCPAuthError(
+                        self.server_name,
+                        "Token refresh completed without an access_token.",
+                        remedy="Check auth configuration and token server behavior.",
+                    )
+                return self.access_token
+
+        async def async_auth_flow(
+            self, request: httpx.Request
+        ) -> AsyncGenerator[httpx.Request, httpx.Response]:
+            token = await self._get_token()
+            request.headers["Authorization"] = f"Bearer {token}"
+            response = yield request
+            if response.status_code == 401:
+                async with self._lock:
+                    self.access_token = None
+                    self.expires_at = 0.0
+                    await self._refresh_token_locked()
+                if not self.access_token:
+                    raise MCPAuthError(
+                        self.server_name,
+                        "Token refresh after HTTP 401 did not yield an access_token.",
+                        remedy="Verify the MCP server accepts this token audience/scope.",
+                    )
+                request.headers["Authorization"] = f"Bearer {self.access_token}"
+                yield request
+
+    _MCP_AUTH_HANDLER_CLS = MCPAuthHandler
+    return MCPAuthHandler
 
 
 @dataclass
@@ -295,6 +564,8 @@ class MCPClient:
         name: str,
         url: str,
         headers: dict[str, str] | None = None,
+        *,
+        auth: Any | None = None,
     ) -> list[ToolDef]:
         """Connect ``name`` to a remote MCP endpoint (Streamable HTTP); register ``server__tool`` names."""
         if name in self._servers:
@@ -306,8 +577,12 @@ class MCPClient:
             from mcp.client.streamable_http import streamable_http_client
 
             hdr = dict(headers) if headers else {}
+            if auth is not None:
+                hdr.pop("Authorization", None)
+                hdr.pop("authorization", None)
             http = httpx.AsyncClient(
-                headers=hdr,
+                headers=hdr if hdr else None,
+                auth=auth,
                 follow_redirects=True,
                 timeout=httpx.Timeout(60.0, read=600.0),
             )
@@ -315,9 +590,7 @@ class MCPClient:
             transport_cm = streamable_http_client(url, http_client=http)
             read_write = await stack.enter_async_context(transport_cm)
             if not isinstance(read_write, tuple) or len(read_write) != 3:
-                raise TypeError(
-                    f"streamable_http_client must yield a 3-tuple, got {read_write!r}"
-                )
+                raise TypeError(f"streamable_http_client must yield a 3-tuple, got {read_write!r}")
             read_s, write_s, _get_sid = read_write
             session_cm = ClientSession(read_s, write_s)
             session = await stack.enter_async_context(session_cm)
@@ -343,6 +616,9 @@ class MCPClient:
             self._servers[name] = _ServerRecord(stack=stack, session=session, tools=list(defs))
             return list(defs)
         except MCPConnectionError:
+            await stack.aclose()
+            raise
+        except MCPAuthError:
             await stack.aclose()
             raise
         except Exception as exc:
@@ -387,8 +663,24 @@ class MCPClient:
         result = await rec.session.call_tool(tool_name, arguments=dict(args))
         return _normalize_call_tool_result(result)
 
-    async def load_from_config(self, mcp_json_path: Path) -> None:
-        """Load Claude/Cursor ``mcpServers`` JSON; tolerate missing paths and noisy failures."""
+    async def load_from_config(
+        self,
+        mcp_json_path: Path,
+        *,
+        raise_on_error: bool = False,
+    ) -> None:
+        """Load Claude/Cursor ``mcpServers`` JSON; tolerate missing paths and noisy failures.
+
+        Replaces ``${ENV_NAME}`` substrings with environment values (missing → empty string).
+
+        Streamable HTTP entries may include an ``auth`` object with ``flow`` set to
+        ``client_credentials`` or ``password`` plus ``token_url`` and related fields.
+
+        Args:
+            mcp_json_path: Path to ``mcp.json``.
+            raise_on_error: When True, abort on the first per-server startup failure after
+                emitting a diagnostic banner. When False, log and continue with other servers.
+        """
         if not mcp_json_path.is_file():
             return
 
@@ -397,6 +689,12 @@ class MCPClient:
             raw = json.loads(raw_text)
         except json.JSONDecodeError:
             logger.error("invalid mcp JSON in %s", mcp_json_path)
+            return
+
+        if isinstance(raw, dict):
+            raw = interpolate_env_vars(raw)
+        else:
+            logger.error("mcp config invalid in %s: expected top-level object", mcp_json_path)
             return
 
         servers_any = raw.get("mcpServers")
@@ -425,26 +723,58 @@ class MCPClient:
                 if isinstance(headers_any, dict):
                     for k, val in headers_any.items():
                         headers_out[str(k)] = "" if val is None else str(val)
+
+                auth_handler: Any | None = None
+                auth_any = spec.get("auth")
+                if isinstance(auth_any, dict) and auth_any:
+                    handler_cls = _mcp_auth_handler_cls()
+                    auth_handler = handler_cls(server_name, auth_any)
+                    headers_out.pop("Authorization", None)
+                    headers_out.pop("authorization", None)
+
                 try:
                     await self.connect_streamable_http(
                         server_name,
                         url.strip(),
                         headers_out if headers_out else None,
+                        auth=auth_handler,
                     )
-                except MCPConnectionError:
+                except MCPAuthError as exc:
+                    log_mcp_startup_diagnostic(
+                        exc, server_name=server_name, mcp_json_path=mcp_json_path
+                    )
                     logger.error(
                         "mcp startup connect failed for server %s (config %s)",
                         server_name,
                         mcp_json_path,
                         exc_info=True,
                     )
-                except Exception:
+                    if raise_on_error:
+                        raise
+                except MCPConnectionError as exc:
+                    log_mcp_startup_diagnostic(
+                        exc, server_name=server_name, mcp_json_path=mcp_json_path
+                    )
                     logger.error(
                         "mcp startup connect failed for server %s (config %s)",
                         server_name,
                         mcp_json_path,
                         exc_info=True,
                     )
+                    if raise_on_error:
+                        raise
+                except Exception as exc:
+                    log_mcp_startup_diagnostic(
+                        exc, server_name=server_name, mcp_json_path=mcp_json_path
+                    )
+                    logger.error(
+                        "mcp startup connect failed for server %s (config %s)",
+                        server_name,
+                        mcp_json_path,
+                        exc_info=True,
+                    )
+                    if raise_on_error:
+                        raise
                 continue
 
             command = spec.get("command")
@@ -467,17 +797,27 @@ class MCPClient:
 
             try:
                 await self.connect(server_name, command, args_out, env_out)
-            except MCPConnectionError:
+            except MCPConnectionError as exc:
+                log_mcp_startup_diagnostic(
+                    exc, server_name=server_name, mcp_json_path=mcp_json_path
+                )
                 logger.error(
                     "mcp startup connect failed for server %s (config %s)",
                     server_name,
                     mcp_json_path,
                     exc_info=True,
                 )
-            except Exception:
+                if raise_on_error:
+                    raise
+            except Exception as exc:
+                log_mcp_startup_diagnostic(
+                    exc, server_name=server_name, mcp_json_path=mcp_json_path
+                )
                 logger.error(
                     "mcp startup connect failed for server %s (config %s)",
                     server_name,
                     mcp_json_path,
                     exc_info=True,
                 )
+                if raise_on_error:
+                    raise

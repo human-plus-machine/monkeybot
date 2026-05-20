@@ -101,7 +101,7 @@ async def test_gateway_lifespan_wires_observability_with_memory_exporter(
     def _memory_processor(_kind: str) -> SimpleSpanProcessor:
         return SimpleSpanProcessor(exporter)
 
-    async def _skip_mcp_load(self: MCPClient, _path: object) -> None:
+    async def _skip_mcp_load(self: MCPClient, _path: object, *_a: object, **_kw: object) -> None:
         return
 
     shutdown_observability()
@@ -162,7 +162,7 @@ async def gateway_client_otel(
     from monkeybot.core.mcp.mcp_client import MCPClient
     from monkeybot.gateway.sse.app import app
 
-    async def _skip_mcp_load(self: MCPClient, _path: object) -> None:
+    async def _skip_mcp_load(self: MCPClient, _path: object, *_a: object, **_kw: object) -> None:
         return
 
     monkeypatch.setattr(MCPClient, "load_from_config", _skip_mcp_load)

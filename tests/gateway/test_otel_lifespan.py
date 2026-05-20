@@ -14,7 +14,7 @@ async def test_gateway_lifespan_calls_observability(
 ) -> None:
     from monkeybot.core.mcp.mcp_client import MCPClient
 
-    async def _skip_mcp_load(self: MCPClient, _path: object) -> None:
+    async def _skip_mcp_load(self: MCPClient, _path: object, *_a: object, **_kw: object) -> None:
         return
 
     monkeypatch.setattr(MCPClient, "load_from_config", _skip_mcp_load)
@@ -29,7 +29,7 @@ async def test_gateway_lifespan_calls_observability(
 async def test_gateway_startup_with_bad_otlp(monkeypatch: pytest.MonkeyPatch) -> None:
     from monkeybot.core.mcp.mcp_client import MCPClient
 
-    async def _skip_mcp_load(self: MCPClient, _path: object) -> None:
+    async def _skip_mcp_load(self: MCPClient, _path: object, *_a: object, **_kw: object) -> None:
         return
 
     def _raise_processor(_kind: str) -> object:

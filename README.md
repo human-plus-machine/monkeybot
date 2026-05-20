@@ -45,6 +45,7 @@ MCP + config       →    SQLite history + usage →    GCP when deployed
 | [Getting Started](docs/getting-started.md) | Install, configure the SSE gateway (`monkeybot_config/monkeybot.example.yaml`, optional `.env`), and exercise sessions + SSE from the command line |
 | [SSE gateway and custom UI](docs/sse-gateway-ui.md) | v2 HTTP + SSE endpoints, event types, CORS/proxy notes, and the same session flow as `playground/chat-ui` |
 | [Skills](docs/skills.md) | Skill directory layout and `SKILL.md` discovery under `SKILLS_PATH` |
+| [Model Context Protocol](docs/mcp.md) | MCP configuration, environment variable interpolation, OAuth2 flows, and fail-fast diagnostics |
 
 Harness defaults and comments: **`monkeybot_config/monkeybot.example.yaml`** (copy to `monkeybot.yaml`). Optional **`.env`** in the repo root for secrets — see the header of that YAML file for common variable names.
 
@@ -216,7 +217,7 @@ monkey-bot/
 │   ├── agent/                   # Local gateway runner (.env + run.sh)
 │   └── chat-ui/                 # Vite + React dev client
 ├── examples/skills/             # Sample skills you can copy into .agents/skills
-├── docs/                        # getting-started.md, skills.md
+├── docs/                        # getting-started.md, skills.md, mcp.md
 ├── tests/                       # pytest suite (see pytest.ini)
 ├── testing/                     # Bench harness (bench.py) + devbot fixture
 ├── docker/
