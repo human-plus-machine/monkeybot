@@ -13,7 +13,7 @@ from monkeybot.core.llm.provider import (
     ToolCall,
 )
 from monkeybot.core.runtime.loop import _provider_messages_prompt_summary, run
-from monkeybot.core.types.content_blocks import Text, ToolRequest, ToolResponse
+from monkeybot.core.types.content_blocks import Text, ToolResponse
 from tests.core.test_loop import (
     AllowInspector,
     FakeHistory,

@@ -70,7 +70,7 @@ async def test_gateway_startup_instruments_fastapi_app(
     _reset_otel_globals()
     monkeypatch.setattr("monkeybot.observability._create_span_processor", _memory_processor)
 
-    async def _skip_mcp_load(self: MCPClient, _path: object) -> None:
+    async def _skip_mcp_load(self: MCPClient, _path: object, *_a: object, **_kw: object) -> None:
         return
 
     monkeypatch.setattr(MCPClient, "load_from_config", _skip_mcp_load)

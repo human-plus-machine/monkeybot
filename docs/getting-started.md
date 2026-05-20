@@ -116,3 +116,4 @@ curl -sS "http://127.0.0.1:8080/health"
 ## Next steps
 
 - [Skills](skills.md) — layout under `SKILLS_PATH` and `SKILL.md` per skill folder.
+- [Model Context Protocol](mcp.md) — configuration, environment variable interpolation, OAuth2 flows, and startup diagnostics.

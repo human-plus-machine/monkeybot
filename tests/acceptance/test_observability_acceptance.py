@@ -80,7 +80,7 @@ async def gateway_client_disabled(
     monkeypatch.setenv("MEMORY_PATH", str(memory))
     monkeypatch.setenv("SKILLS_PATH", str(skills))
 
-    async def _skip_mcp_load(self: MCPClient, _path: object) -> None:
+    async def _skip_mcp_load(self: MCPClient, _path: object, *_a: object, **_kw: object) -> None:
         return
 
     monkeypatch.setattr(MCPClient, "load_from_config", _skip_mcp_load)
@@ -132,7 +132,7 @@ async def gateway_client_otel(
     monkeypatch.setenv("MEMORY_PATH", str(memory))
     monkeypatch.setenv("SKILLS_PATH", str(skills))
 
-    async def _skip_mcp_load(self: MCPClient, _path: object) -> None:
+    async def _skip_mcp_load(self: MCPClient, _path: object, *_a: object, **_kw: object) -> None:
         return
 
     monkeypatch.setattr(MCPClient, "load_from_config", _skip_mcp_load)

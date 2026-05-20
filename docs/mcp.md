@@ -1,0 +1,150 @@
+# Model Context Protocol (MCP) in MonkeyBot
+
+MonkeyBot fully supports the Model Context Protocol (MCP), enabling your agents to interact with external tools, APIs, and data sources. Both local `stdio` subprocess transport and remote `Streamable HTTP` SSE transports are supported.
+
+---
+
+## Configuration
+
+By default, MonkeyBot loads its MCP servers map from a JSON file specified under `paths.mcp_config` in `monkeybot.yaml` (typically `./monkeybot_config/mcp.json`).
+
+A template `mcp.json` looks like this:
+
+```json
+{
+  "mcpServers": {
+    "my-stdio-server": {
+      "enabled": true,
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/path/to/workspace"
+      ],
+      "env": {
+        "NODE_ENV": "production",
+        "API_SECRET": "${MY_SECRET_ENV_VAR}"
+      }
+    },
+    "my-http-server": {
+      "enabled": true,
+      "url": "https://mcp.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${STATIC_TOKEN}"
+      }
+    }
+  }
+}
+```
+
+---
+
+## Features
+
+### 1. Environment Variable Interpolation
+
+To prevent checking secrets or environment-specific paths into version control, MonkeyBot recursively interpolates values in `mcp.json` matching the `${VAR_NAME}` pattern.
+
+* Missing environment variables are interpolated as empty strings `""`.
+* Interpolation applies recursively to keys and nested elements under `env`, `headers`, `args`, `url`, and `auth`.
+
+### 2. OAuth2 / OpenID Connect (OIDC) Authentication
+
+For remote Streamable HTTP MCP endpoints requiring dynamic or short-lived credentials, MonkeyBot can perform background OAuth2 token retrieval and automatic bearer token rotation.
+
+Add an optional `"auth"` block to your server specification inside `mcp.json`:
+
+#### Client Credentials Flow (Machine-to-Machine)
+
+```json
+"langchain-docs": {
+  "enabled": true,
+  "url": "https://mcp-server.example.com/mcp",
+  "auth": {
+    "flow": "client_credentials",
+    "token_url": "https://identity.provider.com/oauth2/token",
+    "client_id": "${OAUTH_CLIENT_ID}",
+    "client_secret": "${OAUTH_CLIENT_SECRET}",
+    "scope": "read:tools write:tools",
+    "client_auth_method": "body"
+  }
+}
+```
+
+#### Resource Owner Password Flow
+
+```json
+"internal-admin-tool": {
+  "enabled": true,
+  "url": "https://admin-mcp.internal.net",
+  "auth": {
+    "flow": "password",
+    "token_url": "https://auth.internal.net/oauth/token",
+    "username": "${BOT_USERNAME}",
+    "password": "${BOT_PASSWORD}",
+    "client_id": "${OAUTH_CLIENT_ID}",
+    "client_secret": "${OAUTH_CLIENT_SECRET}"
+  }
+}
+```
+
+#### Authentication Properties:
+
+| Key | Description | Optional / Required |
+| --- | --- | --- |
+| `flow` | The grant type flow. Must be `client_credentials` or `password`. | **Required** |
+| `token_url` | The URL of the OAuth2 token endpoint. | **Required** |
+| `client_id` | OAuth client ID. | Optional (Depending on endpoint) |
+| `client_secret` | OAuth client secret. | Optional (Depending on endpoint) |
+| `scope` | Space-separated list of scopes to request. | Optional |
+| `audience` | Target audience parameter (optional). | Optional |
+| `resource` | Target resource parameter (optional). | Optional |
+| `client_auth_method` | Specifies how the client ID and secret are sent. Can be `body` (sent in URL-encoded post body) or `basic` (sent in `Authorization: Basic ...` header). Default is `body`. | Optional |
+| `extra` | Dictionary of additional custom query or body params to include in the token request. | Optional |
+
+#### Token Refresh and Expiry Behavior:
+
+* **Background Refresh**: Token expiry is calculated based on the `expires_in` response property (default: 3600 seconds). MonkeyBot automatically refreshes the token in the background 60 seconds before it expires.
+* **401 Retry**: If the target MCP endpoint returns a `401 Unauthorized` response, the authentication handler immediately discards the current token, issues a fresh token request, and retries the failed request once.
+* **Header Priority**: If an `"auth"` block is provided, static `"Authorization"` / `"authorization"` parameters in the `"headers"` block are automatically popped and ignored to avoid conflict.
+
+---
+
+## Startup Validation & Diagnostics
+
+In cloud production environments or CI test pipelines, you may want to detect invalid configurations immediately rather than having background workers fail gracefully and silently ignore unavailable tools.
+
+### Fail-Fast (Strict Load)
+
+Set the environment variable `MCP_STRICT_LOAD` to `true` (or `1`, `yes`):
+
+```bash
+export MCP_STRICT_LOAD=true
+```
+
+When enabled:
+1. Any error connecting or handshaking with an MCP server (including stdio exit codes, unreachable HTTP servers, or DNS failures) will raise an exception during bootstrap.
+2. The exception halts the application boot sequence, preventing unhealthy gateway nodes from serving traffic.
+
+### Actionable Troubleshooting Banners
+
+If startup fails under strict load, MonkeyBot prints a high-signal diagnostic banner to stderr containing user-actionable remedies before exiting:
+
+```
+======================================================================
+[MCP_STARTUP_FAILURE_DIAGNOSTIC]
+======================================================================
+Config file: /app/monkeybot_config/mcp.json
+Server name: langchain-docs
+Exception:   MCPAuthError: Token endpoint returned 400 (invalid_client): Client authentication failed
+Remedy:      Verify client_id and client_secret (or Basic-auth client credentials) against your identity provider.
+======================================================================
+```
+
+---
+
+## Developer Implementation Notes
+
+* The authentication exchange runs inside an `httpx.Auth` subclass (`MCPAuthHandler`).
+* It utilizes `asyncio.Lock` to guarantee that concurrent tool calls from different agent loops do not trigger duplicate token-refresh HTTP calls to the identity provider.
+* Custom exceptions (`MCPAuthError`, `MCPConnectivityError`, `MCPDiagnosticError`) provide descriptive messages and standard troubleshooting remedies for operators.

@@ -44,7 +44,7 @@ class _FakeMCP:
     def split_prefixed_tool(self, name: str) -> tuple[str, str] | None:
         return None
 
-    async def load_from_config(self, path: Path) -> None:
+    async def load_from_config(self, path: Path, *, raise_on_error: bool = False) -> None:
         pass
 
 

@@ -12,7 +12,13 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from monkeybot.core.mcp import mcp_client as mc
-from monkeybot.core.mcp.mcp_client import MCPClient, MCPConnectionError
+from monkeybot.core.mcp.mcp_client import (
+    MCPAuthError,
+    MCPClient,
+    MCPConnectionError,
+    _mcp_auth_handler_cls,
+    interpolate_env_vars,
+)
 
 
 class _SessionACM:
@@ -35,7 +41,6 @@ class _SessionACM:
 
 
 class _CrashHooks:
-
     def stdio_server_parameters(
         self,
         command: str,
@@ -110,9 +115,7 @@ async def test_call_tool_returns_string() -> None:
     sess.list_tools = AsyncMock(return_value=listing)
 
     sess.call_tool = AsyncMock(
-        return_value=SimpleNamespace(
-            content=[SimpleNamespace(type="text", text="ok")]
-        )
+        return_value=SimpleNamespace(content=[SimpleNamespace(type="text", text="ok")])
     )
 
     client = MCPClient(hooks=_stub_hooks(sess))
@@ -188,7 +191,7 @@ async def test_load_from_config_streamable_http_url(tmp_path: Path) -> None:
     with patch.object(client, "connect_streamable_http", new_callable=AsyncMock) as m:
         m.return_value = []
         await client.load_from_config(cfg)
-    m.assert_awaited_once_with("docs", "https://docs.langchain.com/mcp", None)
+    m.assert_awaited_once_with("docs", "https://docs.langchain.com/mcp", None, auth=None)
 
 
 @pytest.mark.asyncio
@@ -293,12 +296,8 @@ async def test_connect_replaces_existing_server() -> None:
 
     sess.list_tools = AsyncMock(
         side_effect=[
-            SimpleNamespace(
-                tools=[SimpleNamespace(name="A", description="a", inputSchema={})]
-            ),
-            SimpleNamespace(
-                tools=[SimpleNamespace(name="B", description="b", inputSchema={})]
-            ),
+            SimpleNamespace(tools=[SimpleNamespace(name="A", description="a", inputSchema={})]),
+            SimpleNamespace(tools=[SimpleNamespace(name="B", description="b", inputSchema={})]),
         ]
     )
 
@@ -325,3 +324,281 @@ def test_split_prefixed_tool_longest_server_wins() -> None:
 def test_split_prefixed_tool_unknown_returns_none() -> None:
     client = MCPClient(hooks=_CrashHooks())
     assert client.split_prefixed_tool("nope__x") is None
+
+
+def test_interpolate_env_vars_nested(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MCP_TEST_TOKEN", "abc123")
+    assert interpolate_env_vars({"h": "Bearer ${MCP_TEST_TOKEN}"}) == {"h": "Bearer abc123"}
+    assert interpolate_env_vars(["${MCP_TEST_TOKEN}", "x"]) == ["abc123", "x"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_auth_client_credentials_fetches_token() -> None:
+    from unittest.mock import patch
+
+    import httpx
+
+    posts: list[object] = []
+
+    class _FakeTokenCM:
+        async def __aenter__(self) -> _FakeTokenCM:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def post(self, *a: object, **kw: object) -> httpx.Response:
+            posts.append((a, kw))
+            return httpx.Response(200, json={"access_token": "tok-z", "expires_in": 600})
+
+    real_client = httpx.AsyncClient
+
+    def _async_client_factory(**kw: object) -> object:
+        timeout = kw.get("timeout")
+        if isinstance(timeout, httpx.Timeout) and timeout.read == 600.0:
+            return real_client(**kw)
+        return _FakeTokenCM()
+
+    with patch("httpx.AsyncClient", side_effect=_async_client_factory):
+        cls = _mcp_auth_handler_cls()
+        h = cls(
+            "srv",
+            {
+                "flow": "client_credentials",
+                "token_url": "https://issuer.example/oauth/token",
+                "client_id": "cid",
+                "client_secret": "sec",
+            },
+        )
+        token = await h._get_token()
+
+    assert token == "tok-z"
+    assert len(posts) == 1
+
+
+@pytest.mark.asyncio
+async def test_mcp_auth_async_auth_flow_retries_on_401() -> None:
+    from unittest.mock import patch
+
+    import httpx
+
+    posts: list[int] = []
+
+    class _FakeTokenCM:
+        async def __aenter__(self) -> _FakeTokenCM:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def post(self, *a: object, **kw: object) -> httpx.Response:
+            posts.append(len(posts) + 1)
+            if posts[-1] == 1:
+                return httpx.Response(200, json={"access_token": "first", "expires_in": 3600})
+            return httpx.Response(200, json={"access_token": "second", "expires_in": 3600})
+
+    real_client = httpx.AsyncClient
+
+    def _async_client_factory(**kw: object) -> object:
+        timeout = kw.get("timeout")
+        if isinstance(timeout, httpx.Timeout) and timeout.read == 600.0:
+            return real_client(**kw)
+        return _FakeTokenCM()
+
+    with patch("httpx.AsyncClient", side_effect=_async_client_factory):
+        cls = _mcp_auth_handler_cls()
+        h = cls(
+            "srv",
+            {
+                "flow": "client_credentials",
+                "token_url": "https://issuer.example/oauth/token",
+                "client_id": "cid",
+                "client_secret": "sec",
+            },
+        )
+        req = httpx.Request("GET", "https://mcp.example/sse")
+        gen = h.async_auth_flow(req)
+        first = await anext(gen)
+        assert first.headers.get("Authorization") == "Bearer first"
+        resp = httpx.Response(401, request=first)
+        second = await gen.asend(resp)
+        assert second.headers.get("Authorization") == "Bearer second"
+
+    assert len(posts) == 2
+
+
+@pytest.mark.asyncio
+async def test_load_from_config_raise_on_error_propagates_mcp_auth_error(
+    tmp_path: Path,
+) -> None:
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "bad": {
+                        "url": "https://mcp.example/mcp",
+                        "auth": {
+                            "flow": "client_credentials",
+                            "token_url": "https://issuer.example/oauth/token",
+                            "client_id": "x",
+                            "client_secret": "y",
+                        },
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    client = MCPClient(hooks=_CrashHooks())
+
+    async def _boom(
+        *_a: object,
+        **_kw: object,
+    ) -> list[object]:
+        raise MCPAuthError(
+            "bad",
+            "token failed",
+            remedy="check credentials",
+        )
+
+    with patch.object(client, "connect_streamable_http", _boom), pytest.raises(MCPAuthError):
+        await client.load_from_config(cfg, raise_on_error=True)
+
+
+def test_interpolate_env_vars_whitespace(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MCP_TEST_TOKEN", "def456")
+    assert interpolate_env_vars({"h": "Bearer ${  MCP_TEST_TOKEN  }"}) == {"h": "Bearer def456"}
+
+
+@pytest.mark.asyncio
+async def test_mcp_auth_password_fetches_token() -> None:
+    from unittest.mock import patch
+
+    import httpx
+
+    posts: list[object] = []
+
+    class _FakeTokenCM:
+        async def __aenter__(self) -> _FakeTokenCM:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def post(self, *a: object, **kw: object) -> httpx.Response:
+            posts.append((a, kw))
+            return httpx.Response(200, json={"access_token": "pwd-tok", "expires_in": 1200})
+
+    real_client = httpx.AsyncClient
+
+    def _async_client_factory(**kw: object) -> object:
+        timeout = kw.get("timeout")
+        if isinstance(timeout, httpx.Timeout) and timeout.read == 600.0:
+            return real_client(**kw)
+        return _FakeTokenCM()
+
+    with patch("httpx.AsyncClient", side_effect=_async_client_factory):
+        cls = _mcp_auth_handler_cls()
+        h = cls(
+            "srv",
+            {
+                "flow": "password",
+                "token_url": "https://issuer.example/oauth/token",
+                "username": "bot-user",
+                "password": "bot-password",
+                "client_id": "cid",
+                "client_secret": "sec",
+            },
+        )
+        token = await h._get_token()
+
+    assert token == "pwd-tok"
+    assert len(posts) == 1
+    data = posts[0][1]["data"]
+    assert data["grant_type"] == "password"
+    assert data["username"] == "bot-user"
+    assert data["password"] == "bot-password"
+    assert data["client_id"] == "cid"
+    assert data["client_secret"] == "sec"
+
+
+@pytest.mark.asyncio
+async def test_mcp_auth_concurrent_stampede_prevention() -> None:
+    from unittest.mock import patch
+
+    import httpx
+
+    refreshes = 0
+
+    class _FakeTokenCM:
+        async def __aenter__(self) -> _FakeTokenCM:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+        async def post(self, *a: object, **kw: object) -> httpx.Response:
+            nonlocal refreshes
+            refreshes += 1
+            return httpx.Response(
+                200, json={"access_token": f"tok-{refreshes}", "expires_in": 3600}
+            )
+
+    real_client = httpx.AsyncClient
+
+    def _async_client_factory(**kw: object) -> object:
+        timeout = kw.get("timeout")
+        if isinstance(timeout, httpx.Timeout) and timeout.read == 600.0:
+            return real_client(**kw)
+        return _FakeTokenCM()
+
+    with patch("httpx.AsyncClient", side_effect=_async_client_factory):
+        cls = _mcp_auth_handler_cls()
+        h = cls(
+            "srv",
+            {
+                "flow": "client_credentials",
+                "token_url": "https://issuer.example/oauth/token",
+                "client_id": "cid",
+                "client_secret": "sec",
+            },
+        )
+
+        # Pre-prime with initial token
+        token = await h._get_token()
+        assert token == "tok-1"
+        assert refreshes == 1
+
+        # Simulate 3 concurrent tasks that already have request carrying tok-1 and receive 401
+        import asyncio
+
+        # Step 1: Initialize generators
+        gens = [
+            h.async_auth_flow(httpx.Request("GET", "https://mcp.example/sse")) for _ in range(3)
+        ]
+
+        # Step 2: Extract the initial request for all of them first.
+        # Since self.access_token is tok-1 and no lock is held for refreshing,
+        # all of them will successfully fetch tok-1 without blocking.
+        p_reqs = []
+        for g in gens:
+            p_req = await anext(g)
+            assert p_req.headers.get("Authorization") == "Bearer tok-1"
+            p_reqs.append(p_req)
+
+        # Step 3: Concurrently send the 401 response back to all three generators.
+        # This forces them to concurrently compete for the lock to refresh the token.
+        async def send_401(g: Any, p_req: httpx.Request) -> httpx.Request:
+            resp = httpx.Response(401, request=p_req)
+            retried_req = await g.asend(resp)
+            return retried_req
+
+        results = await asyncio.gather(*(send_401(g, p_req) for g, p_req in zip(gens, p_reqs)))
+
+        # Under Double-Checked Locking, only 1 new refresh POST should be made,
+        # and all three retried requests should have "Bearer tok-2" (not tok-3 or tok-4)
+        assert refreshes == 2
+        for r_req in results:
+            assert r_req.headers.get("Authorization") == "Bearer tok-2"
