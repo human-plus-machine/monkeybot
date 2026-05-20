@@ -111,7 +111,7 @@ def interpolate_env_vars(value: Any) -> Any:
     if isinstance(value, str):
 
         def _sub(match: re.Match[str]) -> str:
-            return os.environ.get(match.group(1), "")
+            return os.environ.get(match.group(1).strip(), "")
 
         return _ENV_VAR_PATTERN.sub(_sub, value)
     if isinstance(value, dict):
@@ -214,12 +214,13 @@ def _mcp_auth_handler_cls() -> Any:
                     )
                 data["username"] = user
                 data["password"] = "" if pwd is None else str(pwd)
-                cid = self.config.get("client_id")
-                if cid is not None:
-                    data["client_id"] = str(cid)
-                csec = self.config.get("client_secret")
-                if csec is not None:
-                    data["client_secret"] = str(csec)
+                if (self.config.get("client_auth_method") or "body").lower() != "basic":
+                    cid = self.config.get("client_id")
+                    if cid is not None:
+                        data["client_id"] = str(cid)
+                    csec = self.config.get("client_secret")
+                    if csec is not None:
+                        data["client_secret"] = str(csec)
             else:
                 raise MCPAuthError(
                     self.server_name,
@@ -324,9 +325,10 @@ def _mcp_auth_handler_cls() -> Any:
             response = yield request
             if response.status_code == 401:
                 async with self._lock:
-                    self.access_token = None
-                    self.expires_at = 0.0
-                    await self._refresh_token_locked()
+                    if self.access_token == token:
+                        self.access_token = None
+                        self.expires_at = 0.0
+                        await self._refresh_token_locked()
                 if not self.access_token:
                     raise MCPAuthError(
                         self.server_name,
