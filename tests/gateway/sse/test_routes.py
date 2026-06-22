@@ -18,6 +18,8 @@ from httpx import ASGITransport, AsyncClient
 from starlette.testclient import TestClient
 
 from monkeybot.core.runtime.events import AssistantDelta, Thinking, TurnComplete, UsageTotals
+from monkeybot.gateway.sse.loop_port import UsagePort
+from monkeybot.gateway.sse.models import SessionUsageResponse
 from monkeybot.gateway.sse.routes import create_app
 from monkeybot.gateway.sse.session_bus import SessionRegistry
 from monkeybot.gateway.sse.sse import agent_event_to_wire_dict, json_dumps_wire
@@ -175,6 +177,109 @@ def test_get_events_returns_404_for_unknown_session(registry: SessionRegistry) -
         r = client.get("/sessions/does-not-exist/events")
     assert r.status_code == 404
     assert r.json()["error"]["code"] == "SESSION_NOT_FOUND"
+
+
+def test_session_usage_response_defaults_cache_fields() -> None:
+    raw = {
+        "session_id": "s1",
+        "turns": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_tokens": 0,
+        "cost_usd": 0.0,
+        "period_start": 0,
+        "period_end": 0,
+        "last_prompt_tokens": 0,
+        "estimated_prompt_tokens": 0,
+        "summarization_threshold_tokens": 170_000,
+        "context_window_tokens": 200_000,
+    }
+    resp = SessionUsageResponse.model_validate(raw)
+    assert resp.cache_read_tokens == 0
+    assert resp.cache_creation_tokens == 0
+
+
+def test_session_usage_response_includes_cache_fields() -> None:
+    raw = {
+        "session_id": "s1",
+        "turns": 2,
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "cached_tokens": 14,
+        "cache_read_tokens": 10,
+        "cache_creation_tokens": 4,
+        "cost_usd": 0.01,
+        "period_start": 1,
+        "period_end": 2,
+        "last_prompt_tokens": 3,
+        "estimated_prompt_tokens": 4,
+        "summarization_threshold_tokens": 170_000,
+        "context_window_tokens": 200_000,
+    }
+    resp = SessionUsageResponse.model_validate(raw)
+    assert resp.cache_read_tokens == 10
+    assert resp.cache_creation_tokens == 4
+
+
+class _PopulatedUsagePort:
+    async def session_usage(
+        self,
+        session_id: str,
+        *,
+        since: str | None,
+    ) -> dict[str, object]:
+        _ = since
+        return {
+            "session_id": session_id,
+            "turns": 2,
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "cached_tokens": 28,
+            "cache_read_tokens": 20,
+            "cache_creation_tokens": 8,
+            "cost_usd": 0.05,
+            "period_start": 1000,
+            "period_end": 2000,
+            "last_prompt_tokens": 3,
+            "estimated_prompt_tokens": 4,
+            "summarization_threshold_tokens": 170_000,
+            "context_window_tokens": 200_000,
+        }
+
+
+@pytest.mark.asyncio
+async def test_get_usage_zero_payload_has_cache_keys(
+    registry: SessionRegistry,
+) -> None:
+    app = create_app(loop_port=FakeLoopPort(registry), registry=registry)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        cr = await client.post("/sessions", json={})
+        sid = cr.json()["session_id"]
+        r = await client.get(f"/sessions/{sid}/usage")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["cache_read_tokens"] == 0
+    assert body["cache_creation_tokens"] == 0
+
+
+@pytest.mark.asyncio
+async def test_get_usage_populated_payload_has_cache_split(
+    registry: SessionRegistry,
+) -> None:
+    usage_port: UsagePort = _PopulatedUsagePort()
+    app = create_app(
+        loop_port=FakeLoopPort(registry),
+        usage_port=usage_port,
+        registry=registry,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        cr = await client.post("/sessions", json={})
+        sid = cr.json()["session_id"]
+        r = await client.get(f"/sessions/{sid}/usage")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["cache_read_tokens"] == 20
+    assert body["cache_creation_tokens"] == 8
 
 
 @pytest.mark.asyncio

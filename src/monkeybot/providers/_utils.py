@@ -6,6 +6,7 @@ import json
 from collections.abc import Sequence
 from typing import Any
 
+from monkeybot.core.llm.provider import Message
 from monkeybot.core.types.content_blocks import (
     ContentBlock,
     Image,
@@ -15,18 +16,7 @@ from monkeybot.core.types.content_blocks import (
     ToolRequest,
     ToolResponse,
 )
-from monkeybot.core.llm.provider import Message
-
-
-def estimate_cost(
-    model: str,
-    input_tokens: int,
-    output_tokens: int,
-    pricing: dict[str, tuple[float, float]],
-) -> float:
-    """Return estimated USD cost. ``pricing`` values are (input_$/M, output_$/M)."""
-    rates = pricing.get(model, (0.0, 0.0))
-    return (input_tokens * rates[0] + output_tokens * rates[1]) / 1_000_000
+from monkeybot.providers.pricing import estimate_cost
 
 
 def _anthropic_tool_result_content(result: list[ContentBlock]) -> list[dict[str, Any]]:
@@ -97,8 +87,48 @@ def _anthropic_assistant_block(block: ContentBlock) -> dict[str, Any]:
     )
 
 
-def build_anthropic_messages(messages: Sequence[Message]) -> list[dict[str, Any]]:
-    """Convert harness messages to Anthropic ``messages`` API shape (no string parsing)."""
+def build_cached_system_blocks(system: str) -> list[dict[str, Any]]:
+    """Return a single cache-marked system text block list.
+
+    Args:
+        system: Non-empty system prompt text. Callers MUST guard empty strings
+            and pass anthropic.NOT_GIVEN instead (see provider stream methods).
+
+    Returns:
+        ``[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]``
+    """
+    return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+
+
+def mark_last_tool_cached(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return a copy of ``tools`` with ``cache_control: ephemeral`` on the LAST tool.
+
+    Marks the final tool dict so Anthropic caches the entire tools-array prefix.
+    No-ops (returns the list unchanged in content) when ``tools`` is empty.
+
+    Args:
+        tools: Anthropic tool dicts (output of a provider ``_convert_tools``).
+
+    Returns:
+        A new list; only the last element gains a ``cache_control`` key. Input
+        list and its dicts are not mutated (shallow-copy the last dict).
+    """
+    if not tools:
+        return tools
+    marked_last = {**tools[-1], "cache_control": {"type": "ephemeral"}}
+    return [*tools[:-1], marked_last]
+
+
+def build_anthropic_messages(
+    messages: Sequence[Message], *, cache_last_block: bool = False
+) -> list[dict[str, Any]]:
+    """Convert harness messages to Anthropic ``messages`` API shape (no string parsing).
+
+    Args:
+        cache_last_block: Reserved for a future message-level cache breakpoint.
+            Phase 1B leaves this False (no message-level marker emitted). When
+            False, behavior is byte-identical to today.
+    """
     out: list[dict[str, Any]] = []
     for m in messages:
         role = getattr(m, "role", None)
@@ -156,4 +186,10 @@ def estimate_anthropic_input_tokens(
     return max(1, char_count // 4)
 
 
-__all__ = ["build_anthropic_messages", "estimate_anthropic_input_tokens", "estimate_cost"]
+__all__ = [
+    "build_anthropic_messages",
+    "build_cached_system_blocks",
+    "estimate_anthropic_input_tokens",
+    "estimate_cost",
+    "mark_last_tool_cached",
+]

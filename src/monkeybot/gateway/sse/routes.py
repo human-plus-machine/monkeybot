@@ -84,6 +84,8 @@ class _StaticUsagePort:
             "input_tokens": 0,
             "output_tokens": 0,
             "cached_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_creation_tokens": 0,
             "cost_usd": 0.0,
             "period_start": 0,
             "period_end": 0,
@@ -184,8 +186,34 @@ def create_app(
         """Create a session and its event bus."""
         created_at_ms = int(time.time() * 1000)
         sid = body.session_id or str(uuid.uuid4())
+        session_provider = None
+        session_model = None
+        if body.model_provider or body.model_name:
+            from monkeybot.core.config.settings import cache_enabled_from_env, get_provider_config
+
+            try:
+                cfg = get_provider_config(
+                    provider=body.model_provider,
+                    model_name=body.model_name,
+                    cache_enabled=cache_enabled_from_env(),
+                )
+                session_provider = cfg.provider
+                session_model = cfg.model
+            except Exception as exc:
+                raise APIError(
+                    400,
+                    "MODEL_UNAVAILABLE",
+                    f"Model provider '{body.model_provider}' unavailable: {exc}",
+                    uuid.uuid4().hex,
+                ) from exc
         try:
-            reg_dep.create(sid, agent_md=body.agent_md, created_at_ms=created_at_ms)
+            reg_dep.create(
+                sid,
+                agent_md=body.agent_md,
+                created_at_ms=created_at_ms,
+                provider=session_provider,
+                model_name=session_model,
+            )
         except SessionAlreadyExistsError:
             raise APIError(
                 409,

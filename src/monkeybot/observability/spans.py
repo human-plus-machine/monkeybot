@@ -35,6 +35,8 @@ _ATTR_ALLOWLIST_EXACT = frozenset(
         "gen_ai.usage.input_tokens",
         "gen_ai.usage.output_tokens",
         "gen_ai.usage.cached_tokens",
+        "gen_ai.usage.cache_read_tokens",
+        "gen_ai.usage.cache_creation_tokens",
         "gen_ai.usage.total_tokens",
         "turn.index",
         "turns.summarized",
@@ -178,6 +180,8 @@ def set_llm_usage(
     input_tokens: int,
     output_tokens: int,
     cached_tokens: int = 0,
+    cache_read_tokens: int = 0,
+    cache_creation_tokens: int = 0,
 ) -> None:
     span = _current_span()
     if span is None:
@@ -186,6 +190,12 @@ def set_llm_usage(
     set_span_attribute_safe(span, "gen_ai.usage.output_tokens", output_tokens)
     if cached_tokens:
         set_span_attribute_safe(span, "gen_ai.usage.cached_tokens", cached_tokens)
+    if cache_read_tokens:
+        set_span_attribute_safe(span, "gen_ai.usage.cache_read_tokens", cache_read_tokens)
+    if cache_creation_tokens:
+        set_span_attribute_safe(
+            span, "gen_ai.usage.cache_creation_tokens", cache_creation_tokens
+        )
     total = input_tokens + output_tokens
     if total:
         set_span_attribute_safe(span, "gen_ai.usage.total_tokens", total)

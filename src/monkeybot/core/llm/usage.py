@@ -14,6 +14,8 @@ class Usage:
     input_tokens: int = 0
     output_tokens: int = 0
     cached_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
     cost_usd: float = 0.0
     duration_ms: int = 0
     estimated_prompt_tokens: int = 0
@@ -30,6 +32,8 @@ def usage_from_totals(t: UsageTotals) -> Usage:
         input_tokens=t.input_tokens,
         output_tokens=t.output_tokens,
         cached_tokens=t.cached_tokens,
+        cache_read_tokens=t.cache_read_tokens,
+        cache_creation_tokens=t.cache_creation_tokens,
         cost_usd=t.cost_usd,
         duration_ms=t.duration_ms,
         estimated_prompt_tokens=t.estimated_prompt_tokens,
@@ -49,3 +53,5 @@ class UsageSummary:
     period_end_ms: int | None
     last_prompt_tokens: int
     last_estimated_prompt_tokens: int
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0

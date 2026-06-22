@@ -115,7 +115,18 @@ function formatTokens(n: number): string {
   return n.toLocaleString(undefined, { maximumFractionDigits: 0 })
 }
 
+function formatUsd(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '$0.00'
+  return `$${n.toFixed(4)}`
+}
+
 const DEFAULT_CONTEXT_WINDOW = 200_000
+
+const MODEL_OPTIONS = [
+  { label: 'OpenAI', provider: 'openai', model: 'gpt-5' },
+  { label: 'Vertex Gemini', provider: 'gemini', model: 'gemini-3-flash-preview' },
+  { label: 'Anthropic (Vertex)', provider: 'vertex-claude', model: 'claude-haiku-4-5' },
+] as const
 
 function IconRefresh() {
   return (
@@ -242,6 +253,7 @@ export default function App() {
     'disconnected',
   )
   const [statusNote, setStatusNote] = useState('')
+  const [modelIdx, setModelIdx] = useState(0)
   const [feed, setFeed] = useState<ChatFeedItem[]>([])
   const [pendingWidgets, setPendingWidgets] = useState<PendingWidget[]>([])
   const [toasts, setToasts] = useState<ToastItem[]>([])
@@ -669,13 +681,23 @@ export default function App() {
     setLastTraceId(null)
     setRightTab('prompt')
     try {
-      const { session_id } = await createSession()
+      const opt = MODEL_OPTIONS[modelIdx]
+      const { session_id } = await createSession(undefined, {
+        model_provider: opt.provider,
+        model_name: opt.model,
+      })
       setSessionId(session_id)
       setStatus('connected')
     } catch (e) {
       setSessionId(null)
-      setStatus('error')
-      setStatusNote(e instanceof Error ? e.message : String(e))
+      const msg = e instanceof Error ? e.message : String(e)
+      if (msg.includes('MODEL_UNAVAILABLE')) {
+        setStatus('disconnected')
+        setStatusNote('Selected model unavailable — check credentials or pick another.')
+      } else {
+        setStatus('error')
+        setStatusNote(msg)
+      }
     }
   }
 
@@ -929,6 +951,13 @@ export default function App() {
                             <span className="usage-label">Out</span>
                             <span className="usage-value">{formatTokens(sessionUsage.output_tokens)}</span>
                           </span>
+                          <span className="usage-sep" aria-hidden>
+                            ·
+                          </span>
+                          <span className="usage-item">
+                            <span className="usage-label">Cost</span>
+                            <span className="usage-value">{formatUsd(sessionUsage.cost_usd)}</span>
+                          </span>
                         </>
                       ) : (
                         <span className="muted">Usage appears after your first completed reply.</span>
@@ -938,6 +967,19 @@ export default function App() {
                 ) : null}
               </div>
               <div className="chat-controls-trailing row">
+                <select
+                  className="btn"
+                  aria-label="Model"
+                  value={modelIdx}
+                  onChange={(e) => setModelIdx(Number(e.target.value))}
+                  disabled={status === 'connecting' || status === 'connected'}
+                >
+                  {MODEL_OPTIONS.map((opt, idx) => (
+                    <option key={opt.label} value={idx}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
                 {status === 'connected' && sessionId ? (
                   <>
                     <button

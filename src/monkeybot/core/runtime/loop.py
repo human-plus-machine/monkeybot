@@ -40,6 +40,7 @@ from monkeybot.core.types.content_blocks import (
 )
 from monkeybot.core.types.content_blocks import Thinking as ThinkingBlock
 from monkeybot.core.types.types_tools import ToolDef
+from monkeybot.providers.pricing import estimate_cost
 
 from .events import (
     AgentEvent,
@@ -68,6 +69,8 @@ def _usage_to_totals(u: Usage) -> UsageTotals:
         input_tokens=u.input_tokens,
         output_tokens=u.output_tokens,
         cached_tokens=u.cached_tokens,
+        cache_read_tokens=u.cache_read_tokens,
+        cache_creation_tokens=u.cache_creation_tokens,
         cost_usd=u.cost_usd,
         duration_ms=u.duration_ms,
         estimated_prompt_tokens=u.estimated_prompt_tokens,
@@ -78,6 +81,8 @@ def _merge_usage_event(usage: Usage, ev: UsageEvent) -> None:
     usage.input_tokens += ev.input_tokens
     usage.output_tokens += ev.output_tokens
     usage.cached_tokens += ev.cached_tokens
+    usage.cache_read_tokens += ev.cache_read_tokens
+    usage.cache_creation_tokens += ev.cache_creation_tokens
 
 
 def _system_message(
@@ -712,6 +717,8 @@ async def _run_inner_core(
             llm_input = 0
             llm_output = 0
             llm_cached = 0
+            llm_cache_read = 0
+            llm_cache_creation = 0
             try:
                 async with span_llm(ctx=ctx):
                     async with aclosing(
@@ -728,9 +735,18 @@ async def _run_inner_core(
                                     thinking_signature = ev.signature
                             elif isinstance(ev, UsageEvent):
                                 _merge_usage_event(usage, ev)
+                                usage.cost_usd += estimate_cost(
+                                    ctx.model,
+                                    ev.input_tokens,
+                                    ev.output_tokens,
+                                    cache_read_tokens=ev.cache_read_tokens,
+                                    cache_creation_tokens=ev.cache_creation_tokens,
+                                )
                                 llm_input += ev.input_tokens
                                 llm_output += ev.output_tokens
                                 llm_cached += ev.cached_tokens
+                                llm_cache_read += ev.cache_read_tokens
+                                llm_cache_creation += ev.cache_creation_tokens
                             elif isinstance(ev, ToolCall):
                                 pending[ev.call_id] = ev
                             elif isinstance(ev, Done):
@@ -739,6 +755,8 @@ async def _run_inner_core(
                         input_tokens=llm_input,
                         output_tokens=llm_output,
                         cached_tokens=llm_cached,
+                        cache_read_tokens=llm_cache_read,
+                        cache_creation_tokens=llm_cache_creation,
                     )
                     set_llm_io(
                         prompt=_provider_messages_prompt_summary(provider_messages),

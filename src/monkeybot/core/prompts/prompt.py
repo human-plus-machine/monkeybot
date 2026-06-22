@@ -82,7 +82,7 @@ def compose_system_prompt(
     curated_memory_index: list[str] | None = None,
     curated_skills: list[SkillRef] | None = None,
 ) -> str:
-    """Build the system string: AGENT.md, optional task anchor, memory, skills, harness.
+    """Build the system string: AGENT.md, memory, skills, harness, then task anchor.
 
     ``ctx.agent_md`` is the operator-authored base prompt (typically from AGENT.md).
     Runtime sections are appended each turn from context and (when relevant) chat.
@@ -116,4 +116,4 @@ def compose_system_prompt(
         run_command_opensandbox=SandboxConfig.from_env().enabled,
     )
 
-    return f"{ctx.agent_md}{task}{mem_block}{skills_section}\n\n{harness}"
+    return f"{ctx.agent_md}{mem_block}{skills_section}\n\n{harness}{task}"

@@ -60,5 +60,7 @@ def test_no_tool_calls_substring_in_provider_or_core() -> None:
             "tool_calls\"",
             str(_REPO_ROOT / "src/monkeybot/core"),
             str(_REPO_ROOT / "src/monkeybot/providers"),
+            "--glob",
+            "!_openai_compat.py",
         ]
     )

@@ -62,7 +62,9 @@ SCHEMA_DDLS: Final[tuple[str, ...]] = (
     duration_ms INTEGER NOT NULL,
     created_at INTEGER NOT NULL,
     context_json TEXT,
-    estimated_prompt_tokens INTEGER NOT NULL DEFAULT 0
+    estimated_prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_creation_tokens INTEGER NOT NULL DEFAULT 0
 )""",
     "CREATE INDEX IF NOT EXISTS idx_history_thread ON conversation_history(thread_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_runs_parent ON subagent_runs(parent_run_id)",
@@ -126,6 +128,7 @@ async def apply_schema(conn: aiosqlite.Connection) -> None:
         await conn.execute(ddl)
     await conn.commit()
     await _ensure_turn_usage_estimated_column(conn)
+    await _ensure_turn_usage_cache_columns(conn)
     cursor = await conn.execute("PRAGMA table_info(conversation_history)")
     rows = await cursor.fetchall()
     await cursor.close()
@@ -146,6 +149,21 @@ async def _ensure_turn_usage_estimated_column(conn: aiosqlite.Connection) -> Non
     await conn.execute(
         "ALTER TABLE turn_usage ADD COLUMN estimated_prompt_tokens INTEGER NOT NULL DEFAULT 0"
     )
+    await conn.commit()
+
+
+async def _ensure_turn_usage_cache_columns(conn: aiosqlite.Connection) -> None:
+    """Add cache token columns when upgrading an existing DB."""
+    cur = await conn.execute("PRAGMA table_info(turn_usage)")
+    rows = await cur.fetchall()
+    await cur.close()
+    names = {str(r[1]) for r in rows}
+    for col in ("cache_read_tokens", "cache_creation_tokens"):
+        if col in names:
+            continue
+        await conn.execute(
+            f"ALTER TABLE turn_usage ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0"
+        )
     await conn.commit()
 
 

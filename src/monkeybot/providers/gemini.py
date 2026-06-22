@@ -312,13 +312,19 @@ def _usage_from_response(um: Any) -> UsageEvent | None:
         return None
     inp = int(getattr(um, "prompt_token_count", 0) or 0)
     out = int(getattr(um, "candidates_token_count", 0) or 0)
-    cached = int(getattr(um, "cached_content_token_count", 0) or 0)
-    return UsageEvent(input_tokens=inp, output_tokens=out, cached_tokens=cached)
+    # Vertex Gemini implicit caching reports a single read count; there is no
+    # separate cache-creation cost, so creation is 0 and the total equals the read.
+    cache_read = int(getattr(um, "cached_content_token_count", 0) or 0)
+    return UsageEvent(
+        input_tokens=inp,
+        output_tokens=out,
+        cached_tokens=cache_read,
+        cache_read_tokens=cache_read,
+        cache_creation_tokens=0,
+    )
 
 
 class GeminiProvider:
-    """Vertex Gemini streaming using ``google.genai.Client`` (vertexai mode)."""
-
     def __init__(
         self,
         *,
@@ -326,11 +332,23 @@ class GeminiProvider:
         temperature: float | None = None,
         max_output_tokens: int | None = None,
         thinking_budget: int | None = None,
+        cache_enabled: bool = True,
     ) -> None:
+        """Vertex Gemini streaming provider.
+
+        ``cache_enabled`` is accepted for interface symmetry with the other providers
+        (Story 1 constructor contract) but is intentionally **inert** for Gemini: Vertex
+        serves implicit prompt caching provider-side, so there is no request flag to toggle.
+        The flag does **not** disable implicit caching and does **not** change the outbound
+        request config; it only reserves the switch for explicit ``CachedContent`` (out of
+        scope, see design 1A "Out of Scope"). Implicit-cache token counts are always reported
+        in the usage telemetry regardless of this flag.
+        """
         self._supports_streaming = supports_streaming
         self._temperature = temperature
         self._max_output_tokens = max_output_tokens
         self._thinking_budget = thinking_budget
+        self._cache_enabled = cache_enabled
 
     @property
     def name(self) -> str:

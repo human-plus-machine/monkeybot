@@ -56,13 +56,17 @@ _SCHEMA_DDLS: tuple[str, ...] = (
     duration_ms INTEGER NOT NULL,
     created_at BIGINT NOT NULL,
     context_json TEXT,
-    estimated_prompt_tokens INTEGER NOT NULL DEFAULT 0
+    estimated_prompt_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_creation_tokens INTEGER NOT NULL DEFAULT 0
 )""",
     "CREATE INDEX IF NOT EXISTS idx_history_thread ON conversation_history(thread_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_runs_parent ON subagent_runs(parent_run_id)",
     "CREATE INDEX IF NOT EXISTS idx_runs_status ON subagent_runs(status) WHERE status IN ('pending','running')",
     "CREATE INDEX IF NOT EXISTS idx_usage_thread ON turn_usage(thread_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_usage_cost ON turn_usage(created_at)",
+    "ALTER TABLE turn_usage ADD COLUMN IF NOT EXISTS cache_read_tokens INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE turn_usage ADD COLUMN IF NOT EXISTS cache_creation_tokens INTEGER NOT NULL DEFAULT 0",
 )
 
 
@@ -180,9 +184,9 @@ class PostgresUsageStore:
                     thread_id, run_id, model,
                     input_tokens, output_tokens, cached_tokens,
                     cost_usd, duration_ms, created_at, context_json,
-                    estimated_prompt_tokens
+                    estimated_prompt_tokens, cache_read_tokens, cache_creation_tokens
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
                 """,
                 thread_id,
                 run_id,
@@ -195,6 +199,8 @@ class PostgresUsageStore:
                 now_ms,
                 context_json,
                 usage.estimated_prompt_tokens,
+                usage.cache_read_tokens,
+                usage.cache_creation_tokens,
             )
 
     async def summary(
@@ -223,7 +229,9 @@ class PostgresUsageStore:
                 COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
                 COALESCE(SUM(cost_usd), 0.0) AS cost_usd,
                 MIN(created_at) AS period_start_ms,
-                MAX(created_at) AS period_end_ms
+                MAX(created_at) AS period_end_ms,
+                COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens
             FROM turn_usage
             {where_sql}
         """
@@ -246,6 +254,8 @@ class PostgresUsageStore:
                 period_end_ms=None,
                 last_prompt_tokens=0,
                 last_estimated_prompt_tokens=0,
+                cache_read_tokens=0,
+                cache_creation_tokens=0,
             )
 
         last_pt = 0
@@ -281,6 +291,8 @@ class PostgresUsageStore:
             period_end_ms=int(row["period_end_ms"]) if row["period_end_ms"] is not None else None,
             last_prompt_tokens=last_pt,
             last_estimated_prompt_tokens=last_est,
+            cache_read_tokens=int(row["cache_read_tokens"]),
+            cache_creation_tokens=int(row["cache_creation_tokens"]),
         )
 
 
