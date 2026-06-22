@@ -178,6 +178,90 @@ describe('gatewayClient POST helpers (unit)', () => {
       is_error: false,
     })
   })
+
+  it('test_create_session_sends_model_body', async () => {
+    vi.mocked(gw.createSession).mockRestore()
+    fetchMock.mockImplementationOnce(async (input, init) => {
+      expect(String(input)).toMatch(/\/sessions$/)
+      expect(init?.method).toBe('POST')
+      expect(JSON.parse(String(init?.body))).toEqual({
+        model_provider: 'openai',
+        model_name: 'gpt-5',
+      })
+      return new Response(JSON.stringify({ session_id: 's1', created_at: 0 }), { status: 201 })
+    })
+
+    await gw.createSession(undefined, { model_provider: 'openai', model_name: 'gpt-5' })
+  })
+
+  it('test_create_session_empty_body_when_no_opts', async () => {
+    vi.mocked(gw.createSession).mockRestore()
+    fetchMock.mockImplementationOnce(async (input, init) => {
+      expect(String(input)).toMatch(/\/sessions$/)
+      expect(init?.method).toBe('POST')
+      expect(init?.body).toBe('{}')
+      return new Response(JSON.stringify({ session_id: 's1', created_at: 0 }), { status: 201 })
+    })
+
+    await gw.createSession()
+  })
+})
+
+describe('model selector (App)', () => {
+  it('test_selector_renders_three_options', () => {
+    render(<App />)
+    const select = screen.getByRole('combobox', { name: /model/i })
+    const options = within(select).getAllByRole('option')
+    expect(options).toHaveLength(3)
+    expect(options.map((o) => o.textContent)).toEqual([
+      'OpenAI',
+      'Vertex Gemini',
+      'Anthropic (Vertex)',
+    ])
+  })
+
+  it('test_connect_passes_selected_model', async () => {
+    const createSpy = vi.spyOn(gw, 'createSession').mockResolvedValue({
+      session_id: 'sid-model',
+      created_at: 0,
+    })
+    vi.spyOn(gw, 'openEventsStream').mockResolvedValue(
+      new Response(new ReadableStream(), { status: 200, headers: { 'content-type': 'text/event-stream' } }),
+    )
+    vi.spyOn(gw, 'fetchSessionUsage').mockResolvedValue(usageFixture)
+    vi.spyOn(gw, 'consumeSseJson').mockImplementation(() => Promise.resolve())
+
+    const userEv = userEvent.setup()
+    render(<App />)
+
+    const select = screen.getByRole('combobox', { name: /model/i })
+    await userEv.selectOptions(select, 'Vertex Gemini')
+    await userEv.click(screen.getByRole('button', { name: /new session/i }))
+
+    await waitFor(() => {
+      expect(createSpy).toHaveBeenCalledWith(undefined, {
+        model_provider: 'gemini',
+        model_name: 'gemini-3-flash-preview',
+      })
+    })
+  })
+
+  it('test_model_unavailable_shows_note', async () => {
+    vi.spyOn(gw, 'createSession').mockRejectedValue(
+      new Error('createSession failed: 400 {"error":{"code":"MODEL_UNAVAILABLE","message":"Model provider openai unavailable"}}'),
+    )
+
+    const userEv = userEvent.setup()
+    render(<App />)
+    await userEv.click(screen.getByRole('button', { name: /new session/i }))
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/selected model unavailable.*check credentials or pick another/i),
+      ).toBeInTheDocument()
+    })
+    expect(screen.queryByText(/^connected/i)).not.toBeInTheDocument()
+  })
 })
 
 describe('blockRendering integration', () => {
@@ -741,5 +825,30 @@ describe('blockRendering integration', () => {
     })
 
     expect(screen.getByRole('log')).toBeTruthy()
+  })
+})
+
+describe('session cost display (App usage strip)', () => {
+  it('test_usage_strip_shows_dollar_zero_when_cost_zero', async () => {
+    await renderConnected()
+
+    await waitFor(() => {
+      expect(screen.getByText('$0.00')).toBeInTheDocument()
+      expect(screen.getByText('Cost')).toBeInTheDocument()
+    })
+  })
+
+  it('test_usage_strip_shows_subcent_cost', async () => {
+    vi.spyOn(gw, 'fetchSessionUsage').mockResolvedValue({ ...usageFixture, cost_usd: 0.0123 })
+    await renderConnected()
+
+    await waitFor(() => expect(screen.getByText('$0.0123')).toBeInTheDocument())
+  })
+
+  it('test_no_cost_item_when_not_connected', () => {
+    render(<App />)
+
+    expect(screen.queryByText(/\$\d/)).toBeNull()
+    expect(screen.queryByText(/Cost/i)).toBeNull()
   })
 })

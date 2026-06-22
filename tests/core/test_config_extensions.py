@@ -54,7 +54,7 @@ class TestVertexAnthropicProvider:
         from monkeybot.core.config import get_provider_config
 
         monkeypatch.setenv("GCP_PROJECT_ID", "test-project")
-        monkeypatch.setenv("VERTEX_AI_LOCATION", "us-central1")
+        monkeypatch.setenv("ANTHROPIC_VERTEX_REGION", "us-central1")
 
         mock_instance = MagicMock()
         with patch(
@@ -68,13 +68,48 @@ class TestVertexAnthropicProvider:
 
             assert cfg.provider is mock_instance
             assert cfg.model == "claude-3-5-sonnet@20240620"
-            mock_cls.assert_called_once_with(project_id="test-project", region="us-central1")
+            mock_cls.assert_called_once_with(
+                project_id="test-project",
+                region="us-central1",
+                cache_enabled=True,
+            )
 
-    def test_get_provider_config_vertex_anthropic_missing_project(self, monkeypatch):
+    def test_get_provider_config_vertex_anthropic_google_cloud_project(self, monkeypatch):
+        from unittest.mock import MagicMock, patch
+
         from monkeybot.core.config import get_provider_config
 
         monkeypatch.delenv("GCP_PROJECT_ID", raising=False)
         monkeypatch.delenv("VERTEX_AI_PROJECT_ID", raising=False)
+        monkeypatch.delenv("ANTHROPIC_VERTEX_PROJECT_ID", raising=False)
+        monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "adc-project")
+
+        mock_instance = MagicMock()
+        with patch(
+            "monkeybot.core.config.settings.VertexClaudeProvider",
+            return_value=mock_instance,
+        ) as mock_cls:
+            cfg = get_provider_config(
+                provider="vertex-claude",
+                model_name="claude-haiku-4-5",
+            )
+            assert cfg.model == "claude-haiku-4-5"
+            mock_cls.assert_called_once_with(
+                project_id="adc-project",
+                region="us-east5",
+                cache_enabled=True,
+            )
+
+    def test_get_provider_config_vertex_anthropic_missing_project(self, monkeypatch):
+        from monkeybot.core.config import get_provider_config
+
+        for key in (
+            "GCP_PROJECT_ID",
+            "VERTEX_AI_PROJECT_ID",
+            "ANTHROPIC_VERTEX_PROJECT_ID",
+            "GOOGLE_CLOUD_PROJECT",
+        ):
+            monkeypatch.delenv(key, raising=False)
 
         with pytest.raises(ValueError, match="vertex_anthropic provider requires"):
             get_provider_config(
@@ -88,8 +123,8 @@ class TestVertexAnthropicProvider:
         from monkeybot.core.config import get_provider_config
 
         monkeypatch.setenv("GCP_PROJECT_ID", "test-project")
-        monkeypatch.delenv("VERTEX_AI_LOCATION", raising=False)
         monkeypatch.delenv("ANTHROPIC_VERTEX_REGION", raising=False)
+        monkeypatch.delenv("VERTEX_AI_LOCATION", raising=False)
 
         mock_instance = MagicMock()
         with patch(
@@ -101,7 +136,11 @@ class TestVertexAnthropicProvider:
                 model_name="claude-3-5-sonnet@20240620",
             )
 
-            mock_cls.assert_called_once_with(project_id="test-project", region="us-east5")
+            mock_cls.assert_called_once_with(
+                project_id="test-project",
+                region="us-east5",
+                cache_enabled=True,
+            )
 
     def test_validate_provider_config_vertex_anthropic_accepted(self, monkeypatch):
         """Test that vertex_anthropic is accepted as a valid provider."""
@@ -396,6 +435,115 @@ class TestGetSubagentConfigs:
 
         config_state._config_loaded = False
         config_state._raw_yaml = None
+
+
+class TestCacheEnabled:
+    """Tests for model.enable_caching / MODEL_ENABLE_CACHING wiring."""
+
+    def test_enable_caching_in_defaults(self) -> None:
+        from monkeybot.core.config import DEFAULTS
+
+        assert DEFAULTS["MODEL_ENABLE_CACHING"] == "true"
+
+    def test_enable_caching_in_config_mapping(self) -> None:
+        assert CONFIG_MAPPING["model.enable_caching"] == "MODEL_ENABLE_CACHING"
+
+    def test_cache_enabled_from_env_default_true(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from monkeybot.core.config import cache_enabled_from_env
+
+        monkeypatch.delenv("MODEL_ENABLE_CACHING", raising=False)
+        assert cache_enabled_from_env() is True
+
+    @pytest.mark.parametrize("value", ["0", "false", "no", "off", "", "FALSE", " off "])
+    def test_cache_enabled_from_env_falsey_values(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        from monkeybot.core.config import cache_enabled_from_env
+
+        monkeypatch.setenv("MODEL_ENABLE_CACHING", value)
+        assert cache_enabled_from_env() is False
+
+    @pytest.mark.parametrize("value", ["1", "true", "yes", "on", "anything"])
+    def test_cache_enabled_from_env_truthy_values(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ) -> None:
+        from monkeybot.core.config import cache_enabled_from_env
+
+        monkeypatch.setenv("MODEL_ENABLE_CACHING", value)
+        assert cache_enabled_from_env() is True
+
+    def test_cache_enabled_from_yaml_false(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from monkeybot.core.config import cache_enabled_from_env, load_bot_config
+
+        bot_yaml = tmp_path / "bot.yaml"
+        bot_yaml.write_text(
+            "agent:\n  name: test\n"
+            "model:\n  provider: google_vertexai\n"
+            "  enable_caching: false\n"
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("MODEL_ENABLE_CACHING", raising=False)
+        config_state._config_loaded = False
+
+        load_bot_config()
+
+        assert os.environ["MODEL_ENABLE_CACHING"] == "False"
+        assert cache_enabled_from_env() is False
+
+        config_state._config_loaded = False
+
+    def test_get_provider_config_threads_cache_enabled_false(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from unittest.mock import MagicMock, patch
+
+        from monkeybot.core.config import get_provider_config
+
+        monkeypatch.setenv("GCP_PROJECT_ID", "test-project")
+        monkeypatch.setenv("ANTHROPIC_VERTEX_REGION", "us-central1")
+
+        mock_instance = MagicMock()
+        with patch(
+            "monkeybot.core.config.settings.VertexClaudeProvider",
+            return_value=mock_instance,
+        ) as mock_cls:
+            cfg = get_provider_config(
+                provider="vertex_anthropic",
+                model_name="claude-haiku-4-5",
+                cache_enabled=False,
+            )
+
+            assert cfg.provider is mock_instance
+            mock_cls.assert_called_once_with(
+                project_id="test-project",
+                region="us-central1",
+                cache_enabled=False,
+            )
+
+    def test_get_provider_config_resolves_cache_from_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from unittest.mock import MagicMock, patch
+
+        from monkeybot.core.config import get_provider_config
+
+        monkeypatch.setenv("MODEL_ENABLE_CACHING", "off")
+        monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+        mock_instance = MagicMock()
+        with patch(
+            "monkeybot.core.config.settings.OpenAIProvider",
+            return_value=mock_instance,
+        ) as mock_cls:
+            cfg = get_provider_config(provider="openai", model_name="gpt-5")
+
+            assert cfg.provider is mock_instance
+            mock_cls.assert_called_once_with(cache_enabled=False)
+
 
 class TestSandboxConfigMapping:
     """Verify sandbox.* keys are wired in CONFIG_MAPPING and DEFAULTS."""

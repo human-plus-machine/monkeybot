@@ -36,9 +36,13 @@ class SessionBus:
         created_at_ms: int,
         agent_md: str | None,
         replay_maxlen: int | None = None,
+        provider: Any | None = None,
+        model_name: str | None = None,
     ) -> None:
         self.created_at_ms = created_at_ms
         self.agent_md = agent_md
+        self.provider = provider
+        self.model_name = model_name
         self.current_request_id: str | None = None
         self.cancel_requested_for: str | None = None
         self._seq = 0
@@ -156,10 +160,23 @@ class SessionRegistry:
         """Return the bus for id or None."""
         return self._sessions.get(session_id)
 
-    def create(self, session_id: str, *, agent_md: str | None, created_at_ms: int) -> SessionBus:
+    def create(
+        self,
+        session_id: str,
+        *,
+        agent_md: str | None,
+        created_at_ms: int,
+        provider: Any | None = None,
+        model_name: str | None = None,
+    ) -> SessionBus:
         """Create a new session bus or raise SessionAlreadyExistsError."""
         if session_id in self._sessions:
             raise SessionAlreadyExistsError(session_id)
-        bus = SessionBus(created_at_ms=created_at_ms, agent_md=agent_md)
+        bus = SessionBus(
+            created_at_ms=created_at_ms,
+            agent_md=agent_md,
+            provider=provider,
+            model_name=model_name,
+        )
         self._sessions[session_id] = bus
         return bus

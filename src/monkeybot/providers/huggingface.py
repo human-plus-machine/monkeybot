@@ -67,7 +67,7 @@ class HuggingFaceProvider:
     def supports_streaming(self) -> bool:
         return True
 
-    def __init__(self) -> None:
+    def __init__(self, *, cache_enabled: bool = True) -> None:
         token = os.environ.get("HF_TOKEN", "")
         if not token:
             raise ValueError(
@@ -77,6 +77,7 @@ class HuggingFaceProvider:
         self._token = token
         self._endpoint_url = (os.environ.get("HF_ENDPOINT_URL") or "").rstrip("/")
         self._host = (os.environ.get("HF_BASE_URL") or _DEFAULT_HOST).rstrip("/")
+        self._cache_enabled = cache_enabled
 
     def _resolve_base_url(self, model: str) -> str:
         """Return the OpenAI-compat base URL for ``model``.

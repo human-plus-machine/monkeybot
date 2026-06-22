@@ -224,6 +224,7 @@ export async function fetchWorkspaceFile(
 
 export async function createSession(
   init?: RequestInit,
+  opts?: { model_provider?: string; model_name?: string },
 ): Promise<{ session_id: string; created_at: number }> {
   const res = await fetch(`${GATEWAY_BASE}/sessions`, {
     method: 'POST',
@@ -231,7 +232,10 @@ export async function createSession(
       'Content-Type': 'application/json',
       ...(init?.headers as Record<string, string>),
     },
-    body: JSON.stringify({}),
+    body: JSON.stringify({
+      ...(opts?.model_provider ? { model_provider: opts.model_provider } : {}),
+      ...(opts?.model_name ? { model_name: opts.model_name } : {}),
+    }),
     signal: init?.signal,
   })
   if (!res.ok) {

@@ -41,6 +41,15 @@ class CreateSessionRequest(BaseModel):
         description="Client id; server generates UUID when omitted.",
     )
     agent_md: str | None = Field(default=None, description="Optional AGENT.md path override.")
+    model_provider: str | None = Field(
+        default=None,
+        description="Canonical or alias provider id (e.g. 'openai', 'gemini', 'vertex-claude'). None → server env default.",
+    )
+    model_name: str | None = Field(
+        default=None,
+        max_length=200,
+        description="Model id for the chosen provider. None → server env default.",
+    )
 
 
 class CreateSessionResponse(BaseModel):
@@ -104,6 +113,8 @@ class SessionUsageResponse(BaseModel):
     input_tokens: int
     output_tokens: int
     cached_tokens: int
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
     cost_usd: float
     period_start: int
     period_end: int

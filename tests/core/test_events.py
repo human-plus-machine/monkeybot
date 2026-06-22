@@ -64,6 +64,43 @@ def test_agent_event_roundtrip_turn_complete() -> None:
     assert event_from_json(event_to_json(ev)) == ev
 
 
+def test_turn_complete_roundtrip_cache_fields() -> None:
+    ev = TurnComplete(
+        request_id="r1",
+        usage=UsageTotals(
+            cache_read_tokens=10,
+            cache_creation_tokens=4,
+            cached_tokens=14,
+        ),
+    )
+    assert event_from_json(event_to_json(ev)) == ev
+
+
+def test_usage_totals_from_legacy_dict_defaults_zero() -> None:
+    payload = (
+        '{"type":"TurnComplete","request_id":"r",'
+        '"usage":{"input_tokens":1,"output_tokens":2,"cached_tokens":3}}'
+    )
+    out = event_from_json(payload)
+    assert isinstance(out, TurnComplete)
+    assert out.usage.cache_read_tokens == 0
+    assert out.usage.cache_creation_tokens == 0
+
+
+def test_event_to_json_includes_cache_keys() -> None:
+    ev = TurnComplete(
+        request_id="r1",
+        usage=UsageTotals(cache_read_tokens=7, cache_creation_tokens=3),
+    )
+    parsed = json.loads(event_to_json(ev))
+    usage = parsed["usage"]
+    assert isinstance(usage, dict)
+    assert "cache_read_tokens" in usage
+    assert "cache_creation_tokens" in usage
+    assert usage["cache_read_tokens"] == 7
+    assert usage["cache_creation_tokens"] == 3
+
+
 def test_agent_event_roundtrip_error() -> None:
     ev = Error(request_id="r1", error="boom")
     assert event_from_json(event_to_json(ev)) == ev

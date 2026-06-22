@@ -7,6 +7,7 @@ import pytest
 from monkeybot.core.context import TurnContext
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.observability.spans import (
+    set_llm_usage,
     set_span_attribute_safe,
     span_llm,
     span_run,
@@ -127,6 +128,50 @@ async def test_span_tool_error_sets_error_attr(otel_memory_exporter) -> None:
     tool_spans = [s for s in otel_memory_exporter.get_finished_spans() if s.name == "monkeybot.tool"]
     assert tool_spans
     assert "error" in tool_spans[0].attributes
+
+
+@pytest.mark.asyncio
+async def test_set_llm_usage_records_cache_split_attributes(otel_memory_exporter) -> None:
+    from opentelemetry import trace
+
+    tracer = trace.get_tracer("test")
+    with tracer.start_as_current_span("x"):
+        set_llm_usage(
+            input_tokens=100,
+            output_tokens=20,
+            cache_read_tokens=10,
+            cache_creation_tokens=4,
+        )
+        attrs = dict(trace.get_current_span().attributes or {})
+    assert attrs.get("gen_ai.usage.cache_read_tokens") == 10
+    assert attrs.get("gen_ai.usage.cache_creation_tokens") == 4
+
+
+@pytest.mark.asyncio
+async def test_set_llm_usage_omits_zero_cache_attributes(otel_memory_exporter) -> None:
+    from opentelemetry import trace
+
+    tracer = trace.get_tracer("test")
+    with tracer.start_as_current_span("x"):
+        set_llm_usage(
+            input_tokens=100,
+            output_tokens=20,
+            cache_read_tokens=0,
+            cache_creation_tokens=0,
+        )
+        attrs = dict(trace.get_current_span().attributes or {})
+    assert "gen_ai.usage.cache_read_tokens" not in attrs
+    assert "gen_ai.usage.cache_creation_tokens" not in attrs
+
+
+def test_set_llm_usage_no_span_is_noop() -> None:
+    result = set_llm_usage(
+        input_tokens=100,
+        output_tokens=20,
+        cache_read_tokens=10,
+        cache_creation_tokens=4,
+    )
+    assert result is None
 
 
 @pytest.mark.asyncio

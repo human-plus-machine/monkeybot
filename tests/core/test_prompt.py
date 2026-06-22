@@ -124,6 +124,96 @@ def test_compose_harness_reflects_sandbox_env(monkeypatch: pytest.MonkeyPatch) -
     assert "OpenSandbox" in out_s
 
 
+def test_current_request_appears_after_harness() -> None:
+    ctx = _minimal_ctx()
+    msgs = [
+        Message(role="user", content=[Text(text="Do the thing")]),
+        Message(
+            role="assistant",
+            content=[ToolRequest(id="c1", name="read_file", args={})],
+        ),
+        Message(
+            role="user",
+            content=[
+                ToolResponse(
+                    id="c1",
+                    tool_name="read_file",
+                    result=[Text(text="ok")],
+                    is_error=False,
+                )
+            ],
+        ),
+    ]
+    out = compose_system_prompt(ctx, chat_messages=msgs)
+    assert "## Current request" in out
+    assert out.index("## Current request") > out.index("MonkeyBot harness")
+
+
+def test_stable_prefix_byte_identical_across_turns() -> None:
+    ctx = _minimal_ctx()
+
+    def _msgs_with_task(task_text: str) -> list[Message]:
+        return [
+            Message(role="user", content=[Text(text=task_text)]),
+            Message(
+                role="assistant",
+                content=[ToolRequest(id="c1", name="read_file", args={})],
+            ),
+            Message(
+                role="user",
+                content=[
+                    ToolResponse(
+                        id="c1",
+                        tool_name="read_file",
+                        result=[Text(text="ok")],
+                        is_error=False,
+                    )
+                ],
+            ),
+            Message(role="assistant", content=[Text(text="Processing")]),
+        ]
+
+    out_a = compose_system_prompt(ctx, chat_messages=_msgs_with_task("Follow-up A"))
+    out_b = compose_system_prompt(ctx, chat_messages=_msgs_with_task("Follow-up B"))
+    assert "## Current request" in out_a
+    assert "## Current request" in out_b
+    prefix_a = out_a[: out_a.index("## Current request")]
+    prefix_b = out_b[: out_b.index("## Current request")]
+    assert "MonkeyBot harness" in prefix_a
+    assert prefix_a == prefix_b
+
+
+def test_memory_skills_precede_harness() -> None:
+    ctx = _minimal_ctx(
+        memory_index=["Note A"],
+        skills=[SkillRef(name="s1", description="d1")],
+    )
+    msgs = [
+        Message(role="user", content=[Text(text="Do the thing")]),
+        Message(
+            role="assistant",
+            content=[ToolRequest(id="c1", name="read_file", args={})],
+        ),
+        Message(
+            role="user",
+            content=[
+                ToolResponse(
+                    id="c1",
+                    tool_name="read_file",
+                    result=[Text(text="ok")],
+                    is_error=False,
+                )
+            ],
+        ),
+    ]
+    out = compose_system_prompt(ctx, chat_messages=msgs)
+    mem_idx = out.index("## Memory index")
+    skills_idx = out.index("## Skills")
+    harness_idx = out.index("MonkeyBot harness")
+    current_idx = out.index("## Current request")
+    assert mem_idx < skills_idx < harness_idx < current_idx
+
+
 @pytest.mark.parametrize("include_task", [True, False])
 def test_harness_task_line_matches_tools(include_task: bool) -> None:
     tools: list[ToolDef] = []

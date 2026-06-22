@@ -53,6 +53,7 @@ DEFAULTS = {
     "MODEL_TEMPERATURE": "0.7",
     "MODEL_MAX_TOKENS": "60000",
     "MODEL_THINKING_BUDGET": "-1",
+    "MODEL_ENABLE_CACHING": "true",
     "PORT": "8080",
     "LOG_LEVEL": "INFO",
     "ENVIRONMENT": "development",
@@ -81,6 +82,7 @@ CONFIG_MAPPING = {
     "model.temperature": "MODEL_TEMPERATURE",
     "model.max_tokens": "MODEL_MAX_TOKENS",
     "model.thinking_budget": "MODEL_THINKING_BUDGET",
+    "model.enable_caching": "MODEL_ENABLE_CACHING",
     # Server
     "server.port": "PORT",
     "server.log_level": "LOG_LEVEL",
@@ -628,12 +630,34 @@ class ProviderConfig:
     model: str
 
 
+def cache_enabled_from_env() -> bool:
+    """True unless MODEL_ENABLE_CACHING is a falsey string (0/false/no/off/empty).
+
+    Returns:
+        False when MODEL_ENABLE_CACHING (case-insensitive, stripped) is one of
+        {"0", "false", "no", "off", ""}; True otherwise (including when unset → "true").
+    """
+    raw = os.getenv("MODEL_ENABLE_CACHING", "true").strip().lower()
+    return raw not in {"0", "false", "no", "off", ""}
+
+
+def _resolve_gcp_project_id() -> str:
+    """GCP project for Vertex providers (Gemini + Claude-on-Vertex share ADC project)."""
+    return (
+        (os.getenv("GCP_PROJECT_ID") or "").strip()
+        or (os.getenv("VERTEX_AI_PROJECT_ID") or "").strip()
+        or (os.getenv("ANTHROPIC_VERTEX_PROJECT_ID") or "").strip()
+        or (os.getenv("GOOGLE_CLOUD_PROJECT") or "").strip()
+    )
+
+
 def get_provider_config(
     provider: str | None = None,
     model_name: str | None = None,
     temperature: float | None = None,
     max_tokens: int | None = None,
     thinking_budget: int | None = None,
+    cache_enabled: bool | None = None,
 ) -> ProviderConfig:
     """Resolve a :class:`Provider` and model id from environment or explicit parameters.
 
@@ -674,6 +698,10 @@ def get_provider_config(
     thinking_budget = thinking_budget if thinking_budget is not None else int(
         os.getenv("MODEL_THINKING_BUDGET", "-1")
     )
+    resolved_cache = (
+        cache_enabled_from_env() if cache_enabled is None else cache_enabled
+    )
+    logger.debug("cache_enabled resolved to %s", resolved_cache)
 
     logger.info(
         "Initializing provider: provider=%s model=%s temp=%s max_tokens=%s thinking_budget=%s",
@@ -690,41 +718,55 @@ def get_provider_config(
                 temperature=temperature,
                 max_output_tokens=max_tokens,
                 thinking_budget=thinking_budget,
+                cache_enabled=resolved_cache,
             ),
             resolved_model,
         )
 
     if provider_key == "openai":
-        return ProviderConfig(OpenAIProvider(), resolved_model)
+        return ProviderConfig(
+            OpenAIProvider(cache_enabled=resolved_cache),
+            resolved_model,
+        )
 
     if provider_key == "anthropic":
-        return ProviderConfig(ClaudeProvider(), resolved_model)
+        return ProviderConfig(
+            ClaudeProvider(cache_enabled=resolved_cache),
+            resolved_model,
+        )
 
     if provider_key == "vertex_anthropic":
-        project = os.getenv("GCP_PROJECT_ID") or os.getenv("VERTEX_AI_PROJECT_ID")
+        project = _resolve_gcp_project_id()
         if not project:
             raise ValueError(
-                "vertex_anthropic provider requires GCP_PROJECT_ID or VERTEX_AI_PROJECT_ID. "
-                "Set gcp.project_id in bot.yaml or GCP_PROJECT_ID env var."
+                "vertex_anthropic provider requires a GCP project. "
+                "Set GCP_PROJECT_ID, VERTEX_AI_PROJECT_ID, ANTHROPIC_VERTEX_PROJECT_ID, "
+                "or GOOGLE_CLOUD_PROJECT (or gcp.project_id in bot.yaml)."
             )
-        region = (
-            os.getenv("VERTEX_AI_LOCATION")
-            or os.getenv("ANTHROPIC_VERTEX_REGION")
-            or "us-east5"
-        )
+        region = (os.getenv("ANTHROPIC_VERTEX_REGION") or "us-east5").strip() or "us-east5"
         return ProviderConfig(
-            VertexClaudeProvider(project_id=project, region=region),
+            VertexClaudeProvider(
+                project_id=project,
+                region=region,
+                cache_enabled=resolved_cache,
+            ),
             resolved_model,
         )
 
     if provider_key == "huggingface":
-        return ProviderConfig(HuggingFaceProvider(), resolved_model)
+        return ProviderConfig(
+            HuggingFaceProvider(cache_enabled=resolved_cache),
+            resolved_model,
+        )
 
     if provider_key == "aws_bedrock":
         from monkeybot.providers.bedrock import BedrockClaudeProvider  # noqa: PLC0415
 
         region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
-        return ProviderConfig(BedrockClaudeProvider(aws_region=region), resolved_model)
+        return ProviderConfig(
+            BedrockClaudeProvider(aws_region=region, cache_enabled=resolved_cache),
+            resolved_model,
+        )
 
     raise ValueError(
         f"Unsupported model provider: {provider_key}. "

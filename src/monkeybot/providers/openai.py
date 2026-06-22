@@ -53,9 +53,10 @@ class OpenAIProvider:
     def supports_streaming(self) -> bool:
         return True
 
-    def __init__(self) -> None:
+    def __init__(self, *, cache_enabled: bool = True) -> None:
         if not os.environ.get("OPENAI_API_KEY"):
             raise ValueError("OPENAI_API_KEY is not set")
+        self._cache_enabled = cache_enabled
 
     async def count_input_tokens(
         self,

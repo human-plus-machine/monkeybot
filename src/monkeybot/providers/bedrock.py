@@ -18,7 +18,12 @@ from monkeybot.core.llm.provider import (
 )
 from monkeybot.core.types.content_blocks import Text
 from monkeybot.core.types.types_tools import ToolDef
-from monkeybot.providers._utils import build_anthropic_messages, estimate_anthropic_input_tokens
+from monkeybot.providers._utils import (
+    build_anthropic_messages,
+    build_cached_system_blocks,
+    estimate_anthropic_input_tokens,
+    mark_last_tool_cached,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -38,6 +43,7 @@ class BedrockClaudeProvider:
         self,
         *,
         aws_region: str | None = None,
+        cache_enabled: bool = True,
     ) -> None:
         self._aws_region = (
             (aws_region or "").strip()
@@ -45,6 +51,7 @@ class BedrockClaudeProvider:
             or os.environ.get("AWS_DEFAULT_REGION", "").strip()
             or "us-east-1"
         )
+        self._cache_enabled = cache_enabled
 
     def _convert_tools(self, tools: Sequence[ToolDef]) -> list[dict[str, Any]]:
         return [
@@ -112,7 +119,17 @@ class BedrockClaudeProvider:
             msgs = msgs[1:]
 
         converted_messages = build_anthropic_messages(msgs)
-        converted_tools = self._convert_tools(tools) if tools else anthropic.NOT_GIVEN
+        converted = self._convert_tools(tools) if tools else None
+        if self._cache_enabled and system:
+            system_param: Any = build_cached_system_blocks(system)
+        else:
+            system_param = system or anthropic.NOT_GIVEN
+
+        if self._cache_enabled and converted:
+            tools_param: Any = mark_last_tool_cached(converted)
+        else:
+            tools_param = converted if converted else anthropic.NOT_GIVEN
+
         client = self._client()
 
         _tool_input_buf = ""
@@ -120,13 +137,15 @@ class BedrockClaudeProvider:
         _tool_name = ""
         input_tokens = 0
         output_tokens = 0
+        cache_read = 0
+        cache_creation = 0
 
         try:
             async with client.messages.stream(
                 model=model,
-                system=system or anthropic.NOT_GIVEN,
+                system=system_param,
                 messages=converted_messages,
-                tools=converted_tools,
+                tools=tools_param,
                 max_tokens=4096,
             ) as stream:
                 async for event in stream:
@@ -151,10 +170,36 @@ class BedrockClaudeProvider:
                                 _tool_id = _tool_name = _tool_input_buf = ""
                         case "message_delta":
                             if hasattr(event, "usage"):
-                                output_tokens = event.usage.output_tokens or 0
+                                output_tokens = int(
+                                    getattr(event.usage, "output_tokens", 0) or 0
+                                )
+                                _r = int(
+                                    getattr(event.usage, "cache_read_input_tokens", 0)
+                                    or 0
+                                )
+                                _c = int(
+                                    getattr(
+                                        event.usage, "cache_creation_input_tokens", 0
+                                    )
+                                    or 0
+                                )
+                                if _r:
+                                    cache_read = _r
+                                if _c:
+                                    cache_creation = _c
                         case "message_start":
                             if hasattr(event, "message") and event.message.usage:
-                                input_tokens = event.message.usage.input_tokens or 0
+                                usage = event.message.usage
+                                input_tokens = int(
+                                    getattr(usage, "input_tokens", 0) or 0
+                                )
+                                cache_read = int(
+                                    getattr(usage, "cache_read_input_tokens", 0) or 0
+                                )
+                                cache_creation = int(
+                                    getattr(usage, "cache_creation_input_tokens", 0)
+                                    or 0
+                                )
         except Exception as exc:
             _log.warning("Bedrock Claude stream error: %s", exc)
             raise
@@ -162,6 +207,8 @@ class BedrockClaudeProvider:
         yield UsageEvent(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
-            cached_tokens=0,
+            cache_read_tokens=cache_read,
+            cache_creation_tokens=cache_creation,
+            cached_tokens=cache_read + cache_creation,
         )
         yield Done()

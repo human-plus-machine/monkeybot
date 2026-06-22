@@ -138,6 +138,8 @@ class _UsageStoreAdapter(UsagePort):
             "input_tokens": s.input_tokens,
             "output_tokens": s.output_tokens,
             "cached_tokens": s.cached_tokens,
+            "cache_read_tokens": s.cache_read_tokens,
+            "cache_creation_tokens": s.cache_creation_tokens,
             "cost_usd": s.cost_usd,
             "period_start": s.period_start_ms if s.period_start_ms is not None else 0,
             "period_end": s.period_end_ms if s.period_end_ms is not None else 0,
@@ -165,6 +167,8 @@ class _StaticUsagePortZeros(UsagePort):
             "input_tokens": 0,
             "output_tokens": 0,
             "cached_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_creation_tokens": 0,
             "cost_usd": 0.0,
             "period_start": 0,
             "period_end": 0,
@@ -270,7 +274,7 @@ class GatewayLoopPort:
 
         mcp = _deps.mcp
         inspectors = _deps.inspectors
-        provider = _deps.provider
+        provider = bus.provider or _deps.provider
 
         if mcp is None or provider is None:
             logger.error("gateway deps not initialized")
@@ -299,7 +303,7 @@ class GatewayLoopPort:
 
         executor: CoreToolExecutor | None = None
         try:
-            model_name = os.environ.get("MODEL_NAME", "gemini-2.5-flash")
+            model_name = bus.model_name or os.environ.get("MODEL_NAME", "gemini-2.5-flash")
             agent_path = _default_agent_path(bus)
 
             workspace_root, skills_resolved = _resolved_workspace_paths()
@@ -361,6 +365,8 @@ class GatewayLoopPort:
                             input_tokens=u.input_tokens,
                             output_tokens=u.output_tokens,
                             cached_tokens=u.cached_tokens,
+                            cache_read_tokens=u.cache_read_tokens,
+                            cache_creation_tokens=u.cache_creation_tokens,
                             cost_usd=u.cost_usd,
                             duration_ms=u.duration_ms,
                             estimated_prompt_tokens=u.estimated_prompt_tokens,

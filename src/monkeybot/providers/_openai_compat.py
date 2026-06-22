@@ -179,6 +179,7 @@ async def iter_openai_compat_stream(
     """
     input_tokens = 0
     output_tokens = 0
+    cached_tokens = 0
     tool_buf: dict[int, dict[str, Any]] = {}
 
     try:
@@ -187,6 +188,8 @@ async def iter_openai_compat_stream(
             if chunk.usage is not None:
                 input_tokens = int(chunk.usage.prompt_tokens or 0)
                 output_tokens = int(chunk.usage.completion_tokens or 0)
+                details = getattr(chunk.usage, "prompt_tokens_details", None)
+                cached_tokens = int(getattr(details, "cached_tokens", 0) or 0)
             if not chunk.choices:
                 continue
             choice = chunk.choices[0]
@@ -222,10 +225,13 @@ async def iter_openai_compat_stream(
         _log.warning("OpenAI-compat stream error: %s", exc)
         raise
 
+    # OpenAI reports prompt_tokens incl. cached; subtract to avoid double-count (see 1C).
     yield UsageEvent(
-        input_tokens=input_tokens,
+        input_tokens=max(0, input_tokens - cached_tokens),
         output_tokens=output_tokens,
-        cached_tokens=0,
+        cached_tokens=cached_tokens,
+        cache_read_tokens=cached_tokens,
+        cache_creation_tokens=0,
     )
     yield Done()
 

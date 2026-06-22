@@ -186,3 +186,38 @@ def test_usage_from_totals_maps_turn_complete_fields() -> None:
     assert u.cost_usd == 0.5
     assert u.duration_ms == 100
     assert u.estimated_prompt_tokens == 99
+
+
+def test_usage_defaults_cache_fields_zero() -> None:
+    u = Usage()
+    assert u.cache_read_tokens == 0
+    assert u.cache_creation_tokens == 0
+
+
+def test_usage_from_totals_threads_cache_fields() -> None:
+    u = usage_from_totals(
+        UsageTotals(
+            cache_read_tokens=10,
+            cache_creation_tokens=4,
+            cached_tokens=14,
+        )
+    )
+    assert u.cache_read_tokens == 10
+    assert u.cache_creation_tokens == 4
+    assert u.cached_tokens == 14
+
+
+def test_usage_summary_defaults_cache_fields_zero() -> None:
+    s = UsageSummary(
+        turns=0,
+        input_tokens=0,
+        output_tokens=0,
+        cached_tokens=0,
+        cost_usd=0.0,
+        period_start_ms=None,
+        period_end_ms=None,
+        last_prompt_tokens=0,
+        last_estimated_prompt_tokens=0,
+    )
+    assert s.cache_read_tokens == 0
+    assert s.cache_creation_tokens == 0

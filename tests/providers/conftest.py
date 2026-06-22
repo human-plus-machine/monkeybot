@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.types.content_blocks import Text, ToolRequest, ToolResponse
 from monkeybot.core.types.types_tools import ToolDef
@@ -43,6 +45,25 @@ def typed_messages_four_turn() -> list[Message]:
         ),
         Message.text("assistant", "all set"),
     ]
+
+
+def make_anthropic_stream_mock(events: list[object]) -> MagicMock:
+    """Async context manager mock for ``client.messages.stream(...)``."""
+
+    class _AsyncStreamCM:
+        async def __aenter__(self) -> object:
+            async def _gen() -> object:
+                for event in events:
+                    yield event
+
+            return _gen()
+
+        async def __aexit__(self, *_exc: object) -> bool:
+            return False
+
+    client = MagicMock()
+    client.messages.stream = MagicMock(return_value=_AsyncStreamCM())
+    return client
 
 
 def typed_messages_turn_2b_tool_only() -> list[Message]:

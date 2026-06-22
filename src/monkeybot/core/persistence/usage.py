@@ -32,9 +32,9 @@ class SQLiteUsageStore:
                 thread_id, run_id, model,
                 input_tokens, output_tokens, cached_tokens,
                 cost_usd, duration_ms, created_at, context_json,
-                estimated_prompt_tokens
+                estimated_prompt_tokens, cache_read_tokens, cache_creation_tokens
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 thread_id,
@@ -48,6 +48,8 @@ class SQLiteUsageStore:
                 now_ms,
                 context_json,
                 usage.estimated_prompt_tokens,
+                usage.cache_read_tokens,
+                usage.cache_creation_tokens,
             ),
         )
         await self._conn.commit()
@@ -78,7 +80,9 @@ class SQLiteUsageStore:
                 COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
                 COALESCE(SUM(cost_usd), 0.0) AS cost_usd,
                 MIN(created_at) AS period_start_ms,
-                MAX(created_at) AS period_end_ms
+                MAX(created_at) AS period_end_ms,
+                COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens
             FROM turn_usage
             {where_sql}
         """
@@ -101,6 +105,8 @@ class SQLiteUsageStore:
                 period_end_ms=None,
                 last_prompt_tokens=0,
                 last_estimated_prompt_tokens=0,
+                cache_read_tokens=0,
+                cache_creation_tokens=0,
             )
 
         period_start = row[5]
@@ -138,4 +144,6 @@ class SQLiteUsageStore:
             period_end_ms=int(period_end) if period_end is not None else None,
             last_prompt_tokens=last_pt,
             last_estimated_prompt_tokens=last_est,
+            cache_read_tokens=int(row[7]),
+            cache_creation_tokens=int(row[8]),
         )

@@ -29,7 +29,7 @@ model:
 # and overrides GOOGLE_CLOUD_PROJECT when both are present.
 
 anthropic_vertex:
-  region: global
+  region: us-east5
 
 gateway:
   pending_response_timeout_sec: 300

@@ -83,7 +83,9 @@ class UsageEvent:
     kind: Literal["usage"] = "usage"
     input_tokens: int
     output_tokens: int
-    cached_tokens: int
+    cached_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
 
 
 @dataclass(frozen=True)

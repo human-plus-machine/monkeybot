@@ -45,6 +45,10 @@ model:
   max_tokens: 60000
   # Gemini: -1 = model default, 0 = off, N = token budget
   thinking_budget: -1
+  # Prompt caching of the stable prefix (AGENT.md + harness + tools). Default ON.
+  # Native per provider: Anthropic uses explicit cache_control; OpenAI/Gemini cache
+  # automatically. This flag toggles the explicit (Anthropic) behavior; set false to disable.
+  enable_caching: true
   # Summarisation trigger (tokens)
   context_window: 1000000
   max_turns: 50

@@ -11,13 +11,42 @@ from pathlib import Path
 
 import pytest
 
-from monkeybot.core.llm.provider import Done, Message, ProviderEvent, TextDelta
+from dataclasses import FrozenInstanceError
+
+from monkeybot.core.llm.provider import Done, Message, ProviderEvent, TextDelta, UsageEvent
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.types.content_blocks import Text
 from monkeybot.core.types.interfaces import LLMError
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers import gemini as gemini_mod
 from monkeybot.providers.gemini import GeminiProvider
+
+
+def test_usage_event_defaults_cache_split_to_zero() -> None:
+    event = UsageEvent(input_tokens=5, output_tokens=3, cached_tokens=0)
+    assert event.cache_read_tokens == 0
+    assert event.cache_creation_tokens == 0
+    assert event.cached_tokens == 0
+
+
+def test_usage_event_accepts_explicit_split() -> None:
+    event = UsageEvent(
+        input_tokens=5,
+        output_tokens=3,
+        cached_tokens=14,
+        cache_read_tokens=10,
+        cache_creation_tokens=4,
+    )
+    assert event.cache_read_tokens == 10
+    assert event.cache_creation_tokens == 4
+    assert event.cached_tokens == 14
+
+
+def test_usage_event_is_frozen() -> None:
+    event = UsageEvent(input_tokens=5, output_tokens=3, cached_tokens=0)
+    assert event.cache_read_tokens == 0
+    with pytest.raises(FrozenInstanceError):
+        event.cache_read_tokens = 1  # type: ignore[misc]
 
 
 async def _collect_fake(scripted: ScriptedFakeProvider) -> list[ProviderEvent]:

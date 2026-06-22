@@ -29,7 +29,13 @@ from monkeybot.core.runtime.events import (
     ToolCallResult,
     TurnComplete,
 )
-from monkeybot.core.runtime.loop import _chunk_tool_calls, run
+from monkeybot.core.llm.usage import Usage
+from monkeybot.core.runtime.loop import (
+    _chunk_tool_calls,
+    _merge_usage_event,
+    _usage_to_totals,
+    run,
+)
 from monkeybot.core.testing.mocks_provider import fake_provider_prompt_tokens
 from monkeybot.core.tools.inspector import Decision
 from monkeybot.core.types.content_blocks import Text, ToolRequest, ToolResponse
@@ -233,6 +239,122 @@ async def test_run_no_tools_yields_assistant_then_turn_complete() -> None:
     assert events[-1].usage.input_tokens == 1
     assert events[-1].usage.output_tokens == 2
     assert events[-1].usage.cached_tokens == 3
+
+
+def test_merge_usage_event_accumulates_cache_fields() -> None:
+    usage = Usage()
+    ev = UsageEvent(
+        input_tokens=0,
+        output_tokens=0,
+        cached_tokens=14,
+        cache_read_tokens=10,
+        cache_creation_tokens=4,
+    )
+    _merge_usage_event(usage, ev)
+    assert usage.cache_read_tokens == 10
+    assert usage.cache_creation_tokens == 4
+    assert usage.cached_tokens == 14
+
+
+def test_usage_to_totals_carries_cache_fields() -> None:
+    usage = Usage(cache_read_tokens=10, cache_creation_tokens=4)
+    totals = _usage_to_totals(usage)
+    assert totals.cache_read_tokens == 10
+    assert totals.cache_creation_tokens == 4
+
+
+@pytest.mark.asyncio
+async def test_run_computes_cost_for_priced_model() -> None:
+    prov = FakeProvider(
+        [
+            [
+                UsageEvent(input_tokens=1_000_000, output_tokens=0, cached_tokens=0),
+                Done(),
+            ]
+        ]
+    )
+    hist = FakeHistory()
+    ctx = _ctx(model="gpt-5")
+    events = []
+    async for e in run(
+        "m",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        max_turns=3,
+    ):
+        events.append(e)
+    tc = events[-1]
+    assert isinstance(tc, TurnComplete)
+    assert tc.usage.cost_usd == pytest.approx(1.25)
+    assert tc.usage.cost_usd > 0
+
+
+@pytest.mark.asyncio
+async def test_run_cost_zero_for_unknown_model() -> None:
+    prov = FakeProvider(
+        [
+            [
+                UsageEvent(input_tokens=1000, output_tokens=500, cached_tokens=0),
+                Done(),
+            ]
+        ]
+    )
+    hist = FakeHistory()
+    ctx = _ctx(model="totally-unknown-model")
+    events = []
+    async for e in run(
+        "m",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        max_turns=3,
+    ):
+        events.append(e)
+    tc = events[-1]
+    assert isinstance(tc, TurnComplete)
+    assert tc.usage.input_tokens == 1000
+    assert tc.usage.output_tokens == 500
+    assert tc.usage.cost_usd == 0.0
+
+
+@pytest.mark.asyncio
+async def test_run_turn_complete_carries_cache_split() -> None:
+    prov = FakeProvider(
+        [
+            [
+                UsageEvent(
+                    input_tokens=0,
+                    output_tokens=0,
+                    cached_tokens=14,
+                    cache_read_tokens=10,
+                    cache_creation_tokens=4,
+                ),
+                Done(),
+            ]
+        ]
+    )
+    hist = FakeHistory()
+    ctx = _ctx()
+    events = []
+    async for e in run(
+        "m",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        max_turns=3,
+    ):
+        events.append(e)
+    tc = events[-1]
+    assert isinstance(tc, TurnComplete)
+    assert tc.usage.cache_read_tokens == 10
+    assert tc.usage.cache_creation_tokens == 4
 
 
 @pytest.mark.asyncio
