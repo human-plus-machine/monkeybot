@@ -122,6 +122,8 @@ function formatUsd(n: number): string {
 
 const DEFAULT_CONTEXT_WINDOW = 200_000
 
+// Playground dev defaults — provider API model ids (some preview). Each option needs
+// matching credentials in playground/agent/.env (OPENAI_API_KEY, GCP ADC, etc.).
 const MODEL_OPTIONS = [
   { label: 'OpenAI', provider: 'openai', model: 'gpt-5' },
   { label: 'Vertex Gemini', provider: 'gemini', model: 'gemini-3-flash-preview' },

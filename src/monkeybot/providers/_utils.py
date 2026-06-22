@@ -119,16 +119,8 @@ def mark_last_tool_cached(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [*tools[:-1], marked_last]
 
 
-def build_anthropic_messages(
-    messages: Sequence[Message], *, cache_last_block: bool = False
-) -> list[dict[str, Any]]:
-    """Convert harness messages to Anthropic ``messages`` API shape (no string parsing).
-
-    Args:
-        cache_last_block: Reserved for a future message-level cache breakpoint.
-            Phase 1B leaves this False (no message-level marker emitted). When
-            False, behavior is byte-identical to today.
-    """
+def build_anthropic_messages(messages: Sequence[Message]) -> list[dict[str, Any]]:
+    """Convert harness messages to Anthropic ``messages`` API shape (no string parsing)."""
     out: list[dict[str, Any]] = []
     for m in messages:
         role = getattr(m, "role", None)

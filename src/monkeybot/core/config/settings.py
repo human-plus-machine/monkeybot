@@ -743,6 +743,11 @@ def get_provider_config(
                 "Set GCP_PROJECT_ID, VERTEX_AI_PROJECT_ID, ANTHROPIC_VERTEX_PROJECT_ID, "
                 "or GOOGLE_CLOUD_PROJECT (or gcp.project_id in bot.yaml)."
             )
+        if os.getenv("VERTEX_AI_LOCATION"):
+            logger.warning(
+                "VERTEX_AI_LOCATION is no longer read for vertex_anthropic; "
+                "set ANTHROPIC_VERTEX_REGION instead"
+            )
         region = (os.getenv("ANTHROPIC_VERTEX_REGION") or "us-east5").strip() or "us-east5"
         return ProviderConfig(
             VertexClaudeProvider(

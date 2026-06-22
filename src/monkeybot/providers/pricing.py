@@ -7,6 +7,8 @@ import logging
 _log = logging.getLogger(__name__)
 
 # USD per 1M tokens: (input, output, cache_write, cache_read)
+# TODO: add Bedrock model entries — aws_bedrock users get cost_usd 0.0 until then.
+# Gemini-on-Vertex uses the same gemini-* keys when the model id matches.
 MODEL_PRICING: dict[str, tuple[float, float, float, float]] = {
     "claude-sonnet-4": (3.00, 15.00, 3.75, 0.30),
     "claude-haiku-4-5": (1.00, 5.00, 1.25, 0.10),

@@ -142,6 +142,31 @@ class TestVertexAnthropicProvider:
                 cache_enabled=True,
             )
 
+    def test_get_provider_config_vertex_anthropic_warns_on_vertex_ai_location(
+        self, monkeypatch, caplog
+    ):
+        from unittest.mock import MagicMock, patch
+
+        from monkeybot.core.config import get_provider_config
+
+        monkeypatch.setenv("GCP_PROJECT_ID", "test-project")
+        monkeypatch.setenv("VERTEX_AI_LOCATION", "europe-west4")
+        monkeypatch.delenv("ANTHROPIC_VERTEX_REGION", raising=False)
+
+        with patch(
+            "monkeybot.core.config.settings.VertexClaudeProvider",
+            return_value=MagicMock(),
+        ):
+            with caplog.at_level("WARNING"):
+                get_provider_config(
+                    provider="vertex_anthropic",
+                    model_name="claude-3-5-sonnet@20240620",
+                )
+
+        assert any(
+            "VERTEX_AI_LOCATION is no longer read" in r.message for r in caplog.records
+        )
+
     def test_validate_provider_config_vertex_anthropic_accepted(self, monkeypatch):
         """Test that vertex_anthropic is accepted as a valid provider."""
         from monkeybot.core.config import _validate_provider_config

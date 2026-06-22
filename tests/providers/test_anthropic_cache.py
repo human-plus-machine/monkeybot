@@ -137,13 +137,6 @@ def test_mark_last_tool_cached_empty_returns_unchanged() -> None:
     assert mark_last_tool_cached([]) == []
 
 
-def test_build_anthropic_messages_cache_last_block_false_is_noop() -> None:
-    messages = typed_messages_four_turn()
-    baseline = build_anthropic_messages(messages)
-    with_flag = build_anthropic_messages(messages, cache_last_block=False)
-    assert with_flag == baseline
-
-
 # --- Task 2: ClaudeProvider ---
 
 

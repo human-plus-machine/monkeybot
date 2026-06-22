@@ -84,6 +84,8 @@ npm run dev
 
 Open the URL Vite prints (usually `http://localhost:5173`). The UI proxies API calls to the gateway via `/__mb_gateway`; by default the dev server targets **`http://127.0.0.1:8787`**. If your gateway runs elsewhere, set `VITE_GATEWAY_TARGET` in `playground/chat-ui/.env.local` (see `env.local.sample`).
 
+The chat UI includes a per-session **model selector** (`gpt-5`, `gemini-3-flash-preview`, `claude-haiku-4-5`). These are the current provider API ids (some are preview names); without the matching keys or GCP credentials in `playground/agent/.env`, those options return `MODEL_UNAVAILABLE` — that is expected until you configure the provider.
+
 More detail: [Getting Started](docs/getting-started.md).
 
 ---
