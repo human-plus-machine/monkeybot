@@ -55,6 +55,16 @@ Harness defaults and comments: **`monkeybot_config/monkeybot.example.yaml`** (co
 
 The repo includes a minimal **SSE gateway** (Python) and **chat UI** (Vite + React) under `playground/`. Run both for a browser session against your local prompt and SQLite.
 
+**One command (backend + UI)** — from the repository root:
+
+```bash
+./run-playground.sh
+```
+
+Starts `playground/agent/run.sh` (gateway, OpenSandbox, observability Docker stacks) and the Vite dev server. Open `http://localhost:5173` when ready. Ctrl+C stops both. Set `SKIP_OBSERVABILITY=1` or `SKIP_OPENSANDBOX=1` to skip Docker services.
+
+**Or run separately:**
+
 **1. Backend (gateway)** — from the repository root:
 
 ```bash

@@ -168,9 +168,10 @@ def _is_tool_unsupported_error(exc: BaseException) -> bool:
     try:
         from openai import APIStatusError  # noqa: PLC0415
     except ImportError:
-        APIStatusError = None  # type: ignore[misc, assignment]
+        msg = str(exc).lower()
+        return "tool" in msg and "unsupported" in msg
 
-    if APIStatusError is not None and isinstance(exc, APIStatusError):
+    if isinstance(exc, APIStatusError):
         if exc.status_code not in (400, 422):
             return False
         body = str(exc.body or exc.message or "").lower()

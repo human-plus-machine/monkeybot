@@ -38,6 +38,27 @@ export type GatewayJsonEvent = {
   name?: string
   notification_type?: string
   msg?: string
+  attachment_id?: string
+  filename?: string
+  description?: string
+}
+
+/** Wire shapes for POST /reply ``content`` (camelCase per ContentBlock serde). */
+export type ContentBlockWire =
+  | { type: 'text'; text: string }
+  | {
+      type: 'attachmentRef'
+      attachmentId: string
+      mimeType: string
+      metadata?: Record<string, unknown>
+    }
+
+export type AttachmentUploadResponse = {
+  attachment_id: string
+  mime_type: string
+  size_bytes: number
+  filename: string
+  created_at: number
 }
 
 export type SessionUsageResponse = {
@@ -248,7 +269,7 @@ export async function createSession(
 export async function postReply(
   sessionId: string,
   requestId: string,
-  message: string,
+  content: ContentBlockWire[],
   init?: RequestInit,
 ): Promise<void> {
   const res = await fetch(`${GATEWAY_BASE}/sessions/${encodeURIComponent(sessionId)}/reply`, {
@@ -257,13 +278,45 @@ export async function postReply(
       'Content-Type': 'application/json',
       ...(init?.headers as Record<string, string>),
     },
-    body: JSON.stringify({ request_id: requestId, message }),
+    body: JSON.stringify({ request_id: requestId, content }),
     signal: init?.signal,
   })
   if (!res.ok) {
     const text = await res.text()
     throw new Error(`reply failed: ${res.status} ${text}`)
   }
+}
+
+/** Text-only reply (legacy shape). */
+export async function postReplyText(
+  sessionId: string,
+  requestId: string,
+  message: string,
+  init?: RequestInit,
+): Promise<void> {
+  return postReply(sessionId, requestId, [{ type: 'text', text: message }], init)
+}
+
+export async function postAttachment(
+  sessionId: string,
+  file: File,
+  init?: RequestInit,
+): Promise<AttachmentUploadResponse> {
+  const form = new FormData()
+  form.append('file', file, file.name)
+  const res = await fetch(
+    `${GATEWAY_BASE}/sessions/${encodeURIComponent(sessionId)}/attachments`,
+    {
+      method: 'POST',
+      body: form,
+      signal: init?.signal,
+    },
+  )
+  const text = await res.text()
+  if (!res.ok) {
+    throw new Error(`attachment upload failed: ${gatewayErrorDetail(res.status, text)}`)
+  }
+  return JSON.parse(text) as AttachmentUploadResponse
 }
 
 export async function postCancel(

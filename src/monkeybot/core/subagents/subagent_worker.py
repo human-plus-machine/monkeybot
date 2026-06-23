@@ -7,12 +7,14 @@ import logging
 import os
 import sys
 import uuid
+from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any, cast
 
 from dotenv import load_dotenv
 
 from monkeybot.core.config.settings import get_provider_config, normalize_model_provider
-from monkeybot.core.context import build_context
+from monkeybot.core.context import TurnContext, build_context
 from monkeybot.core.llm.provider import (
     Done,
     Provider,
@@ -24,8 +26,8 @@ from monkeybot.core.llm.provider import (
 from monkeybot.core.mcp.mcp_client import MCPClient
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.persistence.backends import create_storage_backend
-from monkeybot.core.runtime.events import Error, event_to_json
-from monkeybot.core.runtime.loop import run as run_loop
+from monkeybot.core.runtime.events import AgentEvent, Error, event_to_json
+from monkeybot.core.runtime.loop import ConversationHistoryPort, run as run_loop
 from monkeybot.core.subagents.subagent_proto import SubagentEnvelope
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
@@ -72,7 +74,7 @@ def _detach_trace(token: object | None) -> None:
     try:
         from opentelemetry import context as otel_context
 
-        otel_context.detach(token)
+        otel_context.detach(cast(Any, token))
     except Exception:
         return
 
@@ -105,15 +107,15 @@ def _clear_span_exporter_buffer() -> None:
 
 async def _stream_run_loop_events(
     body: str,
-    ctx: object,
+    ctx: TurnContext,
     *,
-    provider: object,
-    history: object,
+    provider: Provider,
+    history: ConversationHistoryPort,
     inspectors: list[ToolInspector],
     tool_executor: CoreToolExecutor,
     run_id: str,
     max_turns: int,
-):
+) -> AsyncIterator[AgentEvent]:
     if run_loop is _BUILTIN_RUN_LOOP:
         async for evt in run_loop(
             body,
@@ -131,7 +133,7 @@ async def _stream_run_loop_events(
 
     from monkeybot.observability.spans import span_run
 
-    async with span_run(ctx, user_message=body):  # type: ignore[arg-type]
+    async with span_run(ctx, user_message=body):
         async for evt in run_loop(
             body,
             ctx,
@@ -210,7 +212,7 @@ async def _async_main() -> None:
         raise SystemExit(1)
 
     envelope = SubagentEnvelope.from_json(raw)
-    attach_token = _attach_trace_from_envelope(envelope)
+    attach_token: object | None = _attach_trace_from_envelope(envelope)
     reset_token: object | None = None
 
     ws = Path(os.environ["MONKEYBOT_SUBAGENT_WORKSPACE"]).resolve()

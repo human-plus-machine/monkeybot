@@ -18,6 +18,7 @@ from httpx import ASGITransport, AsyncClient
 from starlette.testclient import TestClient
 
 from monkeybot.core.runtime.events import AssistantDelta, Thinking, TurnComplete, UsageTotals
+from monkeybot.core.types.content_blocks import Text
 from monkeybot.gateway.sse.loop_port import UsagePort
 from monkeybot.gateway.sse.models import SessionUsageResponse
 from monkeybot.gateway.sse.routes import create_app
@@ -35,9 +36,9 @@ class FakeLoopPort:
         self,
         session_id: str,
         request_id: str,
-        message: str,
+        user_content: list[Text],
     ) -> None:
-        _ = message
+        _ = user_content
         bus = self._registry.get(session_id)
         if bus is None:
             return
@@ -81,9 +82,9 @@ class HoldingLoopPort:
         self,
         session_id: str,
         request_id: str,
-        message: str,
+        user_content: list[Text],
     ) -> None:
-        _ = (session_id, request_id, message)
+        _ = (session_id, request_id, user_content)
         await self._hold.wait()
 
 

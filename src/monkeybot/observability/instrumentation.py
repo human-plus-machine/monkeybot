@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator, Sequence
-from typing import Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 from monkeybot.core.context import TurnContext
 from monkeybot.core.llm.provider import Message, Provider, ProviderEvent, ToolDef
@@ -12,6 +12,9 @@ from monkeybot.observability._state import is_observability_enabled
 from monkeybot.observability.spans import span_llm
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from fastapi import FastAPI
 
 HookPhase = Literal["pre_tool", "post_tool"]
 
@@ -87,8 +90,8 @@ def instrument_fastapi_app(app: object) -> None:
             "FastAPI OpenTelemetry instrumentation unavailable (install [observability] extra)"
         )
         return
-    FastAPIInstrumentor().instrument_app(app)
-    app._monkeybot_otel_fastapi_instrumented = True
+    FastAPIInstrumentor().instrument_app(cast("FastAPI", app))
+    setattr(app, "_monkeybot_otel_fastapi_instrumented", True)
 
 
 def get_current_trace_id_hex_optional() -> str | None:

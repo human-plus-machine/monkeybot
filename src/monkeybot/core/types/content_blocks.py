@@ -275,19 +275,111 @@ class Image(ContentBlock):
     TYPE: ClassVar[str] = "image"
     mime_type: str
     data: str
+    metadata: dict[str, object] | None = None
 
     def to_dict(self) -> dict[str, object]:
-        return {
-            "type": self.TYPE,
-            "mimeType": self.mime_type,
-            "data": self.data,
-        }
+        return _drop_none(
+            {
+                "type": self.TYPE,
+                "mimeType": self.mime_type,
+                "data": self.data,
+                "metadata": self.metadata,
+            }
+        )
 
     @classmethod
     def _from_dict_payload(cls, payload: Mapping[str, object]) -> Self:
         return cls(
             mime_type=_require_str(payload, "mimeType", context="Image"),
             data=_require_str(payload, "data", context="Image"),
+            metadata=_optional_dict(payload, "metadata", context="Image"),
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
+class File(ContentBlock):
+    """Base64 document payload (e.g. PDF)."""
+
+    TYPE: ClassVar[str] = "file"
+    mime_type: str
+    data: str
+    metadata: dict[str, object] | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return _drop_none(
+            {
+                "type": self.TYPE,
+                "mimeType": self.mime_type,
+                "data": self.data,
+                "metadata": self.metadata,
+            }
+        )
+
+    @classmethod
+    def _from_dict_payload(cls, payload: Mapping[str, object]) -> Self:
+        return cls(
+            mime_type=_require_str(payload, "mimeType", context="File"),
+            data=_require_str(payload, "data", context="File"),
+            metadata=_optional_dict(payload, "metadata", context="File"),
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
+class AttachmentRef(ContentBlock):
+    """Reference to a session-scoped uploaded attachment (client / pre-freeze user turn)."""
+
+    TYPE: ClassVar[str] = "attachmentRef"
+    attachment_id: str
+    mime_type: str
+    metadata: dict[str, object] | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return _drop_none(
+            {
+                "type": self.TYPE,
+                "attachmentId": self.attachment_id,
+                "mimeType": self.mime_type,
+                "metadata": self.metadata,
+            }
+        )
+
+    @classmethod
+    def _from_dict_payload(cls, payload: Mapping[str, object]) -> Self:
+        return cls(
+            attachment_id=_require_str(payload, "attachmentId", context="AttachmentRef"),
+            mime_type=_require_str(payload, "mimeType", context="AttachmentRef"),
+            metadata=_optional_dict(payload, "metadata", context="AttachmentRef"),
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
+class AttachmentDescriptor(ContentBlock):
+    """Structured attachment metadata for SSE/UI (not persisted in history)."""
+
+    TYPE: ClassVar[str] = "attachmentDescriptor"
+    attachment_id: str
+    mime_type: str
+    description: str
+    metadata: dict[str, object] | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return _drop_none(
+            {
+                "type": self.TYPE,
+                "attachmentId": self.attachment_id,
+                "mimeType": self.mime_type,
+                "description": self.description,
+                "metadata": self.metadata,
+            }
+        )
+
+    @classmethod
+    def _from_dict_payload(cls, payload: Mapping[str, object]) -> Self:
+        return cls(
+            attachment_id=_require_str(payload, "attachmentId", context="AttachmentDescriptor"),
+            mime_type=_require_str(payload, "mimeType", context="AttachmentDescriptor"),
+            description=_require_str(payload, "description", context="AttachmentDescriptor"),
+            metadata=_optional_dict(payload, "metadata", context="AttachmentDescriptor"),
         )
 
 
@@ -514,6 +606,9 @@ _DISPATCH.update(
     {
         "text": Text,
         "image": Image,
+        "file": File,
+        "attachmentRef": AttachmentRef,
+        "attachmentDescriptor": AttachmentDescriptor,
         "toolRequest": ToolRequest,
         "toolResponse": ToolResponse,
         "toolConfirmationRequest": ToolConfirmationRequest,
@@ -529,9 +624,12 @@ _DISPATCH.update(
 __all__ = [
     "ActionRequired",
     "ActionRequiredData",
+    "AttachmentDescriptor",
+    "AttachmentRef",
     "ContentBlock",
     "ElicitationAction",
     "ElicitationResponseAction",
+    "File",
     "FrontendToolRequest",
     "Image",
     "RedactedThinking",

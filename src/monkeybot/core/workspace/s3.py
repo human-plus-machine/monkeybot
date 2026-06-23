@@ -16,7 +16,7 @@ class S3WorkspaceStorage:
     """Object-prefix layout: ``s3://bucket/{prefix}/{path}``."""
 
     def __init__(self, bucket: str, prefix: str = "") -> None:
-        import boto3  # type: ignore[import-untyped]
+        import boto3
 
         self._s3 = boto3.client("s3")
         self._bucket = bucket
@@ -33,7 +33,8 @@ class S3WorkspaceStorage:
 
         def _read() -> str:
             resp = self._s3.get_object(Bucket=self._bucket, Key=key)
-            return resp["Body"].read().decode("utf-8")
+            body: bytes = resp["Body"].read()
+            return body.decode("utf-8")
 
         try:
             return await asyncio.to_thread(_read)

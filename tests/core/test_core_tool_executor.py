@@ -14,6 +14,7 @@ from monkeybot.core.llm.provider import Done, TextDelta, ToolCall, UsageEvent
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
+from monkeybot.core.tools.types import unwrap_tool_execution_result
 from monkeybot.core.workspace import create_workspace_storage
 
 
@@ -104,30 +105,33 @@ async def test_read_file_and_write_file(tmp_path: Path) -> None:
         mcp=_NoMCP(),
     )
     ctx = _ctx()
-    r1, e1 = await ex.execute(
+    r1, e1 = unwrap_tool_execution_result(
+        await ex.execute(
         call=ToolCall(call_id="1", name="read_file", args={"path": "hello.txt"}),
         ctx=ctx,
-    )
+    ))
     assert e1 is not None
     err1 = json.loads(e1)
     assert err1["ok"] is False
     assert err1["error_kind"] == "validation"
     assert "Not a file" in err1["message"]
 
-    w, ew = await ex.execute(
+    w, ew = unwrap_tool_execution_result(
+        await ex.execute(
         call=ToolCall(
             call_id="2",
             name="write_file",
             args={"path": "hello.txt", "content": "abc\n"},
         ),
         ctx=ctx,
-    )
+    ))
     assert ew is None and w is not None and '"ok": true' in w
 
-    r2, e2 = await ex.execute(
+    r2, e2 = unwrap_tool_execution_result(
+        await ex.execute(
         call=ToolCall(call_id="3", name="read_file", args={"path": "hello.txt", "limit": 10}),
         ctx=ctx,
-    )
+    ))
     assert e2 is None and r2 is not None and "abc" in r2
 
 
@@ -146,10 +150,10 @@ async def test_search_memory(tmp_path: Path) -> None:
         mcp=_NoMCP(),
     )
     ctx = _ctx()
-    out, err = await ex.execute(
+    out, err = unwrap_tool_execution_result(await ex.execute(
         call=ToolCall(call_id="1", name="search_memory", args={"query": "alpha"}),
         ctx=ctx,
-    )
+    ))
     assert err is None and out is not None
     assert "alpha" in out
     assert "a.md" in out
@@ -169,10 +173,10 @@ async def test_list_skills_uses_context(tmp_path: Path) -> None:
         mcp=_NoMCP(),
     )
     sk = [SkillRef(name="n", description="d")]
-    out, err = await ex.execute(
+    out, err = unwrap_tool_execution_result(await ex.execute(
         call=ToolCall(call_id="1", name="list_skills", args={}),
         ctx=_ctx(skills=sk),
-    )
+    ))
     assert err is None and out is not None
     payload = json.loads(out)
     assert payload["skills"] == [{"name": "n", "description": "d"}]
@@ -192,14 +196,14 @@ async def test_run_command_cat_under_memory(tmp_path: Path, monkeypatch: pytest.
         skills_path=skills,
         mcp=_NoMCP(),
     )
-    out, err = await ex.execute(
+    out, err = unwrap_tool_execution_result(await ex.execute(
         call=ToolCall(
             call_id="1",
             name="run_command",
             args={"argv": ["cat", "./data/memory/f.md"]},
         ),
         ctx=_ctx(),
-    )
+    ))
     assert err is None and out is not None and "inside" in out
 
 
@@ -218,14 +222,14 @@ async def test_run_command_blocked_command_returns_policy_envelope(
         skills_path=skills,
         mcp=_NoMCP(),
     )
-    out, err = await ex.execute(
+    out, err = unwrap_tool_execution_result(await ex.execute(
         call=ToolCall(
             call_id="1",
             name="run_command",
             args={"argv": ["curl", "http://example.com"]},
         ),
         ctx=_ctx(),
-    )
+    ))
     assert out is None and err is not None
     payload = json.loads(err)
     assert payload["ok"] is False
@@ -250,14 +254,14 @@ async def test_run_command_blocked_path_returns_policy_envelope(
         skills_path=skills,
         mcp=_NoMCP(),
     )
-    out, err = await ex.execute(
+    out, err = unwrap_tool_execution_result(await ex.execute(
         call=ToolCall(
             call_id="1",
             name="run_command",
             args={"argv": ["cat", "./forbidden/x.txt"]},
         ),
         ctx=_ctx(),
-    )
+    ))
     assert out is None and err is not None
     payload = json.loads(err)
     assert payload["ok"] is False
@@ -280,10 +284,10 @@ async def test_run_command_malformed_args_returns_validation_envelope(
         skills_path=skills,
         mcp=_NoMCP(),
     )
-    out, err = await ex.execute(
+    out, err = unwrap_tool_execution_result(await ex.execute(
         call=ToolCall(call_id="1", name="run_command", args={}),
         ctx=_ctx(),
-    )
+    ))
     assert out is None and err is not None
     payload = json.loads(err)
     assert payload["ok"] is False
@@ -300,10 +304,10 @@ async def test_unknown_tool(tmp_path: Path) -> None:
         mcp=_NoMCP(),
     )
     (tmp_path / "s").mkdir(exist_ok=True)
-    out, err = await ex.execute(
+    out, err = unwrap_tool_execution_result(await ex.execute(
         call=ToolCall(call_id="1", name="not_a_real_tool", args={}),
         ctx=_ctx(),
-    )
+    ))
     assert out is None and err is not None
     err_obj = json.loads(err)
     assert err_obj["ok"] is False
@@ -362,14 +366,14 @@ async def test_task_tool_aggregates_subagent_stream(tmp_path: Path, monkeypatch:
         mcp=_NoMCP(),
     )
     ctx = _ctx()
-    out, err = await ex.execute(
+    out, err = unwrap_tool_execution_result(await ex.execute(
         call=ToolCall(
             call_id="c99",
             name="task",
             args={"task": "do the thing", "context": "ctx line"},
         ),
         ctx=ctx,
-    )
+    ))
     assert err is None and out is not None
     payload = json.loads(out)
     assert payload["ok"] is True
@@ -430,7 +434,9 @@ async def test_task_tool_parent_cancel_stops_hanging_subagent(tmp_path: Path, mo
     await asyncio.sleep(0.05)
     parent_cancel.set()
     try:
-        out, err = await asyncio.wait_for(exec_task, timeout=5.0)
+        out, err = unwrap_tool_execution_result(
+            await asyncio.wait_for(exec_task, timeout=5.0)
+        )
     finally:
         hang.set()
 
@@ -470,7 +476,7 @@ async def test_list_skills_spills_large_json(tmp_path: Path) -> None:
         mcp=_NoMCP(),
     )
     ctx = _ctx(skills=big_skills)
-    out, err = await ex.execute(call=ToolCall(call_id="c-spill", name="list_skills", args={}), ctx=ctx)
+    out, err = unwrap_tool_execution_result(await ex.execute(call=ToolCall(call_id="c-spill", name="list_skills", args={}), ctx=ctx))
     assert err is None and out is not None
     assert len(out) <= 20_500
     spill = root / ".monkeybot" / "spill" / "t" / "c-spill.txt"
@@ -488,7 +494,7 @@ async def test_list_skills_small_no_spill(tmp_path: Path) -> None:
     skills.mkdir()
     ex = CoreToolExecutor(workspace_root=root, memory=_mem_sub(mem), skills_path=skills, mcp=_NoMCP())
     ctx = _ctx()
-    out, err = await ex.execute(call=ToolCall(call_id="c1", name="list_skills", args={}), ctx=ctx)
+    out, err = unwrap_tool_execution_result(await ex.execute(call=ToolCall(call_id="c1", name="list_skills", args={}), ctx=ctx))
     assert err is None and out is not None
     assert not (root / ".monkeybot" / "spill").exists()
 
@@ -505,14 +511,14 @@ async def test_read_file_spill_path_caps_limit(tmp_path: Path) -> None:
     spill.write_text("\n".join(f"line{i}" for i in range(600)), encoding="utf-8")
     ex = CoreToolExecutor(workspace_root=root, memory=_mem_sub(mem), skills_path=skills, mcp=_NoMCP())
     ctx = _ctx()
-    out, err = await ex.execute(
+    out, err = unwrap_tool_execution_result(await ex.execute(
         call=ToolCall(
             call_id="r1",
             name="read_file",
             args={"path": ".monkeybot/spill/t/big.txt", "offset": 1, "limit": 10_000},
         ),
         ctx=ctx,
-    )
+    ))
     assert err is None and out is not None
     payload = json.loads(out)
     assert payload["ok"] is True
@@ -530,10 +536,10 @@ async def test_read_file_non_spill_uses_workspace_defaults(tmp_path: Path) -> No
     p.write_text("\n".join(f"L{i}" for i in range(400)), encoding="utf-8")
     ex = CoreToolExecutor(workspace_root=root, memory=_mem_sub(mem), skills_path=skills, mcp=_NoMCP())
     ctx = _ctx()
-    out, err = await ex.execute(
+    out, err = unwrap_tool_execution_result(await ex.execute(
         call=ToolCall(call_id="r2", name="read_file", args={"path": "wide.txt"}),
         ctx=ctx,
-    )
+    ))
     assert err is None and out is not None
     payload = json.loads(out)
     assert payload["ok"] is True
@@ -751,14 +757,14 @@ class TestCoreToolExecutorRunCommandWithSandbox:
 
         with patch.dict(sys.modules, patches):
             ex = _make_executor(tmp_path)
-            out, err = await ex.execute(
+            out, err = unwrap_tool_execution_result(await ex.execute(
                 call=ToolCall(
                     call_id="1",
                     name="run_command",
                     args={"argv": ["echo", "hello"]},
                 ),
                 ctx=_ctx(),
-            )
+            ))
 
         assert err is None
         payload = json.loads(out)
@@ -779,14 +785,14 @@ class TestCoreToolExecutorRunCommandWithSandbox:
 
         with patch.dict(sys.modules, patches):
             ex = _make_executor(tmp_path)
-            out, err = await ex.execute(
+            out, err = unwrap_tool_execution_result(await ex.execute(
                 call=ToolCall(
                     call_id="1",
                     name="run_command",
                     args={"argv": ["rm", "-rf", "/"]},
                 ),
                 ctx=_ctx(),
-            )
+            ))
 
         # Must be an error envelope, not a successful result
         assert out is None

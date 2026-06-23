@@ -4,6 +4,8 @@ Injectable ports between the SSE gateway and the agent loop / usage store.
 
 from typing import Any, Protocol
 
+from monkeybot.core.types.content_blocks import ContentBlock
+
 
 class LoopPort(Protocol):
     """Schedules a turn; implementations publish Agent events to the session bus."""
@@ -12,7 +14,7 @@ class LoopPort(Protocol):
         self,
         session_id: str,
         request_id: str,
-        message: str,
+        user_content: list[ContentBlock],
     ) -> None:
         """Schedule background work; events MUST be published to that session's bus."""
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from monkeybot.core.attachments.catalog import AttachmentRecord
 from monkeybot.core.types.content_blocks import Text
 from monkeybot.core.context import SkillRef, TurnContext
 from monkeybot.core.prompts.harness_prompt import harness_fixed_context
@@ -74,6 +75,16 @@ def _current_request_block(chat_messages: Sequence[Message] | None) -> str:
     )
 
 
+def _session_attachments_block(catalog: Sequence[AttachmentRecord] | None) -> str:
+    if not catalog:
+        return ""
+    lines = [
+        f"- {r.attachment_id} ({r.filename}, {r.mime_type}): {r.description}"
+        for r in catalog
+    ]
+    return "\n\n## Session attachments\n" + "\n".join(lines)
+
+
 def compose_system_prompt(
     ctx: TurnContext,
     *,
@@ -81,6 +92,7 @@ def compose_system_prompt(
     curated_memory_skills: bool = False,
     curated_memory_index: list[str] | None = None,
     curated_skills: list[SkillRef] | None = None,
+    attachment_catalog: Sequence[AttachmentRecord] | None = None,
 ) -> str:
     """Build the system string: AGENT.md, memory, skills, harness, then task anchor.
 
@@ -116,4 +128,6 @@ def compose_system_prompt(
         run_command_opensandbox=SandboxConfig.from_env().enabled,
     )
 
-    return f"{ctx.agent_md}{mem_block}{skills_section}\n\n{harness}{task}"
+    attachments = _session_attachments_block(attachment_catalog)
+
+    return f"{ctx.agent_md}{mem_block}{skills_section}\n\n{harness}{attachments}{task}"

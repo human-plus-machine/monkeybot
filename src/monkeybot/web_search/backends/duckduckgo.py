@@ -12,7 +12,7 @@ class DuckDuckGoBackend:
 
     async def search(self, query: str, *, max_results: int = 5) -> list[SearchResult]:
         try:
-            from ddgs import DDGS  # type: ignore[import-untyped]
+            from ddgs import DDGS
         except ImportError as exc:
             raise ImportError(
                 "ddgs is required for the DuckDuckGo backend. "

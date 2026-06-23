@@ -12,16 +12,27 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, cast
 
-from fastapi import APIRouter, Depends, FastAPI, Request, Response
+from fastapi import APIRouter, Depends, FastAPI, File, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from monkeybot.core.attachments.config import (
+    ALLOWED_MIME_TYPES,
+    attachments_enabled_from_env,
+)
+from monkeybot.core.attachments.store import (
+    AttachmentSessionLimitError,
+    AttachmentStore,
+    AttachmentTooLargeError,
+    UnsupportedAttachmentTypeError,
+)
 from monkeybot.core.types.content_blocks import ContentBlock
 from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService
 
 from .loop_port import LoopPort, UsagePort
 from .models import (
     APIError,
+    AttachmentUploadResponse,
     CancelRequest,
     CreateSessionRequest,
     CreateSessionResponse,
@@ -34,6 +45,7 @@ from .models import (
     ToolConfirmationPOST,
     error_payload_dict,
 )
+from .reply_body import ReplyBodyError, normalize_reply_to_user_content
 from .session_bus import SessionAlreadyExistsError, SessionBus, SessionRegistry
 from .sse import format_active_requests, format_ping
 from .workspace_layout import resolve_agent_workspace_root
@@ -44,6 +56,10 @@ def get_registry(request: Request) -> SessionRegistry:
     return cast(SessionRegistry, request.app.state.registry)
 
 
+def _attachment_store(request: Request) -> AttachmentStore | None:
+    return getattr(request.app.state, "attachment_store", None)
+
+
 def _default_loop_port(registry: SessionRegistry) -> LoopPort:
     """Fallback loop that only clears busy state (no events); wire a real LoopPort in production."""
 
@@ -52,9 +68,9 @@ def _default_loop_port(registry: SessionRegistry) -> LoopPort:
             self,
             session_id: str,
             request_id: str,
-            message: str,
+            user_content: list[ContentBlock],
         ) -> None:
-            _ = (request_id, message)
+            _ = (request_id, user_content)
             bus = registry.get(session_id)
             if bus is not None:
                 bus.current_request_id = None
@@ -158,6 +174,8 @@ def create_app(
     app.state.registry = reg
     app.state.loop = loop
     app.state.usage = usage
+    if not hasattr(app.state, "attachment_store"):
+        app.state.attachment_store = None
 
     @app.exception_handler(APIError)
     async def api_error_handler(_request: Request, exc: APIError) -> JSONResponse:
@@ -248,15 +266,77 @@ def create_app(
             )
         loop_ref: LoopPort = request.app.state.loop
         bus.current_request_id = body.request_id
+        store = _attachment_store(request)
+
+        try:
+            user_content = normalize_reply_to_user_content(
+                message=body.message,
+                content=body.content,
+                session_id=session_id,
+                attachment_store=store,
+            )
+        except ReplyBodyError as exc:
+            status = 404 if exc.code == "ATTACHMENT_NOT_FOUND" else 400
+            raise APIError(status, exc.code, str(exc), uuid.uuid4().hex) from exc
 
         async def _turn() -> None:
             try:
-                await loop_ref.start_turn(session_id, body.request_id, body.message)
+                await loop_ref.start_turn(session_id, body.request_id, user_content)
             finally:
                 bus.current_request_id = None
 
         asyncio.create_task(_turn())
         return ReplyResponse(request_id=body.request_id)
+
+    @api.post(
+        "/sessions/{session_id}/attachments",
+        status_code=201,
+        response_model=AttachmentUploadResponse,
+    )
+    async def post_attachment(
+        session_id: str,
+        request: Request,
+        file: UploadFile = File(...),
+        reg_dep: SessionRegistry = Depends(get_registry),
+    ) -> AttachmentUploadResponse:
+        if not attachments_enabled_from_env():
+            raise APIError(404, "NOT_FOUND", "Attachments are disabled", uuid.uuid4().hex)
+        bus = reg_dep.get(session_id)
+        if bus is None:
+            raise APIError(404, "SESSION_NOT_FOUND", "Unknown session", uuid.uuid4().hex)
+        store = _attachment_store(request)
+        if store is None:
+            raise APIError(404, "NOT_FOUND", "Attachments are disabled", uuid.uuid4().hex)
+        filename = (file.filename or "upload").strip() or "upload"
+        mime_type = (file.content_type or "application/octet-stream").strip()
+        if mime_type not in ALLOWED_MIME_TYPES:
+            raise APIError(
+                415,
+                "UNSUPPORTED_MEDIA_TYPE",
+                f"Unsupported mime type: {mime_type}",
+                uuid.uuid4().hex,
+            )
+        data = await file.read()
+        try:
+            stored = store.save(
+                session_id,
+                data=data,
+                mime_type=mime_type,
+                filename=filename,
+            )
+        except AttachmentTooLargeError as exc:
+            raise APIError(413, "PAYLOAD_TOO_LARGE", str(exc), uuid.uuid4().hex) from exc
+        except UnsupportedAttachmentTypeError as exc:
+            raise APIError(415, "UNSUPPORTED_MEDIA_TYPE", str(exc), uuid.uuid4().hex) from exc
+        except AttachmentSessionLimitError as exc:
+            raise APIError(400, "BAD_REQUEST", str(exc), uuid.uuid4().hex) from exc
+        return AttachmentUploadResponse(
+            attachment_id=stored.attachment_id,
+            mime_type=stored.mime_type,
+            size_bytes=stored.size_bytes,
+            filename=stored.filename,
+            created_at=stored.created_at_ms,
+        )
 
     @api.get("/sessions/{session_id}/events")
     async def stream_events(

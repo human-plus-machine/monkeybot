@@ -8,6 +8,7 @@ import asyncio
 import os
 from collections import deque
 from typing import Any, Literal
+from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 
 from .sse import format_data_event
 
@@ -52,6 +53,7 @@ class SessionBus:
         self._lock = asyncio.Lock()
         self.pending_responses: dict[str, asyncio.Future[Any]] = {}
         self.terminated_pending_keys: deque[str] = deque(maxlen=256)
+        self.attachment_catalog: SessionAttachmentCatalog | None = None
 
     def register_pending(self, pending_key: str) -> asyncio.Future[Any]:
         fut = asyncio.get_running_loop().create_future()
@@ -178,5 +180,6 @@ class SessionRegistry:
             provider=provider,
             model_name=model_name,
         )
+        bus.attachment_catalog = SessionAttachmentCatalog(session_id=session_id)
         self._sessions[session_id] = bus
         return bus

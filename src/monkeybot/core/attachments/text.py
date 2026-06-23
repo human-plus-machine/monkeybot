@@ -1,0 +1,72 @@
+"""Frozen attachment descriptor text render/parse."""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class ParsedAttachmentDescriptor:
+    attachment_id: str
+    filename: str
+    mime_type: str
+    description: str
+
+
+_ATTACHMENT_LINE_RE = re.compile(
+    r'^\[attachment\s+(?P<id>\S+)\s+(?P<filename>.+?)\s+\((?P<mime>[^)]+)\):\s+'
+    r'(?P<desc>.+?)\.\s+Call read_attachment\("(?P=id)"\)\s+to view pixels again\.\]$'
+)
+
+
+def render_attachment_descriptor_text(
+    *,
+    attachment_id: str,
+    filename: str,
+    mime_type: str,
+    description: str,
+) -> str:
+    desc = description.strip() or f"{filename} ({mime_type}) attached by user."
+    if len(desc) > 500:
+        desc = desc[:497].rstrip() + "..."
+    return (
+        f'[attachment {attachment_id} {filename} ({mime_type}): {desc}. '
+        f'Call read_attachment("{attachment_id}") to view pixels again.]'
+    )
+
+
+def parse_attachment_descriptor_text(text: str) -> ParsedAttachmentDescriptor | None:
+    m = _ATTACHMENT_LINE_RE.match(text.strip())
+    if m is None:
+        return None
+    return ParsedAttachmentDescriptor(
+        attachment_id=m.group("id"),
+        filename=m.group("filename"),
+        mime_type=m.group("mime"),
+        description=m.group("desc"),
+    )
+
+
+def render_tool_media_freeze_text(
+    *,
+    tool_name: str,
+    attachment_id: str | None,
+    kind: str,
+) -> str:
+    if tool_name == "read_attachment" and attachment_id:
+        return (
+            f"[read_attachment {attachment_id} result: {kind} shown earlier; "
+            f"call read_attachment to reload.]"
+        )
+    return f"[{tool_name} result: {kind} shown earlier; call tool again to reload.]"
+
+
+def filename_from_metadata(metadata: dict[str, object] | None, *, fallback: str) -> str:
+    if not metadata:
+        return fallback
+    for key in ("filename", "name"):
+        val = metadata.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return fallback

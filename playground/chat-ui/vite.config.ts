@@ -1,6 +1,7 @@
 import { loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
+import tailwindcss from '@tailwindcss/vite'
 
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
@@ -9,7 +10,7 @@ export default defineConfig(({ mode }) => {
   const evalsTarget = env.VITE_EVALS_TARGET || 'http://127.0.0.1:8001'
 
   return {
-    plugins: [react()],
+    plugins: [react(), tailwindcss()],
     test: {
       environment: 'jsdom',
       globals: true,

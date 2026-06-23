@@ -84,7 +84,7 @@ def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]
     out: dict[str, Any] = dict(base)
     for k, v in overlay.items():
         if k in out and isinstance(out[k], dict) and isinstance(v, dict):
-            out[k] = _deep_merge(out[k], v)  # type: ignore[assignment]
+            out[k] = _deep_merge(out[k], v)
         else:
             out[k] = v
     return out

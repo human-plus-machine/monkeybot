@@ -6,7 +6,7 @@ import json
 import logging
 import os
 from collections.abc import AsyncIterator, Sequence
-from typing import Any
+from typing import Any, cast
 
 from monkeybot.core.llm.provider import (
     Done,
@@ -71,9 +71,9 @@ class ClaudeProvider:
         client = anthropic.AsyncAnthropic()
         resp = await client.messages.count_tokens(
             model=model,
-            system=system or anthropic.NOT_GIVEN,
-            messages=converted_messages,
-            tools=converted_tools,
+            system=cast(Any, system or anthropic.NOT_GIVEN),
+            messages=cast(Any, converted_messages),
+            tools=cast(Any, converted_tools),
         )
         return int(resp.input_tokens)
 
@@ -118,7 +118,7 @@ class ClaudeProvider:
             async with client.messages.stream(
                 model=model,
                 system=system_param,
-                messages=converted_messages,
+                messages=cast(Any, converted_messages),
                 tools=tools_param,
                 max_tokens=4096,
             ) as stream:
