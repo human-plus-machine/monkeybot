@@ -151,8 +151,18 @@ afterEach(() => {
 async function renderConnected(): Promise<void> {
   const userEv = userEvent.setup()
   render(<App />)
-  await userEv.click(screen.getByRole('button', { name: /new session/i }))
+  let replyRequestId = ''
+  const postSpy = vi.spyOn(gw, 'postReply').mockImplementation(async (_sid, rid) => {
+    replyRequestId = rid
+  })
+  await userEv.type(screen.getByRole('textbox'), 'hello')
+  await userEv.keyboard('{Enter}')
   await waitFor(() => expect(screen.getByText(/^connected/i)).toBeInTheDocument())
+  await waitFor(() => expect(postSpy).toHaveBeenCalled())
+  await act(async () => {
+    sseFeed.emit({ type: 'TurnComplete', request_id: replyRequestId || 'bootstrap' })
+  })
+  postSpy.mockRestore()
 }
 
 describe('gatewayClient POST helpers (unit)', () => {
@@ -280,13 +290,15 @@ describe('model selector (App)', () => {
     )
     vi.spyOn(gw, 'fetchSessionUsage').mockResolvedValue(usageFixture)
     vi.spyOn(gw, 'consumeSseJson').mockImplementation(() => Promise.resolve())
+    vi.spyOn(gw, 'postReply').mockResolvedValue()
 
     const userEv = userEvent.setup()
     render(<App />)
 
     const select = screen.getByRole('combobox', { name: /model/i })
     await userEv.selectOptions(select, 'Vertex Gemini')
-    await userEv.click(screen.getByRole('button', { name: /new session/i }))
+    await userEv.type(screen.getByRole('textbox'), 'hello')
+    await userEv.keyboard('{Enter}')
 
     await waitFor(() => {
       expect(createSpy).toHaveBeenCalledWith(undefined, {
@@ -303,7 +315,8 @@ describe('model selector (App)', () => {
 
     const userEv = userEvent.setup()
     render(<App />)
-    await userEv.click(screen.getByRole('button', { name: /new session/i }))
+    await userEv.type(screen.getByRole('textbox'), 'hello')
+    await userEv.keyboard('{Enter}')
 
     await waitFor(() => {
       expect(
@@ -719,11 +732,9 @@ describe('blockRendering integration', () => {
   it('test_stop_clears_tool_confirmation_via_post_cancel', async () => {
     const userEv = userEvent.setup()
     render(<App />)
-    await userEv.click(screen.getByRole('button', { name: /new session/i }))
-    await waitFor(() => expect(screen.getByText(/^connected/i)).toBeInTheDocument())
-
     await userEv.type(screen.getByRole('textbox'), 'busy')
     await userEv.keyboard('{Enter}')
+    await waitFor(() => expect(screen.getByText(/^connected/i)).toBeInTheDocument())
 
     await waitFor(() => expect(screen.getByRole('button', { name: /^stop$/i })).toBeInTheDocument())
 

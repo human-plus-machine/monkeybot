@@ -114,47 +114,6 @@ const MODEL_OPTIONS = [
   { label: 'Anthropic (Vertex)', provider: 'vertex-claude', model: 'claude-haiku-4-5' },
 ] as const
 
-function IconRefresh() {
-  return (
-    <svg
-      className="btn-icon-svg"
-      width="16"
-      height="16"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.85"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 3" />
-      <path d="M21 3v5h-5" />
-      <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 21" />
-      <path d="M3 21v-5h5" />
-    </svg>
-  )
-}
-
-function IconX() {
-  return (
-    <svg
-      className="btn-icon-svg"
-      width="16"
-      height="16"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M18 6 6 18M6 6l12 12" />
-    </svg>
-  )
-}
-
 function IconPlus() {
   return (
     <svg
@@ -286,6 +245,7 @@ export default function App() {
   const [historyThreads, setHistoryThreads] = useState<ChatHistoryThread[]>([])
 
   const streamAbortRef = useRef<AbortController | null>(null)
+  const ensureSessionPromiseRef = useRef<Promise<string | null> | null>(null)
   const streamBufRef = useRef('')
   const messagesScrollRef = useRef<HTMLDivElement | null>(null)
   const chatSurfaceRef = useRef<HTMLDivElement | null>(null)
@@ -699,43 +659,70 @@ export default function App() {
     void refreshSessionUsage()
   }, [sessionId, status, refreshSessionUsage])
 
-  const connect = async () => {
+  const ensureSession = useCallback(async (): Promise<string | null> => {
+    const existing = sessionIdRef.current
+    if (existing) return existing
+
+    if (ensureSessionPromiseRef.current) {
+      return ensureSessionPromiseRef.current
+    }
+
+    const promise = (async () => {
+      setStatus('connecting')
+      setStatusNote('')
+      try {
+        const opt = MODEL_OPTIONS[modelIdx]
+        const { session_id } = await createSession(undefined, {
+          model_provider: opt.provider,
+          model_name: opt.model,
+        })
+        setSessionId(session_id)
+        setStatus('connected')
+        return session_id
+      } catch (e) {
+        setSessionId(null)
+        const msg = e instanceof Error ? e.message : String(e)
+        if (msg.includes('MODEL_UNAVAILABLE')) {
+          setStatus('disconnected')
+          setStatusNote('Selected model unavailable — check credentials or pick another.')
+        } else {
+          setStatus('error')
+          setStatusNote(msg)
+        }
+        return null
+      }
+    })()
+
+    ensureSessionPromiseRef.current = promise
+    try {
+      return await promise
+    } finally {
+      ensureSessionPromiseRef.current = null
+    }
+  }, [modelIdx])
+
+  const startNewChat = useCallback(() => {
+    if (activeRequestId !== null) return
     stickToBottomRef.current = true
-    setStatus('connecting')
+    streamAbortRef.current?.abort()
+    setSessionId(null)
+    setStatus('disconnected')
     setStatusNote('')
     setFeed([])
+    pendingAttachments.forEach(revokeAttachmentPreview)
     setPendingAttachments([])
     setPendingWidgets([])
     setToasts([])
     streamBufRef.current = ''
     setStreamingText('')
     setActiveRequestId(null)
+    setToolHint(null)
     setSessionUsage(null)
     setUsageNote('')
     setSystemPromptSnap(null)
     setLastTraceId(null)
-    setRightTab('prompt')
     setHistoryOpen(false)
-    try {
-      const opt = MODEL_OPTIONS[modelIdx]
-      const { session_id } = await createSession(undefined, {
-        model_provider: opt.provider,
-        model_name: opt.model,
-      })
-      setSessionId(session_id)
-      setStatus('connected')
-    } catch (e) {
-      setSessionId(null)
-      const msg = e instanceof Error ? e.message : String(e)
-      if (msg.includes('MODEL_UNAVAILABLE')) {
-        setStatus('disconnected')
-        setStatusNote('Selected model unavailable — check credentials or pick another.')
-      } else {
-        setStatus('error')
-        setStatusNote(msg)
-      }
-    }
-  }
+  }, [activeRequestId, pendingAttachments])
 
   const refreshHistoryThreads = useCallback(async () => {
     setHistoryLoading(true)
@@ -804,32 +791,12 @@ export default function App() {
     void refreshHistoryThreads()
   }, [historyOpen, refreshHistoryThreads])
 
-  const disconnect = () => {
-    stickToBottomRef.current = true
-    streamAbortRef.current?.abort()
-    setSessionId(null)
-    setStatus('disconnected')
-    setStatusNote('')
-    setFeed([])
-    pendingAttachments.forEach(revokeAttachmentPreview)
-    setPendingAttachments([])
-    setPendingWidgets([])
-    streamBufRef.current = ''
-    setStreamingText('')
-    setActiveRequestId(null)
-    setToolHint(null)
-    setSessionUsage(null)
-    setUsageNote('')
-    setSystemPromptSnap(null)
-    setLastTraceId(null)
-    setRightTab('prompt')
-  }
-
   const attachFiles = async (files: FileList | null) => {
-    const sid = sessionId
-    if (!sid || status !== 'connected' || !files?.length || busy || attachBusy) return
+    if (!files?.length || busy || attachBusy || status === 'connecting') return
     setAttachBusy(true)
     try {
+      const sid = await ensureSession()
+      if (!sid) return
       const availableSlots = MAX_ATTACHMENTS_PER_REPLY - pendingAttachments.length
       const selected = Array.from(files).slice(0, Math.max(0, availableSlots))
       const added = await Promise.all(
@@ -872,8 +839,12 @@ export default function App() {
 
   const send = async (text: string) => {
     const trimmed = text.trim()
-    const sid = sessionId
-    if ((!trimmed && pendingAttachments.length === 0) || !sid || status !== 'connected') return
+    if ((!trimmed && pendingAttachments.length === 0) || busy || attachBusy || status === 'connecting') {
+      return
+    }
+
+    const sid = await ensureSession()
+    if (!sid) return
 
     const rid = newRequestId()
     const attachments = [...pendingAttachments]
@@ -920,7 +891,7 @@ export default function App() {
   const stopTurn = async () => {
     const sid = sessionId
     const rid = activeRequestId
-    if (!sid || !rid || status !== 'connected') return
+    if (!sid || !rid) return
     try {
       await postCancel(sid, rid)
       setPendingWidgets([])
@@ -942,12 +913,14 @@ export default function App() {
   const feedSlots = useMemo(() => buildFeedSlots(feed), [feed])
 
   const chatStatus: ChatStatus =
-    status !== 'connected' || !sessionId
-      ? 'idle'
-      : busy
-        ? streamingText || toolHint
-          ? 'streaming'
-          : 'submitted'
+    status === 'connecting'
+      ? 'submitted'
+      : sessionId && status === 'connected'
+        ? busy
+          ? streamingText || toolHint
+            ? 'streaming'
+            : 'submitted'
+          : 'ready'
         : 'ready'
 
   const composerImages = useMemo(
@@ -1017,10 +990,15 @@ export default function App() {
             status={chatStatus}
             onSend={({ content }) => void send(content)}
             onStop={() => void stopTurn()}
-            inputDisabled={status !== 'connected' || attachBusy}
+            inputDisabled={status === 'connecting' || attachBusy}
+            inputPlaceholder={
+              status === 'connecting'
+                ? 'Starting session…'
+                : 'Message… (Enter to send, Shift+Enter newline)'
+            }
             attachments={{
               onAttach:
-                status === 'connected' &&
+                status !== 'connecting' &&
                 !busy &&
                 !attachBusy &&
                 pendingAttachments.length < MAX_ATTACHMENTS_PER_REPLY
@@ -1076,8 +1054,8 @@ export default function App() {
           <div ref={overlayRef} className="chat-controls-overlay" role="region" aria-label="Connection and session usage">
             <div className="chat-controls-bar">
               <div className="chat-controls-leading row">
-                <span className={`pill ${status}`} aria-live="polite">
-                  {status}
+                <span className={`pill ${status === 'connected' ? 'connected' : status}`} aria-live="polite">
+                  {status === 'disconnected' ? 'ready' : status}
                   {sessionId ? ` · ${sessionId.slice(0, 8)}…` : ''}
                 </span>
                 {status === 'connected' && sessionId ? (
@@ -1128,6 +1106,24 @@ export default function App() {
                 ) : null}
               </div>
               <div className="chat-controls-trailing row">
+                <div className="chat-model-select-wrap">
+                  <select
+                    className="btn chat-model-select"
+                    aria-label="Model"
+                    value={modelIdx}
+                    onChange={(e) => setModelIdx(Number(e.target.value))}
+                    disabled={status === 'connecting' || busy || Boolean(sessionId)}
+                  >
+                    {MODEL_OPTIONS.map((opt, idx) => (
+                      <option key={opt.label} value={idx}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="chat-model-select-mirror" aria-hidden>
+                    {MODEL_OPTIONS[modelIdx].label}
+                  </span>
+                </div>
                 <div className="chat-history-anchor">
                   <button
                     type="button"
@@ -1151,55 +1147,17 @@ export default function App() {
                     onSelect={(id) => void resumeSession(id)}
                   />
                 </div>
-                <select
-                  className="btn"
-                  aria-label="Model"
-                  value={modelIdx}
-                  onChange={(e) => setModelIdx(Number(e.target.value))}
-                  disabled={status === 'connecting' || status === 'connected'}
+                <button
+                  type="button"
+                  className="btn btn-icon primary"
+                  onClick={startNewChat}
+                  disabled={status === 'connecting' || busy}
+                  aria-busy={status === 'connecting'}
+                  aria-label={status === 'connecting' ? 'Starting session…' : 'New chat'}
+                  title={status === 'connecting' ? 'Starting session…' : 'New chat'}
                 >
-                  {MODEL_OPTIONS.map((opt, idx) => (
-                    <option key={opt.label} value={idx}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
-                {status === 'connected' && sessionId ? (
-                  <>
-                    <button
-                      type="button"
-                      className="btn btn-icon"
-                      aria-label="Refresh usage"
-                      title="Refresh usage"
-                      onClick={() => void refreshSessionUsage()}
-                      disabled={busy}
-                    >
-                      <IconRefresh />
-                    </button>
-                    <button
-                      type="button"
-                      className="btn btn-icon btn-icon-danger"
-                      aria-label="End session"
-                      title="End session"
-                      onClick={disconnect}
-                      disabled={busy}
-                    >
-                      <IconX />
-                    </button>
-                  </>
-                ) : (
-                  <button
-                    type="button"
-                    className="btn btn-icon primary"
-                    onClick={connect}
-                    disabled={status === 'connecting'}
-                    aria-busy={status === 'connecting'}
-                    aria-label={status === 'connecting' ? 'Connecting…' : 'New session'}
-                    title={status === 'connecting' ? 'Connecting…' : 'New session'}
-                  >
-                    <IconPlus />
-                  </button>
-                )}
+                  <IconPlus />
+                </button>
               </div>
             </div>
             {usageNote || statusNote ? (
@@ -1265,7 +1223,7 @@ export default function App() {
                 </>
               ) : (
                 <>
-                  Updates on each model call (after curation). Connect and send a message to see the composed prompt.
+                  Updates on each model call (after curation). Send a message to see the composed prompt.
                 </>
               )}
             </p>

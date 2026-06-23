@@ -63,6 +63,7 @@ export type AgentChatProps = {
   messageListRef?: Ref<HTMLDivElement>
   onMessageListScroll?: () => void
   inputDisabled?: boolean
+  inputPlaceholder?: string
   className?: string
 }
 
@@ -509,6 +510,7 @@ export const AgentChat = memo(function AgentChat({
   messageListRef,
   onMessageListScroll,
   inputDisabled,
+  inputPlaceholder,
   className,
 }: AgentChatProps) {
   const [draft, setDraft] = useState('')
@@ -541,7 +543,8 @@ export const AgentChat = memo(function AgentChat({
       onChange={setDraft}
       disabled={inputDisabled}
       placeholder={
-        inputDisabled ? 'Connect a session to chat…' : 'Message… (Enter to send, Shift+Enter newline)'
+        inputPlaceholder ??
+        (inputDisabled ? 'Starting session…' : 'Message… (Enter to send, Shift+Enter newline)')
       }
     />
   )

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import logging
 import os
 import shutil
 from collections.abc import AsyncIterator, Sequence
@@ -64,6 +65,24 @@ from .events import (
     TurnComplete,
     UsageTotals,
 )
+
+
+logger = logging.getLogger("monkeybot.core.runtime.loop")
+
+
+async def _await_history_write(task: asyncio.Task[None] | None) -> None:
+    """Await a backgrounded history write, logging (never raising) on failure.
+
+    The final assistant message is persisted off the token-streaming path, but it
+    MUST land before any later ``history.load``/``reset`` (e.g. attachment freeze)
+    so the row is not lost. Callers await this at the turn tail.
+    """
+    if task is None:
+        return
+    try:
+        await task
+    except Exception:
+        logger.exception("background assistant history write failed")
 
 
 def _effective_max_turns(max_turns: int | None) -> int:
@@ -621,6 +640,9 @@ async def _run_inner_core(
 
     turn_index = 0
     needs_followup_after_tools = False
+    # Final assistant write is backgrounded off the streaming path; awaited at the
+    # turn tail before any history load/reset so the row is never lost.
+    assistant_write_task: asyncio.Task[None] | None = None
     curated_injection = False
     curated_mem: list[str] = []
     curated_sks: list[SkillRef] = []
@@ -841,9 +863,15 @@ async def _run_inner_core(
             if not pending:
                 cleaned_text = (assistant_text or "").strip()
                 if cleaned_text:
-                    await history.append(
-                        ctx.thread_id,
-                        Message(role="assistant", content=[Text(text=cleaned_text)]),
+                    # Fire-and-forget: this is the final assistant turn (we break
+                    # right after), so nothing reads it again in-loop. Keeping it
+                    # off the await path means the Firestore write does not delay
+                    # TurnComplete / the user-visible reply. Awaited at the tail.
+                    assistant_write_task = asyncio.create_task(
+                        history.append(
+                            ctx.thread_id,
+                            Message(role="assistant", content=[Text(text=cleaned_text)]),
+                        )
                     )
                     last_assistant[0] = cleaned_text
                     turn_output_text = cleaned_text
@@ -1156,6 +1184,10 @@ async def _run_inner_core(
             end_turn_span(turn_span)
     if needs_followup_after_tools:
         yield Error(request_id=ctx.request_id, error="Max turns exceeded")
+
+    # Ensure the backgrounded assistant write has landed before any load/reset
+    # below (freeze) so the assistant row is durable and not overwritten.
+    await _await_history_write(assistant_write_task)
 
     descriptor_events = await freeze_attachments_in_history(
         thread_id=ctx.thread_id,
