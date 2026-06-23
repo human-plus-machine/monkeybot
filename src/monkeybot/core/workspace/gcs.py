@@ -16,9 +16,9 @@ class GCSWorkspaceStorage:
     """Object-prefix layout: ``gs://bucket/{prefix}/{path}``."""
 
     def __init__(self, bucket: str, prefix: str = "") -> None:
-        from google.cloud import storage  # type: ignore[attr-defined]
+        from google.cloud.storage import Client
 
-        self._client = storage.Client()
+        self._client = Client()
         self._bucket = self._client.bucket(bucket)
         self._prefix = prefix.strip().strip("/").replace("\\", "/")
         if self._prefix:
