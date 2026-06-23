@@ -88,7 +88,7 @@ class SkillLoader:
             logger.warning(f"Skills directory not found: {self.skills_dir}")
             return {}
 
-        for skill_path in self.skills_dir.iterdir():
+        for skill_path in sorted(self.skills_dir.iterdir()):
             if not skill_path.is_dir():
                 continue
 
