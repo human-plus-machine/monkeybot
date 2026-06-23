@@ -175,6 +175,7 @@ def create_app(
     loop_port: LoopPort | None = None,
     usage_port: UsagePort | None = None,
     registry: SessionRegistry | None = None,
+    lifespan: Any | None = None,
 ) -> FastAPI:
     """
     Build a FastAPI app with v2 SSE routes.
@@ -188,6 +189,7 @@ def create_app(
     app = FastAPI(
         title="MonkeyBot v2 Gateway",
         version="2.0.0",
+        lifespan=lifespan,
     )
     app.state.registry = reg
     app.state.loop = loop

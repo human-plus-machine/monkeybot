@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from typing import cast
 
 from google.cloud import firestore
@@ -31,6 +32,38 @@ def _collection_name(prefix: str, base: str) -> str:
     if not prefix:
         return base
     return f"{prefix}_{base}"
+
+
+def _int_value(raw: object, default: int = 0) -> int:
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float):
+        return int(raw)
+    if isinstance(raw, str):
+        try:
+            return int(raw)
+        except ValueError:
+            return default
+    return default
+
+
+def _float_value(raw: object, default: float = 0.0) -> float:
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    if isinstance(raw, str):
+        try:
+            return float(raw)
+        except ValueError:
+            return default
+    return default
+
+
+def _field_int(row: dict[str, object], key: str, default: int = 0) -> int:
+    return _int_value(row.get(key, default), default)
+
+
+def _field_float(row: dict[str, object], key: str, default: float = 0.0) -> float:
+    return _float_value(row.get(key, default), default)
 
 
 class FirestoreHistoryStore:
@@ -186,13 +219,17 @@ class FirestoreUsageStore:
         thread_id: str | None,
         since_ms: int | None,
     ) -> list[dict[str, object]]:
-        query = self._client.collection(self._collection)
-        if thread_id is not None:
-            query = query.where(filter=FieldFilter("thread_id", "==", thread_id))
+        collection = self._client.collection(self._collection)
+        if thread_id is None:
+            doc_stream = collection.stream()
+        else:
+            doc_stream = collection.where(
+                filter=FieldFilter("thread_id", "==", thread_id)
+            ).stream()
         rows: list[dict[str, object]] = []
-        async for doc in query.stream():
+        async for doc in doc_stream:
             data = doc.to_dict() or {}
-            created_at = int(data.get("created_at", 0))
+            created_at = _field_int(data, "created_at")
             if since_ms is not None and created_at < since_ms:
                 continue
             rows.append(data)
@@ -219,20 +256,20 @@ class FirestoreUsageStore:
                 cache_creation_tokens=0,
             )
 
-        input_tokens = sum(int(r.get("input_tokens", 0)) for r in rows)
-        output_tokens = sum(int(r.get("output_tokens", 0)) for r in rows)
-        cached_tokens = sum(int(r.get("cached_tokens", 0)) for r in rows)
-        cost_usd = sum(float(r.get("cost_usd", 0.0)) for r in rows)
-        cache_read_tokens = sum(int(r.get("cache_read_tokens", 0)) for r in rows)
-        cache_creation_tokens = sum(int(r.get("cache_creation_tokens", 0)) for r in rows)
-        created_times = [int(r.get("created_at", 0)) for r in rows]
+        input_tokens = sum(_field_int(r, "input_tokens") for r in rows)
+        output_tokens = sum(_field_int(r, "output_tokens") for r in rows)
+        cached_tokens = sum(_field_int(r, "cached_tokens") for r in rows)
+        cost_usd = sum(_field_float(r, "cost_usd") for r in rows)
+        cache_read_tokens = sum(_field_int(r, "cache_read_tokens") for r in rows)
+        cache_creation_tokens = sum(_field_int(r, "cache_creation_tokens") for r in rows)
+        created_times = [_field_int(r, "created_at") for r in rows]
 
         last_pt = 0
         last_est = 0
         if thread_id is not None:
-            latest = max(rows, key=lambda r: int(r.get("created_at", 0)))
-            last_pt = int(latest.get("input_tokens", 0))
-            last_est = int(latest.get("estimated_prompt_tokens", 0))
+            latest = max(rows, key=lambda r: _field_int(r, "created_at"))
+            last_pt = _field_int(latest, "input_tokens")
+            last_est = _field_int(latest, "estimated_prompt_tokens")
 
         return UsageSummary(
             turns=len(rows),
@@ -331,8 +368,10 @@ class FirestoreRunStore:
         doc_ref = self._doc(run_id)
         transaction = self._client.transaction()
 
-        @firestore.async_transactional
-        async def _claim_in_txn(txn: firestore.AsyncTransaction, ref: firestore.AsyncDocumentReference) -> bool:
+        async def _claim_body(
+            txn: firestore.AsyncTransaction,
+            ref: firestore.AsyncDocumentReference,
+        ) -> bool:
             snapshot = await ref.get(transaction=txn)
             if not snapshot.exists:
                 return False
@@ -350,7 +389,11 @@ class FirestoreRunStore:
             )
             return True
 
-        return await _claim_in_txn(transaction, doc_ref)
+        claim_txn = cast(
+            Callable[[firestore.AsyncTransaction, firestore.AsyncDocumentReference], Awaitable[bool]],
+            firestore.async_transactional(_claim_body),
+        )
+        return bool(await claim_txn(transaction, doc_ref))
 
     async def reset_stale_claims(self, stale_after_ms: int) -> int:
         cutoff = int(time.time() * 1000) - stale_after_ms
@@ -444,7 +487,8 @@ class FirestoreStorageBackend:
 
     async def close(self) -> None:
         if self._client is not None:
-            self._client.close()
+            close_fn = cast(Callable[[], None], self._client.close)
+            close_fn()
             self._client = None
             self._history_store = None
             self._usage_store = None
