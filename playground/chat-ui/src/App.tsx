@@ -733,26 +733,28 @@ export default function App() {
     if (!sid || status !== 'connected' || !files?.length || busy || attachBusy) return
     setAttachBusy(true)
     try {
-      const added: PendingComposerAttachment[] = []
-      for (const file of Array.from(files)) {
-        if (pendingAttachments.length + added.length >= MAX_ATTACHMENTS_PER_REPLY) break
-        const uploaded = await postAttachment(sid, file)
-        let preview_url: string | undefined
-        if (file.type.startsWith('image/')) {
-          try {
-            preview_url = URL.createObjectURL(file)
-          } catch {
-            preview_url = undefined
+      const availableSlots = MAX_ATTACHMENTS_PER_REPLY - pendingAttachments.length
+      const selected = Array.from(files).slice(0, Math.max(0, availableSlots))
+      const added = await Promise.all(
+        selected.map(async (file): Promise<PendingComposerAttachment> => {
+          const uploaded = await postAttachment(sid, file)
+          let preview_url: string | undefined
+          if (file.type.startsWith('image/')) {
+            try {
+              preview_url = URL.createObjectURL(file)
+            } catch {
+              preview_url = undefined
+            }
           }
-        }
-        added.push({
-          attachment_id: uploaded.attachment_id,
-          filename: uploaded.filename || file.name,
-          mime_type: uploaded.mime_type,
-          size_bytes: file.size,
-          preview_url,
-        })
-      }
+          return {
+            attachment_id: uploaded.attachment_id,
+            filename: uploaded.filename || file.name,
+            mime_type: uploaded.mime_type,
+            size_bytes: file.size,
+            preview_url,
+          }
+        }),
+      )
       if (added.length) {
         setPendingAttachments((prev) => [...prev, ...added].slice(0, MAX_ATTACHMENTS_PER_REPLY))
       }

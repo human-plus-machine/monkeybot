@@ -897,6 +897,17 @@ describe('blockRendering integration', () => {
     expect(postSpy).toHaveBeenCalled()
     const rid = postSpy.mock.calls[0]?.[1] as string
 
+    // buildReplyContent must carry the filename metadata on the attachmentRef block;
+    // dropping it would silently break the frozen-descriptor upgrade below.
+    const sentContent = postSpy.mock.calls[0]?.[2] as Array<Record<string, unknown>>
+    expect(sentContent).toContainEqual({ type: 'text', text: 'see this' })
+    expect(sentContent).toContainEqual({
+      type: 'attachmentRef',
+      attachmentId: 'att_test1',
+      mimeType: 'image/png',
+      metadata: { filename: 'dot.png' },
+    })
+
     await act(async () => {
       sseFeed.emit({
         type: 'AttachmentDescriptor',

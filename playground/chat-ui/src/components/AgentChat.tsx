@@ -518,7 +518,7 @@ export const AgentChat = memo(function AgentChat({
     return [
       ...messages,
       {
-        id: 'agent-chat-error',
+        id: `agent-chat-error-${error.title ?? ''}-${error.message}`,
         role: 'assistant' as const,
         parts: [
           {
