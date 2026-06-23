@@ -9,6 +9,7 @@ from monkeybot.core.llm.provider import Message
 from monkeybot.core.runtime.events import AttachmentDescriptorEvent
 from monkeybot.core.types.content_blocks import (
     AttachmentRef,
+    ContentBlock,
     File,
     Image,
     Text,
@@ -43,7 +44,7 @@ def _freeze_user_row(
     user_text = " ".join(
         b.text.strip() for b in msg.content if isinstance(b, Text) and b.text.strip()
     )
-    new_content: list = []
+    new_content: list[ContentBlock] = []
     for block in msg.content:
         if isinstance(block, Text):
             new_content.append(block)
@@ -84,7 +85,7 @@ def _freeze_user_row(
 
 
 def _freeze_tool_responses(msg: Message) -> Message:
-    new_content: list = []
+    new_content: list[ContentBlock] = []
     changed = False
     for block in msg.content:
         if not isinstance(block, ToolResponse):

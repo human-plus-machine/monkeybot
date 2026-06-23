@@ -39,9 +39,12 @@ class WebSearchTool:
 
         default_max = int(os.environ.get("WEB_SEARCH_MAX_RESULTS", "5"))
         raw_max = args.get("max_results")
-        try:
-            max_results = int(raw_max) if raw_max is not None else default_max  # type: ignore[arg-type]
-        except (TypeError, ValueError):
+        if isinstance(raw_max, (int, float, str)):
+            try:
+                max_results = int(raw_max)
+            except (TypeError, ValueError):
+                max_results = default_max
+        else:
             max_results = default_max
 
         results = await self._backend.search(query, max_results=max_results)

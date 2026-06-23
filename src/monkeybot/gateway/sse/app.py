@@ -495,10 +495,11 @@ async def _startup() -> None:
 
     try:
         backend_ws = _build_web_search_backend()
-        _deps.web_search_tool = WebSearchTool(backend_ws) if backend_ws is not None else None
-        if _deps.web_search_tool is not None:
+        if backend_ws is not None:
+            _deps.web_search_tool = WebSearchTool(backend_ws)
             logger.info("web search enabled: backend=%s", backend_ws.name)
         else:
+            _deps.web_search_tool = None
             logger.info("web search disabled (WEB_SEARCH_BACKEND=none)")
     except Exception as exc:
         logger.warning("web search backend init failed — disabling: %s", exc)

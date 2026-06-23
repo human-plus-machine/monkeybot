@@ -259,7 +259,12 @@ def _mcp_auth_handler_cls() -> Any:
             timeout = httpx.Timeout(30.0)
             try:
                 async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-                    resp = await client.post(token_url, data=data, headers=headers, auth=basic)
+                    if basic is not None:
+                        resp = await client.post(
+                            token_url, data=data, headers=headers, auth=basic
+                        )
+                    else:
+                        resp = await client.post(token_url, data=data, headers=headers)
             except httpx.RequestError as exc:
                 raise MCPAuthError(
                     self.server_name,

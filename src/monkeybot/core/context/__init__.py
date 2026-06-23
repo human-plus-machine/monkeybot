@@ -7,6 +7,7 @@ import dataclasses
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from monkeybot.core.mcp.ports_mcp import MCPClientPort
@@ -299,7 +300,7 @@ async def build_context(
     workspace_root: Path | None = None,
     enable_context_curation: bool = True,
     sse_bus: PendingResponseBusPort | None = None,
-    extra_tools: list[CustomTool] | None = None,
+    extra_tools: Sequence[CustomTool] | None = None,
 ) -> TurnContext:
     """Assemble a TurnContext from filesystem paths and the MCP client snapshot.
 

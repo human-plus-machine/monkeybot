@@ -34,6 +34,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 from monkeybot.core.tools.terminal import ALLOWED_PATHS, ALLOWED_COMMANDS, ExecutionResult, SecurityError
 
@@ -102,7 +103,7 @@ class SandboxExecutor:
     ) -> None:
         self._config = config
         self._workspace_root = Path(workspace_root).resolve()
-        self._sandbox: object | None = None
+        self._sandbox: Any = None
         self._allowed_commands: tuple[str, ...] = (
             tuple(allowed_commands) if allowed_commands is not None else tuple(ALLOWED_COMMANDS)
         )
@@ -121,9 +122,9 @@ class SandboxExecutor:
             return
 
         try:
-            from opensandbox import Sandbox  # type: ignore[import]
-            from opensandbox.config import ConnectionConfig  # type: ignore[import]
-            from opensandbox.models.sandboxes import Host, Volume  # type: ignore[import]
+            from opensandbox import Sandbox
+            from opensandbox.config import ConnectionConfig
+            from opensandbox.models.sandboxes import Host, Volume
         except ImportError as exc:
             raise RuntimeError(
                 "opensandbox SDK is required for sandbox execution but is not installed. "
@@ -193,9 +194,9 @@ class SandboxExecutor:
         full_cmd = " ".join([command] + [shlex.quote(a) for a in args])
         logger.info("Sandbox execute: %s", full_cmd)
 
-        from opensandbox.models.execd import RunCommandOpts  # type: ignore[import]
+        from opensandbox.models.execd import RunCommandOpts
 
-        execution = await self._sandbox.commands.run(  # type: ignore[union-attr]
+        execution = await self._sandbox.commands.run(
             full_cmd,
             opts=RunCommandOpts(timeout=timedelta(seconds=timeout)),
         )
@@ -222,7 +223,7 @@ class SandboxExecutor:
         sandbox = self._sandbox
         self._sandbox = None
         try:
-            await sandbox.kill()  # type: ignore[union-attr]
+            await sandbox.kill()
             logger.info("Sandbox destroyed")
         except Exception:
             logger.warning("Failed to destroy sandbox", exc_info=True)

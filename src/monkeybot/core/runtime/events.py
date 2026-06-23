@@ -308,7 +308,7 @@ def event_to_json(event: AgentEvent) -> str:
         payload = {**base, "tool": event.tool, "result": event.result, "error": event.error}
     elif isinstance(event, TurnComplete):
         u = event.usage
-        payload: dict[str, object] = {
+        payload = {
             **base,
             "usage": {
                 "input_tokens": u.input_tokens,

@@ -681,7 +681,7 @@ def get_provider_config(
     Raises:
         ValueError: Unsupported provider or missing required configuration
     """
-    raw_provider = provider or os.getenv("MODEL_PROVIDER", "google_vertexai")
+    raw_provider = str(provider or os.getenv("MODEL_PROVIDER") or "google_vertexai")
     provider_key = normalize_model_provider(raw_provider)
     if provider_key == "fake":
         raise ValueError(
@@ -767,9 +767,9 @@ def get_provider_config(
     if provider_key == "aws_bedrock":
         from monkeybot.providers.bedrock import BedrockClaudeProvider  # noqa: PLC0415
 
-        region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
+        aws_region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
         return ProviderConfig(
-            BedrockClaudeProvider(aws_region=region, cache_enabled=resolved_cache),
+            BedrockClaudeProvider(aws_region=aws_region, cache_enabled=resolved_cache),
             resolved_model,
         )
 

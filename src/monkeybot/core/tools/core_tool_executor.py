@@ -9,13 +9,14 @@ import logging
 import os
 import shlex
 import uuid
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.attachments.config import IMAGE_MIME_TYPES
 from monkeybot.core.attachments.store import AttachmentStore
-from monkeybot.core.context import TurnContext
+from monkeybot.core.context import CustomTool, TurnContext
 from monkeybot.core.llm.provider import ToolCall
 from monkeybot.core.mcp.mcp_client import MCPConnectionError, MCPServerNotConnectedError
 from monkeybot.core.mcp.ports_mcp import MCPClientPort
@@ -29,6 +30,7 @@ from monkeybot.core.runtime.events import (
 )
 from monkeybot.core.runtime.loop import ToolExecutorPort
 from monkeybot.core.subagents.subagent_proto import SubagentEnvelope, spawn_subagent
+from monkeybot.core.tools.sandbox_executor import SandboxConfig, SandboxExecutor
 from monkeybot.core.tools.terminal import (
     ALLOWED_COMMANDS,
     ALLOWED_PATHS,
@@ -240,8 +242,8 @@ class CoreToolExecutor(ToolExecutorPort):
         memory: MemorySubsystem | None,
         skills_path: Path,
         mcp: MCPClientPort,
-        terminal: TerminalExecutor | None = None,
-        extra_tools: list | None = None,
+        terminal: TerminalExecutor | SandboxExecutor | None = None,
+        extra_tools: Sequence[CustomTool] | None = None,
         run_command_allowed_commands: list[str] | tuple[str, ...] | None = None,
         run_command_allowed_path_prefixes: list[str] | tuple[str, ...] | None = None,
         attachment_store: AttachmentStore | None = None,
@@ -253,6 +255,7 @@ class CoreToolExecutor(ToolExecutorPort):
         self._mcp = mcp
         self._attachment_store = attachment_store
         self._attachment_catalog = attachment_catalog
+        self._terminal: TerminalExecutor | SandboxExecutor
         if terminal is not None:
             self._terminal = terminal
             self._run_cmd_allowed_commands = tuple(terminal.allowed_commands)
@@ -270,8 +273,6 @@ class CoreToolExecutor(ToolExecutorPort):
             )
             self._run_cmd_allowed_commands = cmds
             self._run_cmd_allowed_paths = paths
-            from monkeybot.core.tools.sandbox_executor import SandboxConfig, SandboxExecutor
-
             _scfg = SandboxConfig.from_env()
             self._terminal = (
                 SandboxExecutor(_scfg, workspace_root, allowed_commands=cmds)
@@ -417,7 +418,7 @@ class CoreToolExecutor(ToolExecutorPort):
             return ToolExecutionResult.err(
                 f"Attachment {attachment_id} expired or removed; ask user to re-upload"
             )
-        meta = {"attachment_id": attachment_id, "filename": filename}
+        meta: dict[str, object] = {"attachment_id": attachment_id, "filename": filename}
         if mime in IMAGE_MIME_TYPES:
             return ToolExecutionResult.ok_blocks(
                 [Image(mime_type=mime, data=data_b64, metadata=meta)]

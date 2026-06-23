@@ -6,7 +6,7 @@ import re
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 import yaml
 from monkeybot.core.context import TurnContext
@@ -60,7 +60,7 @@ class CommandTierPolicy:
     deny_patterns: tuple[str, ...]
 
 
-def _optional_nonempty_str_list(path: Path, data: dict, key: str) -> list[str] | None:
+def _optional_nonempty_str_list(path: Path, data: dict[str, Any], key: str) -> list[str] | None:
     if key not in data:
         return None
     val = data[key]

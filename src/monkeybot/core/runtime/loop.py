@@ -899,7 +899,7 @@ async def _run_inner_core(
                 # of functionResponse parts equals the number of functionCall parts
                 # in the preceding model turn — splitting them across separate
                 # Message rows produces a 400 INVALID_ARGUMENT error.
-                chunk_responses: list[ToolResponse] = []
+                chunk_responses: list[ContentBlock] = []
 
                 for call in chunk:
                     if cancelled is not None and cancelled.is_set():

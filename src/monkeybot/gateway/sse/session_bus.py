@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections import deque
+from typing import Any, Literal
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 
 from .sse import format_data_event

@@ -16,7 +16,7 @@ class GCSWorkspaceStorage:
     """Object-prefix layout: ``gs://bucket/{prefix}/{path}``."""
 
     def __init__(self, bucket: str, prefix: str = "") -> None:
-        from google.cloud import storage  # type: ignore[import-untyped]
+        from google.cloud import storage  # type: ignore[attr-defined]
 
         self._client = storage.Client()
         self._bucket = self._client.bucket(bucket)
@@ -34,7 +34,8 @@ class GCSWorkspaceStorage:
         def _read() -> str:
             blob = self._bucket.blob(key)
             data = blob.download_as_bytes()
-            return data.decode("utf-8")
+            text: str = data.decode("utf-8")
+            return text
 
         try:
             return await asyncio.to_thread(_read)
