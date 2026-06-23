@@ -48,7 +48,9 @@ SCHEMA_DDLS: Final[tuple[str, ...]] = (
     error_json TEXT,
     started_at INTEGER,
     finished_at INTEGER,
-    scratch_dir TEXT
+    scratch_dir TEXT,
+    worker_id TEXT,
+    claimed_at INTEGER
 )""",
     """CREATE TABLE IF NOT EXISTS turn_usage (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -129,6 +131,7 @@ async def apply_schema(conn: aiosqlite.Connection) -> None:
     await conn.commit()
     await _ensure_turn_usage_estimated_column(conn)
     await _ensure_turn_usage_cache_columns(conn)
+    await _ensure_subagent_runs_claim_columns(conn)
     cursor = await conn.execute("PRAGMA table_info(conversation_history)")
     rows = await cursor.fetchall()
     await cursor.close()
@@ -164,6 +167,19 @@ async def _ensure_turn_usage_cache_columns(conn: aiosqlite.Connection) -> None:
         await conn.execute(
             f"ALTER TABLE turn_usage ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0"
         )
+    await conn.commit()
+
+
+async def _ensure_subagent_runs_claim_columns(conn: aiosqlite.Connection) -> None:
+    """Add worker claim columns when upgrading an existing DB."""
+    cur = await conn.execute("PRAGMA table_info(subagent_runs)")
+    rows = await cur.fetchall()
+    await cur.close()
+    names = {str(r[1]) for r in rows}
+    if "worker_id" not in names:
+        await conn.execute("ALTER TABLE subagent_runs ADD COLUMN worker_id TEXT")
+    if "claimed_at" not in names:
+        await conn.execute("ALTER TABLE subagent_runs ADD COLUMN claimed_at INTEGER")
     await conn.commit()
 
 

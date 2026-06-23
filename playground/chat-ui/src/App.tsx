@@ -6,19 +6,23 @@ import ToolConfirmationModal from './blocks/ToolConfirmationModal'
 import { MAX_RESULT_CHARS } from './blocks/ToolInvocationCard'
 import AgentChat, { type ChatStatus } from './components/AgentChat'
 import type { ChatFeedItem, PendingComposerAttachment } from './chatTypes'
-import { buildFeedSlots, feedToAgentMessages } from './feedAdapter'
+import { buildFeedSlots, feedToAgentMessages, historyMessagesToFeed } from './feedAdapter'
 import {
   consumeSseJson,
   createSession,
+  fetchChatHistoryDetail,
+  fetchChatHistoryThreads,
   fetchSessionUsage,
   openEventsStream,
   postAttachment,
   postCancel,
   postReply,
+  type ChatHistoryThread,
   type ContentBlockWire,
   type GatewayJsonEvent,
   type SessionUsageResponse,
 } from './gatewayClient'
+import ChatHistoryPanel from './ChatHistoryPanel'
 import EvalsPanel from './EvalsPanel'
 import ObservabilityPanel from './ObservabilityPanel'
 import WorkspaceBrowser from './WorkspaceBrowser'
@@ -170,6 +174,27 @@ function IconPlus() {
   )
 }
 
+function IconHistory() {
+  return (
+    <svg
+      className="btn-icon-svg"
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.85"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M3 12a9 9 0 1 0 3-6.7" />
+      <path d="M3 3v5h5" />
+      <path d="M12 7v5l3 2" />
+    </svg>
+  )
+}
+
 function ContextUsageRing({
   estimatedPromptTokens,
   lastPromptTokens,
@@ -255,6 +280,10 @@ export default function App() {
   } | null>(null)
   const [rightTab, setRightTab] = useState<'prompt' | 'workspace' | 'observability' | 'evals'>('prompt')
   const [lastTraceId, setLastTraceId] = useState<string | null>(null)
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const [historyError, setHistoryError] = useState('')
+  const [historyThreads, setHistoryThreads] = useState<ChatHistoryThread[]>([])
 
   const streamAbortRef = useRef<AbortController | null>(null)
   const streamBufRef = useRef('')
@@ -686,6 +715,7 @@ export default function App() {
     setSystemPromptSnap(null)
     setLastTraceId(null)
     setRightTab('prompt')
+    setHistoryOpen(false)
     try {
       const opt = MODEL_OPTIONS[modelIdx]
       const { session_id } = await createSession(undefined, {
@@ -706,6 +736,73 @@ export default function App() {
       }
     }
   }
+
+  const refreshHistoryThreads = useCallback(async () => {
+    setHistoryLoading(true)
+    setHistoryError('')
+    try {
+      const res = await fetchChatHistoryThreads()
+      setHistoryThreads(res.threads)
+    } catch (e) {
+      setHistoryError(e instanceof Error ? e.message : String(e))
+      setHistoryThreads([])
+    } finally {
+      setHistoryLoading(false)
+    }
+  }, [])
+
+  const resumeSession = useCallback(
+    async (threadId: string) => {
+      if (activeRequestId !== null) return
+      stickToBottomRef.current = true
+      streamAbortRef.current?.abort()
+      setStatus('connecting')
+      setStatusNote('')
+      setFeed([])
+      setPendingAttachments([])
+      setPendingWidgets([])
+      setToasts([])
+      streamBufRef.current = ''
+      setStreamingText('')
+      setActiveRequestId(null)
+      setSessionUsage(null)
+      setUsageNote('')
+      setSystemPromptSnap(null)
+      setLastTraceId(null)
+      setRightTab('prompt')
+      setHistoryOpen(false)
+      try {
+        const opt = MODEL_OPTIONS[modelIdx]
+        try {
+          await createSession(undefined, {
+            session_id: threadId,
+            model_provider: opt.provider,
+            model_name: opt.model,
+          })
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e)
+          if (!msg.includes('409') && !msg.includes('SESSION_ALREADY_EXISTS')) {
+            throw e
+          }
+        }
+        const detail = await fetchChatHistoryDetail(threadId)
+        setFeed(historyMessagesToFeed(detail.messages))
+        setSessionId(threadId)
+        setStatus('connected')
+        void refreshSessionUsage()
+      } catch (e) {
+        setSessionId(null)
+        setStatus('error')
+        setStatusNote(e instanceof Error ? e.message : String(e))
+      }
+    },
+    [activeRequestId, modelIdx, refreshSessionUsage],
+  )
+
+  useEffect(() => {
+    if (!historyOpen) return
+    void refreshHistoryThreads()
+  }, [historyOpen, refreshHistoryThreads])
 
   const disconnect = () => {
     stickToBottomRef.current = true
@@ -1031,6 +1128,29 @@ export default function App() {
                 ) : null}
               </div>
               <div className="chat-controls-trailing row">
+                <div className="chat-history-anchor">
+                  <button
+                    type="button"
+                    className="btn btn-icon"
+                    aria-label="Chat history"
+                    title="Load previous chat"
+                    aria-expanded={historyOpen}
+                    onClick={() => setHistoryOpen((open) => !open)}
+                    disabled={status === 'connecting'}
+                  >
+                    <IconHistory />
+                  </button>
+                  <ChatHistoryPanel
+                    open={historyOpen}
+                    loading={historyLoading}
+                    error={historyError}
+                    threads={historyThreads}
+                    activeSessionId={sessionId}
+                    onClose={() => setHistoryOpen(false)}
+                    onRefresh={() => void refreshHistoryThreads()}
+                    onSelect={(id) => void resumeSession(id)}
+                  />
+                </div>
                 <select
                   className="btn"
                   aria-label="Model"

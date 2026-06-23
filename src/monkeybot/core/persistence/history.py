@@ -11,6 +11,7 @@ import aiosqlite
 
 from monkeybot.core.types.content_blocks import ContentBlock
 from monkeybot.core.llm.provider import Message, Role
+from monkeybot.core.persistence.thread_summary import ChatThreadSummary, preview_from_content_blob
 
 logger = logging.getLogger("monkeybot.core.persistence.history")
 
@@ -101,6 +102,47 @@ class SQLiteHistoryStore:
         await self._conn.commit()
         for msg in messages:
             await self.append(thread_id, msg)
+
+    async def list_threads(self, limit: int = 50) -> list[ChatThreadSummary]:
+        """Return recent threads ordered by last activity (newest first)."""
+        cap = max(1, min(limit, 200))
+        cursor = await self._conn.execute(
+            """
+            SELECT
+                h.thread_id,
+                MAX(h.created_at) AS last_message_at,
+                COUNT(*) AS message_count,
+                (
+                    SELECT h2.content
+                    FROM conversation_history h2
+                    WHERE h2.thread_id = h.thread_id
+                    ORDER BY h2.created_at DESC, h2.id DESC
+                    LIMIT 1
+                ) AS last_content
+            FROM conversation_history h
+            GROUP BY h.thread_id
+            ORDER BY last_message_at DESC
+            LIMIT ?
+            """,
+            (cap,),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        out: list[ChatThreadSummary] = []
+        for row in rows:
+            thread_id = str(row[0])
+            last_at = int(row[1])
+            count = int(row[2])
+            preview = preview_from_content_blob(str(row[3] or ""))
+            out.append(
+                ChatThreadSummary(
+                    thread_id=thread_id,
+                    last_message_at=last_at,
+                    message_count=count,
+                    preview=preview or "(empty)",
+                )
+            )
+        return out
 
 
 # Backwards-compat alias — remove once all call sites are updated.

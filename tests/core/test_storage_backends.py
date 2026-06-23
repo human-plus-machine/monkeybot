@@ -402,3 +402,136 @@ async def test_run_pending_runs_orders_by_started_at(sqlite_backend: SQLiteStora
     pending = await store.pending_runs()
     ord_rows = [r for r in pending if r.run_id.startswith("run-ord-")]
     assert [r.run_id for r in ord_rows] == ["run-ord-0", "run-ord-1", "run-ord-2"]
+
+
+# ---------------------------------------------------------------------------
+# RunStore claim / record_pending / reset_stale_claims
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_record_pending_appears_in_pending_runs(sqlite_backend: SQLiteStorageBackend) -> None:
+    store = sqlite_backend.runs()
+    env = _make_envelope(parent_run_id="pending-parent")
+    await store.record_pending(
+        run_id="run-pending-1",
+        parent_run_id=None,
+        script="subagents/x.py",
+        envelope=env,
+        scratch_dir=Path("/tmp/run-pending-1"),
+    )
+    pending = await store.pending_runs()
+    row = next(r for r in pending if r.run_id == "run-pending-1")
+    assert row.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_run_claim_transitions_pending_to_running(sqlite_backend: SQLiteStorageBackend) -> None:
+    store = sqlite_backend.runs()
+    env = _make_envelope(parent_run_id="claim-parent")
+    await store.record_pending(
+        run_id="run-claim-1",
+        parent_run_id=None,
+        script="subagents/x.py",
+        envelope=env,
+        scratch_dir=Path("/tmp/run-claim-1"),
+    )
+    assert await store.claim("run-claim-1", "worker-a") is True
+    row = await store.get_run("run-claim-1")
+    assert row is not None
+    assert row.status == "running"
+    assert row.worker_id == "worker-a"
+    assert row.claimed_at is not None
+
+
+@pytest.mark.asyncio
+async def test_run_claim_returns_false_for_second_caller(sqlite_backend: SQLiteStorageBackend) -> None:
+    store = sqlite_backend.runs()
+    env = _make_envelope(parent_run_id="claim-parent-2")
+    await store.record_pending(
+        run_id="run-claim-2",
+        parent_run_id=None,
+        script="subagents/x.py",
+        envelope=env,
+        scratch_dir=Path("/tmp/run-claim-2"),
+    )
+    assert await store.claim("run-claim-2", "worker-a") is True
+    assert await store.claim("run-claim-2", "worker-b") is False
+
+
+@pytest.mark.asyncio
+async def test_run_claim_returns_false_for_non_pending(sqlite_backend: SQLiteStorageBackend) -> None:
+    store = sqlite_backend.runs()
+    env = _make_envelope(parent_run_id="claim-parent-3")
+    await store.record_started(
+        run_id="run-claim-3",
+        parent_run_id=None,
+        script="subagents/x.py",
+        envelope=env,
+        scratch_dir=Path("/tmp/run-claim-3"),
+    )
+    assert await store.claim("run-claim-3", "worker-a") is False
+
+
+@pytest.mark.asyncio
+async def test_run_claim_concurrency_only_one_wins(sqlite_backend: SQLiteStorageBackend) -> None:
+    import asyncio
+
+    store = sqlite_backend.runs()
+    env = _make_envelope(parent_run_id="claim-race")
+    await store.record_pending(
+        run_id="run-claim-race",
+        parent_run_id=None,
+        script="subagents/x.py",
+        envelope=env,
+        scratch_dir=Path("/tmp/run-claim-race"),
+    )
+
+    results = await asyncio.gather(
+        *[store.claim("run-claim-race", f"worker-{i}") for i in range(8)]
+    )
+    assert sum(1 for ok in results if ok) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_reset_stale_claims(sqlite_backend: SQLiteStorageBackend) -> None:
+    import asyncio
+
+    store = sqlite_backend.runs()
+    env = _make_envelope(parent_run_id="stale-parent")
+    await store.record_pending(
+        run_id="run-stale-1",
+        parent_run_id=None,
+        script="subagents/x.py",
+        envelope=env,
+        scratch_dir=Path("/tmp/run-stale-1"),
+    )
+    assert await store.claim("run-stale-1", "worker-stale") is True
+    await asyncio.sleep(0.02)
+    reset = await store.reset_stale_claims(stale_after_ms=10)
+    assert reset == 1
+    row = await store.get_run("run-stale-1")
+    assert row is not None
+    assert row.status == "pending"
+    assert row.worker_id is None
+
+
+def test_factory_raises_runtime_error_for_firestore_without_client() -> None:
+    try:
+        import google.cloud.firestore  # noqa: F401
+        pytest.skip("google-cloud-firestore is installed; cannot test missing-dep error path")
+    except ImportError:
+        pass
+
+    with pytest.raises(RuntimeError, match="google-cloud-firestore is not installed"):
+        create_storage_backend("firestore://my-project/(default)")
+
+
+def test_parse_firestore_config_from_url() -> None:
+    from monkeybot.core.persistence.backends import _parse_firestore_config
+
+    cfg = _parse_firestore_config("firestore://aurigaos/production?prefix=mb")
+    assert cfg is not None
+    assert cfg.project == "aurigaos"
+    assert cfg.database == "production"
+    assert cfg.prefix == "mb"

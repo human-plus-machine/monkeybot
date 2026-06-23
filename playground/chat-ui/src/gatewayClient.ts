@@ -108,6 +108,27 @@ export type WorkspaceFileResponse = {
   truncated: boolean
 }
 
+export type ChatHistoryThread = {
+  session_id: string
+  last_message_at: number
+  message_count: number
+  preview: string
+}
+
+export type ChatHistoryListResponse = {
+  threads: ChatHistoryThread[]
+}
+
+export type ChatHistoryMessage = {
+  role: 'user' | 'assistant'
+  text: string
+}
+
+export type ChatHistoryDetailResponse = {
+  session_id: string
+  messages: ChatHistoryMessage[]
+}
+
 const USAGE_ZERO: UsageSnapshot = {
   input_tokens: 0,
   output_tokens: 0,
@@ -243,9 +264,47 @@ export async function fetchWorkspaceFile(
   return JSON.parse(text) as WorkspaceFileResponse
 }
 
+export async function fetchChatHistoryThreads(
+  limit = 50,
+  init?: RequestInit,
+): Promise<ChatHistoryListResponse> {
+  const params = new URLSearchParams({ limit: String(limit) })
+  const res = await fetch(`${GATEWAY_BASE}/api/playground/chat-history?${params.toString()}`, {
+    method: 'GET',
+    headers: { ...(init?.headers as Record<string, string>) },
+    signal: init?.signal,
+  })
+  const text = await res.text()
+  if (!res.ok) {
+    throw new Error(`chat history list: ${gatewayErrorDetail(res.status, text)}`)
+  }
+  return JSON.parse(text) as ChatHistoryListResponse
+}
+
+export async function fetchChatHistoryDetail(
+  sessionId: string,
+  limit = 200,
+  init?: RequestInit,
+): Promise<ChatHistoryDetailResponse> {
+  const params = new URLSearchParams({ limit: String(limit) })
+  const res = await fetch(
+    `${GATEWAY_BASE}/api/playground/chat-history/${encodeURIComponent(sessionId)}?${params.toString()}`,
+    {
+      method: 'GET',
+      headers: { ...(init?.headers as Record<string, string>) },
+      signal: init?.signal,
+    },
+  )
+  const text = await res.text()
+  if (!res.ok) {
+    throw new Error(`chat history detail: ${gatewayErrorDetail(res.status, text)}`)
+  }
+  return JSON.parse(text) as ChatHistoryDetailResponse
+}
+
 export async function createSession(
   init?: RequestInit,
-  opts?: { model_provider?: string; model_name?: string },
+  opts?: { model_provider?: string; model_name?: string; session_id?: string },
 ): Promise<{ session_id: string; created_at: number }> {
   const res = await fetch(`${GATEWAY_BASE}/sessions`, {
     method: 'POST',
@@ -254,6 +313,7 @@ export async function createSession(
       ...(init?.headers as Record<string, string>),
     },
     body: JSON.stringify({
+      ...(opts?.session_id ? { session_id: opts.session_id } : {}),
       ...(opts?.model_provider ? { model_provider: opts.model_provider } : {}),
       ...(opts?.model_name ? { model_name: opts.model_name } : {}),
     }),

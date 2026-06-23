@@ -5,6 +5,27 @@ import ThinkingPanel from './blocks/ThinkingPanel'
 import ToolInvocationCard from './blocks/ToolInvocationCard'
 import type { AgentMessage, MessagePart } from './components/AgentChat'
 import type { ChatFeedItem } from './chatTypes'
+import type { ChatHistoryMessage } from './gatewayClient'
+
+export function historyMessagesToFeed(messages: ChatHistoryMessage[]): ChatFeedItem[] {
+  const items: ChatFeedItem[] = []
+  messages.forEach((msg, idx) => {
+    if (msg.role === 'user') {
+      items.push({
+        kind: 'userText',
+        id: `hist-u-${idx}`,
+        text: msg.text,
+      })
+      return
+    }
+    items.push({
+      kind: 'assistantText',
+      id: `hist-a-${idx}`,
+      text: msg.text,
+    })
+  })
+  return items
+}
 
 export function feedToAgentMessages(feed: ChatFeedItem[]): AgentMessage[] {
   const messages: AgentMessage[] = []

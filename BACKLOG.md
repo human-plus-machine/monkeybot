@@ -24,9 +24,10 @@
 - The loop and `/tool-confirmations` API endpoint exist; inspectors have `confirm` as a valid `Decision.kind` but no inspector currently returns it ("Story 5" placeholder).
 - Wire an inspector that returns `confirm` for configurable tool patterns, flowing through the existing `_await_user_response` path.
 
-### 6. DurableRunStore Wiring (crash recovery)
-- `SQLiteRunStore` and `PostgresRunStore` exist on the storage backend but subagents do not persist runs through `core_tool_executor` — no calls into `backend.runs()` in `subagent_worker.py`.
-- Wire subagent launch/completion/failure into the run store so a crashed harness can recover task state.
+### 6. DurableRunStore Wiring (crash recovery) — DONE
+- Subagent runs are persisted via `CoreToolExecutor` (`record_started` / `record_completed` / `record_failed`).
+- Queue mode: set `MONKEYBOT_TASK_QUEUE=1` to enqueue with `record_pending` instead of inline spawn.
+- Worker pool: `MONKEYBOT_WORKER_POOL=1` on the gateway or `python -m monkeybot.subagents.worker` consumes queued runs with atomic `claim()`.
 
 ---
 

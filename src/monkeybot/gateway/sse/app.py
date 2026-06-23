@@ -360,6 +360,9 @@ class GatewayLoopPort:
                 run_command_allowed_path_prefixes=_deps.run_command_allowed_path_prefixes,
                 attachment_store=attachment_store,
                 attachment_catalog=bus.attachment_catalog,
+                run_store=getattr(app.state, "storage", None).runs()
+                if getattr(app.state, "storage", None) is not None
+                else None,
             )
             async for evt in run_loop(
                 user_content,
@@ -560,6 +563,11 @@ async def _startup() -> None:
 
         instrument_fastapi_app(app)
 
+    if os.environ.get("MONKEYBOT_WORKER_POOL", "").strip().lower() in ("1", "true", "yes"):
+        from monkeybot.core.subagents.worker_pool import start_worker_pool_background
+
+        app.state.worker_pool_task = start_worker_pool_background(backend)
+
 
 @app.on_event("shutdown")
 async def _shutdown() -> None:
@@ -575,6 +583,13 @@ async def _shutdown() -> None:
     if mcp is not None:
         for name in list(getattr(mcp, "_servers", {}).keys()):
             await mcp.disconnect(name)
+
+    worker_task: asyncio.Task[None] | None = getattr(app.state, "worker_pool_task", None)
+    if worker_task is not None:
+        worker_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await worker_task
+        app.state.worker_pool_task = None
 
     storage: StorageBackend | None = getattr(app.state, "storage", None)
     if storage is not None:

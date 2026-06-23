@@ -152,6 +152,24 @@ def _workspace_exc_to_api(exc: WorkspaceError) -> APIError:
     return APIError(400, "BAD_REQUEST", str(exc), rid)
 
 
+def _playground_chat_history_api_enabled() -> bool:
+    """Opt out with ``MONKEYBOT_PLAYGROUND_CHAT_HISTORY=0``."""
+    v = os.environ.get("MONKEYBOT_PLAYGROUND_CHAT_HISTORY", "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def _storage_backend(request: Request) -> Any:
+    backend = getattr(request.app.state, "storage", None)
+    if backend is None:
+        raise APIError(
+            503,
+            "STORAGE_UNAVAILABLE",
+            "Storage backend is not initialized",
+            uuid.uuid4().hex,
+        )
+    return backend
+
+
 def create_app(
     *,
     loop_port: LoopPort | None = None,
@@ -608,6 +626,60 @@ def create_app(
             "end_line": result["end_line"],
             "total_lines": result["total_lines"],
             "truncated": result["truncated"],
+        }
+
+    @api.get("/api/playground/chat-history")
+    async def playground_chat_history_list(
+        request: Request,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """List recent persisted chat threads for the playground UI."""
+        if not _playground_chat_history_api_enabled():
+            raise APIError(
+                404,
+                "NOT_FOUND",
+                "Playground chat history API is disabled",
+                uuid.uuid4().hex,
+            )
+        from monkeybot.core.persistence.thread_summary import ChatThreadSummary
+
+        backend = _storage_backend(request)
+        cap = max(1, min(limit, 200))
+        rows: list[ChatThreadSummary] = await backend.history().list_threads(cap)
+        return {
+            "threads": [
+                {
+                    "session_id": row.thread_id,
+                    "last_message_at": row.last_message_at,
+                    "message_count": row.message_count,
+                    "preview": row.preview,
+                }
+                for row in rows
+            ]
+        }
+
+    @api.get("/api/playground/chat-history/{session_id}")
+    async def playground_chat_history_detail(
+        session_id: str,
+        request: Request,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        """Return persisted user/assistant text for one chat thread."""
+        if not _playground_chat_history_api_enabled():
+            raise APIError(
+                404,
+                "NOT_FOUND",
+                "Playground chat history API is disabled",
+                uuid.uuid4().hex,
+            )
+        from monkeybot.core.persistence.thread_summary import messages_to_playground_wire
+
+        backend = _storage_backend(request)
+        cap = max(1, min(limit, 500))
+        messages = await backend.history().load(session_id.strip(), limit=cap)
+        return {
+            "session_id": session_id,
+            "messages": messages_to_playground_wire(messages),
         }
 
     app.include_router(api)

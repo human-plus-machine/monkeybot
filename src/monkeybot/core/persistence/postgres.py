@@ -19,6 +19,7 @@ from monkeybot.core.persistence.durable_runs import (
     _SUBAGENT_COLUMNS,
     _tuple_to_run_row,
 )
+from monkeybot.core.persistence.thread_summary import ChatThreadSummary, preview_from_content_blob
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,9 @@ _SCHEMA_DDLS: tuple[str, ...] = (
     error_json TEXT,
     started_at BIGINT,
     finished_at BIGINT,
-    scratch_dir TEXT
+    scratch_dir TEXT,
+    worker_id TEXT,
+    claimed_at BIGINT
 )""",
     """CREATE TABLE IF NOT EXISTS turn_usage (
     id BIGSERIAL PRIMARY KEY,
@@ -67,6 +70,8 @@ _SCHEMA_DDLS: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_usage_cost ON turn_usage(created_at)",
     "ALTER TABLE turn_usage ADD COLUMN IF NOT EXISTS cache_read_tokens INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE turn_usage ADD COLUMN IF NOT EXISTS cache_creation_tokens INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE subagent_runs ADD COLUMN IF NOT EXISTS worker_id TEXT",
+    "ALTER TABLE subagent_runs ADD COLUMN IF NOT EXISTS claimed_at BIGINT",
 )
 
 
@@ -159,6 +164,42 @@ class PostgresHistoryStore:
                 )
                 for msg in messages:
                     await self._insert_message(conn, thread_id, msg)
+
+    async def list_threads(self, limit: int = 50) -> list[ChatThreadSummary]:
+        cap = max(1, min(limit, 200))
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT
+                    h.thread_id,
+                    MAX(h.created_at) AS last_message_at,
+                    COUNT(*)::int AS message_count,
+                    (
+                        SELECT h2.content
+                        FROM conversation_history h2
+                        WHERE h2.thread_id = h.thread_id
+                        ORDER BY h2.created_at DESC, h2.id DESC
+                        LIMIT 1
+                    ) AS last_content
+                FROM conversation_history h
+                GROUP BY h.thread_id
+                ORDER BY last_message_at DESC
+                LIMIT $1
+                """,
+                cap,
+            )
+        out: list[ChatThreadSummary] = []
+        for row in rows:
+            preview = preview_from_content_blob(str(row["last_content"] or ""))
+            out.append(
+                ChatThreadSummary(
+                    thread_id=str(row["thread_id"]),
+                    last_message_at=int(row["last_message_at"]),
+                    message_count=int(row["message_count"]),
+                    preview=preview or "(empty)",
+                )
+            )
+        return out
 
 
 class PostgresUsageStore:
@@ -302,6 +343,33 @@ class PostgresRunStore:
     def __init__(self, pool: asyncpg.Pool) -> None:
         self._pool = pool
 
+    async def record_pending(
+        self,
+        run_id: str,
+        parent_run_id: str | None,
+        script: str,
+        envelope: SubagentEnvelope,
+        scratch_dir: object,
+    ) -> None:
+        now_ms = int(time.time() * 1000)
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO subagent_runs(
+                    run_id, parent_run_id, script, envelope_json,
+                    status, result_json, error_json, started_at, finished_at, scratch_dir,
+                    worker_id, claimed_at
+                )
+                VALUES ($1, $2, $3, $4, 'pending', NULL, NULL, $5, NULL, $6, NULL, NULL)
+                """,
+                run_id,
+                parent_run_id,
+                script,
+                envelope.to_json(),
+                now_ms,
+                str(scratch_dir),
+            )
+
     async def record_started(
         self,
         run_id: str,
@@ -316,9 +384,10 @@ class PostgresRunStore:
                 """
                 INSERT INTO subagent_runs(
                     run_id, parent_run_id, script, envelope_json,
-                    status, result_json, error_json, started_at, finished_at, scratch_dir
+                    status, result_json, error_json, started_at, finished_at, scratch_dir,
+                    worker_id, claimed_at
                 )
-                VALUES ($1, $2, $3, $4, 'running', NULL, NULL, $5, NULL, $6)
+                VALUES ($1, $2, $3, $4, 'running', NULL, NULL, $5, NULL, $6, NULL, NULL)
                 """,
                 run_id,
                 parent_run_id,
@@ -327,6 +396,44 @@ class PostgresRunStore:
                 now_ms,
                 str(scratch_dir),
             )
+
+    async def claim(self, run_id: str, worker_id: str) -> bool:
+        now_ms = int(time.time() * 1000)
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                UPDATE subagent_runs
+                SET status = 'running',
+                    worker_id = $2,
+                    claimed_at = $3
+                WHERE run_id = $1 AND status = 'pending'
+                RETURNING run_id
+                """,
+                run_id,
+                worker_id,
+                now_ms,
+            )
+        return row is not None
+
+    async def reset_stale_claims(self, stale_after_ms: int) -> int:
+        cutoff = int(time.time() * 1000) - stale_after_ms
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE subagent_runs
+                SET status = 'pending',
+                    worker_id = NULL,
+                    claimed_at = NULL
+                WHERE status = 'running'
+                  AND claimed_at IS NOT NULL
+                  AND claimed_at < $1
+                """,
+                cutoff,
+            )
+        try:
+            return int(result.split()[-1])
+        except (ValueError, IndexError):
+            return 0
 
     async def record_completed(self, run_id: str, result_json: str) -> None:
         now_ms = int(time.time() * 1000)
