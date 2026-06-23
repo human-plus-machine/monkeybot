@@ -63,7 +63,18 @@ class ReplyRequest(BaseModel):
     """POST /sessions/{id}/reply body."""
 
     request_id: str
-    message: str = Field(..., max_length=32000)
+    message: str | None = Field(default=None, max_length=32000)
+    content: list[dict[str, Any]] | None = None
+
+
+class AttachmentUploadResponse(BaseModel):
+    """POST /sessions/{id}/attachments response (201)."""
+
+    attachment_id: str
+    mime_type: str
+    size_bytes: int
+    filename: str
+    created_at: int
 
 
 class ReplyResponse(BaseModel):

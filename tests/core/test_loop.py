@@ -38,6 +38,7 @@ from monkeybot.core.runtime.loop import (
 )
 from monkeybot.core.testing.mocks_provider import fake_provider_prompt_tokens
 from monkeybot.core.tools.inspector import Decision
+from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.types.content_blocks import Text, ToolRequest, ToolResponse
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.core.workspace import create_workspace_storage
@@ -155,12 +156,26 @@ class FakeProvider:
         return fake_provider_prompt_tokens(messages, tools)
 
 
+def _tool_result(
+    result: ToolExecutionResult | tuple[str | None, str | None],
+) -> ToolExecutionResult:
+    if isinstance(result, ToolExecutionResult):
+        return result
+    text, err = result
+    if err is not None:
+        return ToolExecutionResult.err(err)
+    return ToolExecutionResult.ok_text(text or "")
+
+
 class RecordingExecutor:
-    def __init__(self, result: tuple[str | None, str | None] = ("ok", None)) -> None:
-        self.result = result
+    def __init__(
+        self,
+        result: ToolExecutionResult | tuple[str | None, str | None] = ("ok", None),
+    ) -> None:
+        self.result = _tool_result(result)
         self.calls: list[ToolCall] = []
 
-    async def execute(self, *, call: ToolCall, ctx: TurnContext) -> tuple[str | None, str | None]:
+    async def execute(self, *, call: ToolCall, ctx: TurnContext) -> ToolExecutionResult:
         del ctx
         self.calls.append(call)
         return self.result
@@ -458,7 +473,7 @@ async def test_run_cancellation_between_two_tools_second_skipped() -> None:
     cancel = asyncio.Event()
 
     class CancelAfterFirst(RecordingExecutor):
-        async def execute(self, *, call: ToolCall, ctx: TurnContext) -> tuple[str | None, str | None]:
+        async def execute(self, *, call: ToolCall, ctx: TurnContext) -> ToolExecutionResult:
             await super().execute(call=call, ctx=ctx)
             if len(self.calls) == 1:
                 cancel.set()
@@ -498,7 +513,7 @@ async def test_run_generator_closes_without_pending_tasks() -> None:
     cancel = asyncio.Event()
 
     class CancelAfterFirst(RecordingExecutor):
-        async def execute(self, *, call: ToolCall, ctx: TurnContext) -> tuple[str | None, str | None]:
+        async def execute(self, *, call: ToolCall, ctx: TurnContext) -> ToolExecutionResult:
             await super().execute(call=call, ctx=ctx)
             if len(self.calls) == 1:
                 cancel.set()
@@ -611,17 +626,17 @@ async def test_parallel_task_tools_cap_concurrent_executions() -> None:
     _lock = asyncio.Lock()
 
     class CountingExecutor:
-        async def execute(self, *, call: ToolCall, ctx: TurnContext) -> tuple[str | None, str | None]:
+        async def execute(self, *, call: ToolCall, ctx: TurnContext) -> ToolExecutionResult:
             del ctx
             if call.name != "task":
-                return ("x", None)
+                return ToolExecutionResult.ok_text("x")
             async with _lock:
                 _gate["n"] += 1
                 _gate["max"] = max(_gate["max"], _gate["n"])
             await asyncio.sleep(0.04)
             async with _lock:
                 _gate["n"] -= 1
-            return ('{"ok": true}', None)
+            return ToolExecutionResult.ok_text('{"ok": true}')
 
     calls = [ToolCall(call_id=f"t{i:02d}", name="task", args={"task": f"j{i}"}) for i in range(12)]
     prov = FakeProvider([[*calls, Done()]])
@@ -946,13 +961,13 @@ async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> N
             super().__init__()
             self._memory_dir = memory_dir
 
-        async def execute(self, *, call: ToolCall, ctx: TurnContext) -> tuple[str | None, str | None]:
+        async def execute(self, *, call: ToolCall, ctx: TurnContext) -> ToolExecutionResult:
             del call, ctx
             (self._memory_dir / "INDEX.md").write_text(
                 "initial line\nnew memory from tool\n",
                 encoding="utf-8",
             )
-            return ("ok", None)
+            return ToolExecutionResult.ok_text("ok")
 
     prov = CaptureFakeProvider(
         [
@@ -1017,10 +1032,10 @@ async def test_parallel_task_results_appended_in_call_id_order() -> None:
     delays = {"c1": 0.05, "a1": 0.02, "b1": 0.01}
 
     class SlowExecutor:
-        async def execute(self, *, call: ToolCall, ctx: TurnContext) -> tuple[str | None, str | None]:
+        async def execute(self, *, call: ToolCall, ctx: TurnContext) -> ToolExecutionResult:
             del ctx
             await asyncio.sleep(delays.get(call.call_id, 0.01))
-            return (f"result:{call.call_id}", None)
+            return ToolExecutionResult.ok_text(f"result:{call.call_id}")
 
     prov = FakeProvider(
         [

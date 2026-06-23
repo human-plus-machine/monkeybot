@@ -1,3 +1,5 @@
+@import 'tailwindcss';
+
 :root {
   color-scheme: dark;
   --bg: #050505;
@@ -10,6 +12,12 @@
   --danger: #ef4444;
   --mono: ui-monospace, 'SF Mono', Consolas, monospace;
   --sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --page-gutter: clamp(12px, 2.5vw, 24px);
+  --panel-gap: clamp(12px, 2vw, 16px);
+  --panel-radius: 12px;
+  --side-panel-min: 360px;
+  --side-panel-max: 720px;
+  --side-panel-vw: 52vw;
   font-family: var(--sans);
   line-height: 1.45;
   color: var(--text);
@@ -32,6 +40,7 @@ html {
 html,
 body {
   margin: 0;
+  width: 100%;
   height: 100%;
   min-height: 100dvh;
 }
@@ -41,11 +50,14 @@ body {
 }
 
 #root {
+  width: 100%;
   height: 100%;
-  min-height: 0;
-  max-width: min(1280px, 100%);
-  margin: 0 auto;
-  padding: clamp(12px, 3vw, 24px);
+  min-height: 100dvh;
+  margin: 0;
+  padding: max(var(--page-gutter), env(safe-area-inset-top, 0px))
+    max(var(--page-gutter), env(safe-area-inset-right, 0px))
+    max(var(--page-gutter), env(safe-area-inset-bottom, 0px))
+    max(var(--page-gutter), env(safe-area-inset-left, 0px));
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
@@ -214,31 +226,48 @@ code {
 .app {
   display: flex;
   flex-direction: column;
-  gap: 16px;
   flex: 1;
+  width: 100%;
   min-height: 0;
+  height: 100%;
 }
 
 .app--split {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 38vw);
+  grid-template-columns:
+    minmax(0, 1fr)
+    minmax(var(--side-panel-min), min(var(--side-panel-vw), var(--side-panel-max)));
   grid-template-rows: 1fr;
   align-items: stretch;
-  gap: clamp(12px, 2vw, 16px);
+  gap: var(--panel-gap);
   flex: 1;
+  width: 100%;
   min-height: 0;
+  height: 100%;
 }
 
 @media (max-width: 900px) {
   .app--split {
     grid-template-columns: 1fr;
-    grid-template-rows: minmax(0, 1fr) minmax(160px, 36dvh);
+    grid-template-rows: minmax(0, 1fr) minmax(240px, 40dvh);
+    gap: var(--panel-gap);
   }
 }
 
-.app--split > .chat {
-  min-width: 0;
+.app--split > .panel {
+  height: 100%;
   min-height: 0;
+  min-width: 0;
+  border-radius: var(--panel-radius);
+  overflow: hidden;
+}
+
+.app--split > .chat.panel {
+  padding: 0;
+}
+
+.app--split > .right-side-panel.panel {
+  padding: clamp(12px, 2vw, 18px);
 }
 
 .right-side-panel {
@@ -687,7 +716,7 @@ code {
 .panel {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: var(--panel-radius);
   padding: clamp(12px, 2.5vw, 16px);
 }
 
@@ -814,8 +843,11 @@ code {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  gap: 12px;
+  min-width: 0;
+  height: 100%;
+  gap: 0;
   overflow: hidden;
+  padding: 0;
 }
 
 .chat-surface {
@@ -825,6 +857,10 @@ code {
   display: flex;
   flex-direction: column;
   --chat-overlay-pad: 80px;
+}
+
+.chat-surface [data-testid='agent-chat-message-list'] {
+  padding-top: calc(1.5rem + var(--chat-overlay-pad, 80px));
 }
 
 .chat-controls-overlay {
@@ -887,8 +923,9 @@ code {
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
-  padding: 4px;
+  padding: 4px clamp(10px, 2.5vw, 16px);
   padding-top: calc(4px + var(--chat-overlay-pad, 80px));
+  padding-bottom: clamp(8px, 2vw, 12px);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -1170,7 +1207,89 @@ code {
   flex-direction: column;
   gap: 8px;
   flex-shrink: 0;
-  padding-bottom: env(safe-area-inset-bottom, 0);
+  padding: clamp(8px, 2vw, 12px) clamp(10px, 2.5vw, 16px);
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.composer-main {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.composer-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.composer-pending-attachments,
+.user-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.attachment-chip {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle, #3a3f4b);
+  background: var(--surface-elevated, rgba(255, 255, 255, 0.04));
+  font-size: 0.78rem;
+  line-height: 1.3;
+}
+
+.attachment-chip--frozen {
+  border-color: var(--accent-muted, #4a6fa5);
+}
+
+.attachment-chip-kind {
+  text-transform: uppercase;
+  font-size: 0.65rem;
+  letter-spacing: 0.04em;
+  opacity: 0.75;
+}
+
+.attachment-chip-name {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 12rem;
+}
+
+.attachment-chip-id {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  opacity: 0.65;
+  font-size: 0.7rem;
+}
+
+.attachment-chip-remove {
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+  opacity: 0.7;
+}
+
+.attachment-chip-remove:hover {
+  opacity: 1;
 }
 
 .composer-actions {
@@ -1187,12 +1306,48 @@ code {
     align-items: flex-end;
   }
 
+  .composer-main {
+    flex: 1;
+  }
+
   .composer .textarea {
     flex: 1;
   }
 
   .composer-actions .send {
     flex-shrink: 0;
+  }
+}
+
+@media (max-width: 480px) {
+  .composer-actions {
+    width: 100%;
+  }
+
+  .composer-actions .btn.attach,
+  .composer-actions .btn.send,
+  .composer-actions .btn.stop {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .chat-controls-bar {
+    padding: 8px 10px;
+  }
+
+  .chat-controls-trailing .btn {
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+
+  .right-panel-tabs {
+    flex-wrap: wrap;
+  }
+
+  .right-panel-tab {
+    flex: 1 1 calc(50% - 4px);
+    font-size: 0.72rem;
+    padding: 6px 8px;
   }
 }
 

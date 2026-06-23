@@ -1,19 +1,21 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import ImageBlockBubble from './blocks/ImageBlockBubble'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import ElicitationForm from './blocks/ElicitationForm'
 import FrontendToolHandler from './blocks/FrontendToolHandler'
-import RedactedThinkingPlaceholder from './blocks/RedactedThinkingPlaceholder'
 import SystemNotificationToast from './blocks/SystemNotificationToast'
-import ThinkingPanel from './blocks/ThinkingPanel'
 import ToolConfirmationModal from './blocks/ToolConfirmationModal'
-import ToolInvocationCard, { MAX_RESULT_CHARS } from './blocks/ToolInvocationCard'
+import { MAX_RESULT_CHARS } from './blocks/ToolInvocationCard'
+import AgentChat, { type ChatStatus } from './components/AgentChat'
+import type { ChatFeedItem, PendingComposerAttachment } from './chatTypes'
+import { buildFeedSlots, feedToAgentMessages } from './feedAdapter'
 import {
   consumeSseJson,
   createSession,
   fetchSessionUsage,
   openEventsStream,
+  postAttachment,
   postCancel,
   postReply,
+  type ContentBlockWire,
   type GatewayJsonEvent,
   type SessionUsageResponse,
 } from './gatewayClient'
@@ -21,6 +23,8 @@ import EvalsPanel from './EvalsPanel'
 import ObservabilityPanel from './ObservabilityPanel'
 import WorkspaceBrowser from './WorkspaceBrowser'
 import type { ToastItem } from './blocks/SystemNotificationToast'
+
+export type { ChatFeedItem, UserAttachmentView } from './chatTypes'
 
 export type PendingWidget =
   | {
@@ -47,55 +51,31 @@ export type PendingWidget =
       request_id?: string
     }
 
-export type ChatFeedItem =
-  | {
-      kind: 'userText'
-      id: string
-      text: string
-    }
-  | {
-      kind: 'assistantText'
-      id: string
-      text: string
-    }
-  | {
-      kind: 'toolInvocation'
-      id: string
-      request_id: string
-      tool: string
-      label?: string
-      args?: Record<string, unknown>
-      phase: 'running' | 'complete'
-      error?: string
-      resultRaw?: string
-      resultTruncated?: boolean
-    }
-  | {
-      kind: 'systemNotice'
-      id: string
-      text: string
-    }
-  | {
-      kind: 'image'
-      id: string
-      request_id?: string
-      mime_type: string
-      data: string
-    }
-  | {
-      kind: 'thinking'
-      id: string
-      request_id: string
-      text: string
-      phase: 'streaming' | 'complete'
-      signature?: string
-    }
-  | {
-      kind: 'redactedThinking'
-      id: string
-      request_id?: string
-      data: string
-    }
+const MAX_ATTACHMENTS_PER_REPLY = 5
+
+function revokeAttachmentPreview(a: PendingComposerAttachment): void {
+  if (a.preview_url) URL.revokeObjectURL(a.preview_url)
+}
+
+function buildReplyContent(
+  text: string,
+  attachments: PendingComposerAttachment[],
+): ContentBlockWire[] {
+  const blocks: ContentBlockWire[] = []
+  const trimmed = text.trim()
+  if (trimmed) {
+    blocks.push({ type: 'text', text: trimmed })
+  }
+  for (const a of attachments) {
+    blocks.push({
+      type: 'attachmentRef',
+      attachmentId: a.attachment_id,
+      mimeType: a.mime_type,
+      metadata: { filename: a.filename },
+    })
+  }
+  return blocks
+}
 
 function newRequestId(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -259,7 +239,9 @@ export default function App() {
   const [feed, setFeed] = useState<ChatFeedItem[]>([])
   const [pendingWidgets, setPendingWidgets] = useState<PendingWidget[]>([])
   const [toasts, setToasts] = useState<ToastItem[]>([])
-  const [draft, setDraft] = useState('')
+  const [pendingAttachments, setPendingAttachments] = useState<PendingComposerAttachment[]>([])
+  const [attachBusy, setAttachBusy] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [streamingText, setStreamingText] = useState('')
   const [activeRequestId, setActiveRequestId] = useState<string | null>(null)
   const [toolHint, setToolHint] = useState<string | null>(null)
@@ -445,6 +427,27 @@ export default function App() {
           setStreamingText('')
           setFeed((m) => [...m, { id: `e-${newRequestId()}`, kind: 'systemNotice', text: err }])
           void refreshSessionUsage()
+          break
+        }
+        case 'AttachmentDescriptor': {
+          const attId = typeof evt.attachment_id === 'string' ? evt.attachment_id : ''
+          if (!rid || !attId) break
+          const filename = typeof evt.filename === 'string' ? evt.filename : attId
+          const mime = typeof evt.mime_type === 'string' ? evt.mime_type : 'application/octet-stream'
+          const desc = typeof evt.description === 'string' ? evt.description : ''
+          setFeed((f) =>
+            f.map((item) => {
+              if (item.kind !== 'userText' || item.request_id !== rid || !item.attachments?.length) {
+                return item
+              }
+              const nextAtt = item.attachments.map((a) =>
+                a.attachment_id === attId
+                  ? { ...a, filename, mime_type: mime, description: desc, frozen: true }
+                  : a,
+              )
+              return { ...item, attachments: nextAtt }
+            }),
+          )
           break
         }
         case 'Thinking': {
@@ -672,6 +675,7 @@ export default function App() {
     setStatus('connecting')
     setStatusNote('')
     setFeed([])
+    setPendingAttachments([])
     setPendingWidgets([])
     setToasts([])
     streamBufRef.current = ''
@@ -710,6 +714,8 @@ export default function App() {
     setStatus('disconnected')
     setStatusNote('')
     setFeed([])
+    pendingAttachments.forEach(revokeAttachmentPreview)
+    setPendingAttachments([])
     setPendingWidgets([])
     streamBufRef.current = ''
     setStreamingText('')
@@ -722,21 +728,81 @@ export default function App() {
     setRightTab('prompt')
   }
 
-  const send = async () => {
-    const text = draft.trim()
+  const attachFiles = async (files: FileList | null) => {
     const sid = sessionId
-    if (!text || !sid || status !== 'connected') return
+    if (!sid || status !== 'connected' || !files?.length || busy || attachBusy) return
+    setAttachBusy(true)
+    try {
+      const added: PendingComposerAttachment[] = []
+      for (const file of Array.from(files)) {
+        if (pendingAttachments.length + added.length >= MAX_ATTACHMENTS_PER_REPLY) break
+        const uploaded = await postAttachment(sid, file)
+        let preview_url: string | undefined
+        if (file.type.startsWith('image/')) {
+          try {
+            preview_url = URL.createObjectURL(file)
+          } catch {
+            preview_url = undefined
+          }
+        }
+        added.push({
+          attachment_id: uploaded.attachment_id,
+          filename: uploaded.filename || file.name,
+          mime_type: uploaded.mime_type,
+          size_bytes: file.size,
+          preview_url,
+        })
+      }
+      if (added.length) {
+        setPendingAttachments((prev) => [...prev, ...added].slice(0, MAX_ATTACHMENTS_PER_REPLY))
+      }
+    } catch (e) {
+      setFeed((m) => [
+        ...m,
+        {
+          id: `e-${newRequestId()}`,
+          kind: 'systemNotice',
+          text: e instanceof Error ? e.message : String(e),
+        },
+      ])
+    } finally {
+      setAttachBusy(false)
+      if (fileInputRef.current) fileInputRef.current.value = ''
+    }
+  }
+
+  const send = async (text: string) => {
+    const trimmed = text.trim()
+    const sid = sessionId
+    if ((!trimmed && pendingAttachments.length === 0) || !sid || status !== 'connected') return
 
     const rid = newRequestId()
-    setDraft('')
+    const attachments = [...pendingAttachments]
+    attachments.forEach(revokeAttachmentPreview)
+    setPendingAttachments([])
     streamBufRef.current = ''
     setStreamingText('')
     setActiveRequestId(rid)
     setToolHint(null)
-    setFeed((m) => [...m, { id: `u-${rid}`, kind: 'userText', text }])
+    setFeed((m) => [
+      ...m,
+      {
+        id: `u-${rid}`,
+        kind: 'userText',
+        request_id: rid,
+        text: trimmed,
+        attachments: attachments.length
+          ? attachments.map((a) => ({
+              attachment_id: a.attachment_id,
+              filename: a.filename,
+              mime_type: a.mime_type,
+            }))
+          : undefined,
+      },
+    ])
 
     try {
-      await postReply(sid, rid, text)
+      await postReply(sid, rid, buildReplyContent(trimmed, attachments))
     } catch (e) {
       setActiveRequestId(null)
       streamBufRef.current = ''
@@ -773,6 +839,61 @@ export default function App() {
 
   const busy = activeRequestId !== null
 
+  const agentMessages = useMemo(() => feedToAgentMessages(feed), [feed])
+  const feedSlots = useMemo(() => buildFeedSlots(feed), [feed])
+
+  const chatStatus: ChatStatus =
+    status !== 'connected' || !sessionId
+      ? 'idle'
+      : busy
+        ? streamingText || toolHint
+          ? 'streaming'
+          : 'submitted'
+        : 'ready'
+
+  const composerImages = useMemo(
+    () =>
+      pendingAttachments
+        .filter((a) => a.mime_type.startsWith('image/') && a.preview_url)
+        .map((a) => ({
+          id: a.attachment_id,
+          filename: a.filename,
+          url: a.preview_url!,
+          size: a.size_bytes,
+        })),
+    [pendingAttachments],
+  )
+
+  const composerFiles = useMemo(
+    () =>
+      pendingAttachments
+        .filter((a) => !a.mime_type.startsWith('image/') || !a.preview_url)
+        .map((a) => ({
+          id: a.attachment_id,
+          filename: a.filename,
+          size: a.size_bytes,
+        })),
+    [pendingAttachments],
+  )
+
+  const removePendingAttachment = useCallback((id: string) => {
+    setPendingAttachments((prev) => {
+      const target = prev.find((a) => a.attachment_id === id)
+      if (target) revokeAttachmentPreview(target)
+      return prev.filter((a) => a.attachment_id !== id)
+    })
+  }, [])
+
+  const messageListFooter =
+    streamingText || toolHint ? (
+      <div className="flex justify-start" aria-busy={busy}>
+        <div className="max-w-[90%] text-sm leading-relaxed text-neutral-700 dark:text-neutral-300 whitespace-pre-wrap break-words">
+          {toolHint ? <div className="mb-1 text-xs italic text-neutral-500">{toolHint}</div> : null}
+          {streamingText}
+        </div>
+      </div>
+    ) : null
+
   const dismissToast = useCallback((id: string) => {
     setToasts((t) => t.filter((x) => x.id !== id))
   }, [])
@@ -787,103 +908,42 @@ export default function App() {
     <div className="app app--split">
       <main className="panel chat" aria-label="Chat">
         <div className="chat-surface" ref={chatSurfaceRef}>
-          <div
-            ref={messagesScrollRef}
-            className="messages"
-            role="log"
-            aria-relevant="additions"
-            onScroll={handleMessagesScroll}
-          >
-            {feed.map((item) => {
-              if (item.kind === 'userText') {
-                return (
-                  <article key={item.id} className="bubble user">
-                    <div className="bubble-meta">user</div>
-                    <div className="bubble-body">{item.text}</div>
-                  </article>
-                )
-              }
-              if (item.kind === 'assistantText') {
-                return (
-                  <article key={item.id} className="bubble assistant">
-                    <div className="bubble-meta">assistant</div>
-                    <div className="bubble-body">{item.text}</div>
-                  </article>
-                )
-              }
-              if (item.kind === 'toolInvocation') {
-                return (
-                  <article key={item.id} className="bubble tool">
-                    <div className="bubble-meta">tool</div>
-                    <div className="bubble-body bubble-body--tool-card">
-                      <ToolInvocationCard
-                        tool={item.tool}
-                        label={item.label}
-                        args={item.args}
-                        phase={item.phase}
-                        error={item.error}
-                        resultRaw={item.resultRaw}
-                        resultTruncated={item.resultTruncated}
-                      />
-                    </div>
-                  </article>
-                )
-              }
-              if (item.kind === 'systemNotice') {
-                return (
-                  <article key={item.id} className="bubble system">
-                    <div className="bubble-meta">system</div>
-                    <div className="bubble-body">{item.text}</div>
-                  </article>
-                )
-              }
-              if (item.kind === 'image') {
-                return (
-                  <article key={item.id} className="bubble assistant assistant-image-inline">
-                    <div className="bubble-meta">assistant</div>
-                    <div className="bubble-body">
-                      <ImageBlockBubble mime_type={item.mime_type} data={item.data} />
-                    </div>
-                  </article>
-                )
-              }
-              if (item.kind === 'thinking') {
-                return (
-                  <article key={item.id} className="bubble assistant thinking-feed-item">
-                    <div className="bubble-meta">thinking</div>
-                    <div className="bubble-body">
-                      <ThinkingPanel
-                        request_id={item.request_id}
-                        text={item.text}
-                        phase={item.phase}
-                        signature={item.signature}
-                      />
-                    </div>
-                  </article>
-                )
-              }
-              if (item.kind === 'redactedThinking') {
-                return (
-                  <article key={item.id} className="bubble assistant">
-                    <div className="bubble-meta">thinking</div>
-                    <div className="bubble-body">
-                      <RedactedThinkingPlaceholder data={item.data} />
-                    </div>
-                  </article>
-                )
-              }
-              return null
-            })}
-            {(streamingText || toolHint) && (
-              <article className="bubble assistant streaming" aria-busy={busy}>
-                <div className="bubble-meta">assistant</div>
-                <div className="bubble-body">
-                  {toolHint ? <div className="hint">{toolHint}</div> : null}
-                  {streamingText ? <div className="stream">{streamingText}</div> : null}
-                </div>
-              </article>
-            )}
-          </div>
+          <AgentChat
+            className="h-full"
+            messages={agentMessages}
+            slots={feedSlots}
+            messageListRef={messagesScrollRef}
+            onMessageListScroll={handleMessagesScroll}
+            messageListFooter={messageListFooter}
+            status={chatStatus}
+            onSend={({ content }) => void send(content)}
+            onStop={() => void stopTurn()}
+            inputDisabled={status !== 'connected' || attachBusy}
+            attachments={{
+              onAttach:
+                status === 'connected' &&
+                !busy &&
+                !attachBusy &&
+                pendingAttachments.length < MAX_ATTACHMENTS_PER_REPLY
+                  ? () => fileInputRef.current?.click()
+                  : undefined,
+              images: composerImages,
+              files: composerFiles,
+              onRemoveImage: removePendingAttachment,
+              onRemoveFile: removePendingAttachment,
+            }}
+          />
+
+          <input
+            ref={fileInputRef}
+            type="file"
+            className="composer-file-input"
+            accept="image/jpeg,image/png,image/gif,image/webp,application/pdf"
+            multiple
+            aria-hidden
+            tabIndex={-1}
+            onChange={(e) => void attachFiles(e.target.files)}
+          />
 
           <SystemNotificationToast toasts={toasts} onDismiss={dismissToast} />
 
@@ -1026,38 +1086,6 @@ export default function App() {
                 {statusNote ? <p className="error">{statusNote}</p> : null}
               </div>
             ) : null}
-          </div>
-        </div>
-
-        <div className="composer">
-          <textarea
-            className="textarea"
-            rows={3}
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault()
-                void send()
-              }
-            }}
-            placeholder="Message… (Enter to send, Shift+Enter newline)"
-            disabled={status !== 'connected' || busy}
-          />
-          <div className="composer-actions">
-            {busy ? (
-              <button type="button" className="btn stop" onClick={() => void stopTurn()}>
-                Stop
-              </button>
-            ) : null}
-            <button
-              type="button"
-              className="btn primary send"
-              onClick={() => void send()}
-              disabled={status !== 'connected' || busy || !draft.trim()}
-            >
-              Send
-            </button>
           </div>
         </div>
       </main>

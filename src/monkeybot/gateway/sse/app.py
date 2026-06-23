@@ -19,6 +19,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 import monkeybot.gateway.load_env  # noqa: F401 — side effect: dotenv + monkeybot.yaml
+from monkeybot.core.attachments.config import attachments_enabled_from_env
+from monkeybot.core.attachments.store import AttachmentStore, FilesystemAttachmentStore
 from monkeybot.core.config.settings import get_provider_config, normalize_model_provider
 from monkeybot.core.context import build_context
 from monkeybot.core.hooks import HookManager
@@ -44,6 +46,7 @@ from monkeybot.core.runtime.loop import SUMMARY_TRIGGER_RATIO
 from monkeybot.core.runtime.loop import run as run_loop
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
+from monkeybot.core.types.content_blocks import ContentBlock
 from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector, ToolInspector
 from monkeybot.core.workspace import create_workspace_storage
 from monkeybot.gateway.sse.loop_port import UsagePort
@@ -267,7 +270,12 @@ class GatewayLoopPort:
     def __init__(self, registry: SessionRegistry) -> None:
         self._registry = registry
 
-    async def start_turn(self, session_id: str, request_id: str, message: str) -> None:
+    async def start_turn(
+        self,
+        session_id: str,
+        request_id: str,
+        user_content: list[ContentBlock],
+    ) -> None:
         bus = self._registry.get(session_id)
         if bus is None:
             return
@@ -308,6 +316,13 @@ class GatewayLoopPort:
 
             workspace_root, skills_resolved = _resolved_workspace_paths()
 
+            attachment_store: AttachmentStore | None = getattr(
+                app.state, "attachment_store", None
+            )
+            if bus.attachment_catalog is not None:
+                rows = await history.load(session_id)
+                bus.attachment_catalog.rebuild_from_history(rows)
+
             extra_tools = [_deps.web_search_tool] if _deps.web_search_tool is not None else []
 
             try:
@@ -343,9 +358,11 @@ class GatewayLoopPort:
                 extra_tools=extra_tools,
                 run_command_allowed_commands=_deps.run_command_allowed_commands,
                 run_command_allowed_path_prefixes=_deps.run_command_allowed_path_prefixes,
+                attachment_store=attachment_store,
+                attachment_catalog=bus.attachment_catalog,
             )
             async for evt in run_loop(
-                message,
+                user_content,
                 ctx,
                 provider=provider,
                 history=history,
@@ -355,6 +372,8 @@ class GatewayLoopPort:
                 cancelled=cancel_event,
                 hook_manager=_deps.hook_manager,
                 curator_provider=_deps.curator_provider,
+                attachment_store=attachment_store,
+                attachment_catalog=bus.attachment_catalog,
             ):
                 if isinstance(evt, TurnComplete):
                     u = evt.usage
@@ -521,6 +540,19 @@ async def _startup() -> None:
     else:
         logger.info("memory hook disabled via MONKEYBOT_MEMORY_HOOK_ENABLED")
         app.state.memory = None
+
+    if attachments_enabled_from_env():
+        try:
+            app.state.attachment_store = FilesystemAttachmentStore(
+                resolve_agent_workspace_root()
+            )
+            logger.info("attachments enabled")
+        except Exception as exc:
+            logger.warning("attachment store init failed: %s", exc)
+            app.state.attachment_store = None
+    else:
+        app.state.attachment_store = None
+        logger.info("attachments disabled via ATTACHMENTS_ENABLED")
 
     if otel_enabled:
         from monkeybot.observability.instrumentation import instrument_fastapi_app

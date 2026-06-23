@@ -44,7 +44,8 @@ Errors use a common envelope:
 |--------|------|---------|
 | `GET` | `/health` | Liveness; returns `{ "status": "ok", "version": "2.0.0" }`. |
 | `POST` | `/sessions` | Create a session. Body (optional): `{ "session_id"?: string, "agent_md"?: string }`. **201** → `{ "session_id", "created_at" }` (`created_at` is Unix ms). **409** `SESSION_ALREADY_EXISTS` if you reuse an existing `session_id`. |
-| `POST` | `/sessions/{session_id}/reply` | Start a user turn. Body: `{ "request_id": string, "message": string }` (message max 32000 chars). **200** → `{ "request_id" }`. **404** `SESSION_NOT_FOUND`. **409** `SESSION_BUSY` if a turn is already in progress. The agent runs asynchronously; progress arrives on the events stream. |
+| `POST` | `/sessions/{session_id}/reply` | Start a user turn. Body: `{ "request_id": string, "message"?: string, "content"?: ContentBlock[] }` — send **either** `message` **or** `content`, not both (message max 32000 chars). **200** → `{ "request_id" }`. See [Multimodal reply](#multimodal-reply) and error codes below. |
+| `POST` | `/sessions/{session_id}/attachments` | Upload a session attachment (multipart). Field `file` (required). **201** → `{ attachment_id, mime_type, size_bytes, filename, created_at }`. Disabled when `ATTACHMENTS_ENABLED=false`. See [Attachments upload](#attachments-upload). |
 | `POST` | `/sessions/{session_id}/cancel` | Request cancellation for a turn. Body: `{ "request_id": string }`. **200** empty body on success. |
 | `GET` | `/sessions/{session_id}/usage` | Session aggregates and **last-turn** context hints (see [Session usage endpoint](#session-usage-endpoint)). Optional query: `since` (Unix ms). |
 | `POST` | `/sessions/{session_id}/tool-confirmations/{tool_call_id}` | Approve/deny a tool. Body: `{ "approved": boolean, "reason"?: string }`. **202** `{ "ok": true }`. |
@@ -108,6 +109,7 @@ Common types you will handle in a chat UI:
 | `ActionRequiredEvent` | e.g. `action_type: "elicitation"` with `id` and `payload`; POST to `elicitations/{id}`. |
 | `FrontendToolRequest` | UI-executed tool; POST result to `frontend-tool-results/{tool_call_id}`. |
 | `SystemNotificationEvent` | Toasts / inline system messages (`notification_type`, `msg`). |
+| `AttachmentDescriptor` | Frozen attachment metadata after an upload turn (`attachment_id`, `mime_type`, `filename`, `description`). Emitted once per ref when the turn ends; history stores a text descriptor line. |
 | `ContextSummarizing` / `ContextSummarized` | Context window maintenance (optional UI). |
 | `SystemPromptSnapshot` | Debug: full system prompt for an inner iteration (`inner_turn`, `text`). |
 
@@ -119,8 +121,8 @@ The canonical definitions are the `@dataclass` types in `src/monkeybot/core/runt
 
 1. **Connect** — `POST /sessions` with `{}` or your own `session_id`. Store `session_id`.
 2. **Open SSE** — `GET /sessions/{session_id}/events` in parallel with the rest of the UI; keep the connection open for the lifetime of the session (playground: `useEffect` on `sessionId` + `AbortController` on unmount).
-3. **Send a message** — Generate a client-side `request_id` (the playground uses a short random id). `POST /sessions/{session_id}/reply` with `{ request_id, message }`.
-4. **Render** — Append user message locally; merge `AssistantDelta` into a streaming buffer; on `TurnComplete`, finalize the assistant message and clear “busy” state.
+3. **Send a message** — Generate a client-side `request_id` (the playground uses a short random id). `POST /sessions/{session_id}/reply` with `{ request_id, message }` for text-only, or `{ request_id, content }` for multimodal (see [Multimodal reply](#multimodal-reply)).
+4. **Render** — Append user message locally (include attachment chips when using `content`); merge `AssistantDelta` into a streaming buffer; on `TurnComplete`, finalize the assistant message and clear “busy” state. Upgrade attachment chips when `AttachmentDescriptor` arrives.
 5. **Stop** — `POST /sessions/{session_id}/cancel` with the active `request_id` (playground “stop” button).
 6. **Human-in-the-loop** — When you see `ToolConfirmationRequest`, `ActionRequiredEvent` (elicitation), or `FrontendToolRequest`, show UI and call the matching POST endpoint; the agent continues and new events flow on the same SSE connection.
 7. **Usage / context meter** — After `TurnComplete`, call `GET /sessions/{session_id}/usage` (the playground refreshes automatically) to update totals and the **pre-flight prompt token count** vs **summarization threshold** (see [Session usage endpoint](#session-usage-endpoint)).
@@ -128,6 +130,93 @@ The canonical definitions are the `@dataclass` types in `src/monkeybot/core/runt
 **Concurrency rule**
 
 - Only **one** active `/reply` turn per session at a time (`SESSION_BUSY` otherwise). Keep `request_id` stable for that turn across cancel, confirmations, and streamed events.
+
+---
+
+<a id="attachments-upload"></a>
+
+## Attachments upload
+
+`POST /sessions/{session_id}/attachments`
+
+**Request**
+
+- `Content-Type: multipart/form-data`
+- Field `file` (required binary)
+
+**Response `201`**
+
+```json
+{
+  "attachment_id": "att_…",
+  "mime_type": "image/png",
+  "size_bytes": 12345,
+  "filename": "screenshot.png",
+  "created_at": 1710000000000
+}
+```
+
+**Limits (v1)**
+
+- Images: JPEG, PNG, GIF, WebP (max 20 MiB)
+- PDF: max 50 MiB
+- Max 50 attachments per session; max 5 refs per `/reply`
+
+**Errors**
+
+| Status | Code | When |
+|--------|------|------|
+| 404 | `SESSION_NOT_FOUND` | Unknown session |
+| 404 | `NOT_FOUND` | `ATTACHMENTS_ENABLED=false` |
+| 413 | `PAYLOAD_TOO_LARGE` | Over size cap |
+| 415 | `UNSUPPORTED_MEDIA_TYPE` | MIME not allowed or sniff mismatch |
+
+Files are stored under `{workspace}/.monkeybot/attachments/{session_id}/{attachment_id}` with a JSON sidecar. TTL default 48h (`ATTACHMENT_TTL_HOURS`).
+
+---
+
+<a id="multimodal-reply"></a>
+
+## Multimodal reply
+
+`POST /sessions/{session_id}/reply` accepts **either**:
+
+- `{ "request_id", "message": "plain text" }` — same as before, or
+- `{ "request_id", "content": [ …ContentBlock… ] }` — structured blocks.
+
+**Allowed block types in `content` (v1):** `text`, `attachmentRef` only. Inline `image` / `file` with `data` is rejected (`INLINE_ATTACHMENT_NOT_ALLOWED`).
+
+**`attachmentRef` example**
+
+```json
+{
+  "request_id": "req-1",
+  "content": [
+    { "type": "text", "text": "What is in this screenshot?" },
+    {
+      "type": "attachmentRef",
+      "attachmentId": "att_abc…",
+      "mimeType": "image/png",
+      "metadata": { "filename": "bug.png" }
+    }
+  ]
+}
+```
+
+**Rules**
+
+- Multimodal replies may be **text only**, **attachments only**, or both.
+- Do not send both `message` and `content` → `400 AMBIGUOUS_REPLY_BODY`
+- Each `attachmentId` must exist for the session → `404 ATTACHMENT_NOT_FOUND`
+- At most 5 `attachmentRef` blocks per reply → `400 TOO_MANY_ATTACHMENTS`
+- `content` with only empty `text` blocks and no refs → `400 EMPTY_REPLY_BODY`
+
+**Lifecycle**
+
+1. Upload via `POST /attachments`.
+2. Reply with `attachmentRef` — provider sees pixels on that turn only.
+3. Turn end — history rewrites refs to frozen `text` descriptors; gateway emits `AttachmentDescriptor` SSE per attachment.
+4. Later turns — agent uses `read_attachment` tool to reload pixels when needed.
 
 ---
 

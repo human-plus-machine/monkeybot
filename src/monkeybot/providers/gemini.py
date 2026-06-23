@@ -16,7 +16,7 @@ from monkeybot.core.llm.provider import (
     ToolCall,
     UsageEvent,
 )
-from monkeybot.core.types.content_blocks import Text, Thinking, ToolRequest, ToolResponse
+from monkeybot.core.types.content_blocks import File, Image, Text, Thinking, ToolRequest, ToolResponse
 from monkeybot.core.types.interfaces import LLMError
 from monkeybot.core.types.types_tools import ToolDef
 
@@ -135,12 +135,42 @@ def _flatten_tool_response_result(block: ToolResponse) -> str:
     for b in block.result:
         if isinstance(b, Text):
             parts.append(b.text)
+        elif isinstance(b, (Image, File)):
+            continue
         else:
             raise LLMError(
                 "Cannot replay tool result to Vertex: unsupported result block "
                 f"{type(b).__name__}"
             )
     return "".join(parts)
+
+
+def _media_parts_from_blocks(blocks: Sequence[object]) -> list[Any]:
+    import base64
+
+    from google.genai import types
+
+    parts: list[Any] = []
+    for b in blocks:
+        if isinstance(b, Image):
+            parts.append(
+                types.Part(
+                    inline_data=types.Blob(
+                        mime_type=b.mime_type,
+                        data=base64.b64decode(b.data),
+                    )
+                )
+            )
+        elif isinstance(b, File):
+            parts.append(
+                types.Part(
+                    inline_data=types.Blob(
+                        mime_type=b.mime_type,
+                        data=base64.b64decode(b.data),
+                    )
+                )
+            )
+    return parts
 
 
 def _is_user_loop_boundary(message: Message) -> bool:
@@ -230,6 +260,8 @@ def _messages_to_contents(rest: Sequence[Message]) -> list[Any]:
         for block in m.content:
             if isinstance(block, Text):
                 parts.append(types.Part(text=block.text))
+            elif isinstance(block, (Image, File)):
+                parts.extend(_media_parts_from_blocks([block]))
             elif isinstance(block, Thinking):
                 if not in_active_loop:
                     continue
@@ -265,6 +297,7 @@ def _messages_to_contents(rest: Sequence[Message]) -> list[Any]:
                         )
                     )
                 )
+                parts.extend(_media_parts_from_blocks(block.result))
             else:
                 raise LLMError(
                     "Cannot replay message to Vertex Gemini: unsupported block "

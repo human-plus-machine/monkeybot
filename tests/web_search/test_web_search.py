@@ -14,6 +14,7 @@ from monkeybot.core.llm.provider import Done, TextDelta, ToolCall, UsageEvent
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
+from monkeybot.core.tools.types import unwrap_tool_execution_result
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.core.workspace import create_workspace_storage
 from monkeybot.web_search import build_backend
@@ -194,7 +195,7 @@ async def test_web_search_tool_backend_error(tmp_path: Path) -> None:
     executor = _make_executor(tmp_path, extra_tools=[tool])
     ctx = _ctx_stub()
     call = ToolCall(call_id="c1", name="web_search", args={"query": "oops"})
-    result, err = await executor.execute(call=call, ctx=ctx)
+    result, err = unwrap_tool_execution_result(await executor.execute(call=call, ctx=ctx))
     assert result is None
     assert err is not None
     assert "network error" in err
@@ -218,7 +219,7 @@ async def test_custom_tool_dispatched_by_executor(tmp_path: Path) -> None:
     executor = _make_executor(tmp_path, extra_tools=[_EchoTool()])
     ctx = _ctx_stub()
     call = ToolCall(call_id="c1", name="echo", args={"msg": "hi"})
-    result, err = await executor.execute(call=call, ctx=ctx)
+    result, err = unwrap_tool_execution_result(await executor.execute(call=call, ctx=ctx))
     assert err is None
     assert result is not None
     data = json.loads(result)

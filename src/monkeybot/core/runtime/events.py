@@ -175,6 +175,18 @@ class SystemNotificationEvent:
     data: dict[str, object] | None = None
 
 
+@dataclass(frozen=True)
+class AttachmentDescriptorEvent:
+    """Frozen attachment metadata for playground UI (not persisted as a ContentBlock)."""
+
+    kind: Literal["AttachmentDescriptor"] = "AttachmentDescriptor"
+    request_id: str = ""
+    attachment_id: str = ""
+    mime_type: str = ""
+    filename: str = ""
+    description: str = ""
+
+
 AgentEvent: TypeAlias = (
     Thinking
     | AssistantDelta
@@ -193,6 +205,7 @@ AgentEvent: TypeAlias = (
     | ActionRequiredEvent
     | FrontendToolRequestEvent
     | SystemNotificationEvent
+    | AttachmentDescriptorEvent
 )
 
 
@@ -271,6 +284,14 @@ def _story5_event_dict(event: AgentEvent) -> dict[str, object]:
             "msg": event.msg,
             "data": event.data,
         }
+    if isinstance(event, AttachmentDescriptorEvent):
+        return {
+            **base,
+            "attachment_id": event.attachment_id,
+            "mime_type": event.mime_type,
+            "filename": event.filename,
+            "description": event.description,
+        }
     raise AssertionError(f"_story5_event_dict: unsupported type {type(event)!r}")
 
 
@@ -325,6 +346,7 @@ def event_to_json(event: AgentEvent) -> str:
             ActionRequiredEvent,
             FrontendToolRequestEvent,
             SystemNotificationEvent,
+            AttachmentDescriptorEvent,
         ),
     ):
         payload = _story5_event_dict(event)
@@ -515,5 +537,17 @@ def event_from_json(raw: str) -> AgentEvent:
             raise EventDecodeError("SystemNotificationEvent data must be an object or null")
         return SystemNotificationEvent(
             request_id=rid, notification_type=nt, msg=msg, data=data_obj
+        )
+    if t == "AttachmentDescriptor":
+        aid = payload.get("attachment_id", "")
+        mime = payload.get("mime_type", "")
+        fname = payload.get("filename", "")
+        desc = payload.get("description", "")
+        return AttachmentDescriptorEvent(
+            request_id=rid,
+            attachment_id=aid if isinstance(aid, str) else "",
+            mime_type=mime if isinstance(mime, str) else "",
+            filename=fname if isinstance(fname, str) else "",
+            description=desc if isinstance(desc, str) else "",
         )
     raise EventDecodeError(f"unknown AgentEvent type: {t!r}")

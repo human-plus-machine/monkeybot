@@ -12,6 +12,10 @@ from contextlib import aclosing
 from pathlib import Path
 from typing import Any, Protocol, cast, runtime_checkable
 
+from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
+from monkeybot.core.attachments.freeze import freeze_attachments_in_history
+from monkeybot.core.attachments.resolve import resolve_messages_for_provider
+from monkeybot.core.attachments.store import AttachmentStore
 from monkeybot.core.context import SkillRef, TurnContext, refresh_memory_index
 from monkeybot.core.context.curator import (
     curation_enabled_from_env,
@@ -32,8 +36,11 @@ from monkeybot.core.llm.provider import (
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.prompts.prompt import compose_system_prompt, latest_user_message_text
 from monkeybot.core.tools.inspector import InspectorToolCall, ToolInspector
+from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.types.content_blocks import (
     ContentBlock,
+    File,
+    Image,
     Text,
     ToolRequest,
     ToolResponse,
@@ -45,6 +52,7 @@ from monkeybot.providers.pricing import estimate_cost
 from .events import (
     AgentEvent,
     AssistantDelta,
+    AttachmentDescriptorEvent,
     ContextSummarized,
     ContextSummarizing,
     Error,
@@ -85,6 +93,32 @@ def _merge_usage_event(usage: Usage, ev: UsageEvent) -> None:
     usage.cache_creation_tokens += ev.cache_creation_tokens
 
 
+def _normalize_user_content(user_content: str | list[ContentBlock]) -> list[ContentBlock]:
+    if isinstance(user_content, str):
+        return [Text(text=user_content)]
+    return list(user_content)
+
+
+def _user_text_from_content(blocks: Sequence[ContentBlock]) -> str:
+    return " ".join(
+        b.text.strip() for b in blocks if isinstance(b, Text) and b.text.strip()
+    )
+
+
+def _blocks_to_sse_summary(blocks: Sequence[ContentBlock]) -> str:
+    parts: list[str] = []
+    for block in blocks:
+        if isinstance(block, Text):
+            parts.append(block.text)
+        elif isinstance(block, Image):
+            meta = block.metadata or {}
+            att_id = meta.get("attachment_id", "")
+            parts.append(f"[loaded image {att_id}]" if att_id else "[loaded image]")
+        elif isinstance(block, File):
+            parts.append("[loaded pdf]")
+    return "\n".join(parts)
+
+
 def _system_message(
     ctx: TurnContext,
     chat_messages: Sequence[Message],
@@ -92,6 +126,7 @@ def _system_message(
     curated_memory_skills: bool = False,
     curated_memory_index: list[str] | None = None,
     curated_skills: list[SkillRef] | None = None,
+    attachment_catalog: SessionAttachmentCatalog | None = None,
 ) -> Message:
     """System message: AGENT.md base plus runtime memory, skills, harness, and task anchor."""
     body = compose_system_prompt(
@@ -100,6 +135,9 @@ def _system_message(
         curated_memory_skills=curated_memory_skills,
         curated_memory_index=curated_memory_index,
         curated_skills=curated_skills,
+        attachment_catalog=(
+            attachment_catalog.list_records() if attachment_catalog is not None else None
+        ),
     )
     return Message(role="system", content=[Text(text=body)])
 
@@ -350,27 +388,26 @@ async def _summarize_history(
 def _tool_outcome(
     call: ToolCall,
     request_id: str,
-    result_text: str | None,
-    err_text: str | None,
+    result: ToolExecutionResult,
 ) -> tuple[ToolCallResult, ToolResponse]:
     """Build the (event, history block) pair for a finished tool call.
 
     Used by both the sequential and parallel ``task`` dispatch paths so that
     result formatting stays in one place.
     """
-    is_error = err_text is not None
-    body = "" if is_error else (result_text or "")
-    text = err_text if is_error else body
+    is_error = result.error is not None
+    body = "" if is_error else _blocks_to_sse_summary(result.blocks)
+    text = result.error if is_error else body
     event = ToolCallResult(
         request_id=request_id,
         tool=call.name,
         result=body,
-        error=err_text,
+        error=result.error,
     )
     response = ToolResponse(
         id=call.call_id,
         tool_name=call.name,
-        result=[Text(text=text or "")],
+        result=list(result.blocks) if not is_error else [Text(text=text or "")],
         is_error=is_error,
     )
     return event, response
@@ -412,12 +449,12 @@ class ConversationHistoryPort(Protocol):
 class ToolExecutorPort(Protocol):
     """Fakeable tool execution boundary (Story 6 does not invoke real shell)."""
 
-    async def execute(self, *, call: ToolCall, ctx: TurnContext) -> tuple[str | None, str | None]:
-        """``(result_text, error_text)`` — success ``(text, None)``; failure ``(None, message)``."""
+    async def execute(self, *, call: ToolCall, ctx: TurnContext) -> ToolExecutionResult:
+        """Return content blocks for history; ``error`` set on failure."""
 
 
 async def run(
-    message: str,
+    user_content: str | list[ContentBlock],
     ctx: TurnContext,
     *,
     provider: Provider,
@@ -429,6 +466,8 @@ async def run(
     max_turns: int | None = None,
     hook_manager: HookManager | None = None,
     curator_provider: Provider | None = None,
+    attachment_store: AttachmentStore | None = None,
+    attachment_catalog: SessionAttachmentCatalog | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Stream agent events for one user message; ends with ``TurnComplete`` (never raises).
 
@@ -444,9 +483,10 @@ async def run(
     del run_id  # reserved for durable runs / gateway wiring
     usage = Usage()
     trace_id_capture: list[str | None] = [None]
+    blocks = _normalize_user_content(user_content)
     try:
         async for evt in _run_inner(
-            message,
+            blocks,
             ctx,
             provider=provider,
             history=history,
@@ -458,6 +498,8 @@ async def run(
             hook_manager=hook_manager,
             curator_provider=curator_provider,
             trace_id_out=trace_id_capture,
+            attachment_store=attachment_store,
+            attachment_catalog=attachment_catalog,
         ):
             yield evt
     except asyncio.CancelledError:
@@ -479,7 +521,7 @@ async def run(
 
 
 async def _run_inner(
-    message: str,
+    user_content: list[ContentBlock],
     ctx: TurnContext,
     *,
     provider: Provider,
@@ -492,13 +534,16 @@ async def _run_inner(
     hook_manager: HookManager | None = None,
     curator_provider: Provider | None = None,
     trace_id_out: list[str | None] | None = None,
+    attachment_store: AttachmentStore | None = None,
+    attachment_catalog: SessionAttachmentCatalog | None = None,
 ) -> AsyncIterator[AgentEvent]:
     from monkeybot.observability.spans import set_run_output, span_run
 
     last_assistant: list[str] = [""]
-    async with span_run(ctx, user_message=message):
+    user_text = _user_text_from_content(user_content)
+    async with span_run(ctx, user_message=user_text):
         async for evt in _run_inner_core(
-            message,
+            user_content,
             ctx,
             provider=provider,
             history=history,
@@ -510,6 +555,8 @@ async def _run_inner(
             hook_manager=hook_manager,
             curator_provider=curator_provider,
             last_assistant=last_assistant,
+            attachment_store=attachment_store,
+            attachment_catalog=attachment_catalog,
         ):
             yield evt
         set_run_output(last_assistant[0])
@@ -527,7 +574,7 @@ async def _run_inner(
 
 
 async def _run_inner_core(
-    message: str,
+    user_content: list[ContentBlock],
     ctx: TurnContext,
     *,
     provider: Provider,
@@ -540,6 +587,8 @@ async def _run_inner_core(
     hook_manager: HookManager | None = None,
     curator_provider: Provider | None = None,
     last_assistant: list[str],
+    attachment_store: AttachmentStore | None = None,
+    attachment_catalog: SessionAttachmentCatalog | None = None,
 ) -> AsyncIterator[AgentEvent]:
     from monkeybot.observability.spans import (
         begin_turn_span,
@@ -556,17 +605,18 @@ async def _run_inner_core(
     )
 
     effective_max = _effective_max_turns(max_turns)
+    user_text = _user_text_from_content(user_content)
     _ = await history.load(ctx.thread_id)
     if ctx.workspace_root is not None:
         _cleanup_spill_files(ctx.workspace_root, ctx.thread_id)
-    await history.append(ctx.thread_id, Message.text("user", message))
+    await history.append(ctx.thread_id, Message(role="user", content=list(user_content)))
 
     await _fire_hook(
         hook_manager,
         event=HookEvent.USER_MESSAGE,
         ctx=ctx,
         timeout_s=0,
-        user_message=message,
+        user_message=user_text,
     )
 
     turn_index = 0
@@ -584,7 +634,7 @@ async def _run_inner_core(
             break
 
         turn_index += 1
-        turn_input_text = message
+        turn_input_text = user_text
         turn_output_text = ""
         turn_span = begin_turn_span(
             turn_index=turn_index,
@@ -601,7 +651,7 @@ async def _run_inner_core(
 
             chat_messages = await history.load(ctx.thread_id)
             ctx = await refresh_memory_index(ctx)
-            turn_input_text = latest_user_message_text(chat_messages) or message
+            turn_input_text = latest_user_message_text(chat_messages) or user_text
             set_turn_io(input_value=turn_input_text)
 
             if turn_index == 1:
@@ -610,7 +660,7 @@ async def _run_inner_core(
                     event=HookEvent.PRE_TURN,
                     ctx=ctx,
                     timeout_s=_HOOK_READ_TIMEOUT_S,
-                    user_message=message,
+                    user_message=user_text,
                 )
                 if pre_turn_payload is not None:
                     pre_turn_extra = pre_turn_payload.inject_text
@@ -651,11 +701,17 @@ async def _run_inner_core(
                 curated_memory_skills=curated_injection,
                 curated_memory_index=curated_mem,
                 curated_skills=curated_sks,
+                attachment_catalog=attachment_catalog,
             )
             combined_extra = _combine_extras(pre_turn_extra, pre_tool_extra_next)
             system = _append_extra_system_text(system, combined_extra)
             pre_tool_extra_next = None
-            provider_messages = _messages_for_provider(system, chat_messages)
+            resolved_messages = resolve_messages_for_provider(
+                chat_messages,
+                attachment_store=attachment_store,
+                session_id=ctx.thread_id,
+            )
+            provider_messages = _messages_for_provider(system, resolved_messages)
 
             preflight = await _provider_prompt_input_tokens(
                 provider, provider_messages, ctx.tools, model=ctx.model
@@ -695,9 +751,15 @@ async def _run_inner_core(
                     curated_memory_skills=curated_injection,
                     curated_memory_index=curated_mem,
                     curated_skills=curated_sks,
+                    attachment_catalog=attachment_catalog,
                 )
                 system = _append_extra_system_text(system, pre_turn_extra)
-                provider_messages = _messages_for_provider(system, chat_messages)
+                resolved_messages = resolve_messages_for_provider(
+                    chat_messages,
+                    attachment_store=attachment_store,
+                    session_id=ctx.thread_id,
+                )
+                provider_messages = _messages_for_provider(system, resolved_messages)
                 post = await _provider_prompt_input_tokens(
                     provider, provider_messages, ctx.tools, model=ctx.model
                 )
@@ -910,7 +972,9 @@ async def _run_inner_core(
                             label=call.name,
                             args=dict(call.args),
                         )
-                        result_evt, tool_resp = _tool_outcome(call, ctx.request_id, None, msg)
+                        result_evt, tool_resp = _tool_outcome(
+                            call, ctx.request_id, ToolExecutionResult.err(msg)
+                        )
                         yield result_evt
                         chunk_responses.append(tool_resp)
                         continue
@@ -956,7 +1020,7 @@ async def _run_inner_core(
                             )
                         _record_tool_hook_span_event("pre_tool", call.name)
                         try:
-                            result_text, err_text = await tool_executor.execute(
+                            tool_result = await tool_executor.execute(
                                 call=call, ctx=ctx
                             )
                         except asyncio.CancelledError:
@@ -964,9 +1028,13 @@ async def _run_inner_core(
                             needs_followup_after_tools = False
                             return
                         except Exception as exc:
-                            err_text = str(exc)
-                            result_text = None
-                        record_tool_outcome(result_text, err_text)
+                            tool_result = ToolExecutionResult.err(str(exc))
+                        record_tool_outcome(
+                            _blocks_to_sse_summary(tool_result.blocks)
+                            if tool_result.error is None
+                            else None,
+                            tool_result.error,
+                        )
                         await _fire_hook(
                             hook_manager,
                             event=HookEvent.POST_TOOL,
@@ -974,14 +1042,16 @@ async def _run_inner_core(
                             timeout_s=0,
                             tool_name=call.name,
                             tool_args=dict(call.args),
-                            tool_result=result_text,
-                            tool_error=err_text,
+                            tool_result=(
+                                _blocks_to_sse_summary(tool_result.blocks)
+                                if tool_result.error is None
+                                else None
+                            ),
+                            tool_error=tool_result.error,
                         )
                         _record_tool_hook_span_event("post_tool", call.name)
 
-                    event, response = _tool_outcome(
-                        call, ctx.request_id, result_text, err_text
-                    )
+                    event, response = _tool_outcome(call, ctx.request_id, tool_result)
                     yield event
                     chunk_responses.append(response)
                 else:
@@ -997,7 +1067,7 @@ async def _run_inner_core(
                         *,
                         _sem: asyncio.Semaphore = sem,
                         _ctx: TurnContext = ctx,
-                    ) -> tuple[ToolCall, str | None, str | None]:
+                    ) -> tuple[ToolCall, ToolExecutionResult]:
                         async with _sem, span_tool(
                             tool_name=call.name,
                             tool_call_id=call.call_id,
@@ -1020,12 +1090,17 @@ async def _run_inner_core(
                                 )
                             _record_tool_hook_span_event("pre_tool", call.name)
                             try:
-                                rt, et = await tool_executor.execute(call=call, ctx=_ctx)
+                                tool_result = await tool_executor.execute(call=call, ctx=_ctx)
                             except asyncio.CancelledError:
                                 raise
                             except Exception as exc:
-                                rt, et = None, str(exc)
-                            record_tool_outcome(rt, et)
+                                tool_result = ToolExecutionResult.err(str(exc))
+                            record_tool_outcome(
+                                _blocks_to_sse_summary(tool_result.blocks)
+                                if tool_result.error is None
+                                else None,
+                                tool_result.error,
+                            )
                             await _fire_hook(
                                 hook_manager,
                                 event=HookEvent.POST_TOOL,
@@ -1033,11 +1108,15 @@ async def _run_inner_core(
                                 timeout_s=0,
                                 tool_name=call.name,
                                 tool_args=dict(call.args),
-                                tool_result=rt,
-                                tool_error=et,
+                                tool_result=(
+                                    _blocks_to_sse_summary(tool_result.blocks)
+                                    if tool_result.error is None
+                                    else None
+                                ),
+                                tool_error=tool_result.error,
                             )
                             _record_tool_hook_span_event("post_tool", call.name)
-                            return (call, rt, et)
+                            return (call, tool_result)
 
                     try:
                         outcomes = await asyncio.gather(
@@ -1056,16 +1135,11 @@ async def _run_inner_core(
                             needs_followup_after_tools = False
                             return
                         if isinstance(outcome, Exception):
-                            err_text = str(outcome)
-                            result_text = None
+                            tool_result = ToolExecutionResult.err(str(outcome))
                         else:
-                            _, result_text, err_text = cast(
-                                tuple[ToolCall, str | None, str | None], outcome
-                            )
+                            _, tool_result = cast(tuple[ToolCall, ToolExecutionResult], outcome)
 
-                        event, response = _tool_outcome(
-                            call, ctx.request_id, result_text, err_text
-                        )
+                        event, response = _tool_outcome(call, ctx.request_id, tool_result)
                         yield event
                         chunk_responses.append(response)
 
@@ -1082,6 +1156,21 @@ async def _run_inner_core(
             end_turn_span(turn_span)
     if needs_followup_after_tools:
         yield Error(request_id=ctx.request_id, error="Max turns exceeded")
+
+    descriptor_events = await freeze_attachments_in_history(
+        thread_id=ctx.thread_id,
+        history=history,
+        catalog=attachment_catalog,
+        last_assistant_text=last_assistant[0],
+    )
+    for desc_evt in descriptor_events:
+        yield AttachmentDescriptorEvent(
+            request_id=ctx.request_id,
+            attachment_id=desc_evt.attachment_id,
+            mime_type=desc_evt.mime_type,
+            filename=desc_evt.filename,
+            description=desc_evt.description,
+        )
 
     await _fire_hook(
         hook_manager,

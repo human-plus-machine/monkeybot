@@ -9,6 +9,7 @@ from typing import Any
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.types.content_blocks import (
     ContentBlock,
+    File,
     Image,
     RedactedThinking,
     Text,
@@ -36,6 +37,17 @@ def _anthropic_tool_result_content(result: list[ContentBlock]) -> list[dict[str,
                     },
                 }
             )
+        elif isinstance(block, File):
+            out.append(
+                {
+                    "type": "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": block.mime_type,
+                        "data": block.data,
+                    },
+                }
+            )
         else:
             raise ValueError(
                 f"unsupported ToolResponse block for Anthropic: {type(block).__name__}"
@@ -49,6 +61,15 @@ def _anthropic_user_block(block: ContentBlock) -> dict[str, Any]:
     if isinstance(block, Image):
         return {
             "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": block.mime_type,
+                "data": block.data,
+            },
+        }
+    if isinstance(block, File):
+        return {
+            "type": "document",
             "source": {
                 "type": "base64",
                 "media_type": block.mime_type,

@@ -106,6 +106,18 @@ function defaultFetchResponder(input: RequestInfo | URL, init?: RequestInit): Re
   if (url.includes('/sessions/sid-test/reply') && method === 'POST') {
     return new Response(null, { status: 200 })
   }
+  if (url.includes('/sessions/sid-test/attachments') && method === 'POST') {
+    return new Response(
+      JSON.stringify({
+        attachment_id: 'att_test1',
+        mime_type: 'image/png',
+        size_bytes: 100,
+        filename: 'dot.png',
+        created_at: Date.now(),
+      }),
+      { status: 201, headers: { 'content-type': 'application/json' } },
+    )
+  }
   if (url.includes('/sessions/sid-test/cancel') && method === 'POST') {
     return new Response(null, { status: 200 })
   }
@@ -204,6 +216,44 @@ describe('gatewayClient POST helpers (unit)', () => {
     })
 
     await gw.createSession()
+  })
+
+  it('postAttachment_posts_multipart_file', async () => {
+    fetchMock.mockImplementationOnce(async (input, init) => {
+      expect(String(input)).toContain('/sessions/sx/attachments')
+      expect(init?.method).toBe('POST')
+      expect(init?.body).toBeInstanceOf(FormData)
+      return new Response(
+        JSON.stringify({
+          attachment_id: 'att_x',
+          mime_type: 'image/png',
+          size_bytes: 4,
+          filename: 'a.png',
+          created_at: 1,
+        }),
+        { status: 201, headers: { 'content-type': 'application/json' } },
+      )
+    })
+    const file = new File([new Uint8Array([1, 2, 3, 4])], 'a.png', { type: 'image/png' })
+    const res = await gw.postAttachment('sx', file)
+    expect(res.attachment_id).toBe('att_x')
+  })
+
+  it('postReply_sends_content_blocks', async () => {
+    fetchMock.mockImplementationOnce(async (_input, init) => {
+      expect(JSON.parse(String(init?.body))).toEqual({
+        request_id: 'r1',
+        content: [
+          { type: 'text', text: 'hi' },
+          { type: 'attachmentRef', attachmentId: 'att_1', mimeType: 'image/png' },
+        ],
+      })
+      return new Response(null, { status: 200 })
+    })
+    await gw.postReply('s1', 'r1', [
+      { type: 'text', text: 'hi' },
+      { type: 'attachmentRef', attachmentId: 'att_1', mimeType: 'image/png' },
+    ])
   })
 })
 
@@ -750,20 +800,16 @@ describe('blockRendering integration', () => {
     })
     await waitFor(() => expect(screen.getByText('B')).toBeInTheDocument())
 
-    const articles = screen.getAllByRole('article')
-    const findTextIndex = (t: string) => articles.findIndex((a) => (a.textContent ?? '').includes(t))
-    const findImgIndex = () =>
-      articles.findIndex((a) => a.querySelector('img')?.getAttribute('src')?.startsWith('data:image'))
-
-    const ixA = findTextIndex('A')
-    const ixB = findTextIndex('B')
-    const ixI = findImgIndex()
-
-    expect(ixA).not.toBe(-1)
-    expect(ixB).not.toBe(-1)
-    expect(ixI).not.toBe(-1)
-    expect(ixA).toBeLessThan(ixI)
-    expect(ixB).toBeGreaterThan(ixI)
+    const log = screen.getByRole('log')
+    const html = log.innerHTML
+    const posA = html.indexOf('>A<')
+    const posB = html.lastIndexOf('>B<')
+    const imgPos = html.indexOf('data:image')
+    expect(posA).not.toBe(-1)
+    expect(posB).not.toBe(-1)
+    expect(imgPos).not.toBe(-1)
+    expect(posA).toBeLessThan(imgPos)
+    expect(posB).toBeGreaterThan(imgPos)
   })
 
   it('test_elicitation_nested_schema_shows_message_submit_posts_null_user_data', async () => {
@@ -825,6 +871,50 @@ describe('blockRendering integration', () => {
     })
 
     expect(screen.getByRole('log')).toBeTruthy()
+  })
+
+  it('test_attachment_descriptor_upgrades_user_chip', async () => {
+    const postSpy = vi.spyOn(gw, 'postReply').mockResolvedValue(undefined as never)
+    const userEv = userEvent.setup()
+    await renderConnected()
+
+    fetchMock.mockImplementation(async (input, init) => {
+      const d = defaultFetchResponder(input, init)
+      if (d) return Promise.resolve(d)
+      return Promise.resolve(new Response('unexpected', { status: 500 }))
+    })
+
+    await userEv.click(screen.getByRole('button', { name: /^attach$/i }))
+    const fileInput = document.querySelector('.composer-file-input') as HTMLInputElement
+    const file = new File([new Uint8Array([1, 2, 3])], 'shot.png', { type: 'image/png' })
+    await userEv.upload(fileInput, file)
+
+    await waitFor(() => expect(screen.getByTestId('composer-pending-attachments')).toBeInTheDocument())
+
+    await userEv.type(screen.getByRole('textbox'), 'see this')
+    await userEv.click(screen.getByRole('button', { name: /^send$/i }))
+
+    expect(postSpy).toHaveBeenCalled()
+    const rid = postSpy.mock.calls[0]?.[1] as string
+
+    await act(async () => {
+      sseFeed.emit({
+        type: 'AttachmentDescriptor',
+        request_id: rid,
+        attachment_id: 'att_test1',
+        mime_type: 'image/png',
+        filename: 'shot.png',
+        description: 'User asked about the screenshot.',
+      })
+    })
+
+    await waitFor(() => {
+      const frozen = screen
+        .getAllByTestId('attachment-chip')
+        .find((c) => c.getAttribute('data-frozen') === 'true')
+      expect(frozen).toBeTruthy()
+      expect(frozen?.textContent).toContain('shot.png')
+    })
   })
 })
 

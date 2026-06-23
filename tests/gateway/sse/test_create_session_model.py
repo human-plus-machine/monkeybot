@@ -11,6 +11,7 @@ from httpx import ASGITransport, AsyncClient
 
 from monkeybot.core.config.settings import ProviderConfig
 from monkeybot.core.runtime.events import TurnComplete, UsageTotals
+from monkeybot.core.types.content_blocks import ContentBlock, Text
 from monkeybot.gateway.sse import app as gateway_app
 from monkeybot.gateway.sse.app import GatewayLoopPort
 from monkeybot.gateway.sse.loop_port import LoopPort
@@ -19,9 +20,17 @@ from monkeybot.gateway.sse.routes import create_app
 from monkeybot.gateway.sse.session_bus import SessionRegistry
 
 
+from monkeybot.core.types.content_blocks import ContentBlock, Text
+
+
 class _NoopLoopPort:
-    async def start_turn(self, session_id: str, request_id: str, message: str) -> None:
-        _ = (session_id, request_id, message)
+    async def start_turn(
+        self,
+        session_id: str,
+        request_id: str,
+        user_content: list[ContentBlock],
+    ) -> None:
+        _ = (session_id, request_id, user_content)
 
 
 @pytest.fixture
@@ -205,13 +214,15 @@ async def test_start_turn_prefers_session_provider(
     gateway_app._deps.web_search_tool = None
 
     mock_usage = AsyncMock()
+    mock_history = MagicMock()
+    mock_history.load = AsyncMock(return_value=[])
     mock_storage = MagicMock()
-    mock_storage.history.return_value = MagicMock()
+    mock_storage.history.return_value = mock_history
     mock_storage.usage.return_value = mock_usage
     gateway_app.app.state.storage = mock_storage
 
     port = GatewayLoopPort(registry)
-    await port.start_turn("s1", "req-1", "hello")
+    await port.start_turn("s1", "req-1", [Text(text="hello")])
 
     assert captured_run.get("provider") is fake_session_provider
     assert captured_build.get("model") == "gpt-5"
@@ -259,13 +270,15 @@ async def test_start_turn_falls_back_to_env(
     gateway_app._deps.web_search_tool = None
 
     mock_usage = AsyncMock()
+    mock_history = MagicMock()
+    mock_history.load = AsyncMock(return_value=[])
     mock_storage = MagicMock()
-    mock_storage.history.return_value = MagicMock()
+    mock_storage.history.return_value = mock_history
     mock_storage.usage.return_value = mock_usage
     gateway_app.app.state.storage = mock_storage
 
     port = GatewayLoopPort(registry)
-    await port.start_turn("s2", "req-2", "hello")
+    await port.start_turn("s2", "req-2", [Text(text="hello")])
 
     assert captured_run.get("provider") is global_provider
     assert captured_build.get("model") == "env-default-model"

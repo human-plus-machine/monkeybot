@@ -28,6 +28,7 @@ from monkeybot.core.llm.provider import (
     ToolCall,
 )
 from monkeybot.core.runtime.loop import run
+from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.testing.mocks_provider import fake_provider_prompt_tokens
 from monkeybot.core.tools.inspector import Decision
 from monkeybot.core.types.content_blocks import Text, ToolResponse
@@ -112,12 +113,26 @@ class CapturingProvider:
         return fake_provider_prompt_tokens(messages, tools)
 
 
+def _tool_result(
+    result: ToolExecutionResult | tuple[str | None, str | None],
+) -> ToolExecutionResult:
+    if isinstance(result, ToolExecutionResult):
+        return result
+    text, err = result
+    if err is not None:
+        return ToolExecutionResult.err(err)
+    return ToolExecutionResult.ok_text(text or "")
+
+
 class RecordingExecutor:
-    def __init__(self, result: tuple[str | None, str | None] = ("ok", None)) -> None:
-        self.result = result
+    def __init__(
+        self,
+        result: ToolExecutionResult | tuple[str | None, str | None] = ("ok", None),
+    ) -> None:
+        self.result = _tool_result(result)
         self.calls: list[ToolCall] = []
 
-    async def execute(self, *, call: ToolCall, ctx: TurnContext) -> tuple[str | None, str | None]:
+    async def execute(self, *, call: ToolCall, ctx: TurnContext) -> ToolExecutionResult:
         del ctx
         self.calls.append(call)
         return self.result

@@ -11,6 +11,8 @@ from typing import Any, Literal, Protocol, runtime_checkable
 
 from monkeybot.core.mcp.ports_mcp import MCPClientPort
 from monkeybot.core.memory.subsystem import MemorySubsystem
+from monkeybot.core.attachments.config import attachments_enabled_from_env
+from monkeybot.core.attachments.tools import read_attachment_tool_def
 from monkeybot.core.types.types_tools import ToolDef
 
 
@@ -332,6 +334,8 @@ async def build_context(
     memory_index = await memory.load_index() if memory is not None else []
     skills = _discover_skills(skills_path)
     tools = list(_core_tool_defs(include_task_tool=include_task_tool))
+    if attachments_enabled_from_env():
+        tools.append(read_attachment_tool_def())
     tools.extend(mcp_client.all_tools())
     for ct in extra_tools or []:
         tools.append(ct.tool_def)

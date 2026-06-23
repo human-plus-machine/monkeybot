@@ -22,6 +22,7 @@ from monkeybot.core.runtime.events import TurnComplete, UsageTotals
 from monkeybot.core.subagents.subagent_proto import SubagentEnvelope
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
+from monkeybot.core.tools.types import unwrap_tool_execution_result
 from monkeybot.core.workspace import create_workspace_storage
 from monkeybot.observability.propagation import inject_traceparent
 from monkeybot.observability.spans import span_subagent, span_tool
@@ -142,10 +143,10 @@ async def test_tool_task_stdin_contains_traceparent_when_parent_span_active(
         request_id=ctx.request_id,
         args={"task": "do work"},
     ):
-        out, err = await ex.execute(
+        out, err = unwrap_tool_execution_result(await ex.execute(
             call=ToolCall(call_id="c1", name="task", args={"task": "do work", "context": ""}),
             ctx=ctx,
-        )
+        ))
 
     assert err is None and out is not None
     raw = captured["stdin_json"]
@@ -212,10 +213,10 @@ async def test_tool_task_sets_subagent_otel_service_name_in_child_env(
         request_id=ctx.request_id,
         args={"task": "do work"},
     ):
-        out, err = await ex.execute(
+        out, err = unwrap_tool_execution_result(await ex.execute(
             call=ToolCall(call_id="c1", name="task", args={"task": "do work", "context": ""}),
             ctx=ctx,
-        )
+        ))
 
     assert err is None and out is not None
     assert captured_env.get("OTEL_SERVICE_NAME") == "monkeybot-subagent"
@@ -254,10 +255,10 @@ async def test_tool_task_stdin_omits_traceparent_without_active_span(
     monkeypatch.setattr("monkeybot.core.tools.core_tool_executor.spawn_subagent", fake_spawn)
     ex = _make_executor(tmp_path, monkeypatch)
     ctx = _ctx()
-    out, err = await ex.execute(
+    out, err = unwrap_tool_execution_result(await ex.execute(
         call=ToolCall(call_id="c1", name="task", args={"task": "do work", "context": ""}),
         ctx=ctx,
-    )
+    ))
     assert err is None and out is not None
     parsed = json.loads(str(captured["stdin_json"]))
     assert "traceparent" not in parsed
