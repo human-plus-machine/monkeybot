@@ -13,8 +13,8 @@ repos:
         always_run: true
 
       - id: pytest
-        name: pytest
-        entry: uv run pytest tests/ -q --tb=line --no-header
+        name: pytest (changed tests or collection check)
+        entry: bash scripts/precommit-pytest.sh
         language: system
-        pass_filenames: false
-        always_run: true
+        files: ^(src/monkeybot|tests)/.*\.py$
+        pass_filenames: true

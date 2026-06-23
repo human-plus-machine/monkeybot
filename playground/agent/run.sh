@@ -19,11 +19,12 @@ SANDBOX_CONFIG_HOST="${SANDBOX_CONFIG_HOST:-$(pwd)/monkeybot_config/opensandbox.
 # Seconds to wait for OpenSandbox /health after docker start/run (server pulls images on first boot).
 SANDBOX_HEALTH_WAIT_SECS="${SANDBOX_HEALTH_WAIT_SECS:-5}"
 
-# Firestore emulator (local persistence for chat history / runs). Set SKIP_FIRESTORE_EMULATOR=1 to skip.
+# Firestore emulator (only when db_url uses firestore://). Set SKIP_FIRESTORE_EMULATOR=1 to skip.
 FIRESTORE_CONTAINER="${FIRESTORE_CONTAINER:-monkeybot-playground-firestore}"
 FIRESTORE_EMULATOR_HOST_PORT="${FIRESTORE_EMULATOR_HOST_PORT:-8686}"
 FIRESTORE_PROJECT="${FIRESTORE_PROJECT:-monkeybot-playground}"
-FIRESTORE_EMULATOR_IMAGE="${FIRESTORE_EMULATOR_IMAGE:-ghcr.io/178inaba/firestore-emulator:latest}"
+# Official Google Cloud SDK emulators image (566.0.0-emulators, pinned by digest).
+FIRESTORE_EMULATOR_IMAGE="${FIRESTORE_EMULATOR_IMAGE:-gcr.io/google.com/cloudsdktool/google-cloud-cli@sha256:b19eb965d67981489383d544d12283b806040fb13e99cccfdbbdf4c818c2f2ab}"
 FIRESTORE_HEALTH_WAIT_SECS="${FIRESTORE_HEALTH_WAIT_SECS:-15}"
 _FIRESTORE_EMULATOR_PID=""
 
@@ -356,7 +357,8 @@ ensure_firestore_emulator() {
       if ! docker run -d \
         --name "${FIRESTORE_CONTAINER}" \
         -p "${FIRESTORE_EMULATOR_HOST_PORT}:8080" \
-        "${FIRESTORE_EMULATOR_IMAGE}" >/dev/null; then
+        "${FIRESTORE_EMULATOR_IMAGE}" \
+        sh -c 'gcloud beta emulators firestore start --host-port=0.0.0.0:8080' >/dev/null; then
         echo "run.sh: docker run failed for Firestore emulator (port ${FIRESTORE_EMULATOR_HOST_PORT} may be in use)."
       fi
     fi

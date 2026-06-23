@@ -72,6 +72,29 @@ class FirestoreHistoryStore:
     def __init__(self, client: AsyncClient, prefix: str) -> None:
         self._client = client
         self._collection = _collection_name(prefix, "conversation_history")
+        self._threads_collection = _collection_name(prefix, "threads")
+
+    async def _upsert_thread_summary(
+        self,
+        thread_id: str,
+        *,
+        created_at: int,
+        content: str,
+    ) -> None:
+        """Maintain one summary doc per thread for indexed ``list_threads`` reads."""
+        thread_ref = self._client.collection(self._threads_collection).document(thread_id)
+        await thread_ref.set(
+            {
+                "thread_id": thread_id,
+                "last_message_at": created_at,
+                "message_count": firestore.Increment(1),
+                "last_content": content,
+            },
+            merge=True,
+        )
+
+    async def _delete_thread_summary(self, thread_id: str) -> None:
+        await self._client.collection(self._threads_collection).document(thread_id).delete()
 
     async def append(self, thread_id: str, message: Message) -> None:
         role = message.role
@@ -91,6 +114,7 @@ class FirestoreHistoryStore:
                 "created_at": created_at,
             }
         )
+        await self._upsert_thread_summary(thread_id, created_at=created_at, content=payload)
 
     async def load(self, thread_id: str, limit: int = 100) -> list[Message]:
         query = (
@@ -114,14 +138,21 @@ class FirestoreHistoryStore:
                 blocks = [ContentBlock.from_dict(b) for b in raw]
             except (json.JSONDecodeError, ValueError, TypeError) as exc:
                 logger.error(
-                    "Unparseable history row id=%s thread_id=%s",
+                    "Skipping unparseable history row id=%s thread_id=%s: %s",
                     row_id,
                     thread_id,
+                    exc,
                     exc_info=True,
                 )
-                raise ValueError(f"history row {row_id} unparseable: {exc}") from exc
+                continue
             if role not in _VALID_ROLES:
-                raise ValueError(f"history row {row_id} has invalid role: {role!r}")
+                logger.error(
+                    "Skipping history row id=%s thread_id=%s with invalid role=%r",
+                    row_id,
+                    thread_id,
+                    role,
+                )
+                continue
             out.append(Message(role=cast(Role, role), content=blocks))
         return out
 
@@ -140,39 +171,27 @@ class FirestoreHistoryStore:
                 count = 0
         if count:
             await batch.commit()
+        await self._delete_thread_summary(thread_id)
         for msg in messages:
             await self.append(thread_id, msg)
 
     async def list_threads(self, limit: int = 50) -> list[ChatThreadSummary]:
         cap = max(1, min(limit, 200))
         query = (
-            self._client.collection(self._collection)
-            .order_by("created_at", direction=firestore.Query.DESCENDING)
-            .limit(2000)
+            self._client.collection(self._threads_collection)
+            .order_by("last_message_at", direction=firestore.Query.DESCENDING)
+            .limit(cap)
         )
-        counts: dict[str, int] = {}
-        latest: dict[str, tuple[int, str, str]] = {}
+        out: list[ChatThreadSummary] = []
         async for doc in query.stream():
             data = doc.to_dict() or {}
-            thread_id = str(data.get("thread_id", ""))
-            if not thread_id:
-                continue
-            counts[thread_id] = counts.get(thread_id, 0) + 1
-            created_at = int(data.get("created_at", 0))
-            role = str(data.get("role", ""))
-            content = str(data.get("content", ""))
-            prev = latest.get(thread_id)
-            if prev is None or created_at >= prev[0]:
-                latest[thread_id] = (created_at, role, content)
-        rows = sorted(latest.items(), key=lambda item: item[1][0], reverse=True)[:cap]
-        out: list[ChatThreadSummary] = []
-        for thread_id, (last_at, _role, content) in rows:
-            preview = preview_from_content_blob(content)
+            thread_id = str(data.get("thread_id") or doc.id)
+            preview = preview_from_content_blob(str(data.get("last_content", "")))
             out.append(
                 ChatThreadSummary(
                     thread_id=thread_id,
-                    last_message_at=last_at,
-                    message_count=counts.get(thread_id, 0),
+                    last_message_at=_field_int(data, "last_message_at"),
+                    message_count=_field_int(data, "message_count"),
                     preview=preview or "(empty)",
                 )
             )

@@ -27,7 +27,7 @@
 ### 6. DurableRunStore Wiring (crash recovery) — DONE
 - Subagent runs are persisted via `CoreToolExecutor` (`record_started` / `record_completed` / `record_failed`).
 - Queue mode: set `MONKEYBOT_TASK_QUEUE=1` to enqueue with `record_pending` instead of inline spawn.
-- Worker pool: `MONKEYBOT_WORKER_POOL=1` on the gateway or `python -m monkeybot.subagents.worker` consumes queued runs with atomic `claim()`.
+- Worker pool: standalone `python -m monkeybot.subagents.worker` consumes queued runs with atomic `claim()` (recommended for production — its own event loop, scales independently of the gateway). `MONKEYBOT_WORKER_POOL=1` runs the same loop in-process on the gateway and is development-only (competes with the SSE event loop).
 
 ---
 

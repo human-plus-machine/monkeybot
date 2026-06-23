@@ -8,7 +8,8 @@ import asyncio
 import os
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 from typing import Any, cast
 
@@ -170,12 +171,15 @@ def _storage_backend(request: Request) -> Any:
     return backend
 
 
+Lifespan = Callable[[FastAPI], AbstractAsyncContextManager[None]]
+
+
 def create_app(
     *,
     loop_port: LoopPort | None = None,
     usage_port: UsagePort | None = None,
     registry: SessionRegistry | None = None,
-    lifespan: Any | None = None,
+    lifespan: Lifespan | None = None,
 ) -> FastAPI:
     """
     Build a FastAPI app with v2 SSE routes.

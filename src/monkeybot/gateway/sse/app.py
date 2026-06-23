@@ -549,9 +549,20 @@ async def _startup(fastapi_app: FastAPI) -> None:
         instrument_fastapi_app(fastapi_app)
 
     if os.environ.get("MONKEYBOT_WORKER_POOL", "").strip().lower() in ("1", "true", "yes"):
-        from monkeybot.core.subagents.worker_pool import start_worker_pool_background
+        # Development-only: runs the subagent worker loop on the gateway's own asyncio
+        # event loop, so it competes with SSE streaming under load and has no backpressure.
+        # For production, run standalone worker processes (`python -m monkeybot.subagents.worker`)
+        # that scale independently of the gateway.
+        from monkeybot.core.subagents.worker_pool import (
+            start_worker_pool_background,
+        )
 
-        fastapi_app.state.worker_pool_task = start_worker_pool_background(backend)
+        logger.warning(
+            "MONKEYBOT_WORKER_POOL=1: running the subagent worker pool in-process is "
+            "development-only — it shares the gateway event loop with SSE streaming. "
+            "For production, run standalone workers via `python -m monkeybot.subagents.worker`."
+        )
+        fastapi_app.state.worker_pool = start_worker_pool_background(backend)
 
 
 async def _shutdown(fastapi_app: FastAPI) -> None:
@@ -568,12 +579,12 @@ async def _shutdown(fastapi_app: FastAPI) -> None:
         for name in list(getattr(mcp, "_servers", {}).keys()):
             await mcp.disconnect(name)
 
-    worker_task: asyncio.Task[None] | None = getattr(fastapi_app.state, "worker_pool_task", None)
-    if worker_task is not None:
-        worker_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await worker_task
-        fastapi_app.state.worker_pool_task = None
+    worker_pool_handle = getattr(fastapi_app.state, "worker_pool", None)
+    if worker_pool_handle is not None:
+        from monkeybot.core.subagents.worker_pool import shutdown_worker_pool
+
+        await shutdown_worker_pool(worker_pool_handle)
+        fastapi_app.state.worker_pool = None
 
     storage: StorageBackend | None = getattr(fastapi_app.state, "storage", None)
     if storage is not None:
