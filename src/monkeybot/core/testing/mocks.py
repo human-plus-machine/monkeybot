@@ -7,7 +7,7 @@ Story 4 (Integration) replaces these mocks with real implementations.
 """
 
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.types.interfaces import SkillResult, SkillsEngineInterface
@@ -117,7 +117,7 @@ class MockMemoryManager:
         return messages
 
     async def write_conversation(
-        self, user_id: str, role: str, content: str, trace_id: str
+        self, user_id: str, role: Literal["user", "assistant", "system"], content: str, trace_id: str
     ) -> None:
         """Append message to in-memory history for specific user.
 
