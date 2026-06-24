@@ -156,7 +156,7 @@ class SessionRegistry:
     """Process-local registry of SessionBus instances."""
 
     def __init__(self) -> None:
-        self._sessions: dict[str, SessionBus] = {}
+        self._sessions: dict[str, SessionBus] = {}  # ponytail: in-process registry, use Redis pub/sub for multi-instance deployments
 
     def get(self, session_id: str) -> SessionBus | None:
         """Return the bus for id or None."""

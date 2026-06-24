@@ -85,20 +85,6 @@ class StorageBackend(Protocol):
     def runs(self) -> RunStore: ...
 
 
-def _normalize_postgres_db_url(db_url: str) -> str | None:
-    """Return a ``postgresql://`` URL for Postgres backends, or ``None`` if not Postgres.
-
-    Accepts both ``postgresql://`` (SQLAlchemy/asyncpg style) and ``postgres://``
-    (common alias, e.g. Heroku-style URLs). asyncpg expects ``postgresql://``.
-    """
-    stripped = db_url.strip()
-    if stripped.startswith("postgresql://"):
-        return stripped
-    if stripped.startswith("postgres://"):
-        return "postgresql://" + stripped[len("postgres://") :]
-    return None
-
-
 def create_storage_backend(db_url: str) -> StorageBackend:
     """Factory that returns the right backend for ``db_url``.
 
@@ -114,14 +100,18 @@ def create_storage_backend(db_url: str) -> StorageBackend:
         from monkeybot.core.persistence.sqlite_backend import SQLiteStorageBackend
 
         return SQLiteStorageBackend(db_url)
-    pg_url = _normalize_postgres_db_url(db_url)
-    if pg_url is not None:
-        try:
-            from monkeybot.core.persistence.postgres import PostgresStorageBackend
-        except ImportError as exc:
-            raise RuntimeError(
-                "asyncpg is not installed. "
-                "Run: pip install 'monkeybot[postgres]'"
-            ) from exc
-        return PostgresStorageBackend(pg_url)
-    raise ValueError(f"Unsupported DB URL scheme: {db_url!r}")
+    stripped = db_url.strip()
+    if stripped.startswith("postgresql://"):
+        pg_url = stripped
+    elif stripped.startswith("postgres://"):
+        pg_url = "postgresql://" + stripped[len("postgres://"):]
+    else:
+        raise ValueError(f"Unsupported DB URL scheme: {db_url!r}")
+    try:
+        from monkeybot.core.persistence.postgres import PostgresStorageBackend
+    except ImportError as exc:
+        raise RuntimeError(
+            "asyncpg is not installed. "
+            "Run: pip install 'monkeybot[postgres]'"
+        ) from exc
+    return PostgresStorageBackend(pg_url)

@@ -25,9 +25,9 @@ from monkeybot.core.llm.provider import (
 )
 from monkeybot.core.mcp.mcp_client import MCPClient
 from monkeybot.core.memory.subsystem import MemorySubsystem
-from monkeybot.core.persistence.backends import create_storage_backend
+from monkeybot.core.persistence.backends import HistoryStore, create_storage_backend
 from monkeybot.core.runtime.events import AgentEvent, Error, event_to_json
-from monkeybot.core.runtime.loop import ConversationHistoryPort, run as run_loop
+from monkeybot.core.runtime.loop import run as run_loop
 from monkeybot.core.subagents.subagent_proto import SubagentEnvelope
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
@@ -110,7 +110,7 @@ async def _stream_run_loop_events(
     ctx: TurnContext,
     *,
     provider: Provider,
-    history: ConversationHistoryPort,
+    history: HistoryStore,
     inspectors: list[ToolInspector],
     tool_executor: CoreToolExecutor,
     run_id: str,

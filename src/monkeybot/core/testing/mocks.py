@@ -7,10 +7,10 @@ Story 4 (Integration) replaces these mocks with real implementations.
 """
 
 import logging
-from datetime import datetime
 from typing import Any
 
-from monkeybot.core.types.interfaces import Message, SkillResult, SkillsEngineInterface
+from monkeybot.core.llm.provider import Message
+from monkeybot.core.types.interfaces import SkillResult, SkillsEngineInterface
 
 logger = logging.getLogger(__name__)
 
@@ -130,14 +130,7 @@ class MockMemoryManager:
         if user_id not in self.conversation_histories:
             self.conversation_histories[user_id] = []
 
-        self.conversation_histories[user_id].append(
-            Message(
-                role=role,
-                content=content,
-                timestamp=datetime.now().isoformat(),
-                trace_id=trace_id,
-            )
-        )
+        self.conversation_histories[user_id].append(Message.text(role=role, text=content))
         logger.info(
             f"[MOCK] Wrote conversation: role={role}",
             extra={
