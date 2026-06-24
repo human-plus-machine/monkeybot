@@ -5,6 +5,33 @@ import ThinkingPanel from './blocks/ThinkingPanel'
 import ToolInvocationCard from './blocks/ToolInvocationCard'
 import type { AgentMessage, MessagePart } from './components/AgentChat'
 import type { ChatFeedItem } from './chatTypes'
+import type { ChatHistoryMessage } from './gatewayClient'
+
+/** Map persisted chat history into feed items for session resume.
+
+ * Intentionally text-only: the history API returns ``role`` + ``text`` per message.
+ * Tool calls, thinking blocks, and image attachments from the live SSE stream are
+ * not stored in that shape and are omitted here by design (not a rendering bug).
+ */
+export function historyMessagesToFeed(messages: ChatHistoryMessage[]): ChatFeedItem[] {
+  const items: ChatFeedItem[] = []
+  messages.forEach((msg, idx) => {
+    if (msg.role === 'user') {
+      items.push({
+        kind: 'userText',
+        id: `hist-u-${idx}`,
+        text: msg.text,
+      })
+      return
+    }
+    items.push({
+      kind: 'assistantText',
+      id: `hist-a-${idx}`,
+      text: msg.text,
+    })
+  })
+  return items
+}
 
 export function feedToAgentMessages(feed: ChatFeedItem[]): AgentMessage[] {
   const messages: AgentMessage[] = []

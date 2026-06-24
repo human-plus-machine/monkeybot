@@ -34,12 +34,23 @@ Python 3.11+ · [uv](https://docs.astral.sh/uv/) · optional provider keys in `.
 
 ## Key capabilities
 
-- [**Agent loop**](src/monkeybot/core/runtime/loop.py) — streaming providers, tool execution, SQLite-backed turns
-- [**SSE gateway**](src/monkeybot/gateway/sse/) — FastAPI sessions and event stream for clients
-- [**AGENT.md + skills**](docs/skills.md) — system prompt from file plus `SKILL.md` discovery under `SKILLS_PATH`
-- [**MCP**](docs/mcp.md) — stdio and streamable HTTP MCP servers; tools exposed as `server__tool`
-- [**Playground**](playground/) — local gateway (`playground/agent`) and Vite + React chat UI
-- [**Multi-provider**](src/monkeybot/providers/) — Gemini (Vertex), OpenAI, Anthropic, Bedrock via `get_provider_config()`
+### Subagent task queue (optional)
+
+When **`MONKEYBOT_TASK_QUEUE=1`**, the `task` tool enqueues subagent runs via `record_pending` instead of spawning inline. A storage backend (`DB_URL`) is **required** — queue mode without storage raises at enqueue time.
+
+Run workers with `python -m monkeybot.subagents.worker` (production) or `MONKEYBOT_WORKER_POOL=1` on the gateway (development only). Worker tuning:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `MONKEYBOT_WORKER_STALE_CLAIM_MS` | `600000` (10 min) | Reclaim `running` rows with no heartbeat after this window; another worker may re-execute the run |
+| `MONKEYBOT_WORKER_POLL_INTERVAL_S` | `2` | Poll interval for `pending_runs()` |
+| `MONKEYBOT_WORKER_CONCURRENCY` | `1` | Max concurrent claimed runs per worker |
+| `MONKEYBOT_WORKER_ID` | auto | Worker identity for claim attribution |
+
+There is no claim heartbeat yet — subagent runs longer than `MONKEYBOT_WORKER_STALE_CLAIM_MS` risk duplicate execution. Increase the limit for long LLM workloads or keep runs under the window.
+
+**Playground Docker:** local smoke test with harness + workspace paths — `docker-compose.playground.yml` + [`docker/Dockerfile.playground`](docker/Dockerfile.playground). Optional Cloud Run helpers may live in gitignored `internal/` for private forks; see **Step 3** in that doc.
+---
 
 **Config:** copy or scaffold **`monkeybot_config/monkeybot.yaml`** from **`monkeybot_config/monkeybot.example.yaml`**. Secrets go in **`.env`** — see the YAML header for variable names.
 

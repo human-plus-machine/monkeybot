@@ -21,6 +21,8 @@ _SUBAGENT_COLUMNS: tuple[str, ...] = (
     "started_at",
     "finished_at",
     "scratch_dir",
+    "worker_id",
+    "claimed_at",
 )
 
 
@@ -38,6 +40,8 @@ class SubagentRunRow:
     started_at: int
     finished_at: int | None
     scratch_dir: str
+    worker_id: str | None = None
+    claimed_at: int | None = None
 
 
 @dataclass
@@ -49,10 +53,14 @@ class SubagentEnvelope:
     memory_storage_uri: str
     parent_run_id: str
     model: str = "gemini-2.5-flash"
+    traceparent: str | None = None
 
     def to_json(self) -> str:
         """Serialize envelope to JSON text."""
-        return json.dumps(asdict(self), sort_keys=True)
+        data = asdict(self)
+        if data.get("traceparent") is None:
+            data.pop("traceparent", None)
+        return json.dumps(data, sort_keys=True)
 
     @classmethod
     def from_json(cls, raw: str) -> SubagentEnvelope:
@@ -84,12 +92,16 @@ class SubagentEnvelope:
         for key in ("task", "context", "parent_run_id"):
             if not isinstance(data[key], str):
                 raise ValueError(f"{key} must be a string")
+        traceparent = data.get("traceparent")
+        if traceparent is not None and not isinstance(traceparent, str):
+            raise ValueError("traceparent must be a string when present")
         return cls(
             task=data["task"],
             context=data["context"],
             memory_storage_uri=uri.strip(),
             parent_run_id=data["parent_run_id"],
             model=model,
+            traceparent=traceparent.strip() if isinstance(traceparent, str) and traceparent.strip() else None,
         )
 
 
@@ -106,6 +118,8 @@ def _tuple_to_run_row(row: tuple[object, ...]) -> SubagentRunRow:
         started_at=int(cast(int, d["started_at"])),
         finished_at=int(cast(int, d["finished_at"])) if d["finished_at"] is not None else None,
         scratch_dir=str(d["scratch_dir"]),
+        worker_id=str(d["worker_id"]) if d["worker_id"] is not None else None,
+        claimed_at=int(cast(int, d["claimed_at"])) if d["claimed_at"] is not None else None,
     )
 
 
@@ -114,6 +128,36 @@ class SQLiteRunStore:
 
     def __init__(self, conn: aiosqlite.Connection) -> None:
         self._conn = conn
+
+    async def record_pending(
+        self,
+        run_id: str,
+        parent_run_id: str | None,
+        script: str,
+        envelope: SubagentEnvelope,
+        scratch_dir: Path,
+    ) -> None:
+        """Insert a ``pending`` row for worker-pool consumption."""
+        now_ms = int(time.time() * 1000)
+        await self._conn.execute(
+            """
+            INSERT INTO subagent_runs(
+                run_id, parent_run_id, script, envelope_json,
+                status, result_json, error_json, started_at, finished_at, scratch_dir,
+                worker_id, claimed_at
+            )
+            VALUES (?, ?, ?, ?, 'pending', NULL, NULL, ?, NULL, ?, NULL, NULL)
+            """,
+            (
+                run_id,
+                parent_run_id,
+                script,
+                envelope.to_json(),
+                now_ms,
+                str(scratch_dir),
+            ),
+        )
+        await self._conn.commit()
 
     async def record_started(
         self,
@@ -129,9 +173,10 @@ class SQLiteRunStore:
             """
             INSERT INTO subagent_runs(
                 run_id, parent_run_id, script, envelope_json,
-                status, result_json, error_json, started_at, finished_at, scratch_dir
+                status, result_json, error_json, started_at, finished_at, scratch_dir,
+                worker_id, claimed_at
             )
-            VALUES (?, ?, ?, ?, 'running', NULL, NULL, ?, NULL, ?)
+            VALUES (?, ?, ?, ?, 'running', NULL, NULL, ?, NULL, ?, NULL, NULL)
             """,
             (
                 run_id,
@@ -143,6 +188,40 @@ class SQLiteRunStore:
             ),
         )
         await self._conn.commit()
+
+    async def claim(self, run_id: str, worker_id: str) -> bool:
+        """Atomically transition ``pending`` -> ``running``; return True if this caller won."""
+        now_ms = int(time.time() * 1000)
+        cursor = await self._conn.execute(
+            """
+            UPDATE subagent_runs
+            SET status = 'running',
+                worker_id = ?,
+                claimed_at = ?
+            WHERE run_id = ? AND status = 'pending'
+            """,
+            (worker_id, now_ms, run_id),
+        )
+        await self._conn.commit()
+        return int(cursor.rowcount) == 1
+
+    async def reset_stale_claims(self, stale_after_ms: int) -> int:
+        """Reset ``running`` rows with stale ``claimed_at`` back to ``pending``."""
+        cutoff = int(time.time() * 1000) - stale_after_ms
+        cursor = await self._conn.execute(
+            """
+            UPDATE subagent_runs
+            SET status = 'pending',
+                worker_id = NULL,
+                claimed_at = NULL
+            WHERE status = 'running'
+              AND claimed_at IS NOT NULL
+              AND claimed_at < ?
+            """,
+            (cutoff,),
+        )
+        await self._conn.commit()
+        return int(cursor.rowcount)
 
     async def record_completed(self, run_id: str, result_json: str) -> None:
         """Mark run completed with payload."""
@@ -177,12 +256,12 @@ class SQLiteRunStore:
         await self._conn.commit()
 
     async def pending_runs(self) -> list[SubagentRunRow]:
-        """Runs stuck in ``pending`` or ``running``."""
+        """Return ``pending`` runs oldest-first (worker pool claim candidates)."""
         columns = ", ".join(_SUBAGENT_COLUMNS)
         cursor = await self._conn.execute(
             f"""
             SELECT {columns} FROM subagent_runs
-            WHERE status IN ('pending','running')
+            WHERE status = 'pending'
             ORDER BY started_at ASC
             """
         )

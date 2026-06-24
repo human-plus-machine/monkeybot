@@ -21,6 +21,9 @@ from monkeybot.core.llm.provider import ToolCall
 from monkeybot.core.mcp.mcp_client import MCPConnectionError, MCPServerNotConnectedError
 from monkeybot.core.mcp.ports_mcp import MCPClientPort
 from monkeybot.core.memory.subsystem import MemorySubsystem
+from monkeybot.core.persistence.backends import RunStore
+from monkeybot.core.persistence.durable_runs import SubagentEnvelope as PersistedSubagentEnvelope
+from monkeybot.core.persistence.runs import make_run_id
 from monkeybot.core.runtime.events import (
     AssistantDelta,
     Error,
@@ -248,6 +251,7 @@ class CoreToolExecutor(ToolExecutorPort):
         run_command_allowed_path_prefixes: list[str] | tuple[str, ...] | None = None,
         attachment_store: AttachmentStore | None = None,
         attachment_catalog: SessionAttachmentCatalog | None = None,
+        run_store: RunStore | None = None,
     ) -> None:
         self._workspace = WorkspaceFileService(Path(workspace_root).resolve())
         self._memory = memory
@@ -255,6 +259,7 @@ class CoreToolExecutor(ToolExecutorPort):
         self._mcp = mcp
         self._attachment_store = attachment_store
         self._attachment_catalog = attachment_catalog
+        self._run_store = run_store
         self._terminal: TerminalExecutor | SandboxExecutor
         if terminal is not None:
             self._terminal = terminal
@@ -574,6 +579,51 @@ class CoreToolExecutor(ToolExecutorPort):
         scratch = (self._workspace.repo_root / ".monkeybot" / "subagent-runs" / uuid.uuid4().hex)
         scratch.mkdir(parents=True, exist_ok=True)
 
+        run_id = make_run_id()
+        persisted = PersistedSubagentEnvelope(
+            task=envelope.task,
+            context=envelope.context,
+            memory_storage_uri=envelope.memory_storage_uri,
+            parent_run_id=envelope.parent_run_id,
+            model=envelope.model,
+            traceparent=envelope.traceparent,
+        )
+        queue_mode = os.environ.get("MONKEYBOT_TASK_QUEUE", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        if queue_mode and self._run_store is None:
+            raise RuntimeError("MONKEYBOT_TASK_QUEUE=1 requires a configured storage backend")
+        if self._run_store is not None:
+            if queue_mode:
+                await self._run_store.record_pending(
+                    run_id=run_id,
+                    parent_run_id=parent_label,
+                    script=str(script),
+                    envelope=persisted,
+                    scratch_dir=scratch,
+                )
+                return (
+                    _j(
+                        {
+                            "ok": True,
+                            "queued": True,
+                            "run_id": run_id,
+                            "scratch_dir": str(scratch),
+                            "message": "Subagent run queued for worker pool.",
+                        }
+                    ),
+                    None,
+                )
+            await self._run_store.record_started(
+                run_id=run_id,
+                parent_run_id=parent_label,
+                script=str(script),
+                envelope=persisted,
+                scratch_dir=scratch,
+            )
+
         child_env = {
             "MONKEYBOT_SUBAGENT_WORKSPACE": str(self._workspace.repo_root),
             "MEMORY_STORAGE_URI": self._memory.uri,
@@ -710,7 +760,14 @@ class CoreToolExecutor(ToolExecutorPort):
             "errors": errors,
             "usage": usage_payload,
             "scratch_dir": str(scratch),
+            "run_id": run_id,
         }
+        if self._run_store is not None and not queue_mode:
+            result_json = _j(payload)
+            if len(errors) == 0:
+                await self._run_store.record_completed(run_id, result_json)
+            else:
+                await self._run_store.record_failed(run_id, "; ".join(errors))
         return (_j(payload), None)
 
     async def _tool_run_command(self, args: dict[str, Any]) -> tuple[str | None, str | None]:

@@ -11,6 +11,7 @@ import contextlib
 import json
 import logging
 import os
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -352,6 +353,7 @@ class GatewayLoopPort:
                 )
                 return
 
+            storage_backend = getattr(app.state, "storage", None)
             executor = CoreToolExecutor(
                 workspace_root=workspace_root,
                 memory=getattr(app.state, "memory", None),
@@ -362,6 +364,7 @@ class GatewayLoopPort:
                 run_command_allowed_path_prefixes=_deps.run_command_allowed_path_prefixes,
                 attachment_store=attachment_store,
                 attachment_catalog=bus.attachment_catalog,
+                run_store=storage_backend.runs() if storage_backend is not None else None,
             )
             async for evt in run_loop(
                 user_content,
@@ -422,20 +425,6 @@ def _cors_allow_origins() -> list[str]:
     return parts if parts else ["http://localhost:5173"]
 
 
-_registry = SessionRegistry()
-app = build_sse_app(
-    registry=_registry,
-    loop_port=GatewayLoopPort(_registry),
-    usage_port=_StaticUsagePortZeros(),
-)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_cors_allow_origins(),
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
 def _tool_denied_patterns() -> list[str]:
     """Substring deny list for :class:`RulesInspector`. Empty ``MONKEYBOT_TOOL_DENIED_PATTERNS`` disables."""
     raw = os.environ.get("MONKEYBOT_TOOL_DENIED_PATTERNS")
@@ -444,8 +433,7 @@ def _tool_denied_patterns() -> list[str]:
     return [p.strip() for p in raw.split(",") if p.strip()]
 
 
-@app.on_event("startup")
-async def _startup() -> None:
+async def _startup(fastapi_app: FastAPI) -> None:
     """Wire storage backend, MCP, inspectors, and provider."""
     from monkeybot.observability import init_observability
 
@@ -459,8 +447,8 @@ async def _startup() -> None:
 
     backend = create_storage_backend(db_url)
     await backend.open()
-    app.state.storage = backend
-    app.state.usage = _UsageStoreAdapter(backend.usage())
+    fastapi_app.state.storage = backend
+    fastapi_app.state.usage = _UsageStoreAdapter(backend.usage())
 
     mcp = MCPClient()
     _deps.mcp = mcp
@@ -522,7 +510,7 @@ async def _startup() -> None:
             memory.register_hooks(mgr)
             _deps.hook_manager = mgr
             _deps.memory = memory
-            app.state.memory = memory
+            fastapi_app.state.memory = memory
             logger.info("memory hook enabled (memory_storage_uri=%s)", mem_uri)
             try:
                 gc_stats = await memory.gc_processed()
@@ -539,32 +527,47 @@ async def _startup() -> None:
             logger.warning("memory hook setup failed; continuing without: %r", exc)
             _deps.hook_manager = None
             _deps.memory = None
-            app.state.memory = None
+            fastapi_app.state.memory = None
     else:
         logger.info("memory hook disabled via MONKEYBOT_MEMORY_HOOK_ENABLED")
-        app.state.memory = None
+        fastapi_app.state.memory = None
 
     if attachments_enabled_from_env():
         try:
-            app.state.attachment_store = FilesystemAttachmentStore(
+            fastapi_app.state.attachment_store = FilesystemAttachmentStore(
                 resolve_agent_workspace_root()
             )
             logger.info("attachments enabled")
         except Exception as exc:
             logger.warning("attachment store init failed: %s", exc)
-            app.state.attachment_store = None
+            fastapi_app.state.attachment_store = None
     else:
-        app.state.attachment_store = None
+        fastapi_app.state.attachment_store = None
         logger.info("attachments disabled via ATTACHMENTS_ENABLED")
 
     if otel_enabled:
         from monkeybot.observability.instrumentation import instrument_fastapi_app
 
-        instrument_fastapi_app(app)
+        instrument_fastapi_app(fastapi_app)
+
+    if os.environ.get("MONKEYBOT_WORKER_POOL", "").strip().lower() in ("1", "true", "yes"):
+        # Development-only: runs the subagent worker loop on the gateway's own asyncio
+        # event loop, so it competes with SSE streaming under load and has no backpressure.
+        # For production, run standalone worker processes (`python -m monkeybot.subagents.worker`)
+        # that scale independently of the gateway.
+        from monkeybot.core.subagents.worker_pool import (
+            start_worker_pool_background,
+        )
+
+        logger.warning(
+            "MONKEYBOT_WORKER_POOL=1: running the subagent worker pool in-process is "
+            "development-only — it shares the gateway event loop with SSE streaming. "
+            "For production, run standalone workers via `python -m monkeybot.subagents.worker`."
+        )
+        fastapi_app.state.worker_pool = start_worker_pool_background(backend)
 
 
-@app.on_event("shutdown")
-async def _shutdown() -> None:
+async def _shutdown(fastapi_app: FastAPI) -> None:
     """Tear down MCP sessions and storage backend."""
     from monkeybot.observability import shutdown_observability
 
@@ -578,9 +581,40 @@ async def _shutdown() -> None:
         for name in list(getattr(mcp, "_servers", {}).keys()):
             await mcp.disconnect(name)
 
-    storage: StorageBackend | None = getattr(app.state, "storage", None)
+    worker_pool_handle = getattr(fastapi_app.state, "worker_pool", None)
+    if worker_pool_handle is not None:
+        from monkeybot.core.subagents.worker_pool import shutdown_worker_pool
+
+        await shutdown_worker_pool(worker_pool_handle)
+        fastapi_app.state.worker_pool = None
+
+    storage: StorageBackend | None = getattr(fastapi_app.state, "storage", None)
     if storage is not None:
         await storage.close()
+
+
+@contextlib.asynccontextmanager
+async def _gateway_lifespan(fastapi_app: FastAPI) -> AsyncIterator[None]:
+    await _startup(fastapi_app)
+    try:
+        yield
+    finally:
+        await _shutdown(fastapi_app)
+
+
+_registry = SessionRegistry()
+app = build_sse_app(
+    registry=_registry,
+    loop_port=GatewayLoopPort(_registry),
+    usage_port=_StaticUsagePortZeros(),
+    lifespan=_gateway_lifespan,
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_allow_origins(),
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def create_app() -> FastAPI:

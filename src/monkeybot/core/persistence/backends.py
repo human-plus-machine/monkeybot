@@ -8,7 +8,9 @@ Postgres implementation code loads until the factory is actually called.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from urllib.parse import parse_qs, unquote, urlparse
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -16,6 +18,7 @@ if TYPE_CHECKING:
     from monkeybot.core.llm.provider import Message
     from monkeybot.core.llm.usage import Usage, UsageSummary
     from monkeybot.core.persistence.durable_runs import SubagentEnvelope, SubagentRunRow
+    from monkeybot.core.persistence.thread_summary import ChatThreadSummary
 
 
 @runtime_checkable
@@ -27,6 +30,8 @@ class HistoryStore(Protocol):
     async def append(self, thread_id: str, message: Message) -> None: ...
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None: ...
+
+    async def list_threads(self, limit: int = 50) -> list[ChatThreadSummary]: ...
 
 
 @runtime_checkable
@@ -52,6 +57,15 @@ class UsageStore(Protocol):
 class RunStore(Protocol):
     """Protocol for subagent run lifecycle tracking."""
 
+    async def record_pending(
+        self,
+        run_id: str,
+        parent_run_id: str | None,
+        script: str,
+        envelope: SubagentEnvelope,
+        scratch_dir: Path,
+    ) -> None: ...
+
     async def record_started(
         self,
         run_id: str,
@@ -60,6 +74,10 @@ class RunStore(Protocol):
         envelope: SubagentEnvelope,
         scratch_dir: Path,
     ) -> None: ...
+
+    async def claim(self, run_id: str, worker_id: str) -> bool: ...
+
+    async def reset_stale_claims(self, stale_after_ms: int) -> int: ...
 
     async def record_completed(self, run_id: str, result_json: str) -> None: ...
 
@@ -85,6 +103,43 @@ class StorageBackend(Protocol):
     def runs(self) -> RunStore: ...
 
 
+@dataclass(frozen=True)
+class FirestoreConfig:
+    """Parsed ``firestore://`` storage URL."""
+
+    project: str
+    database: str
+    prefix: str = ""
+
+
+def _normalize_postgres_db_url(db_url: str) -> str | None:
+    """Return a ``postgresql://`` URL for Postgres backends, or ``None`` if not Postgres.
+
+    Accepts both ``postgresql://`` (SQLAlchemy/asyncpg style) and ``postgres://``
+    (common alias, e.g. Heroku-style URLs). asyncpg expects ``postgresql://``.
+    """
+    stripped = db_url.strip()
+    if stripped.startswith("postgresql://"):
+        return stripped
+    if stripped.startswith("postgres://"):
+        return "postgresql://" + stripped[len("postgres://") :]
+    return None
+
+
+def _parse_firestore_config(db_url: str) -> FirestoreConfig | None:
+    """Return Firestore settings for ``firestore://`` URLs, or ``None`` if not Firestore."""
+    stripped = db_url.strip()
+    if not stripped.startswith("firestore://"):
+        return None
+    parsed = urlparse(stripped)
+    project = unquote(parsed.hostname or "")
+    if not project:
+        raise ValueError(f"Firestore URL missing project id: {db_url!r}")
+    database = unquote(parsed.path.lstrip("/")) or "(default)"
+    prefix = parse_qs(parsed.query).get("prefix", [""])[0]
+    return FirestoreConfig(project=project, database=database, prefix=prefix)
+
+
 def create_storage_backend(db_url: str) -> StorageBackend:
     """Factory that returns the right backend for ``db_url``.
 
@@ -95,23 +150,31 @@ def create_storage_backend(db_url: str) -> StorageBackend:
       (zero extra deps beyond core)
     - ``postgresql://...`` or ``postgres://...`` → :class:`~monkeybot.core.persistence.postgres.PostgresStorageBackend`
       (requires ``pip install 'monkeybot[postgres]'``)
+    - ``firestore://PROJECT/DATABASE`` → :class:`~monkeybot.core.persistence.firestore.FirestoreStorageBackend`
+      (requires ``pip install 'monkeybot[firestore]'``)
     """
     if db_url.startswith("sqlite://"):
         from monkeybot.core.persistence.sqlite_backend import SQLiteStorageBackend
 
         return SQLiteStorageBackend(db_url)
-    stripped = db_url.strip()
-    if stripped.startswith("postgresql://"):
-        pg_url = stripped
-    elif stripped.startswith("postgres://"):
-        pg_url = "postgresql://" + stripped[len("postgres://"):]
-    else:
-        raise ValueError(f"Unsupported DB URL scheme: {db_url!r}")
-    try:
-        from monkeybot.core.persistence.postgres import PostgresStorageBackend
-    except ImportError as exc:
-        raise RuntimeError(
-            "asyncpg is not installed. "
-            "Run: pip install 'monkeybot[postgres]'"
-        ) from exc
-    return PostgresStorageBackend(pg_url)
+    pg_url = _normalize_postgres_db_url(db_url)
+    if pg_url is not None:
+        try:
+            from monkeybot.core.persistence.postgres import PostgresStorageBackend
+        except ImportError as exc:
+            raise RuntimeError(
+                "asyncpg is not installed. "
+                "Run: pip install 'monkeybot[postgres]'"
+            ) from exc
+        return PostgresStorageBackend(pg_url)
+    fs_config = _parse_firestore_config(db_url)
+    if fs_config is not None:
+        try:
+            from monkeybot.core.persistence.firestore import FirestoreStorageBackend
+        except ImportError as exc:
+            raise RuntimeError(
+                "google-cloud-firestore is not installed. "
+                "Run: pip install 'monkeybot[firestore]'"
+            ) from exc
+        return FirestoreStorageBackend(fs_config)
+    raise ValueError(f"Unsupported DB URL scheme: {db_url!r}")

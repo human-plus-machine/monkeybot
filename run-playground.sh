@@ -7,8 +7,11 @@
 # Environment (passed through to playground/agent/run.sh):
 #   SKIP_OPENSANDBOX=1          Skip OpenSandbox Docker container
 #   SKIP_OBSERVABILITY=1        Skip Phoenix/Langfuse stack
+#   SKIP_FIRESTORE_EMULATOR=1   Skip Firestore emulator (use cloud Firestore or another host)
 #   PRESERVE_OPENSANDBOX=1      Leave OpenSandbox running after exit
 #   PRESERVE_OBSERVABILITY=1    Leave observability stack running after exit
+#   PRESERVE_FIRESTORE_EMULATOR=1  Leave Firestore emulator running after exit
+#   FIRESTORE_EMULATOR_HOST_PORT=8686  Host port for local Firestore emulator
 #   GATEWAY_PORT=8787           Health-check port (default matches monkeybot.yaml)
 #
 set -euo pipefail
