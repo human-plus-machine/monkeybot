@@ -35,6 +35,8 @@ from monkeybot.core.llm.provider import (
     UsageEvent,
 )
 from monkeybot.core.llm.usage import Usage
+from monkeybot.core.logging_utils import kv
+from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.prompts.prompt import compose_system_prompt, latest_user_message_text
 from monkeybot.core.tools.inspector import InspectorToolCall, ToolInspector
 from monkeybot.core.tools.types import ToolExecutionResult
@@ -46,7 +48,6 @@ from monkeybot.core.types.content_blocks import (
     ToolRequest,
     ToolResponse,
 )
-from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.types.content_blocks import Thinking as ThinkingBlock
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers.pricing import estimate_cost
@@ -66,7 +67,6 @@ from .events import (
     TurnComplete,
     UsageTotals,
 )
-
 
 logger = logging.getLogger("monkeybot.core.runtime.loop")
 
@@ -495,6 +495,16 @@ async def run(
     usage = Usage()
     trace_id_capture: list[str | None] = [None]
     blocks = _normalize_user_content(user_content)
+    effective_max = _effective_max_turns(max_turns)
+    logger.debug(
+        "harness run start %s",
+        kv(
+            request_id=ctx.request_id,
+            thread_id=ctx.thread_id,
+            model=ctx.model,
+            max_turns=effective_max,
+        ),
+    )
     try:
         async for evt in _run_inner(
             blocks,
@@ -522,8 +532,21 @@ async def run(
             pass
         yield Error(request_id=ctx.request_id, error="Request cancelled")
     except Exception as exc:
+        logger.exception(
+            "harness turn failed %s",
+            kv(request_id=ctx.request_id, thread_id=ctx.thread_id),
+        )
         yield Error(request_id=ctx.request_id, error=str(exc))
     finally:
+        logger.debug(
+            "harness run end %s",
+            kv(
+                request_id=ctx.request_id,
+                thread_id=ctx.thread_id,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+            ),
+        )
         yield TurnComplete(
             request_id=ctx.request_id,
             usage=_usage_to_totals(usage),
@@ -650,6 +673,15 @@ async def _run_inner_core(
         turn_index += 1
         turn_input_text = user_text
         turn_output_text = ""
+        logger.debug(
+            "inner turn start %s",
+            kv(
+                request_id=ctx.request_id,
+                thread_id=ctx.thread_id,
+                turn=turn_index,
+                estimated_prompt_tokens=usage.estimated_prompt_tokens,
+            ),
+        )
         turn_span = begin_turn_span(
             turn_index=turn_index,
             thread_id=ctx.thread_id,
@@ -694,6 +726,10 @@ async def _run_inner_core(
                 and curation_threshold_met(ctx)
             ):
                 curated_injection = True
+                logger.debug(
+                    "context curation start %s",
+                    kv(request_id=ctx.request_id, thread_id=ctx.thread_id, turn=turn_index),
+                )
                 u = latest_user_message_text(chat_messages) or ""
                 parts = await run_context_curator(
                     ctx=ctx,
@@ -708,6 +744,17 @@ async def _run_inner_core(
                 else:
                     curated_mem = []
                     curated_sks = []
+                logger.debug(
+                    "context curation done %s",
+                    kv(
+                        request_id=ctx.request_id,
+                        thread_id=ctx.thread_id,
+                        turn=turn_index,
+                        memory_lines=len(curated_mem),
+                        skills=len(curated_sks),
+                        success=parts.success,
+                    ),
+                )
 
             system = _system_message(
                 ctx,
@@ -733,6 +780,16 @@ async def _run_inner_core(
             usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, preflight)
             cap = max(1, int(ctx.context_window_tokens * _SUMMARY_TRIGGER_RATIO))
             if preflight >= cap and _summarization_viable(chat_messages):
+                logger.debug(
+                    "summarization triggered %s",
+                    kv(
+                        request_id=ctx.request_id,
+                        thread_id=ctx.thread_id,
+                        turn=turn_index,
+                        preflight=preflight,
+                        cap=cap,
+                    ),
+                )
                 yield ContextSummarizing(
                     request_id=ctx.request_id,
                     estimated_tokens=preflight,
@@ -751,11 +808,25 @@ async def _run_inner_core(
                             _summarization_model_id(ctx),
                         )
                     except Exception:
+                        logger.warning(
+                            "summarization failed %s; continuing",
+                            kv(request_id=ctx.request_id, thread_id=ctx.thread_id),
+                            exc_info=True,
+                        )
                         turns_summarized = 0
                     set_summarize_turns(turns_summarized)
                 yield ContextSummarized(
                     request_id=ctx.request_id,
                     turns_summarized=turns_summarized,
+                )
+                logger.debug(
+                    "summarization done %s",
+                    kv(
+                        request_id=ctx.request_id,
+                        thread_id=ctx.thread_id,
+                        turn=turn_index,
+                        turns_summarized=turns_summarized,
+                    ),
                 )
                 chat_messages = await history.load(ctx.thread_id)
                 ctx = await refresh_memory_index(ctx)
@@ -838,11 +909,27 @@ async def _run_inner_core(
                         prompt=_provider_messages_prompt_summary(provider_messages),
                         completion=assistant_text or "",
                     )
+                logger.debug(
+                    "provider stream done %s",
+                    kv(
+                        request_id=ctx.request_id,
+                        thread_id=ctx.thread_id,
+                        turn=turn_index,
+                        llm_input=llm_input,
+                        llm_output=llm_output,
+                        llm_cached=llm_cached,
+                        tool_calls=len(pending),
+                    ),
+                )
             except asyncio.CancelledError:
                 yield Error(request_id=ctx.request_id, error="Request cancelled")
                 needs_followup_after_tools = False
                 return
             except Exception as exc:
+                logger.exception(
+                    "provider stream failed %s",
+                    kv(request_id=ctx.request_id, thread_id=ctx.thread_id, model=ctx.model),
+                )
                 yield Error(request_id=ctx.request_id, error=str(exc))
                 needs_followup_after_tools = False
                 return
@@ -940,6 +1027,16 @@ async def _run_inner_core(
                             case "deny":
                                 allowed = False
                                 denial_message = decision.message
+                                logger.debug(
+                                    "tool inspector deny %s",
+                                    kv(
+                                        request_id=ctx.request_id,
+                                        thread_id=ctx.thread_id,
+                                        tool=call.name,
+                                        call_id=call.call_id,
+                                        decision="deny",
+                                    ),
+                                )
                                 break
                             case "confirm":
                                 if ctx.sse_bus is None:
@@ -975,12 +1072,32 @@ async def _run_inner_core(
                                     break
                                 if payload.get("approved"):
                                     allowed = True
+                                    logger.debug(
+                                        "tool inspector confirm %s",
+                                        kv(
+                                            request_id=ctx.request_id,
+                                            thread_id=ctx.thread_id,
+                                            tool=call.name,
+                                            call_id=call.call_id,
+                                            decision="confirm_approved",
+                                        ),
+                                    )
                                 else:
                                     allowed = False
                                     reason_raw = payload.get("reason")
                                     denial_message = (
                                         (reason_raw if isinstance(reason_raw, str) else None)
                                         or "denied by user"
+                                    )
+                                    logger.debug(
+                                        "tool inspector confirm %s",
+                                        kv(
+                                            request_id=ctx.request_id,
+                                            thread_id=ctx.thread_id,
+                                            tool=call.name,
+                                            call_id=call.call_id,
+                                            decision="confirm_denied",
+                                        ),
                                     )
                                 break
 
@@ -1016,9 +1133,29 @@ async def _run_inner_core(
                     continue
 
                 parallel_tasks = all(c.name == "task" for c in allowed_exec)
+                dispatch_mode = "parallel" if parallel_tasks else "serial"
+                logger.debug(
+                    "tool dispatch %s",
+                    kv(
+                        request_id=ctx.request_id,
+                        thread_id=ctx.thread_id,
+                        turn=turn_index,
+                        mode=dispatch_mode,
+                        chunk_size=len(allowed_exec),
+                    ),
+                )
 
                 if not parallel_tasks:
                     call = allowed_exec[0]
+                    logger.debug(
+                        "tool execute %s",
+                        kv(
+                            request_id=ctx.request_id,
+                            thread_id=ctx.thread_id,
+                            tool=call.name,
+                            call_id=call.call_id,
+                        ),
+                    )
                     async with span_tool(
                         tool_name=call.name,
                         tool_call_id=call.call_id,
@@ -1048,6 +1185,16 @@ async def _run_inner_core(
                             needs_followup_after_tools = False
                             return
                         except Exception as exc:
+                            logger.warning(
+                                "tool execution failed %s",
+                                kv(
+                                    request_id=ctx.request_id,
+                                    thread_id=ctx.thread_id,
+                                    tool=call.name,
+                                    call_id=call.call_id,
+                                ),
+                                exc_info=True,
+                            )
                             tool_result = ToolExecutionResult.err(str(exc))
                         record_tool_outcome(
                             _blocks_to_sse_summary(tool_result.blocks)
@@ -1109,11 +1256,30 @@ async def _run_inner_core(
                                     pre_tool_extra_next, pre_tool_payload.inject_text
                                 )
                             _record_tool_hook_span_event("pre_tool", call.name)
+                            logger.debug(
+                                "tool execute %s",
+                                kv(
+                                    request_id=_ctx.request_id,
+                                    thread_id=_ctx.thread_id,
+                                    tool=call.name,
+                                    call_id=call.call_id,
+                                ),
+                            )
                             try:
                                 tool_result = await tool_executor.execute(call=call, ctx=_ctx)
                             except asyncio.CancelledError:
                                 raise
                             except Exception as exc:
+                                logger.warning(
+                                    "tool execution failed %s",
+                                    kv(
+                                        request_id=_ctx.request_id,
+                                        thread_id=_ctx.thread_id,
+                                        tool=call.name,
+                                        call_id=call.call_id,
+                                    ),
+                                    exc_info=True,
+                                )
                                 tool_result = ToolExecutionResult.err(str(exc))
                             record_tool_outcome(
                                 _blocks_to_sse_summary(tool_result.blocks)
@@ -1155,6 +1321,16 @@ async def _run_inner_core(
                             needs_followup_after_tools = False
                             return
                         if isinstance(outcome, Exception):
+                            logger.warning(
+                                "tool execution failed %s",
+                                kv(
+                                    request_id=ctx.request_id,
+                                    thread_id=ctx.thread_id,
+                                    tool=call.name,
+                                    call_id=call.call_id,
+                                ),
+                                exc_info=(type(outcome), outcome, outcome.__traceback__),
+                            )
                             tool_result = ToolExecutionResult.err(str(outcome))
                         else:
                             _, tool_result = cast(tuple[ToolCall, ToolExecutionResult], outcome)
@@ -1175,6 +1351,14 @@ async def _run_inner_core(
                 set_turn_io(output_value=turn_output_text)
             end_turn_span(turn_span)
     if needs_followup_after_tools:
+        logger.warning(
+            "max turns exceeded %s",
+            kv(
+                request_id=ctx.request_id,
+                thread_id=ctx.thread_id,
+                max_turns=effective_max,
+            ),
+        )
         yield Error(request_id=ctx.request_id, error="Max turns exceeded")
 
     # Ensure the backgrounded assistant write has landed before any load/reset

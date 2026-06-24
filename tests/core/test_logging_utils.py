@@ -6,7 +6,7 @@ import logging
 
 import pytest
 
-from monkeybot.core.logging_utils import normalize_log_level
+from monkeybot.core.logging_utils import kv, normalize_log_level
 
 
 def test_normalize_log_level_case_insensitive() -> None:
@@ -22,3 +22,11 @@ def test_normalize_log_level_default() -> None:
 def test_normalize_log_level_invalid() -> None:
     with pytest.raises(ValueError, match="invalid log level"):
         normalize_log_level("not-a-level")
+
+
+def test_kv_formats_fields() -> None:
+    assert kv(request_id="r1", thread_id="t1", turn=2) == "request_id=r1 thread_id=t1 turn=2"
+
+
+def test_kv_skips_none() -> None:
+    assert kv(request_id="r1", thread_id=None) == "request_id=r1"

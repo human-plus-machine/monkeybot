@@ -18,6 +18,7 @@ from monkeybot.core.attachments.config import IMAGE_MIME_TYPES
 from monkeybot.core.attachments.store import AttachmentStore
 from monkeybot.core.context import CustomTool, TurnContext
 from monkeybot.core.llm.provider import ToolCall
+from monkeybot.core.logging_utils import kv
 from monkeybot.core.mcp.mcp_client import MCPConnectionError, MCPServerNotConnectedError
 from monkeybot.core.mcp.ports_mcp import MCPClientPort
 from monkeybot.core.memory.subsystem import MemorySubsystem
@@ -42,7 +43,7 @@ from monkeybot.core.tools.terminal import (
 )
 from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService
-from monkeybot.core.types.content_blocks import File, Image, Text
+from monkeybot.core.types.content_blocks import File, Image
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,30 @@ _PARENT_CANCEL_TASK_ERR = "task: cancelled (parent)"
 _SPILL_DIR = ".monkeybot/spill"
 _SPILL_MAX_CHARS = 20_000
 _SPILL_READ_LIMIT = 500
+
+_CORE_TOOL_NAMES = frozenset(
+    {
+        "read_attachment",
+        "read_file",
+        "write_file",
+        "search_memory",
+        "list_skills",
+        "task",
+        "run_command",
+        "add_mcp_server",
+        "remove_mcp_server",
+    }
+)
+
+
+def _tool_handler_kind(name: str, *, mcp: MCPClientPort, extra_tools: dict[str, CustomTool]) -> str:
+    if name in _CORE_TOOL_NAMES:
+        return "core"
+    if name in extra_tools:
+        return "extra"
+    if mcp.split_prefixed_tool(name) is not None:
+        return "mcp"
+    return "unknown"
 
 
 def _safe_spill_filename(call_id: str) -> str:
@@ -326,6 +351,17 @@ class CoreToolExecutor(ToolExecutorPort):
         args: dict[str, Any] = dict(call.args)
         result_text: str | None = None
         err_text: str | None = None
+        handler = _tool_handler_kind(name, mcp=self._mcp, extra_tools=self._extra_tools)
+        logger.debug(
+            "tool dispatch %s",
+            kv(
+                request_id=ctx.request_id,
+                thread_id=ctx.thread_id,
+                tool=name,
+                call_id=call.call_id,
+                handler=handler,
+            ),
+        )
 
         try:
             if name == "read_attachment":
@@ -351,6 +387,17 @@ class CoreToolExecutor(ToolExecutorPort):
                     result_text = await self._extra_tools[name].execute(args)
                     err_text = None
                 except Exception as exc:
+                    logger.warning(
+                        "tool handler failed %s",
+                        kv(
+                            request_id=ctx.request_id,
+                            thread_id=ctx.thread_id,
+                            tool=name,
+                            call_id=call.call_id,
+                            handler="extra",
+                        ),
+                        exc_info=True,
+                    )
                     result_text, err_text = None, _built_in_tool_error(
                         "runtime",
                         str(exc),

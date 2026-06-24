@@ -11,6 +11,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.backends import RunStore, StorageBackend
 from monkeybot.core.persistence.durable_runs import SubagentRunRow
 from monkeybot.core.runtime.events import Error, TurnComplete, event_to_json
@@ -146,6 +147,10 @@ async def execute_claimed_run(
 ) -> None:
     """Run one claimed subagent row to completion and persist the outcome."""
     envelope = SubagentEnvelope.from_json(row.envelope_json)
+    logger.debug(
+        "worker executing %s",
+        kv(run_id=row.run_id, worker_id=worker_id, parent_run_id=envelope.parent_run_id),
+    )
     scratch = Path(row.scratch_dir)
     errors: list[str] = []
     last_event_json: str | None = None
@@ -216,13 +221,25 @@ async def execute_claimed_run(
                 await watchdog
 
     if errors:
+        logger.debug(
+            "worker finished %s",
+            kv(run_id=row.run_id, worker_id=worker_id, outcome="failed"),
+        )
         await _record_failed_if_owner("; ".join(errors))
         return
 
     if last_event_json is None:
+        logger.debug(
+            "worker finished %s",
+            kv(run_id=row.run_id, worker_id=worker_id, outcome="failed_no_turn_complete"),
+        )
         await _record_failed_if_owner("subagent produced no TurnComplete event")
         return
 
+    logger.debug(
+        "worker finished %s",
+        kv(run_id=row.run_id, worker_id=worker_id, outcome="completed"),
+    )
     await _record_completed_if_owner(last_event_json)
 
 
@@ -250,6 +267,10 @@ async def run_worker_loop(
             claimed_row = await run_store.get_run(row.run_id)
             if claimed_row is None:
                 return
+            logger.debug(
+                "worker claimed %s",
+                kv(run_id=row.run_id, worker_id=worker_id),
+            )
             in_flight.add(row.run_id)
             try:
                 await execute_claimed_run(
@@ -275,7 +296,10 @@ async def run_worker_loop(
             try:
                 reset_count = await run_store.reset_stale_claims(stale_claim_ms)
                 if reset_count:
-                    logger.info("reset %d stale subagent claims", reset_count)
+                    logger.info(
+                        "reset stale subagent claims %s",
+                        kv(count=reset_count, worker_id=worker_id),
+                    )
                 pending = await run_store.pending_runs()
                 tasks = [_try_claim_and_run(row) for row in pending if row.status == "pending"]
                 if tasks:
