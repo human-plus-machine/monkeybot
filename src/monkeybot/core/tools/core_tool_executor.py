@@ -44,7 +44,7 @@ from monkeybot.core.tools.terminal import (
 )
 from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService
-from monkeybot.core.types.content_blocks import File, Image, Text
+from monkeybot.core.types.content_blocks import ContentBlock, File, Image, Text
 
 logger = logging.getLogger(__name__)
 
@@ -529,7 +529,7 @@ class CoreToolExecutor(ToolExecutorPort):
                 meta["attachment_id"] = stored.attachment_id
             except Exception as exc:
                 logger.warning("render_image attachment save failed: %s", exc)
-        blocks: list[Image | Text] = [
+        blocks: list[ContentBlock] = [
             Image(mime_type=mime, data=data_b64, metadata=meta),
         ]
         if caption.strip():
