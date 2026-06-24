@@ -10,6 +10,7 @@ from monkeybot.core.tools.inspector import (
     CommandTierConfigError,
     CommandTierInspector,
     Decision,
+    DEFAULT_DENY_PATTERNS,
     InspectorToolCall,
     load_command_tier_policy,
 )
@@ -132,10 +133,17 @@ def test_load_policy_omitted_allowlists_use_terminal_defaults(tmp_path: Path) ->
     from monkeybot.core.tools.terminal import ALLOWED_COMMANDS, ALLOWED_PATHS
 
     path = tmp_path / "t.yaml"
+    path.write_text("allowed_commands:\n  - echo\n", encoding="utf-8")
+    policy = load_command_tier_policy(path)
+    assert policy.allowed_commands == ("echo",)
+    assert policy.allowed_path_prefixes == tuple(ALLOWED_PATHS)
+    assert policy.deny_patterns == DEFAULT_DENY_PATTERNS
+
+
+def test_load_policy_explicit_empty_deny_patterns_opt_out(tmp_path: Path) -> None:
+    path = tmp_path / "t.yaml"
     path.write_text("deny_patterns: []\n", encoding="utf-8")
     policy = load_command_tier_policy(path)
-    assert policy.allowed_commands == tuple(ALLOWED_COMMANDS)
-    assert policy.allowed_path_prefixes == tuple(ALLOWED_PATHS)
     assert policy.deny_patterns == ()
 
 
@@ -165,3 +173,44 @@ def test_load_policy_invalid_deny_regex_raises(tmp_path: Path) -> None:
     )
     with pytest.raises(CommandTierConfigError, match="invalid regex"):
         CommandTierInspector(path)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"argv": ["uv", "pip", "install", "google-genai"]},
+        {"argv": ["pip", "install", "requests"]},
+        {"argv": ["python3", "-m", "pip", "install", "foo"]},
+        {"argv": ["bash", "-c", "pip install foo"]},
+        {"argv": ["npm", "install", "lodash"]},
+        {"argv": ["apt-get", "install", "curl"]},
+    ],
+)
+@pytest.mark.asyncio
+async def test_inspector_install_commands_denied(tmp_path: Path, args: dict) -> None:
+    p = _write_policy(tmp_path)
+    inspector = CommandTierInspector(p)
+    call = InspectorToolCall("1", "run_command", args)
+    d = await inspector.check(call, _minimal_ctx())
+    assert d.kind == "deny"
+    assert d.message
+
+
+@pytest.mark.asyncio
+async def test_inspector_skill_script_argv_allowed(tmp_path: Path) -> None:
+    p = _write_policy(tmp_path)
+    inspector = CommandTierInspector(p)
+    call = InspectorToolCall(
+        "1",
+        "run_command",
+        {
+            "argv": [
+                "python3",
+                "./skills/image-generator/generate_image.py",
+                "--prompt",
+                "test",
+            ]
+        },
+    )
+    d = await inspector.check(call, _minimal_ctx())
+    assert d.kind == "allow"
