@@ -84,8 +84,10 @@ ignore = ["E501"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["monkeybot"]
-# Gateway must load dotenv + monkeybot.yaml before other monkeybot imports read os.environ.
-force-to-top = ["monkeybot.gateway.load_env"]
+
+[tool.ruff.lint.per-file-ignores]
+# ensure_gateway_runtime_env() must run before monkeybot imports read os.environ
+"src/monkeybot/gateway/sse/app.py" = ["E402"]
 
 [tool.mypy]
 python_version = "3.11"
