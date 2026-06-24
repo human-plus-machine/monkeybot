@@ -8,15 +8,12 @@ from monkeybot.core.workspace.local import LocalWorkspaceStorage
 from monkeybot.core.workspace.protocol import WorkspaceStorage
 
 
-def _split_bucket_and_prefix(scheme_body: str) -> tuple[str, str]:
-    """Parse ``bucket`` or ``bucket/prefix/parts`` after the ``scheme://`` portion."""
+def _bucket_and_prefix(scheme_body: str) -> tuple[str, str]:
     body = scheme_body.strip().lstrip("/")
     if not body:
         raise ValueError("URI must include a bucket name")
-    if "/" in body:
-        bucket, prefix = body.split("/", 1)
-        return bucket.strip(), prefix.strip().strip("/")
-    return body.strip(), ""
+    bucket, _, prefix = body.partition("/")
+    return bucket.strip(), prefix.strip().strip("/")
 
 
 def create_workspace_storage(uri: str) -> WorkspaceStorage:
@@ -31,13 +28,13 @@ def create_workspace_storage(uri: str) -> WorkspaceStorage:
     if u.startswith("gcs://"):
         from monkeybot.core.workspace.gcs import GCSWorkspaceStorage
 
-        bucket, prefix = _split_bucket_and_prefix(u[len("gcs://") :])
+        bucket, prefix = _bucket_and_prefix(u[len("gcs://") :])
         return GCSWorkspaceStorage(bucket=bucket, prefix=prefix)
 
     if u.startswith("s3://"):
         from monkeybot.core.workspace.s3 import S3WorkspaceStorage
 
-        bucket, prefix = _split_bucket_and_prefix(u[len("s3://") :])
+        bucket, prefix = _bucket_and_prefix(u[len("s3://") :])
         return S3WorkspaceStorage(bucket=bucket, prefix=prefix)
 
     path_str = u.removeprefix("local://").strip()

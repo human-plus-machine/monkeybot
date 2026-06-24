@@ -46,6 +46,7 @@ from monkeybot.core.types.content_blocks import (
     ToolRequest,
     ToolResponse,
 )
+from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.types.content_blocks import Thinking as ThinkingBlock
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers.pricing import estimate_cost
@@ -348,7 +349,7 @@ def _summarization_model_id(ctx: TurnContext) -> str:
 async def _summarize_history(
     thread_id: str,
     messages: list[Message],
-    history: ConversationHistoryPort,
+    history: HistoryStore,
     provider: Provider,
     model: str,
 ) -> int:
@@ -456,15 +457,6 @@ def _chunk_tool_calls(ordered: Sequence[ToolCall]) -> list[list[ToolCall]]:
 
 
 @runtime_checkable
-class ConversationHistoryPort(Protocol):
-    async def load(self, thread_id: str, limit: int = 100) -> list[Message]: ...
-
-    async def append(self, thread_id: str, message: Message) -> None: ...
-
-    async def reset(self, thread_id: str, messages: list[Message]) -> None: ...
-
-
-@runtime_checkable
 class ToolExecutorPort(Protocol):
     """Fakeable tool execution boundary (Story 6 does not invoke real shell)."""
 
@@ -477,7 +469,7 @@ async def run(
     ctx: TurnContext,
     *,
     provider: Provider,
-    history: ConversationHistoryPort,
+    history: HistoryStore,
     inspectors: list[ToolInspector],
     tool_executor: ToolExecutorPort,
     run_id: str | None = None,
@@ -544,7 +536,7 @@ async def _run_inner(
     ctx: TurnContext,
     *,
     provider: Provider,
-    history: ConversationHistoryPort,
+    history: HistoryStore,
     inspectors: list[ToolInspector],
     tool_executor: ToolExecutorPort,
     cancelled: asyncio.Event | None,
@@ -597,7 +589,7 @@ async def _run_inner_core(
     ctx: TurnContext,
     *,
     provider: Provider,
-    history: ConversationHistoryPort,
+    history: HistoryStore,
     inspectors: list[ToolInspector],
     tool_executor: ToolExecutorPort,
     cancelled: asyncio.Event | None,

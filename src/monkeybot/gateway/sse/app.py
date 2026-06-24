@@ -19,7 +19,9 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-import monkeybot.gateway.load_env  # noqa: F401 — side effect: dotenv + monkeybot.yaml
+from monkeybot.gateway.bootstrap import ensure_gateway_runtime_env
+
+ensure_gateway_runtime_env()
 from monkeybot.core.attachments.config import attachments_enabled_from_env
 from monkeybot.core.attachments.store import AttachmentStore, FilesystemAttachmentStore
 from monkeybot.core.config.settings import get_provider_config, normalize_model_provider

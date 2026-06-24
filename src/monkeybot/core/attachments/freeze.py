@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Protocol
 
 from monkeybot.core.llm.provider import Message
+from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.runtime.events import AttachmentDescriptorEvent
 from monkeybot.core.types.content_blocks import (
     AttachmentRef,
@@ -22,15 +22,6 @@ from .text import (
     render_attachment_descriptor_text,
     render_tool_media_freeze_text,
 )
-
-if TYPE_CHECKING:
-    from monkeybot.core.runtime.loop import ConversationHistoryPort
-else:
-
-    class ConversationHistoryPort(Protocol):
-        async def load(self, thread_id: str, limit: int = 100) -> list[Message]: ...
-
-        async def reset(self, thread_id: str, messages: list[Message]) -> None: ...
 
 
 def _freeze_user_row(
@@ -121,7 +112,7 @@ def _freeze_tool_responses(msg: Message) -> Message:
 async def freeze_attachments_in_history(
     *,
     thread_id: str,
-    history: ConversationHistoryPort,
+    history: HistoryStore,
     catalog: SessionAttachmentCatalog | None,
     last_assistant_text: str,
 ) -> list[AttachmentDescriptorEvent]:
