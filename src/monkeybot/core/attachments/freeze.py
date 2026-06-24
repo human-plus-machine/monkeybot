@@ -90,9 +90,17 @@ def _freeze_tool_responses(msg: Message) -> Message:
             isinstance(b, File) and b.mime_type == "application/pdf" for b in block.result
         ):
             kind = "pdf"
+        attachment_id: str | None = None
+        for b in block.result:
+            if isinstance(b, Image):
+                meta = b.metadata or {}
+                att_raw = meta.get("attachment_id")
+                if isinstance(att_raw, str) and att_raw.strip():
+                    attachment_id = att_raw.strip()
+                    break
         summary = render_tool_media_freeze_text(
             tool_name=block.tool_name,
-            attachment_id=None,
+            attachment_id=attachment_id,
             kind=kind,
         )
         changed = True

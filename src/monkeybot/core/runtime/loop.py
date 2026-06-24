@@ -59,6 +59,7 @@ from .events import (
     ContextSummarized,
     ContextSummarizing,
     Error,
+    ImageBlock,
     SystemPromptSnapshot,
     Thinking,
     ToolCallResult,
@@ -431,6 +432,30 @@ def _tool_outcome(
         is_error=is_error,
     )
     return event, response
+
+
+def _image_events(
+    request_id: str,
+    call_id: str,
+    result: ToolExecutionResult,
+) -> list[ImageBlock]:
+    """SSE image payloads for tool results that include ``Image`` content blocks."""
+    if result.error is not None:
+        return []
+    events: list[ImageBlock] = []
+    for idx, b in enumerate(result.blocks):
+        if not isinstance(b, Image) or not b.data:
+            continue
+        image_id = f"{call_id}:{idx}" if call_id else f"{request_id}:{idx}"
+        events.append(
+            ImageBlock(
+                request_id=request_id,
+                image_id=image_id,
+                mime_type=b.mime_type,
+                data=b.data,
+            )
+        )
+    return events
 
 
 def _chunk_tool_calls(ordered: Sequence[ToolCall]) -> list[list[ToolCall]]:
@@ -994,6 +1019,12 @@ async def _run_inner_core(
 
             needs_followup_after_tools = True
 
+            # One user Message for the whole model tool-call turn (all chunks).
+            # Gemini 400s when functionResponse count != functionCall count on the
+            # preceding model turn; serial non-task tools are separate chunks but
+            # must still share a single user row.
+            all_tool_responses: list[ContentBlock] = []
+
             for chunk in _chunk_tool_calls(ordered):
                 if cancelled is not None and cancelled.is_set():
                     yield Error(request_id=ctx.request_id, error="Request cancelled")
@@ -1001,11 +1032,8 @@ async def _run_inner_core(
                     return
 
                 allowed_exec: list[ToolCall] = []
-                # Collect all ToolResponse blocks for this chunk so they can be
-                # appended in a single user Message. Gemini requires that the number
-                # of functionResponse parts equals the number of functionCall parts
-                # in the preceding model turn — splitting them across separate
-                # Message rows produces a 400 INVALID_ARGUMENT error.
+                # Collect ToolResponse blocks for this chunk; merged into
+                # ``all_tool_responses`` after every chunk completes.
                 chunk_responses: list[ContentBlock] = []
 
                 for call in chunk:
@@ -1125,11 +1153,7 @@ async def _run_inner_core(
                     allowed_exec.append(call)
 
                 if not allowed_exec:
-                    if chunk_responses:
-                        await history.append(
-                            ctx.thread_id,
-                            Message(role="user", content=chunk_responses),
-                        )
+                    all_tool_responses.extend(chunk_responses)
                     continue
 
                 parallel_tasks = all(c.name == "task" for c in allowed_exec)
@@ -1220,6 +1244,8 @@ async def _run_inner_core(
 
                     event, response = _tool_outcome(call, ctx.request_id, tool_result)
                     yield event
+                    for img_evt in _image_events(ctx.request_id, call.call_id, tool_result):
+                        yield img_evt
                     chunk_responses.append(response)
                 else:
                     if cancelled is not None and cancelled.is_set():
@@ -1337,13 +1363,17 @@ async def _run_inner_core(
 
                         event, response = _tool_outcome(call, ctx.request_id, tool_result)
                         yield event
+                        for img_evt in _image_events(ctx.request_id, call.call_id, tool_result):
+                            yield img_evt
                         chunk_responses.append(response)
 
-                if chunk_responses:
-                    await history.append(
-                        ctx.thread_id,
-                        Message(role="user", content=chunk_responses),
-                    )
+                all_tool_responses.extend(chunk_responses)
+
+            if all_tool_responses:
+                await history.append(
+                    ctx.thread_id,
+                    Message(role="user", content=all_tool_responses),
+                )
 
         finally:
             set_turn_prompt_tokens(usage.estimated_prompt_tokens)
