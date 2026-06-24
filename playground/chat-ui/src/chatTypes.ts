@@ -17,7 +17,10 @@ export type ChatFeedItem =
   | {
       kind: 'assistantText'
       id: string
+      request_id?: string
       text: string
+      /** ``streaming`` while ``AssistantDelta`` is in flight; committed before tools or turn end. */
+      phase?: 'streaming' | 'complete'
     }
   | {
       kind: 'toolInvocation'
