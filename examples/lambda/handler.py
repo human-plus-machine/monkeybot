@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from monkeybot.core.bootstrap import HarnessDeps, create_harness_deps, run_pattern_bc_turn
+from monkeybot.core.workspace_layout import resolve_agent_workspace_root
 
 _deps: HarnessDeps | None = None
 
@@ -63,7 +64,7 @@ async def lambda_handler(event: dict[str, Any], context: object) -> dict[str, An
 
     agent_md = Path(os.environ["AGENT_MD_PATH"])
     skills = Path(os.environ["SKILLS_PATH"])
-    workspace_root = Path(os.environ["WORKSPACE_ROOT"])
+    workspace_root = resolve_agent_workspace_root()
 
     text = await run_pattern_bc_turn(
         deps,

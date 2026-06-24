@@ -9,8 +9,8 @@
 **/.ruff_cache
 playground/chat-ui
 playground/agent/.emonk
-playground/agent/data/*.db
-playground/agent/data/*.db-*
+playground/agent/workspace/data/*.db
+playground/agent/workspace/data/*.db-*
 **/.env
 **/*.db-shm
 **/*.db-wal

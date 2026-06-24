@@ -3,6 +3,7 @@ __pycache__
 *.py[cod]
 .env
 .monkeybot/
-data/*.db
-data/*.db-shm
-data/*.db-wal
+workspace/data/*.db
+workspace/data/*.db-shm
+workspace/data/*.db-wal
+workspace/generated-media/

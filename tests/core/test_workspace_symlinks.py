@@ -1,4 +1,4 @@
-"""Workspace paths that use symlinks (playground ``workspace/data`` → ``../data``)."""
+"""Workspace paths that may use symlinks under the workspace root."""
 
 from __future__ import annotations
 
