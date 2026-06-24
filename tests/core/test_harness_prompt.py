@@ -16,6 +16,14 @@ def test_harness_includes_core_tools_and_protocol() -> None:
     assert '{"tool_calls":' not in out
 
 
+def test_harness_includes_runtime_error_and_no_repeat_guidance() -> None:
+    out = harness_fixed_context(include_task_tool=False)
+    assert "runtime" in out
+    assert "No-repeat rule" in out
+    assert "same name and same arguments that already failed" in out
+    assert "ok: false" in out
+
+
 def test_harness_adds_task_line_when_enabled() -> None:
     out = harness_fixed_context(include_task_tool=True)
     assert "`task` — subprocess subagent" in out
