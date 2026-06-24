@@ -184,14 +184,16 @@ async def test_list_skills_uses_context(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_run_command_cat_under_memory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / "data" / "memory").mkdir(parents=True)
-    (tmp_path / "data" / "memory" / "f.md").write_text("inside", encoding="utf-8")
-    mem = tmp_path / "data" / "memory"
-    skills = tmp_path / "skills"
+    agent_dir = tmp_path / "agent"
+    ws = agent_dir / "workspace"
+    (ws / "data" / "memory").mkdir(parents=True)
+    (ws / "data" / "memory" / "f.md").write_text("inside", encoding="utf-8")
+    mem = ws / "data" / "memory"
+    skills = ws / "skills"
     skills.mkdir()
+    monkeypatch.chdir(agent_dir)
     ex = CoreToolExecutor(
-        workspace_root=tmp_path,
+        workspace_root=ws,
         memory=_mem_sub(mem),
         skills_path=skills,
         mcp=_NoMCP(),
@@ -237,6 +239,38 @@ async def test_run_command_blocked_command_returns_policy_envelope(
     assert "curl" in payload["message"].lower() or "not allowed" in payload["message"].lower()
     assert "example_argv" in payload["details"]
     assert "allowed_commands" in payload["details"]
+
+
+@pytest.mark.asyncio
+async def test_run_command_uv_binary_blocked_returns_policy_envelope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data" / "memory").mkdir(parents=True)
+    mem = tmp_path / "data" / "memory"
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="1",
+                name="run_command",
+                args={"argv": ["uv", "pip", "install", "google-genai"]},
+            ),
+            ctx=_ctx(),
+        )
+    )
+    assert out is None and err is not None
+    payload = json.loads(err)
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "policy"
+    assert "uv" in payload["message"].lower() or "not allowed" in payload["message"].lower()
 
 
 @pytest.mark.asyncio
@@ -890,3 +924,88 @@ async def test_task_tool_queue_mode_enqueues_pending_run(
         assert stored.traceparent == "00-" + "a" * 32 + "-" + "b" * 16 + "-01"
     finally:
         await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_render_image_returns_image_block(tmp_path: Path) -> None:
+    from monkeybot.core.attachments.store import FilesystemAttachmentStore
+    from monkeybot.core.types.content_blocks import Image
+
+    img_dir = tmp_path / "generated-media" / "images"
+    img_dir.mkdir(parents=True)
+    # minimal valid PNG for mime sniff
+    png = (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
+        b"\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc"
+        b"\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    rel = "./generated-media/images/test.png"
+    (tmp_path / "generated-media" / "images" / "test.png").write_bytes(png)
+
+    store = FilesystemAttachmentStore(tmp_path)
+    (tmp_path / "mem").mkdir(exist_ok=True)
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_NoMCP(),
+        attachment_store=store,
+    )
+
+    result = await ex.execute(
+        call=ToolCall(call_id="ri1", name="render_image", args={"path": rel}),
+        ctx=_ctx(),
+    )
+    assert result.error is None
+    assert any(isinstance(b, Image) for b in result.blocks)
+    img = next(b for b in result.blocks if isinstance(b, Image))
+    assert img.mime_type == "image/png"
+    assert img.metadata is not None
+    assert "attachment_id" in img.metadata
+
+
+@pytest.mark.asyncio
+async def test_render_image_rejects_non_image(tmp_path: Path) -> None:
+    (tmp_path / "mem").mkdir(exist_ok=True)
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    (tmp_path / "notes.txt").write_text("hello", encoding="utf-8")
+    ex = _make_executor(tmp_path)
+    result = await ex.execute(
+        call=ToolCall(call_id="ri2", name="render_image", args={"path": "./notes.txt"}),
+        ctx=_ctx(),
+    )
+    assert result.error is not None
+    assert "image" in result.error.lower()
+
+
+@pytest.mark.asyncio
+async def test_custom_tool_tool_execution_result_passthrough(tmp_path: Path) -> None:
+    from monkeybot.core.tools.types import ToolExecutionResult
+    from monkeybot.core.types.content_blocks import Image
+
+    class _ImageTool:
+        tool_def = ToolDef("emit_image", "emit test image", {"type": "object", "properties": {}})
+
+        async def execute(self, args: dict[str, object]) -> ToolExecutionResult:
+            del args
+            return ToolExecutionResult.ok_blocks(
+                [Image(mime_type="image/png", data="aW1n", metadata={"filename": "x.png"})]
+            )
+
+    (tmp_path / "mem").mkdir(exist_ok=True)
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_NoMCP(),
+        extra_tools=[_ImageTool()],
+    )
+    result = await ex.execute(
+        call=ToolCall(call_id="ct1", name="emit_image", args={}),
+        ctx=_ctx(),
+    )
+    assert result.error is None
+    assert any(isinstance(b, Image) for b in result.blocks)
+

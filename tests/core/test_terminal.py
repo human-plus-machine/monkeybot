@@ -223,6 +223,79 @@ class TestTerminalExecutorExecution:
         assert "arg1" in result.stdout
         assert "arg2" in result.stdout
 
+    @pytest.mark.asyncio
+    async def test_execute_uses_workspace_cwd(self, executor, tmp_path, monkeypatch):
+        """Commands resolve workspace-relative paths when cwd differs from workspace root."""
+        agent_dir = tmp_path / "agent"
+        workspace = agent_dir / "workspace"
+        target = workspace / "skills" / "probe.txt"
+        target.parent.mkdir(parents=True)
+        target.write_text("workspace-hit", encoding="utf-8")
+        monkeypatch.chdir(agent_dir)
+
+        result = await executor.execute(
+            "cat",
+            ["./skills/probe.txt"],
+            cwd=workspace,
+        )
+
+        assert result.exit_code == 0
+        assert "workspace-hit" in result.stdout
+
+    @pytest.mark.asyncio
+    async def test_execute_absolutizes_google_application_credentials(
+        self, executor, tmp_path, monkeypatch
+    ):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        agent_dir = tmp_path / "agent"
+        workspace = agent_dir / "workspace"
+        workspace.mkdir(parents=True)
+        creds = agent_dir / "gcp.json"
+        creds.write_text("{}", encoding="utf-8")
+        monkeypatch.chdir(agent_dir)
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "gcp.json")
+
+        seen_env: dict[str, str] = {}
+
+        async def fake_exec(*cmd, stdout=None, stderr=None, cwd=None, env=None):
+            nonlocal seen_env
+            seen_env = dict(env or {})
+            proc = MagicMock()
+            proc.communicate = AsyncMock(return_value=(b"ok", b""))
+            proc.returncode = 0
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+        await executor.execute("echo", ["hi"], cwd=workspace)
+        assert seen_env["GOOGLE_APPLICATION_CREDENTIALS"] == str(creds.resolve())
+
+    @pytest.mark.asyncio
+    async def test_execute_with_cwd_inherits_path_from_host_env(
+        self, executor, tmp_path, monkeypatch
+    ):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        monkeypatch.setenv("PATH", "/custom/bin:/usr/bin")
+
+        seen_env: dict[str, str] = {}
+
+        async def fake_exec(*cmd, stdout=None, stderr=None, cwd=None, env=None):
+            nonlocal seen_env
+            seen_env = dict(env or {})
+            proc = MagicMock()
+            proc.communicate = AsyncMock(return_value=(b"ok", b""))
+            proc.returncode = 0
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+        await executor.execute("echo", ["hi"], cwd=workspace)
+        assert seen_env.get("PATH") == "/custom/bin:/usr/bin"
+
 
 class TestTerminalExecutorTimeout:
     """
@@ -382,7 +455,7 @@ class TestTerminalExecutorConstants:
     def test_allowed_commands_list(self):
         """Test that ALLOWED_COMMANDS contains expected commands."""
         # Document expected commands
-        expected_commands = ["cat", "ls", "grep", "echo", "python", "python3", "uv", "git", "gh"]
+        expected_commands = ["cat", "ls", "grep", "echo", "python", "python3", "git", "gh"]
 
         for cmd in expected_commands:
             assert cmd in ALLOWED_COMMANDS, f"Expected command '{cmd}' not in ALLOWED_COMMANDS"
