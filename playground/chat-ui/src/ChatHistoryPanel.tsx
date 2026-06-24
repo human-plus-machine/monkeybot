@@ -7,6 +7,7 @@ type ChatHistoryPanelProps = {
   error: string
   threads: ChatHistoryThread[]
   activeSessionId: string | null
+  containerRef: React.RefObject<HTMLElement | null>
   onClose: () => void
   onRefresh: () => void
   onSelect: (sessionId: string) => void
@@ -32,6 +33,7 @@ export default function ChatHistoryPanel({
   error,
   threads,
   activeSessionId,
+  containerRef,
   onClose,
   onRefresh,
   onSelect,
@@ -41,7 +43,7 @@ export default function ChatHistoryPanel({
   useEffect(() => {
     if (!open) return
     const onDocClick = (ev: MouseEvent) => {
-      const el = panelRef.current
+      const el = containerRef.current
       if (!el) return
       if (ev.target instanceof Node && !el.contains(ev.target)) {
         onClose()
@@ -49,7 +51,7 @@ export default function ChatHistoryPanel({
     }
     document.addEventListener('mousedown', onDocClick)
     return () => document.removeEventListener('mousedown', onDocClick)
-  }, [open, onClose])
+  }, [open, onClose, containerRef])
 
   if (!open) return null
 

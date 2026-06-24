@@ -586,12 +586,15 @@ class CoreToolExecutor(ToolExecutorPort):
             memory_storage_uri=envelope.memory_storage_uri,
             parent_run_id=envelope.parent_run_id,
             model=envelope.model,
+            traceparent=envelope.traceparent,
         )
         queue_mode = os.environ.get("MONKEYBOT_TASK_QUEUE", "").strip().lower() in (
             "1",
             "true",
             "yes",
         )
+        if queue_mode and self._run_store is None:
+            raise RuntimeError("MONKEYBOT_TASK_QUEUE=1 requires a configured storage backend")
         if self._run_store is not None:
             if queue_mode:
                 await self._run_store.record_pending(

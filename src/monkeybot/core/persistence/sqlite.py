@@ -69,6 +69,8 @@ SCHEMA_DDLS: Final[tuple[str, ...]] = (
     cache_creation_tokens INTEGER NOT NULL DEFAULT 0
 )""",
     "CREATE INDEX IF NOT EXISTS idx_history_thread ON conversation_history(thread_id, created_at)",
+    """CREATE INDEX IF NOT EXISTS idx_history_thread_last
+    ON conversation_history(thread_id, created_at DESC, id DESC)""",
     "CREATE INDEX IF NOT EXISTS idx_runs_parent ON subagent_runs(parent_run_id)",
     """CREATE INDEX IF NOT EXISTS idx_runs_status ON subagent_runs(status)
     WHERE status IN ('pending','running')""",

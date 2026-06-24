@@ -18,7 +18,6 @@ from monkeybot.core.persistence.backends import FirestoreConfig
 from monkeybot.core.persistence.durable_runs import (
     SubagentEnvelope,
     SubagentRunRow,
-    _tuple_to_run_row,
 )
 from monkeybot.core.persistence.thread_summary import ChatThreadSummary, preview_from_content_blob
 from monkeybot.core.types.content_blocks import ContentBlock
@@ -259,6 +258,11 @@ class FirestoreUsageStore:
         thread_id: str | None = None,
         since_ms: int | None = None,
     ) -> UsageSummary:
+        """Aggregate usage rows.
+
+        When ``thread_id`` is ``None``, streams the entire ``turn_usage`` collection
+        (playground-scale only; not suitable for large production datasets).
+        """
         rows = await self._fetch_usage_rows(thread_id, since_ms)
         if not rows:
             return UsageSummary(
@@ -306,21 +310,26 @@ class FirestoreUsageStore:
 
 
 def _doc_to_run_row(doc_id: str, data: dict[str, object]) -> SubagentRunRow:
-    row = (
-        doc_id,
-        data.get("parent_run_id"),
-        data.get("script"),
-        data.get("envelope_json"),
-        data.get("status"),
-        data.get("result_json"),
-        data.get("error_json"),
-        data.get("started_at"),
-        data.get("finished_at"),
-        data.get("scratch_dir"),
-        data.get("worker_id"),
-        data.get("claimed_at"),
+    parent = data.get("parent_run_id")
+    result = data.get("result_json")
+    error = data.get("error_json")
+    finished = data.get("finished_at")
+    worker = data.get("worker_id")
+    claimed = data.get("claimed_at")
+    return SubagentRunRow(
+        run_id=doc_id,
+        parent_run_id=str(parent) if parent is not None else None,
+        script=str(data.get("script", "")),
+        envelope_json=str(data.get("envelope_json", "")),
+        status=str(data.get("status", "")),
+        result_json=str(result) if result is not None else None,
+        error_json=str(error) if error is not None else None,
+        started_at=_field_int(data, "started_at"),
+        finished_at=int(finished) if finished is not None else None,
+        scratch_dir=str(data.get("scratch_dir", "")),
+        worker_id=str(worker) if worker is not None else None,
+        claimed_at=int(claimed) if claimed is not None else None,
     )
-    return _tuple_to_run_row(row)
 
 
 class FirestoreRunStore:
@@ -466,15 +475,13 @@ class FirestoreRunStore:
 
     async def pending_runs(self) -> list[SubagentRunRow]:
         rows: list[SubagentRunRow] = []
-        for status in ("pending", "running"):
-            query = (
-                self._client.collection(self._collection)
-                .where(filter=FieldFilter("status", "==", status))
-                .order_by("started_at")
-            )
-            async for doc in query.stream():
-                rows.append(_doc_to_run_row(doc.id, doc.to_dict() or {}))
-        rows.sort(key=lambda r: r.started_at)
+        query = (
+            self._client.collection(self._collection)
+            .where(filter=FieldFilter("status", "==", "pending"))
+            .order_by("started_at")
+        )
+        async for doc in query.stream():
+            rows.append(_doc_to_run_row(doc.id, doc.to_dict() or {}))
         return rows
 
     async def get_run(self, run_id: str) -> SubagentRunRow | None:

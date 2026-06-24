@@ -7,6 +7,12 @@ import type { AgentMessage, MessagePart } from './components/AgentChat'
 import type { ChatFeedItem } from './chatTypes'
 import type { ChatHistoryMessage } from './gatewayClient'
 
+/** Map persisted chat history into feed items for session resume.
+
+ * Intentionally text-only: the history API returns ``role`` + ``text`` per message.
+ * Tool calls, thinking blocks, and image attachments from the live SSE stream are
+ * not stored in that shape and are omitted here by design (not a rendering bug).
+ */
 export function historyMessagesToFeed(messages: ChatHistoryMessage[]): ChatFeedItem[] {
   const items: ChatFeedItem[] = []
   messages.forEach((msg, idx) => {

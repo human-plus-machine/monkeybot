@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +19,7 @@ from monkeybot.core.subagents.subagent_proto import SubagentEnvelope, spawn_suba
 logger = logging.getLogger(__name__)
 
 _SHUTDOWN_FAILURE_MESSAGE = "subagent run cancelled during worker shutdown"
+_STALE_CLAIM_WARN_FRACTION = 0.8
 
 
 def _env_float(name: str, default: float) -> float:
@@ -63,6 +65,7 @@ class WorkerPoolHandle:
     task: asyncio.Task[None]
     backend: StorageBackend
     active_runs: set[str]
+    worker_id: str
 
 
 def resolve_worker_id() -> str:
@@ -81,16 +84,31 @@ def resolve_subagent_script() -> Path:
     ).resolve()
 
 
+async def _still_owns_run(
+    run_store: RunStore,
+    run_id: str,
+    worker_id: str,
+    *,
+    claimed_at: int | None = None,
+) -> bool:
+    row = await run_store.get_run(run_id)
+    if row is None or row.status != "running" or row.worker_id != worker_id:
+        return False
+    if claimed_at is not None and row.claimed_at != claimed_at:
+        return False
+    return True
+
+
 async def _fail_in_flight_runs(
     run_store: RunStore,
     run_ids: set[str],
     *,
+    worker_id: str,
     message: str,
 ) -> None:
     for run_id in list(run_ids):
         try:
-            row = await run_store.get_run(run_id)
-            if row is not None and row.status == "running":
+            if await _still_owns_run(run_store, run_id, worker_id):
                 await run_store.record_failed(run_id, message)
         except Exception:
             logger.exception("failed to mark run_id=%s as failed during shutdown", run_id)
@@ -98,17 +116,82 @@ async def _fail_in_flight_runs(
             run_ids.discard(run_id)
 
 
+async def _stale_claim_watchdog(
+    run_id: str,
+    claimed_at: int,
+    stale_claim_ms: int,
+) -> None:
+    """Warn once when a run approaches the stale-claim reclaim window."""
+    warn_after_ms = int(stale_claim_ms * _STALE_CLAIM_WARN_FRACTION)
+    deadline_s = max(0.0, (claimed_at + warn_after_ms - int(time.time() * 1000)) / 1000.0)
+    if deadline_s > 0:
+        await asyncio.sleep(deadline_s)
+    logger.warning(
+        "subagent run_id=%s has been running for >=%.0f%% of MONKEYBOT_WORKER_STALE_CLAIM_MS "
+        "(%d ms); if execution exceeds the full window another worker may reclaim and "
+        "re-execute the run",
+        run_id,
+        _STALE_CLAIM_WARN_FRACTION * 100,
+        stale_claim_ms,
+    )
+
+
 async def execute_claimed_run(
     run_store: RunStore,
     row: SubagentRunRow,
     *,
     script: Path,
+    worker_id: str,
+    stale_claim_ms: int = 600_000,
 ) -> None:
     """Run one claimed subagent row to completion and persist the outcome."""
     envelope = SubagentEnvelope.from_json(row.envelope_json)
     scratch = Path(row.scratch_dir)
     errors: list[str] = []
     last_event_json: str | None = None
+    claimed_at = row.claimed_at
+    if claimed_at is None:
+        fresh = await run_store.get_run(row.run_id)
+        if fresh is not None:
+            claimed_at = fresh.claimed_at
+    watchdog: asyncio.Task[None] | None = None
+    if claimed_at is not None and stale_claim_ms > 0:
+        watchdog = asyncio.create_task(
+            _stale_claim_watchdog(row.run_id, claimed_at, stale_claim_ms),
+            name=f"monkeybot-stale-watchdog-{row.run_id}",
+        )
+
+    async def _record_failed_if_owner(message: str) -> bool:
+        if not await _still_owns_run(
+            run_store,
+            row.run_id,
+            worker_id,
+            claimed_at=claimed_at,
+        ):
+            logger.warning(
+                "skipping failed outcome for run_id=%s worker_id=%s: claim lost",
+                row.run_id,
+                worker_id,
+            )
+            return False
+        await run_store.record_failed(row.run_id, message)
+        return True
+
+    async def _record_completed_if_owner(result_json: str) -> bool:
+        if not await _still_owns_run(
+            run_store,
+            row.run_id,
+            worker_id,
+            claimed_at=claimed_at,
+        ):
+            logger.warning(
+                "skipping completed outcome for run_id=%s worker_id=%s: claim lost",
+                row.run_id,
+                worker_id,
+            )
+            return False
+        await run_store.record_completed(row.run_id, result_json)
+        return True
 
     try:
         async for evt in spawn_subagent(
@@ -121,21 +204,26 @@ async def execute_claimed_run(
             elif isinstance(evt, TurnComplete):
                 last_event_json = event_to_json(evt)
     except asyncio.CancelledError:
-        await run_store.record_failed(row.run_id, _SHUTDOWN_FAILURE_MESSAGE)
+        await _record_failed_if_owner(_SHUTDOWN_FAILURE_MESSAGE)
         raise
     except Exception as exc:
         logger.exception("worker failed executing run_id=%s", row.run_id)
         errors.append(str(exc))
+    finally:
+        if watchdog is not None:
+            watchdog.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await watchdog
 
     if errors:
-        await run_store.record_failed(row.run_id, "; ".join(errors))
+        await _record_failed_if_owner("; ".join(errors))
         return
 
     if last_event_json is None:
-        await run_store.record_failed(row.run_id, "subagent produced no TurnComplete event")
+        await _record_failed_if_owner("subagent produced no TurnComplete event")
         return
 
-    await run_store.record_completed(row.run_id, last_event_json)
+    await _record_completed_if_owner(last_event_json)
 
 
 async def run_worker_loop(
@@ -159,13 +247,23 @@ async def run_worker_loop(
         async with sem:
             if not await run_store.claim(row.run_id, worker_id):
                 return
+            claimed_row = await run_store.get_run(row.run_id)
+            if claimed_row is None:
+                return
             in_flight.add(row.run_id)
             try:
-                await execute_claimed_run(run_store, row, script=script)
+                await execute_claimed_run(
+                    run_store,
+                    claimed_row,
+                    script=script,
+                    worker_id=worker_id,
+                    stale_claim_ms=stale_claim_ms,
+                )
             except asyncio.CancelledError:
                 await _fail_in_flight_runs(
                     run_store,
                     {row.run_id},
+                    worker_id=worker_id,
                     message=_SHUTDOWN_FAILURE_MESSAGE,
                 )
                 raise
@@ -191,6 +289,7 @@ async def run_worker_loop(
         await _fail_in_flight_runs(
             run_store,
             in_flight,
+            worker_id=worker_id,
             message=_SHUTDOWN_FAILURE_MESSAGE,
         )
         raise
@@ -215,10 +314,13 @@ def start_worker_pool_background(
     settings = worker_env_settings()
     active_runs: set[str] = set()
     logger.info(
-        "starting subagent worker pool worker_id=%s script=%s concurrency=%d",
+        "starting subagent worker pool worker_id=%s script=%s concurrency=%d "
+        "stale_claim_ms=%d (MONKEYBOT_WORKER_STALE_CLAIM_MS; runs without heartbeat "
+        "may be reclaimed and re-executed after this window)",
         wid,
         resolved_script,
         settings.concurrency,
+        settings.stale_claim_ms,
     )
     task = asyncio.create_task(
         run_worker_loop(
@@ -232,7 +334,12 @@ def start_worker_pool_background(
         ),
         name=f"monkeybot-worker-{wid}",
     )
-    return WorkerPoolHandle(task=task, backend=backend, active_runs=active_runs)
+    return WorkerPoolHandle(
+        task=task,
+        backend=backend,
+        active_runs=active_runs,
+        worker_id=wid,
+    )
 
 
 async def shutdown_worker_pool(handle: WorkerPoolHandle) -> None:
@@ -243,6 +350,7 @@ async def shutdown_worker_pool(handle: WorkerPoolHandle) -> None:
     await _fail_in_flight_runs(
         handle.backend.runs(),
         handle.active_runs,
+        worker_id=handle.worker_id,
         message=_SHUTDOWN_FAILURE_MESSAGE,
     )
 
@@ -253,6 +361,10 @@ async def run_worker_main() -> None:
 
     db_url = os.environ.get("DB_URL", "sqlite:///data/monkeybot.db")
     settings = worker_env_settings()
+    logger.info(
+        "subagent worker starting stale_claim_ms=%d (MONKEYBOT_WORKER_STALE_CLAIM_MS)",
+        settings.stale_claim_ms,
+    )
     backend = create_storage_backend(db_url)
     await backend.open()
     try:

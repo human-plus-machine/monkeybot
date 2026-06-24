@@ -294,7 +294,7 @@ async def test_run_record_started_get_run_roundtrip(sqlite_backend: SQLiteStorag
 
 
 @pytest.mark.asyncio
-async def test_run_record_started_appears_in_pending_runs(sqlite_backend: SQLiteStorageBackend) -> None:
+async def test_run_record_started_not_in_pending_runs(sqlite_backend: SQLiteStorageBackend) -> None:
     store = sqlite_backend.runs()
     env = _make_envelope(parent_run_id="p2")
     await store.record_started(
@@ -306,14 +306,14 @@ async def test_run_record_started_appears_in_pending_runs(sqlite_backend: SQLite
     )
     pending = await store.pending_runs()
     run_ids = [r.run_id for r in pending]
-    assert "run-002" in run_ids
+    assert "run-002" not in run_ids
 
 
 @pytest.mark.asyncio
 async def test_run_record_completed_removes_from_pending(sqlite_backend: SQLiteStorageBackend) -> None:
     store = sqlite_backend.runs()
     env = _make_envelope(parent_run_id="p3")
-    await store.record_started(
+    await store.record_pending(
         run_id="run-003",
         parent_run_id=None,
         script="subagents/x.py",
@@ -392,7 +392,7 @@ async def test_run_pending_runs_orders_by_started_at(sqlite_backend: SQLiteStora
     store = sqlite_backend.runs()
     for i in range(3):
         env = _make_envelope(parent_run_id=f"p-ord-{i}")
-        await store.record_started(
+        await store.record_pending(
             run_id=f"run-ord-{i}",
             parent_run_id=None,
             script="subagents/x.py",

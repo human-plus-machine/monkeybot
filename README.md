@@ -175,6 +175,21 @@ The sandbox overlay mounts the agent workspace at `/tmp/monkeybot-workspace` —
 
 Managed deploy (Cloud Run, ECS, etc.): see **[Cloud deployment design](docs/cloud-deployment-design.md)** (Step 4 guides when added). Build arg **`EXTRAS`** selects pip extras in `docker/Dockerfile` (same image for laptop and cloud).
 
+### Subagent task queue (optional)
+
+When **`MONKEYBOT_TASK_QUEUE=1`**, the `task` tool enqueues subagent runs via `record_pending` instead of spawning inline. A storage backend (`DB_URL`) is **required** — queue mode without storage raises at enqueue time.
+
+Run workers with `python -m monkeybot.subagents.worker` (production) or `MONKEYBOT_WORKER_POOL=1` on the gateway (development only). Worker tuning:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `MONKEYBOT_WORKER_STALE_CLAIM_MS` | `600000` (10 min) | Reclaim `running` rows with no heartbeat after this window; another worker may re-execute the run |
+| `MONKEYBOT_WORKER_POLL_INTERVAL_S` | `2` | Poll interval for `pending_runs()` |
+| `MONKEYBOT_WORKER_CONCURRENCY` | `1` | Max concurrent claimed runs per worker |
+| `MONKEYBOT_WORKER_ID` | auto | Worker identity for claim attribution |
+
+There is no claim heartbeat yet — subagent runs longer than `MONKEYBOT_WORKER_STALE_CLAIM_MS` risk duplicate execution. Increase the limit for long LLM workloads or keep runs under the window.
+
 **Playground Docker:** local smoke test with harness + workspace paths — `docker-compose.playground.yml` + [`docker/Dockerfile.playground`](docker/Dockerfile.playground). Optional Cloud Run helpers may live in gitignored `internal/` for private forks; see **Step 3** in that doc.
 ---
 

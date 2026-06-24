@@ -302,6 +302,16 @@ export async function fetchChatHistoryDetail(
   return JSON.parse(text) as ChatHistoryDetailResponse
 }
 
+export class SessionAlreadyExistsError extends Error {
+  readonly sessionId: string
+
+  constructor(sessionId: string) {
+    super('SESSION_ALREADY_EXISTS')
+    this.name = 'SessionAlreadyExistsError'
+    this.sessionId = sessionId
+  }
+}
+
 export async function createSession(
   init?: RequestInit,
   opts?: { model_provider?: string; model_name?: string; session_id?: string },
@@ -321,6 +331,9 @@ export async function createSession(
   })
   if (!res.ok) {
     const text = await res.text()
+    if (res.status === 409) {
+      throw new SessionAlreadyExistsError(opts?.session_id ?? '')
+    }
     throw new Error(`createSession failed: ${res.status} ${text}`)
   }
   return res.json() as Promise<{ session_id: string; created_at: number }>

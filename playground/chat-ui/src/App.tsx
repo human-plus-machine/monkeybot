@@ -10,6 +10,7 @@ import { buildFeedSlots, feedToAgentMessages, historyMessagesToFeed } from './fe
 import {
   consumeSseJson,
   createSession,
+  SessionAlreadyExistsError,
   fetchChatHistoryDetail,
   fetchChatHistoryThreads,
   fetchSessionUsage,
@@ -243,8 +244,10 @@ export default function App() {
   const [historyLoading, setHistoryLoading] = useState(false)
   const [historyError, setHistoryError] = useState('')
   const [historyThreads, setHistoryThreads] = useState<ChatHistoryThread[]>([])
+  const [streamEpoch, setStreamEpoch] = useState(0)
 
   const streamAbortRef = useRef<AbortController | null>(null)
+  const historyAnchorRef = useRef<HTMLDivElement | null>(null)
   const ensureSessionPromiseRef = useRef<Promise<string | null> | null>(null)
   const streamBufRef = useRef('')
   const messagesScrollRef = useRef<HTMLDivElement | null>(null)
@@ -652,7 +655,7 @@ export default function App() {
       ac.abort()
       streamAbortRef.current = null
     }
-  }, [sessionId, handleGatewayEvent])
+  }, [sessionId, streamEpoch, handleGatewayEvent])
 
   useEffect(() => {
     if (!sessionId || status !== 'connected') return
@@ -743,6 +746,7 @@ export default function App() {
       if (activeRequestId !== null) return
       stickToBottomRef.current = true
       streamAbortRef.current?.abort()
+      setStreamEpoch((epoch) => epoch + 1)
       setStatus('connecting')
       setStatusNote('')
       setFeed([])
@@ -767,8 +771,7 @@ export default function App() {
             model_name: opt.model,
           })
         } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e)
-          if (!msg.includes('409') && !msg.includes('SESSION_ALREADY_EXISTS')) {
+          if (!(e instanceof SessionAlreadyExistsError)) {
             throw e
           }
         }
@@ -1124,7 +1127,7 @@ export default function App() {
                     {MODEL_OPTIONS[modelIdx].label}
                   </span>
                 </div>
-                <div className="chat-history-anchor">
+                <div ref={historyAnchorRef} className="chat-history-anchor">
                   <button
                     type="button"
                     className="btn btn-icon"
@@ -1142,6 +1145,7 @@ export default function App() {
                     error={historyError}
                     threads={historyThreads}
                     activeSessionId={sessionId}
+                    containerRef={historyAnchorRef}
                     onClose={() => setHistoryOpen(false)}
                     onRefresh={() => void refreshHistoryThreads()}
                     onSelect={(id) => void resumeSession(id)}

@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
 
+from monkeybot.core.llm.provider import ToolCall
 from monkeybot.core.persistence.durable_runs import SubagentEnvelope
 from monkeybot.core.persistence.sqlite_backend import SQLiteStorageBackend
 from monkeybot.core.runtime.events import TurnComplete, UsageTotals
 from monkeybot.core.subagents import worker_pool
+from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
+from monkeybot.core.tools.types import unwrap_tool_execution_result
+from tests.core.test_core_tool_executor import _NoMCP, _ctx, _mem_sub
 
 
 @pytest_asyncio.fixture
@@ -62,6 +67,7 @@ async def test_worker_pool_executes_claimed_run_once(
             store,
             row,
             script=tmp_path / "worker.py",
+            worker_id="worker-a",
         )
 
     row = await store.get_run("worker-run-1")
@@ -214,6 +220,7 @@ async def test_shutdown_worker_pool_fails_in_flight_run(
         task=loop_task,
         backend=sqlite_backend,
         active_runs=active_runs,
+        worker_id="worker-a",
     )
 
     with patch.object(worker_pool, "spawn_subagent", side_effect=_fake_spawn):
@@ -225,3 +232,109 @@ async def test_shutdown_worker_pool_fails_in_flight_run(
     assert row.status == "failed"
     assert row.error_json is not None
     assert "cancelled" in row.error_json.lower()
+
+
+@pytest.mark.asyncio
+async def test_queue_mode_enqueue_then_worker_executes_e2e(
+    sqlite_backend: SQLiteStorageBackend,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MONKEYBOT_TASK_QUEUE=1: CoreToolExecutor enqueues, worker claims and executes."""
+    monkeypatch.setenv("MONKEYBOT_TASK_QUEUE", "1")
+    root = tmp_path
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    worker_script = root / "subagent_worker.py"
+    worker_script.write_text("# placeholder\n", encoding="utf-8")
+    monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker_script))
+
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+        run_store=sqlite_backend.runs(),
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="c-e2e",
+                name="task",
+                args={"task": "e2e queued", "context": "ctx"},
+            ),
+            ctx=_ctx(),
+        )
+    )
+    assert err is None and out is not None
+    run_id = json.loads(out)["run_id"]
+
+    execution_count = 0
+
+    async def _fake_spawn(script: str, envelope, *, scratch_dir: Path, subprocess_exec=None):
+        nonlocal execution_count
+        execution_count += 1
+        assert envelope.task == "e2e queued"
+        yield TurnComplete(request_id="req-e2e", usage=UsageTotals())
+
+    with (
+        patch.object(worker_pool, "spawn_subagent", side_effect=_fake_spawn),
+        patch.object(worker_pool.asyncio, "sleep", new=AsyncMock(side_effect=asyncio.CancelledError)),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await worker_pool.run_worker_loop(
+            sqlite_backend,
+            worker_id="worker-e2e",
+            script=worker_script,
+            poll_interval_s=0.01,
+            concurrency=1,
+            stale_claim_ms=600_000,
+        )
+
+    row = await sqlite_backend.runs().get_run(run_id)
+    assert row is not None
+    assert row.status == "completed"
+    assert execution_count == 1
+
+
+@pytest.mark.asyncio
+async def test_stale_worker_does_not_overwrite_reclaimed_run(
+    sqlite_backend: SQLiteStorageBackend,
+    tmp_path: Path,
+) -> None:
+    store = sqlite_backend.runs()
+    scratch = tmp_path / "scratch"
+    env = _make_envelope(task="long task")
+    await store.record_pending(
+        run_id="worker-run-stale",
+        parent_run_id="parent",
+        script="subagents/x.py",
+        envelope=env,
+        scratch_dir=scratch,
+    )
+    assert await store.claim("worker-run-stale", "worker-a") is True
+    stale_row = await store.get_run("worker-run-stale")
+    assert stale_row is not None
+
+    await asyncio.sleep(0.02)
+    await store.reset_stale_claims(stale_after_ms=1)
+    assert await store.claim("worker-run-stale", "worker-b") is True
+
+    async def _fake_spawn(script: str, envelope, *, scratch_dir: Path, subprocess_exec=None):
+        yield TurnComplete(request_id="req-stale", usage=UsageTotals())
+
+    with patch.object(worker_pool, "spawn_subagent", side_effect=_fake_spawn):
+        await worker_pool.execute_claimed_run(
+            store,
+            stale_row,
+            script=tmp_path / "worker.py",
+            worker_id="worker-a",
+        )
+
+    row = await store.get_run("worker-run-stale")
+    assert row is not None
+    assert row.status == "running"
+    assert row.worker_id == "worker-b"
+    assert row.result_json is None

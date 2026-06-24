@@ -53,10 +53,14 @@ class SubagentEnvelope:
     memory_storage_uri: str
     parent_run_id: str
     model: str = "gemini-2.5-flash"
+    traceparent: str | None = None
 
     def to_json(self) -> str:
         """Serialize envelope to JSON text."""
-        return json.dumps(asdict(self), sort_keys=True)
+        data = asdict(self)
+        if data.get("traceparent") is None:
+            data.pop("traceparent", None)
+        return json.dumps(data, sort_keys=True)
 
     @classmethod
     def from_json(cls, raw: str) -> SubagentEnvelope:
@@ -88,12 +92,16 @@ class SubagentEnvelope:
         for key in ("task", "context", "parent_run_id"):
             if not isinstance(data[key], str):
                 raise ValueError(f"{key} must be a string")
+        traceparent = data.get("traceparent")
+        if traceparent is not None and not isinstance(traceparent, str):
+            raise ValueError("traceparent must be a string when present")
         return cls(
             task=data["task"],
             context=data["context"],
             memory_storage_uri=uri.strip(),
             parent_run_id=data["parent_run_id"],
             model=model,
+            traceparent=traceparent.strip() if isinstance(traceparent, str) and traceparent.strip() else None,
         )
 
 
@@ -248,12 +256,12 @@ class SQLiteRunStore:
         await self._conn.commit()
 
     async def pending_runs(self) -> list[SubagentRunRow]:
-        """Runs stuck in ``pending`` or ``running``."""
+        """Return ``pending`` runs oldest-first (worker pool claim candidates)."""
         columns = ", ".join(_SUBAGENT_COLUMNS)
         cursor = await self._conn.execute(
             f"""
             SELECT {columns} FROM subagent_runs
-            WHERE status IN ('pending','running')
+            WHERE status = 'pending'
             ORDER BY started_at ASC
             """
         )

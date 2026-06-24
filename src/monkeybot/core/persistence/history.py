@@ -104,7 +104,12 @@ class SQLiteHistoryStore:
             await self.append(thread_id, msg)
 
     async def list_threads(self, limit: int = 50) -> list[ChatThreadSummary]:
-        """Return recent threads ordered by last activity (newest first)."""
+        """Return recent threads ordered by last activity (newest first).
+
+        The correlated subquery on ``last_content`` is O(threads × messages) per call.
+        For production SQLite load, add a composite index on
+        ``conversation_history(thread_id, created_at DESC, id DESC)``.
+        """
         cap = max(1, min(limit, 200))
         cursor = await self._conn.execute(
             """

@@ -475,7 +475,7 @@ class PostgresRunStore:
             rows = await conn.fetch(
                 f"""
                 SELECT {columns} FROM subagent_runs
-                WHERE status IN ('pending','running')
+                WHERE status = 'pending'
                 ORDER BY started_at ASC
                 """
             )

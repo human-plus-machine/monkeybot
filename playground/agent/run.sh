@@ -256,11 +256,20 @@ _playground_db_url() {
     printf '%s' "${DB_URL}"
     return 0
   fi
-  grep -E '^\s*db_url:' monkeybot_config/monkeybot.yaml 2>/dev/null \
-    | head -1 \
-    | sed -E 's/^[[:space:]]*db_url:[[:space:]]*//' \
-    | tr -d "\"'" \
-    || true
+  awk '
+    /^[[:space:]]*#/ { next }
+    /^[[:space:]]*db_url:/ {
+      line = $0
+      sub(/^[[:space:]]*db_url:[[:space:]]*/, "", line)
+      sub(/[[:space:]]*#.*$/, "", line)
+      gsub(/["'\'']/, "", line)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+      if (line != "") {
+        print line
+        exit
+      }
+    }
+  ' monkeybot_config/monkeybot.yaml 2>/dev/null || true
 }
 
 _playground_uses_firestore() {
