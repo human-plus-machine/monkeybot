@@ -14,6 +14,9 @@ paths:
   memory_storage_uri: local://./workspace/data/memory
   skills_path: ./workspace/skills
   db_url: sqlite:///./workspace/data/monkeybot.db
+  # Firestore (opt-in): uncomment below and install monkeybot[firestore]. run.sh starts the
+  # emulator on :8686 when db_url uses firestore:// (see FIRESTORE_EMULATOR_HOST).
+  # db_url: firestore://monkeybot-playground/(default)?prefix=playground
   mcp_config: ./monkeybot_config/mcp.json
   command_allowlist_config: ./monkeybot_config/command_allowlist.yaml
 

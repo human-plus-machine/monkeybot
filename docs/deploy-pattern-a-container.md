@@ -13,7 +13,7 @@ Set these in your platform's secret/env management. Values shown are the default
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `GEMINI_API_KEY` | Yes (Gemini) | — | LLM provider key. Swap for `VERTEX_AI_PROJECT_ID` when using Vertex. |
-| `DB_URL` | No | `sqlite:////app/data/monkeybot.db` | Storage backend. Use `postgresql://user:pass@host:5432/db` for managed Postgres. |
+| `DB_URL` | No | `sqlite:////app/data/monkeybot.db` | Storage backend. Use `postgresql://user:pass@host:5432/db` for managed Postgres or `firestore://PROJECT/(default)` for Firestore (`pip install 'monkeybot[firestore]'`). |
 | `MEMORY_STORAGE_URI` | No | `local:///app/data/memory` | Workspace/memory backend. Use `gcs://bucket/prefix` or `s3://bucket/prefix` for cloud object storage. |
 | `SANDBOX_ENABLED` | No | `false` | Set `true` to enable the OpenSandbox code-execution environment. |
 | `SANDBOX_SERVER_URL` | If sandbox enabled | — | URL of the OpenSandbox server (e.g. `http://localhost:8080` for a sidecar, or a private IP for a VPC-separated service). |

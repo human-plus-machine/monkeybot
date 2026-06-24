@@ -32,7 +32,7 @@ async def durable_conn():
 
 
 @pytest.mark.asyncio
-async def test_pending_runs_includes_unfinished_running(durable_conn) -> None:
+async def test_pending_runs_excludes_running(durable_conn) -> None:
     store = SQLiteRunStore(durable_conn)
     envelope = SubagentEnvelope(
         task="t",
@@ -47,11 +47,7 @@ async def test_pending_runs_includes_unfinished_running(durable_conn) -> None:
         envelope=envelope,
         scratch_dir=Path("/tmp/run-1"),
     )
-    pending = await store.pending_runs()
-    assert len(pending) == 1
-    assert isinstance(pending[0], SubagentRunRow)
-    assert pending[0].status == "running"
-    assert pending[0].run_id == "run-1"
+    assert await store.pending_runs() == []
 
 
 @pytest.mark.asyncio

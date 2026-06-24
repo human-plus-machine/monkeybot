@@ -1,0 +1,20 @@
+# Pre-commit hooks for MonkeyBot
+# Install: uv run pre-commit install
+# Run manually: uv run pre-commit run --all-files
+
+repos:
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy (src/monkeybot)
+        entry: uv run mypy src/monkeybot
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: pytest
+        name: pytest (changed tests or collection check)
+        entry: bash scripts/precommit-pytest.sh
+        language: system
+        files: ^(src/monkeybot|tests)/.*\.py$
+        pass_filenames: true

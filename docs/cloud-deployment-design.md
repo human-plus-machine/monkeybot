@@ -148,6 +148,7 @@ Define a `StorageBackend` that owns connection lifecycle and exposes both stores
 Define a factory `create_storage_backend(db_url: str) → StorageBackend`:
 - `db_url` starts with `sqlite://` → `SQLiteStorageBackend` (uses `aiosqlite`, zero new deps)
 - `db_url` starts with `postgresql://` or `postgres://` → `PostgresStorageBackend` (uses `asyncpg`, gated behind `[postgres]` extra; the factory normalizes `postgres://` to `postgresql://` for asyncpg)
+- `db_url` starts with `firestore://PROJECT/DATABASE` → `FirestoreStorageBackend` (uses `google-cloud-firestore`, gated behind `[firestore]` extra; optional `?prefix=` for collection namespacing)
 
 The gateway's lifespan (`app.on_event("startup")`) calls `create_storage_backend(os.environ["DB_URL"])` once and stores it in `app.state`. The `GatewayLoopPort.start_turn()` retrieves it from `app.state` and passes `backend.history()` and `backend.usage()` into the harness. No connection is opened per-turn.
 
@@ -163,6 +164,31 @@ The gateway's lifespan (`app.on_event("startup")`) calls `create_storage_backend
 
 - Default (SQLite): zero new packages.
 - Postgres: `asyncpg` added only when user installs `[postgres]` extra.
+- Firestore: `google-cloud-firestore` added only when user installs `[firestore]` extra.
+
+### Firestore URL and indexes
+
+- **URL:** `DB_URL=firestore://PROJECT_ID/(default)` or `firestore://PROJECT_ID/production?prefix=monkeybot`
+- **No DDL:** Firestore is schemaless; collections appear on first write.
+- **Collections:** `conversation_history` (one doc per message), `{prefix}_threads` (one doc per thread, updated on append for `list_threads`), `turn_usage`, `subagent_runs`.
+- **Composite indexes** (declare in Firebase console or `firestore.indexes.json`):
+  - `conversation_history`: `thread_id` ASC, `created_at` DESC
+  - `subagent_runs`: `status` ASC, `started_at` ASC
+  - `subagent_runs` (stale-claim reaper): `status` ASC, `claimed_at` ASC
+  - `{prefix}_threads`: single-field index on `last_message_at` DESC (Firestore auto-indexes; declare explicitly if your project disables automatic indexing)
+
+### Multiple agents, one DB
+
+When several gateway or worker processes share one `DB_URL`, conversation isolation is by `thread_id`; subagent run isolation is by `run_id`.
+
+For **queued subagent work** (`MONKEYBOT_TASK_QUEUE=1`), workers poll `pending_runs()` and call `claim(run_id, worker_id)` — an atomic compare-and-set from `pending` → `running`. Only one worker wins per run; losers skip. Stale claims (`MONKEYBOT_WORKER_STALE_CLAIM_MS`, default 10 minutes) are reset to `pending` for retry.
+
+- **Direct launch** (default): parent spawns subagent inline; run is recorded as `running` immediately.
+- **Queue + worker pool:** `MONKEYBOT_TASK_QUEUE=1` enqueues runs; a worker pool consumes them. Two ways to run the consumer:
+  - **Production (recommended):** run one or more standalone worker processes — `python -m monkeybot.subagents.worker` — as their own deployment/replica set alongside the gateway. Each worker has its own event loop, so subagent execution never competes with the gateway's SSE event loop. Gateway and worker replicas scale independently and share state only via `DB_URL` + the atomic `claim()`.
+  - **Development only:** `MONKEYBOT_WORKER_POOL=1` co-locates a worker inside the gateway process (`start_worker_pool_background`) for single-process convenience. The worker's poll/claim/execute loop runs on the same asyncio event loop that serves SSE streams, with no backpressure between the two — under real load subagent work degrades SSE latency. Do not enable this in production; run standalone workers instead.
+- **SQLite:** fine for single-process dev; avoid multiple OS processes sharing one SQLite file (so SQLite is not suitable for standalone workers).
+- **Postgres / Firestore:** intended backends for multi-process worker pools.
 
 ### What this unlocks
 

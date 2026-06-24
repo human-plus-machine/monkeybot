@@ -19,6 +19,15 @@ SANDBOX_CONFIG_HOST="${SANDBOX_CONFIG_HOST:-$(pwd)/monkeybot_config/opensandbox.
 # Seconds to wait for OpenSandbox /health after docker start/run (server pulls images on first boot).
 SANDBOX_HEALTH_WAIT_SECS="${SANDBOX_HEALTH_WAIT_SECS:-5}"
 
+# Firestore emulator (only when db_url uses firestore://). Set SKIP_FIRESTORE_EMULATOR=1 to skip.
+FIRESTORE_CONTAINER="${FIRESTORE_CONTAINER:-monkeybot-playground-firestore}"
+FIRESTORE_EMULATOR_HOST_PORT="${FIRESTORE_EMULATOR_HOST_PORT:-8686}"
+FIRESTORE_PROJECT="${FIRESTORE_PROJECT:-monkeybot-playground}"
+# Official Google Cloud SDK emulators image (566.0.0-emulators, pinned by digest).
+FIRESTORE_EMULATOR_IMAGE="${FIRESTORE_EMULATOR_IMAGE:-gcr.io/google.com/cloudsdktool/google-cloud-cli@sha256:b19eb965d67981489383d544d12283b806040fb13e99cccfdbbdf4c818c2f2ab}"
+FIRESTORE_HEALTH_WAIT_SECS="${FIRESTORE_HEALTH_WAIT_SECS:-15}"
+_FIRESTORE_EMULATOR_PID=""
+
 _opensandbox_health_url() {
   echo "http://127.0.0.1:${SANDBOX_HOST_PORT}/health"
 }
@@ -242,8 +251,173 @@ ensure_observability_stack() {
   export OTEL_SERVICE_NAME="${OTEL_SERVICE_NAME:-monkeybot-gateway}"
 }
 
-# Stops OpenSandbox and observability when the gateway exits (including Ctrl+C ending uv run).
-trap '_run_sh_cleanup; _observability_cleanup' EXIT
+_playground_db_url() {
+  if [[ -n "${DB_URL:-}" ]]; then
+    printf '%s' "${DB_URL}"
+    return 0
+  fi
+  awk '
+    /^[[:space:]]*#/ { next }
+    /^[[:space:]]*db_url:/ {
+      line = $0
+      sub(/^[[:space:]]*db_url:[[:space:]]*/, "", line)
+      sub(/[[:space:]]*#.*$/, "", line)
+      gsub(/["'\'']/, "", line)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+      if (line != "") {
+        print line
+        exit
+      }
+    }
+  ' monkeybot_config/monkeybot.yaml 2>/dev/null || true
+}
+
+_playground_uses_firestore() {
+  local db_url
+  db_url="$(_playground_db_url)"
+  [[ "$db_url" == firestore://* ]]
+}
+
+_playground_uses_sqlite() {
+  local db_url
+  db_url="$(_playground_db_url)"
+  [[ "$db_url" == sqlite://* ]]
+}
+
+_firestore_emulator_health_ok() {
+  if [[ "${SKIP_FIRESTORE_EMULATOR:-}" == "1" ]]; then
+    return 0
+  fi
+  command -v curl >/dev/null 2>&1 || return 0
+  curl -4sS --connect-timeout 1 --max-time 3 \
+    "http://127.0.0.1:${FIRESTORE_EMULATOR_HOST_PORT}/" >/dev/null 2>&1
+}
+
+wait_firestore_emulator_ready() {
+  if [[ "${SKIP_FIRESTORE_EMULATOR:-}" == "1" ]]; then
+    return 0
+  fi
+  local max=$((FIRESTORE_HEALTH_WAIT_SECS * 2))
+  local i
+  for ((i = 1; i <= max; i++)); do
+    if _firestore_emulator_health_ok; then
+      echo "run.sh: Firestore emulator ready (127.0.0.1:${FIRESTORE_EMULATOR_HOST_PORT})"
+      return 0
+    fi
+    sleep 0.5
+  done
+  echo "run.sh: WARNING — Firestore emulator did not become ready within ${FIRESTORE_HEALTH_WAIT_SECS}s."
+  return 1
+}
+
+_start_firestore_emulator_gcloud() {
+  if ! command -v gcloud >/dev/null 2>&1; then
+    return 1
+  fi
+  echo "run.sh: starting Firestore emulator via gcloud (127.0.0.1:${FIRESTORE_EMULATOR_HOST_PORT})…"
+  gcloud emulators firestore start --host-port="127.0.0.1:${FIRESTORE_EMULATOR_HOST_PORT}" >/tmp/monkeybot-firestore-emulator.log 2>&1 &
+  _FIRESTORE_EMULATOR_PID=$!
+  wait_firestore_emulator_ready
+}
+
+_start_firestore_emulator_firebase() {
+  if ! command -v firebase >/dev/null 2>&1; then
+    return 1
+  fi
+  echo "run.sh: starting Firestore emulator via firebase (127.0.0.1:${FIRESTORE_EMULATOR_HOST_PORT})…"
+  firebase emulators:start --only firestore --project "${FIRESTORE_PROJECT}" >/tmp/monkeybot-firestore-emulator.log 2>&1 &
+  _FIRESTORE_EMULATOR_PID=$!
+  wait_firestore_emulator_ready
+}
+
+ensure_firestore_emulator() {
+  if [[ "${SKIP_FIRESTORE_EMULATOR:-}" == "1" ]]; then
+    return 0
+  fi
+  if ! _playground_uses_firestore; then
+    return 0
+  fi
+
+  export FIRESTORE_EMULATOR_HOST="127.0.0.1:${FIRESTORE_EMULATOR_HOST_PORT}"
+
+  if _firestore_emulator_health_ok; then
+    echo "run.sh: Firestore emulator already reachable at ${FIRESTORE_EMULATOR_HOST}"
+    return 0
+  fi
+
+  if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    if docker container inspect "${FIRESTORE_CONTAINER}" >/dev/null 2>&1; then
+      published=$(docker port "${FIRESTORE_CONTAINER}" 8080/tcp 2>/dev/null || true)
+      port_ok=0
+      [[ "$published" == *":${FIRESTORE_EMULATOR_HOST_PORT}"* ]] && port_ok=1
+      if [[ "$port_ok" -eq 0 ]]; then
+        echo "run.sh: replacing Firestore emulator container (need -p ${FIRESTORE_EMULATOR_HOST_PORT}:8080)"
+        docker rm -f "${FIRESTORE_CONTAINER}" >/dev/null
+      elif [[ "$(docker container inspect -f '{{.State.Running}}' "${FIRESTORE_CONTAINER}" 2>/dev/null)" != "true" ]]; then
+        echo "run.sh: starting Firestore emulator container ${FIRESTORE_CONTAINER}"
+        docker start "${FIRESTORE_CONTAINER}" >/dev/null
+      else
+        echo "run.sh: Firestore emulator container already running (${FIRESTORE_CONTAINER})"
+      fi
+    fi
+
+    if ! docker container inspect "${FIRESTORE_CONTAINER}" >/dev/null 2>&1; then
+      echo "run.sh: starting Firestore emulator (${FIRESTORE_EMULATOR_IMAGE}, host port ${FIRESTORE_EMULATOR_HOST_PORT})"
+      if ! docker run -d \
+        --name "${FIRESTORE_CONTAINER}" \
+        -p "${FIRESTORE_EMULATOR_HOST_PORT}:8080" \
+        "${FIRESTORE_EMULATOR_IMAGE}" \
+        sh -c 'gcloud beta emulators firestore start --host-port=0.0.0.0:8080' >/dev/null; then
+        echo "run.sh: docker run failed for Firestore emulator (port ${FIRESTORE_EMULATOR_HOST_PORT} may be in use)."
+      fi
+    fi
+
+    if wait_firestore_emulator_ready; then
+      return 0
+    fi
+    echo "run.sh: Firestore emulator container not ready; trying gcloud/firebase fallback"
+    docker rm -f "${FIRESTORE_CONTAINER}" >/dev/null 2>&1 || true
+  fi
+
+  if _start_firestore_emulator_gcloud; then
+    return 0
+  fi
+  if _start_firestore_emulator_firebase; then
+    return 0
+  fi
+
+  echo "run.sh: WARNING — could not start Firestore emulator."
+  echo "run.sh: Install Docker, gcloud (firestore emulator), or firebase-tools, or set SKIP_FIRESTORE_EMULATOR=1 and point DB_URL at cloud Firestore."
+  echo "run.sh: Logs (if any): /tmp/monkeybot-firestore-emulator.log"
+  return 0
+}
+
+_firestore_emulator_cleanup() {
+  if [[ "${PRESERVE_FIRESTORE_EMULATOR:-}" == "1" ]] || [[ "${SKIP_FIRESTORE_EMULATOR:-}" == "1" ]]; then
+    return 0
+  fi
+  if [[ -n "${_FIRESTORE_EMULATOR_PID}" ]]; then
+    if kill -0 "${_FIRESTORE_EMULATOR_PID}" 2>/dev/null; then
+      echo "run.sh: stopping Firestore emulator process ${_FIRESTORE_EMULATOR_PID}"
+      kill -TERM "${_FIRESTORE_EMULATOR_PID}" 2>/dev/null || true
+      wait "${_FIRESTORE_EMULATOR_PID}" 2>/dev/null || true
+    fi
+    _FIRESTORE_EMULATOR_PID=""
+    return 0
+  fi
+  command -v docker >/dev/null 2>&1 || return 0
+  docker info >/dev/null 2>&1 || return 0
+  if ! docker container inspect "${FIRESTORE_CONTAINER}" >/dev/null 2>&1; then
+    return 0
+  fi
+  if [[ "$(docker container inspect -f '{{.State.Running}}' "${FIRESTORE_CONTAINER}" 2>/dev/null)" == "true" ]]; then
+    echo "run.sh: stopping Firestore emulator container ${FIRESTORE_CONTAINER}"
+    docker stop -t 5 "${FIRESTORE_CONTAINER}" >/dev/null 2>&1 || true
+  fi
+}
+
+# Stops OpenSandbox, Firestore emulator, and observability when the gateway exits (including Ctrl+C ending uv run).
+trap '_run_sh_cleanup; _firestore_emulator_cleanup; _observability_cleanup' EXIT
 
 ensure_opensandbox() {
   if [[ "${SKIP_OPENSANDBOX:-}" == "1" ]]; then
@@ -311,12 +485,15 @@ ensure_opensandbox() {
 
 ensure_opensandbox
 ensure_observability_stack
+ensure_firestore_emulator
 
 # Wipe SQLite state on every launch so schema migrations / typed-block changes
-# never leave the playground stuck on a stale DB.
-rm -f \
-  ./workspace/data/monkeybot.db ./workspace/data/monkeybot.db-wal ./workspace/data/monkeybot.db-shm \
-  ./data/monkeybot.db ./data/monkeybot.db-wal ./data/monkeybot.db-shm
+# never leave the playground stuck on a stale DB (skipped when using Firestore).
+if _playground_uses_sqlite; then
+  rm -f \
+    ./workspace/data/monkeybot.db ./workspace/data/monkeybot.db-wal ./workspace/data/monkeybot.db-shm \
+    ./data/monkeybot.db ./data/monkeybot.db-wal ./data/monkeybot.db-shm
+fi
 
 echo "run.sh: starting MonkeyBot gateway…"
 exit_code=0

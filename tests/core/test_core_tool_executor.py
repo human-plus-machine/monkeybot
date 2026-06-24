@@ -800,3 +800,93 @@ class TestCoreToolExecutorRunCommandWithSandbox:
         payload = json.loads(err)
         assert payload.get("ok") is False or "error" in payload or "denied" in str(payload).lower()
         mock_cls.create.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_task_tool_queue_mode_requires_run_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MONKEYBOT_TASK_QUEUE", "1")
+    root = tmp_path
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    worker = root / "subagent_worker.py"
+    worker.write_text("# placeholder for existence check\n", encoding="utf-8")
+    monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+        run_store=None,
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="c-queue",
+                name="task",
+                args={"task": "do work", "context": "ctx"},
+            ),
+            ctx=_ctx(),
+        )
+    )
+    assert out is None and err is not None
+    assert "requires a configured storage backend" in err
+
+
+@pytest.mark.asyncio
+async def test_task_tool_queue_mode_enqueues_pending_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from monkeybot.core.persistence.durable_runs import SubagentEnvelope as StoredEnvelope
+    from monkeybot.core.persistence.sqlite_backend import SQLiteStorageBackend
+
+    monkeypatch.setenv("MONKEYBOT_TASK_QUEUE", "1")
+    root = tmp_path
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    worker = root / "subagent_worker.py"
+    worker.write_text("# placeholder for existence check\n", encoding="utf-8")
+    monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
+    monkeypatch.setattr(
+        "monkeybot.core.tools.core_tool_executor._inject_subagent_traceparent",
+        lambda: "00-" + "a" * 32 + "-" + "b" * 16 + "-01",
+    )
+
+    backend = SQLiteStorageBackend("sqlite:///:memory:")
+    await backend.open()
+    try:
+        ex = CoreToolExecutor(
+            workspace_root=root,
+            memory=_mem_sub(mem),
+            skills_path=skills,
+            mcp=_NoMCP(),
+            run_store=backend.runs(),
+        )
+        out, err = unwrap_tool_execution_result(
+            await ex.execute(
+                call=ToolCall(
+                    call_id="c-enq",
+                    name="task",
+                    args={"task": "queued task", "context": "ctx"},
+                ),
+                ctx=_ctx(),
+            )
+        )
+        assert err is None and out is not None
+        payload = json.loads(out)
+        assert payload["ok"] is True
+        assert payload["queued"] is True
+        row = await backend.runs().get_run(payload["run_id"])
+        assert row is not None
+        assert row.status == "pending"
+        stored = StoredEnvelope.from_json(row.envelope_json)
+        assert stored.traceparent == "00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+    finally:
+        await backend.close()

@@ -394,3 +394,45 @@ async def test_playground_workspace_file_requires_path(registry: SessionRegistry
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         r = await client.get("/api/playground/workspace/file", params={"path": "  "})
         assert r.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_playground_chat_history_list_and_detail(registry: SessionRegistry) -> None:
+    from monkeybot.core.llm.provider import Message
+    from monkeybot.core.persistence.sqlite_backend import SQLiteStorageBackend
+    from monkeybot.core.types.content_blocks import Text
+
+    backend = SQLiteStorageBackend("sqlite:///:memory:")
+    await backend.open()
+    try:
+        hist = backend.history()
+        await hist.append("sess-a", Message(role="user", content=[Text(text="hello history")]))
+        await hist.append("sess-a", Message(role="assistant", content=[Text(text="hi there")]))
+
+        app = create_app(loop_port=FakeLoopPort(registry), registry=registry)
+        app.state.storage = backend
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            r = await client.get("/api/playground/chat-history")
+            assert r.status_code == 200
+            threads = r.json()["threads"]
+            assert any(t["session_id"] == "sess-a" for t in threads)
+
+            rd = await client.get("/api/playground/chat-history/sess-a")
+            assert rd.status_code == 200
+            body = rd.json()
+            assert body["session_id"] == "sess-a"
+            assert body["messages"][0]["role"] == "user"
+            assert "hello history" in body["messages"][0]["text"]
+            assert body["messages"][1]["role"] == "assistant"
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_playground_chat_history_disabled_returns_404(registry: SessionRegistry, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MONKEYBOT_PLAYGROUND_CHAT_HISTORY", "0")
+    app = create_app(loop_port=FakeLoopPort(registry), registry=registry)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        r = await client.get("/api/playground/chat-history")
+        assert r.status_code == 404
+        assert r.json()["error"]["code"] == "NOT_FOUND"
