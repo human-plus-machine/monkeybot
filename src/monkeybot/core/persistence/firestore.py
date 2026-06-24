@@ -313,9 +313,9 @@ def _doc_to_run_row(doc_id: str, data: dict[str, object]) -> SubagentRunRow:
     parent = data.get("parent_run_id")
     result = data.get("result_json")
     error = data.get("error_json")
-    finished = data.get("finished_at")
+    finished: int | None = data.get("finished_at")  # type: ignore[assignment]
     worker = data.get("worker_id")
-    claimed = data.get("claimed_at")
+    claimed: int | None = data.get("claimed_at")  # type: ignore[assignment]
     return SubagentRunRow(
         run_id=doc_id,
         parent_run_id=str(parent) if parent is not None else None,
