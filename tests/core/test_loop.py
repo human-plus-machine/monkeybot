@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import logging
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from typing import Any
@@ -706,6 +707,54 @@ async def test_run_provider_raises_wrapped_as_error() -> None:
     assert isinstance(events[2], Error)
     assert "boom" in events[2].error
     assert isinstance(events[3], TurnComplete)
+
+
+@pytest.mark.asyncio
+async def test_run_provider_raises_logs_exception(caplog: pytest.LogCaptureFixture) -> None:
+    class BoomProvider:
+        @property
+        def name(self) -> str:
+            return "boom"
+
+        @property
+        def supports_streaming(self) -> bool:
+            return True
+
+        async def stream(
+            self,
+            messages: Sequence[Message],
+            tools: Sequence[ToolDef],
+            *,
+            model: str,
+        ) -> AsyncIterator[ProviderEvent]:
+            del messages, tools, model
+            raise RuntimeError("boom")
+            yield  # pragma: no cover
+
+        async def count_input_tokens(
+            self,
+            messages: Sequence[Message],
+            tools: Sequence[ToolDef],
+            *,
+            model: str,
+        ) -> int:
+            del messages, tools, model
+            return 0
+
+    hist = FakeHistory()
+    ctx = _ctx()
+    with caplog.at_level(logging.ERROR):
+        async for _ in run(
+            "u",
+            ctx,
+            provider=BoomProvider(),
+            history=hist,
+            inspectors=[],
+            tool_executor=RecordingExecutor(),
+            max_turns=2,
+        ):
+            pass
+    assert any("provider stream failed" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio

@@ -12,3 +12,13 @@ def normalize_log_level(raw: str | None, *, default: str = "INFO") -> int:
     if isinstance(level, int):
         return level
     raise ValueError(f"invalid log level: {raw!r}")
+
+
+def kv(**fields: object) -> str:
+    """Format ``key=value`` pairs for structured log messages; skip ``None`` values."""
+    parts: list[str] = []
+    for key, value in fields.items():
+        if value is None:
+            continue
+        parts.append(f"{key}={value}")
+    return " ".join(parts)

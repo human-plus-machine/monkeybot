@@ -76,6 +76,7 @@ def _detach_trace(token: object | None) -> None:
 
         otel_context.detach(cast(Any, token))
     except Exception:
+        logger.debug("trace detach failed", exc_info=True)
         return
 
 
@@ -102,6 +103,7 @@ def _clear_span_exporter_buffer() -> None:
             if exporter is not None and hasattr(exporter, "clear"):
                 exporter.clear()
     except Exception:
+        logger.debug("span exporter buffer clear failed", exc_info=True)
         return
 
 
@@ -296,6 +298,7 @@ async def _async_main() -> None:
                 WebSearchTool(_ws_backend) if _ws_backend is not None else None
             )
         except Exception:
+            logger.debug("web search backend init failed", exc_info=True)
             _ws_tool = None
 
         extra_tools = [_ws_tool] if _ws_tool is not None else []
