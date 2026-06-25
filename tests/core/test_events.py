@@ -167,6 +167,11 @@ def test_tool_call_started_args_default_empty_object() -> None:
 
 
 def test_sse_image_block_roundtrip() -> None:
+    ev = ImageBlock(request_id="r", image_id="c1:0", mime_type="image/png", data="abc")
+    assert event_from_json(event_to_json(ev)) == ev
+
+
+def test_sse_image_block_roundtrip_without_image_id() -> None:
     ev = ImageBlock(request_id="r", mime_type="image/png", data="abc")
     assert event_from_json(event_to_json(ev)) == ev
 

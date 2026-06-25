@@ -36,7 +36,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from monkeybot.core.tools.terminal import ALLOWED_PATHS, ALLOWED_COMMANDS, ExecutionResult, SecurityError
+from monkeybot.core.tools.terminal import ALLOWED_PATHS, ALLOWED_COMMANDS, ExecutionResult, SecurityError, build_skill_runtime_env
 
 logger = logging.getLogger(__name__)
 
@@ -158,18 +158,39 @@ class SandboxExecutor:
         # Derive a DNS-safe volume name from the workspace path (max 63 chars).
         vol_name = re.sub(r"[^a-z0-9-]", "-", workspace_str.lower()).strip("-")[:63]
 
+        runtime_env = build_skill_runtime_env(cwd=self._workspace_root)
+        volumes = [
+            Volume(
+                name=vol_name or "workspace",
+                host=Host(path=workspace_str),
+                mountPath=workspace_str,
+                readOnly=False,
+            )
+        ]
+        mounted_paths = {workspace_str}
+        for cred_env in ("GOOGLE_APPLICATION_CREDENTIALS", "GCP_AUTH_FILE"):
+            cred_path = runtime_env.get(cred_env, "").strip()
+            if not cred_path or cred_path in mounted_paths:
+                continue
+            if not Path(cred_path).is_file():
+                continue
+            cred_vol_name = re.sub(r"[^a-z0-9-]", "-", cred_path.lower()).strip("-")[:63]
+            volumes.append(
+                Volume(
+                    name=cred_vol_name or "gcp-creds",
+                    host=Host(path=cred_path),
+                    mountPath=cred_path,
+                    readOnly=True,
+                )
+            )
+            mounted_paths.add(cred_path)
+
         self._sandbox = await Sandbox.create(
             self._config.image,
             connection_config=connection_config,
             timeout=timedelta(seconds=self._config.ttl_seconds),
-            volumes=[
-                Volume(
-                    name=vol_name or "workspace",
-                    host=Host(path=workspace_str),
-                    mountPath=workspace_str,
-                    readOnly=False,
-                )
-            ],
+            env=runtime_env,
+            volumes=volumes,
         )
         logger.info("Sandbox created: id=%s", getattr(self._sandbox, "id", "unknown"))
 
@@ -179,6 +200,7 @@ class SandboxExecutor:
         args: list[str],
         *,
         timeout: int = 60,
+        cwd: Path | str | None = None,
     ) -> ExecutionResult:
         """Execute a command inside the sandbox container.
 
@@ -196,9 +218,13 @@ class SandboxExecutor:
 
         from opensandbox.models.execd import RunCommandOpts
 
+        workdir = str(Path(cwd).resolve()) if cwd is not None else str(self._workspace_root)
         execution = await self._sandbox.commands.run(
             full_cmd,
-            opts=RunCommandOpts(timeout=timedelta(seconds=timeout)),
+            opts=RunCommandOpts(
+                timeout=timedelta(seconds=timeout),
+                working_directory=workdir,
+            ),
         )
 
         stdout_entries = execution.logs.stdout or []

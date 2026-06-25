@@ -13,6 +13,19 @@ from monkeybot.core.context import TurnContext
 from monkeybot.core.types.interfaces import MonkeybotError
 from monkeybot.core.tools.terminal import ALLOWED_COMMANDS, ALLOWED_PATHS
 
+# Default deny-regex lines when YAML omits ``deny_patterns``. Blocks package installs
+# via common verbs (pip, uv, npm, apt, brew, etc.) while leaving script execution allowed.
+DEFAULT_DENY_PATTERNS: tuple[str, ...] = (
+    r"pip3?\s+install",
+    r"python3?\s+-m\s+pip\s+install",
+    r"(^|\s)uv\s+(add|remove|sync|pip\s+install|pip\s+sync)",
+    r"(^|\s)poetry\s+(add|install)",
+    r"(^|\s)conda\s+install",
+    r"(^|\s)(npm|pnpm|yarn)\s+(install|add|i)(\s|$)",
+    r"(^|\s)(apt|apt-get)\s+install",
+    r"(^|\s)brew\s+install",
+)
+
 
 class CommandTierConfigError(MonkeybotError):
     """Invalid or unloadable run_command policy file."""
@@ -131,7 +144,7 @@ def load_command_tier_policy(path: Path) -> CommandTierPolicy:
 
     deny_raw = data.get("deny_patterns")
     if deny_raw is None:
-        deny_patterns: tuple[str, ...] = ()
+        deny_patterns = DEFAULT_DENY_PATTERNS
     elif isinstance(deny_raw, list):
         for i, item in enumerate(deny_raw):
             if not isinstance(item, str) or not item.strip():

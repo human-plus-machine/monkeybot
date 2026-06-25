@@ -8,6 +8,7 @@ dependencies = [
     "anthropic[vertex]>=0.40.0",
     "duckduckgo-search>=8.1.1",
     "ddgs>=9.14.4",
+    "google-genai>=1.0.0",
 ]
 
 [tool.uv.sources]

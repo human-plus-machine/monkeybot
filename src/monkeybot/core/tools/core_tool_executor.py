@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -15,7 +16,7 @@ from typing import Any
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.attachments.config import IMAGE_MIME_TYPES
-from monkeybot.core.attachments.store import AttachmentStore
+from monkeybot.core.attachments.store import AttachmentStore, _sniff_mime
 from monkeybot.core.context import CustomTool, TurnContext
 from monkeybot.core.llm.provider import ToolCall
 from monkeybot.core.logging_utils import kv
@@ -56,7 +57,7 @@ from monkeybot.core.tools.workspace_service import (
     WorkspaceFileService,
     WorkspaceSettings,
 )
-from monkeybot.core.types.content_blocks import File, Image
+from monkeybot.core.types.content_blocks import ContentBlock, File, Image, Text
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,7 @@ _SPILL_DIR = ".monkeybot/spill"
 _CORE_TOOL_NAMES = frozenset(
     {
         "read_attachment",
+        "render_image",
         "read_file",
         "write_file",
         "search_memory",
@@ -397,6 +399,8 @@ class CoreToolExecutor(ToolExecutorPort):
         try:
             if name == "read_attachment":
                 return self._tool_read_attachment(args, ctx)
+            if name == "render_image":
+                return self._tool_render_image(args, ctx)
             if name == "read_file":
                 result_text, err_text = self._tool_read_file(args)
             elif name == "write_file":
@@ -415,7 +419,10 @@ class CoreToolExecutor(ToolExecutorPort):
                 result_text, err_text = await self._tool_remove_mcp_server(args)
             elif name in self._extra_tools:
                 try:
-                    result_text = await self._extra_tools[name].execute(args)
+                    raw = await self._extra_tools[name].execute(args)
+                    if isinstance(raw, ToolExecutionResult):
+                        return raw
+                    result_text = raw
                     err_text = None
                 except Exception as exc:
                     logger.warning(
@@ -515,6 +522,56 @@ class CoreToolExecutor(ToolExecutorPort):
         return ToolExecutionResult.ok_blocks(
             [File(mime_type=mime, data=data_b64, metadata=meta)]
         )
+
+    def _tool_render_image(self, args: dict[str, Any], ctx: TurnContext) -> ToolExecutionResult:
+        path = _str_arg(args, "path", "file_path", "file")
+        if not path:
+            return ToolExecutionResult.err("render_image requires path")
+        caption = _str_arg(args, "caption", "text") or ""
+        try:
+            fp = self._workspace._resolve_under_root(path, label="path")
+        except WorkspaceError as exc:
+            return ToolExecutionResult.err(_workspace_error_envelope(exc))
+        if not fp.is_file():
+            return ToolExecutionResult.err(f"Not a file: {path}")
+        try:
+            raw = fp.read_bytes()
+        except OSError as exc:
+            return ToolExecutionResult.err(f"Failed to read image at {path}: {exc}")
+        mime = _sniff_mime(raw[:512])
+        if mime is None:
+            ext_map = {
+                ".png": "image/png",
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".gif": "image/gif",
+                ".webp": "image/webp",
+            }
+            mime = ext_map.get(fp.suffix.lower())
+        if mime is None or mime not in IMAGE_MIME_TYPES:
+            return ToolExecutionResult.err(
+                f"render_image requires an image file (png/jpeg/gif/webp); got {mime or 'unknown'}"
+            )
+        data_b64 = base64.b64encode(raw).decode("ascii")
+        filename = fp.name
+        meta: dict[str, object] = {"filename": filename, "path": path}
+        if self._attachment_store is not None:
+            try:
+                stored = self._attachment_store.save(
+                    ctx.thread_id,
+                    data=raw,
+                    mime_type=mime,
+                    filename=filename,
+                )
+                meta["attachment_id"] = stored.attachment_id
+            except Exception as exc:
+                logger.warning("render_image attachment save failed: %s", exc)
+        blocks: list[ContentBlock] = [
+            Image(mime_type=mime, data=data_b64, metadata=meta),
+        ]
+        if caption.strip():
+            blocks.append(Text(text=caption.strip()))
+        return ToolExecutionResult.ok_blocks(blocks)
 
     def _tool_read_file(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
         path = _str_arg(args, "path", "file_path", "file")
@@ -866,7 +923,12 @@ class CoreToolExecutor(ToolExecutorPort):
             return None, _run_command_parse_envelope(exc)
         timeout = _coerce_int(args.get("timeout"), 60) or 60
         try:
-            result = await self._terminal.execute(cmd, argv, timeout=timeout)
+            result = await self._terminal.execute(
+                cmd,
+                argv,
+                timeout=timeout,
+                cwd=self._workspace.repo_root,
+            )
         except SecurityError as exc:
             return None, self._run_command_security_envelope(exc)
         except TimeoutError as exc:

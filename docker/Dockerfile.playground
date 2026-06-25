@@ -23,7 +23,7 @@ RUN pip install --no-cache-dir ".[$EXTRAS]" && rm -rf /tmp/monkeybot_pkg
 WORKDIR /
 RUN mkdir -p /app/workspace/data/memory
 COPY playground/agent/monkeybot_config /app/.harness/monkeybot_config
-COPY playground/agent/skills /app/workspace/skills
+COPY playground/agent/workspace/skills /app/workspace/skills
 
 WORKDIR /app/workspace
 

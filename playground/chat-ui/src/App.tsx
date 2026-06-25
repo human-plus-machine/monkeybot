@@ -7,6 +7,7 @@ import { MAX_RESULT_CHARS } from './blocks/ToolInvocationCard'
 import AgentChat, { type ChatStatus } from './components/AgentChat'
 import type { ChatFeedItem, PendingComposerAttachment } from './chatTypes'
 import { buildFeedSlots, feedToAgentMessages, historyMessagesToFeed } from './feedAdapter'
+import { finalizeStreamingAssistant, flushStreamingAssistant, upsertStreamingAssistant } from './streamFeed'
 import {
   consumeSseJson,
   createSession,
@@ -106,14 +107,6 @@ function formatUsd(n: number): string {
 }
 
 const DEFAULT_CONTEXT_WINDOW = 200_000
-
-// Playground dev defaults — provider API model ids (some preview). Each option needs
-// matching credentials in playground/agent/.env (OPENAI_API_KEY, GCP ADC, etc.).
-const MODEL_OPTIONS = [
-  { label: 'OpenAI', provider: 'openai', model: 'gpt-5' },
-  { label: 'Vertex Gemini', provider: 'gemini', model: 'gemini-3-flash-preview' },
-  { label: 'Anthropic (Vertex)', provider: 'vertex-claude', model: 'claude-haiku-4-5' },
-] as const
 
 function IconPlus() {
   return (
@@ -220,14 +213,12 @@ export default function App() {
     'disconnected',
   )
   const [statusNote, setStatusNote] = useState('')
-  const [modelIdx, setModelIdx] = useState(0)
   const [feed, setFeed] = useState<ChatFeedItem[]>([])
   const [pendingWidgets, setPendingWidgets] = useState<PendingWidget[]>([])
   const [toasts, setToasts] = useState<ToastItem[]>([])
   const [pendingAttachments, setPendingAttachments] = useState<PendingComposerAttachment[]>([])
   const [attachBusy, setAttachBusy] = useState(false)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
-  const [streamingText, setStreamingText] = useState('')
   const [activeRequestId, setActiveRequestId] = useState<string | null>(null)
   const [toolHint, setToolHint] = useState<string | null>(null)
 
@@ -282,7 +273,7 @@ export default function App() {
     const el = messagesScrollRef.current
     if (!el || !stickToBottomRef.current) return
     el.scrollTop = el.scrollHeight
-  }, [feed, streamingText, toolHint])
+  }, [feed, toolHint])
 
   useEffect(() => {
     const el = messagesScrollRef.current
@@ -321,9 +312,9 @@ export default function App() {
       switch (evt.type) {
         case 'AssistantDelta': {
           const d = typeof evt.delta === 'string' ? evt.delta : ''
-          if (!rid) break
+          if (!rid || !d) break
           streamBufRef.current += d
-          setStreamingText(streamBufRef.current)
+          setFeed((f) => upsertStreamingAssistant(f, rid, streamBufRef.current))
           break
         }
         case 'ToolCallStarted': {
@@ -332,8 +323,10 @@ export default function App() {
           const label = labelRaw.trim() ? labelRaw : undefined
           const args = evt.args && typeof evt.args === 'object' ? (evt.args as Record<string, unknown>) : undefined
           setToolHint(null)
+          const pendingProse = streamBufRef.current
+          streamBufRef.current = ''
           setFeed((m) => [
-            ...m,
+            ...flushStreamingAssistant(m, rid, pendingProse),
             {
               id: `ti-${rid}-${tool}-${Date.now()}`,
               kind: 'toolInvocation',
@@ -401,13 +394,10 @@ export default function App() {
           setToolHint(null)
           setActiveRequestId(null)
           void refreshSessionUsage()
-          {
-            const text = streamBufRef.current
-            streamBufRef.current = ''
-            setStreamingText('')
-            if (text.trim()) {
-              setFeed((m) => [...m, { id: `a-${rid || newRequestId()}`, kind: 'assistantText', text }])
-            }
+          const pendingProse = streamBufRef.current
+          streamBufRef.current = ''
+          if (rid) {
+            setFeed((m) => flushStreamingAssistant(m, rid, pendingProse))
           }
           break
         }
@@ -415,9 +405,12 @@ export default function App() {
           const err = typeof evt.error === 'string' ? evt.error : 'Unknown error'
           setToolHint(null)
           setActiveRequestId(null)
+          const pendingProse = streamBufRef.current
           streamBufRef.current = ''
-          setStreamingText('')
-          setFeed((m) => [...m, { id: `e-${newRequestId()}`, kind: 'systemNotice', text: err }])
+          setFeed((m) => {
+            const base = rid ? flushStreamingAssistant(m, rid, pendingProse) : m
+            return [...base, { id: `e-${newRequestId()}`, kind: 'systemNotice', text: err }]
+          })
           void refreshSessionUsage()
           break
         }
@@ -458,12 +451,18 @@ export default function App() {
           const mime = typeof evt.mime_type === 'string' ? evt.mime_type : 'application/octet-stream'
           const b64 = typeof evt.data === 'string' ? evt.data : ''
           if (!b64) break
+          const rid = typeof evt.request_id === 'string' ? evt.request_id : ''
+          const imageId =
+            typeof (evt as { image_id?: string }).image_id === 'string' &&
+            (evt as { image_id?: string }).image_id
+              ? (evt as { image_id: string }).image_id
+              : rid || newRequestId()
           setFeed((f) => [
             ...f,
             {
               kind: 'image',
-              id: `img-${typeof evt.request_id === 'string' ? evt.request_id : newRequestId()}`,
-              request_id: typeof evt.request_id === 'string' ? evt.request_id : undefined,
+              id: `img-${imageId}`,
+              request_id: rid || undefined,
               mime_type: mime,
               data: b64,
             },
@@ -674,11 +673,7 @@ export default function App() {
       setStatus('connecting')
       setStatusNote('')
       try {
-        const opt = MODEL_OPTIONS[modelIdx]
-        const { session_id } = await createSession(undefined, {
-          model_provider: opt.provider,
-          model_name: opt.model,
-        })
+        const { session_id } = await createSession(undefined)
         setSessionId(session_id)
         setStatus('connected')
         return session_id
@@ -687,7 +682,7 @@ export default function App() {
         const msg = e instanceof Error ? e.message : String(e)
         if (msg.includes('MODEL_UNAVAILABLE')) {
           setStatus('disconnected')
-          setStatusNote('Selected model unavailable — check credentials or pick another.')
+          setStatusNote('Configured model unavailable — check monkeybot.yaml and credentials.')
         } else {
           setStatus('error')
           setStatusNote(msg)
@@ -702,7 +697,7 @@ export default function App() {
     } finally {
       ensureSessionPromiseRef.current = null
     }
-  }, [modelIdx])
+  }, [])
 
   const startNewChat = useCallback(() => {
     if (activeRequestId !== null) return
@@ -717,7 +712,6 @@ export default function App() {
     setPendingWidgets([])
     setToasts([])
     streamBufRef.current = ''
-    setStreamingText('')
     setActiveRequestId(null)
     setToolHint(null)
     setSessionUsage(null)
@@ -754,7 +748,6 @@ export default function App() {
       setPendingWidgets([])
       setToasts([])
       streamBufRef.current = ''
-      setStreamingText('')
       setActiveRequestId(null)
       setSessionUsage(null)
       setUsageNote('')
@@ -763,13 +756,8 @@ export default function App() {
       setRightTab('prompt')
       setHistoryOpen(false)
       try {
-        const opt = MODEL_OPTIONS[modelIdx]
         try {
-          await createSession(undefined, {
-            session_id: threadId,
-            model_provider: opt.provider,
-            model_name: opt.model,
-          })
+          await createSession(undefined, { session_id: threadId })
         } catch (e) {
           if (!(e instanceof SessionAlreadyExistsError)) {
             throw e
@@ -786,7 +774,7 @@ export default function App() {
         setStatusNote(e instanceof Error ? e.message : String(e))
       }
     },
-    [activeRequestId, modelIdx, refreshSessionUsage],
+    [activeRequestId, refreshSessionUsage],
   )
 
   useEffect(() => {
@@ -854,7 +842,6 @@ export default function App() {
     attachments.forEach(revokeAttachmentPreview)
     setPendingAttachments([])
     streamBufRef.current = ''
-    setStreamingText('')
     setActiveRequestId(rid)
     setToolHint(null)
     setFeed((m) => [
@@ -879,7 +866,6 @@ export default function App() {
     } catch (e) {
       setActiveRequestId(null)
       streamBufRef.current = ''
-      setStreamingText('')
       setFeed((m) => [
         ...m,
         {
@@ -911,6 +897,10 @@ export default function App() {
   }
 
   const busy = activeRequestId !== null
+  const hasStreamingProse = useMemo(
+    () => feed.some((x) => x.kind === 'assistantText' && x.phase === 'streaming'),
+    [feed],
+  )
 
   const agentMessages = useMemo(() => feedToAgentMessages(feed), [feed])
   const feedSlots = useMemo(() => buildFeedSlots(feed), [feed])
@@ -920,7 +910,7 @@ export default function App() {
       ? 'submitted'
       : sessionId && status === 'connected'
         ? busy
-          ? streamingText || toolHint
+          ? hasStreamingProse || toolHint
             ? 'streaming'
             : 'submitted'
           : 'ready'
@@ -959,15 +949,11 @@ export default function App() {
     })
   }, [])
 
-  const messageListFooter =
-    streamingText || toolHint ? (
-      <div className="flex justify-start" aria-busy={busy}>
-        <div className="max-w-[90%] text-sm leading-relaxed text-neutral-700 dark:text-neutral-300 whitespace-pre-wrap break-words">
-          {toolHint ? <div className="mb-1 text-xs italic text-neutral-500">{toolHint}</div> : null}
-          {streamingText}
-        </div>
-      </div>
-    ) : null
+  const messageListFooter = toolHint ? (
+    <div className="flex justify-start" aria-busy={busy}>
+      <div className="max-w-[90%] text-xs italic text-neutral-500">{toolHint}</div>
+    </div>
+  ) : null
 
   const dismissToast = useCallback((id: string) => {
     setToasts((t) => t.filter((x) => x.id !== id))
@@ -1109,24 +1095,6 @@ export default function App() {
                 ) : null}
               </div>
               <div className="chat-controls-trailing row">
-                <div className="chat-model-select-wrap">
-                  <select
-                    className="btn chat-model-select"
-                    aria-label="Model"
-                    value={modelIdx}
-                    onChange={(e) => setModelIdx(Number(e.target.value))}
-                    disabled={status === 'connecting' || busy || Boolean(sessionId)}
-                  >
-                    {MODEL_OPTIONS.map((opt, idx) => (
-                      <option key={opt.label} value={idx}>
-                        {opt.label}
-                      </option>
-                    ))}
-                  </select>
-                  <span className="chat-model-select-mirror" aria-hidden>
-                    {MODEL_OPTIONS[modelIdx].label}
-                  </span>
-                </div>
                 <div ref={historyAnchorRef} className="chat-history-anchor">
                   <button
                     type="button"

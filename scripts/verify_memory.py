@@ -8,7 +8,7 @@ Checks three things:
      suspiciously short (< 20 chars), which often indicates a truncation bug.
 
 Usage:
-    uv run scripts/verify_memory.py playground/agent/data/memory
+    uv run scripts/verify_memory.py playground/agent/workspace/data/memory
     uv run scripts/verify_memory.py /path/to/any/memory/dir
 """
 

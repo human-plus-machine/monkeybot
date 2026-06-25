@@ -21,10 +21,6 @@ typed-message-content release. Choose one:
     rm -f playground/agent/workspace/data/monkeybot.db
     rm -f playground/agent/workspace/data/monkeybot.db-shm
     rm -f playground/agent/workspace/data/monkeybot.db-wal
-    # (legacy path, if still present)
-    rm -f playground/agent/data/monkeybot.db
-    rm -f playground/agent/data/monkeybot.db-shm
-    rm -f playground/agent/data/monkeybot.db-wal
 
   Other deployments: there is no automated migration. The legacy format is
   a JSON tail inside a TEXT column; transcribing it to typed blocks must

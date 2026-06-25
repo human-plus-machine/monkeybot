@@ -20,8 +20,11 @@ Example:
 
 import asyncio
 import logging
+import os
+import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List
 
 logger = logging.getLogger(__name__)
@@ -35,7 +38,6 @@ ALLOWED_COMMANDS = [
     "echo",     # Print text (used in tests and debugging)
     "python",   # Execute Python scripts (skills)
     "python3",  # Execute Python scripts (skills)
-    "uv",       # Python package manager (for future use)
     "git",      # Version control (clone, branch, commit, push, etc.)
     "gh",       # GitHub CLI (e.g. gh pr create)
     "bash",     # Shell interpreter — use for builtins (cd, &&, pipes) via bash -c "..."
@@ -52,6 +54,38 @@ ALLOWED_PATHS = [
     "./code/",           # Reference / cloned repos (explicit ./ paths in argv)
     "./code",            # Same, when callers omit trailing slash
 ]
+
+
+_VERTEX_SKILL_ENV_KEYS = (
+    "VERTEX_AI_PROJECT_ID",
+    "GOOGLE_CLOUD_PROJECT",
+    "GCP_PROJECT_ID",
+    "VERTEX_AI_LOCATION",
+    "GOOGLE_CLOUD_REGION",
+)
+
+
+def build_skill_runtime_env(*, cwd: Path | str) -> dict[str, str]:
+    """Environment for skill scripts (inherits host env + workspace/GCP overrides)."""
+    exec_cwd = str(Path(cwd).resolve())
+    env = os.environ.copy()
+    env["MONKEYBOT_WORKSPACE_ROOT"] = exec_cwd
+    env["WORKSPACE_ROOT"] = exec_cwd
+    for key in _VERTEX_SKILL_ENV_KEYS:
+        val = os.environ.get(key, "").strip()
+        if val:
+            env[key] = val
+    for cred_env in ("GOOGLE_APPLICATION_CREDENTIALS", "GCP_AUTH_FILE"):
+        raw = os.environ.get(cred_env, "").strip()
+        if not raw:
+            continue
+        cred_path = Path(raw).expanduser()
+        if not cred_path.is_absolute():
+            cred_path = (Path.cwd() / cred_path).resolve()
+        else:
+            cred_path = cred_path.resolve()
+        env[cred_env] = str(cred_path)
+    return env
 
 
 @dataclass
@@ -141,7 +175,9 @@ class TerminalExecutor:
         self,
         command: str,
         args: List[str],
-        timeout: int = 60
+        timeout: int = 60,
+        *,
+        cwd: Path | str | None = None,
     ) -> ExecutionResult:
         """
         Execute a terminal command securely with allowlist validation.
@@ -190,13 +226,23 @@ class TerminalExecutor:
             }
         )
         
+        exec_cwd: str | None = None
+        env: dict[str, str] | None = None
+        if cwd is not None:
+            exec_cwd = str(Path(cwd).resolve())
+            env = build_skill_runtime_env(cwd=exec_cwd)
+
+        executable = sys.executable if command in ("python3", "python") else command
+
         try:
             # Create subprocess with captured output
             process = await asyncio.create_subprocess_exec(
-                command,
+                executable,
                 *args,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                cwd=exec_cwd,
+                env=env,
             )
             
             # Wait for completion with timeout
