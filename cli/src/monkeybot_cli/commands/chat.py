@@ -89,23 +89,50 @@ class _ThinkingSpinner(_SpinnerLine):
         await self.clear()
 
 
+def _truncate_hint(text: str, *, max_len: int = 60) -> str:
+    collapsed = " ".join(text.split())
+    if not collapsed:
+        return ""
+    return collapsed if len(collapsed) <= max_len else f"{collapsed[: max_len - 1]}…"
+
+
 def _tool_hint(args: dict[str, object]) -> str:
     """Short summary of tool args (mirrors playground ToolInvocationCard)."""
-    for key in ("command", "path", "query", "url"):
+    argv = args.get("argv")
+    if isinstance(argv, list) and argv:
+        return _truncate_hint(" ".join(str(x) for x in argv))
+
+    cmd = args.get("command")
+    if isinstance(cmd, str) and cmd.strip():
+        extra = args.get("args")
+        if extra is None:
+            extra = args.get("arguments")
+        if isinstance(extra, list) and extra:
+            line = " ".join([cmd.strip(), *[str(x) for x in extra]])
+        else:
+            line = cmd.strip()
+        return _truncate_hint(line)
+
+    for key in ("shell", "script", "path", "query", "url"):
         val = args.get(key)
         if isinstance(val, str) and val.strip():
-            text = " ".join(val.strip().split())
-            return text if len(text) <= 60 else f"{text[:59]}…"
+            return _truncate_hint(val.strip())
     keys = list(args.keys())
     if len(keys) == 1:
         key = keys[0]
         val = args[key]
         if isinstance(val, (str, int, bool, float)):
-            text = f"{key}: {val}"
-            return text if len(text) <= 60 else f"{text[:59]}…"
+            return _truncate_hint(f"{key}: {val}")
     if keys:
         return f"{len(keys)} arg{'s' if len(keys) != 1 else ''}"
     return ""
+
+
+def _tool_display(tool: str, label: str, args: dict[str, object]) -> str:
+    hint = _tool_hint(args)
+    if not hint and label.strip() and label.strip() != tool:
+        hint = label.strip()[:60]
+    return tool + (f" — {hint}" if hint else "")
 
 
 class _TurnActivity:
@@ -113,6 +140,7 @@ class _TurnActivity:
 
     def __init__(self) -> None:
         self._line: _SpinnerLine | None = None
+        self._active_display: str = ""
 
     async def _start(self, prefix: str) -> None:
         if self._line is not None:
@@ -121,11 +149,8 @@ class _TurnActivity:
         self._line.start()
 
     async def tool_started(self, tool: str, label: str, args: dict[str, object]) -> None:
-        hint = _tool_hint(args)
-        if not hint and label.strip() and label.strip() != tool:
-            hint = label.strip()[:60]
-        text = tool + (f" — {hint}" if hint else "")
-        await self._start(text)
+        self._active_display = _tool_display(tool, label, args)
+        await self._start(self._active_display)
 
     async def tool_finished(
         self,
@@ -135,11 +160,13 @@ class _TurnActivity:
         verbose: bool = False,
         result: str = "",
     ) -> None:
+        display = self._active_display or tool
         if error:
             err = " ".join(error.split())[:80]
-            line = f"{_DIM}  {_RED}✗{_RESET}{_DIM} {tool} — {err}{_RESET}"
+            line = f"{_DIM}  {_RED}✗{_RESET}{_DIM} {display} — {err}{_RESET}"
         else:
-            line = f"{_DIM}  {_GREEN}✓{_RESET}{_DIM} {tool}{_RESET}"
+            line = f"{_DIM}  {_GREEN}✓{_RESET}{_DIM} {display}{_RESET}"
+        self._active_display = ""
         if self._line is not None:
             await self._line.finish(line)
             self._line = None
