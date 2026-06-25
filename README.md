@@ -69,6 +69,16 @@ monkeybot chat --attach  # terminal 2: connect to the running gateway
 
 Common flags: `--cwd` (agent root, defaults to the current directory), `--config` (explicit `monkeybot.yaml` path), `--port` / `--url` (override the config-derived gateway address). Secrets are read from the agent's `.env`; nothing is committed to `monkeybot.yaml`.
 
+## Agent skill
+
+Install the onboarding skill for Cursor and other agents via [skills.sh](https://skills.sh):
+
+```bash
+npx skills add human-plus-machine/monkeybot --skill monkeybot
+```
+
+The skill walks through CLI install, scaffolding `monkeybot_config/`, configuration, and your first chat. Source: [`cli/skills/monkeybot/`](cli/skills/monkeybot/).
+
 ## Requirements
 
 Python 3.11+ · [uv](https://docs.astral.sh/uv/) · optional provider keys in `.env` (Gemini, OpenAI, Anthropic)
