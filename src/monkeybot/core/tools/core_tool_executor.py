@@ -33,7 +33,11 @@ from monkeybot.core.runtime.events import (
     TurnComplete,
 )
 from monkeybot.core.runtime.loop import ToolExecutorPort
-from monkeybot.core.subagents.subagent_proto import SubagentEnvelope, spawn_subagent
+from monkeybot.core.subagents.subagent_proto import (
+    SubagentEnvelope,
+    resolve_subagent_script,
+    spawn_subagent,
+)
 from monkeybot.core.tools.sandbox_executor import SandboxConfig, SandboxExecutor
 from monkeybot.core.tools.spill_inventory import spill_inventory_note, spill_min_chars_from_env
 from monkeybot.core.tools.terminal import (
@@ -621,12 +625,7 @@ class CoreToolExecutor(ToolExecutorPort):
 
         memory_uri = self._memory.uri if self._memory is not None else ""
 
-        script = Path(
-            os.environ.get(
-                "MONKEYBOT_SUBAGENT_SCRIPT",
-                str(Path(__file__).resolve().parent / "subagent_worker.py"),
-            )
-        ).resolve()
+        script = resolve_subagent_script()
         if not script.is_file():
             return (
                 None,

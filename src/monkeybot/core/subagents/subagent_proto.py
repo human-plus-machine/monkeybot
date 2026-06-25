@@ -36,6 +36,21 @@ def _memory_storage_uri_from_dict(decoded: dict[str, Any]) -> str:
     return ""
 
 
+def default_subagent_script() -> Path:
+    """Bundled ``subagent_worker.py`` next to this module."""
+    return Path(__file__).resolve().parent / "subagent_worker.py"
+
+
+def resolve_subagent_script() -> Path:
+    """Resolve worker script from ``MONKEYBOT_SUBAGENT_SCRIPT`` or the bundled default."""
+    return Path(
+        os.environ.get(
+            "MONKEYBOT_SUBAGENT_SCRIPT",
+            str(default_subagent_script()),
+        )
+    ).resolve()
+
+
 @dataclass(frozen=True)
 class SubagentEnvelope:
     """Inputs forwarded to a child Python worker via stdin JSON."""

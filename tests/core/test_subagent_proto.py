@@ -9,7 +9,12 @@ from unittest.mock import AsyncMock
 import pytest
 
 from monkeybot.core.runtime.events import AssistantDelta, Error, Thinking, event_to_json
-from monkeybot.core.subagents.subagent_proto import SubagentEnvelope, spawn_subagent
+from monkeybot.core.subagents.subagent_proto import (
+    SubagentEnvelope,
+    default_subagent_script,
+    resolve_subagent_script,
+    spawn_subagent,
+)
 
 
 class FakeStdin:
@@ -54,6 +59,20 @@ class FakeProcess:
 
     async def wait(self) -> int:
         return self._exit_code
+
+
+def test_default_subagent_script_exists() -> None:
+    script = default_subagent_script()
+    assert script.name == "subagent_worker.py"
+    assert script.is_file()
+    assert script.parent.name == "subagents"
+
+
+def test_resolve_subagent_script_uses_bundled_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MONKEYBOT_SUBAGENT_SCRIPT", raising=False)
+    assert resolve_subagent_script() == default_subagent_script().resolve()
 
 
 def test_subagent_envelope_roundtrip() -> None:

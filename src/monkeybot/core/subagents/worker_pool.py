@@ -15,7 +15,11 @@ from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.backends import RunStore, StorageBackend
 from monkeybot.core.persistence.durable_runs import SubagentRunRow
 from monkeybot.core.runtime.events import Error, TurnComplete, event_to_json
-from monkeybot.core.subagents.subagent_proto import SubagentEnvelope, spawn_subagent
+from monkeybot.core.subagents.subagent_proto import (
+    SubagentEnvelope,
+    resolve_subagent_script,
+    spawn_subagent,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,15 +78,6 @@ def resolve_worker_id() -> str:
     if explicit:
         return explicit
     return f"worker-{uuid.uuid4().hex[:12]}"
-
-
-def resolve_subagent_script() -> Path:
-    return Path(
-        os.environ.get(
-            "MONKEYBOT_SUBAGENT_SCRIPT",
-            str(Path(__file__).resolve().parent / "subagent_worker.py"),
-        )
-    ).resolve()
 
 
 async def _still_owns_run(
