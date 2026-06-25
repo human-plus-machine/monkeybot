@@ -10,12 +10,13 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple, TextIO
 
 import httpx
 from monkeybot.core.runtime.events import (
@@ -41,6 +42,10 @@ _DIM = "\x1b[2m"
 _GREEN = "\x1b[32m"
 _RED = "\x1b[31m"
 _RESET = "\x1b[0m"
+
+
+def _format_http_error(operation: str, exc: httpx.HTTPError) -> str:
+    return f"{operation} failed: {exc}"
 
 
 class _SpinnerLine:
@@ -78,16 +83,6 @@ class _SpinnerLine:
                 await asyncio.wait_for(self._stop.wait(), timeout=0.08)
             except TimeoutError:
                 pass
-
-
-class _ThinkingSpinner(_SpinnerLine):
-    """Inline 'thinking…' spinner on stdout; cleared before assistant text."""
-
-    def __init__(self) -> None:
-        super().__init__("thinking…")
-
-    async def stop(self) -> None:
-        await self.clear()
 
 
 def _collapse_hint(text: str) -> str:
@@ -265,7 +260,7 @@ async def _read_line(prompt: str, interrupt: asyncio.Event) -> str | None:
         return None
 
 
-_EXIT_COMMANDS = frozenset({"/bye", "/quit", "/exit", "bye", "quit", "exit"})
+_EXIT_COMMANDS = frozenset({"/bye", "/quit", "/exit"})
 
 
 def _is_exit_command(line: str) -> bool:
@@ -399,14 +394,20 @@ async def _chat_session(args: argparse.Namespace, base: str, *, spawned_gateway:
             body["model_provider"] = args.model_provider
         if args.model_name:
             body["model_name"] = args.model_name
-        create = await client.post(f"{base}/sessions", json=body)
-        create.raise_for_status()
+        try:
+            create = await client.post(f"{base}/sessions", json=body)
+            create.raise_for_status()
+        except httpx.HTTPError as exc:
+            print(_format_http_error("Session creation", exc), file=sys.stderr)
+            return 1
         session_id = create.json()["session_id"]
 
         stream_task: asyncio.Task[None] | None = None
         event_queue: asyncio.Queue[str | None] = asyncio.Queue()
+        stream_alive = True
 
         async def _consume_stream() -> None:
+            nonlocal stream_alive
             try:
                 async with client.stream("GET", f"{base}/sessions/{session_id}/events") as resp:
                     resp.raise_for_status()
@@ -414,8 +415,10 @@ async def _chat_session(args: argparse.Namespace, base: str, *, spawned_gateway:
                         await event_queue.put(payload)
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                pass
+            except Exception as exc:
+                stream_alive = False
+                print(_format_http_error("Event stream", exc), file=sys.stderr)
+                await event_queue.put(None)
 
         stream_task = asyncio.create_task(_consume_stream())
         _print_welcome(spawned_gateway=spawned_gateway)
@@ -434,17 +437,21 @@ async def _chat_session(args: argparse.Namespace, base: str, *, spawned_gateway:
                         print(f"\n{_DIM}Goodbye.{_RESET}")
                     break
                 request_id = str(uuid.uuid4())
-                reply = await client.post(
-                    f"{base}/sessions/{session_id}/reply",
-                    json={"request_id": request_id, "message": user_line},
-                )
-                if reply.status_code == 409:
-                    print("Session busy — wait for the current turn to finish.", file=sys.stderr)
+                try:
+                    reply = await client.post(
+                        f"{base}/sessions/{session_id}/reply",
+                        json={"request_id": request_id, "message": user_line},
+                    )
+                    if reply.status_code == 409:
+                        print("Session busy — wait for the current turn to finish.", file=sys.stderr)
+                        continue
+                    reply.raise_for_status()
+                except httpx.HTTPError as exc:
+                    print(_format_http_error("Reply", exc), file=sys.stderr)
                     continue
-                reply.raise_for_status()
                 print()
 
-                spinner = _ThinkingSpinner()
+                spinner = _SpinnerLine("thinking…")
                 spinner.start()
                 activity = _TurnActivity()
                 assistant_label_shown = False
@@ -455,6 +462,8 @@ async def _chat_session(args: argparse.Namespace, base: str, *, spawned_gateway:
                     except TimeoutError:
                         continue
                     if payload is None:
+                        await spinner.clear()
+                        await activity.cancel()
                         break
                     try:
                         data = json.loads(payload)
@@ -467,7 +476,7 @@ async def _chat_session(args: argparse.Namespace, base: str, *, spawned_gateway:
                     except Exception:
                         continue
                     if isinstance(evt, (ToolConfirmationRequestEvent, ActionRequiredEvent, FrontendToolRequestEvent)):
-                        await spinner.stop()
+                        await spinner.clear()
                         await activity.cancel()
                         await _handle_hitl(client, base, session_id, evt)
                         spinner.start()
@@ -476,7 +485,7 @@ async def _chat_session(args: argparse.Namespace, base: str, *, spawned_gateway:
                         if assistant_label_shown:
                             print()
                         else:
-                            await spinner.stop()
+                            await spinner.clear()
                         await activity.tool_started(evt.tool, evt.label, evt.args)
                         continue
                     if isinstance(evt, ToolCallResult) and evt.request_id == request_id:
@@ -489,7 +498,7 @@ async def _chat_session(args: argparse.Namespace, base: str, *, spawned_gateway:
                         continue
                     if isinstance(evt, ContextSummarizing) and evt.request_id == request_id:
                         if not assistant_label_shown:
-                            await spinner.stop()
+                            await spinner.clear()
                         await activity.summarizing(evt.estimated_tokens)
                         continue
                     if isinstance(evt, ContextSummarized) and evt.request_id == request_id:
@@ -497,7 +506,7 @@ async def _chat_session(args: argparse.Namespace, base: str, *, spawned_gateway:
                         continue
                     if isinstance(evt, AssistantDelta) and evt.request_id == request_id:
                         if not assistant_label_shown:
-                            await spinner.stop()
+                            await spinner.clear()
                             await activity.cancel()
                             print("assistant: ", end="", flush=True)
                             assistant_label_shown = True
@@ -511,14 +520,16 @@ async def _chat_session(args: argparse.Namespace, base: str, *, spawned_gateway:
                     )
                     if result in ("turn_complete", "error"):
                         if not assistant_label_shown:
-                            await spinner.stop()
+                            await spinner.clear()
                         await activity.cancel()
                         if result == "turn_complete":
                             print()
                         done = True
                 if interrupt.is_set():
-                    await spinner.stop()
+                    await spinner.clear()
                     await activity.cancel()
+                    break
+                if not stream_alive:
                     break
         finally:
             if stream_task:
@@ -528,19 +539,65 @@ async def _chat_session(args: argparse.Namespace, base: str, *, spawned_gateway:
     return 0
 
 
-def _spawn_gateway(config_path: Path | None, cwd: Path, port: int) -> subprocess.Popen[str]:
+class _SpawnedGateway(NamedTuple):
+    proc: subprocess.Popen[str]
+    log_path: Path
+    log_file: TextIO
+
+
+def _format_gateway_log_tail(log_path: Path, *, max_lines: int = 40) -> str:
+    if not log_path.is_file():
+        return ""
+    text = log_path.read_text(encoding="utf-8", errors="replace").strip()
+    if not text:
+        return ""
+    return "\n".join(text.splitlines()[-max_lines:])
+
+
+def _tail_gateway_log(gateway: _SpawnedGateway, *, max_lines: int = 40) -> str:
+    if gateway.proc.poll() is None:
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            gateway.proc.wait(timeout=1)
+    else:
+        gateway.proc.wait()
+    gateway.log_file.flush()
+    with contextlib.suppress(OSError):
+        gateway.log_file.close()
+    return _format_gateway_log_tail(gateway.log_path, max_lines=max_lines)
+
+
+def _cleanup_gateway_log(gateway: _SpawnedGateway | None) -> None:
+    if gateway is None:
+        return
+    with contextlib.suppress(OSError):
+        if not gateway.log_file.closed:
+            gateway.log_file.close()
+    with contextlib.suppress(OSError):
+        gateway.log_path.unlink(missing_ok=True)
+
+
+def _spawn_gateway(config_path: Path | None, cwd: Path, port: int) -> _SpawnedGateway:
     env = os.environ.copy()
     if config_path is not None:
         env["MONKEYBOT_CONFIG"] = str(config_path)
     env["PORT"] = str(port)
     env.setdefault("LOG_LEVEL", "error")
-    return subprocess.Popen(
+    log_file = tempfile.NamedTemporaryFile(
+        mode="w+",
+        prefix="monkeybot-gateway-",
+        suffix=".log",
+        delete=False,
+        encoding="utf-8",
+        errors="replace",
+    )
+    proc = subprocess.Popen(
         [sys.executable, "-m", "monkeybot.gateway.main"],
         env=env,
         cwd=cwd,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=log_file,
     )
+    return _SpawnedGateway(proc=proc, log_path=Path(log_file.name), log_file=log_file)
 
 
 def _wait_for_health(base: str, proc: subprocess.Popen[str] | None, timeout_s: float = 30.0) -> bool:
@@ -568,6 +625,7 @@ def run_chat(args: argparse.Namespace) -> int:
     attach = args.attach or bool(args.url)
 
     proc: subprocess.Popen[str] | None = None
+    spawned: _SpawnedGateway | None = None
     if not attach:
         if config_path is None:
             print(
@@ -577,13 +635,22 @@ def run_chat(args: argparse.Namespace) -> int:
             )
             return 1
         port = args.port if args.port else _port_from_config(config_path)
-        proc = _spawn_gateway(config_path, cwd, port)
+        spawned = _spawn_gateway(config_path, cwd, port)
+        proc = spawned.proc
         if not _wait_for_health(base, proc):
-            print("Gateway failed to start. Run `monkeybot run` to see logs.", file=sys.stderr)
+            print("Gateway failed to start.", file=sys.stderr)
+            log_tail = _tail_gateway_log(spawned)
+            if log_tail:
+                print(f"{_DIM}--- gateway log ---{_RESET}", file=sys.stderr)
+                print(log_tail, file=sys.stderr)
+                print(f"{_DIM}--- end log ---{_RESET}", file=sys.stderr)
+            else:
+                print("Run `monkeybot run` to see logs.", file=sys.stderr)
             if proc.poll() is None:
                 proc.terminate()
                 with contextlib.suppress(subprocess.TimeoutExpired):
                     proc.wait(timeout=5)
+            _cleanup_gateway_log(spawned)
             return 1
 
     try:
@@ -599,6 +666,8 @@ def run_chat(args: argparse.Namespace) -> int:
             proc.kill()
             with contextlib.suppress(subprocess.TimeoutExpired):
                 proc.wait(timeout=1)
+        if spawned is not None:
+            _cleanup_gateway_log(spawned)
 
 
 def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:

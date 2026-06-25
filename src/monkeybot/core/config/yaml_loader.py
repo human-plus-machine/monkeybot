@@ -12,7 +12,11 @@ from monkeybot.core.config.runtime_env import _load_yaml_file, _merge_with_inclu
 logger = logging.getLogger(__name__)
 
 
-def resolve_monkeybot_config_path(explicit: str | Path | None = None) -> Path | None:
+def resolve_monkeybot_config_path(
+    explicit: str | Path | None = None,
+    *,
+    cwd: Path | None = None,
+) -> Path | None:
     """Resolve monkeybot.yaml path from explicit arg, MONKEYBOT_CONFIG, or default."""
     if explicit is not None:
         p = Path(explicit).expanduser()
@@ -24,7 +28,8 @@ def resolve_monkeybot_config_path(explicit: str | Path | None = None) -> Path | 
             return p.resolve()
         logger.warning("MONKEYBOT_CONFIG is set but not a file: %s", p)
         return None
-    default = Path.cwd() / "monkeybot_config" / "monkeybot.yaml"
+    base = (cwd if cwd is not None else Path.cwd()).expanduser().resolve()
+    default = base / "monkeybot_config" / "monkeybot.yaml"
     if default.is_file():
         return default.resolve()
     return None

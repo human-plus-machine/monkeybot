@@ -16,7 +16,7 @@ from typing import Any
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.attachments.config import IMAGE_MIME_TYPES
-from monkeybot.core.attachments.store import AttachmentStore, _sniff_mime
+from monkeybot.core.attachments.store import AttachmentStore, sniff_mime
 from monkeybot.core.config.settings import SubagentConfig
 from monkeybot.core.context import CustomTool, TurnContext
 from monkeybot.core.llm.provider import ToolCall
@@ -541,7 +541,7 @@ class CoreToolExecutor(ToolExecutorPort):
             raw = fp.read_bytes()
         except OSError as exc:
             return ToolExecutionResult.err(f"Failed to read image at {path}: {exc}")
-        mime = _sniff_mime(raw[:512])
+        mime = sniff_mime(raw[:512])
         if mime is None:
             ext_map = {
                 ".png": "image/png",

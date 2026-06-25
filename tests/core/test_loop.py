@@ -1251,8 +1251,11 @@ async def test_serial_mixed_tool_results_consolidated_into_one_user_message() ->
         "serial tool responses must be consolidated into one user Message"
     )
     consolidated = tool_resp_messages[0].content
-    assert [b.id for b in consolidated] == ["a", "b"]
-    assert [b.tool_name for b in consolidated] == ["read_file", "run_command"]
+    by_id = {b.id: b.tool_name for b in consolidated}
+    assert by_id == {"a": "read_file", "b": "run_command"}
+    assert [b.id for b in consolidated] == sorted(by_id), (
+        "tool result blocks must be in call_id order within the consolidated message"
+    )
 
 
 @pytest.mark.asyncio

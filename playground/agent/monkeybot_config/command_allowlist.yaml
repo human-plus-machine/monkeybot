@@ -5,6 +5,7 @@ allowed_commands:
   - echo
   - python
   - python3
+  - uv
   - git
   - gh
   - bash

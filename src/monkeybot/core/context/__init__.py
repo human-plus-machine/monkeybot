@@ -366,8 +366,8 @@ async def build_context(
             subagent_type_names=type_names,
         )
     )
-    tools.append(render_image_tool_def())
     if attachments_enabled_from_env():
+        tools.append(render_image_tool_def())
         tools.append(read_attachment_tool_def())
     tools.extend(mcp_client.all_tools())
     for ct in extra_tools or []:
