@@ -12,6 +12,7 @@ from typing import Any, Literal, Protocol, runtime_checkable
 
 from monkeybot.core.attachments.config import attachments_enabled_from_env
 from monkeybot.core.attachments.tools import read_attachment_tool_def, render_image_tool_def
+from monkeybot.core.config.settings import SubagentConfig
 from monkeybot.core.mcp.ports_mcp import MCPClientPort
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.tools.types import ToolExecutionResult
@@ -102,12 +103,18 @@ class TurnContext:
     """When True (parent agent), optional LLM curation may narrow memory/skills in the system prompt."""
     sse_bus: PendingResponseBusPort | None = None
     """Gateway session bus for Story 5 pending UI responses; None for CLI / harness."""
+    subagent_personas: tuple[tuple[str, str], ...] = ()
+    """Named subagent types (name, description) advertised to the parent in the harness."""
 
 
 _log = logging.getLogger(__name__)
 
 
-def _core_tool_defs(*, include_task_tool: bool = True) -> list[ToolDef]:
+def _core_tool_defs(
+    *,
+    include_task_tool: bool = True,
+    subagent_type_names: Sequence[str] | None = None,
+) -> list[ToolDef]:
     """Static core tools always available before MCP extensions."""
     read_schema: dict[str, object] = {
         "type": "object",
@@ -165,18 +172,30 @@ def _core_tool_defs(*, include_task_tool: bool = True) -> list[ToolDef]:
         "required": [],
     }
     list_skills_schema: dict[str, object] = {"type": "object", "properties": {}}
+    task_props: dict[str, object] = {
+        "task": {
+            "type": "string",
+            "description": "Focused objective or question for the subagent to complete.",
+        },
+        "context": {
+            "type": "string",
+            "description": "Optional background the parent already gathered (constraints, paths, prior tool output).",
+        },
+    }
+    type_names = sorted({n.strip() for n in (subagent_type_names or []) if n and str(n).strip()})
+    subagent_type_schema: dict[str, object] = {
+        "type": "string",
+        "description": (
+            "Named subagent persona from monkeybot.yaml subagents registry. "
+            "Omit to use the default subagent AGENT.md."
+        ),
+    }
+    if type_names:
+        subagent_type_schema["enum"] = type_names
+    task_props["subagent_type"] = subagent_type_schema
     task_schema: dict[str, object] = {
         "type": "object",
-        "properties": {
-            "task": {
-                "type": "string",
-                "description": "Focused objective or question for the subagent to complete.",
-            },
-            "context": {
-                "type": "string",
-                "description": "Optional background the parent already gathered (constraints, paths, prior tool output).",
-            },
-        },
+        "properties": task_props,
         "required": ["task"],
     }
     tools: list[ToolDef] = [
@@ -211,8 +230,9 @@ def _core_tool_defs(*, include_task_tool: bool = True) -> list[ToolDef]:
             ToolDef(
                 "task",
                 "Spawn a subprocess subagent with the same workspace, memory, and MCP configuration "
-                "to work on a delegated objective. Returns JSON with the subagent's streamed answer summary, "
-                "errors, and usage. Nested task calls are disabled inside the subagent.",
+                "to work on a delegated objective. Pass subagent_type to select a named persona "
+                "(see harness Subagent personas). Returns JSON with the subagent's streamed answer "
+                "summary, errors, and usage. Nested task calls are disabled inside the subagent.",
                 task_schema,
             ),
         )
@@ -302,6 +322,7 @@ async def build_context(
     enable_context_curation: bool = True,
     sse_bus: PendingResponseBusPort | None = None,
     extra_tools: Sequence[CustomTool] | None = None,
+    subagent_registry: dict[str, SubagentConfig] | None = None,
 ) -> TurnContext:
     """Assemble a TurnContext from filesystem paths and the MCP client snapshot.
 
@@ -325,6 +346,7 @@ async def build_context(
         extra_tools: Optional list of in-process :class:`CustomTool` implementations.
             Their ``tool_def`` is appended to the tool list advertised to the model and
             their ``execute`` method is dispatched by :class:`CoreToolExecutor`.
+        subagent_registry: Optional map of named subagent personas from monkeybot.yaml.
 
     Returns:
         Frozen :class:`TurnContext`.
@@ -335,7 +357,15 @@ async def build_context(
     agent_md = _load_agent_md(agent_md_path)
     memory_index = await memory.load_index() if memory is not None else []
     skills = _discover_skills(skills_path)
-    tools = list(_core_tool_defs(include_task_tool=include_task_tool))
+    registry = subagent_registry or {}
+    type_names = sorted(registry)
+    personas = tuple((name, registry[name].description) for name in type_names)
+    tools = list(
+        _core_tool_defs(
+            include_task_tool=include_task_tool,
+            subagent_type_names=type_names,
+        )
+    )
     tools.append(render_image_tool_def())
     if attachments_enabled_from_env():
         tools.append(read_attachment_tool_def())
@@ -359,6 +389,7 @@ async def build_context(
         memory=memory,
         context_curation_enabled=enable_context_curation,
         sse_bus=sse_bus,
+        subagent_personas=personas,
     )
 
 

@@ -397,6 +397,8 @@ async def span_subagent(
     thread_id: str,
     request_id: str,
     parent_run_id: str,
+    subagent_type: str | None = None,
+    agent_md: str | None = None,
 ) -> AsyncGenerator[None, None]:
     """Child span for subprocess ``task`` run; nests under propagated context when attached."""
     if not is_observability_enabled():
@@ -411,6 +413,10 @@ async def span_subagent(
         set_span_attribute_safe(span, "thread.id", thread_id)
         set_span_attribute_safe(span, "request.id", request_id)
         set_span_attribute_safe(span, "parent.run.id", parent_run_id)
+        if subagent_type:
+            set_span_attribute_safe(span, "subagent.type", subagent_type)
+        if agent_md:
+            set_span_attribute_safe(span, "subagent.agent_md", agent_md)
         try:
             yield
         except Exception as exc:

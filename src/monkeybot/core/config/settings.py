@@ -64,12 +64,12 @@ class CustomMemoryFolder:
 
 @dataclass
 class SubagentConfig:
-    """Configuration for a single subagent."""
+    """Configuration for a single named subagent persona."""
 
     name: str
     description: str
     skills: list[str]
-    prompt_file: str | None = None
+    agent_md: str | None = None
     model: str | None = None
     vertex_location: str | None = None
 
@@ -216,12 +216,18 @@ def _parse_subagent_entries(raw_entries: Any) -> list[SubagentConfig]:
         vloc = entry.get("vertex_location")
         if vloc is None and "location" in entry:
             vloc = entry.get("location")
+        raw_skills = entry.get("skills", [])
+        skills = list(raw_skills) if isinstance(raw_skills, list) else []
+        agent_md = entry.get("agent_md") or entry.get("prompt_file")
+        if agent_md is not None and not isinstance(agent_md, str):
+            logger.warning("Skipping subagent %s: agent_md must be a string", entry.get("name"))
+            continue
         configs.append(
             SubagentConfig(
                 name=entry["name"],
                 description=entry["description"],
-                skills=entry.get("skills", []),
-                prompt_file=entry.get("prompt_file"),
+                skills=skills,
+                agent_md=agent_md.strip() if isinstance(agent_md, str) and agent_md.strip() else None,
                 model=entry.get("model"),
                 vertex_location=vloc,
             )
@@ -233,3 +239,13 @@ def get_subagent_configs(config_path: str | None = None) -> list[SubagentConfig]
     """Return subagent configurations from ``subagents:`` in monkeybot.yaml."""
     _, doc = load_monkeybot_yaml_dict(config_path)
     return _parse_subagent_entries(doc.get("subagents"))
+
+
+def get_subagent_registry(config_path: str | None = None) -> dict[str, SubagentConfig]:
+    """Named subagent personas keyed by ``name``; raises :class:`ConfigError` on duplicates."""
+    registry: dict[str, SubagentConfig] = {}
+    for cfg in get_subagent_configs(config_path):
+        if cfg.name in registry:
+            raise ConfigError(f"Duplicate subagent name in monkeybot.yaml: {cfg.name!r}")
+        registry[cfg.name] = cfg
+    return registry

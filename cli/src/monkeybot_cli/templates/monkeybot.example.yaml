@@ -32,7 +32,6 @@ paths:
   db_url: sqlite:///data/monkeybot.db
   mcp_config: ./monkeybot_config/mcp.json
   command_allowlist_config: ./monkeybot_config/command_allowlist.yaml
-  # File-tool sandbox (env MONKEYBOT_WORKSPACE_ROOT). Subagents use the same layout.
   workspace_root: ./workspace
 
 model:
@@ -88,10 +87,15 @@ memory_hook:
 subagent:
   timeout_sec: 600
   max_turns: 25
-  # Same AGENT.md as the parent unless overridden (env: MONKEYBOT_SUBAGENT_AGENT_MD).
-  # Relative paths resolve from the bot project root, not workspace/.
-  # Subagents do not support per-task agent_md — specialize via task/context instead.
+  # Default AGENT.md for task calls with no subagent_type (relative to bot project root).
   agent_md: ./monkeybot_config/AGENT.md
+
+# Named subagent personas — parent selects via task(subagent_type=...).
+# Add entries and matching AGENT.md files under monkeybot_config/agents/ when needed.
+# subagents:
+#   - name: researcher
+#     description: "Deep-dives a topic and returns a structured summary."
+#     agent_md: ./monkeybot_config/agents/researcher.md
 
 tools:
   # List of substrings blocked in tool args (also env MONKEYBOT_TOOL_DENIED_PATTERNS as comma-separated)

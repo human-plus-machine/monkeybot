@@ -38,7 +38,9 @@ def test_new_scaffolds(tmp_path: Path) -> None:
     assert "test-model" in text
     assert "workspace_root: ./workspace" in text
     env_text = (tmp_path / ".env.example").read_text()
-    assert "MONKEYBOT_WORKSPACE_ROOT" in env_text
+    assert "MONKEYBOT_WORKSPACE_ROOT" not in env_text
+    assert "AGENT_MD" not in env_text
+    assert "MONKEYBOT_SUBAGENT_AGENT_MD" not in env_text
     assert "DB_URL" in env_text
 
 
