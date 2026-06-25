@@ -63,6 +63,40 @@ async def test_freeze_replaces_attachment_ref_without_mutating_frozen_message() 
 
 
 @pytest.mark.asyncio
+async def test_freeze_tool_result_media_includes_attachment_id() -> None:
+    tool_msg = Message(
+        role="user",
+        content=[
+            ToolResponse(
+                id="call_1",
+                tool_name="render_image",
+                result=[
+                    Image(
+                        data="aW1n",
+                        mime_type="image/png",
+                        metadata={"attachment_id": "att_gen1", "filename": "out.png"},
+                    )
+                ],
+            )
+        ],
+    )
+    history = _InMemoryHistory([tool_msg])
+
+    await freeze_attachments_in_history(
+        thread_id="thread-1",
+        history=history,
+        catalog=None,
+        last_assistant_text="",
+    )
+
+    frozen = history._messages[0].content[0]
+    assert isinstance(frozen, ToolResponse)
+    assert isinstance(frozen.result[0], Text)
+    assert "att_gen1" in frozen.result[0].text
+    assert 'read_attachment("att_gen1")' in frozen.result[0].text
+
+
+@pytest.mark.asyncio
 async def test_freeze_replaces_tool_result_media() -> None:
     tool_msg = Message(
         role="assistant",

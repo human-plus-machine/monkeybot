@@ -1,0 +1,117 @@
+# MonkeyBot harness — copy to monkeybot.yaml and edit (paths relative to process cwd).
+#
+#   cp monkeybot_config/monkeybot.example.yaml monkeybot_config/monkeybot.yaml
+#
+# Precedence: environment variables (and optional `.env` in cwd) win over values here.
+#
+# Secrets are not committed here. Create a `.env` in the repo root when you need keys or
+# machine-local paths, for example:
+#   GOOGLE_APPLICATION_CREDENTIALS, VERTEX_AI_PROJECT_ID, GCP_PROJECT_ID, GOOGLE_CLOUD_PROJECT,
+#   VERTEX_AI_LOCATION, GOOGLE_CLOUD_LOCATION, GEMINI_API_KEY,
+#   OPENAI_API_KEY, ANTHROPIC_API_KEY,
+#   ANTHROPIC_VERTEX_PROJECT_ID, ANTHROPIC_VERTEX_REGION,
+#   TAVILY_API_KEY, FIRECRAWL_API_KEY, SANDBOX_API_KEY,
+#   MONKEYBOT_TOOL_DENIED_PATTERNS, MONKEYBOT_CORS_ALLOW_ORIGINS, MONKEYBOT_CONFIG, …
+#
+# Optional fragments: add top-level ``includes: [includes/extra.yaml]`` (paths relative
+# to this file’s directory); later files deep-merge over earlier ones.
+#
+# Env-only overrides (not in this YAML schema) still work when set in the shell or `.env`.
+
+runtime:
+  # DEBUG | INFO | WARNING | ERROR
+  log_level: INFO
+  port: 8080
+  # Optional second port env (same as PORT if unset in code paths that read GATEWAY_PORT)
+  # gateway_port: 8080
+
+paths:
+  agent_md: ./monkeybot_config/AGENT.md
+  memory_storage_uri: local://./data/memory
+  skills_path: ./.agents/skills
+  db_url: sqlite:///data/monkeybot.db
+  mcp_config: ./monkeybot_config/mcp.json
+  command_allowlist_config: ./monkeybot_config/command_allowlist.yaml
+  # File-tool sandbox (env MONKEYBOT_WORKSPACE_ROOT). Subagents use the same layout.
+  workspace_root: ./workspace
+
+model:
+  # gemini | openai | anthropic | vertex-claude | fake
+  provider: gemini
+  name: gemini-3-flash
+  temperature: 0.7
+  max_tokens: 60000
+  # Gemini: -1 = model default, 0 = off, N = token budget
+  thinking_budget: -1
+  # Prompt caching of the stable prefix (AGENT.md + harness + tools). Default ON.
+  # Native per provider: Anthropic uses explicit cache_control; OpenAI/Gemini cache
+  # automatically. This flag toggles the explicit (Anthropic) behavior; set false to disable.
+  enable_caching: true
+  # Summarisation trigger (tokens)
+  context_window: 1000000
+  max_turns: 50
+  # Optional cheaper model for sync history summarization (env: CONTEXT_SUMMARIZATION_MODEL); omit = main model
+  # summarization_model: gemini-3-flash
+
+# Non-secret GCP identifiers (prefer .env for secrets / ADC path).
+# gcp:
+#   project_id: your-gcp-project
+#   location: us-central1
+
+# anthropic_vertex:
+#   project_id: your-gcp-project
+#   region: us-east5
+
+gateway:
+  pending_response_timeout_sec: 300
+  sse_replay_max: 256
+  graceful_shutdown_timeout_sec: 5
+  # FastAPI CORS allow_origins (comma-separated, or "*" for any origin). Sets MONKEYBOT_CORS_ALLOW_ORIGINS.
+  # Default in code when unset: http://localhost:5173 (Vite dev). Add http://127.0.0.1:5173 if needed.
+  cors_allow_origins: "http://localhost:5173"
+
+context_curation:
+  # When false, curation is skipped (env: CONTEXT_CURATION_ENABLED)
+  enabled: true
+  skill_threshold: 4
+  memory_threshold: 8
+  # Separate small model for curator (env: CONTEXT_CURATOR_MODEL); empty uses main model id
+  curator_model: gemini-3-flash
+  timeout_sec: 10
+  max_memory_lines: 12
+  max_skills: 5
+  search_max_hits: 8
+
+memory_hook:
+  enabled: true
+
+subagent:
+  timeout_sec: 600
+  max_turns: 25
+  # Same AGENT.md as the parent unless overridden (env: MONKEYBOT_SUBAGENT_AGENT_MD).
+  # Relative paths resolve from the bot project root, not workspace/.
+  # Subagents do not support per-task agent_md — specialize via task/context instead.
+  agent_md: ./monkeybot_config/AGENT.md
+
+tools:
+  # List of substrings blocked in tool args (also env MONKEYBOT_TOOL_DENIED_PATTERNS as comma-separated)
+  # denied_patterns:
+  #   - "rm -rf"
+
+web_search:
+  # duckduckgo | tavily | firecrawl | none  (Tavily/Firecrawl need keys in .env)
+  backend: duckduckgo
+  max_results: 5
+
+sandbox:
+  enabled: false
+  server_url: http://localhost:8080
+  image: python:3.12
+  ttl_seconds: 1800
+
+# Optional JSON for MODEL_PROVIDER=fake tests (env: MONKEYBOT_FAKE_PROVIDER_EVENTS)
+# fake_provider:
+#   events_json: '[[]]'
+
+# includes:
+#   - includes/local.yaml

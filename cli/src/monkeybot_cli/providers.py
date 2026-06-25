@@ -1,0 +1,78 @@
+"""Provider → extra → credential mapping (owned by CLI)."""
+
+from __future__ import annotations
+
+import importlib.util
+import os
+from dataclasses import dataclass
+
+from monkeybot.core.config import normalize_model_provider
+
+
+@dataclass(frozen=True)
+class ProviderSpec:
+    yaml_aliases: tuple[str, ...]
+    extra: str | None
+    credential_env_vars: tuple[str, ...]
+    gcp_adc: bool = False
+
+
+PROVIDER_SPECS: dict[str, ProviderSpec] = {
+    "google_vertexai": ProviderSpec(
+        ("gemini", "vertex", "google_vertexai"),
+        "gemini",
+        ("GEMINI_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS", "GCP_PROJECT_ID", "GOOGLE_CLOUD_PROJECT"),
+        gcp_adc=True,
+    ),
+    "openai": ProviderSpec(("openai",), "openai", ("OPENAI_API_KEY",)),
+    "anthropic": ProviderSpec(("anthropic",), "claude", ("ANTHROPIC_API_KEY",)),
+    "vertex_anthropic": ProviderSpec(
+        ("vertex-claude", "vertex_claude", "vertex_anthropic"),
+        "vertex-claude",
+        ("GCP_PROJECT_ID", "GOOGLE_CLOUD_PROJECT", "ANTHROPIC_VERTEX_PROJECT_ID"),
+        gcp_adc=True,
+    ),
+    "aws_bedrock": ProviderSpec(
+        ("aws_bedrock",),
+        "bedrock",
+        ("AWS_ACCESS_KEY_ID", "AWS_PROFILE", "AWS_REGION", "AWS_DEFAULT_REGION"),
+    ),
+    "huggingface": ProviderSpec(("huggingface",), "huggingface", ("HF_TOKEN", "HUGGINGFACE_API_KEY")),
+    "fake": ProviderSpec(("fake",), None, ()),
+}
+
+
+def canonical_provider(yaml_provider: str) -> str:
+    return normalize_model_provider(yaml_provider.strip().lower())
+
+
+def spec_for_provider(yaml_provider: str) -> ProviderSpec | None:
+    key = canonical_provider(yaml_provider)
+    return PROVIDER_SPECS.get(key)
+
+
+def extra_installed(extra: str) -> bool:
+    mapping = {
+        "gemini": "google.genai",
+        "vertex": "google.auth",
+        "claude": "anthropic",
+        "vertex-claude": "anthropic",
+        "openai": "openai",
+        "bedrock": "boto3",
+        "huggingface": "openai",
+    }
+    mod = mapping.get(extra, extra)
+    return importlib.util.find_spec(mod) is not None
+
+
+def credentials_present(spec: ProviderSpec) -> bool:
+    if spec.gcp_adc:
+        if os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip():
+            return True
+        for var in ("GCP_PROJECT_ID", "GOOGLE_CLOUD_PROJECT", "VERTEX_AI_PROJECT_ID"):
+            if os.environ.get(var, "").strip():
+                return True
+        if os.environ.get("GEMINI_API_KEY", "").strip():
+            return True
+        return False
+    return any(os.environ.get(v, "").strip() for v in spec.credential_env_vars)

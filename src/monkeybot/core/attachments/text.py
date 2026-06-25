@@ -54,10 +54,10 @@ def render_tool_media_freeze_text(
     attachment_id: str | None,
     kind: str,
 ) -> str:
-    if tool_name == "read_attachment" and attachment_id:
+    if attachment_id:
         return (
-            f"[read_attachment {attachment_id} result: {kind} shown earlier; "
-            f"call read_attachment to reload.]"
+            f"[{tool_name} {attachment_id} result: {kind} shown earlier; "
+            f'call read_attachment("{attachment_id}") to reload.]'
         )
     return f"[{tool_name} result: {kind} shown earlier; call tool again to reload.]"
 

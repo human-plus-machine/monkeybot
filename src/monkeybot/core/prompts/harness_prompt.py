@@ -33,9 +33,12 @@ This block is injected by the host every turn. Prefer the **active tool list** t
 - `add_mcp_server` / `remove_mcp_server` — register or drop MCP stdio servers; new tools appear on later turns.
 {web_search_line}{task_line}
 ### Built-in tool errors (recovery)
+- A tool **failed** whenever its response contains `ok: false` (or `is_error`), even if the call itself "succeeded" (e.g. `run_command` returns `exit_code != 0` with an `ok:false` JSON body in `stdout`). Read the result; do not treat a non-empty response as success.
 - Failed built-in tools often return **JSON** with `ok: false`, `error_kind` (`policy` | `validation` | `runtime`), `message`, and `hint`.
 - If `error_kind` is **policy** (e.g. `run_command` blocked), **do not** retry the identical call; change the command or path per `hint` and the lists in `details`, then retry **once** after a single fix.
 - If `error_kind` is **validation**, fix the argument shape (see `details.example`), then retry once.
+- If `error_kind` is **runtime** (the command/tool ran but failed — e.g. missing config, missing env var, bad exit code, script error), **do not** re-run the identical call. The same inputs will produce the same failure. Either fix the underlying cause if you can act on it, or stop and tell the user exactly what is missing (e.g. an env var, project id, or credential) and what they must set.
+- **No-repeat rule (applies to every tool):** never issue a tool call with the same name and same arguments that already failed this turn. A retry is only allowed after you have changed the command, arguments, or path in response to the error. If you cannot change anything, stop retrying and report the blocker in plain text.
 
 ### Runtime paths
 - workspace root: `{workspace_root}`

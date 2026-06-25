@@ -1,0 +1,8 @@
+# OpenSandbox worker image for playground skills (image-generator, etc.).
+# Built automatically by playground/agent/run.sh when missing.
+#
+#   docker build -f docker/Dockerfile.playground-sandbox -t monkeybot-playground-sandbox:local .
+FROM python:3.12-slim
+
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir "google-genai>=1.0.0"

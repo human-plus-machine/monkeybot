@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")"
+REPO_ROOT="$(cd ../.. && pwd)"
 
 if [[ -f .env ]]; then
   set -a
@@ -13,6 +14,8 @@ fi
 # Set SKIP_OPENSANDBOX=1 to skip. Requires Docker; sandboxes need the host socket.
 SANDBOX_CONTAINER="${SANDBOX_CONTAINER:-monkeybot-playground-opensandbox}"
 SANDBOX_IMAGE="${SANDBOX_IMAGE:-opensandbox/server:latest}"
+SANDBOX_WORKER_IMAGE="${SANDBOX_WORKER_IMAGE:-monkeybot-playground-sandbox:local}"
+SANDBOX_WORKER_DOCKERFILE="${SANDBOX_WORKER_DOCKERFILE:-${REPO_ROOT}/docker/Dockerfile.playground-sandbox}"
 SANDBOX_HOST_PORT="${SANDBOX_HOST_PORT:-18080}"
 # Docker runtime + bindable API (see monkeybot_config/opensandbox.docker.toml).
 SANDBOX_CONFIG_HOST="${SANDBOX_CONFIG_HOST:-$(pwd)/monkeybot_config/opensandbox.docker.toml}"
@@ -419,6 +422,28 @@ _firestore_emulator_cleanup() {
 # Stops OpenSandbox, Firestore emulator, and observability when the gateway exits (including Ctrl+C ending uv run).
 trap '_run_sh_cleanup; _firestore_emulator_cleanup; _observability_cleanup' EXIT
 
+ensure_playground_sandbox_worker_image() {
+  if [[ "${SKIP_OPENSANDBOX:-}" == "1" ]]; then
+    return 0
+  fi
+  if ! command -v docker >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! docker info >/dev/null 2>&1; then
+    return 0
+  fi
+  if [[ ! -f "${SANDBOX_WORKER_DOCKERFILE}" ]]; then
+    echo "run.sh: missing ${SANDBOX_WORKER_DOCKERFILE}; skipping sandbox worker image build"
+    return 0
+  fi
+  if docker image inspect "${SANDBOX_WORKER_IMAGE}" >/dev/null 2>&1; then
+    echo "run.sh: sandbox worker image present (${SANDBOX_WORKER_IMAGE})"
+    return 0
+  fi
+  echo "run.sh: building sandbox worker image ${SANDBOX_WORKER_IMAGE} (google-genai for skills)"
+  docker build -f "${SANDBOX_WORKER_DOCKERFILE}" -t "${SANDBOX_WORKER_IMAGE}" "${REPO_ROOT}"
+}
+
 ensure_opensandbox() {
   if [[ "${SKIP_OPENSANDBOX:-}" == "1" ]]; then
     return 0
@@ -483,6 +508,7 @@ ensure_opensandbox() {
   wait_opensandbox_ready || true
 }
 
+ensure_playground_sandbox_worker_image
 ensure_opensandbox
 ensure_observability_stack
 ensure_firestore_emulator
@@ -491,8 +517,7 @@ ensure_firestore_emulator
 # never leave the playground stuck on a stale DB (skipped when using Firestore).
 if _playground_uses_sqlite; then
   rm -f \
-    ./workspace/data/monkeybot.db ./workspace/data/monkeybot.db-wal ./workspace/data/monkeybot.db-shm \
-    ./data/monkeybot.db ./data/monkeybot.db-wal ./data/monkeybot.db-shm
+    ./workspace/data/monkeybot.db ./workspace/data/monkeybot.db-wal ./workspace/data/monkeybot.db-shm
 fi
 
 echo "run.sh: starting MonkeyBot gateway…"

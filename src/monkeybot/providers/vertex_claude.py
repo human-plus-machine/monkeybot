@@ -24,6 +24,7 @@ from monkeybot.providers._utils import (
     estimate_anthropic_input_tokens,
     mark_last_tool_cached,
 )
+from monkeybot.providers.sampling import resolve_model_sampling
 
 _log = logging.getLogger(__name__)
 
@@ -44,6 +45,8 @@ class VertexClaudeProvider:
         *,
         project_id: str | None = None,
         region: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
         cache_enabled: bool = True,
     ) -> None:
         self._project_id = (
@@ -58,6 +61,9 @@ class VertexClaudeProvider:
         if not self._project_id:
             raise ValueError("ANTHROPIC_VERTEX_PROJECT_ID is not set (or pass project_id=)")
         self._cache_enabled = cache_enabled
+        sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens)
+        self._temperature = sampling.temperature
+        self._max_tokens = sampling.max_tokens
 
     def _convert_tools(self, tools: Sequence[ToolDef]) -> list[dict[str, Any]]:
         return [
@@ -152,7 +158,8 @@ class VertexClaudeProvider:
                 system=system_param,
                 messages=cast(Any, converted_messages),
                 tools=tools_param,
-                max_tokens=4096,
+                max_tokens=self._max_tokens,
+                temperature=self._temperature,
             ) as stream:
                 async for event in stream:
                     match event.type:

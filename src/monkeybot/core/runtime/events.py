@@ -112,6 +112,7 @@ class SystemPromptSnapshot:
 class ImageBlock:
     kind: Literal["ImageBlock"] = "ImageBlock"
     request_id: str = ""
+    image_id: str = ""
     mime_type: str = ""
     data: str = ""
 
@@ -248,7 +249,10 @@ def _story5_event_dict(event: AgentEvent) -> dict[str, object]:
     """Build JSON-serializable dict for Story 5 SSE types (1B §4.2; snake_case keys)."""
     base: dict[str, object] = {"type": event.kind, "request_id": event.request_id}
     if isinstance(event, ImageBlock):
-        return {**base, "mime_type": event.mime_type, "data": event.data}
+        out: dict[str, object] = {**base, "mime_type": event.mime_type, "data": event.data}
+        if event.image_id:
+            out["image_id"] = event.image_id
+        return out
     if isinstance(event, ThinkingBlockDelta):
         return {**base, "text": event.text, "signature": event.signature}
     if isinstance(event, ThinkingBlockComplete):
@@ -438,9 +442,11 @@ def event_from_json(raw: str) -> AgentEvent:
     if t == "ImageBlock":
         mt = payload.get("mime_type", "")
         data = payload.get("data", "")
+        img_raw = payload.get("image_id", "")
         mime_type = mt if isinstance(mt, str) else ""
         data_s = data if isinstance(data, str) else ""
-        return ImageBlock(request_id=rid, mime_type=mime_type, data=data_s)
+        image_id = img_raw if isinstance(img_raw, str) else ""
+        return ImageBlock(request_id=rid, image_id=image_id, mime_type=mime_type, data=data_s)
     if t == "ThinkingBlockDelta":
         text_raw = payload.get("text", "")
         text = text_raw if isinstance(text_raw, str) else ""

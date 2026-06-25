@@ -501,6 +501,38 @@ class TestSandboxExecutorWorkspaceMount:
         assert vol.host.path == abs_path
         assert vol.mountPath == abs_path
         assert vol.readOnly is False
+        env = kwargs.get("env") or {}
+        assert env.get("MONKEYBOT_WORKSPACE_ROOT") == abs_path
+        assert env.get("WORKSPACE_ROOT") == abs_path
+
+    @pytest.mark.asyncio
+    async def test_gcp_credentials_mounted_when_present(self, tmp_path, monkeypatch):
+        creds = tmp_path / "gcp.json"
+        creds.write_text('{"type":"service_account"}', encoding="utf-8")
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(creds))
+        monkeypatch.setenv("VERTEX_AI_PROJECT_ID", "my-project")
+
+        cfg = SandboxConfig(
+            enabled=True, server_url="http://localhost:8080",
+            api_key=None, image="python:3.12", ttl_seconds=1800,
+        )
+        executor = SandboxExecutor(cfg, tmp_path)
+        mock_cls, _ = _make_create_mock()
+        osb, patches = self._patch_modules(mock_cls)
+
+        with patch.dict(sys.modules, patches):
+            await executor.execute("echo", [])
+
+        _, kwargs = mock_cls.create.call_args
+        volumes = kwargs.get("volumes", [])
+        assert len(volumes) == 2
+        cred_vol = volumes[1]
+        assert cred_vol.host.path == str(creds.resolve())
+        assert cred_vol.mountPath == str(creds.resolve())
+        assert cred_vol.readOnly is True
+        env = kwargs.get("env") or {}
+        assert env["GOOGLE_APPLICATION_CREDENTIALS"] == str(creds.resolve())
+        assert env["VERTEX_AI_PROJECT_ID"] == "my-project"
 
     @pytest.mark.asyncio
     async def test_relative_workspace_resolved_to_absolute(self, tmp_path, monkeypatch):

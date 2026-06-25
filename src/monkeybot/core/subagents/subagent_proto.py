@@ -20,6 +20,82 @@ from monkeybot.core.runtime.events import (
 )
 
 
+def _memory_storage_uri_from_dict(decoded: dict[str, Any]) -> str:
+    """Resolve memory URI from envelope fields; empty string means no memory."""
+    if "memory_storage_uri" in decoded:
+        uri_val = decoded["memory_storage_uri"]
+        if not isinstance(uri_val, str):
+            raise ValueError("envelope: 'memory_storage_uri' must be a string")
+        return uri_val.strip()
+    legacy = decoded.get("memory_path")
+    if isinstance(legacy, str) and legacy.strip():
+        lp = legacy.strip()
+        if lp.startswith("gcs://") or lp.startswith("s3://") or lp.startswith("local://"):
+            return lp
+        return "local://" + lp
+    return ""
+
+
+def default_subagent_script() -> Path:
+    """Bundled ``subagent_worker.py`` next to this module."""
+    return Path(__file__).resolve().parent / "subagent_worker.py"
+
+
+def resolve_subagent_script() -> Path:
+    """Resolve worker script from ``MONKEYBOT_SUBAGENT_SCRIPT`` or the bundled default."""
+    return Path(
+        os.environ.get(
+            "MONKEYBOT_SUBAGENT_SCRIPT",
+            str(default_subagent_script()),
+        )
+    ).resolve()
+
+
+def resolve_agent_project_root() -> Path:
+    """Bot project root (config, AGENT.md, data/) — not the workspace file-tool sandbox."""
+    raw = os.environ.get("MONKEYBOT_AGENT_ROOT", "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return Path.cwd().resolve()
+
+
+def resolve_project_path(raw: str, agent_root: Path | None = None) -> Path:
+    """Resolve a config path relative to ``agent_root`` (default: env or cwd)."""
+    root = agent_root if agent_root is not None else resolve_agent_project_root()
+    p = Path(raw).expanduser()
+    if p.is_absolute():
+        return p.resolve()
+    return (root / p).resolve()
+
+
+def resolve_subagent_agent_md_path(agent_root: Path | None = None) -> Path | None:
+    """Effective subagent AGENT.md path; ``MONKEYBOT_SUBAGENT_AGENT_MD`` wins over ``AGENT_MD``."""
+    root = agent_root if agent_root is not None else resolve_agent_project_root()
+    raw = os.environ.get("MONKEYBOT_SUBAGENT_AGENT_MD", "").strip()
+    if not raw:
+        raw = os.environ.get("AGENT_MD", "").strip()
+    if not raw:
+        return None
+    return resolve_project_path(raw, root)
+
+
+def normalize_sqlite_db_url(db_url: str, agent_root: Path | None = None) -> str:
+    """Rewrite relative ``sqlite:///`` paths against project root (not workspace cwd)."""
+    root = agent_root if agent_root is not None else resolve_agent_project_root()
+    stripped = db_url.strip()
+    prefix = "sqlite:///"
+    if not stripped.lower().startswith(prefix):
+        return db_url
+    remainder = stripped[len(prefix) :]
+    if not remainder or remainder == ":memory:":
+        return db_url
+    p = Path(remainder)
+    if p.is_absolute():
+        return db_url
+    abs_path = (root / p).resolve()
+    return f"sqlite:///{abs_path}"
+
+
 @dataclass(frozen=True)
 class SubagentEnvelope:
     """Inputs forwarded to a child Python worker via stdin JSON."""
@@ -53,21 +129,11 @@ class SubagentEnvelope:
             raise ValueError("envelope: invalid JSON") from exc
         if not isinstance(decoded, dict):
             raise ValueError("envelope: root must be an object")
-        uri = decoded.get("memory_storage_uri")
-        if not isinstance(uri, str) or not uri.strip():
-            legacy = decoded.get("memory_path")
-            if isinstance(legacy, str) and legacy.strip():
-                lp = legacy.strip()
-                if lp.startswith("gcs://") or lp.startswith("s3://") or lp.startswith("local://"):
-                    uri = lp
-                else:
-                    uri = "local://" + lp
-            else:
-                raise ValueError("envelope: 'memory_storage_uri' must be a non-empty string")
+        uri = _memory_storage_uri_from_dict(decoded)
         return cls(
             task=_req_str(decoded, "task"),
             context=_req_str(decoded, "context"),
-            memory_storage_uri=uri.strip(),
+            memory_storage_uri=uri,
             parent_run_id=_req_str(decoded, "parent_run_id"),
             model=_opt_model(decoded),
             traceparent=_opt_traceparent(decoded),

@@ -65,5 +65,6 @@ web_search:
 sandbox:
   enabled: true
   server_url: http://localhost:18080
-  image: python:3.12
+  # Built by run.sh from docker/Dockerfile.playground-sandbox (google-genai for image-generator).
+  image: monkeybot-playground-sandbox:local
   ttl_seconds: 1800

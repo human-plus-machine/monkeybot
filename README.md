@@ -28,6 +28,47 @@ uv run python -m monkeybot.gateway.main
 
 For a browser chat UI, run **`./run-playground.sh`** from the repo root and open `http://localhost:5173`. Full setup (config, `.env`, MCP, Docker): **[Getting Started](docs/getting-started.md)**.
 
+## CLI (`monkeybot`)
+
+The standalone CLI in **[`cli/`](cli/)** scaffolds, validates, and talks to an agent from the terminal. Its one job is **letting you chat with the agent** — `monkeybot chat` starts the gateway for you, reads the port from your `monkeybot.yaml`, connects, and shuts the gateway down on exit.
+
+### Install
+
+```bash
+cd cli
+uv tool install --editable .   # puts `monkeybot` on your PATH
+```
+
+Prefer not to install globally? Use `uv run monkeybot <command>` from inside `cli/` instead.
+
+### Talk to an agent
+
+```bash
+cd path/to/agent          # the dir containing monkeybot_config/monkeybot.yaml
+monkeybot chat            # spawns the gateway, connects, cleans up on exit
+```
+
+Type a message and press Enter. `/bye` exits (and stops the gateway if this command started it). Ctrl-C also exits.
+
+To attach to a gateway you started yourself (e.g. to watch its logs), run it separately and connect with `--attach`:
+
+```bash
+monkeybot run            # terminal 1: gateway with live logs
+monkeybot chat --attach  # terminal 2: connect to the running gateway
+```
+
+### Commands
+
+| Command | Purpose |
+|---|---|
+| `monkeybot new` | Scaffold `monkeybot_config/`, workspace dirs, and `.env.example` |
+| `monkeybot validate` | Check `monkeybot.yaml`, referenced paths, and MCP config (`--json` for machine output) |
+| `monkeybot doctor` | Verify Python, provider extras, credentials, and port availability (`--json` for machine output) |
+| `monkeybot run` | Start the SSE gateway in the foreground (keeps logs visible) |
+| `monkeybot chat` | Talk to the agent; spawns the gateway by default (`--attach` to use a running one) |
+
+Common flags: `--cwd` (agent root, defaults to the current directory), `--config` (explicit `monkeybot.yaml` path), `--port` / `--url` (override the config-derived gateway address). Secrets are read from the agent's `.env`; nothing is committed to `monkeybot.yaml`.
+
 ## Requirements
 
 Python 3.11+ · [uv](https://docs.astral.sh/uv/) · optional provider keys in `.env` (Gemini, OpenAI, Anthropic)

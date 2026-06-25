@@ -25,6 +25,7 @@ from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.runtime.events import (
     AssistantDelta,
     Error,
+    ImageBlock,
     SystemPromptSnapshot,
     Thinking,
     ToolCallResult,
@@ -33,6 +34,7 @@ from monkeybot.core.runtime.events import (
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.runtime.loop import (
     _chunk_tool_calls,
+    _image_events,
     _merge_usage_event,
     _usage_to_totals,
     run,
@@ -40,7 +42,7 @@ from monkeybot.core.runtime.loop import (
 from monkeybot.core.testing.mocks_provider import fake_provider_prompt_tokens
 from monkeybot.core.tools.inspector import Decision
 from monkeybot.core.tools.types import ToolExecutionResult
-from monkeybot.core.types.content_blocks import Text, ToolRequest, ToolResponse
+from monkeybot.core.types.content_blocks import Image, Text, ToolRequest, ToolResponse
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.core.workspace import create_workspace_storage
 
@@ -155,6 +157,24 @@ class FakeProvider:
     ) -> int:
         del model
         return fake_provider_prompt_tokens(messages, tools)
+
+
+class CountingFakeProvider(FakeProvider):
+    """FakeProvider that records messages passed to count_input_tokens."""
+
+    def __init__(self, scripted: list[list[object]]) -> None:
+        super().__init__(scripted)
+        self.count_snapshots: list[list[Message]] = []
+
+    async def count_input_tokens(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[ToolDef],
+        *,
+        model: str,
+    ) -> int:
+        self.count_snapshots.append(list(messages))
+        return await super().count_input_tokens(messages, tools, model=model)
 
 
 def _tool_result(
@@ -579,6 +599,59 @@ async def test_run_empty_model_after_tools_retries_then_succeeds() -> None:
     deltas = [e.delta for e in events if isinstance(e, AssistantDelta)]
     assert deltas == ["summary"]
     assert isinstance(events[-1], TurnComplete)
+
+
+@pytest.mark.asyncio
+async def test_run_tool_image_result_yields_image_block() -> None:
+    b64 = "iVBORw0KGgo="
+    prov = FakeProvider(
+        [
+            [
+                ToolCall(call_id="c1", name="render_image", args={"path": "./x.png"}),
+                Done(),
+            ],
+            [TextDelta(text="done"), Done()],
+        ]
+    )
+    hist = FakeHistory()
+    exe = RecordingExecutor(
+        ToolExecutionResult.ok_blocks(
+            [Image(mime_type="image/png", data=b64, metadata={"filename": "x.png"})]
+        )
+    )
+    ctx = _ctx()
+    events = []
+    async for e in run(
+        "u",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[AllowInspector()],
+        tool_executor=exe,
+        max_turns=4,
+    ):
+        events.append(e)
+    image_blocks = [e for e in events if isinstance(e, ImageBlock)]
+    assert len(image_blocks) == 1
+    assert image_blocks[0].mime_type == "image/png"
+    assert image_blocks[0].data == b64
+    assert image_blocks[0].image_id == "c1:0"
+    tool_results = [e for e in events if isinstance(e, ToolCallResult)]
+    assert any("[loaded image" in tr.result for tr in tool_results)
+
+
+def test_image_events_assign_unique_image_ids() -> None:
+    result = ToolExecutionResult.ok_blocks(
+        [
+            Image(mime_type="image/png", data="a"),
+            Image(mime_type="image/jpeg", data="b"),
+        ]
+    )
+    events = _image_events("req-1", "call-9", result)
+    assert len(events) == 2
+    assert events[0].image_id == "call-9:0"
+    assert events[1].image_id == "call-9:1"
+    assert events[0].request_id == events[1].request_id == "req-1"
 
 
 @pytest.mark.asyncio
@@ -1139,6 +1212,50 @@ async def test_parallel_task_results_appended_in_call_id_order() -> None:
 
 
 @pytest.mark.asyncio
+async def test_serial_mixed_tool_results_consolidated_into_one_user_message() -> None:
+    """Serial non-task tools (separate chunks) must share one user Message for Gemini."""
+    prov = FakeProvider(
+        [
+            [
+                ToolCall(call_id="b", name="run_command", args={"command": "echo b"}),
+                ToolCall(call_id="a", name="read_file", args={"path": "x.md"}),
+                Done(),
+            ],
+            [TextDelta(text="done"), Done()],
+        ]
+    )
+    hist = FakeHistory()
+    exe = RecordingExecutor(
+        ToolExecutionResult.ok_text("ok"),
+    )
+    ctx = _ctx()
+    async for _ in run(
+        "go",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[AllowInspector()],
+        tool_executor=exe,
+        max_turns=4,
+    ):
+        pass
+
+    tool_resp_messages = [
+        m
+        for m in hist.rows
+        if m.role == "user"
+        and m.content
+        and isinstance(m.content[0], ToolResponse)
+    ]
+    assert len(tool_resp_messages) == 1, (
+        "serial tool responses must be consolidated into one user Message"
+    )
+    consolidated = tool_resp_messages[0].content
+    assert [b.id for b in consolidated] == ["a", "b"]
+    assert [b.tool_name for b in consolidated] == ["read_file", "run_command"]
+
+
+@pytest.mark.asyncio
 async def test_loop_tool_only_assistant_history_no_placeholder_json() -> None:
     prov = FakeProvider(
         [
@@ -1580,4 +1697,38 @@ async def test_loop_confirm_timeout_synthetic_response() -> None:
         for row in hist.rows
         if row.role == "user"
         for b in row.content
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_budget_recounts_after_assistant_append() -> None:
+    """Budgeter seeds from a post-assistant provider count, not pre-stream preflight."""
+    prov = CountingFakeProvider(
+        [
+            [
+                ToolCall(call_id="c1", name="run_command", args={"command": "echo hi"}),
+                Done(),
+            ],
+            [TextDelta(text="done"), Done()],
+        ]
+    )
+    hist = FakeHistory()
+    ctx = _ctx()
+    async for _ in run(
+        "u",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(("tool-output", None)),
+        max_turns=3,
+    ):
+        pass
+    assert len(prov.count_snapshots) >= 2
+    budget_messages = prov.count_snapshots[1]
+    history_msgs = [m for m in budget_messages if m.role != "system"]
+    assert any(
+        m.role == "assistant"
+        and any(isinstance(b, ToolRequest) for b in m.content)
+        for m in history_msgs
     )

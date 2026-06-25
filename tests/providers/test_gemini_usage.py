@@ -103,7 +103,7 @@ def test_request_config_identical_regardless_of_cache_flag() -> None:
     )
     for attr in (
         "_temperature",
-        "_max_output_tokens",
+        "_max_tokens",
         "_thinking_budget",
         "_supports_streaming",
     ):

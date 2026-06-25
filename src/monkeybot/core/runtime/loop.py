@@ -38,6 +38,7 @@ from monkeybot.core.llm.usage import Usage
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.prompts.prompt import compose_system_prompt, latest_user_message_text
+from monkeybot.core.runtime.context_budget import ContextBudgeter
 from monkeybot.core.tools.inspector import InspectorToolCall, ToolInspector
 from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.types.content_blocks import (
@@ -59,6 +60,7 @@ from .events import (
     ContextSummarized,
     ContextSummarizing,
     Error,
+    ImageBlock,
     SystemPromptSnapshot,
     Thinking,
     ToolCallResult,
@@ -325,6 +327,39 @@ async def _provider_prompt_input_tokens(
     return await provider.count_input_tokens(messages, tools, model=model)
 
 
+async def _prompt_input_tokens_for_history(
+    *,
+    ctx: TurnContext,
+    chat_messages: Sequence[Message],
+    provider: Provider,
+    attachment_store: AttachmentStore | None,
+    attachment_catalog: SessionAttachmentCatalog | None,
+    curated_memory_skills: bool = False,
+    curated_memory_index: list[str] | None = None,
+    curated_skills: list[SkillRef] | None = None,
+    extra_system_text: str | None = None,
+) -> int:
+    """Provider-accurate prompt size for history rows already persisted (e.g. post-assistant)."""
+    system = _system_message(
+        ctx,
+        chat_messages,
+        curated_memory_skills=curated_memory_skills,
+        curated_memory_index=curated_memory_index,
+        curated_skills=curated_skills,
+        attachment_catalog=attachment_catalog,
+    )
+    system = _append_extra_system_text(system, extra_system_text)
+    resolved_messages = resolve_messages_for_provider(
+        chat_messages,
+        attachment_store=attachment_store,
+        session_id=ctx.thread_id,
+    )
+    provider_messages = _messages_for_provider(system, resolved_messages)
+    return await _provider_prompt_input_tokens(
+        provider, provider_messages, ctx.tools, model=ctx.model
+    )
+
+
 def _cleanup_spill_files(workspace_root: Path, thread_id: str) -> None:
     spill_path = Path(workspace_root).resolve() / _SPILL_REL / thread_id
     if spill_path.exists():
@@ -344,6 +379,71 @@ def _summarization_model_id(ctx: TurnContext) -> str:
     if ctx_sm:
         return ctx_sm
     return ctx.model
+
+
+async def _compact_history_if_needed(
+    *,
+    thread_id: str,
+    history: HistoryStore,
+    provider: Provider,
+    model: str,
+) -> int:
+    """Summarize middle history when tool results exhausted headroom."""
+    chat_messages = await history.load(thread_id)
+    if not _summarization_viable(chat_messages):
+        return 0
+    return await _summarize_history(thread_id, chat_messages, history, provider, model)
+
+
+async def _append_budgeted_tool_responses(
+    *,
+    chunk_responses: list[ContentBlock],
+    ctx: TurnContext,
+    history: HistoryStore,
+    usage: Usage,
+    budgeter: ContextBudgeter,
+    provider: Provider,
+) -> AsyncIterator[AgentEvent]:
+    """Budget tool results against remaining context, append, compact if needed."""
+    trimmed, needs_compaction = budgeter.fit_content_blocks(chunk_responses)
+    await history.append(
+        ctx.thread_id,
+        Message(role="user", content=trimmed),
+    )
+    usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, budgeter.used_tokens)
+    if not needs_compaction:
+        return
+    yield ContextSummarizing(
+        request_id=ctx.request_id,
+        estimated_tokens=usage.estimated_prompt_tokens,
+        context_window_tokens=ctx.context_window_tokens,
+    )
+    try:
+        turns_summarized = await _compact_history_if_needed(
+            thread_id=ctx.thread_id,
+            history=history,
+            provider=provider,
+            model=_summarization_model_id(ctx),
+        )
+    except Exception:
+        logger.warning(
+            "post-tool summarization failed %s; continuing",
+            kv(request_id=ctx.request_id, thread_id=ctx.thread_id),
+            exc_info=True,
+        )
+        turns_summarized = 0
+    yield ContextSummarized(
+        request_id=ctx.request_id,
+        turns_summarized=turns_summarized,
+    )
+    if turns_summarized > 0:
+        chat_messages = await history.load(ctx.thread_id)
+        system = _system_message(ctx, chat_messages)
+        provider_messages = _messages_for_provider(system, chat_messages)
+        post = await _provider_prompt_input_tokens(
+            provider, provider_messages, ctx.tools, model=ctx.model
+        )
+        usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, post)
 
 
 async def _summarize_history(
@@ -431,6 +531,30 @@ def _tool_outcome(
         is_error=is_error,
     )
     return event, response
+
+
+def _image_events(
+    request_id: str,
+    call_id: str,
+    result: ToolExecutionResult,
+) -> list[ImageBlock]:
+    """SSE image payloads for tool results that include ``Image`` content blocks."""
+    if result.error is not None:
+        return []
+    events: list[ImageBlock] = []
+    for idx, b in enumerate(result.blocks):
+        if not isinstance(b, Image) or not b.data:
+            continue
+        image_id = f"{call_id}:{idx}" if call_id else f"{request_id}:{idx}"
+        events.append(
+            ImageBlock(
+                request_id=request_id,
+                image_id=image_id,
+                mime_type=b.mime_type,
+                data=b.data,
+            )
+        )
+    return events
 
 
 def _chunk_tool_calls(ordered: Sequence[ToolCall]) -> list[list[ToolCall]]:
@@ -994,6 +1118,12 @@ async def _run_inner_core(
 
             needs_followup_after_tools = True
 
+            # One user Message for the whole model tool-call turn (all chunks).
+            # Gemini 400s when functionResponse count != functionCall count on the
+            # preceding model turn; serial non-task tools are separate chunks but
+            # must still share a single user row.
+            all_tool_responses: list[ContentBlock] = []
+
             for chunk in _chunk_tool_calls(ordered):
                 if cancelled is not None and cancelled.is_set():
                     yield Error(request_id=ctx.request_id, error="Request cancelled")
@@ -1001,11 +1131,8 @@ async def _run_inner_core(
                     return
 
                 allowed_exec: list[ToolCall] = []
-                # Collect all ToolResponse blocks for this chunk so they can be
-                # appended in a single user Message. Gemini requires that the number
-                # of functionResponse parts equals the number of functionCall parts
-                # in the preceding model turn — splitting them across separate
-                # Message rows produces a 400 INVALID_ARGUMENT error.
+                # Collect ToolResponse blocks for this chunk; merged into
+                # ``all_tool_responses`` after every chunk completes.
                 chunk_responses: list[ContentBlock] = []
 
                 for call in chunk:
@@ -1125,11 +1252,7 @@ async def _run_inner_core(
                     allowed_exec.append(call)
 
                 if not allowed_exec:
-                    if chunk_responses:
-                        await history.append(
-                            ctx.thread_id,
-                            Message(role="user", content=chunk_responses),
-                        )
+                    all_tool_responses.extend(chunk_responses)
                     continue
 
                 parallel_tasks = all(c.name == "task" for c in allowed_exec)
@@ -1220,6 +1343,8 @@ async def _run_inner_core(
 
                     event, response = _tool_outcome(call, ctx.request_id, tool_result)
                     yield event
+                    for img_evt in _image_events(ctx.request_id, call.call_id, tool_result):
+                        yield img_evt
                     chunk_responses.append(response)
                 else:
                     if cancelled is not None and cancelled.is_set():
@@ -1337,13 +1462,49 @@ async def _run_inner_core(
 
                         event, response = _tool_outcome(call, ctx.request_id, tool_result)
                         yield event
+                        for img_evt in _image_events(ctx.request_id, call.call_id, tool_result):
+                            yield img_evt
                         chunk_responses.append(response)
 
-                if chunk_responses:
-                    await history.append(
-                        ctx.thread_id,
-                        Message(role="user", content=chunk_responses),
+                all_tool_responses.extend(chunk_responses)
+
+            if all_tool_responses:
+                chat_for_budget = await history.load(ctx.thread_id)
+                budget_used = usage.estimated_prompt_tokens
+                try:
+                    budget_used = await _prompt_input_tokens_for_history(
+                        ctx=ctx,
+                        chat_messages=chat_for_budget,
+                        provider=provider,
+                        attachment_store=attachment_store,
+                        attachment_catalog=attachment_catalog,
+                        curated_memory_skills=curated_injection,
+                        curated_memory_index=curated_mem,
+                        curated_skills=curated_sks,
+                        extra_system_text=pre_turn_extra,
                     )
+                except Exception:
+                    logger.warning(
+                        "tool budget token recount failed %s; using estimated_prompt_tokens",
+                        kv(request_id=ctx.request_id, thread_id=ctx.thread_id),
+                        exc_info=True,
+                    )
+                usage.estimated_prompt_tokens = max(
+                    usage.estimated_prompt_tokens, budget_used
+                )
+                budgeter = ContextBudgeter.from_env(
+                    window_tokens=ctx.context_window_tokens,
+                    used_tokens=budget_used,
+                )
+                async for budget_evt in _append_budgeted_tool_responses(
+                    chunk_responses=all_tool_responses,
+                    ctx=ctx,
+                    history=history,
+                    usage=usage,
+                    budgeter=budgeter,
+                    provider=provider,
+                ):
+                    yield budget_evt
 
         finally:
             set_turn_prompt_tokens(usage.estimated_prompt_tokens)

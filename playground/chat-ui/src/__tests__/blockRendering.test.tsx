@@ -267,20 +267,8 @@ describe('gatewayClient POST helpers (unit)', () => {
   })
 })
 
-describe('model selector (App)', () => {
-  it('test_selector_renders_three_options', () => {
-    render(<App />)
-    const select = screen.getByRole('combobox', { name: /model/i })
-    const options = within(select).getAllByRole('option')
-    expect(options).toHaveLength(3)
-    expect(options.map((o) => o.textContent)).toEqual([
-      'OpenAI',
-      'Vertex Gemini',
-      'Anthropic (Vertex)',
-    ])
-  })
-
-  it('test_connect_passes_selected_model', async () => {
+describe('session connect (App)', () => {
+  it('test_connect_uses_configured_model', async () => {
     const createSpy = vi.spyOn(gw, 'createSession').mockResolvedValue({
       session_id: 'sid-model',
       created_at: 0,
@@ -295,16 +283,11 @@ describe('model selector (App)', () => {
     const userEv = userEvent.setup()
     render(<App />)
 
-    const select = screen.getByRole('combobox', { name: /model/i })
-    await userEv.selectOptions(select, 'Vertex Gemini')
     await userEv.type(screen.getByRole('textbox'), 'hello')
     await userEv.keyboard('{Enter}')
 
     await waitFor(() => {
-      expect(createSpy).toHaveBeenCalledWith(undefined, {
-        model_provider: 'gemini',
-        model_name: 'gemini-3-flash-preview',
-      })
+      expect(createSpy).toHaveBeenCalledWith(undefined)
     })
   })
 
@@ -320,7 +303,7 @@ describe('model selector (App)', () => {
 
     await waitFor(() => {
       expect(
-        screen.getByText(/selected model unavailable.*check credentials or pick another/i),
+        screen.getByText(/configured model unavailable.*check monkeybot\.yaml/i),
       ).toBeInTheDocument()
     })
     expect(screen.queryByText(/^connected/i)).not.toBeInTheDocument()
@@ -397,6 +380,73 @@ describe('blockRendering integration', () => {
     expect(card.textContent).toContain('"command"')
     expect(card.textContent).toContain('"stdout"')
     expect(card.textContent).toContain('a')
+  })
+
+  it('test_prose_and_tools_interleave_in_transcript_order', async () => {
+    await renderConnected()
+    const rid = 'align-req'
+
+    await act(async () => {
+      sseFeed.emit({ type: 'AssistantDelta', request_id: rid, delta: 'Checking skills.' })
+    })
+    await act(async () => {
+      sseFeed.emit({
+        type: 'ToolCallStarted',
+        request_id: rid,
+        tool: 'list_skills',
+        label: 'list_skills',
+      })
+    })
+    await act(async () => {
+      sseFeed.emit({ type: 'AssistantDelta', request_id: rid, delta: 'Reading skill doc.' })
+    })
+    await act(async () => {
+      sseFeed.emit({
+        type: 'ToolCallStarted',
+        request_id: rid,
+        tool: 'read_file',
+        label: 'read_file',
+        args: { path: 'skills/image-generator/SKILL.md' },
+      })
+    })
+
+    await waitFor(() => expect(screen.getByText('Reading skill doc.')).toBeInTheDocument())
+
+    const log = screen.getByRole('log')
+    const html = log.innerHTML
+    const posSkills = html.indexOf('Checking skills.')
+    const posList = html.indexOf('list_skills')
+    const posRead = html.indexOf('Reading skill doc.')
+    const posFile = html.indexOf('read_file')
+    expect(posSkills).not.toBe(-1)
+    expect(posList).not.toBe(-1)
+    expect(posRead).not.toBe(-1)
+    expect(posFile).not.toBe(-1)
+    expect(posSkills).toBeLessThan(posList)
+    expect(posList).toBeLessThan(posRead)
+    expect(posRead).toBeLessThan(posFile)
+  })
+
+  it('test_prose_survives_delta_and_tool_in_same_sse_batch', async () => {
+    await renderConnected()
+    const rid = 'batch-req'
+
+    await act(async () => {
+      sseFeed.emit({ type: 'AssistantDelta', request_id: rid, delta: 'About to list skills.' })
+      sseFeed.emit({
+        type: 'ToolCallStarted',
+        request_id: rid,
+        tool: 'list_skills',
+        label: 'list_skills',
+      })
+    })
+
+    await waitFor(() => expect(screen.getByText('About to list skills.')).toBeInTheDocument())
+    expect(screen.getByText('list_skills')).toBeInTheDocument()
+
+    const log = screen.getByRole('log')
+    const html = log.innerHTML
+    expect(html.indexOf('About to list skills.')).toBeLessThan(html.indexOf('list_skills'))
   })
 
   it('test_thinking_complete_collapses_to_one_line_summary_click_re_expands', async () => {
@@ -780,6 +830,29 @@ describe('blockRendering integration', () => {
     await waitFor(() =>
       expect(screen.queryByRole('dialog', { name: /tool confirmation/i })).not.toBeInTheDocument(),
     )
+  })
+
+  it('test_multiple_image_blocks_same_request_id_render', async () => {
+    await renderConnected()
+
+    await act(async () => {
+      sseFeed.emit({
+        type: 'ImageBlock',
+        mime_type: 'image/png',
+        data: PNG_1PX,
+        request_id: 'same-req',
+        image_id: 'call-a:0',
+      })
+      sseFeed.emit({
+        type: 'ImageBlock',
+        mime_type: 'image/png',
+        data: PNG_1PX,
+        request_id: 'same-req',
+        image_id: 'call-b:0',
+      })
+    })
+
+    await waitFor(() => expect(screen.getAllByRole('img', { name: /assistant image/i })).toHaveLength(2))
   })
 
   it('test_transcript_article_order_AB_around_png', async () => {

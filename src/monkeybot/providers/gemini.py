@@ -16,9 +16,17 @@ from monkeybot.core.llm.provider import (
     ToolCall,
     UsageEvent,
 )
-from monkeybot.core.types.content_blocks import File, Image, Text, Thinking, ToolRequest, ToolResponse
+from monkeybot.core.types.content_blocks import (
+    File,
+    Image,
+    Text,
+    Thinking,
+    ToolRequest,
+    ToolResponse,
+)
 from monkeybot.core.types.interfaces import LLMError
 from monkeybot.core.types.types_tools import ToolDef
+from monkeybot.providers.sampling import resolve_model_sampling
 
 THOUGHT_SIGNATURE_KEY = "thoughtSignature"
 SYNTHETIC_THOUGHT_SIGNATURE = "skip_thought_signature_validator"
@@ -363,6 +371,7 @@ class GeminiProvider:
         *,
         supports_streaming: bool = True,
         temperature: float | None = None,
+        max_tokens: int | None = None,
         max_output_tokens: int | None = None,
         thinking_budget: int | None = None,
         cache_enabled: bool = True,
@@ -376,10 +385,16 @@ class GeminiProvider:
         request config; it only reserves the switch for explicit ``CachedContent`` (out of
         scope, see design 1A "Out of Scope"). Implicit-cache token counts are always reported
         in the usage telemetry regardless of this flag.
+
+        ``max_output_tokens`` is a backward-compatible alias for ``max_tokens``.
         """
+        if max_output_tokens is not None and max_tokens is not None and max_output_tokens != max_tokens:
+            raise ValueError("pass only one of max_tokens or max_output_tokens")
+        effective_max_tokens = max_tokens if max_tokens is not None else max_output_tokens
         self._supports_streaming = supports_streaming
-        self._temperature = temperature
-        self._max_output_tokens = max_output_tokens
+        sampling = resolve_model_sampling(temperature=temperature, max_tokens=effective_max_tokens)
+        self._temperature = sampling.temperature
+        self._max_tokens = sampling.max_tokens
         self._thinking_budget = thinking_budget
         self._cache_enabled = cache_enabled
 
@@ -408,16 +423,8 @@ class GeminiProvider:
                 "google-genai is required for GeminiProvider. Install with: uv sync (monkeybot dependencies)."
             ) from exc
 
-        temperature = (
-            float(self._temperature)
-            if self._temperature is not None
-            else float(os.environ.get("MODEL_TEMPERATURE", "0.7"))
-        )
-        max_tokens = (
-            int(self._max_output_tokens)
-            if self._max_output_tokens is not None
-            else int(os.environ.get("MODEL_MAX_TOKENS", "60000"))
-        )
+        temperature = float(self._temperature)
+        max_tokens = int(self._max_tokens)
         thinking_budget = (
             int(self._thinking_budget)
             if self._thinking_budget is not None
@@ -470,16 +477,8 @@ class GeminiProvider:
                 "google-genai is required for GeminiProvider. Install with: uv sync (monkeybot dependencies)."
             ) from exc
 
-        temperature = (
-            float(self._temperature)
-            if self._temperature is not None
-            else float(os.environ.get("MODEL_TEMPERATURE", "0.7"))
-        )
-        max_tokens = (
-            int(self._max_output_tokens)
-            if self._max_output_tokens is not None
-            else int(os.environ.get("MODEL_MAX_TOKENS", "60000"))
-        )
+        temperature = float(self._temperature)
+        max_tokens = int(self._max_tokens)
         thinking_budget = (
             int(self._thinking_budget)
             if self._thinking_budget is not None

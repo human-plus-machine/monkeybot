@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -15,7 +16,7 @@ from typing import Any
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.attachments.config import IMAGE_MIME_TYPES
-from monkeybot.core.attachments.store import AttachmentStore
+from monkeybot.core.attachments.store import AttachmentStore, _sniff_mime
 from monkeybot.core.context import CustomTool, TurnContext
 from monkeybot.core.llm.provider import ToolCall
 from monkeybot.core.logging_utils import kv
@@ -33,8 +34,17 @@ from monkeybot.core.runtime.events import (
     TurnComplete,
 )
 from monkeybot.core.runtime.loop import ToolExecutorPort
-from monkeybot.core.subagents.subagent_proto import SubagentEnvelope, spawn_subagent
+from monkeybot.core.subagents.subagent_proto import (
+    SubagentEnvelope,
+    normalize_sqlite_db_url,
+    resolve_agent_project_root,
+    resolve_project_path,
+    resolve_subagent_agent_md_path,
+    resolve_subagent_script,
+    spawn_subagent,
+)
 from monkeybot.core.tools.sandbox_executor import SandboxConfig, SandboxExecutor
+from monkeybot.core.tools.spill_inventory import spill_inventory_note, spill_min_chars_from_env
 from monkeybot.core.tools.terminal import (
     ALLOWED_COMMANDS,
     ALLOWED_PATHS,
@@ -42,8 +52,12 @@ from monkeybot.core.tools.terminal import (
     TerminalExecutor,
 )
 from monkeybot.core.tools.types import ToolExecutionResult
-from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService
-from monkeybot.core.types.content_blocks import File, Image
+from monkeybot.core.tools.workspace_service import (
+    WorkspaceError,
+    WorkspaceFileService,
+    WorkspaceSettings,
+)
+from monkeybot.core.types.content_blocks import ContentBlock, File, Image, Text
 
 logger = logging.getLogger(__name__)
 
@@ -52,12 +66,11 @@ _SUBAGENT_OTEL_SERVICE_NAME = "monkeybot-subagent"
 _PARENT_CANCEL_TASK_ERR = "task: cancelled (parent)"
 
 _SPILL_DIR = ".monkeybot/spill"
-_SPILL_MAX_CHARS = 20_000
-_SPILL_READ_LIMIT = 500
 
 _CORE_TOOL_NAMES = frozenset(
     {
         "read_attachment",
+        "render_image",
         "read_file",
         "write_file",
         "search_memory",
@@ -68,6 +81,8 @@ _CORE_TOOL_NAMES = frozenset(
         "remove_mcp_server",
     }
 )
+
+_SPILL_SKIP_TOOLS = frozenset({"read_file", "read_attachment"})
 
 
 def _tool_handler_kind(name: str, *, mcp: MCPClientPort, extra_tools: dict[str, CustomTool]) -> str:
@@ -85,23 +100,38 @@ def _safe_spill_filename(call_id: str) -> str:
     return safe or "call"
 
 
-def _write_spill_and_cap(
+def _int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def workspace_settings_from_env() -> WorkspaceSettings:
+    """Build workspace read limits from harness env (yaml-backed via runtime_env)."""
+    return WorkspaceSettings(
+        WORKSPACE_READ_MAX_LINES=_int_env("MONKEYBOT_READ_MAX_LINES", 5000),
+        WORKSPACE_READ_DEFAULT_LINES=_int_env("MONKEYBOT_READ_DEFAULT_LINES", 2000),
+        WORKSPACE_SPILL_READ_MAX_LINES=_int_env("MONKEYBOT_SPILL_READ_MAX_LINES", 50_000),
+    )
+
+
+def _write_spill_with_inventory(
     text: str,
     workspace_root: Path,
     thread_id: str,
     call_id: str,
 ) -> str:
-    """Write full ``text`` to spill file; return capped body with path hint."""
+    """Write full ``text`` to spill file; return full body plus inventory note."""
     rel = f"{_SPILL_DIR}/{thread_id}/{_safe_spill_filename(call_id)}.txt"
     out_path = (Path(workspace_root) / rel).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(text, encoding="utf-8")
-    prefix = text[:_SPILL_MAX_CHARS]
-    note = (
-        f"\n[Result truncated — {len(text)} total chars. Full output at: {rel} — "
-        "use read_file with offset/limit to page through it.]"
-    )
-    return prefix + note
+    note = spill_inventory_note(text, rel)
+    return f"{text}\n{note}"
 
 
 def _is_under_spill_path(workspace_root: Path, rel_path: str) -> bool:
@@ -278,7 +308,10 @@ class CoreToolExecutor(ToolExecutorPort):
         attachment_catalog: SessionAttachmentCatalog | None = None,
         run_store: RunStore | None = None,
     ) -> None:
-        self._workspace = WorkspaceFileService(Path(workspace_root).resolve())
+        ws_settings = workspace_settings_from_env()
+        self._workspace = WorkspaceFileService(Path(workspace_root).resolve(), settings=ws_settings)
+        self._spill_read_max_lines = ws_settings.WORKSPACE_SPILL_READ_MAX_LINES
+        self._spill_min_chars = spill_min_chars_from_env()
         self._memory = memory
         self._skills_path = Path(skills_path).resolve()
         self._mcp = mcp
@@ -366,6 +399,8 @@ class CoreToolExecutor(ToolExecutorPort):
         try:
             if name == "read_attachment":
                 return self._tool_read_attachment(args, ctx)
+            if name == "render_image":
+                return self._tool_render_image(args, ctx)
             if name == "read_file":
                 result_text, err_text = self._tool_read_file(args)
             elif name == "write_file":
@@ -384,7 +419,10 @@ class CoreToolExecutor(ToolExecutorPort):
                 result_text, err_text = await self._tool_remove_mcp_server(args)
             elif name in self._extra_tools:
                 try:
-                    result_text = await self._extra_tools[name].execute(args)
+                    raw = await self._extra_tools[name].execute(args)
+                    if isinstance(raw, ToolExecutionResult):
+                        return raw
+                    result_text = raw
                     err_text = None
                 except Exception as exc:
                     logger.warning(
@@ -442,8 +480,14 @@ class CoreToolExecutor(ToolExecutorPort):
                 {"tool": name},
             )
 
-        if err_text is None and result_text is not None and len(result_text) > _SPILL_MAX_CHARS:
-            result_text = _write_spill_and_cap(
+        if (
+            name not in _SPILL_SKIP_TOOLS
+            and err_text is None
+            and result_text is not None
+            and self._spill_min_chars > 0
+            and len(result_text) >= self._spill_min_chars
+        ):
+            result_text = _write_spill_with_inventory(
                 result_text, self._workspace.repo_root, ctx.thread_id, call.call_id
             )
         if err_text is not None:
@@ -479,6 +523,56 @@ class CoreToolExecutor(ToolExecutorPort):
             [File(mime_type=mime, data=data_b64, metadata=meta)]
         )
 
+    def _tool_render_image(self, args: dict[str, Any], ctx: TurnContext) -> ToolExecutionResult:
+        path = _str_arg(args, "path", "file_path", "file")
+        if not path:
+            return ToolExecutionResult.err("render_image requires path")
+        caption = _str_arg(args, "caption", "text") or ""
+        try:
+            fp = self._workspace._resolve_under_root(path, label="path")
+        except WorkspaceError as exc:
+            return ToolExecutionResult.err(_workspace_error_envelope(exc))
+        if not fp.is_file():
+            return ToolExecutionResult.err(f"Not a file: {path}")
+        try:
+            raw = fp.read_bytes()
+        except OSError as exc:
+            return ToolExecutionResult.err(f"Failed to read image at {path}: {exc}")
+        mime = _sniff_mime(raw[:512])
+        if mime is None:
+            ext_map = {
+                ".png": "image/png",
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".gif": "image/gif",
+                ".webp": "image/webp",
+            }
+            mime = ext_map.get(fp.suffix.lower())
+        if mime is None or mime not in IMAGE_MIME_TYPES:
+            return ToolExecutionResult.err(
+                f"render_image requires an image file (png/jpeg/gif/webp); got {mime or 'unknown'}"
+            )
+        data_b64 = base64.b64encode(raw).decode("ascii")
+        filename = fp.name
+        meta: dict[str, object] = {"filename": filename, "path": path}
+        if self._attachment_store is not None:
+            try:
+                stored = self._attachment_store.save(
+                    ctx.thread_id,
+                    data=raw,
+                    mime_type=mime,
+                    filename=filename,
+                )
+                meta["attachment_id"] = stored.attachment_id
+            except Exception as exc:
+                logger.warning("render_image attachment save failed: %s", exc)
+        blocks: list[ContentBlock] = [
+            Image(mime_type=mime, data=data_b64, metadata=meta),
+        ]
+        if caption.strip():
+            blocks.append(Text(text=caption.strip()))
+        return ToolExecutionResult.ok_blocks(blocks)
+
     def _tool_read_file(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
         path = _str_arg(args, "path", "file_path", "file")
         if not path:
@@ -493,10 +587,16 @@ class CoreToolExecutor(ToolExecutorPort):
             )
         offset = _coerce_int(args.get("offset"), 1) or 1
         limit = _coerce_int(args.get("limit"), None)
+        max_lines_cap = None
         if _is_under_spill_path(self._workspace.repo_root, path):
-            limit = min(limit or _SPILL_READ_LIMIT, _SPILL_READ_LIMIT)
+            max_lines_cap = self._spill_read_max_lines
         try:
-            payload = self._workspace.read_file(path, offset=offset, limit=limit)
+            payload = self._workspace.read_file(
+                path,
+                offset=offset,
+                limit=limit,
+                max_lines_cap=max_lines_cap,
+            )
             return (_j(payload), None)
         except WorkspaceError as exc:
             return (None, _workspace_error_envelope(exc))
@@ -584,23 +684,9 @@ class CoreToolExecutor(ToolExecutorPort):
         if not isinstance(context_val, str):
             context_val = str(context_val)
 
-        if self._memory is None:
-            return (
-                None,
-                _built_in_tool_error(
-                    "validation",
-                    "task tool requires memory to be configured for the subagent worker.",
-                    "Enable the memory hook and set paths.memory_storage_uri in monkeybot.yaml.",
-                    {"field": "memory"},
-                ),
-            )
+        memory_uri = self._memory.uri if self._memory is not None else ""
 
-        script = Path(
-            os.environ.get(
-                "MONKEYBOT_SUBAGENT_SCRIPT",
-                str(Path(__file__).resolve().parent / "subagent_worker.py"),
-            )
-        ).resolve()
+        script = resolve_subagent_script()
         if not script.is_file():
             return (
                 None,
@@ -617,7 +703,7 @@ class CoreToolExecutor(ToolExecutorPort):
         envelope = SubagentEnvelope(
             task=task,
             context=context_val,
-            memory_storage_uri=self._memory.uri,
+            memory_storage_uri=memory_uri,
             parent_run_id=parent_label,
             model=ctx.model,
             traceparent=traceparent,
@@ -671,15 +757,28 @@ class CoreToolExecutor(ToolExecutorPort):
                 scratch_dir=scratch,
             )
 
+        agent_root = resolve_agent_project_root()
         child_env = {
             "MONKEYBOT_SUBAGENT_WORKSPACE": str(self._workspace.repo_root),
-            "MEMORY_STORAGE_URI": self._memory.uri,
+            "MONKEYBOT_AGENT_ROOT": str(agent_root),
+            "MEMORY_STORAGE_URI": memory_uri,
             "MONKEYBOT_SUBAGENT_SKILLS_PATH": str(self._skills_path),
             "OTEL_SERVICE_NAME": _SUBAGENT_OTEL_SERVICE_NAME,
         }
-        agent_md = os.environ.get("AGENT_MD")
-        if agent_md:
-            child_env["MONKEYBOT_SUBAGENT_AGENT_MD"] = agent_md
+        subagent_md = resolve_subagent_agent_md_path(agent_root)
+        if subagent_md is not None:
+            child_env["MONKEYBOT_SUBAGENT_AGENT_MD"] = str(subagent_md)
+
+        for env_key, raw_val in (
+            ("MCP_CONFIG", os.environ.get("MCP_CONFIG", "")),
+            ("COMMAND_ALLOWLIST_CONFIG", os.environ.get("COMMAND_ALLOWLIST_CONFIG", "")),
+        ):
+            if raw_val.strip():
+                child_env[env_key] = str(resolve_project_path(raw_val.strip(), agent_root))
+
+        db_raw = os.environ.get("DB_URL", "").strip()
+        if db_raw:
+            child_env["DB_URL"] = normalize_sqlite_db_url(db_raw, agent_root)
 
         timeout_raw = os.environ.get("SUBAGENT_TIMEOUT_SEC", "600").strip()
         try:
@@ -824,7 +923,12 @@ class CoreToolExecutor(ToolExecutorPort):
             return None, _run_command_parse_envelope(exc)
         timeout = _coerce_int(args.get("timeout"), 60) or 60
         try:
-            result = await self._terminal.execute(cmd, argv, timeout=timeout)
+            result = await self._terminal.execute(
+                cmd,
+                argv,
+                timeout=timeout,
+                cwd=self._workspace.repo_root,
+            )
         except SecurityError as exc:
             return None, self._run_command_security_envelope(exc)
         except TimeoutError as exc:

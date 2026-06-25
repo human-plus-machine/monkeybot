@@ -32,9 +32,8 @@ paths:
   db_url: sqlite:///data/monkeybot.db
   mcp_config: ./monkeybot_config/mcp.json
   command_allowlist_config: ./monkeybot_config/command_allowlist.yaml
-  # Optional: agent workspace root for tools + playground file API (env MONKEYBOT_WORKSPACE_ROOT).
-  # If unset and ``./workspace`` exists under cwd, that directory is used (playground layout).
-  # workspace_root: ./workspace
+  # File-tool sandbox (env MONKEYBOT_WORKSPACE_ROOT). Subagents use the same layout.
+  workspace_root: ./workspace
 
 model:
   # gemini | openai | anthropic | vertex-claude | fake
@@ -89,12 +88,21 @@ memory_hook:
 subagent:
   timeout_sec: 600
   max_turns: 25
-  # agent_md: ./monkeybot_config/AGENT.md   # optional override inside subagent (env: MONKEYBOT_SUBAGENT_AGENT_MD)
+  # Same AGENT.md as the parent unless overridden (env: MONKEYBOT_SUBAGENT_AGENT_MD).
+  # Relative paths resolve from the bot project root, not workspace/.
+  # Subagents do not support per-task agent_md — specialize via task/context instead.
+  agent_md: ./monkeybot_config/AGENT.md
 
 tools:
   # List of substrings blocked in tool args (also env MONKEYBOT_TOOL_DENIED_PATTERNS as comma-separated)
   # denied_patterns:
   #   - "rm -rf"
+  # read_max_lines: 50000
+  # read_default_lines: 20000
+  # spill_read_max_lines: 50000
+  # spill_min_chars: 8000
+  # result_budget_fraction: 0.8
+  # result_budget_floor_tokens: 2000
 
 web_search:
   # duckduckgo | tavily | firecrawl | none  (Tavily/Firecrawl need keys in .env)

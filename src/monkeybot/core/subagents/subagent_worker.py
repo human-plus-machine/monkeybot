@@ -28,7 +28,13 @@ from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.persistence.backends import HistoryStore, create_storage_backend
 from monkeybot.core.runtime.events import AgentEvent, Error, event_to_json
 from monkeybot.core.runtime.loop import run as run_loop
-from monkeybot.core.subagents.subagent_proto import SubagentEnvelope
+from monkeybot.core.subagents.subagent_proto import (
+    SubagentEnvelope,
+    normalize_sqlite_db_url,
+    resolve_agent_project_root,
+    resolve_project_path,
+    resolve_subagent_agent_md_path,
+)
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector, ToolInspector
@@ -39,6 +45,11 @@ from monkeybot.web_search import build_backend as _build_web_search_backend
 _BUILTIN_RUN_LOOP = run_loop
 
 logger = logging.getLogger(__name__)
+
+
+def _subagent_memory_uri(envelope: SubagentEnvelope) -> str:
+    """Envelope URI is authoritative; empty means no memory (ignore ambient env)."""
+    return envelope.memory_storage_uri.strip()
 
 
 def init_observability() -> bool:
@@ -217,32 +228,25 @@ async def _async_main() -> None:
     attach_token: object | None = _attach_trace_from_envelope(envelope)
     reset_token: object | None = None
 
+    agent_root = resolve_agent_project_root()
+    dotenv_path = agent_root / ".env"
+    if dotenv_path.is_file():
+        load_dotenv(dotenv_path)
+
     ws = Path(os.environ["MONKEYBOT_SUBAGENT_WORKSPACE"]).resolve()
     os.chdir(ws)
-    load_dotenv()
 
-    mem_uri = (
-        os.environ.get("MEMORY_STORAGE_URI", "").strip() or envelope.memory_storage_uri.strip()
-    )
-    if not mem_uri:
-        print(
-            event_to_json(
-                Error(request_id="", error="subagent_worker: MEMORY_STORAGE_URI is not set")
-            ),
-            flush=True,
-        )
-        raise SystemExit(1)
+    mem_uri = _subagent_memory_uri(envelope)
 
     skills = Path(os.environ["MONKEYBOT_SUBAGENT_SKILLS_PATH"]).resolve()
 
-    agent_raw = os.environ.get("MONKEYBOT_SUBAGENT_AGENT_MD") or os.environ.get(
-        "AGENT_MD", "AGENT.md"
+    agent_md_path = resolve_subagent_agent_md_path(agent_root) or resolve_project_path(
+        "AGENT.md", agent_root
     )
-    agent_md_path = Path(agent_raw)
-    if not agent_md_path.is_absolute():
-        agent_md_path = (ws / agent_md_path).resolve()
 
-    db_url = os.environ.get("DB_URL", "sqlite:///data/monkeybot.db")
+    db_url = normalize_sqlite_db_url(
+        os.environ.get("DB_URL", "sqlite:///data/monkeybot.db"), agent_root
+    )
     backend = create_storage_backend(db_url)
     mcp: MCPClient | None = None
     executor: CoreToolExecutor | None = None
@@ -251,7 +255,9 @@ async def _async_main() -> None:
         await backend.open()
 
         mcp = MCPClient()
-        mcp_config = Path(os.environ.get("MCP_CONFIG", "monkeybot_config/mcp.json"))
+        mcp_config = resolve_project_path(
+            os.environ.get("MCP_CONFIG", "monkeybot_config/mcp.json"), agent_root
+        )
         strict = os.environ.get("MCP_STRICT_LOAD", "").strip().lower() in ("1", "true", "yes")
         try:
             await mcp.load_from_config(mcp_config, raise_on_error=strict)
@@ -261,8 +267,9 @@ async def _async_main() -> None:
         inspectors: list[ToolInspector] = []
         run_allow_cmds: list[str] | None = None
         run_allow_paths: list[str] | None = None
-        tiers_path = Path(
-            os.environ.get("COMMAND_ALLOWLIST_CONFIG", "monkeybot_config/command_allowlist.yaml")
+        tiers_path = resolve_project_path(
+            os.environ.get("COMMAND_ALLOWLIST_CONFIG", "monkeybot_config/command_allowlist.yaml"),
+            agent_root,
         )
         try:
             tier_insp = CommandTierInspector(tiers_path)
@@ -303,13 +310,15 @@ async def _async_main() -> None:
 
         extra_tools = [_ws_tool] if _ws_tool is not None else []
 
-        storage = create_workspace_storage(mem_uri)
-        memory = MemorySubsystem(
-            storage=storage,
-            provider=provider,
-            model=envelope.model,
-            memory_uri=mem_uri,
-        )
+        memory: MemorySubsystem | None = None
+        if mem_uri:
+            storage = create_workspace_storage(mem_uri)
+            memory = MemorySubsystem(
+                storage=storage,
+                provider=provider,
+                model=envelope.model,
+                memory_uri=mem_uri,
+            )
 
         ctx = await build_context(
             thread_id,

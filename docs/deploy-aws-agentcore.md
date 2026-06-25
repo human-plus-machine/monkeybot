@@ -66,7 +66,7 @@ Minimum for bootstrap examples:
 | `DB_URL` | SQLite or Postgres history |
 | `AGENT_MD_PATH` | Path to `AGENT.md` |
 | `SKILLS_PATH` | Skills root (each subfolder needs `SKILL.md`) |
-| `WORKSPACE_ROOT` | Workspace for `read_file` / `run_command` cwd |
+| `WORKSPACE_ROOT` | Workspace for `read_file` / `run_command` cwd (alias: `MONKEYBOT_WORKSPACE_ROOT`; handlers use `resolve_agent_workspace_root()`) |
 | `MODEL_PROVIDER` | e.g. `aws_bedrock` with `monkeybot[bedrock]` |
 | `MODEL_NAME` | Bedrock model id |
 | `COMMAND_ALLOWLIST_CONFIG` | Optional; path to `command_allowlist.yaml` |

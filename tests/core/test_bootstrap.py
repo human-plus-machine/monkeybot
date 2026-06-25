@@ -156,6 +156,15 @@ async def test_close_await_disconnect_all() -> None:
     mock_disconnect.assert_awaited_once()
 
 
+def test_env_context_window_tokens_reads_model_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    from monkeybot.core.bootstrap import _env_context_window_tokens
+
+    monkeypatch.setenv("MODEL_CONTEXT_WINDOW", "750000")
+    assert _env_context_window_tokens() == 750_000
+    monkeypatch.delenv("MODEL_CONTEXT_WINDOW", raising=False)
+    assert _env_context_window_tokens() == 200_000
+
+
 @pytest.mark.asyncio
 async def test_provider_override_bypasses_get_provider_config() -> None:
     fake = _fake()

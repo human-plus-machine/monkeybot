@@ -23,7 +23,8 @@ _RUNTIME_ENV_APPLIED = False
 # YAML gcp/anthropic_vertex project ids map here; prefer GOOGLE_CLOUD_PROJECT when set in .env.
 _GCP_PROJECT_ENV_KEYS = frozenset({"VERTEX_AI_PROJECT_ID", "ANTHROPIC_VERTEX_PROJECT_ID"})
 
-_ENV_MAP: dict[tuple[str, str], str] = {
+# Public alias for CLI / validation (stable API).
+ENV_MAP: dict[tuple[str, str], str] = {
     ("runtime", "log_level"): "LOG_LEVEL",
     ("runtime", "port"): "PORT",
     ("runtime", "gateway_port"): "GATEWAY_PORT",
@@ -40,6 +41,7 @@ _ENV_MAP: dict[tuple[str, str], str] = {
     ("model", "temperature"): "MODEL_TEMPERATURE",
     ("model", "max_tokens"): "MODEL_MAX_TOKENS",
     ("model", "thinking_budget"): "MODEL_THINKING_BUDGET",
+    ("model", "enable_caching"): "MODEL_ENABLE_CACHING",
     ("model", "context_window"): "MODEL_CONTEXT_WINDOW",
     ("model", "summarization_model"): "CONTEXT_SUMMARIZATION_MODEL",
     ("model", "max_turns"): "MAX_TURNS",
@@ -64,6 +66,12 @@ _ENV_MAP: dict[tuple[str, str], str] = {
     ("subagent", "max_turns"): "SUBAGENT_MAX_TURNS",
     ("subagent", "agent_md"): "MONKEYBOT_SUBAGENT_AGENT_MD",
     ("tools", "denied_patterns"): "MONKEYBOT_TOOL_DENIED_PATTERNS",
+    ("tools", "read_max_lines"): "MONKEYBOT_READ_MAX_LINES",
+    ("tools", "read_default_lines"): "MONKEYBOT_READ_DEFAULT_LINES",
+    ("tools", "spill_read_max_lines"): "MONKEYBOT_SPILL_READ_MAX_LINES",
+    ("tools", "spill_min_chars"): "MONKEYBOT_SPILL_MIN_CHARS",
+    ("tools", "result_budget_fraction"): "MONKEYBOT_RESULT_BUDGET_FRACTION",
+    ("tools", "result_budget_floor_tokens"): "MONKEYBOT_RESULT_BUDGET_FLOOR_TOKENS",
     ("web_search", "backend"): "WEB_SEARCH_BACKEND",
     ("web_search", "max_results"): "WEB_SEARCH_MAX_RESULTS",
     ("sandbox", "enabled"): "SANDBOX_ENABLED",
@@ -72,6 +80,9 @@ _ENV_MAP: dict[tuple[str, str], str] = {
     ("sandbox", "ttl_seconds"): "SANDBOX_TTL_SECONDS",
     ("fake_provider", "events_json"): "MONKEYBOT_FAKE_PROVIDER_EVENTS",
 }
+
+# Backward-compatible alias for internal/tests.
+_ENV_MAP = ENV_MAP
 
 
 def reset_runtime_env_state_for_tests() -> None:
@@ -115,7 +126,7 @@ def _denied_patterns_to_env(value: Any) -> str | None:
 
 def _flatten_config(data: Mapping[str, Any]) -> dict[str, str]:
     out: dict[str, str] = {}
-    for (section, key), env_name in _ENV_MAP.items():
+    for (section, key), env_name in ENV_MAP.items():
         sec = data.get(section)
         if not isinstance(sec, dict):
             continue
