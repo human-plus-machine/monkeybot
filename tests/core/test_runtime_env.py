@@ -176,6 +176,39 @@ def test_legacy_memory_path_still_sets_memory_path_env(
     assert os.environ.get("MEMORY_STORAGE_URI") is None
 
 
+def test_tools_budget_env_keys(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    (cfg_dir / "monkeybot.yaml").write_text(
+        "tools:\n"
+        "  read_max_lines: 4000\n"
+        "  read_default_lines: 1500\n"
+        "  spill_read_max_lines: 25000\n"
+        "  spill_min_chars: 9000\n"
+        "  result_budget_fraction: 0.75\n"
+        "  result_budget_floor_tokens: 1500\n",
+        encoding="utf-8",
+    )
+    for key in (
+        "MONKEYBOT_READ_MAX_LINES",
+        "MONKEYBOT_READ_DEFAULT_LINES",
+        "MONKEYBOT_SPILL_READ_MAX_LINES",
+        "MONKEYBOT_SPILL_MIN_CHARS",
+        "MONKEYBOT_RESULT_BUDGET_FRACTION",
+        "MONKEYBOT_RESULT_BUDGET_FLOOR_TOKENS",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    runtime_env.reset_runtime_env_state_for_tests()
+    runtime_env.apply_monkeybot_runtime_env()
+    assert os.environ.get("MONKEYBOT_READ_MAX_LINES") == "4000"
+    assert os.environ.get("MONKEYBOT_READ_DEFAULT_LINES") == "1500"
+    assert os.environ.get("MONKEYBOT_SPILL_READ_MAX_LINES") == "25000"
+    assert os.environ.get("MONKEYBOT_SPILL_MIN_CHARS") == "9000"
+    assert os.environ.get("MONKEYBOT_RESULT_BUDGET_FRACTION") == "0.75"
+    assert os.environ.get("MONKEYBOT_RESULT_BUDGET_FLOOR_TOKENS") == "1500"
+
+
 def test_denied_patterns_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     cfg_dir = tmp_path / "monkeybot_config"

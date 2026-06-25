@@ -35,6 +35,7 @@ from monkeybot.core.runtime.events import (
 from monkeybot.core.runtime.loop import ToolExecutorPort
 from monkeybot.core.subagents.subagent_proto import SubagentEnvelope, spawn_subagent
 from monkeybot.core.tools.sandbox_executor import SandboxConfig, SandboxExecutor
+from monkeybot.core.tools.spill_inventory import spill_inventory_note, spill_min_chars_from_env
 from monkeybot.core.tools.terminal import (
     ALLOWED_COMMANDS,
     ALLOWED_PATHS,
@@ -42,7 +43,11 @@ from monkeybot.core.tools.terminal import (
     TerminalExecutor,
 )
 from monkeybot.core.tools.types import ToolExecutionResult
-from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService
+from monkeybot.core.tools.workspace_service import (
+    WorkspaceError,
+    WorkspaceFileService,
+    WorkspaceSettings,
+)
 from monkeybot.core.types.content_blocks import File, Image
 
 logger = logging.getLogger(__name__)
@@ -52,8 +57,6 @@ _SUBAGENT_OTEL_SERVICE_NAME = "monkeybot-subagent"
 _PARENT_CANCEL_TASK_ERR = "task: cancelled (parent)"
 
 _SPILL_DIR = ".monkeybot/spill"
-_SPILL_MAX_CHARS = 20_000
-_SPILL_READ_LIMIT = 500
 
 _CORE_TOOL_NAMES = frozenset(
     {
@@ -68,6 +71,8 @@ _CORE_TOOL_NAMES = frozenset(
         "remove_mcp_server",
     }
 )
+
+_SPILL_SKIP_TOOLS = frozenset({"read_file", "read_attachment"})
 
 
 def _tool_handler_kind(name: str, *, mcp: MCPClientPort, extra_tools: dict[str, CustomTool]) -> str:
@@ -85,23 +90,38 @@ def _safe_spill_filename(call_id: str) -> str:
     return safe or "call"
 
 
-def _write_spill_and_cap(
+def _int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def workspace_settings_from_env() -> WorkspaceSettings:
+    """Build workspace read limits from harness env (yaml-backed via runtime_env)."""
+    return WorkspaceSettings(
+        WORKSPACE_READ_MAX_LINES=_int_env("MONKEYBOT_READ_MAX_LINES", 5000),
+        WORKSPACE_READ_DEFAULT_LINES=_int_env("MONKEYBOT_READ_DEFAULT_LINES", 2000),
+        WORKSPACE_SPILL_READ_MAX_LINES=_int_env("MONKEYBOT_SPILL_READ_MAX_LINES", 50_000),
+    )
+
+
+def _write_spill_with_inventory(
     text: str,
     workspace_root: Path,
     thread_id: str,
     call_id: str,
 ) -> str:
-    """Write full ``text`` to spill file; return capped body with path hint."""
+    """Write full ``text`` to spill file; return full body plus inventory note."""
     rel = f"{_SPILL_DIR}/{thread_id}/{_safe_spill_filename(call_id)}.txt"
     out_path = (Path(workspace_root) / rel).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(text, encoding="utf-8")
-    prefix = text[:_SPILL_MAX_CHARS]
-    note = (
-        f"\n[Result truncated — {len(text)} total chars. Full output at: {rel} — "
-        "use read_file with offset/limit to page through it.]"
-    )
-    return prefix + note
+    note = spill_inventory_note(text, rel)
+    return f"{text}\n{note}"
 
 
 def _is_under_spill_path(workspace_root: Path, rel_path: str) -> bool:
@@ -278,7 +298,10 @@ class CoreToolExecutor(ToolExecutorPort):
         attachment_catalog: SessionAttachmentCatalog | None = None,
         run_store: RunStore | None = None,
     ) -> None:
-        self._workspace = WorkspaceFileService(Path(workspace_root).resolve())
+        ws_settings = workspace_settings_from_env()
+        self._workspace = WorkspaceFileService(Path(workspace_root).resolve(), settings=ws_settings)
+        self._spill_read_max_lines = ws_settings.WORKSPACE_SPILL_READ_MAX_LINES
+        self._spill_min_chars = spill_min_chars_from_env()
         self._memory = memory
         self._skills_path = Path(skills_path).resolve()
         self._mcp = mcp
@@ -442,8 +465,14 @@ class CoreToolExecutor(ToolExecutorPort):
                 {"tool": name},
             )
 
-        if err_text is None and result_text is not None and len(result_text) > _SPILL_MAX_CHARS:
-            result_text = _write_spill_and_cap(
+        if (
+            name not in _SPILL_SKIP_TOOLS
+            and err_text is None
+            and result_text is not None
+            and self._spill_min_chars > 0
+            and len(result_text) >= self._spill_min_chars
+        ):
+            result_text = _write_spill_with_inventory(
                 result_text, self._workspace.repo_root, ctx.thread_id, call.call_id
             )
         if err_text is not None:
@@ -493,10 +522,16 @@ class CoreToolExecutor(ToolExecutorPort):
             )
         offset = _coerce_int(args.get("offset"), 1) or 1
         limit = _coerce_int(args.get("limit"), None)
+        max_lines_cap = None
         if _is_under_spill_path(self._workspace.repo_root, path):
-            limit = min(limit or _SPILL_READ_LIMIT, _SPILL_READ_LIMIT)
+            max_lines_cap = self._spill_read_max_lines
         try:
-            payload = self._workspace.read_file(path, offset=offset, limit=limit)
+            payload = self._workspace.read_file(
+                path,
+                offset=offset,
+                limit=limit,
+                max_lines_cap=max_lines_cap,
+            )
             return (_j(payload), None)
         except WorkspaceError as exc:
             return (None, _workspace_error_envelope(exc))

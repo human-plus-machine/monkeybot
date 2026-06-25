@@ -76,6 +76,14 @@ def _resolve_run_command_allowlists() -> tuple[list[str] | None, list[str] | Non
         return None, None
 
 
+def _env_context_window_tokens() -> int:
+    cap_raw = os.environ.get("MODEL_CONTEXT_WINDOW", "200000").strip()
+    try:
+        return max(1, int(cap_raw))
+    except ValueError:
+        return 200_000
+
+
 async def create_harness_deps(
     db_url: str,
     memory_storage_uri: str | None = None,
@@ -178,6 +186,7 @@ async def run_pattern_bc_turn(
         include_task_tool=False,
         sse_bus=None,
         workspace_root=workspace_root,
+        context_window_tokens=_env_context_window_tokens(),
     )
 
     run_cmds, run_paths = _resolve_run_command_allowlists()

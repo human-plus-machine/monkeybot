@@ -447,15 +447,16 @@ async def test_task_tool_parent_cancel_stops_hanging_subagent(tmp_path: Path, mo
 
 
 @pytest.mark.asyncio
-async def test_write_spill_and_cap_writes_full_payload(tmp_path: Path) -> None:
-    from monkeybot.core.tools.core_tool_executor import _write_spill_and_cap
+async def test_write_spill_with_inventory_writes_full_payload(tmp_path: Path) -> None:
+    from monkeybot.core.tools.core_tool_executor import _write_spill_with_inventory
 
     body = "x" * 25_000
-    out = _write_spill_and_cap(body, tmp_path, "th1", "call-1")
+    out = _write_spill_with_inventory(body, tmp_path, "th1", "call-1")
     spill = tmp_path / ".monkeybot" / "spill" / "th1" / "call-1.txt"
     assert spill.read_text(encoding="utf-8") == body
-    assert len(out) < len(body)
-    assert "Full output at:" in out
+    assert len(out) > len(body)
+    assert "Spill inventory" in out
+    assert "25000 total chars" in out
     assert ".monkeybot/spill/th1/call-1.txt" in out
 
 
@@ -478,7 +479,8 @@ async def test_list_skills_spills_large_json(tmp_path: Path) -> None:
     ctx = _ctx(skills=big_skills)
     out, err = unwrap_tool_execution_result(await ex.execute(call=ToolCall(call_id="c-spill", name="list_skills", args={}), ctx=ctx))
     assert err is None and out is not None
-    assert len(out) <= 20_500
+    assert len(out) > 20_000
+    assert "Spill inventory" in out
     spill = root / ".monkeybot" / "spill" / "t" / "c-spill.txt"
     assert spill.is_file()
     raw = spill.read_text(encoding="utf-8")
@@ -522,7 +524,7 @@ async def test_read_file_spill_path_caps_limit(tmp_path: Path) -> None:
     assert err is None and out is not None
     payload = json.loads(out)
     assert payload["ok"] is True
-    assert payload["end_line"] - payload["start_line"] + 1 <= 500
+    assert payload["end_line"] - payload["start_line"] + 1 == 600
 
 
 @pytest.mark.asyncio
@@ -543,7 +545,7 @@ async def test_read_file_non_spill_uses_workspace_defaults(tmp_path: Path) -> No
     assert err is None and out is not None
     payload = json.loads(out)
     assert payload["ok"] is True
-    assert payload["end_line"] - payload["start_line"] + 1 <= 200
+    assert payload["end_line"] - payload["start_line"] + 1 <= 2000
 
 
 # Removed in story-3-providers-and-snapshots: helper deleted

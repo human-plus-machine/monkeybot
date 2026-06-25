@@ -13,6 +13,7 @@ from monkeybot.providers.claude import ClaudeProvider
 from monkeybot.providers.gemini import GeminiProvider
 from monkeybot.providers.huggingface import HuggingFaceProvider
 from monkeybot.providers.openai import OpenAIProvider
+from monkeybot.providers.sampling import resolve_model_sampling
 from monkeybot.providers.vertex_claude import VertexClaudeProvider
 
 logger = logging.getLogger(__name__)
@@ -114,8 +115,7 @@ def get_provider_config(
             "or use the gateway fake provider path."
         )
     resolved_model = str(model_name or os.getenv("MODEL_NAME") or "gemini-2.5-flash")
-    temperature = temperature if temperature is not None else float(os.getenv("MODEL_TEMPERATURE", "0.7"))
-    max_tokens = max_tokens if max_tokens is not None else int(os.getenv("MODEL_MAX_TOKENS", "60000"))
+    sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens)
     thinking_budget = (
         thinking_budget if thinking_budget is not None else int(os.getenv("MODEL_THINKING_BUDGET", "-1"))
     )
@@ -124,17 +124,31 @@ def get_provider_config(
     if provider_key == "google_vertexai":
         return ProviderConfig(
             GeminiProvider(
-                temperature=temperature,
-                max_output_tokens=max_tokens,
+                temperature=sampling.temperature,
+                max_tokens=sampling.max_tokens,
                 thinking_budget=thinking_budget,
                 cache_enabled=resolved_cache,
             ),
             resolved_model,
         )
     if provider_key == "openai":
-        return ProviderConfig(OpenAIProvider(cache_enabled=resolved_cache), resolved_model)
+        return ProviderConfig(
+            OpenAIProvider(
+                temperature=sampling.temperature,
+                max_tokens=sampling.max_tokens,
+                cache_enabled=resolved_cache,
+            ),
+            resolved_model,
+        )
     if provider_key == "anthropic":
-        return ProviderConfig(ClaudeProvider(cache_enabled=resolved_cache), resolved_model)
+        return ProviderConfig(
+            ClaudeProvider(
+                temperature=sampling.temperature,
+                max_tokens=sampling.max_tokens,
+                cache_enabled=resolved_cache,
+            ),
+            resolved_model,
+        )
     if provider_key == "vertex_anthropic":
         project = _resolve_gcp_project_id()
         if not project:
@@ -150,17 +164,35 @@ def get_provider_config(
             )
         region = (os.getenv("ANTHROPIC_VERTEX_REGION") or "us-east5").strip() or "us-east5"
         return ProviderConfig(
-            VertexClaudeProvider(project_id=project, region=region, cache_enabled=resolved_cache),
+            VertexClaudeProvider(
+                project_id=project,
+                region=region,
+                temperature=sampling.temperature,
+                max_tokens=sampling.max_tokens,
+                cache_enabled=resolved_cache,
+            ),
             resolved_model,
         )
     if provider_key == "huggingface":
-        return ProviderConfig(HuggingFaceProvider(cache_enabled=resolved_cache), resolved_model)
+        return ProviderConfig(
+            HuggingFaceProvider(
+                temperature=sampling.temperature,
+                max_tokens=sampling.max_tokens,
+                cache_enabled=resolved_cache,
+            ),
+            resolved_model,
+        )
     if provider_key == "aws_bedrock":
         from monkeybot.providers.bedrock import BedrockClaudeProvider  # noqa: PLC0415
 
         aws_region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
         return ProviderConfig(
-            BedrockClaudeProvider(aws_region=aws_region, cache_enabled=resolved_cache),
+            BedrockClaudeProvider(
+                aws_region=aws_region,
+                temperature=sampling.temperature,
+                max_tokens=sampling.max_tokens,
+                cache_enabled=resolved_cache,
+            ),
             resolved_model,
         )
     raise ValueError(

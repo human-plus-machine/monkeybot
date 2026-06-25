@@ -64,8 +64,9 @@ class GrepResult(TypedDict):
 class WorkspaceSettings:
     """Defaults for workspace file limits (override via env in callers or pass explicit settings)."""
 
-    WORKSPACE_READ_MAX_LINES: int = 500
-    WORKSPACE_READ_DEFAULT_LINES: int = 200
+    WORKSPACE_READ_MAX_LINES: int = 50000
+    WORKSPACE_READ_DEFAULT_LINES: int = 20000
+    WORKSPACE_SPILL_READ_MAX_LINES: int = 50_000
     WORKSPACE_WRITE_MAX_BYTES: int = 8_000_000
     WORKSPACE_GLOB_MAX_PATHS: int = 2000
     WORKSPACE_GLOB_TIMEOUT_SEC: float = 20.0
@@ -95,6 +96,7 @@ def _coerce_workspace_settings(settings: object | None) -> WorkspaceSettings:
     for field in (
         "WORKSPACE_READ_MAX_LINES",
         "WORKSPACE_READ_DEFAULT_LINES",
+        "WORKSPACE_SPILL_READ_MAX_LINES",
         "WORKSPACE_WRITE_MAX_BYTES",
         "WORKSPACE_GLOB_MAX_PATHS",
         "WORKSPACE_GLOB_TIMEOUT_SEC",
@@ -226,10 +228,15 @@ class WorkspaceFileService:
         *,
         offset: int = 1,
         limit: int | None = None,
+        max_lines_cap: int | None = None,
     ) -> ReadFileResult:
         if offset < 1:
             raise WorkspaceError("offset must be >= 1", code="invalid_offset")
-        max_lines = self._settings.WORKSPACE_READ_MAX_LINES
+        max_lines = (
+            max_lines_cap
+            if max_lines_cap is not None
+            else self._settings.WORKSPACE_READ_MAX_LINES
+        )
         if limit is None:
             limit = self._settings.WORKSPACE_READ_DEFAULT_LINES
         if limit < 1 or limit > max_lines:

@@ -12,8 +12,8 @@ Configuration (environment variables or ``monkeybot.yaml``):
 - ``HF_BASE_URL`` — OpenAI-compat base host (default:
   ``https://router.huggingface.co/hf-inference``; append ``/v1`` when missing)
 - ``MODEL_NAME`` — model id passed to the API (e.g. ``meta-llama/Llama-3.1-8B-Instruct``)
-- ``MODEL_TEMPERATURE`` — sampling temperature (default: ``0.7``)
-- ``MODEL_MAX_TOKENS`` — max output tokens (default: ``4096``)
+- ``MODEL_TEMPERATURE`` — sampling temperature (default: ``0.7``; set via ``monkeybot.yaml`` / constructor)
+- ``MODEL_MAX_TOKENS`` — max output tokens (default: ``60000``; set via ``monkeybot.yaml`` / constructor)
 
 Install the required extra::
 
@@ -44,6 +44,7 @@ from monkeybot.providers._openai_compat import (
     openai_tools,
     openai_tools_token_count,
 )
+from monkeybot.providers.sampling import resolve_model_sampling
 
 _log = logging.getLogger(__name__)
 
@@ -67,7 +68,13 @@ class HuggingFaceProvider:
     def supports_streaming(self) -> bool:
         return True
 
-    def __init__(self, *, cache_enabled: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        cache_enabled: bool = True,
+    ) -> None:
         token = os.environ.get("HF_TOKEN", "")
         if not token:
             raise ValueError(
@@ -78,6 +85,9 @@ class HuggingFaceProvider:
         self._endpoint_url = (os.environ.get("HF_ENDPOINT_URL") or "").rstrip("/")
         self._host = (os.environ.get("HF_BASE_URL") or _DEFAULT_HOST).rstrip("/")
         self._cache_enabled = cache_enabled
+        sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens)
+        self._temperature = sampling.temperature
+        self._max_tokens = sampling.max_tokens
 
     def _resolve_base_url(self, model: str) -> str:
         """Return the OpenAI-compat base URL for ``model``.
@@ -127,8 +137,6 @@ class HuggingFaceProvider:
         from openai import AsyncOpenAI  # noqa: PLC0415
 
         msgs = list(messages)
-        temperature = float(os.environ.get("MODEL_TEMPERATURE", "0.7"))
-        max_tokens = int(os.environ.get("MODEL_MAX_TOKENS", "4096"))
 
         system, oai_messages = messages_to_openai(msgs)
         if system:
@@ -139,8 +147,8 @@ class HuggingFaceProvider:
             "model": model,
             "messages": oai_messages,
             "stream": True,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
+            "temperature": self._temperature,
+            "max_tokens": self._max_tokens,
         }
         if tools:
             kwargs["tools"] = openai_tools(tools)

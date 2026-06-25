@@ -22,6 +22,7 @@ from monkeybot.providers._openai_compat import (
     openai_tools,
     openai_tools_token_count,
 )
+from monkeybot.providers.sampling import resolve_model_sampling
 
 # Re-export private names that existing tests import directly from this module.
 _messages_to_openai = messages_to_openai
@@ -53,10 +54,19 @@ class OpenAIProvider:
     def supports_streaming(self) -> bool:
         return True
 
-    def __init__(self, *, cache_enabled: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        cache_enabled: bool = True,
+    ) -> None:
         if not os.environ.get("OPENAI_API_KEY"):
             raise ValueError("OPENAI_API_KEY is not set")
         self._cache_enabled = cache_enabled
+        sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens)
+        self._temperature = sampling.temperature
+        self._max_tokens = sampling.max_tokens
 
     async def count_input_tokens(
         self,
@@ -88,8 +98,6 @@ class OpenAIProvider:
         from openai import AsyncOpenAI  # noqa: PLC0415
 
         msgs = list(messages)
-        temperature = float(os.environ.get("MODEL_TEMPERATURE", "0.7"))
-        max_tokens = int(os.environ.get("MODEL_MAX_TOKENS", "4096"))
 
         system, oai_messages = messages_to_openai(msgs)
         if system:
@@ -100,8 +108,8 @@ class OpenAIProvider:
             "model": model,
             "messages": oai_messages,
             "stream": True,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
+            "temperature": self._temperature,
+            "max_tokens": self._max_tokens,
         }
         if tools:
             kwargs["tools"] = openai_tools(tools)

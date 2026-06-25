@@ -23,6 +23,7 @@ from monkeybot.providers._utils import (
     build_cached_system_blocks,
     mark_last_tool_cached,
 )
+from monkeybot.providers.sampling import resolve_model_sampling
 
 _log = logging.getLogger(__name__)
 
@@ -38,10 +39,19 @@ class ClaudeProvider:
     def supports_streaming(self) -> bool:
         return True
 
-    def __init__(self, *, cache_enabled: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        cache_enabled: bool = True,
+    ) -> None:
         if not os.environ.get("ANTHROPIC_API_KEY"):
             raise ValueError("ANTHROPIC_API_KEY is not set")
         self._cache_enabled = cache_enabled
+        sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens)
+        self._temperature = sampling.temperature
+        self._max_tokens = sampling.max_tokens
 
     def _convert_tools(self, tools: Sequence[ToolDef]) -> list[dict[str, Any]]:
         return [
@@ -120,7 +130,8 @@ class ClaudeProvider:
                 system=system_param,
                 messages=cast(Any, converted_messages),
                 tools=tools_param,
-                max_tokens=4096,
+                max_tokens=self._max_tokens,
+                temperature=self._temperature,
             ) as stream:
                 async for event in stream:
                     match event.type:

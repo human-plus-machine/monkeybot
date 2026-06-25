@@ -62,6 +62,8 @@ class TestVertexAnthropicProvider:
             mock_cls.assert_called_once_with(
                 project_id="test-project",
                 region="us-central1",
+                temperature=0.7,
+                max_tokens=60_000,
                 cache_enabled=True,
             )
 

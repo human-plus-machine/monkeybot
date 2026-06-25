@@ -157,6 +157,24 @@ class FakeProvider:
         return fake_provider_prompt_tokens(messages, tools)
 
 
+class CountingFakeProvider(FakeProvider):
+    """FakeProvider that records messages passed to count_input_tokens."""
+
+    def __init__(self, scripted: list[list[object]]) -> None:
+        super().__init__(scripted)
+        self.count_snapshots: list[list[Message]] = []
+
+    async def count_input_tokens(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[ToolDef],
+        *,
+        model: str,
+    ) -> int:
+        self.count_snapshots.append(list(messages))
+        return await super().count_input_tokens(messages, tools, model=model)
+
+
 def _tool_result(
     result: ToolExecutionResult | tuple[str | None, str | None],
 ) -> ToolExecutionResult:
@@ -1580,4 +1598,38 @@ async def test_loop_confirm_timeout_synthetic_response() -> None:
         for row in hist.rows
         if row.role == "user"
         for b in row.content
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_budget_recounts_after_assistant_append() -> None:
+    """Budgeter seeds from a post-assistant provider count, not pre-stream preflight."""
+    prov = CountingFakeProvider(
+        [
+            [
+                ToolCall(call_id="c1", name="run_command", args={"command": "echo hi"}),
+                Done(),
+            ],
+            [TextDelta(text="done"), Done()],
+        ]
+    )
+    hist = FakeHistory()
+    ctx = _ctx()
+    async for _ in run(
+        "u",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(("tool-output", None)),
+        max_turns=3,
+    ):
+        pass
+    assert len(prov.count_snapshots) >= 2
+    budget_messages = prov.count_snapshots[1]
+    history_msgs = [m for m in budget_messages if m.role != "system"]
+    assert any(
+        m.role == "assistant"
+        and any(isinstance(b, ToolRequest) for b in m.content)
+        for m in history_msgs
     )

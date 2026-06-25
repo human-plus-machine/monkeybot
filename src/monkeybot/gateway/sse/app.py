@@ -254,7 +254,7 @@ def _resolve_provider() -> Provider:
 def _resolve_curator_provider(main_provider: Provider) -> Provider:
     """Dedicated provider for context curation with thinking and token cap overrides.
 
-    Uses a small ``max_output_tokens`` (the curator only needs ~50 JSON tokens) and
+    Uses a small ``max_tokens`` (the curator only needs ~50 JSON tokens) and
     ``thinking_budget=0`` to explicitly disable extended thinking, which can stall
     preview models for 10s+ on a short JSON-only completion.
 
@@ -264,7 +264,7 @@ def _resolve_curator_provider(main_provider: Provider) -> Provider:
     mode = normalize_model_provider(os.environ.get("MODEL_PROVIDER", "google_vertexai"))
     if mode in ("fake", "vertex_anthropic"):
         return main_provider
-    return GeminiProvider(thinking_budget=0, max_output_tokens=1024)
+    return GeminiProvider(thinking_budget=0, max_tokens=1024)
 
 
 class GatewayLoopPort:
