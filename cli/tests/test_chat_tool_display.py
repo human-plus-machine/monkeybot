@@ -36,6 +36,17 @@ def test_tool_display_includes_command() -> None:
     )
 
 
+def test_task_tool_display_truncates_long_task_hint() -> None:
+    long_task = "Review " + "x" * 80
+    args = {"task": long_task}
+    display = _tool_display("task", "task", args)
+    assert display.startswith("subagent — ")
+    hint = display.removeprefix("subagent — ")
+    assert len(hint) == 61  # 60 chars + ellipsis
+    assert hint.endswith("…")
+    assert _tool_spinner_prefix("task", "task", args).startswith("spawning subagent — ")
+
+
 def test_task_tool_display_uses_subagent_label() -> None:
     args = {"task": "Review the open PR for security issues"}
     assert _tool_display("task", "task", args) == (
@@ -110,7 +121,7 @@ def test_verbose_prints_full_tool_result(capsys: pytest.CaptureFixture[str]) -> 
     assert long_result in out
 
 
-def test_verbose_truncates_subagent_result(capsys: pytest.CaptureFixture[str]) -> None:
+def test_verbose_prints_full_subagent_result(capsys: pytest.CaptureFixture[str]) -> None:
     activity = _TurnActivity()
     long_result = "z" * 120
 
@@ -120,5 +131,4 @@ def test_verbose_truncates_subagent_result(capsys: pytest.CaptureFixture[str]) -
 
     _run(_run_flow())
     out = capsys.readouterr().out
-    assert long_result not in out
-    assert ("z" * 60 + "…") in out
+    assert long_result in out
