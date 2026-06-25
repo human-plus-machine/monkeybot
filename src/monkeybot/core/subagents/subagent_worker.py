@@ -240,9 +240,14 @@ async def _async_main() -> None:
 
     skills = Path(os.environ["MONKEYBOT_SUBAGENT_SKILLS_PATH"]).resolve()
 
-    agent_md_path = resolve_subagent_agent_md_path(agent_root) or resolve_project_path(
-        "AGENT.md", agent_root
-    )
+    if envelope.agent_md:
+        agent_md_path = Path(envelope.agent_md).expanduser().resolve()
+        if not agent_md_path.is_file():
+            agent_md_path = resolve_project_path(envelope.agent_md, agent_root)
+    else:
+        agent_md_path = resolve_subagent_agent_md_path(agent_root) or resolve_project_path(
+            "AGENT.md", agent_root
+        )
 
     db_url = normalize_sqlite_db_url(
         os.environ.get("DB_URL", "sqlite:///data/monkeybot.db"), agent_root
@@ -370,6 +375,8 @@ async def _async_main() -> None:
                 thread_id=thread_id,
                 request_id=request_id,
                 parent_run_id=envelope.parent_run_id,
+                subagent_type=envelope.subagent_type,
+                agent_md=envelope.agent_md,
             ):
                 async for evt in _stream_run_loop_events(
                     body,

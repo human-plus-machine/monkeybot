@@ -82,6 +82,8 @@ def _ctx() -> TurnContext:
 
 
 def _make_executor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> CoreToolExecutor:
+    (tmp_path / "AGENT.md").write_text("# test agent\n", encoding="utf-8")
+    monkeypatch.setenv("MONKEYBOT_AGENT_ROOT", str(tmp_path))
     mem = tmp_path / "mem"
     mem.mkdir()
     skills = tmp_path / "skills"

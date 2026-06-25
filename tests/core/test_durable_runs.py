@@ -81,6 +81,20 @@ def test_durable_subagent_envelope_empty_memory_uri_roundtrip() -> None:
     assert restored.memory_storage_uri == ""
 
 
+def test_durable_subagent_envelope_persona_roundtrip() -> None:
+    env = SubagentEnvelope(
+        task="t",
+        context="",
+        memory_storage_uri="local:///mem",
+        parent_run_id="p1",
+        agent_md="/tmp/agents/analyst.md",
+        subagent_type="analyst",
+    )
+    restored = SubagentEnvelope.from_json(env.to_json())
+    assert restored.agent_md == "/tmp/agents/analyst.md"
+    assert restored.subagent_type == "analyst"
+
+
 @pytest.mark.asyncio
 async def test_get_run_round_trip(durable_conn) -> None:
     store = SQLiteRunStore(durable_conn)

@@ -17,7 +17,7 @@ from monkeybot.core.runtime.events import TurnComplete, UsageTotals
 from monkeybot.core.subagents import worker_pool
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.tools.types import unwrap_tool_execution_result
-from tests.core.test_core_tool_executor import _NoMCP, _ctx, _mem_sub
+from tests.core.test_core_tool_executor import _NoMCP, _ctx, _mem_sub, _stub_agent_md_for_tasks
 
 
 @pytest_asyncio.fixture
@@ -56,7 +56,16 @@ async def test_worker_pool_executes_claimed_run_once(
 
     executed: list[str] = []
 
-    async def _fake_spawn(script: str, envelope, *, scratch_dir: Path, subprocess_exec=None):
+    async def _fake_spawn(
+        script: str,
+        envelope,
+        *,
+        scratch_dir: Path,
+        subprocess_exec=None,
+        on_event=None,
+        extra_env=None,
+    ):
+        del script, scratch_dir, subprocess_exec, on_event, extra_env
         executed.append(envelope.task)
         yield TurnComplete(request_id="req-1", usage=UsageTotals())
 
@@ -94,7 +103,16 @@ async def test_worker_loop_claims_and_executes_pending_run(
 
     execution_count = 0
 
-    async def _fake_spawn(script: str, envelope, *, scratch_dir: Path, subprocess_exec=None):
+    async def _fake_spawn(
+        script: str,
+        envelope,
+        *,
+        scratch_dir: Path,
+        subprocess_exec=None,
+        on_event=None,
+        extra_env=None,
+    ):
+        del script, scratch_dir, subprocess_exec, on_event, extra_env
         nonlocal execution_count
         execution_count += 1
         yield TurnComplete(request_id="req-2", usage=UsageTotals())
@@ -139,7 +157,16 @@ async def test_worker_pool_does_not_claim_beyond_concurrency(
     first_started = asyncio.Event()
     unblock_first = asyncio.Event()
 
-    async def _fake_spawn(script: str, envelope, *, scratch_dir: Path, subprocess_exec=None):
+    async def _fake_spawn(
+        script: str,
+        envelope,
+        *,
+        scratch_dir: Path,
+        subprocess_exec=None,
+        on_event=None,
+        extra_env=None,
+    ):
+        del script, scratch_dir, subprocess_exec, on_event, extra_env
         if envelope.task == "first":
             first_started.set()
             await unblock_first.wait()
@@ -199,7 +226,16 @@ async def test_shutdown_worker_pool_fails_in_flight_run(
     run_started = asyncio.Event()
     hang_forever = asyncio.Event()
 
-    async def _fake_spawn(script: str, envelope, *, scratch_dir: Path, subprocess_exec=None):
+    async def _fake_spawn(
+        script: str,
+        envelope,
+        *,
+        scratch_dir: Path,
+        subprocess_exec=None,
+        on_event=None,
+        extra_env=None,
+    ):
+        del script, scratch_dir, subprocess_exec, on_event, extra_env
         run_started.set()
         await hang_forever.wait()
         yield TurnComplete(request_id="req-block", usage=UsageTotals())
@@ -243,6 +279,7 @@ async def test_queue_mode_enqueue_then_worker_executes_e2e(
     """MONKEYBOT_TASK_QUEUE=1: CoreToolExecutor enqueues, worker claims and executes."""
     monkeypatch.setenv("MONKEYBOT_TASK_QUEUE", "1")
     root = tmp_path
+    _stub_agent_md_for_tasks(root, monkeypatch)
     mem = tmp_path / "mem"
     mem.mkdir()
     skills = tmp_path / "skills"
@@ -273,7 +310,16 @@ async def test_queue_mode_enqueue_then_worker_executes_e2e(
 
     execution_count = 0
 
-    async def _fake_spawn(script: str, envelope, *, scratch_dir: Path, subprocess_exec=None):
+    async def _fake_spawn(
+        script: str,
+        envelope,
+        *,
+        scratch_dir: Path,
+        subprocess_exec=None,
+        on_event=None,
+        extra_env=None,
+    ):
+        del script, scratch_dir, subprocess_exec, on_event, extra_env
         nonlocal execution_count
         execution_count += 1
         assert envelope.task == "e2e queued"
@@ -322,7 +368,16 @@ async def test_stale_worker_does_not_overwrite_reclaimed_run(
     await store.reset_stale_claims(stale_after_ms=1)
     assert await store.claim("worker-run-stale", "worker-b") is True
 
-    async def _fake_spawn(script: str, envelope, *, scratch_dir: Path, subprocess_exec=None):
+    async def _fake_spawn(
+        script: str,
+        envelope,
+        *,
+        scratch_dir: Path,
+        subprocess_exec=None,
+        on_event=None,
+        extra_env=None,
+    ):
+        del script, scratch_dir, subprocess_exec, on_event, extra_env
         yield TurnComplete(request_id="req-stale", usage=UsageTotals())
 
     with patch.object(worker_pool, "spawn_subagent", side_effect=_fake_spawn):

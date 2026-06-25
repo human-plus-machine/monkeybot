@@ -24,7 +24,13 @@ from monkeybot.gateway.bootstrap import ensure_gateway_runtime_env
 ensure_gateway_runtime_env()
 from monkeybot.core.attachments.config import attachments_enabled_from_env
 from monkeybot.core.attachments.store import AttachmentStore, FilesystemAttachmentStore
-from monkeybot.core.config.settings import get_provider_config, normalize_model_provider
+from monkeybot.core.config.settings import (
+    ConfigError,
+    SubagentConfig,
+    get_provider_config,
+    get_subagent_registry,
+    normalize_model_provider,
+)
 from monkeybot.core.context import build_context
 from monkeybot.core.hooks import HookManager
 from monkeybot.core.llm.provider import (
@@ -49,8 +55,8 @@ from monkeybot.core.runtime.loop import SUMMARY_TRIGGER_RATIO
 from monkeybot.core.runtime.loop import run as run_loop
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
-from monkeybot.core.types.content_blocks import ContentBlock
 from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector, ToolInspector
+from monkeybot.core.types.content_blocks import ContentBlock
 from monkeybot.core.workspace import create_workspace_storage
 from monkeybot.gateway.sse.loop_port import UsagePort
 from monkeybot.gateway.sse.routes import create_app as build_sse_app
@@ -76,6 +82,7 @@ class _GatewayDeps:
     web_search_tool: WebSearchTool | None = None
     run_command_allowed_commands: list[str] | None = None
     run_command_allowed_path_prefixes: list[str] | None = None
+    subagent_registry: dict[str, SubagentConfig] = field(default_factory=dict)
 
 
 _deps = _GatewayDeps()
@@ -342,6 +349,7 @@ class GatewayLoopPort:
                     workspace_root=workspace_root,
                     sse_bus=bus,
                     extra_tools=extra_tools,
+                    subagent_registry=_deps.subagent_registry,
                 )
             except Exception as exc:
                 logger.exception("build_context failed")
@@ -365,6 +373,7 @@ class GatewayLoopPort:
                 attachment_store=attachment_store,
                 attachment_catalog=bus.attachment_catalog,
                 run_store=storage_backend.runs() if storage_backend is not None else None,
+                subagent_registry=_deps.subagent_registry,
             )
             async for evt in run_loop(
                 user_content,
@@ -544,6 +553,17 @@ async def _startup(fastapi_app: FastAPI) -> None:
     else:
         fastapi_app.state.attachment_store = None
         logger.info("attachments disabled via ATTACHMENTS_ENABLED")
+
+    try:
+        _deps.subagent_registry = get_subagent_registry()
+        if _deps.subagent_registry:
+            logger.info(
+                "subagent personas loaded: %s",
+                ", ".join(sorted(_deps.subagent_registry)),
+            )
+    except ConfigError as exc:
+        logger.error("invalid subagents config: %s", exc)
+        raise
 
     if otel_enabled:
         from monkeybot.observability.instrumentation import instrument_fastapi_app

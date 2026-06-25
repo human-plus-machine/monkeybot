@@ -33,7 +33,7 @@ paths:
   db_url: sqlite:///data/monkeybot.db
   mcp_config: ./monkeybot_config/mcp.json
   command_allowlist_config: ./monkeybot_config/command_allowlist.yaml
-  # Optional: agent workspace root for tools + playground file API (env MONKEYBOT_WORKSPACE_ROOT).
+  # Optional: agent workspace root for tools + playground file API.
   # If unset and ``./workspace`` exists under cwd, that directory is used (playground layout).
   # workspace_root: ./workspace
 
@@ -90,7 +90,15 @@ memory_hook:
 subagent:
   timeout_sec: 600
   max_turns: 25
-  # agent_md: ./monkeybot_config/AGENT.md   # optional override inside subagent (env: MONKEYBOT_SUBAGENT_AGENT_MD)
+  # Default AGENT.md when task omits subagent_type.
+  # agent_md: ./monkeybot_config/AGENT.md
+
+# Named subagent personas — parent selects via task(subagent_type=...).
+# Add entries and matching AGENT.md files under monkeybot_config/agents/ when needed.
+# subagents:
+#   - name: researcher
+#     description: "Deep-dives a topic and returns a structured summary."
+#     agent_md: ./monkeybot_config/agents/researcher.md
 
 tools:
   # List of substrings blocked in tool args (also env MONKEYBOT_TOOL_DENIED_PATTERNS as comma-separated)
