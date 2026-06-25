@@ -1,6 +1,6 @@
 ---
 name: monkeybot
-description: Entry point for MonkeyBot — install the CLI from GitHub if needed, then scaffold, configure, validate, and chat with an agent. Use when a user installs this skill via `npx skills add monkeybot`, sets up MonkeyBot for the first time, clones the repo, installs the monkeybot CLI, scaffolds monkeybot_config/, explains monkeybot.yaml options, or smoke-tests from the terminal.
+description: Entry point for MonkeyBot — install the CLI from GitHub if needed, then scaffold, configure, validate, and chat with an agent. Use when a user installs this skill via `npx skills add human-plus-machine/monkeybot --skill monkeybot`, sets up MonkeyBot for the first time, clones the repo, installs the monkeybot CLI, scaffolds monkeybot_config/, explains monkeybot.yaml options, or smoke-tests from the terminal.
 ---
 
 # MonkeyBot
@@ -86,7 +86,7 @@ Re-run the detect probe. `monkeybot --help` or `uv run monkeybot --help` from `c
 If the user arrived via skills.sh:
 
 ```bash
-npx skills add monkeybot -g -y
+npx skills add human-plus-machine/monkeybot --skill monkeybot
 ```
 
 …they have **this skill only**. Walk them through Tier 0 explicitly: clone → `uv sync` (root) → `uv sync` (`cli/`) → verify CLI. Then continue to Tier 1.
