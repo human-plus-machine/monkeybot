@@ -90,3 +90,21 @@ def test_task_tool_finished_shows_subagent_label(capsys: pytest.CaptureFixture[s
     _run(_run_flow())
     out = capsys.readouterr().out
     assert "subagent — Summarize deployment logs" in out
+
+
+def test_tool_hint_no_length_limit() -> None:
+    long_cmd = "git " + "x" * 200
+    assert _tool_hint({"command": long_cmd}) == long_cmd
+
+
+def test_verbose_prints_full_tool_result(capsys: pytest.CaptureFixture[str]) -> None:
+    activity = _TurnActivity()
+    long_result = "line one\n" + ("y" * 300)
+
+    async def _run_flow() -> None:
+        await activity.tool_started("run_command", "run_command", {"command": "echo"})
+        await activity.tool_finished("run_command", verbose=True, result=long_result)
+
+    _run(_run_flow())
+    out = capsys.readouterr().out
+    assert long_result in out

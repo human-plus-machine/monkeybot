@@ -89,18 +89,15 @@ class _ThinkingSpinner(_SpinnerLine):
         await self.clear()
 
 
-def _truncate_hint(text: str, *, max_len: int = 60) -> str:
-    collapsed = " ".join(text.split())
-    if not collapsed:
-        return ""
-    return collapsed if len(collapsed) <= max_len else f"{collapsed[: max_len - 1]}…"
+def _collapse_hint(text: str) -> str:
+    return " ".join(text.split())
 
 
 def _tool_hint(args: dict[str, object]) -> str:
-    """Short summary of tool args (mirrors playground ToolInvocationCard)."""
+    """Summary of tool args for status lines."""
     argv = args.get("argv")
     if isinstance(argv, list) and argv:
-        return _truncate_hint(" ".join(str(x) for x in argv))
+        return _collapse_hint(" ".join(str(x) for x in argv))
 
     cmd = args.get("command")
     if isinstance(cmd, str) and cmd.strip():
@@ -111,18 +108,18 @@ def _tool_hint(args: dict[str, object]) -> str:
             line = " ".join([cmd.strip(), *[str(x) for x in extra]])
         else:
             line = cmd.strip()
-        return _truncate_hint(line)
+        return _collapse_hint(line)
 
     for key in ("shell", "script", "path", "query", "url"):
         val = args.get(key)
         if isinstance(val, str) and val.strip():
-            return _truncate_hint(val.strip())
+            return _collapse_hint(val.strip())
     keys = list(args.keys())
     if len(keys) == 1:
         key = keys[0]
         val = args[key]
         if isinstance(val, (str, int, bool, float)):
-            return _truncate_hint(f"{key}: {val}")
+            return _collapse_hint(f"{key}: {val}")
     if keys:
         return f"{len(keys)} arg{'s' if len(keys) != 1 else ''}"
     return ""
@@ -132,7 +129,7 @@ def _task_hint(args: dict[str, object]) -> str:
     for key in ("task", "instructions", "prompt", "objective"):
         val = args.get(key)
         if isinstance(val, str) and val.strip():
-            return _truncate_hint(val.strip())
+            return _collapse_hint(val.strip())
     return ""
 
 
@@ -140,11 +137,11 @@ def _tool_display(tool: str, label: str, args: dict[str, object]) -> str:
     if tool == "task":
         hint = _task_hint(args)
         if not hint and label.strip() and label.strip() != tool:
-            hint = label.strip()[:60]
+            hint = label.strip()
         return "subagent" + (f" — {hint}" if hint else "")
     hint = _tool_hint(args)
     if not hint and label.strip() and label.strip() != tool:
-        hint = label.strip()[:60]
+        hint = label.strip()
     return tool + (f" — {hint}" if hint else "")
 
 
@@ -152,7 +149,7 @@ def _tool_spinner_prefix(tool: str, label: str, args: dict[str, object]) -> str:
     if tool == "task":
         hint = _task_hint(args)
         if not hint and label.strip() and label.strip() != tool:
-            hint = label.strip()[:60]
+            hint = label.strip()
         return "spawning subagent" + (f" — {hint}" if hint else "")
     return _tool_display(tool, label, args)
 
@@ -184,7 +181,7 @@ class _TurnActivity:
     ) -> None:
         display = self._active_display or tool
         if error:
-            err = " ".join(error.split())[:80]
+            err = " ".join(error.split())
             line = f"{_DIM}  {_RED}✗{_RESET}{_DIM} {display} — {err}{_RESET}"
         else:
             line = f"{_DIM}  {_GREEN}✓{_RESET}{_DIM} {display}{_RESET}"
@@ -196,10 +193,9 @@ class _TurnActivity:
             sys.stdout.write(f"{line}\n")
             sys.stdout.flush()
         if verbose:
-            payload = (error or result or "").replace("\n", " ")
+            payload = error or result or ""
             if payload:
-                preview = payload[:200] + ("…" if len(payload) > 200 else "")
-                print(f"{_DIM}    {preview}{_RESET}")
+                print(f"{_DIM}    {payload}{_RESET}")
 
     async def summarizing(self, tokens: int) -> None:
         await self._start(f"summarizing context ({tokens:,} tokens)")
@@ -597,7 +593,7 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
     p.add_argument("--url", help="Gateway base URL (implies --attach; overrides config-derived port)")
     p.add_argument("--port", type=int, help="Gateway port (overrides runtime.port from config)")
     p.add_argument("--show-thinking", action="store_true", help="Show thinking events")
-    p.add_argument("--verbose", action="store_true", help="Show full tool result payloads")
+    p.add_argument("--verbose", action="store_true", help="Show tool result payloads after each tool")
     p.add_argument("--usage", action="store_true", help="Show token usage after each turn")
     p.add_argument("--model-provider", dest="model_provider", help="Override model provider for session")
     p.add_argument("--model-name", dest="model_name", help="Override model name for session")
