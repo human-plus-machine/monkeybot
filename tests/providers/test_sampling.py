@@ -84,6 +84,7 @@ class TestProviderSamplingConstructors:
 
 class TestGetProviderConfigSampling:
     def test_bedrock_threads_sampling_from_yaml_params(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("MODEL_ENABLE_CACHING", raising=False)
         mock_instance = SimpleNamespace(name="bedrock")
         with patch(
             "monkeybot.providers.bedrock.BedrockClaudeProvider",

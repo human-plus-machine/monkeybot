@@ -186,13 +186,20 @@ class TestCacheEnabled:
             "model:\n  provider: gemini\n  name: test\n  enable_caching: false\n",
             encoding="utf-8",
         )
+        env_before = os.environ.get("MODEL_ENABLE_CACHING")
         monkeypatch.chdir(tmp_path)
         monkeypatch.delenv("MODEL_ENABLE_CACHING", raising=False)
         reset_runtime_env_state_for_tests()
-        apply_monkeybot_runtime_env()
-        assert os.environ["MODEL_ENABLE_CACHING"] == "false"
-        assert cache_enabled_from_env() is False
-        reset_runtime_env_state_for_tests()
+        try:
+            apply_monkeybot_runtime_env()
+            assert os.environ["MODEL_ENABLE_CACHING"] == "false"
+            assert cache_enabled_from_env() is False
+        finally:
+            reset_runtime_env_state_for_tests()
+            if env_before is None:
+                os.environ.pop("MODEL_ENABLE_CACHING", None)
+            else:
+                os.environ["MODEL_ENABLE_CACHING"] = env_before
 
     def test_sandbox_from_monkeybot_yaml(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         cfg_dir = tmp_path / "monkeybot_config"

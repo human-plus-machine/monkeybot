@@ -8,6 +8,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from monkeybot.core.llm.provider import Done, Message, UsageEvent
+from monkeybot.providers.sampling import DEFAULT_MODEL_MAX_TOKENS, DEFAULT_MODEL_TEMPERATURE
 from monkeybot.core.prompts.prompt import compose_system_prompt
 from monkeybot.core.runtime.events import TurnComplete
 from monkeybot.core.runtime.loop import run
@@ -81,7 +82,11 @@ def test_config_cache_flag_threads_to_provider_constructor() -> None:
         )
         assert cfg.provider is mock_instance
         assert cfg.model == "gpt-5"
-        mock_cls.assert_called_once_with(cache_enabled=False)
+        mock_cls.assert_called_once_with(
+            temperature=DEFAULT_MODEL_TEMPERATURE,
+            max_tokens=DEFAULT_MODEL_MAX_TOKENS,
+            cache_enabled=False,
+        )
 
 
 @pytest.mark.integration
