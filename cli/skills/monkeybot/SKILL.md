@@ -124,7 +124,7 @@ Ask (or infer):
 monkeybot new --dest /path/to/bot --provider gemini --model gemini-3-flash --yes
 ```
 
-Creates `monkeybot_config/`, `workspace/` (file-tool sandbox), `workspace/skills` → `.agents/skills`, `data/memory/`, `.env.example`, and `scripts/setup-workspace.sh`. Use `--force` only when overwriting is explicitly requested.
+Creates `monkeybot_config/`, `workspace/` (file-tool sandbox), `workspace/skills` → `skills/`, `data/memory/`, `.env.example`, and `scripts/setup-workspace.sh`. Use `--force` only when overwriting is explicitly requested.
 
 ### 3. Credentials + system prompt
 
@@ -214,7 +214,7 @@ Decision → config map:
 
 | Command | Purpose |
 |---------|---------|
-| `new` | Scaffold `monkeybot_config/`, `workspace/`, `data/memory/`, `.agents/skills/`, `.env.example` |
+| `new` | Scaffold `monkeybot_config/`, `workspace/`, `data/memory/`, `skills/`, `.env.example` |
 | `validate` | Config + paths + MCP shape (`--check-mcp` for network) |
 | `doctor` | Python, provider extra, credentials, port |
 | `run` | Start SSE gateway subprocess |

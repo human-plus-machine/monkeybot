@@ -28,7 +28,7 @@ runtime:
 paths:
   agent_md: ./monkeybot_config/AGENT.md
   memory_storage_uri: local://./data/memory
-  skills_path: ./.agents/skills
+  skills_path: ./skills
   db_url: sqlite:///data/monkeybot.db
   mcp_config: ./monkeybot_config/mcp.json
   command_allowlist_config: ./monkeybot_config/command_allowlist.yaml

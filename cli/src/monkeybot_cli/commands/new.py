@@ -37,7 +37,7 @@ def _install_file(cfg_dir: Path, template_name: str, dest_name: str, *, force: b
 
 
 def _ensure_workspace(dest: Path, *, force: bool) -> list[str]:
-    """Create workspace/ sandbox and workspace/skills -> ../.agents/skills symlink."""
+    """Create workspace/ sandbox and workspace/skills -> ../skills symlink."""
     lines: list[str] = []
     workspace = dest / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
@@ -48,10 +48,10 @@ def _ensure_workspace(dest: Path, *, force: bool) -> list[str]:
     else:
         lines.append("  workspace/.gitkeep: skipped")
 
-    skills_target = dest / ".agents" / "skills"
+    skills_target = dest / "skills"
     skills_target.mkdir(parents=True, exist_ok=True)
     link = workspace / "skills"
-    expected = (dest / ".agents" / "skills").resolve()
+    expected = (dest / "skills").resolve()
 
     if link.is_symlink():
         if link.resolve() == expected:
@@ -69,14 +69,14 @@ def _ensure_workspace(dest: Path, *, force: bool) -> list[str]:
             link.unlink()
 
     try:
-        link.symlink_to("../.agents/skills", target_is_directory=True)
-        lines.append("  workspace/skills: symlink -> ../.agents/skills")
+        link.symlink_to("../skills", target_is_directory=True)
+        lines.append("  workspace/skills: symlink -> ../skills")
     except OSError:
         readme = workspace / "SKILLS_README.txt"
         readme.write_text(
             "Could not create workspace/skills symlink on this platform.\n"
             "Run: bash scripts/setup-workspace.sh\n"
-            "Or copy/symlink .agents/skills into workspace/skills manually.\n",
+            "Or copy/symlink skills/ into workspace/skills manually.\n",
             encoding="utf-8",
         )
         lines.append("  workspace/skills: symlink failed (see workspace/SKILLS_README.txt)")
@@ -166,9 +166,9 @@ def run_new(args: argparse.Namespace) -> int:
     else:
         report.append("  data/memory/INDEX.md: skipped")
 
-    skills = dest / ".agents" / "skills"
+    skills = dest / "skills"
     skills.mkdir(parents=True, exist_ok=True)
-    report.append("  .agents/skills/: ensured")
+    report.append("  skills/: ensured")
 
     report.extend(_ensure_workspace(dest, force=args.force))
     report.append(f"  scripts/setup-workspace.sh: {_install_setup_script(dest, force=args.force)}")

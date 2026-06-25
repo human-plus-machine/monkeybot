@@ -31,7 +31,7 @@ def test_new_scaffolds(tmp_path: Path) -> None:
     assert (tmp_path / "scripts" / "setup-workspace.sh").is_file()
     skills_link = tmp_path / "workspace" / "skills"
     if skills_link.is_symlink():
-        assert skills_link.resolve() == (tmp_path / ".agents" / "skills").resolve()
+        assert skills_link.resolve() == (tmp_path / "skills").resolve()
     else:
         assert (tmp_path / "workspace" / "SKILLS_README.txt").is_file()
     text = (tmp_path / "monkeybot_config" / "monkeybot.yaml").read_text()

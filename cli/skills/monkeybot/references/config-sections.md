@@ -22,7 +22,7 @@ Validate/doctor: `doctor` → `runtime.port.free`.
 |---|---|---|
 | `agent_md` | `./monkeybot_config/AGENT.md` | Alternate system-prompt location |
 | `memory_storage_uri` | `local://./data/memory` | `gcs://…` for shared/cloud memory (requires GCP project) |
-| `skills_path` | `./.agents/skills` | Point at a different skills tree |
+| `skills_path` | `./skills` | Point at a different skills tree |
 | `db_url` | `sqlite:///data/monkeybot.db` | **Postgres for parallel subagents** — SQLite hits `database is locked` under concurrency |
 | `mcp_config` | `./monkeybot_config/mcp.json` | Relocate MCP definitions |
 | `command_allowlist_config` | `./monkeybot_config/command_allowlist.yaml` | Relocate the shell allowlist |
