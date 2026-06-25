@@ -385,6 +385,85 @@ async def test_task_tool_aggregates_subagent_stream(tmp_path: Path, monkeypatch:
 
 
 @pytest.mark.asyncio
+async def test_task_tool_spawns_without_memory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from monkeybot.core.runtime.events import TurnComplete, UsageTotals
+
+    seen_uri: list[str] = []
+
+    async def fake_spawn(
+        script: str,
+        envelope: object,
+        *,
+        scratch_dir: object,
+        subprocess_exec: object | None = None,
+        on_event: object | None = None,
+    ):
+        del script, scratch_dir, subprocess_exec, on_event
+        assert envelope.memory_storage_uri == ""
+        seen_uri.append(envelope.memory_storage_uri)
+        yield TurnComplete(
+            request_id="r",
+            usage=UsageTotals(
+                input_tokens=1,
+                output_tokens=1,
+                cached_tokens=0,
+                cost_usd=0.0,
+                duration_ms=1,
+                estimated_prompt_tokens=0,
+            ),
+        )
+
+    monkeypatch.setattr("monkeybot.core.tools.core_tool_executor.spawn_subagent", fake_spawn)
+
+    root = tmp_path
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    worker = root / "subagent_worker.py"
+    worker.write_text("# placeholder\n", encoding="utf-8")
+    monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
+
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=None,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="c1", name="task", args={"task": "summarize logs"}),
+            ctx=_ctx(),
+        )
+    )
+    assert err is None and out is not None
+    assert seen_uri == [""]
+    payload = json.loads(out)
+    assert payload["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_search_memory_without_memory_returns_validation_error(tmp_path: Path) -> None:
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=None,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="1", name="search_memory", args={"query": "alpha"}),
+            ctx=_ctx(),
+        )
+    )
+    assert out is None and err is not None
+    payload = json.loads(err)
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "validation"
+    assert "memory" in payload["message"].lower()
+
+
+@pytest.mark.asyncio
 async def test_task_tool_parent_cancel_stops_hanging_subagent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     hang = asyncio.Event()
 

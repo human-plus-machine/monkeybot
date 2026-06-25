@@ -96,6 +96,17 @@ def test_subagent_envelope_roundtrip_without_traceparent() -> None:
     assert restored.traceparent is None
 
 
+def test_subagent_envelope_empty_memory_uri_roundtrip() -> None:
+    env = SubagentEnvelope(
+        task="do thing",
+        context="ctx",
+        memory_storage_uri="",
+        parent_run_id="p1",
+    )
+    restored = SubagentEnvelope.from_json(env.to_json())
+    assert restored.memory_storage_uri == ""
+
+
 def test_subagent_envelope_rejects_non_string_traceparent() -> None:
     raw = json.dumps(
         {

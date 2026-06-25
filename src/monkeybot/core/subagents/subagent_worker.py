@@ -41,6 +41,11 @@ _BUILTIN_RUN_LOOP = run_loop
 logger = logging.getLogger(__name__)
 
 
+def _subagent_memory_uri(envelope: SubagentEnvelope) -> str:
+    """Envelope URI is authoritative; empty means no memory (ignore ambient env)."""
+    return envelope.memory_storage_uri.strip()
+
+
 def init_observability() -> bool:
     from monkeybot.observability import init_observability as _init
 
@@ -221,17 +226,7 @@ async def _async_main() -> None:
     os.chdir(ws)
     load_dotenv()
 
-    mem_uri = (
-        os.environ.get("MEMORY_STORAGE_URI", "").strip() or envelope.memory_storage_uri.strip()
-    )
-    if not mem_uri:
-        print(
-            event_to_json(
-                Error(request_id="", error="subagent_worker: MEMORY_STORAGE_URI is not set")
-            ),
-            flush=True,
-        )
-        raise SystemExit(1)
+    mem_uri = _subagent_memory_uri(envelope)
 
     skills = Path(os.environ["MONKEYBOT_SUBAGENT_SKILLS_PATH"]).resolve()
 
@@ -303,13 +298,15 @@ async def _async_main() -> None:
 
         extra_tools = [_ws_tool] if _ws_tool is not None else []
 
-        storage = create_workspace_storage(mem_uri)
-        memory = MemorySubsystem(
-            storage=storage,
-            provider=provider,
-            model=envelope.model,
-            memory_uri=mem_uri,
-        )
+        memory: MemorySubsystem | None = None
+        if mem_uri:
+            storage = create_workspace_storage(mem_uri)
+            memory = MemorySubsystem(
+                storage=storage,
+                provider=provider,
+                model=envelope.model,
+                memory_uri=mem_uri,
+            )
 
         ctx = await build_context(
             thread_id,

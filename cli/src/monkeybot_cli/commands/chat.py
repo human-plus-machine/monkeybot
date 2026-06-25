@@ -128,11 +128,33 @@ def _tool_hint(args: dict[str, object]) -> str:
     return ""
 
 
+def _task_hint(args: dict[str, object]) -> str:
+    for key in ("task", "instructions", "prompt", "objective"):
+        val = args.get(key)
+        if isinstance(val, str) and val.strip():
+            return _truncate_hint(val.strip())
+    return ""
+
+
 def _tool_display(tool: str, label: str, args: dict[str, object]) -> str:
+    if tool == "task":
+        hint = _task_hint(args)
+        if not hint and label.strip() and label.strip() != tool:
+            hint = label.strip()[:60]
+        return "subagent" + (f" — {hint}" if hint else "")
     hint = _tool_hint(args)
     if not hint and label.strip() and label.strip() != tool:
         hint = label.strip()[:60]
     return tool + (f" — {hint}" if hint else "")
+
+
+def _tool_spinner_prefix(tool: str, label: str, args: dict[str, object]) -> str:
+    if tool == "task":
+        hint = _task_hint(args)
+        if not hint and label.strip() and label.strip() != tool:
+            hint = label.strip()[:60]
+        return "spawning subagent" + (f" — {hint}" if hint else "")
+    return _tool_display(tool, label, args)
 
 
 class _TurnActivity:
@@ -150,7 +172,7 @@ class _TurnActivity:
 
     async def tool_started(self, tool: str, label: str, args: dict[str, object]) -> None:
         self._active_display = _tool_display(tool, label, args)
-        await self._start(self._active_display)
+        await self._start(_tool_spinner_prefix(tool, label, args))
 
     async def tool_finished(
         self,

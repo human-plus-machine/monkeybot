@@ -75,17 +75,9 @@ class SubagentEnvelope:
         missing = base_required - data.keys()
         if missing:
             raise ValueError(f"Envelope missing fields: {sorted(missing)}")
-        uri = data.get("memory_storage_uri")
-        if not isinstance(uri, str) or not uri.strip():
-            legacy = data.get("memory_path")
-            if isinstance(legacy, str) and legacy.strip():
-                lp = legacy.strip()
-                if lp.startswith("gcs://") or lp.startswith("s3://") or lp.startswith("local://"):
-                    uri = lp
-                else:
-                    uri = "local://" + lp
-            else:
-                raise ValueError("Envelope missing memory_storage_uri or legacy memory_path")
+        from monkeybot.core.subagents.subagent_proto import _memory_storage_uri_from_dict
+
+        uri = _memory_storage_uri_from_dict(data)
         model = data.get("model", "gemini-2.5-flash")
         if not isinstance(model, str):
             raise ValueError("model must be a string when present")

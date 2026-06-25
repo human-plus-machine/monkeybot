@@ -619,16 +619,7 @@ class CoreToolExecutor(ToolExecutorPort):
         if not isinstance(context_val, str):
             context_val = str(context_val)
 
-        if self._memory is None:
-            return (
-                None,
-                _built_in_tool_error(
-                    "validation",
-                    "task tool requires memory to be configured for the subagent worker.",
-                    "Enable the memory hook and set paths.memory_storage_uri in monkeybot.yaml.",
-                    {"field": "memory"},
-                ),
-            )
+        memory_uri = self._memory.uri if self._memory is not None else ""
 
         script = Path(
             os.environ.get(
@@ -652,7 +643,7 @@ class CoreToolExecutor(ToolExecutorPort):
         envelope = SubagentEnvelope(
             task=task,
             context=context_val,
-            memory_storage_uri=self._memory.uri,
+            memory_storage_uri=memory_uri,
             parent_run_id=parent_label,
             model=ctx.model,
             traceparent=traceparent,
@@ -708,7 +699,7 @@ class CoreToolExecutor(ToolExecutorPort):
 
         child_env = {
             "MONKEYBOT_SUBAGENT_WORKSPACE": str(self._workspace.repo_root),
-            "MEMORY_STORAGE_URI": self._memory.uri,
+            "MEMORY_STORAGE_URI": memory_uri,
             "MONKEYBOT_SUBAGENT_SKILLS_PATH": str(self._skills_path),
             "OTEL_SERVICE_NAME": _SUBAGENT_OTEL_SERVICE_NAME,
         }

@@ -6,7 +6,12 @@ import asyncio
 
 import pytest
 
-from monkeybot_cli.commands.chat import _TurnActivity, _tool_display, _tool_hint
+from monkeybot_cli.commands.chat import (
+    _TurnActivity,
+    _tool_display,
+    _tool_hint,
+    _tool_spinner_prefix,
+)
 
 
 def test_tool_hint_command() -> None:
@@ -28,6 +33,16 @@ def test_tool_hint_shell() -> None:
 def test_tool_display_includes_command() -> None:
     assert _tool_display("run_command", "run_command", {"command": "echo hi"}) == (
         "run_command — echo hi"
+    )
+
+
+def test_task_tool_display_uses_subagent_label() -> None:
+    args = {"task": "Review the open PR for security issues"}
+    assert _tool_display("task", "task", args) == (
+        "subagent — Review the open PR for security issues"
+    )
+    assert _tool_spinner_prefix("task", "task", args) == (
+        "spawning subagent — Review the open PR for security issues"
     )
 
 
@@ -59,3 +74,19 @@ def test_tool_finished_preserves_command_on_error(capsys: pytest.CaptureFixture[
     out = capsys.readouterr().out
     assert "run_command — npm test" in out
     assert "exit code 1" in out
+
+
+def test_task_tool_finished_shows_subagent_label(capsys: pytest.CaptureFixture[str]) -> None:
+    activity = _TurnActivity()
+
+    async def _run_flow() -> None:
+        await activity.tool_started(
+            "task",
+            "task",
+            {"task": "Summarize deployment logs"},
+        )
+        await activity.tool_finished("task")
+
+    _run(_run_flow())
+    out = capsys.readouterr().out
+    assert "subagent — Summarize deployment logs" in out

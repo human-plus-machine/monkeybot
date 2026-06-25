@@ -20,6 +20,22 @@ from monkeybot.core.runtime.events import (
 )
 
 
+def _memory_storage_uri_from_dict(decoded: dict[str, Any]) -> str:
+    """Resolve memory URI from envelope fields; empty string means no memory."""
+    if "memory_storage_uri" in decoded:
+        uri_val = decoded["memory_storage_uri"]
+        if not isinstance(uri_val, str):
+            raise ValueError("envelope: 'memory_storage_uri' must be a string")
+        return uri_val.strip()
+    legacy = decoded.get("memory_path")
+    if isinstance(legacy, str) and legacy.strip():
+        lp = legacy.strip()
+        if lp.startswith("gcs://") or lp.startswith("s3://") or lp.startswith("local://"):
+            return lp
+        return "local://" + lp
+    return ""
+
+
 @dataclass(frozen=True)
 class SubagentEnvelope:
     """Inputs forwarded to a child Python worker via stdin JSON."""
@@ -53,21 +69,11 @@ class SubagentEnvelope:
             raise ValueError("envelope: invalid JSON") from exc
         if not isinstance(decoded, dict):
             raise ValueError("envelope: root must be an object")
-        uri = decoded.get("memory_storage_uri")
-        if not isinstance(uri, str) or not uri.strip():
-            legacy = decoded.get("memory_path")
-            if isinstance(legacy, str) and legacy.strip():
-                lp = legacy.strip()
-                if lp.startswith("gcs://") or lp.startswith("s3://") or lp.startswith("local://"):
-                    uri = lp
-                else:
-                    uri = "local://" + lp
-            else:
-                raise ValueError("envelope: 'memory_storage_uri' must be a non-empty string")
+        uri = _memory_storage_uri_from_dict(decoded)
         return cls(
             task=_req_str(decoded, "task"),
             context=_req_str(decoded, "context"),
-            memory_storage_uri=uri.strip(),
+            memory_storage_uri=uri,
             parent_run_id=_req_str(decoded, "parent_run_id"),
             model=_opt_model(decoded),
             traceparent=_opt_traceparent(decoded),

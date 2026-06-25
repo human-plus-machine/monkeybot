@@ -467,3 +467,97 @@ async def test_legacy_envelope_without_traceparent_starts_disjoint_trace(
     assert spans
     worker_trace_ids = {s.context.trace_id for s in spans}
     assert parent_trace_id not in worker_trace_ids
+
+
+@pytest.mark.asyncio
+async def test_worker_completes_without_memory_uri(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    otel_memory_exporter: object,
+) -> None:
+    from monkeybot.core.subagents import subagent_worker
+
+    envelope = SubagentEnvelope(
+        task="no memory",
+        context="",
+        memory_storage_uri="",
+        parent_run_id="parent-none",
+    )
+    ignored_mem = tmp_path / "ignored"
+    ignored_mem.mkdir()
+    monkeypatch.setenv("MEMORY_STORAGE_URI", "local://" + str(ignored_mem.resolve()))
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    monkeypatch.setenv("MONKEYBOT_SUBAGENT_WORKSPACE", str(ws))
+    monkeypatch.setenv("MONKEYBOT_SUBAGENT_SKILLS_PATH", str(skills))
+    monkeypatch.setenv("MODEL_PROVIDER", "fake")
+    monkeypatch.setenv(
+        "MONKEYBOT_FAKE_PROVIDER_EVENTS",
+        json.dumps([[{"kind": "text_delta", "text": "ok"}, {"kind": "done"}]]),
+    )
+    monkeypatch.setenv("MONKEYBOT_OTEL_ENABLED", "true")
+    monkeypatch.setattr(sys, "stdin", io.StringIO(envelope.to_json()))
+
+    backend = MagicMock()
+    backend.open = AsyncMock()
+    backend.close = AsyncMock()
+    backend.history.return_value = MagicMock()
+    monkeypatch.setattr(subagent_worker, "create_storage_backend", lambda _url: backend)
+
+    mcp = MagicMock()
+    mcp.load_from_config = AsyncMock()
+    mcp.disconnect = AsyncMock()
+    mcp._servers = {}
+    monkeypatch.setattr(subagent_worker, "MCPClient", lambda: mcp)
+
+    seen_memory: list[object | None] = []
+
+    async def _fake_build_context(*_a: object, memory=None, **_k: object) -> TurnContext:
+        seen_memory.append(memory)
+        return _ctx()
+
+    monkeypatch.setattr(subagent_worker, "build_context", _fake_build_context)
+
+    storage_calls: list[str] = []
+
+    def _boom_storage(uri: str) -> object:
+        storage_calls.append(uri)
+        raise AssertionError("create_workspace_storage should not run without memory URI")
+
+    monkeypatch.setattr(subagent_worker, "create_workspace_storage", _boom_storage)
+
+    async def _fake_run_loop(*_a: object, **_k: object):
+        yield TurnComplete(
+            request_id="req-1",
+            usage=UsageTotals(
+                input_tokens=1,
+                output_tokens=1,
+                cached_tokens=0,
+                cost_usd=0.0,
+                duration_ms=1,
+                estimated_prompt_tokens=0,
+            ),
+        )
+
+    monkeypatch.setattr(subagent_worker, "run_loop", _fake_run_loop)
+
+    def _init_with_memory_exporter() -> bool:
+        from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+
+        from monkeybot.observability import init_observability
+
+        provider = trace.get_tracer_provider()
+        if hasattr(provider, "add_span_processor"):
+            provider.add_span_processor(SimpleSpanProcessor(otel_memory_exporter))  # type: ignore[arg-type]
+        return init_observability()
+
+    monkeypatch.setattr(subagent_worker, "init_observability", _init_with_memory_exporter)
+    monkeypatch.setattr(subagent_worker, "shutdown_observability", lambda: None)
+
+    await subagent_worker._async_main()
+
+    assert seen_memory == [None]
+    assert storage_calls == []

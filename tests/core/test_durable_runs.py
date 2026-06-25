@@ -70,6 +70,17 @@ async def test_pending_runs_excludes_completed(durable_conn) -> None:
     assert await store.pending_runs() == []
 
 
+def test_durable_subagent_envelope_empty_memory_uri_roundtrip() -> None:
+    env = SubagentEnvelope(
+        task="t",
+        context="",
+        memory_storage_uri="",
+        parent_run_id="p1",
+    )
+    restored = SubagentEnvelope.from_json(env.to_json())
+    assert restored.memory_storage_uri == ""
+
+
 @pytest.mark.asyncio
 async def test_get_run_round_trip(durable_conn) -> None:
     store = SQLiteRunStore(durable_conn)
