@@ -17,6 +17,7 @@ from typing import Any
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.attachments.config import IMAGE_MIME_TYPES
 from monkeybot.core.attachments.store import AttachmentStore, _sniff_mime
+from monkeybot.core.config.settings import SubagentConfig
 from monkeybot.core.context import CustomTool, TurnContext
 from monkeybot.core.llm.provider import ToolCall
 from monkeybot.core.logging_utils import kv
@@ -39,8 +40,8 @@ from monkeybot.core.subagents.subagent_proto import (
     normalize_sqlite_db_url,
     resolve_agent_project_root,
     resolve_project_path,
-    resolve_subagent_agent_md_path,
     resolve_subagent_script,
+    resolve_task_agent_md_path,
     spawn_subagent,
 )
 from monkeybot.core.tools.sandbox_executor import SandboxConfig, SandboxExecutor
@@ -307,6 +308,7 @@ class CoreToolExecutor(ToolExecutorPort):
         attachment_store: AttachmentStore | None = None,
         attachment_catalog: SessionAttachmentCatalog | None = None,
         run_store: RunStore | None = None,
+        subagent_registry: dict[str, SubagentConfig] | None = None,
     ) -> None:
         ws_settings = workspace_settings_from_env()
         self._workspace = WorkspaceFileService(Path(workspace_root).resolve(), settings=ws_settings)
@@ -318,6 +320,7 @@ class CoreToolExecutor(ToolExecutorPort):
         self._attachment_store = attachment_store
         self._attachment_catalog = attachment_catalog
         self._run_store = run_store
+        self._subagent_registry = dict(subagent_registry or {})
         self._terminal: TerminalExecutor | SandboxExecutor
         if terminal is not None:
             self._terminal = terminal
@@ -684,6 +687,25 @@ class CoreToolExecutor(ToolExecutorPort):
         if not isinstance(context_val, str):
             context_val = str(context_val)
 
+        subagent_type = _str_arg(args, "subagent_type", "type", "persona")
+        agent_root = resolve_agent_project_root()
+        try:
+            agent_md_path = resolve_task_agent_md_path(
+                subagent_type=subagent_type,
+                registry=self._subagent_registry,
+                agent_root=agent_root,
+            )
+        except ValueError as exc:
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    str(exc),
+                    "Use a subagent_type from the harness Subagent personas list, or omit it for the default.",
+                    {"field": "subagent_type", "subagent_type": subagent_type},
+                ),
+            )
+
         memory_uri = self._memory.uri if self._memory is not None else ""
 
         script = resolve_subagent_script()
@@ -707,6 +729,8 @@ class CoreToolExecutor(ToolExecutorPort):
             parent_run_id=parent_label,
             model=ctx.model,
             traceparent=traceparent,
+            agent_md=str(agent_md_path),
+            subagent_type=subagent_type,
         )
 
         scratch = (self._workspace.repo_root / ".monkeybot" / "subagent-runs" / uuid.uuid4().hex)
@@ -720,6 +744,8 @@ class CoreToolExecutor(ToolExecutorPort):
             parent_run_id=envelope.parent_run_id,
             model=envelope.model,
             traceparent=envelope.traceparent,
+            agent_md=envelope.agent_md,
+            subagent_type=envelope.subagent_type,
         )
         queue_mode = os.environ.get("MONKEYBOT_TASK_QUEUE", "").strip().lower() in (
             "1",
@@ -757,17 +783,14 @@ class CoreToolExecutor(ToolExecutorPort):
                 scratch_dir=scratch,
             )
 
-        agent_root = resolve_agent_project_root()
         child_env = {
             "MONKEYBOT_SUBAGENT_WORKSPACE": str(self._workspace.repo_root),
             "MONKEYBOT_AGENT_ROOT": str(agent_root),
             "MEMORY_STORAGE_URI": memory_uri,
             "MONKEYBOT_SUBAGENT_SKILLS_PATH": str(self._skills_path),
             "OTEL_SERVICE_NAME": _SUBAGENT_OTEL_SERVICE_NAME,
+            "MONKEYBOT_SUBAGENT_AGENT_MD": str(agent_md_path),
         }
-        subagent_md = resolve_subagent_agent_md_path(agent_root)
-        if subagent_md is not None:
-            child_env["MONKEYBOT_SUBAGENT_AGENT_MD"] = str(subagent_md)
 
         for env_key, raw_val in (
             ("MCP_CONFIG", os.environ.get("MCP_CONFIG", "")),

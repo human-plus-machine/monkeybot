@@ -54,12 +54,18 @@ class SubagentEnvelope:
     parent_run_id: str
     model: str = "gemini-2.5-flash"
     traceparent: str | None = None
+    agent_md: str | None = None
+    subagent_type: str | None = None
 
     def to_json(self) -> str:
         """Serialize envelope to JSON text."""
         data = asdict(self)
         if data.get("traceparent") is None:
             data.pop("traceparent", None)
+        if data.get("agent_md") is None:
+            data.pop("agent_md", None)
+        if data.get("subagent_type") is None:
+            data.pop("subagent_type", None)
         return json.dumps(data, sort_keys=True)
 
     @classmethod
@@ -87,6 +93,12 @@ class SubagentEnvelope:
         traceparent = data.get("traceparent")
         if traceparent is not None and not isinstance(traceparent, str):
             raise ValueError("traceparent must be a string when present")
+        agent_md = data.get("agent_md")
+        if agent_md is not None and not isinstance(agent_md, str):
+            raise ValueError("agent_md must be a string when present")
+        subagent_type = data.get("subagent_type")
+        if subagent_type is not None and not isinstance(subagent_type, str):
+            raise ValueError("subagent_type must be a string when present")
         return cls(
             task=data["task"],
             context=data["context"],
@@ -94,6 +106,12 @@ class SubagentEnvelope:
             parent_run_id=data["parent_run_id"],
             model=model,
             traceparent=traceparent.strip() if isinstance(traceparent, str) and traceparent.strip() else None,
+            agent_md=agent_md.strip() if isinstance(agent_md, str) and agent_md.strip() else None,
+            subagent_type=(
+                subagent_type.strip()
+                if isinstance(subagent_type, str) and subagent_type.strip()
+                else None
+            ),
         )
 
 

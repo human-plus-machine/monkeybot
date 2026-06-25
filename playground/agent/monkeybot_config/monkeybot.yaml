@@ -13,6 +13,7 @@ paths:
   agent_md: ./monkeybot_config/AGENT.md
   memory_storage_uri: local://./workspace/data/memory
   skills_path: ./workspace/skills
+  workspace_root: ./workspace
   db_url: sqlite:///./workspace/data/monkeybot.db
   # Firestore (opt-in): uncomment below and install monkeybot[firestore]. run.sh starts the
   # emulator on :8686 when db_url uses firestore:// (see FIRESTORE_EMULATOR_HOST).
@@ -57,6 +58,7 @@ memory_hook:
 subagent:
   timeout_sec: 600
   max_turns: 25
+  agent_md: ./monkeybot_config/AGENT.md
 
 web_search:
   backend: duckduckgo

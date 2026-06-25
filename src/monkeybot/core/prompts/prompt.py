@@ -5,11 +5,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from monkeybot.core.attachments.catalog import AttachmentRecord
-from monkeybot.core.types.content_blocks import Text
 from monkeybot.core.context import SkillRef, TurnContext
+from monkeybot.core.llm.provider import Message
 from monkeybot.core.prompts.harness_prompt import harness_fixed_context
 from monkeybot.core.tools.sandbox_executor import SandboxConfig
-from monkeybot.core.llm.provider import Message
+from monkeybot.core.types.content_blocks import Text
 
 # Cap injected user text so long pastes do not dominate the context window.
 _MAX_CURRENT_REQUEST_CHARS = 8000
@@ -126,6 +126,7 @@ def compose_system_prompt(
         workspace_root=str(ctx.workspace_root) if ctx.workspace_root is not None else "(not set)",
         memory_storage_uri=ctx.memory.uri if ctx.memory is not None else "(not set)",
         run_command_opensandbox=SandboxConfig.from_env().enabled,
+        subagent_personas=ctx.subagent_personas,
     )
 
     attachments = _session_attachments_block(attachment_catalog)

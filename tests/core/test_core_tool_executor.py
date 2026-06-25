@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from monkeybot.core.config.settings import SubagentConfig
 from monkeybot.core.context import SkillRef, TurnContext
 from monkeybot.core.llm.provider import Done, TextDelta, ToolCall, UsageEvent
 from monkeybot.core.memory.subsystem import MemorySubsystem
@@ -89,6 +90,12 @@ def _ctx(skills: list[SkillRef] | None = None) -> TurnContext:
         parent_run_id=None,
         model="gemini-2.5-flash",
     )
+
+
+def _stub_agent_md_for_tasks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    agent = tmp_path / "AGENT.md"
+    agent.write_text("# test agent\n", encoding="utf-8")
+    monkeypatch.setenv("MONKEYBOT_AGENT_ROOT", str(tmp_path))
 
 
 @pytest.mark.asyncio
@@ -385,6 +392,7 @@ async def test_task_tool_aggregates_subagent_stream(tmp_path: Path, monkeypatch:
     monkeypatch.setattr("monkeybot.core.tools.core_tool_executor.spawn_subagent", fake_spawn)
 
     root = tmp_path
+    _stub_agent_md_for_tasks(root, monkeypatch)
     mem = tmp_path / "mem"
     mem.mkdir()
     skills = tmp_path / "skills"
@@ -419,6 +427,123 @@ async def test_task_tool_aggregates_subagent_stream(tmp_path: Path, monkeypatch:
 
 
 @pytest.mark.asyncio
+async def test_task_tool_resolves_subagent_type_agent_md(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.runtime.events import TurnComplete, UsageTotals
+
+    agents = tmp_path / "monkeybot_config" / "agents"
+    agents.mkdir(parents=True)
+    impl_md = agents / "researcher.md"
+    impl_md.write_text("# researcher persona\n", encoding="utf-8")
+    default_md = tmp_path / "monkeybot_config" / "AGENT.md"
+    default_md.write_text("# parent\n", encoding="utf-8")
+
+    seen_agent_md: list[str | None] = []
+
+    async def fake_spawn(
+        script: str,
+        envelope: object,
+        *,
+        scratch_dir: object,
+        subprocess_exec: object | None = None,
+        on_event: object | None = None,
+        extra_env: dict[str, str] | None = None,
+    ):
+        del script, scratch_dir, subprocess_exec, on_event, extra_env
+        assert envelope.subagent_type == "researcher"
+        seen_agent_md.append(envelope.agent_md)
+        yield TurnComplete(
+            request_id="r",
+            usage=UsageTotals(
+                input_tokens=1,
+                output_tokens=1,
+                cached_tokens=0,
+                cost_usd=0.0,
+                duration_ms=1,
+                estimated_prompt_tokens=0,
+            ),
+        )
+
+    monkeypatch.setattr("monkeybot.core.tools.core_tool_executor.spawn_subagent", fake_spawn)
+
+    root = tmp_path
+    _stub_agent_md_for_tasks(root, monkeypatch)
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    worker = root / "subagent_worker.py"
+    worker.write_text("# placeholder\n", encoding="utf-8")
+    monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
+    monkeypatch.setenv("MONKEYBOT_AGENT_ROOT", str(tmp_path))
+
+    registry = {
+        "researcher": SubagentConfig(
+            name="researcher",
+            description="research",
+            skills=[],
+            agent_md="./monkeybot_config/agents/researcher.md",
+        )
+    }
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+        subagent_registry=registry,
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="c-persona",
+                name="task",
+                args={"task": "research topic", "subagent_type": "researcher"},
+            ),
+            ctx=_ctx(),
+        )
+    )
+    assert err is None and out is not None
+    assert seen_agent_md == [str(impl_md.resolve())]
+
+
+@pytest.mark.asyncio
+async def test_task_tool_unknown_subagent_type_returns_validation_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    worker = root / "subagent_worker.py"
+    worker.write_text("# placeholder\n", encoding="utf-8")
+    monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
+
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+        subagent_registry={},
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="c-bad",
+                name="task",
+                args={"task": "work", "subagent_type": "nope"},
+            ),
+            ctx=_ctx(),
+        )
+    )
+    assert out is None and err is not None
+    payload = json.loads(err)
+    assert payload["error_kind"] == "validation"
+    assert "Unknown subagent_type" in payload["message"]
+
+
+@pytest.mark.asyncio
 async def test_task_tool_spawns_without_memory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from monkeybot.core.runtime.events import TurnComplete, UsageTotals
 
@@ -450,6 +575,7 @@ async def test_task_tool_spawns_without_memory(tmp_path: Path, monkeypatch: pyte
     monkeypatch.setattr("monkeybot.core.tools.core_tool_executor.spawn_subagent", fake_spawn)
 
     root = tmp_path
+    _stub_agent_md_for_tasks(root, monkeypatch)
     skills = tmp_path / "skills"
     skills.mkdir()
     worker = root / "subagent_worker.py"
@@ -517,6 +643,7 @@ async def test_task_tool_parent_cancel_stops_hanging_subagent(tmp_path: Path, mo
     monkeypatch.setattr("monkeybot.core.tools.core_tool_executor.spawn_subagent", fake_spawn)
 
     root = tmp_path
+    _stub_agent_md_for_tasks(root, monkeypatch)
     mem = tmp_path / "mem"
     mem.mkdir()
     skills = tmp_path / "skills"
@@ -924,6 +1051,7 @@ async def test_task_tool_queue_mode_requires_run_store(
 ) -> None:
     monkeypatch.setenv("MONKEYBOT_TASK_QUEUE", "1")
     root = tmp_path
+    _stub_agent_md_for_tasks(root, monkeypatch)
     mem = tmp_path / "mem"
     mem.mkdir()
     skills = tmp_path / "skills"
@@ -962,6 +1090,7 @@ async def test_task_tool_queue_mode_enqueues_pending_run(
 
     monkeypatch.setenv("MONKEYBOT_TASK_QUEUE", "1")
     root = tmp_path
+    _stub_agent_md_for_tasks(root, monkeypatch)
     mem = tmp_path / "mem"
     mem.mkdir()
     skills = tmp_path / "skills"

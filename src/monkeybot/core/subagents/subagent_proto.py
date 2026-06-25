@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from monkeybot.core.config.settings import SubagentConfig
 from monkeybot.core.runtime.events import (
     AgentEvent,
     Error,
@@ -79,6 +80,41 @@ def resolve_subagent_agent_md_path(agent_root: Path | None = None) -> Path | Non
     return resolve_project_path(raw, root)
 
 
+def resolve_task_agent_md_path(
+    *,
+    subagent_type: str | None,
+    registry: dict[str, SubagentConfig],
+    agent_root: Path | None = None,
+) -> Path:
+    """Resolve AGENT.md for a ``task`` spawn: registry type, then global subagent/parent defaults."""
+    root = agent_root if agent_root is not None else resolve_agent_project_root()
+    key = (subagent_type or "").strip()
+    if key:
+        cfg = registry.get(key)
+        if cfg is None:
+            known = ", ".join(sorted(registry)) if registry else "(none configured)"
+            raise ValueError(f"Unknown subagent_type {key!r}. Configured types: {known}")
+        if not cfg.agent_md:
+            raise ValueError(f"subagent_type {key!r} has no agent_md in monkeybot.yaml")
+        path = resolve_project_path(cfg.agent_md, root)
+        if not path.is_file():
+            raise ValueError(f"agent_md for subagent_type {key!r} not found: {path}")
+        return path
+
+    fallback = resolve_subagent_agent_md_path(root)
+    if fallback is not None and fallback.is_file():
+        return fallback
+    raw = os.environ.get("AGENT_MD", "").strip()
+    if raw:
+        path = resolve_project_path(raw, root)
+        if path.is_file():
+            return path
+    default = (root / "AGENT.md").resolve()
+    if default.is_file():
+        return default
+    raise ValueError("No AGENT.md found for subagent (set subagent.agent_md or paths.agent_md)")
+
+
 def normalize_sqlite_db_url(db_url: str, agent_root: Path | None = None) -> str:
     """Rewrite relative ``sqlite:///`` paths against project root (not workspace cwd)."""
     root = agent_root if agent_root is not None else resolve_agent_project_root()
@@ -106,6 +142,8 @@ class SubagentEnvelope:
     parent_run_id: str
     model: str = "gemini-2.5-flash"
     traceparent: str | None = None
+    agent_md: str | None = None
+    subagent_type: str | None = None
 
     def to_json(self) -> str:
         """Serialize to a compact JSON object for stdin (UTF-8)."""
@@ -118,6 +156,10 @@ class SubagentEnvelope:
         }
         if self.traceparent is not None:
             payload["traceparent"] = self.traceparent
+        if self.agent_md is not None:
+            payload["agent_md"] = self.agent_md
+        if self.subagent_type is not None:
+            payload["subagent_type"] = self.subagent_type
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
     @classmethod
@@ -137,6 +179,8 @@ class SubagentEnvelope:
             parent_run_id=_req_str(decoded, "parent_run_id"),
             model=_opt_model(decoded),
             traceparent=_opt_traceparent(decoded),
+            agent_md=_opt_str_field(decoded, "agent_md"),
+            subagent_type=_opt_str_field(decoded, "subagent_type"),
         )
 
 
@@ -157,6 +201,16 @@ def _opt_traceparent(data: dict[str, Any]) -> str | None:
     return stripped or None
 
 
+def _opt_str_field(data: dict[str, Any], key: str) -> str | None:
+    if key not in data:
+        return None
+    val = data.get(key)
+    if not isinstance(val, str):
+        raise ValueError(f"envelope: {key!r} must be a string")
+    stripped = val.strip()
+    return stripped or None
+
+
 def _opt_model(data: dict[str, Any]) -> str:
     if "model" not in data:
         return "gemini-2.5-flash"
@@ -173,6 +227,7 @@ async def spawn_subagent(
     scratch_dir: Path,
     on_event: Callable[[AgentEvent], Awaitable[None]] | None = None,
     subprocess_exec: Callable[..., Awaitable[asyncio.subprocess.Process]] | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Run ``script`` under ``python -u``, stream NDJSON stdout as ``AgentEvent`` values.
 
@@ -185,7 +240,14 @@ async def spawn_subagent(
     scratch_dir.mkdir(parents=True, exist_ok=True)
     progress_path = scratch_dir / "progress.jsonl"
 
-    exec_fn = subprocess_exec or _default_subprocess_exec
+    if subprocess_exec is not None:
+        exec_fn = subprocess_exec
+    else:
+        merged_env = dict(extra_env) if extra_env else None
+
+        async def exec_fn(*cmd: str | bytes) -> asyncio.subprocess.Process:
+            return await _default_subprocess_exec(*cmd, extra_env=merged_env)
+
     proc = await exec_fn(sys.executable, "-u", script)
 
     stdin = proc.stdin
@@ -231,9 +293,12 @@ async def spawn_subagent(
 
 async def _default_subprocess_exec(
     *cmd: str | bytes,
+    extra_env: dict[str, str] | None = None,
 ) -> asyncio.subprocess.Process:
     """Spawn with ``PYTHONUNBUFFERED=1``; CLI also uses ``python -u``."""
     env = dict(os.environ)
+    if extra_env:
+        env.update(extra_env)
     env["PYTHONUNBUFFERED"] = "1"
     return await asyncio.create_subprocess_exec(
         *cmd,

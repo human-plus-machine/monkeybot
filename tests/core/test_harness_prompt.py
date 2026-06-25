@@ -27,7 +27,18 @@ def test_harness_includes_runtime_error_and_no_repeat_guidance() -> None:
 def test_harness_adds_task_line_when_enabled() -> None:
     out = harness_fixed_context(include_task_tool=True)
     assert "`task` — subprocess subagent" in out
+    assert "subagent_type" in out
     assert "Nested `task` is disabled inside a subagent." in out
+
+
+def test_harness_lists_subagent_personas() -> None:
+    out = harness_fixed_context(
+        include_task_tool=True,
+        subagent_personas=(("researcher", "Deep-dives a topic."), ("analyst", "Read-only review.")),
+    )
+    assert "### Subagent personas" in out
+    assert "`researcher` — Deep-dives a topic." in out
+    assert "`analyst` — Read-only review." in out
 
 
 def test_harness_protocol_is_appended_verbatim() -> None:

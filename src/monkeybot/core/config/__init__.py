@@ -15,6 +15,7 @@ from monkeybot.core.config.settings import (
     cache_enabled_from_env,
     get_provider_config,
     get_subagent_configs,
+    get_subagent_registry,
     normalize_model_provider,
 )
 from monkeybot.core.config.validation import (
@@ -40,6 +41,7 @@ __all__ = [
     "cache_enabled_from_env",
     "get_provider_config",
     "get_subagent_configs",
+    "get_subagent_registry",
     "load_monkeybot_yaml_dict",
     "normalize_model_provider",
     "reset_runtime_env_state_for_tests",

@@ -134,6 +134,14 @@ def _tool_hint(args: dict[str, object]) -> str:
     return ""
 
 
+def _task_subagent_label(args: dict[str, object]) -> str:
+    for key in ("subagent_type", "type", "persona"):
+        val = args.get(key)
+        if isinstance(val, str) and val.strip():
+            return f"subagent:{val.strip()}"
+    return "subagent"
+
+
 def _task_hint(args: dict[str, object]) -> str:
     for key in ("task", "instructions", "prompt", "objective"):
         val = args.get(key)
@@ -147,7 +155,8 @@ def _tool_display(tool: str, label: str, args: dict[str, object]) -> str:
         hint = _task_hint(args)
         if not hint and label.strip() and label.strip() != tool:
             hint = _truncate_subagent_hint(label.strip())
-        return "subagent" + (f" — {hint}" if hint else "")
+        base = _task_subagent_label(args)
+        return base + (f" — {hint}" if hint else "")
     hint = _tool_hint(args)
     if not hint and label.strip() and label.strip() != tool:
         hint = label.strip()
@@ -159,7 +168,8 @@ def _tool_spinner_prefix(tool: str, label: str, args: dict[str, object]) -> str:
         hint = _task_hint(args)
         if not hint and label.strip() and label.strip() != tool:
             hint = _truncate_subagent_hint(label.strip())
-        return "spawning subagent" + (f" — {hint}" if hint else "")
+        base = "spawning " + _task_subagent_label(args)
+        return base + (f" — {hint}" if hint else "")
     return _tool_display(tool, label, args)
 
 

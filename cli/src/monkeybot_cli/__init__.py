@@ -1,3 +1,3 @@
 """MonkeyBot setup CLI — create, configure, validate, and chat with agents."""
 
-__version__ = "0.1.4"
+__version__ = "0.1.5"

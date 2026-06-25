@@ -4,6 +4,8 @@ The agent loop appends :func:`harness_fixed_context` after the operator-authored
 base prompt (AGENT.md) so tool/MCP protocol text lives in code, not in the bot file.
 """
 
+from collections.abc import Sequence
+
 HARNESS_TOOL_CALL_PROTOCOL = """
 ### Tool-call protocol (strict)
 - Invoke tools only through the provider's native function-call channel. Never emit tool invocations as JSON or pseudo-XML inside your assistant text; any such text is treated as a normal message and no tool will run.
@@ -55,13 +57,26 @@ This block is injected by the host every turn. Prefer the **active tool list** t
 
 _TASK_LINE = (
     "- `task` — subprocess subagent with the same workspace, memory, and MCP configuration; "
-    "returns JSON (summary, errors, usage). Nested `task` is disabled inside a subagent.\n"
+    "pass `subagent_type` to select a named persona (see Subagent personas below). "
+    "Returns JSON (summary, errors, usage). Nested `task` is disabled inside a subagent.\n"
 )
 
 _WEB_SEARCH_LINE = (
     "- `web_search` — search the web for current information; "
     "returns titles, URLs, and text snippets.\n"
 )
+
+
+def _subagent_personas_block(personas: Sequence[tuple[str, str]]) -> str:
+    if not personas:
+        return ""
+    lines = ["\n### Subagent personas (`task` tool)", ""]
+    for name, description in personas:
+        lines.append(f"- `{name}` — {description}")
+    lines.append(
+        "Pass `subagent_type` on `task` to select a persona. Omit for the default subagent AGENT.md."
+    )
+    return "\n".join(lines) + "\n"
 
 
 def harness_fixed_context(
@@ -71,6 +86,7 @@ def harness_fixed_context(
     workspace_root: str = "(not set)",
     memory_storage_uri: str = "(not set)",
     run_command_opensandbox: bool = False,
+    subagent_personas: Sequence[tuple[str, str]] | None = None,
 ) -> str:
     """Runtime-owned description of core tools, paths, MCP naming, and strict tool-call rules.
 
@@ -79,6 +95,7 @@ def harness_fixed_context(
     ``include_web_search`` should be True when a web search backend is active.
     ``run_command_opensandbox`` should match whether ``run_command`` is routed through
     OpenSandbox (same signal as ``SandboxConfig.from_env().enabled``).
+    ``subagent_personas`` lists configured named subagent types for the parent orchestrator.
     """
     exec_note = _RUN_COMMAND_EXEC_NOTE_SANDBOX if run_command_opensandbox else _RUN_COMMAND_EXEC_NOTE_HOST
     body = _HARNESS_BODY.format(
@@ -88,4 +105,5 @@ def harness_fixed_context(
         workspace_root=workspace_root,
         memory_storage_uri=memory_storage_uri,
     )
-    return body.rstrip() + HARNESS_TOOL_CALL_PROTOCOL
+    personas_block = _subagent_personas_block(subagent_personas or ())
+    return body.rstrip() + personas_block + HARNESS_TOOL_CALL_PROTOCOL

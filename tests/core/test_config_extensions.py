@@ -16,6 +16,7 @@ from monkeybot.core.config import (
     cache_enabled_from_env,
     get_provider_config,
     get_subagent_configs,
+    get_subagent_registry,
     normalize_model_provider,
     reset_runtime_env_state_for_tests,
     validate_monkeybot_yaml_doc,
@@ -167,6 +168,54 @@ class TestGetSubagentConfigs:
         configs = get_subagent_configs()
         assert len(configs) == 1
         assert configs[0].name == "valid"
+
+
+class TestGetSubagentRegistry:
+    def _write_config(self, tmp_path: Path, yaml_text: str) -> None:
+        cfg_dir = tmp_path / "monkeybot_config"
+        cfg_dir.mkdir(parents=True)
+        (cfg_dir / "monkeybot.yaml").write_text(yaml_text, encoding="utf-8")
+
+    def test_registry_maps_by_name(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        self._write_config(
+            tmp_path,
+            "subagents:\n"
+            "  - name: alpha\n"
+            "    description: First.\n"
+            "    agent_md: ./agents/alpha.md\n"
+            "  - name: beta\n"
+            "    description: Second.\n"
+            "    agent_md: ./agents/beta.md\n",
+        )
+        reg = get_subagent_registry()
+        assert set(reg) == {"alpha", "beta"}
+        assert reg["alpha"].agent_md == "./agents/alpha.md"
+
+    def test_duplicate_name_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        self._write_config(
+            tmp_path,
+            "subagents:\n"
+            "  - name: dup\n"
+            "    description: One.\n"
+            "  - name: dup\n"
+            "    description: Two.\n",
+        )
+        with pytest.raises(ConfigError, match="Duplicate subagent name"):
+            get_subagent_registry()
+
+    def test_prompt_file_alias(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        self._write_config(
+            tmp_path,
+            "subagents:\n"
+            "  - name: legacy\n"
+            "    description: Legacy alias.\n"
+            "    prompt_file: ./agents/legacy.md\n",
+        )
+        reg = get_subagent_registry()
+        assert reg["legacy"].agent_md == "./agents/legacy.md"
 
 
 class TestCacheEnabled:

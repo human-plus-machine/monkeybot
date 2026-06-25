@@ -17,8 +17,10 @@ from monkeybot.core.subagents.subagent_proto import (
     resolve_project_path,
     resolve_subagent_agent_md_path,
     resolve_subagent_script,
+    resolve_task_agent_md_path,
     spawn_subagent,
 )
+from monkeybot.core.config.settings import SubagentConfig
 
 
 class FakeStdin:
@@ -109,6 +111,48 @@ def test_normalize_sqlite_db_url_relative(tmp_path: Path) -> None:
 def test_resolve_agent_project_root_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MONKEYBOT_AGENT_ROOT", str(tmp_path))
     assert resolve_agent_project_root() == tmp_path.resolve()
+
+
+def test_subagent_envelope_roundtrip_with_persona_fields() -> None:
+    env = SubagentEnvelope(
+        task="do thing",
+        context="ctx",
+        memory_storage_uri="local:///tmp/m",
+        parent_run_id="p1",
+        agent_md="/tmp/agents/researcher.md",
+        subagent_type="researcher",
+    )
+    restored = SubagentEnvelope.from_json(env.to_json())
+    assert restored == env
+
+
+def test_resolve_task_agent_md_path_uses_registry(tmp_path: Path) -> None:
+    impl = tmp_path / "agents" / "researcher.md"
+    impl.parent.mkdir(parents=True)
+    impl.write_text("# researcher\n", encoding="utf-8")
+    registry = {
+        "researcher": SubagentConfig(
+            name="researcher",
+            description="research",
+            skills=[],
+            agent_md="./agents/researcher.md",
+        )
+    }
+    got = resolve_task_agent_md_path(
+        subagent_type="researcher",
+        registry=registry,
+        agent_root=tmp_path,
+    )
+    assert got == impl.resolve()
+
+
+def test_resolve_task_agent_md_path_unknown_type(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="Unknown subagent_type"):
+        resolve_task_agent_md_path(
+            subagent_type="missing",
+            registry={},
+            agent_root=tmp_path,
+        )
 
 
 def test_subagent_envelope_roundtrip() -> None:

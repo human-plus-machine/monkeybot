@@ -193,11 +193,16 @@ async def execute_claimed_run(
         await run_store.record_completed(row.run_id, result_json)
         return True
 
+    extra_env: dict[str, str] | None = None
+    if envelope.agent_md:
+        extra_env = {"MONKEYBOT_SUBAGENT_AGENT_MD": envelope.agent_md}
+
     try:
         async for evt in spawn_subagent(
             str(script),
             envelope,
             scratch_dir=scratch,
+            extra_env=extra_env,
         ):
             if isinstance(evt, Error):
                 errors.append(evt.error)

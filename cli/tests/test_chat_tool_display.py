@@ -57,6 +57,12 @@ def test_task_tool_display_uses_subagent_label() -> None:
     )
 
 
+def test_task_tool_display_includes_subagent_type() -> None:
+    args = {"task": "Summarize findings", "subagent_type": "researcher"}
+    assert _tool_display("task", "task", args) == "subagent:researcher — Summarize findings"
+    assert _tool_spinner_prefix("task", "task", args) == "spawning subagent:researcher — Summarize findings"
+
+
 def _run(coro):  # type: ignore[no-untyped-def]
     return asyncio.run(coro)
 
