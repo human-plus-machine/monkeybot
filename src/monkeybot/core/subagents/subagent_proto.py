@@ -51,6 +51,51 @@ def resolve_subagent_script() -> Path:
     ).resolve()
 
 
+def resolve_agent_project_root() -> Path:
+    """Bot project root (config, AGENT.md, data/) — not the workspace file-tool sandbox."""
+    raw = os.environ.get("MONKEYBOT_AGENT_ROOT", "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return Path.cwd().resolve()
+
+
+def resolve_project_path(raw: str, agent_root: Path | None = None) -> Path:
+    """Resolve a config path relative to ``agent_root`` (default: env or cwd)."""
+    root = agent_root if agent_root is not None else resolve_agent_project_root()
+    p = Path(raw).expanduser()
+    if p.is_absolute():
+        return p.resolve()
+    return (root / p).resolve()
+
+
+def resolve_subagent_agent_md_path(agent_root: Path | None = None) -> Path | None:
+    """Effective subagent AGENT.md path; ``MONKEYBOT_SUBAGENT_AGENT_MD`` wins over ``AGENT_MD``."""
+    root = agent_root if agent_root is not None else resolve_agent_project_root()
+    raw = os.environ.get("MONKEYBOT_SUBAGENT_AGENT_MD", "").strip()
+    if not raw:
+        raw = os.environ.get("AGENT_MD", "").strip()
+    if not raw:
+        return None
+    return resolve_project_path(raw, root)
+
+
+def normalize_sqlite_db_url(db_url: str, agent_root: Path | None = None) -> str:
+    """Rewrite relative ``sqlite:///`` paths against project root (not workspace cwd)."""
+    root = agent_root if agent_root is not None else resolve_agent_project_root()
+    stripped = db_url.strip()
+    prefix = "sqlite:///"
+    if not stripped.lower().startswith(prefix):
+        return db_url
+    remainder = stripped[len(prefix) :]
+    if not remainder or remainder == ":memory:":
+        return db_url
+    p = Path(remainder)
+    if p.is_absolute():
+        return db_url
+    abs_path = (root / p).resolve()
+    return f"sqlite:///{abs_path}"
+
+
 @dataclass(frozen=True)
 class SubagentEnvelope:
     """Inputs forwarded to a child Python worker via stdin JSON."""

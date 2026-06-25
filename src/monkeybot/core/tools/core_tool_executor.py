@@ -35,6 +35,10 @@ from monkeybot.core.runtime.events import (
 from monkeybot.core.runtime.loop import ToolExecutorPort
 from monkeybot.core.subagents.subagent_proto import (
     SubagentEnvelope,
+    normalize_sqlite_db_url,
+    resolve_agent_project_root,
+    resolve_project_path,
+    resolve_subagent_agent_md_path,
     resolve_subagent_script,
     spawn_subagent,
 )
@@ -696,15 +700,28 @@ class CoreToolExecutor(ToolExecutorPort):
                 scratch_dir=scratch,
             )
 
+        agent_root = resolve_agent_project_root()
         child_env = {
             "MONKEYBOT_SUBAGENT_WORKSPACE": str(self._workspace.repo_root),
+            "MONKEYBOT_AGENT_ROOT": str(agent_root),
             "MEMORY_STORAGE_URI": memory_uri,
             "MONKEYBOT_SUBAGENT_SKILLS_PATH": str(self._skills_path),
             "OTEL_SERVICE_NAME": _SUBAGENT_OTEL_SERVICE_NAME,
         }
-        agent_md = os.environ.get("AGENT_MD")
-        if agent_md:
-            child_env["MONKEYBOT_SUBAGENT_AGENT_MD"] = agent_md
+        subagent_md = resolve_subagent_agent_md_path(agent_root)
+        if subagent_md is not None:
+            child_env["MONKEYBOT_SUBAGENT_AGENT_MD"] = str(subagent_md)
+
+        for env_key, raw_val in (
+            ("MCP_CONFIG", os.environ.get("MCP_CONFIG", "")),
+            ("COMMAND_ALLOWLIST_CONFIG", os.environ.get("COMMAND_ALLOWLIST_CONFIG", "")),
+        ):
+            if raw_val.strip():
+                child_env[env_key] = str(resolve_project_path(raw_val.strip(), agent_root))
+
+        db_raw = os.environ.get("DB_URL", "").strip()
+        if db_raw:
+            child_env["DB_URL"] = normalize_sqlite_db_url(db_raw, agent_root)
 
         timeout_raw = os.environ.get("SUBAGENT_TIMEOUT_SEC", "600").strip()
         try:

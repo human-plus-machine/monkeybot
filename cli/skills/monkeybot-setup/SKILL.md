@@ -31,7 +31,11 @@ Ask (or infer from context):
 uv run monkeybot new --dest /path/to/bot --provider gemini --model gemini-3-flash --yes
 ```
 
-Use `--force` only when overwriting is explicitly requested.
+Creates `monkeybot_config/`, `workspace/` (file-tool sandbox), `workspace/skills` → `.agents/skills`, `data/memory/`, and `scripts/setup-workspace.sh`. Use `--force` only when overwriting is explicitly requested.
+
+**Subagents (`task` tool):** share the parent `AGENT.md` (or `subagent.agent_md` in yaml). Relative paths resolve from the bot project root, not `workspace/`. Specialize subagents via `task` / `context`, not separate agent type folders.
+
+**Parallel `task` fan-out:** SQLite can hit `database is locked` with concurrent subagents. For local parallel work, use Postgres (`uv sync --extra postgres` in the harness repo) and set `DB_URL=postgresql://...` in `.env`.
 
 ### 3. Author AGENT.md
 
@@ -82,7 +86,7 @@ One successful turn confirms the setup.
 
 | Command | Purpose |
 |---------|---------|
-| `new` | Scaffold `monkeybot_config/`, `data/memory/`, `.agents/skills/`, `.env.example` |
+| `new` | Scaffold `monkeybot_config/`, `workspace/`, `data/memory/`, `.agents/skills/`, `.env.example` |
 | `validate` | Config + paths + MCP shape (`--check-mcp` for network) |
 | `doctor` | Python, provider extra, credentials, port |
 | `run` | Start SSE gateway subprocess |

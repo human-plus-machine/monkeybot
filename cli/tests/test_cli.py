@@ -27,8 +27,19 @@ def test_new_scaffolds(tmp_path: Path) -> None:
     assert result.returncode == 0
     assert (tmp_path / "monkeybot_config" / "monkeybot.yaml").is_file()
     assert (tmp_path / ".env.example").is_file()
+    assert (tmp_path / "workspace" / ".gitkeep").is_file()
+    assert (tmp_path / "scripts" / "setup-workspace.sh").is_file()
+    skills_link = tmp_path / "workspace" / "skills"
+    if skills_link.is_symlink():
+        assert skills_link.resolve() == (tmp_path / ".agents" / "skills").resolve()
+    else:
+        assert (tmp_path / "workspace" / "SKILLS_README.txt").is_file()
     text = (tmp_path / "monkeybot_config" / "monkeybot.yaml").read_text()
     assert "test-model" in text
+    assert "workspace_root: ./workspace" in text
+    env_text = (tmp_path / ".env.example").read_text()
+    assert "MONKEYBOT_WORKSPACE_ROOT" in env_text
+    assert "DB_URL" in env_text
 
 
 def test_validate_missing_config(tmp_path: Path) -> None:

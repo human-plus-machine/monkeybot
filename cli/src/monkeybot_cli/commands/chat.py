@@ -35,6 +35,7 @@ from monkeybot.core.runtime.events import (
 from monkeybot_cli.config_resolve import load_agent_dotenv, load_config_doc, resolve_config
 
 DEFAULT_PORT = 8080
+_SUBAGENT_VERBOSE_MAX = 60
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _DIM = "\x1b[2m"
 _GREEN = "\x1b[32m"
@@ -91,6 +92,14 @@ class _ThinkingSpinner(_SpinnerLine):
 
 def _collapse_hint(text: str) -> str:
     return " ".join(text.split())
+
+
+def _verbose_payload(tool: str, payload: str) -> str:
+    """Format --verbose tool output; subagent (task) results are capped for readability."""
+    collapsed = " ".join(payload.split())
+    if tool != "task" or len(collapsed) <= _SUBAGENT_VERBOSE_MAX:
+        return collapsed if tool == "task" else payload
+    return collapsed[:_SUBAGENT_VERBOSE_MAX] + "…"
 
 
 def _tool_hint(args: dict[str, object]) -> str:
@@ -195,7 +204,7 @@ class _TurnActivity:
         if verbose:
             payload = error or result or ""
             if payload:
-                print(f"{_DIM}    {payload}{_RESET}")
+                print(f"{_DIM}    {_verbose_payload(tool, payload)}{_RESET}")
 
     async def summarizing(self, tokens: int) -> None:
         await self._start(f"summarizing context ({tokens:,} tokens)")

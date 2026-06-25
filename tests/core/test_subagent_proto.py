@@ -12,6 +12,10 @@ from monkeybot.core.runtime.events import AssistantDelta, Error, Thinking, event
 from monkeybot.core.subagents.subagent_proto import (
     SubagentEnvelope,
     default_subagent_script,
+    normalize_sqlite_db_url,
+    resolve_agent_project_root,
+    resolve_project_path,
+    resolve_subagent_agent_md_path,
     resolve_subagent_script,
     spawn_subagent,
 )
@@ -73,6 +77,38 @@ def test_resolve_subagent_script_uses_bundled_default(
 ) -> None:
     monkeypatch.delenv("MONKEYBOT_SUBAGENT_SCRIPT", raising=False)
     assert resolve_subagent_script() == default_subagent_script().resolve()
+
+
+def test_resolve_project_path_relative(tmp_path: Path) -> None:
+    cfg = tmp_path / "monkeybot_config"
+    cfg.mkdir()
+    agent = cfg / "AGENT.md"
+    agent.write_text("# bot\n", encoding="utf-8")
+    got = resolve_project_path("./monkeybot_config/AGENT.md", tmp_path)
+    assert got == agent.resolve()
+
+
+def test_resolve_subagent_agent_md_prefers_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parent = tmp_path / "monkeybot_config" / "AGENT.md"
+    parent.parent.mkdir(parents=True)
+    parent.write_text("# parent\n", encoding="utf-8")
+    override = tmp_path / "custom.md"
+    override.write_text("# custom\n", encoding="utf-8")
+    monkeypatch.setenv("AGENT_MD", "./monkeybot_config/AGENT.md")
+    monkeypatch.setenv("MONKEYBOT_SUBAGENT_AGENT_MD", str(override))
+    assert resolve_subagent_agent_md_path(tmp_path) == override.resolve()
+
+
+def test_normalize_sqlite_db_url_relative(tmp_path: Path) -> None:
+    url = normalize_sqlite_db_url("sqlite:///data/monkeybot.db", tmp_path)
+    assert url == f"sqlite:///{(tmp_path / 'data' / 'monkeybot.db').resolve()}"
+
+
+def test_resolve_agent_project_root_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MONKEYBOT_AGENT_ROOT", str(tmp_path))
+    assert resolve_agent_project_root() == tmp_path.resolve()
 
 
 def test_subagent_envelope_roundtrip() -> None:

@@ -108,3 +108,17 @@ def test_verbose_prints_full_tool_result(capsys: pytest.CaptureFixture[str]) -> 
     _run(_run_flow())
     out = capsys.readouterr().out
     assert long_result in out
+
+
+def test_verbose_truncates_subagent_result(capsys: pytest.CaptureFixture[str]) -> None:
+    activity = _TurnActivity()
+    long_result = "z" * 120
+
+    async def _run_flow() -> None:
+        await activity.tool_started("task", "task", {"task": "do work"})
+        await activity.tool_finished("task", verbose=True, result=long_result)
+
+    _run(_run_flow())
+    out = capsys.readouterr().out
+    assert long_result not in out
+    assert ("z" * 60 + "…") in out

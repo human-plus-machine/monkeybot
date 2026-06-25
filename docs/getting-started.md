@@ -47,11 +47,13 @@ Important knobs (see **`monkeybot_config/monkeybot.example.yaml`** for all secti
 
 | YAML section | Purpose |
 |---|---|
+| `paths.workspace_root` | File-tool sandbox (default `./workspace` when scaffolded via CLI). |
 | `paths.agent_md` | System prompt file (default `./monkeybot_config/AGENT.md`). |
 | `paths.memory_storage_uri` | Durable markdown memory root (`local://…`, `gcs://…`, `s3://…`); optional `INDEX.md` is surfaced in the prompt. Legacy `paths.memory_path` still maps to `MEMORY_PATH`. |
 | `paths.skills_path` | Skill bundle root. |
 | `paths.db_url` | SQLite URL for conversation + usage. |
 | `paths.mcp_config` / `paths.command_allowlist_config` | MCP map and run_command allowlist policy path. |
+| `subagent.agent_md` | Subagent prompt file (defaults to same as `paths.agent_md`). Relative paths use project root, not `workspace/`. |
 | `model.provider` / `model.name` | Provider and model id (`gemini`, `openai`, `fake`, …). |
 | `runtime.port` | Gateway listen port. |
 
@@ -60,6 +62,8 @@ Important knobs (see **`monkeybot_config/monkeybot.example.yaml`** for all secti
 ## 3. Author AGENT.md
 
 Point `paths.agent_md` in `monkeybot_config/monkeybot.yaml` at a non-empty Markdown file (the repo ships `monkeybot_config/AGENT.md`). Its contents become the base system message for each turn, plus the optional memory index and skill list. See [Skills](skills.md) for adding capabilities under `paths.skills_path`.
+
+When using `workspace_root: ./workspace`, put agent-authored files under `workspace/` and ensure skills are reachable from the sandbox (the CLI scaffolds `workspace/skills` → `.agents/skills`). Subagents spawned via the `task` tool use the same `AGENT.md` unless `subagent.agent_md` is set. For multiple concurrent subagents locally, prefer Postgres for `paths.db_url` instead of SQLite.
 
 ---
 

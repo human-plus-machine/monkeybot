@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import shutil
+import stat
 import sys
 from importlib import resources
 from pathlib import Path
@@ -32,6 +33,66 @@ def _install_file(cfg_dir: Path, template_name: str, dest_name: str, *, force: b
         return "skipped"
     existed = dest.exists()
     shutil.copyfile(src, dest)
+    return "overwritten" if existed else "created"
+
+
+def _ensure_workspace(dest: Path, *, force: bool) -> list[str]:
+    """Create workspace/ sandbox and workspace/skills -> ../.agents/skills symlink."""
+    lines: list[str] = []
+    workspace = dest / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    gitkeep = workspace / ".gitkeep"
+    if not gitkeep.exists() or force:
+        gitkeep.touch(exist_ok=True)
+        lines.append(f"  workspace/.gitkeep: {'overwritten' if force and gitkeep.exists() else 'created'}")
+    else:
+        lines.append("  workspace/.gitkeep: skipped")
+
+    skills_target = dest / ".agents" / "skills"
+    skills_target.mkdir(parents=True, exist_ok=True)
+    link = workspace / "skills"
+    expected = (dest / ".agents" / "skills").resolve()
+
+    if link.is_symlink():
+        if link.resolve() == expected:
+            lines.append("  workspace/skills: skipped (symlink ok)")
+            return lines
+        link.unlink()
+
+    if link.exists() and not link.is_symlink():
+        if not force:
+            lines.append("  workspace/skills: skipped (path exists)")
+            return lines
+        if link.is_dir():
+            shutil.rmtree(link)
+        else:
+            link.unlink()
+
+    try:
+        link.symlink_to("../.agents/skills", target_is_directory=True)
+        lines.append("  workspace/skills: symlink -> ../.agents/skills")
+    except OSError:
+        readme = workspace / "SKILLS_README.txt"
+        readme.write_text(
+            "Could not create workspace/skills symlink on this platform.\n"
+            "Run: bash scripts/setup-workspace.sh\n"
+            "Or copy/symlink .agents/skills into workspace/skills manually.\n",
+            encoding="utf-8",
+        )
+        lines.append("  workspace/skills: symlink failed (see workspace/SKILLS_README.txt)")
+
+    return lines
+
+
+def _install_setup_script(dest: Path, *, force: bool) -> str:
+    scripts = dest / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    dest_script = scripts / "setup-workspace.sh"
+    if dest_script.exists() and not force:
+        return "skipped"
+    existed = dest_script.exists()
+    shutil.copyfile(_template_path("setup-workspace.sh"), dest_script)
+    dest_script.chmod(dest_script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return "overwritten" if existed else "created"
 
 
@@ -108,6 +169,9 @@ def run_new(args: argparse.Namespace) -> int:
     skills = dest / ".agents" / "skills"
     skills.mkdir(parents=True, exist_ok=True)
     report.append("  .agents/skills/: ensured")
+
+    report.extend(_ensure_workspace(dest, force=args.force))
+    report.append(f"  scripts/setup-workspace.sh: {_install_setup_script(dest, force=args.force)}")
 
     env_example = dest / ".env.example"
     if not env_example.exists() or args.force:
