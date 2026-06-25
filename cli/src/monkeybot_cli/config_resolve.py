@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -47,14 +46,8 @@ def resolve_config(explicit: str | None, *, cwd: Path | None = None) -> Path | N
     if explicit:
         p = Path(explicit).expanduser()
         return p.resolve() if p.is_file() else None
-    if cwd is not None:
-        prev = Path.cwd()
-        try:
-            os.chdir(cwd)
-            return resolve_monkeybot_config_path()
-        finally:
-            os.chdir(prev)
-    return resolve_monkeybot_config_path()
+    resolved_cwd = cwd.expanduser().resolve() if cwd is not None else None
+    return resolve_monkeybot_config_path(cwd=resolved_cwd)
 
 
 def load_config_doc(config_path: str | Path | None = None) -> tuple[Path | None, dict]:

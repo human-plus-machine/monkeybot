@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import socket
 import sys
 from pathlib import Path
+
+import httpx
 
 from monkeybot_cli.config_resolve import load_agent_dotenv, load_config_doc, resolve_config
 from monkeybot_cli.output import CommandReport, check
@@ -74,7 +78,7 @@ def run_doctor(args: argparse.Namespace) -> int:
             remediation="Set API keys or ADC in .env (see .env.example)",
         )
         if spec.gcp_adc:
-            adc_path = __import__("os").environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+            adc_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
             adc_ok = bool(adc_path) and Path(adc_path).is_file()
             check(
                 report,
@@ -122,8 +126,6 @@ def run_doctor(args: argparse.Namespace) -> int:
                 value=backend,
             )
     else:
-        import os
-
         key_var = "TAVILY_API_KEY" if backend == "tavily" else "FIRECRAWL_API_KEY"
         has_key = bool(os.environ.get(key_var, "").strip())
         check(
@@ -137,9 +139,6 @@ def run_doctor(args: argparse.Namespace) -> int:
         )
 
     if args.check_mcp and config_path:
-        import json
-        import os
-
         paths = doc.get("paths") if isinstance(doc.get("paths"), dict) else {}
         mcp_rel = str(paths.get("mcp_config", "")) if isinstance(paths, dict) else ""
         if mcp_rel:
@@ -149,8 +148,6 @@ def run_doctor(args: argparse.Namespace) -> int:
                 mcp_doc = json.loads(mcp_path.read_text(encoding="utf-8"))
                 servers = mcp_doc.get("mcpServers", {})
                 if isinstance(servers, dict):
-                    import httpx
-
                     for name, srv in servers.items():
                         if not isinstance(srv, dict) or srv.get("enabled") is False:
                             continue

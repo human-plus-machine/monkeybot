@@ -44,6 +44,41 @@ def test_new_scaffolds(tmp_path: Path) -> None:
     assert "DB_URL" in env_text
 
 
+def test_new_force_reports_overwritten_config(tmp_path: Path) -> None:
+    first = _run_cli("new", "--dest", str(tmp_path), "--yes")
+    assert first.returncode == 0
+    second = _run_cli("new", "--dest", str(tmp_path), "--yes", "--force")
+    assert second.returncode == 0
+    assert "monkeybot_config/monkeybot.yaml: overwritten" in second.stdout
+
+
+def test_write_active_config_reports_overwritten_on_force(tmp_path: Path) -> None:
+    from monkeybot_cli.commands.new import _write_active_config
+
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    active = cfg_dir / "monkeybot.yaml"
+    active.write_text("old: true\n", encoding="utf-8")
+
+    status = _write_active_config(cfg_dir, provider=None, model=None, force=True)
+
+    assert status == "overwritten"
+    assert "old: true" not in active.read_text()
+
+
+def test_write_active_config_reports_created(tmp_path: Path) -> None:
+    from monkeybot_cli.commands.new import _write_active_config
+
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+
+    status = _write_active_config(cfg_dir, provider="gemini", model="test-model", force=False)
+
+    assert status == "created"
+    text = (cfg_dir / "monkeybot.yaml").read_text()
+    assert "test-model" in text
+
+
 def test_validate_missing_config(tmp_path: Path) -> None:
     result = _run_cli("validate", "--json", "--cwd", str(tmp_path))
     assert result.returncode == 1

@@ -38,6 +38,7 @@ ALLOWED_COMMANDS = [
     "echo",     # Print text (used in tests and debugging)
     "python",   # Execute Python scripts (skills)
     "python3",  # Execute Python scripts (skills)
+    "uv",       # Package runner (install subcommands blocked by deny_patterns)
     "git",      # Version control (clone, branch, commit, push, etc.)
     "gh",       # GitHub CLI (e.g. gh pr create)
     "bash",     # Shell interpreter — use for builtins (cd, &&, pipes) via bash -c "..."

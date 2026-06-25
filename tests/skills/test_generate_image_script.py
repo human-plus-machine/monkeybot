@@ -8,8 +8,10 @@ import os
 import subprocess
 import sys
 import types
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -23,6 +25,12 @@ SCRIPT = (
     / "generate_image.py"
 )
 
+_MINIMAL_PNG = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
+    b"\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc"
+    b"\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+
 
 def _load_module():
     spec = importlib.util.spec_from_file_location("generate_image_skill", SCRIPT)
@@ -30,6 +38,56 @@ def _load_module():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+def _vertex_response(png: bytes) -> MagicMock:
+    inline = MagicMock()
+    inline.data = png
+    part = MagicMock()
+    part.inline_data = inline
+    content = MagicMock()
+    content.parts = [part]
+    candidate = MagicMock()
+    candidate.content = content
+    response = MagicMock()
+    response.candidates = [candidate]
+    return response
+
+
+@pytest.fixture
+def mock_vertex_genai(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, Any]]:
+    """Install fake google.genai modules matching the pinned SDK response shape."""
+
+    def _install(*, client_factory: Callable[..., MagicMock] | None = None) -> dict[str, Any]:
+        response = _vertex_response(_MINIMAL_PNG)
+        mock_client = MagicMock()
+        mock_client.models.generate_content.return_value = response
+
+        fake_types = types.ModuleType("google.genai.types")
+        fake_types.GenerateContentConfig = MagicMock
+        fake_types.ImageConfig = MagicMock
+
+        fake_genai = types.ModuleType("google.genai")
+        fake_genai.Client = client_factory or MagicMock(return_value=mock_client)
+        fake_genai.types = fake_types
+
+        fake_google = types.ModuleType("google")
+        fake_google.genai = fake_genai
+
+        monkeypatch.setitem(sys.modules, "google", fake_google)
+        monkeypatch.setitem(sys.modules, "google.genai", fake_genai)
+        monkeypatch.setitem(sys.modules, "google.genai.types", fake_types)
+        return {"client": mock_client, "response": response}
+
+    yield {"install": _install}
+
+
+def test_image_bytes_from_response_reads_candidate_inline_data() -> None:
+    mod = _load_module()
+    png = b"\x89PNG\r\n\x1a\n"
+    assert mod._image_bytes_from_response(_vertex_response(png)) == png
+    assert mod._image_bytes_from_response(_vertex_response(b"")) is None
+    assert mod._image_bytes_from_response(MagicMock(candidates=[])) is None
 
 
 def test_generate_image_script_requires_prompt(tmp_path: Path) -> None:
@@ -69,37 +127,12 @@ def test_generate_image_script_invalid_aspect(tmp_path: Path, aspect: str) -> No
     assert payload["ok"] is False
 
 
-def test_generate_image_script_success_mocked_vertex(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_png = (
-        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
-        b"\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc"
-        b"\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
-    )
-    inline = MagicMock()
-    inline.data = fake_png
-    part = MagicMock()
-    part.inline_data = inline
-    response = MagicMock()
-    response.parts = [part]
-    response.candidates = None
-
-    mock_client = MagicMock()
-    mock_client.models.generate_content.return_value = response
-
-    fake_types = types.ModuleType("google.genai.types")
-    fake_types.GenerateContentConfig = MagicMock
-    fake_types.ImageConfig = MagicMock
-
-    fake_genai = types.ModuleType("google.genai")
-    fake_genai.Client = MagicMock(return_value=mock_client)
-    fake_genai.types = fake_types
-
-    fake_google = types.ModuleType("google")
-    fake_google.genai = fake_genai
-
-    monkeypatch.setitem(sys.modules, "google", fake_google)
-    monkeypatch.setitem(sys.modules, "google.genai", fake_genai)
-    monkeypatch.setitem(sys.modules, "google.genai.types", fake_types)
+def test_generate_image_script_success_mocked_vertex(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mock_vertex_genai: dict[str, Any],
+) -> None:
+    mock_vertex_genai["install"]()
     monkeypatch.setenv("VERTEX_AI_PROJECT_ID", "test-project")
     monkeypatch.setenv("VERTEX_AI_LOCATION", "global")
     monkeypatch.chdir(tmp_path)
@@ -116,6 +149,7 @@ def test_generate_image_script_success_mocked_vertex(tmp_path: Path, monkeypatch
 def test_generate_image_script_writes_under_workspace_root_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    mock_vertex_genai: dict[str, Any],
 ) -> None:
     agent_dir = tmp_path / "agent"
     workspace = agent_dir / "workspace"
@@ -125,32 +159,7 @@ def test_generate_image_script_writes_under_workspace_root_env(
     monkeypatch.setenv("VERTEX_AI_PROJECT_ID", "test-project")
     monkeypatch.setenv("VERTEX_AI_LOCATION", "global")
 
-    fake_png = b"\x89PNG\r\n\x1a\n"
-    inline = MagicMock()
-    inline.data = fake_png
-    part = MagicMock()
-    part.inline_data = inline
-    response = MagicMock()
-    response.parts = [part]
-    response.candidates = None
-
-    mock_client = MagicMock()
-    mock_client.models.generate_content.return_value = response
-
-    fake_types = types.ModuleType("google.genai.types")
-    fake_types.GenerateContentConfig = MagicMock
-    fake_types.ImageConfig = MagicMock
-
-    fake_genai = types.ModuleType("google.genai")
-    fake_genai.Client = MagicMock(return_value=mock_client)
-    fake_genai.types = fake_types
-
-    fake_google = types.ModuleType("google")
-    fake_google.genai = fake_genai
-
-    monkeypatch.setitem(sys.modules, "google", fake_google)
-    monkeypatch.setitem(sys.modules, "google.genai", fake_genai)
-    monkeypatch.setitem(sys.modules, "google.genai.types", fake_types)
+    mock_vertex_genai["install"]()
     monkeypatch.setattr(sys, "argv", ["generate_image.py", "--prompt", "circle"])
 
     mod = _load_module()
@@ -165,6 +174,7 @@ def test_generate_image_script_writes_under_workspace_root_env(
 def test_generate_image_script_uses_credentials_file_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    mock_vertex_genai: dict[str, Any],
 ) -> None:
     creds_file = tmp_path / "gcp-sa.json"
     creds_file.write_text(
@@ -176,37 +186,15 @@ def test_generate_image_script_uses_credentials_file_path(
     monkeypatch.setenv("VERTEX_AI_PROJECT_ID", "test-project")
     monkeypatch.setenv("VERTEX_AI_LOCATION", "global")
 
-    fake_png = b"\x89PNG\r\n\x1a\n"
-    inline = MagicMock()
-    inline.data = fake_png
-    part = MagicMock()
-    part.inline_data = inline
-    response = MagicMock()
-    response.parts = [part]
-    response.candidates = None
-
-    mock_client = MagicMock()
-    mock_client.models.generate_content.return_value = response
     captured_client_kwargs: dict[str, object] = {}
 
     def _client_factory(**kwargs: object) -> MagicMock:
         captured_client_kwargs.update(kwargs)
-        return mock_client
+        client = MagicMock()
+        client.models.generate_content.return_value = _vertex_response(_MINIMAL_PNG)
+        return client
 
-    fake_types = types.ModuleType("google.genai.types")
-    fake_types.GenerateContentConfig = MagicMock
-    fake_types.ImageConfig = MagicMock
-
-    fake_genai = types.ModuleType("google.genai")
-    fake_genai.Client = _client_factory
-    fake_genai.types = fake_types
-
-    fake_google = types.ModuleType("google")
-    fake_google.genai = fake_genai
-
-    monkeypatch.setitem(sys.modules, "google", fake_google)
-    monkeypatch.setitem(sys.modules, "google.genai", fake_genai)
-    monkeypatch.setitem(sys.modules, "google.genai.types", fake_types)
+    mock_vertex_genai["install"](client_factory=_client_factory)
     monkeypatch.setattr(sys, "argv", ["generate_image.py", "--prompt", "circle"])
 
     mod = _load_module()

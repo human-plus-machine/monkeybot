@@ -10,6 +10,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
+import httpx
 import yaml
 from monkeybot.core.config import (
     SUPPORTED_YAML_MODEL_PROVIDERS,
@@ -312,8 +313,6 @@ def run_validate(args: argparse.Namespace) -> int:
                                 continue
                             url = srv.get("url")
                             if isinstance(url, str) and url.startswith("http"):
-                                import httpx
-
                                 try:
                                     httpx.get(url, timeout=3.0)
                                     reachable = True

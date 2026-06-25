@@ -197,6 +197,15 @@ async def test_inspector_install_commands_denied(tmp_path: Path, args: dict) -> 
 
 
 @pytest.mark.asyncio
+async def test_inspector_uv_run_allowed(tmp_path: Path) -> None:
+    p = _write_policy(tmp_path)
+    inspector = CommandTierInspector(p)
+    call = InspectorToolCall("1", "run_command", {"argv": ["uv", "run", "pytest", "tests/"]})
+    d = await inspector.check(call, _minimal_ctx())
+    assert d.kind == "allow"
+
+
+@pytest.mark.asyncio
 async def test_inspector_skill_script_argv_allowed(tmp_path: Path) -> None:
     p = _write_policy(tmp_path)
     inspector = CommandTierInspector(p)

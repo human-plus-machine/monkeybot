@@ -129,6 +129,32 @@ async def test_build_context_merges_core_and_mcp_tools(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_build_context_omits_attachment_tools_when_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ATTACHMENTS_ENABLED", "false")
+    agent_path = tmp_path / "AGENT.md"
+    agent_path.write_text("ok\n", encoding="utf-8")
+    mem = tmp_path / "memory"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+
+    ctx = await build_context(
+        "t",
+        "r",
+        agent_md_path=agent_path,
+        memory=_memory_subsystem(mem),
+        skills_path=skills,
+        mcp_client=FakeMCPClient([]),
+    )
+
+    names = {t.name for t in ctx.tools}
+    assert "render_image" not in names
+    assert "read_attachment" not in names
+
+
+@pytest.mark.asyncio
 async def test_build_context_include_task_tool_false(tmp_path: Path) -> None:
     agent_path = tmp_path / "AGENT.md"
     agent_path.write_text("ok\n", encoding="utf-8")

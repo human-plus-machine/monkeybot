@@ -113,6 +113,7 @@ def _write_active_config(cfg_dir: Path, *, provider: str | None, model: str | No
             active.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
             return "updated (provider/model)"
         return "skipped"
+    existed = active.exists()
     shutil.copyfile(example, active)
     if provider or model:
         doc = yaml.safe_load(active.read_text(encoding="utf-8")) or {}
@@ -124,8 +125,7 @@ def _write_active_config(cfg_dir: Path, *, provider: str | None, model: str | No
                 if model:
                     model_sec["name"] = model
             active.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
-    existed = False
-    return "created" if not existed else "overwritten"
+    return "overwritten" if existed else "created"
 
 
 def run_new(args: argparse.Namespace) -> int:

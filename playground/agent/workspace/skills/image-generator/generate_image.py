@@ -4,8 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
-import binascii
 import json
 import os
 import sys
@@ -80,37 +78,20 @@ def _prepare_google_application_credentials() -> None:
 
 
 def _image_bytes_from_response(response: object) -> bytes | None:
-    parts = getattr(response, "parts", None)
-    if parts is None:
-        candidates = getattr(response, "candidates", None) or []
-        if candidates:
-            content = getattr(candidates[0], "content", None)
-            parts = getattr(content, "parts", None) if content is not None else None
-    for part in parts or []:
-        inline = getattr(part, "inline_data", None)
-        if inline is None:
+    """Extract image bytes from a ``google.genai`` ``GenerateContentResponse``."""
+    for cand in getattr(response, "candidates", None) or []:
+        content = getattr(cand, "content", None)
+        if content is None:
             continue
-        data = getattr(inline, "data", None)
-        if not data:
-            continue
-        if isinstance(data, str):
-            try:
-                return base64.b64decode(data)
-            except binascii.Error:
+        for part in getattr(content, "parts", None) or []:
+            inline = getattr(part, "inline_data", None)
+            if inline is None:
                 continue
-        if isinstance(data, (bytes, bytearray)):
-            return bytes(data)
-        as_image = getattr(part, "as_image", None)
-        if callable(as_image):
-            try:
-                img = as_image()
-                from io import BytesIO
-
-                buf = BytesIO()
-                img.save(buf, format="PNG")
-                return buf.getvalue()
-            except Exception:
-                continue
+            data = getattr(inline, "data", None)
+            if isinstance(data, (bytes, bytearray)):
+                raw = bytes(data)
+                if raw:
+                    return raw
     return None
 
 
