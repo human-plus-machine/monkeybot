@@ -33,6 +33,7 @@ from monkeybot.core.runtime.events import (
     event_from_json,
 )
 
+from monkeybot_cli.chat_status_bar import ChatStatusBar, parse_usage_response
 from monkeybot_cli.config_resolve import load_agent_dotenv, load_config_doc, resolve_config
 from monkeybot_cli.runtime_python import gateway_argv, resolve_runtime_python
 
@@ -231,6 +232,21 @@ class _TurnActivity:
             self._line = None
 
 
+async def _fetch_session_usage(
+    client: httpx.AsyncClient,
+    base: str,
+    session_id: str,
+    *,
+    status_bar: ChatStatusBar,
+) -> None:
+    try:
+        resp = await client.get(f"{base}/sessions/{session_id}/usage")
+        resp.raise_for_status()
+    except httpx.HTTPError:
+        return
+    status_bar.update(parse_usage_response(resp.json()))
+
+
 async def _read_line(prompt: str, interrupt: asyncio.Event) -> str | None:
     """Read a line from stdin without blocking process exit on Ctrl+C."""
     if interrupt.is_set():
@@ -424,6 +440,8 @@ async def _chat_session(args: argparse.Namespace, base: str, *, spawned_gateway:
                 await event_queue.put(None)
 
         stream_task = asyncio.create_task(_consume_stream())
+        status_bar = ChatStatusBar()
+        status_bar.activate()
         _print_welcome(spawned_gateway=spawned_gateway)
 
         try:
@@ -511,10 +529,15 @@ async def _chat_session(args: argparse.Namespace, base: str, *, spawned_gateway:
                     if isinstance(evt, ContextSummarizing) and evt.request_id == request_id:
                         if not assistant_label_shown:
                             await spinner.clear()
+                        status_bar.update_context_hint(
+                            estimated_prompt_tokens=evt.estimated_tokens,
+                            context_window_tokens=evt.context_window_tokens,
+                        )
                         await activity.summarizing(evt.estimated_tokens)
                         continue
                     if isinstance(evt, ContextSummarized) and evt.request_id == request_id:
                         await activity.summarized(evt.turns_summarized)
+                        await _fetch_session_usage(client, base, session_id, status_bar=status_bar)
                         continue
                     if isinstance(evt, AssistantDelta) and evt.request_id == request_id:
                         if not assistant_label_shown:
@@ -536,6 +559,7 @@ async def _chat_session(args: argparse.Namespace, base: str, *, spawned_gateway:
                         await activity.cancel()
                         if result == "turn_complete":
                             print()
+                            await _fetch_session_usage(client, base, session_id, status_bar=status_bar)
                         done = True
                 if interrupt.is_set():
                     await spinner.clear()
@@ -544,6 +568,7 @@ async def _chat_session(args: argparse.Namespace, base: str, *, spawned_gateway:
                 if not stream_alive:
                     break
         finally:
+            status_bar.deactivate()
             if stream_task:
                 stream_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):

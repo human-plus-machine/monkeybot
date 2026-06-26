@@ -109,7 +109,7 @@ def test_chat_session_stream_failure_exits_turn(capsys: pytest.CaptureFixture[st
 
     read_lines = iter(["hello", None])
 
-    async def fake_read_line(prompt: str, interrupt: asyncio.Event) -> str | None:
+    async def fake_read_line(prompt: str, interrupt: asyncio.Event, **kwargs: object) -> str | None:
         return next(read_lines)
 
     with (
