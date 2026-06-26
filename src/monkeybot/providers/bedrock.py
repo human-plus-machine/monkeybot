@@ -114,7 +114,9 @@ class BedrockClaudeProvider:
         tools: Sequence[ToolDef],
         *,
         model: str,
+        thinking_budget: int | None = None,
     ) -> AsyncIterator[ProviderEvent]:
+        del thinking_budget
         import anthropic  # noqa: PLC0415
 
         msgs = list(messages)

@@ -64,7 +64,9 @@ class ScriptedFakeProvider:
         tools: Sequence[ToolDef],
         *,
         model: str,
+        thinking_budget: int | None = None,
     ) -> AsyncIterator[ProviderEvent]:
+        del thinking_budget
         # Copy protects against callers mutating the original list mid-stream.
         for ev in list(self._events):
             yield ev

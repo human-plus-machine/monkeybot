@@ -105,6 +105,14 @@ tools:
   # denied_patterns:
   #   - "rm -rf"
 
+# Context pressure tiers (token optimization). Ratios are used_tokens / context_window.
+compression:
+  light_ratio: 0.50
+  moderate_ratio: 0.70
+  aggressive_ratio: 0.85
+  # Opt-in: lower Gemini/Claude thinking budget on routine tool-resume turns (omit = disabled)
+  # resume_thinking_budget: 512
+
 web_search:
   # duckduckgo | tavily | firecrawl | none  (Tavily/Firecrawl need keys in .env)
   backend: duckduckgo

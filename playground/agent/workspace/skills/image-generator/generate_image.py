@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import json
 import os
 import sys
@@ -77,21 +79,50 @@ def _prepare_google_application_credentials() -> None:
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(cred_path)
 
 
-def _image_bytes_from_response(response: object) -> bytes | None:
-    """Extract image bytes from a ``google.genai`` ``GenerateContentResponse``."""
+def _response_parts(response: object) -> list[object]:
+    """Collect content parts from a GenerateContentResponse (top-level or candidate)."""
+    top = getattr(response, "parts", None)
+    if isinstance(top, list) and top:
+        return top
     for cand in getattr(response, "candidates", None) or []:
         content = getattr(cand, "content", None)
         if content is None:
             continue
-        for part in getattr(content, "parts", None) or []:
-            inline = getattr(part, "inline_data", None)
-            if inline is None:
+        nested = getattr(content, "parts", None)
+        if isinstance(nested, list) and nested:
+            return nested
+    return []
+
+
+def _image_bytes_from_response(response: object) -> bytes | None:
+    """Extract image bytes from a ``google.genai`` ``GenerateContentResponse``."""
+    for part in _response_parts(response):
+        inline = getattr(part, "inline_data", None)
+        if inline is None:
+            continue
+        data = getattr(inline, "data", None)
+        if not data:
+            continue
+        if isinstance(data, str):
+            try:
+                return base64.b64decode(data)
+            except binascii.Error:
                 continue
-            data = getattr(inline, "data", None)
-            if isinstance(data, (bytes, bytearray)):
-                raw = bytes(data)
-                if raw:
-                    return raw
+        if isinstance(data, (bytes, bytearray)):
+            raw = bytes(data)
+            if raw:
+                return raw
+        as_image = getattr(part, "as_image", None)
+        if callable(as_image):
+            try:
+                img = as_image()
+                from io import BytesIO
+
+                buf = BytesIO()
+                img.save(buf, format="PNG")
+                return buf.getvalue()
+            except Exception:
+                continue
     return None
 
 

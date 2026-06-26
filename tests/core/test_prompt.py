@@ -5,6 +5,7 @@ import pytest
 from monkeybot.core.context import SkillRef, TurnContext
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.prompts.prompt import compose_system_prompt
+from monkeybot.providers._utils import split_system_prompt_for_cache
 from monkeybot.core.types.content_blocks import Text, ToolRequest, ToolResponse
 from monkeybot.core.types.types_tools import ToolDef
 
@@ -177,13 +178,13 @@ def test_stable_prefix_byte_identical_across_turns() -> None:
     out_b = compose_system_prompt(ctx, chat_messages=_msgs_with_task("Follow-up B"))
     assert "## Current request" in out_a
     assert "## Current request" in out_b
-    prefix_a = out_a[: out_a.index("## Current request")]
-    prefix_b = out_b[: out_b.index("## Current request")]
-    assert "MonkeyBot harness" in prefix_a
-    assert prefix_a == prefix_b
+    stable_a, _ = split_system_prompt_for_cache(out_a)
+    stable_b, _ = split_system_prompt_for_cache(out_b)
+    assert "MonkeyBot harness" in stable_a
+    assert stable_a == stable_b
 
 
-def test_memory_skills_precede_harness() -> None:
+def test_harness_precedes_volatile_sections() -> None:
     ctx = _minimal_ctx(
         memory_index=["Note A"],
         skills=[SkillRef(name="s1", description="d1")],
@@ -207,11 +208,14 @@ def test_memory_skills_precede_harness() -> None:
         ),
     ]
     out = compose_system_prompt(ctx, chat_messages=msgs)
-    mem_idx = out.index("## Memory index")
-    skills_idx = out.index("## Skills")
-    harness_idx = out.index("MonkeyBot harness")
-    current_idx = out.index("## Current request")
-    assert mem_idx < skills_idx < harness_idx < current_idx
+    stable, volatile = split_system_prompt_for_cache(out)
+    assert "MonkeyBot harness" in stable
+    assert "## Memory index" not in stable
+    assert "## Current request" not in stable
+    mem_idx = volatile.index("## Memory index")
+    skills_idx = volatile.index("\n\n## Skills\n")
+    current_idx = volatile.index("## Current request")
+    assert mem_idx < skills_idx < current_idx
 
 
 @pytest.mark.parametrize("include_task", [True, False])

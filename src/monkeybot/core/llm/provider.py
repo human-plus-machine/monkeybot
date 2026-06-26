@@ -121,8 +121,13 @@ class Provider(Protocol):
         tools: Sequence[ToolDef],
         *,
         model: str,
+        thinking_budget: int | None = None,
     ) -> AsyncIterator[ProviderEvent]:
-        """Yield provider events for one model request."""
+        """Yield provider events for one model request.
+
+        ``thinking_budget`` overrides the configured reasoning budget for this call
+        when the provider supports it (Gemini, Claude). ``None`` uses the default.
+        """
 
     async def count_input_tokens(
         self,

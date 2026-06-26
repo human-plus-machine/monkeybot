@@ -32,10 +32,19 @@ def _port_free(port: int) -> bool:
             return False
 
 
-def _runtime_python_version(runtime) -> tuple[int, int, int]:
+def _runtime_python_version(runtime, agent_root: Path) -> tuple[int, int, int]:
     """Ask the runtime interpreter for its version (major, minor, micro)."""
     code = "import sys; print(sys.version_info[0], sys.version_info[1], sys.version_info[2])"
-    proc = subprocess.run([*runtime.argv, "-c", code], capture_output=True, text=True, timeout=15.0)
+    kwargs: dict[str, object] = {}
+    if runtime.source == "uv":
+        kwargs["cwd"] = str(agent_root)
+    proc = subprocess.run(
+        [*runtime.argv, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=15.0,
+        **kwargs,
+    )
     if proc.returncode != 0:
         return (0, 0, 0)
     parts = proc.stdout.strip().split()
@@ -65,7 +74,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     agent_root = resolve_agent_root(cwd=cwd, config_path=config_path)
     runtime = resolve_runtime_python(agent_root)
 
-    py_version = _runtime_python_version(runtime)
+    py_version = _runtime_python_version(runtime, agent_root)
     py_ok = py_version >= (3, 11)
     check(
         report,
@@ -86,7 +95,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     if spec and spec.extra:
         installed = run_probe(
             runtime,
-            f"import importlib.util; sys.exit(0 if importlib.util.find_spec({extra_module(spec.extra)!r}) else 1)",
+            f"import importlib.util, sys; sys.exit(0 if importlib.util.find_spec({extra_module(spec.extra)!r}) else 1)",
         )
         check(
             report,

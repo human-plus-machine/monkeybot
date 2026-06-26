@@ -88,8 +88,9 @@ class CapturingProvider:
         tools: Sequence[ToolDef],
         *,
         model: str,
+        thinking_budget: int | None = None,
     ) -> AsyncIterator[ProviderEvent]:
-        del tools, model
+        del tools, model, thinking_budget
         system = next((m for m in messages if m.role == "system"), None)
         text = ""
         if system is not None:

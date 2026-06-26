@@ -120,7 +120,9 @@ class VertexClaudeProvider:
         tools: Sequence[ToolDef],
         *,
         model: str,
+        thinking_budget: int | None = None,
     ) -> AsyncIterator[ProviderEvent]:
+        del thinking_budget
         import anthropic  # noqa: PLC0415
         from anthropic import AsyncAnthropicVertex  # noqa: PLC0415
 
