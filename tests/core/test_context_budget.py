@@ -78,9 +78,46 @@ def test_batch_allocation_splits_headroom() -> None:
     assert len(_text(trimmed[1])) < 20_000
 
 
+def test_fit_applies_log_shaping_under_pressure() -> None:
+    from monkeybot.core.runtime.context_budget import ContextBudgeter
+
+    long_log = "\n".join(f"line {i}" for i in range(500))
+    budgeter = ContextBudgeter(
+        window_tokens=100_000,
+        used_tokens=75_000,
+        pressure_tier="moderate",
+    )
+    blocks = [
+        ToolResponse(id="1", tool_name="run_command", result=[Text(text=long_log)]),
+    ]
+    trimmed, _ = budgeter.fit_content_blocks(blocks)
+    out = trimmed[0].result[0].text  # type: ignore[union-attr]
+    assert len(out.splitlines()) < 500
+
+
 def _text(block: ToolResponse) -> str:
     parts: list[str] = []
     for b in block.result:
         if isinstance(b, Text):
             parts.append(b.text)
     return "".join(parts)
+
+
+def test_compute_context_pressure_tier_thresholds() -> None:
+    from monkeybot.core.runtime.context_budget import compute_context_pressure_tier
+
+    assert compute_context_pressure_tier(40_000, 100_000, light_ratio=0.5, moderate_ratio=0.7, aggressive_ratio=0.85) is None
+    assert compute_context_pressure_tier(55_000, 100_000, light_ratio=0.5, moderate_ratio=0.7, aggressive_ratio=0.85) == "light"
+    assert compute_context_pressure_tier(75_000, 100_000, light_ratio=0.5, moderate_ratio=0.7, aggressive_ratio=0.85) == "moderate"
+    assert compute_context_pressure_tier(90_000, 100_000, light_ratio=0.5, moderate_ratio=0.7, aggressive_ratio=0.85) == "aggressive"
+
+
+def test_from_env_tightens_safety_fraction_under_pressure(monkeypatch) -> None:
+    from monkeybot.core.runtime.context_budget import ContextBudgeter
+
+    monkeypatch.setenv("MONKEYBOT_PRESSURE_LIGHT_RATIO", "0.5")
+    monkeypatch.setenv("MONKEYBOT_PRESSURE_MODERATE_RATIO", "0.7")
+    monkeypatch.setenv("MONKEYBOT_PRESSURE_AGGRESSIVE_RATIO", "0.85")
+    budgeter = ContextBudgeter.from_env(window_tokens=100_000, used_tokens=75_000)
+    assert budgeter.pressure_tier == "moderate"
+    assert budgeter.safety_fraction <= 0.45

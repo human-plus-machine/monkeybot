@@ -254,6 +254,32 @@ def run_validate(args: argparse.Namespace) -> int:
                 passed=ap.is_file(),
                 message=f"Missing command allowlist: {ap}",
             )
+            if ap.is_file():
+                try:
+                    from monkeybot.core.context.tool_output_policy import (
+                        load_tool_output_policies,
+                        validate_tool_output_budgets,
+                    )
+
+                    policies = load_tool_output_policies(ap)
+                    for warn in validate_tool_output_budgets(policies):
+                        check(
+                            report,
+                            id="tool_output.budgets.sane",
+                            category="tools",
+                            severity="warning",
+                            passed=False,
+                            message=warn,
+                        )
+                except Exception as exc:
+                    check(
+                        report,
+                        id="tool_output.parse",
+                        category="tools",
+                        severity="warning",
+                        passed=False,
+                        message=f"tool_output section: {exc}",
+                    )
         db_url = str(paths.get("db_url", ""))
         if db_url.startswith("sqlite:///"):
             db_file = Path(db_url.removeprefix("sqlite:///"))

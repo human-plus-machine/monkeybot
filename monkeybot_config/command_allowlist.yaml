@@ -37,3 +37,21 @@ deny_patterns:
   - "^rm\\s+-rf"
   - "^sudo\\s+"
   - ".*>\\s*/etc/.*"
+
+# Per-tool output shaping (token optimization). Merged with built-in defaults for
+# run_command and web_search when keys are omitted here.
+tool_output:
+  run_command:
+    content_type: logs
+    max_output_lines: 400
+    collapse_repeated: true
+    keep_patterns:
+      - "(?i)\\berror\\b"
+      - "(?i)\\bfatal\\b"
+      - "(?i)traceback"
+      - "(?i)\\bexception\\b"
+  web_search:
+    content_type: json
+    max_array_items: 30
+  read_file:
+    content_type: code

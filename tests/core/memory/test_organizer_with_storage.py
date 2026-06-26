@@ -18,7 +18,7 @@ class FakeProvider:
     def __init__(self, responses: list[str]) -> None:
         self._responses = list(responses)
 
-    async def stream(self, messages, tools, *, model: str):
+    async def stream(self, messages, tools, *, model: str, thinking_budget=None):
         del messages, tools, model
         if not self._responses:
             raise RuntimeError("LLM unavailable")

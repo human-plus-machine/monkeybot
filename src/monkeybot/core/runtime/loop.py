@@ -24,6 +24,12 @@ from monkeybot.core.context.curator import (
     curator_model_id,
     run_context_curator,
 )
+from monkeybot.core.context.tool_output_policy import resolve_tool_budget
+from monkeybot.core.context.tool_shapers import (
+    exceeds_tool_output_budget,
+    shape_messages_tool_results,
+    shape_tool_text,
+)
 from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
 from monkeybot.core.llm.provider import (
     Done,
@@ -38,7 +44,11 @@ from monkeybot.core.llm.usage import Usage
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.prompts.prompt import compose_system_prompt, latest_user_message_text
-from monkeybot.core.runtime.context_budget import ContextBudgeter
+from monkeybot.core.runtime.context_budget import (
+    ContextBudgeter,
+    compute_context_pressure_tier,
+    summarization_trigger_ratio_from_env,
+)
 from monkeybot.core.tools.inspector import InspectorToolCall, ToolInspector
 from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.types.content_blocks import (
@@ -257,7 +267,7 @@ def _combine_extras(*parts: str | None) -> str | None:
 _MAX_CONCURRENT_SUBAGENTS = 10
 
 _SPILL_REL = Path(".monkeybot") / "spill"
-SUMMARY_TRIGGER_RATIO = 0.95
+SUMMARY_TRIGGER_RATIO = summarization_trigger_ratio_from_env()
 """Same ratio as pre-stream summarization check (``preflight_prompt_tokens >= cap``)."""
 _SUMMARY_TRIGGER_RATIO = SUMMARY_TRIGGER_RATIO
 _SUMMARY_KEEP_HEAD = 1
@@ -315,6 +325,46 @@ def _summary_line_for_message(m: Message) -> str:
 def _system_prompt_snapshot_text(system: Message) -> str:
     """Plain string for :class:`SystemPromptSnapshot` (composed prompt lives in Text blocks)."""
     return "".join(b.text for b in system.content if isinstance(b, Text))
+
+
+def _is_resume_turn(resolved_messages: Sequence[Message]) -> bool:
+    """True when the model continues after tool results, not a new user question."""
+    if not resolved_messages:
+        return False
+    last = resolved_messages[-1]
+    if last.role != "user":
+        return False
+    has_tool_response = any(isinstance(b, ToolResponse) for b in last.content)
+    has_user_text = any(isinstance(b, Text) and b.text.strip() for b in last.content)
+    return has_tool_response and not has_user_text
+
+
+def _is_routine_resume_turn(resolved_messages: Sequence[Message]) -> bool:
+    """Resume turn with only successful tool results (safe to reduce thinking budget)."""
+    if not _is_resume_turn(resolved_messages):
+        return False
+    last = resolved_messages[-1]
+    tool_responses = [b for b in last.content if isinstance(b, ToolResponse)]
+    return bool(tool_responses) and all(not b.is_error for b in tool_responses)
+
+
+def _stream_thinking_budget(
+    provider: Provider,
+    resolved_messages: Sequence[Message],
+) -> int | None:
+    """Per-call thinking budget override; None keeps the provider default."""
+    if provider.name not in ("gemini", "claude"):
+        return None
+    raw = os.environ.get("MONKEYBOT_RESUME_THINKING_BUDGET", "").strip()
+    if not raw:
+        return None
+    try:
+        resume_budget = int(raw)
+    except ValueError:
+        return None
+    if _is_routine_resume_turn(resolved_messages):
+        return resume_budget
+    return None
 
 
 async def _provider_prompt_input_tokens(
@@ -518,6 +568,30 @@ def _tool_outcome(
     is_error = result.error is not None
     body = "" if is_error else _blocks_to_sse_summary(result.blocks)
     text = result.error if is_error else body
+    response_blocks: list[ContentBlock] = (
+        list(result.blocks) if not is_error else [Text(text=text or "")]
+    )
+    if not is_error:
+        budget = resolve_tool_budget(call.name)
+        if budget is not None:
+            flat = _blocks_to_sse_summary(response_blocks)
+            if exceeds_tool_output_budget(flat, tool_name=call.name, budget=budget):
+                shaped_blocks: list[ContentBlock] = []
+                for block in response_blocks:
+                    if isinstance(block, Text):
+                        shaped = shape_tool_text(
+                            block.text,
+                            tool_name=call.name,
+                            budget=budget,
+                            pressure_tier=None,
+                        )
+                        shaped_blocks.append(
+                            Text(text=shaped) if shaped != block.text else block
+                        )
+                    else:
+                        shaped_blocks.append(block)
+                response_blocks = shaped_blocks
+                body = _blocks_to_sse_summary(response_blocks)
     event = ToolCallResult(
         request_id=request_id,
         tool=call.name,
@@ -527,7 +601,7 @@ def _tool_outcome(
     response = ToolResponse(
         id=call.call_id,
         tool_name=call.name,
-        result=list(result.blocks) if not is_error else [Text(text=text or "")],
+        result=response_blocks,
         is_error=is_error,
     )
     return event, response
@@ -974,6 +1048,23 @@ async def _run_inner_core(
                 )
                 usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, post)
 
+            pressure_tier = compute_context_pressure_tier(
+                usage.estimated_prompt_tokens,
+                ctx.context_window_tokens,
+            )
+            if pressure_tier in ("moderate", "aggressive"):
+                shaped_history = shape_messages_tool_results(
+                    chat_messages,
+                    protect_recent=_SUMMARY_KEEP_TAIL,
+                    pressure_tier=pressure_tier,
+                )
+                resolved_messages = resolve_messages_for_provider(
+                    shaped_history,
+                    attachment_store=attachment_store,
+                    session_id=ctx.thread_id,
+                )
+                provider_messages = _messages_for_provider(system, resolved_messages)
+
             yield SystemPromptSnapshot(
                 request_id=ctx.request_id,
                 inner_turn=turn_index,
@@ -991,9 +1082,18 @@ async def _run_inner_core(
             llm_cache_read = 0
             llm_cache_creation = 0
             try:
+                stream_thinking = _stream_thinking_budget(provider, resolved_messages)
                 async with span_llm(ctx=ctx):
                     async with aclosing(
-                        cast(Any, provider.stream(provider_messages, ctx.tools, model=ctx.model))
+                        cast(
+                            Any,
+                            provider.stream(
+                                provider_messages,
+                                ctx.tools,
+                                model=ctx.model,
+                                thinking_budget=stream_thinking,
+                            ),
+                        )
                     ) as stream:
                         async for ev in stream:
                             if isinstance(ev, TextDelta):

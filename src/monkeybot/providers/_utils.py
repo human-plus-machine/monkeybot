@@ -108,17 +108,48 @@ def _anthropic_assistant_block(block: ContentBlock) -> dict[str, Any]:
     )
 
 
+# Must match volatile section headers emitted by ``compose_system_prompt``.
+_VOLATILE_SYSTEM_MARKERS = (
+    "\n\n## Memory index\n",
+    "\n\n## Skills\n",
+    "\n\n## Current request\n",
+)
+
+
+def split_system_prompt_for_cache(system: str) -> tuple[str, str]:
+    """Split composed system text into stable (cacheable) prefix and volatile tail."""
+    split_at = len(system)
+    for marker in _VOLATILE_SYSTEM_MARKERS:
+        idx = system.find(marker)
+        if idx != -1:
+            split_at = min(split_at, idx)
+    if split_at >= len(system):
+        return system, ""
+    return system[:split_at], system[split_at:]
+
+
 def build_cached_system_blocks(system: str) -> list[dict[str, Any]]:
-    """Return a single cache-marked system text block list.
+    """Return Anthropic system blocks with cache_control only on the stable prefix.
+
+    Volatile tail sections (memory, skills, current request) are sent in a second
+    uncached block so explicit caching hits across curation turns.
 
     Args:
         system: Non-empty system prompt text. Callers MUST guard empty strings
             and pass anthropic.NOT_GIVEN instead (see provider stream methods).
 
     Returns:
-        ``[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]``
+        One or two text blocks; the stable prefix carries ``cache_control: ephemeral``.
     """
-    return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+    stable, volatile = split_system_prompt_for_cache(system)
+    if not volatile.strip():
+        return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+    blocks: list[dict[str, Any]] = [
+        {"type": "text", "text": stable, "cache_control": {"type": "ephemeral"}},
+    ]
+    if volatile:
+        blocks.append({"type": "text", "text": volatile})
+    return blocks
 
 
 def mark_last_tool_cached(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -205,4 +236,5 @@ __all__ = [
     "estimate_anthropic_input_tokens",
     "estimate_cost",
     "mark_last_tool_cached",
+    "split_system_prompt_for_cache",
 ]

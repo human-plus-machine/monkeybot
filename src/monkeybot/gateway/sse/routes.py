@@ -28,6 +28,7 @@ from monkeybot.core.attachments.store import (
     UnsupportedAttachmentTypeError,
 )
 from monkeybot.core.types.content_blocks import ContentBlock
+from monkeybot.core.runtime.context_budget import summarization_trigger_ratio_from_env
 from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService
 
 from .loop_port import LoopPort, UsagePort
@@ -94,7 +95,7 @@ class _StaticUsagePort:
             cw = max(1, int(cap_raw))
         except ValueError:
             cw = 200_000
-        st = max(1, int(cw * 0.85))
+        st = max(1, int(cw * summarization_trigger_ratio_from_env()))
         return {
             "session_id": session_id,
             "turns": 0,

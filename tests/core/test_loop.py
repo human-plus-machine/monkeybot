@@ -138,8 +138,9 @@ class FakeProvider:
         tools: Sequence[ToolDef],
         *,
         model: str,
+        thinking_budget: int | None = None,
     ) -> AsyncIterator[ProviderEvent]:
-        del messages, tools
+        del messages, tools, thinking_budget
         self.stream_models.append(model)
         idx = self.stream_calls
         self.stream_calls += 1
@@ -747,8 +748,9 @@ async def test_run_provider_raises_wrapped_as_error() -> None:
             tools: Sequence[ToolDef],
             *,
             model: str,
+            thinking_budget: int | None = None,
         ) -> AsyncIterator[ProviderEvent]:
-            del messages, tools, model
+            del messages, tools, model, thinking_budget
             raise RuntimeError("boom")
             yield  # pragma: no cover
 
@@ -799,8 +801,9 @@ async def test_run_provider_raises_logs_exception(caplog: pytest.LogCaptureFixtu
             tools: Sequence[ToolDef],
             *,
             model: str,
+            thinking_budget: int | None = None,
         ) -> AsyncIterator[ProviderEvent]:
-            del messages, tools, model
+            del messages, tools, model, thinking_budget
             raise RuntimeError("boom")
             yield  # pragma: no cover
 
@@ -1058,9 +1061,10 @@ async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> N
             tools: Sequence[ToolDef],
             *,
             model: str,
+            thinking_budget: int | None = None,
         ) -> AsyncIterator[ProviderEvent]:
             self.captured_messages.append(list(messages))
-            del tools, model
+            del tools, model, thinking_budget
             idx = self.stream_calls
             self.stream_calls += 1
             if idx >= len(self._scripted):

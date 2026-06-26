@@ -36,20 +36,22 @@ class RuntimePython:
 
     ``argv`` is the prefix to prepend to ``-m monkeybot.gateway.main`` or
     ``-c "…"`` doctor probes. ``source`` is for diagnostics/remediation text.
+    ``agent_root`` is set for ``uv run`` resolution (probes need the project cwd).
     """
 
     argv: list[str]
     source: str  # "venv" | "uv" | "cli"
+    agent_root: Path | None = None
 
 
 def resolve_runtime_python(agent_root: Path) -> RuntimePython:
     """Resolve the interpreter that should run the gateway for ``agent_root``."""
     venv_py = _venv_python(agent_root)
     if venv_py is not None:
-        return RuntimePython([str(venv_py)], "venv")
+        return RuntimePython([str(venv_py)], "venv", agent_root)
     if (agent_root / "pyproject.toml").is_file():
-        return RuntimePython(["uv", "run", "python"], "uv")
-    return RuntimePython([sys.executable], "cli")
+        return RuntimePython(["uv", "run", "python"], "uv", agent_root)
+    return RuntimePython([sys.executable], "cli", agent_root)
 
 
 def gateway_argv(runtime: RuntimePython) -> list[str]:
@@ -65,9 +67,13 @@ def run_probe(runtime: RuntimePython, code: str, *, timeout: float = 15.0) -> bo
     """
     import subprocess
 
+    kwargs: dict[str, object] = {}
+    if runtime.source == "uv" and runtime.agent_root is not None:
+        kwargs["cwd"] = str(runtime.agent_root)
     proc = subprocess.run(
         [*runtime.argv, "-c", code],
         capture_output=True,
         timeout=timeout,
+        **kwargs,
     )
     return proc.returncode == 0

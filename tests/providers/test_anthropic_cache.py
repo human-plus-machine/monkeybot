@@ -110,6 +110,15 @@ def test_build_cached_system_blocks_shape() -> None:
     ]
 
 
+def test_build_cached_system_blocks_splits_volatile_tail() -> None:
+    system = "STABLE\n\n## Memory index\n- note"
+    blocks = build_cached_system_blocks(system)
+    assert blocks == [
+        {"type": "text", "text": "STABLE", "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": "\n\n## Memory index\n- note"},
+    ]
+
+
 def test_mark_last_tool_cached_marks_only_last() -> None:
     tools = [
         {"name": "a", "description": "d", "input_schema": {}},

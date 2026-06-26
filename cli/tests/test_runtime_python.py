@@ -65,3 +65,25 @@ def test_run_probe_executes_code_under_runtime() -> None:
     assert run_probe(runtime, "import sys") is True
     assert run_probe(runtime, "import sys; sys.exit(1)") is False
     assert run_probe(runtime, "import this_module_does_not_exist_xyz") is False
+
+
+def test_run_probe_uv_sets_agent_root_cwd(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "agent"\n', encoding="utf-8")
+    runtime = resolve_runtime_python(tmp_path)
+    assert runtime.source == "uv"
+    assert runtime.agent_root == tmp_path
+
+    captured: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):
+        captured["cwd"] = kwargs.get("cwd")
+        class Result:
+            returncode = 0
+
+        return Result()
+
+    import subprocess
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert run_probe(runtime, "import sys") is True
+    assert captured["cwd"] == str(tmp_path)
