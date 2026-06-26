@@ -133,7 +133,7 @@ Creates `monkeybot_config/`, `workspace/` (file-tool sandbox), `workspace/skills
 
 ### Provider table
 
-| YAML `model.provider` | `.env` credentials (any one) | Install extra |
+| YAML `model.provider` | `.env` credentials (any one) | Install extra (in the **agent project**) |
 |---|---|---|
 | `gemini` (or `vertex`) | `GEMINI_API_KEY`, or `GOOGLE_APPLICATION_CREDENTIALS`, or `GCP_PROJECT_ID` / `GOOGLE_CLOUD_PROJECT` (ADC) | `uv sync --extra gemini` |
 | `openai` | `OPENAI_API_KEY` | `uv sync --extra openai` |
@@ -142,9 +142,9 @@ Creates `monkeybot_config/`, `workspace/` (file-tool sandbox), `workspace/skills
 | `aws_bedrock` | `AWS_ACCESS_KEY_ID` / `AWS_PROFILE` + `AWS_REGION` | `uv sync --extra bedrock` |
 | `huggingface` | `HF_TOKEN` (or `HUGGINGFACE_API_KEY`) | `uv sync --extra huggingface` |
 
-Provider extras install from the **harness repo root** (`cd "$MONKEYBOT_HOME" && uv sync --extra …`), not from `cli/`.
+**Agent-first dependencies.** The CLI is thin — it does **not** install provider/storage extras globally. Declare them on the **agent project**: give the agent a `pyproject.toml` listing `monkeybot[bedrock,postgres,...]` and run `uv sync` there (this creates `.venv`). `monkeybot run` / `chat` spawn the gateway from that project's interpreter (`.venv/bin/python`, else `uv run python`), and `doctor` checks extras in that same interpreter. For a config-only tree (just `monkeybot_config/`, no `pyproject.toml`) the gateway falls back to the CLI's interpreter, so extras must be installed in the CLI env (`uv tool install --with 'monkeybot[<extra>]' monkeybot-cli`).
 
-`doctor` is the source of truth for credentials and extras — when in doubt, run it and read the `remediation` field rather than guessing.
+`doctor` is the source of truth for credentials and extras — when in doubt, run it and read the `remediation` field (it points at the agent project, not the CLI env).
 
 ### 4. Validate (loop until clean)
 
@@ -197,7 +197,7 @@ Decision → config map:
 | "Restrict dangerous commands" | `tools.denied_patterns`, `command_allowlist.yaml` |
 | "Multiple environments" | top-level `includes:` fragments |
 
-**Subagents (`task` tool):** share the parent `AGENT.md` (or `subagent.agent_md`). Relative paths resolve from the bot project root, not `workspace/`. Specialize via `task` / `context`, not separate agent type folders. For parallel `task` fan-out, prefer Postgres: `uv sync --extra postgres` in the harness, then `DB_URL=postgresql://...` in `.env`.
+**Subagents (`task` tool):** share the parent `AGENT.md` (or `subagent.agent_md`). Relative paths resolve from the bot project root, not `workspace/`. Specialize via `task` / `context`, not separate agent type folders. For parallel `task` fan-out, prefer Postgres: `uv sync --extra postgres` in the **agent project**, then `DB_URL=postgresql://...` in `.env`.
 
 **Observability** is mostly env + `uv sync --extra observability` + an OTel collector — not `monkeybot.yaml`. See `docs/observability-runbook.md`.
 

@@ -21,7 +21,12 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
     "google_vertexai": ProviderSpec(
         ("gemini", "vertex", "google_vertexai"),
         "gemini",
-        ("GEMINI_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS", "GCP_PROJECT_ID", "GOOGLE_CLOUD_PROJECT"),
+        (
+            "GEMINI_API_KEY",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "GCP_PROJECT_ID",
+            "GOOGLE_CLOUD_PROJECT",
+        ),
         gcp_adc=True,
     ),
     "openai": ProviderSpec(("openai",), "openai", ("OPENAI_API_KEY",)),
@@ -37,7 +42,9 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
         "bedrock",
         ("AWS_ACCESS_KEY_ID", "AWS_PROFILE", "AWS_REGION", "AWS_DEFAULT_REGION"),
     ),
-    "huggingface": ProviderSpec(("huggingface",), "huggingface", ("HF_TOKEN", "HUGGINGFACE_API_KEY")),
+    "huggingface": ProviderSpec(
+        ("huggingface",), "huggingface", ("HF_TOKEN", "HUGGINGFACE_API_KEY")
+    ),
     "fake": ProviderSpec(("fake",), None, ()),
 }
 
@@ -51,7 +58,8 @@ def spec_for_provider(yaml_provider: str) -> ProviderSpec | None:
     return PROVIDER_SPECS.get(key)
 
 
-def extra_installed(extra: str) -> bool:
+def extra_module(extra: str) -> str:
+    """Return the importable module name used to detect ``extra``."""
     mapping = {
         "gemini": "google.genai",
         "vertex": "google.auth",
@@ -61,8 +69,17 @@ def extra_installed(extra: str) -> bool:
         "bedrock": "boto3",
         "huggingface": "openai",
     }
-    mod = mapping.get(extra, extra)
-    return importlib.util.find_spec(mod) is not None
+    return mapping.get(extra, extra)
+
+
+def extra_installed(extra: str) -> bool:
+    """Check ``extra`` in the *current* process (the CLI env).
+
+    Prefer running the check in the interpreter that will host the gateway
+    (see ``monkeybot_cli.runtime_python``) so provider/storage extras declared
+    on the agent project are detected, not the CLI's globals.
+    """
+    return importlib.util.find_spec(extra_module(extra)) is not None
 
 
 def credentials_present(spec: ProviderSpec) -> bool:

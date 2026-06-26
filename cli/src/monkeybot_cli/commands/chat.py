@@ -34,6 +34,7 @@ from monkeybot.core.runtime.events import (
 )
 
 from monkeybot_cli.config_resolve import load_agent_dotenv, load_config_doc, resolve_config
+from monkeybot_cli.runtime_python import gateway_argv, resolve_runtime_python
 
 DEFAULT_PORT = 8080
 _SUBAGENT_HINT_MAX = 60
@@ -371,7 +372,9 @@ async def _handle_hitl(
             json={"user_data": user_data},
         )
     elif isinstance(evt, FrontendToolRequestEvent):
-        print(f"\x1b[33mFrontend tool '{evt.name}' requires a UI — not supported in terminal chat.\x1b[0m")
+        print(
+            f"\x1b[33mFrontend tool '{evt.name}' requires a UI — not supported in terminal chat.\x1b[0m"
+        )
 
 
 async def _chat_session(args: argparse.Namespace, base: str, *, spawned_gateway: bool) -> int:
@@ -443,7 +446,9 @@ async def _chat_session(args: argparse.Namespace, base: str, *, spawned_gateway:
                         json={"request_id": request_id, "message": user_line},
                     )
                     if reply.status_code == 409:
-                        print("Session busy — wait for the current turn to finish.", file=sys.stderr)
+                        print(
+                            "Session busy — wait for the current turn to finish.", file=sys.stderr
+                        )
                         continue
                     reply.raise_for_status()
                 except httpx.HTTPError as exc:
@@ -475,7 +480,14 @@ async def _chat_session(args: argparse.Namespace, base: str, *, spawned_gateway:
                         evt = event_from_json(payload)
                     except Exception:
                         continue
-                    if isinstance(evt, (ToolConfirmationRequestEvent, ActionRequiredEvent, FrontendToolRequestEvent)):
+                    if isinstance(
+                        evt,
+                        (
+                            ToolConfirmationRequestEvent,
+                            ActionRequiredEvent,
+                            FrontendToolRequestEvent,
+                        ),
+                    ):
                         await spinner.clear()
                         await activity.cancel()
                         await _handle_hitl(client, base, session_id, evt)
@@ -591,7 +603,7 @@ def _spawn_gateway(config_path: Path | None, cwd: Path, port: int) -> _SpawnedGa
         errors="replace",
     )
     proc = subprocess.Popen(
-        [sys.executable, "-m", "monkeybot.gateway.main"],
+        gateway_argv(resolve_runtime_python(cwd)),
         env=env,
         cwd=cwd,
         stdout=subprocess.DEVNULL,
@@ -600,7 +612,9 @@ def _spawn_gateway(config_path: Path | None, cwd: Path, port: int) -> _SpawnedGa
     return _SpawnedGateway(proc=proc, log_path=Path(log_file.name), log_file=log_file)
 
 
-def _wait_for_health(base: str, proc: subprocess.Popen[str] | None, timeout_s: float = 30.0) -> bool:
+def _wait_for_health(
+    base: str, proc: subprocess.Popen[str] | None, timeout_s: float = 30.0
+) -> bool:
     """Poll the gateway /health until it responds or the spawned process exits."""
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -676,13 +690,25 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
         help="Talk to the agent (starts the gateway automatically from the current dir)",
     )
     p.add_argument("--cwd", help="Agent root (defaults to the current directory)")
-    p.add_argument("--config", help="Path to monkeybot.yaml (defaults to ./monkeybot_config/monkeybot.yaml)")
-    p.add_argument("--attach", action="store_true", help="Connect to an already-running gateway instead of spawning one")
-    p.add_argument("--url", help="Gateway base URL (implies --attach; overrides config-derived port)")
+    p.add_argument(
+        "--config", help="Path to monkeybot.yaml (defaults to ./monkeybot_config/monkeybot.yaml)"
+    )
+    p.add_argument(
+        "--attach",
+        action="store_true",
+        help="Connect to an already-running gateway instead of spawning one",
+    )
+    p.add_argument(
+        "--url", help="Gateway base URL (implies --attach; overrides config-derived port)"
+    )
     p.add_argument("--port", type=int, help="Gateway port (overrides runtime.port from config)")
     p.add_argument("--show-thinking", action="store_true", help="Show thinking events")
-    p.add_argument("--verbose", action="store_true", help="Show tool result payloads after each tool")
+    p.add_argument(
+        "--verbose", action="store_true", help="Show tool result payloads after each tool"
+    )
     p.add_argument("--usage", action="store_true", help="Show token usage after each turn")
-    p.add_argument("--model-provider", dest="model_provider", help="Override model provider for session")
+    p.add_argument(
+        "--model-provider", dest="model_provider", help="Override model provider for session"
+    )
     p.add_argument("--model-name", dest="model_name", help="Override model name for session")
     p.set_defaults(func=run_chat)
