@@ -249,9 +249,10 @@ async def test_run_command_blocked_command_returns_policy_envelope(
 
 
 @pytest.mark.asyncio
-async def test_run_command_uv_binary_blocked_returns_policy_envelope(
+async def test_run_command_uv_allowed_by_binary_allowlist(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """``uv`` is on the binary allowlist; install subcommands are blocked by deny_patterns in the loop inspector."""
     monkeypatch.chdir(tmp_path)
     (tmp_path / "data" / "memory").mkdir(parents=True)
     mem = tmp_path / "data" / "memory"
@@ -268,16 +269,15 @@ async def test_run_command_uv_binary_blocked_returns_policy_envelope(
             call=ToolCall(
                 call_id="1",
                 name="run_command",
-                args={"argv": ["uv", "pip", "install", "google-genai"]},
+                args={"argv": ["uv", "--version"]},
             ),
             ctx=_ctx(),
         )
     )
-    assert out is None and err is not None
-    payload = json.loads(err)
-    assert payload["ok"] is False
-    assert payload["error_kind"] == "policy"
-    assert "uv" in payload["message"].lower() or "not allowed" in payload["message"].lower()
+    assert out is not None and err is None
+    payload = json.loads(out)
+    assert payload["ok"] is True
+    assert payload["exit_code"] == 0
 
 
 @pytest.mark.asyncio

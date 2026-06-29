@@ -45,7 +45,7 @@ class StoredAttachment:
     created_at_ms: int
 
 
-def _sniff_mime(header: bytes) -> str | None:
+def sniff_mime(header: bytes) -> str | None:
     if header[:8] == b"\x89PNG\r\n\x1a\n":
         return "image/png"
     if header[:3] == b"\xff\xd8\xff":
@@ -116,7 +116,7 @@ class FilesystemAttachmentStore:
         max_bytes = max_image_bytes() if mime_type in IMAGE_MIME_TYPES else max_pdf_bytes()
         if len(data) > max_bytes:
             raise AttachmentTooLargeError(f"attachment exceeds {max_bytes} bytes")
-        sniffed = _sniff_mime(data[:512])
+        sniffed = sniff_mime(data[:512])
         if sniffed is not None and sniffed != mime_type:
             raise UnsupportedAttachmentTypeError(
                 f"declared mime {mime_type!r} does not match content ({sniffed})"

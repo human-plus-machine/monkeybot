@@ -16,7 +16,7 @@ def test_init_config_creates_bundle(tmp_path: Path) -> None:
     assert (cfg / "command_allowlist.yaml").is_file()
     assert (cfg / "AGENT.md").is_file()
     assert (tmp_path / "data" / "memory" / "INDEX.md").is_file()
-    assert (tmp_path / ".agents" / "skills").is_dir()
+    assert (tmp_path / "skills").is_dir()
 
 
 def test_init_config_skips_existing(tmp_path: Path) -> None:

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Ensure workspace/ exists and workspace/skills points at .agents/skills (for read_file in sandbox).
+# Ensure workspace/ exists and workspace/skills points at skills/ (for read_file in sandbox).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WS="$ROOT/workspace"
-SKILLS_SRC="$ROOT/.agents/skills"
+SKILLS_SRC="$ROOT/skills"
 LINK="$WS/skills"
 
 mkdir -p "$WS"
@@ -20,5 +20,5 @@ if [[ -e "$LINK" ]]; then
   exit 1
 fi
 
-ln -sfn "../.agents/skills" "$LINK"
-echo "Created workspace/skills -> ../.agents/skills"
+ln -sfn "../skills" "$LINK"
+echo "Created workspace/skills -> ../skills"

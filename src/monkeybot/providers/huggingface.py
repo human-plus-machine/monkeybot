@@ -133,7 +133,9 @@ class HuggingFaceProvider:
         tools: Sequence[ToolDef],
         *,
         model: str,
+        thinking_budget: int | None = None,
     ) -> AsyncIterator[ProviderEvent]:
+        del thinking_budget
         from openai import AsyncOpenAI  # noqa: PLC0415
 
         msgs = list(messages)

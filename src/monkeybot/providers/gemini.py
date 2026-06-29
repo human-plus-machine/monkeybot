@@ -125,6 +125,24 @@ def _suppress_thinking_for_auxiliary_call(
     return any(m in sys_txt for m in markers)
 
 
+def _resolve_thinking_budget(
+    configured: int | None,
+    *,
+    override: int | None,
+    messages: Sequence[Message],
+    tools: Sequence[ToolDef],
+) -> int:
+    if override is not None:
+        thinking_budget = int(override)
+    elif configured is not None:
+        thinking_budget = int(configured)
+    else:
+        thinking_budget = int(os.environ.get("MODEL_THINKING_BUDGET", "-1"))
+    if _suppress_thinking_for_auxiliary_call(messages, tools):
+        return _THINKING_DISABLED
+    return thinking_budget
+
+
 def _split_system_and_rest(messages: Sequence[Message]) -> tuple[str, list[Message]]:
     systems: list[str] = []
     rest: list[Message] = []
@@ -412,6 +430,7 @@ class GeminiProvider:
         tools: Sequence[ToolDef],
         *,
         model: str,
+        thinking_budget: int | None = None,
     ) -> int:
         model_param = _normalize_vertex_model(model)
         project, location = _vertex_project_and_location(model_param)
@@ -425,13 +444,12 @@ class GeminiProvider:
 
         temperature = float(self._temperature)
         max_tokens = int(self._max_tokens)
-        thinking_budget = (
-            int(self._thinking_budget)
-            if self._thinking_budget is not None
-            else int(os.environ.get("MODEL_THINKING_BUDGET", "-1"))
+        thinking_budget = _resolve_thinking_budget(
+            self._thinking_budget,
+            override=thinking_budget,
+            messages=messages,
+            tools=tools,
         )
-        if _suppress_thinking_for_auxiliary_call(messages, tools):
-            thinking_budget = _THINKING_DISABLED
 
         system_instruction, rest = _split_system_and_rest(messages)
         contents = _messages_to_contents(rest)
@@ -466,6 +484,7 @@ class GeminiProvider:
         tools: Sequence[ToolDef],
         *,
         model: str,
+        thinking_budget: int | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         model_param = _normalize_vertex_model(model)
         project, location = _vertex_project_and_location(model_param)
@@ -479,13 +498,12 @@ class GeminiProvider:
 
         temperature = float(self._temperature)
         max_tokens = int(self._max_tokens)
-        thinking_budget = (
-            int(self._thinking_budget)
-            if self._thinking_budget is not None
-            else int(os.environ.get("MODEL_THINKING_BUDGET", "-1"))
+        thinking_budget = _resolve_thinking_budget(
+            self._thinking_budget,
+            override=thinking_budget,
+            messages=messages,
+            tools=tools,
         )
-        if _suppress_thinking_for_auxiliary_call(messages, tools):
-            thinking_budget = _THINKING_DISABLED
 
         system_instruction, rest = _split_system_and_rest(messages)
         contents = _messages_to_contents(rest)

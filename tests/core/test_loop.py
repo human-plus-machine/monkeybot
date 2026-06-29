@@ -34,6 +34,7 @@ from monkeybot.core.runtime.events import (
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.runtime.loop import (
     _chunk_tool_calls,
+    _compact_history_if_needed,
     _image_events,
     _merge_usage_event,
     _usage_to_totals,
@@ -138,8 +139,9 @@ class FakeProvider:
         tools: Sequence[ToolDef],
         *,
         model: str,
+        thinking_budget: int | None = None,
     ) -> AsyncIterator[ProviderEvent]:
-        del messages, tools
+        del messages, tools, thinking_budget
         self.stream_models.append(model)
         idx = self.stream_calls
         self.stream_calls += 1
@@ -747,8 +749,9 @@ async def test_run_provider_raises_wrapped_as_error() -> None:
             tools: Sequence[ToolDef],
             *,
             model: str,
+            thinking_budget: int | None = None,
         ) -> AsyncIterator[ProviderEvent]:
-            del messages, tools, model
+            del messages, tools, model, thinking_budget
             raise RuntimeError("boom")
             yield  # pragma: no cover
 
@@ -799,8 +802,9 @@ async def test_run_provider_raises_logs_exception(caplog: pytest.LogCaptureFixtu
             tools: Sequence[ToolDef],
             *,
             model: str,
+            thinking_budget: int | None = None,
         ) -> AsyncIterator[ProviderEvent]:
-            del messages, tools, model
+            del messages, tools, model, thinking_budget
             raise RuntimeError("boom")
             yield  # pragma: no cover
 
@@ -1058,9 +1062,10 @@ async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> N
             tools: Sequence[ToolDef],
             *,
             model: str,
+            thinking_budget: int | None = None,
         ) -> AsyncIterator[ProviderEvent]:
             self.captured_messages.append(list(messages))
-            del tools, model
+            del tools, model, thinking_budget
             idx = self.stream_calls
             self.stream_calls += 1
             if idx >= len(self._scripted):
@@ -1251,8 +1256,11 @@ async def test_serial_mixed_tool_results_consolidated_into_one_user_message() ->
         "serial tool responses must be consolidated into one user Message"
     )
     consolidated = tool_resp_messages[0].content
-    assert [b.id for b in consolidated] == ["a", "b"]
-    assert [b.tool_name for b in consolidated] == ["read_file", "run_command"]
+    by_id = {b.id: b.tool_name for b in consolidated}
+    assert by_id == {"a": "read_file", "b": "run_command"}
+    assert [b.id for b in consolidated] == sorted(by_id), (
+        "tool result blocks must be in call_id order within the consolidated message"
+    )
 
 
 @pytest.mark.asyncio
@@ -1732,3 +1740,41 @@ async def test_tool_budget_recounts_after_assistant_append() -> None:
         and any(isinstance(b, ToolRequest) for b in m.content)
         for m in history_msgs
     )
+
+
+@pytest.mark.asyncio
+async def test_compact_history_does_not_persist_synthetic_tool_repairs() -> None:
+    """Compaction must reset unrepaired rows so in-memory repairs are not stored."""
+    from monkeybot.core.messages.tool_integrity import repair_tool_turn_integrity
+
+    preload: list[Message] = []
+    for i in range(7):
+        role = "user" if i % 2 == 0 else "assistant"
+        preload.append(Message(role=role, content=[Text(text=f"turn-{i}")]))
+    broken_tail = Message(
+        role="assistant",
+        content=[ToolRequest(id="c1", name="echo", args={})],
+    )
+    preload.append(broken_tail)
+    assert len(preload) == 8
+
+    repaired = repair_tool_turn_integrity(preload)
+    assert len(repaired) == len(preload) + 1
+
+    hist = FakeHistory(preload)
+    prov = FakeProvider([[TextDelta(text=" compressed summary "), Done()]])
+    turns = await _compact_history_if_needed(
+        thread_id="t1",
+        history=hist,
+        provider=prov,
+        model="gemini-2.5-flash",
+    )
+    assert turns == 1
+    assert len(hist.reset_calls) == 1
+    _, persisted = hist.reset_calls[0]
+    synthetic_marker = "Tool call interrupted or result missing"
+    for msg in persisted:
+        for block in msg.content:
+            if isinstance(block, ToolResponse):
+                texts = [b.text for b in block.result if isinstance(b, Text)]
+                assert synthetic_marker not in " ".join(texts)

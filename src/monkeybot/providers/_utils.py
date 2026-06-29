@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Sequence
 from typing import Any
 
 from monkeybot.core.llm.provider import Message
+from monkeybot.core.logging_utils import kv
 from monkeybot.core.types.content_blocks import (
     ContentBlock,
     File,
@@ -18,6 +20,41 @@ from monkeybot.core.types.content_blocks import (
     ToolResponse,
 )
 from monkeybot.providers.pricing import estimate_cost
+
+_log = logging.getLogger(__name__)
+
+
+def safe_parse_tool_args(
+    raw: str,
+    *,
+    call_id: str,
+    tool_name: str,
+    provider: str,
+) -> tuple[dict[str, object], str | None]:
+    """Parse streamed tool arguments; return ``({}, error)`` when JSON is invalid."""
+    text = (raw or "").strip()
+    if not text:
+        return {}, None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        action = "malformed_tool_args"
+        error = f"malformed tool args JSON: {exc}"
+    else:
+        if isinstance(parsed, dict):
+            return parsed, None
+        action = "non_object_tool_args"
+        error = f"tool args must be a JSON object, got {type(parsed).__name__}"
+    _log.warning(
+        "stream_parse_repair %s",
+        kv(
+            action=action,
+            call_id=call_id,
+            tool_name=tool_name,
+            provider=provider,
+        ),
+    )
+    return {}, error
 
 
 def _anthropic_tool_result_content(result: list[ContentBlock]) -> list[dict[str, Any]]:
@@ -108,17 +145,48 @@ def _anthropic_assistant_block(block: ContentBlock) -> dict[str, Any]:
     )
 
 
+# Must match volatile section headers emitted by ``compose_system_prompt``.
+_VOLATILE_SYSTEM_MARKERS = (
+    "\n\n## Memory index\n",
+    "\n\n## Skills\n",
+    "\n\n## Current request\n",
+)
+
+
+def split_system_prompt_for_cache(system: str) -> tuple[str, str]:
+    """Split composed system text into stable (cacheable) prefix and volatile tail."""
+    split_at = len(system)
+    for marker in _VOLATILE_SYSTEM_MARKERS:
+        idx = system.find(marker)
+        if idx != -1:
+            split_at = min(split_at, idx)
+    if split_at >= len(system):
+        return system, ""
+    return system[:split_at], system[split_at:]
+
+
 def build_cached_system_blocks(system: str) -> list[dict[str, Any]]:
-    """Return a single cache-marked system text block list.
+    """Return Anthropic system blocks with cache_control only on the stable prefix.
+
+    Volatile tail sections (memory, skills, current request) are sent in a second
+    uncached block so explicit caching hits across curation turns.
 
     Args:
         system: Non-empty system prompt text. Callers MUST guard empty strings
             and pass anthropic.NOT_GIVEN instead (see provider stream methods).
 
     Returns:
-        ``[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]``
+        One or two text blocks; the stable prefix carries ``cache_control: ephemeral``.
     """
-    return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+    stable, volatile = split_system_prompt_for_cache(system)
+    if not volatile.strip():
+        return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+    blocks: list[dict[str, Any]] = [
+        {"type": "text", "text": stable, "cache_control": {"type": "ephemeral"}},
+    ]
+    if volatile:
+        blocks.append({"type": "text", "text": volatile})
+    return blocks
 
 
 def mark_last_tool_cached(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -205,4 +273,6 @@ __all__ = [
     "estimate_anthropic_input_tokens",
     "estimate_cost",
     "mark_last_tool_cached",
+    "safe_parse_tool_args",
+    "split_system_prompt_for_cache",
 ]

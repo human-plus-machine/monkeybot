@@ -5,10 +5,10 @@ from __future__ import annotations
 import argparse
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 from monkeybot_cli.config_resolve import load_agent_dotenv, resolve_config
+from monkeybot_cli.runtime_python import gateway_argv, resolve_runtime_python
 
 
 def run_run(args: argparse.Namespace) -> int:
@@ -21,7 +21,8 @@ def run_run(args: argparse.Namespace) -> int:
     if args.port:
         env["PORT"] = str(args.port)
     workdir = cwd
-    cmd = [sys.executable, "-m", "monkeybot.gateway.main"]
+    runtime = resolve_runtime_python(workdir)
+    cmd = gateway_argv(runtime)
     try:
         proc = subprocess.run(cmd, env=env, cwd=workdir)
         return proc.returncode

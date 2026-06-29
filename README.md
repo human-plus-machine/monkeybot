@@ -50,6 +50,16 @@ monkeybot chat            # spawns the gateway, connects, cleans up on exit
 
 Type a message and press Enter. `/bye` exits (and stops the gateway if this command started it). Ctrl-C also exits.
 
+### Agent-first dependencies
+
+The CLI is intentionally thin — it depends only on base `monkeybot` and does **not** pull in provider/storage extras (`bedrock`, `postgres`, …) globally. Those extras are declared on the **agent project** (e.g. `pr-review-agent/pyproject.toml` lists `monkeybot[bedrock,postgres]`). `monkeybot run` and `monkeybot chat` spawn the gateway from the agent project's interpreter so the extras resolve correctly:
+
+1. `<agent>/.venv/bin/python` — used directly when a project venv exists.
+2. `uv run python -m monkeybot.gateway.main` — when `<agent>/pyproject.toml` exists but no `.venv`.
+3. `sys.executable` (the CLI's interpreter) — legacy fallback for config-only trees (just `monkeybot_config/`, no `pyproject.toml`); in this case extras must be installed in the CLI env.
+
+`monkeybot doctor` checks provider extras and Python version in that same interpreter, and its `remediation` field points at the agent project (`uv sync --extra …` there), not the CLI.
+
 To attach to a gateway you started yourself (e.g. to watch its logs), run it separately and connect with `--attach`:
 
 ```bash

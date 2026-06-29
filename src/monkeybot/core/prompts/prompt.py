@@ -94,10 +94,12 @@ def compose_system_prompt(
     curated_skills: list[SkillRef] | None = None,
     attachment_catalog: Sequence[AttachmentRecord] | None = None,
 ) -> str:
-    """Build the system string: AGENT.md, memory, skills, harness, then task anchor.
+    """Build the system string: AGENT.md, harness, attachments, then volatile tail.
 
     ``ctx.agent_md`` is the operator-authored base prompt (typically from AGENT.md).
-    Runtime sections are appended each turn from context and (when relevant) chat.
+    Stable sections (harness, attachments) precede volatile curation (memory, skills,
+    current-request anchor) so implicit and explicit prompt caching can hit a contiguous
+    prefix across turns.
 
     When ``curated_memory_skills`` is True, ``curated_memory_index`` and ``curated_skills``
     replace ctx memory/skills in the prompt (lists may be empty to omit those sections).
@@ -131,4 +133,6 @@ def compose_system_prompt(
 
     attachments = _session_attachments_block(attachment_catalog)
 
-    return f"{ctx.agent_md}{mem_block}{skills_section}\n\n{harness}{attachments}{task}"
+    stable = f"{ctx.agent_md}\n\n{harness}{attachments}"
+    volatile = f"{mem_block}{skills_section}{task}"
+    return f"{stable}{volatile}"

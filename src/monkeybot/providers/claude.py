@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 from collections.abc import AsyncIterator, Sequence
@@ -22,6 +21,7 @@ from monkeybot.providers._utils import (
     build_anthropic_messages,
     build_cached_system_blocks,
     mark_last_tool_cached,
+    safe_parse_tool_args,
 )
 from monkeybot.providers.sampling import resolve_model_sampling
 
@@ -93,6 +93,7 @@ class ClaudeProvider:
         tools: Sequence[ToolDef],
         *,
         model: str,
+        thinking_budget: int | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         import anthropic  # noqa: PLC0415
 
@@ -115,6 +116,22 @@ class ClaudeProvider:
         else:
             tools_param = converted if converted else anthropic.NOT_GIVEN
 
+        stream_kwargs: dict[str, Any] = {
+            "model": model,
+            "system": system_param,
+            "messages": cast(Any, converted_messages),
+            "tools": tools_param,
+            "max_tokens": self._max_tokens,
+            "temperature": self._temperature,
+        }
+        if thinking_budget is not None and thinking_budget > 0:
+            stream_kwargs["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": thinking_budget,
+            }
+            # Anthropic requires temperature=1 when extended thinking is enabled.
+            stream_kwargs["temperature"] = 1
+
         client = anthropic.AsyncAnthropic()
         _tool_input_buf = ""
         _tool_id = ""
@@ -125,14 +142,7 @@ class ClaudeProvider:
         cache_creation = 0
 
         try:
-            async with client.messages.stream(
-                model=model,
-                system=system_param,
-                messages=cast(Any, converted_messages),
-                tools=tools_param,
-                max_tokens=self._max_tokens,
-                temperature=self._temperature,
-            ) as stream:
+            async with client.messages.stream(**stream_kwargs) as stream:
                 async for event in stream:
                     match event.type:
                         case "content_block_start":
@@ -147,10 +157,17 @@ class ClaudeProvider:
                                 _tool_input_buf += event.delta.partial_json
                         case "content_block_stop":
                             if _tool_id:
+                                args, parse_error = safe_parse_tool_args(
+                                    _tool_input_buf,
+                                    call_id=_tool_id,
+                                    tool_name=_tool_name,
+                                    provider="claude",
+                                )
                                 yield ToolCall(
                                     call_id=_tool_id,
                                     name=_tool_name,
-                                    args=json.loads(_tool_input_buf or "{}"),
+                                    args=args,
+                                    parse_error=parse_error,
                                 )
                                 _tool_id = _tool_name = _tool_input_buf = ""
                         case "message_delta":

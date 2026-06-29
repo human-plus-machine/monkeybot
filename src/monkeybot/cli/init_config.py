@@ -64,9 +64,9 @@ def run_init(*, dest: Path, force: bool) -> int:
     else:
         report.append("  data/memory/INDEX.md: skipped")
 
-    skills = dest / ".agents" / "skills"
+    skills = dest / "skills"
     skills.mkdir(parents=True, exist_ok=True)
-    report.append("  .agents/skills/: ensured (empty ok)")
+    report.append("  skills/: ensured (empty ok)")
 
     print(f"MonkeyBot scaffold under {dest.resolve()}:")
     print("\n".join(report))

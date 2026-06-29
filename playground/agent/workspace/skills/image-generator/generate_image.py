@@ -79,14 +79,24 @@ def _prepare_google_application_credentials() -> None:
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(cred_path)
 
 
+def _response_parts(response: object) -> list[object]:
+    """Collect content parts from a GenerateContentResponse (top-level or candidate)."""
+    top = getattr(response, "parts", None)
+    if isinstance(top, list) and top:
+        return top
+    for cand in getattr(response, "candidates", None) or []:
+        content = getattr(cand, "content", None)
+        if content is None:
+            continue
+        nested = getattr(content, "parts", None)
+        if isinstance(nested, list) and nested:
+            return nested
+    return []
+
+
 def _image_bytes_from_response(response: object) -> bytes | None:
-    parts = getattr(response, "parts", None)
-    if parts is None:
-        candidates = getattr(response, "candidates", None) or []
-        if candidates:
-            content = getattr(candidates[0], "content", None)
-            parts = getattr(content, "parts", None) if content is not None else None
-    for part in parts or []:
+    """Extract image bytes from a ``google.genai`` ``GenerateContentResponse``."""
+    for part in _response_parts(response):
         inline = getattr(part, "inline_data", None)
         if inline is None:
             continue
@@ -99,7 +109,9 @@ def _image_bytes_from_response(response: object) -> bytes | None:
             except binascii.Error:
                 continue
         if isinstance(data, (bytes, bytearray)):
-            return bytes(data)
+            raw = bytes(data)
+            if raw:
+                return raw
         as_image = getattr(part, "as_image", None)
         if callable(as_image):
             try:

@@ -23,7 +23,7 @@ class _FakeCuratorProvider:
     def supports_streaming(self) -> bool:
         return True
 
-    async def stream(self, messages, tools, *, model: str):
+    async def stream(self, messages, tools, *, model: str, thinking_budget=None):
         del messages, tools, model
         self.stream_calls += 1
         yield TextDelta(text=self._text)

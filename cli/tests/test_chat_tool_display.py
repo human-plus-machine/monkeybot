@@ -7,10 +7,10 @@ import asyncio
 import pytest
 
 from monkeybot_cli.commands.chat import (
-    _TurnActivity,
     _tool_display,
     _tool_hint,
     _tool_spinner_prefix,
+    _TurnActivity,
 )
 
 
