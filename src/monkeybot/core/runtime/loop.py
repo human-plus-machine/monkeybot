@@ -40,6 +40,7 @@ from monkeybot.core.llm.provider import (
     ToolCall,
     UsageEvent,
 )
+from monkeybot.core.llm.retry import retrying_provider_stream
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.messages.tool_integrity import repair_tool_turn_integrity
@@ -1093,7 +1094,8 @@ async def _run_inner_core(
                     async with aclosing(
                         cast(
                             Any,
-                            provider.stream(
+                            retrying_provider_stream(
+                                provider,
                                 provider_messages,
                                 ctx.tools,
                                 model=ctx.model,
