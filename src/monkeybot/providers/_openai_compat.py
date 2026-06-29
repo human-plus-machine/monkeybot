@@ -20,6 +20,7 @@ from monkeybot.core.llm.provider import (
 )
 from monkeybot.core.types.content_blocks import ContentBlock, Text, ToolRequest, ToolResponse
 from monkeybot.core.types.types_tools import ToolDef
+from monkeybot.providers._utils import safe_parse_tool_args
 
 _log = logging.getLogger(__name__)
 
@@ -216,10 +217,12 @@ async def iter_openai_compat_stream(
                 continue
             tid = str(slot.get("id") or "") or f"anon:{name}"
             raw_args = str(slot.get("args") or "{}")
-            try:
-                parsed: dict[str, object] = json.loads(raw_args)
-            except json.JSONDecodeError:
-                parsed = {}
+            parsed = safe_parse_tool_args(
+                raw_args,
+                call_id=tid,
+                tool_name=name,
+                provider="openai_compat",
+            )
             yield ToolCall(call_id=tid, name=name, args=parsed)
     except Exception as exc:
         _log.warning("OpenAI-compat stream error: %s", exc)
