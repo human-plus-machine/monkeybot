@@ -11,6 +11,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from monkeybot.core.env_utils import env_float, env_int
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.backends import RunStore, StorageBackend
 from monkeybot.core.persistence.durable_runs import SubagentRunRow
@@ -27,26 +28,6 @@ _SHUTDOWN_FAILURE_MESSAGE = "subagent run cancelled during worker shutdown"
 _STALE_CLAIM_WARN_FRACTION = 0.8
 
 
-def _env_float(name: str, default: float) -> float:
-    raw = os.environ.get(name, "").strip()
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        return default
-
-
-def _env_int(name: str, default: int) -> int:
-    raw = os.environ.get(name, "").strip()
-    if not raw:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
-
-
 @dataclass(frozen=True)
 class WorkerEnvSettings:
     poll_interval_s: float
@@ -57,9 +38,9 @@ class WorkerEnvSettings:
 def worker_env_settings() -> WorkerEnvSettings:
     """Read worker-pool tuning from environment once."""
     return WorkerEnvSettings(
-        poll_interval_s=_env_float("MONKEYBOT_WORKER_POLL_INTERVAL_S", 2.0),
-        concurrency=_env_int("MONKEYBOT_WORKER_CONCURRENCY", 1),
-        stale_claim_ms=_env_int("MONKEYBOT_WORKER_STALE_CLAIM_MS", 600_000),
+        poll_interval_s=env_float("MONKEYBOT_WORKER_POLL_INTERVAL_S", 2.0),
+        concurrency=env_int("MONKEYBOT_WORKER_CONCURRENCY", 1),
+        stale_claim_ms=env_int("MONKEYBOT_WORKER_STALE_CLAIM_MS", 600_000),
     )
 
 

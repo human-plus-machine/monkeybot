@@ -76,6 +76,8 @@ def _status_error(status: int, message: str) -> httpx.HTTPStatusError:
         (_status_error(400, "bad request"), False),
         (TimeoutError("timed out"), True),
         (ConnectionError("connection refused"), True),
+        (ConnectionResetError("connection reset"), True),
+        (PermissionError("permission denied"), False),
         (RuntimeError("rate limit exceeded"), True),
         (RuntimeError("invalid api key"), False),
     ],
@@ -95,6 +97,13 @@ def test_compute_retry_delay_exponential_without_header() -> None:
     cfg = ProviderRetryConfig(base_delay_s=1.0, max_delay_s=60.0, jitter_fraction=0.0)
     assert compute_retry_delay_seconds(0, exc, cfg) == 1.0
     assert compute_retry_delay_seconds(2, exc, cfg) == 4.0
+
+
+def test_compute_retry_delay_jitter_respects_max_delay(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("monkeybot.core.llm.retry.random.random", lambda: 1.0)
+    exc = RuntimeError("server error")
+    cfg = ProviderRetryConfig(base_delay_s=1.0, max_delay_s=60.0, jitter_fraction=0.25)
+    assert compute_retry_delay_seconds(10, exc, cfg) == 60.0
 
 
 @pytest.mark.asyncio

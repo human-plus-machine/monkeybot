@@ -12,10 +12,11 @@ from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Any, cast
 
-from monkeybot.core.types.content_blocks import Text
 from monkeybot.core.context import SkillRef, TurnContext
-from monkeybot.core.memory.subsystem import MemorySubsystem
+from monkeybot.core.env_utils import env_float, env_int
 from monkeybot.core.llm.provider import Done, Message, Provider, TextDelta, ToolCall, UsageEvent
+from monkeybot.core.memory.subsystem import MemorySubsystem
+from monkeybot.core.types.content_blocks import Text
 
 _log = logging.getLogger(__name__)
 
@@ -25,26 +26,10 @@ def curation_enabled_from_env() -> bool:
     return v not in ("0", "false", "no", "off")
 
 
-def _env_int(name: str, default: int) -> int:
-    raw = os.getenv(name, str(default)).strip()
-    try:
-        return int(raw)
-    except ValueError:
-        return default
-
-
-def _env_float(name: str, default: float) -> float:
-    raw = os.getenv(name, str(default)).strip()
-    try:
-        return float(raw)
-    except ValueError:
-        return default
-
-
 def curation_threshold_met(ctx: TurnContext) -> bool:
     """Option C: run curator only when the catalog is large enough to benefit."""
-    skill_n = _env_int("CONTEXT_CURATION_SKILL_THRESHOLD", 4)
-    mem_n = _env_int("CONTEXT_CURATION_MEMORY_THRESHOLD", 8)
+    skill_n = env_int("CONTEXT_CURATION_SKILL_THRESHOLD", 4)
+    mem_n = env_int("CONTEXT_CURATION_MEMORY_THRESHOLD", 8)
     return len(ctx.skills) > skill_n or len(ctx.memory_index) > mem_n
 
 
@@ -145,10 +130,10 @@ async def run_context_curator(
     to ``provider`` when not supplied.
     """
     _provider = curator_provider if curator_provider is not None else provider
-    max_mem = max(1, _env_int("CONTEXT_CURATION_MAX_MEMORY_LINES", 12))
-    max_sk = max(1, _env_int("CONTEXT_CURATION_MAX_SKILLS", 5))
-    search_hits = max(1, _env_int("CONTEXT_CURATION_SEARCH_MAX_HITS", 8))
-    timeout_sec = max(1.0, _env_float("CONTEXT_CURATION_TIMEOUT_SEC", 10.0))
+    max_mem = max(1, env_int("CONTEXT_CURATION_MAX_MEMORY_LINES", 12))
+    max_sk = max(1, env_int("CONTEXT_CURATION_MAX_SKILLS", 5))
+    search_hits = max(1, env_int("CONTEXT_CURATION_SEARCH_MAX_HITS", 8))
+    timeout_sec = max(1.0, env_float("CONTEXT_CURATION_TIMEOUT_SEC", 10.0))
 
     index_lines = list(ctx.memory_index)
     search_lines: list[str] = []

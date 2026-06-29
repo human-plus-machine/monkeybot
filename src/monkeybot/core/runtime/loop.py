@@ -541,14 +541,16 @@ async def _summarize_history(
         ),
     ]
     summary_text = ""
-    async with aclosing(
-        cast(Any, provider.stream(summarize_messages, [], model=model))
-    ) as stream:
-        async for ev in stream:
-            if isinstance(ev, TextDelta):
-                summary_text += ev.text
-            elif isinstance(ev, Done):
-                break
+    async for ev in retrying_provider_stream(
+        provider,
+        summarize_messages,
+        [],
+        model=model,
+    ):
+        if isinstance(ev, TextDelta):
+            summary_text += ev.text
+        elif isinstance(ev, Done):
+            break
     summary_text = summary_text.strip() or "(empty summary)"
     merged = [
         *head,

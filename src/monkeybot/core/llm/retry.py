@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import random
 from collections.abc import AsyncIterator, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Any, cast
 
+from monkeybot.core.env_utils import env_bool, env_float, env_int
 from monkeybot.core.llm.provider import Message, Provider, ProviderEvent
 from monkeybot.core.types.types_tools import ToolDef
 
@@ -24,6 +24,14 @@ _DEFAULT_BASE_DELAY_S = 1.0
 _DEFAULT_MAX_DELAY_S = 60.0
 _DEFAULT_JITTER_FRACTION = 0.25
 
+_NETWORK_TRANSIENT_ERRORS = (
+    TimeoutError,
+    ConnectionError,
+    ConnectionResetError,
+    BrokenPipeError,
+    ConnectionAbortedError,
+)
+
 
 @dataclass(frozen=True)
 class ProviderRetryConfig:
@@ -36,46 +44,19 @@ class ProviderRetryConfig:
     jitter_fraction: float = _DEFAULT_JITTER_FRACTION
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    raw = os.getenv(name, "").strip().lower()
-    if not raw:
-        return default
-    return raw in ("1", "true", "yes", "on")
-
-
-def _env_float(name: str, default: float) -> float:
-    raw = os.getenv(name, "").strip()
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        return default
-
-
-def _env_int(name: str, default: int) -> int:
-    raw = os.getenv(name, "").strip()
-    if not raw:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
-
-
 def provider_retry_config_from_env() -> ProviderRetryConfig:
     """Load retry settings from ``MONKEYBOT_PROVIDER_RETRY_*`` env vars."""
     return ProviderRetryConfig(
-        enabled=_env_bool("MONKEYBOT_PROVIDER_RETRY_ENABLED", True),
-        max_attempts=max(1, _env_int("MONKEYBOT_PROVIDER_RETRY_MAX_ATTEMPTS", _DEFAULT_MAX_ATTEMPTS)),
-        base_delay_s=max(0.0, _env_float("MONKEYBOT_PROVIDER_RETRY_BASE_DELAY_SEC", _DEFAULT_BASE_DELAY_S)),
+        enabled=env_bool("MONKEYBOT_PROVIDER_RETRY_ENABLED", True),
+        max_attempts=max(1, env_int("MONKEYBOT_PROVIDER_RETRY_MAX_ATTEMPTS", _DEFAULT_MAX_ATTEMPTS)),
+        base_delay_s=max(0.0, env_float("MONKEYBOT_PROVIDER_RETRY_BASE_DELAY_SEC", _DEFAULT_BASE_DELAY_S)),
         max_delay_s=max(
             0.0,
-            _env_float("MONKEYBOT_PROVIDER_RETRY_MAX_DELAY_SEC", _DEFAULT_MAX_DELAY_S),
+            env_float("MONKEYBOT_PROVIDER_RETRY_MAX_DELAY_SEC", _DEFAULT_MAX_DELAY_S),
         ),
         jitter_fraction=min(
             1.0,
-            max(0.0, _env_float("MONKEYBOT_PROVIDER_RETRY_JITTER_FRACTION", _DEFAULT_JITTER_FRACTION)),
+            max(0.0, env_float("MONKEYBOT_PROVIDER_RETRY_JITTER_FRACTION", _DEFAULT_JITTER_FRACTION)),
         ),
     )
 
@@ -198,9 +179,12 @@ def is_transient_provider_error(exc: BaseException) -> bool:
     if _is_sdk_transient(exc):
         return True
 
-    if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
+    if isinstance(exc, _NETWORK_TRANSIENT_ERRORS):
         return True
 
+    # Best-effort fallback for providers that raise plain exceptions without HTTP
+    # status codes. False positives are possible when a permanent error message
+    # happens to contain transient markers (e.g. "server error").
     return _message_suggests_transient(exc)
 
 
@@ -216,7 +200,7 @@ def compute_retry_delay_seconds(
     delay = min(base, config.max_delay_s)
     if config.jitter_fraction > 0:
         jitter = delay * config.jitter_fraction * random.random()
-        delay += jitter
+        delay = min(delay + jitter, config.max_delay_s)
     return delay
 
 
@@ -245,7 +229,6 @@ async def retrying_provider_stream(
             yield event
         return
 
-    last_exc: BaseException | None = None
     for attempt in range(cfg.max_attempts):
         emitted = False
         try:
@@ -267,7 +250,6 @@ async def retrying_provider_stream(
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            last_exc = exc
             is_last_attempt = attempt + 1 >= cfg.max_attempts
             if emitted or not is_transient_provider_error(exc) or is_last_attempt:
                 raise
@@ -283,9 +265,6 @@ async def retrying_provider_stream(
                 exc,
             )
             await asyncio.sleep(delay)
-
-    if last_exc is not None:
-        raise last_exc
 
 
 __all__ = [
