@@ -217,13 +217,13 @@ async def iter_openai_compat_stream(
                 continue
             tid = str(slot.get("id") or "") or f"anon:{name}"
             raw_args = str(slot.get("args") or "{}")
-            parsed = safe_parse_tool_args(
+            parsed, parse_error = safe_parse_tool_args(
                 raw_args,
                 call_id=tid,
                 tool_name=name,
                 provider="openai_compat",
             )
-            yield ToolCall(call_id=tid, name=name, args=parsed)
+            yield ToolCall(call_id=tid, name=name, args=parsed, parse_error=parse_error)
     except Exception as exc:
         _log.warning("OpenAI-compat stream error: %s", exc)
         raise

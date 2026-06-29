@@ -32,7 +32,7 @@ def test_repair_synthesizes_missing_tool_result() -> None:
     assert responses[0].is_error is True
 
 
-def test_repair_synthesizes_assistant_for_orphan_tool_result() -> None:
+def test_repair_skips_synthetic_assistant_for_unresolvable_orphan() -> None:
     messages = [
         Message(
             role="user",
@@ -42,14 +42,29 @@ def test_repair_synthesizes_assistant_for_orphan_tool_result() -> None:
         ),
     ]
     repaired = repair_tool_turn_integrity(messages)
+    assert len(repaired) == 1
+    assert repaired[0].role == "user"
+    responses = [b for b in repaired[0].content if isinstance(b, ToolResponse)]
+    assert len(responses) == 1
+    assert responses[0].tool_name == "unknown_tool"
+
+
+def test_repair_synthesizes_assistant_for_resolvable_orphan() -> None:
+    messages = [
+        Message(
+            role="user",
+            content=[
+                ToolResponse(id="orph", tool_name="echo", result=[Text(text="done")]),
+            ],
+        ),
+    ]
+    repaired = repair_tool_turn_integrity(messages)
     assert len(repaired) == 2
     assert repaired[0].role == "assistant"
     requests = [b for b in repaired[0].content if isinstance(b, ToolRequest)]
     assert len(requests) == 1
     assert requests[0].id == "orph"
-    assert requests[0].name == "unknown_tool"
-    responses = [b for b in repaired[1].content if isinstance(b, ToolResponse)]
-    assert responses[0].tool_name == "unknown_tool"
+    assert requests[0].name == "echo"
 
 
 def test_repair_fills_empty_tool_name_from_request() -> None:
@@ -129,7 +144,7 @@ def test_repaired_orphan_history_converts_for_gemini() -> None:
         Message(
             role="user",
             content=[
-                ToolResponse(id="x", tool_name="", result=[Text(text="a")]),
+                ToolResponse(id="x", tool_name="echo", result=[Text(text="a")]),
             ],
         ),
     ]
@@ -143,7 +158,7 @@ def test_repaired_orphan_history_converts_for_anthropic() -> None:
         Message(
             role="user",
             content=[
-                ToolResponse(id="x", tool_name="", result=[Text(text="a")]),
+                ToolResponse(id="x", tool_name="echo", result=[Text(text="a")]),
             ],
         ),
     ]
@@ -157,7 +172,7 @@ def test_repaired_orphan_history_converts_for_openai() -> None:
         Message(
             role="user",
             content=[
-                ToolResponse(id="x", tool_name="", result=[Text(text="a")]),
+                ToolResponse(id="x", tool_name="echo", result=[Text(text="a")]),
             ],
         ),
     ]

@@ -30,36 +30,31 @@ def safe_parse_tool_args(
     call_id: str,
     tool_name: str,
     provider: str,
-) -> dict[str, object]:
-    """Parse streamed tool arguments; return ``{}`` and log when JSON is invalid."""
+) -> tuple[dict[str, object], str | None]:
+    """Parse streamed tool arguments; return ``({}, error)`` when JSON is invalid."""
     text = (raw or "").strip()
     if not text:
-        return {}
+        return {}, None
     try:
         parsed = json.loads(text)
-    except json.JSONDecodeError:
-        _log.warning(
-            "stream_parse_repair %s",
-            kv(
-                action="malformed_tool_args",
-                call_id=call_id,
-                tool_name=tool_name,
-                provider=provider,
-            ),
-        )
-        return {}
-    if isinstance(parsed, dict):
-        return parsed
+    except json.JSONDecodeError as exc:
+        action = "malformed_tool_args"
+        error = f"malformed tool args JSON: {exc}"
+    else:
+        if isinstance(parsed, dict):
+            return parsed, None
+        action = "non_object_tool_args"
+        error = f"tool args must be a JSON object, got {type(parsed).__name__}"
     _log.warning(
         "stream_parse_repair %s",
         kv(
-            action="non_object_tool_args",
+            action=action,
             call_id=call_id,
             tool_name=tool_name,
             provider=provider,
         ),
     )
-    return {}
+    return {}, error
 
 
 def _anthropic_tool_result_content(result: list[ContentBlock]) -> list[dict[str, Any]]:

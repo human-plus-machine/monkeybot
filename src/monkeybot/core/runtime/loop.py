@@ -445,7 +445,9 @@ async def _compact_history_if_needed(
     model: str,
 ) -> int:
     """Summarize middle history when tool results exhausted headroom."""
-    chat_messages = await _load_repaired_chat_history(history, thread_id)
+    # Compaction persists via history.reset; use unrepaired rows so synthetic
+    # in-memory repairs are never written to the store.
+    chat_messages = await history.load(thread_id)
     if not _summarization_viable(chat_messages):
         return 0
     return await _summarize_history(thread_id, chat_messages, history, provider, model)
@@ -1188,7 +1190,7 @@ async def _run_inner_core(
                     break
                 # Model returned no text after tool results (or only whitespace). Without another
                 # provider round the user sees tools then silence — retry until turn budget.
-                rows = await history.load(ctx.thread_id)
+                rows = await _load_repaired_chat_history(history, ctx.thread_id)
                 owes_tool_followup = needs_followup_after_tools or (
                     bool(rows)
                     and rows[-1].role == "user"
@@ -1214,6 +1216,7 @@ async def _run_inner_core(
                         id=c.call_id,
                         name=c.name,
                         args=dict(c.args),
+                        parse_error=c.parse_error,
                         metadata=dict(c.metadata) if c.metadata else None,
                     )
                 )

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from typing import cast
 
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.logging_utils import kv
@@ -55,7 +56,7 @@ def _repair_tool_request(block: ToolRequest) -> ToolRequest:
 
 
 def _repair_assistant_message(msg: Message) -> Message:
-    new_blocks: list[object] = []
+    new_blocks: list[ContentBlock] = []
     changed = False
     for block in msg.content:
         if isinstance(block, ToolRequest):
@@ -67,7 +68,7 @@ def _repair_assistant_message(msg: Message) -> Message:
             new_blocks.append(block)
     if not changed:
         return msg
-    return Message(role=msg.role, content=[b for b in new_blocks if isinstance(b, ContentBlock)])
+    return Message(role=msg.role, content=new_blocks)
 
 
 def _tool_name_for_response(
@@ -117,14 +118,36 @@ def _synthetic_error_response(req: ToolRequest) -> ToolResponse:
     )
 
 
-def _synthetic_tool_request(block: ToolResponse) -> ToolRequest:
-    name = _tool_name_for_response(block, {})
+def _synthetic_tool_request(
+    block: ToolResponse,
+    request_by_id: dict[str, ToolRequest],
+) -> ToolRequest | None:
+    name = _tool_name_for_response(block, request_by_id)
+    if name == _UNKNOWN_TOOL:
+        _log_repair(
+            "skip_synthetic_tool_request",
+            call_id=block.id,
+            reason="unresolvable_tool_name",
+        )
+        return None
     _log_repair(
         "synthetic_tool_request",
         call_id=block.id,
         tool_name=name,
     )
     return ToolRequest(id=block.id, name=name, args={})
+
+
+def _synthetic_tool_requests(
+    blocks: Sequence[ToolResponse],
+    request_by_id: dict[str, ToolRequest],
+) -> list[ToolRequest]:
+    out: list[ToolRequest] = []
+    for block in blocks:
+        req = _synthetic_tool_request(block, request_by_id)
+        if req is not None:
+            out.append(req)
+    return out
 
 
 def repair_tool_turn_integrity(messages: Sequence[Message]) -> list[Message]:
@@ -149,7 +172,7 @@ def repair_tool_turn_integrity(messages: Sequence[Message]) -> list[Message]:
                     user_responses = _tool_responses(user_msg)
                     orphan_responses = [b for b in user_responses if b.id not in request_ids]
 
-                    repaired_blocks: list[object] = []
+                    repaired_blocks: list[ContentBlock] = []
                     user_changed = False
                     for block in user_msg.content:
                         if isinstance(block, ToolResponse):
@@ -160,27 +183,21 @@ def repair_tool_turn_integrity(messages: Sequence[Message]) -> list[Message]:
                         else:
                             repaired_blocks.append(block)
 
-                    response_ids = {
-                        b.id for b in repaired_blocks if isinstance(b, ToolResponse)
-                    }
+                    response_ids = {b.id for b in repaired_blocks if isinstance(b, ToolResponse)}
                     missing_ids = sorted(request_ids - response_ids)
                     if missing_ids:
                         for req_id in missing_ids:
                             repaired_blocks.append(_synthetic_error_response(request_map[req_id]))
                         user_changed = True
 
-                    repaired_user = Message(
-                        role="user",
-                        content=[b for b in repaired_blocks if isinstance(b, ContentBlock)],
-                    )
+                    repaired_user = Message(role="user", content=repaired_blocks)
                     out.append(repaired)
-                    if orphan_responses:
+                    synthetic_orphans = _synthetic_tool_requests(orphan_responses, request_map)
+                    if synthetic_orphans:
                         out.append(
                             Message(
                                 role="assistant",
-                                content=[
-                                    _synthetic_tool_request(block) for block in orphan_responses
-                                ],
+                                content=cast(list[ContentBlock], synthetic_orphans),
                             )
                         )
                     out.append(repaired_user if user_changed else user_msg)
@@ -212,17 +229,16 @@ def repair_tool_turn_integrity(messages: Sequence[Message]) -> list[Message]:
                     if isinstance(b, ToolRequest)
                 }
                 orphan_responses = [b for b in user_responses if b.id not in prior_requests]
-                if orphan_responses:
+                synthetic_orphans = _synthetic_tool_requests(orphan_responses, prior_requests)
+                if synthetic_orphans:
                     out.append(
                         Message(
                             role="assistant",
-                            content=[
-                                _synthetic_tool_request(block) for block in orphan_responses
-                            ],
+                            content=cast(list[ContentBlock], synthetic_orphans),
                         )
                     )
 
-                user_blocks: list[object] = []
+                user_blocks: list[ContentBlock] = []
                 changed = False
                 for block in msg.content:
                     if isinstance(block, ToolResponse):
@@ -233,14 +249,7 @@ def repair_tool_turn_integrity(messages: Sequence[Message]) -> list[Message]:
                     else:
                         user_blocks.append(block)
 
-                out.append(
-                    Message(
-                        role="user",
-                        content=[b for b in user_blocks if isinstance(b, ContentBlock)],
-                    )
-                    if changed
-                    else msg
-                )
+                out.append(Message(role="user", content=user_blocks) if changed else msg)
                 i += 1
                 continue
 
