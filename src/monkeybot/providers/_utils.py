@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Sequence
 from typing import Any
 
 from monkeybot.core.llm.provider import Message
+from monkeybot.core.logging_utils import kv
 from monkeybot.core.types.content_blocks import (
     ContentBlock,
     File,
@@ -18,6 +20,41 @@ from monkeybot.core.types.content_blocks import (
     ToolResponse,
 )
 from monkeybot.providers.pricing import estimate_cost
+
+_log = logging.getLogger(__name__)
+
+
+def safe_parse_tool_args(
+    raw: str,
+    *,
+    call_id: str,
+    tool_name: str,
+    provider: str,
+) -> tuple[dict[str, object], str | None]:
+    """Parse streamed tool arguments; return ``({}, error)`` when JSON is invalid."""
+    text = (raw or "").strip()
+    if not text:
+        return {}, None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        action = "malformed_tool_args"
+        error = f"malformed tool args JSON: {exc}"
+    else:
+        if isinstance(parsed, dict):
+            return parsed, None
+        action = "non_object_tool_args"
+        error = f"tool args must be a JSON object, got {type(parsed).__name__}"
+    _log.warning(
+        "stream_parse_repair %s",
+        kv(
+            action=action,
+            call_id=call_id,
+            tool_name=tool_name,
+            provider=provider,
+        ),
+    )
+    return {}, error
 
 
 def _anthropic_tool_result_content(result: list[ContentBlock]) -> list[dict[str, Any]]:
@@ -236,5 +273,6 @@ __all__ = [
     "estimate_anthropic_input_tokens",
     "estimate_cost",
     "mark_last_tool_cached",
+    "safe_parse_tool_args",
     "split_system_prompt_for_cache",
 ]

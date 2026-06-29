@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 from collections.abc import AsyncIterator, Sequence
@@ -23,6 +22,7 @@ from monkeybot.providers._utils import (
     build_cached_system_blocks,
     estimate_anthropic_input_tokens,
     mark_last_tool_cached,
+    safe_parse_tool_args,
 )
 from monkeybot.providers.sampling import resolve_model_sampling
 
@@ -171,10 +171,17 @@ class BedrockClaudeProvider:
                                 _tool_input_buf += event.delta.partial_json
                         case "content_block_stop":
                             if _tool_id:
+                                args, parse_error = safe_parse_tool_args(
+                                    _tool_input_buf,
+                                    call_id=_tool_id,
+                                    tool_name=_tool_name,
+                                    provider="bedrock",
+                                )
                                 yield ToolCall(
                                     call_id=_tool_id,
                                     name=_tool_name,
-                                    args=json.loads(_tool_input_buf or "{}"),
+                                    args=args,
+                                    parse_error=parse_error,
                                 )
                                 _tool_id = _tool_name = _tool_input_buf = ""
                         case "message_delta":

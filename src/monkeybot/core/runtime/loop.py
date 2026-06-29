@@ -42,6 +42,7 @@ from monkeybot.core.llm.provider import (
 )
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.messages.tool_integrity import repair_tool_turn_integrity
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.prompts.prompt import compose_system_prompt, latest_user_message_text
 from monkeybot.core.runtime.context_budget import (
@@ -176,6 +177,11 @@ def _system_message(
 
 def _messages_for_provider(system: Message, history: Sequence[Message]) -> list[Message]:
     return [system, *list(history)]
+
+
+async def _load_repaired_chat_history(history: HistoryStore, thread_id: str) -> list[Message]:
+    """Load transcript rows and repair broken tool turns in memory before provider replay."""
+    return repair_tool_turn_integrity(await history.load(thread_id))
 
 
 def _provider_messages_prompt_summary(messages: Sequence[Message]) -> str:
@@ -439,6 +445,8 @@ async def _compact_history_if_needed(
     model: str,
 ) -> int:
     """Summarize middle history when tool results exhausted headroom."""
+    # Compaction persists via history.reset; use unrepaired rows so synthetic
+    # in-memory repairs are never written to the store.
     chat_messages = await history.load(thread_id)
     if not _summarization_viable(chat_messages):
         return 0
@@ -487,7 +495,7 @@ async def _append_budgeted_tool_responses(
         turns_summarized=turns_summarized,
     )
     if turns_summarized > 0:
-        chat_messages = await history.load(ctx.thread_id)
+        chat_messages = await _load_repaired_chat_history(history, ctx.thread_id)
         system = _system_message(ctx, chat_messages)
         provider_messages = _messages_for_provider(system, chat_messages)
         post = await _provider_prompt_input_tokens(
@@ -893,7 +901,7 @@ async def _run_inner_core(
                 needs_followup_after_tools = False
                 break
 
-            chat_messages = await history.load(ctx.thread_id)
+            chat_messages = await _load_repaired_chat_history(history, ctx.thread_id)
             ctx = await refresh_memory_index(ctx)
             turn_input_text = latest_user_message_text(chat_messages) or user_text
             set_turn_io(input_value=turn_input_text)
@@ -1026,7 +1034,7 @@ async def _run_inner_core(
                         turns_summarized=turns_summarized,
                     ),
                 )
-                chat_messages = await history.load(ctx.thread_id)
+                chat_messages = await _load_repaired_chat_history(history, ctx.thread_id)
                 ctx = await refresh_memory_index(ctx)
                 system = _system_message(
                     ctx,
@@ -1182,7 +1190,7 @@ async def _run_inner_core(
                     break
                 # Model returned no text after tool results (or only whitespace). Without another
                 # provider round the user sees tools then silence — retry until turn budget.
-                rows = await history.load(ctx.thread_id)
+                rows = await _load_repaired_chat_history(history, ctx.thread_id)
                 owes_tool_followup = needs_followup_after_tools or (
                     bool(rows)
                     and rows[-1].role == "user"
@@ -1208,6 +1216,7 @@ async def _run_inner_core(
                         id=c.call_id,
                         name=c.name,
                         args=dict(c.args),
+                        parse_error=c.parse_error,
                         metadata=dict(c.metadata) if c.metadata else None,
                     )
                 )
@@ -1569,7 +1578,7 @@ async def _run_inner_core(
                 all_tool_responses.extend(chunk_responses)
 
             if all_tool_responses:
-                chat_for_budget = await history.load(ctx.thread_id)
+                chat_for_budget = await _load_repaired_chat_history(history, ctx.thread_id)
                 budget_used = usage.estimated_prompt_tokens
                 try:
                     budget_used = await _prompt_input_tokens_for_history(

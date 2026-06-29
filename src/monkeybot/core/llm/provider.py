@@ -75,6 +75,7 @@ class ToolCall:
     call_id: str
     name: str
     args: dict[str, object]
+    parse_error: str | None = None
     metadata: dict[str, object] | None = None
 
 

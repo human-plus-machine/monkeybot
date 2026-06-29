@@ -34,6 +34,7 @@ from monkeybot.core.runtime.events import (
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.runtime.loop import (
     _chunk_tool_calls,
+    _compact_history_if_needed,
     _image_events,
     _merge_usage_event,
     _usage_to_totals,
@@ -1739,3 +1740,41 @@ async def test_tool_budget_recounts_after_assistant_append() -> None:
         and any(isinstance(b, ToolRequest) for b in m.content)
         for m in history_msgs
     )
+
+
+@pytest.mark.asyncio
+async def test_compact_history_does_not_persist_synthetic_tool_repairs() -> None:
+    """Compaction must reset unrepaired rows so in-memory repairs are not stored."""
+    from monkeybot.core.messages.tool_integrity import repair_tool_turn_integrity
+
+    preload: list[Message] = []
+    for i in range(7):
+        role = "user" if i % 2 == 0 else "assistant"
+        preload.append(Message(role=role, content=[Text(text=f"turn-{i}")]))
+    broken_tail = Message(
+        role="assistant",
+        content=[ToolRequest(id="c1", name="echo", args={})],
+    )
+    preload.append(broken_tail)
+    assert len(preload) == 8
+
+    repaired = repair_tool_turn_integrity(preload)
+    assert len(repaired) == len(preload) + 1
+
+    hist = FakeHistory(preload)
+    prov = FakeProvider([[TextDelta(text=" compressed summary "), Done()]])
+    turns = await _compact_history_if_needed(
+        thread_id="t1",
+        history=hist,
+        provider=prov,
+        model="gemini-2.5-flash",
+    )
+    assert turns == 1
+    assert len(hist.reset_calls) == 1
+    _, persisted = hist.reset_calls[0]
+    synthetic_marker = "Tool call interrupted or result missing"
+    for msg in persisted:
+        for block in msg.content:
+            if isinstance(block, ToolResponse):
+                texts = [b.text for b in block.result if isinstance(b, Text)]
+                assert synthetic_marker not in " ".join(texts)
