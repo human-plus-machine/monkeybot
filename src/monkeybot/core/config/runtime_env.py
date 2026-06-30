@@ -83,6 +83,7 @@ ENV_MAP: dict[tuple[str, str], str] = {
     ("sandbox", "image"): "SANDBOX_IMAGE",
     ("sandbox", "ttl_seconds"): "SANDBOX_TTL_SECONDS",
     ("fake_provider", "events_json"): "MONKEYBOT_FAKE_PROVIDER_EVENTS",
+    ("emission", "style"): "MONKEYBOT_EMISSION_STYLE",
 }
 
 # Backward-compatible alias for internal/tests.
