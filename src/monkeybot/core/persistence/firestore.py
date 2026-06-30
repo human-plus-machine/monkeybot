@@ -501,7 +501,12 @@ class FirestoreStorageBackend:
         self._usage_store: FirestoreUsageStore | None = None
         self._runs_store: FirestoreRunStore | None = None
 
-    async def open(self) -> None:
+    async def open(self, *, run_schema: bool = True) -> None:
+        """Open the Firestore client.
+
+        ``run_schema`` is accepted for API parity with other backends; Firestore
+        is schemaless and performs no DDL.
+        """
         self._client = AsyncClient(
             project=self._config.project,
             database=self._config.database,

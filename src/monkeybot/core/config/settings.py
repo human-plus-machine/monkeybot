@@ -249,3 +249,21 @@ def get_subagent_registry(config_path: str | None = None) -> dict[str, SubagentC
             raise ConfigError(f"Duplicate subagent name in monkeybot.yaml: {cfg.name!r}")
         registry[cfg.name] = cfg
     return registry
+
+
+def auto_schema_enabled_from_config(config_path: str | None = None) -> bool:
+    """Whether storage backends should apply DDL on ``open()`` (``paths.auto_schema``).
+
+    Defaults to ``True`` when the key is absent. Only read from monkeybot.yaml —
+    not from environment variables.
+    """
+    _, doc = load_monkeybot_yaml_dict(config_path)
+    paths = doc.get("paths")
+    if not isinstance(paths, dict):
+        return True
+    raw = paths.get("auto_schema")
+    if raw is None:
+        return True
+    if isinstance(raw, bool):
+        return raw
+    raise ConfigError(f"paths.auto_schema must be true or false, got {raw!r}")

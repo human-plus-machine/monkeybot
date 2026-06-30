@@ -13,7 +13,11 @@ from typing import Any, cast
 
 from dotenv import load_dotenv
 
-from monkeybot.core.config.settings import get_provider_config, normalize_model_provider
+from monkeybot.core.config.settings import (
+    auto_schema_enabled_from_config,
+    get_provider_config,
+    normalize_model_provider,
+)
 from monkeybot.core.context import TurnContext, build_context
 from monkeybot.core.llm.provider import (
     Done,
@@ -257,7 +261,7 @@ async def _async_main() -> None:
     executor: CoreToolExecutor | None = None
 
     try:
-        await backend.open()
+        await backend.open(run_schema=auto_schema_enabled_from_config())
 
         mcp = MCPClient()
         mcp_config = resolve_project_path(

@@ -12,6 +12,7 @@ paths:
   memory_storage_uri: local://./data/memory
   skills_path: ./skills
   db_url: sqlite:///data/monkeybot.db
+  auto_schema: true
   mcp_config: ./monkeybot_config/mcp.json
   command_allowlist_config: ./monkeybot_config/command_allowlist.yaml
 

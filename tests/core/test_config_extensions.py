@@ -13,6 +13,7 @@ from monkeybot.core.config import (
     CustomMemoryFolder,
     SubagentConfig,
     apply_monkeybot_runtime_env,
+    auto_schema_enabled_from_config,
     cache_enabled_from_env,
     get_provider_config,
     get_subagent_configs,
@@ -276,3 +277,27 @@ class TestValidateMonkeybotYamlDoc:
 
     def test_accepts_gemini(self) -> None:
         validate_monkeybot_yaml_doc({"model": {"provider": "gemini", "name": "gemini-3-flash"}})
+
+
+class TestAutoSchemaConfig:
+    def test_defaults_true_when_missing(self) -> None:
+        assert auto_schema_enabled_from_config("/nonexistent/monkeybot.yaml") is True
+
+    def test_reads_false_from_yaml(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text("paths:\n  auto_schema: false\n", encoding="utf-8")
+        assert auto_schema_enabled_from_config(str(config_path)) is False
+
+    def test_reads_true_from_yaml(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text("paths:\n  auto_schema: true\n", encoding="utf-8")
+        assert auto_schema_enabled_from_config(str(config_path)) is True
+
+    def test_rejects_non_boolean(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text("paths:\n  auto_schema: 0\n", encoding="utf-8")
+        with pytest.raises(ConfigError, match="must be true or false"):
+            auto_schema_enabled_from_config(str(config_path))
+
+    def test_not_mapped_to_env(self) -> None:
+        assert ("paths", "auto_schema") not in ENV_MAP

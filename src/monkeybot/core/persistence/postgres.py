@@ -10,16 +10,16 @@ from typing import cast
 
 import asyncpg
 
-from monkeybot.core.llm.usage import Usage, UsageSummary
 from monkeybot.core.llm.provider import Message, Role
-from monkeybot.core.types.content_blocks import ContentBlock
+from monkeybot.core.llm.usage import Usage, UsageSummary
 from monkeybot.core.persistence.durable_runs import (
+    _SUBAGENT_COLUMNS,
     SubagentEnvelope,
     SubagentRunRow,
-    _SUBAGENT_COLUMNS,
     _tuple_to_run_row,
 )
 from monkeybot.core.persistence.thread_summary import ChatThreadSummary, preview_from_content_blob
+from monkeybot.core.types.content_blocks import ContentBlock
 
 logger = logging.getLogger(__name__)
 
@@ -157,13 +157,12 @@ class PostgresHistoryStore:
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None:
         """Replace thread history atomically (single transaction)."""
-        async with self._pool.acquire() as conn:
-            async with conn.transaction():
-                await conn.execute(
-                    "DELETE FROM conversation_history WHERE thread_id = $1", thread_id
-                )
-                for msg in messages:
-                    await self._insert_message(conn, thread_id, msg)
+        async with self._pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                "DELETE FROM conversation_history WHERE thread_id = $1", thread_id
+            )
+            for msg in messages:
+                await self._insert_message(conn, thread_id, msg)
 
     async def list_threads(self, limit: int = 50) -> list[ChatThreadSummary]:
         cap = max(1, min(limit, 200))
@@ -503,13 +502,14 @@ class PostgresStorageBackend:
         self._usage_store: PostgresUsageStore | None = None
         self._runs_store: PostgresRunStore | None = None
 
-    async def open(self) -> None:
+    async def open(self, *, run_schema: bool = True) -> None:
         min_size = int(os.environ.get("POSTGRES_POOL_MIN", "1"))
         max_size = int(os.environ.get("POSTGRES_POOL_MAX", "5"))
         self._pool = await asyncpg.create_pool(
             self._db_url, min_size=min_size, max_size=max_size
         )
-        await _apply_schema(self._pool)
+        if run_schema:
+            await _apply_schema(self._pool)
         self._history_store = PostgresHistoryStore(self._pool)
         self._usage_store = PostgresUsageStore(self._pool)
         self._runs_store = PostgresRunStore(self._pool)

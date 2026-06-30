@@ -27,6 +27,7 @@ from monkeybot.core.attachments.store import AttachmentStore, FilesystemAttachme
 from monkeybot.core.config.settings import (
     ConfigError,
     SubagentConfig,
+    auto_schema_enabled_from_config,
     get_provider_config,
     get_subagent_registry,
     normalize_model_provider,
@@ -455,7 +456,7 @@ async def _startup(fastapi_app: FastAPI) -> None:
     db_url = os.environ.get("DB_URL", "sqlite:///data/monkeybot.db")
 
     backend = create_storage_backend(db_url)
-    await backend.open()
+    await backend.open(run_schema=auto_schema_enabled_from_config())
     fastapi_app.state.storage = backend
     fastapi_app.state.usage = _UsageStoreAdapter(backend.usage())
 
