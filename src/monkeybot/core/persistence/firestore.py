@@ -350,25 +350,21 @@ class FirestoreRunStore:
         envelope: SubagentEnvelope,
         scratch_dir: object,
     ) -> None:
-        now_ms = int(time.time() * 1000)
-        await self._doc(run_id).set(
-            {
-                "parent_run_id": parent_run_id,
-                "script": script,
-                "envelope_json": envelope.to_json(),
-                "status": "pending",
-                "result_json": None,
-                "error_json": None,
-                "started_at": now_ms,
-                "finished_at": None,
-                "scratch_dir": str(scratch_dir),
-                "worker_id": None,
-                "claimed_at": None,
-            }
-        )
+        await self._record_run("pending", run_id, parent_run_id, script, envelope, scratch_dir)
 
     async def record_started(
         self,
+        run_id: str,
+        parent_run_id: str | None,
+        script: str,
+        envelope: SubagentEnvelope,
+        scratch_dir: object,
+    ) -> None:
+        await self._record_run("running", run_id, parent_run_id, script, envelope, scratch_dir)
+
+    async def _record_run(
+        self,
+        status: str,
         run_id: str,
         parent_run_id: str | None,
         script: str,
@@ -381,7 +377,7 @@ class FirestoreRunStore:
                 "parent_run_id": parent_run_id,
                 "script": script,
                 "envelope_json": envelope.to_json(),
-                "status": "running",
+                "status": status,
                 "result_json": None,
                 "error_json": None,
                 "started_at": now_ms,

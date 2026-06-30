@@ -1396,13 +1396,17 @@ async def _run_inner_core(
                     ),
                 )
 
-                if not parallel_tasks:
-                    call = allowed_exec[0]
+                async def _execute_one_tool_call(
+                    call: ToolCall,
+                    *,
+                    _ctx: TurnContext = ctx,
+                ) -> ToolExecutionResult:
+                    nonlocal pre_tool_extra_next
                     logger.debug(
                         "tool execute %s",
                         kv(
-                            request_id=ctx.request_id,
-                            thread_id=ctx.thread_id,
+                            request_id=_ctx.request_id,
+                            thread_id=_ctx.thread_id,
                             tool=call.name,
                             call_id=call.call_id,
                         ),
@@ -1410,14 +1414,14 @@ async def _run_inner_core(
                     async with span_tool(
                         tool_name=call.name,
                         tool_call_id=call.call_id,
-                        thread_id=ctx.thread_id,
-                        request_id=ctx.request_id,
+                        thread_id=_ctx.thread_id,
+                        request_id=_ctx.request_id,
                         args=dict(call.args),
                     ):
                         pre_tool_payload = await _fire_hook(
                             hook_manager,
                             event=HookEvent.PRE_TOOL,
-                            ctx=ctx,
+                            ctx=_ctx,
                             timeout_s=_HOOK_PRE_TOOL_TIMEOUT_S,
                             tool_name=call.name,
                             tool_args=dict(call.args),
@@ -1428,46 +1432,48 @@ async def _run_inner_core(
                             )
                         _record_tool_hook_span_event("pre_tool", call.name)
                         try:
-                            tool_result = await tool_executor.execute(
-                                call=call, ctx=ctx
-                            )
+                            tool_result = await tool_executor.execute(call=call, ctx=_ctx)
                         except asyncio.CancelledError:
-                            yield Error(request_id=ctx.request_id, error="Request cancelled")
-                            needs_followup_after_tools = False
-                            return
+                            raise
                         except Exception as exc:
                             logger.warning(
                                 "tool execution failed %s",
                                 kv(
-                                    request_id=ctx.request_id,
-                                    thread_id=ctx.thread_id,
+                                    request_id=_ctx.request_id,
+                                    thread_id=_ctx.thread_id,
                                     tool=call.name,
                                     call_id=call.call_id,
                                 ),
                                 exc_info=True,
                             )
                             tool_result = ToolExecutionResult.err(str(exc))
-                        record_tool_outcome(
+                        result_summary = (
                             _blocks_to_sse_summary(tool_result.blocks)
                             if tool_result.error is None
-                            else None,
-                            tool_result.error,
+                            else None
                         )
+                        record_tool_outcome(result_summary, tool_result.error)
                         await _fire_hook(
                             hook_manager,
                             event=HookEvent.POST_TOOL,
-                            ctx=ctx,
+                            ctx=_ctx,
                             timeout_s=0,
                             tool_name=call.name,
                             tool_args=dict(call.args),
-                            tool_result=(
-                                _blocks_to_sse_summary(tool_result.blocks)
-                                if tool_result.error is None
-                                else None
-                            ),
+                            tool_result=result_summary,
                             tool_error=tool_result.error,
                         )
                         _record_tool_hook_span_event("post_tool", call.name)
+                    return tool_result
+
+                if not parallel_tasks:
+                    call = allowed_exec[0]
+                    try:
+                        tool_result = await _execute_one_tool_call(call)
+                    except asyncio.CancelledError:
+                        yield Error(request_id=ctx.request_id, error="Request cancelled")
+                        needs_followup_after_tools = False
+                        return
 
                     event, response = _tool_outcome(call, ctx.request_id, tool_result)
                     yield event
@@ -1488,74 +1494,8 @@ async def _run_inner_core(
                         _sem: asyncio.Semaphore = sem,
                         _ctx: TurnContext = ctx,
                     ) -> tuple[ToolCall, ToolExecutionResult]:
-                        async with _sem, span_tool(
-                            tool_name=call.name,
-                            tool_call_id=call.call_id,
-                            thread_id=_ctx.thread_id,
-                            request_id=_ctx.request_id,
-                            args=dict(call.args),
-                        ):
-                            pre_tool_payload = await _fire_hook(
-                                hook_manager,
-                                event=HookEvent.PRE_TOOL,
-                                ctx=_ctx,
-                                timeout_s=_HOOK_PRE_TOOL_TIMEOUT_S,
-                                tool_name=call.name,
-                                tool_args=dict(call.args),
-                            )
-                            if pre_tool_payload is not None and pre_tool_payload.inject_text:
-                                nonlocal pre_tool_extra_next
-                                pre_tool_extra_next = _combine_extras(
-                                    pre_tool_extra_next, pre_tool_payload.inject_text
-                                )
-                            _record_tool_hook_span_event("pre_tool", call.name)
-                            logger.debug(
-                                "tool execute %s",
-                                kv(
-                                    request_id=_ctx.request_id,
-                                    thread_id=_ctx.thread_id,
-                                    tool=call.name,
-                                    call_id=call.call_id,
-                                ),
-                            )
-                            try:
-                                tool_result = await tool_executor.execute(call=call, ctx=_ctx)
-                            except asyncio.CancelledError:
-                                raise
-                            except Exception as exc:
-                                logger.warning(
-                                    "tool execution failed %s",
-                                    kv(
-                                        request_id=_ctx.request_id,
-                                        thread_id=_ctx.thread_id,
-                                        tool=call.name,
-                                        call_id=call.call_id,
-                                    ),
-                                    exc_info=True,
-                                )
-                                tool_result = ToolExecutionResult.err(str(exc))
-                            record_tool_outcome(
-                                _blocks_to_sse_summary(tool_result.blocks)
-                                if tool_result.error is None
-                                else None,
-                                tool_result.error,
-                            )
-                            await _fire_hook(
-                                hook_manager,
-                                event=HookEvent.POST_TOOL,
-                                ctx=_ctx,
-                                timeout_s=0,
-                                tool_name=call.name,
-                                tool_args=dict(call.args),
-                                tool_result=(
-                                    _blocks_to_sse_summary(tool_result.blocks)
-                                    if tool_result.error is None
-                                    else None
-                                ),
-                                tool_error=tool_result.error,
-                            )
-                            _record_tool_hook_span_event("post_tool", call.name)
-                            return (call, tool_result)
+                        async with _sem:
+                            return (call, await _execute_one_tool_call(call, _ctx=_ctx))
 
                     try:
                         outcomes = await asyncio.gather(

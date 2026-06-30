@@ -4,10 +4,17 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
-from monkeybot.core.llm.provider import Message
+from monkeybot.core.llm.provider import (
+    Done,
+    Message,
+    ProviderEvent,
+    TextDelta,
+    ToolCall,
+    UsageEvent,
+)
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.types.content_blocks import (
     ContentBlock,
@@ -55,6 +62,120 @@ def safe_parse_tool_args(
         ),
     )
     return {}, error
+
+
+def anthropic_tool_defs(tools: Sequence[Any]) -> list[dict[str, Any]]:
+    return [
+        {"name": t.name, "description": t.description, "input_schema": t.input_schema}
+        for t in tools
+    ]
+
+
+def split_leading_system(messages: Sequence[Message]) -> tuple[str, list[Message]]:
+    msgs = list(messages)
+    if not msgs or msgs[0].role != "system":
+        return "", msgs
+    system = "\n\n".join(b.text for b in msgs[0].content if isinstance(b, Text))
+    return system, msgs[1:]
+
+
+async def count_anthropic_input_tokens(
+    client: Any,
+    *,
+    anthropic_module: Any,
+    model: str,
+    system: str,
+    messages: Sequence[dict[str, Any]],
+    tools: Sequence[dict[str, Any]] | None,
+) -> int:
+    resp = await client.messages.count_tokens(
+        model=model,
+        system=system or anthropic_module.NOT_GIVEN,
+        messages=messages,
+        tools=tools if tools else anthropic_module.NOT_GIVEN,
+    )
+    return int(resp.input_tokens)
+
+
+async def iter_anthropic_sdk_stream(
+    client: Any,
+    stream_kwargs: dict[str, Any],
+    *,
+    provider: str,
+    error_message: str,
+) -> AsyncIterator[ProviderEvent]:
+    tool_input_buf = ""
+    tool_id = ""
+    tool_name = ""
+    input_tokens = 0
+    output_tokens = 0
+    cache_read = 0
+    cache_creation = 0
+
+    try:
+        async with client.messages.stream(**stream_kwargs) as stream:
+            async for event in stream:
+                match event.type:
+                    case "content_block_start":
+                        if event.content_block.type == "tool_use":
+                            tool_id = event.content_block.id
+                            tool_name = event.content_block.name
+                            tool_input_buf = ""
+                    case "content_block_delta":
+                        if event.delta.type == "text_delta":
+                            yield TextDelta(text=event.delta.text)
+                        elif event.delta.type == "input_json_delta":
+                            tool_input_buf += event.delta.partial_json
+                    case "content_block_stop":
+                        if tool_id:
+                            args, parse_error = safe_parse_tool_args(
+                                tool_input_buf,
+                                call_id=tool_id,
+                                tool_name=tool_name,
+                                provider=provider,
+                            )
+                            yield ToolCall(
+                                call_id=tool_id,
+                                name=tool_name,
+                                args=args,
+                                parse_error=parse_error,
+                            )
+                            tool_id = tool_name = tool_input_buf = ""
+                    case "message_delta":
+                        if hasattr(event, "usage"):
+                            output_tokens = int(getattr(event.usage, "output_tokens", 0) or 0)
+                            read = int(
+                                getattr(event.usage, "cache_read_input_tokens", 0) or 0
+                            )
+                            created = int(
+                                getattr(event.usage, "cache_creation_input_tokens", 0) or 0
+                            )
+                            if read:
+                                cache_read = read
+                            if created:
+                                cache_creation = created
+                    case "message_start":
+                        if hasattr(event, "message") and event.message.usage:
+                            usage = event.message.usage
+                            input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+                            cache_read = int(
+                                getattr(usage, "cache_read_input_tokens", 0) or 0
+                            )
+                            cache_creation = int(
+                                getattr(usage, "cache_creation_input_tokens", 0) or 0
+                            )
+    except Exception as exc:
+        _log.warning(error_message, exc)
+        raise
+
+    yield UsageEvent(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_tokens=cache_read,
+        cache_creation_tokens=cache_creation,
+        cached_tokens=cache_read + cache_creation,
+    )
+    yield Done()
 
 
 def _anthropic_tool_result_content(result: list[ContentBlock]) -> list[dict[str, Any]]:
@@ -268,11 +389,15 @@ def estimate_anthropic_input_tokens(
 
 
 __all__ = [
+    "anthropic_tool_defs",
     "build_anthropic_messages",
     "build_cached_system_blocks",
+    "count_anthropic_input_tokens",
     "estimate_anthropic_input_tokens",
     "estimate_cost",
+    "iter_anthropic_sdk_stream",
     "mark_last_tool_cached",
     "safe_parse_tool_args",
+    "split_leading_system",
     "split_system_prompt_for_cache",
 ]

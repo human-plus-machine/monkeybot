@@ -169,6 +169,20 @@ def openai_tools_token_count(encoding: Any, tools: list[dict[str, Any]]) -> int:
     return len(encoding.encode(json.dumps(tools, ensure_ascii=False, default=str)))
 
 
+def count_openai_compat_input_tokens(
+    encoding: Any,
+    messages: Sequence[Message],
+    tools: Sequence[ToolDef],
+) -> int:
+    system, oai_messages = messages_to_openai(messages)
+    if system:
+        oai_messages = [{"role": "system", "content": system}, *oai_messages]
+    tool_defs = openai_tools(tools) if tools else []
+    return openai_messages_token_count(encoding, oai_messages) + openai_tools_token_count(
+        encoding, tool_defs
+    )
+
+
 async def iter_openai_compat_stream(
     client: Any,
     kwargs: dict[str, Any],
@@ -240,6 +254,7 @@ async def iter_openai_compat_stream(
 
 
 __all__ = [
+    "count_openai_compat_input_tokens",
     "iter_openai_compat_stream",
     "messages_to_openai",
     "openai_messages_token_count",
