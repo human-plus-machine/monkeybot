@@ -176,6 +176,16 @@ Contributions are welcome. You can help by:
 
 Run checks before submitting: `uv run pytest && uv run ruff check . && uv run mypy src/`
 
+### Releasing
+
+`develop` is the working branch; `main` always reflects the latest release.
+
+1. Anyone runs the **Prepare release** workflow (Actions tab → Prepare release → Run workflow), choosing `core` or `cli` and a version bump. It bumps the package's `pyproject.toml`, moves the `CHANGELOG.md` `Unreleased` section into a dated entry, and opens a `develop` → `main` PR.
+2. An admin reviews and merges the PR (branch protection on `main` restricts who can merge — see below).
+3. The **Publish release** workflow runs automatically on that merge: it tags the new version and creates a GitHub Release from the changelog entry.
+
+One-time setup (repo Settings → Branches → add rule for `main`): require a pull request before merging, and restrict who can push to matching branches to Admins. That's the only access control needed — anyone can prepare a release, only admins can promote it to `main`.
+
 ## License
 
 You may use, modify, and distribute MonkeyBot under the MIT license. See the [`LICENSE`](LICENSE) file for details.

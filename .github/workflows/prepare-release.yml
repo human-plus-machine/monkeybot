@@ -1,0 +1,36 @@
+name: Prepare release
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: "Which package to release"
+        required: true
+        type: choice
+        options: [core, cli]
+      bump:
+        description: "Version bump"
+        required: true
+        type: choice
+        options: [patch, minor, major]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: develop
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - run: python3 scripts/release.py prepare ${{ inputs.package }} ${{ inputs.bump }}
+        env:
+          GH_TOKEN: ${{ github.token }}
