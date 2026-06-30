@@ -379,8 +379,14 @@ async def _provider_prompt_input_tokens(
     tools: Sequence[ToolDef],
     *,
     model: str,
+    thinking_budget: int | None = None,
 ) -> int:
-    return await provider.count_input_tokens(messages, tools, model=model)
+    return await provider.count_input_tokens(
+        messages,
+        tools,
+        model=model,
+        thinking_budget=thinking_budget,
+    )
 
 
 async def _prompt_input_tokens_for_history(
@@ -678,7 +684,6 @@ async def run(
     history: HistoryStore,
     inspectors: list[ToolInspector],
     tool_executor: ToolExecutorPort,
-    run_id: str | None = None,
     cancelled: asyncio.Event | None = None,
     max_turns: int | None = None,
     hook_manager: HookManager | None = None,
@@ -697,7 +702,6 @@ async def run(
     ``curator_provider`` is an optional dedicated provider for context curation (e.g. with
     ``thinking_budget=0``). Falls back to ``provider`` when not supplied.
     """
-    del run_id  # reserved for durable runs / gateway wiring
     usage = Usage()
     trace_id_capture: list[str | None] = [None]
     blocks = _normalize_user_content(user_content)
@@ -735,7 +739,11 @@ async def run(
             if cur is not None and getattr(cur, "uncancel", None):
                 cur.uncancel()
         except Exception:
-            pass
+            logger.warning(
+                "uncancel cleanup failed %s",
+                kv(request_id=ctx.request_id, thread_id=ctx.thread_id),
+                exc_info=True,
+            )
         yield Error(request_id=ctx.request_id, error="Request cancelled")
     except Exception as exc:
         logger.exception(
@@ -980,8 +988,13 @@ async def _run_inner_core(
             )
             provider_messages = _messages_for_provider(system, resolved_messages)
 
+            stream_thinking = _stream_thinking_budget(provider, resolved_messages)
             preflight = await _provider_prompt_input_tokens(
-                provider, provider_messages, ctx.tools, model=ctx.model
+                provider,
+                provider_messages,
+                ctx.tools,
+                model=ctx.model,
+                thinking_budget=stream_thinking,
             )
             usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, preflight)
             cap = max(1, int(ctx.context_window_tokens * _SUMMARY_TRIGGER_RATIO))
@@ -1052,7 +1065,11 @@ async def _run_inner_core(
                 )
                 provider_messages = _messages_for_provider(system, resolved_messages)
                 post = await _provider_prompt_input_tokens(
-                    provider, provider_messages, ctx.tools, model=ctx.model
+                    provider,
+                    provider_messages,
+                    ctx.tools,
+                    model=ctx.model,
+                    thinking_budget=_stream_thinking_budget(provider, resolved_messages),
                 )
                 usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, post)
 
@@ -1090,7 +1107,6 @@ async def _run_inner_core(
             llm_cache_read = 0
             llm_cache_creation = 0
             try:
-                stream_thinking = _stream_thinking_budget(provider, resolved_messages)
                 async with span_llm(ctx=ctx):
                     async with aclosing(
                         cast(

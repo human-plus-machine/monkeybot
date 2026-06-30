@@ -7,11 +7,10 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 import pytest
-
-from dataclasses import FrozenInstanceError
 
 from monkeybot.core.llm.provider import Done, Message, ProviderEvent, TextDelta, UsageEvent
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
@@ -155,6 +154,16 @@ def test_vertex_location_preview_defaults_to_global(monkeypatch: pytest.MonkeyPa
     project, loc = gemini_mod._vertex_project_and_location("gemini-3-flash-preview")
     assert project == "my-proj"
     assert loc == "global"
+
+
+def test_vertex_location_unknown_preview_named_model_uses_regional_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VERTEX_AI_LOCATION", raising=False)
+    monkeypatch.delenv("GOOGLE_CLOUD_LOCATION", raising=False)
+    monkeypatch.setenv("GCP_PROJECT_ID", "my-proj")
+    _project, loc = gemini_mod._vertex_project_and_location("gemini-local-preview-test")
+    assert loc == "us-central1"
 
 
 def test_vertex_location_explicit_env_overrides_preview(

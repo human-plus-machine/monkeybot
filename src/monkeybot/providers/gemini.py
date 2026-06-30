@@ -35,6 +35,9 @@ SYNTHETIC_THOUGHT_SIGNATURE = "skip_thought_signature_validator"
 
 _log = logging.getLogger(__name__)
 
+# Keep this in sync when onboarding another Vertex Gemini model that must use "global".
+_GLOBAL_VERTEX_MODEL_IDS = frozenset({"gemini-3-flash-preview"})
+
 
 def _normalize_vertex_model(model: str) -> str:
     """Return a ``model`` value accepted by ``google.genai`` for Vertex (see SDK docstring).
@@ -70,7 +73,7 @@ def _location_from_full_vertex_model(model: str) -> str | None:
 def _vertex_project_and_location(model_param: str) -> tuple[str, str]:
     """Resolve project id and API location for ``genai.Client(vertexai=True, ...)``.
 
-    Preview model ids (e.g. ``*-preview``) are typically **not** published under regional
+    Some preview model ids are not published under regional
     endpoints like ``us-central1``; Vertex serves them from ``global`` unless you override
     ``VERTEX_AI_LOCATION`` / ``GOOGLE_CLOUD_LOCATION``.
     """
@@ -92,7 +95,7 @@ def _vertex_project_and_location(model_param: str) -> tuple[str, str]:
         return str(project).strip(), embedded
 
     tail = model_param.split("/")[-1]
-    if "preview" in tail.lower():
+    if tail.lower() in _GLOBAL_VERTEX_MODEL_IDS:
         return str(project).strip(), "global"
 
     return str(project).strip(), "us-central1"

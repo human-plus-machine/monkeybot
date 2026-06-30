@@ -51,7 +51,9 @@ class ClaudeProvider:
         tools: Sequence[ToolDef],
         *,
         model: str,
+        thinking_budget: int | None = None,
     ) -> int:
+        del thinking_budget
         import anthropic  # noqa: PLC0415
 
         system, msgs = split_leading_system(messages)
