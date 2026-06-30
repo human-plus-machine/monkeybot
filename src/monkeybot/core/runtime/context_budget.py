@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -9,7 +10,10 @@ from dataclasses import dataclass
 from monkeybot.core.context.common import ContextPressureTier, text_from_blocks
 from monkeybot.core.context.tool_output_policy import resolve_tool_budget
 from monkeybot.core.context.tool_shapers import shape_tool_text
+from monkeybot.core.logging_utils import kv
 from monkeybot.core.types.content_blocks import ContentBlock, Text, ToolResponse
+
+logger = logging.getLogger(__name__)
 
 _INVENTORY_MARKER = "[Spill inventory —"
 _CHARS_PER_TOKEN = 4
@@ -28,6 +32,10 @@ def _ratio_from_env(name: str, default: float) -> float:
     try:
         val = float(raw)
     except ValueError:
+        logger.warning(
+            "invalid env var value %s",
+            kv(name=name, value=raw, default=default),
+        )
         return default
     return min(0.99, max(0.05, val))
 

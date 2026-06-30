@@ -18,6 +18,7 @@ from monkeybot.core.llm.provider import (
     ToolCall,
     UsageEvent,
 )
+from monkeybot.core.logging_utils import kv
 from monkeybot.core.types.content_blocks import ContentBlock, Text, ToolRequest, ToolResponse
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._utils import safe_parse_tool_args
@@ -186,6 +187,10 @@ def count_openai_compat_input_tokens(
 async def iter_openai_compat_stream(
     client: Any,
     kwargs: dict[str, Any],
+    *,
+    provider: str = "openai_compat",
+    n_messages: int | None = None,
+    n_tools: int | None = None,
 ) -> AsyncIterator[ProviderEvent]:
     """Yield ProviderEvents from an OpenAI-compatible streaming chat request.
 
@@ -238,8 +243,17 @@ async def iter_openai_compat_stream(
                 provider="openai_compat",
             )
             yield ToolCall(call_id=tid, name=name, args=parsed, parse_error=parse_error)
-    except Exception as exc:
-        _log.warning("OpenAI-compat stream error: %s", exc)
+    except Exception:
+        _log.warning(
+            "OpenAI-compat stream error %s",
+            kv(
+                provider=provider,
+                model=kwargs.get("model"),
+                n_messages=n_messages,
+                n_tools=n_tools,
+            ),
+            exc_info=True,
+        )
         raise
 
     # OpenAI reports prompt_tokens incl. cached; subtract to avoid double-count (see 1C).

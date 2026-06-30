@@ -121,3 +121,15 @@ def test_from_env_tightens_safety_fraction_under_pressure(monkeypatch) -> None:
     budgeter = ContextBudgeter.from_env(window_tokens=100_000, used_tokens=75_000)
     assert budgeter.pressure_tier == "moderate"
     assert budgeter.safety_fraction <= 0.45
+
+
+def test_invalid_pressure_ratio_logs_warning(monkeypatch, caplog) -> None:
+    from monkeybot.core.runtime.context_budget import pressure_light_ratio_from_env
+
+    monkeypatch.setenv("MONKEYBOT_PRESSURE_LIGHT_RATIO", "bogus")
+    with caplog.at_level("WARNING", logger="monkeybot.core.runtime.context_budget"):
+        assert pressure_light_ratio_from_env() == 0.50
+
+    assert "invalid env var value" in caplog.text
+    assert "name=MONKEYBOT_PRESSURE_LIGHT_RATIO" in caplog.text
+    assert "value=bogus" in caplog.text

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from collections.abc import Sequence
@@ -11,7 +12,10 @@ from typing import Any, Literal
 from monkeybot.core.context.common import ContextPressureTier, text_from_blocks
 from monkeybot.core.context.tool_output_policy import ToolOutputBudget, resolve_tool_budget
 from monkeybot.core.llm.provider import Message
+from monkeybot.core.logging_utils import kv
 from monkeybot.core.types.content_blocks import ContentBlock, Text, ToolResponse
+
+logger = logging.getLogger(__name__)
 
 ContentType = Literal["json", "logs", "code", "prose"]
 
@@ -38,6 +42,10 @@ def _int_from_env(name: str, default: int) -> int:
     try:
         return max(1, int(raw))
     except ValueError:
+        logger.warning(
+            "invalid env var value %s",
+            kv(name=name, value=raw, default=default),
+        )
         return default
 
 

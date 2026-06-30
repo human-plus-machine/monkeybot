@@ -103,6 +103,8 @@ async def iter_anthropic_sdk_stream(
     *,
     provider: str,
     error_message: str,
+    n_messages: int | None = None,
+    n_tools: int | None = None,
 ) -> AsyncIterator[ProviderEvent]:
     tool_input_buf = ""
     tool_id = ""
@@ -164,8 +166,17 @@ async def iter_anthropic_sdk_stream(
                             cache_creation = int(
                                 getattr(usage, "cache_creation_input_tokens", 0) or 0
                             )
-    except Exception as exc:
-        _log.warning(error_message, exc)
+    except Exception:
+        _log.warning(
+            error_message,
+            kv(
+                provider=provider,
+                model=stream_kwargs.get("model"),
+                n_messages=n_messages,
+                n_tools=n_tools,
+            ),
+            exc_info=True,
+        )
         raise
 
     yield UsageEvent(

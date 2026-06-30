@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from monkeybot.core.config.settings import SubagentConfig
 from monkeybot.core.runtime.events import AssistantDelta, Error, Thinking, event_to_json
 from monkeybot.core.subagents.subagent_proto import (
     SubagentEnvelope,
@@ -20,7 +21,6 @@ from monkeybot.core.subagents.subagent_proto import (
     resolve_task_agent_md_path,
     spawn_subagent,
 )
-from monkeybot.core.config.settings import SubagentConfig
 
 
 class FakeStdin:
@@ -296,7 +296,10 @@ async def test_spawn_subagent_on_event_called(tmp_scratch: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_spawn_subagent_malformed_line_emits_error_continues(tmp_scratch: Path) -> None:
+async def test_spawn_subagent_malformed_line_emits_error_continues(
+    tmp_scratch: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     rid = "r"
     good = event_to_json(AssistantDelta(request_id=rid, delta="ok"))
     lines = ["not-json", good]
@@ -306,12 +309,41 @@ async def test_spawn_subagent_malformed_line_emits_error_continues(tmp_scratch: 
         return FakeProcess(lines, exit_code=0)
 
     collected = []
-    async for evt in spawn_subagent(
-        "s.py",
-        env,
-        scratch_dir=tmp_scratch,
-        subprocess_exec=subprocess_exec,
-    ):
-        collected.append(evt)
+    with caplog.at_level("WARNING", logger="monkeybot.core.subagents.subagent_proto"):
+        async for evt in spawn_subagent(
+            "s.py",
+            env,
+            scratch_dir=tmp_scratch,
+            subprocess_exec=subprocess_exec,
+        ):
+            collected.append(evt)
     assert any(isinstance(e, Error) for e in collected)
     assert isinstance(collected[-1], AssistantDelta)
+    assert "subagent NDJSON parse error" in caplog.text
+    assert "parent_run_id=p" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_spawn_subagent_nonzero_exit_logs_warning(
+    tmp_scratch: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    env = SubagentEnvelope(task="a", context="", memory_storage_uri="local://m", parent_run_id="p")
+
+    async def subprocess_exec(*_a: object, **_k: object) -> FakeProcess:
+        return FakeProcess([], exit_code=7)
+
+    with caplog.at_level("WARNING", logger="monkeybot.core.subagents.subagent_proto"):
+        collected = [
+            evt
+            async for evt in spawn_subagent(
+                "s.py",
+                env,
+                scratch_dir=tmp_scratch,
+                subprocess_exec=subprocess_exec,
+            )
+        ]
+
+    assert any(isinstance(e, Error) and "code 7" in e.error for e in collected)
+    assert "subagent process exited nonzero" in caplog.text
+    assert "exit_code=7" in caplog.text

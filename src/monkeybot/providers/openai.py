@@ -110,5 +110,11 @@ class OpenAIProvider:
             kwargs["tools"] = openai_tools(tools)
             kwargs["parallel_" + "tool" + "_calls"] = True
 
-        async for event in iter_openai_compat_stream(client, kwargs):
+        async for event in iter_openai_compat_stream(
+            client,
+            kwargs,
+            provider="openai",
+            n_messages=len(messages),
+            n_tools=len(tools),
+        ):
             yield event

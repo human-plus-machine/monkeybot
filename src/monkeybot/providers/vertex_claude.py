@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator, Sequence
 from typing import Any, cast
 
 from monkeybot.core.llm.provider import Message, ProviderEvent
+from monkeybot.core.logging_utils import kv
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._utils import (
     anthropic_tool_defs,
@@ -86,10 +87,10 @@ class VertexClaudeProvider:
         except Exception as exc:
             msg = str(exc).lower()
             if "token counting" in msg or "not supported" in msg:
-                _log.debug(
-                    "Vertex Claude count_tokens unavailable for %s, using estimate: %s",
-                    model,
-                    exc,
+                _log.warning(
+                    "Vertex Claude count_tokens unavailable, using estimate %s",
+                    kv(provider="vertex_claude", model=model),
+                    exc_info=True,
                 )
                 return estimate_anthropic_input_tokens(
                     system=system,
@@ -137,5 +138,7 @@ class VertexClaudeProvider:
             stream_kwargs,
             provider="vertex_claude",
             error_message="Vertex Claude stream error: %s",
+            n_messages=len(messages),
+            n_tools=len(tools),
         ):
             yield event

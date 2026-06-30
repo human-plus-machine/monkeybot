@@ -110,5 +110,7 @@ class ClaudeProvider:
             stream_kwargs,
             provider="claude",
             error_message="Claude stream error: %s",
+            n_messages=len(messages),
+            n_tools=len(tools),
         ):
             yield event

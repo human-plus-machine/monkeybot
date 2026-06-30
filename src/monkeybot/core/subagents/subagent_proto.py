@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from monkeybot.core.config.settings import SubagentConfig
+from monkeybot.core.logging_utils import kv
 from monkeybot.core.runtime.events import (
     AgentEvent,
     Error,
@@ -19,6 +21,8 @@ from monkeybot.core.runtime.events import (
     event_from_json,
     event_to_json,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _memory_storage_uri_from_dict(decoded: dict[str, Any]) -> str:
@@ -253,6 +257,10 @@ async def spawn_subagent(
     stdin = proc.stdin
     stdout = proc.stdout
     if stdin is None or stdout is None:
+        logger.warning(
+            "subagent subprocess missing pipes %s",
+            kv(script=script, parent_run_id=envelope.parent_run_id),
+        )
         yield Error(request_id="", error="subagent: subprocess missing stdin/stdout pipes")
         await proc.wait()
         return
@@ -274,6 +282,10 @@ async def spawn_subagent(
         try:
             evt = event_from_json(raw_line)
         except EventDecodeError as exc:
+            logger.warning(
+                "subagent NDJSON parse error %s",
+                kv(script=script, parent_run_id=envelope.parent_run_id, error=exc),
+            )
             yield Error(request_id="", error=f"NDJSON parse error: {exc}")
             continue
 
@@ -284,6 +296,10 @@ async def spawn_subagent(
 
     code = await proc.wait()
     if code != 0:
+        logger.warning(
+            "subagent process exited nonzero %s",
+            kv(script=script, parent_run_id=envelope.parent_run_id, exit_code=code),
+        )
         yield Error(request_id="", error=f"subagent process exited with code {code}")
 
     if code == 0 and last_evt is not None:
