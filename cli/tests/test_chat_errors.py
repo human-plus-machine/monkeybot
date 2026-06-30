@@ -119,7 +119,9 @@ def test_chat_session_stream_failure_exits_turn(capsys: pytest.CaptureFixture[st
     ):
         code = asyncio.run(_chat_session(args, "http://localhost:8080", spawned_gateway=False))
 
-    assert code == 0
+    # A failed event stream must surface a non-zero exit so callers can
+    # distinguish it from a clean /bye.
+    assert code == 1
     err = capsys.readouterr().err
     assert "Event stream failed" in err
 
