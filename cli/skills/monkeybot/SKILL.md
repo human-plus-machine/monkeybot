@@ -95,7 +95,7 @@ npx skills add human-plus-machine/monkeybot --skill monkeybot
 
 ## How config works (tell the user this first)
 
-- **CLI scaffolds, YAML customizes, then validate.** `monkeybot new` copies templates and sets `model.provider` / `model.name`. After that, customization happens by editing `monkeybot_config/monkeybot.yaml` and `.env`, then re-running `monkeybot validate --json`.
+- **CLI scaffolds, YAML customizes, then validate.** `monkeybot new` copies packaged defaults from the `monkeybot` package and sets `model.provider` / `model.name`. After that, customization happens by editing `monkeybot_config/monkeybot.yaml` and `.env`, then re-running `monkeybot validate --json`.
 - **Three config surfaces:**
   - `monkeybot_config/monkeybot.yaml` — non-secret settings (model, paths, gateway, behavior).
   - `.env` — secrets and machine-local paths (API keys, GCP project, DB URL).

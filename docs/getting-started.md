@@ -11,7 +11,7 @@ Run the **SSE gateway** locally: FastAPI, SQLite conversation history, optional 
 | Python | 3.11+ (3.12 recommended) |
 | [uv](https://docs.astral.sh/uv/) | Used in this repo for installs and `uv run` |
 
-For **Gemini / Vertex**, you need Google Cloud credentials and a project. Put values in a **`.env`** file in the repo root (optional) or export them in the shell — see the header of **`monkeybot_config/monkeybot.example.yaml`** for common variable names.
+For **Gemini / Vertex**, you need Google Cloud credentials and a project. Put values in a **`.env`** file in the repo root (optional) or export them in the shell — after scaffolding (step 2), see the header of **`monkeybot_config/monkeybot.example.yaml`** for common variable names.
 
 ---
 
@@ -27,19 +27,19 @@ uv sync
 
 ## 2. Configure
 
-**Option A — scaffold defaults** (from the repo root; skips files that already exist; add `--force` to overwrite):
+Install the CLI and scaffold defaults (skips files that already exist; add `--force` to overwrite):
 
 ```bash
-uv run monkeybot-init-config
+cd cli && uv sync && uv run monkeybot new --dest .. --yes && cd ..
 ```
 
-**Option B — manual copy** of the harness template (paths, model, gateway, curation, web search, sandbox — everything non-secret):
+**Manual copy** of only the active config (if you already have the example sidecars):
 
 ```bash
 cp monkeybot_config/monkeybot.example.yaml monkeybot_config/monkeybot.yaml
 ```
 
-If you used **Option A**, `monkeybot.yaml` is already created from the same template. Edit `monkeybot_config/monkeybot.yaml` for your layout. Create a **`.env`** in the repo root only when you need API keys, `GOOGLE_APPLICATION_CREDENTIALS`, or other secrets / machine-local overrides (variable names are listed in the header of `monkeybot.example.yaml`).
+After scaffolding, `monkeybot.yaml` is already created from the example template. Edit `monkeybot_config/monkeybot.yaml` for your layout. Create a **`.env`** in the repo root only when you need API keys, `GOOGLE_APPLICATION_CREDENTIALS`, or other secrets / machine-local overrides (variable names are listed in the header of `monkeybot.example.yaml`).
 
 The gateway loads `.env` first, then applies `monkeybot_config/monkeybot.yaml` for any environment variable that is **still unset**. Use `MONKEYBOT_CONFIG` to point at a different YAML file. Optional **`includes:`** in that file lists extra YAML fragments (paths relative to the primary file’s directory) merged in order.
 
@@ -61,7 +61,7 @@ Important knobs (see **`monkeybot_config/monkeybot.example.yaml`** for all secti
 
 ## 3. Author AGENT.md
 
-Point `paths.agent_md` in `monkeybot_config/monkeybot.yaml` at a non-empty Markdown file (the repo ships `monkeybot_config/AGENT.md`). Its contents become the base system message for each turn, plus the optional memory index and skill list. See [Skills](skills.md) for adding capabilities under `paths.skills_path`.
+Point `paths.agent_md` in `monkeybot_config/monkeybot.yaml` at a non-empty Markdown file (scaffold creates `monkeybot_config/AGENT.md`). Its contents become the base system message for each turn, plus the optional memory index and skill list. See [Skills](skills.md) for adding capabilities under `paths.skills_path`.
 
 When using `workspace_root: ./workspace`, put agent-authored files under `workspace/` and ensure skills are reachable from the sandbox (the CLI scaffolds `workspace/skills` → `.agents/skills`). Subagents spawned via the `task` tool use the same `AGENT.md` unless `subagent.agent_md` is set. For multiple concurrent subagents locally, prefer Postgres for `paths.db_url` instead of SQLite.
 
@@ -73,7 +73,7 @@ When using `workspace_root: ./workspace`, put agent-authored files under `worksp
 uv run python -m monkeybot.gateway.main
 ```
 
-The gateway reads `PORT` (falls back to `GATEWAY_PORT`, then `8000`). The shipped `monkeybot_config/monkeybot.yaml` sets `runtime.port` to `8080`, so examples below use `8080`.
+The gateway reads `PORT` (falls back to `GATEWAY_PORT`, then `8000`). The scaffolded `monkeybot_config/monkeybot.yaml` sets `runtime.port` to `8080`, so examples below use `8080`.
 
 ---
 
