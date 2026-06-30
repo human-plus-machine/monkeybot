@@ -81,6 +81,18 @@ context_curation:
   max_skills: 5
   search_max_hits: 8
 
+emission:
+  # Terse emission-style guidance injected into the cached harness prefix.
+  # Two named modes:
+  #   off    (default) — no prompt change. Use for conversational / user-facing
+  #                      agents where warmth and explanation are the deliverable.
+  #   terse            — cut model output volume (less code, less prose). When the
+  #                      `task` tool is active, also requests dense, minified
+  #                      agent-to-agent handoffs (Lever 3).
+  # Env override: MONKEYBOT_EMISSION_STYLE — accepts off | terse | true | 1 | on | yes
+  # (any value other than the terse-set means off).
+  style: off
+
 memory_hook:
   enabled: true
 

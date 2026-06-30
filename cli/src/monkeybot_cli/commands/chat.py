@@ -34,7 +34,12 @@ from monkeybot.core.runtime.events import (
 )
 
 from monkeybot_cli.chat_status_bar import ChatStatusBar, parse_usage_response
-from monkeybot_cli.config_resolve import load_agent_dotenv, load_config_doc, resolve_config
+from monkeybot_cli.config_resolve import (
+    load_agent_dotenv,
+    load_config_doc,
+    resolve_agent_root,
+    resolve_config,
+)
 from monkeybot_cli.runtime_python import gateway_argv, resolve_runtime_python
 
 DEFAULT_PORT = 8080
@@ -424,9 +429,10 @@ async def _chat_session(args: argparse.Namespace, base: str, *, spawned_gateway:
         stream_task: asyncio.Task[None] | None = None
         event_queue: asyncio.Queue[str | None] = asyncio.Queue()
         stream_alive = True
+        stream_error = False
 
         async def _consume_stream() -> None:
-            nonlocal stream_alive
+            nonlocal stream_alive, stream_error
             try:
                 async with client.stream("GET", f"{base}/sessions/{session_id}/events") as resp:
                     resp.raise_for_status()
@@ -436,6 +442,7 @@ async def _chat_session(args: argparse.Namespace, base: str, *, spawned_gateway:
                 raise
             except Exception as exc:
                 stream_alive = False
+                stream_error = True
                 print(_format_http_error("Event stream", exc), file=sys.stderr)
                 await event_queue.put(None)
 
@@ -573,7 +580,7 @@ async def _chat_session(args: argparse.Namespace, base: str, *, spawned_gateway:
                 stream_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
                     await asyncio.wait_for(stream_task, timeout=0.5)
-    return 0
+    return 1 if stream_error else 0
 
 
 class _SpawnedGateway(NamedTuple):
@@ -613,7 +620,7 @@ def _cleanup_gateway_log(gateway: _SpawnedGateway | None) -> None:
         gateway.log_path.unlink(missing_ok=True)
 
 
-def _spawn_gateway(config_path: Path | None, cwd: Path, port: int) -> _SpawnedGateway:
+def _spawn_gateway(config_path: Path | None, agent_root: Path, port: int) -> _SpawnedGateway:
     env = os.environ.copy()
     if config_path is not None:
         env["MONKEYBOT_CONFIG"] = str(config_path)
@@ -628,9 +635,9 @@ def _spawn_gateway(config_path: Path | None, cwd: Path, port: int) -> _SpawnedGa
         errors="replace",
     )
     proc = subprocess.Popen(
-        gateway_argv(resolve_runtime_python(cwd)),
+        gateway_argv(resolve_runtime_python(agent_root)),
         env=env,
-        cwd=cwd,
+        cwd=agent_root,
         stdout=subprocess.DEVNULL,
         stderr=log_file,
     )
@@ -656,9 +663,10 @@ def _wait_for_health(
 
 
 def run_chat(args: argparse.Namespace) -> int:
-    cwd = Path(args.cwd).expanduser().resolve() if args.cwd else Path.cwd()
+    cwd = Path(args.cwd).expanduser().resolve() if args.cwd else None
     config_path = resolve_config(args.config, cwd=cwd)
     load_agent_dotenv(cwd=cwd, config_path=config_path)
+    agent_root = resolve_agent_root(cwd=cwd, config_path=config_path)
 
     base = _resolve_base_url(args, config_path)
     attach = args.attach or bool(args.url)
@@ -674,7 +682,7 @@ def run_chat(args: argparse.Namespace) -> int:
             )
             return 1
         port = args.port if args.port else _port_from_config(config_path)
-        spawned = _spawn_gateway(config_path, cwd, port)
+        spawned = _spawn_gateway(config_path, agent_root, port)
         proc = spawned.proc
         if not _wait_for_health(base, proc):
             print("Gateway failed to start.", file=sys.stderr)
