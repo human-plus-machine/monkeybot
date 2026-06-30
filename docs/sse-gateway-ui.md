@@ -73,7 +73,7 @@ Errors use a common envelope:
 - `Content-Type: text/event-stream`
 - Framing:
   - **Numbered data events** (replayable): lines `id: <seq>` + `data: <json>` + blank line. Each `data` line is one JSON object.
-  - **Heartbeats** (not replayed): comment frames like `: ping 1` — ignore for JSON parsing (playground’s `parseSseBlocks` skips lines starting with `:`).
+  - **Heartbeats** (not replayed): comment frames like `: ping 1` — ignore for JSON parsing (skip lines starting with `:`).
   - **ActiveRequests** snapshot: a `data:` JSON object **without** an `id:` line, shape `{ "type": "ActiveRequests", "request_ids": string[] }`, sent after replay when you connect. Reflects in-flight work (typically zero or one id).
 
 **Parsing**
