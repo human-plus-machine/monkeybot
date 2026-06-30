@@ -1260,6 +1260,7 @@ async def _run_inner_core(
                             tool=call.name,
                             label=call.name,
                             args=dict(call.args),
+                            parse_error=call.parse_error,
                         )
                         result_evt, tool_resp = _tool_outcome(
                             call, ctx.request_id, ToolExecutionResult.err(call.parse_error)

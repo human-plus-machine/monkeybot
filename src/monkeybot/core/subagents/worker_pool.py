@@ -11,8 +11,9 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from monkeybot.core.config.settings import auto_schema_enabled_from_config
 from monkeybot.core.logging_utils import kv
-from monkeybot.core.persistence.backends import RunStore, StorageBackend
+from monkeybot.core.persistence.backends import RunStore, StorageBackend, create_storage_backend
 from monkeybot.core.persistence.durable_runs import SubagentRunRow
 from monkeybot.core.runtime.events import Error, TurnComplete, event_to_json
 from monkeybot.core.subagents.subagent_proto import (
@@ -381,9 +382,6 @@ async def shutdown_worker_pool(handle: WorkerPoolHandle) -> None:
 
 async def run_worker_main() -> None:
     """CLI entry: open storage backend and run the worker loop until cancelled."""
-    from monkeybot.core.config.settings import auto_schema_enabled_from_config
-    from monkeybot.core.persistence.backends import create_storage_backend
-
     db_url = os.environ.get("DB_URL", "sqlite:///data/monkeybot.db")
     settings = worker_env_settings()
     logger.info(

@@ -14,7 +14,7 @@ from monkeybot.core.tools.inspector import (
     InspectorToolCall,
     load_command_tier_policy,
 )
-from monkeybot.scaffold import packaged_defaults_path
+from importlib import resources
 
 
 def _minimal_ctx() -> TurnContext:
@@ -33,9 +33,9 @@ def _minimal_ctx() -> TurnContext:
 
 def _write_policy(tmp_path: Path) -> Path:
     """Copy packaged policy into tmp_path for isolated inspector construction."""
-    src = packaged_defaults_path("command_allowlist.yaml")
+    content = (resources.files("monkeybot.monkeybot_config") / "command_allowlist.yaml").read_text(encoding="utf-8")
     dest = tmp_path / "policy.yaml"
-    dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    dest.write_text(content, encoding="utf-8")
     return dest
 
 
