@@ -9,7 +9,7 @@
 # Run collector (adjust mount path):
 #   docker run --rm -p 4318:4318 \
 #     -e LANGFUSE_OTEL_BASIC_AUTH \
-#     -v "$(pwd)/docs/otel-collector.example.yaml:/etc/otelcol/config.yaml:ro" \
+#     -v "$(pwd)/monkeybot_config/otel-collector.example.yaml:/etc/otelcol/config.yaml:ro" \
 #     otel/opentelemetry-collector-contrib:latest \
 #     --config=/etc/otelcol/config.yaml
 #

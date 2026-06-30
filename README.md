@@ -22,7 +22,7 @@ MonkeyBot (`monkeybot`) is a thin framework for running **tool-using LLM agents*
 git clone https://github.com/human-and-machine/monkey-bot.git
 cd monkey-bot
 uv sync
-uv run monkeybot-init-config
+cd cli && uv sync && uv run monkeybot new --dest .. --yes && cd ..
 uv run python -m monkeybot.gateway.main
 ```
 

@@ -53,26 +53,26 @@ def test_new_force_reports_overwritten_config(tmp_path: Path) -> None:
 
 
 def test_write_active_config_reports_overwritten_on_force(tmp_path: Path) -> None:
-    from monkeybot_cli.commands.new import _write_active_config
+    from monkeybot.scaffold import write_active_config
 
     cfg_dir = tmp_path / "monkeybot_config"
     cfg_dir.mkdir()
     active = cfg_dir / "monkeybot.yaml"
     active.write_text("old: true\n", encoding="utf-8")
 
-    status = _write_active_config(cfg_dir, provider=None, model=None, force=True)
+    status = write_active_config(cfg_dir, provider=None, model=None, force=True)
 
     assert status == "overwritten"
     assert "old: true" not in active.read_text()
 
 
 def test_write_active_config_reports_created(tmp_path: Path) -> None:
-    from monkeybot_cli.commands.new import _write_active_config
+    from monkeybot.scaffold import write_active_config
 
     cfg_dir = tmp_path / "monkeybot_config"
     cfg_dir.mkdir()
 
-    status = _write_active_config(cfg_dir, provider="gemini", model="test-model", force=False)
+    status = write_active_config(cfg_dir, provider="gemini", model="test-model", force=False)
 
     assert status == "created"
     text = (cfg_dir / "monkeybot.yaml").read_text()
