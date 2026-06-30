@@ -9,8 +9,8 @@ internal/
 # Local scaffolded harness config (defaults ship in src/monkeybot/monkeybot_config/)
 /monkeybot_config/
 
-# Playground MCP (may contain PATs; untrack with git rm --cached if already committed)
-playground/agent/monkeybot_config/mcp.json
+# Demo agent MCP (may contain PATs; untrack with git rm --cached if already committed)
+demo_agent/monkeybot_config/mcp.json
 
 # Python
 __pycache__/

@@ -26,7 +26,14 @@ cd cli && uv sync && uv run monkeybot new --dest .. --yes && cd ..
 uv run python -m monkeybot.gateway.main
 ```
 
-For a browser chat UI, run **`./run-playground.sh`** from the repo root and open `http://localhost:5173`. Full setup (config, `.env`, MCP, Docker): **[Getting Started](docs/getting-started.md)**.
+For a self-contained example agent (own `pyproject.toml` + `.venv`, depends on this harness via an editable path — never modifies it), see **[`demo_agent/`](demo_agent/)**:
+
+```bash
+cd demo_agent && uv sync
+cd ../cli && uv run monkeybot chat --cwd ../demo_agent
+```
+
+Full setup (config, `.env`, MCP, Docker): **[Getting Started](docs/getting-started.md)**.
 
 ## CLI (`monkeybot`)
 
@@ -110,7 +117,7 @@ Run workers with `python -m monkeybot.subagents.worker` (production) or `MONKEYB
 
 There is no claim heartbeat yet — subagent runs longer than `MONKEYBOT_WORKER_STALE_CLAIM_MS` risk duplicate execution. Increase the limit for long LLM workloads or keep runs under the window.
 
-**Playground Docker:** local smoke test with harness + workspace paths — `docker-compose.playground.yml` + [`docker/Dockerfile.playground`](docker/Dockerfile.playground). Optional Cloud Run helpers may live in gitignored `internal/` for private forks; see **Step 3** in that doc.
+**Docker:** baseline production-style image — [`docker/Dockerfile`](docker/Dockerfile) + [`docker-compose.yml`](docker-compose.yml). Optional Cloud Run helpers may live in gitignored `internal/` for private forks; see **Step 3** in that doc.
 ---
 
 **Config:** copy or scaffold **`monkeybot_config/monkeybot.yaml`** from **`monkeybot_config/monkeybot.example.yaml`**. Secrets go in **`.env`** — see the YAML header for variable names.
@@ -120,7 +127,7 @@ There is no claim heartbeat yet — subagent runs longer than `MONKEYBOT_WORKER_
 | Guide | Description |
 |---|---|
 | [Getting Started](docs/getting-started.md) | Install, configure the gateway, and exercise sessions + SSE from the command line |
-| [SSE gateway and custom UI](docs/sse-gateway-ui.md) | HTTP + SSE endpoints, event types, CORS/proxy notes, and the playground chat UI flow |
+| [SSE gateway and custom UI](docs/sse-gateway-ui.md) | HTTP + SSE endpoints, event types, CORS/proxy notes, and how to wire your own frontend |
 | [Skills](docs/skills.md) | Skill directory layout and `SKILL.md` discovery |
 | [Model Context Protocol](docs/mcp.md) | MCP configuration, env interpolation, OAuth2 flows, and diagnostics |
 | [Cloud deployment](docs/cloud-deployment-design.md) | Container and serverless deploy patterns for GCP, AWS, and more |

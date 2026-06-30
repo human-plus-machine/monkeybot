@@ -136,13 +136,13 @@ def _parse_last_event_id(request: Request) -> int | None:
         return None
 
 
-def _playground_workspace_api_enabled() -> bool:
-    """Opt out with ``MONKEYBOT_PLAYGROUND_WORKSPACE_API=0`` (or ``false`` / ``no`` / ``off``)."""
-    v = os.environ.get("MONKEYBOT_PLAYGROUND_WORKSPACE_API", "1").strip().lower()
+def _workspace_api_enabled() -> bool:
+    """Opt out with ``MONKEYBOT_WORKSPACE_API=0`` (or ``false`` / ``no`` / ``off``)."""
+    v = os.environ.get("MONKEYBOT_WORKSPACE_API", "1").strip().lower()
     return v not in ("0", "false", "no", "off")
 
 
-def _playground_workspace_root() -> Path:
+def _api_workspace_root() -> Path:
     """Workspace root for listing/reads; aligned with :func:`resolve_agent_workspace_root`."""
     return resolve_agent_workspace_root()
 
@@ -154,9 +154,9 @@ def _workspace_exc_to_api(exc: WorkspaceError) -> APIError:
     return APIError(400, "BAD_REQUEST", str(exc), rid)
 
 
-def _playground_chat_history_api_enabled() -> bool:
-    """Opt out with ``MONKEYBOT_PLAYGROUND_CHAT_HISTORY=0``."""
-    v = os.environ.get("MONKEYBOT_PLAYGROUND_CHAT_HISTORY", "1").strip().lower()
+def _chat_history_api_enabled() -> bool:
+    """Opt out with ``MONKEYBOT_CHAT_HISTORY_API=0``."""
+    v = os.environ.get("MONKEYBOT_CHAT_HISTORY_API", "1").strip().lower()
     return v not in ("0", "false", "no", "off")
 
 
@@ -579,20 +579,20 @@ def create_app(
         raw = await usage_ref.session_usage(session_id, since=since)
         return SessionUsageResponse.model_validate(raw)
 
-    @api.get("/api/playground/workspace/tree")
-    async def playground_workspace_tree(
+    @api.get("/api/workspace/tree")
+    async def workspace_tree(
         path: str | None = None,
     ) -> dict[str, Any]:
         """List one directory under the gateway workspace (repo-relative ``path``)."""
-        if not _playground_workspace_api_enabled():
+        if not _workspace_api_enabled():
             raise APIError(
                 404,
                 "NOT_FOUND",
-                "Playground workspace API is disabled",
+                "Workspace API is disabled",
                 uuid.uuid4().hex,
             )
         rel = path.strip() if path and path.strip() else None
-        ws = WorkspaceFileService(_playground_workspace_root())
+        ws = WorkspaceFileService(_api_workspace_root())
         try:
             entries = ws.list_directory(rel)
         except WorkspaceError as exc:
@@ -600,18 +600,18 @@ def create_app(
         display = rel if rel else "."
         return {"path": display, "entries": entries}
 
-    @api.get("/api/playground/workspace/file")
-    async def playground_workspace_file(
+    @api.get("/api/workspace/file")
+    async def workspace_file(
         path: str,
         offset: int = 1,
         limit: int | None = 200,
     ) -> dict[str, Any]:
         """Read a text slice from a file under the gateway workspace (numbered lines)."""
-        if not _playground_workspace_api_enabled():
+        if not _workspace_api_enabled():
             raise APIError(
                 404,
                 "NOT_FOUND",
-                "Playground workspace API is disabled",
+                "Workspace API is disabled",
                 uuid.uuid4().hex,
             )
         if not path or not str(path).strip():
@@ -621,7 +621,7 @@ def create_app(
                 "path query parameter is required",
                 uuid.uuid4().hex,
             )
-        ws = WorkspaceFileService(_playground_workspace_root())
+        ws = WorkspaceFileService(_api_workspace_root())
         try:
             result = ws.read_file(path.strip(), offset=offset, limit=limit)
         except WorkspaceError as exc:
@@ -635,17 +635,17 @@ def create_app(
             "truncated": result["truncated"],
         }
 
-    @api.get("/api/playground/chat-history")
-    async def playground_chat_history_list(
+    @api.get("/api/chat-history")
+    async def chat_history_list(
         request: Request,
         limit: int = 50,
     ) -> dict[str, Any]:
-        """List recent persisted chat threads for the playground UI."""
-        if not _playground_chat_history_api_enabled():
+        """List recent persisted chat threads."""
+        if not _chat_history_api_enabled():
             raise APIError(
                 404,
                 "NOT_FOUND",
-                "Playground chat history API is disabled",
+                "Chat history API is disabled",
                 uuid.uuid4().hex,
             )
         from monkeybot.core.persistence.thread_summary import ChatThreadSummary
@@ -665,28 +665,28 @@ def create_app(
             ]
         }
 
-    @api.get("/api/playground/chat-history/{session_id}")
-    async def playground_chat_history_detail(
+    @api.get("/api/chat-history/{session_id}")
+    async def chat_history_detail(
         session_id: str,
         request: Request,
         limit: int = 200,
     ) -> dict[str, Any]:
         """Return persisted user/assistant text for one chat thread."""
-        if not _playground_chat_history_api_enabled():
+        if not _chat_history_api_enabled():
             raise APIError(
                 404,
                 "NOT_FOUND",
-                "Playground chat history API is disabled",
+                "Chat history API is disabled",
                 uuid.uuid4().hex,
             )
-        from monkeybot.core.persistence.thread_summary import messages_to_playground_wire
+        from monkeybot.core.persistence.thread_summary import messages_to_wire
 
         backend = _storage_backend(request)
         cap = max(1, min(limit, 500))
         messages = await backend.history().load(session_id.strip(), limit=cap)
         return {
             "session_id": session_id,
-            "messages": messages_to_playground_wire(messages),
+            "messages": messages_to_wire(messages),
         }
 
     app.include_router(api)

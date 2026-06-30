@@ -1,18 +1,17 @@
 # SSE gateway: HTTP API and custom UI integration
 
-This document describes the **MonkeyBot v2 FastAPI gateway** endpoints used for chat, streaming, and playground helpers. It mirrors how the **playground chat UI** (`playground/chat-ui`) talks to the gateway so you can wire your own frontend.
+This document describes the **MonkeyBot v2 FastAPI gateway** endpoints used for chat, streaming, and workspace/history helpers, so you can wire your own frontend.
 
 **Reference implementation**
 
-- HTTP helpers and SSE parsing: `playground/chat-ui/src/gatewayClient.ts`
-- Session lifecycle and event handling: `playground/chat-ui/src/App.tsx`
 - Route definitions: `src/monkeybot/gateway/sse/routes.py`
 - Request/response models: `src/monkeybot/gateway/sse/models.py`
 - Event payloads (`type` field on the wire): `src/monkeybot/core/runtime/events.py`
+- Terminal client (built on this same API): `cli/src/monkeybot_cli/commands/chat.py`
 
 **Base URL**
 
-- Default local playground port is **8787** (see `playground/agent/monkeybot_config/monkeybot.yaml`).
+- Default local gateway port is **8787** (see `demo_agent/monkeybot_config/monkeybot.yaml`).
 - All paths below are relative to the gateway origin, e.g. `http://127.0.0.1:8787`.
 
 ---
@@ -21,14 +20,13 @@ This document describes the **MonkeyBot v2 FastAPI gateway** endpoints used for 
 
 **Cross-origin browser access**
 
-- The production app sets CORS from `MONKEYBOT_CORS_ALLOW_ORIGINS` (comma-separated origins). If unset, the default allows `http://localhost:5173` (Vite’s default).
+- The production app sets CORS from `MONKEYBOT_CORS_ALLOW_ORIGINS` (comma-separated origins). If unset, the default allows `http://localhost:5173` (Vite's default).
 - Set this when your UI is on another host/port and calls the gateway **directly** without a reverse proxy.
 
-**Playground dev (same origin)**
+**Local dev (same origin)**
 
-- `playground/chat-ui/vite.config.ts` proxies `/__mb_gateway` → your gateway (`VITE_GATEWAY_TARGET`, default `http://127.0.0.1:8787`) and strips the `/__mb_gateway` prefix.
-- In dev, `gatewayClient.ts` uses `GATEWAY_BASE = '/__mb_gateway'` so the browser stays same-origin and avoids CORS.
-- For production builds, set `VITE_GATEWAY_TARGET` to the full gateway URL (trailing slash is trimmed), or rely on the client default `http://127.0.0.1:8787`.
+- If your UI dev server proxies API calls (e.g. a Vite `server.proxy` entry), point it at the gateway origin (default `http://127.0.0.1:8787`) and strip your chosen prefix before forwarding.
+- Same-origin proxying avoids CORS entirely; set `MONKEYBOT_CORS_ALLOW_ORIGINS` only when calling the gateway cross-origin.
 
 ---
 
@@ -51,8 +49,10 @@ Errors use a common envelope:
 | `POST` | `/sessions/{session_id}/tool-confirmations/{tool_call_id}` | Approve/deny a tool. Body: `{ "approved": boolean, "reason"?: string }`. **202** `{ "ok": true }`. |
 | `POST` | `/sessions/{session_id}/elicitations/{elicitation_id}` | Answer an elicitation. Body: `{ "user_data": any }`. **202** `{ "ok": true }`. |
 | `POST` | `/sessions/{session_id}/frontend-tool-results/{tool_call_id}` | Return a frontend tool result. Body: `{ "result": ContentBlock[], "is_error": boolean }` (blocks are JSON objects matching `ContentBlock` schema). **202** `{ "ok": true }`. |
-| `GET` | `/api/playground/workspace/tree` | Optional directory listing under the gateway workspace. Query `path` (repo-relative). Disabled when `MONKEYBOT_PLAYGROUND_WORKSPACE_API` is `0` / `false` / `no` / `off`. |
-| `GET` | `/api/playground/workspace/file` | Optional file slice read. Query `path` (required), `offset` (1-based line, default 1), `limit` (default 200). Same env gate as tree. |
+| `GET` | `/api/workspace/tree` | Optional directory listing under the gateway workspace. Query `path` (repo-relative). Disabled when `MONKEYBOT_WORKSPACE_API` is `0` / `false` / `no` / `off`. |
+| `GET` | `/api/workspace/file` | Optional file slice read. Query `path` (required), `offset` (1-based line, default 1), `limit` (default 200). Same env gate as tree. |
+| `GET` | `/api/chat-history` | Optional recent-threads listing. Disabled when `MONKEYBOT_CHAT_HISTORY_API` is `0` / `false` / `no` / `off`. |
+| `GET` | `/api/chat-history/{session_id}` | Optional persisted user/assistant text for one thread. Same env gate as the list endpoint. |
 
 ---
 
@@ -65,7 +65,7 @@ Errors use a common envelope:
 **Request**
 
 - Method: `GET`
-- Headers: `Accept: text/event-stream` (recommended; playground uses this with `fetch`).
+- Headers: `Accept: text/event-stream` (recommended when using `fetch`).
 - Optional: `Last-Event-ID: <integer>` — numeric sequence id of the last **buffered** data event you processed. The server replays buffered events with `id:` greater than this value, then continues live. Omit or use a fresh connection to receive the full replay buffer from the start (see `SessionBus.subscribe` in `session_bus.py`).
 
 **Response**
@@ -79,7 +79,7 @@ Errors use a common envelope:
 **Parsing**
 
 - Split on SSE event boundaries (double newline). For each event block, read `data:` lines and `JSON.parse` the payload.
-- The playground uses `fetch` + `ReadableStream` + `TextDecoder` in `consumeSseJson` so it can attach `AbortSignal` for clean teardown; `EventSource` also works if you do not need custom headers (use `Last-Event-ID` for resume).
+- `fetch` + `ReadableStream` + `TextDecoder` lets you attach an `AbortSignal` for clean teardown; `EventSource` also works if you do not need custom headers (use `Last-Event-ID` for resume).
 
 **Environment**
 
@@ -117,15 +117,15 @@ The canonical definitions are the `@dataclass` types in `src/monkeybot/core/runt
 
 ---
 
-## Recommended client flow (same as playground)
+## Recommended client flow
 
 1. **Connect** — `POST /sessions` with `{}` or your own `session_id`. Store `session_id`.
-2. **Open SSE** — `GET /sessions/{session_id}/events` in parallel with the rest of the UI; keep the connection open for the lifetime of the session (playground: `useEffect` on `sessionId` + `AbortController` on unmount).
-3. **Send a message** — Generate a client-side `request_id` (the playground uses a short random id). `POST /sessions/{session_id}/reply` with `{ request_id, message }` for text-only, or `{ request_id, content }` for multimodal (see [Multimodal reply](#multimodal-reply)).
-4. **Render** — Append user message locally (include attachment chips when using `content`); merge `AssistantDelta` into a streaming buffer; on `TurnComplete`, finalize the assistant message and clear “busy” state. Upgrade attachment chips when `AttachmentDescriptor` arrives.
-5. **Stop** — `POST /sessions/{session_id}/cancel` with the active `request_id` (playground “stop” button).
+2. **Open SSE** — `GET /sessions/{session_id}/events` in parallel with the rest of the UI; keep the connection open for the lifetime of the session (e.g. on mount, with an `AbortController` on unmount).
+3. **Send a message** — Generate a client-side `request_id`. `POST /sessions/{session_id}/reply` with `{ request_id, message }` for text-only, or `{ request_id, content }` for multimodal (see [Multimodal reply](#multimodal-reply)).
+4. **Render** — Append user message locally (include attachment chips when using `content`); merge `AssistantDelta` into a streaming buffer; on `TurnComplete`, finalize the assistant message and clear "busy" state. Upgrade attachment chips when `AttachmentDescriptor` arrives.
+5. **Stop** — `POST /sessions/{session_id}/cancel` with the active `request_id` (e.g. a "stop" button).
 6. **Human-in-the-loop** — When you see `ToolConfirmationRequest`, `ActionRequiredEvent` (elicitation), or `FrontendToolRequest`, show UI and call the matching POST endpoint; the agent continues and new events flow on the same SSE connection.
-7. **Usage / context meter** — After `TurnComplete`, call `GET /sessions/{session_id}/usage` (the playground refreshes automatically) to update totals and the **pre-flight prompt token count** vs **summarization threshold** (see [Session usage endpoint](#session-usage-endpoint)).
+7. **Usage / context meter** — After `TurnComplete`, call `GET /sessions/{session_id}/usage` to update totals and the **pre-flight prompt token count** vs **summarization threshold** (see [Session usage endpoint](#session-usage-endpoint)).
 
 **Concurrency rule**
 

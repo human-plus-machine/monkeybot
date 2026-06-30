@@ -1,4 +1,4 @@
-"""Agent-facing workspace root (playground file API + loop ``workspace_root``)."""
+"""Agent-facing workspace root (workspace file API + loop ``workspace_root``)."""
 
 from __future__ import annotations
 
