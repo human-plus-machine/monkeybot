@@ -55,6 +55,7 @@ class ToolCallStarted:
     tool: str = ""
     label: str = ""
     args: dict[str, object] = field(default_factory=dict)
+    parse_error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -308,6 +309,8 @@ def event_to_json(event: AgentEvent) -> str:
         payload = {**base, "delta": event.delta}
     elif isinstance(event, ToolCallStarted):
         payload = {**base, "tool": event.tool, "label": event.label, "args": dict(event.args)}
+        if event.parse_error is not None:
+            payload["parse_error"] = event.parse_error
     elif isinstance(event, ToolCallResult):
         payload = {**base, "tool": event.tool, "result": event.result, "error": event.error}
     elif isinstance(event, TurnComplete):
@@ -391,7 +394,9 @@ def event_from_json(raw: str) -> AgentEvent:
         tool = tool_raw if isinstance(tool_raw, str) else ""
         label = label_raw if isinstance(label_raw, str) else ""
         args = _args_from_obj(payload.get("args"))
-        return ToolCallStarted(request_id=rid, tool=tool, label=label, args=args)
+        pe_raw = payload.get("parse_error")
+        parse_error: str | None = pe_raw if isinstance(pe_raw, str) else None
+        return ToolCallStarted(request_id=rid, tool=tool, label=label, args=args, parse_error=parse_error)
     if t == "ToolCallResult":
         tool_raw = payload.get("tool", "")
         result_raw = payload.get("result", "")

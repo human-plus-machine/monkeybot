@@ -5,6 +5,7 @@ from __future__ import annotations
 import shutil
 import stat
 from importlib import resources
+from importlib.resources.abc import Traversable
 from pathlib import Path
 from typing import Final
 
@@ -28,23 +29,12 @@ _MEMORY_INDEX: Final = (
 )
 
 
-def packaged_defaults_path(name: str) -> Path:
-    ref = resources.files(_DEFAULTS_PKG) / name
-    with resources.as_file(ref) as path:
-        return Path(path)
-
-
-def scaffold_asset_path(name: str) -> Path:
-    ref = resources.files(_SCAFFOLD_PKG) / name
-    with resources.as_file(ref) as path:
-        return Path(path)
-
-
-def _install_file(dest: Path, src: Path, *, force: bool) -> str:
+def _install_file(dest: Path, src: Traversable, *, force: bool) -> str:
+    # ponytail: read_bytes() avoids resources.as_file() temp-file lifetime issue in zip distributions
     if dest.exists() and not force:
         return "skipped"
     existed = dest.exists()
-    shutil.copyfile(src, dest)
+    dest.write_bytes(src.read_bytes())
     return "overwritten" if existed else "created"
 
 
@@ -55,7 +45,7 @@ def install_config_bundle(cfg_dir: Path, *, force: bool) -> list[str]:
     for src_name, dest_name in _CONFIG_BUNDLE:
         status = _install_file(
             cfg_dir / dest_name,
-            packaged_defaults_path(src_name),
+            resources.files(_DEFAULTS_PKG) / src_name,
             force=force,
         )
         lines.append(f"  monkeybot_config/{dest_name}: {status}")
@@ -71,7 +61,6 @@ def write_active_config(
 ) -> str:
     """Create or update ``monkeybot.yaml`` from the packaged example."""
     active = cfg_dir / "monkeybot.yaml"
-    example = packaged_defaults_path("monkeybot.example.yaml")
     if active.exists() and not force:
         if provider or model:
             doc = yaml.safe_load(active.read_text(encoding="utf-8")) or {}
@@ -87,7 +76,8 @@ def write_active_config(
             return "updated (provider/model)"
         return "skipped"
     existed = active.exists()
-    shutil.copyfile(example, active)
+    example_text = (resources.files(_DEFAULTS_PKG) / "monkeybot.example.yaml").read_text(encoding="utf-8")
+    active.write_text(example_text, encoding="utf-8")
     if provider or model:
         doc = yaml.safe_load(active.read_text(encoding="utf-8")) or {}
         if isinstance(doc, dict):
@@ -172,7 +162,7 @@ def install_setup_script(dest: Path, *, force: bool) -> str:
     if dest_script.exists() and not force:
         return "skipped"
     existed = dest_script.exists()
-    shutil.copyfile(scaffold_asset_path("setup-workspace.sh"), dest_script)
+    dest_script.write_bytes((resources.files(_SCAFFOLD_PKG) / "setup-workspace.sh").read_bytes())
     dest_script.chmod(dest_script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return "overwritten" if existed else "created"
 
@@ -182,7 +172,7 @@ def install_env_example(dest: Path, *, force: bool) -> str:
     if env_example.exists() and not force:
         return "skipped"
     existed = env_example.exists()
-    shutil.copyfile(packaged_defaults_path("env.example"), env_example)
+    _install_file(env_example, resources.files(_DEFAULTS_PKG) / "env.example", force=True)
     return "overwritten" if existed else "created"
 
 
@@ -201,8 +191,6 @@ def run_new(
         f"{write_active_config(cfg_dir, provider=provider, model=model, force=force)}"
     )
     report.extend(ensure_memory(dest, force=force))
-    report.append("  skills/: ensured")
-    dest.joinpath("skills").mkdir(parents=True, exist_ok=True)
     report.extend(ensure_workspace(dest, force=force))
     report.append(f"  scripts/setup-workspace.sh: {install_setup_script(dest, force=force)}")
     report.append(f"  .env.example: {install_env_example(dest, force=force)}")
