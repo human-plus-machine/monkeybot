@@ -383,7 +383,6 @@ class GatewayLoopPort:
                 history=history,
                 inspectors=inspectors,
                 tool_executor=executor,
-                run_id=request_id,
                 cancelled=cancel_event,
                 hook_manager=_deps.hook_manager,
                 curator_provider=_deps.curator_provider,

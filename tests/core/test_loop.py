@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import inspect
 import json
 import logging
 from collections.abc import AsyncIterator, Sequence
@@ -12,6 +13,7 @@ from typing import Any
 
 import pytest
 
+import monkeybot.core.runtime.loop as loop_mod
 from monkeybot.core.context import TurnContext
 from monkeybot.core.llm.provider import (
     Done,
@@ -21,6 +23,7 @@ from monkeybot.core.llm.provider import (
     ToolCall,
     UsageEvent,
 )
+from monkeybot.core.llm.usage import Usage
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.runtime.events import (
     AssistantDelta,
@@ -31,7 +34,6 @@ from monkeybot.core.runtime.events import (
     ToolCallResult,
     TurnComplete,
 )
-from monkeybot.core.llm.usage import Usage
 from monkeybot.core.runtime.loop import (
     _chunk_tool_calls,
     _compact_history_if_needed,
@@ -73,6 +75,43 @@ def _ctx(
         workspace_root=workspace_root,
         context_window_tokens=context_window_tokens,
     )
+
+
+def test_run_signature_has_no_unused_run_id() -> None:
+    assert "run_id" not in inspect.signature(run).parameters
+
+
+@pytest.mark.asyncio
+async def test_run_logs_uncancel_cleanup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class BrokenTask:
+        def uncancel(self) -> None:
+            raise RuntimeError("boom")
+
+    async def raise_cancelled(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        raise asyncio.CancelledError
+        yield
+
+    monkeypatch.setattr(loop_mod, "_run_inner", raise_cancelled)
+    monkeypatch.setattr(asyncio, "current_task", lambda: BrokenTask())
+
+    provider = FakeProvider([[Done()]])
+    events = []
+    with caplog.at_level(logging.DEBUG, logger="monkeybot.core.runtime.loop"):
+        async for evt in run(
+            "hi",
+            _ctx(),
+            provider=provider,
+            history=FakeHistory(),
+            inspectors=[],
+            tool_executor=RecordingExecutor(),
+        ):
+            events.append(evt)
+
+    assert any(isinstance(evt, Error) and evt.error == "Request cancelled" for evt in events)
+    assert "uncancel cleanup failed" in caplog.text
 
 
 def _ctx_with_task(
@@ -124,6 +163,7 @@ class FakeProvider:
         self._scripted = scripted
         self.stream_calls = 0
         self.stream_models: list[str] = []
+        self.count_thinking_budgets: list[int | None] = []
 
     @property
     def name(self) -> str:
@@ -156,8 +196,10 @@ class FakeProvider:
         tools: Sequence[ToolDef],
         *,
         model: str,
+        thinking_budget: int | None = None,
     ) -> int:
         del model
+        self.count_thinking_budgets.append(thinking_budget)
         return fake_provider_prompt_tokens(messages, tools)
 
 
@@ -174,9 +216,15 @@ class CountingFakeProvider(FakeProvider):
         tools: Sequence[ToolDef],
         *,
         model: str,
+        thinking_budget: int | None = None,
     ) -> int:
         self.count_snapshots.append(list(messages))
-        return await super().count_input_tokens(messages, tools, model=model)
+        return await super().count_input_tokens(
+            messages,
+            tools,
+            model=model,
+            thinking_budget=thinking_budget,
+        )
 
 
 def _tool_result(
@@ -489,6 +537,40 @@ async def test_run_inspector_allow_invokes_executor_once() -> None:
             break
     assert len(exe.calls) == 1
     assert len(hist.rows) >= 2
+
+
+@pytest.mark.asyncio
+async def test_run_counts_routine_resume_with_stream_thinking_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class GeminiFakeProvider(FakeProvider):
+        @property
+        def name(self) -> str:
+            return "gemini"
+
+    monkeypatch.setenv("MONKEYBOT_RESUME_THINKING_BUDGET", "0")
+    prov = GeminiFakeProvider(
+        [
+            [
+                ToolCall(call_id="c1", name="run_command", args={"command": "echo hi"}),
+                Done(),
+            ],
+            [TextDelta(text="done"), Done()],
+        ]
+    )
+    async for _ in run(
+        "u",
+        _ctx(),
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(),
+        max_turns=3,
+    ):
+        pass
+
+    assert prov.stream_calls == 2
+    assert prov.count_thinking_budgets[-1] == 0
 
 
 @pytest.mark.asyncio
@@ -805,8 +887,9 @@ async def test_run_provider_raises_wrapped_as_error() -> None:
             tools: Sequence[ToolDef],
             *,
             model: str,
+            thinking_budget: int | None = None,
         ) -> int:
-            del messages, tools, model
+            del messages, tools, model, thinking_budget
             return 0
 
     hist = FakeHistory()
@@ -858,8 +941,9 @@ async def test_run_provider_raises_logs_exception(caplog: pytest.LogCaptureFixtu
             tools: Sequence[ToolDef],
             *,
             model: str,
+            thinking_budget: int | None = None,
         ) -> int:
-            del messages, tools, model
+            del messages, tools, model, thinking_budget
             return 0
 
     hist = FakeHistory()
@@ -1123,8 +1207,9 @@ async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> N
             tools: Sequence[ToolDef],
             *,
             model: str,
+            thinking_budget: int | None = None,
         ) -> int:
-            del model
+            del model, thinking_budget
             return fake_provider_prompt_tokens(messages, tools)
 
     class BumpIndexExecutor(RecordingExecutor):

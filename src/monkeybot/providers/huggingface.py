@@ -106,8 +106,11 @@ class HuggingFaceProvider:
         tools: Sequence[ToolDef],
         *,
         model: str,
+        thinking_budget: int | None = None,
     ) -> int:
-        return await count_input_tokens_tiktoken(messages, tools, model=model)
+        return await count_input_tokens_tiktoken(
+            messages, tools, model=model, thinking_budget=thinking_budget
+        )
 
     async def stream(
         self,

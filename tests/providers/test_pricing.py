@@ -18,9 +18,11 @@ def test_pricing_for_longest_prefix_match() -> None:
     assert result == (1.00, 5.00, 1.25, 0.10)
 
 
-def test_pricing_for_unknown_returns_zeros() -> None:
+def test_pricing_for_unknown_returns_zeros(caplog: pytest.LogCaptureFixture) -> None:
     assert "gpt-5" in pricing.MODEL_PRICING
-    assert pricing_for("nonexistent-model") == (0.0, 0.0, 0.0, 0.0)
+    with caplog.at_level("WARNING", logger="monkeybot.providers.pricing"):
+        assert pricing_for("nonexistent-model") == (0.0, 0.0, 0.0, 0.0)
+    assert "unknown model for pricing lookup: nonexistent-model" in caplog.text
 
 
 def test_estimate_cost_input_output_only() -> None:

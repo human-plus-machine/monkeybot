@@ -38,7 +38,7 @@ def pricing_for(model: str) -> tuple[float, float, float, float]:
     if best_key is not None:
         return MODEL_PRICING[best_key]
 
-    _log.debug("unknown model for pricing lookup: %s", model)
+    _log.warning("unknown model for pricing lookup: %s", model)
     return (0.0, 0.0, 0.0, 0.0)
 
 

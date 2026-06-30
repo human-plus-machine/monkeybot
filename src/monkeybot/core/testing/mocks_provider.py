@@ -77,8 +77,9 @@ class ScriptedFakeProvider:
         tools: Sequence[ToolDef],
         *,
         model: str,
+        thinking_budget: int | None = None,
     ) -> int:
-        del model
+        del model, thinking_budget
         return fake_provider_prompt_tokens(messages, tools)
 
 

@@ -141,7 +141,6 @@ async def _stream_run_loop_events(
             history=history,
             inspectors=inspectors,
             tool_executor=tool_executor,
-            run_id=run_id,
             cancelled=None,
             max_turns=max_turns,
         ):
@@ -158,7 +157,6 @@ async def _stream_run_loop_events(
             history=history,
             inspectors=inspectors,
             tool_executor=tool_executor,
-            run_id=run_id,
             cancelled=None,
             max_turns=max_turns,
         ):

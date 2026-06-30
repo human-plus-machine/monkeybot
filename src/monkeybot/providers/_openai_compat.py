@@ -276,12 +276,16 @@ async def count_input_tokens_tiktoken(
     tools: Sequence[ToolDef],
     *,
     model: str,
+    thinking_budget: int | None = None,
 ) -> int:
     """Shared ``count_input_tokens`` body for tiktoken-based providers.
 
     Falls back to ``cl100k_base`` when ``model`` isn't a tiktoken-known model id
     (true for most non-OpenAI models served through an OpenAI-compat endpoint).
+    ``thinking_budget`` is accepted for ``Provider`` protocol symmetry but unused:
+    none of these providers' token counts vary with reasoning configuration.
     """
+    del thinking_budget
     import tiktoken  # noqa: PLC0415
 
     msgs = list(messages)
