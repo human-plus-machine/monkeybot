@@ -15,6 +15,9 @@ class ProviderSpec:
     extra: str | None
     credential_env_vars: tuple[str, ...]
     gcp_adc: bool = False
+    # True when the provider needs no API key (e.g. a local server reachable
+    # without auth, such as Ollama). Skips the credentials check in `doctor`.
+    credentials_optional: bool = False
 
 
 PROVIDER_SPECS: dict[str, ProviderSpec] = {
@@ -45,6 +48,15 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
     "huggingface": ProviderSpec(
         ("huggingface",), "huggingface", ("HF_TOKEN", "HUGGINGFACE_API_KEY")
     ),
+    "ollama": ProviderSpec(
+        # credential_env_vars is empty: credentials_optional=True short-circuits
+        # credentials_present() before these are ever read, and OLLAMA_BASE_URL
+        # isn't a credential anyway (it's just the server address).
+        ("ollama",),
+        "ollama",
+        (),
+        credentials_optional=True,
+    ),
     "fake": ProviderSpec(("fake",), None, ()),
 }
 
@@ -68,6 +80,7 @@ def extra_module(extra: str) -> str:
         "openai": "openai",
         "bedrock": "boto3",
         "huggingface": "openai",
+        "ollama": "openai",
     }
     return mapping.get(extra, extra)
 
@@ -83,6 +96,8 @@ def extra_installed(extra: str) -> bool:
 
 
 def credentials_present(spec: ProviderSpec) -> bool:
+    if spec.credentials_optional:
+        return True
     if spec.gcp_adc:
         if os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip():
             return True
