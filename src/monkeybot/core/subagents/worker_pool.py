@@ -381,6 +381,7 @@ async def shutdown_worker_pool(handle: WorkerPoolHandle) -> None:
 
 async def run_worker_main() -> None:
     """CLI entry: open storage backend and run the worker loop until cancelled."""
+    from monkeybot.core.config.settings import auto_schema_enabled_from_config
     from monkeybot.core.persistence.backends import create_storage_backend
 
     db_url = os.environ.get("DB_URL", "sqlite:///data/monkeybot.db")
@@ -390,7 +391,7 @@ async def run_worker_main() -> None:
         settings.stale_claim_ms,
     )
     backend = create_storage_backend(db_url)
-    await backend.open()
+    await backend.open(run_schema=auto_schema_enabled_from_config())
     try:
         await run_worker_loop(
             backend,

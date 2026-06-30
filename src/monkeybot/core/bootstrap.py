@@ -13,7 +13,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from monkeybot.core.config.settings import get_provider_config
+from monkeybot.core.config.settings import auto_schema_enabled_from_config, get_provider_config
 from monkeybot.core.context import build_context
 from monkeybot.core.hooks import HookManager
 from monkeybot.core.llm.provider import Provider
@@ -111,7 +111,7 @@ async def create_harness_deps(
     """
     override = provider_override if provider_override is not None else _provider_override
     backend = create_storage_backend(db_url)
-    await backend.open()
+    await backend.open(run_schema=auto_schema_enabled_from_config())
     try:
         if override is not None:
             prov = override

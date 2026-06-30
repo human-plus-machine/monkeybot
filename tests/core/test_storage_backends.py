@@ -36,6 +36,91 @@ def _make_envelope(task: str = "do something", parent_run_id: str = "p1") -> Sub
 
 
 # ---------------------------------------------------------------------------
+# Auto schema (paths.auto_schema)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sqlite_open_run_schema_false_skips_apply_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+
+    async def spy_apply(conn: object) -> None:
+        calls.append(conn)
+
+    monkeypatch.setattr(
+        "monkeybot.core.persistence.sqlite_backend.apply_schema",
+        spy_apply,
+    )
+    backend = SQLiteStorageBackend("sqlite:///:memory:")
+    await backend.open(run_schema=False)
+    assert calls == []
+    await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_open_run_schema_false_reads_writes_after_manual_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from monkeybot.core.persistence.sqlite import apply_schema
+
+    calls: list[object] = []
+
+    async def spy_apply(conn: object) -> None:
+        calls.append(conn)
+
+    monkeypatch.setattr(
+        "monkeybot.core.persistence.sqlite_backend.apply_schema",
+        spy_apply,
+    )
+    backend = SQLiteStorageBackend("sqlite:///:memory:")
+    await backend.open(run_schema=False)
+    assert calls == []
+    await apply_schema(backend._conn)  # type: ignore[arg-type]
+    store = backend.history()
+    msg = Message.text("user", "hello")
+    await store.append("t-auto-schema", msg)
+    assert await store.load("t-auto-schema") == [msg]
+    await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_postgres_open_run_schema_false_skips_apply_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    try:
+        import asyncpg  # noqa: F401
+    except ImportError:
+        pytest.skip("asyncpg is not installed")
+
+    from unittest.mock import AsyncMock, MagicMock
+
+    from monkeybot.core.persistence.postgres import PostgresStorageBackend
+
+    apply_calls: list[object] = []
+
+    async def spy_apply(pool: object) -> None:
+        apply_calls.append(pool)
+
+    mock_pool = MagicMock()
+    monkeypatch.setattr(
+        "monkeybot.core.persistence.postgres.asyncpg.create_pool",
+        AsyncMock(return_value=mock_pool),
+    )
+    monkeypatch.setattr(
+        "monkeybot.core.persistence.postgres._apply_schema",
+        spy_apply,
+    )
+
+    backend = PostgresStorageBackend("postgresql://localhost/test")
+    await backend.open(run_schema=False)
+    assert apply_calls == []
+    assert backend._pool is mock_pool
+    await backend.close()
+
+
+# ---------------------------------------------------------------------------
 # Factory tests
 # ---------------------------------------------------------------------------
 

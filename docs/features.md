@@ -286,6 +286,8 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **DB URL schemes:** `sqlite://`, `postgresql://` / `postgres://`, `firestore://PROJECT/DATABASE`
 
+**Auto schema:** SQLite and Postgres run idempotent DDL on `open()` when `paths.auto_schema` is `true` in monkeybot.yaml (default). Set `paths.auto_schema: false` when a migration process owns the schema. Firestore is schemaless — no DDL on `open()`.
+
 **Invariants:**
 - Lazy backend imports.
 - Relative `sqlite:///` paths normalized against `MONKEYBOT_AGENT_ROOT` for subagents.

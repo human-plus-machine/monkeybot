@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import aiosqlite
 
-from monkeybot.core.persistence.history import SQLiteHistoryStore
-from monkeybot.core.persistence.usage import SQLiteUsageStore
 from monkeybot.core.persistence.durable_runs import SQLiteRunStore
+from monkeybot.core.persistence.history import SQLiteHistoryStore
 from monkeybot.core.persistence.sqlite import apply_schema, open_connection
+from monkeybot.core.persistence.usage import SQLiteUsageStore
 
 
 class SQLiteStorageBackend:
@@ -24,9 +24,10 @@ class SQLiteStorageBackend:
         self._usage_store: SQLiteUsageStore | None = None
         self._runs_store: SQLiteRunStore | None = None
 
-    async def open(self) -> None:
+    async def open(self, *, run_schema: bool = True) -> None:
         self._conn = await open_connection(self._db_url)
-        await apply_schema(self._conn)
+        if run_schema:
+            await apply_schema(self._conn)
         self._history_store = SQLiteHistoryStore(self._conn)
         self._usage_store = SQLiteUsageStore(self._conn)
         self._runs_store = SQLiteRunStore(self._conn)
