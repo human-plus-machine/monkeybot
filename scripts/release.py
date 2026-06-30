@@ -53,36 +53,44 @@ def write_version(pyproject: Path, new_version: str) -> None:
 
 
 def cut_changelog(version: str) -> None:
+    """Move everything under [Unreleased] into a new dated [version] section."""
     text = CHANGELOG.read_text()
     today = datetime.date.today().isoformat()
-    if "## [Unreleased]" not in text:
+    m = re.search(r"## \[Unreleased\]\n(.*?)(?=\n## \[|\Z)", text, re.S)
+    if not m:
         raise SystemExit("CHANGELOG.md has no [Unreleased] section to cut")
-    text = text.replace(
-        "## [Unreleased]",
-        f"## [Unreleased]\n\n## [{version}] - {today}",
-        1,
-    )
+    body = m.group(1).strip("\n")
+    if not body:
+        raise SystemExit("Unreleased section is empty - nothing to release")
+    new_section = f"## [Unreleased]\n\n## [{version}] - {today}\n\n{body}\n"
+    text = text[: m.start()] + new_section + text[m.end() :]
     CHANGELOG.write_text(text)
 
 
-def changelog_section(version: str) -> str:
+def changelog_section(version: str) -> str | None:
     text = CHANGELOG.read_text()
     m = re.search(rf"## \[{re.escape(version)}\].*?\n(.*?)(?=\n## \[|\Z)", text, re.S)
-    return m.group(1).strip() if m else f"(no changelog entry found for {version})"
+    return m.group(1).strip() if m else None
 
 
 def cmd_prepare(args: argparse.Namespace) -> None:
     pyproject = PACKAGES[args.package]
     old = read_version(pyproject)
     new = bump(old, args.bump)
+    branch = f"release/{args.package}-v{new}"
+
+    # Cut on a throwaway branch, not develop directly: if the PR is closed
+    # without merging, develop is untouched.
+    run("git", "checkout", "-b", branch)
     write_version(pyproject, new)
     cut_changelog(new)
     run("git", "add", str(pyproject), str(CHANGELOG))
     run("git", "commit", "-m", f"chore(release): {args.package} v{new}")
-    run("git", "push")
+    run("git", "push", "-u", "origin", branch)
     run(
         "gh", "pr", "create",
         "--base", "main",
+        "--head", branch,
         "--title", f"Release {args.package} v{new}",
         "--body", f"## {args.package} v{new}\n\n{changelog_section(new)}",
     )
@@ -91,19 +99,32 @@ def cmd_prepare(args: argparse.Namespace) -> None:
 
 def cmd_publish(_: argparse.Namespace) -> None:
     existing_tags = set(run("git", "tag", "--list").splitlines())
+    published = False
     for name, pyproject in PACKAGES.items():
         version = read_version(pyproject)
         tag = f"{name}-v{version}"
         if tag in existing_tags:
             continue
+        notes = changelog_section(version)
+        if notes is None:
+            # No changelog entry for this version - it predates this tooling
+            # (e.g. the version already on main when this script was added).
+            # Skip rather than publish a release with placeholder notes.
+            print(f"Skipping {tag}: no changelog entry found (pre-existing version)")
+            continue
         run("git", "tag", tag)
         run("git", "push", "origin", tag)
-        run(
-            "gh", "release", "create", tag,
-            "--title", f"{name} v{version}",
-            "--notes", changelog_section(version) or f"{name} v{version}",
-        )
+        run("gh", "release", "create", tag, "--title", f"{name} v{version}", "--notes", notes)
         print(f"Published {tag}")
+        published = True
+
+    if published:
+        # Keep develop from drifting behind main now that releases land via
+        # a release/* branch instead of develop itself.
+        run("git", "fetch", "origin", "develop")
+        run("git", "checkout", "-B", "develop", "origin/develop")
+        run("git", "merge", "--no-edit", "origin/main")
+        run("git", "push", "origin", "develop")
 
 
 def main() -> None:
