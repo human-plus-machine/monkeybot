@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import stat
 from importlib import resources
 from importlib.resources.abc import Traversable
