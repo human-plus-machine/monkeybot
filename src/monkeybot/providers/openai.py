@@ -7,12 +7,8 @@ from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 from monkeybot.core.llm.provider import (
-    Done,
     Message,
     ProviderEvent,
-    TextDelta,
-    ToolCall,
-    UsageEvent,
 )
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._openai_compat import (
@@ -39,9 +35,6 @@ __all__ = [
     "_openai_tools_token_count",
 ]
 
-# Keep these names importable to avoid breaking the unused-import linter
-_ = (Done, TextDelta, ToolCall, UsageEvent)  # consumed via _openai_compat re-export
-
 
 class OpenAIProvider:
     """OpenAI chat models using the official ``openai`` async client."""
@@ -63,6 +56,9 @@ class OpenAIProvider:
     ) -> None:
         if not os.environ.get("OPENAI_API_KEY"):
             raise ValueError("OPENAI_API_KEY is not set")
+        # ``cache_enabled`` is accepted for constructor-contract symmetry with the
+        # other providers (Story 1) but is currently inert here: OpenAI's chat
+        # completions request shape has no cache_control-equivalent field to set.
         self._cache_enabled = cache_enabled
         sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens)
         self._temperature = sampling.temperature

@@ -291,7 +291,3 @@ class SQLiteRunStore:
         if row is None:
             return None
         return _tuple_to_run_row(tuple(row))
-
-
-# Backwards-compat alias — DurableRunStore was renamed to SQLiteRunStore in Step 1.5.
-DurableRunStore = SQLiteRunStore

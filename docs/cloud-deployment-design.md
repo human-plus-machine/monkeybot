@@ -156,7 +156,7 @@ The gateway's lifespan (`app.on_event("startup")`) calls `create_storage_backend
 
 ### What does NOT change
 
-- SQLite concrete types remain the default implementations (`SQLiteHistoryStore`, `SQLiteUsageStore`; `ConversationHistory` is kept as a backwards-compat alias where applicable).
+- SQLite concrete types remain the default implementations (`SQLiteHistoryStore`, `SQLiteUsageStore`).
 - `DB_URL` env var stays as-is. `sqlite:///data/monkeybot.db` keeps working exactly as today.
 - `monkeybot.yaml` `db_url` key stays as-is.
 
