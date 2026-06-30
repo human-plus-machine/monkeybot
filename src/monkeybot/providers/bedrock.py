@@ -15,6 +15,7 @@ from monkeybot.core.llm.provider import (
     ToolCall,
     UsageEvent,
 )
+from monkeybot.core.logging_utils import kv
 from monkeybot.core.types.content_blocks import Text
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._utils import (
@@ -100,7 +101,11 @@ class BedrockClaudeProvider:
         except Exception as exc:
             msg = str(exc).lower()
             if "token counting" in msg or "not supported" in msg or "bedrock" in msg:
-                _log.debug("Bedrock count_tokens unavailable, using estimate: %s", exc)
+                _log.warning(
+                    "Bedrock count_tokens unavailable, using estimate %s",
+                    kv(provider="bedrock", model=model),
+                    exc_info=True,
+                )
                 return estimate_anthropic_input_tokens(
                     system=system,
                     messages=converted_messages,
@@ -216,8 +221,12 @@ class BedrockClaudeProvider:
                                     getattr(usage, "cache_creation_input_tokens", 0)
                                     or 0
                                 )
-        except Exception as exc:
-            _log.warning("Bedrock Claude stream error: %s", exc)
+        except Exception:
+            _log.warning(
+                "Bedrock Claude stream error %s",
+                kv(provider="bedrock", model=model, n_messages=len(messages), n_tools=len(tools)),
+                exc_info=True,
+            )
             raise
 
         yield UsageEvent(

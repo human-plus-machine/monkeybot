@@ -16,6 +16,7 @@ from monkeybot.core.context.tool_output_policy import (
 from monkeybot.core.context.tool_shapers import (
     classify_content,
     exceeds_tool_output_budget,
+    log_head_lines_from_env,
     shape_json,
     shape_logs,
     shape_messages_tool_results,
@@ -141,3 +142,13 @@ def test_load_tool_output_policies_from_file(tmp_path, monkeypatch: pytest.Monke
     reset_tool_output_policy_cache_for_tests()
     policies = load_tool_output_policies()
     assert policies["web_search"].max_array_items == 10
+
+
+def test_invalid_int_env_logs_warning(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
+    monkeypatch.setenv("MONKEYBOT_SHAPE_LOG_HEAD_LINES", "bogus")
+    with caplog.at_level("WARNING", logger="monkeybot.core.context.tool_shapers"):
+        assert log_head_lines_from_env() == 40
+
+    assert "invalid env var value" in caplog.text
+    assert "name=MONKEYBOT_SHAPE_LOG_HEAD_LINES" in caplog.text
+    assert "value=bogus" in caplog.text

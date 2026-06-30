@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
@@ -16,6 +17,7 @@ from monkeybot.core.llm.provider import (
     ToolCall,
     UsageEvent,
 )
+from monkeybot.core.logging_utils import kv
 from monkeybot.core.types.content_blocks import (
     File,
     Image,
@@ -30,6 +32,8 @@ from monkeybot.providers.sampling import resolve_model_sampling
 
 THOUGHT_SIGNATURE_KEY = "thoughtSignature"
 SYNTHETIC_THOUGHT_SIGNATURE = "skip_thought_signature_validator"
+
+_log = logging.getLogger(__name__)
 
 
 def _normalize_vertex_model(model: str) -> str:
@@ -178,16 +182,7 @@ def _media_parts_from_blocks(blocks: Sequence[object]) -> list[Any]:
 
     parts: list[Any] = []
     for b in blocks:
-        if isinstance(b, Image):
-            parts.append(
-                types.Part(
-                    inline_data=types.Blob(
-                        mime_type=b.mime_type,
-                        data=base64.b64decode(b.data),
-                    )
-                )
-            )
-        elif isinstance(b, File):
+        if isinstance(b, (Image, File)):
             parts.append(
                 types.Part(
                     inline_data=types.Blob(
@@ -593,6 +588,11 @@ class GeminiProvider:
         except LLMError:
             raise
         except Exception as exc:
+            _log.warning(
+                "Gemini stream error %s",
+                kv(provider="gemini", model=model, n_messages=len(messages), n_tools=len(tools)),
+                exc_info=True,
+            )
             raise LLMError(str(exc)) from exc
 
         ev = _usage_from_response(last_usage)

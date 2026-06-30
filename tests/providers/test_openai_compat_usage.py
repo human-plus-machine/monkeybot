@@ -55,6 +55,13 @@ def _fake_client(chunks: list[SimpleNamespace]) -> Any:
     return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=_create)))
 
 
+def _failing_client(exc: Exception) -> Any:
+    async def _create(**_kwargs: Any) -> Any:
+        raise exc
+
+    return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=_create)))
+
+
 def _usage_from_events(events: list[Any]) -> UsageEvent:
     return next(e for e in events if isinstance(e, UsageEvent))
 
@@ -132,3 +139,28 @@ async def test_invariant_cached_equals_read_plus_creation() -> None:
     assert usage.cache_read_tokens == 900
     assert usage.cache_creation_tokens == 0
     assert usage.cached_tokens == usage.cache_read_tokens + usage.cache_creation_tokens
+
+
+@pytest.mark.asyncio
+async def test_stream_error_logs_structured_context(caplog: pytest.LogCaptureFixture) -> None:
+    client = _failing_client(RuntimeError("boom"))
+    with (
+        caplog.at_level("WARNING", logger="monkeybot.providers._openai_compat"),
+        pytest.raises(RuntimeError, match="boom"),
+    ):
+        [
+            ev
+            async for ev in iter_openai_compat_stream(
+                client,
+                {"model": "m"},
+                provider="openai",
+                n_messages=2,
+                n_tools=3,
+            )
+        ]
+
+    assert "OpenAI-compat stream error" in caplog.text
+    assert "provider=openai" in caplog.text
+    assert "model=m" in caplog.text
+    assert "n_messages=2" in caplog.text
+    assert "n_tools=3" in caplog.text

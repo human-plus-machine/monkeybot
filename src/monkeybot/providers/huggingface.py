@@ -152,7 +152,13 @@ class HuggingFaceProvider:
             kwargs["tools"] = openai_tools(tools)
 
         try:
-            async for event in iter_openai_compat_stream(client, kwargs):
+            async for event in iter_openai_compat_stream(
+                client,
+                kwargs,
+                provider="huggingface",
+                n_messages=len(messages),
+                n_tools=len(tools),
+            ):
                 yield event
         except Exception as exc:
             if tools and _is_tool_unsupported_error(exc):
@@ -163,7 +169,13 @@ class HuggingFaceProvider:
                     exc,
                 )
                 kwargs.pop("tools", None)
-                async for event in iter_openai_compat_stream(client, kwargs):
+                async for event in iter_openai_compat_stream(
+                    client,
+                    kwargs,
+                    provider="huggingface",
+                    n_messages=len(messages),
+                    n_tools=0,
+                ):
                     yield event
             else:
                 raise
