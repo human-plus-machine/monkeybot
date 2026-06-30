@@ -64,6 +64,7 @@ dev = [
     "tiktoken>=0.7.0",
     "types-pyyaml>=6.0.12",
     "asgi-lifespan>=2.1.0",
+    "anthropic[vertex,bedrock]>=0.40.0",
 ]
 
 [tool.uv]

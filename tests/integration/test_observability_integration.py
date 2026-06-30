@@ -27,7 +27,7 @@ from monkeybot.core.runtime.events import TurnComplete, UsageTotals
 from monkeybot.core.runtime.loop import run
 from monkeybot.core.subagents.subagent_proto import SubagentEnvelope
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
-from tests.core.test_loop import AllowInspector, FakeHistory, FakeProvider, _ctx
+from tests.core.test_loop import AllowInspector, FakeHistory, FakeProvider, _ctx, _ctx_with_task
 from tests.core.test_subagent_trace_propagation import (
     _mem_sub,
     _NoMCP,
@@ -322,6 +322,9 @@ async def test_integrated_run_task_subagent_shares_parent_trace_id(
     worker_script = tmp_path / "subagent_worker.py"
     worker_script.write_text("# stub\n", encoding="utf-8")
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker_script))
+    agent_md = tmp_path / "AGENT.md"
+    agent_md.write_text("# Agent\n", encoding="utf-8")
+    monkeypatch.setenv("AGENT_MD", str(agent_md))
 
     ex = CoreToolExecutor(
         workspace_root=tmp_path,
@@ -337,7 +340,7 @@ async def test_integrated_run_task_subagent_shares_parent_trace_id(
             [TextDelta(text="done"), Done()],
         ]
     )
-    ctx = _ctx()
+    ctx = _ctx_with_task()
     ctx = TurnContext(
         thread_id=ctx.thread_id,
         request_id=ctx.request_id,
