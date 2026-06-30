@@ -350,27 +350,21 @@ class PostgresRunStore:
         envelope: SubagentEnvelope,
         scratch_dir: object,
     ) -> None:
-        now_ms = int(time.time() * 1000)
-        async with self._pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO subagent_runs(
-                    run_id, parent_run_id, script, envelope_json,
-                    status, result_json, error_json, started_at, finished_at, scratch_dir,
-                    worker_id, claimed_at
-                )
-                VALUES ($1, $2, $3, $4, 'pending', NULL, NULL, $5, NULL, $6, NULL, NULL)
-                """,
-                run_id,
-                parent_run_id,
-                script,
-                envelope.to_json(),
-                now_ms,
-                str(scratch_dir),
-            )
+        await self._record_run("pending", run_id, parent_run_id, script, envelope, scratch_dir)
 
     async def record_started(
         self,
+        run_id: str,
+        parent_run_id: str | None,
+        script: str,
+        envelope: SubagentEnvelope,
+        scratch_dir: object,
+    ) -> None:
+        await self._record_run("running", run_id, parent_run_id, script, envelope, scratch_dir)
+
+    async def _record_run(
+        self,
+        status: str,
         run_id: str,
         parent_run_id: str | None,
         script: str,
@@ -386,12 +380,13 @@ class PostgresRunStore:
                     status, result_json, error_json, started_at, finished_at, scratch_dir,
                     worker_id, claimed_at
                 )
-                VALUES ($1, $2, $3, $4, 'running', NULL, NULL, $5, NULL, $6, NULL, NULL)
+                VALUES ($1, $2, $3, $4, $5, NULL, NULL, $6, NULL, $7, NULL, NULL)
                 """,
                 run_id,
                 parent_run_id,
                 script,
                 envelope.to_json(),
+                status,
                 now_ms,
                 str(scratch_dir),
             )

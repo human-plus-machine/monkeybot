@@ -8,12 +8,12 @@ import re
 from collections.abc import Sequence
 from typing import Any, Literal
 
+from monkeybot.core.context.common import ContextPressureTier, text_from_blocks
 from monkeybot.core.context.tool_output_policy import ToolOutputBudget, resolve_tool_budget
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.types.content_blocks import ContentBlock, Text, ToolResponse
 
 ContentType = Literal["json", "logs", "code", "prose"]
-ContextPressureTier = Literal["light", "moderate", "aggressive"]
 
 _DEFAULT_LOG_HEAD_LINES = 40
 _DEFAULT_LOG_TAIL_LINES = 40
@@ -87,14 +87,6 @@ def classify_content(text: str, *, tool_name: str, hint: str | None = None) -> C
         return "logs"
 
     return "prose"
-
-
-def _text_from_blocks(blocks: Sequence[ContentBlock]) -> str:
-    parts: list[str] = []
-    for block in blocks:
-        if isinstance(block, Text):
-            parts.append(block.text)
-    return "".join(parts)
 
 
 def _compiled_keep_patterns(patterns: tuple[str, ...]) -> tuple[re.Pattern[str], ...]:
@@ -327,7 +319,7 @@ def shape_messages_tool_results(
             if not isinstance(block, ToolResponse) or block.is_error:
                 new_content.append(block)
                 continue
-            text = _text_from_blocks(list(block.result))
+            text = text_from_blocks(list(block.result))
             budget = resolve_tool_budget(block.tool_name)
             shaped = shape_tool_text(
                 text,
