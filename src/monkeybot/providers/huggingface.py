@@ -23,10 +23,8 @@ Install the required extra::
 
 from __future__ import annotations
 
-import logging
 import os
 from collections.abc import AsyncIterator, Sequence
-from typing import Any
 
 from monkeybot.core.llm.provider import (
     Message,
@@ -34,15 +32,11 @@ from monkeybot.core.llm.provider import (
 )
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._openai_compat import (
-    count_openai_compat_input_tokens,
+    count_input_tokens_tiktoken,
     is_tool_unsupported_error,
-    iter_openai_compat_stream,
-    messages_to_openai,
-    openai_tools,
+    stream_chat_completions_with_tool_fallback,
 )
 from monkeybot.providers.sampling import resolve_model_sampling
-
-_log = logging.getLogger(__name__)
 
 _DEFAULT_HOST = "https://router.huggingface.co/hf-inference"
 
@@ -113,14 +107,7 @@ class HuggingFaceProvider:
         *,
         model: str,
     ) -> int:
-        import tiktoken  # noqa: PLC0415
-
-        msgs = list(messages)
-        try:
-            enc = tiktoken.encoding_for_model(model)
-        except KeyError:
-            enc = tiktoken.get_encoding("cl100k_base")
-        return count_openai_compat_input_tokens(enc, msgs, tools)
+        return await count_input_tokens_tiktoken(messages, tools, model=model)
 
     async def stream(
         self,
@@ -131,50 +118,14 @@ class HuggingFaceProvider:
         thinking_budget: int | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         del thinking_budget
-        from openai import AsyncOpenAI  # noqa: PLC0415
-
-        msgs = list(messages)
-
-        system, oai_messages = messages_to_openai(msgs)
-        if system:
-            oai_messages = [{"role": "system", "content": system}, *oai_messages]
-
-        client = AsyncOpenAI(base_url=self._resolve_base_url(model), api_key=self._token)
-        kwargs: dict[str, Any] = {
-            "model": model,
-            "messages": oai_messages,
-            "stream": True,
-            "temperature": self._temperature,
-            "max_tokens": self._max_tokens,
-        }
-        if tools:
-            kwargs["tools"] = openai_tools(tools)
-
-        try:
-            async for event in iter_openai_compat_stream(
-                client,
-                kwargs,
-                provider="huggingface",
-                n_messages=len(messages),
-                n_tools=len(tools),
-            ):
-                yield event
-        except Exception as exc:
-            if tools and is_tool_unsupported_error(exc):
-                _log.warning(
-                    "HuggingFace model %r does not support tool calling; retrying without tools. "
-                    "Error: %s",
-                    model,
-                    exc,
-                )
-                kwargs.pop("tools", None)
-                async for event in iter_openai_compat_stream(
-                    client,
-                    kwargs,
-                    provider="huggingface",
-                    n_messages=len(messages),
-                    n_tools=0,
-                ):
-                    yield event
-            else:
-                raise
+        async for event in stream_chat_completions_with_tool_fallback(
+            base_url=self._resolve_base_url(model),
+            api_key=self._token,
+            provider="huggingface",
+            messages=messages,
+            tools=tools,
+            model=model,
+            temperature=self._temperature,
+            max_tokens=self._max_tokens,
+        ):
+            yield event

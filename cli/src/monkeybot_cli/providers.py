@@ -49,7 +49,13 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
         ("huggingface",), "huggingface", ("HF_TOKEN", "HUGGINGFACE_API_KEY")
     ),
     "ollama": ProviderSpec(
-        ("ollama",), "ollama", ("OLLAMA_BASE_URL", "OLLAMA_API_KEY"), credentials_optional=True
+        # credential_env_vars is empty: credentials_optional=True short-circuits
+        # credentials_present() before these are ever read, and OLLAMA_BASE_URL
+        # isn't a credential anyway (it's just the server address).
+        ("ollama",),
+        "ollama",
+        (),
+        credentials_optional=True,
     ),
     "fake": ProviderSpec(("fake",), None, ()),
 }

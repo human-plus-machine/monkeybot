@@ -1,6 +1,10 @@
 """Shared helpers for OpenAI-compatible Chat Completions providers.
 
-Used by OpenAIProvider and HuggingFaceProvider — same wire format, different auth/URLs.
+Used by OpenAIProvider, HuggingFaceProvider, and OllamaProvider — same wire
+format, different auth/URLs. ``count_input_tokens_tiktoken`` and
+``stream_chat_completions_with_tool_fallback`` provide full method bodies for
+providers whose ``count_input_tokens``/``stream`` differ only by base URL,
+API key, and provider name (HuggingFace, Ollama).
 """
 
 from __future__ import annotations
@@ -267,6 +271,90 @@ async def iter_openai_compat_stream(
     yield Done()
 
 
+async def count_input_tokens_tiktoken(
+    messages: Sequence[Message],
+    tools: Sequence[ToolDef],
+    *,
+    model: str,
+) -> int:
+    """Shared ``count_input_tokens`` body for tiktoken-based providers.
+
+    Falls back to ``cl100k_base`` when ``model`` isn't a tiktoken-known model id
+    (true for most non-OpenAI models served through an OpenAI-compat endpoint).
+    """
+    import tiktoken  # noqa: PLC0415
+
+    msgs = list(messages)
+    try:
+        enc = tiktoken.encoding_for_model(model)
+    except KeyError:
+        enc = tiktoken.get_encoding("cl100k_base")
+    return count_openai_compat_input_tokens(enc, msgs, tools)
+
+
+async def stream_chat_completions_with_tool_fallback(
+    *,
+    base_url: str,
+    api_key: str,
+    provider: str,
+    messages: Sequence[Message],
+    tools: Sequence[ToolDef],
+    model: str,
+    temperature: float,
+    max_tokens: int,
+) -> AsyncIterator[ProviderEvent]:
+    """Shared ``stream`` body for OpenAI-compat providers that retry without
+    tools when the upstream server rejects function calling (HuggingFace,
+    Ollama, …).
+    """
+    from openai import AsyncOpenAI  # noqa: PLC0415
+
+    msgs = list(messages)
+    system, oai_messages = messages_to_openai(msgs)
+    if system:
+        oai_messages = [{"role": "system", "content": system}, *oai_messages]
+
+    client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": oai_messages,
+        "stream": True,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if tools:
+        kwargs["tools"] = openai_tools(tools)
+
+    try:
+        async for event in iter_openai_compat_stream(
+            client,
+            kwargs,
+            provider=provider,
+            n_messages=len(messages),
+            n_tools=len(tools),
+        ):
+            yield event
+    except Exception as exc:
+        if tools and is_tool_unsupported_error(exc):
+            _log.warning(
+                "%s model %r does not support tool calling; retrying without tools. Error: %s",
+                provider,
+                model,
+                exc,
+            )
+            kwargs.pop("tools", None)
+            async for event in iter_openai_compat_stream(
+                client,
+                kwargs,
+                provider=provider,
+                n_messages=len(messages),
+                n_tools=0,
+            ):
+                yield event
+        else:
+            raise
+
+
 def is_tool_unsupported_error(exc: BaseException) -> bool:
     """Return True when the exception likely indicates unsupported tool calling.
 
@@ -298,6 +386,7 @@ def is_tool_unsupported_error(exc: BaseException) -> bool:
 
 
 __all__ = [
+    "count_input_tokens_tiktoken",
     "count_openai_compat_input_tokens",
     "is_tool_unsupported_error",
     "iter_openai_compat_stream",
@@ -305,4 +394,5 @@ __all__ = [
     "openai_messages_token_count",
     "openai_tools",
     "openai_tools_token_count",
+    "stream_chat_completions_with_tool_fallback",
 ]
