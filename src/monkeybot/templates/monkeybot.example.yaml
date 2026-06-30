@@ -30,6 +30,8 @@ paths:
   memory_storage_uri: local://./data/memory
   skills_path: ./skills
   db_url: sqlite:///data/monkeybot.db
+  # Apply SQLite/Postgres DDL on startup (true | false). Default true. Set false when migrations own the schema.
+  auto_schema: true
   mcp_config: ./monkeybot_config/mcp.json
   command_allowlist_config: ./monkeybot_config/command_allowlist.yaml
   workspace_root: ./workspace
@@ -80,6 +82,18 @@ context_curation:
   max_memory_lines: 12
   max_skills: 5
   search_max_hits: 8
+
+emission:
+  # Terse emission-style guidance injected into the cached harness prefix.
+  # Two named modes:
+  #   off    (default) — no prompt change. Use for conversational / user-facing
+  #                      agents where warmth and explanation are the deliverable.
+  #   terse            — cut model output volume (less code, less prose). When the
+  #                      `task` tool is active, also requests dense, minified
+  #                      agent-to-agent handoffs (Lever 3).
+  # Env override: MONKEYBOT_EMISSION_STYLE — accepts off | terse | true | 1 | on | yes
+  # (any value other than the terse-set means off).
+  style: off
 
 memory_hook:
   enabled: true

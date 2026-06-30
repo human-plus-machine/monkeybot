@@ -24,6 +24,7 @@ Validate/doctor: `doctor` → `runtime.port.free`.
 | `memory_storage_uri` | `local://./data/memory` | `gcs://…` for shared/cloud memory (requires GCP project) |
 | `skills_path` | `./skills` | Point at a different skills tree |
 | `db_url` | `sqlite:///data/monkeybot.db` | **Postgres for parallel subagents** — SQLite hits `database is locked` under concurrency |
+| `auto_schema` | `true` | Set `false` when migrations own the schema (managed Postgres with DML-only runtime user) |
 | `mcp_config` | `./monkeybot_config/mcp.json` | Relocate MCP definitions |
 | `command_allowlist_config` | `./monkeybot_config/command_allowlist.yaml` | Relocate the shell allowlist |
 | `workspace_root` | `./workspace` (if present) | Change the file-tool sandbox root |

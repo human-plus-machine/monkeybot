@@ -4,6 +4,7 @@ The agent loop appends :func:`harness_fixed_context` after the operator-authored
 base prompt (AGENT.md) so tool/MCP protocol text lives in code, not in the bot file.
 """
 
+import os
 from collections.abc import Sequence
 
 HARNESS_TOOL_CALL_PROTOCOL = """
@@ -67,6 +68,56 @@ _WEB_SEARCH_LINE = (
 )
 
 
+# Always-on terse-emission guidance (Levers 1-2 of the honey writing style).
+# Trimmed to rules + safety carve-outs; no examples (volume is cost). Lives in
+# the stable harness prefix so it caches, and never overrides the evidence or
+# no-repeat rules above. Opt-in via ``emission_style`` (env MONKEYBOT_EMISSION_STYLE).
+_EMISSION_STYLE_BLOCK = """
+### Emission style (terse)
+
+Volume is cost. Default to terse; add detail only when brevity would drop correctness.
+
+- **Code:** write the minimum that needs to exist. Prefer stdlib and installed deps over new code; edit over add; one line over a block. No speculative params, "might need it later" branches, or single-caller abstractions.
+- **Prose:** answer first. Drop wind-up, hedging, and restating the request. Use fragments/lists over paragraphs when they carry the same info. Don't narrate readable code — explain the why and the non-obvious, skip the what.
+- **Keep exact, never compress:** code blocks verbatim and runnable; identifiers, paths, commands, versions, and error messages quoted exactly.
+
+Never cut (brevity must not break correctness):
+- Input validation at trust boundaries, error handling that prevents data loss, and security/auth checks.
+- The blocker report when every tool path failed — state what failed and what's needed; do not synthesize missing content (see the evidence rule below).
+- Anything the user explicitly asked for.
+
+When editing code, keep function bodies — signatures alone are not enough to edit correctly.
+"""
+
+# Lever 3: dense agent-to-agent handoffs. Only meaningful when the `task` tool
+# is active, so the caller gates this on ``include_task_tool``.
+_EMISSION_AGENT_TO_AGENT_BLOCK = """
+### Subagent handoffs (dense)
+
+When the reader is a subagent or orchestrator (`task` results, not user-facing answers), emit the densest format the receiver parses losslessly:
+- Minified JSON, never pretty-printed.
+- Address records by stable key, not position ("the finding with id X", not "the 37th").
+- Aggregate in code; pass counts, not rows for the receiver to count. Number rows only if positional access is unavoidable.
+- For uniform record arrays, prefer columnar: keys once, then value rows.
+"""
+
+
+def emission_style_terse_from_env() -> bool:
+    """True when ``MONKEYBOT_EMISSION_STYLE`` opts into the terse emission block."""
+    raw = os.environ.get("MONKEYBOT_EMISSION_STYLE", "").strip().lower()
+    return raw in {"terse", "true", "1", "on", "yes"}
+
+
+def _emission_section(*, emission_style: bool, include_task_tool: bool) -> str:
+    """Stable-prefix emission guidance; empty unless terse style is opted in."""
+    if not emission_style:
+        return ""
+    section = _EMISSION_STYLE_BLOCK
+    if include_task_tool:
+        section += _EMISSION_AGENT_TO_AGENT_BLOCK
+    return section
+
+
 def _subagent_personas_block(personas: Sequence[tuple[str, str]]) -> str:
     if not personas:
         return ""
@@ -87,6 +138,7 @@ def harness_fixed_context(
     memory_storage_uri: str = "(not set)",
     run_command_opensandbox: bool = False,
     subagent_personas: Sequence[tuple[str, str]] | None = None,
+    emission_style: bool = False,
 ) -> str:
     """Runtime-owned description of core tools, paths, MCP naming, and strict tool-call rules.
 
@@ -96,6 +148,9 @@ def harness_fixed_context(
     ``run_command_opensandbox`` should match whether ``run_command`` is routed through
     OpenSandbox (same signal as ``SandboxConfig.from_env().enabled``).
     ``subagent_personas`` lists configured named subagent types for the parent orchestrator.
+    ``emission_style`` opts in the terse emission-guidance block (env
+    ``MONKEYBOT_EMISSION_STYLE``); the dense agent-to-agent sub-block is also gated
+    on ``include_task_tool`` so it only appears when the ``task`` tool is active.
     """
     exec_note = _RUN_COMMAND_EXEC_NOTE_SANDBOX if run_command_opensandbox else _RUN_COMMAND_EXEC_NOTE_HOST
     body = _HARNESS_BODY.format(
@@ -106,4 +161,8 @@ def harness_fixed_context(
         memory_storage_uri=memory_storage_uri,
     )
     personas_block = _subagent_personas_block(subagent_personas or ())
-    return body.rstrip() + personas_block + HARNESS_TOOL_CALL_PROTOCOL
+    emission_block = _emission_section(
+        emission_style=emission_style,
+        include_task_tool=include_task_tool,
+    )
+    return body.rstrip() + personas_block + emission_block + HARNESS_TOOL_CALL_PROTOCOL

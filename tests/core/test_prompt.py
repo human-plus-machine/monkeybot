@@ -125,6 +125,33 @@ def test_compose_harness_reflects_sandbox_env(monkeypatch: pytest.MonkeyPatch) -
     assert "OpenSandbox" in out_s
 
 
+def test_compose_harness_reflects_emission_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MONKEYBOT_EMISSION_STYLE", raising=False)
+    ctx = _minimal_ctx()
+    assert "### Emission style (terse)" not in compose_system_prompt(ctx)
+
+    monkeypatch.setenv("MONKEYBOT_EMISSION_STYLE", "terse")
+    out = compose_system_prompt(ctx)
+    assert "### Emission style (terse)" in out
+    # No task tool in the minimal ctx, so the agent-to-agent sub-block stays out.
+    assert "### Subagent handoffs (dense)" not in out
+
+
+def test_compose_emission_agent_to_agent_block_gated_on_task_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MONKEYBOT_EMISSION_STYLE", "terse")
+    ctx = _minimal_ctx(
+        tools=[ToolDef("task", "subagent", {"type": "object", "properties": {}, "required": []})],
+    )
+    out = compose_system_prompt(ctx)
+    assert "### Subagent handoffs (dense)" in out
+    # Emission block lives in the stable (cacheable) prefix, before volatile sections.
+    stable, _ = split_system_prompt_for_cache(out)
+    assert "### Emission style (terse)" in stable
+    assert "### Subagent handoffs (dense)" in stable
+
+
 def test_current_request_appears_after_harness() -> None:
     ctx = _minimal_ctx()
     msgs = [

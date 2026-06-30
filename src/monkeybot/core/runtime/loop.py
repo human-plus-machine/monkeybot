@@ -1250,6 +1250,24 @@ async def _run_inner_core(
                         needs_followup_after_tools = False
                         return
 
+                    # A provider couldn't parse the streamed tool JSON: args are
+                    # empty and ``parse_error`` holds the reason. Surface it as a
+                    # tool error result so the model can self-correct instead of
+                    # executing the tool with empty arguments.
+                    if call.parse_error:
+                        yield ToolCallStarted(
+                            request_id=ctx.request_id,
+                            tool=call.name,
+                            label=call.name,
+                            args=dict(call.args),
+                        )
+                        result_evt, tool_resp = _tool_outcome(
+                            call, ctx.request_id, ToolExecutionResult.err(call.parse_error)
+                        )
+                        yield result_evt
+                        chunk_responses.append(tool_resp)
+                        continue
+
                     inspector_call = InspectorToolCall(
                         call_id=call.call_id, name=call.name, args=dict(call.args)
                     )

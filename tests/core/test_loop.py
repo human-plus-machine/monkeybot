@@ -492,6 +492,50 @@ async def test_run_inspector_allow_invokes_executor_once() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_parse_error_short_circuits_execution() -> None:
+    prov = FakeProvider(
+        [
+            [
+                ToolCall(
+                    call_id="c1",
+                    name="run_command",
+                    args={},
+                    parse_error="malformed tool args JSON: boom",
+                ),
+                Done(),
+            ],
+            [TextDelta(text="recovered"), Done()],
+        ]
+    )
+    hist = FakeHistory()
+    exe = RecordingExecutor()
+    ctx = _ctx()
+    events = []
+    async for e in run(
+        "u",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[AllowInspector()],
+        tool_executor=exe,
+        max_turns=3,
+    ):
+        events.append(e)
+    # The tool must NOT execute with the empty args the provider fell back to.
+    assert exe.calls == []
+    assert prov.stream_calls == 2
+    assert any(
+        isinstance(e, ToolCallResult)
+        and e.tool == "run_command"
+        and isinstance(e.error, str)
+        and "malformed tool args JSON" in e.error
+        for e in events
+    )
+    assert any(isinstance(e, AssistantDelta) and e.delta == "recovered" for e in events)
+    assert isinstance(events[-1], TurnComplete)
+
+
+@pytest.mark.asyncio
 async def test_run_cancellation_between_two_tools_second_skipped() -> None:
     cancel = asyncio.Event()
 
