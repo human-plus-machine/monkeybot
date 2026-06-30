@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -12,6 +14,7 @@ from monkeybot.core.config.settings import SubagentConfig
 from monkeybot.core.runtime.events import AssistantDelta, Error, Thinking, event_to_json
 from monkeybot.core.subagents.subagent_proto import (
     SubagentEnvelope,
+    _default_subprocess_exec,
     default_subagent_script,
     normalize_sqlite_db_url,
     resolve_agent_project_root,
@@ -347,3 +350,19 @@ async def test_spawn_subagent_nonzero_exit_logs_warning(
     assert any(isinstance(e, Error) and "code 7" in e.error for e in collected)
     assert "subagent process exited nonzero" in caplog.text
     assert "exit_code=7" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_default_subprocess_exec_discards_stderr_to_avoid_deadlock(tmp_path: Path) -> None:
+    script = tmp_path / "child.py"
+    script.write_text(
+        "import sys\n"
+        "sys.stderr.write('x' * 200000)\n"
+        "sys.stderr.flush()\n"
+        "print('ok', flush=True)\n",
+        encoding="utf-8",
+    )
+    proc = await _default_subprocess_exec(sys.executable, "-u", str(script))
+    assert proc.stdout is not None
+    assert (await asyncio.wait_for(proc.stdout.readline(), timeout=2)).strip() == b"ok"
+    assert await asyncio.wait_for(proc.wait(), timeout=2) == 0

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator, Sequence
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from monkeybot.core.context import TurnContext
 from monkeybot.core.llm.provider import Message, Provider, ProviderEvent, ToolDef
@@ -40,8 +40,14 @@ class ObservingProvider:
         tools: Sequence[ToolDef],
         *,
         model: str,
+        thinking_budget: int | None = None,
     ) -> int:
-        return await self._inner.count_input_tokens(messages, tools, model=model)
+        return await self._inner.count_input_tokens(
+            messages,
+            tools,
+            model=model,
+            thinking_budget=thinking_budget,
+        )
 
     def stream(
         self,
@@ -91,7 +97,7 @@ def instrument_fastapi_app(app: object) -> None:
         )
         return
     FastAPIInstrumentor().instrument_app(cast("FastAPI", app))
-    setattr(app, "_monkeybot_otel_fastapi_instrumented", True)
+    cast(Any, app)._monkeybot_otel_fastapi_instrumented = True
 
 
 def get_current_trace_id_hex_optional() -> str | None:

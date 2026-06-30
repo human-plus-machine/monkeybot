@@ -108,7 +108,9 @@ class HuggingFaceProvider:
         tools: Sequence[ToolDef],
         *,
         model: str,
+        thinking_budget: int | None = None,
     ) -> int:
+        del thinking_budget
         import tiktoken  # noqa: PLC0415
 
         msgs = list(messages)

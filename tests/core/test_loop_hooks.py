@@ -28,9 +28,9 @@ from monkeybot.core.llm.provider import (
     ToolCall,
 )
 from monkeybot.core.runtime.loop import run
-from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.testing.mocks_provider import fake_provider_prompt_tokens
 from monkeybot.core.tools.inspector import Decision
+from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.types.content_blocks import Text, ToolResponse
 from monkeybot.core.types.types_tools import ToolDef
 
@@ -109,8 +109,9 @@ class CapturingProvider:
         tools: Sequence[ToolDef],
         *,
         model: str,
+        thinking_budget: int | None = None,
     ) -> int:
-        del model
+        del model, thinking_budget
         return fake_provider_prompt_tokens(messages, tools)
 
 

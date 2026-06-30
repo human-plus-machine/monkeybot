@@ -46,8 +46,10 @@ class _FakeInner:
         tools: Sequence[ToolDef],
         *,
         model: str,
+        thinking_budget: int | None = None,
     ) -> int:
         del messages, tools, model
+        self.thinking_budget = thinking_budget
         return 42
 
 
@@ -83,6 +85,15 @@ async def test_observing_provider_delegates_count_input_tokens() -> None:
     wrapped = ObservingProvider(_FakeInner())
     n = await wrapped.count_input_tokens([], [], model="m")
     assert n == 42
+
+
+@pytest.mark.asyncio
+async def test_observing_provider_forwards_count_input_tokens_thinking_budget() -> None:
+    inner = _FakeInner()
+    wrapped = ObservingProvider(inner)
+    n = await wrapped.count_input_tokens([], [], model="m", thinking_budget=0)
+    assert n == 42
+    assert inner.thinking_budget == 0
 
 
 def test_instrument_fastapi_app_noop_when_disabled(
