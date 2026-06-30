@@ -267,8 +267,39 @@ async def iter_openai_compat_stream(
     yield Done()
 
 
+def is_tool_unsupported_error(exc: BaseException) -> bool:
+    """Return True when the exception likely indicates unsupported tool calling.
+
+    Shared by providers (HuggingFace, Ollama, …) that fall back to a tool-less
+    request when the upstream model/server rejects function calling.
+    """
+    try:
+        from openai import APIStatusError  # noqa: PLC0415
+    except ImportError:
+        msg = str(exc).lower()
+        return "tool" in msg and "unsupported" in msg
+
+    if isinstance(exc, APIStatusError):
+        if exc.status_code not in (400, 422):
+            return False
+        body = str(exc.body or exc.message or "").lower()
+        return any(
+            phrase in body
+            for phrase in (
+                "tool",
+                "function_call",
+                "functions",
+                "unsupported",
+            )
+        )
+
+    msg = str(exc).lower()
+    return "tool" in msg and "unsupported" in msg
+
+
 __all__ = [
     "count_openai_compat_input_tokens",
+    "is_tool_unsupported_error",
     "iter_openai_compat_stream",
     "messages_to_openai",
     "openai_messages_token_count",

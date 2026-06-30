@@ -137,6 +137,7 @@ There is no claim heartbeat yet — subagent runs longer than `MONKEYBOT_WORKER_
 | **GCP Secret Manager** | Production | Production secrets management |
 | **Google Chat** | Optional | Workspace Add-on interface (when deployed) |
 | **OpenAI** | Supported | `OpenAIProvider` (`monkeybot[openai]`) via `get_provider_config()` |
+| **Ollama** | Supported | `OllamaProvider` for local models (`monkeybot[ollama]`), no API key required |
 | **Anthropic Claude** | Supported | `ClaudeProvider` (`monkeybot[claude]`) via `get_provider_config()` |
 | **Anthropic via Vertex AI** | Supported | `VertexClaudeProvider` (`anthropic[vertex]`) |
 | **AWS Bedrock** | Supported | `BedrockClaudeProvider` (`monkeybot[bedrock]`); `MODEL_PROVIDER=aws_bedrock` |

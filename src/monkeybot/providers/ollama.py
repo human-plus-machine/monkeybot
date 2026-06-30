@@ -1,24 +1,25 @@
-"""Hugging Face provider via the OpenAI-compatible Chat Completions API.
+"""Ollama provider via the OpenAI-compatible Chat Completions API.
 
-Default host is the HF inference router (``router.huggingface.co/hf-inference``).
-Override with ``HF_BASE_URL`` for provider-specific routers (e.g. Cerebras) or
-``HF_ENDPOINT_URL`` for a dedicated Inference Endpoint.
+Runs against a local (or remote) Ollama server — no API key required. Ollama
+exposes an OpenAI-compatible endpoint at ``/v1`` on top of its native API, so
+this adapter reuses the same request/response plumbing as ``OpenAIProvider``
+and ``HuggingFaceProvider``.
 
 Configuration (environment variables or ``monkeybot.yaml``):
 
-- ``HF_TOKEN`` (**required**) — Hugging Face API token
-- ``HF_ENDPOINT_URL`` — full base URL of a dedicated Inference Endpoint
-  (takes precedence over ``HF_BASE_URL`` and the default)
-- ``HF_BASE_URL`` — OpenAI-compat base host (default:
-  ``https://router.huggingface.co/hf-inference``; append ``/v1`` when missing)
-- ``MODEL_NAME`` — model id passed to the API (e.g. ``meta-llama/Llama-3.1-8B-Instruct``)
+- ``OLLAMA_BASE_URL`` — OpenAI-compat base host (default: ``http://localhost:11434``;
+  ``/v1`` is appended when missing)
+- ``OLLAMA_API_KEY`` — optional; Ollama ignores the value but the OpenAI SDK
+  requires a non-empty string. Set this only if a reverse proxy enforces auth.
+- ``MODEL_NAME`` — model id passed to the API (e.g. ``llama3.1``, ``qwen2.5``).
+  Must already be pulled on the Ollama server (``ollama pull <model>``).
 - ``MODEL_TEMPERATURE`` — sampling temperature (default: ``0.7``; set via ``monkeybot.yaml`` / constructor)
 - ``MODEL_MAX_TOKENS`` — max output tokens (default: ``60000``; set via ``monkeybot.yaml`` / constructor)
 
 Install the required extra::
 
-    uv sync --extra huggingface
-    # or: pip install "monkeybot[huggingface]"
+    uv sync --extra ollama
+    # or: pip install "monkeybot[ollama]"
 """
 
 from __future__ import annotations
@@ -44,21 +45,21 @@ from monkeybot.providers.sampling import resolve_model_sampling
 
 _log = logging.getLogger(__name__)
 
-_DEFAULT_HOST = "https://router.huggingface.co/hf-inference"
-
-# Re-exported for tests that historically imported this private name from here.
-_is_tool_unsupported_error = is_tool_unsupported_error
+_DEFAULT_BASE_URL = "http://localhost:11434"
+_DUMMY_API_KEY = "ollama"
 
 
-class HuggingFaceProvider:
-    """Hugging Face models using the OpenAI-compatible Chat Completions endpoint.
+class OllamaProvider:
+    """Local (or self-hosted) models via Ollama's OpenAI-compatible endpoint.
 
-    Requires ``monkeybot[huggingface]`` (``openai`` + ``tiktoken``) and ``HF_TOKEN``.
+    Requires ``monkeybot[ollama]`` (``openai`` + ``tiktoken``) and a reachable
+    Ollama server with the configured model already pulled. No API key is
+    required by default.
     """
 
     @property
     def name(self) -> str:
-        return "huggingface"
+        return "ollama"
 
     @property
     def supports_streaming(self) -> bool:
@@ -71,15 +72,8 @@ class HuggingFaceProvider:
         max_tokens: int | None = None,
         cache_enabled: bool = True,
     ) -> None:
-        token = os.environ.get("HF_TOKEN", "")
-        if not token:
-            raise ValueError(
-                "HF_TOKEN is not set. Create a token at https://huggingface.co/settings/tokens "
-                "and add it to your .env or environment."
-            )
-        self._token = token
-        self._endpoint_url = (os.environ.get("HF_ENDPOINT_URL") or "").rstrip("/")
-        self._host = (os.environ.get("HF_BASE_URL") or _DEFAULT_HOST).rstrip("/")
+        self._base_url = (os.environ.get("OLLAMA_BASE_URL") or _DEFAULT_BASE_URL).rstrip("/")
+        self._api_key = os.environ.get("OLLAMA_API_KEY") or _DUMMY_API_KEY
         # ``cache_enabled`` is accepted for constructor-contract symmetry with the
         # other providers (Story 1) but is currently inert here: the OpenAI-compatible
         # request shape has no cache_control-equivalent field to set.
@@ -91,17 +85,11 @@ class HuggingFaceProvider:
     def _resolve_base_url(self, model: str) -> str:
         """Return the OpenAI-compat base URL for ``model``.
 
-        URL resolution priority:
-        1. ``HF_ENDPOINT_URL`` — dedicated Inference Endpoint, used as-is
-        2. ``HF_BASE_URL`` — when it already ends in ``/v1``, used as-is; else ``/v1`` is appended
-        3. Default — ``router.huggingface.co/hf-inference/v1``
-
-        Router examples: ``HF_BASE_URL=https://router.huggingface.co/cerebras/v1``.
+        ``OLLAMA_BASE_URL`` is used as-is when it already ends in ``/v1``;
+        otherwise ``/v1`` is appended. Defaults to a local Ollama server.
         """
-        del model  # model id is passed per request; endpoint URL is env-driven
-        if self._endpoint_url:
-            return self._endpoint_url
-        host = self._host
+        del model  # model id is passed per request; base URL is env-driven
+        host = self._base_url
         if host.endswith("/v1"):
             return host
         return f"{host}/v1"
@@ -139,7 +127,7 @@ class HuggingFaceProvider:
         if system:
             oai_messages = [{"role": "system", "content": system}, *oai_messages]
 
-        client = AsyncOpenAI(base_url=self._resolve_base_url(model), api_key=self._token)
+        client = AsyncOpenAI(base_url=self._resolve_base_url(model), api_key=self._api_key)
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": oai_messages,
@@ -154,7 +142,7 @@ class HuggingFaceProvider:
             async for event in iter_openai_compat_stream(
                 client,
                 kwargs,
-                provider="huggingface",
+                provider="ollama",
                 n_messages=len(messages),
                 n_tools=len(tools),
             ):
@@ -162,7 +150,7 @@ class HuggingFaceProvider:
         except Exception as exc:
             if tools and is_tool_unsupported_error(exc):
                 _log.warning(
-                    "HuggingFace model %r does not support tool calling; retrying without tools. "
+                    "Ollama model %r does not support tool calling; retrying without tools. "
                     "Error: %s",
                     model,
                     exc,
@@ -171,7 +159,7 @@ class HuggingFaceProvider:
                 async for event in iter_openai_compat_stream(
                     client,
                     kwargs,
-                    provider="huggingface",
+                    provider="ollama",
                     n_messages=len(messages),
                     n_tools=0,
                 ):

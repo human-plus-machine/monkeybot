@@ -47,6 +47,12 @@ class TestVertexAnthropicProvider:
         assert cfg.provider.name == "huggingface"
         assert cfg.model == "meta-llama/Llama-3.1-8B-Instruct"
 
+    def test_get_provider_config_ollama(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+        cfg = get_provider_config(provider="ollama", model_name="llama3.1")
+        assert cfg.provider.name == "ollama"
+        assert cfg.model == "llama3.1"
+
     def test_get_provider_config_vertex_anthropic_happy_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("GCP_PROJECT_ID", "test-project")
         monkeypatch.setenv("ANTHROPIC_VERTEX_REGION", "us-central1")

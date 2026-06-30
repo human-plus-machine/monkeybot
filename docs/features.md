@@ -152,14 +152,15 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Key files:**
 - `core/llm/provider.py` — `Provider` protocol, `Message`, `ProviderEvent`
-- `providers/gemini.py`, `openai.py`, `claude.py`, `vertex_claude.py`, `bedrock.py`, `huggingface.py`
+- `providers/gemini.py`, `openai.py`, `claude.py`, `vertex_claude.py`, `bedrock.py`, `huggingface.py`, `ollama.py`
 - `core/config/settings.py` — `get_provider_config()`
 
 **How it works:**
 - `stream(messages, tools, model=..., thinking_budget=...)` yields `TextDelta`, `ThinkingDelta`, `ToolCall`, `UsageEvent`, `Done`.
 - `count_input_tokens()` must match the same payload shape as `stream()` (summarization triggers, tool budgets).
 - Provider resolution via `MODEL_PROVIDER` aliases (`gemini` → `google_vertexai`, `vertex-claude` → `vertex_anthropic`).
-- Optional extras in `pyproject.toml`: `gemini`, `openai`, `claude`, `vertex-claude`, `bedrock`, `huggingface`.
+- Optional extras in `pyproject.toml`: `gemini`, `openai`, `claude`, `vertex-claude`, `bedrock`, `huggingface`, `ollama`.
+- `ollama` and `huggingface` share the OpenAI-compatible streaming core (`providers/_openai_compat.py`) and only differ in base URL / auth; `ollama` runs against a local server (`OLLAMA_BASE_URL`, default `http://localhost:11434`) and needs no API key.
 - `MODEL_PROVIDER=fake` is gateway/test-only; unit tests inject `ScriptedFakeProvider` directly.
 
 **Depends on:** `ToolDef`, `ContentBlock` serialization per adapter.
