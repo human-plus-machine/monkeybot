@@ -12,6 +12,7 @@ from monkeybot.core.llm.provider import (
 )
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._openai_compat import (
+    count_openai_compat_input_tokens,
     iter_openai_compat_stream,
     messages_to_openai,
     openai_messages_token_count,
@@ -74,15 +75,11 @@ class OpenAIProvider:
         import tiktoken  # noqa: PLC0415
 
         msgs = list(messages)
-        system, oai_messages = messages_to_openai(msgs)
-        if system:
-            oai_messages = [{"role": "system", "content": system}, *oai_messages]
-        tool_defs = openai_tools(tools) if tools else []
         try:
             enc = tiktoken.encoding_for_model(model)
         except KeyError:
             enc = tiktoken.get_encoding("cl100k_base")
-        return openai_messages_token_count(enc, oai_messages) + openai_tools_token_count(enc, tool_defs)
+        return count_openai_compat_input_tokens(enc, msgs, tools)
 
     async def stream(
         self,
