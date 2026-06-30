@@ -203,7 +203,7 @@ def _default_agent_path(bus: SessionBus) -> Path:
 
 
 def _scripted_fake_provider() -> Provider:
-    """Deterministic provider for ``MODEL_PROVIDER=fake`` (tests and playground)."""
+    """Deterministic provider for ``MODEL_PROVIDER=fake`` (tests and local dev)."""
     raw = os.environ.get("MONKEYBOT_FAKE_PROVIDER_EVENTS", "")
     if not raw:
         return ScriptedFakeProvider(

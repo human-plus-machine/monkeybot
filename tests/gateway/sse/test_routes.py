@@ -310,7 +310,7 @@ async def test_get_usage_404_for_unknown_session(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
-async def test_playground_workspace_tree_and_file(
+async def test_workspace_tree_and_file(
     registry: SessionRegistry,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -323,7 +323,7 @@ async def test_playground_workspace_tree_and_file(
 
     app = create_app(loop_port=FakeLoopPort(registry), registry=registry)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        r = await client.get("/api/playground/workspace/tree")
+        r = await client.get("/api/workspace/tree")
         assert r.status_code == 200
         root = r.json()
         assert root["path"] == "."
@@ -331,26 +331,26 @@ async def test_playground_workspace_tree_and_file(
         assert "hello.txt" in names
         assert "nested" in names
 
-        r2 = await client.get("/api/playground/workspace/tree", params={"path": "nested"})
+        r2 = await client.get("/api/workspace/tree", params={"path": "nested"})
         assert r2.status_code == 200
         assert {e["name"] for e in r2.json()["entries"]} == {"inner.txt"}
 
-        rf = await client.get("/api/playground/workspace/file", params={"path": "hello.txt"})
+        rf = await client.get("/api/workspace/file", params={"path": "hello.txt"})
         assert rf.status_code == 200
         body = rf.json()
         assert body["path"] == "hello.txt"
         assert body["total_lines"] == 2
         assert "alpha" in body["content"]
 
-        r404 = await client.get("/api/playground/workspace/tree", params={"path": "missing-dir"})
+        r404 = await client.get("/api/workspace/tree", params={"path": "missing-dir"})
         assert r404.status_code == 404
 
-        r_bad = await client.get("/api/playground/workspace/tree", params={"path": ".."})
+        r_bad = await client.get("/api/workspace/tree", params={"path": ".."})
         assert r_bad.status_code == 400
 
 
 @pytest.mark.asyncio
-async def test_playground_workspace_prefers_workspace_subdirectory(
+async def test_workspace_prefers_workspace_subdirectory(
     registry: SessionRegistry,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -365,7 +365,7 @@ async def test_playground_workspace_prefers_workspace_subdirectory(
 
     app = create_app(loop_port=FakeLoopPort(registry), registry=registry)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        r = await client.get("/api/playground/workspace/tree")
+        r = await client.get("/api/workspace/tree")
         assert r.status_code == 200
         names = {e["name"] for e in r.json()["entries"]}
         assert "hello.txt" in names
@@ -373,31 +373,31 @@ async def test_playground_workspace_prefers_workspace_subdirectory(
 
 
 @pytest.mark.asyncio
-async def test_playground_workspace_disabled_returns_404(
+async def test_workspace_disabled_returns_404(
     registry: SessionRegistry,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("MONKEYBOT_PLAYGROUND_WORKSPACE_API", "0")
+    monkeypatch.setenv("MONKEYBOT_WORKSPACE_API", "0")
     app = create_app(loop_port=FakeLoopPort(registry), registry=registry)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        r = await client.get("/api/playground/workspace/tree")
+        r = await client.get("/api/workspace/tree")
         assert r.status_code == 404
         assert r.json()["error"]["code"] == "NOT_FOUND"
 
 
 @pytest.mark.asyncio
-async def test_playground_workspace_file_requires_path(registry: SessionRegistry, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+async def test_workspace_file_requires_path(registry: SessionRegistry, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     monkeypatch.chdir(tmp_path)
     app = create_app(loop_port=FakeLoopPort(registry), registry=registry)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        r = await client.get("/api/playground/workspace/file", params={"path": "  "})
+        r = await client.get("/api/workspace/file", params={"path": "  "})
         assert r.status_code == 400
 
 
 @pytest.mark.asyncio
-async def test_playground_chat_history_list_and_detail(registry: SessionRegistry) -> None:
+async def test_chat_history_list_and_detail(registry: SessionRegistry) -> None:
     from monkeybot.core.llm.provider import Message
     from monkeybot.core.persistence.sqlite_backend import SQLiteStorageBackend
     from monkeybot.core.types.content_blocks import Text
@@ -412,12 +412,12 @@ async def test_playground_chat_history_list_and_detail(registry: SessionRegistry
         app = create_app(loop_port=FakeLoopPort(registry), registry=registry)
         app.state.storage = backend
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            r = await client.get("/api/playground/chat-history")
+            r = await client.get("/api/chat-history")
             assert r.status_code == 200
             threads = r.json()["threads"]
             assert any(t["session_id"] == "sess-a" for t in threads)
 
-            rd = await client.get("/api/playground/chat-history/sess-a")
+            rd = await client.get("/api/chat-history/sess-a")
             assert rd.status_code == 200
             body = rd.json()
             assert body["session_id"] == "sess-a"
@@ -429,10 +429,10 @@ async def test_playground_chat_history_list_and_detail(registry: SessionRegistry
 
 
 @pytest.mark.asyncio
-async def test_playground_chat_history_disabled_returns_404(registry: SessionRegistry, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MONKEYBOT_PLAYGROUND_CHAT_HISTORY", "0")
+async def test_chat_history_disabled_returns_404(registry: SessionRegistry, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MONKEYBOT_CHAT_HISTORY_API", "0")
     app = create_app(loop_port=FakeLoopPort(registry), registry=registry)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        r = await client.get("/api/playground/chat-history")
+        r = await client.get("/api/chat-history")
         assert r.status_code == 404
         assert r.json()["error"]["code"] == "NOT_FOUND"

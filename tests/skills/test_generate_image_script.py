@@ -17,8 +17,7 @@ import pytest
 
 SCRIPT = (
     Path(__file__).resolve().parents[2]
-    / "playground"
-    / "agent"
+    / "demo_agent"
     / "workspace"
     / "skills"
     / "image-generator"

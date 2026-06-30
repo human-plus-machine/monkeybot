@@ -261,7 +261,7 @@ class FirestoreUsageStore:
         """Aggregate usage rows.
 
         When ``thread_id`` is ``None``, streams the entire ``turn_usage`` collection
-        (playground-scale only; not suitable for large production datasets).
+        (small-scale only; not suitable for large production datasets).
         """
         rows = await self._fetch_usage_rows(thread_id, since_ms)
         if not rows:

@@ -53,8 +53,10 @@ the project adheres to [Semantic Versioning](https://semver.org/).
   OpenAI (`providers/openai.py`), Anthropic (`providers/claude.py`),
   Anthropic-on-Vertex (`providers/vertex_claude.py`). Resolved via
   `monkeybot.core.config.get_provider_config()` returning a `ProviderConfig`.
-- **Playground** under `playground/` — local gateway runner
-  (`playground/agent/`) and Vite + React chat UI (`playground/chat-ui/`).
+- **Demo agent** under `demo_agent/` — self-contained sample agent project
+  (own `pyproject.toml` + `.venv`, harness via editable path dependency) for
+  trying out providers, OpenSandbox, observability, Firestore, and skills.
+  Talk to it with `monkeybot run` / `monkeybot chat` from the CLI.
 - **Reference bot** at `bots/example-bot/` (`AGENT.md`, `MEMORY.md`,
   `config.yaml`).
 - **Default skills** under `.agents/skills/` (`file-ops`, `memory-search`,

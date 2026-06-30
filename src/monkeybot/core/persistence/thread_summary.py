@@ -48,8 +48,8 @@ def text_from_message(message: Message) -> str:
     return "\n".join(parts).strip()
 
 
-def messages_to_playground_wire(messages: list[Message]) -> list[dict[str, str]]:
-    """Serialize user/assistant turns for the playground chat UI."""
+def messages_to_wire(messages: list[Message]) -> list[dict[str, str]]:
+    """Serialize user/assistant turns for the chat-history API."""
     out: list[dict[str, str]] = []
     for msg in messages:
         if msg.role not in ("user", "assistant"):

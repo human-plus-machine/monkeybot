@@ -29,6 +29,11 @@
 - Queue mode: set `MONKEYBOT_TASK_QUEUE=1` to enqueue with `record_pending` instead of inline spawn.
 - Worker pool: standalone `python -m monkeybot.subagents.worker` consumes queued runs with atomic `claim()` (recommended for production — its own event loop, scales independently of the gateway). `MONKEYBOT_WORKER_POOL=1` runs the same loop in-process on the gateway and is development-only (competes with the SSE event loop).
 
+### 7. CLI-managed optional service dependencies
+- `monkeybot chat` / `run` only spawn the gateway process; they don't start the Docker-backed optional services some `monkeybot.yaml` configs require: OpenSandbox (`sandbox.enabled`), Firestore emulator (`paths.db_url: firestore://...`), or the observability stack (Phoenix/Langfuse/OTel collector). `demo_agent/run.sh` currently does this orchestration via bash (build/start/health-check/cleanup), which means the CLI alone can't fully run an agent that uses those features.
+- Decide and implement: should the CLI (`doctor`, `run`, `chat`) detect these from config and actually start/stop the containers (matching `run.sh` behavior, retiring the bash script), or just validate/warn with remediation hints while the user manages Docker manually?
+- Open sub-questions if going the "CLI starts services" route: where do per-project Docker assets live (`opensandbox.docker.toml`, OTel collector yaml, compose files) — agent-project-owned files referenced from `monkeybot.yaml`, or CLI-shipped generic templates; and is the sandbox worker image (project-specific extra deps) something the CLI should build, or stay manual/documented.
+
 ---
 
 ## Do Later

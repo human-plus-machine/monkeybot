@@ -17,7 +17,7 @@ _log = logging.getLogger(__name__)
 
 
 def _parse_sse_blocks(buffer: str) -> tuple[list[dict[str, Any]], str]:
-    """Split SSE buffer into JSON objects (same idea as playground gatewayClient)."""
+    """Split SSE buffer into JSON objects (same idea as a browser SSE client)."""
     events: list[dict[str, Any]] = []
     parts = re.split(r"\r?\n\r?\n", buffer)
     rest = parts.pop() if parts else buffer

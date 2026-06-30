@@ -106,7 +106,7 @@ async def test_apply_schema_raises_when_legacy_tool_columns_present() -> None:
             await apply_schema(conn)
         msg = str(excinfo.value)
         assert "Legacy conversation_history schema detected" in msg
-        assert "rm -f playground/agent/workspace/data/monkeybot.db" in msg
+        assert "rm -f demo_agent/workspace/data/monkeybot.db" in msg
     finally:
         await conn.close()
 
