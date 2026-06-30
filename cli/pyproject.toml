@@ -29,9 +29,6 @@ dev = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/monkeybot_cli"]
 
-[tool.hatch.build.targets.wheel.force-include]
-"src/monkeybot_cli/templates" = "monkeybot_cli/templates"
-
 [tool.ruff]
 line-length = 100
 target-version = "py311"

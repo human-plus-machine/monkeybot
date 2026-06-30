@@ -6,6 +6,9 @@ internal/
 .env.*
 !.env.example
 
+# Local scaffolded harness config (defaults ship in src/monkeybot/monkeybot_config/)
+/monkeybot_config/
+
 # Playground MCP (may contain PATs; untrack with git rm --cached if already committed)
 playground/agent/monkeybot_config/mcp.json
 

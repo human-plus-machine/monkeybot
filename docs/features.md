@@ -386,7 +386,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 **Purpose:** Declarative agent config; secrets in `.env`.
 
 **Key files:**
-- `monkeybot_config/monkeybot.example.yaml`
+- Packaged defaults: `src/monkeybot/monkeybot_config/monkeybot.example.yaml` (scaffolded to `monkeybot_config/monkeybot.example.yaml`)
 - `core/config/runtime_env.py` — `ENV_MAP`, `apply_monkeybot_runtime_env()`
 - `core/config/yaml_loader.py` — includes/deep-merge
 - `core/config/validation.py`
@@ -626,7 +626,7 @@ Separate harness at repo root for higher-level agent evaluation (`evals/main.py`
 | System prompt | `src/monkeybot/core/prompts/prompt.py`, `harness_prompt.py` |
 | Gateway wiring | `src/monkeybot/gateway/sse/app.py` |
 | Tool dispatch | `src/monkeybot/core/tools/core_tool_executor.py` |
-| Config | `core/config/runtime_env.py`, `monkeybot_config/monkeybot.example.yaml` |
+| Config | `core/config/runtime_env.py`, `src/monkeybot/monkeybot_config/monkeybot.example.yaml` |
 | MCP | `core/mcp/mcp_client.py`, `docs/mcp.md` |
 | Memory | `core/memory/subsystem.py`, `core/memory/hook.py` |
 | Library embed | `core/bootstrap.py` |
