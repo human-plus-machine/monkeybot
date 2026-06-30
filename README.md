@@ -177,6 +177,18 @@ Contributions are welcome. You can help by:
 
 Run checks before submitting: `uv run pytest && uv run ruff check . && uv run mypy src/`
 
+### Releasing
+
+`develop` is the working branch; `main` always reflects the latest release.
+
+1. Anyone runs the **Prepare release** workflow (Actions tab → Prepare release → Run workflow), choosing `core` or `cli` and a version bump. It bumps the package's `pyproject.toml`, moves the `CHANGELOG.md` `Unreleased` section into a dated entry on a `release/<package>-v<version>` branch, and opens a PR from that branch into `main` (`develop` itself is untouched until the PR merges, so an abandoned release PR leaves no trace).
+2. An admin reviews and **merges the PR** (branch protection on `main` restricts who can merge — see below). Use a regular merge commit, not squash, so `main`'s history and the release tag line up with what was reviewed.
+3. The **Publish release** workflow runs automatically on that merge: it tags the new version, creates a GitHub Release from the changelog entry, and merges `main` back into `develop` so the two branches don't drift apart.
+
+One-time setup (repo Settings → Branches → add rule for `main`): require a pull request before merging, and restrict who can push to matching branches to Admins. That's the only access control needed — anyone can prepare a release, only admins can promote it to `main`.
+
+**Before relying on this:** `develop` and `main` currently have diverged history (independent commits on each side). Reconcile them once with a manual merge before running the first automated release, or the first release PR may show unrelated changes or conflicts. `CHANGELOG.md` is shared across both packages — `core` and `cli` versions are bumped independently but their release notes live in the same file. The current versions already on `main` (`core` 2.0.0, `cli` 0.1.7) predate this tooling and have no changelog entry, so the first `publish` run intentionally skips tagging them rather than creating a release with empty notes; tagging starts from the next real version bump.
+
 ## License
 
 You may use, modify, and distribute MonkeyBot under the MIT license. See the [`LICENSE`](LICENSE) file for details.
