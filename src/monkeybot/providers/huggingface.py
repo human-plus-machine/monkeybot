@@ -29,12 +29,8 @@ from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 from monkeybot.core.llm.provider import (
-    Done,
     Message,
     ProviderEvent,
-    TextDelta,
-    ToolCall,
-    UsageEvent,
 )
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._openai_compat import (
@@ -49,9 +45,6 @@ from monkeybot.providers.sampling import resolve_model_sampling
 _log = logging.getLogger(__name__)
 
 _DEFAULT_HOST = "https://router.huggingface.co/hf-inference"
-
-# Keep these names importable to silence unused-import linters
-_ = (Done, TextDelta, ToolCall, UsageEvent)
 
 
 class HuggingFaceProvider:
@@ -84,6 +77,9 @@ class HuggingFaceProvider:
         self._token = token
         self._endpoint_url = (os.environ.get("HF_ENDPOINT_URL") or "").rstrip("/")
         self._host = (os.environ.get("HF_BASE_URL") or _DEFAULT_HOST).rstrip("/")
+        # ``cache_enabled`` is accepted for constructor-contract symmetry with the
+        # other providers (Story 1) but is currently inert here: the OpenAI-compatible
+        # request shape has no cache_control-equivalent field to set.
         self._cache_enabled = cache_enabled
         sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens)
         self._temperature = sampling.temperature

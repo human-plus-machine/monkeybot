@@ -148,7 +148,3 @@ class SQLiteHistoryStore:
                 )
             )
         return out
-
-
-# Backwards-compat alias — remove once all call sites are updated.
-ConversationHistory = SQLiteHistoryStore

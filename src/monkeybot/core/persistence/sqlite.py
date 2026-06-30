@@ -181,9 +181,6 @@ async def _ensure_subagent_runs_claim_columns(conn: aiosqlite.Connection) -> Non
     await conn.commit()
 
 
-_ensure_schema = apply_schema
-
-
 async def open_connection(db_url: str | None = None) -> aiosqlite.Connection:
     """Open aiosqlite connection, configure WAL, return ready connection."""
     path = sqlite_path_from_db_url(db_url)
