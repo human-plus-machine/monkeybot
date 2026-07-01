@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from monkeybot.core.llm.provider import UsageEvent
+from monkeybot.core.llm.provider import ThinkingDelta, UsageEvent
 from monkeybot.providers._openai_compat import iter_openai_compat_stream
 
 
@@ -37,10 +37,14 @@ def _usage_chunk(
     return SimpleNamespace(usage=usage, choices=[])
 
 
-def _text_chunk(content: str = "hi") -> SimpleNamespace:
+def _text_chunk(content: str = "hi", *, reasoning: str | None = None) -> SimpleNamespace:
     return SimpleNamespace(
         usage=None,
-        choices=[SimpleNamespace(delta=SimpleNamespace(content=content, tool_calls=None))],
+        choices=[
+            SimpleNamespace(
+                delta=SimpleNamespace(content=content, reasoning=reasoning, tool_calls=None)
+            )
+        ],
     )
 
 
@@ -139,6 +143,15 @@ async def test_invariant_cached_equals_read_plus_creation() -> None:
     assert usage.cache_read_tokens == 900
     assert usage.cache_creation_tokens == 0
     assert usage.cached_tokens == usage.cache_read_tokens + usage.cache_creation_tokens
+
+
+@pytest.mark.asyncio
+async def test_iter_openai_compat_stream_yields_reasoning_delta() -> None:
+    client = _fake_client([_text_chunk(reasoning="plan step")])
+    events = [ev async for ev in iter_openai_compat_stream(client, {})]
+    thinking = [ev for ev in events if isinstance(ev, ThinkingDelta)]
+    assert len(thinking) == 1
+    assert thinking[0].text == "plan step"
 
 
 @pytest.mark.asyncio

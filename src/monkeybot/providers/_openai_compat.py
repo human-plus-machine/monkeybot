@@ -19,6 +19,7 @@ from monkeybot.core.llm.provider import (
     Message,
     ProviderEvent,
     TextDelta,
+    ThinkingDelta,
     ToolCall,
     UsageEvent,
 )
@@ -229,6 +230,9 @@ async def iter_openai_compat_stream(
                 continue
             if delta.content:
                 yield TextDelta(text=delta.content)
+            reasoning = getattr(delta, "reasoning", None)
+            if reasoning:
+                yield ThinkingDelta(text=reasoning)
             if delta.tool_calls:
                 for tc in delta.tool_calls:
                     idx = int(tc.index or 0)
@@ -313,6 +317,7 @@ async def stream_chat_completions_with_tool_fallback(
     model: str,
     temperature: float,
     max_tokens: int,
+    reasoning_effort: str | None = None,
 ) -> AsyncIterator[ProviderEvent]:
     """Shared ``stream`` body for OpenAI-compat providers that retry without
     tools when the upstream server rejects function calling (HuggingFace,
@@ -335,6 +340,8 @@ async def stream_chat_completions_with_tool_fallback(
     }
     if tools:
         kwargs["tools"] = openai_tools(tools)
+    if reasoning_effort is not None:
+        kwargs["reasoning_effort"] = reasoning_effort
 
     try:
         async for event in iter_openai_compat_stream(

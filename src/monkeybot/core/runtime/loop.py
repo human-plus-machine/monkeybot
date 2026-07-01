@@ -361,7 +361,7 @@ def _stream_thinking_budget(
     resolved_messages: Sequence[Message],
 ) -> int | None:
     """Per-call thinking budget override; None keeps the provider default."""
-    if provider.name not in ("gemini", "claude"):
+    if provider.name not in ("gemini", "claude", "ollama"):
         return None
     raw = os.environ.get("MONKEYBOT_RESUME_THINKING_BUDGET", "").strip()
     if not raw:

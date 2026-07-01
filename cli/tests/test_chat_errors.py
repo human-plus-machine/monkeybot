@@ -12,12 +12,28 @@ import pytest
 
 from monkeybot_cli.commands.chat import (
     _chat_session,
+    _finish_assistant_turn,
     _format_gateway_log_tail,
     _format_http_error,
     _SpawnedGateway,
     _tail_gateway_log,
     run_chat,
 )
+from monkeybot_cli.terminal_markdown import MarkdownPlainStream
+
+
+def test_finish_assistant_turn_leaves_blank_line_before_next_prompt(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stream = MarkdownPlainStream()
+    stream.feed("Hello!")
+    _finish_assistant_turn(
+        md_stream=stream,
+        assistant_label_shown=True,
+        show_usage=False,
+    )
+    out = capsys.readouterr().out
+    assert out.endswith("Hello!\n\n")
 
 
 def test_format_http_error_status() -> None:

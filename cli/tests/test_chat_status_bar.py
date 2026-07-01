@@ -59,7 +59,7 @@ def test_format_context_ring_falls_back_to_last_prompt() -> None:
     assert "25%" in ring
 
 
-def test_format_status_line_includes_in_out_cost_not_turns() -> None:
+def test_format_status_line_shows_context_ring_only() -> None:
     usage = SessionUsageView(
         input_tokens=1234,
         output_tokens=567,
@@ -69,17 +69,17 @@ def test_format_status_line_includes_in_out_cost_not_turns() -> None:
         summarization_threshold_tokens=850,
     )
     line = format_status_line(usage, width=120)
-    assert "In 1,234" in line
-    assert "Out 567" in line
-    assert "$0.0456" in line
-    assert "Turn" not in line
+    assert "40%" in line
+    assert "In" not in line
+    assert "Out" not in line
+    assert "$" not in line
 
 
 def test_format_status_line_placeholder_without_usage() -> None:
     line = format_status_line(None, width=80)
-    assert "In —" in line
-    assert "Out —" in line
-    assert "$0.00" in line
+    assert "0%" in line
+    assert "In" not in line
+    assert "Out" not in line
 
 
 def test_activate_reserves_bottom_row_with_scroll_region(monkeypatch: pytest.MonkeyPatch) -> None:
