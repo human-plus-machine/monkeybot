@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
 from browser_mcp import playbooks
+
+logger = logging.getLogger(__name__)
 
 _bh: tuple[Any, Any] | None = None
 
@@ -173,6 +176,7 @@ def browser_read_playbook(host: str) -> str:
     try:
         content = playbooks.read_playbook(host)
     except playbooks.PlaybookError as exc:
+        logger.warning("browser_read_playbook failed for host=%r: %s", host, exc)
         return _json_text({"ok": False, "error": str(exc)})
     return _json_text({"ok": True, "host": playbooks.host_slug(host), "content": content})
 
@@ -183,6 +187,7 @@ def browser_write_playbook(host: str, content: str, append: bool = False) -> str
     try:
         result = playbooks.write_playbook(host, content, append=append)
     except playbooks.PlaybookError as exc:
+        logger.warning("browser_write_playbook failed for host=%r: %s", host, exc)
         return _json_text({"ok": False, "error": str(exc)})
     return _json_text(result)
 

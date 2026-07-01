@@ -19,6 +19,10 @@ from monkeybot.core.attachments.config import IMAGE_MIME_TYPES
 from monkeybot.core.attachments.store import AttachmentStore, sniff_mime
 from monkeybot.core.config.settings import SubagentConfig
 from monkeybot.core.context import CustomTool, TurnContext
+from monkeybot.core.context.tool_result_ingress import (
+    cap_tool_result_text,
+    sanitize_tool_result_text,
+)
 from monkeybot.core.llm.provider import ToolCall
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.mcp.mcp_client import MCPConnectionError, MCPServerNotConnectedError
@@ -45,7 +49,6 @@ from monkeybot.core.subagents.subagent_proto import (
     spawn_subagent,
 )
 from monkeybot.core.tools.sandbox_executor import SandboxConfig, SandboxExecutor
-from monkeybot.core.context.tool_result_ingress import cap_tool_result_text, sanitize_tool_result_text
 from monkeybot.core.tools.spill_inventory import spill_inventory_note, spill_min_chars_from_env
 from monkeybot.core.tools.terminal import (
     ALLOWED_COMMANDS,

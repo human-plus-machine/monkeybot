@@ -20,7 +20,7 @@ _DATA_URL_RE = re.compile(
     re.IGNORECASE,
 )
 _LONG_B64_RE = re.compile(
-    rf"(?<![A-Za-z0-9+/=])(?:[A-Za-z0-9+/]{{4}}){{200,}}(?:[A-Za-z0-9+/]{{0,3}}={{0,3}})(?![A-Za-z0-9+/=])"
+    r"(?<![A-Za-z0-9+/=])(?:[A-Za-z0-9+/]{4}){200,}(?:[A-Za-z0-9+/]{0,3}={0,3})(?![A-Za-z0-9+/=])"
 )
 
 _REDACT_JSON_KEYS = frozenset(
@@ -203,6 +203,18 @@ def format_mcp_binary_block(
     )
 
 
+def dump_model_or_str(obj: Any) -> str:
+    """JSON-dump ``obj.model_dump()`` when available and serializable, else ``str(obj)``."""
+    md = getattr(obj, "model_dump", None)
+    if callable(md):
+        try:
+            dumped = md(mode="python", by_alias=True)
+            return json.dumps(dumped, default=str)
+        except TypeError as exc:
+            logger.debug("model_dump not JSON-serializable, falling back to str(): %s", exc)
+    return str(obj)
+
+
 def format_mcp_content_block(block: Any, *, sanitize: bool = True) -> str:
     """Turn one MCP content block into a safe string."""
     blk_type = getattr(block, "type", None)
@@ -225,19 +237,13 @@ def format_mcp_content_block(block: Any, *, sanitize: bool = True) -> str:
         mime = getattr(block, "mimeType", None) or getattr(block, "mime_type", None) or "resource"
         return f"[resource omitted from tool text: uri={uri!s}, mime={mime}]"
 
-    bmd = getattr(block, "model_dump", None)
-    if callable(bmd):
-        try:
-            dumped = bmd(mode="python", by_alias=True)
-            text = json.dumps(dumped, default=str)
-            return sanitize_tool_result_text(text) if sanitize else text
-        except TypeError:
-            pass
-    return sanitize_tool_result_text(str(block)) if sanitize else str(block)
+    text = dump_model_or_str(block)
+    return sanitize_tool_result_text(text) if sanitize else text
 
 
 __all__ = [
     "cap_tool_result_text",
+    "dump_model_or_str",
     "format_mcp_binary_block",
     "format_mcp_content_block",
     "sanitize_enabled_from_env",

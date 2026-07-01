@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Protocol, cast, runtime_checkable
 
 from monkeybot.core.context.tool_result_ingress import (
+    dump_model_or_str,
     format_mcp_content_block,
     sanitize_tool_result_text,
 )
@@ -458,27 +459,14 @@ def _normalize_call_tool_result(result: Any) -> str:
         return ""
     content = getattr(result, "content", None)
     if not isinstance(content, list):
-        md = getattr(result, "model_dump", None)
-        if callable(md):
-            dumped = md(mode="python", by_alias=True)
-            try:
-                return sanitize_tool_result_text(json.dumps(dumped, default=str))
-            except TypeError:
-                pass
-        return sanitize_tool_result_text(str(result))
+        return sanitize_tool_result_text(dump_model_or_str(result))
 
     chunks: list[str] = []
     for block in content:
         chunks.append(format_mcp_content_block(block))
     if not chunks:
-        md = getattr(result, "model_dump", None)
-        if callable(md):
-            dumped = md(mode="python", by_alias=True)
-            try:
-                return sanitize_tool_result_text(json.dumps(dumped, default=str))
-            except TypeError:
-                pass
-        return ""
+        dumped = dump_model_or_str(result) if getattr(result, "model_dump", None) else ""
+        return sanitize_tool_result_text(dumped)
     return sanitize_tool_result_text("".join(chunks))
 
 

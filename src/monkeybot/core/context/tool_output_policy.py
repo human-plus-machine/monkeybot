@@ -201,7 +201,7 @@ def resolve_tool_budget(tool_name: str) -> ToolOutputBudget | None:
     if tool_name in merged:
         return merged[tool_name]
     if "__" in tool_name:
-        return merged.get("*") or merged.get("__mcp__") or _MCP_DEFAULT_TOOL_BUDGET
+        return merged.get("*") or _MCP_DEFAULT_TOOL_BUDGET
     return None
 
 
