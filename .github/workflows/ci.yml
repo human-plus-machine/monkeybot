@@ -26,3 +26,9 @@ jobs:
 
       - name: Pytest
         run: uv run pytest tests/ -q
+
+      - name: CLI pytest
+        working-directory: cli
+        run: |
+          uv sync
+          uv run pytest -q
