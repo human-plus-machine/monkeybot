@@ -9,13 +9,26 @@ from pathlib import Path
 
 import httpx
 
-from monkeybot_cli.config_resolve import load_agent_dotenv, resolve_agent_root, resolve_config
+from monkeybot_cli.config_resolve import load_agent_dotenv, load_config_doc, resolve_agent_root, resolve_config
+
+DEFAULT_GATEWAY_PORT = 8000
 
 
-def _gateway_url(args: argparse.Namespace) -> str:
+def _port_from_config(config_path: Path | None) -> int:
+    if config_path is None:
+        return DEFAULT_GATEWAY_PORT
+    _, doc = load_config_doc(config_path)
+    runtime = doc.get("runtime") if isinstance(doc.get("runtime"), dict) else {}
+    try:
+        return int(runtime.get("port", DEFAULT_GATEWAY_PORT))
+    except (TypeError, ValueError):
+        return DEFAULT_GATEWAY_PORT
+
+
+def _gateway_url(args: argparse.Namespace, config_path: Path | None) -> str:
     if args.url:
         return args.url.rstrip("/")
-    port = args.port or 8080
+    port = args.port if args.port else _port_from_config(config_path)
     return f"http://127.0.0.1:{port}"
 
 
@@ -86,7 +99,7 @@ def run_loop_run(args: argparse.Namespace) -> int:
     cwd = Path(args.cwd).expanduser().resolve() if args.cwd else None
     config_path = resolve_config(args.config, cwd=cwd)
     load_agent_dotenv(cwd=cwd, config_path=config_path)
-    url = _gateway_url(args)
+    url = _gateway_url(args, config_path)
     prompt = _read_prompt(args)
     payload: dict[str, object] = {
         "prompt": prompt,
@@ -121,7 +134,7 @@ def run_loop_status(args: argparse.Namespace) -> int:
     cwd = Path(args.cwd).expanduser().resolve() if args.cwd else None
     config_path = resolve_config(args.config, cwd=cwd)
     load_agent_dotenv(cwd=cwd, config_path=config_path)
-    url = _gateway_url(args)
+    url = _gateway_url(args, config_path)
     if args.loop_id:
         data = _get_json(url, f"/scheduler/loops/{args.loop_id}")
     else:
@@ -136,7 +149,7 @@ def _loop_action(action: str, args: argparse.Namespace) -> int:
     load_agent_dotenv(cwd=cwd, config_path=config_path)
     if not args.loop_id:
         raise SystemExit(f"loop {action} requires --id")
-    url = _gateway_url(args)
+    url = _gateway_url(args, config_path)
     data = _post_json(url, f"/scheduler/loops/{args.loop_id}/{action}", {})
     print(json.dumps(data, indent=2) if args.json else json.dumps(data, indent=2))
     return 0

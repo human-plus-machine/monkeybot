@@ -236,22 +236,15 @@ async def _execute_claimed_tick(
             [Text(text=tick_prompt)],
         )
         if result.status is TickInvokeStatus.SESSION_BUSY:
-            if row.skip_if_busy:
-                await store.defer_tick(
-                    row.loop_id,
-                    worker_id=worker_id,
-                    reason="session busy; deferred",
-                )
-                logger.info(
-                    "scheduler deferred tick loop_id=%s session_id=%s (remote busy)",
-                    row.loop_id,
-                    row.session_id,
-                )
-                return
-            await store.complete_tick(
+            await store.defer_tick(
                 row.loop_id,
                 worker_id=worker_id,
-                error="session busy",
+                reason="session busy; deferred",
+            )
+            logger.info(
+                "scheduler deferred tick loop_id=%s session_id=%s (remote busy)",
+                row.loop_id,
+                row.session_id,
             )
             return
 
@@ -328,8 +321,13 @@ def start_scheduler_background(
     return SchedulerHandle(task=task, shutdown=shutdown)
 
 
-async def shutdown_scheduler(handle: SchedulerHandle) -> None:
+async def shutdown_scheduler(handle: SchedulerHandle, *, drain_timeout_s: float = 30.0) -> None:
     handle.shutdown.set()
-    handle.task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await handle.task
+    try:
+        await asyncio.wait_for(handle.task, timeout=drain_timeout_s)
+    except TimeoutError:
+        handle.task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await handle.task
+    except asyncio.CancelledError:
+        raise

@@ -95,7 +95,7 @@ async def test_scheduler_requires_confirmation(scheduler_app) -> None:
 
 
 @pytest.mark.asyncio
-async def test_scheduler_requires_confirmation(scheduler_app) -> None:
+async def test_scheduler_get_loop_includes_usage(scheduler_app) -> None:
     app, open_storage = scheduler_app
     await open_storage()
     transport = ASGITransport(app=app)

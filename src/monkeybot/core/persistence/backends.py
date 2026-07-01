@@ -137,6 +137,8 @@ class SessionTurnLockStore(Protocol):
 
     async def is_busy(self, session_id: str) -> bool: ...
 
+    async def release_stale_claims(self, stale_after_ms: int) -> int: ...
+
 
 @runtime_checkable
 class StorageBackend(Protocol):

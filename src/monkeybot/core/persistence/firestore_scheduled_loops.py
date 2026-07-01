@@ -39,9 +39,6 @@ class FirestoreScheduledLoopStore:
 
     async def create(self, spec: ScheduledLoopCreate) -> ScheduledLoopRow:
         loop_id = _loop_id_from_create(spec)
-        existing = await self.get(loop_id)
-        if existing is not None:
-            raise ValueError(f"scheduled loop already exists: {loop_id}")
         validate_loop_guards(
             max_ticks=spec.max_ticks,
             max_runtime_ms=spec.max_runtime_ms,
@@ -66,7 +63,23 @@ class FirestoreScheduledLoopStore:
             "worker_id": None,
             "claimed_at_ms": None,
         }
-        await self._doc(loop_id).set(payload)
+        doc_ref = self._doc(loop_id)
+        transaction = self._client.transaction()
+
+        async def _create_body(
+            txn: firestore.AsyncTransaction,
+            ref: firestore.AsyncDocumentReference,
+        ) -> None:
+            snapshot = await ref.get(transaction=txn)
+            if snapshot.exists:
+                raise ValueError(f"scheduled loop already exists: {loop_id}")
+            txn.set(ref, payload)
+
+        create_txn = cast(
+            Callable[[firestore.AsyncTransaction, firestore.AsyncDocumentReference], Awaitable[None]],
+            firestore.async_transactional(_create_body),
+        )
+        await create_txn(transaction, doc_ref)
         row = await self.get(loop_id)
         if row is None:
             raise RuntimeError("failed to read scheduled loop after insert")
@@ -177,36 +190,67 @@ class FirestoreScheduledLoopStore:
         worker_id: str,
         error: str | None = None,
     ) -> ScheduledLoopRow | None:
-        row = await self.get(loop_id)
-        if row is None or not row.tick_in_flight or row.worker_id != worker_id:
-            return None
+        doc_ref = self._doc(loop_id)
+        transaction = self._client.transaction()
         now_ms = int(time.time() * 1000)
-        tick_index = row.tick_index + 1
-        stop_reason: str | None = None
-        status = row.status
-        if error:
-            status = "failed"
-            stop_reason = "tick_error"
-        elif row.max_ticks is not None and tick_index >= row.max_ticks:
-            status = "completed"
-            stop_reason = "max_ticks"
-        elif row.max_runtime_ms is not None and (now_ms - row.started_at_ms) >= row.max_runtime_ms:
-            status = "completed"
-            stop_reason = "max_runtime"
-        next_tick = now_ms + row.interval_ms if status == "active" else row.next_tick_at_ms
-        await self._doc(loop_id).update(
-            {
-                "tick_index": tick_index,
-                "last_tick_at_ms": now_ms,
-                "last_error": error,
-                "status": status,
-                "stop_reason": stop_reason,
-                "next_tick_at_ms": next_tick,
-                "tick_in_flight": 0,
-                "worker_id": None,
-                "claimed_at_ms": None,
-            }
+
+        async def _complete_body(
+            txn: firestore.AsyncTransaction,
+            ref: firestore.AsyncDocumentReference,
+        ) -> bool:
+            snapshot = await ref.get(transaction=txn)
+            if not snapshot.exists:
+                return False
+            data = snapshot.to_dict() or {}
+            if data.get("worker_id") != worker_id or int(data.get("tick_in_flight", 0)) != 1:
+                return False
+            tick_index = int(cast(int, data.get("tick_index", 0))) + 1
+            status = str(data.get("status", "active"))
+            stop_reason: str | None = None
+            interval_ms = int(cast(int, data.get("interval_ms", 0)))
+            started_at_ms = int(cast(int, data.get("started_at_ms", now_ms)))
+            if error:
+                status = "failed"
+                stop_reason = "tick_error"
+            else:
+                max_ticks = data.get("max_ticks")
+                max_runtime_ms = data.get("max_runtime_ms")
+                if max_ticks is not None and tick_index >= int(cast(int, max_ticks)):
+                    status = "completed"
+                    stop_reason = "max_ticks"
+                elif (
+                    max_runtime_ms is not None
+                    and (now_ms - started_at_ms) >= int(cast(int, max_runtime_ms))
+                ):
+                    status = "completed"
+                    stop_reason = "max_runtime"
+            next_tick_at = (
+                now_ms + interval_ms
+                if status == "active"
+                else int(cast(int, data.get("next_tick_at_ms", now_ms)))
+            )
+            txn.update(
+                ref,
+                {
+                    "tick_index": tick_index,
+                    "last_tick_at_ms": now_ms,
+                    "last_error": error,
+                    "status": status,
+                    "stop_reason": stop_reason,
+                    "next_tick_at_ms": next_tick_at,
+                    "tick_in_flight": 0,
+                    "worker_id": None,
+                    "claimed_at_ms": None,
+                },
+            )
+            return True
+
+        complete_txn = cast(
+            Callable[[firestore.AsyncTransaction, firestore.AsyncDocumentReference], Awaitable[bool]],
+            firestore.async_transactional(_complete_body),
         )
+        if not await complete_txn(transaction, doc_ref):
+            return None
         return await self.get(loop_id)
 
     async def defer_tick(self, loop_id: str, *, worker_id: str, reason: str) -> None:
@@ -225,15 +269,28 @@ class FirestoreScheduledLoopStore:
         )
 
     async def renew_tick_claim(self, loop_id: str, worker_id: str) -> bool:
-        snapshot = await self._doc(loop_id).get()
-        if not snapshot.exists:
-            return False
-        data = snapshot.to_dict() or {}
-        if data.get("worker_id") != worker_id or int(data.get("tick_in_flight", 0)) != 1:
-            return False
+        doc_ref = self._doc(loop_id)
+        transaction = self._client.transaction()
         now_ms = int(time.time() * 1000)
-        await self._doc(loop_id).update({"claimed_at_ms": now_ms})
-        return True
+
+        async def _renew_body(
+            txn: firestore.AsyncTransaction,
+            ref: firestore.AsyncDocumentReference,
+        ) -> bool:
+            snapshot = await ref.get(transaction=txn)
+            if not snapshot.exists:
+                return False
+            data = snapshot.to_dict() or {}
+            if data.get("worker_id") != worker_id or int(data.get("tick_in_flight", 0)) != 1:
+                return False
+            txn.update(ref, {"claimed_at_ms": now_ms})
+            return True
+
+        renew_txn = cast(
+            Callable[[firestore.AsyncTransaction, firestore.AsyncDocumentReference], Awaitable[bool]],
+            firestore.async_transactional(_renew_body),
+        )
+        return bool(await renew_txn(transaction, doc_ref))
 
     async def set_status(self, loop_id: str, status: str, *, stop_reason: str | None = None) -> bool:
         if status not in _LOOP_STATUSES:

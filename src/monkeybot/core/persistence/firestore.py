@@ -504,10 +504,38 @@ class FirestoreSessionTurnLockStore:
     def _doc(self, session_id: str) -> firestore.AsyncDocumentReference:
         return self._client.collection(self._collection).document(session_id)
 
+    async def release_stale_claims(self, stale_after_ms: int) -> int:
+        cutoff = int(time.time() * 1000) - stale_after_ms
+        query = (
+            self._client.collection(self._collection)
+            .where(filter=FieldFilter("claimed_at_ms", "<", cutoff))
+        )
+        reset = 0
+        batch = self._client.batch()
+        count = 0
+        async for doc in query.stream():
+            data = doc.to_dict() or {}
+            if data.get("request_id") is None:
+                continue
+            batch.update(doc.reference, {"request_id": None, "claimed_at_ms": None})
+            reset += 1
+            count += 1
+            if count >= 400:
+                await batch.commit()
+                batch = self._client.batch()
+                count = 0
+        if count:
+            await batch.commit()
+        return reset
+
     async def try_acquire(self, session_id: str, request_id: str) -> bool:
+        from monkeybot.core.persistence.session_turn_locks import session_turn_stale_ms
+
+        stale_ms = session_turn_stale_ms()
         doc_ref = self._doc(session_id)
         transaction = self._client.transaction()
         now_ms = int(time.time() * 1000)
+        cutoff = now_ms - stale_ms
 
         async def _claim_body(
             txn: firestore.AsyncTransaction,
@@ -518,7 +546,12 @@ class FirestoreSessionTurnLockStore:
                 txn.set(ref, {"request_id": request_id, "claimed_at_ms": now_ms})
                 return True
             data = snapshot.to_dict() or {}
-            if data.get("request_id") is None:
+            current = data.get("request_id")
+            claimed_at = data.get("claimed_at_ms")
+            if current is None:
+                txn.update(ref, {"request_id": request_id, "claimed_at_ms": now_ms})
+                return True
+            if isinstance(claimed_at, int) and claimed_at < cutoff:
                 txn.update(ref, {"request_id": request_id, "claimed_at_ms": now_ms})
                 return True
             return False

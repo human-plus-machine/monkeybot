@@ -35,7 +35,7 @@ class _NoopSessionEnsurer:
 
 
 def _gateway_base_url() -> str:
-    port = os.environ.get("PORT", os.environ.get("GATEWAY_PORT", "8080"))
+    port = os.environ.get("PORT", os.environ.get("GATEWAY_PORT", "8000"))
     host = os.environ.get("MONKEYBOT_GATEWAY_HOST", "127.0.0.1")
     explicit = os.environ.get("MONKEYBOT_GATEWAY_URL", "").strip()
     if explicit:

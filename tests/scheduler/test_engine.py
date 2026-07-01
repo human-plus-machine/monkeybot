@@ -93,7 +93,7 @@ async def test_execute_claimed_tick_defers_on_remote_busy(loop_store) -> None:
 
 
 @pytest.mark.asyncio
-async def test_execute_claimed_tick_fails_when_busy_and_not_skipping(loop_store) -> None:
+async def test_execute_claimed_tick_defers_when_busy_and_queue_if_busy(loop_store) -> None:
     row = await _active_row(loop_store, skip_if_busy=False)
     invoker = _RecordingInvoker(result=TickInvokeResult.session_busy())
     await _execute_claimed_tick(
@@ -107,8 +107,9 @@ async def test_execute_claimed_tick_fails_when_busy_and_not_skipping(loop_store)
     )
     updated = await loop_store.get("loop-1")
     assert updated is not None
-    assert updated.status == "failed"
-    assert updated.last_error == "session busy"
+    assert updated.status == "active"
+    assert updated.tick_index == 0
+    assert updated.last_error == "session busy; deferred"
 
 
 @pytest.mark.asyncio

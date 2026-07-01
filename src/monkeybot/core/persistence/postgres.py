@@ -760,7 +760,25 @@ class PostgresSessionTurnLockStore:
     def __init__(self, pool: asyncpg.Pool) -> None:
         self._pool = pool
 
+    async def release_stale_claims(self, stale_after_ms: int) -> int:
+        cutoff = int(time.time() * 1000) - stale_after_ms
+        async with self._pool.acquire() as conn:
+            status = await conn.execute(
+                """
+                UPDATE session_turn_locks
+                SET request_id = NULL, claimed_at_ms = NULL
+                WHERE request_id IS NOT NULL
+                  AND claimed_at_ms IS NOT NULL
+                  AND claimed_at_ms < $1
+                """,
+                cutoff,
+            )
+        return int(status.split()[-1])
+
     async def try_acquire(self, session_id: str, request_id: str) -> bool:
+        from monkeybot.core.persistence.session_turn_locks import session_turn_stale_ms
+
+        await self.release_stale_claims(session_turn_stale_ms())
         now_ms = int(time.time() * 1000)
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(

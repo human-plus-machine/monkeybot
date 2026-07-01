@@ -2,9 +2,22 @@
 
 from __future__ import annotations
 
+import os
 import time
 
 import aiosqlite
+
+_DEFAULT_STALE_MS = 600_000
+
+
+def session_turn_stale_ms() -> int:
+    raw = os.environ.get("MONKEYBOT_SESSION_TURN_STALE_MS", "").strip()
+    if not raw:
+        return _DEFAULT_STALE_MS
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return _DEFAULT_STALE_MS
 
 
 class SQLiteSessionTurnLockStore:
@@ -13,7 +26,23 @@ class SQLiteSessionTurnLockStore:
     def __init__(self, conn: aiosqlite.Connection) -> None:
         self._conn = conn
 
+    async def release_stale_claims(self, stale_after_ms: int) -> int:
+        cutoff = int(time.time() * 1000) - stale_after_ms
+        cursor = await self._conn.execute(
+            """
+            UPDATE session_turn_locks
+            SET request_id = NULL, claimed_at_ms = NULL
+            WHERE request_id IS NOT NULL
+              AND claimed_at_ms IS NOT NULL
+              AND claimed_at_ms < ?
+            """,
+            (cutoff,),
+        )
+        await self._conn.commit()
+        return int(cursor.rowcount)
+
     async def try_acquire(self, session_id: str, request_id: str) -> bool:
+        await self.release_stale_claims(session_turn_stale_ms())
         now_ms = int(time.time() * 1000)
         cursor = await self._conn.execute(
             """
