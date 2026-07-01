@@ -26,6 +26,11 @@ runtime:
   port: 8080
   # Optional second port env (same as PORT if unset in code paths that read GATEWAY_PORT)
   # gateway_port: 8080
+  # Internal debugging only (not agent-visible): write every AgentEvent and raw
+  # provider request/response for each session to
+  # {workspace_root}/.monkeybot/transcripts/{session_id}.ndjson. Opt-in; default off.
+  # (env: MONKEYBOT_TRANSCRIPT_ENABLED)
+  transcript_enabled: false
 
 paths:
   agent_md: ./monkeybot_config/AGENT.md

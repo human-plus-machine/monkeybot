@@ -50,6 +50,7 @@ from monkeybot.core.persistence.backends import (
     UsageStore,
     create_storage_backend,
 )
+from monkeybot.core.persistence.transcript import TranscriptWriter, transcript_enabled_from_env
 from monkeybot.core.runtime.events import Error as AgentError
 from monkeybot.core.runtime.events import TurnComplete, UsageTotals, event_to_json
 from monkeybot.core.runtime.loop import SUMMARY_TRIGGER_RATIO
@@ -57,7 +58,7 @@ from monkeybot.core.runtime.loop import run as run_loop
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector, ToolInspector
-from monkeybot.core.types.content_blocks import ContentBlock
+from monkeybot.core.types.content_blocks import ContentBlock, Text
 from monkeybot.core.workspace import create_workspace_storage
 from monkeybot.gateway.sse.loop_port import UsagePort
 from monkeybot.gateway.sse.routes import create_app as build_sse_app
@@ -191,6 +192,17 @@ class _StaticUsagePortZeros(UsagePort):
             "summarization_threshold_tokens": max(1, int(cw * SUMMARY_TRIGGER_RATIO)),
             "context_window_tokens": cw,
         }
+
+
+def _content_blocks_to_text(blocks: list[ContentBlock]) -> str:
+    """Transcript-only rendering of the incoming user turn (non-text blocks summarized)."""
+    parts: list[str] = []
+    for block in blocks:
+        if isinstance(block, Text):
+            parts.append(block.text)
+        else:
+            parts.append(f"[{type(block).__name__}]")
+    return "\n".join(parts)
 
 
 def _default_agent_path(bus: SessionBus) -> Path:
@@ -327,6 +339,20 @@ class GatewayLoopPort:
 
             workspace_root, skills_resolved = _resolved_workspace_paths()
 
+            transcript_writer: TranscriptWriter | None = None
+            if transcript_enabled_from_env():
+                if bus.transcript_writer is None:
+                    bus.transcript_writer = TranscriptWriter(
+                        session_id, workspace_root=workspace_root
+                    )
+                transcript_writer = bus.transcript_writer
+                await transcript_writer.ensure_manifest(
+                    agent_md=str(agent_path),
+                    model=model_name,
+                    provider=provider.name,
+                    workspace_root=str(workspace_root),
+                )
+
             attachment_store: AttachmentStore | None = getattr(
                 app.state, "attachment_store", None
             )
@@ -376,6 +402,11 @@ class GatewayLoopPort:
                 run_store=storage_backend.runs() if storage_backend is not None else None,
                 subagent_registry=_deps.subagent_registry,
             )
+            if transcript_writer is not None:
+                await transcript_writer.write_user_message(
+                    request_id=request_id,
+                    content=_content_blocks_to_text(user_content),
+                )
             async for evt in run_loop(
                 user_content,
                 ctx,
@@ -388,6 +419,7 @@ class GatewayLoopPort:
                 curator_provider=_deps.curator_provider,
                 attachment_store=attachment_store,
                 attachment_catalog=bus.attachment_catalog,
+                transcript_writer=transcript_writer,
             ):
                 if isinstance(evt, TurnComplete):
                     u = evt.usage
@@ -406,6 +438,8 @@ class GatewayLoopPort:
                         ),
                         run_id=request_id,
                     )
+                if transcript_writer is not None:
+                    await transcript_writer.write_event(evt)
                 await bus.publish_data(event_to_json(evt))
         finally:
             if executor is not None:

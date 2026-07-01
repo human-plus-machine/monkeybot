@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from monkeybot.core.path_safety import sanitize_path_component
 from monkeybot.core.attachments.config import (
     ALLOWED_MIME_TYPES,
     IMAGE_MIME_TYPES,
@@ -87,12 +88,10 @@ class FilesystemAttachmentStore:
         self._root = workspace_root.resolve()
 
     def _session_dir(self, session_id: str) -> Path:
-        safe = session_id.replace("/", "_").replace("..", "_")
-        return self._root / ".monkeybot" / "attachments" / safe
+        return self._root / ".monkeybot" / "attachments" / sanitize_path_component(session_id)
 
     def _path_for(self, session_id: str, attachment_id: str) -> Path:
-        safe_id = attachment_id.replace("/", "_").replace("..", "_")
-        return self._session_dir(session_id) / safe_id
+        return self._session_dir(session_id) / sanitize_path_component(attachment_id)
 
     def exists(self, session_id: str, attachment_id: str) -> bool:
         return self._path_for(session_id, attachment_id).is_file()

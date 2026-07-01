@@ -1,0 +1,11 @@
+# Requires a stable workspace across the run (e.g. demo_agent/workspace or a temp dir wired
+# through agent config) — not ephemeral /tmp that vanishes between sessions — since memory is
+# scoped to the agent's configured workspace, not to an individual session.
+description: "A fact stated in one session is recallable from a brand-new session afterward"
+tags: [memory, recall, cross-session]
+sessions:
+  - - "Remember this for later: the codename for our Q3 infra migration is 'project-marigold'."
+  - - "What is the codename for our Q3 infra migration?"
+session_pause_sec: 8
+assertions:
+  metrics: [response_relevancy, faithfulness]

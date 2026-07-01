@@ -8,7 +8,9 @@ import asyncio
 import os
 from collections import deque
 from typing import Any, Literal
+
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
+from monkeybot.core.persistence.transcript import TranscriptWriter
 
 from .sse import format_data_event
 
@@ -54,6 +56,8 @@ class SessionBus:
         self.pending_responses: dict[str, asyncio.Future[Any]] = {}
         self.terminated_pending_keys: deque[str] = deque(maxlen=256)
         self.attachment_catalog: SessionAttachmentCatalog | None = None
+        self.transcript_writer: TranscriptWriter | None = None
+        """Lazily-created ``TranscriptWriter`` (internal debugging only); None when disabled."""
 
     def register_pending(self, pending_key: str) -> asyncio.Future[Any]:
         fut = asyncio.get_running_loop().create_future()
