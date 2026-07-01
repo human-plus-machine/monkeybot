@@ -6,6 +6,8 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-07-01
+
 ### Changed
 - **Pre-flight prompt tokens** — Summarization threshold and `estimated_prompt_tokens` (usage DB, SSE, `GET /usage`) use each provider's tokenizer / count API (`Provider.count_input_tokens`): Vertex Gemini `countTokens`, Anthropic `messages.count_tokens`, OpenAI `tiktoken` on the Chat Completions payload. OpenAI installs should include the `openai` extra (adds `tiktoken`).
 - **Configurable history summarization model** — `CONTEXT_SUMMARIZATION_MODEL` and optional
