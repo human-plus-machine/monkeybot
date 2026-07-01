@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from monkeybot.core.path_safety import sanitize_path_component
 from monkeybot.core.runtime.events import AgentEvent, event_to_json
 
 logger = logging.getLogger(__name__)
@@ -46,7 +47,8 @@ class TranscriptWriter:
 
     def __init__(self, session_id: str, *, workspace_root: Path) -> None:
         self._session_id = session_id
-        self._path = workspace_root / _TRANSCRIPT_REL_DIR / f"{session_id}.ndjson"
+        safe_id = sanitize_path_component(session_id)
+        self._path = workspace_root.resolve() / _TRANSCRIPT_REL_DIR / f"{safe_id}.ndjson"
         self._lock = asyncio.Lock()
         self._manifest_written = False
         self._seq = 0

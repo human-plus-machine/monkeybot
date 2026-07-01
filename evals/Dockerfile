@@ -10,8 +10,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY main.py models.py store.py runner.py scorer.py ws_manager.py test_judge.py ./
+COPY assertions.py persistence.py report.py scenario_loader.py ./
 COPY eval_config.yaml ./
 COPY scenarios ./scenarios
+COPY suites ./suites
 
 EXPOSE 8001
 

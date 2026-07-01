@@ -1,0 +1,6 @@
+description: "Agent recalls a known fact from memory context"
+tags: [memory, recall]
+messages:
+  - "What is the main goal of project-alpha?"
+assertions:
+  metrics: [response_relevancy]

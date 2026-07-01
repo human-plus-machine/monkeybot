@@ -18,4 +18,15 @@ dependencies = [
 ]
 
 [tool.setuptools]
-py-modules = ["main", "models", "store", "runner", "scorer", "ws_manager"]
+py-modules = [
+    "main",
+    "models",
+    "store",
+    "runner",
+    "scorer",
+    "ws_manager",
+    "assertions",
+    "persistence",
+    "report",
+    "scenario_loader",
+]

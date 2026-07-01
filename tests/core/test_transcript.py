@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from monkeybot.core.path_safety import sanitize_path_component
 from monkeybot.core.persistence.transcript import TranscriptWriter, transcript_enabled_from_env
 from monkeybot.core.runtime.events import AssistantDelta, ToolCallStarted, TurnComplete, UsageTotals
 
@@ -149,3 +150,16 @@ async def test_file_created_under_dot_monkeybot_transcripts(tmp_path: Path) -> N
     expected = tmp_path / ".monkeybot" / "transcripts" / "abc-123.ndjson"
     assert writer.path == expected
     assert expected.is_file()
+
+
+@pytest.mark.asyncio
+async def test_transcript_path_sanitizes_session_id(tmp_path: Path) -> None:
+    """Path traversal in session_id must not escape the transcripts directory."""
+    malicious = "../../../../tmp/pwned"
+    writer = TranscriptWriter(malicious, workspace_root=tmp_path)
+    await writer.ensure_manifest(model="gpt-5")
+
+    expected = tmp_path / ".monkeybot" / "transcripts" / f"{sanitize_path_component(malicious)}.ndjson"
+    assert writer.path == expected
+    assert expected.is_file()
+    assert not (tmp_path.parent.parent / "tmp" / "pwned.ndjson").exists()

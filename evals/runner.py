@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -10,8 +11,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
-
-from models import Scenario, TurnResult
+from models import Scenario, ToolCallRecord, TurnResult, UsageSummary
 
 _log = logging.getLogger(__name__)
 
@@ -45,6 +45,14 @@ def _event_matches_request(ev: dict[str, Any], request_id: str) -> bool:
     return str(rid) == request_id
 
 
+def _args_summary(args: dict[str, Any]) -> str:
+    try:
+        raw = json.dumps(args, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        raw = str(args)
+    return raw[:300]
+
+
 async def _collect_turn_output(
     client: httpx.AsyncClient,
     agent_url: str,
@@ -53,15 +61,30 @@ async def _collect_turn_output(
     message: str,
     *,
     timeout_sec: float = 180.0,
-) -> tuple[str, str | None, str | None]:
+) -> tuple[TurnResult, str | None]:
     """Open the SSE stream first, then POST reply; read until ``TurnComplete``.
 
-    Returns ``(assistant_text, trace_id, error_message)``.
+    Accumulates assistant text, usage, tool-call telemetry, and summarization
+    counts for the matching ``request_id``. Returns ``(turn_result, error_message)``;
+    ``turn_result.output`` is empty and ``error_message`` set on failure.
     """
     base = agent_url.rstrip("/")
     out_parts: list[str] = []
     trace_id: str | None = None
     err_msg: str | None = None
+    usage = UsageSummary()
+    tool_calls: list[ToolCallRecord] = []
+    summarizations_count = 0
+
+    def _result() -> TurnResult:
+        return TurnResult(
+            input=message,
+            output="".join(out_parts),
+            trace_id=trace_id,
+            usage=usage,
+            tool_calls=tool_calls,
+            summarizations_count=summarizations_count,
+        )
 
     timeout = httpx.Timeout(timeout_sec, connect=30.0)
     async with client.stream(
@@ -77,7 +100,7 @@ async def _collect_turn_output(
             timeout=timeout,
         )
         if not reply.is_success:
-            return "", None, f"reply HTTP {reply.status_code}: {reply.text[:500]}"
+            return _result(), f"reply HTTP {reply.status_code}: {reply.text[:500]}"
 
         buffer = ""
         async for chunk in stream.aiter_text():
@@ -85,20 +108,79 @@ async def _collect_turn_output(
             parsed, buffer = _parse_sse_blocks(buffer)
             for ev in parsed:
                 et = ev.get("type")
+                if not _event_matches_request(ev, request_id):
+                    continue
                 if et == "AssistantDelta" and ev.get("delta"):
-                    if _event_matches_request(ev, request_id):
-                        out_parts.append(str(ev["delta"]))
+                    out_parts.append(str(ev["delta"]))
+                elif et == "ToolCallStarted":
+                    tool_calls.append(
+                        ToolCallRecord(
+                            tool=str(ev.get("tool") or ""),
+                            args_summary=_args_summary(dict(ev.get("args") or {})),
+                        )
+                    )
+                elif et == "ToolCallResult":
+                    tool = str(ev.get("tool") or "")
+                    error = ev.get("error")
+                    # Match the most recent started-but-unresolved call for this tool, else append.
+                    for rec in reversed(tool_calls):
+                        if rec.tool == tool and rec.error is None:
+                            if error:
+                                rec.error = str(error)
+                            break
+                    else:
+                        tool_calls.append(
+                            ToolCallRecord(tool=tool, error=str(error) if error else None)
+                        )
+                elif et == "ContextSummarized":
+                    summarizations_count += 1
                 elif et == "Error":
-                    if _event_matches_request(ev, request_id):
-                        err_msg = str(ev.get("error") or "unknown error")
-                        return "".join(out_parts), trace_id, err_msg
+                    err_msg = str(ev.get("error") or "unknown error")
+                    return _result(), err_msg
                 elif et == "TurnComplete":
-                    if _event_matches_request(ev, request_id):
-                        tid = ev.get("trace_id")
-                        trace_id = str(tid) if tid else None
-                        return "".join(out_parts), trace_id, err_msg
+                    tid = ev.get("trace_id")
+                    trace_id = str(tid) if tid else None
+                    u = ev.get("usage") or {}
+                    if isinstance(u, dict):
+                        usage.input_tokens = int(u.get("input_tokens", 0) or 0)
+                        usage.output_tokens = int(u.get("output_tokens", 0) or 0)
+                        usage.cached_tokens = int(u.get("cached_tokens", 0) or 0)
+                        usage.cache_read_tokens = int(u.get("cache_read_tokens", 0) or 0)
+                        usage.cache_creation_tokens = int(u.get("cache_creation_tokens", 0) or 0)
+                        usage.cost_usd = float(u.get("cost_usd", 0.0) or 0.0)
+                        usage.duration_ms = int(u.get("duration_ms", 0) or 0)
+                    return _result(), None
 
-    return "".join(out_parts), trace_id, err_msg or "SSE ended before TurnComplete"
+    return _result(), (err_msg or "SSE ended before TurnComplete")
+
+
+async def _run_session(
+    client: httpx.AsyncClient,
+    agent_url: str,
+    messages: list[str],
+    *,
+    timeout_sec: float,
+    start_index: int,
+    on_turn_complete: Callable[[int, TurnResult], Awaitable[None]] | None,
+) -> list[TurnResult]:
+    """Open one session and send ``messages`` through it sequentially."""
+    base = agent_url.rstrip("/")
+    r = await client.post(f"{base}/sessions", json={})
+    r.raise_for_status()
+    session_id = str(r.json()["session_id"])
+
+    turns: list[TurnResult] = []
+    for offset, msg in enumerate(messages):
+        rid = str(uuid.uuid4())
+        tr, err = await _collect_turn_output(
+            client, agent_url, session_id, rid, msg, timeout_sec=timeout_sec
+        )
+        if err:
+            raise RuntimeError(err)
+        turns.append(tr)
+        if on_turn_complete is not None:
+            await on_turn_complete(start_index + offset, tr)
+    return turns
 
 
 async def run_scenario_live(
@@ -108,29 +190,27 @@ async def run_scenario_live(
     timeout_sec: float = 180.0,
     on_turn_complete: Callable[[int, TurnResult], Awaitable[None]] | None = None,
 ) -> list[TurnResult]:
-    """Create a session and send each user message; collect assistant output per turn."""
-    base = agent_url.rstrip("/")
+    """Send each scenario message group through its own session; collect output per turn.
+
+    A scenario with a single implicit session (the common case) opens one session and
+    sends every message through it. A scenario with ``sessions`` set opens a fresh
+    session per group, in order, against the same running agent — enough to express
+    "write in session A, recall in session B" without a general orchestration DSL.
+    """
     timeout = httpx.Timeout(timeout_sec, connect=30.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        r = await client.post(f"{base}/sessions", json={})
-        r.raise_for_status()
-        session_id = str(r.json()["session_id"])
-
         turns: list[TurnResult] = []
-        for idx, msg in enumerate(scenario.messages):
-            rid = str(uuid.uuid4())
-            text, tid, err = await _collect_turn_output(
+        groups = scenario.message_groups()
+        for i, group in enumerate(groups):
+            if i > 0 and scenario.session_pause_sec > 0:
+                await asyncio.sleep(scenario.session_pause_sec)
+            group_turns = await _run_session(
                 client,
                 agent_url,
-                session_id,
-                rid,
-                msg,
+                group,
                 timeout_sec=timeout_sec,
+                start_index=len(turns),
+                on_turn_complete=on_turn_complete,
             )
-            if err:
-                raise RuntimeError(err)
-            tr = TurnResult(input=msg, output=text, trace_id=tid)
-            turns.append(tr)
-            if on_turn_complete is not None:
-                await on_turn_complete(idx, tr)
+            turns.extend(group_turns)
         return turns

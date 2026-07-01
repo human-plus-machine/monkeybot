@@ -54,6 +54,17 @@ def _load_eval_config() -> dict[str, Any]:
         return {}
 
 
+def resolve_judge_provider_model() -> tuple[str, str]:
+    """Judge provider/model precedence: ``JUDGE_PROVIDER``/``JUDGE_MODEL`` env (CI pin) >
+    ``eval_config.yaml`` > the agent's own model config (local default)."""
+    if os.environ.get("JUDGE_PROVIDER"):
+        return os.environ["JUDGE_PROVIDER"].strip().lower(), os.environ.get("JUDGE_MODEL", "").strip()
+    cfg = _load_eval_config()
+    if cfg.get("judge_provider"):
+        return str(cfg["judge_provider"]).strip().lower(), str(cfg.get("judge_model", "")).strip()
+    return _read_agent_model_config()
+
+
 def _build_judge_model() -> Any | None:
     """Return a deepeval judge model, or ``None`` to use deepeval defaults.
 
@@ -61,12 +72,7 @@ def _build_judge_model() -> Any | None:
     gateway uses MonkeyBot's provider stack; scoring uses deepeval's ``GeminiModel`` / etc.,
     which require their own deps (e.g. ``google-genai`` for Gemini judges).
     """
-    cfg = _load_eval_config()
-    if cfg.get("judge_provider"):
-        provider = str(cfg["judge_provider"]).strip().lower()
-        model = str(cfg.get("judge_model", "")).strip()
-    else:
-        provider, model = _read_agent_model_config()
+    provider, model = resolve_judge_provider_model()
 
     if not model:
         return None
@@ -217,15 +223,30 @@ def _extract_scores_and_details(eval_result: Any) -> tuple[dict[str, float], lis
     return scores, details
 
 
+_JUDGE_DISABLED_PROVIDERS = frozenset({"fake", "mock", "none", "disabled"})
+
+
 def score_scenario(
     scenario: Scenario,
     turns: list[TurnResult],
 ) -> tuple[dict[str, float], list[dict[str, Any]], float | None]:
-    """Run deepeval metrics; returns ``(aggregate_scores, score_details, pass_rate)``."""
+    """Run deepeval metrics; returns ``(aggregate_scores, score_details, pass_rate)``.
+
+    ``metrics: []`` (explicitly empty, distinct from an absent key) or a disabled judge
+    provider (``JUDGE_PROVIDER=fake`` etc.) both skip deepeval entirely — no network,
+    no credentials needed — so the local/offline loop (requirement + cap assertions only)
+    works without a judge configured.
+    """
     assertions = scenario.assertions or {}
-    metric_names = assertions.get("metrics") or ["turn_relevancy"]
+    metric_names = assertions.get("metrics", ["turn_relevancy"])
     if isinstance(metric_names, str):
         metric_names = [metric_names]
+    if not metric_names:
+        return {}, [], None
+
+    judge_provider, _ = resolve_judge_provider_model()
+    if judge_provider in _JUDGE_DISABLED_PROVIDERS:
+        return {}, [], None
 
     judge = _build_judge_model()
     metrics = _resolve_metrics([str(m) for m in metric_names], judge)
