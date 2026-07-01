@@ -59,6 +59,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check required secrets are configured
+        env:
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          missing=()
+          [[ -z "$NVIDIA_API_KEY" ]] && missing+=("NVIDIA_API_KEY (agent model, https://build.nvidia.com)")
+          [[ -z "$OPENAI_API_KEY" ]] && missing+=("OPENAI_API_KEY (deepeval judge model)")
+          if [[ ${#missing[@]} -gt 0 ]]; then
+            echo "::error::Live eval smoke needs repo secrets that are not configured yet:"
+            for m in "${missing[@]}"; do echo "::error::  - $m"; done
+            echo "Add them under Settings > Secrets and variables > Actions, then re-run this job." >&2
+            exit 1
+          fi
+
       - uses: astral-sh/setup-uv@v5
         with:
           version: "latest"
