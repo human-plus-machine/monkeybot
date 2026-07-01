@@ -1,0 +1,135 @@
+name: Live eval smoke
+
+# Runs the live eval smoke suite (see docs/eval-pr-scorecard.md) and posts a Markdown
+# scorecard as a PR comment. Only two trigger points, gated in the `gate` job below —
+# LLM-judge calls cost money and take minutes, so this does not run on ordinary
+# feature-branch -> develop PRs:
+#   (a) any PR from develop into main (release-promotion gate)
+#   (b) any PR that touches a dependency lockfile/manifest (catches silent SDK breakage,
+#       e.g. provider request/response shape changes, that code review won't see)
+#
+# Cost/time budget: smoke suite is ~7 scenarios x 2-5 turns x (agent call + judge call).
+# Expect roughly $0.50-2.00 and 5-10 minutes per run depending on model pricing.
+#
+# Secrets required: NVIDIA_API_KEY (agent model, matches demo_agent's default free-tier
+# provider) and OPENAI_API_KEY (deepeval judge model — JUDGE_PROVIDER/JUDGE_MODEL below
+# pin it explicitly so scoring doesn't silently drift with deepeval's own default).
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: decide
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          run=false
+          if [[ "$BASE_REF" == "main" && "$HEAD_REF" == "develop" ]]; then
+            run=true
+          fi
+          changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+          for f in uv.lock pyproject.toml cli/pyproject.toml cli/uv.lock demo_agent/pyproject.toml demo_agent/uv.lock; do
+            if grep -qxF "$f" <<<"$changed"; then
+              run=true
+            fi
+          done
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
+  live-eval:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Sync root deps (evals/report.py: deepeval, langfuse)
+        run: uv sync --extra evals
+
+      - name: Sync demo_agent deps
+        working-directory: demo_agent
+        run: uv sync
+
+      - name: Boot MonkeyBot gateway (demo_agent workspace)
+        working-directory: demo_agent
+        env:
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          SANDBOX_ENABLED: "false" # no Docker socket in this runner
+          # Small context window so context/summarization_trigger.yaml actually crosses the
+          # real summarization threshold; the other smoke scenarios are short enough to fit.
+          MODEL_CONTEXT_WINDOW: "8000"
+        run: |
+          uv run -m monkeybot.gateway.main > /tmp/gateway.log 2>&1 &
+          echo $! > /tmp/gateway.pid
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8787/health > /dev/null; then
+              echo "gateway healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "gateway did not become healthy" >&2
+          cat /tmp/gateway.log >&2
+          exit 1
+
+      - name: Run smoke suite report
+        env:
+          AGENT_URL: http://127.0.0.1:8787
+          JUDGE_PROVIDER: openai
+          JUDGE_MODEL: gpt-4o-mini
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          uv run python -m evals.report \
+            --suite smoke \
+            --baseline evals/baselines/smoke.json \
+            --fail-on-regression \
+            | tee eval-report.md
+
+      - name: Post report as PR comment
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const body = fs.readFileSync("eval-report.md", "utf8");
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });
+
+      - name: Upload run + report artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-eval-smoke-${{ github.run_id }}
+          path: |
+            evals/runs/
+            eval-report.md
+          if-no-files-found: ignore
+
+      - name: Stop gateway
+        if: always()
+        working-directory: demo_agent
+        run: kill "$(cat /tmp/gateway.pid)" 2>/dev/null || true

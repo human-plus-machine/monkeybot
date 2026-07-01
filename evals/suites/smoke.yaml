@@ -1,0 +1,12 @@
+# Explicit smoke suite membership — not implicitly "every scenario in the tree". Add a scenario
+# here only once it's stable enough to gate merges. See docs/eval-pr-scorecard.md.
+id: smoke
+scenarios:
+  - tools/core_read
+  - skills/skill_invocation
+  - subagents/dispatch_complete
+  - memory/recall_single_session
+  - memory/recall_cross_session
+  - context/summarization_trigger
+  - multi_turn/task_tracking
+  # - mcp/tool_invoke   # add once a CI MCP fixture exists (see mcp/tool_invoke.yaml)
