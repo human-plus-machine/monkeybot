@@ -115,27 +115,35 @@ class TranscriptWriter:
         self,
         *,
         request_id: str,
+        inner_turn: int,
         model: str,
         messages: list[dict[str, object]],
-        tools: list[dict[str, object]],
+        message_offset: int = 0,
+        messages_reset: bool = False,
+        tools: list[dict[str, object]] | None = None,
         thinking_budget: int | None,
     ) -> None:
-        await self._append_line(
-            {
-                "ts": _now_iso(),
-                "type": "ProviderRequest",
-                "request_id": request_id,
-                "model": model,
-                "messages": messages,
-                "tools": tools,
-                "thinking_budget": thinking_budget,
-            }
-        )
+        record: dict[str, Any] = {
+            "ts": _now_iso(),
+            "type": "ProviderRequest",
+            "request_id": request_id,
+            "inner_turn": inner_turn,
+            "model": model,
+            "message_offset": message_offset,
+            "messages": messages,
+            "thinking_budget": thinking_budget,
+        }
+        if messages_reset:
+            record["messages_reset"] = True
+        if tools is not None:
+            record["tools"] = tools
+        await self._append_line(record)
 
     async def write_provider_response(
         self,
         *,
         request_id: str,
+        inner_turn: int,
         model: str,
         text: str,
         thinking: str,
@@ -147,6 +155,7 @@ class TranscriptWriter:
                 "ts": _now_iso(),
                 "type": "ProviderResponse",
                 "request_id": request_id,
+                "inner_turn": inner_turn,
                 "model": model,
                 "text": text,
                 "thinking": thinking,

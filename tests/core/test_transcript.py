@@ -106,6 +106,7 @@ async def test_write_provider_request_and_response(tmp_path: Path) -> None:
     writer = TranscriptWriter("sess-1", workspace_root=tmp_path)
     await writer.write_provider_request(
         request_id="r1",
+        inner_turn=1,
         model="gpt-5",
         messages=[{"role": "user", "content": "hi"}],
         tools=[{"name": "read_file"}],
@@ -113,6 +114,7 @@ async def test_write_provider_request_and_response(tmp_path: Path) -> None:
     )
     await writer.write_provider_response(
         request_id="r1",
+        inner_turn=1,
         model="gpt-5",
         text="hello",
         thinking="",
@@ -124,9 +126,39 @@ async def test_write_provider_request_and_response(tmp_path: Path) -> None:
     assert lines[0]["type"] == "ProviderRequest"
     assert lines[0]["messages"] == [{"role": "user", "content": "hi"}]
     assert lines[0]["tools"] == [{"name": "read_file"}]
+    assert lines[0]["inner_turn"] == 1
+    assert lines[0]["message_offset"] == 0
     assert lines[1]["type"] == "ProviderResponse"
     assert lines[1]["text"] == "hello"
+    assert lines[1]["inner_turn"] == 1
     assert lines[1]["usage"]["input_tokens"] == 10
+
+
+@pytest.mark.asyncio
+async def test_write_provider_request_delta_only(tmp_path: Path) -> None:
+    writer = TranscriptWriter("sess-1", workspace_root=tmp_path)
+    await writer.write_provider_request(
+        request_id="r1",
+        inner_turn=1,
+        model="gpt-5",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[{"name": "read_file"}],
+        thinking_budget=None,
+    )
+    await writer.write_provider_request(
+        request_id="r1",
+        inner_turn=2,
+        model="gpt-5",
+        messages=[{"role": "assistant", "content": "tool call"}, {"role": "user", "content": "tool result"}],
+        message_offset=1,
+        thinking_budget=None,
+    )
+
+    lines = _read_lines(writer.path)
+    assert len(lines) == 2
+    assert lines[1]["message_offset"] == 1
+    assert len(lines[1]["messages"]) == 2
+    assert "tools" not in lines[1]
 
 
 @pytest.mark.asyncio

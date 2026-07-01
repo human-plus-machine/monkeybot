@@ -876,6 +876,7 @@ async def _run_inner_core(
 
     turn_index = 0
     needs_followup_after_tools = False
+    provider_messages_written = 0
     # Final assistant write is backgrounded off the streaming path; awaited at the
     # turn tail before any history load/reset so the row is never lost.
     assistant_write_task: asyncio.Task[None] | None = None
@@ -1114,13 +1115,26 @@ async def _run_inner_core(
             llm_cache_read = 0
             llm_cache_creation = 0
             if transcript_writer is not None:
+                if provider_messages_written >= len(provider_messages):
+                    delta_messages = provider_messages
+                    message_offset = 0
+                    messages_reset = provider_messages_written > 0
+                else:
+                    delta_messages = provider_messages[provider_messages_written:]
+                    message_offset = provider_messages_written
+                    messages_reset = False
+                include_tools = turn_index == 1 or messages_reset
                 await transcript_writer.write_provider_request(
                     request_id=ctx.request_id,
+                    inner_turn=turn_index,
                     model=ctx.model,
-                    messages=[m.to_dict() for m in provider_messages],
-                    tools=[dataclasses.asdict(t) for t in ctx.tools],
+                    messages=[m.to_dict() for m in delta_messages],
+                    message_offset=message_offset,
+                    messages_reset=messages_reset,
+                    tools=[dataclasses.asdict(t) for t in ctx.tools] if include_tools else None,
                     thinking_budget=stream_thinking,
                 )
+                provider_messages_written = len(provider_messages)
             try:
                 async with span_llm(ctx=ctx):
                     async with aclosing(
@@ -1175,6 +1189,7 @@ async def _run_inner_core(
                 if transcript_writer is not None:
                     await transcript_writer.write_provider_response(
                         request_id=ctx.request_id,
+                        inner_turn=turn_index,
                         model=ctx.model,
                         text=assistant_text,
                         thinking=thinking_text,

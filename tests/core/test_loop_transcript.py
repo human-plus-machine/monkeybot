@@ -192,3 +192,49 @@ async def test_run_with_transcript_writer_captures_agent_events(tmp_path: Path) 
     assert "ProviderRequest" in types
     assert "ProviderResponse" in types
     assert len(events) > 0
+
+
+@pytest.mark.asyncio
+async def test_run_with_transcript_writer_writes_message_deltas_on_tool_loop(
+    tmp_path: Path,
+) -> None:
+    """Each inner turn should append only new provider messages, not the full history."""
+    prov = FakeProvider(
+        [
+            [
+                ToolCall(call_id="c1", name="run_command", args={"cmd": "echo hi"}),
+                UsageEvent(input_tokens=5, output_tokens=2),
+                Done(),
+            ],
+            [TextDelta(text="done"), UsageEvent(input_tokens=3, output_tokens=1), Done()],
+        ]
+    )
+    writer = TranscriptWriter("sess-delta", workspace_root=tmp_path)
+
+    async for _ in run(
+        "hello",
+        _ctx(workspace_root=tmp_path),
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(),
+        max_turns=5,
+        transcript_writer=writer,
+    ):
+        pass
+
+    lines = _read_lines(writer.path)
+    requests = [line for line in lines if line["type"] == "ProviderRequest"]
+    assert len(requests) == 2
+
+    first, second = requests
+    assert first["inner_turn"] == 1
+    assert first["message_offset"] == 0
+    assert "tools" in first
+    assert len(first["messages"]) >= 1
+
+    assert second["inner_turn"] == 2
+    assert second["message_offset"] == len(first["messages"])
+    assert "tools" not in second
+    assert len(second["messages"]) >= 1
+    assert len(second["messages"]) < len(first["messages"]) + len(second["messages"])
