@@ -22,6 +22,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast, runtime_checkable
 
+from monkeybot.core.context.tool_result_ingress import (
+    format_mcp_content_block,
+    sanitize_tool_result_text,
+)
 from monkeybot.core.types.types_tools import ToolDef
 
 logger = logging.getLogger(__name__)
@@ -458,36 +462,24 @@ def _normalize_call_tool_result(result: Any) -> str:
         if callable(md):
             dumped = md(mode="python", by_alias=True)
             try:
-                return json.dumps(dumped, default=str)
+                return sanitize_tool_result_text(json.dumps(dumped, default=str))
             except TypeError:
                 pass
-        return str(result)
+        return sanitize_tool_result_text(str(result))
 
     chunks: list[str] = []
     for block in content:
-        blk_type = getattr(block, "type", None)
-        txt = getattr(block, "text", None)
-        if blk_type == "text" and txt is not None:
-            chunks.append(str(txt))
-            continue
-        bmd = getattr(block, "model_dump", None)
-        if callable(bmd):
-            try:
-                chunks.append(json.dumps(bmd(mode="python", by_alias=True), default=str))
-            except TypeError:
-                chunks.append(str(block))
-        else:
-            chunks.append(str(block))
+        chunks.append(format_mcp_content_block(block))
     if not chunks:
         md = getattr(result, "model_dump", None)
         if callable(md):
             dumped = md(mode="python", by_alias=True)
             try:
-                return json.dumps(dumped, default=str)
+                return sanitize_tool_result_text(json.dumps(dumped, default=str))
             except TypeError:
                 pass
         return ""
-    return "".join(chunks)
+    return sanitize_tool_result_text("".join(chunks))
 
 
 class MCPClient:

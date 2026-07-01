@@ -694,7 +694,7 @@ async def test_write_spill_with_inventory_writes_full_payload(tmp_path: Path) ->
     out = _write_spill_with_inventory(body, tmp_path, "th1", "call-1")
     spill = tmp_path / ".monkeybot" / "spill" / "th1" / "call-1.txt"
     assert spill.read_text(encoding="utf-8") == body
-    assert len(out) > len(body)
+    assert body not in out
     assert "Spill inventory" in out
     assert "25000 total chars" in out
     assert ".monkeybot/spill/th1/call-1.txt" in out
@@ -719,8 +719,8 @@ async def test_list_skills_spills_large_json(tmp_path: Path) -> None:
     ctx = _ctx(skills=big_skills)
     out, err = unwrap_tool_execution_result(await ex.execute(call=ToolCall(call_id="c-spill", name="list_skills", args={}), ctx=ctx))
     assert err is None and out is not None
-    assert len(out) > 20_000
     assert "Spill inventory" in out
+    assert len(out) < 2000
     spill = root / ".monkeybot" / "spill" / "t" / "c-spill.txt"
     assert spill.is_file()
     raw = spill.read_text(encoding="utf-8")

@@ -45,6 +45,7 @@ from monkeybot.core.subagents.subagent_proto import (
     spawn_subagent,
 )
 from monkeybot.core.tools.sandbox_executor import SandboxConfig, SandboxExecutor
+from monkeybot.core.context.tool_result_ingress import cap_tool_result_text, sanitize_tool_result_text
 from monkeybot.core.tools.spill_inventory import spill_inventory_note, spill_min_chars_from_env
 from monkeybot.core.tools.terminal import (
     ALLOWED_COMMANDS,
@@ -126,13 +127,12 @@ def _write_spill_with_inventory(
     thread_id: str,
     call_id: str,
 ) -> str:
-    """Write full ``text`` to spill file; return full body plus inventory note."""
+    """Write full ``text`` to spill file; return inventory pointer only (not inline body)."""
     rel = f"{_SPILL_DIR}/{thread_id}/{_safe_spill_filename(call_id)}.txt"
     out_path = (Path(workspace_root) / rel).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(text, encoding="utf-8")
-    note = spill_inventory_note(text, rel)
-    return f"{text}\n{note}"
+    return spill_inventory_note(text, rel)
 
 
 def _is_under_spill_path(workspace_root: Path, rel_path: str) -> bool:
@@ -483,16 +483,18 @@ class CoreToolExecutor(ToolExecutorPort):
                 {"tool": name},
             )
 
-        if (
-            name not in _SPILL_SKIP_TOOLS
-            and err_text is None
-            and result_text is not None
-            and self._spill_min_chars > 0
-            and len(result_text) >= self._spill_min_chars
-        ):
-            result_text = _write_spill_with_inventory(
-                result_text, self._workspace.repo_root, ctx.thread_id, call.call_id
-            )
+        if err_text is None and result_text is not None:
+            result_text = sanitize_tool_result_text(result_text)
+            if (
+                name not in _SPILL_SKIP_TOOLS
+                and self._spill_min_chars > 0
+                and len(result_text) >= self._spill_min_chars
+            ):
+                result_text = _write_spill_with_inventory(
+                    result_text, self._workspace.repo_root, ctx.thread_id, call.call_id
+                )
+            else:
+                result_text = cap_tool_result_text(result_text)
         if err_text is not None:
             return ToolExecutionResult.err(err_text)
         return ToolExecutionResult.ok_text(result_text or "")

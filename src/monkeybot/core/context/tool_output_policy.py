@@ -30,6 +30,12 @@ class ToolOutputBudget:
 
 
 # Sensible defaults when YAML omits ``tool_output`` entries.
+_MCP_DEFAULT_TOOL_BUDGET = ToolOutputBudget(
+    content_type="auto",
+    max_output_lines=120,
+    max_array_items=40,
+)
+
 _BUILTIN_TOOL_BUDGETS: dict[str, ToolOutputBudget] = {
     "run_command": ToolOutputBudget(
         content_type="logs",
@@ -190,8 +196,13 @@ def cached_tool_output_policies() -> dict[str, ToolOutputBudget]:
 
 
 def resolve_tool_budget(tool_name: str) -> ToolOutputBudget | None:
-    """Return configured budget for ``tool_name``, or None when no policy applies."""
-    return cached_tool_output_policies().get(tool_name)
+    """Return configured budget for ``tool_name``, or MCP default for ``server__tool`` names."""
+    merged = cached_tool_output_policies()
+    if tool_name in merged:
+        return merged[tool_name]
+    if "__" in tool_name:
+        return merged.get("*") or merged.get("__mcp__") or _MCP_DEFAULT_TOOL_BUDGET
+    return None
 
 
 def validate_tool_output_budgets(
