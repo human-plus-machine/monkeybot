@@ -32,6 +32,7 @@ from monkeybot.core.runtime.context_budget import summarization_trigger_ratio_fr
 from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService
 
 from .loop_port import LoopPort, UsagePort
+from .scheduler_routes import build_scheduler_router
 from .models import (
     APIError,
     AttachmentUploadResponse,
@@ -690,6 +691,7 @@ def create_app(
         }
 
     app.include_router(api)
+    app.include_router(build_scheduler_router(loop_port=loop, registry=reg))
 
     @app.get("/health", response_model=HealthResponse)
     async def health() -> HealthResponse:

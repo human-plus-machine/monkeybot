@@ -9,6 +9,7 @@ from __future__ import annotations
 import aiosqlite
 
 from monkeybot.core.persistence.durable_runs import SQLiteRunStore
+from monkeybot.core.persistence.scheduled_loops import SQLiteScheduledLoopStore
 from monkeybot.core.persistence.history import SQLiteHistoryStore
 from monkeybot.core.persistence.sqlite import apply_schema, open_connection
 from monkeybot.core.persistence.usage import SQLiteUsageStore
@@ -23,6 +24,7 @@ class SQLiteStorageBackend:
         self._history_store: SQLiteHistoryStore | None = None
         self._usage_store: SQLiteUsageStore | None = None
         self._runs_store: SQLiteRunStore | None = None
+        self._scheduled_loops_store: SQLiteScheduledLoopStore | None = None
 
     async def open(self, *, run_schema: bool = True) -> None:
         self._conn = await open_connection(self._db_url)
@@ -31,6 +33,7 @@ class SQLiteStorageBackend:
         self._history_store = SQLiteHistoryStore(self._conn)
         self._usage_store = SQLiteUsageStore(self._conn)
         self._runs_store = SQLiteRunStore(self._conn)
+        self._scheduled_loops_store = SQLiteScheduledLoopStore(self._conn)
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -39,6 +42,7 @@ class SQLiteStorageBackend:
             self._history_store = None
             self._usage_store = None
             self._runs_store = None
+            self._scheduled_loops_store = None
 
     def history(self) -> SQLiteHistoryStore:
         if self._history_store is None:
@@ -54,3 +58,8 @@ class SQLiteStorageBackend:
         if self._runs_store is None:
             raise RuntimeError("SQLiteStorageBackend.open() has not been called")
         return self._runs_store
+
+    def scheduled_loops(self) -> SQLiteScheduledLoopStore:
+        if self._scheduled_loops_store is None:
+            raise RuntimeError("SQLiteStorageBackend.open() has not been called")
+        return self._scheduled_loops_store

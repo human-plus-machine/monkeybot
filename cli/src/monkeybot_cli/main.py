@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from monkeybot_cli.commands import chat, doctor, new, run_cmd, validate
+from monkeybot_cli.commands import chat, doctor, loop, new, run_cmd, validate
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -20,6 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.register(sub)
     run_cmd.register(sub)
     chat.register(sub)
+    loop.register(sub)
     return parser
 
 

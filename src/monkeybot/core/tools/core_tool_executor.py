@@ -28,8 +28,10 @@ from monkeybot.core.logging_utils import kv
 from monkeybot.core.mcp.mcp_client import MCPConnectionError, MCPServerNotConnectedError
 from monkeybot.core.mcp.ports_mcp import MCPClientPort
 from monkeybot.core.memory.subsystem import MemorySubsystem
-from monkeybot.core.persistence.backends import RunStore
+from monkeybot.core.persistence.backends import RunStore, ScheduledLoopStore
 from monkeybot.core.persistence.durable_runs import SubagentEnvelope as PersistedSubagentEnvelope
+from monkeybot.core.persistence.scheduled_loops import ScheduledLoopCreate
+from monkeybot.scheduler.interval import parse_interval_ms, parse_optional_duration_ms
 from monkeybot.core.persistence.runs import make_run_id
 from monkeybot.core.runtime.events import (
     AssistantDelta,
@@ -84,6 +86,11 @@ _CORE_TOOL_NAMES = frozenset(
         "run_command",
         "add_mcp_server",
         "remove_mcp_server",
+        "start_loop",
+        "loop_status",
+        "pause_loop",
+        "resume_loop",
+        "stop_loop",
     }
 )
 
@@ -314,6 +321,7 @@ class CoreToolExecutor(ToolExecutorPort):
         attachment_store: AttachmentStore | None = None,
         attachment_catalog: SessionAttachmentCatalog | None = None,
         run_store: RunStore | None = None,
+        scheduled_loop_store: ScheduledLoopStore | None = None,
         subagent_registry: dict[str, SubagentConfig] | None = None,
     ) -> None:
         ws_settings = workspace_settings_from_env()
@@ -326,6 +334,7 @@ class CoreToolExecutor(ToolExecutorPort):
         self._attachment_store = attachment_store
         self._attachment_catalog = attachment_catalog
         self._run_store = run_store
+        self._scheduled_loop_store = scheduled_loop_store
         self._subagent_registry = dict(subagent_registry or {})
         self._terminal: TerminalExecutor | SandboxExecutor
         if terminal is not None:
@@ -426,6 +435,16 @@ class CoreToolExecutor(ToolExecutorPort):
                 result_text, err_text = await self._tool_add_mcp_server(args)
             elif name == "remove_mcp_server":
                 result_text, err_text = await self._tool_remove_mcp_server(args)
+            elif name == "start_loop":
+                result_text, err_text = await self._tool_start_loop(args, ctx)
+            elif name == "loop_status":
+                result_text, err_text = await self._tool_loop_status(args)
+            elif name == "pause_loop":
+                result_text, err_text = await self._tool_pause_loop(args)
+            elif name == "resume_loop":
+                result_text, err_text = await self._tool_resume_loop(args)
+            elif name == "stop_loop":
+                result_text, err_text = await self._tool_stop_loop(args)
             elif name in self._extra_tools:
                 try:
                     raw = await self._extra_tools[name].execute(args)
@@ -1022,3 +1041,150 @@ class CoreToolExecutor(ToolExecutorPort):
             return (None, "remove_mcp_server requires name (or server_name / server)")
         await self._mcp.disconnect(sname)
         return (_j({"ok": True, "server": sname, "disconnected": True}), None)
+
+    def _require_loop_store(self) -> ScheduledLoopStore | tuple[None, str]:
+        if self._scheduled_loop_store is None:
+            return (
+                None,
+                _built_in_tool_error(
+                    "policy",
+                    "scheduled loops require durable storage (DB_URL)",
+                    "Configure paths.db_url in monkeybot.yaml and enable MONKEYBOT_SCHEDULER_ENABLED=1 on the gateway.",
+                    {},
+                ),
+            )
+        return self._scheduled_loop_store
+
+    async def _tool_start_loop(
+        self, args: dict[str, Any], ctx: TurnContext
+    ) -> tuple[str | None, str | None]:
+        store_or_err = self._require_loop_store()
+        if isinstance(store_or_err, tuple):
+            return None, store_or_err[1]
+        store = store_or_err
+        prompt = _str_arg(args, "prompt", "plan", "message")
+        if not prompt:
+            return (None, "start_loop requires prompt with the agreed loop plan")
+        interval_raw = args.get("interval")
+        if interval_raw is None:
+            return (None, "start_loop requires interval (e.g. 20s, 5m, 1h)")
+        try:
+            interval_ms = parse_interval_ms(interval_raw)
+            max_runtime_ms = parse_optional_duration_ms(args.get("max_runtime"))
+        except ValueError as exc:
+            return (None, str(exc))
+        max_ticks_raw = args.get("max_ticks")
+        max_ticks: int | None = None
+        if max_ticks_raw is not None:
+            max_ticks = _coerce_int(max_ticks_raw, 0)
+            if max_ticks is None or max_ticks < 1:
+                return (None, "max_ticks must be a positive integer when set")
+        session_id = _str_arg(args, "session_id") or ctx.thread_id
+        loop_id = _str_arg(args, "loop_id")
+        skip_if_busy = args.get("skip_if_busy", True)
+        if not isinstance(skip_if_busy, bool):
+            skip_if_busy = True
+        spec = ScheduledLoopCreate(
+            prompt=prompt,
+            interval_ms=interval_ms,
+            session_id=session_id,
+            loop_id=loop_id,
+            max_ticks=max_ticks,
+            max_runtime_ms=max_runtime_ms,
+            skip_if_busy=skip_if_busy,
+        )
+        try:
+            row = await store.create(spec)
+        except ValueError as exc:
+            return (None, str(exc))
+        return (
+            _j(
+                {
+                    "ok": True,
+                    "loop_id": row.loop_id,
+                    "session_id": row.session_id,
+                    "status": row.status,
+                    "interval_ms": row.interval_ms,
+                    "max_ticks": row.max_ticks,
+                    "max_runtime_ms": row.max_runtime_ms,
+                    "message": (
+                        "Scheduled loop registered. The scheduler worker will fire the prompt "
+                        "on each tick when MONKEYBOT_SCHEDULER_ENABLED=1 or the standalone "
+                        "scheduler worker is running."
+                    ),
+                }
+            ),
+            None,
+        )
+
+    async def _tool_loop_status(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+        store_or_err = self._require_loop_store()
+        if isinstance(store_or_err, tuple):
+            return None, store_or_err[1]
+        store = store_or_err
+        loop_id = _str_arg(args, "loop_id", "id")
+        if loop_id:
+            row = await store.get(loop_id)
+            if row is None:
+                return (None, f"unknown loop: {loop_id}")
+            return (_j({"ok": True, "loop": self._loop_row_json(row)}), None)
+        rows = await store.list_all()
+        return (_j({"ok": True, "loops": [self._loop_row_json(r) for r in rows]}), None)
+
+    @staticmethod
+    def _loop_row_json(row: object) -> dict[str, object]:
+        from monkeybot.core.persistence.scheduled_loops import ScheduledLoopRow
+
+        if not isinstance(row, ScheduledLoopRow):
+            raise TypeError("expected ScheduledLoopRow")
+        return {
+            "loop_id": row.loop_id,
+            "session_id": row.session_id,
+            "status": row.status,
+            "tick_index": row.tick_index,
+            "interval_ms": row.interval_ms,
+            "max_ticks": row.max_ticks,
+            "max_runtime_ms": row.max_runtime_ms,
+            "next_tick_at_ms": row.next_tick_at_ms,
+            "last_tick_at_ms": row.last_tick_at_ms,
+            "last_error": row.last_error,
+            "stop_reason": row.stop_reason,
+            "tick_in_flight": row.tick_in_flight,
+        }
+
+    async def _tool_pause_loop(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+        store_or_err = self._require_loop_store()
+        if isinstance(store_or_err, tuple):
+            return None, store_or_err[1]
+        loop_id = _str_arg(args, "loop_id", "id")
+        if not loop_id:
+            return (None, "pause_loop requires loop_id")
+        ok = await store_or_err.pause(loop_id)
+        if not ok:
+            return (None, f"unknown loop: {loop_id}")
+        return (_j({"ok": True, "loop_id": loop_id, "status": "paused"}), None)
+
+    async def _tool_resume_loop(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+        store_or_err = self._require_loop_store()
+        if isinstance(store_or_err, tuple):
+            return None, store_or_err[1]
+        loop_id = _str_arg(args, "loop_id", "id")
+        if not loop_id:
+            return (None, "resume_loop requires loop_id")
+        ok = await store_or_err.resume(loop_id)
+        if not ok:
+            return (None, f"paused loop not found: {loop_id}")
+        return (_j({"ok": True, "loop_id": loop_id, "status": "active"}), None)
+
+    async def _tool_stop_loop(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+        store_or_err = self._require_loop_store()
+        if isinstance(store_or_err, tuple):
+            return None, store_or_err[1]
+        loop_id = _str_arg(args, "loop_id", "id")
+        if not loop_id:
+            return (None, "stop_loop requires loop_id")
+        ok = await store_or_err.stop(loop_id)
+        if not ok:
+            return (None, f"unknown loop: {loop_id}")
+        return (_j({"ok": True, "loop_id": loop_id, "status": "completed"}), None)
+

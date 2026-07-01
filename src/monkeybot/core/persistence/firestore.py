@@ -15,6 +15,7 @@ from google.cloud.firestore_v1.base_query import FieldFilter
 from monkeybot.core.llm.provider import Message, Role
 from monkeybot.core.llm.usage import Usage, UsageSummary
 from monkeybot.core.persistence.backends import FirestoreConfig
+from monkeybot.core.persistence.firestore_scheduled_loops import FirestoreScheduledLoopStore
 from monkeybot.core.persistence.durable_runs import (
     SubagentEnvelope,
     SubagentRunRow,
@@ -496,6 +497,7 @@ class FirestoreStorageBackend:
         self._history_store: FirestoreHistoryStore | None = None
         self._usage_store: FirestoreUsageStore | None = None
         self._runs_store: FirestoreRunStore | None = None
+        self._scheduled_loops_store: FirestoreScheduledLoopStore | None = None
 
     async def open(self, *, run_schema: bool = True) -> None:
         """Open the Firestore client.
@@ -511,6 +513,7 @@ class FirestoreStorageBackend:
         self._history_store = FirestoreHistoryStore(self._client, prefix)
         self._usage_store = FirestoreUsageStore(self._client, prefix)
         self._runs_store = FirestoreRunStore(self._client, prefix)
+        self._scheduled_loops_store = FirestoreScheduledLoopStore()
 
     async def close(self) -> None:
         if self._client is not None:
@@ -520,6 +523,7 @@ class FirestoreStorageBackend:
             self._history_store = None
             self._usage_store = None
             self._runs_store = None
+            self._scheduled_loops_store = None
 
     def history(self) -> FirestoreHistoryStore:
         if self._history_store is None:
@@ -535,3 +539,8 @@ class FirestoreStorageBackend:
         if self._runs_store is None:
             raise RuntimeError("FirestoreStorageBackend.open() has not been called")
         return self._runs_store
+
+    def scheduled_loops(self) -> FirestoreScheduledLoopStore:
+        if self._scheduled_loops_store is None:
+            raise RuntimeError("FirestoreStorageBackend.open() has not been called")
+        return self._scheduled_loops_store
