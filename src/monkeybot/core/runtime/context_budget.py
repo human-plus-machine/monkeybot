@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from monkeybot.core.context.common import ContextPressureTier, text_from_blocks
 from monkeybot.core.context.tool_output_policy import resolve_tool_budget
+from monkeybot.core.context.tool_result_ingress import sanitize_tool_result_text
 from monkeybot.core.context.tool_shapers import shape_tool_text
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.types.content_blocks import ContentBlock, Text, ToolResponse
@@ -229,6 +230,7 @@ class ContextBudgeter:
         if not isinstance(block, ToolResponse) or block.is_error:
             return None
         text = text_from_blocks(list(block.result))
+        text = sanitize_tool_result_text(text)
         budget = resolve_tool_budget(block.tool_name)
         if budget is not None or self.pressure_tier in ("moderate", "aggressive"):
             text = shape_tool_text(
