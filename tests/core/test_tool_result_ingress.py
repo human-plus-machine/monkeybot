@@ -14,6 +14,7 @@ from monkeybot.core.context.tool_result_ingress import (
     summarize_tool_result_text,
 )
 from monkeybot.core.context.tool_output_policy import (
+    register_mcp_tool_names,
     resolve_tool_budget,
     reset_tool_output_policy_cache_for_tests,
 )
@@ -102,9 +103,15 @@ def test_normalize_call_tool_result_uses_ingress() -> None:
 
 def test_resolve_tool_budget_mcp_default() -> None:
     reset_tool_output_policy_cache_for_tests()
+    register_mcp_tool_names(["browser__browser_screenshot"])
     budget = resolve_tool_budget("browser__browser_screenshot")
     assert budget is not None
     assert budget.max_output_lines == 120
+
+
+def test_resolve_tool_budget_ignores_unregistered_double_underscore_name() -> None:
+    reset_tool_output_policy_cache_for_tests()
+    assert resolve_tool_budget("my__custom_tool") is None
 
 
 def test_resolve_tool_budget_yaml_wildcard(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -116,6 +123,7 @@ def test_resolve_tool_budget_yaml_wildcard(tmp_path, monkeypatch: pytest.MonkeyP
     )
     monkeypatch.setenv("COMMAND_ALLOWLIST_CONFIG", str(cfg))
     reset_tool_output_policy_cache_for_tests()
+    register_mcp_tool_names(["browser__browser_goto"])
     budget = resolve_tool_budget("browser__browser_goto")
     assert budget is not None
     assert budget.max_output_lines == 77

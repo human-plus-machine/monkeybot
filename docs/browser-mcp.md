@@ -25,7 +25,8 @@ Add to `monkeybot_config/mcp.json`:
   "args": ["run", "--project", "../integrations/browser-mcp", "python", "-m", "browser_mcp.server"],
   "env": {
     "BU_NAME": "monkeybot",
-    "BROWSER_MCP_PLAYBOOKS_DIR": "./workspace/skills/browser/playbooks"
+    "BROWSER_MCP_PLAYBOOKS_DIR": "./workspace/skills/browser/playbooks",
+    "BROWSER_MCP_SCREENSHOTS_DIR": "${MONKEYBOT_WORKSPACE_ROOT}/browser/Screenshots"
   }
 }
 ```
@@ -69,7 +70,8 @@ google-chrome \
 "env": {
   "BU_NAME": "monkeybot",
   "BU_CDP_URL": "http://127.0.0.1:9222",
-  "BROWSER_MCP_PLAYBOOKS_DIR": "./workspace/skills/browser/playbooks"
+  "BROWSER_MCP_PLAYBOOKS_DIR": "./workspace/skills/browser/playbooks",
+  "BROWSER_MCP_SCREENSHOTS_DIR": "${MONKEYBOT_WORKSPACE_ROOT}/browser/Screenshots"
 }
 ```
 
@@ -90,11 +92,12 @@ No Chrome in your image. [Browser Use Cloud](https://cloud.browser-use.com/) hos
   "BU_NAME": "monkeybot-prod",
   "BROWSER_USE_API_KEY": "${BROWSER_USE_API_KEY}",
   "BU_CDP_WS": "${BU_CDP_WS}",
-  "BROWSER_MCP_PLAYBOOKS_DIR": "./workspace/skills/browser/playbooks"
+  "BROWSER_MCP_PLAYBOOKS_DIR": "./workspace/skills/browser/playbooks",
+  "BROWSER_MCP_SCREENSHOTS_DIR": "${MONKEYBOT_WORKSPACE_ROOT}/browser/Screenshots"
 }
 ```
 
-Call the `browser_stop` MCP tool when browsing is done — cloud sessions bill until stopped.
+Call the `browser_stop` MCP tool when browsing is done — cloud sessions bill until stopped. As a safety net, MonkeyBot's `MCPClient.disconnect()`/`disconnect_all()` also call `browser_stop` automatically (best-effort, 10s timeout) whenever a connected server exposes that tool, so agent crashes, abandoned conversations, and normal shutdown all stop the remote session rather than only killing the local stdio subprocess.
 
 For syncing cookies from a local Chrome profile into cloud browsers, see [browser-harness profile-sync](https://github.com/browser-use/browser-harness/blob/main/interaction-skills/profile-sync.md).
 
@@ -109,6 +112,7 @@ For syncing cookies from a local Chrome profile into cloud browsers, see [browse
 | `BU_NAME` | Daemon name; separate values for parallel browser sessions |
 | `BROWSER_USE_API_KEY` | Browser Use Cloud auth |
 | `BROWSER_MCP_PLAYBOOKS_DIR` | Playbooks directory (agent-written site notes) |
+| `BROWSER_MCP_SCREENSHOTS_DIR` | Screenshot output directory (default: `{workspace}/browser/Screenshots`) |
 
 All `BU_*` vars are passed through to `browser-harness` unchanged.
 
@@ -118,7 +122,7 @@ All `BU_*` vars are passed through to `browser-harness` unchanged.
 
 Navigation, interaction, screenshots, tabs, waits, playbooks (`browser_list_playbooks`, `browser_read_playbook`, `browser_write_playbook`), and `browser_stop` for daemon cleanup.
 
-`browser_screenshot` returns **JSON metadata** (host path, url, title, viewport) — not inline base64 image bytes. This keeps tool results small for text-only models (Ollama) and avoids context-window blowups. Use `browser_js` to extract visible page text when the model cannot view images.
+`browser_screenshot` saves a PNG under **`./browser/Screenshots/`** in the agent workspace and returns JSON with a workspace-relative `path` (for `render_image` on vision models), `screenshots_dir`, url, title, and viewport — not inline base64 image bytes. This keeps tool results small for text-only models (Ollama) and avoids context-window blowups. Use `browser_js` to extract visible page text when the model cannot view images.
 
 `browser-harness` is imported lazily on first browser tool call so listing MCP tools does not require Chrome to be running.
 

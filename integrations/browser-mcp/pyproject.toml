@@ -15,5 +15,8 @@ dependencies = [
 [project.scripts]
 browser-mcp = "browser_mcp.server:main"
 
+[dependency-groups]
+dev = ["pytest>=8.0.0"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/browser_mcp"]

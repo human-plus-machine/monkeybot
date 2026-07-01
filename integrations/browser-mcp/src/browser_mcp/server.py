@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import atexit
+import contextlib
 import json
 import logging
+import signal
+import sys
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from browser_mcp import playbooks
+from browser_mcp import playbooks, screenshots
 
 logger = logging.getLogger(__name__)
 
@@ -53,20 +57,27 @@ def browser_goto(url: str) -> str:
 
 @mcp.tool()
 def browser_screenshot(full: bool = False, max_dim: int | None = 1800) -> str:
-    """Capture a PNG of the current viewport. Returns JSON with host path and page metadata (not inline image bytes)."""
+    """Capture a PNG of the current viewport.
+
+    Returns JSON with a workspace-relative path under ``./browser/Screenshots/`` (for
+    ``render_image`` on vision models) plus page metadata — not inline image bytes.
+    """
     helpers, _ = _browser_harness()
-    path = helpers.capture_screenshot(full=full, max_dim=max_dim)
+    abs_path, rel_path = screenshots.allocate_screenshot_path()
+    helpers.capture_screenshot(path=str(abs_path), full=full, max_dim=max_dim)
     info = helpers.page_info()
     return _json_text(
         {
             "ok": True,
-            "path": path,
+            "path": rel_path,
+            "screenshots_dir": "./browser/Screenshots",
             "url": info.get("url"),
             "title": info.get("title"),
             "viewport": {"w": info.get("w"), "h": info.get("h")},
             "note": (
-                "Screenshot saved on the gateway host. Use browser_js to extract visible text "
-                "when the model cannot view images. Coordinate clicks still use this capture."
+                "Screenshot saved under the agent workspace. Vision models: call render_image "
+                "with path. Text-only models: use browser_js for visible text. Coordinate clicks "
+                "use viewport metadata from this capture."
             ),
         }
     )
@@ -203,7 +214,50 @@ def browser_stop() -> str:
     return _json_text({"ok": True, "message": "daemon stopped"})
 
 
+def _stop_daemon_for_shutdown() -> None:
+    """Best-effort daemon stop on process exit (SIGTERM/SIGINT/atexit).
+
+    A crashed turn, abandoned conversation, or container SIGTERM can end this
+    stdio process without the model ever calling ``browser_stop``. Closing this
+    process's own stdio pipes never reaches the detached browser-harness daemon
+    (started via ``start_new_session=True``), so without this hook a remote
+    Browser Use Cloud session -- and its billing -- would keep running
+    indefinitely. Idempotent: safe to call even if no daemon was ever started.
+    """
+    global _bh
+    if _bh is None:
+        return
+    _bh = None
+    try:
+        from browser_harness import admin
+
+        admin.restart_daemon()
+    except Exception:
+        logger.warning("browser-mcp shutdown: failed to stop browser-harness daemon", exc_info=True)
+
+
+def _install_shutdown_handlers() -> None:
+    """Register atexit + SIGTERM/SIGINT hooks so daemon teardown survives process exit.
+
+    SIGKILL cannot be intercepted by any process (OS-level guarantee) -- this
+    only closes the gap for SIGTERM, which orchestrators (Kubernetes, Docker,
+    ECS) send first with a grace period before escalating to SIGKILL.
+    """
+    atexit.register(_stop_daemon_for_shutdown)
+
+    def _handle_signal(signum: int, _frame: object) -> None:
+        _stop_daemon_for_shutdown()
+        sys.exit(128 + signum)
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        # Not the main thread, or unsupported on this platform -- atexit still
+        # covers normal interpreter shutdown in that case.
+        with contextlib.suppress(ValueError, OSError):
+            signal.signal(sig, _handle_signal)
+
+
 def main() -> None:
+    _install_shutdown_handlers()
     mcp.run(transport="stdio")
 
 

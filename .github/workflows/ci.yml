@@ -32,3 +32,9 @@ jobs:
         run: |
           uv sync
           uv run pytest -q
+
+      - name: Browser MCP pytest
+        working-directory: integrations/browser-mcp
+        run: |
+          uv sync --dev
+          uv run pytest -q

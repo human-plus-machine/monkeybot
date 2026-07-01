@@ -22,6 +22,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast, runtime_checkable
 
+from monkeybot.core.context.tool_output_policy import (
+    register_mcp_tool_names,
+    unregister_mcp_server_tools,
+)
 from monkeybot.core.context.tool_result_ingress import (
     dump_model_or_str,
     format_mcp_content_block,
@@ -108,6 +112,13 @@ class MCPConnectivityError(MCPDiagnosticError):
 
 
 _ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
+
+# Unprefixed tool name that cloud-browser MCP servers (e.g. browser-harness) expose
+# to stop a remote session before it accrues further billing. Disconnecting the
+# stdio transport alone never reaches the remote session, so disconnect() calls
+# this tool first, best-effort, whenever a connected server exposes it.
+_BROWSER_STOP_TOOL = "browser_stop"
+_BROWSER_STOP_TIMEOUT_S = 10.0
 
 
 def interpolate_env_vars(value: Any) -> Any:
@@ -538,6 +549,7 @@ class MCPClient:
                 defs.append(ToolDef(name=prefixed, description=desc, input_schema=schema))
 
             self._servers[name] = _ServerRecord(stack=stack, session=session, tools=list(defs))
+            register_mcp_tool_names(t.name for t in defs)
             return list(defs)
         except MCPConnectionError:
             await stack.aclose()
@@ -601,6 +613,7 @@ class MCPClient:
                 defs.append(ToolDef(name=prefixed, description=desc, input_schema=schema))
 
             self._servers[name] = _ServerRecord(stack=stack, session=session, tools=list(defs))
+            register_mcp_tool_names(t.name for t in defs)
             return list(defs)
         except MCPConnectionError:
             await stack.aclose()
@@ -612,11 +625,35 @@ class MCPClient:
             await stack.aclose()
             raise MCPConnectionError(name, str(exc)) from exc
 
+    async def _stop_remote_session_before_teardown(self, name: str, rec: _ServerRecord) -> None:
+        """Best-effort ``browser_stop`` call so cloud-browser billing ends on disconnect.
+
+        Closing the stdio transport only kills the local MCP subprocess; a remote
+        Browser Use Cloud session (or any other server's remote resource behind a
+        ``browser_stop`` tool) keeps running otherwise. Runs before ``stack.aclose()``
+        with a short timeout so a hung remote call never blocks shutdown.
+        """
+        prefixed_stop_tool = f"{name}__{_BROWSER_STOP_TOOL}"
+        if not any(t.name == prefixed_stop_tool for t in rec.tools):
+            return
+        try:
+            async with asyncio.timeout(_BROWSER_STOP_TIMEOUT_S):
+                await rec.session.call_tool(_BROWSER_STOP_TOOL, arguments={})
+        except Exception as exc:
+            logger.warning(
+                "mcp disconnect %s: %s call failed (remote session may keep billing): %s",
+                name,
+                _BROWSER_STOP_TOOL,
+                exc,
+            )
+
     async def disconnect(self, name: str) -> None:
         """Tear down one server session; harmless if already disconnected."""
         rec = self._servers.pop(name, None)
         if rec is None:
             return
+        unregister_mcp_server_tools(name)
+        await self._stop_remote_session_before_teardown(name, rec)
         try:
             await rec.stack.aclose()
         except BaseException as exc:
