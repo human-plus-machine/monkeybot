@@ -145,6 +145,7 @@ There is no claim heartbeat yet — subagent runs longer than `MONKEYBOT_WORKER_
 | **Google Chat** | Optional | Workspace Add-on interface (when deployed) |
 | **OpenAI** | Supported | `OpenAIProvider` (`monkeybot[openai]`) via `get_provider_config()` |
 | **Ollama** | Supported | `OllamaProvider` for local models (`monkeybot[ollama]`), no API key required |
+| **NVIDIA (build.nvidia.com)** | Supported | `NvidiaProvider` (`monkeybot[nvidia]`); free `NVIDIA_API_KEY`, `MODEL_PROVIDER=nvidia` |
 | **Anthropic Claude** | Supported | `ClaudeProvider` (`monkeybot[claude]`) via `get_provider_config()` |
 | **Anthropic via Vertex AI** | Supported | `VertexClaudeProvider` (`anthropic[vertex]`) |
 | **AWS Bedrock** | Supported | `BedrockClaudeProvider` (`monkeybot[bedrock]`); `MODEL_PROVIDER=aws_bedrock` |

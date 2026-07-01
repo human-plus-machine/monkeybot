@@ -48,6 +48,7 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
     "huggingface": ProviderSpec(
         ("huggingface",), "huggingface", ("HF_TOKEN", "HUGGINGFACE_API_KEY")
     ),
+    "nvidia": ProviderSpec(("nvidia",), "nvidia", ("NVIDIA_API_KEY",)),
     "ollama": ProviderSpec(
         # credential_env_vars is empty: credentials_optional=True short-circuits
         # credentials_present() before these are ever read, and OLLAMA_BASE_URL
@@ -81,6 +82,7 @@ def extra_module(extra: str) -> str:
         "bedrock": "boto3",
         "huggingface": "openai",
         "ollama": "openai",
+        "nvidia": "openai",
     }
     return mapping.get(extra, extra)
 
