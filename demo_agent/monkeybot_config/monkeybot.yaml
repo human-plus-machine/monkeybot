@@ -8,6 +8,7 @@
 runtime:
   log_level: INFO
   port: 8787
+  transcript_enabled: true
 
 paths:
   agent_md: ./monkeybot_config/AGENT.md
@@ -24,7 +25,7 @@ paths:
 model:
   # Free key from https://build.nvidia.com — set NVIDIA_API_KEY in .env.
   provider: nvidia
-  name: meta/llama-3.1-8b-instruct
+  name: nvidia/nemotron-3-ultra-550b-a55b
   # summarization_model: meta/llama-3.1-8b-instruct  # optional; env CONTEXT_SUMMARIZATION_MODEL overrides
 
 gateway:
