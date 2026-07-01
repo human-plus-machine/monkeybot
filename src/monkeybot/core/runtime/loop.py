@@ -45,6 +45,7 @@ from monkeybot.core.llm.usage import Usage
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.messages.tool_integrity import repair_tool_turn_integrity
 from monkeybot.core.persistence.backends import HistoryStore
+from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.prompts.prompt import compose_system_prompt, latest_user_message_text
 from monkeybot.core.runtime.context_budget import (
     ContextBudgeter,
@@ -691,6 +692,7 @@ async def run(
     curator_provider: Provider | None = None,
     attachment_store: AttachmentStore | None = None,
     attachment_catalog: SessionAttachmentCatalog | None = None,
+    transcript_writer: TranscriptWriter | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Stream agent events for one user message; ends with ``TurnComplete`` (never raises).
 
@@ -732,6 +734,7 @@ async def run(
             trace_id_out=trace_id_capture,
             attachment_store=attachment_store,
             attachment_catalog=attachment_catalog,
+            transcript_writer=transcript_writer,
         ):
             yield evt
     except asyncio.CancelledError:
@@ -785,6 +788,7 @@ async def _run_inner(
     trace_id_out: list[str | None] | None = None,
     attachment_store: AttachmentStore | None = None,
     attachment_catalog: SessionAttachmentCatalog | None = None,
+    transcript_writer: TranscriptWriter | None = None,
 ) -> AsyncIterator[AgentEvent]:
     from monkeybot.observability.spans import set_run_output, span_run
 
@@ -806,6 +810,7 @@ async def _run_inner(
             last_assistant=last_assistant,
             attachment_store=attachment_store,
             attachment_catalog=attachment_catalog,
+            transcript_writer=transcript_writer,
         ):
             yield evt
         set_run_output(last_assistant[0])
@@ -838,6 +843,7 @@ async def _run_inner_core(
     last_assistant: list[str],
     attachment_store: AttachmentStore | None = None,
     attachment_catalog: SessionAttachmentCatalog | None = None,
+    transcript_writer: TranscriptWriter | None = None,
 ) -> AsyncIterator[AgentEvent]:
     from monkeybot.observability.spans import (
         begin_turn_span,
@@ -1107,6 +1113,14 @@ async def _run_inner_core(
             llm_cached = 0
             llm_cache_read = 0
             llm_cache_creation = 0
+            if transcript_writer is not None:
+                await transcript_writer.write_provider_request(
+                    request_id=ctx.request_id,
+                    model=ctx.model,
+                    messages=[m.to_dict() for m in provider_messages],
+                    tools=[dataclasses.asdict(t) for t in ctx.tools],
+                    thinking_budget=stream_thinking,
+                )
             try:
                 async with span_llm(ctx=ctx):
                     async with aclosing(
@@ -1157,6 +1171,24 @@ async def _run_inner_core(
                     set_llm_io(
                         prompt=_provider_messages_prompt_summary(provider_messages),
                         completion=assistant_text or "",
+                    )
+                if transcript_writer is not None:
+                    await transcript_writer.write_provider_response(
+                        request_id=ctx.request_id,
+                        model=ctx.model,
+                        text=assistant_text,
+                        thinking=thinking_text,
+                        tool_requests=[
+                            {"call_id": tc.call_id, "name": tc.name, "args": tc.args}
+                            for tc in pending.values()
+                        ],
+                        usage={
+                            "input_tokens": llm_input,
+                            "output_tokens": llm_output,
+                            "cached_tokens": llm_cached,
+                            "cache_read_tokens": llm_cache_read,
+                            "cache_creation_tokens": llm_cache_creation,
+                        },
                     )
                 logger.debug(
                     "provider stream done %s",
