@@ -11,6 +11,7 @@
 #   OPENAI_API_KEY, ANTHROPIC_API_KEY,
 #   ANTHROPIC_VERTEX_PROJECT_ID, ANTHROPIC_VERTEX_REGION,
 #   OLLAMA_BASE_URL (default http://localhost:11434, no API key needed),
+#   NVIDIA_API_KEY (free key from https://build.nvidia.com),
 #   TAVILY_API_KEY, FIRECRAWL_API_KEY, SANDBOX_API_KEY,
 #   MONKEYBOT_TOOL_DENIED_PATTERNS, MONKEYBOT_CORS_ALLOW_ORIGINS, MONKEYBOT_CONFIG, …
 #
@@ -38,7 +39,7 @@ paths:
   workspace_root: ./workspace
 
 model:
-  # gemini | openai | anthropic | vertex-claude | huggingface | ollama | aws_bedrock | fake
+  # gemini | openai | anthropic | vertex-claude | huggingface | ollama | nvidia | aws_bedrock | fake
   provider: gemini
   name: gemini-3-flash
   temperature: 0.7

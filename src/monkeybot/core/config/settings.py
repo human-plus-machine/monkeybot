@@ -12,6 +12,7 @@ from monkeybot.core.llm.provider import Provider
 from monkeybot.providers.claude import ClaudeProvider
 from monkeybot.providers.gemini import GeminiProvider
 from monkeybot.providers.huggingface import HuggingFaceProvider
+from monkeybot.providers.nvidia import NvidiaProvider
 from monkeybot.providers.ollama import OllamaProvider
 from monkeybot.providers.openai import OpenAIProvider
 from monkeybot.providers.sampling import resolve_model_sampling
@@ -192,6 +193,15 @@ def get_provider_config(
             ),
             resolved_model,
         )
+    if provider_key == "nvidia":
+        return ProviderConfig(
+            NvidiaProvider(
+                temperature=sampling.temperature,
+                max_tokens=sampling.max_tokens,
+                cache_enabled=resolved_cache,
+            ),
+            resolved_model,
+        )
     if provider_key == "aws_bedrock":
         from monkeybot.providers.bedrock import BedrockClaudeProvider  # noqa: PLC0415
 
@@ -208,7 +218,7 @@ def get_provider_config(
     raise ValueError(
         f"Unsupported model provider: {provider_key}. "
         "Supported providers: google_vertexai, openai, anthropic, vertex_anthropic, "
-        "huggingface, ollama, aws_bedrock"
+        "huggingface, ollama, nvidia, aws_bedrock"
     )
 
 

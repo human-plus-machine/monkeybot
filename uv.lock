@@ -1545,6 +1545,10 @@ huggingface = [
     { name = "openai" },
     { name = "tiktoken" },
 ]
+nvidia = [
+    { name = "openai" },
+    { name = "tiktoken" },
+]
 observability = [
     { name = "opentelemetry-api" },
     { name = "opentelemetry-exporter-otlp-proto-http" },
@@ -1620,6 +1624,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "mcp", specifier = ">=1.0.0" },
     { name = "openai", marker = "extra == 'huggingface'", specifier = ">=1.0" },
+    { name = "openai", marker = "extra == 'nvidia'", specifier = ">=1.0" },
     { name = "openai", marker = "extra == 'ollama'", specifier = ">=1.0" },
     { name = "openai", marker = "extra == 'openai'", specifier = ">=1.0" },
     { name = "opensandbox", marker = "extra == 'sandbox'", specifier = ">=0.1.7" },
@@ -1632,11 +1637,12 @@ requires-dist = [
     { name = "python-ulid", specifier = ">=2.0.0" },
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "tiktoken", marker = "extra == 'huggingface'", specifier = ">=0.7.0" },
+    { name = "tiktoken", marker = "extra == 'nvidia'", specifier = ">=0.7.0" },
     { name = "tiktoken", marker = "extra == 'ollama'", specifier = ">=0.7.0" },
     { name = "tiktoken", marker = "extra == 'openai'", specifier = ">=0.7.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32.0" },
 ]
-provides-extras = ["gemini", "vertex", "claude", "vertex-claude", "bedrock", "openai", "huggingface", "ollama", "sandbox", "scheduler", "postgres", "firestore", "gcs", "aws", "council", "web-search", "observability"]
+provides-extras = ["gemini", "vertex", "claude", "vertex-claude", "bedrock", "openai", "huggingface", "ollama", "nvidia", "sandbox", "scheduler", "postgres", "firestore", "gcs", "aws", "council", "web-search", "observability"]
 
 [package.metadata.requires-dev]
 dev = [
