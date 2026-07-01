@@ -100,6 +100,9 @@ def build_suite_aggregate(scenarios: list[ScenarioAggregate]) -> SuiteAggregate:
     errored = sum(1 for s in scenarios if s.status == "errored")
     latencies = sorted(s.latency_ms_total for s in scenarios)
     mean_latency = sum(latencies) / len(latencies) if latencies else 0.0
+    # Nearest-rank index, not a true percentile interpolation (e.g. ~86th rank on 7 scenarios).
+    # Fine for a 7-scenario smoke suite; switch to statistics.quantiles if a larger suite needs
+    # real interpolated percentiles.
     p95_latency = latencies[int(0.95 * (len(latencies) - 1))] if latencies else 0.0
     total_tokens = sum(s.input_tokens + s.output_tokens for s in scenarios)
     total_cost = sum(s.cost_usd for s in scenarios)

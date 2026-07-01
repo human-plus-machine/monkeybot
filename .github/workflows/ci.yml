@@ -38,3 +38,10 @@ jobs:
         run: |
           uv sync --dev
           uv run pytest -q
+
+      - name: Evals self-checks (no live agent, no model calls)
+        run: |
+          uv sync --extra evals
+          uv run python evals/test_assertions.py
+          uv run python evals/test_report.py
+          uv run python evals/test_runner_sse.py

@@ -1,8 +1,8 @@
 """Requirement + cap assertions evaluated against SSE telemetry, independent of judge score.
 
 Caps (``max_*`` / ``min_score``) and requirements (``required_tools``, ``min_tool_calls``,
-``min_subagent_calls``, ``min_summarizations``) are read straight from a scenario's
-``assertions`` mapping; keys that aren't present are simply not checked.
+``min_subagent_calls``, ``min_summarizations``, ``response_contains``) are read straight from
+a scenario's ``assertions`` mapping; keys that aren't present are simply not checked.
 """
 
 from __future__ import annotations
@@ -61,5 +61,11 @@ def evaluate_assertions(scenario: Scenario, run: EvalRun) -> list[str]:
         failures.append(
             f"min_summarizations: {run.summarizations_count()} < {a['min_summarizations']}"
         )
+
+    if "response_contains" in a:
+        phrases = [str(p).lower() for p in a["response_contains"]]
+        combined = " ".join(t.output for t in run.turns).lower()
+        if phrases and not any(p in combined for p in phrases):
+            failures.append(f"response_contains: none of {phrases} found in the agent's output")
 
     return failures
