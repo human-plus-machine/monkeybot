@@ -43,6 +43,7 @@ class CreateLoopRequest(BaseModel):
     max_runtime: str | int | float | None = None
     skip_if_busy: bool = True
     unbounded: bool = False
+    confirmed: bool = False
 
 
 class InvokeTickRequest(BaseModel):
@@ -81,6 +82,13 @@ def build_scheduler_router(*, loop_port: LoopPort, registry: SessionRegistry) ->
         request: Request,
     ) -> dict[str, Any]:
         store = _loop_store(request)
+        if not body.confirmed:
+            raise APIError(
+                400,
+                "CONFIRMATION_REQUIRED",
+                "confirmed=true is required to register a scheduled loop via REST/CLI",
+                uuid.uuid4().hex,
+            )
         try:
             interval_ms = parse_interval_ms(body.interval)
             max_runtime_ms = parse_optional_duration_ms(body.max_runtime)
@@ -159,13 +167,15 @@ def build_scheduler_router(*, loop_port: LoopPort, registry: SessionRegistry) ->
     @router.post("/invoke-tick")
     async def invoke_tick_sync(
         body: InvokeTickRequest,
+        request: Request,
         reg_dep: SessionRegistry = Depends(_get_registry),
     ) -> dict[str, Any]:
         """Run one agent turn synchronously (scheduler worker / internal automation)."""
         if reg_dep.get(body.session_id) is None:
             await ensurer.ensure_session(body.session_id)
-        bus = reg_dep.get(body.session_id)
-        if bus is not None and bus.current_request_id is not None:
+        turn_locks = _storage_backend(request).session_turns()
+        acquired = await turn_locks.try_acquire(body.session_id, body.request_id)
+        if not acquired:
             raise APIError(
                 409,
                 "SESSION_BUSY",
@@ -182,7 +192,8 @@ def build_scheduler_router(*, loop_port: LoopPort, registry: SessionRegistry) ->
                 [Text(text=body.message)],
             )
         finally:
-            if bus is not None:
+            await turn_locks.release(body.session_id, body.request_id)
+            if bus is not None and bus.current_request_id == body.request_id:
                 bus.current_request_id = None
         return {"ok": True, "session_id": body.session_id, "request_id": body.request_id}
 

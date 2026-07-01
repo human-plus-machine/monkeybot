@@ -128,6 +128,17 @@ class ScheduledLoopStore(Protocol):
 
 
 @runtime_checkable
+class SessionTurnLockStore(Protocol):
+    """Exclusive turn lock per session for multi-replica gateways."""
+
+    async def try_acquire(self, session_id: str, request_id: str) -> bool: ...
+
+    async def release(self, session_id: str, request_id: str) -> None: ...
+
+    async def is_busy(self, session_id: str) -> bool: ...
+
+
+@runtime_checkable
 class StorageBackend(Protocol):
     """Owns a storage connection lifecycle and vends all stores."""
 
@@ -142,6 +153,8 @@ class StorageBackend(Protocol):
     def runs(self) -> RunStore: ...
 
     def scheduled_loops(self) -> ScheduledLoopStore: ...
+
+    def session_turns(self) -> SessionTurnLockStore: ...
 
 
 @dataclass(frozen=True)

@@ -10,6 +10,7 @@ import aiosqlite
 
 from monkeybot.core.persistence.durable_runs import SQLiteRunStore
 from monkeybot.core.persistence.scheduled_loops import SQLiteScheduledLoopStore
+from monkeybot.core.persistence.session_turn_locks import SQLiteSessionTurnLockStore
 from monkeybot.core.persistence.history import SQLiteHistoryStore
 from monkeybot.core.persistence.sqlite import apply_schema, open_connection
 from monkeybot.core.persistence.usage import SQLiteUsageStore
@@ -25,6 +26,7 @@ class SQLiteStorageBackend:
         self._usage_store: SQLiteUsageStore | None = None
         self._runs_store: SQLiteRunStore | None = None
         self._scheduled_loops_store: SQLiteScheduledLoopStore | None = None
+        self._session_turn_lock_store: SQLiteSessionTurnLockStore | None = None
 
     async def open(self, *, run_schema: bool = True) -> None:
         self._conn = await open_connection(self._db_url)
@@ -34,6 +36,7 @@ class SQLiteStorageBackend:
         self._usage_store = SQLiteUsageStore(self._conn)
         self._runs_store = SQLiteRunStore(self._conn)
         self._scheduled_loops_store = SQLiteScheduledLoopStore(self._conn)
+        self._session_turn_lock_store = SQLiteSessionTurnLockStore(self._conn)
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -43,6 +46,7 @@ class SQLiteStorageBackend:
             self._usage_store = None
             self._runs_store = None
             self._scheduled_loops_store = None
+            self._session_turn_lock_store = None
 
     def history(self) -> SQLiteHistoryStore:
         if self._history_store is None:
@@ -63,3 +67,8 @@ class SQLiteStorageBackend:
         if self._scheduled_loops_store is None:
             raise RuntimeError("SQLiteStorageBackend.open() has not been called")
         return self._scheduled_loops_store
+
+    def session_turns(self) -> SQLiteSessionTurnLockStore:
+        if self._session_turn_lock_store is None:
+            raise RuntimeError("SQLiteStorageBackend.open() has not been called")
+        return self._session_turn_lock_store

@@ -102,6 +102,11 @@ _SCHEMA_DDLS: tuple[str, ...] = (
     """CREATE INDEX IF NOT EXISTS idx_scheduled_loops_due
     ON scheduled_loops(status, tick_in_flight, next_tick_at_ms)
     WHERE status = 'active'""",
+    """CREATE TABLE IF NOT EXISTS session_turn_locks (
+    session_id TEXT PRIMARY KEY,
+    request_id TEXT,
+    claimed_at_ms BIGINT
+)""",
 )
 
 
@@ -749,6 +754,67 @@ class PostgresScheduledLoopStore:
         return bool(status.split()[-1] == "1")
 
 
+class PostgresSessionTurnLockStore:
+    """Postgres-backed exclusive turn lock per session."""
+
+    def __init__(self, pool: asyncpg.Pool) -> None:
+        self._pool = pool
+
+    async def try_acquire(self, session_id: str, request_id: str) -> bool:
+        now_ms = int(time.time() * 1000)
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                UPDATE session_turn_locks
+                SET request_id = $2, claimed_at_ms = $3
+                WHERE session_id = $1 AND request_id IS NULL
+                RETURNING session_id
+                """,
+                session_id,
+                request_id,
+                now_ms,
+            )
+            if row is not None:
+                return True
+            try:
+                await conn.execute(
+                    """
+                    INSERT INTO session_turn_locks (session_id, request_id, claimed_at_ms)
+                    VALUES ($1, $2, $3)
+                    """,
+                    session_id,
+                    request_id,
+                    now_ms,
+                )
+                return True
+            except asyncpg.UniqueViolationError:
+                return False
+
+    async def release(self, session_id: str, request_id: str) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE session_turn_locks
+                SET request_id = NULL, claimed_at_ms = NULL
+                WHERE session_id = $1 AND request_id = $2
+                """,
+                session_id,
+                request_id,
+            )
+
+    async def is_busy(self, session_id: str) -> bool:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT 1 FROM session_turn_locks
+                WHERE session_id = $1 AND request_id IS NOT NULL
+                LIMIT 1
+                """,
+                session_id,
+            )
+        return row is not None
+
+
 class PostgresStorageBackend:
     """Postgres-backed storage backend using an asyncpg connection pool."""
 
@@ -759,6 +825,7 @@ class PostgresStorageBackend:
         self._usage_store: PostgresUsageStore | None = None
         self._runs_store: PostgresRunStore | None = None
         self._scheduled_loops_store: PostgresScheduledLoopStore | None = None
+        self._session_turn_lock_store: PostgresSessionTurnLockStore | None = None
 
     async def open(self, *, run_schema: bool = True) -> None:
         min_size = int(os.environ.get("POSTGRES_POOL_MIN", "1"))
@@ -772,6 +839,7 @@ class PostgresStorageBackend:
         self._usage_store = PostgresUsageStore(self._pool)
         self._runs_store = PostgresRunStore(self._pool)
         self._scheduled_loops_store = PostgresScheduledLoopStore(self._pool)
+        self._session_turn_lock_store = PostgresSessionTurnLockStore(self._pool)
 
     async def close(self) -> None:
         if self._pool is not None:
@@ -781,6 +849,7 @@ class PostgresStorageBackend:
             self._usage_store = None
             self._runs_store = None
             self._scheduled_loops_store = None
+            self._session_turn_lock_store = None
 
     def history(self) -> PostgresHistoryStore:
         if self._history_store is None:
@@ -801,3 +870,8 @@ class PostgresStorageBackend:
         if self._scheduled_loops_store is None:
             raise RuntimeError("PostgresStorageBackend.open() has not been called")
         return self._scheduled_loops_store
+
+    def session_turns(self) -> PostgresSessionTurnLockStore:
+        if self._session_turn_lock_store is None:
+            raise RuntimeError("PostgresStorageBackend.open() has not been called")
+        return self._session_turn_lock_store

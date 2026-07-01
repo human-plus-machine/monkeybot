@@ -94,6 +94,11 @@ SCHEMA_DDLS: Final[tuple[str, ...]] = (
     """CREATE INDEX IF NOT EXISTS idx_scheduled_loops_due
     ON scheduled_loops(status, tick_in_flight, next_tick_at_ms)
     WHERE status = 'active'""",
+    """CREATE TABLE IF NOT EXISTS session_turn_locks (
+    session_id TEXT PRIMARY KEY,
+    request_id TEXT,
+    claimed_at_ms INTEGER
+)""",
 )
 
 

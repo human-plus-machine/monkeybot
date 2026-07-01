@@ -627,17 +627,18 @@ async def _startup(fastapi_app: FastAPI) -> None:
 
     from monkeybot.scheduler.engine import scheduler_enabled_from_env, start_scheduler_background
     from monkeybot.gateway.sse.scheduler_wiring import (
-        GatewaySessionBusyChecker,
         GatewaySessionEnsurer,
         GatewayTickInvoker,
+        StorageSessionBusyChecker,
     )
 
     if scheduler_enabled_from_env():
         loop_port = GatewayLoopPort(_registry)
+        turn_locks = backend.session_turns()
         fastapi_app.state.scheduler = start_scheduler_background(
             store=backend.scheduled_loops(),
-            invoker=GatewayTickInvoker(loop_port, _registry),
-            session_busy=GatewaySessionBusyChecker(_registry),
+            invoker=GatewayTickInvoker(loop_port, _registry, turn_locks),
+            session_busy=StorageSessionBusyChecker(turn_locks),
             ensure_session=GatewaySessionEnsurer(_registry),
         )
         logger.info("scheduled-loop engine enabled (in-process; development-friendly)")

@@ -488,6 +488,77 @@ class FirestoreRunStore:
         return _doc_to_run_row(snapshot.id, snapshot.to_dict() or {})
 
 
+def _turn_lock_collection(prefix: str) -> str:
+    if not prefix:
+        return "session_turn_locks"
+    return f"{prefix}_session_turn_locks"
+
+
+class FirestoreSessionTurnLockStore:
+    """Firestore-backed exclusive turn lock per session."""
+
+    def __init__(self, client: AsyncClient, prefix: str) -> None:
+        self._client = client
+        self._collection = _turn_lock_collection(prefix)
+
+    def _doc(self, session_id: str) -> firestore.AsyncDocumentReference:
+        return self._client.collection(self._collection).document(session_id)
+
+    async def try_acquire(self, session_id: str, request_id: str) -> bool:
+        doc_ref = self._doc(session_id)
+        transaction = self._client.transaction()
+        now_ms = int(time.time() * 1000)
+
+        async def _claim_body(
+            txn: firestore.AsyncTransaction,
+            ref: firestore.AsyncDocumentReference,
+        ) -> bool:
+            snapshot = await ref.get(transaction=txn)
+            if not snapshot.exists:
+                txn.set(ref, {"request_id": request_id, "claimed_at_ms": now_ms})
+                return True
+            data = snapshot.to_dict() or {}
+            if data.get("request_id") is None:
+                txn.update(ref, {"request_id": request_id, "claimed_at_ms": now_ms})
+                return True
+            return False
+
+        claim_txn = cast(
+            Callable[[firestore.AsyncTransaction, firestore.AsyncDocumentReference], Awaitable[bool]],
+            firestore.async_transactional(_claim_body),
+        )
+        return bool(await claim_txn(transaction, doc_ref))
+
+    async def release(self, session_id: str, request_id: str) -> None:
+        doc_ref = self._doc(session_id)
+        transaction = self._client.transaction()
+
+        async def _release_body(
+            txn: firestore.AsyncTransaction,
+            ref: firestore.AsyncDocumentReference,
+        ) -> None:
+            snapshot = await ref.get(transaction=txn)
+            if not snapshot.exists:
+                return
+            data = snapshot.to_dict() or {}
+            if data.get("request_id") != request_id:
+                return
+            txn.update(ref, {"request_id": None, "claimed_at_ms": None})
+
+        release_txn = cast(
+            Callable[[firestore.AsyncTransaction, firestore.AsyncDocumentReference], Awaitable[None]],
+            firestore.async_transactional(_release_body),
+        )
+        await release_txn(transaction, doc_ref)
+
+    async def is_busy(self, session_id: str) -> bool:
+        snapshot = await self._doc(session_id).get()
+        if not snapshot.exists:
+            return False
+        data = snapshot.to_dict() or {}
+        return data.get("request_id") is not None
+
+
 class FirestoreStorageBackend:
     """Firestore-backed storage backend using ``google.cloud.firestore.AsyncClient``."""
 
@@ -498,6 +569,7 @@ class FirestoreStorageBackend:
         self._usage_store: FirestoreUsageStore | None = None
         self._runs_store: FirestoreRunStore | None = None
         self._scheduled_loops_store: FirestoreScheduledLoopStore | None = None
+        self._session_turn_lock_store: FirestoreSessionTurnLockStore | None = None
 
     async def open(self, *, run_schema: bool = True) -> None:
         """Open the Firestore client.
@@ -514,6 +586,7 @@ class FirestoreStorageBackend:
         self._usage_store = FirestoreUsageStore(self._client, prefix)
         self._runs_store = FirestoreRunStore(self._client, prefix)
         self._scheduled_loops_store = FirestoreScheduledLoopStore(self._client, prefix)
+        self._session_turn_lock_store = FirestoreSessionTurnLockStore(self._client, prefix)
 
     async def close(self) -> None:
         if self._client is not None:
@@ -524,6 +597,7 @@ class FirestoreStorageBackend:
             self._usage_store = None
             self._runs_store = None
             self._scheduled_loops_store = None
+            self._session_turn_lock_store = None
 
     def history(self) -> FirestoreHistoryStore:
         if self._history_store is None:
@@ -544,3 +618,8 @@ class FirestoreStorageBackend:
         if self._scheduled_loops_store is None:
             raise RuntimeError("FirestoreStorageBackend.open() has not been called")
         return self._scheduled_loops_store
+
+    def session_turns(self) -> FirestoreSessionTurnLockStore:
+        if self._session_turn_lock_store is None:
+            raise RuntimeError("FirestoreStorageBackend.open() has not been called")
+        return self._session_turn_lock_store

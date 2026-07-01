@@ -14,6 +14,21 @@ class HttpTickInvoker:
     def __init__(self, base_url: str, *, timeout_s: float = 3600.0) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout_s = timeout_s
+        self._sessions_ready: set[str] = set()
+
+    async def _ensure_session(self, client: httpx.AsyncClient, session_id: str) -> TickInvokeResult | None:
+        if session_id in self._sessions_ready:
+            return None
+        session_resp = await client.post(
+            f"{self._base_url}/sessions",
+            json={"session_id": session_id},
+        )
+        if session_resp.status_code in (201, 409):
+            self._sessions_ready.add(session_id)
+            return None
+        return TickInvokeResult.fail(
+            f"create session failed: {session_resp.status_code} {session_resp.text}"
+        )
 
     async def invoke_tick(
         self,
@@ -31,14 +46,9 @@ class HttpTickInvoker:
         }
         async with httpx.AsyncClient(timeout=self._timeout_s) as client:
             try:
-                session_resp = await client.post(
-                    f"{self._base_url}/sessions",
-                    json={"session_id": session_id},
-                )
-                if session_resp.status_code not in (201, 409):
-                    return TickInvokeResult.fail(
-                        f"create session failed: {session_resp.status_code} {session_resp.text}"
-                    )
+                ensure_err = await self._ensure_session(client, session_id)
+                if ensure_err is not None:
+                    return ensure_err
                 resp = await client.post(f"{self._base_url}/scheduler/invoke-tick", json=payload)
             except httpx.HTTPError as exc:
                 return TickInvokeResult.fail(str(exc))

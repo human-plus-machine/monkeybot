@@ -19,6 +19,11 @@ def test_parse_optional_duration() -> None:
     assert parse_optional_duration_ms("2h") == 7_200_000
 
 
+def test_parse_interval_rejects_sub_minimum() -> None:
+    with pytest.raises(ValueError, match="at least"):
+        parse_interval_ms("1s")
+
+
 def test_parse_interval_invalid() -> None:
     with pytest.raises(ValueError):
         parse_interval_ms("nope")

@@ -42,6 +42,7 @@ async def test_scheduler_create_and_list_loop(scheduler_app) -> None:
                 "session_id": "loop-main",
                 "loop_id": "demo-loop",
                 "max_ticks": 3,
+                "confirmed": True,
             },
         )
         assert create.status_code == 201
@@ -66,6 +67,7 @@ async def test_scheduler_rejects_loop_without_guards(scheduler_app) -> None:
                 "interval": "5s",
                 "session_id": "loop-main",
                 "loop_id": "unguarded",
+                "confirmed": True,
             },
         )
         assert resp.status_code == 400
@@ -73,7 +75,27 @@ async def test_scheduler_rejects_loop_without_guards(scheduler_app) -> None:
 
 
 @pytest.mark.asyncio
-async def test_scheduler_get_loop_includes_usage(scheduler_app) -> None:
+async def test_scheduler_requires_confirmation(scheduler_app) -> None:
+    app, open_storage = scheduler_app
+    await open_storage()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/scheduler/loops",
+            json={
+                "prompt": "BUSINESS: append status",
+                "interval": "5s",
+                "session_id": "loop-main",
+                "loop_id": "unconfirmed",
+                "max_ticks": 3,
+            },
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "CONFIRMATION_REQUIRED"
+
+
+@pytest.mark.asyncio
+async def test_scheduler_requires_confirmation(scheduler_app) -> None:
     app, open_storage = scheduler_app
     await open_storage()
     transport = ASGITransport(app=app)
@@ -86,6 +108,7 @@ async def test_scheduler_get_loop_includes_usage(scheduler_app) -> None:
                 "session_id": "loop-main",
                 "loop_id": "usage-loop",
                 "max_ticks": 3,
+                "confirmed": True,
             },
         )
         assert create.status_code == 201

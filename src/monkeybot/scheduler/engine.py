@@ -25,6 +25,10 @@ class SessionBusyChecker(Protocol):
     def is_busy(self, session_id: str) -> bool: ...
 
 
+class AsyncSessionBusyChecker(Protocol):
+    async def is_busy_async(self, session_id: str) -> bool: ...
+
+
 class SessionEnsurer(Protocol):
     async def ensure_session(self, session_id: str) -> None: ...
 
@@ -181,6 +185,13 @@ async def run_scheduler_loop(
         await asyncio.gather(*tick_tasks, return_exceptions=True)
 
 
+async def _session_is_busy(session_busy: SessionBusyChecker, session_id: str) -> bool:
+    async_check = getattr(session_busy, "is_busy_async", None)
+    if async_check is not None:
+        return bool(await async_check(session_id))
+    return session_busy.is_busy(session_id)
+
+
 async def _execute_claimed_tick(
     *,
     store: ScheduledLoopStore,
@@ -191,7 +202,7 @@ async def _execute_claimed_tick(
     worker_id: str,
     claim_heartbeat_interval_s: float,
 ) -> None:
-    if row.skip_if_busy and session_busy.is_busy(row.session_id):
+    if row.skip_if_busy and await _session_is_busy(session_busy, row.session_id):
         await store.defer_tick(
             row.loop_id,
             worker_id=worker_id,

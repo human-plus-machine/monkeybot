@@ -51,6 +51,37 @@ def _get_json(url: str, path: str) -> dict[str, object]:
         return data
 
 
+def _confirm_loop_start(args: argparse.Namespace, prompt: str) -> None:
+    if args.yes:
+        return
+    guards: list[str] = []
+    if args.max_ticks is not None:
+        guards.append(f"max_ticks={args.max_ticks}")
+    if args.max_runtime:
+        guards.append(f"max_runtime={args.max_runtime}")
+    if args.unbounded:
+        guard_text = "UNBOUNDED (no max_ticks/max_runtime)"
+    elif guards:
+        guard_text = ", ".join(guards)
+    else:
+        guard_text = "(guards validated above)"
+    preview = prompt if len(prompt) <= 400 else prompt[:400] + "…"
+    print(
+        "Start scheduled loop?\n"
+        f"- session: {args.session_id}\n"
+        f"- interval: {args.interval}\n"
+        f"- loop_id: {args.loop_id or '(auto)'}\n"
+        f"- guards: {guard_text}\n\n"
+        f"Plan:\n{preview or '(empty prompt)'}"
+    )
+    if sys.stdin.isatty():
+        answer = input("Proceed? [y/N] ").strip().lower()
+        if answer not in {"y", "yes"}:
+            raise SystemExit("Aborted.")
+        return
+    raise SystemExit("Refusing to start loop without --yes on non-interactive stdin.")
+
+
 def run_loop_run(args: argparse.Namespace) -> int:
     cwd = Path(args.cwd).expanduser().resolve() if args.cwd else None
     config_path = resolve_config(args.config, cwd=cwd)
@@ -75,6 +106,8 @@ def run_loop_run(args: argparse.Namespace) -> int:
         raise SystemExit(
             "Provide --max-ticks, --max-runtime, or --unbounded to set loop stop guards"
         )
+    _confirm_loop_start(args, prompt)
+    payload["confirmed"] = True
     data = _post_json(url, "/scheduler/loops", payload)
     if args.json:
         print(json.dumps(data, indent=2))
@@ -131,6 +164,11 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
         "--unbounded",
         action="store_true",
         help="Run without max_ticks/max_runtime guards (explicit opt-in)",
+    )
+    run.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip interactive confirmation prompt",
     )
     run.add_argument(
         "--queue-if-busy",

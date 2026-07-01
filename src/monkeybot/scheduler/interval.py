@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 
 _INTERVAL_RE = re.compile(
@@ -28,25 +29,43 @@ _UNIT_TO_MS: dict[str, int] = {
 }
 
 
+_MIN_INTERVAL_MS = 5_000
+
+
+def min_interval_ms() -> int:
+    raw = os.environ.get("MONKEYBOT_SCHEDULER_MIN_INTERVAL_MS", "").strip()
+    if not raw:
+        return _MIN_INTERVAL_MS
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return _MIN_INTERVAL_MS
+
+
 def parse_interval_ms(value: str | int | float) -> int:
     """Parse ``20s``, ``5m``, ``1h``, or raw seconds into milliseconds."""
     if isinstance(value, (int, float)):
         seconds = float(value)
         if seconds <= 0:
             raise ValueError("interval must be positive")
-        return max(1, int(seconds * 1000))
-    raw = str(value).strip()
-    if not raw:
-        raise ValueError("interval is required")
-    match = _INTERVAL_RE.match(raw)
-    if not match:
-        raise ValueError(f"invalid interval: {value!r}")
-    num = float(match.group("num"))
-    if num <= 0:
-        raise ValueError("interval must be positive")
-    unit = (match.group("unit") or "s").lower()
-    ms = int(num * _UNIT_TO_MS[unit])
-    return max(1, ms)
+        ms = max(1, int(seconds * 1000))
+    else:
+        raw = str(value).strip()
+        if not raw:
+            raise ValueError("interval is required")
+        match = _INTERVAL_RE.match(raw)
+        if not match:
+            raise ValueError(f"invalid interval: {value!r}")
+        num = float(match.group("num"))
+        if num <= 0:
+            raise ValueError("interval must be positive")
+        unit = (match.group("unit") or "s").lower()
+        ms = int(num * _UNIT_TO_MS[unit])
+        ms = max(1, ms)
+    floor = min_interval_ms()
+    if ms < floor:
+        raise ValueError(f"interval must be at least {floor}ms")
+    return ms
 
 
 def parse_optional_duration_ms(value: str | int | float | None) -> int | None:
