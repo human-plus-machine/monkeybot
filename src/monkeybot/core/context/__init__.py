@@ -274,6 +274,13 @@ def _core_tool_defs(
                             "type": "string",
                             "description": "Hard wall-clock limit, e.g. 1h.",
                         },
+                        "unbounded": {
+                            "type": "boolean",
+                            "description": (
+                                "Opt out of max_ticks/max_runtime guards. "
+                                "Requires explicit user confirmation."
+                            ),
+                        },
                         "skip_if_busy": {"type": "boolean"},
                     },
                     "required": ["prompt", "interval"],

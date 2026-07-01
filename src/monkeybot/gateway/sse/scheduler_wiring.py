@@ -9,6 +9,7 @@ import time
 from monkeybot.core.types.content_blocks import ContentBlock
 from monkeybot.gateway.sse.loop_port import LoopPort
 from monkeybot.gateway.sse.session_bus import SessionAlreadyExistsError, SessionRegistry
+from monkeybot.scheduler.tick_result import TickInvokeResult
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ class GatewaySessionEnsurer:
 
 
 class GatewayTickInvoker:
-    """Invoke ``LoopPort.start_turn`` and surface turn-level errors."""
+    """Invoke ``LoopPort.start_turn`` and surface turn-level outcomes."""
 
     def __init__(self, loop_port: LoopPort, registry: SessionRegistry) -> None:
         self._loop_port = loop_port
@@ -53,18 +54,18 @@ class GatewayTickInvoker:
         session_id: str,
         request_id: str,
         user_content: list[ContentBlock],
-    ) -> str | None:
+    ) -> TickInvokeResult:
         bus = self._registry.get(session_id)
         if bus is not None and bus.current_request_id is not None:
-            return "session busy"
+            return TickInvokeResult.session_busy()
         if bus is not None:
             bus.current_request_id = request_id
         try:
             await self._loop_port.start_turn(session_id, request_id, user_content)
         except Exception as exc:
-            return str(exc)
+            return TickInvokeResult.fail(str(exc))
         finally:
             bus = self._registry.get(session_id)
             if bus is not None and bus.current_request_id == request_id:
                 bus.current_request_id = None
-        return None
+        return TickInvokeResult.ok()

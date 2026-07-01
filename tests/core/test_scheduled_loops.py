@@ -7,7 +7,11 @@ import time
 
 import pytest
 
-from monkeybot.core.persistence.scheduled_loops import ScheduledLoopCreate, format_tick_prompt
+from monkeybot.core.persistence.scheduled_loops import (
+    ScheduledLoopCreate,
+    format_tick_prompt,
+    validate_loop_guards,
+)
 from monkeybot.core.persistence.sqlite_backend import SQLiteStorageBackend
 
 
@@ -66,6 +70,7 @@ async def test_scheduled_loop_pause_resume_stop(tmp_path) -> None:
             prompt="tick",
             interval_ms=5000,
             loop_id="ctrl",
+            max_ticks=10,
         )
     )
     assert await store.pause("ctrl")
@@ -77,4 +82,35 @@ async def test_scheduled_loop_pause_resume_stop(tmp_path) -> None:
     assert await store.stop("ctrl")
     row = await store.get("ctrl")
     assert row is not None and row.status == "completed"
+    await backend.close()
+
+
+def test_validate_loop_guards_requires_stop_condition() -> None:
+    with pytest.raises(ValueError, match="max_ticks, max_runtime, or unbounded"):
+        validate_loop_guards(max_ticks=None, max_runtime_ms=None, unbounded=False)
+
+
+def test_validate_loop_guards_allows_unbounded() -> None:
+    validate_loop_guards(max_ticks=None, max_runtime_ms=None, unbounded=True)
+
+
+@pytest.mark.asyncio
+async def test_renew_tick_claim_prevents_stale_release(tmp_path) -> None:
+    db_url = f"sqlite:///{tmp_path / 'loops.db'}"
+    backend = SQLiteStorageBackend(db_url)
+    await backend.open()
+    store = backend.scheduled_loops()
+    await store.create(
+        ScheduledLoopCreate(
+            prompt="tick",
+            interval_ms=1000,
+            loop_id="heartbeat",
+            max_ticks=5,
+        )
+    )
+    claimed = await store.claim_tick("heartbeat", "worker-1")
+    assert claimed is not None
+    assert await store.renew_tick_claim("heartbeat", "worker-1")
+    released = await store.release_stale_claims(100)
+    assert released == 0
     await backend.close()

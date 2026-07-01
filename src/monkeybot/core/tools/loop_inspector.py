@@ -18,6 +18,7 @@ class LoopStartInspector:
         session_id = call.args.get("session_id") or "loop-main"
         max_ticks = call.args.get("max_ticks")
         max_runtime = call.args.get("max_runtime")
+        unbounded = call.args.get("unbounded", False) is True
         preview = str(prompt).strip() if isinstance(prompt, str) else ""
         if len(preview) > 400:
             preview = preview[:400] + "…"
@@ -26,7 +27,12 @@ class LoopStartInspector:
             guards.append(f"max_ticks={max_ticks}")
         if max_runtime is not None:
             guards.append(f"max_runtime={max_runtime}")
-        guard_text = ", ".join(guards) if guards else "no explicit max_ticks/max_runtime"
+        if unbounded:
+            guard_text = "UNBOUNDED (no max_ticks/max_runtime)"
+        elif guards:
+            guard_text = ", ".join(guards)
+        else:
+            guard_text = "MISSING — requires max_ticks, max_runtime, or unbounded=true"
         message = (
             f"Start scheduled loop?\n"
             f"- loop_id: {loop_id}\n"

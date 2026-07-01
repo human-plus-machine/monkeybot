@@ -14,8 +14,11 @@ from typing import Protocol
 from monkeybot.core.persistence.backends import ScheduledLoopStore
 from monkeybot.core.persistence.scheduled_loops import ScheduledLoopRow, format_tick_prompt
 from monkeybot.core.types.content_blocks import ContentBlock, Text
+from monkeybot.scheduler.tick_result import TickInvokeResult, TickInvokeStatus
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_HEARTBEAT_INTERVAL_S = 30.0
 
 
 class SessionBusyChecker(Protocol):
@@ -32,8 +35,8 @@ class TickInvoker(Protocol):
         session_id: str,
         request_id: str,
         user_content: list[ContentBlock],
-    ) -> str | None:
-        """Run one scheduled tick; return error text or None on success."""
+    ) -> TickInvokeResult:
+        """Run one scheduled tick."""
 
 
 def _env_float(name: str, default: float) -> float:
@@ -60,12 +63,22 @@ def _env_int(name: str, default: int) -> int:
 class SchedulerSettings:
     poll_interval_s: float
     stale_claim_ms: int
+    max_concurrency: int
+    claim_heartbeat_interval_s: float
 
 
 def scheduler_settings() -> SchedulerSettings:
+    stale_claim_ms = _env_int("MONKEYBOT_SCHEDULER_STALE_CLAIM_MS", 600_000)
+    heartbeat_raw = os.environ.get("MONKEYBOT_SCHEDULER_CLAIM_HEARTBEAT_S", "").strip()
+    if heartbeat_raw:
+        heartbeat_s = _env_float("MONKEYBOT_SCHEDULER_CLAIM_HEARTBEAT_S", _DEFAULT_HEARTBEAT_INTERVAL_S)
+    else:
+        heartbeat_s = min(_DEFAULT_HEARTBEAT_INTERVAL_S, max(5.0, stale_claim_ms / 4000.0))
     return SchedulerSettings(
         poll_interval_s=_env_float("MONKEYBOT_SCHEDULER_POLL_INTERVAL_S", 5.0),
-        stale_claim_ms=_env_int("MONKEYBOT_SCHEDULER_STALE_CLAIM_MS", 600_000),
+        stale_claim_ms=stale_claim_ms,
+        max_concurrency=max(1, _env_int("MONKEYBOT_SCHEDULER_CONCURRENCY", 1)),
+        claim_heartbeat_interval_s=heartbeat_s,
     )
 
 
@@ -81,18 +94,44 @@ def resolve_scheduler_worker_id() -> str:
     return f"scheduler-{uuid.uuid4().hex[:12]}"
 
 
+async def _claim_heartbeat(
+    *,
+    store: ScheduledLoopStore,
+    loop_id: str,
+    worker_id: str,
+    interval_s: float,
+    stop: asyncio.Event,
+) -> None:
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval_s)
+            return
+        except TimeoutError:
+            renewed = await store.renew_tick_claim(loop_id, worker_id)
+            if not renewed:
+                return
+
+
 async def run_scheduler_loop(
     *,
     store: ScheduledLoopStore,
     invoker: TickInvoker,
-  session_busy: SessionBusyChecker,
-  ensure_session: SessionEnsurer,
+    session_busy: SessionBusyChecker,
+    ensure_session: SessionEnsurer,
     worker_id: str,
     poll_interval_s: float = 5.0,
     stale_claim_ms: int = 600_000,
+    max_concurrency: int = 1,
+    claim_heartbeat_interval_s: float = _DEFAULT_HEARTBEAT_INTERVAL_S,
     shutdown: asyncio.Event | None = None,
 ) -> None:
     """Poll due loops and invoke agent ticks until ``shutdown`` is set."""
+    semaphore = asyncio.Semaphore(max(1, max_concurrency))
+    tick_tasks: set[asyncio.Task[None]] = set()
+
+    def _prune_done() -> None:
+        tick_tasks.difference_update({task for task in tick_tasks if task.done()})
+
     while shutdown is None or not shutdown.is_set():
         try:
             released = await store.release_stale_claims(stale_claim_ms)
@@ -100,20 +139,36 @@ async def run_scheduler_loop(
                 logger.warning("scheduler released %d stale tick claims", released)
             now_ms = int(time.time() * 1000)
             due = await store.list_due(now_ms)
+            claimed_rows: list[ScheduledLoopRow] = []
             for candidate in due:
                 if shutdown is not None and shutdown.is_set():
                     break
                 claimed = await store.claim_tick(candidate.loop_id, worker_id)
-                if claimed is None:
-                    continue
-                await _execute_claimed_tick(
-                    store=store,
-                    invoker=invoker,
-                    session_busy=session_busy,
-                    ensure_session=ensure_session,
-                    row=claimed,
-                    worker_id=worker_id,
+                if claimed is not None:
+                    claimed_rows.append(claimed)
+
+            async def _run_claimed(row: ScheduledLoopRow) -> None:
+                async with semaphore:
+                    await _execute_claimed_tick(
+                        store=store,
+                        invoker=invoker,
+                        session_busy=session_busy,
+                        ensure_session=ensure_session,
+                        row=row,
+                        worker_id=worker_id,
+                        claim_heartbeat_interval_s=claim_heartbeat_interval_s,
+                    )
+
+            for row in claimed_rows:
+                if shutdown is not None and shutdown.is_set():
+                    break
+                task = asyncio.create_task(
+                    _run_claimed(row),
+                    name=f"scheduler-tick-{row.loop_id}",
                 )
+                tick_tasks.add(task)
+                task.add_done_callback(tick_tasks.discard)
+            _prune_done()
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -121,6 +176,9 @@ async def run_scheduler_loop(
         if shutdown is not None and shutdown.is_set():
             break
         await asyncio.sleep(poll_interval_s)
+
+    if tick_tasks:
+        await asyncio.gather(*tick_tasks, return_exceptions=True)
 
 
 async def _execute_claimed_tick(
@@ -131,6 +189,7 @@ async def _execute_claimed_tick(
     ensure_session: SessionEnsurer,
     row: ScheduledLoopRow,
     worker_id: str,
+    claim_heartbeat_interval_s: float,
 ) -> None:
     if row.skip_if_busy and session_busy.is_busy(row.session_id):
         await store.defer_tick(
@@ -144,15 +203,48 @@ async def _execute_claimed_tick(
             row.session_id,
         )
         return
+
+    heartbeat_stop = asyncio.Event()
+    heartbeat_task = asyncio.create_task(
+        _claim_heartbeat(
+            store=store,
+            loop_id=row.loop_id,
+            worker_id=worker_id,
+            interval_s=claim_heartbeat_interval_s,
+            stop=heartbeat_stop,
+        ),
+        name=f"scheduler-heartbeat-{row.loop_id}",
+    )
     try:
         await ensure_session.ensure_session(row.session_id)
         request_id = f"loop-{row.loop_id}-{row.tick_index + 1}-{uuid.uuid4().hex[:8]}"
         tick_prompt = format_tick_prompt(row)
-        error = await invoker.invoke_tick(
+        result = await invoker.invoke_tick(
             row.session_id,
             request_id,
             [Text(text=tick_prompt)],
         )
+        if result.status is TickInvokeStatus.SESSION_BUSY:
+            if row.skip_if_busy:
+                await store.defer_tick(
+                    row.loop_id,
+                    worker_id=worker_id,
+                    reason="session busy; deferred",
+                )
+                logger.info(
+                    "scheduler deferred tick loop_id=%s session_id=%s (remote busy)",
+                    row.loop_id,
+                    row.session_id,
+                )
+                return
+            await store.complete_tick(
+                row.loop_id,
+                worker_id=worker_id,
+                error="session busy",
+            )
+            return
+
+        error = result.error if result.status is TickInvokeStatus.ERROR else None
         await store.complete_tick(row.loop_id, worker_id=worker_id, error=error)
         if error:
             logger.warning(
@@ -171,6 +263,11 @@ async def _execute_claimed_tick(
     except Exception as exc:
         logger.exception("scheduler tick exception loop_id=%s", row.loop_id)
         await store.complete_tick(row.loop_id, worker_id=worker_id, error=str(exc))
+    finally:
+        heartbeat_stop.set()
+        heartbeat_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat_task
 
 
 @dataclass
@@ -188,6 +285,8 @@ def start_scheduler_background(
     worker_id: str | None = None,
     poll_interval_s: float | None = None,
     stale_claim_ms: int | None = None,
+    max_concurrency: int | None = None,
+    claim_heartbeat_interval_s: float | None = None,
 ) -> SchedulerHandle:
     settings = scheduler_settings()
     shutdown = asyncio.Event()
@@ -203,6 +302,14 @@ def start_scheduler_background(
                 poll_interval_s if poll_interval_s is not None else settings.poll_interval_s
             ),
             stale_claim_ms=stale_claim_ms if stale_claim_ms is not None else settings.stale_claim_ms,
+            max_concurrency=(
+                max_concurrency if max_concurrency is not None else settings.max_concurrency
+            ),
+            claim_heartbeat_interval_s=(
+                claim_heartbeat_interval_s
+                if claim_heartbeat_interval_s is not None
+                else settings.claim_heartbeat_interval_s
+            ),
             shutdown=shutdown,
         ),
         name=f"monkeybot-scheduler-{wid}",

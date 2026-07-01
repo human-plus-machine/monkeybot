@@ -42,6 +42,7 @@ class CreateLoopRequest(BaseModel):
     max_ticks: int | None = Field(default=None, ge=1)
     max_runtime: str | int | float | None = None
     skip_if_busy: bool = True
+    unbounded: bool = False
 
 
 class InvokeTickRequest(BaseModel):
@@ -93,11 +94,15 @@ def build_scheduler_router(*, loop_port: LoopPort, registry: SessionRegistry) ->
             max_ticks=body.max_ticks,
             max_runtime_ms=max_runtime_ms,
             skip_if_busy=body.skip_if_busy,
+            unbounded=body.unbounded,
         )
         try:
             row = await store.create(spec)
         except ValueError as exc:
-            raise APIError(409, "LOOP_EXISTS", str(exc), uuid.uuid4().hex) from exc
+            msg = str(exc)
+            if "scheduled loops require" in msg:
+                raise APIError(400, "INVALID_GUARDS", msg, uuid.uuid4().hex) from exc
+            raise APIError(409, "LOOP_EXISTS", msg, uuid.uuid4().hex) from exc
         await ensurer.ensure_session(row.session_id)
         return {"loop": _row_dict(row)}
 
@@ -111,7 +116,24 @@ def build_scheduler_router(*, loop_port: LoopPort, registry: SessionRegistry) ->
         row = await _loop_store(request).get(loop_id)
         if row is None:
             raise APIError(404, "LOOP_NOT_FOUND", f"Unknown loop {loop_id}", uuid.uuid4().hex)
-        return {"loop": _row_dict(row)}
+        usage = await _storage_backend(request).usage().summary(
+            thread_id=row.session_id,
+            since_ms=row.started_at_ms,
+        )
+        return {
+            "loop": _row_dict(row),
+            "usage": {
+                "session_id": row.session_id,
+                "since_ms": row.started_at_ms,
+                "turns": usage.turns,
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "cached_tokens": usage.cached_tokens,
+                "cache_read_tokens": usage.cache_read_tokens,
+                "cache_creation_tokens": usage.cache_creation_tokens,
+                "cost_usd": usage.cost_usd,
+            },
+        }
 
     @router.post("/loops/{loop_id}/pause")
     async def pause_loop(loop_id: str, request: Request) -> dict[str, Any]:

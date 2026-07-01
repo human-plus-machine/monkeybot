@@ -51,3 +51,47 @@ async def test_scheduler_create_and_list_loop(scheduler_app) -> None:
         assert listed.status_code == 200
         loops = listed.json()["loops"]
         assert any(row["loop_id"] == "demo-loop" for row in loops)
+
+
+@pytest.mark.asyncio
+async def test_scheduler_rejects_loop_without_guards(scheduler_app) -> None:
+    app, open_storage = scheduler_app
+    await open_storage()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/scheduler/loops",
+            json={
+                "prompt": "BUSINESS: append status",
+                "interval": "5s",
+                "session_id": "loop-main",
+                "loop_id": "unguarded",
+            },
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "INVALID_GUARDS"
+
+
+@pytest.mark.asyncio
+async def test_scheduler_get_loop_includes_usage(scheduler_app) -> None:
+    app, open_storage = scheduler_app
+    await open_storage()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        create = await client.post(
+            "/scheduler/loops",
+            json={
+                "prompt": "BUSINESS: append status",
+                "interval": "5s",
+                "session_id": "loop-main",
+                "loop_id": "usage-loop",
+                "max_ticks": 3,
+            },
+        )
+        assert create.status_code == 201
+        detail = await client.get("/scheduler/loops/usage-loop")
+        assert detail.status_code == 200
+        body = detail.json()
+        assert "usage" in body
+        assert body["usage"]["session_id"] == "loop-main"
+        assert body["usage"]["turns"] == 0

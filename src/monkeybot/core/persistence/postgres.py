@@ -24,6 +24,7 @@ from monkeybot.core.persistence.scheduled_loops import (
     _SCHEDULED_LOOP_COLUMNS,
     _loop_id_from_create,
     _row_from_tuple,
+    validate_loop_guards,
 )
 from monkeybot.core.persistence.thread_summary import ChatThreadSummary, preview_from_content_blob
 from monkeybot.core.types.content_blocks import ContentBlock
@@ -526,6 +527,11 @@ class PostgresScheduledLoopStore:
         loop_id = _loop_id_from_create(spec)
         if await self.get(loop_id) is not None:
             raise ValueError(f"scheduled loop already exists: {loop_id}")
+        validate_loop_guards(
+            max_ticks=spec.max_ticks,
+            max_runtime_ms=spec.max_runtime_ms,
+            unbounded=spec.unbounded,
+        )
         now_ms = int(time.time() * 1000)
         async with self._pool.acquire() as conn:
             await conn.execute(
@@ -683,6 +689,23 @@ class PostgresScheduledLoopStore:
                 loop_id,
                 worker_id,
             )
+
+    async def renew_tick_claim(self, loop_id: str, worker_id: str) -> bool:
+        now_ms = int(time.time() * 1000)
+        async with self._pool.acquire() as conn:
+            status = await conn.execute(
+                """
+                UPDATE scheduled_loops
+                SET claimed_at_ms = $1
+                WHERE loop_id = $2
+                  AND worker_id = $3
+                  AND tick_in_flight = 1
+                """,
+                now_ms,
+                loop_id,
+                worker_id,
+            )
+        return bool(status.split()[-1] == "1")
 
     async def pause(self, loop_id: str) -> bool:
         async with self._pool.acquire() as conn:

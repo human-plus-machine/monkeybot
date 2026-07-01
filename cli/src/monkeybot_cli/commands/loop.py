@@ -69,6 +69,12 @@ def run_loop_run(args: argparse.Namespace) -> int:
         payload["max_ticks"] = args.max_ticks
     if args.max_runtime:
         payload["max_runtime"] = args.max_runtime
+    if args.unbounded:
+        payload["unbounded"] = True
+    if not args.unbounded and args.max_ticks is None and not args.max_runtime:
+        raise SystemExit(
+            "Provide --max-ticks, --max-runtime, or --unbounded to set loop stop guards"
+        )
     data = _post_json(url, "/scheduler/loops", payload)
     if args.json:
         print(json.dumps(data, indent=2))
@@ -121,6 +127,11 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
     run.add_argument("--loop-id", help="Optional stable loop id")
     run.add_argument("--max-ticks", type=int)
     run.add_argument("--max-runtime", help="Hard wall-clock limit, e.g. 2h")
+    run.add_argument(
+        "--unbounded",
+        action="store_true",
+        help="Run without max_ticks/max_runtime guards (explicit opt-in)",
+    )
     run.add_argument(
         "--queue-if-busy",
         action="store_true",

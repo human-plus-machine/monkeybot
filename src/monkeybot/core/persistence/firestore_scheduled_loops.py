@@ -15,6 +15,7 @@ from monkeybot.core.persistence.scheduled_loops import (
     ScheduledLoopRow,
     _loop_id_from_create,
     doc_to_scheduled_loop_row,
+    validate_loop_guards,
 )
 
 _LOOP_STATUSES = frozenset({"active", "paused", "completed", "failed"})
@@ -41,6 +42,11 @@ class FirestoreScheduledLoopStore:
         existing = await self.get(loop_id)
         if existing is not None:
             raise ValueError(f"scheduled loop already exists: {loop_id}")
+        validate_loop_guards(
+            max_ticks=spec.max_ticks,
+            max_runtime_ms=spec.max_runtime_ms,
+            unbounded=spec.unbounded,
+        )
         now_ms = int(time.time() * 1000)
         payload = {
             "session_id": spec.session_id.strip() or "loop-main",
@@ -217,6 +223,17 @@ class FirestoreScheduledLoopStore:
                 "last_error": reason,
             }
         )
+
+    async def renew_tick_claim(self, loop_id: str, worker_id: str) -> bool:
+        snapshot = await self._doc(loop_id).get()
+        if not snapshot.exists:
+            return False
+        data = snapshot.to_dict() or {}
+        if data.get("worker_id") != worker_id or int(data.get("tick_in_flight", 0)) != 1:
+            return False
+        now_ms = int(time.time() * 1000)
+        await self._doc(loop_id).update({"claimed_at_ms": now_ms})
+        return True
 
     async def set_status(self, loop_id: str, status: str, *, stop_reason: str | None = None) -> bool:
         if status not in _LOOP_STATUSES:

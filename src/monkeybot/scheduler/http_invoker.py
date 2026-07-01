@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import logging
-
 import httpx
 
 from monkeybot.core.types.content_blocks import ContentBlock, Text
-
-logger = logging.getLogger(__name__)
+from monkeybot.scheduler.tick_result import TickInvokeResult
 
 
 class HttpTickInvoker:
@@ -23,7 +20,7 @@ class HttpTickInvoker:
         session_id: str,
         request_id: str,
         user_content: list[ContentBlock],
-    ) -> str | None:
+    ) -> TickInvokeResult:
         message = "\n".join(
             block.text for block in user_content if isinstance(block, Text)
         )
@@ -39,12 +36,16 @@ class HttpTickInvoker:
                     json={"session_id": session_id},
                 )
                 if session_resp.status_code not in (201, 409):
-                    return f"create session failed: {session_resp.status_code} {session_resp.text}"
+                    return TickInvokeResult.fail(
+                        f"create session failed: {session_resp.status_code} {session_resp.text}"
+                    )
                 resp = await client.post(f"{self._base_url}/scheduler/invoke-tick", json=payload)
             except httpx.HTTPError as exc:
-                return str(exc)
+                return TickInvokeResult.fail(str(exc))
         if resp.status_code == 409:
-            return "session busy"
+            return TickInvokeResult.session_busy()
         if resp.status_code >= 400:
-            return f"invoke-tick failed: {resp.status_code} {resp.text}"
-        return None
+            return TickInvokeResult.fail(
+                f"invoke-tick failed: {resp.status_code} {resp.text}"
+            )
+        return TickInvokeResult.ok()

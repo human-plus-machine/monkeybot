@@ -19,16 +19,17 @@ from monkeybot.scheduler.http_invoker import HttpTickInvoker
 logger = logging.getLogger(__name__)
 
 
-class _HttpSessionBusyChecker:
-    def __init__(self, invoker: HttpTickInvoker) -> None:
-        self._invoker = invoker
+class _NoopSessionBusyChecker:
+    """Remote busy detection is handled by :class:`HttpTickInvoker` (HTTP 409)."""
 
     def is_busy(self, session_id: str) -> bool:
-        del session_id, self._invoker
+        del session_id
         return False
 
 
 class _NoopSessionEnsurer:
+    """Session creation is handled by :class:`HttpTickInvoker` before each tick."""
+
     async def ensure_session(self, session_id: str) -> None:
         del session_id
 
@@ -52,20 +53,23 @@ async def _run() -> None:
     base_url = _gateway_base_url()
     invoker = HttpTickInvoker(base_url)
     logger.info(
-        "scheduler worker starting worker_id=%s gateway=%s poll_interval_s=%s",
+        "scheduler worker starting worker_id=%s gateway=%s poll_interval_s=%s concurrency=%s",
         worker_id,
         base_url,
         settings.poll_interval_s,
+        settings.max_concurrency,
     )
     try:
         await run_scheduler_loop(
             store=backend.scheduled_loops(),
             invoker=invoker,
-            session_busy=_HttpSessionBusyChecker(invoker),
+            session_busy=_NoopSessionBusyChecker(),
             ensure_session=_NoopSessionEnsurer(),
             worker_id=worker_id,
             poll_interval_s=settings.poll_interval_s,
             stale_claim_ms=settings.stale_claim_ms,
+            max_concurrency=settings.max_concurrency,
+            claim_heartbeat_interval_s=settings.claim_heartbeat_interval_s,
         )
     finally:
         await backend.close()

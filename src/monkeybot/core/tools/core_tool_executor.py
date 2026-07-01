@@ -1084,6 +1084,9 @@ class CoreToolExecutor(ToolExecutorPort):
         skip_if_busy = args.get("skip_if_busy", True)
         if not isinstance(skip_if_busy, bool):
             skip_if_busy = True
+        unbounded = args.get("unbounded", False)
+        if not isinstance(unbounded, bool):
+            unbounded = False
         spec = ScheduledLoopCreate(
             prompt=prompt,
             interval_ms=interval_ms,
@@ -1092,6 +1095,7 @@ class CoreToolExecutor(ToolExecutorPort):
             max_ticks=max_ticks,
             max_runtime_ms=max_runtime_ms,
             skip_if_busy=skip_if_busy,
+            unbounded=unbounded,
         )
         try:
             row = await store.create(spec)

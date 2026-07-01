@@ -117,6 +117,22 @@ class ScheduledLoopCreate:
     max_ticks: int | None = None
     max_runtime_ms: int | None = None
     skip_if_busy: bool = True
+    unbounded: bool = False
+
+
+def validate_loop_guards(
+    *,
+    max_ticks: int | None,
+    max_runtime_ms: int | None,
+    unbounded: bool,
+) -> None:
+    """Require an explicit stop guard unless the operator opts into unbounded loops."""
+    if unbounded:
+        return
+    if max_ticks is None and max_runtime_ms is None:
+        raise ValueError(
+            "scheduled loops require max_ticks, max_runtime, or unbounded=true"
+        )
 
 
 def _row_from_tuple(row: tuple[object, ...]) -> ScheduledLoopRow:
@@ -176,6 +192,11 @@ class SQLiteScheduledLoopStore:
         existing = await self.get(loop_id)
         if existing is not None:
             raise ValueError(f"scheduled loop already exists: {loop_id}")
+        validate_loop_guards(
+            max_ticks=spec.max_ticks,
+            max_runtime_ms=spec.max_runtime_ms,
+            unbounded=spec.unbounded,
+        )
         now_ms = int(time.time() * 1000)
         await self._conn.execute(
             """
@@ -276,6 +297,22 @@ class SQLiteScheduledLoopStore:
         )
         await self._conn.commit()
         return int(cursor.rowcount)
+
+    async def renew_tick_claim(self, loop_id: str, worker_id: str) -> bool:
+        """Extend the in-flight claim lease for a worker that is still executing a tick."""
+        now_ms = int(time.time() * 1000)
+        cursor = await self._conn.execute(
+            """
+            UPDATE scheduled_loops
+            SET claimed_at_ms = ?
+            WHERE loop_id = ?
+              AND worker_id = ?
+              AND tick_in_flight = 1
+            """,
+            (now_ms, loop_id, worker_id),
+        )
+        await self._conn.commit()
+        return cursor.rowcount == 1
 
     async def complete_tick(
         self,
