@@ -56,6 +56,56 @@ class ScheduledLoopRow:
     claimed_at_ms: int | None = None
 
 
+def _optional_int_field(raw: object) -> int | None:
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float):
+        return int(raw)
+    if isinstance(raw, str) and raw.strip():
+        try:
+            return int(raw)
+        except ValueError:
+            return None
+    return None
+
+
+def _bool_field(raw: object, *, default: bool = False) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, int):
+        return bool(raw)
+    if isinstance(raw, str):
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+    return default
+
+
+def doc_to_scheduled_loop_row(loop_id: str, data: dict[str, object]) -> ScheduledLoopRow:
+    """Map a Firestore document (or JSON blob) to :class:`ScheduledLoopRow`."""
+    return ScheduledLoopRow(
+        loop_id=loop_id,
+        session_id=str(data.get("session_id", "")),
+        status=str(data.get("status", "")),
+        prompt=str(data.get("prompt", "")),
+        interval_ms=int(cast(int, data.get("interval_ms", 0))),
+        max_ticks=_optional_int_field(data.get("max_ticks")),
+        max_runtime_ms=_optional_int_field(data.get("max_runtime_ms")),
+        skip_if_busy=_bool_field(data.get("skip_if_busy"), default=True),
+        tick_index=int(cast(int, data.get("tick_index", 0))),
+        next_tick_at_ms=int(cast(int, data.get("next_tick_at_ms", 0))),
+        started_at_ms=int(cast(int, data.get("started_at_ms", 0))),
+        last_tick_at_ms=_optional_int_field(data.get("last_tick_at_ms")),
+        last_error=str(data["last_error"]) if data.get("last_error") is not None else None,
+        stop_reason=str(data["stop_reason"]) if data.get("stop_reason") is not None else None,
+        tick_in_flight=_bool_field(data.get("tick_in_flight")),
+        worker_id=str(data["worker_id"]) if data.get("worker_id") is not None else None,
+        claimed_at_ms=_optional_int_field(data.get("claimed_at_ms")),
+    )
+
+
 @dataclass(frozen=True)
 class ScheduledLoopCreate:
     """Arguments for registering a new scheduled loop."""

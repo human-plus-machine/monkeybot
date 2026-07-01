@@ -513,7 +513,7 @@ class FirestoreStorageBackend:
         self._history_store = FirestoreHistoryStore(self._client, prefix)
         self._usage_store = FirestoreUsageStore(self._client, prefix)
         self._runs_store = FirestoreRunStore(self._client, prefix)
-        self._scheduled_loops_store = FirestoreScheduledLoopStore()
+        self._scheduled_loops_store = FirestoreScheduledLoopStore(self._client, prefix)
 
     async def close(self) -> None:
         if self._client is not None:

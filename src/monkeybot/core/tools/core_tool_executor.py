@@ -1048,7 +1048,7 @@ class CoreToolExecutor(ToolExecutorPort):
                 None,
                 _built_in_tool_error(
                     "policy",
-                    "scheduled loops require durable storage (DB_URL)",
+                    "scheduled loops require durable storage (DB_URL: sqlite, postgresql, or firestore)",
                     "Configure paths.db_url in monkeybot.yaml and enable MONKEYBOT_SCHEDULER_ENABLED=1 on the gateway.",
                     {},
                 ),
