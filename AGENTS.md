@@ -13,3 +13,22 @@ Non-obvious gotchas discovered during setup:
 - **The root pytest suite must NOT be run with the scaffold present.** A scaffolded `monkeybot_config/` + `workspace/` at the repo root makes 2 workspace-resolution tests fail (`tests/gateway/sse/test_routes.py::test_workspace_tree_and_file` and `tests/skills/test_generate_image_script.py::test_generate_image_script_success_mocked_vertex`); both pass in isolation. CI passes because it runs from a fresh checkout with no scaffold. Before `uv run pytest tests/ -q`, run tests in a clean tree (move `monkeybot_config/`, `workspace/`, `data/` aside, or use a checkout that was never scaffolded).
 - **`ruff` is not enforced by CI** and currently reports pre-existing failures across `src/` and `tests/`. CI gates only `mypy src/monkeybot` + pytest (root, `cli/`, `integrations/browser-mcp/`) + the three `evals/test_*.py` standalone self-check scripts. Do not treat existing `ruff check .` failures as regressions.
 - **`monkeybot doctor` reporting port 8080 "in use" or "no provider credentials" is expected** when the gateway is already running and/or you are using the `fake` provider — it is not a setup failure.
+
+## Git workflow
+
+Always sync with the remote **before** writing code — do not assume the local checkout is current.
+
+**Starting a new feature:**
+
+1. `git fetch origin develop && git checkout develop && git pull origin develop`
+2. Create the feature branch from that fresh tip: `git checkout -b cursor/<descriptive-name>-<suffix>`
+
+**Continuing an existing feature branch:**
+
+1. `git fetch origin <branch-name> && git checkout <branch-name> && git pull origin <branch-name>`
+
+**When the base branch (`develop`) has moved** and you need those changes on your feature branch:
+
+- `git fetch origin develop` then `git merge origin/develop` (or `git rebase origin/develop` if that is the project convention)
+
+Check `git status` and `git branch -a` first when the environment starts on a detached `HEAD` or an unfamiliar checkout.
