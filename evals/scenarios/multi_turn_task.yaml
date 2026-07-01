@@ -1,8 +1,0 @@
-description: "Multi-turn conversation stays coherent across turns"
-tags: [multi_turn, coherence]
-messages:
-  - "I need help with my Python project"
-  - "It's a FastAPI application"
-  - "How should I structure the routes?"
-assertions:
-  metrics: [response_relevancy, conversational_coherence]

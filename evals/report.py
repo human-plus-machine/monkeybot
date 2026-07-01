@@ -131,9 +131,15 @@ def _pct_increase(current: float, base: float) -> float:
 
 
 def compare_to_baseline(
-    baseline: BaselineFile | None, current: RunRecord
+    baseline: BaselineFile | None, current: RunRecord, *, require_baseline: bool = False
 ) -> tuple[list[str], list[str]]:
-    """Return ``(hard_failures, warnings)`` per the ticket's regression-gate table."""
+    """Return ``(hard_failures, warnings)`` per the ticket's regression-gate table.
+
+    ``require_baseline`` is set from ``--fail-on-regression``: without a baseline there is
+    nothing to diff token/cost/latency/p95 against, so a silent no-op there would let the
+    very first gated merge through with no regression check at all. With the flag, a missing
+    baseline is itself a hard failure telling the author to run ``--update-baseline``.
+    """
     hard: list[str] = []
     warn: list[str] = []
 
@@ -144,6 +150,11 @@ def compare_to_baseline(
             hard.append(f"{s.scenario_id}: assertion failed — {'; '.join(s.requirement_failures)}")
 
     if baseline is None:
+        if require_baseline:
+            hard.append(
+                "No baseline found — regression checks (tokens/cost/latency) cannot run. "
+                "Run `--update-baseline` once this run is trustworthy, or pass --baseline."
+            )
         return hard, warn
 
     base_by_id = {s.scenario_id: s for s in baseline.scenarios}
@@ -305,7 +316,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     baseline = load_baseline(baseline_path)
-    hard, warn = compare_to_baseline(baseline, record)
+    hard, warn = compare_to_baseline(baseline, record, require_baseline=args.fail_on_regression)
     print(build_markdown_report(record, baseline, hard, warn))
 
     if args.fail_on_regression and hard:

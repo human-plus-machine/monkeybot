@@ -106,7 +106,7 @@ async def _execute_run(app: FastAPI, run_id: str, scenario: Scenario) -> None:
             scores=scores,
             score_details=details,
             pass_rate=pass_rate,
-            status="completed",
+            status="failed" if requirement_failures else "completed",
             error=None,
             requirement_failures=requirement_failures,
         )

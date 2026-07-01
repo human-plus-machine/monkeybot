@@ -9,3 +9,4 @@ sessions:
 session_pause_sec: 8
 assertions:
   metrics: [response_relevancy, faithfulness]
+  response_contains: ["project-marigold", "marigold"]

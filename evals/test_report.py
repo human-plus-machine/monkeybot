@@ -46,6 +46,20 @@ def test_no_baseline_only_checks_current_run() -> None:
     assert warn == []
 
 
+def test_missing_baseline_is_noop_without_require_baseline() -> None:
+    current = _record([_agg(status="passed")])
+    hard, warn = compare_to_baseline(None, current)
+    assert hard == []
+    assert warn == []
+
+
+def test_missing_baseline_hard_fails_when_required() -> None:
+    current = _record([_agg(status="passed")])
+    hard, _ = compare_to_baseline(None, current, require_baseline=True)
+    assert len(hard) == 1
+    assert "baseline" in hard[0].lower()
+
+
 def test_scenario_errored_is_hard_fail() -> None:
     current = _record([_agg(status="errored", failure_reason="boom")])
     hard, _ = compare_to_baseline(None, current)
