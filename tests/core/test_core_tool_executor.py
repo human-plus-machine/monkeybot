@@ -78,6 +78,56 @@ class _NoMCP:
         del path
 
 
+class _MCPWithBlob:
+    """MCP stub returning a large JSON payload with an embedded base64 field."""
+
+    def __init__(self, *, blob_len: int = 1200) -> None:
+        alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+        self._payload = json.dumps({"data": (alphabet * 20)[:blob_len]})
+
+    async def connect(
+        self,
+        name: str,
+        command: str,
+        args: list[str],
+        env: dict[str, str],
+    ) -> list[ToolDef]:
+        del name, command, args, env
+        return []
+
+    async def connect_streamable_http(
+        self,
+        name: str,
+        url: str,
+        headers: dict[str, str] | None = None,
+    ) -> list[ToolDef]:
+        del name, url, headers
+        return []
+
+    async def disconnect(self, name: str) -> None:
+        del name
+
+    async def call_tool(
+        self,
+        server_name: str,
+        tool_name: str,
+        args: dict[str, object],
+    ) -> str:
+        del server_name, tool_name, args
+        return self._payload
+
+    def all_tools(self) -> list[ToolDef]:
+        return []
+
+    def split_prefixed_tool(self, prefixed_name: str) -> tuple[str, str] | None:
+        if prefixed_name == "srv__capture":
+            return ("srv", "capture")
+        return None
+
+    async def load_from_config(self, path: Path, *, raise_on_error: bool = False) -> None:
+        del path, raise_on_error
+
+
 def _ctx(skills: list[SkillRef] | None = None) -> TurnContext:
     return TurnContext(
         thread_id="t",
@@ -694,7 +744,7 @@ async def test_write_spill_with_inventory_writes_full_payload(tmp_path: Path) ->
     out = _write_spill_with_inventory(body, tmp_path, "th1", "call-1")
     spill = tmp_path / ".monkeybot" / "spill" / "th1" / "call-1.txt"
     assert spill.read_text(encoding="utf-8") == body
-    assert len(out) > len(body)
+    assert body not in out
     assert "Spill inventory" in out
     assert "25000 total chars" in out
     assert ".monkeybot/spill/th1/call-1.txt" in out
@@ -719,8 +769,8 @@ async def test_list_skills_spills_large_json(tmp_path: Path) -> None:
     ctx = _ctx(skills=big_skills)
     out, err = unwrap_tool_execution_result(await ex.execute(call=ToolCall(call_id="c-spill", name="list_skills", args={}), ctx=ctx))
     assert err is None and out is not None
-    assert len(out) > 20_000
     assert "Spill inventory" in out
+    assert len(out) < 2000
     spill = root / ".monkeybot" / "spill" / "t" / "c-spill.txt"
     assert spill.is_file()
     raw = spill.read_text(encoding="utf-8")
@@ -765,6 +815,83 @@ async def test_read_file_spill_path_caps_limit(tmp_path: Path) -> None:
     payload = json.loads(out)
     assert payload["ok"] is True
     assert payload["end_line"] - payload["start_line"] + 1 == 600
+    assert "line0" in payload["content"]
+    assert "omitted" not in payload["content"]
+
+
+@pytest.mark.asyncio
+async def test_read_file_preserves_large_content_through_ingress(tmp_path: Path) -> None:
+    root = tmp_path
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    (root / "big.txt").write_text("hello world\n" * 200, encoding="utf-8")
+    ex = CoreToolExecutor(workspace_root=root, memory=_mem_sub(mem), skills_path=skills, mcp=_NoMCP())
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="rf-big", name="read_file", args={"path": "big.txt", "limit": 50}),
+            ctx=_ctx(),
+        )
+    )
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert payload["ok"] is True
+    assert "hello world" in payload["content"]
+    assert "omitted" not in payload["content"]
+
+
+@pytest.mark.asyncio
+async def test_read_file_preserves_embedded_base64_blob(tmp_path: Path) -> None:
+    root = tmp_path
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    blob = (alphabet * 20)[:1200]
+    (root / "fixture.json").write_text(json.dumps({"token": blob}), encoding="utf-8")
+    ex = CoreToolExecutor(workspace_root=root, memory=_mem_sub(mem), skills_path=skills, mcp=_NoMCP())
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="rf-b64", name="read_file", args={"path": "fixture.json"}),
+            ctx=_ctx(),
+        )
+    )
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert payload["ok"] is True
+    assert blob[:80] in payload["content"]
+    assert "base64 run" not in payload["content"]
+
+
+@pytest.mark.asyncio
+async def test_spill_writes_raw_payload_before_sanitize(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    monkeypatch.setenv("MONKEYBOT_SPILL_MIN_CHARS", "500")
+    mcp = _MCPWithBlob()
+    ex = CoreToolExecutor(workspace_root=root, memory=_mem_sub(mem), skills_path=skills, mcp=mcp)
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="mcp-blob", name="srv__capture", args={}),
+            ctx=_ctx(),
+        )
+    )
+    assert err is None and out is not None
+    assert "Spill inventory" in out
+    spill = root / ".monkeybot" / "spill" / "t" / "mcp-blob.txt"
+    assert spill.is_file()
+    raw = spill.read_text(encoding="utf-8")
+    parsed = json.loads(raw)
+    assert len(parsed["data"]) == 1200
+    assert "omitted" not in parsed["data"]
+    assert mcp._payload[:80] not in out
 
 
 @pytest.mark.asyncio

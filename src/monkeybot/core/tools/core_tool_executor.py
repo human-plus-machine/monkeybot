@@ -19,6 +19,10 @@ from monkeybot.core.attachments.config import IMAGE_MIME_TYPES
 from monkeybot.core.attachments.store import AttachmentStore, sniff_mime
 from monkeybot.core.config.settings import SubagentConfig
 from monkeybot.core.context import CustomTool, TurnContext
+from monkeybot.core.context.tool_result_ingress import (
+    cap_tool_result_text,
+    sanitize_tool_result_text,
+)
 from monkeybot.core.llm.provider import ToolCall
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.mcp.mcp_client import MCPConnectionError, MCPServerNotConnectedError
@@ -85,6 +89,9 @@ _CORE_TOOL_NAMES = frozenset(
 
 _SPILL_SKIP_TOOLS = frozenset({"read_file", "read_attachment"})
 
+# Workspace reads return faithful file/memory/skills content; ingress sanitization is for MCP/shell output.
+_SANITIZE_SKIP_TOOLS = frozenset({"read_file", "write_file", "search_memory", "list_skills"})
+
 
 def _tool_handler_kind(name: str, *, mcp: MCPClientPort, extra_tools: dict[str, CustomTool]) -> str:
     if name in _CORE_TOOL_NAMES:
@@ -126,13 +133,12 @@ def _write_spill_with_inventory(
     thread_id: str,
     call_id: str,
 ) -> str:
-    """Write full ``text`` to spill file; return full body plus inventory note."""
+    """Write raw ``text`` to spill file; return inventory pointer only (not inline body)."""
     rel = f"{_SPILL_DIR}/{thread_id}/{_safe_spill_filename(call_id)}.txt"
     out_path = (Path(workspace_root) / rel).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(text, encoding="utf-8")
-    note = spill_inventory_note(text, rel)
-    return f"{text}\n{note}"
+    return spill_inventory_note(text, rel)
 
 
 def _is_under_spill_path(workspace_root: Path, rel_path: str) -> bool:
@@ -483,16 +489,23 @@ class CoreToolExecutor(ToolExecutorPort):
                 {"tool": name},
             )
 
-        if (
-            name not in _SPILL_SKIP_TOOLS
-            and err_text is None
-            and result_text is not None
-            and self._spill_min_chars > 0
-            and len(result_text) >= self._spill_min_chars
-        ):
-            result_text = _write_spill_with_inventory(
-                result_text, self._workspace.repo_root, ctx.thread_id, call.call_id
+        if err_text is None and result_text is not None:
+            skip_sanitize = name in _SANITIZE_SKIP_TOOLS
+            should_spill = (
+                name not in _SPILL_SKIP_TOOLS
+                and self._spill_min_chars > 0
+                and len(result_text) >= self._spill_min_chars
             )
+            if should_spill:
+                result_text = _write_spill_with_inventory(
+                    result_text, self._workspace.repo_root, ctx.thread_id, call.call_id
+                )
+                if not skip_sanitize:
+                    result_text = sanitize_tool_result_text(result_text)
+            else:
+                if not skip_sanitize:
+                    result_text = sanitize_tool_result_text(result_text)
+                result_text = cap_tool_result_text(result_text)
         if err_text is not None:
             return ToolExecutionResult.err(err_text)
         return ToolExecutionResult.ok_text(result_text or "")

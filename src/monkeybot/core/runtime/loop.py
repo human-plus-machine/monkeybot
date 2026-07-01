@@ -25,6 +25,7 @@ from monkeybot.core.context.curator import (
     run_context_curator,
 )
 from monkeybot.core.context.tool_output_policy import resolve_tool_budget
+from monkeybot.core.context.tool_result_ingress import summarize_tool_result_text
 from monkeybot.core.context.tool_shapers import (
     exceeds_tool_output_budget,
     shape_messages_tool_results,
@@ -305,9 +306,9 @@ def _flatten_tool_result_for_summary(resp: ToolResponse) -> str:
     parts: list[str] = []
     for b in resp.result:
         if isinstance(b, Text):
-            parts.append(b.text)
+            parts.append(summarize_tool_result_text(b.text))
         else:
-            parts.append(json.dumps(b.to_dict(), sort_keys=True))
+            parts.append(summarize_tool_result_text(json.dumps(b.to_dict(), sort_keys=True)))
     return "".join(parts) or "(empty)"
 
 

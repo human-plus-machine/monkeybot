@@ -148,3 +148,9 @@ Remedy:      Verify client_id and client_secret (or Basic-auth client credential
 * The authentication exchange runs inside an `httpx.Auth` subclass (`MCPAuthHandler`).
 * It utilizes `asyncio.Lock` to guarantee that concurrent tool calls from different agent loops do not trigger duplicate token-refresh HTTP calls to the identity provider.
 * Custom exceptions (`MCPAuthError`, `MCPConnectivityError`, `MCPDiagnosticError`) provide descriptive messages and standard troubleshooting remedies for operators.
+
+---
+
+## Browser MCP
+
+For real-browser control (CDP) via the optional `browser` stdio server — local dev, self-hosted headless Chromium, and Browser Use Cloud — see [Browser MCP](browser-mcp.md).

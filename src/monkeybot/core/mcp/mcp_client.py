@@ -22,6 +22,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast, runtime_checkable
 
+from monkeybot.core.context.tool_output_policy import (
+    register_mcp_tool_names,
+    unregister_mcp_server_tools,
+)
+from monkeybot.core.context.tool_result_ingress import (
+    dump_model_or_str,
+    format_mcp_content_block,
+    sanitize_tool_result_text,
+)
 from monkeybot.core.types.types_tools import ToolDef
 
 logger = logging.getLogger(__name__)
@@ -103,6 +112,13 @@ class MCPConnectivityError(MCPDiagnosticError):
 
 
 _ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
+
+# Unprefixed tool name that cloud-browser MCP servers (e.g. browser-harness) expose
+# to stop a remote session before it accrues further billing. Disconnecting the
+# stdio transport alone never reaches the remote session, so disconnect() calls
+# this tool first, best-effort, whenever a connected server exposes it.
+_BROWSER_STOP_TOOL = "browser_stop"
+_BROWSER_STOP_TIMEOUT_S = 10.0
 
 
 def interpolate_env_vars(value: Any) -> Any:
@@ -454,40 +470,15 @@ def _normalize_call_tool_result(result: Any) -> str:
         return ""
     content = getattr(result, "content", None)
     if not isinstance(content, list):
-        md = getattr(result, "model_dump", None)
-        if callable(md):
-            dumped = md(mode="python", by_alias=True)
-            try:
-                return json.dumps(dumped, default=str)
-            except TypeError:
-                pass
-        return str(result)
+        return sanitize_tool_result_text(dump_model_or_str(result))
 
     chunks: list[str] = []
     for block in content:
-        blk_type = getattr(block, "type", None)
-        txt = getattr(block, "text", None)
-        if blk_type == "text" and txt is not None:
-            chunks.append(str(txt))
-            continue
-        bmd = getattr(block, "model_dump", None)
-        if callable(bmd):
-            try:
-                chunks.append(json.dumps(bmd(mode="python", by_alias=True), default=str))
-            except TypeError:
-                chunks.append(str(block))
-        else:
-            chunks.append(str(block))
+        chunks.append(format_mcp_content_block(block))
     if not chunks:
-        md = getattr(result, "model_dump", None)
-        if callable(md):
-            dumped = md(mode="python", by_alias=True)
-            try:
-                return json.dumps(dumped, default=str)
-            except TypeError:
-                pass
-        return ""
-    return "".join(chunks)
+        dumped = dump_model_or_str(result) if getattr(result, "model_dump", None) else ""
+        return sanitize_tool_result_text(dumped)
+    return sanitize_tool_result_text("".join(chunks))
 
 
 class MCPClient:
@@ -558,6 +549,7 @@ class MCPClient:
                 defs.append(ToolDef(name=prefixed, description=desc, input_schema=schema))
 
             self._servers[name] = _ServerRecord(stack=stack, session=session, tools=list(defs))
+            register_mcp_tool_names(t.name for t in defs)
             return list(defs)
         except MCPConnectionError:
             await stack.aclose()
@@ -621,6 +613,7 @@ class MCPClient:
                 defs.append(ToolDef(name=prefixed, description=desc, input_schema=schema))
 
             self._servers[name] = _ServerRecord(stack=stack, session=session, tools=list(defs))
+            register_mcp_tool_names(t.name for t in defs)
             return list(defs)
         except MCPConnectionError:
             await stack.aclose()
@@ -632,11 +625,35 @@ class MCPClient:
             await stack.aclose()
             raise MCPConnectionError(name, str(exc)) from exc
 
+    async def _stop_remote_session_before_teardown(self, name: str, rec: _ServerRecord) -> None:
+        """Best-effort ``browser_stop`` call so cloud-browser billing ends on disconnect.
+
+        Closing the stdio transport only kills the local MCP subprocess; a remote
+        Browser Use Cloud session (or any other server's remote resource behind a
+        ``browser_stop`` tool) keeps running otherwise. Runs before ``stack.aclose()``
+        with a short timeout so a hung remote call never blocks shutdown.
+        """
+        prefixed_stop_tool = f"{name}__{_BROWSER_STOP_TOOL}"
+        if not any(t.name == prefixed_stop_tool for t in rec.tools):
+            return
+        try:
+            async with asyncio.timeout(_BROWSER_STOP_TIMEOUT_S):
+                await rec.session.call_tool(_BROWSER_STOP_TOOL, arguments={})
+        except Exception as exc:
+            logger.warning(
+                "mcp disconnect %s: %s call failed (remote session may keep billing): %s",
+                name,
+                _BROWSER_STOP_TOOL,
+                exc,
+            )
+
     async def disconnect(self, name: str) -> None:
         """Tear down one server session; harmless if already disconnected."""
         rec = self._servers.pop(name, None)
         if rec is None:
             return
+        unregister_mcp_server_tools(name)
+        await self._stop_remote_session_before_teardown(name, rec)
         try:
             await rec.stack.aclose()
         except BaseException as exc:
