@@ -1,4 +1,4 @@
-"""Pinned bottom status bar for ``monkeybot chat`` (context ring + session usage)."""
+"""Pinned bottom status bar for ``monkeybot chat`` (context window ring)."""
 
 from __future__ import annotations
 
@@ -51,16 +51,6 @@ def parse_usage_response(data: dict[str, object]) -> SessionUsageView:
     )
 
 
-def _format_tokens(n: int) -> str:
-    return f"{n:,}"
-
-
-def _format_usd(n: float) -> str:
-    if not n or n <= 0:
-        return "$0.00"
-    return f"${n:.4f}"
-
-
 def _ring_glyph(pct_used: int) -> str:
     idx = min(len(_RING_GLYPHS) - 1, max(0, (pct_used + 12) // 25))
     return _RING_GLYPHS[idx]
@@ -98,7 +88,6 @@ def format_context_ring(
 def format_status_line(usage: SessionUsageView | None, *, width: int) -> str:
     if usage is None:
         ring = f"{_DIM}○ 0%{_RESET}"
-        stats = f"{_DIM}In —  Out —  $0.00{_RESET}"
     else:
         ring = format_context_ring(
             estimated_prompt_tokens=usage.estimated_prompt_tokens,
@@ -106,36 +95,9 @@ def format_status_line(usage: SessionUsageView | None, *, width: int) -> str:
             context_window_tokens=usage.context_window_tokens,
             summarization_threshold_tokens=usage.summarization_threshold_tokens,
         )
-        stats = (
-            f"{_DIM}In {_format_tokens(usage.input_tokens)}  "
-            f"Out {_format_tokens(usage.output_tokens)}  "
-            f"{_format_usd(usage.cost_usd)}{_RESET}"
-        )
-    line = f" {ring}  {stats}"
+    line = f" {ring}"
     visible_budget = max(20, width - 1)
-    if len(_strip_ansi(line)) > visible_budget:
-        compact = (
-            f" {ring}  {_DIM}{_format_tokens(usage.input_tokens if usage else 0)}"
-            f"/{_format_tokens(usage.output_tokens if usage else 0)}  "
-            f"{_format_usd(usage.cost_usd if usage else 0.0)}{_RESET}"
-        )
-        line = compact
     return line[:visible_budget]
-
-
-def _strip_ansi(text: str) -> str:
-    out: list[str] = []
-    i = 0
-    while i < len(text):
-        if text[i] == "\x1b" and i + 1 < len(text) and text[i + 1] == "[":
-            j = i + 2
-            while j < len(text) and not text[j].isalpha():
-                j += 1
-            i = j + 1 if j < len(text) else len(text)
-            continue
-        out.append(text[i])
-        i += 1
-    return "".join(out)
 
 
 def _terminal_rows() -> int:

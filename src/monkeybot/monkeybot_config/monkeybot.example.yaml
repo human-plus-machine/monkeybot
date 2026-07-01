@@ -50,6 +50,7 @@ model:
   temperature: 0.7
   max_tokens: 60000
   # Gemini: -1 = model default, 0 = off, N = token budget
+  # Ollama (Gemma 4, Qwen3, …): -1 = server default, 0 = off (reasoning_effort: none)
   thinking_budget: -1
   # Prompt caching of the stable prefix (AGENT.md + harness + tools). Default ON.
   # Native per provider: Anthropic uses explicit cache_control; OpenAI/Gemini cache

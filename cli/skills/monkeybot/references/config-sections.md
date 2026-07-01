@@ -39,7 +39,7 @@ Validate check ids: `paths.agent_md.exists`, `paths.skills_path.exists`, `paths.
 | `name` | `gemini-3-flash` | Pick a specific model id |
 | `temperature` | `0.7` | Lower for deterministic output, higher for creative |
 | `max_tokens` | `60000` | Cap per-response length |
-| `thinking_budget` | `-1` | Gemini reasoning budget: `-1` model default, `0` off, `N` token budget |
+| `thinking_budget` | `-1` | Gemini: `-1` model default, `0` off, `N` token budget. Ollama reasoning models: `-1` server default, `0` off (`reasoning_effort: none`) |
 | `enable_caching` | `true` | Toggles explicit Anthropic prompt caching of the stable prefix |
 | `context_window` | `1000000` | Summarization trigger threshold (tokens) |
 | `max_turns` | `50` | Hard cap on turns per run |

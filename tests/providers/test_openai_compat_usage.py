@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
 
-from monkeybot.core.llm.provider import UsageEvent
-from monkeybot.providers._openai_compat import iter_openai_compat_stream
+from monkeybot.core.llm.provider import ThinkingDelta, UsageEvent
+from monkeybot.providers._openai_compat import (
+    iter_openai_compat_stream,
+    stream_chat_completions_with_tool_fallback,
+)
 
 
 def _usage_chunk(
@@ -37,10 +41,14 @@ def _usage_chunk(
     return SimpleNamespace(usage=usage, choices=[])
 
 
-def _text_chunk(content: str = "hi") -> SimpleNamespace:
+def _text_chunk(content: str = "hi", *, reasoning: str | None = None) -> SimpleNamespace:
     return SimpleNamespace(
         usage=None,
-        choices=[SimpleNamespace(delta=SimpleNamespace(content=content, tool_calls=None))],
+        choices=[
+            SimpleNamespace(
+                delta=SimpleNamespace(content=content, reasoning=reasoning, tool_calls=None)
+            )
+        ],
     )
 
 
@@ -139,6 +147,56 @@ async def test_invariant_cached_equals_read_plus_creation() -> None:
     assert usage.cache_read_tokens == 900
     assert usage.cache_creation_tokens == 0
     assert usage.cached_tokens == usage.cache_read_tokens + usage.cache_creation_tokens
+
+
+@pytest.mark.asyncio
+async def test_iter_openai_compat_stream_yields_reasoning_delta() -> None:
+    client = _fake_client([_text_chunk(reasoning="plan step")])
+    events = [ev async for ev in iter_openai_compat_stream(client, {})]
+    thinking = [ev for ev in events if isinstance(ev, ThinkingDelta)]
+    assert len(thinking) == 1
+    assert thinking[0].text == "plan step"
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_completions_forwards_reasoning_effort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[dict[str, Any]] = []
+
+    async def _create(**kwargs: Any) -> Any:
+        captured.append(kwargs)
+
+        async def _stream() -> Any:
+            if False:  # pragma: no cover
+                yield
+
+        return _stream()
+
+    def _fake_openai(*_args: Any, **_kwargs: Any) -> Any:
+        return SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=_create)),
+        )
+
+    fake_openai = ModuleType("openai")
+    fake_openai.AsyncOpenAI = _fake_openai
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+
+    _ = [
+        ev
+        async for ev in stream_chat_completions_with_tool_fallback(
+            base_url="http://localhost:11434/v1",
+            api_key="ollama",
+            provider="ollama",
+            messages=[],
+            tools=[],
+            model="gemma4",
+            temperature=0.7,
+            max_tokens=100,
+            reasoning_effort="none",
+        )
+    ]
+    assert captured[0]["reasoning_effort"] == "none"
 
 
 @pytest.mark.asyncio

@@ -189,6 +189,7 @@ def get_provider_config(
             OllamaProvider(
                 temperature=sampling.temperature,
                 max_tokens=sampling.max_tokens,
+                thinking_budget=thinking_budget,
                 cache_enabled=resolved_cache,
             ),
             resolved_model,

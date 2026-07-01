@@ -15,6 +15,9 @@ Configuration (environment variables or ``monkeybot.yaml``):
   Must already be pulled on the Ollama server (``ollama pull <model>``).
 - ``MODEL_TEMPERATURE`` — sampling temperature (default: ``0.7``; set via ``monkeybot.yaml`` / constructor)
 - ``MODEL_MAX_TOKENS`` — max output tokens (default: ``60000``; set via ``monkeybot.yaml`` / constructor)
+- ``MODEL_THINKING_BUDGET`` — thinking control for reasoning models (e.g. Gemma 4):
+  ``-1`` = Ollama default (thinking on when supported), ``0`` = off via
+  ``reasoning_effort: none``, ``N > 0`` = on (no token budget on Ollama).
 
 Install the required extra::
 
@@ -42,6 +45,28 @@ _DEFAULT_BASE_URL = "http://localhost:11434"
 _DUMMY_API_KEY = "ollama"
 
 
+def reasoning_effort_for_thinking_budget(budget: int) -> str | None:
+    """Map MonkeyBot ``thinking_budget`` to Ollama OpenAI-compat ``reasoning_effort``.
+
+    Returns ``None`` when the field should be omitted (server default).
+    """
+    if budget == 0:
+        return "none"
+    return None
+
+
+def _resolve_thinking_budget(
+    configured: int | None,
+    *,
+    override: int | None,
+) -> int:
+    if override is not None:
+        return override
+    if configured is not None:
+        return configured
+    return int(os.environ.get("MODEL_THINKING_BUDGET", "-1"))
+
+
 class OllamaProvider:
     """Local (or self-hosted) models via Ollama's OpenAI-compatible endpoint.
 
@@ -63,6 +88,7 @@ class OllamaProvider:
         *,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        thinking_budget: int | None = None,
         cache_enabled: bool = True,
     ) -> None:
         self._base_url = (os.environ.get("OLLAMA_BASE_URL") or _DEFAULT_BASE_URL).rstrip("/")
@@ -74,6 +100,11 @@ class OllamaProvider:
         sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens)
         self._temperature = sampling.temperature
         self._max_tokens = sampling.max_tokens
+        self._thinking_budget = (
+            thinking_budget
+            if thinking_budget is not None
+            else int(os.environ.get("MODEL_THINKING_BUDGET", "-1"))
+        )
 
     def _resolve_base_url(self, model: str) -> str:
         """Return the OpenAI-compat base URL for ``model``.
@@ -107,7 +138,11 @@ class OllamaProvider:
         model: str,
         thinking_budget: int | None = None,
     ) -> AsyncIterator[ProviderEvent]:
-        del thinking_budget
+        budget = _resolve_thinking_budget(self._thinking_budget, override=thinking_budget)
+        reasoning_effort = reasoning_effort_for_thinking_budget(budget)
+        effort_kw = (
+            {"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}
+        )
         async for event in stream_chat_completions_with_tool_fallback(
             base_url=self._resolve_base_url(model),
             api_key=self._api_key,
@@ -117,5 +152,6 @@ class OllamaProvider:
             model=model,
             temperature=self._temperature,
             max_tokens=self._max_tokens,
+            **effort_kw,
         ):
             yield event

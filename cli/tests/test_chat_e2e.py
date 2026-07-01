@@ -9,7 +9,11 @@ import sys
 from pathlib import Path
 
 import pexpect
-from monkeybot_cli.commands.chat import _wait_for_health
+from monkeybot_cli.commands.chat import (
+    _ASSISTANT_PREFIX,
+    _USER_PROMPT,
+    _wait_for_health,
+)
 
 
 def _free_port() -> int:
@@ -60,11 +64,11 @@ def test_chat_repl_round_trip_with_fake_gateway(tmp_path: Path) -> None:
             timeout=20,
         )
         try:
-            child.expect("you:")
+            child.expect(_USER_PROMPT.strip())
             child.sendline("hello")
-            child.expect("assistant:")
+            child.expect(_ASSISTANT_PREFIX.strip())
             child.expect("hello")
-            child.expect("you:")
+            child.expect(_USER_PROMPT.strip())
             child.sendline("/bye")
             child.expect("Goodbye")
             child.expect(pexpect.EOF)
