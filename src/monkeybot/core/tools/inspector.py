@@ -38,9 +38,9 @@ class CommandTierConfigError(MonkeybotError):
 
 @dataclass(frozen=True)
 class Decision:
-    """Allow or deny outcome from a tool inspector.
+    """Allow, deny, or confirm outcome from a tool inspector.
 
-    ``confirm`` is reserved for Story 5; no inspector should return it until then.
+    ``confirm`` requires an SSE session so the user can approve via tool-confirmations.
     """
 
     kind: Literal["allow", "deny", "confirm"]

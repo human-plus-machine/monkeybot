@@ -248,6 +248,80 @@ def _core_tool_defs(
                 "Disconnect an MCP server by name and drop its tools.",
                 mcp_rm_schema,
             ),
+            ToolDef(
+                "start_loop",
+                "Start a prompt-first scheduled loop after the user confirms. Pass the agreed "
+                "plan in prompt (BUSINESS/RULES). The scheduler fires that prompt on each tick. "
+                "Requires durable storage (DB_URL).",
+                {
+                    "type": "object",
+                    "properties": {
+                        "prompt": {
+                            "type": "string",
+                            "description": "Agreed loop plan / tick instructions.",
+                        },
+                        "interval": {
+                            "type": "string",
+                            "description": "Tick interval, e.g. 20s, 5m, 1h.",
+                        },
+                        "loop_id": {"type": "string"},
+                        "session_id": {
+                            "type": "string",
+                            "description": "Conversation thread for ticks (default loop-main).",
+                        },
+                        "max_ticks": {"type": "integer"},
+                        "max_runtime": {
+                            "type": "string",
+                            "description": "Hard wall-clock limit, e.g. 1h.",
+                        },
+                        "unbounded": {
+                            "type": "boolean",
+                            "description": (
+                                "Opt out of max_ticks/max_runtime guards. "
+                                "Requires explicit user confirmation."
+                            ),
+                        },
+                        "skip_if_busy": {"type": "boolean"},
+                    },
+                    "required": ["prompt", "interval"],
+                },
+            ),
+            ToolDef(
+                "loop_status",
+                "Get status of one scheduled loop or list all loops.",
+                {
+                    "type": "object",
+                    "properties": {"loop_id": {"type": "string"}},
+                    "required": [],
+                },
+            ),
+            ToolDef(
+                "pause_loop",
+                "Pause a scheduled loop.",
+                {
+                    "type": "object",
+                    "properties": {"loop_id": {"type": "string"}},
+                    "required": ["loop_id"],
+                },
+            ),
+            ToolDef(
+                "resume_loop",
+                "Resume a paused scheduled loop.",
+                {
+                    "type": "object",
+                    "properties": {"loop_id": {"type": "string"}},
+                    "required": ["loop_id"],
+                },
+            ),
+            ToolDef(
+                "stop_loop",
+                "Stop a scheduled loop permanently.",
+                {
+                    "type": "object",
+                    "properties": {"loop_id": {"type": "string"}},
+                    "required": ["loop_id"],
+                },
+            ),
         ]
     )
     return tools

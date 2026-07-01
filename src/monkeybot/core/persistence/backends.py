@@ -18,6 +18,10 @@ if TYPE_CHECKING:
     from monkeybot.core.llm.provider import Message
     from monkeybot.core.llm.usage import Usage, UsageSummary
     from monkeybot.core.persistence.durable_runs import SubagentEnvelope, SubagentRunRow
+    from monkeybot.core.persistence.scheduled_loops import (
+        ScheduledLoopCreate,
+        ScheduledLoopRow,
+    )
     from monkeybot.core.persistence.thread_summary import ChatThreadSummary
 
 
@@ -89,8 +93,56 @@ class RunStore(Protocol):
 
 
 @runtime_checkable
+class ScheduledLoopStore(Protocol):
+    """Protocol for prompt-first scheduled agent loops."""
+
+    async def create(self, spec: ScheduledLoopCreate) -> ScheduledLoopRow: ...
+
+    async def get(self, loop_id: str) -> ScheduledLoopRow | None: ...
+
+    async def list_all(self) -> list[ScheduledLoopRow]: ...
+
+    async def list_due(self, now_ms: int) -> list[ScheduledLoopRow]: ...
+
+    async def claim_tick(self, loop_id: str, worker_id: str) -> ScheduledLoopRow | None: ...
+
+    async def release_stale_claims(self, stale_after_ms: int) -> int: ...
+
+    async def complete_tick(
+        self,
+        loop_id: str,
+        *,
+        worker_id: str,
+        error: str | None = None,
+    ) -> ScheduledLoopRow | None: ...
+
+    async def defer_tick(self, loop_id: str, *, worker_id: str, reason: str) -> None: ...
+
+    async def renew_tick_claim(self, loop_id: str, worker_id: str) -> bool: ...
+
+    async def pause(self, loop_id: str) -> bool: ...
+
+    async def resume(self, loop_id: str) -> bool: ...
+
+    async def stop(self, loop_id: str, *, stop_reason: str = "manual") -> bool: ...
+
+
+@runtime_checkable
+class SessionTurnLockStore(Protocol):
+    """Exclusive turn lock per session for multi-replica gateways."""
+
+    async def try_acquire(self, session_id: str, request_id: str) -> bool: ...
+
+    async def release(self, session_id: str, request_id: str) -> None: ...
+
+    async def is_busy(self, session_id: str) -> bool: ...
+
+    async def release_stale_claims(self, stale_after_ms: int) -> int: ...
+
+
+@runtime_checkable
 class StorageBackend(Protocol):
-    """Owns a storage connection lifecycle and vends all three stores."""
+    """Owns a storage connection lifecycle and vends all stores."""
 
     async def open(self, *, run_schema: bool = True) -> None: ...
 
@@ -101,6 +153,10 @@ class StorageBackend(Protocol):
     def usage(self) -> UsageStore: ...
 
     def runs(self) -> RunStore: ...
+
+    def scheduled_loops(self) -> ScheduledLoopStore: ...
+
+    def session_turns(self) -> SessionTurnLockStore: ...
 
 
 @dataclass(frozen=True)

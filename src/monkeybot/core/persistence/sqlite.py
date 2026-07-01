@@ -72,6 +72,33 @@ SCHEMA_DDLS: Final[tuple[str, ...]] = (
     WHERE status IN ('pending','running')""",
     "CREATE INDEX IF NOT EXISTS idx_usage_thread ON turn_usage(thread_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_usage_cost ON turn_usage(created_at)",
+    """CREATE TABLE IF NOT EXISTS scheduled_loops (
+    loop_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    interval_ms INTEGER NOT NULL,
+    max_ticks INTEGER,
+    max_runtime_ms INTEGER,
+    skip_if_busy INTEGER NOT NULL DEFAULT 1,
+    tick_index INTEGER NOT NULL DEFAULT 0,
+    next_tick_at_ms INTEGER NOT NULL,
+    started_at_ms INTEGER NOT NULL,
+    last_tick_at_ms INTEGER,
+    last_error TEXT,
+    stop_reason TEXT,
+    tick_in_flight INTEGER NOT NULL DEFAULT 0,
+    worker_id TEXT,
+    claimed_at_ms INTEGER
+)""",
+    """CREATE INDEX IF NOT EXISTS idx_scheduled_loops_due
+    ON scheduled_loops(status, tick_in_flight, next_tick_at_ms)
+    WHERE status = 'active'""",
+    """CREATE TABLE IF NOT EXISTS session_turn_locks (
+    session_id TEXT PRIMARY KEY,
+    request_id TEXT,
+    claimed_at_ms INTEGER
+)""",
 )
 
 

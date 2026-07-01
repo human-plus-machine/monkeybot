@@ -58,6 +58,7 @@ from monkeybot.core.runtime.loop import run as run_loop
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector, ToolInspector
+from monkeybot.core.tools.loop_inspector import LoopStartInspector
 from monkeybot.core.types.content_blocks import ContentBlock, Text
 from monkeybot.core.workspace import create_workspace_storage
 from monkeybot.gateway.sse.loop_port import UsagePort
@@ -400,6 +401,9 @@ class GatewayLoopPort:
                 attachment_store=attachment_store,
                 attachment_catalog=bus.attachment_catalog,
                 run_store=storage_backend.runs() if storage_backend is not None else None,
+                scheduled_loop_store=(
+                    storage_backend.scheduled_loops() if storage_backend is not None else None
+                ),
                 subagent_registry=_deps.subagent_registry,
             )
             if transcript_writer is not None:
@@ -521,6 +525,7 @@ async def _startup(fastapi_app: FastAPI) -> None:
     denied = _tool_denied_patterns()
     if denied:
         inspectors.append(RulesInspector(denied))
+    inspectors.append(LoopStartInspector())
     _deps.inspectors = inspectors
 
     _deps.provider = _resolve_provider()
@@ -620,6 +625,24 @@ async def _startup(fastapi_app: FastAPI) -> None:
         )
         fastapi_app.state.worker_pool = start_worker_pool_background(backend)
 
+    from monkeybot.scheduler.engine import scheduler_enabled_from_env, start_scheduler_background
+    from monkeybot.gateway.sse.scheduler_wiring import (
+        GatewaySessionEnsurer,
+        GatewayTickInvoker,
+        StorageSessionBusyChecker,
+    )
+
+    if scheduler_enabled_from_env():
+        loop_port = GatewayLoopPort(_registry)
+        turn_locks = backend.session_turns()
+        fastapi_app.state.scheduler = start_scheduler_background(
+            store=backend.scheduled_loops(),
+            invoker=GatewayTickInvoker(loop_port, _registry, turn_locks),
+            session_busy=StorageSessionBusyChecker(turn_locks),
+            ensure_session=GatewaySessionEnsurer(_registry),
+        )
+        logger.info("scheduled-loop engine enabled (in-process; development-friendly)")
+
 
 async def _shutdown(fastapi_app: FastAPI) -> None:
     """Tear down MCP sessions and storage backend."""
@@ -641,6 +664,13 @@ async def _shutdown(fastapi_app: FastAPI) -> None:
 
         await shutdown_worker_pool(worker_pool_handle)
         fastapi_app.state.worker_pool = None
+
+    scheduler_handle = getattr(fastapi_app.state, "scheduler", None)
+    if scheduler_handle is not None:
+        from monkeybot.scheduler.engine import shutdown_scheduler
+
+        await shutdown_scheduler(scheduler_handle)
+        fastapi_app.state.scheduler = None
 
     storage: StorageBackend | None = getattr(fastapi_app.state, "storage", None)
     if storage is not None:

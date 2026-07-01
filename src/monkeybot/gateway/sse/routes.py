@@ -32,6 +32,7 @@ from monkeybot.core.runtime.context_budget import summarization_trigger_ratio_fr
 from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService
 
 from .loop_port import LoopPort, UsagePort
+from .scheduler_routes import build_scheduler_router
 from .models import (
     APIError,
     AttachmentUploadResponse,
@@ -282,13 +283,25 @@ def create_app(
                 "Unknown session",
                 uuid.uuid4().hex,
             )
-        if bus.current_request_id is not None:
-            raise APIError(
-                409,
-                "SESSION_BUSY",
-                "Session already processing a request",
-                uuid.uuid4().hex,
-            )
+        storage = getattr(request.app.state, "storage", None)
+        if storage is None:
+            if bus.current_request_id is not None:
+                raise APIError(
+                    409,
+                    "SESSION_BUSY",
+                    "Session already processing a request",
+                    uuid.uuid4().hex,
+                )
+        else:
+            turn_locks = storage.session_turns()
+            acquired = await turn_locks.try_acquire(session_id, body.request_id)
+            if not acquired:
+                raise APIError(
+                    409,
+                    "SESSION_BUSY",
+                    "Session already processing a request",
+                    uuid.uuid4().hex,
+                )
         loop_ref: LoopPort = request.app.state.loop
         bus.current_request_id = body.request_id
         store = _attachment_store(request)
@@ -308,7 +321,10 @@ def create_app(
             try:
                 await loop_ref.start_turn(session_id, body.request_id, user_content)
             finally:
-                bus.current_request_id = None
+                if storage is not None:
+                    await storage.session_turns().release(session_id, body.request_id)
+                if bus.current_request_id == body.request_id:
+                    bus.current_request_id = None
 
         asyncio.create_task(_turn())
         return ReplyResponse(request_id=body.request_id)
@@ -690,6 +706,7 @@ def create_app(
         }
 
     app.include_router(api)
+    app.include_router(build_scheduler_router(loop_port=loop, registry=reg))
 
     @app.get("/health", response_model=HealthResponse)
     async def health() -> HealthResponse:

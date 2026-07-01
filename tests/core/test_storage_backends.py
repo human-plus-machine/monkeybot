@@ -119,6 +119,8 @@ async def test_postgres_open_run_schema_false_skips_apply_schema(
     await backend.open(run_schema=False)
     assert apply_calls == []
     assert backend._pool is mock_pool
+    loops = backend.scheduled_loops()
+    assert loops is backend.scheduled_loops()
     await backend.close()
 
 
@@ -205,6 +207,8 @@ async def test_sqlite_backend_raises_before_open() -> None:
         backend.usage()
     with pytest.raises(RuntimeError, match="open\\(\\) has not been called"):
         backend.runs()
+    with pytest.raises(RuntimeError, match="open\\(\\) has not been called"):
+        backend.scheduled_loops()
 
 
 @pytest.mark.asyncio
@@ -226,6 +230,15 @@ async def test_sqlite_backend_runs_returns_same_instance(sqlite_backend: SQLiteS
     r1 = sqlite_backend.runs()
     r2 = sqlite_backend.runs()
     assert r1 is r2
+
+
+@pytest.mark.asyncio
+async def test_sqlite_backend_scheduled_loops_returns_same_instance(
+    sqlite_backend: SQLiteStorageBackend,
+) -> None:
+    s1 = sqlite_backend.scheduled_loops()
+    s2 = sqlite_backend.scheduled_loops()
+    assert s1 is s2
 
 
 # ---------------------------------------------------------------------------
