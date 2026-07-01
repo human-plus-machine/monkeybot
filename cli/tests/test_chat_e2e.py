@@ -6,31 +6,16 @@ import os
 import socket
 import subprocess
 import sys
-import time
 from pathlib import Path
 
-import httpx
 import pexpect
+from monkeybot_cli.commands.chat import _wait_for_health
 
 
 def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
-
-
-def _wait_for_health(base: str, proc: subprocess.Popen[str], timeout_s: float = 30.0) -> None:
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            raise AssertionError(f"gateway exited early with {proc.returncode}")
-        try:
-            if httpx.get(f"{base}/health", timeout=1.0).status_code == 200:
-                return
-        except httpx.HTTPError:
-            pass
-        time.sleep(0.2)
-    raise AssertionError("gateway did not become healthy")
 
 
 def test_chat_repl_round_trip_with_fake_gateway(tmp_path: Path) -> None:
@@ -66,7 +51,7 @@ def test_chat_repl_round_trip_with_fake_gateway(tmp_path: Path) -> None:
         text=True,
     )
     try:
-        _wait_for_health(base, gateway)
+        assert _wait_for_health(base, gateway)
         child = pexpect.spawn(
             "monkeybot",
             ["chat", "--url", base],
