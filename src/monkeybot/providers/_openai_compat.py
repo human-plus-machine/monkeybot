@@ -188,6 +188,9 @@ def count_openai_compat_input_tokens(
     )
 
 
+_STREAM_USAGE_OPTIONS: dict[str, bool] = {"include_usage": True}
+
+
 async def iter_openai_compat_stream(
     client: Any,
     kwargs: dict[str, Any],
@@ -201,13 +204,17 @@ async def iter_openai_compat_stream(
     Handles text deltas, tool call buffering, usage accounting, and Done.
     ``client`` must be an ``AsyncOpenAI``-compatible object.
     """
+    req = dict(kwargs)
+    if req.get("stream") and "stream_options" not in req:
+        req["stream_options"] = dict(_STREAM_USAGE_OPTIONS)
+
     input_tokens = 0
     output_tokens = 0
     cached_tokens = 0
     tool_buf: dict[int, dict[str, Any]] = {}
 
     try:
-        stream = await client.chat.completions.create(**kwargs)
+        stream = await client.chat.completions.create(**req)
         async for chunk in stream:
             if chunk.usage is not None:
                 input_tokens = int(chunk.usage.prompt_tokens or 0)

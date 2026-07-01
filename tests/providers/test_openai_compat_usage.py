@@ -142,6 +142,53 @@ async def test_invariant_cached_equals_read_plus_creation() -> None:
 
 
 @pytest.mark.asyncio
+async def test_iter_openai_compat_stream_sets_include_usage() -> None:
+    captured: list[dict[str, Any]] = []
+
+    async def _create(**kwargs: Any) -> Any:
+        captured.append(kwargs)
+
+        async def _stream() -> Any:
+            if False:  # pragma: no cover — make this an async generator
+                yield
+
+        return _stream()
+
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=_create)),
+    )
+    _ = [ev async for ev in iter_openai_compat_stream(client, {"model": "m", "stream": True})]
+    assert captured[0]["stream_options"] == {"include_usage": True}
+
+
+@pytest.mark.asyncio
+async def test_iter_openai_compat_stream_preserves_explicit_stream_options() -> None:
+    captured: list[dict[str, Any]] = []
+
+    async def _create(**kwargs: Any) -> Any:
+        captured.append(kwargs)
+
+        async def _stream() -> Any:
+            if False:  # pragma: no cover
+                yield
+
+        return _stream()
+
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=_create)),
+    )
+    custom = {"include_usage": False}
+    _ = [
+        ev
+        async for ev in iter_openai_compat_stream(
+            client,
+            {"model": "m", "stream": True, "stream_options": custom},
+        )
+    ]
+    assert captured[0]["stream_options"] is custom
+
+
+@pytest.mark.asyncio
 async def test_stream_error_logs_structured_context(caplog: pytest.LogCaptureFixture) -> None:
     client = _failing_client(RuntimeError("boom"))
     with (
