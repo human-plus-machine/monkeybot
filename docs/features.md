@@ -267,7 +267,8 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 **Key files:** `core/context/curator.py`, `monkeybot.yaml` `context_curation:`
 
 **How it works:**
-- Runs on **turn 1 only** when `CONTEXT_CURATION_ENABLED` and `memory_index` exceeds `memory_threshold`.
+- Runs on **turn 1 only** when `CONTEXT_CURATION_ENABLED` and `memory_index` exceeds `memory_threshold` **or** estimated index tokens exceed `memory_token_threshold`.
+- Curator picks numbered pool lines via `memory_line_indices` (fail-open to full index on provider/validation errors).
 - Separate `curator_provider` (gateway: `GeminiProvider(thinking_budget=0, max_tokens=1024)`).
 - Curated memory lines are **frozen for follow-up turns** in the same user message.
 
@@ -275,7 +276,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Invariants:**
 - Subagents disable curation (`enable_context_curation=False`).
-- On curator failure, the memory index section is omitted.
+- On curator failure, the memory index section falls back to the full `ctx.memory_index` (fail-open).
 
 ---
 

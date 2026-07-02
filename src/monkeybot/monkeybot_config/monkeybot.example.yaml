@@ -83,6 +83,8 @@ context_curation:
   # When false, curation is skipped (env: CONTEXT_CURATION_ENABLED)
   enabled: true
   memory_threshold: 8
+  # OR trigger when estimated memory-index tokens exceed this (env: CONTEXT_CURATION_MEMORY_TOKEN_THRESHOLD)
+  memory_token_threshold: 2000
   # Separate small model for curator (env: CONTEXT_CURATOR_MODEL); empty uses main model id
   curator_model: gemini-3-flash
   timeout_sec: 10

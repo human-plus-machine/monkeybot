@@ -55,6 +55,7 @@ ENV_MAP: dict[tuple[str, str], str] = {
     ("gateway", "cors_allow_origins"): "MONKEYBOT_CORS_ALLOW_ORIGINS",
     ("context_curation", "enabled"): "CONTEXT_CURATION_ENABLED",
     ("context_curation", "memory_threshold"): "CONTEXT_CURATION_MEMORY_THRESHOLD",
+    ("context_curation", "memory_token_threshold"): "CONTEXT_CURATION_MEMORY_TOKEN_THRESHOLD",
     ("context_curation", "curator_model"): "CONTEXT_CURATOR_MODEL",
     ("context_curation", "timeout_sec"): "CONTEXT_CURATION_TIMEOUT_SEC",
     ("context_curation", "max_memory_lines"): "CONTEXT_CURATION_MAX_MEMORY_LINES",

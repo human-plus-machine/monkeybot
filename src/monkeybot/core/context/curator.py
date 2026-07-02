@@ -16,6 +16,7 @@ from monkeybot.core.types.content_blocks import Text
 from monkeybot.core.context import TurnContext
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.llm.provider import Done, Message, Provider, TextDelta, ToolCall, UsageEvent
+from monkeybot.core.runtime.context_budget import estimate_tokens
 
 _log = logging.getLogger(__name__)
 
@@ -41,10 +42,20 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def memory_index_token_estimate(lines: list[str]) -> int:
+    """Cheap local estimate of memory-index prompt size (no provider call)."""
+    if not lines:
+        return 0
+    return estimate_tokens("\n".join(lines))
+
+
 def curation_threshold_met(ctx: TurnContext) -> bool:
-    """Run curator only when the memory index is large enough to benefit."""
+    """Run curator when the memory index is large by line count or token estimate."""
     mem_n = _env_int("CONTEXT_CURATION_MEMORY_THRESHOLD", 8)
-    return len(ctx.memory_index) > mem_n
+    token_n = _env_int("CONTEXT_CURATION_MEMORY_TOKEN_THRESHOLD", 2000)
+    if len(ctx.memory_index) > mem_n:
+        return True
+    return memory_index_token_estimate(ctx.memory_index) > token_n
 
 
 def curator_model_id(ctx: TurnContext) -> str:
@@ -58,6 +69,13 @@ class CuratedPromptParts:
     memory_lines: list[str]
     success: bool
     """False on timeout, provider error, invalid JSON, or invalid selections when the model proposed content."""
+
+
+def curation_prompt_injection(parts: CuratedPromptParts) -> tuple[bool, list[str]]:
+    """Map curator output to system-prompt injection (fail-open on failure)."""
+    if parts.success:
+        return True, list(parts.memory_lines)
+    return False, []
 
 
 def _parse_json_object(text: str) -> dict[str, object] | None:
@@ -97,13 +115,26 @@ async def _gather_search_pool_lines(
     return lines
 
 
-def _validate_memory_lines(selected: list[object], allowed: set[str], cap: int) -> list[str]:
+def _coerce_index(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
+def _lines_from_indices(indices: list[object], pool: list[str], cap: int) -> list[str]:
     out: list[str] = []
-    for item in selected:
-        if not isinstance(item, str):
+    for item in indices:
+        idx = _coerce_index(item)
+        if idx is None or idx < 1 or idx > len(pool):
             continue
-        line = item.strip()
-        if line in allowed and line not in out:
+        line = pool[idx - 1]
+        if line not in out:
             out.append(line)
         if len(out) >= cap:
             break
@@ -118,7 +149,7 @@ async def run_context_curator(
     user_message: str,
     curator_provider: Provider | None = None,
 ) -> CuratedPromptParts:
-    """Call a small JSON-only completion to pick verbatim memory lines.
+    """Call a small JSON-only completion to pick numbered memory pool lines.
 
     ``curator_provider`` is an optional dedicated provider instance tuned for this
     auxiliary call (e.g. ``thinking_budget=0, max_output_tokens=1024``). Falls back
@@ -137,16 +168,12 @@ async def run_context_curator(
         search_lines = await _gather_search_pool_lines(ctx.memory, user_message, max_hits=search_hits)
         memory_scan_sec = time.monotonic() - t_scan
 
-    allowed_memory: set[str] = set(index_lines) | set(search_lines)
+    pool = index_lines + search_lines
 
     catalog_user = []
-    catalog_user.append("## MEMORY_POOL (each line is selectable verbatim)")
-    for i, ln in enumerate(index_lines, 1):
+    catalog_user.append("## MEMORY_POOL (1-based line numbers)")
+    for i, ln in enumerate(pool, 1):
         catalog_user.append(f"{i}. {ln}")
-    if search_lines:
-        catalog_user.append("\n## SEARCH_HIT_LINES (selectable verbatim)")
-        for i, ln in enumerate(search_lines, start=len(index_lines) + 1):
-            catalog_user.append(f"{i}. {ln}")
     catalog_user.append("\n## USER_MESSAGE")
     catalog_user.append(user_message.strip() or "(empty)")
 
@@ -156,10 +183,10 @@ async def run_context_curator(
             Text(
                 text=(
                     "You narrow context for another assistant. Reply with ONLY a JSON object, no markdown fences. "
-                    f'Schema: {{"memory_lines": string[]}}. '
-                    f"At most {max_mem} memory strings. "
-                    "Every element of memory_lines MUST be copied EXACTLY from MEMORY_POOL or SEARCH_HIT_LINES "
-                    "(same characters). If nothing helps, return an empty array."
+                    f'Schema: {{"memory_line_indices": number[]}}. '
+                    f"At most {max_mem} indices. "
+                    "Each index must be a 1-based line number from MEMORY_POOL. "
+                    "If nothing helps, return an empty array."
                 )
             )
         ],
@@ -209,21 +236,21 @@ async def run_context_curator(
         _log.warning("[curation] invalid JSON from model")
         return CuratedPromptParts([], success=False)
 
-    raw_mem = parsed.get("memory_lines", [])
-    if not isinstance(raw_mem, list):
-        raw_mem = []
+    raw_indices = parsed.get("memory_line_indices", [])
+    if not isinstance(raw_indices, list):
+        raw_indices = []
 
-    mem_out = _validate_memory_lines(raw_mem, allowed_memory, max_mem)
+    mem_out = _lines_from_indices(raw_indices, pool, max_mem)
 
-    proposed = bool(raw_mem)
+    proposed = bool(raw_indices)
     if proposed and not mem_out:
-        _log.warning("[curation] model proposed memory lines but none matched the allowed pool")
+        _log.warning("[curation] model proposed indices but none matched the memory pool")
         return CuratedPromptParts([], success=False)
 
     _log.info(
         "[curation] selected %d/%d memory lines (model=%s) | mem=%s",
         len(mem_out),
-        len(index_lines) + len(search_lines),
+        len(pool),
         curator_model,
         [ln.split("|")[-1].strip()[:60] if "|" in ln else ln[:60] for ln in mem_out],
     )

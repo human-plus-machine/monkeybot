@@ -7,7 +7,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Changed
-- **Context curation** — Memory-only: the curator no longer selects skills. Curation triggers on `memory_threshold` only. Removed `skill_threshold`, `max_skills`, and related env vars. Skills are no longer injected into the system prompt; the harness directs agents to call `list_skills` before skill-backed work.
+- **Context curation** — Memory-only curation with index-based pool selection (`memory_line_indices`), hybrid line/token thresholds, and fail-open fallback to the full memory index on curator errors. Skills discovered via `list_skills` (not injected into the system prompt).
 - **Pre-flight prompt tokens** — Summarization threshold and `estimated_prompt_tokens` (usage DB, SSE, `GET /usage`) use each provider's tokenizer / count API (`Provider.count_input_tokens`): Vertex Gemini `countTokens`, Anthropic `messages.count_tokens`, OpenAI `tiktoken` on the Chat Completions payload. OpenAI installs should include the `openai` extra (adds `tiktoken`).
 - **Configurable history summarization model** — `CONTEXT_SUMMARIZATION_MODEL` and optional
   `model.summarization_model` in `monkeybot.yaml` (via runtime env) or `TurnContext.summarization_model`

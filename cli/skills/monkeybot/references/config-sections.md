@@ -78,6 +78,7 @@ Trims memory injected into context. `enabled: true` by default.
 | Field | Default | Notes |
 |---|---|---|
 | `memory_threshold` | `8` | Curate memory past this many index lines |
+| `memory_token_threshold` | `2000` | Also curate when estimated memory-index tokens exceed this |
 | `curator_model` | `gemini-3-flash` | Separate small model; empty = main model |
 | `timeout_sec` | `10` | Curator call timeout |
 | `max_memory_lines` | `12` | Cap injected memory |

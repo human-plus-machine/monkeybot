@@ -20,6 +20,7 @@ from monkeybot.core.attachments.store import AttachmentStore
 from monkeybot.core.context import TurnContext, refresh_memory_index
 from monkeybot.core.context.curator import (
     curation_enabled_from_env,
+    curation_prompt_injection,
     curation_threshold_met,
     curator_model_id,
     run_context_curator,
@@ -942,7 +943,6 @@ async def _run_inner_core(
                 and curation_enabled_from_env()
                 and curation_threshold_met(ctx)
             ):
-                curated_injection = True
                 logger.debug(
                     "context curation start %s",
                     kv(request_id=ctx.request_id, thread_id=ctx.thread_id, turn=turn_index),
@@ -955,10 +955,7 @@ async def _run_inner_core(
                     user_message=u,
                     curator_provider=curator_provider,
                 )
-                if parts.success:
-                    curated_mem = list(parts.memory_lines)
-                else:
-                    curated_mem = []
+                curated_injection, curated_mem = curation_prompt_injection(parts)
                 logger.debug(
                     "context curation done %s",
                     kv(
