@@ -275,28 +275,63 @@ def _str_arg(args: dict[str, Any], *keys: str) -> str | None:
 _SHELL_OPERATOR_TOKENS = frozenset({"&&", "||", ";", "|", "&"})
 
 
-def _needs_shell_wrapper(stripped: str, parts: list[str]) -> bool:
-    if any(part in _SHELL_OPERATOR_TOKENS for part in parts):
-        return True
-    return any(op in stripped for op in _SHELL_OPERATOR_TOKENS)
+def _tokenize_shell_string(stripped: str) -> list[str]:
+    """Tokenize ``stripped`` the way a POSIX shell would, keeping operators as
+    distinct tokens but leaving quoted content untouched (so ``;``/``|`` inside
+    a quoted argument does not look like an operator)."""
+    lexer = shlex.shlex(stripped, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    return list(lexer)
 
 
-def _argv_from_command_string(stripped: str) -> tuple[str, list[str]]:
-    """Parse a command string; wrap in ``bash -c`` when shell operators are present."""
-    if not any(ch.isspace() for ch in stripped):
-        parts = shlex.split(stripped, posix=True)
-        if parts and _needs_shell_wrapper(stripped, parts):
-            return "bash", ["-c", stripped]
-        return stripped, []
-    parts = shlex.split(stripped, posix=True)
+def _needs_shell_wrapper(parts: list[str]) -> bool:
+    """True when ``parts`` (as produced by :func:`_tokenize_shell_string`)
+    contains a genuine, unquoted shell operator token."""
+    return any(part in _SHELL_OPERATOR_TOKENS for part in parts)
+
+
+def _split_on_operators(parts: list[str]) -> list[list[str]]:
+    """Split a token list into the argv segments separated by shell operators."""
+    segments: list[list[str]] = [[]]
+    for part in parts:
+        if part in _SHELL_OPERATOR_TOKENS:
+            segments.append([])
+        else:
+            segments[-1].append(part)
+    return [seg for seg in segments if seg]
+
+
+def _argv_from_command_string(
+    stripped: str, *, allowed_commands: Sequence[str] | None = None
+) -> tuple[str, list[str]]:
+    """Parse a command string; wrap in ``bash -c`` when shell operators are present.
+
+    Wrapping in ``bash -c`` re-enters the shell, which would otherwise bypass the
+    per-token command allowlist (``bash`` itself is allowed). To keep the
+    allowlist meaningful, every command segment separated by an operator must
+    itself resolve to an allowed binary before we take the ``bash -c`` path;
+    otherwise we fall back to treating the whole string as a single (likely
+    invalid) argv so the normal allowlist check still rejects it.
+    """
+    parts = _tokenize_shell_string(stripped)
     if not parts:
         return stripped, []
-    if _needs_shell_wrapper(stripped, parts):
+    if _needs_shell_wrapper(parts):
+        if allowed_commands is not None:
+            segments = _split_on_operators(parts)
+            if not segments or any(
+                not seg or seg[0] not in allowed_commands for seg in segments
+            ):
+                # Fall through to a plain (non-wrapped) parse so the leading
+                # token still goes through the standard allowlist check.
+                return parts[0], parts[1:]
         return "bash", ["-c", stripped]
     return parts[0], parts[1:]
 
 
-def _parse_run_command(args: dict[str, Any]) -> tuple[str, list[str]]:
+def _parse_run_command(
+    args: dict[str, Any], *, allowed_commands: Sequence[str] | None = None
+) -> tuple[str, list[str]]:
     argv_raw = args.get("argv")
     if isinstance(argv_raw, list) and argv_raw:
         argv = [str(x) for x in argv_raw]
@@ -310,8 +345,8 @@ def _parse_run_command(args: dict[str, Any]) -> tuple[str, list[str]]:
         if isinstance(extra, list):
             if extra:
                 return cmd.strip(), [str(x) for x in extra]
-            return _argv_from_command_string(cmd.strip())
-        return _argv_from_command_string(cmd.strip())
+            return _argv_from_command_string(cmd.strip(), allowed_commands=allowed_commands)
+        return _argv_from_command_string(cmd.strip(), allowed_commands=allowed_commands)
 
     shell = args.get("shell") or args.get("script")
     if isinstance(shell, str) and shell.strip():
@@ -319,7 +354,7 @@ def _parse_run_command(args: dict[str, Any]) -> tuple[str, list[str]]:
         parts = shlex.split(stripped, posix=True)
         if not parts:
             raise ValueError("shell/script is empty after parsing")
-        return _argv_from_command_string(stripped)
+        return _argv_from_command_string(stripped, allowed_commands=allowed_commands)
 
     raise ValueError(
         "run_command needs one of: argv (non-empty list), command+args/arguments, "
@@ -1055,7 +1090,9 @@ class CoreToolExecutor(ToolExecutorPort):
 
     async def _tool_run_command(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
         try:
-            cmd, argv = _parse_run_command(args)
+            cmd, argv = _parse_run_command(
+                args, allowed_commands=self._run_cmd_allowed_commands
+            )
         except ValueError as exc:
             return None, _run_command_parse_envelope(exc)
         timeout = _coerce_int(args.get("timeout"), 60) or 60

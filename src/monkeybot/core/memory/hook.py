@@ -145,7 +145,7 @@ _STOPWORDS = frozenset(
 
 
 _PRE_TOOL_TOOLS = frozenset(
-    {"read_file", "write_file", "search_memory", "run_command"}
+    {"read_file", "write_file", "search_memory", "run_command", "replace_in_file", "glob"}
 )
 
 
@@ -326,7 +326,18 @@ class MemoryHook:
             return
         args = payload.tool_args or {}
         candidates: list[str] = []
-        for key in ("path", "file_path", "file", "query", "q", "command", "shell", "script"):
+        for key in (
+            "path",
+            "file_path",
+            "file",
+            "query",
+            "q",
+            "command",
+            "shell",
+            "script",
+            "pattern",
+            "glob",
+        ):
             val = args.get(key)
             if isinstance(val, str) and val.strip():
                 candidates.append(val.strip())
