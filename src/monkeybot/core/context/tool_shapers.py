@@ -71,7 +71,7 @@ def classify_content(text: str, *, tool_name: str, hint: str | None = None) -> C
         return "logs"
     if tool_name in ("web_search", "search_memory", "task") and stripped.startswith(("{", "[")):
         return "json"
-    if tool_name in ("read_file", "write_file"):
+    if tool_name in ("read_file", "write_file", "replace_in_file", "glob"):
         return "code"
 
     if stripped.startswith(("{", "[")):

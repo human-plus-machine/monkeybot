@@ -193,6 +193,66 @@ async def test_read_file_and_write_file(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_replace_in_file(tmp_path: Path) -> None:
+    root = tmp_path
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    (root / "hello.txt").write_text("alpha beta gamma\n", encoding="utf-8")
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    ctx = _ctx()
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="1",
+                name="replace_in_file",
+                args={
+                    "path": "hello.txt",
+                    "old_string": "beta",
+                    "new_string": "BETA",
+                },
+            ),
+            ctx=ctx,
+        )
+    )
+    assert err is None and out is not None and '"ok": true' in out
+    assert (root / "hello.txt").read_text(encoding="utf-8") == "alpha BETA gamma\n"
+
+
+@pytest.mark.asyncio
+async def test_glob(tmp_path: Path) -> None:
+    root = tmp_path
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    (root / "index.html").write_text("<html></html>", encoding="utf-8")
+    (root / "notes.md").write_text("# hi", encoding="utf-8")
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    ctx = _ctx()
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="1", name="glob", args={"pattern": "*.html"}),
+            ctx=ctx,
+        )
+    )
+    assert err is None and out is not None and '"ok": true' in out
+    assert "index.html" in out
+    assert "notes.md" not in out
+
+
+@pytest.mark.asyncio
 async def test_search_memory(tmp_path: Path) -> None:
     root = tmp_path
     mem = tmp_path / "mem"

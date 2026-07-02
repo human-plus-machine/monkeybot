@@ -22,6 +22,7 @@ from monkeybot.core.context import CustomTool, TurnContext
 from monkeybot.core.context.tool_result_ingress import (
     cap_tool_result_text,
     sanitize_tool_result_text,
+    skip_tool_result_sanitize,
 )
 from monkeybot.core.llm.provider import ToolCall
 from monkeybot.core.logging_utils import kv
@@ -80,6 +81,8 @@ _CORE_TOOL_NAMES = frozenset(
         "render_image",
         "read_file",
         "write_file",
+        "replace_in_file",
+        "glob",
         "search_memory",
         "list_skills",
         "task",
@@ -95,10 +98,6 @@ _CORE_TOOL_NAMES = frozenset(
 )
 
 _SPILL_SKIP_TOOLS = frozenset({"read_file", "read_attachment"})
-
-# Workspace reads return faithful file/memory/skills content; ingress sanitization is for MCP/shell output.
-_SANITIZE_SKIP_TOOLS = frozenset({"read_file", "write_file", "search_memory", "list_skills"})
-
 
 def _tool_handler_kind(name: str, *, mcp: MCPClientPort, extra_tools: dict[str, CustomTool]) -> str:
     if name in _CORE_TOOL_NAMES:
@@ -273,6 +272,30 @@ def _str_arg(args: dict[str, Any], *keys: str) -> str | None:
     return None
 
 
+_SHELL_OPERATOR_TOKENS = frozenset({"&&", "||", ";", "|", "&"})
+
+
+def _needs_shell_wrapper(stripped: str, parts: list[str]) -> bool:
+    if any(part in _SHELL_OPERATOR_TOKENS for part in parts):
+        return True
+    return any(op in stripped for op in _SHELL_OPERATOR_TOKENS)
+
+
+def _argv_from_command_string(stripped: str) -> tuple[str, list[str]]:
+    """Parse a command string; wrap in ``bash -c`` when shell operators are present."""
+    if not any(ch.isspace() for ch in stripped):
+        parts = shlex.split(stripped, posix=True)
+        if parts and _needs_shell_wrapper(stripped, parts):
+            return "bash", ["-c", stripped]
+        return stripped, []
+    parts = shlex.split(stripped, posix=True)
+    if not parts:
+        return stripped, []
+    if _needs_shell_wrapper(stripped, parts):
+        return "bash", ["-c", stripped]
+    return parts[0], parts[1:]
+
+
 def _parse_run_command(args: dict[str, Any]) -> tuple[str, list[str]]:
     argv_raw = args.get("argv")
     if isinstance(argv_raw, list) and argv_raw:
@@ -285,17 +308,18 @@ def _parse_run_command(args: dict[str, Any]) -> tuple[str, list[str]]:
         if extra is None:
             extra = args.get("arguments")
         if isinstance(extra, list):
-            return cmd.strip(), [str(x) for x in extra]
-        parts = shlex.split(cmd, posix=True)
-        if parts:
-            return parts[0], parts[1:]
+            if extra:
+                return cmd.strip(), [str(x) for x in extra]
+            return _argv_from_command_string(cmd.strip())
+        return _argv_from_command_string(cmd.strip())
 
     shell = args.get("shell") or args.get("script")
     if isinstance(shell, str) and shell.strip():
-        parts = shlex.split(shell.strip(), posix=True)
+        stripped = shell.strip()
+        parts = shlex.split(stripped, posix=True)
         if not parts:
             raise ValueError("shell/script is empty after parsing")
-        return parts[0], parts[1:]
+        return _argv_from_command_string(stripped)
 
     raise ValueError(
         "run_command needs one of: argv (non-empty list), command+args/arguments, "
@@ -423,6 +447,10 @@ class CoreToolExecutor(ToolExecutorPort):
                 result_text, err_text = self._tool_read_file(args)
             elif name == "write_file":
                 result_text, err_text = self._tool_write_file(args)
+            elif name == "replace_in_file":
+                result_text, err_text = self._tool_replace_in_file(args)
+            elif name == "glob":
+                result_text, err_text = self._tool_glob(args)
             elif name == "search_memory":
                 result_text, err_text = await self._tool_search_memory(args)
             elif name == "list_skills":
@@ -509,7 +537,7 @@ class CoreToolExecutor(ToolExecutorPort):
             )
 
         if err_text is None and result_text is not None:
-            skip_sanitize = name in _SANITIZE_SKIP_TOOLS
+            skip_sanitize = skip_tool_result_sanitize(name)
             should_spill = (
                 name not in _SPILL_SKIP_TOOLS
                 and self._spill_min_chars > 0
@@ -655,6 +683,60 @@ class CoreToolExecutor(ToolExecutorPort):
             content = str(content)
         try:
             payload = self._workspace.write_file(path, content)
+            return (_j(payload), None)
+        except WorkspaceError as exc:
+            return (None, _workspace_error_envelope(exc))
+
+    def _tool_replace_in_file(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+        path = _str_arg(args, "path", "file_path", "file")
+        if not path:
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "replace_in_file requires a path argument.",
+                    'Pass path, old_string, and new_string, e.g. {"path": "README.md", "old_string": "a", "new_string": "b"}.',
+                    {
+                        "field": "path",
+                        "example": {
+                            "path": "README.md",
+                            "old_string": "old",
+                            "new_string": "new",
+                        },
+                    },
+                ),
+            )
+        old_string = args.get("old_string")
+        if old_string is None:
+            old_string = args.get("old", "")
+        if not isinstance(old_string, str):
+            old_string = str(old_string)
+        new_string = args.get("new_string")
+        if new_string is None:
+            new_string = args.get("new", "")
+        if not isinstance(new_string, str):
+            new_string = str(new_string)
+        try:
+            payload = self._workspace.replace_in_file(path, old_string, new_string)
+            return (_j(payload), None)
+        except WorkspaceError as exc:
+            return (None, _workspace_error_envelope(exc))
+
+    def _tool_glob(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+        pattern = _str_arg(args, "pattern", "glob")
+        if not pattern:
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "glob requires a pattern argument.",
+                    'Pass a glob pattern, e.g. {"pattern": "**/*.html"}.',
+                    {"field": "pattern", "example": {"pattern": "**/*.md"}},
+                ),
+            )
+        root = _str_arg(args, "root")
+        try:
+            payload = self._workspace.glob_paths(pattern, root=root)
             return (_j(payload), None)
         except WorkspaceError as exc:
             return (None, _workspace_error_envelope(exc))
