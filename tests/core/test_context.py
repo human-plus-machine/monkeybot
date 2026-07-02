@@ -112,18 +112,25 @@ async def test_build_context_merges_core_and_mcp_tools(tmp_path: Path) -> None:
         "run_command",
         "read_file",
         "write_file",
+        "replace_in_file",
+        "glob",
         "search_memory",
         "list_skills",
         "task",
         "add_mcp_server",
         "remove_mcp_server",
+        "start_loop",
+        "loop_status",
+        "pause_loop",
+        "resume_loop",
+        "stop_loop",
         "render_image",
         "read_attachment",
     }
     assert core_names.issubset(set(names))
     assert "db__query" in names
     assert "wiki__search" in names
-    assert len(ctx.tools) == 10 + 2
+    assert len(ctx.tools) == 17 + 2
     for t in ctx.tools:
         assert t.description.strip()
 

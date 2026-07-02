@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "monkeybot-evals"
 version = "0.1.0"
-description = "T3 quality eval service (FastAPI + deepeval + Langfuse) for MonkeyBot playground"
+description = "T3 quality eval service (FastAPI + deepeval + Langfuse) for MonkeyBot"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",
@@ -18,4 +18,15 @@ dependencies = [
 ]
 
 [tool.setuptools]
-py-modules = ["main", "models", "store", "runner", "scorer", "ws_manager"]
+py-modules = [
+    "main",
+    "models",
+    "store",
+    "runner",
+    "scorer",
+    "ws_manager",
+    "assertions",
+    "persistence",
+    "report",
+    "scenario_loader",
+]

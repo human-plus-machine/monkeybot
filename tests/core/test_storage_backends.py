@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -104,6 +105,7 @@ async def test_postgres_open_run_schema_false_skips_apply_schema(
         apply_calls.append(pool)
 
     mock_pool = MagicMock()
+    mock_pool.close = AsyncMock()
     monkeypatch.setattr(
         "monkeybot.core.persistence.postgres.asyncpg.create_pool",
         AsyncMock(return_value=mock_pool),
@@ -117,6 +119,8 @@ async def test_postgres_open_run_schema_false_skips_apply_schema(
     await backend.open(run_schema=False)
     assert apply_calls == []
     assert backend._pool is mock_pool
+    loops = backend.scheduled_loops()
+    assert loops is backend.scheduled_loops()
     await backend.close()
 
 
@@ -135,24 +139,21 @@ def test_factory_raises_value_error_for_unknown_scheme() -> None:
         create_storage_backend("mysql://localhost/db")
 
 
-def test_factory_raises_runtime_error_for_postgres_without_asyncpg() -> None:
-    try:
-        import asyncpg  # noqa: F401
-        pytest.skip("asyncpg is installed; cannot test missing-dep error path")
-    except ImportError:
-        pass
+def test_factory_raises_runtime_error_for_postgres_without_asyncpg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Setting a module to ``None`` in sys.modules forces the next import of it
+    # to raise ImportError, regardless of whether asyncpg is actually
+    # installed in this environment — deterministic across all CI configs.
+    monkeypatch.setitem(sys.modules, "monkeybot.core.persistence.postgres", None)
 
     with pytest.raises(RuntimeError, match="asyncpg is not installed"):
         create_storage_backend("postgresql://localhost/db")
 
 
-def test_factory_postgres_scheme_alias_without_asyncpg() -> None:
+def test_factory_postgres_scheme_alias_without_asyncpg(monkeypatch: pytest.MonkeyPatch) -> None:
     """``postgres://`` must hit the Postgres branch (not ValueError), same as postgresql://."""
-    try:
-        import asyncpg  # noqa: F401
-        pytest.skip("asyncpg is installed; cannot test missing-dep error path")
-    except ImportError:
-        pass
+    monkeypatch.setitem(sys.modules, "monkeybot.core.persistence.postgres", None)
 
     with pytest.raises(RuntimeError, match="asyncpg is not installed"):
         create_storage_backend("postgres://localhost/db")
@@ -206,6 +207,8 @@ async def test_sqlite_backend_raises_before_open() -> None:
         backend.usage()
     with pytest.raises(RuntimeError, match="open\\(\\) has not been called"):
         backend.runs()
+    with pytest.raises(RuntimeError, match="open\\(\\) has not been called"):
+        backend.scheduled_loops()
 
 
 @pytest.mark.asyncio
@@ -227,6 +230,15 @@ async def test_sqlite_backend_runs_returns_same_instance(sqlite_backend: SQLiteS
     r1 = sqlite_backend.runs()
     r2 = sqlite_backend.runs()
     assert r1 is r2
+
+
+@pytest.mark.asyncio
+async def test_sqlite_backend_scheduled_loops_returns_same_instance(
+    sqlite_backend: SQLiteStorageBackend,
+) -> None:
+    s1 = sqlite_backend.scheduled_loops()
+    s2 = sqlite_backend.scheduled_loops()
+    assert s1 is s2
 
 
 # ---------------------------------------------------------------------------
@@ -601,12 +613,10 @@ async def test_run_reset_stale_claims(sqlite_backend: SQLiteStorageBackend) -> N
     assert row.worker_id is None
 
 
-def test_factory_raises_runtime_error_for_firestore_without_client() -> None:
-    try:
-        import google.cloud.firestore  # noqa: F401
-        pytest.skip("google-cloud-firestore is installed; cannot test missing-dep error path")
-    except ImportError:
-        pass
+def test_factory_raises_runtime_error_for_firestore_without_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(sys.modules, "monkeybot.core.persistence.firestore", None)
 
     with pytest.raises(RuntimeError, match="google-cloud-firestore is not installed"):
         create_storage_backend("firestore://my-project/(default)")

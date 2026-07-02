@@ -86,6 +86,12 @@ def _stub_hooks(session: SimpleNamespace) -> mc.MCPStdioHooks:
 @pytest.mark.asyncio
 async def test_connect_prefixes_tool_names() -> None:
     """``connect`` returns ``server__tool`` ``ToolDef`` names."""
+    from monkeybot.core.context.tool_output_policy import (
+        resolve_tool_budget,
+        reset_tool_output_policy_cache_for_tests,
+    )
+
+    reset_tool_output_policy_cache_for_tests()
     fs_tool_read = SimpleNamespace(name="read_file", description="d1", inputSchema={})
     fs_tool_write = SimpleNamespace(name="write_file", description="d2", inputSchema={})
     listing = SimpleNamespace(tools=[fs_tool_write, fs_tool_read])
@@ -102,6 +108,9 @@ async def test_connect_prefixes_tool_names() -> None:
     assert names == ["fs__read_file", "fs__write_file"]
     all_names = sorted(t.name for t in client.all_tools())
     assert all_names == names
+    assert resolve_tool_budget("fs__read_file") is not None
+    assert resolve_tool_budget("fs__write_file") is not None
+    assert resolve_tool_budget("my__custom_tool") is None
 
 
 @pytest.mark.asyncio
@@ -129,6 +138,12 @@ async def test_call_tool_returns_string() -> None:
 @pytest.mark.asyncio
 async def test_disconnect_removes_tools() -> None:
     """Disconnected servers drop out of ``all_tools``; repeat disconnect is tolerated."""
+    from monkeybot.core.context.tool_output_policy import (
+        resolve_tool_budget,
+        reset_tool_output_policy_cache_for_tests,
+    )
+
+    reset_tool_output_policy_cache_for_tests()
     listing = SimpleNamespace(
         tools=[
             SimpleNamespace(name="only", description="x", inputSchema={"type": "object"}),
@@ -142,10 +157,78 @@ async def test_disconnect_removes_tools() -> None:
     client = MCPClient(hooks=_stub_hooks(sess))
     await client.connect("fs", "python", [], {})
     assert len(client.all_tools()) == 1
+    assert resolve_tool_budget("fs__only") is not None
     await client.disconnect("fs")
     assert client.all_tools() == []
+    assert resolve_tool_budget("fs__only") is None
     await client.disconnect("fs")
     assert client.all_tools() == []
+
+
+@pytest.mark.asyncio
+async def test_disconnect_calls_browser_stop_before_teardown() -> None:
+    """A server exposing ``browser_stop`` gets it called before the transport closes.
+
+    Regression test for H1: disconnecting a cloud-browser MCP server (e.g.
+    browser-harness) must stop the remote session, not just kill the local
+    stdio subprocess, or billing keeps accruing after the agent stops talking.
+    """
+    listing = SimpleNamespace(
+        tools=[SimpleNamespace(name="browser_stop", description="stop", inputSchema={})]
+    )
+    sess = SimpleNamespace()
+    sess.initialize = AsyncMock()
+    sess.list_tools = AsyncMock(return_value=listing)
+    sess.call_tool = AsyncMock(
+        return_value=SimpleNamespace(content=[SimpleNamespace(type="text", text="ok")])
+    )
+
+    client = MCPClient(hooks=_stub_hooks(sess))
+    await client.connect("browser", "python", [], {})
+    await client.disconnect("browser")
+
+    sess.call_tool.assert_awaited_once_with("browser_stop", arguments={})
+
+
+@pytest.mark.asyncio
+async def test_disconnect_skips_browser_stop_when_tool_absent() -> None:
+    """Servers without a ``browser_stop`` tool are unaffected (no spurious call_tool)."""
+    listing = SimpleNamespace(
+        tools=[SimpleNamespace(name="read_file", description="d", inputSchema={})]
+    )
+    sess = SimpleNamespace()
+    sess.initialize = AsyncMock()
+    sess.list_tools = AsyncMock(return_value=listing)
+    sess.call_tool = AsyncMock()
+
+    client = MCPClient(hooks=_stub_hooks(sess))
+    await client.connect("fs", "python", [], {})
+    await client.disconnect("fs")
+
+    sess.call_tool.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_tolerates_browser_stop_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A hung/erroring ``browser_stop`` call is logged, not raised, and teardown proceeds."""
+    listing = SimpleNamespace(
+        tools=[SimpleNamespace(name="browser_stop", description="stop", inputSchema={})]
+    )
+    sess = SimpleNamespace()
+    sess.initialize = AsyncMock()
+    sess.list_tools = AsyncMock(return_value=listing)
+    sess.call_tool = AsyncMock(side_effect=RuntimeError("remote unreachable"))
+
+    client = MCPClient(hooks=_stub_hooks(sess))
+    await client.connect("browser", "python", [], {})
+
+    with caplog.at_level(logging.WARNING, logger="monkeybot.core.mcp.mcp_client"):
+        await client.disconnect("browser")
+
+    assert client.all_tools() == []
+    assert any("browser_stop" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio

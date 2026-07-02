@@ -1,0 +1,65 @@
+# Demo agent defaults when ``uv run`` cwd is ``demo_agent/``.
+# Template with comments: src/monkeybot/monkeybot_config/monkeybot.example.yaml in the harness.
+# Override with .env or environment variables as needed.
+#
+# Agent-facing files live under ``./workspace`` (``data/``, ``skills/``); harness config stays
+# in ``./monkeybot_config/``. The workspace API lists only ``workspace/``.
+
+runtime:
+  log_level: INFO
+  port: 8787
+  transcript_enabled: true
+
+paths:
+  agent_md: ./monkeybot_config/AGENT.md
+  memory_storage_uri: local://./workspace/data/memory
+  skills_path: ./workspace/skills
+  workspace_root: ./workspace
+  db_url: sqlite:///./workspace/data/monkeybot.db
+  # Firestore (opt-in): uncomment below and install monkeybot[firestore]. run.sh starts the
+  # emulator on :8686 when db_url uses firestore:// (see FIRESTORE_EMULATOR_HOST).
+  # db_url: firestore://monkeybot-demo/(default)?prefix=demo
+  mcp_config: ./monkeybot_config/mcp.json
+  command_allowlist_config: ./monkeybot_config/command_allowlist.yaml
+
+model:
+  # Free key from https://build.nvidia.com — set NVIDIA_API_KEY in .env.
+  provider: nvidia
+  name: nvidia/nemotron-3-ultra-550b-a55b
+  # summarization_model: meta/llama-3.1-8b-instruct  # optional; env CONTEXT_SUMMARIZATION_MODEL overrides
+
+gateway:
+  pending_response_timeout_sec: 300
+  sse_replay_max: 256
+  graceful_shutdown_timeout_sec: 5
+  # Sets MONKEYBOT_CORS_ALLOW_ORIGINS (comma-separated, or "*"). Set this if you wire your own UI.
+  cors_allow_origins: "http://localhost:5173,http://127.0.0.1:5173"
+
+context_curation:
+  enabled: true
+  skill_threshold: 4
+  memory_threshold: 8
+  curator_model: meta/llama-3.1-8b-instruct
+  timeout_sec: 10
+  max_memory_lines: 12
+  max_skills: 5
+  search_max_hits: 8
+
+memory_hook:
+  enabled: true
+
+subagent:
+  timeout_sec: 600
+  max_turns: 25
+  agent_md: ./monkeybot_config/AGENT.md
+
+web_search:
+  backend: duckduckgo
+  max_results: 5
+
+sandbox:
+  enabled: true
+  server_url: http://localhost:18080
+  # Built by run.sh from docker/Dockerfile.demo-sandbox (google-genai for image-generator).
+  image: monkeybot-demo-sandbox:local
+  ttl_seconds: 1800

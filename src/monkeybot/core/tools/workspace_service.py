@@ -151,7 +151,7 @@ class WorkspaceFileService:
             raise WorkspaceError(f"Invalid {label}: absolute or home not allowed", code="invalid_path")
         segs = self._normalize_rel_segments(s.lstrip("/"), label=label)
         # Lexical join (no final .resolve()) so symlinks under the workspace may point outside
-        # the physical root — e.g. playground ``workspace/data`` when linked to sibling dirs.
+        # the physical root — e.g. demo agent ``workspace/data`` when linked to sibling dirs.
         return self._join_under_root(segs)
 
     def _resolve_root_dir(self, rel: str | None) -> Path:

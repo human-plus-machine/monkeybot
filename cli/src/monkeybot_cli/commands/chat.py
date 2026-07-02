@@ -34,11 +34,17 @@ from monkeybot.core.runtime.events import (
 )
 
 from monkeybot_cli.chat_status_bar import ChatStatusBar, parse_usage_response
+from monkeybot_cli.terminal_markdown import MarkdownPlainStream
 from monkeybot_cli.config_resolve import (
     load_agent_dotenv,
     load_config_doc,
     resolve_agent_root,
     resolve_config,
+)
+from monkeybot_cli.opensandbox_lifecycle import (
+    ensure_opensandbox_for_agent,
+    is_sandbox_enabled,
+    server_url_from_config,
 )
 from monkeybot_cli.runtime_python import gateway_argv, resolve_runtime_python
 
@@ -49,6 +55,8 @@ _DIM = "\x1b[2m"
 _GREEN = "\x1b[32m"
 _RED = "\x1b[31m"
 _RESET = "\x1b[0m"
+_USER_PROMPT = "🧑"
+_ASSISTANT_PREFIX = "🐵 "
 
 
 def _format_http_error(operation: str, exc: httpx.HTTPError) -> str:
@@ -335,29 +343,40 @@ def _print_event(
     evt: Any,
     *,
     show_thinking: bool,
-    show_usage: bool,
     request_id: str,
-) -> str | None:
-    """Render one event. Returns 'turn_complete', 'error', or None."""
+) -> None:
+    """Render auxiliary stream events (thinking traces)."""
     if show_thinking and evt.request_id == request_id:
         kind = getattr(evt, "kind", "")
         if kind in ("Thinking", "ThinkingBlockDelta"):
             text = getattr(evt, "text", "") or getattr(evt, "delta", "")
             if text:
                 print(f"{_DIM}[thinking] {text}{_RESET}", flush=True)
-    if isinstance(evt, Error) and evt.request_id == request_id:
-        print(f"\n{_RED}Error: {evt.error}{_RESET}", flush=True)
-        return "error"
-    if isinstance(evt, TurnComplete) and evt.request_id == request_id:
+
+
+def _finish_assistant_turn(
+    *,
+    md_stream: MarkdownPlainStream,
+    assistant_label_shown: bool,
+    show_usage: bool,
+    usage: Any | None = None,
+    error: str | None = None,
+) -> None:
+    """Flush streamed assistant text and leave a blank line before the next prompt."""
+    if assistant_label_shown:
+        tail = md_stream.flush()
+        if tail:
+            print(tail, end="", flush=True)
+    if error:
+        print(f"\n{_RED}Error: {error}{_RESET}", flush=True)
+    elif assistant_label_shown or error:
         print()
-        if show_usage:
-            u = evt.usage
-            print(
-                f"{_DIM}[usage] in={u.input_tokens} out={u.output_tokens} "
-                f"cost=${u.cost_usd:.4f} {u.duration_ms}ms{_RESET}"
-            )
-        return "turn_complete"
-    return None
+    if show_usage and usage is not None:
+        print(
+            f"{_DIM}[usage] in={usage.input_tokens} out={usage.output_tokens} "
+            f"cost=${usage.cost_usd:.4f} {usage.duration_ms}ms{_RESET}"
+        )
+    print()
 
 
 async def _handle_hitl(
@@ -453,7 +472,7 @@ async def _chat_session(args: argparse.Namespace, base: str, *, spawned_gateway:
 
         try:
             while not interrupt.is_set():
-                user_line = await _read_line("you: ", interrupt)
+                user_line = await _read_line(_USER_PROMPT, interrupt)
                 if user_line is None or interrupt.is_set():
                     break
                 if not user_line.strip():
@@ -485,6 +504,7 @@ async def _chat_session(args: argparse.Namespace, base: str, *, spawned_gateway:
                 spinner.start()
                 activity = _TurnActivity()
                 assistant_label_shown = False
+                md_stream = MarkdownPlainStream()
                 done = False
                 while not done and not interrupt.is_set():
                     try:
@@ -520,6 +540,9 @@ async def _chat_session(args: argparse.Namespace, base: str, *, spawned_gateway:
                         continue
                     if isinstance(evt, ToolCallStarted) and evt.request_id == request_id:
                         if assistant_label_shown:
+                            tail = md_stream.flush()
+                            if tail:
+                                print(tail, end="", flush=True)
                             print()
                         else:
                             await spinner.clear()
@@ -550,24 +573,42 @@ async def _chat_session(args: argparse.Namespace, base: str, *, spawned_gateway:
                         if not assistant_label_shown:
                             await spinner.clear()
                             await activity.cancel()
-                            print("assistant: ", end="", flush=True)
+                            print(_ASSISTANT_PREFIX, end="", flush=True)
                             assistant_label_shown = True
-                        print(evt.delta, end="", flush=True)
+                        rendered = md_stream.feed(evt.delta)
+                        if rendered:
+                            print(rendered, end="", flush=True)
                         continue
-                    result = _print_event(
-                        evt,
-                        show_thinking=args.show_thinking,
-                        show_usage=args.usage,
-                        request_id=request_id,
-                    )
-                    if result in ("turn_complete", "error"):
+                    if isinstance(evt, Error) and evt.request_id == request_id:
                         if not assistant_label_shown:
                             await spinner.clear()
                         await activity.cancel()
-                        if result == "turn_complete":
-                            print()
-                            await _fetch_session_usage(client, base, session_id, status_bar=status_bar)
+                        _finish_assistant_turn(
+                            md_stream=md_stream,
+                            assistant_label_shown=assistant_label_shown,
+                            show_usage=False,
+                            error=evt.error,
+                        )
                         done = True
+                        continue
+                    if isinstance(evt, TurnComplete) and evt.request_id == request_id:
+                        if not assistant_label_shown:
+                            await spinner.clear()
+                        await activity.cancel()
+                        _finish_assistant_turn(
+                            md_stream=md_stream,
+                            assistant_label_shown=assistant_label_shown,
+                            show_usage=args.usage,
+                            usage=evt.usage,
+                        )
+                        await _fetch_session_usage(client, base, session_id, status_bar=status_bar)
+                        done = True
+                        continue
+                    _print_event(
+                        evt,
+                        show_thinking=args.show_thinking,
+                        request_id=request_id,
+                    )
                 if interrupt.is_set():
                     await spinner.clear()
                     await activity.cancel()
@@ -681,6 +722,16 @@ def run_chat(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
+        _, cfg_doc = load_config_doc(config_path)
+        if is_sandbox_enabled(cfg_doc):
+            if not ensure_opensandbox_for_agent(
+                agent_root,
+                server_url=server_url_from_config(cfg_doc),
+            ):
+                print(
+                    f"{_DIM}Continuing without a healthy OpenSandbox — run_command may fail.{_RESET}",
+                    file=sys.stderr,
+                )
         port = args.port if args.port else _port_from_config(config_path)
         spawned = _spawn_gateway(config_path, agent_root, port)
         proc = spawned.proc

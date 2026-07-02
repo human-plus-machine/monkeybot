@@ -23,35 +23,25 @@ Install the required extra::
 
 from __future__ import annotations
 
-import logging
 import os
 from collections.abc import AsyncIterator, Sequence
-from typing import Any
 
 from monkeybot.core.llm.provider import (
-    Done,
     Message,
     ProviderEvent,
-    TextDelta,
-    ToolCall,
-    UsageEvent,
 )
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._openai_compat import (
-    iter_openai_compat_stream,
-    messages_to_openai,
-    openai_messages_token_count,
-    openai_tools,
-    openai_tools_token_count,
+    count_input_tokens_tiktoken,
+    is_tool_unsupported_error,
+    stream_chat_completions_with_tool_fallback,
 )
 from monkeybot.providers.sampling import resolve_model_sampling
 
-_log = logging.getLogger(__name__)
-
 _DEFAULT_HOST = "https://router.huggingface.co/hf-inference"
 
-# Keep these names importable to silence unused-import linters
-_ = (Done, TextDelta, ToolCall, UsageEvent)
+# Re-exported for tests that historically imported this private name from here.
+_is_tool_unsupported_error = is_tool_unsupported_error
 
 
 class HuggingFaceProvider:
@@ -84,6 +74,9 @@ class HuggingFaceProvider:
         self._token = token
         self._endpoint_url = (os.environ.get("HF_ENDPOINT_URL") or "").rstrip("/")
         self._host = (os.environ.get("HF_BASE_URL") or _DEFAULT_HOST).rstrip("/")
+        # ``cache_enabled`` is accepted for constructor-contract symmetry with the
+        # other providers (Story 1) but is currently inert here: the OpenAI-compatible
+        # request shape has no cache_control-equivalent field to set.
         self._cache_enabled = cache_enabled
         sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens)
         self._temperature = sampling.temperature
@@ -113,19 +106,11 @@ class HuggingFaceProvider:
         tools: Sequence[ToolDef],
         *,
         model: str,
+        thinking_budget: int | None = None,
     ) -> int:
-        import tiktoken  # noqa: PLC0415
-
-        msgs = list(messages)
-        system, oai_messages = messages_to_openai(msgs)
-        if system:
-            oai_messages = [{"role": "system", "content": system}, *oai_messages]
-        tool_defs = openai_tools(tools) if tools else []
-        try:
-            enc = tiktoken.encoding_for_model(model)
-        except KeyError:
-            enc = tiktoken.get_encoding("cl100k_base")
-        return openai_messages_token_count(enc, oai_messages) + openai_tools_token_count(enc, tool_defs)
+        return await count_input_tokens_tiktoken(
+            messages, tools, model=model, thinking_budget=thinking_budget
+        )
 
     async def stream(
         self,
@@ -136,64 +121,14 @@ class HuggingFaceProvider:
         thinking_budget: int | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         del thinking_budget
-        from openai import AsyncOpenAI  # noqa: PLC0415
-
-        msgs = list(messages)
-
-        system, oai_messages = messages_to_openai(msgs)
-        if system:
-            oai_messages = [{"role": "system", "content": system}, *oai_messages]
-
-        client = AsyncOpenAI(base_url=self._resolve_base_url(model), api_key=self._token)
-        kwargs: dict[str, Any] = {
-            "model": model,
-            "messages": oai_messages,
-            "stream": True,
-            "temperature": self._temperature,
-            "max_tokens": self._max_tokens,
-        }
-        if tools:
-            kwargs["tools"] = openai_tools(tools)
-
-        try:
-            async for event in iter_openai_compat_stream(client, kwargs):
-                yield event
-        except Exception as exc:
-            if tools and _is_tool_unsupported_error(exc):
-                _log.warning(
-                    "HuggingFace model %r does not support tool calling; retrying without tools. "
-                    "Error: %s",
-                    model,
-                    exc,
-                )
-                kwargs.pop("tools", None)
-                async for event in iter_openai_compat_stream(client, kwargs):
-                    yield event
-            else:
-                raise
-
-
-def _is_tool_unsupported_error(exc: BaseException) -> bool:
-    """Return True when the exception likely indicates unsupported tool calling."""
-    try:
-        from openai import APIStatusError  # noqa: PLC0415
-    except ImportError:
-        msg = str(exc).lower()
-        return "tool" in msg and "unsupported" in msg
-
-    if isinstance(exc, APIStatusError):
-        if exc.status_code not in (400, 422):
-            return False
-        body = str(exc.body or exc.message or "").lower()
-        return any(
-            phrase in body
-            for phrase in (
-                "tool",
-                "function_call",
-                "functions",
-                "unsupported",
-            )
-        )
-
-    msg = str(exc).lower()
-    return "tool" in msg and "unsupported" in msg
+        async for event in stream_chat_completions_with_tool_fallback(
+            base_url=self._resolve_base_url(model),
+            api_key=self._token,
+            provider="huggingface",
+            messages=messages,
+            tools=tools,
+            model=model,
+            temperature=self._temperature,
+            max_tokens=self._max_tokens,
+        ):
+            yield event

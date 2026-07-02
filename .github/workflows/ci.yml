@@ -26,3 +26,22 @@ jobs:
 
       - name: Pytest
         run: uv run pytest tests/ -q
+
+      - name: CLI pytest
+        working-directory: cli
+        run: |
+          uv sync
+          uv run pytest -q
+
+      - name: Browser MCP pytest
+        working-directory: integrations/browser-mcp
+        run: |
+          uv sync --dev
+          uv run pytest -q
+
+      - name: Evals self-checks (no live agent, no model calls)
+        run: |
+          uv sync --extra evals
+          uv run python evals/test_assertions.py
+          uv run python evals/test_report.py
+          uv run python evals/test_runner_sse.py

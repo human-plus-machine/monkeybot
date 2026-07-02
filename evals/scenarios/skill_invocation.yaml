@@ -1,7 +1,0 @@
-description: "Agent uses an available skill when relevant"
-tags: [skills, tools]
-messages:
-  - "List your available skills"
-  - "Use one of those skills to help me"
-assertions:
-  metrics: [response_relevancy, faithfulness]

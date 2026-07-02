@@ -1,0 +1,14 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "scheduled_loops",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "tick_in_flight", "order": "ASCENDING" },
+        { "fieldPath": "next_tick_at_ms", "order": "ASCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

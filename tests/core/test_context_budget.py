@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from monkeybot.core.runtime.context_budget import ContextBudgeter, estimate_tokens
 from monkeybot.core.types.content_blocks import Text, ToolResponse
 
@@ -121,3 +123,52 @@ def test_from_env_tightens_safety_fraction_under_pressure(monkeypatch) -> None:
     budgeter = ContextBudgeter.from_env(window_tokens=100_000, used_tokens=75_000)
     assert budgeter.pressure_tier == "moderate"
     assert budgeter.safety_fraction <= 0.45
+
+
+def test_fit_preserves_read_file_content_through_budgeter() -> None:
+    """read_file JSON must not lose the content field to ingress redaction."""
+    body = "     1|<!DOCTYPE html>\n" + ("     2|<p>hello</p>\n" * 400)
+    payload = json.dumps(
+        {
+            "ok": True,
+            "path": "index.html",
+            "content": body,
+            "start_line": 1,
+            "end_line": 401,
+            "total_lines": 401,
+            "truncated": False,
+        }
+    )
+    budgeter = ContextBudgeter(window_tokens=200_000, used_tokens=10_000, safety_fraction=0.8)
+    blocks = [
+        ToolResponse(id="1", tool_name="read_file", result=[Text(text=payload)]),
+    ]
+    trimmed, needs = budgeter.fit_content_blocks(blocks)
+    assert not needs
+    out = _text(trimmed[0])
+    parsed = json.loads(out)
+    assert parsed["content"] == body
+    assert "omitted" not in out
+
+
+def test_fit_still_sanitizes_run_command_large_json_fields() -> None:
+    payload = json.dumps({"ok": True, "stdout": "x" * 2000})
+    budgeter = ContextBudgeter(window_tokens=200_000, used_tokens=10_000, safety_fraction=0.8)
+    blocks = [
+        ToolResponse(id="1", tool_name="run_command", result=[Text(text=payload)]),
+    ]
+    trimmed, _ = budgeter.fit_content_blocks(blocks)
+    out = _text(trimmed[0])
+    assert "omitted" in out
+
+
+def test_invalid_pressure_ratio_logs_warning(monkeypatch, caplog) -> None:
+    from monkeybot.core.runtime.context_budget import pressure_light_ratio_from_env
+
+    monkeypatch.setenv("MONKEYBOT_PRESSURE_LIGHT_RATIO", "bogus")
+    with caplog.at_level("WARNING", logger="monkeybot.core.runtime.context_budget"):
+        assert pressure_light_ratio_from_env() == 0.50
+
+    assert "invalid env var value" in caplog.text
+    assert "name=MONKEYBOT_PRESSURE_LIGHT_RATIO" in caplog.text
+    assert "value=bogus" in caplog.text

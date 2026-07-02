@@ -13,12 +13,21 @@ def test_harness_includes_core_tools_and_protocol() -> None:
     out = harness_fixed_context(include_task_tool=False)
     assert "## MonkeyBot harness (fixed)" in out
     assert "`read_file`" in out
+    assert "`write_file`" in out
+    assert "`replace_in_file`" in out
+    assert "`glob`" in out
     assert "`run_command`" in out
+    assert "argv" in out
     assert "`task` —" not in out
+    assert "### Workspace deliverables" in out
+    assert "New file or full rewrite" in out
+    assert "Targeted change to an existing file" in out
+    assert "writable workspace" in out
     assert "### Built-in tool errors (recovery)" in out
     assert "error_kind" in out
     assert "### Tool-call protocol (strict)" in out
     assert "native function-call channel" in out
+    assert "Fulfillment rule" in out
     assert '{"tool_calls":' not in out
 
 

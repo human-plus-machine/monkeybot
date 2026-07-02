@@ -19,13 +19,20 @@ from monkeybot.core.attachments.config import IMAGE_MIME_TYPES
 from monkeybot.core.attachments.store import AttachmentStore, sniff_mime
 from monkeybot.core.config.settings import SubagentConfig
 from monkeybot.core.context import CustomTool, TurnContext
+from monkeybot.core.context.tool_result_ingress import (
+    cap_tool_result_text,
+    sanitize_tool_result_text,
+    skip_tool_result_sanitize,
+)
 from monkeybot.core.llm.provider import ToolCall
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.mcp.mcp_client import MCPConnectionError, MCPServerNotConnectedError
 from monkeybot.core.mcp.ports_mcp import MCPClientPort
 from monkeybot.core.memory.subsystem import MemorySubsystem
-from monkeybot.core.persistence.backends import RunStore
+from monkeybot.core.persistence.backends import RunStore, ScheduledLoopStore
 from monkeybot.core.persistence.durable_runs import SubagentEnvelope as PersistedSubagentEnvelope
+from monkeybot.core.persistence.scheduled_loops import ScheduledLoopCreate
+from monkeybot.scheduler.interval import parse_interval_ms, parse_optional_duration_ms
 from monkeybot.core.persistence.runs import make_run_id
 from monkeybot.core.runtime.events import (
     AssistantDelta,
@@ -74,17 +81,23 @@ _CORE_TOOL_NAMES = frozenset(
         "render_image",
         "read_file",
         "write_file",
+        "replace_in_file",
+        "glob",
         "search_memory",
         "list_skills",
         "task",
         "run_command",
         "add_mcp_server",
         "remove_mcp_server",
+        "start_loop",
+        "loop_status",
+        "pause_loop",
+        "resume_loop",
+        "stop_loop",
     }
 )
 
 _SPILL_SKIP_TOOLS = frozenset({"read_file", "read_attachment"})
-
 
 def _tool_handler_kind(name: str, *, mcp: MCPClientPort, extra_tools: dict[str, CustomTool]) -> str:
     if name in _CORE_TOOL_NAMES:
@@ -126,13 +139,12 @@ def _write_spill_with_inventory(
     thread_id: str,
     call_id: str,
 ) -> str:
-    """Write full ``text`` to spill file; return full body plus inventory note."""
+    """Write raw ``text`` to spill file; return inventory pointer only (not inline body)."""
     rel = f"{_SPILL_DIR}/{thread_id}/{_safe_spill_filename(call_id)}.txt"
     out_path = (Path(workspace_root) / rel).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(text, encoding="utf-8")
-    note = spill_inventory_note(text, rel)
-    return f"{text}\n{note}"
+    return spill_inventory_note(text, rel)
 
 
 def _is_under_spill_path(workspace_root: Path, rel_path: str) -> bool:
@@ -260,6 +272,30 @@ def _str_arg(args: dict[str, Any], *keys: str) -> str | None:
     return None
 
 
+_SHELL_OPERATOR_TOKENS = frozenset({"&&", "||", ";", "|", "&"})
+
+
+def _needs_shell_wrapper(stripped: str, parts: list[str]) -> bool:
+    if any(part in _SHELL_OPERATOR_TOKENS for part in parts):
+        return True
+    return any(op in stripped for op in _SHELL_OPERATOR_TOKENS)
+
+
+def _argv_from_command_string(stripped: str) -> tuple[str, list[str]]:
+    """Parse a command string; wrap in ``bash -c`` when shell operators are present."""
+    if not any(ch.isspace() for ch in stripped):
+        parts = shlex.split(stripped, posix=True)
+        if parts and _needs_shell_wrapper(stripped, parts):
+            return "bash", ["-c", stripped]
+        return stripped, []
+    parts = shlex.split(stripped, posix=True)
+    if not parts:
+        return stripped, []
+    if _needs_shell_wrapper(stripped, parts):
+        return "bash", ["-c", stripped]
+    return parts[0], parts[1:]
+
+
 def _parse_run_command(args: dict[str, Any]) -> tuple[str, list[str]]:
     argv_raw = args.get("argv")
     if isinstance(argv_raw, list) and argv_raw:
@@ -272,17 +308,18 @@ def _parse_run_command(args: dict[str, Any]) -> tuple[str, list[str]]:
         if extra is None:
             extra = args.get("arguments")
         if isinstance(extra, list):
-            return cmd.strip(), [str(x) for x in extra]
-        parts = shlex.split(cmd, posix=True)
-        if parts:
-            return parts[0], parts[1:]
+            if extra:
+                return cmd.strip(), [str(x) for x in extra]
+            return _argv_from_command_string(cmd.strip())
+        return _argv_from_command_string(cmd.strip())
 
     shell = args.get("shell") or args.get("script")
     if isinstance(shell, str) and shell.strip():
-        parts = shlex.split(shell.strip(), posix=True)
+        stripped = shell.strip()
+        parts = shlex.split(stripped, posix=True)
         if not parts:
             raise ValueError("shell/script is empty after parsing")
-        return parts[0], parts[1:]
+        return _argv_from_command_string(stripped)
 
     raise ValueError(
         "run_command needs one of: argv (non-empty list), command+args/arguments, "
@@ -308,6 +345,7 @@ class CoreToolExecutor(ToolExecutorPort):
         attachment_store: AttachmentStore | None = None,
         attachment_catalog: SessionAttachmentCatalog | None = None,
         run_store: RunStore | None = None,
+        scheduled_loop_store: ScheduledLoopStore | None = None,
         subagent_registry: dict[str, SubagentConfig] | None = None,
     ) -> None:
         ws_settings = workspace_settings_from_env()
@@ -320,6 +358,7 @@ class CoreToolExecutor(ToolExecutorPort):
         self._attachment_store = attachment_store
         self._attachment_catalog = attachment_catalog
         self._run_store = run_store
+        self._scheduled_loop_store = scheduled_loop_store
         self._subagent_registry = dict(subagent_registry or {})
         self._terminal: TerminalExecutor | SandboxExecutor
         if terminal is not None:
@@ -408,6 +447,10 @@ class CoreToolExecutor(ToolExecutorPort):
                 result_text, err_text = self._tool_read_file(args)
             elif name == "write_file":
                 result_text, err_text = self._tool_write_file(args)
+            elif name == "replace_in_file":
+                result_text, err_text = self._tool_replace_in_file(args)
+            elif name == "glob":
+                result_text, err_text = self._tool_glob(args)
             elif name == "search_memory":
                 result_text, err_text = await self._tool_search_memory(args)
             elif name == "list_skills":
@@ -420,6 +463,16 @@ class CoreToolExecutor(ToolExecutorPort):
                 result_text, err_text = await self._tool_add_mcp_server(args)
             elif name == "remove_mcp_server":
                 result_text, err_text = await self._tool_remove_mcp_server(args)
+            elif name == "start_loop":
+                result_text, err_text = await self._tool_start_loop(args, ctx)
+            elif name == "loop_status":
+                result_text, err_text = await self._tool_loop_status(args)
+            elif name == "pause_loop":
+                result_text, err_text = await self._tool_pause_loop(args)
+            elif name == "resume_loop":
+                result_text, err_text = await self._tool_resume_loop(args)
+            elif name == "stop_loop":
+                result_text, err_text = await self._tool_stop_loop(args)
             elif name in self._extra_tools:
                 try:
                     raw = await self._extra_tools[name].execute(args)
@@ -483,16 +536,23 @@ class CoreToolExecutor(ToolExecutorPort):
                 {"tool": name},
             )
 
-        if (
-            name not in _SPILL_SKIP_TOOLS
-            and err_text is None
-            and result_text is not None
-            and self._spill_min_chars > 0
-            and len(result_text) >= self._spill_min_chars
-        ):
-            result_text = _write_spill_with_inventory(
-                result_text, self._workspace.repo_root, ctx.thread_id, call.call_id
+        if err_text is None and result_text is not None:
+            skip_sanitize = skip_tool_result_sanitize(name)
+            should_spill = (
+                name not in _SPILL_SKIP_TOOLS
+                and self._spill_min_chars > 0
+                and len(result_text) >= self._spill_min_chars
             )
+            if should_spill:
+                result_text = _write_spill_with_inventory(
+                    result_text, self._workspace.repo_root, ctx.thread_id, call.call_id
+                )
+                if not skip_sanitize:
+                    result_text = sanitize_tool_result_text(result_text)
+            else:
+                if not skip_sanitize:
+                    result_text = sanitize_tool_result_text(result_text)
+                result_text = cap_tool_result_text(result_text)
         if err_text is not None:
             return ToolExecutionResult.err(err_text)
         return ToolExecutionResult.ok_text(result_text or "")
@@ -623,6 +683,60 @@ class CoreToolExecutor(ToolExecutorPort):
             content = str(content)
         try:
             payload = self._workspace.write_file(path, content)
+            return (_j(payload), None)
+        except WorkspaceError as exc:
+            return (None, _workspace_error_envelope(exc))
+
+    def _tool_replace_in_file(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+        path = _str_arg(args, "path", "file_path", "file")
+        if not path:
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "replace_in_file requires a path argument.",
+                    'Pass path, old_string, and new_string, e.g. {"path": "README.md", "old_string": "a", "new_string": "b"}.',
+                    {
+                        "field": "path",
+                        "example": {
+                            "path": "README.md",
+                            "old_string": "old",
+                            "new_string": "new",
+                        },
+                    },
+                ),
+            )
+        old_string = args.get("old_string")
+        if old_string is None:
+            old_string = args.get("old", "")
+        if not isinstance(old_string, str):
+            old_string = str(old_string)
+        new_string = args.get("new_string")
+        if new_string is None:
+            new_string = args.get("new", "")
+        if not isinstance(new_string, str):
+            new_string = str(new_string)
+        try:
+            payload = self._workspace.replace_in_file(path, old_string, new_string)
+            return (_j(payload), None)
+        except WorkspaceError as exc:
+            return (None, _workspace_error_envelope(exc))
+
+    def _tool_glob(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+        pattern = _str_arg(args, "pattern", "glob")
+        if not pattern:
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "glob requires a pattern argument.",
+                    'Pass a glob pattern, e.g. {"pattern": "**/*.html"}.',
+                    {"field": "pattern", "example": {"pattern": "**/*.md"}},
+                ),
+            )
+        root = _str_arg(args, "root")
+        try:
+            payload = self._workspace.glob_paths(pattern, root=root)
             return (_j(payload), None)
         except WorkspaceError as exc:
             return (None, _workspace_error_envelope(exc))
@@ -1009,3 +1123,154 @@ class CoreToolExecutor(ToolExecutorPort):
             return (None, "remove_mcp_server requires name (or server_name / server)")
         await self._mcp.disconnect(sname)
         return (_j({"ok": True, "server": sname, "disconnected": True}), None)
+
+    def _require_loop_store(self) -> ScheduledLoopStore | tuple[None, str]:
+        if self._scheduled_loop_store is None:
+            return (
+                None,
+                _built_in_tool_error(
+                    "policy",
+                    "scheduled loops require durable storage (DB_URL: sqlite, postgresql, or firestore)",
+                    "Configure paths.db_url in monkeybot.yaml and enable MONKEYBOT_SCHEDULER_ENABLED=1 on the gateway.",
+                    {},
+                ),
+            )
+        return self._scheduled_loop_store
+
+    async def _tool_start_loop(
+        self, args: dict[str, Any], ctx: TurnContext
+    ) -> tuple[str | None, str | None]:
+        store_or_err = self._require_loop_store()
+        if isinstance(store_or_err, tuple):
+            return None, store_or_err[1]
+        store = store_or_err
+        prompt = _str_arg(args, "prompt", "plan", "message")
+        if not prompt:
+            return (None, "start_loop requires prompt with the agreed loop plan")
+        interval_raw = args.get("interval")
+        if interval_raw is None:
+            return (None, "start_loop requires interval (e.g. 20s, 5m, 1h)")
+        try:
+            interval_ms = parse_interval_ms(interval_raw)
+            max_runtime_ms = parse_optional_duration_ms(args.get("max_runtime"))
+        except ValueError as exc:
+            return (None, str(exc))
+        max_ticks_raw = args.get("max_ticks")
+        max_ticks: int | None = None
+        if max_ticks_raw is not None:
+            max_ticks = _coerce_int(max_ticks_raw, 0)
+            if max_ticks is None or max_ticks < 1:
+                return (None, "max_ticks must be a positive integer when set")
+        session_id = _str_arg(args, "session_id") or ctx.thread_id
+        loop_id = _str_arg(args, "loop_id")
+        skip_if_busy = args.get("skip_if_busy", True)
+        if not isinstance(skip_if_busy, bool):
+            skip_if_busy = True
+        unbounded = args.get("unbounded", False)
+        if not isinstance(unbounded, bool):
+            unbounded = False
+        spec = ScheduledLoopCreate(
+            prompt=prompt,
+            interval_ms=interval_ms,
+            session_id=session_id,
+            loop_id=loop_id,
+            max_ticks=max_ticks,
+            max_runtime_ms=max_runtime_ms,
+            skip_if_busy=skip_if_busy,
+            unbounded=unbounded,
+        )
+        try:
+            row = await store.create(spec)
+        except ValueError as exc:
+            return (None, str(exc))
+        return (
+            _j(
+                {
+                    "ok": True,
+                    "loop_id": row.loop_id,
+                    "session_id": row.session_id,
+                    "status": row.status,
+                    "interval_ms": row.interval_ms,
+                    "max_ticks": row.max_ticks,
+                    "max_runtime_ms": row.max_runtime_ms,
+                    "message": (
+                        "Scheduled loop registered. The scheduler worker will fire the prompt "
+                        "on each tick when MONKEYBOT_SCHEDULER_ENABLED=1 or the standalone "
+                        "scheduler worker is running."
+                    ),
+                }
+            ),
+            None,
+        )
+
+    async def _tool_loop_status(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+        store_or_err = self._require_loop_store()
+        if isinstance(store_or_err, tuple):
+            return None, store_or_err[1]
+        store = store_or_err
+        loop_id = _str_arg(args, "loop_id", "id")
+        if loop_id:
+            row = await store.get(loop_id)
+            if row is None:
+                return (None, f"unknown loop: {loop_id}")
+            return (_j({"ok": True, "loop": self._loop_row_json(row)}), None)
+        rows = await store.list_all()
+        return (_j({"ok": True, "loops": [self._loop_row_json(r) for r in rows]}), None)
+
+    @staticmethod
+    def _loop_row_json(row: object) -> dict[str, object]:
+        from monkeybot.core.persistence.scheduled_loops import ScheduledLoopRow
+
+        if not isinstance(row, ScheduledLoopRow):
+            raise TypeError("expected ScheduledLoopRow")
+        return {
+            "loop_id": row.loop_id,
+            "session_id": row.session_id,
+            "status": row.status,
+            "tick_index": row.tick_index,
+            "interval_ms": row.interval_ms,
+            "max_ticks": row.max_ticks,
+            "max_runtime_ms": row.max_runtime_ms,
+            "next_tick_at_ms": row.next_tick_at_ms,
+            "last_tick_at_ms": row.last_tick_at_ms,
+            "last_error": row.last_error,
+            "stop_reason": row.stop_reason,
+            "tick_in_flight": row.tick_in_flight,
+        }
+
+    async def _tool_pause_loop(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+        store_or_err = self._require_loop_store()
+        if isinstance(store_or_err, tuple):
+            return None, store_or_err[1]
+        loop_id = _str_arg(args, "loop_id", "id")
+        if not loop_id:
+            return (None, "pause_loop requires loop_id")
+        ok = await store_or_err.pause(loop_id)
+        if not ok:
+            return (None, f"unknown loop: {loop_id}")
+        return (_j({"ok": True, "loop_id": loop_id, "status": "paused"}), None)
+
+    async def _tool_resume_loop(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+        store_or_err = self._require_loop_store()
+        if isinstance(store_or_err, tuple):
+            return None, store_or_err[1]
+        loop_id = _str_arg(args, "loop_id", "id")
+        if not loop_id:
+            return (None, "resume_loop requires loop_id")
+        ok = await store_or_err.resume(loop_id)
+        if not ok:
+            return (None, f"paused loop not found: {loop_id}")
+        return (_j({"ok": True, "loop_id": loop_id, "status": "active"}), None)
+
+    async def _tool_stop_loop(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+        store_or_err = self._require_loop_store()
+        if isinstance(store_or_err, tuple):
+            return None, store_or_err[1]
+        loop_id = _str_arg(args, "loop_id", "id")
+        if not loop_id:
+            return (None, "stop_loop requires loop_id")
+        ok = await store_or_err.stop(loop_id)
+        if not ok:
+            return (None, f"unknown loop: {loop_id}")
+        return (_j({"ok": True, "loop_id": loop_id, "status": "completed"}), None)
+

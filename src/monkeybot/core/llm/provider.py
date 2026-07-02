@@ -136,12 +136,15 @@ class Provider(Protocol):
         tools: Sequence[ToolDef],
         *,
         model: str,
+        thinking_budget: int | None = None,
     ) -> int:
         """Return the provider-aligned input (prompt) token count for one outbound request.
 
         Must reflect the same payload shape as :meth:`stream` (messages, tools, model),
         typically via the vendor's tokenizer or count API — not post-hoc usage from a
         prior response.
+        ``thinking_budget`` mirrors :meth:`stream` for providers whose token count
+        changes with reasoning configuration.
         """
 
 

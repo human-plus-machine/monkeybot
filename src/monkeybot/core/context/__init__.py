@@ -133,6 +133,32 @@ def _core_tool_defs(
         },
         "required": ["path"],
     }
+    replace_schema: dict[str, object] = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Repo-relative path under the workspace root."},
+            "old_string": {
+                "type": "string",
+                "description": "Exact substring to replace (must match once).",
+            },
+            "new_string": {"type": "string", "description": "Replacement text (may be empty)."},
+        },
+        "required": ["path", "old_string", "new_string"],
+    }
+    glob_schema: dict[str, object] = {
+        "type": "object",
+        "properties": {
+            "pattern": {
+                "type": "string",
+                "description": "Glob pattern (e.g. **/*.html, *.md).",
+            },
+            "root": {
+                "type": "string",
+                "description": "Optional repo-relative directory to search under.",
+            },
+        },
+        "required": ["pattern"],
+    }
     search_schema: dict[str, object] = {
         "type": "object",
         "properties": {
@@ -215,6 +241,17 @@ def _core_tool_defs(
             write_schema,
         ),
         ToolDef(
+            "replace_in_file",
+            "Replace exactly one occurrence of old_string with new_string in an existing file. "
+            "Fails if old_string is missing or matches more than once.",
+            replace_schema,
+        ),
+        ToolDef(
+            "glob",
+            "List workspace file paths matching a glob pattern. Prefer over run_command+ls for discovery.",
+            glob_schema,
+        ),
+        ToolDef(
             "search_memory",
             "Search markdown/text under the memory directory for a keyword or phrase.",
             search_schema,
@@ -247,6 +284,80 @@ def _core_tool_defs(
                 "remove_mcp_server",
                 "Disconnect an MCP server by name and drop its tools.",
                 mcp_rm_schema,
+            ),
+            ToolDef(
+                "start_loop",
+                "Start a prompt-first scheduled loop after the user confirms. Pass the agreed "
+                "plan in prompt (BUSINESS/RULES). The scheduler fires that prompt on each tick. "
+                "Requires durable storage (DB_URL).",
+                {
+                    "type": "object",
+                    "properties": {
+                        "prompt": {
+                            "type": "string",
+                            "description": "Agreed loop plan / tick instructions.",
+                        },
+                        "interval": {
+                            "type": "string",
+                            "description": "Tick interval, e.g. 20s, 5m, 1h.",
+                        },
+                        "loop_id": {"type": "string"},
+                        "session_id": {
+                            "type": "string",
+                            "description": "Conversation thread for ticks (default loop-main).",
+                        },
+                        "max_ticks": {"type": "integer"},
+                        "max_runtime": {
+                            "type": "string",
+                            "description": "Hard wall-clock limit, e.g. 1h.",
+                        },
+                        "unbounded": {
+                            "type": "boolean",
+                            "description": (
+                                "Opt out of max_ticks/max_runtime guards. "
+                                "Requires explicit user confirmation."
+                            ),
+                        },
+                        "skip_if_busy": {"type": "boolean"},
+                    },
+                    "required": ["prompt", "interval"],
+                },
+            ),
+            ToolDef(
+                "loop_status",
+                "Get status of one scheduled loop or list all loops.",
+                {
+                    "type": "object",
+                    "properties": {"loop_id": {"type": "string"}},
+                    "required": [],
+                },
+            ),
+            ToolDef(
+                "pause_loop",
+                "Pause a scheduled loop.",
+                {
+                    "type": "object",
+                    "properties": {"loop_id": {"type": "string"}},
+                    "required": ["loop_id"],
+                },
+            ),
+            ToolDef(
+                "resume_loop",
+                "Resume a paused scheduled loop.",
+                {
+                    "type": "object",
+                    "properties": {"loop_id": {"type": "string"}},
+                    "required": ["loop_id"],
+                },
+            ),
+            ToolDef(
+                "stop_loop",
+                "Stop a scheduled loop permanently.",
+                {
+                    "type": "object",
+                    "properties": {"loop_id": {"type": "string"}},
+                    "required": ["loop_id"],
+                },
             ),
         ]
     )

@@ -323,7 +323,7 @@ async def test_integrated_run_task_subagent_shares_parent_trace_id(
     worker_script.write_text("# stub\n", encoding="utf-8")
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker_script))
     agent_md = tmp_path / "AGENT.md"
-    agent_md.write_text("# Agent\n", encoding="utf-8")
+    agent_md.write_text("# Test agent\n", encoding="utf-8")
     monkeypatch.setenv("AGENT_MD", str(agent_md))
 
     ex = CoreToolExecutor(

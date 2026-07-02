@@ -1,0 +1,32 @@
+name: Publish release
+
+# Fires whenever main moves - i.e. right after an admin merges a release PR.
+# Branch protection on main (require PR + restrict merges to admins) is the
+# actual access control; this just tags + publishes whatever landed.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "pyproject.toml"
+      - "cli/pyproject.toml"
+      - "CHANGELOG.md"
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - run: python3 scripts/release.py publish
+        env:
+          GH_TOKEN: ${{ github.token }}

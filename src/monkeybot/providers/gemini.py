@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
@@ -16,6 +17,7 @@ from monkeybot.core.llm.provider import (
     ToolCall,
     UsageEvent,
 )
+from monkeybot.core.logging_utils import kv
 from monkeybot.core.types.content_blocks import (
     File,
     Image,
@@ -30,6 +32,11 @@ from monkeybot.providers.sampling import resolve_model_sampling
 
 THOUGHT_SIGNATURE_KEY = "thoughtSignature"
 SYNTHETIC_THOUGHT_SIGNATURE = "skip_thought_signature_validator"
+
+_log = logging.getLogger(__name__)
+
+# Keep this in sync when onboarding another Vertex Gemini model that must use "global".
+_GLOBAL_VERTEX_MODEL_IDS = frozenset({"gemini-3-flash-preview"})
 
 
 def _normalize_vertex_model(model: str) -> str:
@@ -66,7 +73,7 @@ def _location_from_full_vertex_model(model: str) -> str | None:
 def _vertex_project_and_location(model_param: str) -> tuple[str, str]:
     """Resolve project id and API location for ``genai.Client(vertexai=True, ...)``.
 
-    Preview model ids (e.g. ``*-preview``) are typically **not** published under regional
+    Some preview model ids are not published under regional
     endpoints like ``us-central1``; Vertex serves them from ``global`` unless you override
     ``VERTEX_AI_LOCATION`` / ``GOOGLE_CLOUD_LOCATION``.
     """
@@ -88,7 +95,7 @@ def _vertex_project_and_location(model_param: str) -> tuple[str, str]:
         return str(project).strip(), embedded
 
     tail = model_param.split("/")[-1]
-    if "preview" in tail.lower():
+    if tail.lower() in _GLOBAL_VERTEX_MODEL_IDS:
         return str(project).strip(), "global"
 
     return str(project).strip(), "us-central1"
@@ -178,16 +185,7 @@ def _media_parts_from_blocks(blocks: Sequence[object]) -> list[Any]:
 
     parts: list[Any] = []
     for b in blocks:
-        if isinstance(b, Image):
-            parts.append(
-                types.Part(
-                    inline_data=types.Blob(
-                        mime_type=b.mime_type,
-                        data=base64.b64decode(b.data),
-                    )
-                )
-            )
-        elif isinstance(b, File):
+        if isinstance(b, (Image, File)):
             parts.append(
                 types.Part(
                     inline_data=types.Blob(
@@ -593,6 +591,11 @@ class GeminiProvider:
         except LLMError:
             raise
         except Exception as exc:
+            _log.warning(
+                "Gemini stream error %s",
+                kv(provider="gemini", model=model, n_messages=len(messages), n_tools=len(tools)),
+                exc_info=True,
+            )
             raise LLMError(str(exc)) from exc
 
         ev = _usage_from_response(last_usage)

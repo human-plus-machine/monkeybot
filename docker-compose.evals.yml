@@ -7,8 +7,8 @@ services:
     environment:
       AGENT_URL: http://monkeybot:8080
       LANGFUSE_HOST: ${LANGFUSE_HOST:-http://langfuse-web:3000}
-      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-pk-playground}
-      LANGFUSE_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-sk-playground}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-pk-demo}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-sk-demo}
       MONKEYBOT_AGENT_CONFIG: /config/monkeybot.yaml
       GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcp_creds
       GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT:-}
@@ -20,5 +20,5 @@ services:
       AWS_BEDROCK_REGION: ${AWS_BEDROCK_REGION:-}
     volumes:
       - ${GCP_AUTH_FILE:-/dev/null}:/run/secrets/gcp_creds:ro
-      - ./playground/agent/monkeybot_config/monkeybot.yaml:/config/monkeybot.yaml:ro
+      - ./demo_agent/monkeybot_config/monkeybot.yaml:/config/monkeybot.yaml:ro
       - ${OPERATOR_SCENARIOS_PATH:-./evals/scenarios/operator}:/app/scenarios/operator:ro

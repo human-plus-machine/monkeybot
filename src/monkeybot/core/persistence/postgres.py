@@ -18,6 +18,14 @@ from monkeybot.core.persistence.durable_runs import (
     SubagentRunRow,
     _tuple_to_run_row,
 )
+from monkeybot.core.persistence.scheduled_loops import (
+    ScheduledLoopCreate,
+    ScheduledLoopRow,
+    _SCHEDULED_LOOP_COLUMNS,
+    _loop_id_from_create,
+    _row_from_tuple,
+    validate_loop_guards,
+)
 from monkeybot.core.persistence.thread_summary import ChatThreadSummary, preview_from_content_blob
 from monkeybot.core.types.content_blocks import ContentBlock
 
@@ -72,6 +80,33 @@ _SCHEMA_DDLS: tuple[str, ...] = (
     "ALTER TABLE turn_usage ADD COLUMN IF NOT EXISTS cache_creation_tokens INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE subagent_runs ADD COLUMN IF NOT EXISTS worker_id TEXT",
     "ALTER TABLE subagent_runs ADD COLUMN IF NOT EXISTS claimed_at BIGINT",
+    """CREATE TABLE IF NOT EXISTS scheduled_loops (
+    loop_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    interval_ms BIGINT NOT NULL,
+    max_ticks INTEGER,
+    max_runtime_ms BIGINT,
+    skip_if_busy INTEGER NOT NULL DEFAULT 1,
+    tick_index INTEGER NOT NULL DEFAULT 0,
+    next_tick_at_ms BIGINT NOT NULL,
+    started_at_ms BIGINT NOT NULL,
+    last_tick_at_ms BIGINT,
+    last_error TEXT,
+    stop_reason TEXT,
+    tick_in_flight INTEGER NOT NULL DEFAULT 0,
+    worker_id TEXT,
+    claimed_at_ms BIGINT
+)""",
+    """CREATE INDEX IF NOT EXISTS idx_scheduled_loops_due
+    ON scheduled_loops(status, tick_in_flight, next_tick_at_ms)
+    WHERE status = 'active'""",
+    """CREATE TABLE IF NOT EXISTS session_turn_locks (
+    session_id TEXT PRIMARY KEY,
+    request_id TEXT,
+    claimed_at_ms BIGINT
+)""",
 )
 
 
@@ -350,27 +385,21 @@ class PostgresRunStore:
         envelope: SubagentEnvelope,
         scratch_dir: object,
     ) -> None:
-        now_ms = int(time.time() * 1000)
-        async with self._pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO subagent_runs(
-                    run_id, parent_run_id, script, envelope_json,
-                    status, result_json, error_json, started_at, finished_at, scratch_dir,
-                    worker_id, claimed_at
-                )
-                VALUES ($1, $2, $3, $4, 'pending', NULL, NULL, $5, NULL, $6, NULL, NULL)
-                """,
-                run_id,
-                parent_run_id,
-                script,
-                envelope.to_json(),
-                now_ms,
-                str(scratch_dir),
-            )
+        await self._record_run("pending", run_id, parent_run_id, script, envelope, scratch_dir)
 
     async def record_started(
         self,
+        run_id: str,
+        parent_run_id: str | None,
+        script: str,
+        envelope: SubagentEnvelope,
+        scratch_dir: object,
+    ) -> None:
+        await self._record_run("running", run_id, parent_run_id, script, envelope, scratch_dir)
+
+    async def _record_run(
+        self,
+        status: str,
         run_id: str,
         parent_run_id: str | None,
         script: str,
@@ -386,12 +415,13 @@ class PostgresRunStore:
                     status, result_json, error_json, started_at, finished_at, scratch_dir,
                     worker_id, claimed_at
                 )
-                VALUES ($1, $2, $3, $4, 'running', NULL, NULL, $5, NULL, $6, NULL, NULL)
+                VALUES ($1, $2, $3, $4, $5, NULL, NULL, $6, NULL, $7, NULL, NULL)
                 """,
                 run_id,
                 parent_run_id,
                 script,
                 envelope.to_json(),
+                status,
                 now_ms,
                 str(scratch_dir),
             )
@@ -492,6 +522,317 @@ class PostgresRunStore:
         return _tuple_to_run_row(tuple(row))
 
 
+class PostgresScheduledLoopStore:
+    """Postgres persistence for scheduled agent loops."""
+
+    def __init__(self, pool: asyncpg.Pool) -> None:
+        self._pool = pool
+
+    async def create(self, spec: ScheduledLoopCreate) -> ScheduledLoopRow:
+        loop_id = _loop_id_from_create(spec)
+        if await self.get(loop_id) is not None:
+            raise ValueError(f"scheduled loop already exists: {loop_id}")
+        validate_loop_guards(
+            max_ticks=spec.max_ticks,
+            max_runtime_ms=spec.max_runtime_ms,
+            unbounded=spec.unbounded,
+        )
+        now_ms = int(time.time() * 1000)
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO scheduled_loops(
+                    loop_id, session_id, status, prompt, interval_ms,
+                    max_ticks, max_runtime_ms, skip_if_busy, tick_index,
+                    next_tick_at_ms, started_at_ms, last_tick_at_ms,
+                    last_error, stop_reason, tick_in_flight, worker_id, claimed_at_ms
+                ) VALUES ($1, $2, 'active', $3, $4, $5, $6, $7, 0, $8, $8, NULL, NULL, NULL, 0, NULL, NULL)
+                """,
+                loop_id,
+                spec.session_id.strip() or "loop-main",
+                spec.prompt.strip(),
+                spec.interval_ms,
+                spec.max_ticks,
+                spec.max_runtime_ms,
+                1 if spec.skip_if_busy else 0,
+                now_ms,
+            )
+        row = await self.get(loop_id)
+        if row is None:
+            raise RuntimeError("failed to read scheduled loop after insert")
+        return row
+
+    async def get(self, loop_id: str) -> ScheduledLoopRow | None:
+        columns = ", ".join(_SCHEDULED_LOOP_COLUMNS)
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"SELECT {columns} FROM scheduled_loops WHERE loop_id = $1",
+                loop_id,
+            )
+        if row is None:
+            return None
+        return _row_from_tuple(tuple(row))
+
+    async def list_all(self) -> list[ScheduledLoopRow]:
+        columns = ", ".join(_SCHEDULED_LOOP_COLUMNS)
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"SELECT {columns} FROM scheduled_loops ORDER BY started_at_ms DESC"
+            )
+        return [_row_from_tuple(tuple(r)) for r in rows]
+
+    async def list_due(self, now_ms: int) -> list[ScheduledLoopRow]:
+        columns = ", ".join(_SCHEDULED_LOOP_COLUMNS)
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT {columns} FROM scheduled_loops
+                WHERE status = 'active'
+                  AND tick_in_flight = 0
+                  AND next_tick_at_ms <= $1
+                ORDER BY next_tick_at_ms ASC
+                """,
+                now_ms,
+            )
+        return [_row_from_tuple(tuple(r)) for r in rows]
+
+    async def claim_tick(self, loop_id: str, worker_id: str) -> ScheduledLoopRow | None:
+        now_ms = int(time.time() * 1000)
+        async with self._pool.acquire() as conn:
+            status = await conn.execute(
+                """
+                UPDATE scheduled_loops
+                SET tick_in_flight = 1, worker_id = $1, claimed_at_ms = $2
+                WHERE loop_id = $3
+                  AND status = 'active'
+                  AND tick_in_flight = 0
+                  AND next_tick_at_ms <= $2
+                """,
+                worker_id,
+                now_ms,
+                loop_id,
+            )
+        if status.split()[-1] != "1":
+            return None
+        return await self.get(loop_id)
+
+    async def release_stale_claims(self, stale_after_ms: int) -> int:
+        cutoff = int(time.time() * 1000) - stale_after_ms
+        async with self._pool.acquire() as conn:
+            status = await conn.execute(
+                """
+                UPDATE scheduled_loops
+                SET tick_in_flight = 0, worker_id = NULL, claimed_at_ms = NULL,
+                    last_error = COALESCE(last_error, 'stale tick claim released')
+                WHERE tick_in_flight = 1
+                  AND claimed_at_ms IS NOT NULL
+                  AND claimed_at_ms < $1
+                """,
+                cutoff,
+            )
+        return int(status.split()[-1])
+
+    async def complete_tick(
+        self,
+        loop_id: str,
+        *,
+        worker_id: str,
+        error: str | None = None,
+    ) -> ScheduledLoopRow | None:
+        row = await self.get(loop_id)
+        if row is None or not row.tick_in_flight or row.worker_id != worker_id:
+            return None
+        now_ms = int(time.time() * 1000)
+        tick_index = row.tick_index + 1
+        stop_reason: str | None = None
+        status = row.status
+        if error:
+            status = "failed"
+            stop_reason = "tick_error"
+        elif row.max_ticks is not None and tick_index >= row.max_ticks:
+            status = "completed"
+            stop_reason = "max_ticks"
+        elif row.max_runtime_ms is not None and (now_ms - row.started_at_ms) >= row.max_runtime_ms:
+            status = "completed"
+            stop_reason = "max_runtime"
+        next_tick = now_ms + row.interval_ms if status == "active" else row.next_tick_at_ms
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE scheduled_loops
+                SET tick_index = $1, last_tick_at_ms = $2, last_error = $3,
+                    status = $4, stop_reason = $5, next_tick_at_ms = $6,
+                    tick_in_flight = 0, worker_id = NULL, claimed_at_ms = NULL
+                WHERE loop_id = $7 AND worker_id = $8 AND tick_in_flight = 1
+                """,
+                tick_index,
+                now_ms,
+                error,
+                status,
+                stop_reason,
+                next_tick,
+                loop_id,
+                worker_id,
+            )
+        return await self.get(loop_id)
+
+    async def defer_tick(self, loop_id: str, *, worker_id: str, reason: str) -> None:
+        row = await self.get(loop_id)
+        if row is None or row.worker_id != worker_id:
+            return
+        now_ms = int(time.time() * 1000)
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE scheduled_loops
+                SET tick_in_flight = 0, worker_id = NULL, claimed_at_ms = NULL,
+                    next_tick_at_ms = $1, last_error = $2
+                WHERE loop_id = $3 AND worker_id = $4
+                """,
+                now_ms + row.interval_ms,
+                reason,
+                loop_id,
+                worker_id,
+            )
+
+    async def renew_tick_claim(self, loop_id: str, worker_id: str) -> bool:
+        now_ms = int(time.time() * 1000)
+        async with self._pool.acquire() as conn:
+            status = await conn.execute(
+                """
+                UPDATE scheduled_loops
+                SET claimed_at_ms = $1
+                WHERE loop_id = $2
+                  AND worker_id = $3
+                  AND tick_in_flight = 1
+                """,
+                now_ms,
+                loop_id,
+                worker_id,
+            )
+        return bool(status.split()[-1] == "1")
+
+    async def pause(self, loop_id: str) -> bool:
+        async with self._pool.acquire() as conn:
+            status = await conn.execute(
+                """
+                UPDATE scheduled_loops
+                SET status = 'paused', tick_in_flight = 0, worker_id = NULL, claimed_at_ms = NULL
+                WHERE loop_id = $1
+                """,
+                loop_id,
+            )
+        return bool(status.split()[-1] == "1")
+
+    async def resume(self, loop_id: str) -> bool:
+        now_ms = int(time.time() * 1000)
+        async with self._pool.acquire() as conn:
+            status = await conn.execute(
+                """
+                UPDATE scheduled_loops
+                SET status = 'active', stop_reason = NULL, next_tick_at_ms = $1,
+                    tick_in_flight = 0, worker_id = NULL, claimed_at_ms = NULL
+                WHERE loop_id = $2 AND status = 'paused'
+                """,
+                now_ms,
+                loop_id,
+            )
+        return bool(status.split()[-1] == "1")
+
+    async def stop(self, loop_id: str, *, stop_reason: str = "manual") -> bool:
+        async with self._pool.acquire() as conn:
+            status = await conn.execute(
+                """
+                UPDATE scheduled_loops
+                SET status = 'completed', stop_reason = $1,
+                    tick_in_flight = 0, worker_id = NULL, claimed_at_ms = NULL
+                WHERE loop_id = $2
+                """,
+                stop_reason,
+                loop_id,
+            )
+        return bool(status.split()[-1] == "1")
+
+
+class PostgresSessionTurnLockStore:
+    """Postgres-backed exclusive turn lock per session."""
+
+    def __init__(self, pool: asyncpg.Pool) -> None:
+        self._pool = pool
+
+    async def release_stale_claims(self, stale_after_ms: int) -> int:
+        cutoff = int(time.time() * 1000) - stale_after_ms
+        async with self._pool.acquire() as conn:
+            status = await conn.execute(
+                """
+                UPDATE session_turn_locks
+                SET request_id = NULL, claimed_at_ms = NULL
+                WHERE request_id IS NOT NULL
+                  AND claimed_at_ms IS NOT NULL
+                  AND claimed_at_ms < $1
+                """,
+                cutoff,
+            )
+        return int(status.split()[-1])
+
+    async def try_acquire(self, session_id: str, request_id: str) -> bool:
+        from monkeybot.core.persistence.session_turn_locks import session_turn_stale_ms
+
+        await self.release_stale_claims(session_turn_stale_ms())
+        now_ms = int(time.time() * 1000)
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                UPDATE session_turn_locks
+                SET request_id = $2, claimed_at_ms = $3
+                WHERE session_id = $1 AND request_id IS NULL
+                RETURNING session_id
+                """,
+                session_id,
+                request_id,
+                now_ms,
+            )
+            if row is not None:
+                return True
+            try:
+                await conn.execute(
+                    """
+                    INSERT INTO session_turn_locks (session_id, request_id, claimed_at_ms)
+                    VALUES ($1, $2, $3)
+                    """,
+                    session_id,
+                    request_id,
+                    now_ms,
+                )
+                return True
+            except asyncpg.UniqueViolationError:
+                return False
+
+    async def release(self, session_id: str, request_id: str) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE session_turn_locks
+                SET request_id = NULL, claimed_at_ms = NULL
+                WHERE session_id = $1 AND request_id = $2
+                """,
+                session_id,
+                request_id,
+            )
+
+    async def is_busy(self, session_id: str) -> bool:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT 1 FROM session_turn_locks
+                WHERE session_id = $1 AND request_id IS NOT NULL
+                LIMIT 1
+                """,
+                session_id,
+            )
+        return row is not None
+
+
 class PostgresStorageBackend:
     """Postgres-backed storage backend using an asyncpg connection pool."""
 
@@ -501,6 +842,8 @@ class PostgresStorageBackend:
         self._history_store: PostgresHistoryStore | None = None
         self._usage_store: PostgresUsageStore | None = None
         self._runs_store: PostgresRunStore | None = None
+        self._scheduled_loops_store: PostgresScheduledLoopStore | None = None
+        self._session_turn_lock_store: PostgresSessionTurnLockStore | None = None
 
     async def open(self, *, run_schema: bool = True) -> None:
         min_size = int(os.environ.get("POSTGRES_POOL_MIN", "1"))
@@ -513,6 +856,8 @@ class PostgresStorageBackend:
         self._history_store = PostgresHistoryStore(self._pool)
         self._usage_store = PostgresUsageStore(self._pool)
         self._runs_store = PostgresRunStore(self._pool)
+        self._scheduled_loops_store = PostgresScheduledLoopStore(self._pool)
+        self._session_turn_lock_store = PostgresSessionTurnLockStore(self._pool)
 
     async def close(self) -> None:
         if self._pool is not None:
@@ -521,6 +866,8 @@ class PostgresStorageBackend:
             self._history_store = None
             self._usage_store = None
             self._runs_store = None
+            self._scheduled_loops_store = None
+            self._session_turn_lock_store = None
 
     def history(self) -> PostgresHistoryStore:
         if self._history_store is None:
@@ -536,3 +883,13 @@ class PostgresStorageBackend:
         if self._runs_store is None:
             raise RuntimeError("PostgresStorageBackend.open() has not been called")
         return self._runs_store
+
+    def scheduled_loops(self) -> PostgresScheduledLoopStore:
+        if self._scheduled_loops_store is None:
+            raise RuntimeError("PostgresStorageBackend.open() has not been called")
+        return self._scheduled_loops_store
+
+    def session_turns(self) -> PostgresSessionTurnLockStore:
+        if self._session_turn_lock_store is None:
+            raise RuntimeError("PostgresStorageBackend.open() has not been called")
+        return self._session_turn_lock_store

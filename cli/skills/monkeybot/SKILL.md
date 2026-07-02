@@ -141,6 +141,7 @@ Creates `monkeybot_config/`, `workspace/` (file-tool sandbox), `workspace/skills
 | `vertex-claude` | `GCP_PROJECT_ID` / `GOOGLE_CLOUD_PROJECT` / `ANTHROPIC_VERTEX_PROJECT_ID` (ADC) | `uv sync --extra vertex-claude` |
 | `aws_bedrock` | `AWS_ACCESS_KEY_ID` / `AWS_PROFILE` + `AWS_REGION` | `uv sync --extra bedrock` |
 | `huggingface` | `HF_TOKEN` (or `HUGGINGFACE_API_KEY`) | `uv sync --extra huggingface` |
+| `ollama` | None required — `OLLAMA_BASE_URL` (default `http://localhost:11434`) for a non-default server | `uv sync --extra ollama` |
 
 **Agent-first dependencies.** The CLI is thin — it does **not** install provider/storage extras globally. Declare them on the **agent project**: give the agent a `pyproject.toml` listing `monkeybot[bedrock,postgres,...]` and run `uv sync` there (this creates `.venv`). `monkeybot run` / `chat` spawn the gateway from that project's interpreter (`.venv/bin/python`, else `uv run python`), and `doctor` checks extras in that same interpreter. For a config-only tree (just `monkeybot_config/`, no `pyproject.toml`) the gateway falls back to the CLI's interpreter, so extras must be installed in the CLI env (`uv tool install --with 'monkeybot[<extra>]' monkeybot-cli`).
 

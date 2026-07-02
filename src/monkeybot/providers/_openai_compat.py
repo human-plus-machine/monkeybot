@@ -1,6 +1,10 @@
 """Shared helpers for OpenAI-compatible Chat Completions providers.
 
-Used by OpenAIProvider and HuggingFaceProvider — same wire format, different auth/URLs.
+Used by OpenAIProvider, HuggingFaceProvider, and OllamaProvider — same wire
+format, different auth/URLs. ``count_input_tokens_tiktoken`` and
+``stream_chat_completions_with_tool_fallback`` provide full method bodies for
+providers whose ``count_input_tokens``/``stream`` differ only by base URL,
+API key, and provider name (HuggingFace, Ollama).
 """
 
 from __future__ import annotations
@@ -15,9 +19,11 @@ from monkeybot.core.llm.provider import (
     Message,
     ProviderEvent,
     TextDelta,
+    ThinkingDelta,
     ToolCall,
     UsageEvent,
 )
+from monkeybot.core.logging_utils import kv
 from monkeybot.core.types.content_blocks import ContentBlock, Text, ToolRequest, ToolResponse
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._utils import safe_parse_tool_args
@@ -169,22 +175,47 @@ def openai_tools_token_count(encoding: Any, tools: list[dict[str, Any]]) -> int:
     return len(encoding.encode(json.dumps(tools, ensure_ascii=False, default=str)))
 
 
+def count_openai_compat_input_tokens(
+    encoding: Any,
+    messages: Sequence[Message],
+    tools: Sequence[ToolDef],
+) -> int:
+    system, oai_messages = messages_to_openai(messages)
+    if system:
+        oai_messages = [{"role": "system", "content": system}, *oai_messages]
+    tool_defs = openai_tools(tools) if tools else []
+    return openai_messages_token_count(encoding, oai_messages) + openai_tools_token_count(
+        encoding, tool_defs
+    )
+
+
+_STREAM_USAGE_OPTIONS: dict[str, bool] = {"include_usage": True}
+
+
 async def iter_openai_compat_stream(
     client: Any,
     kwargs: dict[str, Any],
+    *,
+    provider: str = "openai_compat",
+    n_messages: int | None = None,
+    n_tools: int | None = None,
 ) -> AsyncIterator[ProviderEvent]:
     """Yield ProviderEvents from an OpenAI-compatible streaming chat request.
 
     Handles text deltas, tool call buffering, usage accounting, and Done.
     ``client`` must be an ``AsyncOpenAI``-compatible object.
     """
+    req = dict(kwargs)
+    if req.get("stream") and "stream_options" not in req:
+        req["stream_options"] = dict(_STREAM_USAGE_OPTIONS)
+
     input_tokens = 0
     output_tokens = 0
     cached_tokens = 0
     tool_buf: dict[int, dict[str, Any]] = {}
 
     try:
-        stream = await client.chat.completions.create(**kwargs)
+        stream = await client.chat.completions.create(**req)
         async for chunk in stream:
             if chunk.usage is not None:
                 input_tokens = int(chunk.usage.prompt_tokens or 0)
@@ -199,6 +230,9 @@ async def iter_openai_compat_stream(
                 continue
             if delta.content:
                 yield TextDelta(text=delta.content)
+            reasoning = getattr(delta, "reasoning", None)
+            if reasoning:
+                yield ThinkingDelta(text=reasoning)
             if delta.tool_calls:
                 for tc in delta.tool_calls:
                     idx = int(tc.index or 0)
@@ -224,8 +258,17 @@ async def iter_openai_compat_stream(
                 provider="openai_compat",
             )
             yield ToolCall(call_id=tid, name=name, args=parsed, parse_error=parse_error)
-    except Exception as exc:
-        _log.warning("OpenAI-compat stream error: %s", exc)
+    except Exception:
+        _log.warning(
+            "OpenAI-compat stream error %s",
+            kv(
+                provider=provider,
+                model=kwargs.get("model"),
+                n_messages=n_messages,
+                n_tools=n_tools,
+            ),
+            exc_info=True,
+        )
         raise
 
     # OpenAI reports prompt_tokens incl. cached; subtract to avoid double-count (see 1C).
@@ -239,10 +282,135 @@ async def iter_openai_compat_stream(
     yield Done()
 
 
+async def count_input_tokens_tiktoken(
+    messages: Sequence[Message],
+    tools: Sequence[ToolDef],
+    *,
+    model: str,
+    thinking_budget: int | None = None,
+) -> int:
+    """Shared ``count_input_tokens`` body for tiktoken-based providers.
+
+    Falls back to ``cl100k_base`` when ``model`` isn't a tiktoken-known model id
+    (true for most non-OpenAI models served through an OpenAI-compat endpoint).
+    ``thinking_budget`` is accepted for ``Provider`` protocol symmetry but unused:
+    none of these providers' token counts vary with reasoning configuration.
+    """
+    del thinking_budget
+    import tiktoken  # noqa: PLC0415
+
+    msgs = list(messages)
+    try:
+        enc = tiktoken.encoding_for_model(model)
+    except KeyError:
+        enc = tiktoken.get_encoding("cl100k_base")
+    return count_openai_compat_input_tokens(enc, msgs, tools)
+
+
+async def stream_chat_completions_with_tool_fallback(
+    *,
+    base_url: str,
+    api_key: str,
+    provider: str,
+    messages: Sequence[Message],
+    tools: Sequence[ToolDef],
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    reasoning_effort: str | None = None,
+) -> AsyncIterator[ProviderEvent]:
+    """Shared ``stream`` body for OpenAI-compat providers that retry without
+    tools when the upstream server rejects function calling (HuggingFace,
+    Ollama, …).
+    """
+    from openai import AsyncOpenAI  # noqa: PLC0415
+
+    msgs = list(messages)
+    system, oai_messages = messages_to_openai(msgs)
+    if system:
+        oai_messages = [{"role": "system", "content": system}, *oai_messages]
+
+    client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": oai_messages,
+        "stream": True,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if tools:
+        kwargs["tools"] = openai_tools(tools)
+    if reasoning_effort is not None:
+        kwargs["reasoning_effort"] = reasoning_effort
+
+    try:
+        async for event in iter_openai_compat_stream(
+            client,
+            kwargs,
+            provider=provider,
+            n_messages=len(messages),
+            n_tools=len(tools),
+        ):
+            yield event
+    except Exception as exc:
+        if tools and is_tool_unsupported_error(exc):
+            _log.warning(
+                "%s model %r does not support tool calling; retrying without tools. Error: %s",
+                provider,
+                model,
+                exc,
+            )
+            kwargs.pop("tools", None)
+            async for event in iter_openai_compat_stream(
+                client,
+                kwargs,
+                provider=provider,
+                n_messages=len(messages),
+                n_tools=0,
+            ):
+                yield event
+        else:
+            raise
+
+
+def is_tool_unsupported_error(exc: BaseException) -> bool:
+    """Return True when the exception likely indicates unsupported tool calling.
+
+    Shared by providers (HuggingFace, Ollama, …) that fall back to a tool-less
+    request when the upstream model/server rejects function calling.
+    """
+    try:
+        from openai import APIStatusError  # noqa: PLC0415
+    except ImportError:
+        msg = str(exc).lower()
+        return "tool" in msg and "unsupported" in msg
+
+    if isinstance(exc, APIStatusError):
+        if exc.status_code not in (400, 422):
+            return False
+        body = str(exc.body or exc.message or "").lower()
+        return any(
+            phrase in body
+            for phrase in (
+                "tool",
+                "function_call",
+                "functions",
+                "unsupported",
+            )
+        )
+
+    msg = str(exc).lower()
+    return "tool" in msg and "unsupported" in msg
+
+
 __all__ = [
+    "count_input_tokens_tiktoken",
+    "count_openai_compat_input_tokens",
+    "is_tool_unsupported_error",
     "iter_openai_compat_stream",
     "messages_to_openai",
     "openai_messages_token_count",
     "openai_tools",
     "openai_tools_token_count",
+    "stream_chat_completions_with_tool_fallback",
 ]

@@ -1,0 +1,47 @@
+# OpenSandbox control plane — Docker runtime for the local demo agent.
+# Mounted into the server container by demo_agent/run.sh.
+# Based on OpenSandbox server/opensandbox_server/examples/example.config.toml
+
+[server]
+host = "0.0.0.0"
+port = 8080
+max_sandbox_timeout_seconds = 86400
+
+[log]
+level = "INFO"
+
+[runtime]
+type = "docker"
+execd_image = "opensandbox/execd:v1.0.16"
+
+[storage]
+# Bind mounts from the MCP host must be under one of these prefixes (empty = deny all on current OpenSandbox).
+# Include /private/Users — macOS often resolves realpaths there while the agent still uses /Users/... .
+# Demo defaults cover typical macOS/Linux home layouts; add a prefix if your repo lives elsewhere.
+allowed_host_paths = ["/Users", "/private/Users", "/home", "/tmp"]
+# Required by upstream example.toml for a complete [storage] table (K8s PVC default size).
+volume_default_size = "1Gi"
+
+[store]
+type = "sqlite"
+path = "/tmp/opensandbox/opensandbox.db"
+
+[docker]
+network_mode = "bridge"
+host_ip = "host.docker.internal"
+drop_capabilities = ["AUDIT_WRITE", "MKNOD", "NET_ADMIN", "NET_RAW", "SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE", "SYS_TIME", "SYS_TTY_CONFIG"]
+no_new_privileges = true
+pids_limit = 4096
+seccomp_profile = ""
+apparmor_profile = ""
+
+[ingress]
+mode = "direct"
+
+[egress]
+image = "opensandbox/egress:v1.0.11"
+mode = "dns"
+
+[renew_intent]
+enabled = false
+min_interval_seconds = 60

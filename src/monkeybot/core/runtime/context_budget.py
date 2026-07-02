@@ -2,19 +2,25 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass
-from typing import Literal
 
+from monkeybot.core.context.common import ContextPressureTier, text_from_blocks
 from monkeybot.core.context.tool_output_policy import resolve_tool_budget
+from monkeybot.core.context.tool_result_ingress import (
+    sanitize_tool_result_text,
+    skip_tool_result_sanitize,
+)
 from monkeybot.core.context.tool_shapers import shape_tool_text
+from monkeybot.core.logging_utils import kv
 from monkeybot.core.types.content_blocks import ContentBlock, Text, ToolResponse
+
+logger = logging.getLogger(__name__)
 
 _INVENTORY_MARKER = "[Spill inventory —"
 _CHARS_PER_TOKEN = 4
-
-ContextPressureTier = Literal["light", "moderate", "aggressive"]
 
 _DIFF_GIT_RE = re.compile(r"^diff --git a/.+ b/(.+)$", re.MULTILINE)
 
@@ -30,6 +36,10 @@ def _ratio_from_env(name: str, default: float) -> float:
     try:
         val = float(raw)
     except ValueError:
+        logger.warning(
+            "invalid env var value %s",
+            kv(name=name, value=raw, default=default),
+        )
         return default
     return min(0.99, max(0.05, val))
 
@@ -97,16 +107,8 @@ def estimate_tokens(text: str) -> int:
     return max(1, len(text) // _CHARS_PER_TOKEN)
 
 
-def _text_from_blocks(blocks: list[ContentBlock]) -> str:
-    parts: list[str] = []
-    for block in blocks:
-        if isinstance(block, Text):
-            parts.append(block.text)
-    return "".join(parts)
-
-
 def _tool_response_with_text(block: ToolResponse, text: str) -> ToolResponse:
-    original = _text_from_blocks(list(block.result))
+    original = text_from_blocks(list(block.result))
     if text == original:
         return block
     return ToolResponse(
@@ -210,18 +212,11 @@ class ContextBudgeter:
 
         out: list[ContentBlock] = []
         for block in blocks:
-            if not isinstance(block, ToolResponse) or block.is_error:
+            shaped = self._shape_tool_response(block)
+            if shaped is None:
                 out.append(block)
                 continue
-            text = _text_from_blocks(list(block.result))
-            budget = resolve_tool_budget(block.tool_name)
-            if budget is not None or self.pressure_tier in ("moderate", "aggressive"):
-                text = shape_tool_text(
-                    text,
-                    tool_name=block.tool_name,
-                    budget=budget,
-                    pressure_tier=self.pressure_tier,
-                )
+            block, text = shaped
             est = estimate_tokens(text)
             if est <= per_item:
                 out.append(_tool_response_with_text(block, text))
@@ -234,21 +229,30 @@ class ContextBudgeter:
 
         return out, needs_compaction
 
+    def _shape_tool_response(self, block: ContentBlock) -> tuple[ToolResponse, str] | None:
+        if not isinstance(block, ToolResponse) or block.is_error:
+            return None
+        text = text_from_blocks(list(block.result))
+        if not skip_tool_result_sanitize(block.tool_name):
+            text = sanitize_tool_result_text(text)
+        budget = resolve_tool_budget(block.tool_name)
+        if budget is not None or self.pressure_tier in ("moderate", "aggressive"):
+            text = shape_tool_text(
+                text,
+                tool_name=block.tool_name,
+                budget=budget,
+                pressure_tier=self.pressure_tier,
+            )
+        return block, text
+
     def _trim_all(self, blocks: list[ContentBlock], per_item: int) -> list[ContentBlock]:
         out: list[ContentBlock] = []
         for block in blocks:
-            if not isinstance(block, ToolResponse) or block.is_error:
+            shaped = self._shape_tool_response(block)
+            if shaped is None:
                 out.append(block)
                 continue
-            text = _text_from_blocks(list(block.result))
-            budget = resolve_tool_budget(block.tool_name)
-            if budget is not None or self.pressure_tier in ("moderate", "aggressive"):
-                text = shape_tool_text(
-                    text,
-                    tool_name=block.tool_name,
-                    budget=budget,
-                    pressure_tier=self.pressure_tier,
-                )
+            block, text = shaped
             trimmed = _trim_text_to_token_budget(text, per_item)
             out.append(_tool_response_with_text(block, trimmed))
             self.used_tokens += estimate_tokens(trimmed)

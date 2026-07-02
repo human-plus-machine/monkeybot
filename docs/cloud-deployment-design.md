@@ -156,7 +156,7 @@ The gateway's lifespan (`app.on_event("startup")`) calls `create_storage_backend
 
 ### What does NOT change
 
-- SQLite concrete types remain the default implementations (`SQLiteHistoryStore`, `SQLiteUsageStore`; `ConversationHistory` is kept as a backwards-compat alias where applicable).
+- SQLite concrete types remain the default implementations (`SQLiteHistoryStore`, `SQLiteUsageStore`).
 - `DB_URL` env var stays as-is. `sqlite:///data/monkeybot.db` keeps working exactly as today.
 - `monkeybot.yaml` `db_url` key stays as-is.
 
@@ -289,7 +289,7 @@ Cloud Run / ECS can point YAML at `memory_storage_uri: gcs://…` or `s3://…` 
 | [`docker/Dockerfile`](../docker/Dockerfile) | Single production-style image: `WORKDIR /app`, `scaffold.run_new()` during build for `/app/monkeybot_config/` and workspace layout, optional `EXTRAS` at build time. No `PYTHONPATH` to `src/` — runtime uses the installed package only. Creates `/app/data` and `/app/skills`; `HEALTHCHECK` hits `/health`. |
 | [`docker-compose.yml`](../docker-compose.yml) | Baseline **monkeybot** service: build `docker/Dockerfile`, `EXTRAS` from host env (default `gemini`), bind-mount `./data` → `/app/data`, optional `.env` (`required: false`), port `${PORT:-8080}:8080`. No duplicate inline `environment:` — defaults come from scaffolded `/app/monkeybot_config/monkeybot.yaml` (paths already use `./data/...`). |
 | [`.env.example`](../.env.example) | Documents secrets and common overrides for Docker users (`GEMINI_API_KEY`, `EXTRAS`, `OPENSANDBOX_CONFIG`, optional `DB_URL` / `MEMORY_STORAGE_URI`). |
-| [`docker/opensandbox.docker.toml`](../docker/opensandbox.docker.toml) | Default OpenSandbox server config for the compose overlay; **`allowed_host_paths = ["/tmp"]`** only (safe default). Broader paths (e.g. repo on home volume) → set `OPENSANDBOX_CONFIG` to your own file (e.g. `playground/agent/monkeybot_config/opensandbox.docker.toml`). |
+| [`docker/opensandbox.docker.toml`](../docker/opensandbox.docker.toml) | Default OpenSandbox server config for the compose overlay; **`allowed_host_paths = ["/tmp"]`** only (safe default). Broader paths (e.g. repo on home volume) → set `OPENSANDBOX_CONFIG` to your own file (e.g. `demo_agent/monkeybot_config/opensandbox.docker.toml`). |
 | [`docker/docker-compose.sandbox.yml`](../docker/docker-compose.sandbox.yml) | Overlay: **opensandbox-server** sidecar + rebuild monkeybot with `EXTRAS=gemini,sandbox` + `SANDBOX_*` env. Mount: `${OPENSANDBOX_CONFIG:-./docker/opensandbox.docker.toml}` → `/etc/opensandbox/config.toml`. |
 
 **Build arg `EXTRAS`** (unchanged contract):

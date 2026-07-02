@@ -7,15 +7,12 @@ from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 from monkeybot.core.llm.provider import (
-    Done,
     Message,
     ProviderEvent,
-    TextDelta,
-    ToolCall,
-    UsageEvent,
 )
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._openai_compat import (
+    count_openai_compat_input_tokens,
     iter_openai_compat_stream,
     messages_to_openai,
     openai_messages_token_count,
@@ -39,9 +36,6 @@ __all__ = [
     "_openai_tools_token_count",
 ]
 
-# Keep these names importable to avoid breaking the unused-import linter
-_ = (Done, TextDelta, ToolCall, UsageEvent)  # consumed via _openai_compat re-export
-
 
 class OpenAIProvider:
     """OpenAI chat models using the official ``openai`` async client."""
@@ -63,6 +57,9 @@ class OpenAIProvider:
     ) -> None:
         if not os.environ.get("OPENAI_API_KEY"):
             raise ValueError("OPENAI_API_KEY is not set")
+        # ``cache_enabled`` is accepted for constructor-contract symmetry with the
+        # other providers (Story 1) but is currently inert here: OpenAI's chat
+        # completions request shape has no cache_control-equivalent field to set.
         self._cache_enabled = cache_enabled
         sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens)
         self._temperature = sampling.temperature
@@ -74,19 +71,17 @@ class OpenAIProvider:
         tools: Sequence[ToolDef],
         *,
         model: str,
+        thinking_budget: int | None = None,
     ) -> int:
+        del thinking_budget
         import tiktoken  # noqa: PLC0415
 
         msgs = list(messages)
-        system, oai_messages = messages_to_openai(msgs)
-        if system:
-            oai_messages = [{"role": "system", "content": system}, *oai_messages]
-        tool_defs = openai_tools(tools) if tools else []
         try:
             enc = tiktoken.encoding_for_model(model)
         except KeyError:
             enc = tiktoken.get_encoding("cl100k_base")
-        return openai_messages_token_count(enc, oai_messages) + openai_tools_token_count(enc, tool_defs)
+        return count_openai_compat_input_tokens(enc, msgs, tools)
 
     async def stream(
         self,
@@ -117,5 +112,11 @@ class OpenAIProvider:
             kwargs["tools"] = openai_tools(tools)
             kwargs["parallel_" + "tool" + "_calls"] = True
 
-        async for event in iter_openai_compat_stream(client, kwargs):
+        async for event in iter_openai_compat_stream(
+            client,
+            kwargs,
+            provider="openai",
+            n_messages=len(messages),
+            n_tools=len(tools),
+        ):
             yield event

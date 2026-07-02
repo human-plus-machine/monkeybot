@@ -8,14 +8,12 @@ import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Literal
+from datetime import UTC, datetime
+from typing import Any
 
-import yaml
+from assertions import evaluate_assertions
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-
 from models import (
     CreateRunRequest,
     CreateRunResponse,
@@ -26,6 +24,7 @@ from models import (
     TurnResult,
 )
 from runner import run_scenario_live
+from scenario_loader import load_disk_scenarios, parse_scenario_yaml
 from scorer import push_langfuse_scores, score_scenario
 from store import EvalStore
 from ws_manager import WSManager
@@ -33,55 +32,9 @@ from ws_manager import WSManager
 logging.basicConfig(level=logging.INFO)
 _log = logging.getLogger(__name__)
 
-EVAL_ROOT = Path(__file__).resolve().parent
-
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _parse_scenario_yaml(text: str, *, sid: str | None, source: Literal["builtin", "operator"]) -> Scenario:
-    data = yaml.safe_load(text) or {}
-    if not isinstance(data, dict):
-        raise ValueError("YAML must be a mapping at the top level")
-    stem = (sid or str(data.get("id") or "").strip() or uuid.uuid4().hex[:12]).strip()
-    messages = data.get("messages") or []
-    if not isinstance(messages, list) or not messages:
-        raise ValueError("messages must be a non-empty list of strings")
-    if not all(isinstance(m, str) for m in messages):
-        raise ValueError("each message must be a string")
-    tags = data.get("tags") or []
-    if isinstance(tags, str):
-        tags = [tags]
-    if not isinstance(tags, list):
-        raise ValueError("tags must be a list of strings")
-    assertions = data.get("assertions") or {}
-    if assertions is not None and not isinstance(assertions, dict):
-        raise ValueError("assertions must be a mapping")
-    return Scenario(
-        id=stem,
-        description=str(data.get("description") or ""),
-        tags=[str(t) for t in tags],
-        messages=list(messages),
-        assertions=dict(assertions),
-        source=source,
-    )
-
-
-def load_disk_scenarios() -> list[Scenario]:
-    scenarios: list[Scenario] = []
-    root = EVAL_ROOT / "scenarios"
-    if not root.is_dir():
-        return scenarios
-    for path in sorted(root.glob("*.yaml")):
-        raw = path.read_text(encoding="utf-8")
-        scenarios.append(_parse_scenario_yaml(raw, sid=path.stem, source="builtin"))
-    op = root / "operator"
-    if op.is_dir():
-        for path in sorted(op.glob("*.yaml")):
-            raw = path.read_text(encoding="utf-8")
-            scenarios.append(_parse_scenario_yaml(raw, sid=path.stem, source="operator"))
-    return scenarios
+    return datetime.now(UTC).isoformat()
 
 
 @asynccontextmanager
@@ -143,17 +96,28 @@ async def _execute_run(app: FastAPI, run_id: str, scenario: Scenario) -> None:
         scores, details, pass_rate = await asyncio.to_thread(score_scenario, scenario, turns_final)
         await asyncio.to_thread(push_langfuse_scores, turns_final, scores, pass_rate)
 
+        run_for_assertions = EvalRun(
+            run_id=run_id, scenario_id=scenario.id, turns=turns_final, scores=scores
+        )
+        requirement_failures = evaluate_assertions(scenario, run_for_assertions)
+
         patch_run(
             turns=turns_final,
             scores=scores,
             score_details=details,
             pass_rate=pass_rate,
-            status="completed",
+            status="failed" if requirement_failures else "completed",
             error=None,
+            requirement_failures=requirement_failures,
         )
         await broadcast(
             "scores",
-            {"scores": scores, "pass_rate": pass_rate, "details": details},
+            {
+                "scores": scores,
+                "pass_rate": pass_rate,
+                "details": details,
+                "requirement_failures": requirement_failures,
+            },
         )
         await broadcast("status", {"status": "completed"})
     except Exception as exc:
@@ -223,7 +187,7 @@ def list_scenarios() -> list[Scenario]:
     return store.list_scenarios()
 
 
-@app.get("/api/scenarios/{scenario_id}", response_model=Scenario)
+@app.get("/api/scenarios/{scenario_id:path}", response_model=Scenario)
 def get_scenario(scenario_id: str) -> Scenario:
     store: EvalStore = app.state.store
     sc = store.get_scenario(scenario_id)
@@ -236,7 +200,7 @@ def get_scenario(scenario_id: str) -> Scenario:
 def create_scenario(body: CreateScenarioBody) -> Scenario:
     store: EvalStore = app.state.store
     try:
-        scenario = _parse_scenario_yaml(body.yaml, sid=None, source="operator")
+        scenario = parse_scenario_yaml(body.yaml, sid=None, source="operator")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     existing = store.get_scenario(scenario.id)
@@ -248,14 +212,14 @@ def create_scenario(body: CreateScenarioBody) -> Scenario:
     return scenario
 
 
-@app.put("/api/scenarios/{scenario_id}", response_model=Scenario)
+@app.put("/api/scenarios/{scenario_id:path}", response_model=Scenario)
 def put_scenario(scenario_id: str, body: CreateScenarioBody) -> Scenario:
     store: EvalStore = app.state.store
     existing = store.get_scenario(scenario_id)
     if existing is not None and existing.source == "builtin":
         raise HTTPException(status_code=403, detail="Built-in scenarios cannot be updated")
     try:
-        scenario = _parse_scenario_yaml(body.yaml, sid=scenario_id, source="operator")
+        scenario = parse_scenario_yaml(body.yaml, sid=scenario_id, source="operator")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if scenario.id != scenario_id:
@@ -264,7 +228,7 @@ def put_scenario(scenario_id: str, body: CreateScenarioBody) -> Scenario:
     return scenario
 
 
-@app.delete("/api/scenarios/{scenario_id}", status_code=204)
+@app.delete("/api/scenarios/{scenario_id:path}", status_code=204)
 def delete_scenario(scenario_id: str) -> None:
     store: EvalStore = app.state.store
     existing = store.get_scenario(scenario_id)

@@ -1,0 +1,11 @@
+# No pre-seeded memory fixture exists in demo_agent/workspace/data/memory/, so this states a
+# fact and immediately asks about it in the same session rather than assuming prior content —
+# a judge-only version of this scenario had nothing deterministic to recall and was flaky.
+description: "A fact stated earlier in the same session is recalled when asked about later"
+tags: [memory, recall]
+messages:
+  - "Remember this: the mascot project's internal codename is 'silver-fox'."
+  - "What is the mascot project's internal codename?"
+assertions:
+  metrics: [response_relevancy]
+  response_contains: ["silver-fox"]

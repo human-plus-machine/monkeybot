@@ -1,0 +1,8 @@
+description: "Agent delegates a focused sub-task to a subagent via the task tool and the run completes"
+tags: [subagents]
+messages:
+  - "Delegate this to a subagent: have it list the top-level files in this workspace and summarize what kind of project it is. Report back what it found."
+assertions:
+  metrics: [response_relevancy]
+  required_tools: [task]
+  min_subagent_calls: 1

@@ -1,0 +1,10 @@
+description: >
+  Deliberate-error case: agent is asked to read a file that does not exist. It should still
+  call read_file (proving the tool wiring works) and recover gracefully in the turn rather
+  than crashing the loop.
+tags: [tools, core, error-path]
+messages:
+  - "Read the file definitely-not-a-real-file-in-this-repo.md and tell me what's in it."
+assertions:
+  metrics: [response_relevancy]
+  required_tools: [read_file]

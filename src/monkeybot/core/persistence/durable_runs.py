@@ -148,26 +148,7 @@ class SQLiteRunStore:
         scratch_dir: Path,
     ) -> None:
         """Insert a ``pending`` row for worker-pool consumption."""
-        now_ms = int(time.time() * 1000)
-        await self._conn.execute(
-            """
-            INSERT INTO subagent_runs(
-                run_id, parent_run_id, script, envelope_json,
-                status, result_json, error_json, started_at, finished_at, scratch_dir,
-                worker_id, claimed_at
-            )
-            VALUES (?, ?, ?, ?, 'pending', NULL, NULL, ?, NULL, ?, NULL, NULL)
-            """,
-            (
-                run_id,
-                parent_run_id,
-                script,
-                envelope.to_json(),
-                now_ms,
-                str(scratch_dir),
-            ),
-        )
-        await self._conn.commit()
+        await self._record_run("pending", run_id, parent_run_id, script, envelope, scratch_dir)
 
     async def record_started(
         self,
@@ -178,6 +159,17 @@ class SQLiteRunStore:
         scratch_dir: Path,
     ) -> None:
         """Insert a ``running`` row with envelope metadata."""
+        await self._record_run("running", run_id, parent_run_id, script, envelope, scratch_dir)
+
+    async def _record_run(
+        self,
+        status: str,
+        run_id: str,
+        parent_run_id: str | None,
+        script: str,
+        envelope: SubagentEnvelope,
+        scratch_dir: Path,
+    ) -> None:
         now_ms = int(time.time() * 1000)
         await self._conn.execute(
             """
@@ -186,13 +178,14 @@ class SQLiteRunStore:
                 status, result_json, error_json, started_at, finished_at, scratch_dir,
                 worker_id, claimed_at
             )
-            VALUES (?, ?, ?, ?, 'running', NULL, NULL, ?, NULL, ?, NULL, NULL)
+            VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, NULL, NULL)
             """,
             (
                 run_id,
                 parent_run_id,
                 script,
                 envelope.to_json(),
+                status,
                 now_ms,
                 str(scratch_dir),
             ),
@@ -291,7 +284,3 @@ class SQLiteRunStore:
         if row is None:
             return None
         return _tuple_to_run_row(tuple(row))
-
-
-# Backwards-compat alias — DurableRunStore was renamed to SQLiteRunStore in Step 1.5.
-DurableRunStore = SQLiteRunStore

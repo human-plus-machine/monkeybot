@@ -25,6 +25,7 @@ from monkeybot.core.context.curator import (
     run_context_curator,
 )
 from monkeybot.core.context.tool_output_policy import resolve_tool_budget
+from monkeybot.core.context.tool_result_ingress import summarize_tool_result_text
 from monkeybot.core.context.tool_shapers import (
     exceeds_tool_output_budget,
     shape_messages_tool_results,
@@ -44,6 +45,7 @@ from monkeybot.core.llm.usage import Usage
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.messages.tool_integrity import repair_tool_turn_integrity
 from monkeybot.core.persistence.backends import HistoryStore
+from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.prompts.prompt import compose_system_prompt, latest_user_message_text
 from monkeybot.core.runtime.context_budget import (
     ContextBudgeter,
@@ -305,9 +307,9 @@ def _flatten_tool_result_for_summary(resp: ToolResponse) -> str:
     parts: list[str] = []
     for b in resp.result:
         if isinstance(b, Text):
-            parts.append(b.text)
+            parts.append(summarize_tool_result_text(b.text))
         else:
-            parts.append(json.dumps(b.to_dict(), sort_keys=True))
+            parts.append(summarize_tool_result_text(json.dumps(b.to_dict(), sort_keys=True)))
     return "".join(parts) or "(empty)"
 
 
@@ -359,7 +361,7 @@ def _stream_thinking_budget(
     resolved_messages: Sequence[Message],
 ) -> int | None:
     """Per-call thinking budget override; None keeps the provider default."""
-    if provider.name not in ("gemini", "claude"):
+    if provider.name not in ("gemini", "claude", "ollama"):
         return None
     raw = os.environ.get("MONKEYBOT_RESUME_THINKING_BUDGET", "").strip()
     if not raw:
@@ -379,8 +381,14 @@ async def _provider_prompt_input_tokens(
     tools: Sequence[ToolDef],
     *,
     model: str,
+    thinking_budget: int | None = None,
 ) -> int:
-    return await provider.count_input_tokens(messages, tools, model=model)
+    return await provider.count_input_tokens(
+        messages,
+        tools,
+        model=model,
+        thinking_budget=thinking_budget,
+    )
 
 
 async def _prompt_input_tokens_for_history(
@@ -678,13 +686,13 @@ async def run(
     history: HistoryStore,
     inspectors: list[ToolInspector],
     tool_executor: ToolExecutorPort,
-    run_id: str | None = None,
     cancelled: asyncio.Event | None = None,
     max_turns: int | None = None,
     hook_manager: HookManager | None = None,
     curator_provider: Provider | None = None,
     attachment_store: AttachmentStore | None = None,
     attachment_catalog: SessionAttachmentCatalog | None = None,
+    transcript_writer: TranscriptWriter | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Stream agent events for one user message; ends with ``TurnComplete`` (never raises).
 
@@ -697,7 +705,6 @@ async def run(
     ``curator_provider`` is an optional dedicated provider for context curation (e.g. with
     ``thinking_budget=0``). Falls back to ``provider`` when not supplied.
     """
-    del run_id  # reserved for durable runs / gateway wiring
     usage = Usage()
     trace_id_capture: list[str | None] = [None]
     blocks = _normalize_user_content(user_content)
@@ -727,6 +734,7 @@ async def run(
             trace_id_out=trace_id_capture,
             attachment_store=attachment_store,
             attachment_catalog=attachment_catalog,
+            transcript_writer=transcript_writer,
         ):
             yield evt
     except asyncio.CancelledError:
@@ -735,7 +743,11 @@ async def run(
             if cur is not None and getattr(cur, "uncancel", None):
                 cur.uncancel()
         except Exception:
-            pass
+            logger.warning(
+                "uncancel cleanup failed %s",
+                kv(request_id=ctx.request_id, thread_id=ctx.thread_id),
+                exc_info=True,
+            )
         yield Error(request_id=ctx.request_id, error="Request cancelled")
     except Exception as exc:
         logger.exception(
@@ -776,6 +788,7 @@ async def _run_inner(
     trace_id_out: list[str | None] | None = None,
     attachment_store: AttachmentStore | None = None,
     attachment_catalog: SessionAttachmentCatalog | None = None,
+    transcript_writer: TranscriptWriter | None = None,
 ) -> AsyncIterator[AgentEvent]:
     from monkeybot.observability.spans import set_run_output, span_run
 
@@ -797,6 +810,7 @@ async def _run_inner(
             last_assistant=last_assistant,
             attachment_store=attachment_store,
             attachment_catalog=attachment_catalog,
+            transcript_writer=transcript_writer,
         ):
             yield evt
         set_run_output(last_assistant[0])
@@ -829,6 +843,7 @@ async def _run_inner_core(
     last_assistant: list[str],
     attachment_store: AttachmentStore | None = None,
     attachment_catalog: SessionAttachmentCatalog | None = None,
+    transcript_writer: TranscriptWriter | None = None,
 ) -> AsyncIterator[AgentEvent]:
     from monkeybot.observability.spans import (
         begin_turn_span,
@@ -861,6 +876,7 @@ async def _run_inner_core(
 
     turn_index = 0
     needs_followup_after_tools = False
+    provider_messages_written = 0
     # Final assistant write is backgrounded off the streaming path; awaited at the
     # turn tail before any history load/reset so the row is never lost.
     assistant_write_task: asyncio.Task[None] | None = None
@@ -980,8 +996,13 @@ async def _run_inner_core(
             )
             provider_messages = _messages_for_provider(system, resolved_messages)
 
+            stream_thinking = _stream_thinking_budget(provider, resolved_messages)
             preflight = await _provider_prompt_input_tokens(
-                provider, provider_messages, ctx.tools, model=ctx.model
+                provider,
+                provider_messages,
+                ctx.tools,
+                model=ctx.model,
+                thinking_budget=stream_thinking,
             )
             usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, preflight)
             cap = max(1, int(ctx.context_window_tokens * _SUMMARY_TRIGGER_RATIO))
@@ -1052,7 +1073,11 @@ async def _run_inner_core(
                 )
                 provider_messages = _messages_for_provider(system, resolved_messages)
                 post = await _provider_prompt_input_tokens(
-                    provider, provider_messages, ctx.tools, model=ctx.model
+                    provider,
+                    provider_messages,
+                    ctx.tools,
+                    model=ctx.model,
+                    thinking_budget=_stream_thinking_budget(provider, resolved_messages),
                 )
                 usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, post)
 
@@ -1089,8 +1114,28 @@ async def _run_inner_core(
             llm_cached = 0
             llm_cache_read = 0
             llm_cache_creation = 0
+            if transcript_writer is not None:
+                if provider_messages_written >= len(provider_messages):
+                    delta_messages = provider_messages
+                    message_offset = 0
+                    messages_reset = provider_messages_written > 0
+                else:
+                    delta_messages = provider_messages[provider_messages_written:]
+                    message_offset = provider_messages_written
+                    messages_reset = False
+                include_tools = turn_index == 1 or messages_reset
+                await transcript_writer.write_provider_request(
+                    request_id=ctx.request_id,
+                    inner_turn=turn_index,
+                    model=ctx.model,
+                    messages=[m.to_dict() for m in delta_messages],
+                    message_offset=message_offset,
+                    messages_reset=messages_reset,
+                    tools=[dataclasses.asdict(t) for t in ctx.tools] if include_tools else None,
+                    thinking_budget=stream_thinking,
+                )
+                provider_messages_written = len(provider_messages)
             try:
-                stream_thinking = _stream_thinking_budget(provider, resolved_messages)
                 async with span_llm(ctx=ctx):
                     async with aclosing(
                         cast(
@@ -1140,6 +1185,25 @@ async def _run_inner_core(
                     set_llm_io(
                         prompt=_provider_messages_prompt_summary(provider_messages),
                         completion=assistant_text or "",
+                    )
+                if transcript_writer is not None:
+                    await transcript_writer.write_provider_response(
+                        request_id=ctx.request_id,
+                        inner_turn=turn_index,
+                        model=ctx.model,
+                        text=assistant_text,
+                        thinking=thinking_text,
+                        tool_requests=[
+                            {"call_id": tc.call_id, "name": tc.name, "args": tc.args}
+                            for tc in pending.values()
+                        ],
+                        usage={
+                            "input_tokens": llm_input,
+                            "output_tokens": llm_output,
+                            "cached_tokens": llm_cached,
+                            "cache_read_tokens": llm_cache_read,
+                            "cache_creation_tokens": llm_cache_creation,
+                        },
                     )
                 logger.debug(
                     "provider stream done %s",
@@ -1260,6 +1324,7 @@ async def _run_inner_core(
                             tool=call.name,
                             label=call.name,
                             args=dict(call.args),
+                            parse_error=call.parse_error,
                         )
                         result_evt, tool_resp = _tool_outcome(
                             call, ctx.request_id, ToolExecutionResult.err(call.parse_error)
@@ -1395,13 +1460,17 @@ async def _run_inner_core(
                     ),
                 )
 
-                if not parallel_tasks:
-                    call = allowed_exec[0]
+                async def _execute_one_tool_call(
+                    call: ToolCall,
+                    *,
+                    _ctx: TurnContext = ctx,
+                ) -> ToolExecutionResult:
+                    nonlocal pre_tool_extra_next
                     logger.debug(
                         "tool execute %s",
                         kv(
-                            request_id=ctx.request_id,
-                            thread_id=ctx.thread_id,
+                            request_id=_ctx.request_id,
+                            thread_id=_ctx.thread_id,
                             tool=call.name,
                             call_id=call.call_id,
                         ),
@@ -1409,14 +1478,14 @@ async def _run_inner_core(
                     async with span_tool(
                         tool_name=call.name,
                         tool_call_id=call.call_id,
-                        thread_id=ctx.thread_id,
-                        request_id=ctx.request_id,
+                        thread_id=_ctx.thread_id,
+                        request_id=_ctx.request_id,
                         args=dict(call.args),
                     ):
                         pre_tool_payload = await _fire_hook(
                             hook_manager,
                             event=HookEvent.PRE_TOOL,
-                            ctx=ctx,
+                            ctx=_ctx,
                             timeout_s=_HOOK_PRE_TOOL_TIMEOUT_S,
                             tool_name=call.name,
                             tool_args=dict(call.args),
@@ -1427,46 +1496,48 @@ async def _run_inner_core(
                             )
                         _record_tool_hook_span_event("pre_tool", call.name)
                         try:
-                            tool_result = await tool_executor.execute(
-                                call=call, ctx=ctx
-                            )
+                            tool_result = await tool_executor.execute(call=call, ctx=_ctx)
                         except asyncio.CancelledError:
-                            yield Error(request_id=ctx.request_id, error="Request cancelled")
-                            needs_followup_after_tools = False
-                            return
+                            raise
                         except Exception as exc:
                             logger.warning(
                                 "tool execution failed %s",
                                 kv(
-                                    request_id=ctx.request_id,
-                                    thread_id=ctx.thread_id,
+                                    request_id=_ctx.request_id,
+                                    thread_id=_ctx.thread_id,
                                     tool=call.name,
                                     call_id=call.call_id,
                                 ),
                                 exc_info=True,
                             )
                             tool_result = ToolExecutionResult.err(str(exc))
-                        record_tool_outcome(
+                        result_summary = (
                             _blocks_to_sse_summary(tool_result.blocks)
                             if tool_result.error is None
-                            else None,
-                            tool_result.error,
+                            else None
                         )
+                        record_tool_outcome(result_summary, tool_result.error)
                         await _fire_hook(
                             hook_manager,
                             event=HookEvent.POST_TOOL,
-                            ctx=ctx,
+                            ctx=_ctx,
                             timeout_s=0,
                             tool_name=call.name,
                             tool_args=dict(call.args),
-                            tool_result=(
-                                _blocks_to_sse_summary(tool_result.blocks)
-                                if tool_result.error is None
-                                else None
-                            ),
+                            tool_result=result_summary,
                             tool_error=tool_result.error,
                         )
                         _record_tool_hook_span_event("post_tool", call.name)
+                    return tool_result
+
+                if not parallel_tasks:
+                    call = allowed_exec[0]
+                    try:
+                        tool_result = await _execute_one_tool_call(call)
+                    except asyncio.CancelledError:
+                        yield Error(request_id=ctx.request_id, error="Request cancelled")
+                        needs_followup_after_tools = False
+                        return
 
                     event, response = _tool_outcome(call, ctx.request_id, tool_result)
                     yield event
@@ -1487,74 +1558,8 @@ async def _run_inner_core(
                         _sem: asyncio.Semaphore = sem,
                         _ctx: TurnContext = ctx,
                     ) -> tuple[ToolCall, ToolExecutionResult]:
-                        async with _sem, span_tool(
-                            tool_name=call.name,
-                            tool_call_id=call.call_id,
-                            thread_id=_ctx.thread_id,
-                            request_id=_ctx.request_id,
-                            args=dict(call.args),
-                        ):
-                            pre_tool_payload = await _fire_hook(
-                                hook_manager,
-                                event=HookEvent.PRE_TOOL,
-                                ctx=_ctx,
-                                timeout_s=_HOOK_PRE_TOOL_TIMEOUT_S,
-                                tool_name=call.name,
-                                tool_args=dict(call.args),
-                            )
-                            if pre_tool_payload is not None and pre_tool_payload.inject_text:
-                                nonlocal pre_tool_extra_next
-                                pre_tool_extra_next = _combine_extras(
-                                    pre_tool_extra_next, pre_tool_payload.inject_text
-                                )
-                            _record_tool_hook_span_event("pre_tool", call.name)
-                            logger.debug(
-                                "tool execute %s",
-                                kv(
-                                    request_id=_ctx.request_id,
-                                    thread_id=_ctx.thread_id,
-                                    tool=call.name,
-                                    call_id=call.call_id,
-                                ),
-                            )
-                            try:
-                                tool_result = await tool_executor.execute(call=call, ctx=_ctx)
-                            except asyncio.CancelledError:
-                                raise
-                            except Exception as exc:
-                                logger.warning(
-                                    "tool execution failed %s",
-                                    kv(
-                                        request_id=_ctx.request_id,
-                                        thread_id=_ctx.thread_id,
-                                        tool=call.name,
-                                        call_id=call.call_id,
-                                    ),
-                                    exc_info=True,
-                                )
-                                tool_result = ToolExecutionResult.err(str(exc))
-                            record_tool_outcome(
-                                _blocks_to_sse_summary(tool_result.blocks)
-                                if tool_result.error is None
-                                else None,
-                                tool_result.error,
-                            )
-                            await _fire_hook(
-                                hook_manager,
-                                event=HookEvent.POST_TOOL,
-                                ctx=_ctx,
-                                timeout_s=0,
-                                tool_name=call.name,
-                                tool_args=dict(call.args),
-                                tool_result=(
-                                    _blocks_to_sse_summary(tool_result.blocks)
-                                    if tool_result.error is None
-                                    else None
-                                ),
-                                tool_error=tool_result.error,
-                            )
-                            _record_tool_hook_span_event("post_tool", call.name)
-                            return (call, tool_result)
+                        async with _sem:
+                            return (call, await _execute_one_tool_call(call, _ctx=_ctx))
 
                     try:
                         outcomes = await asyncio.gather(

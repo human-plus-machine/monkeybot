@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import sys
 import types
 from pathlib import Path
+from types import ModuleType
+from typing import Any
 
 import pytest
 
 from monkeybot.core.llm.provider import UsageEvent
+from monkeybot.core.types.interfaces import LLMError
 from monkeybot.providers.gemini import GeminiProvider, _usage_from_response
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -115,3 +119,43 @@ def test_request_config_identical_regardless_of_cache_flag() -> None:
     remainder = src[init_end:]
     assert init_block.count("self._cache_enabled") == 1
     assert "self._cache_enabled" not in remainder
+
+
+@pytest.mark.asyncio
+async def test_stream_error_logs_before_wrapping(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class FakeModels:
+        async def generate_content_stream(self, **_kwargs: Any) -> Any:
+            raise RuntimeError("boom")
+
+    class FakeClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            self.aio = types.SimpleNamespace(models=FakeModels())
+
+    fake_google = ModuleType("google")
+    fake_genai = ModuleType("google.genai")
+    fake_types = ModuleType("google.genai.types")
+    fake_genai.Client = FakeClient  # type: ignore[attr-defined]
+    fake_types.GenerateContentConfig = lambda **kw: kw  # type: ignore[attr-defined]
+    fake_types.ThinkingConfig = lambda **kw: kw  # type: ignore[attr-defined]
+    fake_types.Tool = lambda **kw: kw  # type: ignore[attr-defined]
+    fake_types.FunctionDeclaration = lambda **kw: kw  # type: ignore[attr-defined]
+    fake_google.genai = fake_genai  # type: ignore[attr-defined]
+    fake_genai.types = fake_types  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "google", fake_google)
+    monkeypatch.setitem(sys.modules, "google.genai", fake_genai)
+    monkeypatch.setitem(sys.modules, "google.genai.types", fake_types)
+    monkeypatch.setenv("VERTEX_AI_PROJECT_ID", "p")
+
+    provider = GeminiProvider()
+    with (
+        caplog.at_level("WARNING", logger="monkeybot.providers.gemini"),
+        pytest.raises(LLMError, match="boom"),
+    ):
+        [ev async for ev in provider.stream([], [], model="gemini-2.5-flash")]
+
+    assert "Gemini stream error" in caplog.text
+    assert "provider=gemini" in caplog.text
+    assert "model=gemini-2.5-flash" in caplog.text

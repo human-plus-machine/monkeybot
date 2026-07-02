@@ -26,7 +26,14 @@ cd cli && uv sync && uv run monkeybot new --dest .. --yes && cd ..
 uv run python -m monkeybot.gateway.main
 ```
 
-For a browser chat UI, run **`./run-playground.sh`** from the repo root and open `http://localhost:5173`. Full setup (config, `.env`, MCP, Docker): **[Getting Started](docs/getting-started.md)**.
+For a self-contained example agent (own `pyproject.toml` + `.venv`, depends on this harness via an editable path — never modifies it), see **[`demo_agent/`](demo_agent/)**:
+
+```bash
+cd demo_agent && uv sync
+cd ../cli && uv run monkeybot chat --cwd ../demo_agent
+```
+
+Full setup (config, `.env`, MCP, Docker): **[Getting Started](docs/getting-started.md)**.
 
 ## CLI (`monkeybot`)
 
@@ -110,7 +117,7 @@ Run workers with `python -m monkeybot.subagents.worker` (production) or `MONKEYB
 
 There is no claim heartbeat yet — subagent runs longer than `MONKEYBOT_WORKER_STALE_CLAIM_MS` risk duplicate execution. Increase the limit for long LLM workloads or keep runs under the window.
 
-**Playground Docker:** local smoke test with harness + workspace paths — `docker-compose.playground.yml` + [`docker/Dockerfile.playground`](docker/Dockerfile.playground). Optional Cloud Run helpers may live in gitignored `internal/` for private forks; see **Step 3** in that doc.
+**Docker:** baseline production-style image — [`docker/Dockerfile`](docker/Dockerfile) + [`docker-compose.yml`](docker-compose.yml). Optional Cloud Run helpers may live in gitignored `internal/` for private forks; see **Step 3** in that doc.
 ---
 
 **Config:** copy or scaffold **`monkeybot_config/monkeybot.yaml`** from **`monkeybot_config/monkeybot.example.yaml`**. Secrets go in **`.env`** — see the YAML header for variable names.
@@ -120,7 +127,7 @@ There is no claim heartbeat yet — subagent runs longer than `MONKEYBOT_WORKER_
 | Guide | Description |
 |---|---|
 | [Getting Started](docs/getting-started.md) | Install, configure the gateway, and exercise sessions + SSE from the command line |
-| [SSE gateway and custom UI](docs/sse-gateway-ui.md) | HTTP + SSE endpoints, event types, CORS/proxy notes, and the playground chat UI flow |
+| [SSE gateway and custom UI](docs/sse-gateway-ui.md) | HTTP + SSE endpoints, event types, CORS/proxy notes, and how to wire your own frontend |
 | [Skills](docs/skills.md) | Skill directory layout and `SKILL.md` discovery |
 | [Model Context Protocol](docs/mcp.md) | MCP configuration, env interpolation, OAuth2 flows, and diagnostics |
 | [Cloud deployment](docs/cloud-deployment-design.md) | Container and serverless deploy patterns for GCP, AWS, and more |
@@ -137,6 +144,8 @@ There is no claim heartbeat yet — subagent runs longer than `MONKEYBOT_WORKER_
 | **GCP Secret Manager** | Production | Production secrets management |
 | **Google Chat** | Optional | Workspace Add-on interface (when deployed) |
 | **OpenAI** | Supported | `OpenAIProvider` (`monkeybot[openai]`) via `get_provider_config()` |
+| **Ollama** | Supported | `OllamaProvider` for local models (`monkeybot[ollama]`), no API key required |
+| **NVIDIA (build.nvidia.com)** | Supported | `NvidiaProvider` (`monkeybot[nvidia]`); free `NVIDIA_API_KEY`, `MODEL_PROVIDER=nvidia` |
 | **Anthropic Claude** | Supported | `ClaudeProvider` (`monkeybot[claude]`) via `get_provider_config()` |
 | **Anthropic via Vertex AI** | Supported | `VertexClaudeProvider` (`anthropic[vertex]`) |
 | **AWS Bedrock** | Supported | `BedrockClaudeProvider` (`monkeybot[bedrock]`); `MODEL_PROVIDER=aws_bedrock` |
@@ -175,6 +184,18 @@ Contributions are welcome. You can help by:
 - Opening pull requests for fixes and improvements.
 
 Run checks before submitting: `uv run pytest && uv run ruff check . && uv run mypy src/`
+
+### Releasing
+
+`develop` is the working branch; `main` always reflects the latest release.
+
+1. Anyone runs the **Prepare release** workflow (Actions tab → Prepare release → Run workflow), choosing `core` or `cli` and a version bump. It bumps the package's `pyproject.toml`, moves the `CHANGELOG.md` `Unreleased` section into a dated entry on a `release/<package>-v<version>` branch, and opens a PR from that branch into `main` (`develop` itself is untouched until the PR merges, so an abandoned release PR leaves no trace).
+2. An admin reviews and **merges the PR** (branch protection on `main` restricts who can merge — see below). Use a regular merge commit, not squash, so `main`'s history and the release tag line up with what was reviewed.
+3. The **Publish release** workflow runs automatically on that merge: it tags the new version, creates a GitHub Release from the changelog entry, and merges `main` back into `develop` so the two branches don't drift apart.
+
+One-time setup (repo Settings → Branches → add rule for `main`): require a pull request before merging, and restrict who can push to matching branches to Admins. That's the only access control needed — anyone can prepare a release, only admins can promote it to `main`.
+
+**Before relying on this:** `develop` and `main` currently have diverged history (independent commits on each side). Reconcile them once with a manual merge before running the first automated release, or the first release PR may show unrelated changes or conflicts. `CHANGELOG.md` is shared across both packages — `core` and `cli` versions are bumped independently but their release notes live in the same file. The current versions already on `main` (`core` 2.0.0, `cli` 0.1.7) predate this tooling and have no changelog entry, so the first `publish` run intentionally skips tagging them rather than creating a release with empty notes; tagging starts from the next real version bump.
 
 ## License
 

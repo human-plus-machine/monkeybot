@@ -15,6 +15,8 @@ SUPPORTED_MODEL_PROVIDERS = frozenset(
         "anthropic",
         "vertex_anthropic",
         "huggingface",
+        "ollama",
+        "nvidia",
         "fake",
         "aws_bedrock",
     }
@@ -31,6 +33,8 @@ SUPPORTED_YAML_MODEL_PROVIDERS = frozenset(
         "vertex_claude",
         "vertex_anthropic",
         "huggingface",
+        "ollama",
+        "nvidia",
         "fake",
         "aws_bedrock",
     }

@@ -1,0 +1,11 @@
+description: "Multi-turn conversation stays coherent across turns"
+tags: [multi_turn, coherence]
+messages:
+  - "I need help with my Python project"
+  - "It's a FastAPI application"
+  - "How should I structure the routes?"
+assertions:
+  metrics: [response_relevancy, conversational_coherence]
+  # Deterministic floor alongside the judge metrics: the final answer must actually engage
+  # with the FastAPI/routing context carried across turns, not just sound plausible in isolation.
+  response_contains: ["route", "router", "fastapi", "endpoint"]

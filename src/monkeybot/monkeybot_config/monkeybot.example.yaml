@@ -10,6 +10,8 @@
 #   VERTEX_AI_LOCATION, GOOGLE_CLOUD_LOCATION, GEMINI_API_KEY,
 #   OPENAI_API_KEY, ANTHROPIC_API_KEY,
 #   ANTHROPIC_VERTEX_PROJECT_ID, ANTHROPIC_VERTEX_REGION,
+#   OLLAMA_BASE_URL (default http://localhost:11434, no API key needed),
+#   NVIDIA_API_KEY (free key from https://build.nvidia.com),
 #   TAVILY_API_KEY, FIRECRAWL_API_KEY, SANDBOX_API_KEY,
 #   MONKEYBOT_TOOL_DENIED_PATTERNS, MONKEYBOT_CORS_ALLOW_ORIGINS, MONKEYBOT_CONFIG, …
 #
@@ -24,6 +26,11 @@ runtime:
   port: 8080
   # Optional second port env (same as PORT if unset in code paths that read GATEWAY_PORT)
   # gateway_port: 8080
+  # Internal debugging only (not agent-visible): write every AgentEvent and raw
+  # provider request/response for each session to
+  # {workspace_root}/.monkeybot/transcripts/{session_id}.ndjson. Opt-in; default off.
+  # (env: MONKEYBOT_TRANSCRIPT_ENABLED)
+  transcript_enabled: false
 
 paths:
   agent_md: ./monkeybot_config/AGENT.md
@@ -37,12 +44,13 @@ paths:
   workspace_root: ./workspace
 
 model:
-  # gemini | openai | anthropic | vertex-claude | fake
+  # gemini | openai | anthropic | vertex-claude | huggingface | ollama | nvidia | aws_bedrock | fake
   provider: gemini
   name: gemini-3-flash
   temperature: 0.7
   max_tokens: 60000
   # Gemini: -1 = model default, 0 = off, N = token budget
+  # Ollama (Gemma 4, Qwen3, …): -1 = server default, 0 = off (reasoning_effort: none)
   thinking_budget: -1
   # Prompt caching of the stable prefix (AGENT.md + harness + tools). Default ON.
   # Native per provider: Anthropic uses explicit cache_control; OpenAI/Gemini cache

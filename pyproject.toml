@@ -34,6 +34,8 @@ vertex-claude = ["anthropic[vertex]>=0.40.0"]
 bedrock = ["anthropic[bedrock]>=0.40.0", "boto3>=1.34.0"]
 openai = ["openai>=1.0", "tiktoken>=0.7.0"]
 huggingface = ["openai>=1.0", "tiktoken>=0.7.0"]
+ollama = ["openai>=1.0", "tiktoken>=0.7.0"]
+nvidia = ["openai>=1.0", "tiktoken>=0.7.0"]
 sandbox = ["opensandbox>=0.1.7"]
 scheduler = ["croniter>=2.0"]
 postgres = ["asyncpg>=0.29.0"]
@@ -42,6 +44,9 @@ gcs = ["google-cloud-storage>=2.18.0"]
 aws = ["boto3>=1.34.0"]
 council = ["google-cloud-storage>=2.18.0"]
 web-search = ["ddgs>=7.0"]
+# Live E2E eval report (evals/report.py) — deepeval/langfuse are otherwise only needed
+# inside the standalone evals/ service image (see evals/pyproject.toml + evals/Dockerfile).
+evals = ["deepeval>=3.0.0", "langfuse>=3.0.0"]
 observability = [
     "opentelemetry-api>=1.28",
     "opentelemetry-sdk>=1.28",
@@ -72,10 +77,6 @@ default-groups = ["dev"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/monkeybot"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"src/monkeybot/monkeybot_config" = "monkeybot/monkeybot_config"
-"src/monkeybot/scaffold" = "monkeybot/scaffold"
 
 [tool.ruff]
 line-length = 100

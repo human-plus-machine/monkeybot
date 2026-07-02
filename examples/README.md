@@ -38,7 +38,7 @@ cp -r examples/skills/diagnostics/ ./.agents/skills/
 ```python
 from skills.diagnostics.diagnostics import run_diagnostics
 
-# Invoke the async skill entry point directly (or load via SkillLoader per docs)
+# Invoke the async skill entry point directly
 result = await run_diagnostics(check_type="full")
 ```
 

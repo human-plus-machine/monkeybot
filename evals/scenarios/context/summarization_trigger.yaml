@@ -1,0 +1,32 @@
+# Crossing the real summarization threshold needs enough accumulated token volume. Set
+# MODEL_CONTEXT_WINDOW to a small value (e.g. 8000) on the agent process running this scenario
+# so SUMMARY_TRIGGER_RATIO * context_window is reachable within a handful of turns — don't rely
+# on the production 200k default, or this scenario will pass without ever exercising curation.
+description: "Long multi-turn conversation crosses the real summarization threshold"
+tags: [context, summarization]
+messages:
+  - >
+    I'm going to describe a large system in detail over several messages, please keep track.
+    Component 1: the ingestion service reads events from a queue, validates schema, deduplicates
+    by event id, and writes to a staging table. It retries transient failures up to 5 times with
+    exponential backoff, and dead-letters anything that still fails after that. It emits metrics
+    for queue lag, validation failure rate, and staging write latency.
+  - >
+    Component 2: the enrichment service reads from the staging table, joins against a reference
+    dataset keyed by account id, and attaches geography, plan tier, and risk score. It caches the
+    reference dataset in memory with a 10 minute TTL, and falls back to a direct lookup on cache
+    miss. It emits metrics for join hit rate, enrichment latency, and cache hit rate.
+  - >
+    Component 3: the scoring service takes enriched events, runs them through a rules engine and
+    a small ML model, and produces a combined risk score. It batches requests to the model in
+    groups of 50 with a 200ms max wait, and falls back to rules-only scoring if the model call
+    times out. It emits metrics for model latency, fallback rate, and score distribution.
+  - >
+    Component 4: the notification service reads scored events above a threshold, groups them by
+    account, applies a rate limit per account per hour, and sends alerts via email or webhook
+    depending on account preference. It logs every suppressed alert with a reason code. It emits
+    metrics for alert volume, suppression rate, and delivery latency by channel.
+  - "Given everything I described, what were the retry and fallback behaviors across all four components?"
+assertions:
+  metrics: [response_relevancy, conversational_coherence]
+  min_summarizations: 1

@@ -45,7 +45,9 @@ async def test_openai_request_kwargs_identical_regardless_of_flag(
             pass
 
     async def _record_stream(
-        _client: Any, kwargs: dict[str, Any]
+        _client: Any,
+        kwargs: dict[str, Any],
+        **_metadata: Any,
     ) -> AsyncIterator[ProviderEvent]:
         captured.append(dict(kwargs))
         if False:  # pragma: no cover — make this an async generator

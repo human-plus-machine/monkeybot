@@ -17,10 +17,10 @@ _LEGACY_SCHEMA_MESSAGE = """Legacy conversation_history schema detected (tool_na
 tool_call_id columns present). The on-disk format changed in the
 typed-message-content release. Choose one:
 
-  Dev / playground:
-    rm -f playground/agent/workspace/data/monkeybot.db
-    rm -f playground/agent/workspace/data/monkeybot.db-shm
-    rm -f playground/agent/workspace/data/monkeybot.db-wal
+  Dev / demo agent:
+    rm -f demo_agent/workspace/data/monkeybot.db
+    rm -f demo_agent/workspace/data/monkeybot.db-shm
+    rm -f demo_agent/workspace/data/monkeybot.db-wal
 
   Other deployments: there is no automated migration. The legacy format is
   a JSON tail inside a TEXT column; transcribing it to typed blocks must
@@ -72,6 +72,33 @@ SCHEMA_DDLS: Final[tuple[str, ...]] = (
     WHERE status IN ('pending','running')""",
     "CREATE INDEX IF NOT EXISTS idx_usage_thread ON turn_usage(thread_id, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_usage_cost ON turn_usage(created_at)",
+    """CREATE TABLE IF NOT EXISTS scheduled_loops (
+    loop_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    interval_ms INTEGER NOT NULL,
+    max_ticks INTEGER,
+    max_runtime_ms INTEGER,
+    skip_if_busy INTEGER NOT NULL DEFAULT 1,
+    tick_index INTEGER NOT NULL DEFAULT 0,
+    next_tick_at_ms INTEGER NOT NULL,
+    started_at_ms INTEGER NOT NULL,
+    last_tick_at_ms INTEGER,
+    last_error TEXT,
+    stop_reason TEXT,
+    tick_in_flight INTEGER NOT NULL DEFAULT 0,
+    worker_id TEXT,
+    claimed_at_ms INTEGER
+)""",
+    """CREATE INDEX IF NOT EXISTS idx_scheduled_loops_due
+    ON scheduled_loops(status, tick_in_flight, next_tick_at_ms)
+    WHERE status = 'active'""",
+    """CREATE TABLE IF NOT EXISTS session_turn_locks (
+    session_id TEXT PRIMARY KEY,
+    request_id TEXT,
+    claimed_at_ms INTEGER
+)""",
 )
 
 
@@ -179,9 +206,6 @@ async def _ensure_subagent_runs_claim_columns(conn: aiosqlite.Connection) -> Non
     if "claimed_at" not in names:
         await conn.execute("ALTER TABLE subagent_runs ADD COLUMN claimed_at INTEGER")
     await conn.commit()
-
-
-_ensure_schema = apply_schema
 
 
 async def open_connection(db_url: str | None = None) -> aiosqlite.Connection:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -30,6 +31,15 @@ class ToolOutputBudget:
 
 
 # Sensible defaults when YAML omits ``tool_output`` entries.
+_MCP_DEFAULT_TOOL_BUDGET = ToolOutputBudget(
+    content_type="auto",
+    max_output_lines=120,
+    max_array_items=40,
+)
+
+_known_mcp_tools: frozenset[str] = frozenset()
+
+
 _BUILTIN_TOOL_BUDGETS: dict[str, ToolOutputBudget] = {
     "run_command": ToolOutputBudget(
         content_type="logs",
@@ -189,9 +199,38 @@ def cached_tool_output_policies() -> dict[str, ToolOutputBudget]:
     return load_tool_output_policies()
 
 
+def register_mcp_tool_names(names: Iterable[str]) -> None:
+    """Record prefixed MCP tool names for output-budget resolution (updated on MCP connect)."""
+    global _known_mcp_tools
+    added = frozenset(n for n in names if n)
+    if not added:
+        return
+    _known_mcp_tools = _known_mcp_tools | added
+
+
+def unregister_mcp_server_tools(server_name: str) -> None:
+    """Drop every ``server__*`` tool registered for ``server_name`` (MCP disconnect)."""
+    global _known_mcp_tools
+    if not server_name:
+        return
+    prefix = f"{server_name}__"
+    _known_mcp_tools = frozenset(n for n in _known_mcp_tools if not n.startswith(prefix))
+
+
+def reset_mcp_tool_registry_for_tests() -> None:
+    """Clear the MCP tool registry (tests only)."""
+    global _known_mcp_tools
+    _known_mcp_tools = frozenset()
+
+
 def resolve_tool_budget(tool_name: str) -> ToolOutputBudget | None:
-    """Return configured budget for ``tool_name``, or None when no policy applies."""
-    return cached_tool_output_policies().get(tool_name)
+    """Return configured budget for ``tool_name``, or MCP default for registered MCP tools."""
+    merged = cached_tool_output_policies()
+    if tool_name in merged:
+        return merged[tool_name]
+    if tool_name in _known_mcp_tools:
+        return merged.get("*") or _MCP_DEFAULT_TOOL_BUDGET
+    return None
 
 
 def validate_tool_output_budgets(
@@ -215,13 +254,17 @@ def validate_tool_output_budgets(
 
 def reset_tool_output_policy_cache_for_tests() -> None:
     cached_tool_output_policies.cache_clear()
+    reset_mcp_tool_registry_for_tests()
 
 
 __all__ = [
     "ToolOutputBudget",
     "load_tool_output_policies",
     "parse_tool_output_section",
+    "register_mcp_tool_names",
     "resolve_tool_budget",
+    "reset_mcp_tool_registry_for_tests",
     "reset_tool_output_policy_cache_for_tests",
+    "unregister_mcp_server_tools",
     "validate_tool_output_budgets",
 ]
