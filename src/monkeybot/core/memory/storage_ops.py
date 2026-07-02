@@ -5,9 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from monkeybot.core.memory.index_format import INDEX_FILENAME, parse_index_entry_lines
 from monkeybot.core.workspace.protocol import WorkspaceStorage
-
-INDEX_FILENAME = "INDEX.md"
 
 
 class MemoryPromotionError(RuntimeError):
@@ -15,7 +14,7 @@ class MemoryPromotionError(RuntimeError):
 
 
 def _parse_index_lines(raw: str) -> list[str]:
-    return [stripped for line in raw.splitlines() if (stripped := line.strip())]
+    return parse_index_entry_lines(raw)
 
 
 async def async_load_index(storage: WorkspaceStorage) -> list[str]:

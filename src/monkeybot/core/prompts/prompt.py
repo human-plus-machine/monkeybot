@@ -6,6 +6,7 @@ from collections.abc import Sequence
 
 from monkeybot.core.attachments.catalog import AttachmentRecord
 from monkeybot.core.context import TurnContext
+from monkeybot.core.context.memory_prompt import MemoryPromptSelection
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.prompts.harness_prompt import (
     emission_style_terse_from_env,
@@ -92,8 +93,7 @@ def compose_system_prompt(
     ctx: TurnContext,
     *,
     chat_messages: Sequence[Message] | None = None,
-    use_curated_memory: bool = False,
-    curated_memory_index: list[str] | None = None,
+    memory_selection: MemoryPromptSelection | None = None,
     attachment_catalog: Sequence[AttachmentRecord] | None = None,
 ) -> str:
     """Build the system string: AGENT.md, harness, attachments, then volatile tail.
@@ -103,19 +103,27 @@ def compose_system_prompt(
     current-request anchor) so implicit and explicit prompt caching can hit a contiguous
     prefix across turns.
 
-    When ``use_curated_memory`` is True, ``curated_memory_index`` replaces
-    ``ctx.memory_index`` in the prompt (may be empty to omit the memory section).
-    Skill discovery is via the ``list_skills`` tool (see harness guidance).
+    When ``memory_selection`` is set, its lines (and optional search nudge) are used
+    instead of the full ``ctx.memory_index``. Skill discovery is via ``list_skills``.
     """
     task = _current_request_block(chat_messages)
 
-    if use_curated_memory:
-        mem_lines = list(curated_memory_index or [])
+    if memory_selection is not None:
+        mem_lines = list(memory_selection.lines)
     else:
         mem_lines = list(ctx.memory_index)
 
     memory_bullets = "\n".join(f"- {line}" for line in mem_lines) if mem_lines else ""
     mem_block = f"\n\n## Memory index\n{memory_bullets}" if memory_bullets else ""
+    if memory_selection is not None and memory_selection.nudge_search:
+        shown = len(memory_selection.lines)
+        total = memory_selection.total_lines
+        mem_block += (
+            f"\n\n## Memory\n"
+            f"Showing {shown} of {total} index entries "
+            f"(coverage {memory_selection.coverage:.0%}, confidence {memory_selection.confidence:.0%}). "
+            "Use `search_memory` with keywords when the task may depend on older or unstated context."
+        )
 
     include_task = any(t.name == "task" for t in ctx.tools)
     include_web_search = any(t.name == "web_search" for t in ctx.tools)

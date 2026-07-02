@@ -77,14 +77,17 @@ Trims memory injected into context. `enabled: true` by default.
 
 | Field | Default | Notes |
 |---|---|---|
-| `memory_threshold` | `8` | Curate memory past this many index lines |
-| `memory_token_threshold` | `2000` | Also curate when estimated memory-index tokens exceed this |
+| `mode` | `hybrid` | `window` (recent slice only), `curator` (LLM pick), or `hybrid` (window + curator when token-heavy) |
+| `memory_window_lines` | `12` | Recent index lines injected in window/hybrid modes |
+| `memory_index_cap` | `200` | Organizer keeps this many INDEX.md entries; older rows move to `INDEX.archive.md` |
+| `memory_threshold` | `8` | Curate when index line count exceeds this |
+| `memory_token_threshold` | `2000` | Also curate when estimated index tokens exceed this |
 | `curator_model` | `gemini-3-flash` | Separate small model; empty = main model |
 | `timeout_sec` | `10` | Curator call timeout |
-| `max_memory_lines` | `12` | Cap injected memory |
-| `search_max_hits` | `8` | Cap search hits considered |
+| `max_memory_lines` | `12` | Cap curator-selected lines |
+| `search_max_hits` | `8` | Cap search hits in curator pool |
 
-Change when controlling cost or when too much/little memory is being injected. Set `enabled: false` to skip entirely. Skills are discovered via `list_skills` (see harness), not injected into the system prompt.
+When the prompt shows fewer entries than exist, a structural confidence score triggers a `search_memory` nudge. Skills are discovered via `list_skills`.
 
 ## `memory_hook`
 

@@ -182,35 +182,45 @@ class TestUpdateIndex:
         index_path = root / "INDEX.md"
         assert index_path.exists()
         content = index_path.read_text()
-        assert "## episodic/" in content
         assert "2026-03-18-event.md" in content
+        assert content.strip().startswith("# Memory Index")
 
     @pytest.mark.asyncio
-    async def test_appends_to_existing_section(self, tmp_path):
+    async def test_appends_entries_in_recency_order(self, tmp_path):
         organizer, root = make_organizer(
             tmp_path,
             provider=FakeProvider(["tags: new\nsummary: New event"]),
         )
         index_path = root / "INDEX.md"
         index_path.write_text(
-            "# Memory Index\n\n## episodic/\n- [[episodic/old.md]] | tags: old | Old event\n"
+            "# Memory Index\n\n- [[episodic/old.md]] | tags: old | Old event\n"
         )
         entries = [IndexEntry("episodic", "new.md", "new", "New event")]
         await organizer._update_index(entries)
         content = index_path.read_text()
         assert "old.md" in content
         assert "new.md" in content
+        assert content.index("old.md") < content.index("new.md")
 
     @pytest.mark.asyncio
-    async def test_creates_new_section_if_missing(self, tmp_path):
+    async def test_archives_overflow_when_cap_exceeded(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MEMORY_INDEX_CAP", "2")
         organizer, root = make_organizer(
             tmp_path,
-            provider=FakeProvider(["tags: data\nsummary: Campaign result"]),
+            provider=FakeProvider(["tags: c\nsummary: Third"]),
         )
         index_path = root / "INDEX.md"
-        index_path.write_text("# Memory Index\n\n## episodic/\n")
-        entries = [IndexEntry("semantic", "fact.md", "data", "Campaign result")]
+        index_path.write_text(
+            "# Memory Index\n\n"
+            "- [[episodic/a.md]] | tags: a | A\n"
+            "- [[episodic/b.md]] | tags: b | B\n"
+        )
+        entries = [IndexEntry("episodic", "c.md", "c", "Third")]
         await organizer._update_index(entries)
-        content = index_path.read_text()
-        assert "## semantic/" in content
-        assert "fact.md" in content
+        index_content = index_path.read_text()
+        assert "a.md" not in index_content
+        assert "b.md" in index_content
+        assert "c.md" in index_content
+        archive = root / "INDEX.archive.md"
+        assert archive.exists()
+        assert "a.md" in archive.read_text()

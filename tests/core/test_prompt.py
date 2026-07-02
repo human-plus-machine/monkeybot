@@ -3,6 +3,7 @@
 import pytest
 
 from monkeybot.core.context import SkillRef, TurnContext
+from monkeybot.core.context.memory_prompt import MemoryPromptSelection
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.prompts.prompt import compose_system_prompt
 from monkeybot.providers._utils import split_system_prompt_for_cache
@@ -30,7 +31,7 @@ def _minimal_ctx(
     )
 
 
-def test_compose_curated_memory_omits_unlisted_lines() -> None:
+def test_compose_memory_selection_omits_unlisted_lines() -> None:
     ctx = _minimal_ctx(
         memory_index=["a", "b"],
         skills=[
@@ -38,13 +39,19 @@ def test_compose_curated_memory_omits_unlisted_lines() -> None:
             SkillRef(name="s2", description="d2"),
         ],
     )
-    out = compose_system_prompt(
-        ctx,
-        use_curated_memory=True,
-        curated_memory_index=["a"],
+    selection = MemoryPromptSelection(
+        lines=["a"],
+        total_lines=2,
+        coverage=0.5,
+        confidence=0.5,
+        nudge_search=True,
+        use_custom_lines=True,
     )
+    out = compose_system_prompt(ctx, memory_selection=selection)
     assert "- a" in out
     assert "- b" not in out
+    assert "search_memory" in out
+    assert "Showing 1 of 2" in out
     assert "\n\n## Skills\n" not in out
     assert "s1" not in out
 
