@@ -133,6 +133,32 @@ def _core_tool_defs(
         },
         "required": ["path"],
     }
+    replace_schema: dict[str, object] = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Repo-relative path under the workspace root."},
+            "old_string": {
+                "type": "string",
+                "description": "Exact substring to replace (must match once).",
+            },
+            "new_string": {"type": "string", "description": "Replacement text (may be empty)."},
+        },
+        "required": ["path", "old_string", "new_string"],
+    }
+    glob_schema: dict[str, object] = {
+        "type": "object",
+        "properties": {
+            "pattern": {
+                "type": "string",
+                "description": "Glob pattern (e.g. **/*.html, *.md).",
+            },
+            "root": {
+                "type": "string",
+                "description": "Optional repo-relative directory to search under.",
+            },
+        },
+        "required": ["pattern"],
+    }
     search_schema: dict[str, object] = {
         "type": "object",
         "properties": {
@@ -213,6 +239,17 @@ def _core_tool_defs(
             "write_file",
             "Write or replace a UTF-8 text file under the workspace root.",
             write_schema,
+        ),
+        ToolDef(
+            "replace_in_file",
+            "Replace exactly one occurrence of old_string with new_string in an existing file. "
+            "Fails if old_string is missing or matches more than once.",
+            replace_schema,
+        ),
+        ToolDef(
+            "glob",
+            "List workspace file paths matching a glob pattern. Prefer over run_command+ls for discovery.",
+            glob_schema,
         ),
         ToolDef(
             "search_memory",

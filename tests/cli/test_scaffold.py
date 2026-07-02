@@ -36,4 +36,6 @@ def test_run_new_force_overwrites(tmp_path: Path) -> None:
     p = tmp_path / "monkeybot_config" / "AGENT.md"
     p.write_text("custom\n", encoding="utf-8")
     run_new(dest=tmp_path, force=True)
-    assert "Replace this file" in p.read_text(encoding="utf-8")
+    text = p.read_text(encoding="utf-8")
+    assert "Making files and code changes" in text
+    assert "custom" not in text

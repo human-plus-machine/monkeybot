@@ -12,7 +12,8 @@ HARNESS_TOOL_CALL_PROTOCOL = """
 - Invoke tools only through the provider's native function-call channel. Never emit tool invocations as JSON or pseudo-XML inside your assistant text; any such text is treated as a normal message and no tool will run.
 - After tool results are returned to you, your next response MUST be natural-language text that addresses the user's request using those results. Do not return another empty turn.
 - If you have nothing more to do, give a short final answer; do not stay silent.
-- **Evidence rule:** Never produce a substantive answer about content you were supposed to fetch but could not. If every tool path to that content failed or errored, tell the user what blocked you and what they need to supply — do not synthesize, guess, or hallucinate the missing content."""
+- **Evidence rule:** Never produce a substantive answer about content you were supposed to fetch but could not. If every tool path to that content failed or errored, tell the user what blocked you and what they need to supply — do not synthesize, guess, or hallucinate the missing content.
+- **Fulfillment rule:** When the user asks for a file or code change and the relevant tools are available, use them. Do not answer with only pasted code and manual save instructions."""
 
 
 _RUN_COMMAND_EXEC_NOTE_HOST = (
@@ -28,13 +29,22 @@ _HARNESS_BODY = """## MonkeyBot harness (fixed)
 
 This block is injected by the host every turn. Prefer the **active tool list** the model receives over any stale summary here.
 
+When workspace tools (`read_file`, `write_file`, `run_command`, …) appear in that list, you **have a writable workspace** — not a read-only chat window. Fulfill file and code requests with tools; do not paste full artifacts and instruct the user to save manually unless they explicitly asked to see code in chat.
+
 ### Core built-in tools (when present in the active tool list)
-- `read_file` / `write_file` — paths are **workspace-relative** (repository root the process uses).
+- `read_file` / `write_file` / `replace_in_file` / `glob` — paths are **workspace-relative** under the workspace root below. **`glob`** lists matching files; prefer it over `run_command` + `ls` for discovery. Do not substitute a code block in chat for a file deliverable.
 - `search_memory` — keyword search under the configured memory directory; prefer this over shell commands for any memory lookup.
 - `list_skills` — lists installed skills; read each skill's `SKILL.md` under the skills root for procedure.
-- `run_command` — allowlisted shell with optional `timeout` (seconds). {run_command_exec_note} Shell starts in **workspace root**; use the paths listed under Runtime paths below — do NOT guess directory names. `cd` is a shell builtin and cannot be used as a bare command; use `bash -c "cd <dir> && <cmd>"` instead.
+- `run_command` — allowlisted shell with optional `timeout` (seconds). {run_command_exec_note} Shell starts in **workspace root**; use the paths listed under Runtime paths below — do NOT guess directory names. `cd` is a shell builtin and cannot be used as a bare command; use `bash -c "cd <dir> && <cmd>"` instead. Pass **`argv` as a list** with the binary first (e.g. `{{"argv": ["ls", "."]}}`); do not pass `{{"command": "ls -R", "args": []}}` — that treats `ls -R` as the binary name.
 - `add_mcp_server` / `remove_mcp_server` — register or drop MCP stdio servers; new tools appear on later turns.
 {web_search_line}{task_line}
+### Workspace deliverables
+- **New file or full rewrite** → `write_file`.
+- **Targeted change to an existing file** → `read_file` then `replace_in_file` (`old_string` must match exactly once).
+- Tell the user the workspace-relative path when done.
+- **Do not claim** you lack filesystem access, cannot touch the user's machine, or are limited to "chat-only" output when workspace file tools are in the active tool list.
+- Chat text is for answers and brief excerpts — not a stand-in for a file the user asked you to produce.
+
 ### Built-in tool errors (recovery)
 - A tool **failed** whenever its response contains `ok: false` (or `is_error`), even if the call itself "succeeded" (e.g. `run_command` returns `exit_code != 0` with an `ok:false` JSON body in `stdout`). Read the result; do not treat a non-empty response as success.
 - Failed built-in tools often return **JSON** with `ok: false`, `error_kind` (`policy` | `validation` | `runtime`), `message`, and `hint`.

@@ -41,6 +41,11 @@ from monkeybot_cli.config_resolve import (
     resolve_agent_root,
     resolve_config,
 )
+from monkeybot_cli.opensandbox_lifecycle import (
+    ensure_opensandbox_for_agent,
+    is_sandbox_enabled,
+    server_url_from_config,
+)
 from monkeybot_cli.runtime_python import gateway_argv, resolve_runtime_python
 
 DEFAULT_PORT = 8080
@@ -717,6 +722,16 @@ def run_chat(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
+        _, cfg_doc = load_config_doc(config_path)
+        if is_sandbox_enabled(cfg_doc):
+            if not ensure_opensandbox_for_agent(
+                agent_root,
+                server_url=server_url_from_config(cfg_doc),
+            ):
+                print(
+                    f"{_DIM}Continuing without a healthy OpenSandbox — run_command may fail.{_RESET}",
+                    file=sys.stderr,
+                )
         port = args.port if args.port else _port_from_config(config_path)
         spawned = _spawn_gateway(config_path, agent_root, port)
         proc = spawned.proc

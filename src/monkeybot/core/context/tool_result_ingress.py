@@ -39,6 +39,23 @@ _REDACT_JSON_KEYS = frozenset(
     }
 )
 
+# Workspace tools return faithful text/JSON; skip ingress JSON field redaction (see CoreToolExecutor).
+SANITIZE_SKIP_TOOL_NAMES = frozenset(
+    {
+        "read_file",
+        "write_file",
+        "replace_in_file",
+        "glob",
+        "search_memory",
+        "list_skills",
+    }
+)
+
+
+def skip_tool_result_sanitize(tool_name: str) -> bool:
+    """True when tool results must not pass through ``sanitize_tool_result_text``."""
+    return tool_name in SANITIZE_SKIP_TOOL_NAMES
+
 
 def _int_from_env(name: str, default: int) -> int:
     raw = os.environ.get(name, "").strip()
@@ -242,12 +259,14 @@ def format_mcp_content_block(block: Any, *, sanitize: bool = True) -> str:
 
 
 __all__ = [
+    "SANITIZE_SKIP_TOOL_NAMES",
     "cap_tool_result_text",
     "dump_model_or_str",
     "format_mcp_binary_block",
     "format_mcp_content_block",
     "sanitize_enabled_from_env",
     "sanitize_tool_result_text",
+    "skip_tool_result_sanitize",
     "summarize_tool_result_text",
     "summary_tool_result_max_chars_from_env",
     "tool_result_max_chars_from_env",
