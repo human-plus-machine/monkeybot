@@ -126,7 +126,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 **Section order (cache-friendly):**
 
 1. **Stable prefix:** `AGENT.md` + harness + session attachments
-2. **Volatile tail:** memory index + skills + "Current request" anchor
+2. **Volatile tail:** memory index + "Current request" anchor
 
 **How it works:**
 - `compose_system_prompt()` builds the full system string each inner turn.
@@ -134,7 +134,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - Emission-style block (Levers 1–2: minimum code, terse prose) is injected into the stable prefix when `MONKEYBOT_EMISSION_STYLE=terse`; its dense agent-to-agent sub-block (Lever 3) is additionally gated on the `task` tool being active. Default off. See [§21](#21-emission-style-terse-output-guidance).
 - `HARNESS_TOOL_CALL_PROTOCOL` enforces native tool-call channel, evidence rule, no-repeat rule.
 - "Current request" block restates last user text when transcript continued with assistant/tool messages (skipped when user row is already last).
-- Curated memory replaces `ctx.memory_index` when context curation ran on turn 1; skills always come from `ctx.skills`.
+- Curated memory replaces `ctx.memory_index` when context curation ran on turn 1. Skills are discovered via `list_skills` (harness guidance).
 
 **Depends on:** `TurnContext`, `SandboxConfig.from_env()`, attachment catalog.
 
@@ -270,13 +270,12 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - Runs on **turn 1 only** when `CONTEXT_CURATION_ENABLED` and `memory_index` exceeds `memory_threshold`.
 - Separate `curator_provider` (gateway: `GeminiProvider(thinking_budget=0, max_tokens=1024)`).
 - Curated memory lines are **frozen for follow-up turns** in the same user message.
-- Skills are always injected in full from `ctx.skills` (use `list_skills` at runtime for discovery).
 
 **Depends on:** Curator provider, memory index.
 
 **Invariants:**
 - Subagents disable curation (`enable_context_curation=False`).
-- On curator failure, the memory index section is omitted (skills still appear).
+- On curator failure, the memory index section is omitted.
 
 ---
 

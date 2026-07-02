@@ -9,6 +9,12 @@ from monkeybot.core.prompts.harness_prompt import (
 )
 
 
+def test_harness_directs_list_skills_before_skill_work() -> None:
+    out = harness_fixed_context(include_task_tool=False)
+    assert "Call `list_skills` before working on tasks" in out
+    assert "skills root" in out
+
+
 def test_harness_includes_core_tools_and_protocol() -> None:
     out = harness_fixed_context(include_task_tool=False)
     assert "## MonkeyBot harness (fixed)" in out

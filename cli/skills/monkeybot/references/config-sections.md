@@ -83,7 +83,7 @@ Trims memory injected into context. `enabled: true` by default.
 | `max_memory_lines` | `12` | Cap injected memory |
 | `search_max_hits` | `8` | Cap search hits considered |
 
-Change when controlling cost or when too much/little memory is being injected. Set `enabled: false` to skip entirely. Skills are always injected in full.
+Change when controlling cost or when too much/little memory is being injected. Set `enabled: false` to skip entirely. Skills are discovered via `list_skills` (see harness), not injected into the system prompt.
 
 ## `memory_hook`
 

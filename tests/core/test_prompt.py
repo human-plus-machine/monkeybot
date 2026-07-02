@@ -30,7 +30,7 @@ def _minimal_ctx(
     )
 
 
-def test_compose_curated_memory_only_skills_always_full() -> None:
+def test_compose_curated_memory_omits_unlisted_lines() -> None:
     ctx = _minimal_ctx(
         memory_index=["a", "b"],
         skills=[
@@ -45,8 +45,8 @@ def test_compose_curated_memory_only_skills_always_full() -> None:
     )
     assert "- a" in out
     assert "- b" not in out
-    assert "s1" in out
-    assert "s2" in out
+    assert "\n\n## Skills\n" not in out
+    assert "s1" not in out
 
 
 def test_compose_no_chat_skips_current_request() -> None:
@@ -89,7 +89,7 @@ def test_compose_injects_current_request_after_tool_round() -> None:
     assert "Do the thing" in out
 
 
-def test_memory_and_skills_sections() -> None:
+def test_memory_section_without_skills_block() -> None:
     ctx = _minimal_ctx(
         memory_index=["Note A"],
         skills=[SkillRef(name="s1", description="d1")],
@@ -97,8 +97,8 @@ def test_memory_and_skills_sections() -> None:
     out = compose_system_prompt(ctx)
     assert "## Memory index" in out
     assert "- Note A" in out
-    assert "## Skills" in out
-    assert "- s1: d1" in out
+    assert "\n\n## Skills\n" not in out
+    assert "list_skills" in out
 
 
 def test_task_truncation() -> None:
@@ -110,7 +110,7 @@ def test_task_truncation() -> None:
     ]
     out = compose_system_prompt(ctx, chat_messages=msgs)
     assert "…(truncated)" in out
-    assert len(out) < len(long_user) + 5000
+    assert len(out) < len(long_user) + 5500
 
 
 def test_compose_harness_reflects_sandbox_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -239,9 +239,8 @@ def test_harness_precedes_volatile_sections() -> None:
     assert "## Memory index" not in stable
     assert "## Current request" not in stable
     mem_idx = volatile.index("## Memory index")
-    skills_idx = volatile.index("\n\n## Skills\n")
     current_idx = volatile.index("## Current request")
-    assert mem_idx < skills_idx < current_idx
+    assert mem_idx < current_idx
 
 
 @pytest.mark.parametrize("include_task", [True, False])

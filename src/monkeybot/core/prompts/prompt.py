@@ -99,13 +99,13 @@ def compose_system_prompt(
     """Build the system string: AGENT.md, harness, attachments, then volatile tail.
 
     ``ctx.agent_md`` is the operator-authored base prompt (typically from AGENT.md).
-    Stable sections (harness, attachments) precede volatile curation (memory, skills,
+    Stable sections (harness, attachments) precede volatile curation (memory,
     current-request anchor) so implicit and explicit prompt caching can hit a contiguous
     prefix across turns.
 
     When ``use_curated_memory`` is True, ``curated_memory_index`` replaces
     ``ctx.memory_index`` in the prompt (may be empty to omit the memory section).
-    Skills are always taken from ``ctx.skills``.
+    Skill discovery is via the ``list_skills`` tool (see harness guidance).
     """
     task = _current_request_block(chat_messages)
 
@@ -113,14 +113,9 @@ def compose_system_prompt(
         mem_lines = list(curated_memory_index or [])
     else:
         mem_lines = list(ctx.memory_index)
-    skill_refs = list(ctx.skills)
 
     memory_bullets = "\n".join(f"- {line}" for line in mem_lines) if mem_lines else ""
     mem_block = f"\n\n## Memory index\n{memory_bullets}" if memory_bullets else ""
-
-    skill_lines = [f"- {s.name}: {s.description}" for s in skill_refs]
-    skills_block = "\n".join(skill_lines)
-    skills_section = f"\n\n## Skills\n{skills_block}" if skills_block else ""
 
     include_task = any(t.name == "task" for t in ctx.tools)
     include_web_search = any(t.name == "web_search" for t in ctx.tools)
@@ -137,5 +132,5 @@ def compose_system_prompt(
     attachments = _session_attachments_block(attachment_catalog)
 
     stable = f"{ctx.agent_md}\n\n{harness}{attachments}"
-    volatile = f"{mem_block}{skills_section}{task}"
+    volatile = f"{mem_block}{task}"
     return f"{stable}{volatile}"
