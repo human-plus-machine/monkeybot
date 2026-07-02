@@ -17,7 +17,7 @@ from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.attachments.freeze import freeze_attachments_in_history
 from monkeybot.core.attachments.resolve import resolve_messages_for_provider
 from monkeybot.core.attachments.store import AttachmentStore
-from monkeybot.core.context import SkillRef, TurnContext, refresh_memory_index
+from monkeybot.core.context import TurnContext, refresh_memory_index
 from monkeybot.core.context.curator import (
     curation_enabled_from_env,
     curation_threshold_met,
@@ -158,18 +158,16 @@ def _system_message(
     ctx: TurnContext,
     chat_messages: Sequence[Message],
     *,
-    curated_memory_skills: bool = False,
+    use_curated_memory: bool = False,
     curated_memory_index: list[str] | None = None,
-    curated_skills: list[SkillRef] | None = None,
     attachment_catalog: SessionAttachmentCatalog | None = None,
 ) -> Message:
     """System message: AGENT.md base plus runtime memory, skills, harness, and task anchor."""
     body = compose_system_prompt(
         ctx,
         chat_messages=chat_messages,
-        curated_memory_skills=curated_memory_skills,
+        use_curated_memory=use_curated_memory,
         curated_memory_index=curated_memory_index,
-        curated_skills=curated_skills,
         attachment_catalog=(
             attachment_catalog.list_records() if attachment_catalog is not None else None
         ),
@@ -398,18 +396,16 @@ async def _prompt_input_tokens_for_history(
     provider: Provider,
     attachment_store: AttachmentStore | None,
     attachment_catalog: SessionAttachmentCatalog | None,
-    curated_memory_skills: bool = False,
+    use_curated_memory: bool = False,
     curated_memory_index: list[str] | None = None,
-    curated_skills: list[SkillRef] | None = None,
     extra_system_text: str | None = None,
 ) -> int:
     """Provider-accurate prompt size for history rows already persisted (e.g. post-assistant)."""
     system = _system_message(
         ctx,
         chat_messages,
-        curated_memory_skills=curated_memory_skills,
+        use_curated_memory=use_curated_memory,
         curated_memory_index=curated_memory_index,
-        curated_skills=curated_skills,
         attachment_catalog=attachment_catalog,
     )
     system = _append_extra_system_text(system, extra_system_text)
@@ -882,7 +878,6 @@ async def _run_inner_core(
     assistant_write_task: asyncio.Task[None] | None = None
     curated_injection = False
     curated_mem: list[str] = []
-    curated_sks: list[SkillRef] = []
     pre_turn_extra: str | None = None
     pre_tool_extra_next: str | None = None
 
@@ -962,10 +957,8 @@ async def _run_inner_core(
                 )
                 if parts.success:
                     curated_mem = list(parts.memory_lines)
-                    curated_sks = list(parts.skills)
                 else:
                     curated_mem = []
-                    curated_sks = []
                 logger.debug(
                     "context curation done %s",
                     kv(
@@ -973,7 +966,6 @@ async def _run_inner_core(
                         thread_id=ctx.thread_id,
                         turn=turn_index,
                         memory_lines=len(curated_mem),
-                        skills=len(curated_sks),
                         success=parts.success,
                     ),
                 )
@@ -981,9 +973,8 @@ async def _run_inner_core(
             system = _system_message(
                 ctx,
                 chat_messages,
-                curated_memory_skills=curated_injection,
+                use_curated_memory=curated_injection,
                 curated_memory_index=curated_mem,
-                curated_skills=curated_sks,
                 attachment_catalog=attachment_catalog,
             )
             combined_extra = _combine_extras(pre_turn_extra, pre_tool_extra_next)
@@ -1060,9 +1051,8 @@ async def _run_inner_core(
                 system = _system_message(
                     ctx,
                     chat_messages,
-                    curated_memory_skills=curated_injection,
+                    use_curated_memory=curated_injection,
                     curated_memory_index=curated_mem,
-                    curated_skills=curated_sks,
                     attachment_catalog=attachment_catalog,
                 )
                 system = _append_extra_system_text(system, pre_turn_extra)
@@ -1610,9 +1600,8 @@ async def _run_inner_core(
                         provider=provider,
                         attachment_store=attachment_store,
                         attachment_catalog=attachment_catalog,
-                        curated_memory_skills=curated_injection,
+                        use_curated_memory=curated_injection,
                         curated_memory_index=curated_mem,
-                        curated_skills=curated_sks,
                         extra_system_text=pre_turn_extra,
                     )
                 except Exception:

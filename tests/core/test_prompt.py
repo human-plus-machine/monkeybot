@@ -30,7 +30,7 @@ def _minimal_ctx(
     )
 
 
-def test_compose_curated_omits_unlisted_memory_and_skills() -> None:
+def test_compose_curated_memory_only_skills_always_full() -> None:
     ctx = _minimal_ctx(
         memory_index=["a", "b"],
         skills=[
@@ -40,14 +40,13 @@ def test_compose_curated_omits_unlisted_memory_and_skills() -> None:
     )
     out = compose_system_prompt(
         ctx,
-        curated_memory_skills=True,
+        use_curated_memory=True,
         curated_memory_index=["a"],
-        curated_skills=[SkillRef(name="s2", description="d2")],
     )
     assert "- a" in out
     assert "- b" not in out
+    assert "s1" in out
     assert "s2" in out
-    assert "s1" not in out
 
 
 def test_compose_no_chat_skips_current_request() -> None:

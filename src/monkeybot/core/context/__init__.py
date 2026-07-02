@@ -100,7 +100,7 @@ class TurnContext:
     memory: MemorySubsystem | None = None
     """Memory subsystem for index refresh and search; optional when memory is disabled."""
     context_curation_enabled: bool = True
-    """When True (parent agent), optional LLM curation may narrow memory/skills in the system prompt."""
+    """When True (parent agent), optional LLM curation may narrow memory in the system prompt."""
     sse_bus: PendingResponseBusPort | None = None
     """Gateway session bus for Story 5 pending UI responses; None for CLI / harness."""
     subagent_personas: tuple[tuple[str, str], ...] = ()

@@ -73,19 +73,17 @@ Required when `memory_storage_uri` is `gcs://…` or `provider: vertex-claude` (
 
 ## `context_curation`
 
-Trims skills/memory injected into context. `enabled: true` by default.
+Trims memory injected into context. `enabled: true` by default.
 
 | Field | Default | Notes |
 |---|---|---|
-| `skill_threshold` | `4` | Curate skills once this many are relevant |
-| `memory_threshold` | `8` | Curate memory past this many lines |
+| `memory_threshold` | `8` | Curate memory past this many index lines |
 | `curator_model` | `gemini-3-flash` | Separate small model; empty = main model |
 | `timeout_sec` | `10` | Curator call timeout |
 | `max_memory_lines` | `12` | Cap injected memory |
-| `max_skills` | `5` | Cap injected skills |
 | `search_max_hits` | `8` | Cap search hits considered |
 
-Change when controlling cost or when too much/little context is being injected. Set `enabled: false` to skip entirely.
+Change when controlling cost or when too much/little memory is being injected. Set `enabled: false` to skip entirely. Skills are always injected in full.
 
 ## `memory_hook`
 

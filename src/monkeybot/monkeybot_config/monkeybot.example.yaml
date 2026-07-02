@@ -82,13 +82,11 @@ gateway:
 context_curation:
   # When false, curation is skipped (env: CONTEXT_CURATION_ENABLED)
   enabled: true
-  skill_threshold: 4
   memory_threshold: 8
   # Separate small model for curator (env: CONTEXT_CURATOR_MODEL); empty uses main model id
   curator_model: gemini-3-flash
   timeout_sec: 10
   max_memory_lines: 12
-  max_skills: 5
   search_max_hits: 8
 
 emission:

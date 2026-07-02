@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from monkeybot.core.attachments.catalog import AttachmentRecord
-from monkeybot.core.context import SkillRef, TurnContext
+from monkeybot.core.context import TurnContext
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.prompts.harness_prompt import (
     emission_style_terse_from_env,
@@ -92,9 +92,8 @@ def compose_system_prompt(
     ctx: TurnContext,
     *,
     chat_messages: Sequence[Message] | None = None,
-    curated_memory_skills: bool = False,
+    use_curated_memory: bool = False,
     curated_memory_index: list[str] | None = None,
-    curated_skills: list[SkillRef] | None = None,
     attachment_catalog: Sequence[AttachmentRecord] | None = None,
 ) -> str:
     """Build the system string: AGENT.md, harness, attachments, then volatile tail.
@@ -104,17 +103,17 @@ def compose_system_prompt(
     current-request anchor) so implicit and explicit prompt caching can hit a contiguous
     prefix across turns.
 
-    When ``curated_memory_skills`` is True, ``curated_memory_index`` and ``curated_skills``
-    replace ctx memory/skills in the prompt (lists may be empty to omit those sections).
+    When ``use_curated_memory`` is True, ``curated_memory_index`` replaces
+    ``ctx.memory_index`` in the prompt (may be empty to omit the memory section).
+    Skills are always taken from ``ctx.skills``.
     """
     task = _current_request_block(chat_messages)
 
-    if curated_memory_skills:
+    if use_curated_memory:
         mem_lines = list(curated_memory_index or [])
-        skill_refs = list(curated_skills or [])
     else:
         mem_lines = list(ctx.memory_index)
-        skill_refs = list(ctx.skills)
+    skill_refs = list(ctx.skills)
 
     memory_bullets = "\n".join(f"- {line}" for line in mem_lines) if mem_lines else ""
     mem_block = f"\n\n## Memory index\n{memory_bullets}" if memory_bullets else ""

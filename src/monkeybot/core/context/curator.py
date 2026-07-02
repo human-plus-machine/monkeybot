@@ -1,4 +1,4 @@
-"""Optional secondary LLM pass to pick memory lines and skills for the system prompt."""
+"""Optional secondary LLM pass to pick memory lines for the system prompt."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from monkeybot.core.types.content_blocks import Text
-from monkeybot.core.context import SkillRef, TurnContext
+from monkeybot.core.context import TurnContext
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.llm.provider import Done, Message, Provider, TextDelta, ToolCall, UsageEvent
 
@@ -42,10 +42,9 @@ def _env_float(name: str, default: float) -> float:
 
 
 def curation_threshold_met(ctx: TurnContext) -> bool:
-    """Option C: run curator only when the catalog is large enough to benefit."""
-    skill_n = _env_int("CONTEXT_CURATION_SKILL_THRESHOLD", 4)
+    """Run curator only when the memory index is large enough to benefit."""
     mem_n = _env_int("CONTEXT_CURATION_MEMORY_THRESHOLD", 8)
-    return len(ctx.skills) > skill_n or len(ctx.memory_index) > mem_n
+    return len(ctx.memory_index) > mem_n
 
 
 def curator_model_id(ctx: TurnContext) -> str:
@@ -54,10 +53,9 @@ def curator_model_id(ctx: TurnContext) -> str:
 
 @dataclass(frozen=True)
 class CuratedPromptParts:
-    """Subset of memory lines and skills chosen for this user message (frozen for follow-up turns)."""
+    """Subset of memory lines chosen for this user message (frozen for follow-up turns)."""
 
     memory_lines: list[str]
-    skills: list[SkillRef]
     success: bool
     """False on timeout, provider error, invalid JSON, or invalid selections when the model proposed content."""
 
@@ -112,24 +110,6 @@ def _validate_memory_lines(selected: list[object], allowed: set[str], cap: int) 
     return out
 
 
-def _validate_skill_names(
-    names: list[object],
-    by_name: dict[str, SkillRef],
-    cap: int,
-) -> list[SkillRef]:
-    out: list[SkillRef] = []
-    for item in names:
-        if not isinstance(item, str):
-            continue
-        key = item.strip()
-        ref = by_name.get(key)
-        if ref is not None and ref not in out:
-            out.append(ref)
-        if len(out) >= cap:
-            break
-    return out
-
-
 async def run_context_curator(
     *,
     ctx: TurnContext,
@@ -138,7 +118,7 @@ async def run_context_curator(
     user_message: str,
     curator_provider: Provider | None = None,
 ) -> CuratedPromptParts:
-    """Call a small JSON-only completion to pick verbatim memory lines and skill names.
+    """Call a small JSON-only completion to pick verbatim memory lines.
 
     ``curator_provider`` is an optional dedicated provider instance tuned for this
     auxiliary call (e.g. ``thinking_budget=0, max_output_tokens=1024``). Falls back
@@ -146,7 +126,6 @@ async def run_context_curator(
     """
     _provider = curator_provider if curator_provider is not None else provider
     max_mem = max(1, _env_int("CONTEXT_CURATION_MAX_MEMORY_LINES", 12))
-    max_sk = max(1, _env_int("CONTEXT_CURATION_MAX_SKILLS", 5))
     search_hits = max(1, _env_int("CONTEXT_CURATION_SEARCH_MAX_HITS", 8))
     timeout_sec = max(1.0, _env_float("CONTEXT_CURATION_TIMEOUT_SEC", 10.0))
 
@@ -159,7 +138,6 @@ async def run_context_curator(
         memory_scan_sec = time.monotonic() - t_scan
 
     allowed_memory: set[str] = set(index_lines) | set(search_lines)
-    by_skill = {s.name: s for s in ctx.skills}
 
     catalog_user = []
     catalog_user.append("## MEMORY_POOL (each line is selectable verbatim)")
@@ -169,8 +147,6 @@ async def run_context_curator(
         catalog_user.append("\n## SEARCH_HIT_LINES (selectable verbatim)")
         for i, ln in enumerate(search_lines, start=len(index_lines) + 1):
             catalog_user.append(f"{i}. {ln}")
-    catalog_user.append("\n## SKILL_NAMES (pick from this set only)")
-    catalog_user.append(", ".join(sorted(by_skill.keys())) or "(none)")
     catalog_user.append("\n## USER_MESSAGE")
     catalog_user.append(user_message.strip() or "(empty)")
 
@@ -180,11 +156,10 @@ async def run_context_curator(
             Text(
                 text=(
                     "You narrow context for another assistant. Reply with ONLY a JSON object, no markdown fences. "
-                    f'Schema: {{"memory_lines": string[], "highlighted_skills": string[]}}. '
-                    f"At most {max_mem} memory strings and {max_sk} skill names. "
+                    f'Schema: {{"memory_lines": string[]}}. '
+                    f"At most {max_mem} memory strings. "
                     "Every element of memory_lines MUST be copied EXACTLY from MEMORY_POOL or SEARCH_HIT_LINES "
-                    "(same characters). Every element of highlighted_skills MUST exactly match a name from SKILL_NAMES. "
-                    "If nothing helps, return empty arrays."
+                    "(same characters). If nothing helps, return an empty array."
                 )
             )
         ],
@@ -215,55 +190,44 @@ async def run_context_curator(
     except TimeoutError:
         _log.warning(
             "[curation] provider stream exceeded %ss without Done (curator_model=%r "
-            "index_lines=%d search_pool_lines=%d skills=%d catalog_user_chars=%d "
+            "index_lines=%d search_pool_lines=%d catalog_user_chars=%d "
             "memory_tree_scan=%.2fs; timeout applies only to the LLM stream, not local prep)",
             timeout_sec,
             curator_model,
             len(index_lines),
             len(search_lines),
-            len(by_skill),
             catalog_chars,
             memory_scan_sec,
         )
-        return CuratedPromptParts([], [], success=False)
+        return CuratedPromptParts([], success=False)
     except Exception as exc:
         _log.warning("[curation] provider error: %s", exc)
-        return CuratedPromptParts([], [], success=False)
+        return CuratedPromptParts([], success=False)
 
     parsed = _parse_json_object(raw)
     if parsed is None:
         _log.warning("[curation] invalid JSON from model")
-        return CuratedPromptParts([], [], success=False)
+        return CuratedPromptParts([], success=False)
 
     raw_mem = parsed.get("memory_lines", [])
-    raw_sk = parsed.get("highlighted_skills", [])
     if not isinstance(raw_mem, list):
         raw_mem = []
-    if not isinstance(raw_sk, list):
-        raw_sk = []
 
     mem_out = _validate_memory_lines(raw_mem, allowed_memory, max_mem)
-    sk_out = _validate_skill_names(raw_sk, by_skill, max_sk)
 
-    proposed = bool(raw_mem or raw_sk)
-    if proposed and not mem_out and not sk_out:
-        _log.warning("[curation] model proposed memory/skills but none matched the allowed pool")
-        return CuratedPromptParts([], [], success=False)
+    proposed = bool(raw_mem)
+    if proposed and not mem_out:
+        _log.warning("[curation] model proposed memory lines but none matched the allowed pool")
+        return CuratedPromptParts([], success=False)
 
-    skill_names = [sk.name for sk in sk_out]
     _log.info(
-        "[curation] selected %d/%d memory lines, %d/%d skills (model=%s) | mem=%s skills=%s",
-        len(mem_out), len(index_lines) + len(search_lines),
-        len(sk_out), len(by_skill),
+        "[curation] selected %d/%d memory lines (model=%s) | mem=%s",
+        len(mem_out),
+        len(index_lines) + len(search_lines),
         curator_model,
         [ln.split("|")[-1].strip()[:60] if "|" in ln else ln[:60] for ln in mem_out],
-        skill_names,
     )
-    if mem_out:
-        for line in mem_out:
-            _log.debug("[curation] memory → %s", line)
-    if sk_out:
-        for sk in sk_out:
-            _log.debug("[curation] skill  → %s", sk.name)
+    for line in mem_out:
+        _log.debug("[curation] memory → %s", line)
 
-    return CuratedPromptParts(mem_out, sk_out, success=True)
+    return CuratedPromptParts(mem_out, success=True)
