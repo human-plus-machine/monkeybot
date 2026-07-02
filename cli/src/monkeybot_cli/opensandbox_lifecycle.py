@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -91,47 +93,57 @@ def _docker_available() -> bool:
     return proc.returncode == 0
 
 
-def _container_running(name: str) -> bool:
-    proc = _docker("container", "inspect", "-f", "{{.State.Running}}", name)
-    return proc.returncode == 0 and proc.stdout.strip() == "true"
+@dataclass(frozen=True)
+class _ContainerInfo:
+    running: bool
+    published_port: str
+    config_mounted: bool
+    config_sha256: str
 
 
-def _container_exists(name: str) -> bool:
+def _inspect_container(name: str) -> _ContainerInfo | None:
+    """Fetch all container state needed by :func:`ensure_opensandbox_for_agent`
+    in a single ``docker container inspect`` call, instead of one shell-out per
+    field."""
     proc = _docker("container", "inspect", name)
-    return proc.returncode == 0
-
-
-def _published_port(name: str) -> str:
-    proc = _docker("port", name, "8080/tcp")
     if proc.returncode != 0:
-        return ""
-    return proc.stdout.strip()
+        return None
+    try:
+        data = json.loads(proc.stdout)[0]
+    except (ValueError, IndexError, KeyError):
+        return None
 
+    state = data.get("State", {}) if isinstance(data, dict) else {}
+    running = bool(state.get("Running", False))
 
-def _config_mount_ok(name: str) -> bool:
-    proc = _docker(
-        "container",
-        "inspect",
-        name,
-        "--format",
-        "{{range .Mounts}}{{.Destination}};{{end}}",
+    ports = (
+        data.get("NetworkSettings", {}).get("Ports", {}) if isinstance(data, dict) else {}
     )
-    if proc.returncode != 0:
-        return False
-    return "/etc/opensandbox/config.toml" in proc.stdout
+    bindings = ports.get("8080/tcp") or []
+    published_port = ""
+    if bindings:
+        first = bindings[0] or {}
+        host_port = first.get("HostPort", "")
+        if host_port:
+            published_port = f"0.0.0.0:{host_port}"
 
-
-def _container_config_label(name: str) -> str:
-    proc = _docker(
-        "container",
-        "inspect",
-        name,
-        "--format",
-        '{{index .Config.Labels "mb.opensandbox.config_sha256"}}',
+    mounts = data.get("Mounts", []) if isinstance(data, dict) else []
+    config_mounted = any(
+        isinstance(m, dict) and m.get("Destination") == "/etc/opensandbox/config.toml"
+        for m in mounts
     )
-    if proc.returncode != 0:
-        return ""
-    return proc.stdout.strip()
+
+    labels = (
+        data.get("Config", {}).get("Labels", {}) if isinstance(data, dict) else {}
+    ) or {}
+    config_sha256 = str(labels.get("mb.opensandbox.config_sha256", ""))
+
+    return _ContainerInfo(
+        running=running,
+        published_port=published_port,
+        config_mounted=config_mounted,
+        config_sha256=config_sha256,
+    )
 
 
 def _remove_container(name: str) -> None:
@@ -215,20 +227,22 @@ def ensure_opensandbox_for_agent(
     wait_secs = float(os.environ.get("SANDBOX_HEALTH_WAIT_SECS", str(_DEFAULT_HEALTH_WAIT_SECS)))
     want_hash = _config_sha256(config_path)
 
-    if _container_exists(container):
-        published = _published_port(container)
-        port_ok = f":{host_port}" in published
-        if not _config_mount_ok(container) or not port_ok:
+    info = _inspect_container(container)
+    if info is not None:
+        port_ok = f":{host_port}" in info.published_port
+        if not info.config_mounted or not port_ok:
             print(f"monkeybot chat: recreating OpenSandbox container {container}", flush=True)
             _remove_container(container)
-        elif want_hash and _container_config_label(container) != want_hash:
+            info = None
+        elif want_hash and info.config_sha256 != want_hash:
             print(f"monkeybot chat: recreating OpenSandbox (config changed)", flush=True)
             _remove_container(container)
-        elif not _container_running(container):
+            info = None
+        elif not info.running:
             print(f"monkeybot chat: starting OpenSandbox container {container}", flush=True)
             _start_existing(container)
 
-    if _container_exists(container):
+    if info is not None:
         if _wait_healthy(host_port, timeout_secs=wait_secs):
             return True
         print("monkeybot chat: OpenSandbox unhealthy; recreating container", flush=True)
