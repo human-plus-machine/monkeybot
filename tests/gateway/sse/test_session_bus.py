@@ -6,8 +6,9 @@ import asyncio
 
 import pytest
 
+from monkeybot.core.context.memory_prompt import _curation_cache, reset_curation_cache_for_tests
 from monkeybot.core.runtime.events import Thinking
-from monkeybot.gateway.sse.session_bus import SessionBus
+from monkeybot.gateway.sse.session_bus import SessionBus, SessionRegistry
 from monkeybot.gateway.sse.sse import agent_event_to_wire_dict, format_active_requests
 
 
@@ -66,4 +67,45 @@ def test_active_requests_frame_has_no_id_line() -> None:
     frame = format_active_requests(["a"])
     assert frame.startswith("data:")
     assert not frame.startswith("id:")
+
+
+def test_registry_remove_drops_session_and_returns_true() -> None:
+    reg = SessionRegistry()
+    reg.create("s1", agent_md=None, created_at_ms=0)
+    assert reg.get("s1") is not None
+
+    assert reg.remove("s1") is True
+    assert reg.get("s1") is None
+
+
+def test_registry_remove_unknown_session_returns_false() -> None:
+    reg = SessionRegistry()
+    assert reg.remove("nope") is False
+
+
+def test_registry_remove_evicts_curation_cache_entry() -> None:
+    """SessionRegistry.remove must also clear memory_prompt._curation_cache.
+
+    Otherwise per-thread curator selections outlive their session for the
+    life of the process (unbounded growth in a long-running gateway).
+    """
+    reset_curation_cache_for_tests()
+    reg = SessionRegistry()
+    reg.create("s1", agent_md=None, created_at_ms=0)
+    _curation_cache["s1"] = ("fingerprint", ["cached line"])
+
+    reg.remove("s1")
+
+    assert "s1" not in _curation_cache
+
+
+@pytest.mark.asyncio
+async def test_registry_remove_cancels_pending_responses() -> None:
+    reg = SessionRegistry()
+    bus = reg.create("s1", agent_md=None, created_at_ms=0)
+    fut = bus.register_pending("p1")
+
+    reg.remove("s1")
+
+    assert fut.cancelled()
 

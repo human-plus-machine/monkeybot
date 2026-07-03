@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from monkeybot.core.config.settings import SubagentConfig
-from monkeybot.core.context import SkillRef, TurnContext
+from monkeybot.core.context import SkillRef, TurnContext, _discover_skills
 from monkeybot.core.llm.provider import Done, TextDelta, ToolCall, UsageEvent
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
@@ -277,7 +277,8 @@ async def test_search_memory(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_list_skills_uses_context(tmp_path: Path) -> None:
+async def test_list_skills_echoes_context_skill_refs(tmp_path: Path) -> None:
+    """``list_skills`` returns whatever is already on ``TurnContext.skills`` (no disk read)."""
     root = tmp_path
     mem = tmp_path / "mem"
     mem.mkdir()
@@ -297,6 +298,52 @@ async def test_list_skills_uses_context(tmp_path: Path) -> None:
     assert err is None and out is not None
     payload = json.loads(out)
     assert payload["skills"] == [{"name": "n", "description": "d"}]
+
+
+@pytest.mark.asyncio
+async def test_list_skills_returns_descriptions_from_discovered_skill_md(tmp_path: Path) -> None:
+    """End-to-end: SKILL.md frontmatter description must surface in list_skills JSON."""
+    root = tmp_path
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    image_gen = skills / "image-generator"
+    image_gen.mkdir(parents=True)
+    (image_gen / "SKILL.md").write_text(
+        "---\n"
+        "name: image-generator\n"
+        "description: Generate images with Vertex AI Nano Banana Pro (Gemini image models) and display them in chat.\n"
+        "---\n\n"
+        "# image-generator\n\n"
+        "Procedural body the list_skills tool must not use as the short description.\n",
+        encoding="utf-8",
+    )
+
+    discovered = _discover_skills(skills)
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="1", name="list_skills", args={}),
+            ctx=_ctx(skills=discovered),
+        )
+    )
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert payload["ok"] is True
+    assert payload["skills"] == [
+        {
+            "name": "image-generator",
+            "description": (
+                "Generate images with Vertex AI Nano Banana Pro (Gemini image models) and display them in chat."
+            ),
+        }
+    ]
+    assert payload["skills"][0]["description"] != "# image-generator"
 
 
 @pytest.mark.asyncio

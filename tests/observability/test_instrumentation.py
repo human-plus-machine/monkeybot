@@ -31,8 +31,9 @@ class _FakeInner:
         tools: Sequence[ToolDef],
         *,
         model: str,
+        thinking_budget: int | None = None,
     ) -> AsyncIterator[ProviderEvent]:
-        del messages, tools, model
+        del messages, tools, model, thinking_budget
 
         async def _gen() -> AsyncIterator[ProviderEvent]:
             yield TextDelta(text="hi")

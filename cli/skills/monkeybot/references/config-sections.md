@@ -73,19 +73,21 @@ Required when `memory_storage_uri` is `gcs://…` or `provider: vertex-claude` (
 
 ## `context_curation`
 
-Trims skills/memory injected into context. `enabled: true` by default.
+Trims memory injected into context. `enabled: true` by default.
 
 | Field | Default | Notes |
 |---|---|---|
-| `skill_threshold` | `4` | Curate skills once this many are relevant |
-| `memory_threshold` | `8` | Curate memory past this many lines |
+| `mode` | `hybrid` | `window` (recent slice only), `curator` (LLM pick), or `hybrid` (window + curator when token-heavy) |
+| `memory_window_lines` | `12` | Recent index lines injected in window/hybrid modes |
+| `memory_index_cap` | `200` | Organizer keeps this many INDEX.md entries; older rows move to `INDEX.archive.md` |
+| `memory_threshold` | `8` | Curate when index line count exceeds this |
+| `memory_token_threshold` | `2000` | Also curate when estimated index tokens exceed this |
 | `curator_model` | `gemini-3-flash` | Separate small model; empty = main model |
 | `timeout_sec` | `10` | Curator call timeout |
-| `max_memory_lines` | `12` | Cap injected memory |
-| `max_skills` | `5` | Cap injected skills |
-| `search_max_hits` | `8` | Cap search hits considered |
+| `max_memory_lines` | `12` | Cap curator-selected lines |
+| `search_max_hits` | `8` | Cap search hits in curator pool |
 
-Change when controlling cost or when too much/little context is being injected. Set `enabled: false` to skip entirely.
+When the prompt shows fewer entries than exist, a structural confidence score triggers a `search_memory` nudge. Skill names are always shown in full in the prompt; use `list_skills` to get the skills root path.
 
 ## `memory_hook`
 
@@ -99,6 +101,7 @@ Change when controlling cost or when too much/little context is being injected. 
 |---|---|---|
 | `timeout_sec` | `600` | Per-subagent timeout |
 | `max_turns` | `25` | Per-subagent turn cap |
+| `vertex_google_search` | `false` | **Gemini only.** Enables native `google_search` grounding for subagent `task` runs. Config-file only. |
 | `agent_md` | (parent `AGENT.md`) | Default prompt when `task` omits `subagent_type` |
 
 `subagents[]` defines named personas the parent selects via `task(subagent_type=...)`:
@@ -129,6 +132,7 @@ For shell-command safety, pair `denied_patterns` with `monkeybot_config/command_
 |---|---|---|
 | `backend` | `duckduckgo` | `duckduckgo` (no key) \| `tavily` \| `firecrawl` \| `none` |
 | `max_results` | `5` | Result cap |
+| `vertex_google_search` | `false` | **Gemini only.** Additive to `backend` — enables Vertex Gemini's native `google_search` grounding tool for **main agent** turns only (not summarization, memory organizer, or curator). Ignored for other model providers. Config-file only — no env var override (like `paths.auto_schema`). |
 
 Tavily/Firecrawl need `TAVILY_API_KEY` / `FIRECRAWL_API_KEY` in `.env`. Doctor check: `web_search.backend.ready` (`duckduckgo` needs the `web-search` extra).
 

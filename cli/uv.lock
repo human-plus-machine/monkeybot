@@ -589,6 +589,7 @@ provides-extras = ["gemini", "vertex", "claude", "vertex-claude", "bedrock", "op
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "anthropic", extras = ["vertex", "bedrock"], specifier = ">=0.40.0" },
     { name = "asgi-lifespan", specifier = ">=2.1.0" },
     { name = "mypy", specifier = ">=1.13.0" },
     { name = "opentelemetry-api", specifier = ">=1.28" },
@@ -606,7 +607,7 @@ dev = [
 
 [[package]]
 name = "monkeybot-cli"
-version = "0.1.9"
+version = "0.1.10"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal, Protocol, TypeAlias
+from typing import Any, Literal, Protocol, TypeAlias, cast
 
 from monkeybot.core.types.content_blocks import ContentBlock, Text, ToolRequest, ToolResponse
 from monkeybot.core.types.types_tools import ToolDef
@@ -80,6 +80,63 @@ class ToolCall:
 
 
 @dataclass(frozen=True, kw_only=True)
+class GroundingEvent:
+    """Provider-native web-search grounding metadata (e.g. Gemini ``google_search``).
+
+    Additive to the harness's pluggable ``web_search`` custom tool — this carries
+    citations/search-suggestion data from a provider-hosted search tool invoked
+    server-side, not a tool call the harness dispatched itself.
+    """
+
+    kind: Literal["grounding"] = "grounding"
+    sources: list[dict[str, str]]
+    search_queries: list[str]
+
+
+def gemini_extra_kwargs(provider: Provider, *, vertex_google_search: bool) -> dict[str, bool]:
+    if vertex_google_search and provider.name == "gemini":
+        return {"vertex_google_search": True}
+    return {}
+
+
+async def provider_count_input_tokens(
+    provider: Provider,
+    messages: Sequence[Message],
+    tools: Sequence[ToolDef],
+    *,
+    model: str,
+    thinking_budget: int | None = None,
+    vertex_google_search: bool = False,
+) -> int:
+    kwargs: dict[str, Any] = {"model": model, "thinking_budget": thinking_budget}
+    extra = gemini_extra_kwargs(provider, vertex_google_search=vertex_google_search)
+    if extra:
+        return int(
+            await cast(Any, provider).count_input_tokens(messages, tools, **kwargs, **extra)
+        )
+    return await provider.count_input_tokens(messages, tools, **kwargs)
+
+
+def provider_stream(
+    provider: Provider,
+    messages: Sequence[Message],
+    tools: Sequence[ToolDef],
+    *,
+    model: str,
+    thinking_budget: int | None = None,
+    vertex_google_search: bool = False,
+) -> AsyncIterator[ProviderEvent]:
+    kwargs: dict[str, Any] = {"model": model, "thinking_budget": thinking_budget}
+    extra = gemini_extra_kwargs(provider, vertex_google_search=vertex_google_search)
+    if extra:
+        return cast(
+            AsyncIterator[ProviderEvent],
+            cast(Any, provider).stream(messages, tools, **kwargs, **extra),
+        )
+    return provider.stream(messages, tools, **kwargs)
+
+
+@dataclass(frozen=True, kw_only=True)
 class UsageEvent:
     kind: Literal["usage"] = "usage"
     input_tokens: int
@@ -94,7 +151,7 @@ class Done:
     kind: Literal["done"] = "done"
 
 
-ProviderEvent: TypeAlias = TextDelta | ThinkingDelta | ToolCall | UsageEvent | Done
+ProviderEvent: TypeAlias = TextDelta | ThinkingDelta | ToolCall | GroundingEvent | UsageEvent | Done
 
 
 class Provider(Protocol):
@@ -150,6 +207,7 @@ class Provider(Protocol):
 
 __all__ = [
     "Done",
+    "GroundingEvent",
     "Message",
     "Provider",
     "ProviderEvent",
@@ -162,4 +220,7 @@ __all__ = [
     "ToolRequest",
     "ToolResponse",
     "UsageEvent",
+    "gemini_extra_kwargs",
+    "provider_count_input_tokens",
+    "provider_stream",
 ]

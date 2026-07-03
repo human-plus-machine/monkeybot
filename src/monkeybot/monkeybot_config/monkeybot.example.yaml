@@ -82,13 +82,17 @@ gateway:
 context_curation:
   # When false, curation is skipped (env: CONTEXT_CURATION_ENABLED)
   enabled: true
-  skill_threshold: 4
+  # window | curator | hybrid — hybrid uses recent window + LLM curator when token-heavy
+  mode: hybrid
+  memory_window_lines: 12
+  memory_index_cap: 200
   memory_threshold: 8
+  # OR trigger when estimated memory-index tokens exceed this (env: CONTEXT_CURATION_MEMORY_TOKEN_THRESHOLD)
+  memory_token_threshold: 2000
   # Separate small model for curator (env: CONTEXT_CURATOR_MODEL); empty uses main model id
   curator_model: gemini-3-flash
   timeout_sec: 10
   max_memory_lines: 12
-  max_skills: 5
   search_max_hits: 8
 
 emission:
@@ -109,6 +113,9 @@ memory_hook:
 subagent:
   timeout_sec: 600
   max_turns: 25
+  # Gemini only: enable native google_search grounding for subagent task runs.
+  # Config-file only (no env var override). Defaults to false.
+  vertex_google_search: false
   # Default AGENT.md for task calls with no subagent_type (relative to bot project root).
   agent_md: ./monkeybot_config/AGENT.md
 
@@ -134,6 +141,10 @@ web_search:
   # duckduckgo | tavily | firecrawl | none  (Tavily/Firecrawl need keys in .env)
   backend: duckduckgo
   max_results: 5
+  # Gemini only, additive to `backend` above (both can be on at once): enables Vertex
+  # Gemini's native `google_search` grounding tool. Ignored for other model providers.
+  # Config-file only (no env var override).
+  vertex_google_search: false
 
 sandbox:
   enabled: false

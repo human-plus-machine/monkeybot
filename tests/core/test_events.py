@@ -13,6 +13,7 @@ from monkeybot.core.runtime.events import (
     Error,
     EventDecodeError,
     FrontendToolRequestEvent,
+    GroundingEvent,
     ImageBlock,
     RedactedThinkingBlock,
     SystemNotificationEvent,
@@ -164,6 +165,20 @@ def test_tool_call_started_args_default_empty_object() -> None:
     out = event_from_json(payload)
     assert isinstance(out, ToolCallStarted)
     assert out.args == {}
+
+
+def test_grounding_event_roundtrip() -> None:
+    ev = GroundingEvent(
+        request_id="r1",
+        sources=[{"title": "T", "uri": "https://a.com"}],
+        search_queries=["q1", "q2"],
+    )
+    assert event_from_json(event_to_json(ev)) == ev
+
+
+def test_grounding_event_roundtrip_empty() -> None:
+    ev = GroundingEvent(request_id="r1")
+    assert event_from_json(event_to_json(ev)) == ev
 
 
 def test_sse_image_block_roundtrip() -> None:

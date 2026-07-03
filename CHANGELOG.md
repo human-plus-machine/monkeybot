@@ -7,6 +7,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Changed
+- **Context curation** — Hybrid memory prompt: append-only INDEX with archive cap, sliding `memory_window_lines`, structural coverage/confidence with `search_memory` nudge when truncated, optional LLM curator (`mode`: window/curator/hybrid), index fingerprint cache skips repeat curator calls. Skill names are always injected in full from `ctx.skills` (curator never selects skills); `list_skills`/`read_file` remain the path for the skills root and full `SKILL.md` procedure.
 - **Pre-flight prompt tokens** — Summarization threshold and `estimated_prompt_tokens` (usage DB, SSE, `GET /usage`) use each provider's tokenizer / count API (`Provider.count_input_tokens`): Vertex Gemini `countTokens`, Anthropic `messages.count_tokens`, OpenAI `tiktoken` on the Chat Completions payload. OpenAI installs should include the `openai` extra (adds `tiktoken`).
 - **Configurable history summarization model** — `CONTEXT_SUMMARIZATION_MODEL` and optional
   `model.summarization_model` in `monkeybot.yaml` (via runtime env) or `TurnContext.summarization_model`
@@ -30,9 +31,8 @@ the project adheres to [Semantic Versioning](https://semver.org/).
   post-turn classifier that updates `INDEX.md` and routes new entries to the
   right markdown file.
 - **Context curator** (`monkeybot.core.context.curator`) — optional secondary
-  LLM pass that narrows skills + memory snippets injected into the system
-  prompt; main-loop only, never runs in subagents. Configured via
-  `CONTEXT_CURATION_*` env vars.
+  LLM pass that narrows memory lines injected into the system prompt; main-loop
+  only, never runs in subagents. Configured via `CONTEXT_CURATION_*` env vars.
 - **Context-window safety** — pre-call token counting against
   `MODEL_CONTEXT_WINDOW`, sync history summarization at threshold, and tool-result
   spill to `.monkeybot/spill/{thread_id}/{call_id}.txt` with capped in-history

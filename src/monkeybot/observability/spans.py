@@ -312,6 +312,7 @@ async def span_llm(
     *,
     ctx: TurnContext,
     model: str | None = None,
+    vertex_google_search: bool = False,
 ) -> AsyncGenerator[None, None]:
     if not is_observability_enabled():
         yield
@@ -327,6 +328,8 @@ async def span_llm(
         set_span_attribute_safe(span, "gen_ai.operation.name", "chat")
         set_span_attribute_safe(span, "thread.id", ctx.thread_id)
         set_span_attribute_safe(span, "request.id", ctx.request_id)
+        if vertex_google_search:
+            set_span_attribute_safe(span, "monkeybot.vertex_google_search", True)
         try:
             yield
         except Exception as exc:

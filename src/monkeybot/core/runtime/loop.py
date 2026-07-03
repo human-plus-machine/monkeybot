@@ -17,12 +17,11 @@ from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.attachments.freeze import freeze_attachments_in_history
 from monkeybot.core.attachments.resolve import resolve_messages_for_provider
 from monkeybot.core.attachments.store import AttachmentStore
-from monkeybot.core.context import SkillRef, TurnContext, refresh_memory_index
-from monkeybot.core.context.curator import (
-    curation_enabled_from_env,
-    curation_threshold_met,
-    curator_model_id,
-    run_context_curator,
+from monkeybot.core.context import TurnContext, refresh_memory_index
+from monkeybot.core.context.memory_prompt import (
+    MemoryPromptSelection,
+    memory_index_fingerprint,
+    prepare_memory_for_prompt,
 )
 from monkeybot.core.context.tool_output_policy import resolve_tool_budget
 from monkeybot.core.context.tool_result_ingress import summarize_tool_result_text
@@ -34,12 +33,15 @@ from monkeybot.core.context.tool_shapers import (
 from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
 from monkeybot.core.llm.provider import (
     Done,
+    GroundingEvent as ProviderGroundingEvent,
     Message,
     Provider,
     TextDelta,
     ThinkingDelta,
     ToolCall,
     UsageEvent,
+    provider_count_input_tokens,
+    provider_stream,
 )
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.logging_utils import kv
@@ -73,6 +75,7 @@ from .events import (
     ContextSummarized,
     ContextSummarizing,
     Error,
+    GroundingEvent,
     ImageBlock,
     SystemPromptSnapshot,
     Thinking,
@@ -158,18 +161,14 @@ def _system_message(
     ctx: TurnContext,
     chat_messages: Sequence[Message],
     *,
-    curated_memory_skills: bool = False,
-    curated_memory_index: list[str] | None = None,
-    curated_skills: list[SkillRef] | None = None,
+    memory_selection: MemoryPromptSelection | None = None,
     attachment_catalog: SessionAttachmentCatalog | None = None,
 ) -> Message:
     """System message: AGENT.md base plus runtime memory, skills, harness, and task anchor."""
     body = compose_system_prompt(
         ctx,
         chat_messages=chat_messages,
-        curated_memory_skills=curated_memory_skills,
-        curated_memory_index=curated_memory_index,
-        curated_skills=curated_skills,
+        memory_selection=memory_selection,
         attachment_catalog=(
             attachment_catalog.list_records() if attachment_catalog is not None else None
         ),
@@ -382,12 +381,15 @@ async def _provider_prompt_input_tokens(
     *,
     model: str,
     thinking_budget: int | None = None,
+    vertex_google_search: bool = False,
 ) -> int:
-    return await provider.count_input_tokens(
+    return await provider_count_input_tokens(
+        provider,
         messages,
         tools,
         model=model,
         thinking_budget=thinking_budget,
+        vertex_google_search=vertex_google_search,
     )
 
 
@@ -398,18 +400,15 @@ async def _prompt_input_tokens_for_history(
     provider: Provider,
     attachment_store: AttachmentStore | None,
     attachment_catalog: SessionAttachmentCatalog | None,
-    curated_memory_skills: bool = False,
-    curated_memory_index: list[str] | None = None,
-    curated_skills: list[SkillRef] | None = None,
+    memory_selection: MemoryPromptSelection | None = None,
     extra_system_text: str | None = None,
+    vertex_google_search: bool = False,
 ) -> int:
     """Provider-accurate prompt size for history rows already persisted (e.g. post-assistant)."""
     system = _system_message(
         ctx,
         chat_messages,
-        curated_memory_skills=curated_memory_skills,
-        curated_memory_index=curated_memory_index,
-        curated_skills=curated_skills,
+        memory_selection=memory_selection,
         attachment_catalog=attachment_catalog,
     )
     system = _append_extra_system_text(system, extra_system_text)
@@ -420,7 +419,8 @@ async def _prompt_input_tokens_for_history(
     )
     provider_messages = _messages_for_provider(system, resolved_messages)
     return await _provider_prompt_input_tokens(
-        provider, provider_messages, ctx.tools, model=ctx.model
+        provider, provider_messages, ctx.tools, model=ctx.model,
+        vertex_google_search=vertex_google_search,
     )
 
 
@@ -469,6 +469,7 @@ async def _append_budgeted_tool_responses(
     usage: Usage,
     budgeter: ContextBudgeter,
     provider: Provider,
+    vertex_google_search: bool = False,
 ) -> AsyncIterator[AgentEvent]:
     """Budget tool results against remaining context, append, compact if needed."""
     trimmed, needs_compaction = budgeter.fit_content_blocks(chunk_responses)
@@ -507,7 +508,8 @@ async def _append_budgeted_tool_responses(
         system = _system_message(ctx, chat_messages)
         provider_messages = _messages_for_provider(system, chat_messages)
         post = await _provider_prompt_input_tokens(
-            provider, provider_messages, ctx.tools, model=ctx.model
+            provider, provider_messages, ctx.tools, model=ctx.model,
+            vertex_google_search=vertex_google_search,
         )
         usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, post)
 
@@ -693,6 +695,7 @@ async def run(
     attachment_store: AttachmentStore | None = None,
     attachment_catalog: SessionAttachmentCatalog | None = None,
     transcript_writer: TranscriptWriter | None = None,
+    vertex_google_search: bool = False,
 ) -> AsyncIterator[AgentEvent]:
     """Stream agent events for one user message; ends with ``TurnComplete`` (never raises).
 
@@ -704,6 +707,10 @@ async def run(
 
     ``curator_provider`` is an optional dedicated provider for context curation (e.g. with
     ``thinking_budget=0``). Falls back to ``provider`` when not supplied.
+
+    ``vertex_google_search`` opts into Gemini native ``google_search`` grounding for agent
+    turns in this run (main agent or subagent). Only passed through to ``GeminiProvider``;
+    internal harness calls (history summarization, memory organizer) never set this flag.
     """
     usage = Usage()
     trace_id_capture: list[str | None] = [None]
@@ -735,6 +742,7 @@ async def run(
             attachment_store=attachment_store,
             attachment_catalog=attachment_catalog,
             transcript_writer=transcript_writer,
+            vertex_google_search=vertex_google_search,
         ):
             yield evt
     except asyncio.CancelledError:
@@ -789,6 +797,7 @@ async def _run_inner(
     attachment_store: AttachmentStore | None = None,
     attachment_catalog: SessionAttachmentCatalog | None = None,
     transcript_writer: TranscriptWriter | None = None,
+    vertex_google_search: bool = False,
 ) -> AsyncIterator[AgentEvent]:
     from monkeybot.observability.spans import set_run_output, span_run
 
@@ -811,6 +820,7 @@ async def _run_inner(
             attachment_store=attachment_store,
             attachment_catalog=attachment_catalog,
             transcript_writer=transcript_writer,
+            vertex_google_search=vertex_google_search,
         ):
             yield evt
         set_run_output(last_assistant[0])
@@ -844,6 +854,7 @@ async def _run_inner_core(
     attachment_store: AttachmentStore | None = None,
     attachment_catalog: SessionAttachmentCatalog | None = None,
     transcript_writer: TranscriptWriter | None = None,
+    vertex_google_search: bool = False,
 ) -> AsyncIterator[AgentEvent]:
     from monkeybot.observability.spans import (
         begin_turn_span,
@@ -880,9 +891,8 @@ async def _run_inner_core(
     # Final assistant write is backgrounded off the streaming path; awaited at the
     # turn tail before any history load/reset so the row is never lost.
     assistant_write_task: asyncio.Task[None] | None = None
-    curated_injection = False
-    curated_mem: list[str] = []
-    curated_sks: list[SkillRef] = []
+    memory_selection: MemoryPromptSelection | None = None
+    memory_selection_fingerprint: str | None = None
     pre_turn_extra: str | None = None
     pre_tool_extra_next: str | None = None
 
@@ -941,49 +951,34 @@ async def _run_inner_core(
                             ],
                         )
 
-            if (
-                turn_index == 1
-                and ctx.context_curation_enabled
-                and curation_enabled_from_env()
-                and curation_threshold_met(ctx)
-            ):
-                curated_injection = True
-                logger.debug(
-                    "context curation start %s",
-                    kv(request_id=ctx.request_id, thread_id=ctx.thread_id, turn=turn_index),
-                )
-                u = latest_user_message_text(chat_messages) or ""
-                parts = await run_context_curator(
+            index_fp = memory_index_fingerprint(ctx.memory_index)
+            if memory_selection is None or memory_selection_fingerprint != index_fp:
+                u = latest_user_message_text(chat_messages) or user_text
+                memory_selection = await prepare_memory_for_prompt(
                     ctx=ctx,
-                    provider=provider,
-                    curator_model=curator_model_id(ctx),
                     user_message=u,
+                    provider=provider,
                     curator_provider=curator_provider,
                 )
-                if parts.success:
-                    curated_mem = list(parts.memory_lines)
-                    curated_sks = list(parts.skills)
-                else:
-                    curated_mem = []
-                    curated_sks = []
+                memory_selection_fingerprint = index_fp
                 logger.debug(
-                    "context curation done %s",
+                    "memory prompt selection %s",
                     kv(
                         request_id=ctx.request_id,
                         thread_id=ctx.thread_id,
                         turn=turn_index,
-                        memory_lines=len(curated_mem),
-                        skills=len(curated_sks),
-                        success=parts.success,
+                        memory_lines=len(memory_selection.lines),
+                        total_lines=memory_selection.total_lines,
+                        coverage=memory_selection.coverage,
+                        confidence=memory_selection.confidence,
+                        nudge_search=memory_selection.nudge_search,
                     ),
                 )
 
             system = _system_message(
                 ctx,
                 chat_messages,
-                curated_memory_skills=curated_injection,
-                curated_memory_index=curated_mem,
-                curated_skills=curated_sks,
+                memory_selection=memory_selection,
                 attachment_catalog=attachment_catalog,
             )
             combined_extra = _combine_extras(pre_turn_extra, pre_tool_extra_next)
@@ -1003,6 +998,7 @@ async def _run_inner_core(
                 ctx.tools,
                 model=ctx.model,
                 thinking_budget=stream_thinking,
+                vertex_google_search=vertex_google_search,
             )
             usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, preflight)
             cap = max(1, int(ctx.context_window_tokens * _SUMMARY_TRIGGER_RATIO))
@@ -1060,9 +1056,7 @@ async def _run_inner_core(
                 system = _system_message(
                     ctx,
                     chat_messages,
-                    curated_memory_skills=curated_injection,
-                    curated_memory_index=curated_mem,
-                    curated_skills=curated_sks,
+                    memory_selection=memory_selection,
                     attachment_catalog=attachment_catalog,
                 )
                 system = _append_extra_system_text(system, pre_turn_extra)
@@ -1078,6 +1072,7 @@ async def _run_inner_core(
                     ctx.tools,
                     model=ctx.model,
                     thinking_budget=_stream_thinking_budget(provider, resolved_messages),
+                    vertex_google_search=vertex_google_search,
                 )
                 usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, post)
 
@@ -1136,15 +1131,17 @@ async def _run_inner_core(
                 )
                 provider_messages_written = len(provider_messages)
             try:
-                async with span_llm(ctx=ctx):
+                async with span_llm(ctx=ctx, vertex_google_search=vertex_google_search):
                     async with aclosing(
                         cast(
                             Any,
-                            provider.stream(
+                            provider_stream(
+                                provider,
                                 provider_messages,
                                 ctx.tools,
                                 model=ctx.model,
                                 thinking_budget=stream_thinking,
+                                vertex_google_search=vertex_google_search,
                             ),
                         )
                     ) as stream:
@@ -1173,6 +1170,12 @@ async def _run_inner_core(
                                 llm_cache_creation += ev.cache_creation_tokens
                             elif isinstance(ev, ToolCall):
                                 pending[ev.call_id] = ev
+                            elif isinstance(ev, ProviderGroundingEvent):
+                                yield GroundingEvent(
+                                    request_id=ctx.request_id,
+                                    sources=[dict(s) for s in ev.sources],
+                                    search_queries=list(ev.search_queries),
+                                )
                             elif isinstance(ev, Done):
                                 break
                     set_llm_usage(
@@ -1610,10 +1613,9 @@ async def _run_inner_core(
                         provider=provider,
                         attachment_store=attachment_store,
                         attachment_catalog=attachment_catalog,
-                        curated_memory_skills=curated_injection,
-                        curated_memory_index=curated_mem,
-                        curated_skills=curated_sks,
+                        memory_selection=memory_selection,
                         extra_system_text=pre_turn_extra,
+                        vertex_google_search=vertex_google_search,
                     )
                 except Exception:
                     logger.warning(
@@ -1635,6 +1637,7 @@ async def _run_inner_core(
                     usage=usage,
                     budgeter=budgeter,
                     provider=provider,
+                    vertex_google_search=vertex_google_search,
                 ):
                     yield budget_evt
 

@@ -280,6 +280,7 @@ def _anthropic_assistant_block(block: ContentBlock) -> dict[str, Any]:
 # Must match volatile section headers emitted by ``compose_system_prompt``.
 _VOLATILE_SYSTEM_MARKERS = (
     "\n\n## Memory index\n",
+    "\n\n## Memory\n",
     "\n\n## Skills\n",
     "\n\n## Current request\n",
 )

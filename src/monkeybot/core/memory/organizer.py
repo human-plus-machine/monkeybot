@@ -7,6 +7,7 @@ classifies into a typed folder, and updates INDEX.md for deterministic retrieval
 from __future__ import annotations
 
 import asyncio
+import os
 import logging
 from collections.abc import Sequence
 from contextlib import aclosing
@@ -14,7 +15,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, cast
 
-from monkeybot.core.memory.storage_ops import INDEX_FILENAME
+from monkeybot.core.memory.index_format import (
+    INDEX_ARCHIVE_FILENAME,
+    INDEX_FILENAME,
+    DEFAULT_INDEX_HEADER,
+    append_index_entries,
+    apply_index_entry_cap,
+    format_index_document,
+    merge_archive_content,
+    split_index_document,
+)
 from monkeybot.core.types.content_blocks import Text
 from monkeybot.core.types.interfaces import MonkeybotError
 from monkeybot.core.llm.provider import Done, Message, Provider, TextDelta
@@ -203,9 +213,9 @@ class MemoryOrganizer:
             except Exception:
                 existing_content = ""
 
-        if not existing_content:
-            existing_content = "# Memory Index\n\n"
-
+        if not existing_content.strip():
+            existing_content = f"{DEFAULT_INDEX_HEADER}\n"
+        new_lines: list[str] = []
         for entry in entries:
             try:
                 response = await _complete_text(
@@ -233,30 +243,36 @@ class MemoryOrganizer:
                 f"- [[{entry.folder}/{entry.filename}]]"
                 f" | tags: {entry.tags} | {entry.summary}"
             )
-            section_header = f"## {entry.folder}/"
+            new_lines.append(formatted)
 
-            if section_header in existing_content:
-                lines = existing_content.splitlines()
-                insert_idx = len(lines)
-                in_section = False
-                for i, line in enumerate(lines):
-                    if line.strip() == section_header:
-                        in_section = True
-                        continue
-                    if in_section and line.startswith("## "):
-                        insert_idx = i
-                        break
-                    if in_section:
-                        insert_idx = i + 1
-                lines.insert(insert_idx, formatted)
-                existing_content = "\n".join(lines) + "\n"
-            else:
-                existing_content = (
-                    existing_content.rstrip("\n")
-                    + f"\n\n{section_header}\n{formatted}\n"
-                )
+        if not new_lines:
+            return
+
+        merged = append_index_entries(existing_content, new_lines)
+        _header, entry_lines = split_index_document(merged)
+        cap = _index_cap_from_env()
+        kept, archived = apply_index_entry_cap(entry_lines, cap)
+        if archived:
+            archive_raw = ""
+            if await self._storage.exists(INDEX_ARCHIVE_FILENAME):
+                try:
+                    archive_raw = await self._storage.read_text(INDEX_ARCHIVE_FILENAME)
+                except Exception:
+                    archive_raw = ""
+            archive_out = merge_archive_content(archive_raw, archived)
+            await self._storage.write_text(INDEX_ARCHIVE_FILENAME, archive_out)
+
+        final_content = format_index_document(_header, kept)
 
         try:
-            await self._storage.write_text(INDEX_FILENAME, existing_content)
+            await self._storage.write_text(INDEX_FILENAME, final_content)
         except Exception as e:
             raise MemoryOrganizerError(f"Failed to write INDEX.md: {e}") from e
+
+
+def _index_cap_from_env() -> int:
+    raw = os.getenv("MEMORY_INDEX_CAP", "200").strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 200
