@@ -126,7 +126,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 **Section order (cache-friendly):**
 
 1. **Stable prefix:** `AGENT.md` + harness + session attachments
-2. **Volatile tail:** memory index + skills + "Current request" anchor
+2. **Volatile tail:** memory index + "Current request" anchor
 
 **How it works:**
 - `compose_system_prompt()` builds the full system string each inner turn.
@@ -134,7 +134,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - Emission-style block (Levers 1–2: minimum code, terse prose) is injected into the stable prefix when `MONKEYBOT_EMISSION_STYLE=terse`; its dense agent-to-agent sub-block (Lever 3) is additionally gated on the `task` tool being active. Default off. See [§21](#21-emission-style-terse-output-guidance).
 - `HARNESS_TOOL_CALL_PROTOCOL` enforces native tool-call channel, evidence rule, no-repeat rule.
 - "Current request" block restates last user text when transcript continued with assistant/tool messages (skipped when user row is already last).
-- Curated memory/skills replace ctx lists when context curation ran on turn 1.
+- Memory selection (`MemoryPromptSelection`) replaces full `ctx.memory_index` when truncated; skills via `list_skills`.
 
 **Depends on:** `TurnContext`, `SandboxConfig.from_env()`, attachment catalog.
 
@@ -262,20 +262,23 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 ### 8. Context curation
 
-**Purpose:** Narrow memory/skills in system prompt when catalog is large.
+**Purpose:** Bound memory-index prompt size via sliding window, optional LLM curator, and search nudges.
 
-**Key files:** `core/context/curator.py`, `monkeybot.yaml` `context_curation:`
+**Key files:** `core/context/memory_prompt.py`, `core/context/curator.py`, `core/memory/index_format.py`, `core/memory/organizer.py`, `monkeybot.yaml` `context_curation:`
 
 **How it works:**
-- Runs on **turn 1 only** when `CONTEXT_CURATION_ENABLED` and thresholds met.
-- Separate `curator_provider` (gateway: `GeminiProvider(thinking_budget=0, max_tokens=1024)`).
-- Curated selections are **frozen for follow-up turns** in the same user message.
+- **Organizer** appends INDEX.md entries in recency order and archives overflow to `INDEX.archive.md` (`memory_index_cap`, default 200).
+- **Modes:** `window` (recent `memory_window_lines` only), `curator` (LLM index pick), `hybrid` (window + curator when token-heavy; default).
+- Runs on **turn 1** when `CONTEXT_CURATION_ENABLED` and line/token thresholds met.
+- **Coverage/confidence** are structural (`injected/total`); when truncated, prompt nudges `search_memory`.
+- Curator uses numbered `memory_line_indices`; fail-open to full index (curator mode) or window (hybrid).
+- Curator skipped when index fingerprint unchanged for the thread (cache).
 
-**Depends on:** Curator provider, memory index, skills list.
+**Depends on:** Curator provider (hybrid/curator modes), memory index.
 
 **Invariants:**
 - Subagents disable curation (`enable_context_curation=False`).
-- On curator failure, empty curated lists are used.
+- Skills discovered via `list_skills`, not injected into the system prompt.
 
 ---
 

@@ -17,12 +17,11 @@ from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.attachments.freeze import freeze_attachments_in_history
 from monkeybot.core.attachments.resolve import resolve_messages_for_provider
 from monkeybot.core.attachments.store import AttachmentStore
-from monkeybot.core.context import SkillRef, TurnContext, refresh_memory_index
-from monkeybot.core.context.curator import (
-    curation_enabled_from_env,
-    curation_threshold_met,
-    curator_model_id,
-    run_context_curator,
+from monkeybot.core.context import TurnContext, refresh_memory_index
+from monkeybot.core.context.memory_prompt import (
+    MemoryPromptSelection,
+    memory_index_fingerprint,
+    prepare_memory_for_prompt,
 )
 from monkeybot.core.context.tool_output_policy import resolve_tool_budget
 from monkeybot.core.context.tool_result_ingress import summarize_tool_result_text
@@ -158,18 +157,14 @@ def _system_message(
     ctx: TurnContext,
     chat_messages: Sequence[Message],
     *,
-    curated_memory_skills: bool = False,
-    curated_memory_index: list[str] | None = None,
-    curated_skills: list[SkillRef] | None = None,
+    memory_selection: MemoryPromptSelection | None = None,
     attachment_catalog: SessionAttachmentCatalog | None = None,
 ) -> Message:
     """System message: AGENT.md base plus runtime memory, skills, harness, and task anchor."""
     body = compose_system_prompt(
         ctx,
         chat_messages=chat_messages,
-        curated_memory_skills=curated_memory_skills,
-        curated_memory_index=curated_memory_index,
-        curated_skills=curated_skills,
+        memory_selection=memory_selection,
         attachment_catalog=(
             attachment_catalog.list_records() if attachment_catalog is not None else None
         ),
@@ -398,18 +393,14 @@ async def _prompt_input_tokens_for_history(
     provider: Provider,
     attachment_store: AttachmentStore | None,
     attachment_catalog: SessionAttachmentCatalog | None,
-    curated_memory_skills: bool = False,
-    curated_memory_index: list[str] | None = None,
-    curated_skills: list[SkillRef] | None = None,
+    memory_selection: MemoryPromptSelection | None = None,
     extra_system_text: str | None = None,
 ) -> int:
     """Provider-accurate prompt size for history rows already persisted (e.g. post-assistant)."""
     system = _system_message(
         ctx,
         chat_messages,
-        curated_memory_skills=curated_memory_skills,
-        curated_memory_index=curated_memory_index,
-        curated_skills=curated_skills,
+        memory_selection=memory_selection,
         attachment_catalog=attachment_catalog,
     )
     system = _append_extra_system_text(system, extra_system_text)
@@ -880,9 +871,8 @@ async def _run_inner_core(
     # Final assistant write is backgrounded off the streaming path; awaited at the
     # turn tail before any history load/reset so the row is never lost.
     assistant_write_task: asyncio.Task[None] | None = None
-    curated_injection = False
-    curated_mem: list[str] = []
-    curated_sks: list[SkillRef] = []
+    memory_selection: MemoryPromptSelection | None = None
+    memory_selection_fingerprint: str | None = None
     pre_turn_extra: str | None = None
     pre_tool_extra_next: str | None = None
 
@@ -941,49 +931,34 @@ async def _run_inner_core(
                             ],
                         )
 
-            if (
-                turn_index == 1
-                and ctx.context_curation_enabled
-                and curation_enabled_from_env()
-                and curation_threshold_met(ctx)
-            ):
-                curated_injection = True
-                logger.debug(
-                    "context curation start %s",
-                    kv(request_id=ctx.request_id, thread_id=ctx.thread_id, turn=turn_index),
-                )
-                u = latest_user_message_text(chat_messages) or ""
-                parts = await run_context_curator(
+            index_fp = memory_index_fingerprint(ctx.memory_index)
+            if memory_selection is None or memory_selection_fingerprint != index_fp:
+                u = latest_user_message_text(chat_messages) or user_text
+                memory_selection = await prepare_memory_for_prompt(
                     ctx=ctx,
-                    provider=provider,
-                    curator_model=curator_model_id(ctx),
                     user_message=u,
+                    provider=provider,
                     curator_provider=curator_provider,
                 )
-                if parts.success:
-                    curated_mem = list(parts.memory_lines)
-                    curated_sks = list(parts.skills)
-                else:
-                    curated_mem = []
-                    curated_sks = []
+                memory_selection_fingerprint = index_fp
                 logger.debug(
-                    "context curation done %s",
+                    "memory prompt selection %s",
                     kv(
                         request_id=ctx.request_id,
                         thread_id=ctx.thread_id,
                         turn=turn_index,
-                        memory_lines=len(curated_mem),
-                        skills=len(curated_sks),
-                        success=parts.success,
+                        memory_lines=len(memory_selection.lines),
+                        total_lines=memory_selection.total_lines,
+                        coverage=memory_selection.coverage,
+                        confidence=memory_selection.confidence,
+                        nudge_search=memory_selection.nudge_search,
                     ),
                 )
 
             system = _system_message(
                 ctx,
                 chat_messages,
-                curated_memory_skills=curated_injection,
-                curated_memory_index=curated_mem,
-                curated_skills=curated_sks,
+                memory_selection=memory_selection,
                 attachment_catalog=attachment_catalog,
             )
             combined_extra = _combine_extras(pre_turn_extra, pre_tool_extra_next)
@@ -1060,9 +1035,7 @@ async def _run_inner_core(
                 system = _system_message(
                     ctx,
                     chat_messages,
-                    curated_memory_skills=curated_injection,
-                    curated_memory_index=curated_mem,
-                    curated_skills=curated_sks,
+                    memory_selection=memory_selection,
                     attachment_catalog=attachment_catalog,
                 )
                 system = _append_extra_system_text(system, pre_turn_extra)
@@ -1610,9 +1583,7 @@ async def _run_inner_core(
                         provider=provider,
                         attachment_store=attachment_store,
                         attachment_catalog=attachment_catalog,
-                        curated_memory_skills=curated_injection,
-                        curated_memory_index=curated_mem,
-                        curated_skills=curated_sks,
+                        memory_selection=memory_selection,
                         extra_system_text=pre_turn_extra,
                     )
                 except Exception:

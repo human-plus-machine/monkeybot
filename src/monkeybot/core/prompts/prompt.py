@@ -5,7 +5,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from monkeybot.core.attachments.catalog import AttachmentRecord
-from monkeybot.core.context import SkillRef, TurnContext
+from monkeybot.core.context import TurnContext
+from monkeybot.core.context.memory_prompt import MemoryPromptSelection
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.prompts.harness_prompt import (
     emission_style_terse_from_env,
@@ -92,36 +93,37 @@ def compose_system_prompt(
     ctx: TurnContext,
     *,
     chat_messages: Sequence[Message] | None = None,
-    curated_memory_skills: bool = False,
-    curated_memory_index: list[str] | None = None,
-    curated_skills: list[SkillRef] | None = None,
+    memory_selection: MemoryPromptSelection | None = None,
     attachment_catalog: Sequence[AttachmentRecord] | None = None,
 ) -> str:
     """Build the system string: AGENT.md, harness, attachments, then volatile tail.
 
     ``ctx.agent_md`` is the operator-authored base prompt (typically from AGENT.md).
-    Stable sections (harness, attachments) precede volatile curation (memory, skills,
+    Stable sections (harness, attachments) precede volatile curation (memory,
     current-request anchor) so implicit and explicit prompt caching can hit a contiguous
     prefix across turns.
 
-    When ``curated_memory_skills`` is True, ``curated_memory_index`` and ``curated_skills``
-    replace ctx memory/skills in the prompt (lists may be empty to omit those sections).
+    When ``memory_selection`` is set, its lines (and optional search nudge) are used
+    instead of the full ``ctx.memory_index``. Skill discovery is via ``list_skills``.
     """
     task = _current_request_block(chat_messages)
 
-    if curated_memory_skills:
-        mem_lines = list(curated_memory_index or [])
-        skill_refs = list(curated_skills or [])
+    if memory_selection is not None:
+        mem_lines = list(memory_selection.lines)
     else:
         mem_lines = list(ctx.memory_index)
-        skill_refs = list(ctx.skills)
 
     memory_bullets = "\n".join(f"- {line}" for line in mem_lines) if mem_lines else ""
     mem_block = f"\n\n## Memory index\n{memory_bullets}" if memory_bullets else ""
-
-    skill_lines = [f"- {s.name}: {s.description}" for s in skill_refs]
-    skills_block = "\n".join(skill_lines)
-    skills_section = f"\n\n## Skills\n{skills_block}" if skills_block else ""
+    if memory_selection is not None and memory_selection.nudge_search:
+        shown = len(memory_selection.lines)
+        total = memory_selection.total_lines
+        mem_block += (
+            f"\n\n## Memory\n"
+            f"Showing {shown} of {total} index entries "
+            f"(coverage {memory_selection.coverage:.0%}, confidence {memory_selection.confidence:.0%}). "
+            "Use `search_memory` with keywords when the task may depend on older or unstated context."
+        )
 
     include_task = any(t.name == "task" for t in ctx.tools)
     include_web_search = any(t.name == "web_search" for t in ctx.tools)
@@ -138,5 +140,5 @@ def compose_system_prompt(
     attachments = _session_attachments_block(attachment_catalog)
 
     stable = f"{ctx.agent_md}\n\n{harness}{attachments}"
-    volatile = f"{mem_block}{skills_section}{task}"
+    volatile = f"{mem_block}{task}"
     return f"{stable}{volatile}"
