@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
+import yaml
+
 from monkeybot.core.attachments.config import attachments_enabled_from_env
 from monkeybot.core.attachments.tools import read_attachment_tool_def, render_image_tool_def
 from monkeybot.core.config.settings import SubagentConfig
@@ -364,27 +366,47 @@ def _core_tool_defs(
     return tools
 
 
+def _first_body_line(lines: list[str], start: int, skill_name: str) -> str:
+    """Return the first non-empty body line, stripping a leading markdown heading."""
+    i = start
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+    if i >= len(lines):
+        return f"Skill {skill_name}"
+    line = lines[i].strip()
+    if line.startswith("#"):
+        line = line.lstrip("#").strip()
+    return line or f"Skill {skill_name}"
+
+
 def _parse_skill_description(body: str, skill_name: str) -> str:
-    """Return first instructional line from SKILL.md, skipping optional YAML frontmatter."""
+    """Return short description from SKILL.md YAML frontmatter or first body line."""
     lines = body.splitlines()
     i = 0
     while i < len(lines) and not lines[i].strip():
         i += 1
     if i >= len(lines):
         return f"Skill {skill_name}"
-    if lines[i].strip() == "---":
-        i += 1
-        while i < len(lines) and lines[i].strip() != "---":
-            i += 1
-        if i < len(lines) and lines[i].strip() == "---":
-            i += 1
-        while i < len(lines) and not lines[i].strip():
-            i += 1
-    else:
-        return lines[i].strip()
-    if i >= len(lines):
-        return f"Skill {skill_name}"
-    return lines[i].strip()
+    if lines[i].strip() != "---":
+        return _first_body_line(lines, i, skill_name)
+
+    frontmatter_end = i + 1
+    while frontmatter_end < len(lines) and lines[frontmatter_end].strip() != "---":
+        frontmatter_end += 1
+    if frontmatter_end >= len(lines):
+        return _first_body_line(lines, i, skill_name)
+
+    frontmatter_text = "\n".join(lines[i + 1 : frontmatter_end])
+    try:
+        meta = yaml.safe_load(frontmatter_text)
+        if isinstance(meta, dict):
+            desc = meta.get("description")
+            if isinstance(desc, str) and desc.strip():
+                return desc.strip()
+    except yaml.YAMLError:
+        pass
+
+    return _first_body_line(lines, frontmatter_end + 1, skill_name)
 
 
 def _discover_skills(skills_path: Path) -> list[SkillRef]:
