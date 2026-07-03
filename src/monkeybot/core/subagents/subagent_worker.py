@@ -17,6 +17,7 @@ from monkeybot.core.config.settings import (
     auto_schema_enabled_from_config,
     get_provider_config,
     normalize_model_provider,
+    subagent_vertex_google_search_from_config,
 )
 from monkeybot.core.context import TurnContext, build_context
 from monkeybot.core.llm.provider import (
@@ -132,6 +133,7 @@ async def _stream_run_loop_events(
     tool_executor: CoreToolExecutor,
     run_id: str,
     max_turns: int,
+    vertex_google_search: bool = False,
 ) -> AsyncIterator[AgentEvent]:
     if run_loop is _BUILTIN_RUN_LOOP:
         async for evt in run_loop(
@@ -143,6 +145,7 @@ async def _stream_run_loop_events(
             tool_executor=tool_executor,
             cancelled=None,
             max_turns=max_turns,
+            vertex_google_search=vertex_google_search,
         ):
             yield evt
         return
@@ -159,6 +162,7 @@ async def _stream_run_loop_events(
             tool_executor=tool_executor,
             cancelled=None,
             max_turns=max_turns,
+            vertex_google_search=vertex_google_search,
         ):
             yield evt
 
@@ -389,6 +393,7 @@ async def _async_main() -> None:
                     tool_executor=executor,
                     run_id=request_id,
                     max_turns=max_turns,
+                    vertex_google_search=subagent_vertex_google_search_from_config(),
                 ):
                     print(event_to_json(evt), flush=True)
         finally:

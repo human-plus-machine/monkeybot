@@ -126,16 +126,6 @@ def test_request_config_identical_regardless_of_cache_flag() -> None:
     assert "self._cache_enabled" not in remainder
 
 
-def test_init_google_search_enabled_defaults_false() -> None:
-    provider = GeminiProvider()
-    assert provider._google_search_enabled is False
-
-
-def test_init_google_search_enabled_explicit_true() -> None:
-    provider = GeminiProvider(google_search_enabled=True)
-    assert provider._google_search_enabled is True
-
-
 def test_grounding_metadata_to_dict_none_returns_none() -> None:
     assert _grounding_metadata_to_dict(None) is None
 
@@ -162,7 +152,7 @@ def test_grounding_metadata_to_dict_extracts_sources_and_queries() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stream_adds_google_search_tool_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_stream_adds_google_search_tool_when_opted_in(monkeypatch: pytest.MonkeyPatch) -> None:
     captured_config: dict[str, Any] = {}
 
     class FakeModels:
@@ -198,8 +188,13 @@ async def test_stream_adds_google_search_tool_when_enabled(monkeypatch: pytest.M
     monkeypatch.setitem(sys.modules, "google.genai.types", fake_types)
     monkeypatch.setenv("VERTEX_AI_PROJECT_ID", "p")
 
-    provider = GeminiProvider(google_search_enabled=True)
-    events = [ev async for ev in provider.stream([], [], model="gemini-2.5-flash")]
+    provider = GeminiProvider()
+    events = [
+        ev
+        async for ev in provider.stream(
+            [], [], model="gemini-2.5-flash", vertex_google_search=True
+        )
+    ]
 
     assert {"google_search": {}} in captured_config["config"]["tools"]
     assert not any(isinstance(ev, GroundingEvent) for ev in events)
@@ -242,7 +237,7 @@ async def test_stream_omits_google_search_tool_when_disabled(monkeypatch: pytest
     monkeypatch.setitem(sys.modules, "google.genai.types", fake_types)
     monkeypatch.setenv("VERTEX_AI_PROJECT_ID", "p")
 
-    provider = GeminiProvider(google_search_enabled=False)
+    provider = GeminiProvider()
     [ev async for ev in provider.stream([], [], model="gemini-2.5-flash")]
 
     assert "tools" not in captured_config["config"]

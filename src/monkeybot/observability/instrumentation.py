@@ -41,7 +41,18 @@ class ObservingProvider:
         *,
         model: str,
         thinking_budget: int | None = None,
+        vertex_google_search: bool = False,
     ) -> int:
+        if vertex_google_search and self._inner.name == "gemini":
+            return int(
+                await cast(Any, self._inner).count_input_tokens(
+                    messages,
+                    tools,
+                    model=model,
+                    thinking_budget=thinking_budget,
+                    vertex_google_search=True,
+                )
+            )
         return await self._inner.count_input_tokens(
             messages,
             tools,
@@ -55,14 +66,31 @@ class ObservingProvider:
         tools: Sequence[ToolDef],
         *,
         model: str,
+        thinking_budget: int | None = None,
+        vertex_google_search: bool = False,
     ) -> AsyncIterator[ProviderEvent]:
+        if vertex_google_search and self._inner.name == "gemini":
+            inner_stream = cast(Any, self._inner).stream(
+                messages,
+                tools,
+                model=model,
+                thinking_budget=thinking_budget,
+                vertex_google_search=True,
+            )
+        else:
+            inner_stream = self._inner.stream(
+                messages,
+                tools,
+                model=model,
+                thinking_budget=thinking_budget,
+            )
         if not is_observability_enabled():
-            return self._inner.stream(messages, tools, model=model)
+            return cast(AsyncIterator[ProviderEvent], inner_stream)
 
         async def _observed() -> AsyncIterator[ProviderEvent]:
             ctx = self._correlation_ctx(model)
             async with span_llm(ctx=ctx, model=model):
-                async for evt in self._inner.stream(messages, tools, model=model):
+                async for evt in inner_stream:
                     yield evt
 
         return _observed()

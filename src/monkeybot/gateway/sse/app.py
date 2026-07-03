@@ -31,6 +31,7 @@ from monkeybot.core.config.settings import (
     get_provider_config,
     get_subagent_registry,
     normalize_model_provider,
+    vertex_google_search_enabled_from_config,
 )
 from monkeybot.core.context import build_context
 from monkeybot.core.hooks import HookManager
@@ -285,10 +286,8 @@ def _resolve_curator_provider(main_provider: Provider) -> Provider:
     mode = normalize_model_provider(os.environ.get("MODEL_PROVIDER", "google_vertexai"))
     if mode in ("fake", "vertex_anthropic"):
         return main_provider
-    # Curator calls are tools=() JSON-only completions; google_search grounding is
-    # irrelevant here and would only add latency/cost, so keep it off regardless of
-    # the main provider's web_search.vertex_google_search setting.
-    return GeminiProvider(thinking_budget=0, max_tokens=1024, google_search_enabled=False)
+    # Curator calls are tools=() JSON-only completions; keep thinking off and token cap low.
+    return GeminiProvider(thinking_budget=0, max_tokens=1024)
 
 
 class GatewayLoopPort:
@@ -427,6 +426,7 @@ class GatewayLoopPort:
                 attachment_store=attachment_store,
                 attachment_catalog=bus.attachment_catalog,
                 transcript_writer=transcript_writer,
+                vertex_google_search=vertex_google_search_enabled_from_config(),
             ):
                 if isinstance(evt, TurnComplete):
                     u = evt.usage

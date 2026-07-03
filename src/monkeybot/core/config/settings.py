@@ -130,7 +130,6 @@ def get_provider_config(
                 max_tokens=sampling.max_tokens,
                 thinking_budget=thinking_budget,
                 cache_enabled=resolved_cache,
-                google_search_enabled=vertex_google_search_enabled_from_config(),
             ),
             resolved_model,
         )
@@ -292,11 +291,11 @@ def auto_schema_enabled_from_config(config_path: str | None = None) -> bool:
 
 
 def vertex_google_search_enabled_from_config(config_path: str | None = None) -> bool:
-    """Whether Gemini's native ``google_search`` grounding tool is enabled (``web_search.vertex_google_search``).
+    """Whether the main agent enables Gemini's native ``google_search`` grounding tool.
 
-    Additive to, and independent of, ``web_search.backend`` (the harness's pluggable
-    DuckDuckGo/Tavily/Firecrawl custom tool). Defaults to ``False`` when the key is
-    absent. Only read from monkeybot.yaml — not from environment variables.
+    Read from ``web_search.vertex_google_search`` in monkeybot.yaml. Additive to, and
+    independent of, ``web_search.backend`` (the harness's pluggable DuckDuckGo/Tavily/
+    Firecrawl custom tool). Defaults to ``False`` when absent. Config-file only.
     """
     _, doc = load_monkeybot_yaml_dict(config_path)
     web_search = doc.get("web_search")
@@ -308,3 +307,21 @@ def vertex_google_search_enabled_from_config(config_path: str | None = None) -> 
     if isinstance(raw, bool):
         return raw
     raise ConfigError(f"web_search.vertex_google_search must be true or false, got {raw!r}")
+
+
+def subagent_vertex_google_search_from_config(config_path: str | None = None) -> bool:
+    """Whether subagent runs enable Gemini's native ``google_search`` grounding tool.
+
+    Read from ``subagent.vertex_google_search`` in monkeybot.yaml. Defaults to ``False``
+    when absent. Config-file only — not exposed via environment variables.
+    """
+    _, doc = load_monkeybot_yaml_dict(config_path)
+    subagent = doc.get("subagent")
+    if not isinstance(subagent, dict):
+        return False
+    raw = subagent.get("vertex_google_search")
+    if raw is None:
+        return False
+    if isinstance(raw, bool):
+        return raw
+    raise ConfigError(f"subagent.vertex_google_search must be true or false, got {raw!r}")

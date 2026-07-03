@@ -425,7 +425,6 @@ class GeminiProvider:
         max_output_tokens: int | None = None,
         thinking_budget: int | None = None,
         cache_enabled: bool = True,
-        google_search_enabled: bool = False,
     ) -> None:
         """Vertex Gemini streaming provider.
 
@@ -439,11 +438,10 @@ class GeminiProvider:
 
         ``max_output_tokens`` is a backward-compatible alias for ``max_tokens``.
 
-        ``google_search_enabled`` toggles Gemini's native ``google_search`` grounding
-        tool (additive to, and independent of, the harness's pluggable ``web_search``
-        custom tool). Defaults to ``False``; callers resolve the config-file value via
-        :func:`~monkeybot.core.config.settings.vertex_google_search_enabled_from_config`
-        (``web_search.vertex_google_search`` in ``monkeybot.yaml`` — config-only, no env var).
+        Native ``google_search`` grounding is opt-in per call via the
+        ``vertex_google_search`` keyword on :meth:`stream` and
+        :meth:`count_input_tokens` (Gemini-only; the runtime loop passes it only
+        when ``provider.name == \"gemini\"``).
         """
         if max_output_tokens is not None and max_tokens is not None and max_output_tokens != max_tokens:
             raise ValueError("pass only one of max_tokens or max_output_tokens")
@@ -454,7 +452,6 @@ class GeminiProvider:
         self._max_tokens = sampling.max_tokens
         self._thinking_budget = thinking_budget
         self._cache_enabled = cache_enabled
-        self._google_search_enabled = google_search_enabled
 
     @property
     def name(self) -> str:
@@ -471,6 +468,7 @@ class GeminiProvider:
         *,
         model: str,
         thinking_budget: int | None = None,
+        vertex_google_search: bool = False,
     ) -> int:
         model_param = _normalize_vertex_model(model)
         project, location = _vertex_project_and_location(model_param)
@@ -501,7 +499,7 @@ class GeminiProvider:
         count_tools: list[Any] = []
         if decls:
             count_tools.append(types.Tool(function_declarations=decls))
-        if self._google_search_enabled:
+        if vertex_google_search:
             count_tools.append(types.Tool(google_search=types.GoogleSearch()))
         if count_tools:
             count_cfg_kwargs["tools"] = count_tools
@@ -530,6 +528,7 @@ class GeminiProvider:
         *,
         model: str,
         thinking_budget: int | None = None,
+        vertex_google_search: bool = False,
     ) -> AsyncIterator[ProviderEvent]:
         model_param = _normalize_vertex_model(model)
         project, location = _vertex_project_and_location(model_param)
@@ -569,7 +568,7 @@ class GeminiProvider:
         stream_tools: list[Any] = []
         if decls:
             stream_tools.append(types.Tool(function_declarations=decls))
-        if self._google_search_enabled:
+        if vertex_google_search:
             stream_tools.append(types.Tool(google_search=types.GoogleSearch()))
         if stream_tools:
             cfg_kwargs["tools"] = stream_tools

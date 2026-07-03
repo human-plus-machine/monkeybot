@@ -381,13 +381,40 @@ async def _provider_prompt_input_tokens(
     *,
     model: str,
     thinking_budget: int | None = None,
+    vertex_google_search: bool = False,
 ) -> int:
+    if vertex_google_search and provider.name == "gemini":
+        return int(
+            await cast(Any, provider).count_input_tokens(
+                messages,
+                tools,
+                model=model,
+                thinking_budget=thinking_budget,
+                vertex_google_search=True,
+            )
+        )
     return await provider.count_input_tokens(
         messages,
         tools,
         model=model,
         thinking_budget=thinking_budget,
     )
+
+
+def _provider_stream_kwargs(
+    provider: Provider,
+    *,
+    model: str,
+    thinking_budget: int | None,
+    vertex_google_search: bool,
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "thinking_budget": thinking_budget,
+    }
+    if vertex_google_search and provider.name == "gemini":
+        kwargs["vertex_google_search"] = True
+    return kwargs
 
 
 async def _prompt_input_tokens_for_history(
@@ -399,6 +426,7 @@ async def _prompt_input_tokens_for_history(
     attachment_catalog: SessionAttachmentCatalog | None,
     memory_selection: MemoryPromptSelection | None = None,
     extra_system_text: str | None = None,
+    vertex_google_search: bool = False,
 ) -> int:
     """Provider-accurate prompt size for history rows already persisted (e.g. post-assistant)."""
     system = _system_message(
@@ -415,7 +443,8 @@ async def _prompt_input_tokens_for_history(
     )
     provider_messages = _messages_for_provider(system, resolved_messages)
     return await _provider_prompt_input_tokens(
-        provider, provider_messages, ctx.tools, model=ctx.model
+        provider, provider_messages, ctx.tools, model=ctx.model,
+        vertex_google_search=vertex_google_search,
     )
 
 
@@ -464,6 +493,7 @@ async def _append_budgeted_tool_responses(
     usage: Usage,
     budgeter: ContextBudgeter,
     provider: Provider,
+    vertex_google_search: bool = False,
 ) -> AsyncIterator[AgentEvent]:
     """Budget tool results against remaining context, append, compact if needed."""
     trimmed, needs_compaction = budgeter.fit_content_blocks(chunk_responses)
@@ -502,7 +532,8 @@ async def _append_budgeted_tool_responses(
         system = _system_message(ctx, chat_messages)
         provider_messages = _messages_for_provider(system, chat_messages)
         post = await _provider_prompt_input_tokens(
-            provider, provider_messages, ctx.tools, model=ctx.model
+            provider, provider_messages, ctx.tools, model=ctx.model,
+            vertex_google_search=vertex_google_search,
         )
         usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, post)
 
@@ -688,6 +719,7 @@ async def run(
     attachment_store: AttachmentStore | None = None,
     attachment_catalog: SessionAttachmentCatalog | None = None,
     transcript_writer: TranscriptWriter | None = None,
+    vertex_google_search: bool = False,
 ) -> AsyncIterator[AgentEvent]:
     """Stream agent events for one user message; ends with ``TurnComplete`` (never raises).
 
@@ -699,6 +731,10 @@ async def run(
 
     ``curator_provider`` is an optional dedicated provider for context curation (e.g. with
     ``thinking_budget=0``). Falls back to ``provider`` when not supplied.
+
+    ``vertex_google_search`` opts into Gemini native ``google_search`` grounding for agent
+    turns in this run (main agent or subagent). Only passed through to ``GeminiProvider``;
+    internal harness calls (history summarization, memory organizer) never set this flag.
     """
     usage = Usage()
     trace_id_capture: list[str | None] = [None]
@@ -730,6 +766,7 @@ async def run(
             attachment_store=attachment_store,
             attachment_catalog=attachment_catalog,
             transcript_writer=transcript_writer,
+            vertex_google_search=vertex_google_search,
         ):
             yield evt
     except asyncio.CancelledError:
@@ -784,6 +821,7 @@ async def _run_inner(
     attachment_store: AttachmentStore | None = None,
     attachment_catalog: SessionAttachmentCatalog | None = None,
     transcript_writer: TranscriptWriter | None = None,
+    vertex_google_search: bool = False,
 ) -> AsyncIterator[AgentEvent]:
     from monkeybot.observability.spans import set_run_output, span_run
 
@@ -806,6 +844,7 @@ async def _run_inner(
             attachment_store=attachment_store,
             attachment_catalog=attachment_catalog,
             transcript_writer=transcript_writer,
+            vertex_google_search=vertex_google_search,
         ):
             yield evt
         set_run_output(last_assistant[0])
@@ -839,6 +878,7 @@ async def _run_inner_core(
     attachment_store: AttachmentStore | None = None,
     attachment_catalog: SessionAttachmentCatalog | None = None,
     transcript_writer: TranscriptWriter | None = None,
+    vertex_google_search: bool = False,
 ) -> AsyncIterator[AgentEvent]:
     from monkeybot.observability.spans import (
         begin_turn_span,
@@ -982,6 +1022,7 @@ async def _run_inner_core(
                 ctx.tools,
                 model=ctx.model,
                 thinking_budget=stream_thinking,
+                vertex_google_search=vertex_google_search,
             )
             usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, preflight)
             cap = max(1, int(ctx.context_window_tokens * _SUMMARY_TRIGGER_RATIO))
@@ -1055,6 +1096,7 @@ async def _run_inner_core(
                     ctx.tools,
                     model=ctx.model,
                     thinking_budget=_stream_thinking_budget(provider, resolved_messages),
+                    vertex_google_search=vertex_google_search,
                 )
                 usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, post)
 
@@ -1120,8 +1162,12 @@ async def _run_inner_core(
                             provider.stream(
                                 provider_messages,
                                 ctx.tools,
-                                model=ctx.model,
-                                thinking_budget=stream_thinking,
+                                **_provider_stream_kwargs(
+                                    provider,
+                                    model=ctx.model,
+                                    thinking_budget=stream_thinking,
+                                    vertex_google_search=vertex_google_search,
+                                ),
                             ),
                         )
                     ) as stream:
@@ -1596,6 +1642,7 @@ async def _run_inner_core(
                         attachment_catalog=attachment_catalog,
                         memory_selection=memory_selection,
                         extra_system_text=pre_turn_extra,
+                        vertex_google_search=vertex_google_search,
                     )
                 except Exception:
                     logger.warning(
@@ -1617,6 +1664,7 @@ async def _run_inner_core(
                     usage=usage,
                     budgeter=budgeter,
                     provider=provider,
+                    vertex_google_search=vertex_google_search,
                 ):
                     yield budget_evt
 
