@@ -281,6 +281,7 @@ def _anthropic_assistant_block(block: ContentBlock) -> dict[str, Any]:
 _VOLATILE_SYSTEM_MARKERS = (
     "\n\n## Memory index\n",
     "\n\n## Memory\n",
+    "\n\n## Skills\n",
     "\n\n## Current request\n",
 )
 
@@ -300,7 +301,7 @@ def split_system_prompt_for_cache(system: str) -> tuple[str, str]:
 def build_cached_system_blocks(system: str) -> list[dict[str, Any]]:
     """Return Anthropic system blocks with cache_control only on the stable prefix.
 
-    Volatile tail sections (memory, current request) are sent in a second
+    Volatile tail sections (memory, skills, current request) are sent in a second
     uncached block so explicit caching hits across curation turns.
 
     Args:

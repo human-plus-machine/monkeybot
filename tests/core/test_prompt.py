@@ -52,8 +52,7 @@ def test_compose_memory_selection_omits_unlisted_lines() -> None:
     assert "- b" not in out
     assert "search_memory" in out
     assert "Showing 1 of 2" in out
-    assert "\n\n## Skills\n" not in out
-    assert "s1" not in out
+    assert "\n\n## Skills\n- s1\n- s2" in out
 
 
 def test_compose_no_chat_skips_current_request() -> None:
@@ -96,7 +95,7 @@ def test_compose_injects_current_request_after_tool_round() -> None:
     assert "Do the thing" in out
 
 
-def test_memory_section_without_skills_block() -> None:
+def test_memory_section_with_skills_block() -> None:
     ctx = _minimal_ctx(
         memory_index=["Note A"],
         skills=[SkillRef(name="s1", description="d1")],
@@ -104,7 +103,7 @@ def test_memory_section_without_skills_block() -> None:
     out = compose_system_prompt(ctx)
     assert "## Memory index" in out
     assert "- Note A" in out
-    assert "\n\n## Skills\n" not in out
+    assert "\n\n## Skills\n- s1" in out
     assert "list_skills" in out
 
 
@@ -246,8 +245,9 @@ def test_harness_precedes_volatile_sections() -> None:
     assert "## Memory index" not in stable
     assert "## Current request" not in stable
     mem_idx = volatile.index("## Memory index")
+    skills_idx = volatile.index("## Skills")
     current_idx = volatile.index("## Current request")
-    assert mem_idx < current_idx
+    assert mem_idx < skills_idx < current_idx
 
 
 @pytest.mark.parametrize("include_task", [True, False])

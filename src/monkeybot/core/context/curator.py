@@ -71,13 +71,6 @@ class CuratedPromptParts:
     """False on timeout, provider error, invalid JSON, or invalid selections when the model proposed content."""
 
 
-def curation_prompt_injection(parts: CuratedPromptParts) -> tuple[bool, list[str]]:
-    """Map curator output to system-prompt injection (fail-open on failure)."""
-    if parts.success:
-        return True, list(parts.memory_lines)
-    return False, []
-
-
 def _parse_json_object(text: str) -> dict[str, object] | None:
     raw = text.strip()
     if raw.startswith("```"):

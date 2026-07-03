@@ -128,6 +128,28 @@ async def test_duplicate_session_returns_409(
 
 
 @pytest.mark.asyncio
+async def test_delete_session_returns_204_and_removes_it(
+    client: AsyncClient,
+    registry: SessionRegistry,
+) -> None:
+    cr = await client.post("/sessions", json={})
+    sid = cr.json()["session_id"]
+    assert registry.get(sid) is not None
+
+    r = await client.delete(f"/sessions/{sid}")
+    assert r.status_code == 204
+    assert registry.get(sid) is None
+
+
+@pytest.mark.asyncio
+async def test_delete_unknown_session_is_idempotent_204(
+    client: AsyncClient,
+) -> None:
+    r = await client.delete("/sessions/does-not-exist")
+    assert r.status_code == 204
+
+
+@pytest.mark.asyncio
 async def test_reply_returns_409_when_busy(
     registry: SessionRegistry,
 ) -> None:

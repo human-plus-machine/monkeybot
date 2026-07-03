@@ -24,9 +24,9 @@ paths:
 
 model:
   # Free key from https://build.nvidia.com — set NVIDIA_API_KEY in .env.
-  provider: ollama
-  name: ornith:9b
-  context_window: 256000
+  provider: nvidia
+  name: z-ai/glm-5.2
+  context_window: 1000000
   thinking_budget: 0
   # summarization_model: meta/llama-3.1-8b-instruct  # optional; env CONTEXT_SUMMARIZATION_MODEL overrides
 

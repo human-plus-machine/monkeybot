@@ -28,6 +28,18 @@ class _FakeProvider:
         yield Done()
 
 
+class _FailingProvider:
+    """Simulates a curator call that fails to produce valid JSON."""
+
+    name = "fake-failing"
+    supports_streaming = True
+
+    async def stream(self, messages, tools, *, model: str, thinking_budget=None):
+        del messages, tools, model, thinking_budget
+        yield TextDelta(text="not json")
+        yield Done()
+
+
 def _ctx(memory: list[str]) -> TurnContext:
     return TurnContext(
         thread_id="t1",
@@ -85,3 +97,25 @@ async def test_curator_cache_skips_second_call(monkeypatch: pytest.MonkeyPatch) 
     )
     assert sel1.lines == ["alpha"]
     assert sel2.lines == ["alpha"]
+
+
+@pytest.mark.asyncio
+async def test_curator_mode_falls_back_to_window_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Curator-mode failures must fail open to the bounded window, not the full index."""
+    reset_curation_cache_for_tests()
+    monkeypatch.setenv("CONTEXT_CURATION_ENABLED", "1")
+    monkeypatch.setenv("CONTEXT_CURATION_MODE", "curator")
+    monkeypatch.setenv("CONTEXT_CURATION_MEMORY_THRESHOLD", "2")
+    monkeypatch.setenv("CONTEXT_CURATION_MEMORY_WINDOW_LINES", "2")
+    lines = [f"entry-{i}" for i in range(5)]
+    sel = await prepare_memory_for_prompt(
+        ctx=_ctx(lines),
+        user_message="hello",
+        provider=_FailingProvider(),
+        curator_provider=None,
+    )
+    assert sel.lines == ["entry-3", "entry-4"]
+    assert sel.total_lines == 5
+    assert sel.nudge_search is True

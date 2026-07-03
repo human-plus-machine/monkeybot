@@ -126,7 +126,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 **Section order (cache-friendly):**
 
 1. **Stable prefix:** `AGENT.md` + harness + session attachments
-2. **Volatile tail:** memory index + "Current request" anchor
+2. **Volatile tail:** memory index + skills + "Current request" anchor
 
 **How it works:**
 - `compose_system_prompt()` builds the full system string each inner turn.
@@ -134,7 +134,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - Emission-style block (Levers 1–2: minimum code, terse prose) is injected into the stable prefix when `MONKEYBOT_EMISSION_STYLE=terse`; its dense agent-to-agent sub-block (Lever 3) is additionally gated on the `task` tool being active. Default off. See [§21](#21-emission-style-terse-output-guidance).
 - `HARNESS_TOOL_CALL_PROTOCOL` enforces native tool-call channel, evidence rule, no-repeat rule.
 - "Current request" block restates last user text when transcript continued with assistant/tool messages (skipped when user row is already last).
-- Memory selection (`MemoryPromptSelection`) replaces full `ctx.memory_index` when truncated; skills via `list_skills`.
+- Memory selection (`MemoryPromptSelection`) replaces full `ctx.memory_index` when truncated; skill names always come from `ctx.skills` (use `list_skills`/`read_file` for the skills root path and full `SKILL.md` procedure).
 
 **Depends on:** `TurnContext`, `SandboxConfig.from_env()`, attachment catalog.
 
@@ -271,14 +271,14 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - **Modes:** `window` (recent `memory_window_lines` only), `curator` (LLM index pick), `hybrid` (window + curator when token-heavy; default).
 - Runs on **turn 1** when `CONTEXT_CURATION_ENABLED` and line/token thresholds met.
 - **Coverage/confidence** are structural (`injected/total`); when truncated, prompt nudges `search_memory`.
-- Curator uses numbered `memory_line_indices`; fail-open to full index (curator mode) or window (hybrid).
+- Curator uses numbered `memory_line_indices`; fails open to the recency window in both curator and hybrid modes.
 - Curator skipped when index fingerprint unchanged for the thread (cache).
 
 **Depends on:** Curator provider (hybrid/curator modes), memory index.
 
 **Invariants:**
 - Subagents disable curation (`enable_context_curation=False`).
-- Skills discovered via `list_skills`, not injected into the system prompt.
+- Skill names are always injected in full from `ctx.skills` (use `list_skills` for the skills root, `read_file` for full `SKILL.md` procedure).
 
 ---
 
@@ -451,7 +451,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 ### 18. Skills
 
-**Purpose:** Doc-driven procedural knowledge; agent discovers via `list_skills` + `read_file`.
+**Purpose:** Doc-driven procedural knowledge; skill names are always in the system prompt (`## Skills`), agent gets the root path via `list_skills` and full procedure via `read_file` on `SKILL.md`.
 
 **Key files:** `skills/*/SKILL.md`, `docs/skills.md`
 

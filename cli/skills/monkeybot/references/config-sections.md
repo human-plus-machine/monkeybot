@@ -87,7 +87,7 @@ Trims memory injected into context. `enabled: true` by default.
 | `max_memory_lines` | `12` | Cap curator-selected lines |
 | `search_max_hits` | `8` | Cap search hits in curator pool |
 
-When the prompt shows fewer entries than exist, a structural confidence score triggers a `search_memory` nudge. Skills are discovered via `list_skills`.
+When the prompt shows fewer entries than exist, a structural confidence score triggers a `search_memory` nudge. Skill names are always shown in full in the prompt; use `list_skills` to get the skills root path.
 
 ## `memory_hook`
 
