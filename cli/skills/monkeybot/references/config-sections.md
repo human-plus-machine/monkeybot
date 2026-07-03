@@ -101,6 +101,7 @@ When the prompt shows fewer entries than exist, a structural confidence score tr
 |---|---|---|
 | `timeout_sec` | `600` | Per-subagent timeout |
 | `max_turns` | `25` | Per-subagent turn cap |
+| `vertex_google_search` | `false` | **Gemini only.** Enables native `google_search` grounding for subagent `task` runs. Config-file only. |
 | `agent_md` | (parent `AGENT.md`) | Default prompt when `task` omits `subagent_type` |
 
 `subagents[]` defines named personas the parent selects via `task(subagent_type=...)`:
@@ -131,6 +132,7 @@ For shell-command safety, pair `denied_patterns` with `monkeybot_config/command_
 |---|---|---|
 | `backend` | `duckduckgo` | `duckduckgo` (no key) \| `tavily` \| `firecrawl` \| `none` |
 | `max_results` | `5` | Result cap |
+| `vertex_google_search` | `false` | **Gemini only.** Additive to `backend` — enables Vertex Gemini's native `google_search` grounding tool for **main agent** turns only (not summarization, memory organizer, or curator). Ignored for other model providers. Config-file only — no env var override (like `paths.auto_schema`). |
 
 Tavily/Firecrawl need `TAVILY_API_KEY` / `FIRECRAWL_API_KEY` in `.env`. Doctor check: `web_search.backend.ready` (`duckduckgo` needs the `web-search` extra).
 

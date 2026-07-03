@@ -10,6 +10,7 @@ from typing import Any
 
 from monkeybot.core.llm.provider import (
     Done,
+    GroundingEvent,
     Message,
     ProviderEvent,
     TextDelta,
@@ -349,6 +350,35 @@ def _tool_defs_to_declarations(tools: Sequence[ToolDef]) -> list[Any]:
     return out
 
 
+def _grounding_metadata_to_dict(gm: Any) -> dict[str, Any] | None:
+    """Flatten Vertex ``GroundingMetadata`` into a small, wire-friendly dict.
+
+    Only carries what a UI needs for citations/search-suggestion display: source
+    chunks (title/uri) and web search queries. Returns ``None`` when there is
+    nothing worth surfacing.
+    """
+    if gm is None:
+        return None
+    chunks: list[dict[str, str]] = []
+    for chunk in getattr(gm, "grounding_chunks", None) or []:
+        web = getattr(chunk, "web", None)
+        if web is None:
+            continue
+        title = str(getattr(web, "title", "") or "")
+        uri = str(getattr(web, "uri", "") or "")
+        if title or uri:
+            chunks.append({"title": title, "uri": uri})
+    queries = [str(q) for q in (getattr(gm, "web_search_queries", None) or [])]
+    if not chunks and not queries:
+        return None
+    out: dict[str, Any] = {}
+    if chunks:
+        out["sources"] = chunks
+    if queries:
+        out["search_queries"] = queries
+    return out
+
+
 def _merge_function_call_args(existing: dict[str, Any], fc: Any) -> dict[str, Any]:
     merged = dict(existing)
     if isinstance(getattr(fc, "args", None), dict):
@@ -403,6 +433,11 @@ class GeminiProvider:
         in the usage telemetry regardless of this flag.
 
         ``max_output_tokens`` is a backward-compatible alias for ``max_tokens``.
+
+        Native ``google_search`` grounding is opt-in per call via the
+        ``vertex_google_search`` keyword on :meth:`stream` and
+        :meth:`count_input_tokens` (Gemini-only; the runtime loop passes it only
+        when ``provider.name == \"gemini\"``).
         """
         if max_output_tokens is not None and max_tokens is not None and max_output_tokens != max_tokens:
             raise ValueError("pass only one of max_tokens or max_output_tokens")
@@ -429,6 +464,7 @@ class GeminiProvider:
         *,
         model: str,
         thinking_budget: int | None = None,
+        vertex_google_search: bool = False,
     ) -> int:
         model_param = _normalize_vertex_model(model)
         project, location = _vertex_project_and_location(model_param)
@@ -456,8 +492,13 @@ class GeminiProvider:
         count_cfg_kwargs: dict[str, Any] = {}
         if system_instruction:
             count_cfg_kwargs["system_instruction"] = system_instruction
+        count_tools: list[Any] = []
         if decls:
-            count_cfg_kwargs["tools"] = [types.Tool(function_declarations=decls)]
+            count_tools.append(types.Tool(function_declarations=decls))
+        if vertex_google_search:
+            count_tools.append(types.Tool(google_search=types.GoogleSearch()))
+        if count_tools:
+            count_cfg_kwargs["tools"] = count_tools
 
         gen_cfg_kwargs: dict[str, Any] = {
             "temperature": temperature,
@@ -483,6 +524,7 @@ class GeminiProvider:
         *,
         model: str,
         thinking_budget: int | None = None,
+        vertex_google_search: bool = False,
     ) -> AsyncIterator[ProviderEvent]:
         model_param = _normalize_vertex_model(model)
         project, location = _vertex_project_and_location(model_param)
@@ -519,8 +561,13 @@ class GeminiProvider:
             cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=thinking_budget)
 
         decls = _tool_defs_to_declarations(tools)
+        stream_tools: list[Any] = []
         if decls:
-            cfg_kwargs["tools"] = [types.Tool(function_declarations=decls)]
+            stream_tools.append(types.Tool(function_declarations=decls))
+        if vertex_google_search:
+            stream_tools.append(types.Tool(google_search=types.GoogleSearch()))
+        if stream_tools:
+            cfg_kwargs["tools"] = stream_tools
 
         config = types.GenerateContentConfig(**cfg_kwargs)
 
@@ -529,6 +576,7 @@ class GeminiProvider:
         pending_tools: dict[str, ToolCall] = {}
         last_usage: Any = None
         last_signature: str | None = None
+        grounding_meta: dict[str, Any] | None = None
 
         try:
             stream_it = await client.aio.models.generate_content_stream(
@@ -541,6 +589,14 @@ class GeminiProvider:
                     last_usage = resp.usage_metadata
 
                 for cand in resp.candidates or []:
+                    cand_gm = _grounding_metadata_to_dict(getattr(cand, "grounding_metadata", None))
+                    if cand_gm is not None:
+                        if grounding_meta is not None and cand_gm != grounding_meta:
+                            _log.debug(
+                                "grounding metadata replaced by later candidate %s",
+                                kv(provider="gemini", model=model),
+                            )
+                        grounding_meta = cand_gm
                     content = getattr(cand, "content", None)
                     if content is None or not content.parts:
                         continue
@@ -597,6 +653,12 @@ class GeminiProvider:
                 exc_info=True,
             )
             raise LLMError(str(exc)) from exc
+
+        if grounding_meta is not None:
+            yield GroundingEvent(
+                sources=list(grounding_meta.get("sources", [])),
+                search_queries=list(grounding_meta.get("search_queries", [])),
+            )
 
         ev = _usage_from_response(last_usage)
         if ev is not None:

@@ -26,6 +26,7 @@ from monkeybot.core.runtime.events import (
     ContextSummarizing,
     Error,
     FrontendToolRequestEvent,
+    GroundingEvent,
     ToolCallResult,
     ToolCallStarted,
     ToolConfirmationRequestEvent,
@@ -57,6 +58,9 @@ _RED = "\x1b[31m"
 _RESET = "\x1b[0m"
 _USER_PROMPT = "🧑"
 _ASSISTANT_PREFIX = "🐵 "
+_CYAN = "\x1b[36m"
+_UNDERLINE = "\x1b[4m"
+_GROUNDING_SOURCES_MAX = 5
 
 
 def _format_http_error(operation: str, exc: httpx.HTTPError) -> str:
@@ -339,6 +343,36 @@ async def _iter_sse_lines(resp: httpx.Response) -> AsyncIterator[str]:
         yield "\n".join(data_lines)
 
 
+def _hyperlink(url: str, label: str) -> str:
+    """OSC 8 terminal hyperlink; falls back to a plain URL on non-TTY streams."""
+    if not url:
+        return label
+    if not sys.stdout.isatty():
+        return f"{label} ({url})" if label and label != url else url
+    return f"\x1b]8;;{url}\x1b\\{label or url}\x1b]8;;\x1b\\"
+
+
+def _print_grounding(evt: GroundingEvent) -> None:
+    """Render Gemini `google_search` grounding sources as clickable links."""
+    if not evt.sources and not evt.search_queries:
+        return
+    header = "grounded search"
+    if evt.search_queries:
+        queries = ", ".join(f'"{q}"' for q in evt.search_queries)
+        header += f" — {queries}"
+    print(f"{_DIM}  🔎 {header}{_RESET}", flush=True)
+    for source in evt.sources[:_GROUNDING_SOURCES_MAX]:
+        title = source.get("title", "").strip()
+        uri = source.get("uri", "").strip()
+        if not uri:
+            continue
+        link = _hyperlink(uri, title or uri)
+        print(f"{_DIM}    {_CYAN}{_UNDERLINE}{link}{_RESET}", flush=True)
+    remaining = len(evt.sources) - _GROUNDING_SOURCES_MAX
+    if remaining > 0:
+        print(f"{_DIM}    … and {remaining} more{_RESET}", flush=True)
+
+
 def _print_event(
     evt: Any,
     *,
@@ -537,6 +571,16 @@ async def _chat_session(args: argparse.Namespace, base: str, *, spawned_gateway:
                         await activity.cancel()
                         await _handle_hitl(client, base, session_id, evt)
                         spinner.start()
+                        continue
+                    if isinstance(evt, GroundingEvent) and evt.request_id == request_id:
+                        if assistant_label_shown:
+                            tail = md_stream.flush()
+                            if tail:
+                                print(tail, end="", flush=True)
+                            print()
+                        else:
+                            await spinner.clear()
+                        _print_grounding(evt)
                         continue
                     if isinstance(evt, ToolCallStarted) and evt.request_id == request_id:
                         if assistant_label_shown:

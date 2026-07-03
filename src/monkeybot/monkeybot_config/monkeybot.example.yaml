@@ -113,6 +113,9 @@ memory_hook:
 subagent:
   timeout_sec: 600
   max_turns: 25
+  # Gemini only: enable native google_search grounding for subagent task runs.
+  # Config-file only (no env var override). Defaults to false.
+  vertex_google_search: false
   # Default AGENT.md for task calls with no subagent_type (relative to bot project root).
   agent_md: ./monkeybot_config/AGENT.md
 
@@ -138,6 +141,10 @@ web_search:
   # duckduckgo | tavily | firecrawl | none  (Tavily/Firecrawl need keys in .env)
   backend: duckduckgo
   max_results: 5
+  # Gemini only, additive to `backend` above (both can be on at once): enables Vertex
+  # Gemini's native `google_search` grounding tool. Ignored for other model providers.
+  # Config-file only (no env var override).
+  vertex_google_search: false
 
 sandbox:
   enabled: false

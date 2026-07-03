@@ -22,6 +22,8 @@ from monkeybot.core.config import (
     reset_runtime_env_state_for_tests,
     validate_monkeybot_yaml_doc,
     validate_provider_env,
+    subagent_vertex_google_search_from_config,
+    vertex_google_search_enabled_from_config,
 )
 from monkeybot.core.config.runtime_env import ENV_MAP
 
@@ -34,6 +36,50 @@ class TestEnvMap:
         assert ENV_MAP[("sandbox", "enabled")] == "SANDBOX_ENABLED"
         assert ENV_MAP[("sandbox", "server_url")] == "SANDBOX_SERVER_URL"
         assert ENV_MAP[("sandbox", "image")] == "SANDBOX_IMAGE"
+
+    def test_vertex_google_search_not_in_env_map(self) -> None:
+        """Config-file only (like paths.auto_schema) — no env var override."""
+        assert ("web_search", "vertex_google_search") not in ENV_MAP
+
+
+class TestVertexGoogleSearchConfig:
+    def test_defaults_false_when_missing(self) -> None:
+        assert vertex_google_search_enabled_from_config("/nonexistent/monkeybot.yaml") is False
+
+    def test_reads_true_from_yaml(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text("web_search:\n  vertex_google_search: true\n", encoding="utf-8")
+        assert vertex_google_search_enabled_from_config(str(config_path)) is True
+
+    def test_reads_false_from_yaml(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text("web_search:\n  vertex_google_search: false\n", encoding="utf-8")
+        assert vertex_google_search_enabled_from_config(str(config_path)) is False
+
+    def test_rejects_non_boolean(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text("web_search:\n  vertex_google_search: 0\n", encoding="utf-8")
+        with pytest.raises(ConfigError, match="must be true or false"):
+            vertex_google_search_enabled_from_config(str(config_path))
+
+
+class TestSubagentVertexGoogleSearchConfig:
+    def test_defaults_false_when_missing(self) -> None:
+        assert subagent_vertex_google_search_from_config("/nonexistent/monkeybot.yaml") is False
+
+    def test_reads_true_from_yaml(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text("subagent:\n  vertex_google_search: true\n", encoding="utf-8")
+        assert subagent_vertex_google_search_from_config(str(config_path)) is True
+
+    def test_rejects_non_boolean(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text("subagent:\n  vertex_google_search: 1\n", encoding="utf-8")
+        with pytest.raises(ConfigError, match="must be true or false"):
+            subagent_vertex_google_search_from_config(str(config_path))
+
+    def test_subagent_vertex_google_search_not_in_env_map(self) -> None:
+        assert ("subagent", "vertex_google_search") not in ENV_MAP
 
 
 class TestVertexAnthropicProvider:
