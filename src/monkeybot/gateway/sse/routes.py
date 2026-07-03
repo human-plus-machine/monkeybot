@@ -267,6 +267,19 @@ def create_app(
             ) from None
         return CreateSessionResponse(session_id=sid, created_at=created_at_ms)
 
+    @api.delete("/sessions/{session_id}", status_code=204)
+    async def delete_session(
+        session_id: str,
+        reg_dep: SessionRegistry = Depends(get_registry),
+    ) -> Response:
+        """End a session: cancel pending work and free its in-process state.
+
+        Idempotent — deleting an unknown or already-deleted session_id is a no-op
+        204 rather than a 404, since the end state (no session) is identical.
+        """
+        reg_dep.remove(session_id)
+        return Response(status_code=204)
+
     @api.post("/sessions/{session_id}/reply", response_model=ReplyResponse)
     async def post_reply(
         session_id: str,

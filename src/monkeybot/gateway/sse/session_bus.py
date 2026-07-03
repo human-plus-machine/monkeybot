@@ -187,3 +187,23 @@ class SessionRegistry:
         bus.attachment_catalog = SessionAttachmentCatalog(session_id=session_id)
         self._sessions[session_id] = bus
         return bus
+
+    def remove(self, session_id: str) -> bool:
+        """Drop a session bus and any auxiliary per-session state keyed by it.
+
+        Cancels outstanding pending-response futures so awaiting callers don't
+        hang, then evicts the memory-curation cache entry for this thread id
+        (see ``memory_prompt._curation_cache``) so both structures share the
+        same lifecycle instead of growing unbounded for the life of the process.
+
+        Returns True if a session was found and removed, False otherwise.
+        """
+        bus = self._sessions.pop(session_id, None)
+        if bus is None:
+            return False
+        bus.abandon_pending_cancel_all()
+
+        from monkeybot.core.context.memory_prompt import evict_curation_cache
+
+        evict_curation_cache(session_id)
+        return True

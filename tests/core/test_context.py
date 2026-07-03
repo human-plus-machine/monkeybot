@@ -5,7 +5,12 @@ from pathlib import Path
 
 import pytest
 
-from monkeybot.core.context import build_context, refresh_memory_index
+from monkeybot.core.context import (
+    _discover_skills,
+    _parse_skill_description,
+    build_context,
+    refresh_memory_index,
+)
 from monkeybot.core.llm.provider import Done, TextDelta, UsageEvent
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
@@ -72,6 +77,86 @@ class FakeMCPClient:
 
     async def load_from_config(self, path: Path, *, raise_on_error: bool = False) -> None:
         del path
+
+
+# Standard layout used by demo_agent/workspace/skills/* — regression for list_skills descriptions.
+_IMAGE_GENERATOR_SKILL_MD = """---
+name: image-generator
+description: Generate images with Vertex AI Nano Banana Pro (Gemini image models) and display them in chat.
+---
+
+# image-generator
+
+Generate images using **Vertex AI** Gemini image models.
+"""
+
+_BROWSER_SKILL_MD = """---
+name: browser
+description: Control a real browser via CDP for web tasks; check and write site playbooks before improvising.
+---
+
+# browser
+
+Use the **browser** MCP tools for web interaction.
+"""
+
+
+def _write_skill(skills_root: Path, folder: str, content: str) -> None:
+    skill_dir = skills_root / folder
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("skill_md", "folder", "expected"),
+    [
+        (
+            _IMAGE_GENERATOR_SKILL_MD,
+            "image-generator",
+            "Generate images with Vertex AI Nano Banana Pro (Gemini image models) and display them in chat.",
+        ),
+        (
+            _BROWSER_SKILL_MD,
+            "browser",
+            "Control a real browser via CDP for web tasks; check and write site playbooks before improvising.",
+        ),
+        ("Do research tasks.\n\nMore body.\n", "research", "Do research tasks."),
+        (
+            "---\nname: bare\n---\n\n# bare\n\nBody only.\n",
+            "bare",
+            "bare",
+        ),
+    ],
+)
+def test_parse_skill_description(skill_md: str, folder: str, expected: str) -> None:
+    assert _parse_skill_description(skill_md, folder) == expected
+
+
+def test_parse_skill_description_frontmatter_not_markdown_heading() -> None:
+    """Regression: YAML description must win over ``# skill-name`` body heading."""
+    desc = _parse_skill_description(_IMAGE_GENERATOR_SKILL_MD, "image-generator")
+    assert desc != "# image-generator"
+    assert desc != "image-generator"
+    assert "Vertex AI" in desc
+
+
+def test_discover_skills_returns_frontmatter_descriptions(tmp_path: Path) -> None:
+    skills = tmp_path / "skills"
+    _write_skill(skills, "image-generator", _IMAGE_GENERATOR_SKILL_MD)
+    _write_skill(skills, "browser", _BROWSER_SKILL_MD)
+
+    discovered = _discover_skills(skills)
+
+    assert [(s.name, s.description) for s in discovered] == [
+        (
+            "browser",
+            "Control a real browser via CDP for web tasks; check and write site playbooks before improvising.",
+        ),
+        (
+            "image-generator",
+            "Generate images with Vertex AI Nano Banana Pro (Gemini image models) and display them in chat.",
+        ),
+    ]
 
 
 @pytest.mark.asyncio
@@ -220,6 +305,32 @@ async def test_build_context_empty_agent_md_raises(tmp_path: Path) -> None:
             skills_path=skills,
             mcp_client=FakeMCPClient([]),
         )
+
+
+@pytest.mark.asyncio
+async def test_build_context_discovers_skill_description_from_frontmatter(tmp_path: Path) -> None:
+    agent_path = tmp_path / "AGENT.md"
+    agent_path.write_text("ok\n", encoding="utf-8")
+    mem = tmp_path / "memory"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    _write_skill(skills, "image-generator", _IMAGE_GENERATOR_SKILL_MD)
+
+    ctx = await build_context(
+        "t",
+        "r",
+        agent_md_path=agent_path,
+        memory=_memory_subsystem(mem),
+        skills_path=skills,
+        mcp_client=FakeMCPClient([]),
+    )
+
+    assert len(ctx.skills) == 1
+    assert ctx.skills[0].name == "image-generator"
+    assert ctx.skills[0].description == (
+        "Generate images with Vertex AI Nano Banana Pro (Gemini image models) and display them in chat."
+    )
+    assert ctx.skills[0].description != "# image-generator"
 
 
 @pytest.mark.asyncio

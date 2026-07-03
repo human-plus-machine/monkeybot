@@ -29,6 +29,15 @@ def reset_curation_cache_for_tests() -> None:
     _curation_cache.clear()
 
 
+def evict_curation_cache(thread_id: str) -> None:
+    """Drop the cached curator selection for a thread (call on session removal).
+
+    ``_curation_cache`` is otherwise append-only for the life of the process;
+    this must be invoked whenever the owning session is torn down.
+    """
+    _curation_cache.pop(thread_id, None)
+
+
 @dataclass(frozen=True)
 class MemoryPromptSelection:
     """Memory lines and structural coverage for volatile system-prompt injection."""
@@ -179,7 +188,7 @@ async def prepare_memory_for_prompt(
         if parts.success:
             injected = list(parts.memory_lines)
             return _selection_from_lines(injected, total, use_custom_lines=True)
-        return _selection_from_lines(total, total, use_custom_lines=False)
+        return _selection_from_lines(window, total, use_custom_lines=len(window) < len(total))
 
     # hybrid: recent window by default; curator when full index is token-heavy
     token_n = _env_int("CONTEXT_CURATION_MEMORY_TOKEN_THRESHOLD", 2000)

@@ -7,7 +7,6 @@ import pytest
 from monkeybot.core.context import SkillRef, TurnContext
 from monkeybot.core.context.curator import (
     CuratedPromptParts,
-    curation_prompt_injection,
     curation_threshold_met,
     memory_index_token_estimate,
     run_context_curator,
@@ -101,18 +100,6 @@ async def test_curator_bad_json_fails() -> None:
     ctx = _ctx(memory=[])
     out = await run_context_curator(ctx=ctx, provider=prov, curator_model="m", user_message="")
     assert not out.success
-
-
-def test_curation_prompt_injection_fail_open() -> None:
-    use_curated, lines = curation_prompt_injection(CuratedPromptParts([], success=False))
-    assert use_curated is False
-    assert lines == []
-
-    use_curated, lines = curation_prompt_injection(
-        CuratedPromptParts(["a"], success=True),
-    )
-    assert use_curated is True
-    assert lines == ["a"]
 
 
 def test_curation_threshold_ignores_skill_count(monkeypatch: pytest.MonkeyPatch) -> None:

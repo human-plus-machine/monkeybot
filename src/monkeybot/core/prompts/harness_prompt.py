@@ -34,7 +34,7 @@ When workspace tools (`read_file`, `write_file`, `run_command`, …) appear in t
 ### Core built-in tools (when present in the active tool list)
 - `read_file` / `write_file` / `replace_in_file` / `glob` — paths are **workspace-relative** under the workspace root below. **`glob`** lists matching files; prefer it over `run_command` + `ls` for discovery. Do not substitute a code block in chat for a file deliverable.
 - `search_memory` — keyword search under the configured memory directory; prefer this over shell commands for any memory lookup.
-- `list_skills` — lists installed skills and the skills root; call before work that may use procedural knowledge, then `read_file` on the skill's `SKILL.md` for procedure.
+- `list_skills` — resolves the skills root path for installed skills listed under `## Skills` below; read each skill's `SKILL.md` under that root for procedure.
 - `run_command` — allowlisted shell with optional `timeout` (seconds). {run_command_exec_note} Shell starts in **workspace root**; use the paths listed under Runtime paths below — do NOT guess directory names. `cd` is a shell builtin and cannot be used as a bare command; use `bash -c "cd <dir> && <cmd>"` instead. Pass **`argv` as a list** with the binary first (e.g. `{{"argv": ["ls", "."]}}`); do not pass `{{"command": "ls -R", "args": []}}` — that treats `ls -R` as the binary name.
 - `add_mcp_server` / `remove_mcp_server` — register or drop MCP stdio servers; new tools appear on later turns.
 {web_search_line}{task_line}
@@ -63,7 +63,7 @@ When workspace tools (`read_file`, `write_file`, `run_command`, …) appear in t
 - When an MCP tool fails: state what failed in one sentence, then stop — do **not** fabricate, infer, or summarize content that the tool was supposed to fetch. If a fallback tool is available and meaningfully different, try it once; otherwise tell the user what is needed to proceed (e.g. correct credentials, a public URL, pasting the content directly).
 
 ### Skills
-- Call `list_skills` before working on tasks that may involve installed procedural knowledge; then `read_file` on the matching skill's `SKILL.md` for procedure before running commands or steps it documents."""
+- Installed skill names are listed under `## Skills` in this prompt. When a task matches one, use `list_skills` to get the skills root, then `read_file` on that skill's `SKILL.md` for procedure before running commands or steps it documents."""
 
 
 _TASK_LINE = (
