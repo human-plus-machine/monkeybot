@@ -18,7 +18,11 @@ from monkeybot.core.attachments.freeze import freeze_attachments_in_history
 from monkeybot.core.attachments.resolve import resolve_messages_for_provider
 from monkeybot.core.attachments.store import AttachmentStore
 from monkeybot.core.context import TurnContext, refresh_memory_index
-from monkeybot.core.context.memory_prompt import MemoryPromptSelection, prepare_memory_for_prompt
+from monkeybot.core.context.memory_prompt import (
+    MemoryPromptSelection,
+    memory_index_fingerprint,
+    prepare_memory_for_prompt,
+)
 from monkeybot.core.context.tool_output_policy import resolve_tool_budget
 from monkeybot.core.context.tool_result_ingress import summarize_tool_result_text
 from monkeybot.core.context.tool_shapers import (
@@ -868,6 +872,7 @@ async def _run_inner_core(
     # turn tail before any history load/reset so the row is never lost.
     assistant_write_task: asyncio.Task[None] | None = None
     memory_selection: MemoryPromptSelection | None = None
+    memory_selection_fingerprint: str | None = None
     pre_turn_extra: str | None = None
     pre_tool_extra_next: str | None = None
 
@@ -926,7 +931,8 @@ async def _run_inner_core(
                             ],
                         )
 
-            if turn_index == 1:
+            index_fp = memory_index_fingerprint(ctx.memory_index)
+            if memory_selection is None or memory_selection_fingerprint != index_fp:
                 u = latest_user_message_text(chat_messages) or user_text
                 memory_selection = await prepare_memory_for_prompt(
                     ctx=ctx,
@@ -934,6 +940,7 @@ async def _run_inner_core(
                     provider=provider,
                     curator_provider=curator_provider,
                 )
+                memory_selection_fingerprint = index_fp
                 logger.debug(
                     "memory prompt selection %s",
                     kv(

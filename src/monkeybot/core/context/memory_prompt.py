@@ -64,7 +64,8 @@ def memory_index_cap_from_env() -> int:
     return max(1, _env_int("MEMORY_INDEX_CAP", 200))
 
 
-def _index_fingerprint(lines: list[str]) -> str:
+def memory_index_fingerprint(lines: list[str]) -> str:
+    """Stable hash of index lines; used to detect mid-turn INDEX refreshes."""
     payload = "\n".join(lines)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -161,7 +162,7 @@ async def prepare_memory_for_prompt(
     mode = curation_mode_from_env()
     window_n = memory_window_lines_from_env()
     window = memory_window_slice(total, window_n)
-    fingerprint = _index_fingerprint(total)
+    fingerprint = memory_index_fingerprint(total)
 
     if mode == "window":
         return _selection_from_lines(window, total, use_custom_lines=len(window) < len(total))
