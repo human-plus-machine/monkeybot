@@ -178,6 +178,22 @@ class SystemNotificationEvent:
 
 
 @dataclass(frozen=True)
+class GroundingEvent:
+    """Provider-native web-search grounding metadata (e.g. Gemini ``google_search``).
+
+    Additive: distinct from the harness's ``web_search`` custom tool (``ToolCallStarted``/
+    ``ToolCallResult``); this surfaces citations from a provider-hosted search invoked
+    server-side during the model call.
+    """
+
+    kind: Literal["GroundingEvent"] = "GroundingEvent"
+    request_id: str = ""
+    sources: list[dict[str, str]] = field(default_factory=list)
+    search_queries: list[str] = field(default_factory=list)
+    search_entry_point_html: str = ""
+
+
+@dataclass(frozen=True)
 class AttachmentDescriptorEvent:
     """Frozen attachment metadata for playground UI (not persisted as a ContentBlock)."""
 
@@ -208,6 +224,7 @@ AgentEvent: TypeAlias = (
     | FrontendToolRequestEvent
     | SystemNotificationEvent
     | AttachmentDescriptorEvent
+    | GroundingEvent
 )
 
 
@@ -297,6 +314,13 @@ def _story5_event_dict(event: AgentEvent) -> dict[str, object]:
             "filename": event.filename,
             "description": event.description,
         }
+    if isinstance(event, GroundingEvent):
+        return {
+            **base,
+            "sources": [dict(s) for s in event.sources],
+            "search_queries": list(event.search_queries),
+            "search_entry_point_html": event.search_entry_point_html,
+        }
     raise AssertionError(f"_story5_event_dict: unsupported type {type(event)!r}")
 
 
@@ -354,6 +378,7 @@ def event_to_json(event: AgentEvent) -> str:
             FrontendToolRequestEvent,
             SystemNotificationEvent,
             AttachmentDescriptorEvent,
+            GroundingEvent,
         ),
     ):
         payload = _story5_event_dict(event)
@@ -548,6 +573,20 @@ def event_from_json(raw: str) -> AgentEvent:
             raise EventDecodeError("SystemNotificationEvent data must be an object or null")
         return SystemNotificationEvent(
             request_id=rid, notification_type=nt, msg=msg, data=data_obj
+        )
+    if t == "GroundingEvent":
+        sources_raw = payload.get("sources")
+        sources: list[dict[str, str]] = []
+        if isinstance(sources_raw, list):
+            for item in sources_raw:
+                if isinstance(item, dict):
+                    sources.append({str(k): str(v) for k, v in item.items()})
+        queries_raw = payload.get("search_queries")
+        queries = [str(q) for q in queries_raw] if isinstance(queries_raw, list) else []
+        html_raw = payload.get("search_entry_point_html", "")
+        html = html_raw if isinstance(html_raw, str) else ""
+        return GroundingEvent(
+            request_id=rid, sources=sources, search_queries=queries, search_entry_point_html=html
         )
     if t == "AttachmentDescriptor":
         aid = payload.get("attachment_id", "")

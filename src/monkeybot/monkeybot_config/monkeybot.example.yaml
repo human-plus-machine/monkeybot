@@ -138,6 +138,10 @@ web_search:
   # duckduckgo | tavily | firecrawl | none  (Tavily/Firecrawl need keys in .env)
   backend: duckduckgo
   max_results: 5
+  # Gemini only, additive to `backend` above (both can be on at once): enables Vertex
+  # Gemini's native `google_search` grounding tool. Ignored for other model providers.
+  # Config-file only (no env var override).
+  vertex_google_search: false
 
 sandbox:
   enabled: false

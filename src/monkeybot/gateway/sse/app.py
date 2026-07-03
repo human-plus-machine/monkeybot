@@ -285,7 +285,10 @@ def _resolve_curator_provider(main_provider: Provider) -> Provider:
     mode = normalize_model_provider(os.environ.get("MODEL_PROVIDER", "google_vertexai"))
     if mode in ("fake", "vertex_anthropic"):
         return main_provider
-    return GeminiProvider(thinking_budget=0, max_tokens=1024)
+    # Curator calls are tools=() JSON-only completions; google_search grounding is
+    # irrelevant here and would only add latency/cost, so keep it off regardless of
+    # the main provider's web_search.vertex_google_search setting.
+    return GeminiProvider(thinking_budget=0, max_tokens=1024, google_search_enabled=False)
 
 
 class GatewayLoopPort:

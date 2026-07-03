@@ -22,6 +22,7 @@ from monkeybot.core.config import (
     reset_runtime_env_state_for_tests,
     validate_monkeybot_yaml_doc,
     validate_provider_env,
+    vertex_google_search_enabled_from_config,
 )
 from monkeybot.core.config.runtime_env import ENV_MAP
 
@@ -34,6 +35,50 @@ class TestEnvMap:
         assert ENV_MAP[("sandbox", "enabled")] == "SANDBOX_ENABLED"
         assert ENV_MAP[("sandbox", "server_url")] == "SANDBOX_SERVER_URL"
         assert ENV_MAP[("sandbox", "image")] == "SANDBOX_IMAGE"
+
+    def test_vertex_google_search_not_in_env_map(self) -> None:
+        """Config-file only (like paths.auto_schema) — no env var override."""
+        assert ("web_search", "vertex_google_search") not in ENV_MAP
+
+
+class TestVertexGoogleSearchConfig:
+    def test_defaults_false_when_missing(self) -> None:
+        assert vertex_google_search_enabled_from_config("/nonexistent/monkeybot.yaml") is False
+
+    def test_reads_true_from_yaml(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text("web_search:\n  vertex_google_search: true\n", encoding="utf-8")
+        assert vertex_google_search_enabled_from_config(str(config_path)) is True
+
+    def test_reads_false_from_yaml(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text("web_search:\n  vertex_google_search: false\n", encoding="utf-8")
+        assert vertex_google_search_enabled_from_config(str(config_path)) is False
+
+    def test_rejects_non_boolean(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text("web_search:\n  vertex_google_search: 0\n", encoding="utf-8")
+        with pytest.raises(ConfigError, match="must be true or false"):
+            vertex_google_search_enabled_from_config(str(config_path))
+
+    def test_get_provider_config_reads_yaml_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg_dir = tmp_path / "monkeybot_config"
+        cfg_dir.mkdir(parents=True)
+        (cfg_dir / "monkeybot.yaml").write_text(
+            "web_search:\n  vertex_google_search: true\n", encoding="utf-8"
+        )
+        monkeypatch.chdir(tmp_path)
+        cfg = get_provider_config(provider="google_vertexai", model_name="gemini-3-flash")
+        assert cfg.provider._google_search_enabled is True  # type: ignore[attr-defined]
+
+    def test_get_provider_config_defaults_off_without_yaml(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        cfg = get_provider_config(provider="google_vertexai", model_name="gemini-3-flash")
+        assert cfg.provider._google_search_enabled is False  # type: ignore[attr-defined]
 
 
 class TestVertexAnthropicProvider:

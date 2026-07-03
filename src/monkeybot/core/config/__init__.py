@@ -18,6 +18,7 @@ from monkeybot.core.config.settings import (
     get_subagent_configs,
     get_subagent_registry,
     normalize_model_provider,
+    vertex_google_search_enabled_from_config,
 )
 from monkeybot.core.config.validation import (
     SUPPORTED_MODEL_PROVIDERS,
@@ -50,4 +51,5 @@ __all__ = [
     "resolve_monkeybot_config_path",
     "validate_monkeybot_yaml_doc",
     "validate_provider_env",
+    "vertex_google_search_enabled_from_config",
 ]

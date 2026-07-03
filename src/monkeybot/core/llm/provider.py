@@ -80,6 +80,21 @@ class ToolCall:
 
 
 @dataclass(frozen=True, kw_only=True)
+class GroundingEvent:
+    """Provider-native web-search grounding metadata (e.g. Gemini ``google_search``).
+
+    Additive to the harness's pluggable ``web_search`` custom tool — this carries
+    citations/search-suggestion data from a provider-hosted search tool invoked
+    server-side, not a tool call the harness dispatched itself.
+    """
+
+    kind: Literal["grounding"] = "grounding"
+    sources: list[dict[str, str]]
+    search_queries: list[str]
+    search_entry_point_html: str = ""
+
+
+@dataclass(frozen=True, kw_only=True)
 class UsageEvent:
     kind: Literal["usage"] = "usage"
     input_tokens: int
@@ -94,7 +109,7 @@ class Done:
     kind: Literal["done"] = "done"
 
 
-ProviderEvent: TypeAlias = TextDelta | ThinkingDelta | ToolCall | UsageEvent | Done
+ProviderEvent: TypeAlias = TextDelta | ThinkingDelta | ToolCall | GroundingEvent | UsageEvent | Done
 
 
 class Provider(Protocol):
@@ -150,6 +165,7 @@ class Provider(Protocol):
 
 __all__ = [
     "Done",
+    "GroundingEvent",
     "Message",
     "Provider",
     "ProviderEvent",

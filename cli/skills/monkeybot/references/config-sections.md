@@ -131,6 +131,7 @@ For shell-command safety, pair `denied_patterns` with `monkeybot_config/command_
 |---|---|---|
 | `backend` | `duckduckgo` | `duckduckgo` (no key) \| `tavily` \| `firecrawl` \| `none` |
 | `max_results` | `5` | Result cap |
+| `vertex_google_search` | `false` | **Gemini only.** Additive to `backend` — enables Vertex Gemini's native `google_search` grounding tool alongside (not instead of) the `backend` custom tool. Ignored for other model providers. Config-file only — no env var override (like `paths.auto_schema`). |
 
 Tavily/Firecrawl need `TAVILY_API_KEY` / `FIRECRAWL_API_KEY` in `.env`. Doctor check: `web_search.backend.ready` (`duckduckgo` needs the `web-search` extra).
 

@@ -40,6 +40,9 @@ from monkeybot.core.llm.provider import (
     ToolCall,
     UsageEvent,
 )
+from monkeybot.core.llm.provider import (
+    GroundingEvent as ProviderGroundingEvent,
+)
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.messages.tool_integrity import repair_tool_turn_integrity
@@ -72,6 +75,7 @@ from .events import (
     ContextSummarized,
     ContextSummarizing,
     Error,
+    GroundingEvent,
     ImageBlock,
     SystemPromptSnapshot,
     Thinking,
@@ -1146,6 +1150,13 @@ async def _run_inner_core(
                                 llm_cache_creation += ev.cache_creation_tokens
                             elif isinstance(ev, ToolCall):
                                 pending[ev.call_id] = ev
+                            elif isinstance(ev, ProviderGroundingEvent):
+                                yield GroundingEvent(
+                                    request_id=ctx.request_id,
+                                    sources=[dict(s) for s in ev.sources],
+                                    search_queries=list(ev.search_queries),
+                                    search_entry_point_html=ev.search_entry_point_html,
+                                )
                             elif isinstance(ev, Done):
                                 break
                     set_llm_usage(

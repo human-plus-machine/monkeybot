@@ -130,6 +130,7 @@ def get_provider_config(
                 max_tokens=sampling.max_tokens,
                 thinking_budget=thinking_budget,
                 cache_enabled=resolved_cache,
+                google_search_enabled=vertex_google_search_enabled_from_config(),
             ),
             resolved_model,
         )
@@ -288,3 +289,22 @@ def auto_schema_enabled_from_config(config_path: str | None = None) -> bool:
     if isinstance(raw, bool):
         return raw
     raise ConfigError(f"paths.auto_schema must be true or false, got {raw!r}")
+
+
+def vertex_google_search_enabled_from_config(config_path: str | None = None) -> bool:
+    """Whether Gemini's native ``google_search`` grounding tool is enabled (``web_search.vertex_google_search``).
+
+    Additive to, and independent of, ``web_search.backend`` (the harness's pluggable
+    DuckDuckGo/Tavily/Firecrawl custom tool). Defaults to ``False`` when the key is
+    absent. Only read from monkeybot.yaml — not from environment variables.
+    """
+    _, doc = load_monkeybot_yaml_dict(config_path)
+    web_search = doc.get("web_search")
+    if not isinstance(web_search, dict):
+        return False
+    raw = web_search.get("vertex_google_search")
+    if raw is None:
+        return False
+    if isinstance(raw, bool):
+        return raw
+    raise ConfigError(f"web_search.vertex_google_search must be true or false, got {raw!r}")
