@@ -354,8 +354,8 @@ def _grounding_metadata_to_dict(gm: Any) -> dict[str, Any] | None:
     """Flatten Vertex ``GroundingMetadata`` into a small, wire-friendly dict.
 
     Only carries what a UI needs for citations/search-suggestion display: source
-    chunks (title/uri) and the rendered search-entry-point HTML/URI, if present.
-    Returns ``None`` when there is nothing worth surfacing.
+    chunks (title/uri) and web search queries. Returns ``None`` when there is
+    nothing worth surfacing.
     """
     if gm is None:
         return None
@@ -369,17 +369,13 @@ def _grounding_metadata_to_dict(gm: Any) -> dict[str, Any] | None:
         if title or uri:
             chunks.append({"title": title, "uri": uri})
     queries = [str(q) for q in (getattr(gm, "web_search_queries", None) or [])]
-    entry_point = getattr(gm, "search_entry_point", None)
-    entry_point_html = str(getattr(entry_point, "rendered_content", "") or "") if entry_point else ""
-    if not chunks and not queries and not entry_point_html:
+    if not chunks and not queries:
         return None
     out: dict[str, Any] = {}
     if chunks:
         out["sources"] = chunks
     if queries:
-        out["searchQueries"] = queries
-    if entry_point_html:
-        out["searchEntryPointHtml"] = entry_point_html
+        out["search_queries"] = queries
     return out
 
 
@@ -595,6 +591,11 @@ class GeminiProvider:
                 for cand in resp.candidates or []:
                     cand_gm = _grounding_metadata_to_dict(getattr(cand, "grounding_metadata", None))
                     if cand_gm is not None:
+                        if grounding_meta is not None and cand_gm != grounding_meta:
+                            _log.debug(
+                                "grounding metadata replaced by later candidate %s",
+                                kv(provider="gemini", model=model),
+                            )
                         grounding_meta = cand_gm
                     content = getattr(cand, "content", None)
                     if content is None or not content.parts:
@@ -656,8 +657,7 @@ class GeminiProvider:
         if grounding_meta is not None:
             yield GroundingEvent(
                 sources=list(grounding_meta.get("sources", [])),
-                search_queries=list(grounding_meta.get("searchQueries", [])),
-                search_entry_point_html=str(grounding_meta.get("searchEntryPointHtml", "")),
+                search_queries=list(grounding_meta.get("search_queries", [])),
             )
 
         ev = _usage_from_response(last_usage)

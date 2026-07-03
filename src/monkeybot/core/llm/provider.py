@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal, Protocol, TypeAlias
+from typing import Any, Literal, Protocol, TypeAlias, cast
 
 from monkeybot.core.types.content_blocks import ContentBlock, Text, ToolRequest, ToolResponse
 from monkeybot.core.types.types_tools import ToolDef
@@ -91,7 +91,49 @@ class GroundingEvent:
     kind: Literal["grounding"] = "grounding"
     sources: list[dict[str, str]]
     search_queries: list[str]
-    search_entry_point_html: str = ""
+
+
+def gemini_extra_kwargs(provider: Provider, *, vertex_google_search: bool) -> dict[str, bool]:
+    if vertex_google_search and provider.name == "gemini":
+        return {"vertex_google_search": True}
+    return {}
+
+
+async def provider_count_input_tokens(
+    provider: Provider,
+    messages: Sequence[Message],
+    tools: Sequence[ToolDef],
+    *,
+    model: str,
+    thinking_budget: int | None = None,
+    vertex_google_search: bool = False,
+) -> int:
+    kwargs: dict[str, Any] = {"model": model, "thinking_budget": thinking_budget}
+    extra = gemini_extra_kwargs(provider, vertex_google_search=vertex_google_search)
+    if extra:
+        return int(
+            await cast(Any, provider).count_input_tokens(messages, tools, **kwargs, **extra)
+        )
+    return await provider.count_input_tokens(messages, tools, **kwargs)
+
+
+def provider_stream(
+    provider: Provider,
+    messages: Sequence[Message],
+    tools: Sequence[ToolDef],
+    *,
+    model: str,
+    thinking_budget: int | None = None,
+    vertex_google_search: bool = False,
+) -> AsyncIterator[ProviderEvent]:
+    kwargs: dict[str, Any] = {"model": model, "thinking_budget": thinking_budget}
+    extra = gemini_extra_kwargs(provider, vertex_google_search=vertex_google_search)
+    if extra:
+        return cast(
+            AsyncIterator[ProviderEvent],
+            cast(Any, provider).stream(messages, tools, **kwargs, **extra),
+        )
+    return provider.stream(messages, tools, **kwargs)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -178,4 +220,7 @@ __all__ = [
     "ToolRequest",
     "ToolResponse",
     "UsageEvent",
+    "gemini_extra_kwargs",
+    "provider_count_input_tokens",
+    "provider_stream",
 ]

@@ -131,28 +131,28 @@ def test_grounding_metadata_to_dict_none_returns_none() -> None:
 
 
 def test_grounding_metadata_to_dict_empty_returns_none() -> None:
-    gm = types.SimpleNamespace(grounding_chunks=[], web_search_queries=[], search_entry_point=None)
+    gm = types.SimpleNamespace(grounding_chunks=[], web_search_queries=[])
     assert _grounding_metadata_to_dict(gm) is None
 
 
 def test_grounding_metadata_to_dict_extracts_sources_and_queries() -> None:
     chunk = types.SimpleNamespace(web=types.SimpleNamespace(title="Example", uri="https://example.com"))
-    entry_point = types.SimpleNamespace(rendered_content="<div>widget</div>")
     gm = types.SimpleNamespace(
         grounding_chunks=[chunk],
         web_search_queries=["weather today"],
-        search_entry_point=entry_point,
     )
     out = _grounding_metadata_to_dict(gm)
     assert out == {
         "sources": [{"title": "Example", "uri": "https://example.com"}],
-        "searchQueries": ["weather today"],
-        "searchEntryPointHtml": "<div>widget</div>",
+        "search_queries": ["weather today"],
     }
 
 
-@pytest.mark.asyncio
-async def test_stream_adds_google_search_tool_when_opted_in(monkeypatch: pytest.MonkeyPatch) -> None:
+def _install_fake_google_genai(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stream_chunks: list[Any] | None,
+) -> dict[str, Any]:
     captured_config: dict[str, Any] = {}
 
     class FakeModels:
@@ -160,11 +160,11 @@ async def test_stream_adds_google_search_tool_when_opted_in(monkeypatch: pytest.
             captured_config["config"] = kwargs["config"]
 
             async def _gen() -> AsyncIterator[Any]:
-                cand = types.SimpleNamespace(
-                    content=types.SimpleNamespace(parts=[types.SimpleNamespace(text="hi", function_call=None)]),
-                    grounding_metadata=None,
-                )
-                yield types.SimpleNamespace(candidates=[cand], usage_metadata=None)
+                if stream_chunks is None:
+                    return
+                    yield  # pragma: no cover
+                for chunk in stream_chunks:
+                    yield chunk
 
             return _gen()
 
@@ -187,6 +187,19 @@ async def test_stream_adds_google_search_tool_when_opted_in(monkeypatch: pytest.
     monkeypatch.setitem(sys.modules, "google.genai", fake_genai)
     monkeypatch.setitem(sys.modules, "google.genai.types", fake_types)
     monkeypatch.setenv("VERTEX_AI_PROJECT_ID", "p")
+    return captured_config
+
+
+@pytest.mark.asyncio
+async def test_stream_adds_google_search_tool_when_opted_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    cand = types.SimpleNamespace(
+        content=types.SimpleNamespace(parts=[types.SimpleNamespace(text="hi", function_call=None)]),
+        grounding_metadata=None,
+    )
+    captured_config = _install_fake_google_genai(
+        monkeypatch,
+        stream_chunks=[types.SimpleNamespace(candidates=[cand], usage_metadata=None)],
+    )
 
     provider = GeminiProvider()
     events = [
@@ -205,37 +218,7 @@ async def test_stream_adds_google_search_tool_when_opted_in(monkeypatch: pytest.
 
 @pytest.mark.asyncio
 async def test_stream_omits_google_search_tool_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured_config: dict[str, Any] = {}
-
-    class FakeModels:
-        async def generate_content_stream(self, **kwargs: Any) -> Any:
-            captured_config["config"] = kwargs["config"]
-
-            async def _gen() -> AsyncIterator[Any]:
-                return
-                yield  # pragma: no cover
-
-            return _gen()
-
-    class FakeClient:
-        def __init__(self, **_kwargs: Any) -> None:
-            self.aio = types.SimpleNamespace(models=FakeModels())
-
-    fake_google = ModuleType("google")
-    fake_genai = ModuleType("google.genai")
-    fake_types = ModuleType("google.genai.types")
-    fake_genai.Client = FakeClient  # type: ignore[attr-defined]
-    fake_types.GenerateContentConfig = lambda **kw: kw  # type: ignore[attr-defined]
-    fake_types.ThinkingConfig = lambda **kw: kw  # type: ignore[attr-defined]
-    fake_types.Tool = lambda **kw: kw  # type: ignore[attr-defined]
-    fake_types.GoogleSearch = lambda **kw: kw  # type: ignore[attr-defined]
-    fake_types.FunctionDeclaration = lambda **kw: kw  # type: ignore[attr-defined]
-    fake_google.genai = fake_genai  # type: ignore[attr-defined]
-    fake_genai.types = fake_types  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "google", fake_google)
-    monkeypatch.setitem(sys.modules, "google.genai", fake_genai)
-    monkeypatch.setitem(sys.modules, "google.genai.types", fake_types)
-    monkeypatch.setenv("VERTEX_AI_PROJECT_ID", "p")
+    captured_config = _install_fake_google_genai(monkeypatch, stream_chunks=[])
 
     provider = GeminiProvider()
     [ev async for ev in provider.stream([], [], model="gemini-2.5-flash")]

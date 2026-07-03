@@ -33,15 +33,15 @@ from monkeybot.core.context.tool_shapers import (
 from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
 from monkeybot.core.llm.provider import (
     Done,
+    GroundingEvent as ProviderGroundingEvent,
     Message,
     Provider,
     TextDelta,
     ThinkingDelta,
     ToolCall,
     UsageEvent,
-)
-from monkeybot.core.llm.provider import (
-    GroundingEvent as ProviderGroundingEvent,
+    provider_count_input_tokens,
+    provider_stream,
 )
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.logging_utils import kv
@@ -383,38 +383,14 @@ async def _provider_prompt_input_tokens(
     thinking_budget: int | None = None,
     vertex_google_search: bool = False,
 ) -> int:
-    if vertex_google_search and provider.name == "gemini":
-        return int(
-            await cast(Any, provider).count_input_tokens(
-                messages,
-                tools,
-                model=model,
-                thinking_budget=thinking_budget,
-                vertex_google_search=True,
-            )
-        )
-    return await provider.count_input_tokens(
+    return await provider_count_input_tokens(
+        provider,
         messages,
         tools,
         model=model,
         thinking_budget=thinking_budget,
+        vertex_google_search=vertex_google_search,
     )
-
-
-def _provider_stream_kwargs(
-    provider: Provider,
-    *,
-    model: str,
-    thinking_budget: int | None,
-    vertex_google_search: bool,
-) -> dict[str, Any]:
-    kwargs: dict[str, Any] = {
-        "model": model,
-        "thinking_budget": thinking_budget,
-    }
-    if vertex_google_search and provider.name == "gemini":
-        kwargs["vertex_google_search"] = True
-    return kwargs
 
 
 async def _prompt_input_tokens_for_history(
@@ -1155,19 +1131,17 @@ async def _run_inner_core(
                 )
                 provider_messages_written = len(provider_messages)
             try:
-                async with span_llm(ctx=ctx):
+                async with span_llm(ctx=ctx, vertex_google_search=vertex_google_search):
                     async with aclosing(
                         cast(
                             Any,
-                            provider.stream(
+                            provider_stream(
+                                provider,
                                 provider_messages,
                                 ctx.tools,
-                                **_provider_stream_kwargs(
-                                    provider,
-                                    model=ctx.model,
-                                    thinking_budget=stream_thinking,
-                                    vertex_google_search=vertex_google_search,
-                                ),
+                                model=ctx.model,
+                                thinking_budget=stream_thinking,
+                                vertex_google_search=vertex_google_search,
                             ),
                         )
                     ) as stream:
@@ -1201,7 +1175,6 @@ async def _run_inner_core(
                                     request_id=ctx.request_id,
                                     sources=[dict(s) for s in ev.sources],
                                     search_queries=list(ev.search_queries),
-                                    search_entry_point_html=ev.search_entry_point_html,
                                 )
                             elif isinstance(ev, Done):
                                 break

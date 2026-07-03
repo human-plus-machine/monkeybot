@@ -190,7 +190,6 @@ class GroundingEvent:
     request_id: str = ""
     sources: list[dict[str, str]] = field(default_factory=list)
     search_queries: list[str] = field(default_factory=list)
-    search_entry_point_html: str = ""
 
 
 @dataclass(frozen=True)
@@ -319,7 +318,6 @@ def _story5_event_dict(event: AgentEvent) -> dict[str, object]:
             **base,
             "sources": [dict(s) for s in event.sources],
             "search_queries": list(event.search_queries),
-            "search_entry_point_html": event.search_entry_point_html,
         }
     raise AssertionError(f"_story5_event_dict: unsupported type {type(event)!r}")
 
@@ -583,11 +581,7 @@ def event_from_json(raw: str) -> AgentEvent:
                     sources.append({str(k): str(v) for k, v in item.items()})
         queries_raw = payload.get("search_queries")
         queries = [str(q) for q in queries_raw] if isinstance(queries_raw, list) else []
-        html_raw = payload.get("search_entry_point_html", "")
-        html = html_raw if isinstance(html_raw, str) else ""
-        return GroundingEvent(
-            request_id=rid, sources=sources, search_queries=queries, search_entry_point_html=html
-        )
+        return GroundingEvent(request_id=rid, sources=sources, search_queries=queries)
     if t == "AttachmentDescriptor":
         aid = payload.get("attachment_id", "")
         mime = payload.get("mime_type", "")

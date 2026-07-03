@@ -7,7 +7,14 @@ from collections.abc import AsyncIterator, Sequence
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from monkeybot.core.context import TurnContext
-from monkeybot.core.llm.provider import Message, Provider, ProviderEvent, ToolDef
+from monkeybot.core.llm.provider import (
+    Message,
+    Provider,
+    ProviderEvent,
+    ToolDef,
+    provider_count_input_tokens,
+    provider_stream,
+)
 from monkeybot.observability._state import is_observability_enabled
 from monkeybot.observability.spans import span_llm
 
@@ -43,21 +50,13 @@ class ObservingProvider:
         thinking_budget: int | None = None,
         vertex_google_search: bool = False,
     ) -> int:
-        if vertex_google_search and self._inner.name == "gemini":
-            return int(
-                await cast(Any, self._inner).count_input_tokens(
-                    messages,
-                    tools,
-                    model=model,
-                    thinking_budget=thinking_budget,
-                    vertex_google_search=True,
-                )
-            )
-        return await self._inner.count_input_tokens(
+        return await provider_count_input_tokens(
+            self._inner,
             messages,
             tools,
             model=model,
             thinking_budget=thinking_budget,
+            vertex_google_search=vertex_google_search,
         )
 
     def stream(
@@ -69,27 +68,24 @@ class ObservingProvider:
         thinking_budget: int | None = None,
         vertex_google_search: bool = False,
     ) -> AsyncIterator[ProviderEvent]:
-        if vertex_google_search and self._inner.name == "gemini":
-            inner_stream = cast(Any, self._inner).stream(
-                messages,
-                tools,
-                model=model,
-                thinking_budget=thinking_budget,
-                vertex_google_search=True,
-            )
-        else:
-            inner_stream = self._inner.stream(
-                messages,
-                tools,
-                model=model,
-                thinking_budget=thinking_budget,
-            )
+        inner_stream = provider_stream(
+            self._inner,
+            messages,
+            tools,
+            model=model,
+            thinking_budget=thinking_budget,
+            vertex_google_search=vertex_google_search,
+        )
         if not is_observability_enabled():
-            return cast(AsyncIterator[ProviderEvent], inner_stream)
+            return inner_stream
 
         async def _observed() -> AsyncIterator[ProviderEvent]:
             ctx = self._correlation_ctx(model)
-            async with span_llm(ctx=ctx, model=model):
+            async with span_llm(
+                ctx=ctx,
+                model=model,
+                vertex_google_search=vertex_google_search,
+            ):
                 async for evt in inner_stream:
                     yield evt
 

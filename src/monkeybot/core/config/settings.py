@@ -272,6 +272,25 @@ def get_subagent_registry(config_path: str | None = None) -> dict[str, SubagentC
     return registry
 
 
+def _bool_config_flag(
+    doc: dict[str, Any],
+    section: str,
+    key: str,
+    *,
+    default: bool,
+    label: str,
+) -> bool:
+    section_obj = doc.get(section)
+    if not isinstance(section_obj, dict):
+        return default
+    raw = section_obj.get(key)
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    raise ConfigError(f"{label} must be true or false, got {raw!r}")
+
+
 def auto_schema_enabled_from_config(config_path: str | None = None) -> bool:
     """Whether storage backends should apply DDL on ``open()`` (``paths.auto_schema``).
 
@@ -298,15 +317,13 @@ def vertex_google_search_enabled_from_config(config_path: str | None = None) -> 
     Firecrawl custom tool). Defaults to ``False`` when absent. Config-file only.
     """
     _, doc = load_monkeybot_yaml_dict(config_path)
-    web_search = doc.get("web_search")
-    if not isinstance(web_search, dict):
-        return False
-    raw = web_search.get("vertex_google_search")
-    if raw is None:
-        return False
-    if isinstance(raw, bool):
-        return raw
-    raise ConfigError(f"web_search.vertex_google_search must be true or false, got {raw!r}")
+    return _bool_config_flag(
+        doc,
+        "web_search",
+        "vertex_google_search",
+        default=False,
+        label="web_search.vertex_google_search",
+    )
 
 
 def subagent_vertex_google_search_from_config(config_path: str | None = None) -> bool:
@@ -316,12 +333,10 @@ def subagent_vertex_google_search_from_config(config_path: str | None = None) ->
     when absent. Config-file only — not exposed via environment variables.
     """
     _, doc = load_monkeybot_yaml_dict(config_path)
-    subagent = doc.get("subagent")
-    if not isinstance(subagent, dict):
-        return False
-    raw = subagent.get("vertex_google_search")
-    if raw is None:
-        return False
-    if isinstance(raw, bool):
-        return raw
-    raise ConfigError(f"subagent.vertex_google_search must be true or false, got {raw!r}")
+    return _bool_config_flag(
+        doc,
+        "subagent",
+        "vertex_google_search",
+        default=False,
+        label="subagent.vertex_google_search",
+    )

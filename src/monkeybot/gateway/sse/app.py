@@ -286,7 +286,6 @@ def _resolve_curator_provider(main_provider: Provider) -> Provider:
     mode = normalize_model_provider(os.environ.get("MODEL_PROVIDER", "google_vertexai"))
     if mode in ("fake", "vertex_anthropic"):
         return main_provider
-    # Curator calls are tools=() JSON-only completions; keep thinking off and token cap low.
     return GeminiProvider(thinking_budget=0, max_tokens=1024)
 
 
@@ -534,6 +533,7 @@ async def _startup(fastapi_app: FastAPI) -> None:
     _deps.provider = _resolve_provider()
     _deps.curator_provider = _resolve_curator_provider(_deps.provider)
 
+    vertex_gs = vertex_google_search_enabled_from_config()
     try:
         backend_ws = _build_web_search_backend()
         if backend_ws is not None:
@@ -541,10 +541,14 @@ async def _startup(fastapi_app: FastAPI) -> None:
             logger.info("web search enabled: backend=%s", backend_ws.name)
         else:
             _deps.web_search_tool = None
-            logger.info("web search disabled (WEB_SEARCH_BACKEND=none)")
     except Exception as exc:
         logger.warning("web search backend init failed — disabling: %s", exc)
         _deps.web_search_tool = None
+
+    if vertex_gs:
+        logger.info("vertex google_search grounding enabled")
+    if _deps.web_search_tool is None and not vertex_gs:
+        logger.info("web search disabled (WEB_SEARCH_BACKEND=none)")
 
     if _memory_enabled():
         try:

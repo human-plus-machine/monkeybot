@@ -172,7 +172,6 @@ def test_grounding_event_roundtrip() -> None:
         request_id="r1",
         sources=[{"title": "T", "uri": "https://a.com"}],
         search_queries=["q1", "q2"],
-        search_entry_point_html="<div>html</div>",
     )
     assert event_from_json(event_to_json(ev)) == ev
 
