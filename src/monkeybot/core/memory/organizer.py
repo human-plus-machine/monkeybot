@@ -7,7 +7,6 @@ classifies into a typed folder, and updates INDEX.md for deterministic retrieval
 from __future__ import annotations
 
 import asyncio
-import os
 import logging
 from collections.abc import Sequence
 from contextlib import aclosing
@@ -22,6 +21,7 @@ from monkeybot.core.memory.index_format import (
     append_index_entries,
     apply_index_entry_cap,
     format_index_document,
+    index_cap_from_env,
     merge_archive_content,
     split_index_document,
 )
@@ -250,7 +250,7 @@ class MemoryOrganizer:
 
         merged = append_index_entries(existing_content, new_lines)
         _header, entry_lines = split_index_document(merged)
-        cap = _index_cap_from_env()
+        cap = index_cap_from_env()
         kept, archived = apply_index_entry_cap(entry_lines, cap)
         if archived:
             archive_raw = ""
@@ -268,11 +268,3 @@ class MemoryOrganizer:
             await self._storage.write_text(INDEX_FILENAME, final_content)
         except Exception as e:
             raise MemoryOrganizerError(f"Failed to write INDEX.md: {e}") from e
-
-
-def _index_cap_from_env() -> int:
-    raw = os.getenv("MEMORY_INDEX_CAP", "200").strip()
-    try:
-        return max(1, int(raw))
-    except ValueError:
-        return 200
