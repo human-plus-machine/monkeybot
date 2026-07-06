@@ -2,6 +2,7 @@
 
 import pytest
 
+from monkeybot.core.attachments.catalog import AttachmentRecord
 from monkeybot.core.context import SkillRef, TurnContext
 from monkeybot.core.context.memory_prompt import MemoryPromptSelection
 from monkeybot.core.llm.provider import Message
@@ -105,6 +106,28 @@ def test_memory_section_with_skills_block() -> None:
     assert "- Note A" in out
     assert "\n\n## Skills\n- s1" in out
     assert "list_skills" in out
+
+
+def test_session_attachments_block_present_and_in_stable_prefix() -> None:
+    ctx = _minimal_ctx(memory_index=["Note A"], skills=[SkillRef(name="s1", description="d1")])
+    record = AttachmentRecord(
+        attachment_id="att1",
+        filename="report.pdf",
+        mime_type="application/pdf",
+        description="Q1 report",
+        storage_path=".monkeybot/attachments/t1/att1",
+    )
+    out = compose_system_prompt(ctx, attachment_catalog=[record])
+    assert "\n\n## Session attachments\n- att1 (report.pdf, application/pdf): Q1 report" in out
+    stable, volatile = split_system_prompt_for_cache(out)
+    assert "## Session attachments" in stable
+    assert "## Session attachments" not in volatile
+
+
+def test_no_attachment_catalog_omits_session_attachments_block() -> None:
+    ctx = _minimal_ctx()
+    out = compose_system_prompt(ctx, attachment_catalog=None)
+    assert "## Session attachments" not in out
 
 
 def test_task_truncation() -> None:

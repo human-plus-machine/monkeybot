@@ -21,9 +21,13 @@ class _FakeProvider:
 
     def __init__(self, text: str = '{"memory_line_indices": [1]}') -> None:
         self._text = text
+        self.vertex_google_search_calls: list[bool] = []
 
-    async def stream(self, messages, tools, *, model: str, thinking_budget=None):
+    async def stream(
+        self, messages, tools, *, model: str, thinking_budget=None, vertex_google_search=False
+    ):
         del messages, tools, model, thinking_budget
+        self.vertex_google_search_calls.append(vertex_google_search)
         yield TextDelta(text=self._text)
         yield Done()
 
@@ -97,6 +101,56 @@ async def test_curator_cache_skips_second_call(monkeypatch: pytest.MonkeyPatch) 
     )
     assert sel1.lines == ["alpha"]
     assert sel2.lines == ["alpha"]
+
+
+@pytest.mark.asyncio
+async def test_curator_call_never_receives_vertex_google_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The curator's own LLM call is an internal harness call, not an agent turn.
+
+    Regression guard: it must never be able to receive ``vertex_google_search=True``,
+    even though nothing here threads the flag in explicitly — pins the invariant so a
+    future refactor can't accidentally wire it through.
+    """
+    reset_curation_cache_for_tests()
+    monkeypatch.setenv("CONTEXT_CURATION_ENABLED", "1")
+    monkeypatch.setenv("CONTEXT_CURATION_MODE", "curator")
+    monkeypatch.setenv("CONTEXT_CURATION_MEMORY_THRESHOLD", "0")
+    prov = _FakeProvider('{"memory_line_indices": [1]}')
+    ctx = _ctx(["alpha", "beta"])
+    await prepare_memory_for_prompt(
+        ctx=ctx, user_message="x", provider=prov, curator_provider=None
+    )
+    assert prov.vertex_google_search_calls == [False]
+
+
+@pytest.mark.asyncio
+async def test_hybrid_mode_runs_curator_when_token_heavy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default (hybrid) curation mode: token-heavy branch delegates to the curator.
+
+    ``CONTEXT_CURATION_MODE`` defaults to ``hybrid``; below the token threshold it
+    falls back to a recent-lines window, but above it, it must actually invoke the
+    curator rather than silently using the window instead.
+    """
+    reset_curation_cache_for_tests()
+    monkeypatch.setenv("CONTEXT_CURATION_ENABLED", "1")
+    monkeypatch.setenv("CONTEXT_CURATION_MODE", "hybrid")
+    monkeypatch.setenv("CONTEXT_CURATION_MEMORY_THRESHOLD", "0")
+    monkeypatch.setenv("CONTEXT_CURATION_MEMORY_TOKEN_THRESHOLD", "1")
+    monkeypatch.setenv("CONTEXT_CURATION_MEMORY_WINDOW_LINES", "2")
+    lines = [f"entry-{i}" for i in range(5)]
+    prov = _FakeProvider('{"memory_line_indices": [1, 2]}')
+    sel = await prepare_memory_for_prompt(
+        ctx=_ctx(lines), user_message="hello", provider=prov, curator_provider=None
+    )
+    # Curator picked lines 1 and 2 (entry-0, entry-1); the window fallback would
+    # instead have picked the most recent tail (entry-3, entry-4).
+    assert sel.lines == ["entry-0", "entry-1"]
+    assert sel.use_custom_lines is True
+    assert prov.vertex_google_search_calls == [False]
 
 
 @pytest.mark.asyncio

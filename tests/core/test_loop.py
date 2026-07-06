@@ -14,9 +14,11 @@ from typing import Any
 import pytest
 
 import monkeybot.core.runtime.loop as loop_mod
-from monkeybot.core.context import TurnContext
+from monkeybot.core.attachments.catalog import AttachmentRecord, SessionAttachmentCatalog
+from monkeybot.core.context import SkillRef, TurnContext
 from monkeybot.core.llm.provider import (
     Done,
+    GroundingEvent as ProviderGroundingEvent,
     Message,
     ProviderEvent,
     TextDelta,
@@ -28,6 +30,7 @@ from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.runtime.events import (
     AssistantDelta,
     Error,
+    GroundingEvent,
     ImageBlock,
     SystemPromptSnapshot,
     Thinking,
@@ -159,15 +162,17 @@ class FakeHistory:
 
 
 class FakeProvider:
-    def __init__(self, scripted: list[list[object]]) -> None:
+    def __init__(self, scripted: list[list[object]], *, name: str = "fake") -> None:
         self._scripted = scripted
+        self._name = name
         self.stream_calls = 0
         self.stream_models: list[str] = []
         self.count_thinking_budgets: list[int | None] = []
+        self.vertex_google_search_calls: list[bool] = []
 
     @property
     def name(self) -> str:
-        return "fake"
+        return self._name
 
     @property
     def supports_streaming(self) -> bool:
@@ -180,9 +185,11 @@ class FakeProvider:
         *,
         model: str,
         thinking_budget: int | None = None,
+        vertex_google_search: bool = False,
     ) -> AsyncIterator[ProviderEvent]:
         del messages, tools, thinking_budget
         self.stream_models.append(model)
+        self.vertex_google_search_calls.append(vertex_google_search)
         idx = self.stream_calls
         self.stream_calls += 1
         if idx >= len(self._scripted):
@@ -197,8 +204,9 @@ class FakeProvider:
         *,
         model: str,
         thinking_budget: int | None = None,
+        vertex_google_search: bool = False,
     ) -> int:
-        del model
+        del model, vertex_google_search
         self.count_thinking_budgets.append(thinking_budget)
         return fake_provider_prompt_tokens(messages, tools)
 
@@ -217,6 +225,7 @@ class CountingFakeProvider(FakeProvider):
         *,
         model: str,
         thinking_budget: int | None = None,
+        vertex_google_search: bool = False,
     ) -> int:
         self.count_snapshots.append(list(messages))
         return await super().count_input_tokens(
@@ -224,6 +233,7 @@ class CountingFakeProvider(FakeProvider):
             tools,
             model=model,
             thinking_budget=thinking_budget,
+            vertex_google_search=vertex_google_search,
         )
 
 
@@ -1028,6 +1038,50 @@ async def test_run_emits_context_summarize_events_when_over_cap(
 
 
 @pytest.mark.asyncio
+async def test_summarization_call_never_receives_vertex_google_search(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """History summarization is an internal harness call, not an agent turn.
+
+    Regression guard: even with ``vertex_google_search=True`` on the main run,
+    the summarization LLM call (``loop.py`` calling ``provider.stream`` directly
+    for the summarizer model) must never receive the flag.
+    """
+    monkeypatch.setenv("CONTEXT_SUMMARIZATION_MODEL", "summarizer-model-x")
+    preload = [
+        Message(
+            role="user" if i % 2 == 0 else "assistant",
+            content=[Text(text="z" * 600)],
+        )
+        for i in range(8)
+    ]
+    hist = FakeHistory(preload)
+    prov = FakeProvider(
+        [
+            [TextDelta(text=" compressed summary "), Done()],
+            [TextDelta(text="final"), Done()],
+        ],
+        name="gemini",
+    )
+    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=800)
+    async for _ in run(
+        "hello",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        max_turns=4,
+        vertex_google_search=True,
+    ):
+        pass
+    assert prov.stream_models == ["summarizer-model-x", "gemini-2.5-flash"]
+    summarizer_call, main_turn_call = prov.vertex_google_search_calls
+    assert summarizer_call is False
+    assert main_turn_call is True
+
+
+@pytest.mark.asyncio
 async def test_run_summarization_uses_context_summarization_model_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1650,6 +1704,123 @@ async def test_system_prompt_snapshot_still_plain_string_event() -> None:
     assert snaps
     assert isinstance(snaps[0].text, str)
     assert len(snaps[0].text) > 0
+
+
+@pytest.mark.asyncio
+async def test_run_vertex_google_search_true_reaches_gemini_provider_stream() -> None:
+    prov = FakeProvider([[TextDelta(text="hi"), Done()]], name="gemini")
+    async for _ in run(
+        "hello",
+        _ctx(),
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        max_turns=3,
+        vertex_google_search=True,
+    ):
+        pass
+    assert prov.vertex_google_search_calls
+    assert all(prov.vertex_google_search_calls)
+
+
+@pytest.mark.asyncio
+async def test_run_vertex_google_search_defaults_false() -> None:
+    prov = FakeProvider([[TextDelta(text="hi"), Done()]], name="gemini")
+    async for _ in run(
+        "hello",
+        _ctx(),
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        max_turns=3,
+    ):
+        pass
+    assert prov.vertex_google_search_calls
+    assert not any(prov.vertex_google_search_calls)
+
+
+@pytest.mark.asyncio
+async def test_provider_grounding_event_translates_sources_and_queries_unchanged() -> None:
+    prov = FakeProvider(
+        [
+            [
+                ProviderGroundingEvent(
+                    sources=[{"title": "Example", "url": "https://example.com"}],
+                    search_queries=["weather today"],
+                ),
+                TextDelta(text="hi"),
+                Done(),
+            ]
+        ],
+        name="gemini",
+    )
+    events = []
+    async for e in run(
+        "hello",
+        _ctx(),
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        max_turns=3,
+        vertex_google_search=True,
+    ):
+        events.append(e)
+    grounding_events = [e for e in events if isinstance(e, GroundingEvent)]
+    assert len(grounding_events) == 1
+    assert grounding_events[0].sources == [{"title": "Example", "url": "https://example.com"}]
+    assert grounding_events[0].search_queries == ["weather today"]
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_snapshot_includes_skills_memory_and_attachments() -> None:
+    """Regression guard for PR #62: skills, memory, and attachments must survive into
+
+    the actual system prompt sent through ``run()`` — not just be non-empty.
+    """
+    catalog = SessionAttachmentCatalog(session_id="t1")
+    catalog.upsert(
+        AttachmentRecord(
+            attachment_id="att1",
+            filename="report.pdf",
+            mime_type="application/pdf",
+            description="Q1 report",
+            storage_path=".monkeybot/attachments/t1/att1",
+        )
+    )
+    ctx = TurnContext(
+        thread_id="t1",
+        request_id="r1",
+        agent_md="# Agent",
+        memory_index=["remembers the sky is blue"],
+        skills=[SkillRef(name="pdf-skill", description="Handles PDFs")],
+        tools=[ToolDef("run_command", "Run shell", {})],
+        user_id=None,
+        parent_run_id=None,
+        model="gemini-2.5-flash",
+    )
+    prov = FakeProvider([[TextDelta(text="hi"), Done()]])
+    events = []
+    async for e in run(
+        "hello",
+        ctx,
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        attachment_catalog=catalog,
+        max_turns=3,
+    ):
+        events.append(e)
+    snaps = [e for e in events if isinstance(e, SystemPromptSnapshot)]
+    assert snaps
+    text = snaps[0].text
+    assert "\n\n## Skills\n- pdf-skill" in text
+    assert "## Memory index" in text
+    assert "- remembers the sky is blue" in text
+    assert "\n\n## Session attachments\n- att1 (report.pdf, application/pdf): Q1 report" in text
 
 
 @pytest.mark.asyncio
