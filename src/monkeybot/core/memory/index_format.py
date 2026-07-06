@@ -2,9 +2,20 @@
 
 from __future__ import annotations
 
+import os
+
 INDEX_FILENAME = "INDEX.md"
 INDEX_ARCHIVE_FILENAME = "INDEX.archive.md"
 DEFAULT_INDEX_HEADER = "# Memory Index"
+
+
+def index_cap_from_env() -> int:
+    """Max INDEX.md entries kept before older ones move to the archive file."""
+    raw = os.getenv("MEMORY_INDEX_CAP", "200").strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 200
 
 
 def is_index_entry_line(line: str) -> bool:

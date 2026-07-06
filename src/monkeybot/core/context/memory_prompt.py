@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from monkeybot.core.context import TurnContext
 from monkeybot.core.context.curator import (
     CuratedPromptParts,
+    _env_int,
     curation_enabled_from_env,
     curation_threshold_met,
     curator_model_id,
@@ -50,14 +51,6 @@ class MemoryPromptSelection:
     use_custom_lines: bool
 
 
-def _env_int(name: str, default: int) -> int:
-    raw = os.getenv(name, str(default)).strip()
-    try:
-        return int(raw)
-    except ValueError:
-        return default
-
-
 def curation_mode_from_env() -> str:
     mode = os.getenv("CONTEXT_CURATION_MODE", "hybrid").strip().lower()
     if mode in ("window", "curator", "hybrid"):
@@ -67,10 +60,6 @@ def curation_mode_from_env() -> str:
 
 def memory_window_lines_from_env() -> int:
     return max(1, _env_int("CONTEXT_CURATION_MEMORY_WINDOW_LINES", 12))
-
-
-def memory_index_cap_from_env() -> int:
-    return max(1, _env_int("MEMORY_INDEX_CAP", 200))
 
 
 def memory_index_fingerprint(lines: list[str]) -> str:
