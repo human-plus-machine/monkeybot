@@ -13,6 +13,7 @@ import pytest
 
 from monkeybot.core.llm.provider import GroundingEvent, UsageEvent
 from monkeybot.core.types.interfaces import LLMError
+from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers.gemini import (
     GeminiProvider,
     _grounding_metadata_to_dict,
@@ -214,6 +215,40 @@ async def test_stream_adds_google_search_tool_when_opted_in(monkeypatch: pytest.
     # Vertex AI (Gemini Enterprise Agent Platform) rejects `ToolConfig(include_
     # server_side_tool_invocations=...)`: it's Gemini Developer API (AI Studio) only.
     assert "tool_config" not in captured_config["config"]
+
+
+@pytest.mark.asyncio
+async def test_stream_combines_google_search_with_function_declarations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real agent turns always carry function-call tools (read_file, run_command, ...);
+
+    grounding must be wired in *alongside* them, not only when ``tools=[]``. This is a
+    mocked structural check that both ``Tool`` entries are sent together — it does not
+    prove the real Vertex API accepts the combination for a given model generation (see
+    the live test in tests/integration/test_vertex_google_search_live.py for that).
+    """
+    cand = types.SimpleNamespace(
+        content=types.SimpleNamespace(parts=[types.SimpleNamespace(text="hi", function_call=None)]),
+        grounding_metadata=None,
+    )
+    captured_config = _install_fake_google_genai(
+        monkeypatch,
+        stream_chunks=[types.SimpleNamespace(candidates=[cand], usage_metadata=None)],
+    )
+
+    provider = GeminiProvider()
+    tool = ToolDef("read_file", "Read a file", {"type": "object", "properties": {}})
+    [
+        ev
+        async for ev in provider.stream(
+            [], [tool], model="gemini-2.5-flash", vertex_google_search=True
+        )
+    ]
+
+    tools = captured_config["config"]["tools"]
+    assert {"google_search": {}} in tools
+    assert any("function_declarations" in t for t in tools)
 
 
 @pytest.mark.asyncio
