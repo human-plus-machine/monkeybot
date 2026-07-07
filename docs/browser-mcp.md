@@ -122,7 +122,25 @@ All `BU_*` vars are passed through to `browser-harness` unchanged.
 
 Navigation, interaction, screenshots, tabs, waits, playbooks (`browser_list_playbooks`, `browser_read_playbook`, `browser_write_playbook`), and `browser_stop` for daemon cleanup.
 
-`browser_screenshot` saves a PNG under **`./browser/Screenshots/`** in the agent workspace and returns JSON with a workspace-relative `path` (for `render_image` on vision models), `screenshots_dir`, url, title, and viewport — not inline base64 image bytes. This keeps tool results small for text-only models (Ollama) and avoids context-window blowups. Use `browser_js` to extract visible page text when the model cannot view images.
+### Default: indexed DOM interaction (no screenshots needed)
+
+`browser_get_elements`, `browser_click_by_index`, `browser_input_by_index`, and `browser_select_by_index` give the agent a **text-based, indexed** view of the page instead of screenshot + pixel coordinates — ported from [alibaba/page-agent](https://github.com/alibaba/page-agent)'s DOM-extraction engine (MIT licensed; see `src/browser_mcp/dom_indexing.py` and `src/browser_mcp/assets/` for provenance).
+
+Workflow:
+
+1. `browser_get_elements()` — returns an indexed text tree, e.g.:
+   ```
+   [12]<input placeholder='Email' />
+   [35]<button aria-label='Submit form'>Submit</button>
+   ```
+2. `browser_click_by_index(35)` / `browser_input_by_index(12, "user@example.com")` / `browser_select_by_index(index, "Option text")`
+3. Call `browser_get_elements()` again after navigation or any action that may have changed the DOM — indices are only valid for the tree they came from.
+
+This is the default, preferred workflow: no image tokens, no coordinate-guessing, and clicks are resilient to layout shifts since they resolve through the live DOM rather than a fixed pixel position.
+
+### Fallback: screenshots + coordinates
+
+`browser_screenshot` + `browser_click(x, y)` is a **last-resort fallback**, for cases `browser_get_elements` can't handle: canvas-based apps, heavy shadow-DOM UIs, drag-and-drop, or visually confirming layout/rendering. `browser_screenshot` saves a PNG under **`./browser/Screenshots/`** in the agent workspace and returns JSON with a workspace-relative `path` (for `render_image` on vision models), `screenshots_dir`, url, title, and viewport — not inline base64 image bytes. This keeps tool results small for text-only models (Ollama) and avoids context-window blowups. Text-only models should use `browser_get_elements` (or `browser_js` for ad hoc extraction) instead of screenshots entirely, since they can't view images.
 
 `browser-harness` is imported lazily on first browser tool call so listing MCP tools does not require Chrome to be running.
 

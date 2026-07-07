@@ -12,7 +12,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from browser_mcp import playbooks, screenshots
+from browser_mcp import dom_indexing, playbooks, screenshots
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,22 @@ _bh: tuple[Any, Any] | None = None
 mcp = FastMCP(
     "browser",
     instructions=(
-        "Real-browser control via CDP (browser-harness). Use browser_* tools for web tasks. "
+        "Real-browser control via CDP (browser-harness). Use browser_* tools for web tasks.\n"
+        "\n"
+        "Default workflow — text-based, indexed DOM interaction:\n"
+        "1. browser_get_elements() to see interactive elements as an indexed text tree "
+        "(no image tokens, no pixel-guessing).\n"
+        "2. browser_click_by_index(index) / browser_input_by_index(index, text) / "
+        "browser_select_by_index(index, text) to act on them.\n"
+        "3. Call browser_get_elements() again after any action that may have changed the "
+        "page (navigation, dynamic content, modal opened) — indices are only valid for the "
+        "tree they came from.\n"
+        "\n"
+        "browser_screenshot + browser_click(x, y) is a LAST-RESORT FALLBACK only — use it "
+        "when browser_get_elements returns nothing useful for what you need (canvas apps, "
+        "heavily shadow-DOM UIs, drag-and-drop, or visually confirming layout/rendering). "
+        "Do not default to screenshots for ordinary clicking/typing.\n"
+        "\n"
         "Check browser_list_playbooks / browser_read_playbook before improvising on a site; "
         "call browser_write_playbook after learning non-obvious flows. "
         "Call browser_stop when done with remote/cloud sessions."
@@ -56,8 +71,73 @@ def browser_goto(url: str) -> str:
 
 
 @mcp.tool()
+def browser_get_elements(viewport_only: bool = False) -> str:
+    """Return interactive elements as an indexed text tree — the default way to see the page.
+
+    Prefer this over browser_screenshot for locating things to click/type into. Injects a
+    DOM-walker (vendored from alibaba/page-agent, MIT licensed) that scans the live DOM and
+    returns lines like ``[12]<input placeholder='Email' />`` / ``[35]<button>Submit</button>``,
+    indentation shows parent/child nesting. Use the numeric index with browser_click_by_index /
+    browser_input_by_index / browser_select_by_index — no coordinates needed.
+
+    Set viewport_only=True to restrict to the visible viewport (default scans the full page).
+    Re-call this after navigation or any action that may have changed the DOM — indices are
+    only valid for the tree they came from.
+    """
+    helpers, _ = _browser_harness()
+    result = dom_indexing.get_elements(helpers, viewport_only)
+    return _json_text({"ok": True, **result})
+
+
+@mcp.tool()
+def browser_click_by_index(index: int) -> str:
+    """Click an interactive element by index from browser_get_elements. Prefer this over
+    browser_click(x, y) — no pixel-guessing, resilient to layout shifts."""
+    helpers, _ = _browser_harness()
+    try:
+        rect = dom_indexing.get_rect(helpers, index)
+    except dom_indexing.ElementNotFoundError as exc:
+        return _json_text({"ok": False, "error": str(exc)})
+    helpers.click_at_xy(rect["x"], rect["y"])
+    return _json_text({"ok": True, "clicked": rect})
+
+
+@mcp.tool()
+def browser_input_by_index(index: int, text: str, clear_first: bool = True) -> str:
+    """Click and type text into an indexed input/textarea/contenteditable element from
+    browser_get_elements. Prefer this over screenshot + coordinate typing."""
+    helpers, _ = _browser_harness()
+    try:
+        info = dom_indexing.get_input_info(helpers, index)
+    except dom_indexing.ElementNotFoundError as exc:
+        return _json_text({"ok": False, "error": str(exc)})
+    # fill_input drives real key events through framework-controlled inputs (React/Vue),
+    # matching browser_fill's behavior instead of a hand-rolled clear+type loop here.
+    helpers.fill_input(info["selector"], text, clear_first=clear_first)
+    return _json_text({"ok": True, "index": index, "tagName": info.get("tagName")})
+
+
+@mcp.tool()
+def browser_select_by_index(index: int, text: str) -> str:
+    """Select a <select> dropdown option by visible text, using the index from
+    browser_get_elements."""
+    helpers, _ = _browser_harness()
+    try:
+        dom_indexing.select_option(helpers, index, text)
+    except dom_indexing.ElementNotFoundError as exc:
+        return _json_text({"ok": False, "error": str(exc)})
+    return _json_text({"ok": True, "index": index, "selected": text})
+
+
+@mcp.tool()
 def browser_screenshot(full: bool = False, max_dim: int | None = 1800) -> str:
     """Capture a PNG of the current viewport.
+
+    LAST-RESORT FALLBACK: use browser_get_elements + browser_click_by_index /
+    browser_input_by_index for ordinary clicking and typing instead — it's cheaper (no
+    image tokens) and more reliable (indexed elements vs. guessed pixels). Reach for
+    this tool only when browser_get_elements doesn't surface what you need: canvas-based
+    apps, heavy shadow-DOM UIs, drag-and-drop, or visually confirming rendering/layout.
 
     Returns JSON with a workspace-relative path under ``./browser/Screenshots/`` (for
     ``render_image`` on vision models) plus page metadata — not inline image bytes.
@@ -76,8 +156,8 @@ def browser_screenshot(full: bool = False, max_dim: int | None = 1800) -> str:
             "viewport": {"w": info.get("w"), "h": info.get("h")},
             "note": (
                 "Screenshot saved under the agent workspace. Vision models: call render_image "
-                "with path. Text-only models: use browser_js for visible text. Coordinate clicks "
-                "use viewport metadata from this capture."
+                "with path. Text-only models: use browser_get_elements instead of this tool. "
+                "Coordinate clicks use viewport metadata from this capture."
             ),
         }
     )
@@ -85,7 +165,13 @@ def browser_screenshot(full: bool = False, max_dim: int | None = 1800) -> str:
 
 @mcp.tool()
 def browser_click(x: float, y: float, button: str = "left", clicks: int = 1) -> str:
-    """Click at viewport coordinates (x, y). Prefer screenshot + coordinates for complex UIs."""
+    """Click at viewport coordinates (x, y).
+
+    LAST-RESORT FALLBACK: prefer browser_get_elements + browser_click_by_index for
+    ordinary clicking. Only use raw coordinates for elements browser_get_elements can't
+    represent (canvas, shadow DOM, drag targets) or after visually confirming a spot via
+    browser_screenshot.
+    """
     helpers, _ = _browser_harness()
     helpers.click_at_xy(x, y, button=button, clicks=clicks)
     return _json_text({"ok": True})
