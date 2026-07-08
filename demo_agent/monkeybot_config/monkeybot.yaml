@@ -22,13 +22,39 @@ paths:
   mcp_config: ./monkeybot_config/mcp.json
   command_allowlist_config: ./monkeybot_config/command_allowlist.yaml
 
+harness:
+  # turn_based  - existing HTTP POST + SSE (default, backwards-compatible)
+  # realtime    - WebSocket full-duplex audio/text (requires monkeybot[realtime])
+  mode: turn_based
+
 model:
-  # Free key from https://build.nvidia.com — set NVIDIA_API_KEY in .env.
+  # Main turn-based model: used for context curation, memory, and tool execution.
+  # Use a non-Live model that supports generateContent.
   provider: nvidia
   name: z-ai/glm-5.2
   context_window: 1000000
   thinking_budget: 0
-  # summarization_model: meta/llama-3.1-8b-instruct  # optional; env CONTEXT_SUMMARIZATION_MODEL overrides
+  # summarization_model: gemini-2.5-flash  # optional; env CONTEXT_SUMMARIZATION_MODEL overrides
+
+realtime:
+  # Live-only model override for the realtime session.
+  # gemini-3.1-flash-live-preview is currently available only on Google AI Studio (global).
+  model:
+    name: gemini-3.1-flash-live-preview
+  websocket:
+    enabled: true
+    # port defaults to runtime.port when unset
+  audio:
+    input_format: pcm_s16le_24khz_mono
+    output_format: pcm_s16le_24khz_mono
+    chunk_ms: 200
+  session:
+    max_duration_sec: 1800
+    idle_timeout_sec: 120
+    max_response_turn_sec: 300
+    max_concurrent_sessions: 100
+  metrics:
+    emit_summary_on_close: true
 
 gateway:
   pending_response_timeout_sec: 300
@@ -44,7 +70,7 @@ context_curation:
   memory_index_cap: 200
   memory_threshold: 8
   memory_token_threshold: 2000
-  curator_model: ornith:9b
+  curator_model: z-ai/glm-5.2
   timeout_sec: 10
   max_memory_lines: 12
   search_max_hits: 8

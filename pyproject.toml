@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "monkeybot"
-version = "2.0.0"
+version = "2.1.0"
 description = "MonkeyBot agent harness — FastAPI SSE gateway, owned loop, SQLite, and MCP."
 requires-python = ">=3.11"
 readme = "README.md"
@@ -47,6 +47,13 @@ web-search = ["ddgs>=7.0"]
 # Live E2E eval report (evals/report.py) — deepeval/langfuse are otherwise only needed
 # inside the standalone evals/ service image (see evals/pyproject.toml + evals/Dockerfile).
 evals = ["deepeval>=3.0.0", "langfuse>=3.0.0"]
+realtime = ["websockets>=14.0"]
+realtime-gemini = ["monkeybot[realtime]", "google-genai>=1.0.0"]
+# Realtime talk helpers (imported by monkeybot-cli's `talk` subcommand).
+# The user-facing `monkeybot` console script is provided by the monkeybot-cli package
+# in cli/ — do not register a competing [project.scripts] entry here.
+cli = ["monkeybot[realtime]", "typer>=0.12.0"]
+cli-realtime = ["monkeybot[cli]", "pyaudio>=0.2.11", "pynput>=1.7.6"]
 observability = [
     "opentelemetry-api>=1.28",
     "opentelemetry-sdk>=1.28",

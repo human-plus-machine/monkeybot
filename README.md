@@ -37,7 +37,7 @@ Full setup (config, `.env`, MCP, Docker): **[Getting Started](docs/getting-start
 
 ## CLI (`monkeybot`)
 
-The standalone CLI in **[`cli/`](cli/)** scaffolds, validates, and talks to an agent from the terminal. Its one job is **letting you chat with the agent** — `monkeybot chat` starts the gateway for you, reads the port from your `monkeybot.yaml`, connects, and shuts the gateway down on exit.
+The standalone CLI in **[`cli/`](cli/)** scaffolds, validates, and talks to an agent from the terminal. Use `monkeybot chat` for the turn-based SSE gateway, or `monkeybot talk` for the realtime WebSocket gateway (audio/text).
 
 ### Install
 
@@ -82,9 +82,12 @@ monkeybot chat --attach  # terminal 2: connect to the running gateway
 | `monkeybot validate` | Check `monkeybot.yaml`, referenced paths, and MCP config (`--json` for machine output) |
 | `monkeybot doctor` | Verify Python, provider extras, credentials, and port availability (`--json` for machine output) |
 | `monkeybot run` | Start the SSE gateway in the foreground (keeps logs visible) |
-| `monkeybot chat` | Talk to the agent; spawns the gateway by default (`--attach` to use a running one) |
+| `monkeybot chat` | Talk to the agent (SSE); spawns the gateway by default (`--attach` to use a running one) |
+| `monkeybot talk` | Realtime voice/text client (WebSocket); audio by default, `--text` for typed input |
 
 Common flags: `--cwd` (agent root, defaults to the current directory), `--config` (explicit `monkeybot.yaml` path), `--port` / `--url` (override the config-derived gateway address). Secrets are read from the agent's `.env`; nothing is committed to `monkeybot.yaml`.
+
+Realtime audio (`monkeybot talk` without `--text`) needs PortAudio plus `monkeybot[cli-realtime]` in the agent env (already included for `demo_agent`).
 
 ## Agent skill
 

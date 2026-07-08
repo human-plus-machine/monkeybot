@@ -421,8 +421,13 @@ class GeminiProvider:
         max_output_tokens: int | None = None,
         thinking_budget: int | None = None,
         cache_enabled: bool = True,
+        api_key: str | None = None,
     ) -> None:
-        """Vertex Gemini streaming provider.
+        """Gemini streaming provider (Vertex AI or Google AI Studio).
+
+        When ``api_key`` is provided, the provider connects to Google AI Studio
+        (``generativelanguage.googleapis.com``). Otherwise it connects to Vertex AI
+        using application default credentials or the project/location environment variables.
 
         ``cache_enabled`` is accepted for interface symmetry with the other providers
         (Story 1 constructor contract) but is intentionally **inert** for Gemini: Vertex
@@ -448,6 +453,16 @@ class GeminiProvider:
         self._max_tokens = sampling.max_tokens
         self._thinking_budget = thinking_budget
         self._cache_enabled = cache_enabled
+        self._api_key = api_key
+
+    def _client(self, model_param: str) -> Any:
+        """Create a google-genai client for Vertex AI or Google AI Studio."""
+        from google import genai
+
+        if self._api_key:
+            return genai.Client(api_key=self._api_key)
+        project, location = _vertex_project_and_location(model_param)
+        return genai.Client(vertexai=True, project=project, location=location)
 
     @property
     def name(self) -> str:
@@ -467,9 +482,7 @@ class GeminiProvider:
         vertex_google_search: bool = False,
     ) -> int:
         model_param = _normalize_vertex_model(model)
-        project, location = _vertex_project_and_location(model_param)
         try:
-            from google import genai
             from google.genai import types
         except ImportError as exc:
             raise LLMError(
@@ -509,7 +522,7 @@ class GeminiProvider:
         count_cfg_kwargs["generation_config"] = types.GenerationConfig(**gen_cfg_kwargs)
 
         ct_cfg = types.CountTokensConfig(**count_cfg_kwargs)
-        client = genai.Client(vertexai=True, project=project, location=location)
+        client = self._client(model_param)
         resp = await client.aio.models.count_tokens(
             model=model_param,
             contents=contents,
@@ -527,9 +540,7 @@ class GeminiProvider:
         vertex_google_search: bool = False,
     ) -> AsyncIterator[ProviderEvent]:
         model_param = _normalize_vertex_model(model)
-        project, location = _vertex_project_and_location(model_param)
         try:
-            from google import genai
             from google.genai import types
         except ImportError as exc:
             raise LLMError(
@@ -571,7 +582,7 @@ class GeminiProvider:
 
         config = types.GenerateContentConfig(**cfg_kwargs)
 
-        client = genai.Client(vertexai=True, project=project, location=location)
+        client = self._client(model_param)
 
         pending_tools: dict[str, ToolCall] = {}
         last_usage: Any = None

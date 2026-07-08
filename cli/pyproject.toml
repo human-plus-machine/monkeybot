@@ -8,7 +8,9 @@ version = "0.1.10"
 description = "CLI to create, configure, validate, and chat with MonkeyBot agents."
 requires-python = ">=3.11"
 dependencies = [
-    "monkeybot",
+    # `cli` pulls realtime + typer so `monkeybot talk` works out of the box (text mode).
+    # Audio mic/PTT needs the agent (or this env) to also install monkeybot[cli-realtime].
+    "monkeybot[cli]",
     "httpx>=0.27.0",
     "pyyaml>=6.0.2",
     "python-dotenv>=1.0.0",
