@@ -18,10 +18,17 @@ Vendored assets (MIT licensed, see NOTICE.md):
 Element indices are only valid until the next navigation or DOM mutation big enough
 to change the tree; call browser_get_elements again after any action that might
 have changed the page. A stale/unknown index raises ElementNotFoundError.
+
+Injection note: browser-harness relays CDP over a newline-delimited Unix/TCP socket
+whose asyncio StreamReader defaults to a 64 KiB line limit. The combined driver is
+~60 KiB, so a single ``helpers.js(full_script)`` call fails with
+``Separator is found, but chunk is longer than limit``. We therefore assemble the
+script in-page from base64 chunks, each well under that limit.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 from typing import Any
@@ -31,19 +38,48 @@ _ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 _DOM_TREE_JS = (_ASSETS_DIR / "dom_tree.js").read_text(encoding="utf-8")
 _DRIVER_JS = (_ASSETS_DIR / "pa_driver.js").read_text(encoding="utf-8")
 
-# Injected once per page/tab; window.__bmcp is the presence marker. Re-injecting is
-# harmless (both scripts are idempotent re-assignments) but wasteful over CDP.
-_INJECT_GUARD = "if (!window.__bmcp) {" + _DOM_TREE_JS + "\n" + _DRIVER_JS + "\n}"
+# Full driver body (no presence guard). Injected via chunked base64 assembly.
+_DRIVER_SOURCE = _DOM_TREE_JS + "\n" + _DRIVER_JS
+
+# Keep each IPC JSON line comfortably under asyncio's default 64 KiB StreamReader
+# limit (request framing + JSON escaping inflate the on-wire size).
+_INJECT_CHUNK_CHARS = 24_000
 
 
 class ElementNotFoundError(RuntimeError):
     """Raised when an index has no matching element in the page's current selector map."""
 
 
+def _b64_chunks(source: str, size: int = _INJECT_CHUNK_CHARS) -> list[str]:
+    encoded = base64.b64encode(source.encode("utf-8")).decode("ascii")
+    return [encoded[i : i + size] for i in range(0, len(encoded), size)]
+
+
+def _ensure_driver(helpers: Any) -> None:
+    """Inject the DOM driver if ``window.__bmcp`` is missing (chunked for IPC limits)."""
+    if helpers.js("!!window.__bmcp") is True:
+        return
+
+    helpers.js("window.__bmcpChunks = []")
+    for chunk in _b64_chunks(_DRIVER_SOURCE):
+        helpers.js(f"window.__bmcpChunks.push({json.dumps(chunk)})")
+    helpers.js(
+        "(() => {"
+        "const src = atob(window.__bmcpChunks.join(''));"
+        "delete window.__bmcpChunks;"
+        "(0, eval)(src);"
+        "})()"
+    )
+    if helpers.js("!!window.__bmcp") is not True:
+        raise RuntimeError(
+            "Failed to inject browser DOM indexing driver (window.__bmcp missing after eval)."
+        )
+
+
 def _call(helpers: Any, expression: str) -> Any:
     """Evaluate a window.__bmcp.* expression, assuming it's already injected.
 
-    Only get_elements() injects the ~54KB driver script; every other call here is a
+    Only get_elements() injects the driver script; every other call here is a
     short follow-up against the page's cached selector map, so we don't want to
     resend the full script on every click/type/select.
     """
@@ -64,8 +100,8 @@ def get_elements(helpers: Any, viewport_only: bool) -> dict:
     Caches an index -> element map in the page (window.__bmcpSelectorMap) that
     subsequent click/input/select-by-index calls read from.
     """
-    expression = f"{_INJECT_GUARD}\nwindow.__bmcp.getTree({json.dumps(viewport_only)})"
-    return helpers.js(expression)
+    _ensure_driver(helpers)
+    return helpers.js(f"window.__bmcp.getTree({json.dumps(viewport_only)})")
 
 
 def get_rect(helpers: Any, index: int) -> dict:
