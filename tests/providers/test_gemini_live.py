@@ -16,6 +16,7 @@ from monkeybot.core.llm.realtime_provider import (
     RealtimeTextDelta,
     RealtimeToolCall,
     RealtimeTurnBoundary,
+    RealtimeUsage,
 )
 from monkeybot.providers.gemini_live import GeminiLiveSession
 
@@ -211,5 +212,20 @@ class TestGeminiLiveEventMapping:
         assert any(
             isinstance(e, RealtimeError)
             and "something went wrong" in e.error
+            for e in events
+        )
+
+    async def test_usage_metadata(self) -> None:
+        session = _make_session()
+        usage = type("UsageMetadata", (), {})()
+        usage.prompt_token_count = 42
+        usage.candidates_token_count = 17
+        msg = _mock_message(server_content=_mock_server_content(turn_complete=True))
+        msg.usage_metadata = usage
+        events = await _collect(session._map_message(msg))
+        assert any(
+            isinstance(e, RealtimeUsage)
+            and e.input_tokens == 42
+            and e.output_tokens == 17
             for e in events
         )

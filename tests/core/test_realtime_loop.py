@@ -132,3 +132,31 @@ class TestRunRealtimeTurn:
         )
         assert len(history.rows) == 1
         assert history.rows[0].role == "user"
+
+    async def test_inject_texts_out_collects_pre_tool_hook_text(self) -> None:
+        from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
+
+        history = FakeHistory()
+        executor = RecordingExecutor()
+        ctx = _ctx()
+        inject_texts: list[str] = []
+
+        async def _inject(payload: HookPayload) -> None:
+            if payload.event == HookEvent.PRE_TOOL:
+                payload.inject_text = "remember this"
+
+        mgr = HookManager()
+        mgr.register(HookEvent.PRE_TOOL, _inject)
+        await _collect_events(
+            run_realtime_turn(
+                "read it",
+                "",
+                [RealtimeToolCall(call_id="c1", name="read_file", args={"path": "x"})],
+                ctx,
+                history=history,
+                tool_executor=executor,
+                hook_manager=mgr,
+                inject_texts_out=inject_texts,
+            )
+        )
+        assert inject_texts == ["remember this"]

@@ -1,9 +1,9 @@
 """Realtime error taxonomy.
 
 Every error in the realtime loop is either (a) surfaced to the client as a typed
-``RealtimeError`` event and the session is closed, or (b) logged and swallowed only if it
-is a non-fatal client-side event (e.g. a malformed client frame). There are no bare
-``except Exception: pass`` blocks.
+``RealtimeError`` event and the session is closed, or (b) logged and treated as
+non-fatal (e.g. a malformed client frame). Close/send failures must be logged, never
+silently discarded.
 """
 
 from __future__ import annotations

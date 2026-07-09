@@ -6,7 +6,11 @@ from typing import Any
 
 import pytest
 
-from monkeybot.core.llm.realtime_provider import AudioFormat, RealtimeSession
+from monkeybot.core.llm.realtime_provider import (
+    AudioFormat,
+    RealtimeSession,
+    RealtimeUsage,
+)
 from monkeybot.core.runtime.utterance_buffer import UtteranceBuffer
 from monkeybot.gateway.realtime.session import (
     RealtimeConnectionState,
@@ -138,3 +142,17 @@ def test_any_state_can_close() -> None:
     state.transition("tool_running")
     state.close()
     assert state.state == "closing"
+
+
+def test_usage_event_updates_metrics() -> None:
+    state = _state()
+    state.apply_provider_event(RealtimeUsage(input_tokens=11, output_tokens=7))
+    assert state.metrics.input_tokens == 11
+    assert state.metrics.output_tokens == 7
+
+
+def test_enqueue_idle_delivery() -> None:
+    state = _state()
+    state.enqueue_idle_delivery("hook context")
+    assert state.idle_delivery_queue.qsize() == 1
+    assert state.idle_delivery_queue.get_nowait() == "hook context"

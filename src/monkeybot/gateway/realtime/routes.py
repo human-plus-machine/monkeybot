@@ -12,7 +12,9 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 
+from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.config.realtime_config import RealtimeConfig
 from monkeybot.core.context import TurnContext, build_context
 from monkeybot.core.llm.realtime_provider import (
@@ -29,6 +31,7 @@ from monkeybot.core.llm.realtime_provider import (
 from monkeybot.core.llm.realtime_provider import RealtimeError as ProviderError
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.backends import HistoryStore
+from monkeybot.core.runtime.events import Error as AgentError
 from monkeybot.core.runtime.realtime_loop import run_realtime_turn
 from monkeybot.core.runtime.utterance_buffer import UtteranceBuffer
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
@@ -37,11 +40,15 @@ from monkeybot.gateway.sse.workspace_layout import resolve_agent_workspace_root
 
 from .deps import RealtimeDependencies
 from .errors import (
+    AudioFormatError,
+    ClientProtocolError,
+    ConcurrencyLimitError,
     GatewayInternalError,
     GuardrailError,
     ProviderConnectionError,
     ProviderStreamError,
     RealtimeError,
+    SubagentDispatchError,
 )
 from .guardrails import run_guardrails
 from .manager import RealtimeSessionManager
@@ -61,6 +68,7 @@ from .wire import (
     ServerTextDeltaFrame,
     ServerToolCallFrame,
     ServerTurnBoundaryFrame,
+    audio_duration_sec,
     encode_server_frame,
     parse_client_frame,
 )
@@ -82,15 +90,6 @@ def _resolved_workspace_paths() -> tuple[Path, Path]:
     skills = Path(os.environ.get("SKILLS_PATH", "skills"))
     skills_p = skills.resolve() if skills.is_absolute() else (cwd / skills).resolve()
     return root, skills_p
-
-
-def _audio_duration_sec(chunk: bytes, fmt: AudioFormat) -> float:
-    bytes_per_sample = 2 if fmt.encoding.startswith("pcm_s") else 1
-    frame_size = bytes_per_sample * fmt.channels
-    if frame_size == 0:
-        return 0.0
-    samples = len(chunk) // frame_size
-    return samples / fmt.sample_rate_hz
 
 
 async def _build_realtime_context(
@@ -152,7 +151,6 @@ def _make_realtime_session_config(
 ) -> RealtimeSessionConfig:
     input_fmt_str = os.environ.get("MONKEYBOT_REALTIME_AUDIO_INPUT_FORMAT", "pcm_s16le_24khz_mono")
     output_fmt_str = os.environ.get("MONKEYBOT_REALTIME_AUDIO_OUTPUT_FORMAT", "pcm_s16le_24khz_mono")
-    from monkeybot.core.llm.realtime_provider import AudioFormat
 
     def _parse(fmt: str) -> AudioFormat:
         parts = fmt.lower().split("_")
@@ -188,58 +186,6 @@ async def _send_frame(ws: WebSocket, frame: Any) -> None:
         await ws.send_text(encoded)
 
 
-async def _handle_assistant_boundary(
-    state: RealtimeConnectionState,
-    ctx: TurnContext,
-    history: HistoryStore,
-    deps: RealtimeDependencies,
-    attachment_store: Any | None,
-    attachment_catalog: Any | None,
-) -> None:
-    """Called when the assistant turn ends. Commits the turn and dispatches tools."""
-    turn = state.buffer.current_assistant_turn()
-    if turn.is_empty:
-        return
-
-    tool_executor = _create_tool_executor(deps, attachment_store, attachment_catalog)
-    tool_results: list[Any] = []
-    user_text = state.buffer.current_user_text().strip()
-    try:
-        async for event in run_realtime_turn(
-            user_content=[Text(text=user_text)] if user_text else "",
-            assistant_text=turn.text,
-            assistant_tool_calls=turn.tool_calls,
-            ctx=ctx,
-            history=history,
-            tool_executor=tool_executor,
-            inspectors=deps.inspectors,
-            hook_manager=deps.hook_manager,
-            attachment_store=attachment_store,
-            attachment_catalog=attachment_catalog,
-            tool_results_out=tool_results,
-        ):
-            # Realtime loop events are not forwarded to the client directly; the
-            # client already received the audio/text stream. Tool events are surfaced
-            # as lightweight server frames so the UI can show tool execution.
-            if isinstance(event, (str, str)):
-                # Placeholder: actual event types imported from realtime_loop events.
-                pass
-    except Exception:
-        logger.exception(
-            "run_realtime_turn failed %s",
-            kv(request_id=state.request_id, session_id=state.session_id),
-        )
-        return
-
-    if tool_results:
-        # Always inject immediately. Gemini Live will not continue until function
-        # responses are returned for outstanding tool calls; queuing them forever
-        # leaves the session hung.
-        await _inject_tool_results(state, tool_results)
-        if state.state == "tool_running":
-            state.transition("listening")
-
-
 async def _inject_tool_results(state: RealtimeConnectionState, results: list[Any]) -> None:
     """Serialize tool results and send them to the live provider session."""
     payloads: list[tuple[str, str, dict[str, object], bool]] = []
@@ -272,6 +218,103 @@ async def _inject_tool_results(state: RealtimeConnectionState, results: list[Any
     await state.realtime_session.send_context("\n\n".join(summaries))
 
 
+async def _deliver_idle_payload(state: RealtimeConnectionState, payload: Any) -> None:
+    """Inject one queued idle payload into the live provider session."""
+    if isinstance(payload, str):
+        await state.realtime_session.send_context(payload)
+        return
+    if isinstance(payload, list):
+        await _inject_tool_results(state, payload)
+        return
+    logger.warning(
+        "ignored unknown idle delivery payload %s",
+        kv(session_id=state.session_id, payload_type=type(payload).__name__),
+    )
+
+
+async def _flush_idle_deliveries(state: RealtimeConnectionState) -> None:
+    """Drain the idle queue while the session is listening."""
+    while state.is_idle() and not state.idle_delivery_queue.empty():
+        payload = state.idle_delivery_queue.get_nowait()
+        try:
+            await _deliver_idle_payload(state, payload)
+        except Exception as exc:
+            logger.exception(
+                "idle delivery failed %s",
+                kv(session_id=state.session_id, request_id=state.request_id),
+            )
+            raise SubagentDispatchError(
+                f"Failed to deliver idle payload: {exc}",
+                details="idle_delivery_failed",
+            ) from exc
+
+
+async def _handle_assistant_boundary(
+    ws: WebSocket,
+    state: RealtimeConnectionState,
+    ctx: TurnContext,
+    history: HistoryStore,
+    deps: RealtimeDependencies,
+    attachment_store: Any | None,
+    attachment_catalog: Any | None,
+) -> None:
+    """Called when the assistant turn ends. Commits the turn and dispatches tools."""
+    turn = state.buffer.current_assistant_turn()
+    if turn.is_empty:
+        return
+
+    tool_executor = _create_tool_executor(deps, attachment_store, attachment_catalog)
+    tool_results: list[Any] = []
+    inject_texts: list[str] = []
+    user_text = state.buffer.current_user_text().strip()
+    turn_error: str | None = None
+    try:
+        async for event in run_realtime_turn(
+            user_content=[Text(text=user_text)] if user_text else "",
+            assistant_text=turn.text,
+            assistant_tool_calls=turn.tool_calls,
+            ctx=ctx,
+            history=history,
+            tool_executor=tool_executor,
+            inspectors=deps.inspectors,
+            hook_manager=deps.hook_manager,
+            attachment_store=attachment_store,
+            attachment_catalog=attachment_catalog,
+            tool_results_out=tool_results,
+            inject_texts_out=inject_texts,
+        ):
+            if isinstance(event, AgentError):
+                turn_error = event.error
+    except Exception:
+        logger.exception(
+            "run_realtime_turn failed %s",
+            kv(request_id=state.request_id, session_id=state.session_id),
+        )
+        await _send_frame(
+            ws,
+            ServerErrorFrame(error="Failed to process realtime turn"),
+        )
+        return
+
+    if turn_error:
+        await _send_frame(ws, ServerErrorFrame(error=turn_error))
+
+    if tool_results:
+        # Outstanding tool calls must be answered immediately or Gemini Live hangs.
+        # Also enqueue for idle flush so any follow-up context is ordered correctly.
+        await _inject_tool_results(state, tool_results)
+        if state.state == "tool_running":
+            state.transition("listening")
+
+    for text in inject_texts:
+        if state.is_idle():
+            await state.realtime_session.send_context(text)
+        else:
+            state.enqueue_idle_delivery(text)
+
+    await _flush_idle_deliveries(state)
+
+
 async def _process_provider_events(
     ws: WebSocket,
     state: RealtimeConnectionState,
@@ -295,6 +338,18 @@ async def _process_provider_events(
                 attachment_store,
                 attachment_catalog,
             )
+            if state.is_idle():
+                await _flush_idle_deliveries(state)
+        except SubagentDispatchError as exc:
+            logger.warning(
+                "idle delivery failed (non-fatal) %s",
+                kv(
+                    request_id=state.request_id,
+                    session_id=state.session_id,
+                    error=exc.message,
+                ),
+            )
+            await _send_frame(ws, ServerErrorFrame(error=exc.message))
         except RealtimeError:
             # Session-fatal error: propagate so the session loop can close cleanly.
             raise
@@ -337,7 +392,7 @@ async def _handle_provider_event(
         await _send_frame(ws, ServerTurnBoundaryFrame(role=event.role))
         if event.role == "assistant":
             await _handle_assistant_boundary(
-                state, ctx, history, deps, attachment_store, attachment_catalog
+                ws, state, ctx, history, deps, attachment_store, attachment_catalog
             )
     elif isinstance(event, RealtimeToolCall):
         await _send_frame(
@@ -352,6 +407,20 @@ async def _handle_provider_event(
         raise ProviderStreamError(event.error)
 
 
+def _validate_client_audio_format(
+    chunk: bytes,
+    input_format: AudioFormat,
+) -> None:
+    """Reject empty or misaligned PCM frames from the client."""
+    bytes_per_sample = 2 if input_format.encoding.startswith("pcm_s") else 1
+    frame_size = bytes_per_sample * input_format.channels
+    if frame_size <= 0 or len(chunk) % frame_size != 0:
+        raise AudioFormatError(
+            f"Audio chunk length {len(chunk)} is not aligned to frame size {frame_size}",
+            details="audio_format_mismatch",
+        )
+
+
 async def _handle_client_frames(
     ws: WebSocket,
     state: RealtimeConnectionState,
@@ -362,17 +431,16 @@ async def _handle_client_frames(
         now = time.monotonic()
         state.mark_activity(now)
         if isinstance(raw, bytes):
-            # Binary audio chunks are passed through as bytes.
+            _validate_client_audio_format(raw, input_format)
             state.buffer.add_user_audio(raw, fmt=input_format)
             await state.realtime_session.send_audio(raw)
-            duration = _audio_duration_sec(raw, input_format)
+            duration = audio_duration_sec(raw, input_format)
             state.mark_user_audio(duration)
             continue
         try:
             frame = parse_client_frame(raw)
         except ProtocolError as exc:
-            await _send_frame(ws, ServerErrorFrame(error=str(exc)))
-            continue
+            raise ClientProtocolError(str(exc), details="malformed_client_frame") from exc
 
         if isinstance(frame, ClientTextFrame):
             state.buffer.add_user_text(frame.text)
@@ -384,6 +452,8 @@ async def _handle_client_frames(
             if callable(end_audio):
                 await end_audio()
             state.buffer.mark_user_turn_boundary()
+            if state.is_idle():
+                await _flush_idle_deliveries(state)
         elif isinstance(frame, ClientInterruptFrame):
             state.handle_user_interrupt()
             await state.realtime_session.interrupt()
@@ -482,27 +552,68 @@ async def _close_session(
     manager.remove(state.session_id)
 
 
+async def _safe_client_notify(ws: WebSocket, coro: Any) -> None:
+    """Best-effort client notify; log failures instead of swallowing silently."""
+    try:
+        await coro
+    except Exception:
+        logger.debug("client notify failed after session error", exc_info=True)
+
+
 def create_realtime_router(
     deps: RealtimeDependencies,
     manager: RealtimeSessionManager,
 ) -> APIRouter:
-    """Build an APIRouter with the realtime WebSocket endpoint."""
+    """Build an APIRouter with the realtime WebSocket endpoint and health snapshot."""
     router = APIRouter()
+
+    @router.get("/realtime/health")
+    async def realtime_health() -> JSONResponse:
+        """Liveness plus in-process session concurrency snapshot."""
+        return JSONResponse(
+            {
+                "status": "ok",
+                "realtime": manager.snapshot_metrics(),
+            }
+        )
+
+    @router.get("/realtime/sessions/{session_id}")
+    async def realtime_session_lookup(session_id: str) -> JSONResponse:
+        """Return whether a session is registered in this process."""
+        state = manager.get(session_id)
+        if state is None:
+            return JSONResponse(
+                {"session_id": session_id, "active": False},
+                status_code=404,
+            )
+        return JSONResponse(
+            {
+                "session_id": session_id,
+                "active": True,
+                "state": state.state,
+                "request_id": state.request_id,
+            }
+        )
 
     @router.websocket("/sessions/{session_id}/realtime")
     async def realtime_endpoint(ws: WebSocket, session_id: str) -> None:
         request_id = os.environ.get("REQUEST_ID", "") or f"rt-{id(ws):x}"
         # Concurrency guardrail: reject the HTTP upgrade before accepting the WebSocket.
         if not await manager.acquire_slot(session_id):
+            err = ConcurrencyLimitError(
+                "Realtime concurrency limit reached",
+                details="concurrency_limit",
+            )
+            logger.warning(
+                "realtime concurrency limit reached %s",
+                kv(session_id=session_id, request_id=request_id, error=err.message),
+            )
             raise HTTPException(
                 status_code=503,
-                detail="Realtime concurrency limit reached",
+                detail=err.message,
                 headers={"Retry-After": "10"},
             )
 
-        # Auth placeholder: in production this should validate the upgrade request
-        # using the same auth middleware as the SSE gateway (currently none exists).
-        # For v1, knowing the session id is the access control.
         await ws.accept()
         logger.info(
             "realtime websocket accepted %s",
@@ -549,9 +660,18 @@ def create_realtime_router(
                 ),
             )
 
-            # TODO: attach a FilesystemAttachmentStore when realtime file uploads are needed.
-            attachment_store = None
-            attachment_catalog = None
+            attachment_store = deps.attachment_store
+            attachment_catalog = SessionAttachmentCatalog(session_id=session_id)
+            if attachment_store is not None:
+                try:
+                    rows = await history.load(session_id)
+                    attachment_catalog.rebuild_from_history(rows)
+                except Exception:
+                    logger.warning(
+                        "attachment catalog rebuild failed %s",
+                        kv(session_id=session_id),
+                        exc_info=True,
+                    )
 
             await _run_session(
                 ws,
@@ -585,17 +705,22 @@ def create_realtime_router(
                 ),
             )
             if ws.client_state.name == "CONNECTED":
-                try:
-                    if isinstance(exc, GuardrailError):
-                        await _send_frame(
-                            ws, ServerSessionEndedFrame(reason=close_reason)
-                        )
-                    else:
-                        await _send_frame(ws, ServerErrorFrame(error=exc.message))
-                    if exc.close_code:
-                        await ws.close(code=exc.close_code, reason=exc.message[:123])
-                except Exception:
-                    pass
+                if isinstance(exc, GuardrailError):
+                    await _safe_client_notify(
+                        ws, _send_frame(ws, ServerSessionEndedFrame(reason=close_reason))
+                    )
+                elif isinstance(exc, ConcurrencyLimitError):
+                    await _safe_client_notify(
+                        ws, _send_frame(ws, ServerErrorFrame(error=exc.message))
+                    )
+                else:
+                    await _safe_client_notify(
+                        ws, _send_frame(ws, ServerErrorFrame(error=exc.message))
+                    )
+                if exc.close_code:
+                    await _safe_client_notify(
+                        ws, ws.close(code=exc.close_code, reason=exc.message[:123])
+                    )
         except Exception as exc:
             close_reason = "error"
             logger.exception(
@@ -603,11 +728,12 @@ def create_realtime_router(
                 kv(session_id=session_id, request_id=request_id),
             )
             if ws.client_state.name == "CONNECTED":
-                try:
-                    await _send_frame(ws, ServerErrorFrame(error=str(exc)))
-                    await ws.close(code=1011, reason="Internal error")
-                except Exception:
-                    pass
+                await _safe_client_notify(
+                    ws, _send_frame(ws, ServerErrorFrame(error=str(exc)))
+                )
+                await _safe_client_notify(
+                    ws, ws.close(code=1011, reason="Internal error")
+                )
         finally:
             if state is not None:
                 await _close_session(state, manager, reason=close_reason)

@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from monkeybot.core.llm.realtime_provider import AudioFormat
 from monkeybot.gateway.realtime.wire import (
     ClientCloseFrame,
     ClientConnectFrame,
@@ -20,6 +21,7 @@ from monkeybot.gateway.realtime.wire import (
     ServerTextDeltaFrame,
     ServerToolCallFrame,
     ServerTurnBoundaryFrame,
+    audio_duration_sec,
     encode_server_frame,
     parse_client_frame,
     parse_server_frame,
@@ -176,3 +178,9 @@ def test_parse_server_error_and_session_ended_frames() -> None:
 def test_parse_server_unknown_kind_raises() -> None:
     with pytest.raises(ProtocolError, match="Unknown server frame kind"):
         parse_server_frame(json.dumps({"kind": "unknown"}))
+
+
+def test_audio_duration_sec() -> None:
+    fmt = AudioFormat(encoding="pcm_s16le", sample_rate_hz=24000, channels=1, frame_ms=200)
+    # 24000 samples/sec * 2 bytes = 48000 bytes/sec; 4800 bytes => 0.1s
+    assert audio_duration_sec(b"\x00" * 4800, fmt) == pytest.approx(0.1)

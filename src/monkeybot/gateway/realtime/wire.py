@@ -132,6 +132,16 @@ def _frame_size_for(fmt: AudioFormat) -> int:
     return samples * bytes_per_sample * fmt.channels
 
 
+def audio_duration_sec(chunk: bytes, fmt: AudioFormat) -> float:
+    """Duration in seconds for a PCM (or similar) audio chunk."""
+    bytes_per_sample = 2 if fmt.encoding.startswith("pcm_s") else 1
+    frame_size = bytes_per_sample * fmt.channels
+    if frame_size == 0:
+        return 0.0
+    samples = len(chunk) // frame_size
+    return samples / fmt.sample_rate_hz
+
+
 def parse_client_frame(data: str | bytes) -> ClientFrame:
     """Parse a client JSON control frame."""
     if isinstance(data, bytes):
@@ -241,6 +251,7 @@ __all__ = [
     "ServerTextDeltaFrame",
     "ServerToolCallFrame",
     "ServerTurnBoundaryFrame",
+    "audio_duration_sec",
     "encode_server_frame",
     "parse_client_frame",
     "parse_server_frame",

@@ -29,6 +29,7 @@ from monkeybot.core.llm.realtime_provider import (
     RealtimeTextDelta,
     RealtimeToolCall,
     RealtimeTurnBoundary,
+    RealtimeUsage,
 )
 from monkeybot.core.types.interfaces import LLMError
 from monkeybot.core.types.types_tools import ToolDef
@@ -317,6 +318,22 @@ class GeminiLiveSession(RealtimeSession):
                             yield RealtimeAudioDelta(chunk=data)
 
             turn_complete = bool(getattr(server_content, "turn_complete", False))
+
+        usage_metadata = getattr(msg, "usage_metadata", None)
+        if usage_metadata is not None:
+            yield RealtimeUsage(
+                input_tokens=int(
+                    getattr(usage_metadata, "prompt_token_count", 0)
+                    or getattr(usage_metadata, "input_token_count", 0)
+                    or 0
+                ),
+                output_tokens=int(
+                    getattr(usage_metadata, "candidates_token_count", 0)
+                    or getattr(usage_metadata, "response_token_count", 0)
+                    or getattr(usage_metadata, "output_token_count", 0)
+                    or 0
+                ),
+            )
 
         # Emit tool calls before any turn boundary so the gateway buffers them first.
         had_tool_calls = False

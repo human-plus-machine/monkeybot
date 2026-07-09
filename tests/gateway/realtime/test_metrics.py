@@ -53,6 +53,16 @@ def test_turn_without_first_output(metrics: RealtimeMetrics) -> None:
     assert metrics.turn_tool_counts == [0]
 
 
+def test_mark_usage(metrics: RealtimeMetrics) -> None:
+    metrics.mark_usage(input_tokens=10, output_tokens=20)
+    metrics.mark_usage(input_tokens=5, output_tokens=0)
+    assert metrics.input_tokens == 15
+    assert metrics.output_tokens == 20
+    summary = metrics.as_dict()
+    assert summary["realtime_session_input_tokens"] == 15
+    assert summary["realtime_session_output_tokens"] == 20
+
+
 def test_close_and_summary(metrics: RealtimeMetrics) -> None:
     metrics.mark_user_audio_sec(1.0)
     metrics.mark_interrupt()

@@ -47,8 +47,7 @@ from .loop import ToolExecutorPort
 logger = logging.getLogger("monkeybot.core.runtime.realtime_loop")
 
 
-_HOOk_READ_TIMEOUT_S = 2.0
-_HOOk_PRE_TOOL_TIMEOUT_S = 1.5
+_HOOK_PRE_TOOL_TIMEOUT_S = 1.5
 
 
 def _user_text_from_content(blocks: Sequence[ContentBlock]) -> str:
@@ -128,7 +127,8 @@ async def _execute_tool(
     tool_executor: ToolExecutorPort,
     hook_manager: HookManager | None,
     request_id: str,
-) -> ToolExecutionResult:
+) -> tuple[ToolExecutionResult, str | None]:
+    """Execute one tool; return (result, optional inject_text from pre-tool hooks)."""
     logger.debug(
         "realtime tool execute %s",
         kv(
@@ -142,13 +142,13 @@ async def _execute_tool(
         hook_manager,
         event=HookEvent.PRE_TOOL,
         ctx=ctx,
-        timeout_s=_HOOk_PRE_TOOL_TIMEOUT_S,
+        timeout_s=_HOOK_PRE_TOOL_TIMEOUT_S,
         tool_name=call.name,
         tool_args=dict(call.args),
     )
-    extra_text: str | None = None
+    inject_text: str | None = None
     if pre_tool_payload is not None and pre_tool_payload.inject_text:
-        extra_text = pre_tool_payload.inject_text
+        inject_text = pre_tool_payload.inject_text
     try:
         result = await tool_executor.execute(call=call, ctx=ctx)
     except asyncio.CancelledError:
@@ -178,12 +178,7 @@ async def _execute_tool(
         tool_result=result_summary,
         tool_error=result.error,
     )
-    if extra_text:
-        # TODO: surface extra_text back into the next system prompt. For now it is
-        # discarded because the realtime loop does not rebuild the system prompt
-        # between turns; the gateway/session manager will need to inject it.
-        _ = extra_text
-    return result
+    return result, inject_text
 
 
 def _realtime_tool_call_to_tool_call(call: RealtimeToolCall) -> ToolCall:
@@ -209,21 +204,23 @@ async def run_realtime_turn(
     attachment_catalog: SessionAttachmentCatalog | None = None,
     transcript_writer: TranscriptWriter | None = None,
     tool_results_out: list[ContentBlock] | None = None,
+    inject_texts_out: list[str] | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Process a finalized realtime user utterance + assistant response.
 
     Commits the user message, runs memory hooks, commits the assistant message (with
     any tool requests), and dispatches the tools sequentially. Tool results are
     yielded as ``ToolCallResult`` events and also appended to ``tool_results_out``
-    when the generator completes.
+    when the generator completes. Pre-tool hook ``inject_text`` values are appended to
+    ``inject_texts_out`` for the gateway to inject into the live session.
 
     The caller is responsible for injecting the collected tool results back into the
-    live realtime session via ``RealtimeSession.send_context()`` when the session is
-    idle, as described in the realtime design doc.
+    live realtime session via ``RealtimeSession.send_tool_results()`` /
+    ``send_context()`` when the session is idle.
     """
     usage = UsageTotals()
-    # attachment_store is part of the public signature for symmetry with loop.run();
-    # realtime does not replay messages to a streaming provider, so it is unused here.
+    # attachment_store is accepted for symmetry with loop.run and future resolve paths;
+    # freeze_attachments_in_history uses the catalog rebuilt from history.
     _ = attachment_store
     blocks = [Text(text=user_content)] if isinstance(user_content, str) else list(user_content)
     user_text = _user_text_from_content(blocks)
@@ -286,7 +283,6 @@ async def run_realtime_turn(
             )
 
         # 4. Dispatch tools sequentially (v1: no parallel subagent dispatch here).
-        # TODO: non-blocking subagent dispatch for `task` tools, delivering results at session-idle.
         for rtc in assistant_tool_calls:
             call = _realtime_tool_call_to_tool_call(rtc)
 
@@ -314,6 +310,7 @@ async def run_realtime_turn(
 
             if not allowed:
                 result = ToolExecutionResult.err(denial_message or "tool call denied")
+                inject_text = None
             else:
                 yield ToolCallStarted(
                     request_id=ctx.request_id,
@@ -321,13 +318,16 @@ async def run_realtime_turn(
                     label=call.name,
                     args=dict(call.args),
                 )
-                result = await _execute_tool(
+                result, inject_text = await _execute_tool(
                     call,
                     ctx,
                     tool_executor=tool_executor,
                     hook_manager=hook_manager,
                     request_id=ctx.request_id,
                 )
+
+            if inject_text and inject_texts_out is not None:
+                inject_texts_out.append(inject_text)
 
             event, response = _tool_outcome(call, ctx.request_id, result)
             yield event

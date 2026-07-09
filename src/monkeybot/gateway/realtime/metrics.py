@@ -25,6 +25,8 @@ class RealtimeMetrics:
     model_audio_sec: float = 0.0
     interrupt_count: int = 0
     turn_count: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
     turn_latencies_ms: list[float] = field(default_factory=list)
     turn_model_durations_ms: list[float] = field(default_factory=list)
     turn_tool_counts: list[int] = field(default_factory=list)
@@ -40,6 +42,10 @@ class RealtimeMetrics:
 
     def mark_interrupt(self) -> None:
         self.interrupt_count += 1
+
+    def mark_usage(self, *, input_tokens: int = 0, output_tokens: int = 0) -> None:
+        self.input_tokens += max(0, input_tokens)
+        self.output_tokens += max(0, output_tokens)
 
     def start_turn(self, now: float | None = None) -> None:
         """Call when a user turn boundary is finalized (model is about to respond)."""
@@ -94,6 +100,8 @@ class RealtimeMetrics:
             "realtime_session_model_audio_sec": round(self.model_audio_sec, 3),
             "realtime_session_interrupt_count": self.interrupt_count,
             "realtime_session_turn_count": self.turn_count,
+            "realtime_session_input_tokens": self.input_tokens,
+            "realtime_session_output_tokens": self.output_tokens,
             "realtime_session_close_reason": self.close_reason,
             "realtime_turn_latency_ms_avg": round(sum(self.turn_latencies_ms) / len(self.turn_latencies_ms), 2)
             if self.turn_latencies_ms

@@ -5,11 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import socket
 import sys
 import urllib.parse
 from pathlib import Path
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +46,8 @@ async def _is_gateway_reachable(url: str, timeout: float = 1.0) -> bool:
         writer.close()
         await writer.wait_closed()
         return True
-    except Exception:
+    except Exception as exc:
+        logger.debug("Gateway not reachable at %s: %s", url, exc)
         return False
 
 
@@ -129,17 +128,3 @@ async def stop_gateway(proc: asyncio.subprocess.Process | None) -> None:
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
-
-
-async def drain_gateway_output(proc: asyncio.subprocess.Process | None) -> None:
-    """Drain remaining stdout/stderr from a gateway subprocess for debugging."""
-    if proc is None:
-        return
-    try:
-        stdout, stderr = await proc.communicate()
-        if stdout:
-            logger.info("Gateway stdout:\n%s", stdout.decode(errors="replace"))
-        if stderr:
-            logger.info("Gateway stderr:\n%s", stderr.decode(errors="replace"))
-    except Exception:
-        logger.warning("Failed to drain gateway output", exc_info=True)

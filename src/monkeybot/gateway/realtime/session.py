@@ -19,11 +19,13 @@ from monkeybot.core.llm.realtime_provider import (
     RealtimeTextDelta,
     RealtimeToolCall,
     RealtimeTurnBoundary,
+    RealtimeUsage,
 )
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.runtime.utterance_buffer import UtteranceBuffer
 
 from .metrics import RealtimeMetrics
+from .wire import audio_duration_sec
 
 logger = logging.getLogger("monkeybot.gateway.realtime.session")
 
@@ -32,7 +34,9 @@ class SessionStateError(Exception):
     """Invalid state transition or operation on a realtime session."""
 
 
-RealtimeSessionState = Literal["listening", "thinking", "speaking", "interrupted", "tool_running", "closing"]
+RealtimeSessionState = Literal[
+    "listening", "thinking", "speaking", "interrupted", "tool_running", "closing"
+]
 
 
 @dataclass
@@ -47,10 +51,10 @@ class RealtimeConnectionState:
     state: RealtimeSessionState = "listening"
     opened_at: float = 0.0
     last_activity_at: float = 0.0
-    tool_results_pending: list[Any] = field(default_factory=list)
-    # Queue for subagent/tool results that arrived while the session is busy.
-    # The gateway injects them via send_context() when the session reaches idle.
-    idle_delivery_queue: asyncio.Queue[list[Any]] = field(default_factory=asyncio.Queue)
+    # Pending tool/subagent payloads to inject when the session reaches idle.
+    # Each item is either tool-result tuples for send_tool_results, or a context
+    # string for send_context (e.g. hook inject_text).
+    idle_delivery_queue: asyncio.Queue[Any] = field(default_factory=asyncio.Queue)
     metrics: RealtimeMetrics = field(init=False)
     _closed: bool = False
 
@@ -94,7 +98,7 @@ class RealtimeConnectionState:
         elif isinstance(event, (RealtimeAudioDelta, RealtimeTextDelta)):
             if isinstance(event, RealtimeAudioDelta):
                 self.metrics.mark_model_audio_sec(
-                    _audio_duration_sec(event.chunk, self.realtime_session.output_format)
+                    audio_duration_sec(event.chunk, self.realtime_session.output_format)
                 )
             else:
                 self.buffer.add_assistant_text(event.text)
@@ -126,6 +130,11 @@ class RealtimeConnectionState:
             # Provider acknowledged interrupt.
             if self.state in ("speaking", "thinking"):
                 self.transition("interrupted")
+        elif isinstance(event, RealtimeUsage):
+            self.metrics.mark_usage(
+                input_tokens=event.input_tokens,
+                output_tokens=event.output_tokens,
+            )
         elif isinstance(event, RealtimeDone) and self.state in (
             "speaking",
             "thinking",
@@ -154,6 +163,10 @@ class RealtimeConnectionState:
     def is_idle(self) -> bool:
         return self.state == "listening" and not self.buffer.in_user_turn
 
+    def enqueue_idle_delivery(self, payload: Any) -> None:
+        """Queue a payload for injection when the session is idle."""
+        self.idle_delivery_queue.put_nowait(payload)
+
     def close(self) -> None:
         self._closed = True
         self.state = "closing"
@@ -181,12 +194,3 @@ _VALID_TRANSITIONS: set[tuple[RealtimeSessionState, RealtimeSessionState]] = {
 # Any source state may transition to closing.
 for _src in ("listening", "thinking", "speaking", "interrupted", "tool_running"):
     _VALID_TRANSITIONS.add((_src, "closing"))
-
-
-def _audio_duration_sec(chunk: bytes, fmt: AudioFormat) -> float:
-    bytes_per_sample = 2 if fmt.encoding.startswith("pcm_s") else 1
-    frame_size = bytes_per_sample * fmt.channels
-    if frame_size == 0:
-        return 0.0
-    samples = len(chunk) // frame_size
-    return samples / fmt.sample_rate_hz

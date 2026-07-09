@@ -16,6 +16,8 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from monkeybot.core.attachments.config import attachments_enabled_from_env
+from monkeybot.core.attachments.store import FilesystemAttachmentStore
 from monkeybot.core.config.realtime_config import RealtimeConfig, get_realtime_config
 from monkeybot.core.config.settings import (
     auto_schema_enabled_from_config,
@@ -32,6 +34,7 @@ from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector
 from monkeybot.core.workspace import create_workspace_storage
 from monkeybot.gateway.bootstrap import ensure_gateway_runtime_env
 from monkeybot.gateway.sse.routes import create_app as build_sse_app
+from monkeybot.gateway.sse.workspace_layout import resolve_agent_workspace_root
 from monkeybot.providers.gemini_live import GeminiLiveProvider
 from monkeybot.web_search import WebSearchTool, build_backend
 
@@ -177,6 +180,22 @@ async def _realtime_lifespan(
         logger.info("memory hook disabled")
 
     deps.subagent_registry = get_subagent_registry()
+
+    if attachments_enabled_from_env():
+        try:
+            deps.attachment_store = FilesystemAttachmentStore(resolve_agent_workspace_root())
+            app.state.attachment_store = deps.attachment_store
+            logger.info("attachments enabled")
+        except Exception as exc:
+            logger.warning("attachment store init failed: %s", exc)
+            deps.attachment_store = None
+            app.state.attachment_store = None
+    else:
+        deps.attachment_store = None
+        app.state.attachment_store = None
+        logger.info("attachments disabled via ATTACHMENTS_ENABLED")
+
+    deps.freeze()
 
     try:
         yield
