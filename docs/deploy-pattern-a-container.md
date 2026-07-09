@@ -312,7 +312,7 @@ eksctl create iamserviceaccount \
   --name monkeybot-sa \
   --namespace default \
   --cluster my-cluster \
-  --attach-policy-arn arn:aws:iam::ACCOUNT:policy/monkeybotPolicy \
+  --attach-policy-arn arn:aws:iam::ACCOUNT:policy/monkeybot-policy \
   --approve
 ```
 
