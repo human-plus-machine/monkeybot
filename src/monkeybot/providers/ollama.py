@@ -46,7 +46,7 @@ _DUMMY_API_KEY = "ollama"
 
 
 def reasoning_effort_for_thinking_budget(budget: int) -> str | None:
-    """Map MonkeyBot ``thinking_budget`` to Ollama OpenAI-compat ``reasoning_effort``.
+    """Map monkeybot ``thinking_budget`` to Ollama OpenAI-compat ``reasoning_effort``.
 
     Returns ``None`` when the field should be omitted (server default).
     """

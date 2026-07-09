@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MonkeyBot v2 — Sandbox Benchmark Suite
+monkeybot v2 — Sandbox Benchmark Suite
 =======================================
 Measures: cold start, time-to-first-token (TTFT), e2e turn latency,
 tool dispatch overhead, memory ops, and streaming throughput.
@@ -525,7 +525,7 @@ def print_summary() -> None:
 async def main_async(args: argparse.Namespace) -> None:
     provider_name = os.getenv("MODEL_PROVIDER", "vertex-claude")
     model = os.getenv("MODEL", _default_model(provider_name))
-    print("\n  MonkeyBot v2 Sandbox Benchmark")
+    print("\n  monkeybot v2 Sandbox Benchmark")
     print(f"  Provider : {provider_name}  |  Model: {model}")
     print(f"  Bot      : {BOT_DIR}")
     print(f"  Skills   : {SKILLS_PATH}")
@@ -548,7 +548,7 @@ async def main_async(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="MonkeyBot v2 Benchmark Suite")
+    parser = argparse.ArgumentParser(description="monkeybot v2 Benchmark Suite")
     parser.add_argument("--live", action="store_true", help="Run live LLM tests (needs API key)")
     parser.add_argument("--docker", action="store_true", help="Run HTTP tests against Docker")
     parser.add_argument("--docker-url", default="http://localhost:8080", help="Docker base URL (default: http://localhost:8080)")

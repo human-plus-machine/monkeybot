@@ -1,4 +1,4 @@
-# Getting Started (MonkeyBot v2)
+# Getting Started (monkeybot v2)
 
 Run the **SSE gateway** locally: FastAPI, SQLite conversation history, optional MCP tools, and a single system prompt from **AGENT.md**. Session routes are **not** authenticated; do not expose the gateway to the public internet without putting auth or a private network in front of it.
 

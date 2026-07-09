@@ -1,4 +1,4 @@
-# MonkeyBot Cloud Deployment Design
+# monkeybot Cloud Deployment Design
 
 **Status:** Complete — Steps **1**, **1.5**, **2**, **3**, **4**, and **5** are done.  
 **Purpose:** Single source of truth for the multi-cloud deployment work. Open this in any new chat before starting a step to ensure nothing in that step breaks a later one.
@@ -67,7 +67,7 @@ These apply to **every step**. Violating any of them creates a design debt that 
 
 5. **`run_loop()` must remain callable from a short-lived process.** No assumptions about process lifetime. A Lambda handler that calls `run_loop()` once and returns must work correctly.
 
-6. **OpenSandbox is always an external service.** MonkeyBot's config is always `SANDBOX_ENABLED + SANDBOX_SERVER_URL`. Where opensandbox runs is a deployment concern, not a harness concern. Authentication to opensandbox is network-layer (VPC/private subnet) by default, with an optional `SANDBOX_AUTH_TOKEN` env var forwarded as a Bearer header if needed.
+6. **OpenSandbox is always an external service.** monkeybot's config is always `SANDBOX_ENABLED + SANDBOX_SERVER_URL`. Where opensandbox runs is a deployment concern, not a harness concern. Authentication to opensandbox is network-layer (VPC/private subnet) by default, with an optional `SANDBOX_AUTH_TOKEN` env var forwarded as a Bearer header if needed.
 
 ---
 
@@ -168,7 +168,7 @@ Define a factory `create_storage_backend(db_url: str) → StorageBackend`:
 
 The gateway's lifespan (`app.on_event("startup")`) calls `create_storage_backend(os.environ["DB_URL"])` once and stores it in `app.state`. The `GatewayLoopPort.start_turn()` retrieves it from `app.state` and passes `backend.history()` and `backend.usage()` into the harness. No connection is opened per-turn.
 
-**Managed Postgres (SSL):** Cloud SQL, RDS, and similar often require TLS. Use whatever your provider documents for libpq-style URLs (for example `sslmode=require` / `ssl=true` query params or `sslrootcert=…` on `DB_URL`). MonkeyBot passes the URL through to asyncpg unchanged after scheme normalization.
+**Managed Postgres (SSL):** Cloud SQL, RDS, and similar often require TLS. Use whatever your provider documents for libpq-style URLs (for example `sslmode=require` / `ssl=true` query params or `sslrootcert=…` on `DB_URL`). monkeybot passes the URL through to asyncpg unchanged after scheme normalization.
 
 ### What does NOT change
 

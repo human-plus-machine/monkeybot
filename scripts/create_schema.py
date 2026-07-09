@@ -1,4 +1,4 @@
-"""Apply MonkeyBot SQLite schema DDL idempotently (stdlib sqlite3)."""
+"""Apply monkeybot SQLite schema DDL idempotently (stdlib sqlite3)."""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ def _apply_schema_sync(conn: sqlite3.Connection) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Create MonkeyBot SQLite schema.")
+    parser = argparse.ArgumentParser(description="Create monkeybot SQLite schema.")
     parser.add_argument(
         "--db",
         default=None,

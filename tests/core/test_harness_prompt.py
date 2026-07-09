@@ -17,7 +17,7 @@ def test_harness_directs_list_skills_before_skill_work() -> None:
 
 def test_harness_includes_core_tools_and_protocol() -> None:
     out = harness_fixed_context(include_task_tool=False)
-    assert "## MonkeyBot harness (fixed)" in out
+    assert "## monkeybot harness (fixed)" in out
     assert "`read_file`" in out
     assert "`write_file`" in out
     assert "`replace_in_file`" in out

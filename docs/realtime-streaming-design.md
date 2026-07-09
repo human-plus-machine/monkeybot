@@ -1,4 +1,4 @@
-# MonkeyBot Realtime / Micro-Turn Streaming Design
+# monkeybot Realtime / Micro-Turn Streaming Design
 
 **Status:** Draft — not started. No code in this repo implements anything described here.
 **Purpose:** Single source of truth for adding a continuous, low-latency, full-duplex conversational mode ("micro-turns," e.g. ~200ms input/output slices) alongside the existing turn-based harness. Open this before starting any step so later steps don't get broken by earlier ones.
@@ -9,7 +9,7 @@
 
 ## Why this is a new subsystem, not an extension of `loop.run()`
 
-MonkeyBot's harness is **turn-based with streamed output**, not continuous/full-duplex:
+monkeybot's harness is **turn-based with streamed output**, not continuous/full-duplex:
 
 - `POST /sessions/{id}/reply` takes one complete user message; the session is locked (`SESSION_BUSY`) until `TurnComplete` (`gateway/sse/routes.py`, `core/persistence/session_turn_locks.py`).
 - `loop.run()` commits the user message to history atomically at turn start (`core/runtime/loop.py`), buffers tool calls until the provider signals `Done`, then executes them — there is no concept of a "partial," in-flight, or revocable utterance.
@@ -64,7 +64,7 @@ None of this is a bug — it's the correct design for a tool-using chat/agent ha
 3. **Utterance-boundary commits only.** Partial/in-flight audio or text is never written to `HistoryStore`. History still only ever contains complete, finalized `Message` rows — this preserves every existing invariant in `docs/features.md` (`ToolRequest`/`ToolResponse` pairing, tool-call ordering, summarization, memory hooks) without touching them.
 4. **Tool execution is post-utterance only; no mid-tool-execution interruption.** Tools run after an utterance is finalized (VAD/endpoint signal), same as today's "after `Done`" semantics — just triggered by an endpoint event instead of a provider stream end. Once a tool call is dispatched, the user cannot interrupt it — this is a permanent design decision, not a v1 limitation to revisit later.
 5. **Realtime provider is a new, separate protocol — not a `stream()` shape.** `Provider.stream()` is request/response-per-call; realtime vendor APIs (Gemini Live, OpenAI Realtime, Bedrock Nova Sonic) are persistent duplex sessions. Do not force-fit them into the existing `Provider` protocol. Define a new `RealtimeProvider` protocol instead.
-6. **Transport is WebSocket. Not WebRTC.** MonkeyBot's target deployments (Cloud Run/ECS server-to-server, Vertex AI Agent Engine `bidi_stream_query`, Bedrock AgentCore `/ws`) are all WebSocket-native. WebRTC only pays off for direct-from-browser mic capture over lossy networks, which is not a MonkeyBot use case.
+6. **Transport is WebSocket. Not WebRTC.** monkeybot's target deployments (Cloud Run/ECS server-to-server, Vertex AI Agent Engine `bidi_stream_query`, Bedrock AgentCore `/ws`) are all WebSocket-native. WebRTC only pays off for direct-from-browser mic capture over lossy networks, which is not a monkeybot use case.
 7. **Gateway-only feature flag.** Realtime support ships as an optional gateway route + optional extras (`monkeybot[realtime]`), same pattern as `[postgres]`/`[gcs]`. Zero impact on default install size or behavior for existing users.
 
 ---

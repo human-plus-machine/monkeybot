@@ -1,12 +1,12 @@
-# Model Context Protocol (MCP) in MonkeyBot
+# Model Context Protocol (MCP) in monkeybot
 
-MonkeyBot fully supports the Model Context Protocol (MCP), enabling your agents to interact with external tools, APIs, and data sources. Both local `stdio` subprocess transport and remote `Streamable HTTP` SSE transports are supported.
+monkeybot fully supports the Model Context Protocol (MCP), enabling your agents to interact with external tools, APIs, and data sources. Both local `stdio` subprocess transport and remote `Streamable HTTP` SSE transports are supported.
 
 ---
 
 ## Configuration
 
-By default, MonkeyBot loads its MCP servers map from a JSON file specified under `paths.mcp_config` in `monkeybot.yaml` (typically `./monkeybot_config/mcp.json`).
+By default, monkeybot loads its MCP servers map from a JSON file specified under `paths.mcp_config` in `monkeybot.yaml` (typically `./monkeybot_config/mcp.json`).
 
 A template `mcp.json` looks like this:
 
@@ -43,14 +43,14 @@ A template `mcp.json` looks like this:
 
 ### 1. Environment Variable Interpolation
 
-To prevent checking secrets or environment-specific paths into version control, MonkeyBot recursively interpolates values in `mcp.json` matching the `${VAR_NAME}` pattern.
+To prevent checking secrets or environment-specific paths into version control, monkeybot recursively interpolates values in `mcp.json` matching the `${VAR_NAME}` pattern.
 
 * Missing environment variables are interpolated as empty strings `""`.
 * Interpolation applies recursively to keys and nested elements under `env`, `headers`, `args`, `url`, and `auth`.
 
 ### 2. OAuth2 / OpenID Connect (OIDC) Authentication
 
-For remote Streamable HTTP MCP endpoints requiring dynamic or short-lived credentials, MonkeyBot can perform background OAuth2 token retrieval and automatic bearer token rotation.
+For remote Streamable HTTP MCP endpoints requiring dynamic or short-lived credentials, monkeybot can perform background OAuth2 token retrieval and automatic bearer token rotation.
 
 Add an optional `"auth"` block to your server specification inside `mcp.json`:
 
@@ -104,7 +104,7 @@ Add an optional `"auth"` block to your server specification inside `mcp.json`:
 
 #### Token Refresh and Expiry Behavior:
 
-* **Background Refresh**: Token expiry is calculated based on the `expires_in` response property (default: 3600 seconds). MonkeyBot automatically refreshes the token in the background 60 seconds before it expires.
+* **Background Refresh**: Token expiry is calculated based on the `expires_in` response property (default: 3600 seconds). monkeybot automatically refreshes the token in the background 60 seconds before it expires.
 * **401 Retry**: If the target MCP endpoint returns a `401 Unauthorized` response, the authentication handler immediately discards the current token, issues a fresh token request, and retries the failed request once.
 * **Header Priority**: If an `"auth"` block is provided, static `"Authorization"` / `"authorization"` parameters in the `"headers"` block are automatically popped and ignored to avoid conflict.
 
@@ -128,7 +128,7 @@ When enabled:
 
 ### Actionable Troubleshooting Banners
 
-If startup fails under strict load, MonkeyBot prints a high-signal diagnostic banner to stderr containing user-actionable remedies before exiting:
+If startup fails under strict load, monkeybot prints a high-signal diagnostic banner to stderr containing user-actionable remedies before exiting:
 
 ```
 ======================================================================

@@ -1,6 +1,6 @@
-# Monkey-Bot Examples
+# monkeybot Examples
 
-This directory contains example implementations and patterns for building agents with the monkey-bot framework.
+This directory contains example implementations and patterns for building agents with the monkeybot framework.
 
 ## Examples
 

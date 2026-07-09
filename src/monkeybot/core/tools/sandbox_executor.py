@@ -13,7 +13,7 @@ reused across all run_command calls in that session. The sandbox is created
 lazily on the first execute() call so there is zero overhead when run_command
 is never invoked.
 
-Configuration (all via env vars or bot.yaml sandbox.*):
+Configuration (all via env vars or monkeybot.yaml sandbox.*):
     SANDBOX_ENABLED            - "true" to activate (default: "false")
     SANDBOX_SERVER_URL         - OpenSandbox server URL (default: http://localhost:8080)
     SANDBOX_IMAGE              - Container image to run (default: python:3.12)
@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 class SandboxConfig:
     """Configuration for the OpenSandbox integration.
 
-    Populated from environment variables set by bot.yaml or directly.
+    Populated from environment variables set by monkeybot.yaml or directly.
     Only SANDBOX_ENABLED=true (exact, case-insensitive) activates the sandbox.
     """
 

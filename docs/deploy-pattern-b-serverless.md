@@ -86,7 +86,7 @@ Opening and closing per invocation adds ~20–50 ms of latency and connection ch
 
 ## 3. Dependency Installation
 
-Install MonkeyBot with only the extras you need:
+Install monkeybot with only the extras you need:
 
 ```bash
 # Gemini + Postgres + GCS memory

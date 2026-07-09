@@ -1,8 +1,8 @@
 # DevBot Memory
 
 ## About This Bot
-DevBot is the sandbox test bot for MonkeyBot v2. It lives in the sandbox workspace.
-It was created to validate the MonkeyBot harness — cold start, TTFT, tool latency, and streaming.
+DevBot is the sandbox test bot for monkeybot v2. It lives in the sandbox workspace.
+It was created to validate the monkeybot harness — cold start, TTFT, tool latency, and streaming.
 
 ## Skills Loaded
 - file-ops: read/write/organize files

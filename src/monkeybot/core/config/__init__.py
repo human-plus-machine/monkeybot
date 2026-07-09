@@ -1,4 +1,4 @@
-"""Configuration utilities for the MonkeyBot harness."""
+"""Configuration utilities for the monkeybot harness."""
 
 from __future__ import annotations
 

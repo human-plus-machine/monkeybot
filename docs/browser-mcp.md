@@ -1,6 +1,6 @@
 # Browser MCP
 
-Stdio MCP server for MonkeyBot that wraps [browser-harness](https://github.com/browser-use/browser-harness) for real-browser control (CDP) and agent-writable site playbooks.
+Stdio MCP server for monkeybot that wraps [browser-harness](https://github.com/browser-use/browser-harness) for real-browser control (CDP) and agent-writable site playbooks.
 
 Package location: `integrations/browser-mcp/`.
 
@@ -14,7 +14,7 @@ uv sync --project integrations/browser-mcp
 
 ---
 
-## Wire into MonkeyBot
+## Wire into monkeybot
 
 Add to `monkeybot_config/mcp.json`:
 
@@ -97,7 +97,7 @@ No Chrome in your image. [Browser Use Cloud](https://cloud.browser-use.com/) hos
 }
 ```
 
-Call the `browser_stop` MCP tool when browsing is done — cloud sessions bill until stopped. As a safety net, MonkeyBot's `MCPClient.disconnect()`/`disconnect_all()` also call `browser_stop` automatically (best-effort, 10s timeout) whenever a connected server exposes that tool, so agent crashes, abandoned conversations, and normal shutdown all stop the remote session rather than only killing the local stdio subprocess.
+Call the `browser_stop` MCP tool when browsing is done — cloud sessions bill until stopped. As a safety net, monkeybot's `MCPClient.disconnect()`/`disconnect_all()` also call `browser_stop` automatically (best-effort, 10s timeout) whenever a connected server exposes that tool, so agent crashes, abandoned conversations, and normal shutdown all stop the remote session rather than only killing the local stdio subprocess.
 
 For syncing cookies from a local Chrome profile into cloud browsers, see [browser-harness profile-sync](https://github.com/browser-use/browser-harness/blob/main/interaction-skills/profile-sync.md).
 
