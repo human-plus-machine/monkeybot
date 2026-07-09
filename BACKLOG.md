@@ -56,7 +56,21 @@
 - **INDEX.md size cap** *(deferred 2026-05-15)* — `MemoryOrganizer` appends without bound; acceptable for now via `ContextCurator` selection. When indices grow wastefully large, cap with a sliding window (N=200, archive to `INDEX.archive.md`) in `core/memory_organizer.py`.
 
 ### MCP
-- **MCP distro linkage** — confirm `demo_agent/` env (`MCP_CONFIG`, `SKILLS_PATH`) matches deployment; smoke-test against real MCP servers beyond the bundled LangChain docs URL.
+- **MCP distro linkage** — confirm `demo_agent/` `monkeybot.yaml` paths (`paths.mcp_config`, `paths.skills_path`) match deployment; smoke-test against real MCP servers beyond the bundled LangChain docs URL.
+
+### Future platforms *(not scheduled)*
+
+Moved from README — longer-term / speculative integrations without active implementation:
+
+- **Azure OpenAI** — Azure-hosted OpenAI models
+- **Azure Blob Storage** — memory backend (`[azure]` extra; docs note as planned)
+- **Azure Key Vault** — secrets for Azure deployments
+- **AWS Secrets Manager** — secret resolver at runtime
+- **GCP Secret Manager** — finish `secrets.provider: gcp_secret_manager` wiring (schema exists; resolver not shipped)
+- **Microsoft Teams** — Teams bot interface
+- **Telegram** — Telegram bot interface
+- **DynamoDB** — checkpointer / job storage backend
+- **Cosmos DB** — Azure-native persistence options
 
 ### Tooling
 - **File-op tool audit** — evaluate removing `write_file` in favor of `create_file` + `find_and_replace` in `core_tool_executor.py` and `workspace_tools.py` (reference: Claude Code patterns).

@@ -8,6 +8,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- README integrations tables aligned with v2.0.0 shipped scope (per CHANGELOG); removed speculative "Coming Soon" items to BACKLOG.md with a short near-term roadmap.
 - Reframed public positioning: multi-cloud-capable harness with **GCP-first** docs (README, cloud deployment design, getting started, features, Pattern A guide). Clarifies this is not a universal integration catalog; documents AWS shipped paths alongside GCP examples.
 
 ## [2.0.0] - 2026-07-05
@@ -84,7 +85,7 @@ Major v2 rewrite: FastAPI SSE gateway, owned agent loop, pluggable storage, mult
 - **2026-05-17** — Harness-as-library (Step 5) for embedding the runtime in other services.
 - **2026-05-18** — OSS sanitization: gitignore `internal/`, GCP placeholders, public playground Docker.
 - **2026-05-16** — Opt-in OpenSandbox execution backend.
-- **2026-05-14** — Demo agent under `demo_agent/`, reference bot at `bots/example-bot/`, default skills under `.agents/skills/`.
+- **2026-05-14** — Demo agent under `demo_agent/`, default skills under `.agents/skills/`.
 - **2026-05-14** — Docs (v2): `docs/getting-started.md`, `docs/skills.md`; configuration reference in `.env.example`.
 - **2026-05-14** — Test + bench infra: `tests/` (pytest + pytest-asyncio) and `testing/bench.py`.
 
