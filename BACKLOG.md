@@ -56,7 +56,7 @@
 - **INDEX.md size cap** *(deferred 2026-05-15)* — `MemoryOrganizer` appends without bound; acceptable for now via `ContextCurator` selection. When indices grow wastefully large, cap with a sliding window (N=200, archive to `INDEX.archive.md`) in `core/memory_organizer.py`.
 
 ### MCP
-- **MCP distro linkage** — confirm `demo_agent/` env (`MCP_CONFIG`, `SKILLS_PATH`) matches deployment; smoke-test against real MCP servers beyond the bundled LangChain docs URL.
+- **MCP distro linkage** — confirm `demo_agent/` `monkeybot.yaml` paths (`paths.mcp_config`, `paths.skills_path`) match deployment; smoke-test against real MCP servers beyond the bundled LangChain docs URL.
 
 ### Future platforms *(not scheduled)*
 

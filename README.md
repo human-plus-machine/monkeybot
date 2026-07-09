@@ -168,7 +168,7 @@ Tables below reflect what **shipped in v2.0.0** (see [CHANGELOG](CHANGELOG.md)).
 | **MCP** (stdio + HTTP) | Shipped | `monkeybot_config/mcp.json` |
 | **Browser MCP** | Shipped | `integrations/browser-mcp/` |
 | **OpenSandbox** | Shipped | Optional sandbox (`monkeybot[sandbox]`) |
-| **Web search** | Shipped | Tavily / Firecrawl / Vertex grounding |
+| **Web search** | Shipped | DuckDuckGo (default, `monkeybot[web-search]`); Tavily / Firecrawl / Vertex grounding |
 | **OpenTelemetry** | Shipped | `monkeybot[observability]` |
 | **Docker / Cloud Run** | Shipped | Pattern A — [deploy guide](docs/deploy-pattern-a-container.md) |
 | **AWS Bedrock AgentCore** | Shipped | Pattern C — `examples/agentcore/` |
