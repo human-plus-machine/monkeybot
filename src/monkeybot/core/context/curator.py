@@ -14,6 +14,7 @@ from typing import Any, cast
 
 from monkeybot.core.types.content_blocks import Text
 from monkeybot.core.context import TurnContext
+from monkeybot.core.logging_utils import kv
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.llm.provider import Done, Message, Provider, TextDelta, ToolCall, UsageEvent
 from monkeybot.core.runtime.context_budget import estimate_tokens
@@ -49,13 +50,8 @@ def memory_index_token_estimate(lines: list[str]) -> int:
     return estimate_tokens("\n".join(lines))
 
 
-def curation_threshold_met(ctx: TurnContext) -> bool:
-    """Run curator when the memory index is large by line count or token estimate."""
-    mem_n = _env_int("CONTEXT_CURATION_MEMORY_THRESHOLD", 8)
-    token_n = _env_int("CONTEXT_CURATION_MEMORY_TOKEN_THRESHOLD", 2000)
-    if len(ctx.memory_index) > mem_n:
-        return True
-    return memory_index_token_estimate(ctx.memory_index) > token_n
+# Cap on search hits added to the curator MEMORY_POOL (not user-configurable).
+_CURATOR_SEARCH_MAX_HITS = 8
 
 
 def curator_model_id(ctx: TurnContext) -> str:
@@ -140,17 +136,19 @@ async def run_context_curator(
     provider: Provider,
     curator_model: str,
     user_message: str,
+    max_memory_lines: int,
     curator_provider: Provider | None = None,
 ) -> CuratedPromptParts:
     """Call a small JSON-only completion to pick numbered memory pool lines.
 
+    ``max_memory_lines`` is the caller's window size (no env re-read here).
     ``curator_provider`` is an optional dedicated provider instance tuned for this
     auxiliary call (e.g. ``thinking_budget=0, max_output_tokens=1024``). Falls back
     to ``provider`` when not supplied.
     """
     _provider = curator_provider if curator_provider is not None else provider
-    max_mem = max(1, _env_int("CONTEXT_CURATION_MAX_MEMORY_LINES", 12))
-    search_hits = max(1, _env_int("CONTEXT_CURATION_SEARCH_MAX_HITS", 8))
+    max_mem = max(1, max_memory_lines)
+    search_hits = _CURATOR_SEARCH_MAX_HITS
     timeout_sec = max(1.0, _env_float("CONTEXT_CURATION_TIMEOUT_SEC", 10.0))
 
     index_lines = list(ctx.memory_index)
@@ -197,7 +195,10 @@ async def run_context_curator(
                 if isinstance(ev, TextDelta):
                     buf.append(ev.text)
                 elif isinstance(ev, ToolCall):
-                    _log.warning("[curation] unexpected tool call from curator model; aborting curation")
+                    _log.warning(
+                        "curation unexpected tool call %s",
+                        kv(curator_model=curator_model),
+                    )
                     return ""
                 elif isinstance(ev, UsageEvent):
                     pass
@@ -209,24 +210,24 @@ async def run_context_curator(
         raw = await asyncio.wait_for(_stream_once(), timeout=timeout_sec)
     except TimeoutError:
         _log.warning(
-            "[curation] provider stream exceeded %ss without Done (curator_model=%r "
-            "index_lines=%d search_pool_lines=%d catalog_user_chars=%d "
-            "memory_tree_scan=%.2fs; timeout applies only to the LLM stream, not local prep)",
-            timeout_sec,
-            curator_model,
-            len(index_lines),
-            len(search_lines),
-            catalog_chars,
-            memory_scan_sec,
+            "curation timeout %s",
+            kv(
+                timeout_sec=timeout_sec,
+                curator_model=curator_model,
+                index_lines=len(index_lines),
+                search_pool_lines=len(search_lines),
+                catalog_chars=catalog_chars,
+                memory_scan_sec=f"{memory_scan_sec:.2f}",
+            ),
         )
         return CuratedPromptParts([], success=False)
     except Exception as exc:
-        _log.warning("[curation] provider error: %s", exc)
+        _log.warning("curation provider error %s", kv(error=exc))
         return CuratedPromptParts([], success=False)
 
     parsed = _parse_json_object(raw)
     if parsed is None:
-        _log.warning("[curation] invalid JSON from model")
+        _log.warning("curation invalid JSON %s", kv(curator_model=curator_model))
         return CuratedPromptParts([], success=False)
 
     raw_indices = parsed.get("memory_line_indices", [])
@@ -237,17 +238,18 @@ async def run_context_curator(
 
     proposed = bool(raw_indices)
     if proposed and not mem_out:
-        _log.warning("[curation] model proposed indices but none matched the memory pool")
+        _log.warning(
+            "curation indices unmatched %s",
+            kv(curator_model=curator_model, proposed=len(raw_indices), pool=len(pool)),
+        )
         return CuratedPromptParts([], success=False)
 
     _log.info(
-        "[curation] selected %d/%d memory lines (model=%s) | mem=%s",
-        len(mem_out),
-        len(pool),
-        curator_model,
-        [ln.split("|")[-1].strip()[:60] if "|" in ln else ln[:60] for ln in mem_out],
+        "curation selected %s",
+        kv(
+            selected=len(mem_out),
+            pool=len(pool),
+            curator_model=curator_model,
+        ),
     )
-    for line in mem_out:
-        _log.debug("[curation] memory → %s", line)
-
     return CuratedPromptParts(mem_out, success=True)

@@ -39,15 +39,11 @@ gateway:
 
 context_curation:
   enabled: true
-  mode: hybrid
   memory_window_lines: 12
   memory_index_cap: 200
-  memory_threshold: 8
   memory_token_threshold: 2000
   curator_model: ornith:9b
   timeout_sec: 10
-  max_memory_lines: 12
-  search_max_hits: 8
 
 memory_hook:
   enabled: true

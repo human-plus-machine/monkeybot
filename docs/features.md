@@ -270,13 +270,13 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **How it works:**
 - **Organizer** appends INDEX.md entries in recency order and archives overflow to `INDEX.archive.md` (`memory_index_cap`, default 200).
-- **Modes:** `window` (recent `memory_window_lines` only), `curator` (LLM index pick), `hybrid` (window + curator when token-heavy; default).
-- Runs on **turn 1** when `CONTEXT_CURATION_ENABLED` and line/token thresholds met.
+- **Default path:** recent `memory_window_lines` (default 12). LLM curator runs only when the full index is token-heavy (`memory_token_threshold`).
+- Runs when `CONTEXT_CURATION_ENABLED` and the index exceeds the window (by line count) or the token threshold.
 - **Coverage/confidence** are structural (`injected/total`); when truncated, prompt nudges `search_memory`.
-- Curator uses numbered `memory_line_indices`; fails open to the recency window in both curator and hybrid modes.
+- Curator uses numbered `memory_line_indices`; fails open to the recency window.
 - Curator skipped when index fingerprint unchanged for the thread (cache).
 
-**Depends on:** Curator provider (hybrid/curator modes), memory index.
+**Depends on:** Curator provider (token-heavy path), memory index.
 
 **Invariants:**
 - Subagents disable curation (`enable_context_curation=False`).
