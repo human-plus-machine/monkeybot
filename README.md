@@ -134,31 +134,55 @@ There is no claim heartbeat yet — subagent runs longer than `MONKEYBOT_WORKER_
 
 ## Integrations
 
-| Integration | Status | Purpose |
+Tables below reflect what **shipped in v2.0.0** (see [CHANGELOG](CHANGELOG.md)). Longer-term platform work lives in [BACKLOG.md](BACKLOG.md).
+
+### LLM providers
+
+| Provider | Status | Install extra |
 |---|---|---|
-| **Google Vertex AI** (Gemini) | Production | Primary LLM provider (gateway + `GeminiProvider`) |
-| **Google Cloud Run** | Production | Serverless container hosting |
-| **SQLite** | Default (SSE gateway) | Session history and per-turn usage |
-| **Google Cloud Firestore** | Supported (`monkeybot[firestore]`) | Session history, threads, and usage via `firestore://` DB_URL |
-| **Google Cloud Storage** | Optional (`monkeybot[gcs]`) | Long-term memory and file sync |
-| **GCP Secret Manager** | Production | Production secrets management |
-| **Google Chat** | Optional | Workspace Add-on interface (when deployed) |
-| **OpenAI** | Supported | `OpenAIProvider` (`monkeybot[openai]`) via `get_provider_config()` |
-| **Ollama** | Supported | `OllamaProvider` for local models (`monkeybot[ollama]`), no API key required |
-| **NVIDIA (build.nvidia.com)** | Supported | `NvidiaProvider` (`monkeybot[nvidia]`); free `NVIDIA_API_KEY`, `MODEL_PROVIDER=nvidia` |
-| **Anthropic Claude** | Supported | `ClaudeProvider` (`monkeybot[claude]`) via `get_provider_config()` |
-| **Anthropic via Vertex AI** | Supported | `VertexClaudeProvider` (`anthropic[vertex]`) |
-| **AWS Bedrock** | Supported | `BedrockClaudeProvider` (`monkeybot[bedrock]`); `MODEL_PROVIDER=aws_bedrock` |
-| **AWS S3** | Planned | Memory store backend |
-| **AWS Secrets Manager** | Planned | Secret resolver |
-| **Azure OpenAI** | Coming Soon | Azure-hosted OpenAI models |
-| **Azure Blob Storage** | Coming Soon | Memory backend for Azure deployments |
-| **Azure Key Vault** | Coming Soon | Secrets for Azure deployments |
-| **Slack** | Coming Soon | Slack bot interface |
-| **Microsoft Teams** | Coming Soon | Teams bot interface |
-| **Telegram** | Coming Soon | Telegram bot interface |
-| **DynamoDB** | Planned | Checkpointer / job storage |
-| **CosmosDB** | Coming Soon | Azure-native persistence options |
+| **Google Vertex AI / Gemini** | Supported | `monkeybot[gemini]` or ADC |
+| **OpenAI** | Supported | `monkeybot[openai]` |
+| **Anthropic Claude** | Supported | `monkeybot[claude]` |
+| **Anthropic on Vertex AI** | Supported | `monkeybot[vertex-claude]` |
+| **AWS Bedrock** | Supported | `monkeybot[bedrock]` |
+| **HuggingFace Inference** | Supported | `monkeybot[huggingface]` |
+| **Ollama** | Supported | `monkeybot[ollama]` |
+| **NVIDIA NIM** (build.nvidia.com) | Supported | `monkeybot[nvidia]` |
+
+### Storage & persistence
+
+| Backend | Status | Install extra |
+|---|---|---|
+| **SQLite** | Default | — (SSE gateway session history) |
+| **Postgres** | Supported | `monkeybot[postgres]` |
+| **Google Cloud Firestore** | Supported | `monkeybot[firestore]` |
+| **Local filesystem** | Default | `local://` memory URI |
+| **Google Cloud Storage** | Supported | `monkeybot[gcs]` |
+| **AWS S3** | Supported | `monkeybot[aws]` |
+
+### Platform & tooling
+
+| Integration | Status | Notes |
+|---|---|---|
+| **FastAPI SSE gateway** | Shipped | Sessions, streaming, health |
+| **MCP** (stdio + HTTP) | Shipped | `monkeybot_config/mcp.json` |
+| **Browser MCP** | Shipped | `integrations/browser-mcp/` |
+| **OpenSandbox** | Shipped | Optional sandbox (`monkeybot[sandbox]`) |
+| **Web search** | Shipped | Tavily / Firecrawl / Vertex grounding |
+| **OpenTelemetry** | Shipped | `monkeybot[observability]` |
+| **Docker / Cloud Run** | Shipped | Pattern A — [deploy guide](docs/deploy-pattern-a-container.md) |
+| **AWS Bedrock AgentCore** | Shipped | Pattern C — `examples/agentcore/` |
+
+### Roadmap (near-term)
+
+| Item | Notes |
+|---|---|
+| **Slack gateway** | Events API / socket mode — [BACKLOG](BACKLOG.md#1-chat-integration) |
+| **Google Chat gateway** | Workspace webhook handler — [BACKLOG](BACKLOG.md#1-chat-integration) |
+| **Harness evals** | Langfuse / deepeval traceability in the agent loop — in progress |
+| **Scheduler in gateway** | Cron jobs for long-running deployments — design in [BACKLOG](BACKLOG.md#3-scheduler) |
+
+Azure, Microsoft Teams, Telegram, DynamoDB, CosmosDB, and managed secret resolvers (AWS Secrets Manager, Azure Key Vault, full GCP Secret Manager wiring) are tracked under **Future platforms** in [BACKLOG.md](BACKLOG.md).
 
 For provider and cloud wiring, start from **`monkeybot_config/monkeybot.example.yaml`** and the [Cloud deployment](docs/cloud-deployment-design.md) guide.
 
