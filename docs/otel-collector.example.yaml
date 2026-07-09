@@ -13,7 +13,7 @@
 #     otel/opentelemetry-collector-contrib:latest \
 #     --config=/etc/otelcol/config.yaml
 #
-# Point MonkeyBot at the collector (HTTP/protobuf, no path suffix on endpoint):
+# Point monkeybot at the collector (HTTP/protobuf, no path suffix on endpoint):
 #   export MONKEYBOT_OTEL_ENABLED=true
 #   export OTEL_TRACES_EXPORTER=otlp
 #   export OTEL_METRICS_EXPORTER=none

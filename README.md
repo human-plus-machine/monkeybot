@@ -1,17 +1,20 @@
-# MonkeyBot
+# monkeybot
 
 <div align="center">
-  <img src="logo.png" alt="MonkeyBot Logo" width="600" />
+  <img src="logo.png" alt="monkeybot Logo" width="600" />
 
   <br />
 
-  *Production-ready Python framework for building and deploying LLM agents*
+  *Multi-cloud agent harness — GCP-first docs, portable runtime*
 
   [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 </div>
 
-MonkeyBot (`monkeybot`) is a thin framework for running **tool-using LLM agents** with a **FastAPI SSE gateway**, **SQLite** conversation storage, **MCP** tool servers, and optional skills and memory workflows — wired for local dev and deployable on GCP Cloud Run (or anywhere Docker runs).
+monkeybot is a thin **multi-cloud-capable** harness for tool-using LLM agents: FastAPI SSE gateway, pluggable storage (SQLite/Postgres/Firestore), MCP tools, skills, and memory. It runs locally with zero cloud dependencies and ships the same container image to any Docker host.
+
+> [!TIP]
+> **Positioning:** monkeybot is an owned agent runtime with a focused provider set — not a universal integration catalog. **Docs and examples are GCP-first** (Vertex, GCS, Cloud Run, Agent Engine); **AWS** paths (Bedrock, S3, AgentCore, ECS/Lambda) are shipped in the Pattern guides; Azure coverage is thinner. See [Cloud deployment — Positioning](docs/cloud-deployment-design.md#positioning).
 
 > [!NOTE]
 > **Not on PyPI yet** — install from a clone of this repository. Skills under `SKILLS_PATH` execute Python code; only add skills from trusted sources.
@@ -19,8 +22,8 @@ MonkeyBot (`monkeybot`) is a thin framework for running **tool-using LLM agents*
 ## Installation
 
 ```bash
-git clone https://github.com/human-and-machine/monkey-bot.git
-cd monkey-bot
+git clone https://github.com/human-plus-machine/monkeybot.git
+cd monkeybot
 uv sync
 cd cli && uv sync && uv run monkeybot new --dest .. --yes && cd ..
 uv run python -m monkeybot.gateway.main
@@ -130,7 +133,7 @@ There is no claim heartbeat yet — subagent runs longer than `MONKEYBOT_WORKER_
 | [SSE gateway and custom UI](docs/sse-gateway-ui.md) | HTTP + SSE endpoints, event types, CORS/proxy notes, and how to wire your own frontend |
 | [Skills](docs/skills.md) | Skill directory layout and `SKILL.md` discovery |
 | [Model Context Protocol](docs/mcp.md) | MCP configuration, env interpolation, OAuth2 flows, and diagnostics |
-| [Cloud deployment](docs/cloud-deployment-design.md) | Container and serverless deploy patterns for GCP, AWS, and more |
+| [Cloud deployment](docs/cloud-deployment-design.md) | Multi-cloud Patterns A/B/C — **GCP-first guides**, AWS addenda, portable harness |
 
 ## Integrations
 
@@ -197,7 +200,7 @@ uv run mypy src/
 
 ## Support
 
-If you need help or hit a problem, search existing issues or open a new one in the [GitHub issue tracker](https://github.com/human-and-machine/monkey-bot/issues).
+If you need help or hit a problem, search existing issues or open a new one in the [GitHub issue tracker](https://github.com/human-plus-machine/monkeybot/issues).
 
 ## Contributing
 
@@ -223,4 +226,4 @@ One-time setup (repo Settings → Branches → add rule for `main`): require a p
 
 ## License
 
-You may use, modify, and distribute MonkeyBot under the MIT license. See the [`LICENSE`](LICENSE) file for details.
+You may use, modify, and distribute monkeybot under the MIT license. See the [`LICENSE`](LICENSE) file for details.

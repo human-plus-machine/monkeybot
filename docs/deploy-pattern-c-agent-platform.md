@@ -4,6 +4,8 @@ Same harness-as-library approach as Pattern B, but the platform imposes its own 
 
 **Targets covered:** AWS Bedrock AgentCore · GCP Vertex AI Agent Engine
 
+**Guide depth:** This guide documents **both** shipped platform adapters side by side. You need only the section for your target — AgentCore does not require Vertex, and vice versa. See [Positioning](cloud-deployment-design.md#positioning).
+
 **Sandbox:** Not supported. These platforms manage their own execution environments and do not provide a Docker socket.
 
 ---
@@ -51,7 +53,7 @@ No `[sandbox]` extra needed. Use only the storage extras appropriate for your pl
 
 ### AWS Bedrock AgentCore
 
-AWS Bedrock AgentCore can invoke a **Lambda/action-group** handler or a **managed HTTP container** (port 8080, `/ping`, `/invocations`). MonkeyBot examples:
+AWS Bedrock AgentCore can invoke a **Lambda/action-group** handler or a **managed HTTP container** (port 8080, `/ping`, `/invocations`). monkeybot examples:
 
 | Artifact | Use case |
 |---|---|
@@ -109,7 +111,7 @@ MODEL_PROVIDER     = aws_bedrock
 MODEL_NAME         = (your Bedrock model id)
 ```
 
-**Session continuity:** AgentCore manages session routing externally. The `sessionId` it provides maps directly to MonkeyBot's `session_id` — history and memory are keyed on it. You do not need to implement session management yourself.
+**Session continuity:** AgentCore manages session routing externally. The `sessionId` it provides maps directly to monkeybot's `session_id` — history and memory are keyed on it. You do not need to implement session management yourself.
 
 ---
 
@@ -186,7 +188,7 @@ remote_app = reasoning_engines.ReasoningEngine.create(
     app,
     requirements=["monkeybot[gemini,postgres,gcs]"],
     display_name="monkeybot",
-    description="MonkeyBot via Vertex AI Agent Engine",
+    description="monkeybot via Vertex AI Agent Engine",
 )
 print(remote_app.resource_name)
 ```
@@ -200,7 +202,7 @@ remote_app.query(
 )
 ```
 
-**Session continuity:** Agent Engine provides the `session_id`. MonkeyBot uses it as the history and memory key — no additional session management is needed in your adapter.
+**Session continuity:** Agent Engine provides the `session_id`. monkeybot uses it as the history and memory key — no additional session management is needed in your adapter.
 
 **Environment variables:** Set these on the reasoning engine at creation time via `env_vars` in the SDK, or read them from Secret Manager at cold start using the service account's credentials.
 

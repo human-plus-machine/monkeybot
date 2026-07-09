@@ -1,6 +1,6 @@
 # Observability runbook (production)
 
-Operator guide for OpenTelemetry tracing in MonkeyBot. See also [observability-plan.md](./observability-plan.md) for the full env var table and Phoenix/Langfuse setup.
+Operator guide for OpenTelemetry tracing in monkeybot. See also [observability-plan.md](./observability-plan.md) for the full env var table and Phoenix/Langfuse setup.
 
 ## Enable tracing
 

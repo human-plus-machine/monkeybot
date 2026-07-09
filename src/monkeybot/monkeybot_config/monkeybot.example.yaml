@@ -1,4 +1,4 @@
-# MonkeyBot harness — copy to monkeybot.yaml and edit (paths relative to process cwd).
+# monkeybot harness — copy to monkeybot.yaml and edit (paths relative to process cwd).
 #
 #   cp monkeybot_config/monkeybot.example.yaml monkeybot_config/monkeybot.yaml
 #

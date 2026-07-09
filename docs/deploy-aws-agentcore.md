@@ -1,6 +1,6 @@
 # Deploy on AWS Bedrock AgentCore Runtime
 
-[AgentCore Runtime](https://docs.aws.amazon.com/bedrock/latest/userguide/agents-core.html) is a managed **HTTP container** runtime (linux/arm64). MonkeyBot ships Pattern C wiring via `monkeybot.core.bootstrap` and `examples/agentcore/`.
+[AgentCore Runtime](https://docs.aws.amazon.com/bedrock/latest/userguide/agents-core.html) is a managed **HTTP container** runtime (linux/arm64). monkeybot ships Pattern C wiring via `monkeybot.core.bootstrap` and `examples/agentcore/`.
 
 For Lambda-style action groups, see `docs/deploy-pattern-c-agent-platform.md`. This page covers the **container HTTP** contract and CLI pitfalls.
 

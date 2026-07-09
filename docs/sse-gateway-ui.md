@@ -1,6 +1,6 @@
 # SSE gateway: HTTP API and custom UI integration
 
-This document describes the **MonkeyBot v2 FastAPI gateway** endpoints used for chat, streaming, and workspace/history helpers, so you can wire your own frontend.
+This document describes the **monkeybot v2 FastAPI gateway** endpoints used for chat, streaming, and workspace/history helpers, so you can wire your own frontend.
 
 **Reference implementation**
 

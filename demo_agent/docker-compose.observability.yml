@@ -4,7 +4,7 @@
 #
 # Phoenix UI:     http://localhost:6006
 # Langfuse UI:    http://localhost:3000
-# OTLP ingest:    http://localhost:4318  (MonkeyBot OTEL_EXPORTER_OTLP_ENDPOINT)
+# OTLP ingest:    http://localhost:4318  (monkeybot OTEL_EXPORTER_OTLP_ENDPOINT)
 
 services:
   phoenix:

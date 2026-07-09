@@ -32,7 +32,7 @@ def run_new_command(args: argparse.Namespace) -> int:
                 model = "gemini-3-flash"
 
     report = run_new(dest=dest, force=args.force, provider=provider, model=model)
-    print(f"MonkeyBot scaffold under {dest}:")
+    print(f"monkeybot scaffold under {dest}:")
     print("\n".join(report))
     return 0
 
