@@ -5,13 +5,16 @@
 
   <br />
 
-  *Production-ready Python framework for building and deploying LLM agents*
+  *Multi-cloud agent harness — GCP-first docs, portable runtime*
 
   [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 </div>
 
-MonkeyBot (`monkeybot`) is a thin framework for running **tool-using LLM agents** with a **FastAPI SSE gateway**, **SQLite** conversation storage, **MCP** tool servers, and optional skills and memory workflows — wired for local dev and deployable on GCP Cloud Run (or anywhere Docker runs).
+MonkeyBot (`monkeybot`) is a thin **multi-cloud-capable** harness for tool-using LLM agents: FastAPI SSE gateway, pluggable storage (SQLite/Postgres/Firestore), MCP tools, skills, and memory. It runs locally with zero cloud dependencies and ships the same container image to any Docker host.
+
+> [!TIP]
+> **Positioning:** monkeybot is an owned agent runtime with a focused provider set — not a universal integration catalog. **Docs and examples are GCP-first** (Vertex, GCS, Cloud Run, Agent Engine); **AWS** paths (Bedrock, S3, AgentCore, ECS/Lambda) are shipped in the Pattern guides; Azure coverage is thinner. See [Cloud deployment — Positioning](docs/cloud-deployment-design.md#positioning).
 
 > [!NOTE]
 > **Not on PyPI yet** — install from a clone of this repository. Skills under `SKILLS_PATH` execute Python code; only add skills from trusted sources.
@@ -130,7 +133,7 @@ There is no claim heartbeat yet — subagent runs longer than `MONKEYBOT_WORKER_
 | [SSE gateway and custom UI](docs/sse-gateway-ui.md) | HTTP + SSE endpoints, event types, CORS/proxy notes, and how to wire your own frontend |
 | [Skills](docs/skills.md) | Skill directory layout and `SKILL.md` discovery |
 | [Model Context Protocol](docs/mcp.md) | MCP configuration, env interpolation, OAuth2 flows, and diagnostics |
-| [Cloud deployment](docs/cloud-deployment-design.md) | Container and serverless deploy patterns for GCP, AWS, and more |
+| [Cloud deployment](docs/cloud-deployment-design.md) | Multi-cloud Patterns A/B/C — **GCP-first guides**, AWS addenda, portable harness |
 
 ## Integrations
 

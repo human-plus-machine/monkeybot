@@ -6,7 +6,9 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- Reframed public positioning: multi-cloud-capable harness with **GCP-first** docs (README, cloud deployment design, getting started, features, Pattern A guide). Clarifies this is not a universal integration catalog; documents AWS shipped paths alongside GCP examples.
 
 ## [2.0.0] - 2026-07-05
 
