@@ -1,6 +1,6 @@
 # Pattern A — Managed Container Deployment
 
-Run MonkeyBot as a long-lived container process. The FastAPI SSE gateway handles sessions, streaming, and the agent loop. Storage and memory backends are selected via env vars. Sandbox (OpenSandbox) runs as a sidecar or as a separate service in the same private network.
+Run monkeybot as a long-lived container process. The FastAPI SSE gateway handles sessions, streaming, and the agent loop. Storage and memory backends are selected via env vars. Sandbox (OpenSandbox) runs as a sidecar or as a separate service in the same private network.
 
 **Targets covered:** GCP Cloud Run · GKE · GCE (VM) · AWS ECS · EKS · EC2 (VM) · Azure Container Apps · AKS · Azure VM · NVIDIA / other container hosts
 
@@ -29,7 +29,7 @@ postgresql://user:pass@host:5432/db?sslmode=require
 postgresql://user:pass@host:5432/db?ssl=true&sslrootcert=/path/to/ca.pem
 ```
 
-MonkeyBot passes the URL through to asyncpg unchanged after normalizing `postgres://` → `postgresql://`.
+monkeybot passes the URL through to asyncpg unchanged after normalizing `postgres://` → `postgresql://`.
 
 ---
 
@@ -67,7 +67,7 @@ docker push <registry>/<image>:<tag>
 
 1. Install the `[postgres]` extra at build time (`EXTRAS=...,postgres`).
 2. Set `DB_URL` to a `postgresql://` connection string pointing at your managed instance.
-3. By default MonkeyBot applies the schema on startup (`paths.auto_schema: true` in monkeybot.yaml). For DML-only runtime users, pre-create the schema via your migration tool and set `paths.auto_schema: false`.
+3. By default monkeybot applies the schema on startup (`paths.auto_schema: true` in monkeybot.yaml). For DML-only runtime users, pre-create the schema via your migration tool and set `paths.auto_schema: false`.
 4. The gateway opens the connection pool once at startup and closes it on shutdown.
 
 **Short-lived processes (scale-to-zero):** On Cloud Run or ECS Fargate, a new instance starts a new connection pool. Postgres connection limits can be hit if many instances start simultaneously — consider a connection pooler (Cloud SQL Auth Proxy, RDS Proxy, PgBouncer) in front of the DB.
@@ -92,7 +92,7 @@ The factory (`create_workspace_storage`) reads the URI scheme and returns the ri
 
 ## 5. OpenSandbox Deployment
 
-OpenSandbox always runs as a separate service. MonkeyBot connects to it via `SANDBOX_SERVER_URL`. Where OpenSandbox runs is an infrastructure decision, not a MonkeyBot config concern.
+OpenSandbox always runs as a separate service. monkeybot connects to it via `SANDBOX_SERVER_URL`. Where OpenSandbox runs is an infrastructure decision, not a monkeybot config concern.
 
 | Infrastructure | Where OpenSandbox runs | `SANDBOX_SERVER_URL` |
 |---|---|---|
@@ -102,7 +102,7 @@ OpenSandbox always runs as a separate service. MonkeyBot connects to it via `SAN
 | GCE / EC2 / Azure VM | Same host, sidecar container | `http://localhost:8080` |
 | Cloud Run / ECS Fargate / Container Apps | Separate VM in same VPC | Private IP of the OpenSandbox VM |
 
-**Authentication:** Network-layer isolation (VPC / private subnet) is the default and is sufficient for most deployments. If OpenSandbox must be reachable across a network boundary, set `SANDBOX_AUTH_TOKEN` in MonkeyBot's env — it is forwarded as `Authorization: Bearer <token>`. Configure OpenSandbox to require the token on its end.
+**Authentication:** Network-layer isolation (VPC / private subnet) is the default and is sufficient for most deployments. If OpenSandbox must be reachable across a network boundary, set `SANDBOX_AUTH_TOKEN` in monkeybot's env — it is forwarded as `Authorization: Bearer <token>`. Configure OpenSandbox to require the token on its end.
 
 **Note:** OpenSandbox requires access to the Docker daemon (`/var/run/docker.sock`). Platforms with no Docker socket (Cloud Run, ECS Fargate, Container Apps) cannot run OpenSandbox as a sidecar — deploy it on a separate VM/node in the same VPC.
 
@@ -145,7 +145,7 @@ gcloud builds submit --tag ${IMAGE}:latest --project ${PROJECT_ID} \
 
 # Create service account (first deploy only)
 gcloud iam service-accounts create ${SERVICE}-sa \
-  --display-name "MonkeyBot Service Account" \
+  --display-name "monkeybot Service Account" \
   --project ${PROJECT_ID}
 
 # Grant roles
@@ -312,7 +312,7 @@ eksctl create iamserviceaccount \
   --name monkeybot-sa \
   --namespace default \
   --cluster my-cluster \
-  --attach-policy-arn arn:aws:iam::ACCOUNT:policy/MonkeyBotPolicy \
+  --attach-policy-arn arn:aws:iam::ACCOUNT:policy/monkeybotPolicy \
   --approve
 ```
 
@@ -351,6 +351,6 @@ az keyvault set-policy --name my-vault --object-id <identity-object-id> --secret
 
 ### NVIDIA DGX / NIM-Compatible Hosts and Other Container Hosts
 
-Same pattern as GCE/EC2. Run the MonkeyBot container with the appropriate env vars. If the host has a Docker socket available, the OpenSandbox sidecar pattern works identically to GCE/EC2.
+Same pattern as GCE/EC2. Run the monkeybot container with the appropriate env vars. If the host has a Docker socket available, the OpenSandbox sidecar pattern works identically to GCE/EC2.
 
-For GPU-accelerated LLM inference via NIM: point MonkeyBot at the NIM endpoint by configuring the provider in `monkeybot_config/monkeybot.yaml`; no changes to the container entrypoint or storage wiring are needed.
+For GPU-accelerated LLM inference via NIM: point monkeybot at the NIM endpoint by configuring the provider in `monkeybot_config/monkeybot.yaml`; no changes to the container entrypoint or storage wiring are needed.

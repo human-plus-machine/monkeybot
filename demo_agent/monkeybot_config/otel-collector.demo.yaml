@@ -1,5 +1,5 @@
 # Demo agent OTel Collector — Phoenix only (Langfuse needs LANGFUSE_OTEL_BASIC_AUTH).
-# MonkeyBot: OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
+# monkeybot: OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
 
 receivers:
   otlp:

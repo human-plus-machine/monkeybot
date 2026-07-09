@@ -89,7 +89,7 @@ jobs:
         working-directory: demo_agent
         run: uv sync
 
-      - name: Boot MonkeyBot gateway (demo_agent workspace)
+      - name: Boot monkeybot gateway (demo_agent workspace)
         working-directory: demo_agent
         env:
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
@@ -132,7 +132,7 @@ jobs:
             const fs = require("fs");
             const body = fs.existsSync("eval-report.md")
               ? fs.readFileSync("eval-report.md", "utf8")
-              : "## MonkeyBot Eval Scorecard\n\n`FAIL` — the report step did not complete " +
+              : "## monkeybot Eval Scorecard\n\n`FAIL` — the report step did not complete " +
                 "(gateway boot or the report command itself errored before writing a report). " +
                 "See the workflow run logs for details.";
             await github.rest.issues.createComment({

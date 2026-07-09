@@ -25,7 +25,7 @@ _RUN_COMMAND_EXEC_NOTE_SANDBOX = (
     "The workspace root is bind-mounted at the **same absolute path**; still subject to the allowlist."
 )
 
-_HARNESS_BODY = """## MonkeyBot harness (fixed)
+_HARNESS_BODY = """## monkeybot harness (fixed)
 
 This block is injected by the host every turn. Prefer the **active tool list** the model receives over any stale summary here.
 

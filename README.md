@@ -1,7 +1,7 @@
-# MonkeyBot
+# monkeybot
 
 <div align="center">
-  <img src="logo.png" alt="MonkeyBot Logo" width="600" />
+  <img src="logo.png" alt="monkeybot Logo" width="600" />
 
   <br />
 
@@ -11,7 +11,7 @@
 
 </div>
 
-MonkeyBot (`monkeybot`) is a thin framework for running **tool-using LLM agents** with a **FastAPI SSE gateway**, **SQLite** conversation storage, **MCP** tool servers, and optional skills and memory workflows — wired for local dev and deployable on GCP Cloud Run (or anywhere Docker runs).
+monkeybot is a thin framework for running **tool-using LLM agents** with a **FastAPI SSE gateway**, **SQLite** conversation storage, **MCP** tool servers, and optional skills and memory workflows — wired for local dev and deployable on GCP Cloud Run (or anywhere Docker runs).
 
 > [!NOTE]
 > **Not on PyPI yet** — install from a clone of this repository. Skills under `SKILLS_PATH` execute Python code; only add skills from trusted sources.
@@ -19,8 +19,8 @@ MonkeyBot (`monkeybot`) is a thin framework for running **tool-using LLM agents*
 ## Installation
 
 ```bash
-git clone https://github.com/human-and-machine/monkey-bot.git
-cd monkey-bot
+git clone https://github.com/human-plus-machine/monkeybot.git
+cd monkeybot
 uv sync
 cd cli && uv sync && uv run monkeybot new --dest .. --yes && cd ..
 uv run python -m monkeybot.gateway.main
@@ -173,7 +173,7 @@ uv run mypy src/
 
 ## Support
 
-If you need help or hit a problem, search existing issues or open a new one in the [GitHub issue tracker](https://github.com/human-and-machine/monkey-bot/issues).
+If you need help or hit a problem, search existing issues or open a new one in the [GitHub issue tracker](https://github.com/human-plus-machine/monkeybot/issues).
 
 ## Contributing
 
@@ -199,4 +199,4 @@ One-time setup (repo Settings → Branches → add rule for `main`): require a p
 
 ## License
 
-You may use, modify, and distribute MonkeyBot under the MIT license. See the [`LICENSE`](LICENSE) file for details.
+You may use, modify, and distribute monkeybot under the MIT license. See the [`LICENSE`](LICENSE) file for details.

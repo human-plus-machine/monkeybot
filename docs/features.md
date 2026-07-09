@@ -1,6 +1,6 @@
-# MonkeyBot Harness — Features & Design Reference
+# monkeybot Harness — Features & Design Reference
 
-This document anchors the **MonkeyBot harness** — the runtime that owns turn semantics, tool dispatch, prompt composition, memory, and persistence. Use it when adding or modifying features so new work stays compatible with existing behavior and invariants.
+This document anchors the **monkeybot harness** — the runtime that owns turn semantics, tool dispatch, prompt composition, memory, and persistence. Use it when adding or modifying features so new work stays compatible with existing behavior and invariants.
 
 **Related docs:** [Getting Started](getting-started.md) · [SSE Gateway](sse-gateway-ui.md) · [MCP](mcp.md) · [Skills](skills.md) · [Cloud deployment](cloud-deployment-design.md)
 
@@ -8,7 +8,7 @@ This document anchors the **MonkeyBot harness** — the runtime that owns turn s
 
 ## Architecture overview
 
-MonkeyBot is a thin framework for **tool-using LLM agents**. The harness owns orchestration; the gateway is transport; providers are adapters; MCP and custom tools extend capabilities at runtime.
+monkeybot is a thin framework for **tool-using LLM agents**. The harness owns orchestration; the gateway is transport; providers are adapters; MCP and custom tools extend capabilities at runtime.
 
 ```
 Client (CLI / chat UI / serverless handler)

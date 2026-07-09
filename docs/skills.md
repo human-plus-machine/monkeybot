@@ -1,4 +1,4 @@
-# Skills (MonkeyBot v2)
+# Skills (monkeybot v2)
 
 Skills are **directories** under `SKILLS_PATH` (default `./.agents/skills`). The gateway discovers them at context-build time and lists **name** and **description** in the system prompt so the model knows what is available. The model uses **`read_file`** (and other tools) to follow each skill’s **`SKILL.md`** and any supporting files under that folder.
 

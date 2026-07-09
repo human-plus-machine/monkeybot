@@ -1,4 +1,4 @@
-# MonkeyBot Backlog
+# monkeybot Backlog
 
 ---
 
@@ -17,7 +17,7 @@
 - Needs significant design work for cloud runtimes: Lambda/Cloud Functions have no persistent process, GKE/ECS can use sidecar or CronJob, etc. Think through heartbeat / self-scheduling before implementing.
 
 ### 4. Sandbox Workspace Protection
-- Add a hard-coded deny layer inside `SandboxExecutor` that blocks `run_command` from targeting harness-owned paths: `.monkeybot/`, `bot.yaml`, `*.env`, `.agents/`, `config/`.
+- Add a hard-coded deny layer inside `SandboxExecutor` that blocks `run_command` from targeting harness-owned paths: `.monkeybot/`, `monkeybot.yaml`, `*.env`, `.agents/`, `config/`.
 - Path-level policy at the executor — distinct from `command_allowlist.yaml` which is command-level. Agent should retain free rw access to `./code/`, `./data/`, etc.
 
 ### 5. HITL Completion

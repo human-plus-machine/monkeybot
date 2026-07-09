@@ -2,7 +2,7 @@
 
 ## Cursor Cloud specific instructions
 
-MonkeyBot is a Python 3.11+ framework (managed with `uv`) whose product is the **FastAPI SSE gateway** (`python -m monkeybot.gateway.main`). Satellite sub-projects each have their own `pyproject.toml`/`uv.lock`/`.venv` and depend on the core via an editable path: `cli/` (the `monkeybot` CLI, recommended entrypoint), `integrations/browser-mcp/` (MCP server), and `evals/` (standalone eval service). Standard install/lint/test/build commands are documented in `README.md`, `docs/getting-started.md`, and `.github/workflows/ci.yml` (the authoritative CI recipe) — refer to those rather than duplicating them.
+monkeybot is a Python 3.11+ framework (managed with `uv`) whose product is the **FastAPI SSE gateway** (`python -m monkeybot.gateway.main`). Satellite sub-projects each have their own `pyproject.toml`/`uv.lock`/`.venv` and depend on the core via an editable path: `cli/` (the `monkeybot` CLI, recommended entrypoint), `integrations/browser-mcp/` (MCP server), and `evals/` (standalone eval service). Standard install/lint/test/build commands are documented in `README.md`, `docs/getting-started.md`, and `.github/workflows/ci.yml` (the authoritative CI recipe) — refer to those rather than duplicating them.
 
 The startup update script already runs `uv sync` for the root (with the CI extras plus `evals` and `web-search`) and for `cli/` and `integrations/browser-mcp/`, so dependencies are ready. `uv` installs to `~/.local/bin`; if `uv` is not found, add that to `PATH`.
 

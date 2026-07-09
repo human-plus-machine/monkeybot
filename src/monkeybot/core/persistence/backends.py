@@ -1,4 +1,4 @@
-"""Storage backend protocols and factory for MonkeyBot persistence.
+"""Storage backend protocols and factory for monkeybot persistence.
 
 ``backends.py`` is protocol-only — no implementation code is imported at module
 level. Both ``SQLiteStorageBackend`` and ``PostgresStorageBackend`` are lazy-

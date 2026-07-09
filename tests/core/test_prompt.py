@@ -61,7 +61,7 @@ def test_compose_no_chat_skips_current_request() -> None:
     out = compose_system_prompt(ctx, chat_messages=None)
     assert "You are TestBot." in out
     assert "## Current request" not in out
-    assert "MonkeyBot harness" in out
+    assert "monkeybot harness" in out
 
 
 def test_compose_last_message_user_skips_duplicate_task() -> None:
@@ -202,7 +202,7 @@ def test_current_request_appears_after_harness() -> None:
     ]
     out = compose_system_prompt(ctx, chat_messages=msgs)
     assert "## Current request" in out
-    assert out.index("## Current request") > out.index("MonkeyBot harness")
+    assert out.index("## Current request") > out.index("monkeybot harness")
 
 
 def test_stable_prefix_byte_identical_across_turns() -> None:
@@ -235,7 +235,7 @@ def test_stable_prefix_byte_identical_across_turns() -> None:
     assert "## Current request" in out_b
     stable_a, _ = split_system_prompt_for_cache(out_a)
     stable_b, _ = split_system_prompt_for_cache(out_b)
-    assert "MonkeyBot harness" in stable_a
+    assert "monkeybot harness" in stable_a
     assert stable_a == stable_b
 
 
@@ -264,7 +264,7 @@ def test_harness_precedes_volatile_sections() -> None:
     ]
     out = compose_system_prompt(ctx, chat_messages=msgs)
     stable, volatile = split_system_prompt_for_cache(out)
-    assert "MonkeyBot harness" in stable
+    assert "monkeybot harness" in stable
     assert "## Memory index" not in stable
     assert "## Current request" not in stable
     mem_idx = volatile.index("## Memory index")
