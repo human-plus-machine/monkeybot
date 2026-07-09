@@ -82,18 +82,15 @@ gateway:
 context_curation:
   # When false, curation is skipped (env: CONTEXT_CURATION_ENABLED)
   enabled: true
-  # window | curator | hybrid — hybrid uses recent window + LLM curator when token-heavy
-  mode: hybrid
+  # Recent INDEX lines injected by default; also caps curator-selected lines
   memory_window_lines: 12
   memory_index_cap: 200
-  memory_threshold: 8
-  # OR trigger when estimated memory-index tokens exceed this (env: CONTEXT_CURATION_MEMORY_TOKEN_THRESHOLD)
+  # Call LLM curator when estimated memory-index tokens exceed this
+  # (env: CONTEXT_CURATION_MEMORY_TOKEN_THRESHOLD). Below this, use the window only.
   memory_token_threshold: 2000
   # Separate small model for curator (env: CONTEXT_CURATOR_MODEL); empty uses main model id
   curator_model: gemini-3-flash
   timeout_sec: 10
-  max_memory_lines: 12
-  search_max_hits: 8
 
 emission:
   # Terse emission-style guidance injected into the cached harness prefix.

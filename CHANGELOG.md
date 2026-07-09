@@ -35,6 +35,7 @@ Major v2 rewrite: FastAPI SSE gateway, owned agent loop, pluggable storage, mult
 - **2026-05-14** — Memory organizer (`monkeybot.core.memory.organizer`) — async post-turn classifier that updates `INDEX.md` and routes new entries to the right markdown file.
 - **2026-05-15** — Context curation configuration (`CONTEXT_CURATION_*` env vars) and optional secondary LLM curator pass.
 - **2026-07-02** — Hybrid memory curation: append-only INDEX with archive cap, sliding `memory_window_lines`, structural coverage/confidence with `search_memory` nudge when truncated, optional LLM curator (`mode`: window/curator/hybrid), and index fingerprint cache to skip repeat curator calls.
+- **2026-07-09** — Simplified context curation to a single path (recent window; curator only when token-heavy). Removed `CONTEXT_CURATION_MODE` / `window`/`curator`-only modes and dropped `memory_threshold`, `max_memory_lines`, and `search_max_hits` knobs (#67).
 - **2026-07-02** — Skills discovered via `list_skills` instead of full prompt injection; skill names always injected from `ctx.skills`; `list_skills`/`read_file` remain the path for the skills root and full `SKILL.md` procedure.
 
 #### Tools, skills & workspace
