@@ -11,7 +11,7 @@ _SCREENSHOTS_REL = Path("browser") / "Screenshots"
 
 
 def workspace_root() -> Path:
-    """MonkeyBot workspace root (for workspace-relative paths returned to the agent)."""
+    """monkeybot workspace root (for workspace-relative paths returned to the agent)."""
     for env_name in ("MONKEYBOT_WORKSPACE_ROOT", "WORKSPACE_ROOT"):
         raw = os.environ.get(env_name, "").strip()
         if raw:

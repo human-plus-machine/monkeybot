@@ -1,7 +1,23 @@
-# MonkeyBot Cloud Deployment Design
+# monkeybot Cloud Deployment Design
 
 **Status:** Complete — Steps **1**, **1.5**, **2**, **3**, **4**, and **5** are done.  
 **Purpose:** Single source of truth for the multi-cloud deployment work. Open this in any new chat before starting a step to ensure nothing in that step breaks a later one.
+
+## Positioning
+
+monkeybot is **multi-cloud by architecture**, **GCP-first in documentation**. The harness layer is cloud-neutral: inject SQLite, Postgres, or Firestore for session storage; use `local://`, `gcs://`, or `s3://` for memory; pick any shipped LLM adapter (Gemini/Vertex, OpenAI, Anthropic, Bedrock, HuggingFace, Ollama, NVIDIA NIM). This is not a "100+ provider integrations" framework — it is a single owned runtime with three deployment patterns and explicit extras per cloud SDK.
+
+| Area | GCP (most detailed guides) | AWS (shipped) | Azure / other |
+|---|---|---|---|
+| LLM | Vertex / Gemini — primary examples | Bedrock (`monkeybot[bedrock]`) | OpenAI-compat providers where applicable |
+| Object memory | GCS (`monkeybot[gcs]`) | S3 (`monkeybot[aws]`) | Azure Blob — planned ([BACKLOG](../BACKLOG.md)) |
+| Session DB | Cloud SQL, Firestore | RDS + Postgres URI | Azure Database for PostgreSQL (Pattern A addendum) |
+| Platform adapters | Cloud Run, Vertex AI Agent Engine | AgentCore, ECS, Lambda | Container Apps / Functions — thinner addenda |
+| Local dev | SQLite + `local://` — **no cloud account required** | Same | Same |
+
+**If you are not on GCP:** start with [Pattern A](deploy-pattern-a-container.md) or [Pattern B](deploy-pattern-b-serverless.md), set `DB_URL` and `MEMORY_STORAGE_URI` for your managed Postgres and object store, install the provider extra you need (`bedrock`, `openai`, …) — GCS and Vertex are not required to run the harness.
+
+Per-target sections in the Pattern guides often **lead with GCP** service names (Cloud SQL, Secret Manager, Cloud Run) because that is the primary production target; the **env-var contract is the same** on AWS and Azure — swap managed-service names and IAM syntax using the per-target addenda in each guide.
 
 ---
 
@@ -51,7 +67,7 @@ These apply to **every step**. Violating any of them creates a design debt that 
 
 5. **`run_loop()` must remain callable from a short-lived process.** No assumptions about process lifetime. A Lambda handler that calls `run_loop()` once and returns must work correctly.
 
-6. **OpenSandbox is always an external service.** MonkeyBot's config is always `SANDBOX_ENABLED + SANDBOX_SERVER_URL`. Where opensandbox runs is a deployment concern, not a harness concern. Authentication to opensandbox is network-layer (VPC/private subnet) by default, with an optional `SANDBOX_AUTH_TOKEN` env var forwarded as a Bearer header if needed.
+6. **OpenSandbox is always an external service.** monkeybot's config is always `SANDBOX_ENABLED + SANDBOX_SERVER_URL`. Where opensandbox runs is a deployment concern, not a harness concern. Authentication to opensandbox is network-layer (VPC/private subnet) by default, with an optional `SANDBOX_AUTH_TOKEN` env var forwarded as a Bearer header if needed.
 
 ---
 
@@ -152,7 +168,7 @@ Define a factory `create_storage_backend(db_url: str) → StorageBackend`:
 
 The gateway's lifespan (`app.on_event("startup")`) calls `create_storage_backend(os.environ["DB_URL"])` once and stores it in `app.state`. The `GatewayLoopPort.start_turn()` retrieves it from `app.state` and passes `backend.history()` and `backend.usage()` into the harness. No connection is opened per-turn.
 
-**Managed Postgres (SSL):** Cloud SQL, RDS, and similar often require TLS. Use whatever your provider documents for libpq-style URLs (for example `sslmode=require` / `ssl=true` query params or `sslrootcert=…` on `DB_URL`). MonkeyBot passes the URL through to asyncpg unchanged after scheme normalization.
+**Managed Postgres (SSL):** Cloud SQL, RDS, and similar often require TLS. Use whatever your provider documents for libpq-style URLs (for example `sslmode=require` / `ssl=true` query params or `sslrootcert=…` on `DB_URL`). monkeybot passes the URL through to asyncpg unchanged after scheme normalization.
 
 ### What does NOT change
 

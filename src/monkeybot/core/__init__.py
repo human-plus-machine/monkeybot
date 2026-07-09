@@ -1,4 +1,4 @@
-"""Core agent components for MonkeyBot v2.
+"""Core agent components for monkeybot v2.
 
 Subpackages (import concrete modules from these paths, e.g.
 ``monkeybot.core.runtime.loop``):

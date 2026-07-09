@@ -34,7 +34,7 @@ def run_run(args: argparse.Namespace) -> int:
 
 
 def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
-    p = subparsers.add_parser("run", help="Start the MonkeyBot SSE gateway")
+    p = subparsers.add_parser("run", help="Start the monkeybot SSE gateway")
     p.add_argument("--config", help="Path to monkeybot.yaml (sets MONKEYBOT_CONFIG)")
     p.add_argument("--port", type=int, help="Listen port (sets PORT)")
     p.add_argument("--cwd", help="Working directory for the gateway process")

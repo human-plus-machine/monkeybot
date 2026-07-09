@@ -1,4 +1,4 @@
-"""MonkeyBot CLI entry point."""
+"""monkeybot CLI entry point."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from monkeybot_cli.commands import chat, doctor, loop, new, run_cmd, talk, valid
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="monkeybot",
-        description="Create, configure, validate, and chat with MonkeyBot agents.",
+        description="Create, configure, validate, and chat with monkeybot agents.",
     )
     parser.add_argument("--json", action="store_true", help="JSON output (validate/doctor)")
     sub = parser.add_subparsers(dest="command", required=True)

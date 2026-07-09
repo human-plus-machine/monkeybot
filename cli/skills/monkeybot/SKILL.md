@@ -1,11 +1,11 @@
 ---
 name: monkeybot
-description: Entry point for MonkeyBot — install the CLI from GitHub if needed, then scaffold, configure, validate, and chat with an agent. Use when a user installs this skill via `npx skills add human-plus-machine/monkeybot --skill monkeybot`, sets up MonkeyBot for the first time, clones the repo, installs the monkeybot CLI, scaffolds monkeybot_config/, explains monkeybot.yaml options, or smoke-tests from the terminal.
+description: Entry point for monkeybot — install the CLI from GitHub if needed, then scaffold, configure, validate, and chat with an agent. Use when a user installs this skill via `npx skills add human-plus-machine/monkeybot --skill monkeybot`, sets up monkeybot for the first time, clones the repo, installs the monkeybot CLI, scaffolds monkeybot_config/, explains monkeybot.yaml options, or smoke-tests from the terminal.
 ---
 
-# MonkeyBot
+# monkeybot
 
-Guide a new user from **only this skill** to a working agent. Installing the skill (`npx skills add …`) gives you these instructions — it does **not** install the MonkeyBot repo or CLI. **Always run Tier 0 first** unless you already know the toolchain is ready.
+Guide a new user from **only this skill** to a working agent. Installing the skill (`npx skills add …`) gives you these instructions — it does **not** install the monkeybot repo or CLI. **Always run Tier 0 first** unless you already know the toolchain is ready.
 
 ## Tier 0 — Bootstrap toolchain
 
@@ -24,7 +24,7 @@ test -n "$MONKEYBOT_HOME" && test -f "$MONKEYBOT_HOME/cli/pyproject.toml" \
   && cd "$MONKEYBOT_HOME/cli" && uv run monkeybot --help
 
 # C) Common clone locations
-for d in "$HOME/monkeybot" "$HOME/code/monkeybot" "$HOME/monkey-bot"; do
+for d in "$HOME/monkeybot" "$HOME/code/monkeybot"; do
   test -f "$d/cli/pyproject.toml" && echo "found:$d" && break
 done
 ```
@@ -32,7 +32,7 @@ done
 **If a repo path is found**, export it for the rest of the session:
 
 ```bash
-export MONKEYBOT_HOME=/path/to/monkey-bot   # directory that contains cli/ and pyproject.toml
+export MONKEYBOT_HOME=/path/to/monkeybot   # directory that contains cli/ and pyproject.toml
 ```
 
 **CLI invocation for this session** — use whichever works:
@@ -54,15 +54,15 @@ Prefer `uv run` from `cli/` when unsure — it always uses the editable harness 
 
 Tell the user what you're installing and why. On macOS/Linux you can run these yourself; on Windows, point them at [uv](https://docs.astral.sh/uv/) and Git for Windows.
 
-### 2. Clone and install MonkeyBot (only if Tier 0 detect failed)
+### 2. Clone and install monkeybot (only if Tier 0 detect failed)
 
-MonkeyBot is **not on PyPI yet** — clone the GitHub repo and install the CLI from source.
+monkeybot is **not on PyPI yet** — clone the GitHub repo and install the CLI from source.
 
 ```bash
 # Pick a directory (default ~/monkeybot); ask if the user has a preference
 export MONKEYBOT_HOME="${MONKEYBOT_HOME:-$HOME/monkeybot}"
 
-git clone https://github.com/human-and-machine/monkey-bot.git "$MONKEYBOT_HOME"
+git clone https://github.com/human-plus-machine/monkeybot.git "$MONKEYBOT_HOME"
 cd "$MONKEYBOT_HOME"
 
 # Harness (required — CLI depends on editable ../monkeybot)

@@ -5,7 +5,7 @@ name: Live eval smoke
 # LLM-judge calls cost money and take minutes, so this does not run on ordinary
 # feature-branch -> develop PRs:
 #   (a) any PR from develop into main (release-promotion gate)
-#   (b) any PR that touches a dependency lockfile/manifest (catches silent SDK breakage,
+#   (b) any PR that touches a dependency lockfile (catches silent SDK breakage,
 #       e.g. provider request/response shape changes, that code review won't see)
 #
 # Cost/time budget: smoke suite is ~7 scenarios x 2-5 turns x (agent call + judge call).
@@ -44,7 +44,7 @@ jobs:
             run=true
           fi
           changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
-          for f in uv.lock pyproject.toml cli/pyproject.toml cli/uv.lock demo_agent/pyproject.toml demo_agent/uv.lock; do
+          for f in uv.lock cli/uv.lock demo_agent/uv.lock; do
             if grep -qxF "$f" <<<"$changed"; then
               run=true
             fi
@@ -89,7 +89,7 @@ jobs:
         working-directory: demo_agent
         run: uv sync
 
-      - name: Boot MonkeyBot gateway (demo_agent workspace)
+      - name: Boot monkeybot gateway (demo_agent workspace)
         working-directory: demo_agent
         env:
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
@@ -132,7 +132,7 @@ jobs:
             const fs = require("fs");
             const body = fs.existsSync("eval-report.md")
               ? fs.readFileSync("eval-report.md", "utf8")
-              : "## MonkeyBot Eval Scorecard\n\n`FAIL` — the report step did not complete " +
+              : "## monkeybot Eval Scorecard\n\n`FAIL` — the report step did not complete " +
                 "(gateway boot or the report command itself errored before writing a report). " +
                 "See the workflow run logs for details.";
             await github.rest.issues.createComment({

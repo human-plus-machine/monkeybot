@@ -520,7 +520,7 @@ if _demo_uses_sqlite; then
     ./workspace/data/monkeybot.db ./workspace/data/monkeybot.db-wal ./workspace/data/monkeybot.db-shm
 fi
 
-echo "run.sh: starting MonkeyBot realtime gateway…"
+echo "run.sh: starting monkeybot realtime gateway…"
 exit_code=0
 if [[ -f .env ]]; then
   uv run --env-file .env -m monkeybot.gateway.realtime_main || exit_code=$?

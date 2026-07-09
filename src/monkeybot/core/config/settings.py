@@ -1,4 +1,4 @@
-"""Provider resolution and configuration types for the MonkeyBot harness."""
+"""Provider resolution and configuration types for the monkeybot harness."""
 
 from __future__ import annotations
 

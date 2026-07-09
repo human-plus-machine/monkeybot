@@ -27,7 +27,7 @@ from monkeybot.core.bootstrap import (
 )
 from monkeybot.core.workspace_layout import resolve_agent_workspace_root
 
-app = FastAPI(title="MonkeyBot AgentCore Runtime")
+app = FastAPI(title="monkeybot AgentCore Runtime")
 _deps: HarnessDeps | None = None
 
 

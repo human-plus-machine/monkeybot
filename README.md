@@ -1,17 +1,20 @@
-# MonkeyBot
+# monkeybot
 
 <div align="center">
-  <img src="logo.png" alt="MonkeyBot Logo" width="600" />
+  <img src="logo.png" alt="monkeybot Logo" width="600" />
 
   <br />
 
-  *Production-ready Python framework for building and deploying LLM agents*
+  *Multi-cloud agent harness — GCP-first docs, portable runtime*
 
   [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 </div>
 
-MonkeyBot (`monkeybot`) is a thin framework for running **tool-using LLM agents** with a **FastAPI SSE gateway**, **SQLite** conversation storage, **MCP** tool servers, and optional skills and memory workflows — wired for local dev and deployable on GCP Cloud Run (or anywhere Docker runs).
+monkeybot is a thin **multi-cloud-capable** harness for tool-using LLM agents: FastAPI SSE gateway, pluggable storage (SQLite/Postgres/Firestore), MCP tools, skills, and memory. It runs locally with zero cloud dependencies and ships the same container image to any Docker host.
+
+> [!TIP]
+> **Positioning:** monkeybot is an owned agent runtime with a focused provider set — not a universal integration catalog. **Docs and examples are GCP-first** (Vertex, GCS, Cloud Run, Agent Engine); **AWS** paths (Bedrock, S3, AgentCore, ECS/Lambda) are shipped in the Pattern guides; Azure coverage is thinner. See [Cloud deployment — Positioning](docs/cloud-deployment-design.md#positioning).
 
 > [!NOTE]
 > **Not on PyPI yet** — install from a clone of this repository. Skills under `SKILLS_PATH` execute Python code; only add skills from trusted sources.
@@ -19,8 +22,8 @@ MonkeyBot (`monkeybot`) is a thin framework for running **tool-using LLM agents*
 ## Installation
 
 ```bash
-git clone https://github.com/human-and-machine/monkey-bot.git
-cd monkey-bot
+git clone https://github.com/human-plus-machine/monkeybot.git
+cd monkeybot
 uv sync
 cd cli && uv sync && uv run monkeybot new --dest .. --yes && cd ..
 uv run python -m monkeybot.gateway.main
@@ -133,35 +136,59 @@ There is no claim heartbeat yet — subagent runs longer than `MONKEYBOT_WORKER_
 | [SSE gateway and custom UI](docs/sse-gateway-ui.md) | HTTP + SSE endpoints, event types, CORS/proxy notes, and how to wire your own frontend |
 | [Skills](docs/skills.md) | Skill directory layout and `SKILL.md` discovery |
 | [Model Context Protocol](docs/mcp.md) | MCP configuration, env interpolation, OAuth2 flows, and diagnostics |
-| [Cloud deployment](docs/cloud-deployment-design.md) | Container and serverless deploy patterns for GCP, AWS, and more |
+| [Cloud deployment](docs/cloud-deployment-design.md) | Multi-cloud Patterns A/B/C — **GCP-first guides**, AWS addenda, portable harness |
 
 ## Integrations
 
-| Integration | Status | Purpose |
+Tables below reflect what **shipped in v2.0.0** (see [CHANGELOG](CHANGELOG.md)). Longer-term platform work lives in [BACKLOG.md](BACKLOG.md).
+
+### LLM providers
+
+| Provider | Status | Install extra |
 |---|---|---|
-| **Google Vertex AI** (Gemini) | Production | Primary LLM provider (gateway + `GeminiProvider`) |
-| **Google Cloud Run** | Production | Serverless container hosting |
-| **SQLite** | Default (SSE gateway) | Session history and per-turn usage |
-| **Google Cloud Firestore** | Supported (`monkeybot[firestore]`) | Session history, threads, and usage via `firestore://` DB_URL |
-| **Google Cloud Storage** | Optional (`monkeybot[gcs]`) | Long-term memory and file sync |
-| **GCP Secret Manager** | Production | Production secrets management |
-| **Google Chat** | Optional | Workspace Add-on interface (when deployed) |
-| **OpenAI** | Supported | `OpenAIProvider` (`monkeybot[openai]`) via `get_provider_config()` |
-| **Ollama** | Supported | `OllamaProvider` for local models (`monkeybot[ollama]`), no API key required |
-| **NVIDIA (build.nvidia.com)** | Supported | `NvidiaProvider` (`monkeybot[nvidia]`); free `NVIDIA_API_KEY`, `MODEL_PROVIDER=nvidia` |
-| **Anthropic Claude** | Supported | `ClaudeProvider` (`monkeybot[claude]`) via `get_provider_config()` |
-| **Anthropic via Vertex AI** | Supported | `VertexClaudeProvider` (`anthropic[vertex]`) |
-| **AWS Bedrock** | Supported | `BedrockClaudeProvider` (`monkeybot[bedrock]`); `MODEL_PROVIDER=aws_bedrock` |
-| **AWS S3** | Planned | Memory store backend |
-| **AWS Secrets Manager** | Planned | Secret resolver |
-| **Azure OpenAI** | Coming Soon | Azure-hosted OpenAI models |
-| **Azure Blob Storage** | Coming Soon | Memory backend for Azure deployments |
-| **Azure Key Vault** | Coming Soon | Secrets for Azure deployments |
-| **Slack** | Coming Soon | Slack bot interface |
-| **Microsoft Teams** | Coming Soon | Teams bot interface |
-| **Telegram** | Coming Soon | Telegram bot interface |
-| **DynamoDB** | Planned | Checkpointer / job storage |
-| **CosmosDB** | Coming Soon | Azure-native persistence options |
+| **Google Vertex AI / Gemini** | Supported | `monkeybot[gemini]` or ADC |
+| **OpenAI** | Supported | `monkeybot[openai]` |
+| **Anthropic Claude** | Supported | `monkeybot[claude]` |
+| **Anthropic on Vertex AI** | Supported | `monkeybot[vertex-claude]` |
+| **AWS Bedrock** | Supported | `monkeybot[bedrock]` |
+| **HuggingFace Inference** | Supported | `monkeybot[huggingface]` |
+| **Ollama** | Supported | `monkeybot[ollama]` |
+| **NVIDIA NIM** (build.nvidia.com) | Supported | `monkeybot[nvidia]` |
+
+### Storage & persistence
+
+| Backend | Status | Install extra |
+|---|---|---|
+| **SQLite** | Default | — (SSE gateway session history) |
+| **Postgres** | Supported | `monkeybot[postgres]` |
+| **Google Cloud Firestore** | Supported | `monkeybot[firestore]` |
+| **Local filesystem** | Default | `local://` memory URI |
+| **Google Cloud Storage** | Supported | `monkeybot[gcs]` |
+| **AWS S3** | Supported | `monkeybot[aws]` |
+
+### Platform & tooling
+
+| Integration | Status | Notes |
+|---|---|---|
+| **FastAPI SSE gateway** | Shipped | Sessions, streaming, health |
+| **MCP** (stdio + HTTP) | Shipped | `monkeybot_config/mcp.json` |
+| **Browser MCP** | Shipped | `integrations/browser-mcp/` |
+| **OpenSandbox** | Shipped | Optional sandbox (`monkeybot[sandbox]`) |
+| **Web search** | Shipped | DuckDuckGo (default, `monkeybot[web-search]`); Tavily / Firecrawl / Vertex grounding |
+| **OpenTelemetry** | Shipped | `monkeybot[observability]` |
+| **Docker / Cloud Run** | Shipped | Pattern A — [deploy guide](docs/deploy-pattern-a-container.md) |
+| **Pattern C adapters** | Shipped | Agent platforms — e.g. AWS Bedrock AgentCore (`examples/agentcore/`), Vertex AI Agent Engine |
+
+### Roadmap (near-term)
+
+| Item | Notes |
+|---|---|
+| **Slack gateway** | Events API / socket mode — [BACKLOG](BACKLOG.md#1-chat-integration) |
+| **Google Chat gateway** | Workspace webhook handler — [BACKLOG](BACKLOG.md#1-chat-integration) |
+| **Harness evals** | Langfuse / deepeval traceability in the agent loop — in progress |
+| **Scheduler in gateway** | Cron jobs for long-running deployments — design in [BACKLOG](BACKLOG.md#3-scheduler) |
+
+Azure, Microsoft Teams, Telegram, DynamoDB, CosmosDB, and managed secret resolvers (AWS Secrets Manager, Azure Key Vault, full GCP Secret Manager wiring) are tracked under **Future platforms** in [BACKLOG.md](BACKLOG.md).
 
 For provider and cloud wiring, start from **`monkeybot_config/monkeybot.example.yaml`** and the [Cloud deployment](docs/cloud-deployment-design.md) guide.
 
@@ -176,7 +203,7 @@ uv run mypy src/
 
 ## Support
 
-If you need help or hit a problem, search existing issues or open a new one in the [GitHub issue tracker](https://github.com/human-and-machine/monkey-bot/issues).
+If you need help or hit a problem, search existing issues or open a new one in the [GitHub issue tracker](https://github.com/human-plus-machine/monkeybot/issues).
 
 ## Contributing
 
@@ -202,4 +229,4 @@ One-time setup (repo Settings → Branches → add rule for `main`): require a p
 
 ## License
 
-You may use, modify, and distribute MonkeyBot under the MIT license. See the [`LICENSE`](LICENSE) file for details.
+You may use, modify, and distribute monkeybot under the MIT license. See the [`LICENSE`](LICENSE) file for details.

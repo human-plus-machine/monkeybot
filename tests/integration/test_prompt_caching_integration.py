@@ -113,7 +113,7 @@ def test_prompt_stable_prefix_before_current_request() -> None:
     ]
     out = compose_system_prompt(ctx, chat_messages=msgs)
     assert "## Current request" in out
-    assert out.index("## Current request") > out.index("MonkeyBot harness")
+    assert out.index("## Current request") > out.index("monkeybot harness")
 
 
 @pytest.mark.integration

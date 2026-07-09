@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "monkeybot-cli"
 version = "0.1.10"
-description = "CLI to create, configure, validate, and chat with MonkeyBot agents."
+description = "CLI to create, configure, validate, and chat with monkeybot agents."
 requires-python = ">=3.11"
 dependencies = [
     # `cli` pulls realtime + typer so `monkeybot talk` works out of the box (text mode).

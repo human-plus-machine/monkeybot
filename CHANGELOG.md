@@ -1,12 +1,14 @@
 # Changelog
 
-All notable changes to monkey-bot (`monkeybot`) are documented in this file. The
+All notable changes to monkeybot are documented in this file. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- Reframed public positioning: multi-cloud-capable harness with **GCP-first** docs (README, cloud deployment design, getting started, features, Pattern A guide). Clarifies this is not a universal integration catalog; documents AWS shipped paths alongside GCP examples.
 
 ## [2.0.0] - 2026-07-05
 
@@ -91,7 +93,7 @@ Major v2 rewrite: FastAPI SSE gateway, owned agent loop, pluggable storage, mult
 
 ### Changed
 
-- **2026-05-14** — Packaging: `pyproject.toml` authors set to `human+machine`; repository URLs point at `https://github.com/human-and-machine/monkey-bot`. Build backend is `hatchling`; package layout is `src/monkeybot`.
+- **2026-05-14** — Packaging: `pyproject.toml` authors set to `human-plus-machine`; repository URLs point at `https://github.com/human-plus-machine/monkeybot`. Build backend is `hatchling`; package layout is `src/monkeybot`.
 - **2026-05-14** — Default `SKILLS_PATH` is `./.agents/skills` (matches `.env.example` and `docker/Dockerfile`).
 - **2026-05-16** — Core module restructure and configuration cleanup; legacy files removed.
 - **2026-06-24** — Improved tool failure recovery and progress visibility in prompts.

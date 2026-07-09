@@ -1,4 +1,4 @@
-# MonkeyBot — Baseline Testing Guide
+# monkeybot — Baseline Testing Guide
 
 ## Cursor Canvas (optional)
 

@@ -4,6 +4,8 @@ Import `monkeybot.core` directly in your own handler. No FastAPI, no SSE, no lon
 
 **Targets covered:** AWS Lambda · GCP Cloud Functions · Azure Functions · Cloudflare Workers
 
+**Guide depth:** Examples below often use **GCP Cloud Functions** or **AWS Lambda** first; the harness-as-library pattern is identical — inject your storage/workspace backends and return events in your platform's response shape. See [Positioning](cloud-deployment-design.md#positioning).
+
 **Sandbox:** Not supported on any FaaS platform. Functions have no Docker socket and hard execution time limits. Disable sandbox (`SANDBOX_ENABLED=false` or omit it).
 
 ---
@@ -84,7 +86,7 @@ Opening and closing per invocation adds ~20–50 ms of latency and connection ch
 
 ## 3. Dependency Installation
 
-Install MonkeyBot with only the extras you need:
+Install monkeybot with only the extras you need:
 
 ```bash
 # Gemini + Postgres + GCS memory

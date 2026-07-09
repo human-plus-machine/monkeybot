@@ -11,4 +11,4 @@ Copy this folder into your configured `SKILLS_PATH` (needs `SKILL.md` and a `pla
 
 Enable the `browser` MCP server in `monkeybot_config/mcp.json` and install the separate `integrations/browser-mcp` package (`uv sync --project integrations/browser-mcp`).
 
-Operator reference: `docs/browser-mcp.md` in the MonkeyBot repo.
+Operator reference: `docs/browser-mcp.md` in the monkeybot repo.

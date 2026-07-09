@@ -1,4 +1,4 @@
-# MonkeyBot Backlog
+# monkeybot Backlog
 
 ---
 
@@ -17,7 +17,7 @@
 - Needs significant design work for cloud runtimes: Lambda/Cloud Functions have no persistent process, GKE/ECS can use sidecar or CronJob, etc. Think through heartbeat / self-scheduling before implementing.
 
 ### 4. Sandbox Workspace Protection
-- Add a hard-coded deny layer inside `SandboxExecutor` that blocks `run_command` from targeting harness-owned paths: `.monkeybot/`, `bot.yaml`, `*.env`, `.agents/`, `config/`.
+- Add a hard-coded deny layer inside `SandboxExecutor` that blocks `run_command` from targeting harness-owned paths: `.monkeybot/`, `monkeybot.yaml`, `*.env`, `.agents/`, `config/`.
 - Path-level policy at the executor — distinct from `command_allowlist.yaml` which is command-level. Agent should retain free rw access to `./code/`, `./data/`, etc.
 
 ### 5. HITL Completion
@@ -56,7 +56,7 @@
 - **INDEX.md size cap** *(deferred 2026-05-15)* — `MemoryOrganizer` appends without bound; acceptable for now via `ContextCurator` selection. When indices grow wastefully large, cap with a sliding window (N=200, archive to `INDEX.archive.md`) in `core/memory_organizer.py`.
 
 ### MCP
-- **MCP distro linkage** — confirm `bots/example-bot/` env (`MCP_CONFIG`, `SKILLS_PATH`) matches deployment; smoke-test against real MCP servers beyond the bundled LangChain docs URL.
+- **MCP distro linkage** — confirm `demo_agent/` env (`MCP_CONFIG`, `SKILLS_PATH`) matches deployment; smoke-test against real MCP servers beyond the bundled LangChain docs URL.
 
 ### Tooling
 - **File-op tool audit** — evaluate removing `write_file` in favor of `create_file` + `find_and_replace` in `core_tool_executor.py` and `workspace_tools.py` (reference: Claude Code patterns).

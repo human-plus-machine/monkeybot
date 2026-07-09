@@ -193,7 +193,7 @@ def create_app(
     usage = usage_port or _StaticUsagePort()
 
     app = FastAPI(
-        title="MonkeyBot v2 Gateway",
+        title="monkeybot v2 Gateway",
         version="2.0.0",
         lifespan=lifespan,
     )
