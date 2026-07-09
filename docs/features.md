@@ -8,7 +8,7 @@ This document anchors the **MonkeyBot harness** — the runtime that owns turn s
 
 ## Architecture overview
 
-MonkeyBot is a thin framework for **tool-using LLM agents**. The harness owns orchestration; the gateway is transport; providers are adapters; MCP and custom tools extend capabilities at runtime.
+MonkeyBot is a thin **harness** for tool-using LLM agents. It owns orchestration; the gateway is transport; providers are adapters; MCP and custom tools extend capabilities at runtime.
 
 **Positioning:** The runtime is **multi-cloud-capable** (Postgres/SQLite/Firestore + local/GCS/S3 memory; multiple LLM adapters; Patterns A/B/C). **Docs and examples lean GCP-first** — see [Cloud deployment — Positioning](cloud-deployment-design.md#positioning) for what is shipped on AWS vs planned on Azure.
 
