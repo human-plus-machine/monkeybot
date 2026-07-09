@@ -7,45 +7,43 @@ description: Control a real browser via CDP for web tasks; check and write site 
 
 Use the **browser** MCP tools (`browser__*` in the active tool list) for any web interaction: automation, scraping, testing, or site work. These come from the **`browser` MCP server** (stdio process), not from monkeybot core built-ins.
 
-## Screenshots
+## Default: indexed DOM (prefer this)
 
-`browser_screenshot` saves PNG files under **`./browser/Screenshots/`** in the agent workspace (unique filename per capture). The tool response includes:
+Do **not** start with screenshots. Use the indexed element tree:
 
-- `path` — workspace-relative path (e.g. `./browser/Screenshots/shot-20260701T142230Z-a1b2c3d4.png`)
-- `screenshots_dir` — always `./browser/Screenshots`
-- `viewport` — width/height for coordinate clicks
+1. `browser_get_elements()` — returns interactive elements as an indexed text tree, e.g. `[35]<button>Submit</button>`
+2. Act with `browser_click_by_index(index)`, `browser_input_by_index(index, text)`, or `browser_select_by_index(index, option_text)`
+3. Call `browser_get_elements()` again after navigation or any action that may have changed the DOM — indices are only valid for the tree they came from
 
-Reuse a prior capture later with `render_image` (vision models) or `read_file` is not applicable for binary PNGs — use `render_image` with the saved `path`.
+This is the default workflow: no image tokens, no pixel guessing, and clicks resolve through the live DOM.
 
 ## Before acting on a site
 
 1. Call `browser_list_playbooks` with the host or URL.
-2. If a playbook exists, call `browser_read_playbook` and follow it before inventing selectors or flows.
-3. Take a screenshot (`browser_screenshot`) when you need coordinates for clicks or a visual of the page.
+2. If a playbook exists, call `browser_read_playbook` and follow it before inventing flows.
+3. Use `browser_get_elements` to see what you can click/type — not a screenshot.
 
-## Vision models
+## Fallback: screenshots + coordinates (last resort)
 
-After `browser_screenshot`, call **`render_image`** with the returned `path` so the model can see the page:
+If `browser_get_elements` returns an error, retry once (or with `viewport_only: false`) before giving up — do **not** immediately screenshot. Use `browser_screenshot` + `browser_click(x, y)` **only** when the indexed tree truly cannot help: canvas apps, heavy shadow-DOM UIs, drag-and-drop, or visually confirming layout/rendering.
 
-```json
-{
-  "path": "./browser/Screenshots/shot-20260701T142230Z-a1b2c3d4.png"
-}
-```
+`browser_screenshot` saves PNGs under **`./browser/Screenshots/`**. The tool response includes:
 
-Then read pixels for `browser_click(x, y)`. Take another screenshot after each click when the UI may have changed.
+- `path` — workspace-relative path (e.g. `./browser/Screenshots/shot-….png`)
+- `screenshots_dir` — always `./browser/Screenshots`
+- `viewport` — width/height for coordinate clicks
 
-## Non-vision models (Ollama, etc.)
+On vision models, after a fallback screenshot call **`render_image`** with the returned `path`, then `browser_click(x, y)`. Do not screenshot after every ordinary click when indexed tools work.
 
-`browser_screenshot` does not inline image bytes in the tool result. Do not call `render_image` if attachments/vision are unavailable. Prefer `browser_js(...)` to extract headings, hero copy, and nav labels when answering "what is this site about?" Coordinate clicks still work when you have viewport size from the screenshot JSON and element positions from JS.
+Text-only models should never rely on screenshots for page understanding — use `browser_get_elements` or `browser_js(...)`.
 
 ## Workflow
 
 - First navigation: `browser_goto(url)` — response includes matching playbook filenames when present.
 - After navigation: `browser_wait_for` or `browser_wait_idle` as needed.
-- Clicking (vision): `browser_screenshot` → `render_image(path)` → `browser_click(x, y)` → screenshot again.
-- Clicking (text-only): use `browser_js` to locate elements or return bounding boxes when possible; otherwise ask the user.
-- DOM extraction: `browser_js(expression)` when coordinates are the wrong tool.
+- Clicking / typing (default): `browser_get_elements` → `browser_click_by_index` / `browser_input_by_index` / `browser_select_by_index` → `browser_get_elements` again if the page changed.
+- Clicking (fallback only): `browser_screenshot` → `render_image(path)` → `browser_click(x, y)`.
+- Ad hoc DOM extraction: `browser_js(expression)` when you need custom page text or attributes.
 - Login walls: stop and ask the user. Use SSO only when Chrome is already signed in; still stop for passwords, MFA, or consent.
 
 ## After learning something non-obvious

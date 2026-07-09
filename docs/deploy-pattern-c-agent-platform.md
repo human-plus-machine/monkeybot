@@ -4,6 +4,8 @@ Same harness-as-library approach as Pattern B, but the platform imposes its own 
 
 **Targets covered:** AWS Bedrock AgentCore · GCP Vertex AI Agent Engine
 
+**Guide depth:** This guide documents **both** shipped platform adapters side by side. You need only the section for your target — AgentCore does not require Vertex, and vice versa. See [Positioning](cloud-deployment-design.md#positioning).
+
 **Sandbox:** Not supported. These platforms manage their own execution environments and do not provide a Docker socket.
 
 ---

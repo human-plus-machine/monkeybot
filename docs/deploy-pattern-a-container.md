@@ -4,6 +4,8 @@ Run monkeybot as a long-lived container process. The FastAPI SSE gateway handles
 
 **Targets covered:** GCP Cloud Run · GKE · GCE (VM) · AWS ECS · EKS · EC2 (VM) · Azure Container Apps · AKS · Azure VM · NVIDIA / other container hosts
 
+**Guide depth:** Per-target sections below **lead with GCP** (the most exercised production path). AWS and Azure subsections use the **same environment variables** — substitute RDS/S3 or your platform's managed Postgres and object store. See [Positioning](cloud-deployment-design.md#positioning).
+
 ---
 
 ## 1. Environment Variables
@@ -47,6 +49,9 @@ docker build -f docker/Dockerfile --build-arg EXTRAS=gemini,postgres -t monkeybo
 
 # Vertex AI + GCS memory + Postgres storage (typical managed GCP stack)
 docker build -f docker/Dockerfile --build-arg EXTRAS=vertex,gcs,postgres -t monkeybot:latest .
+
+# Bedrock + S3 memory + Postgres storage (typical managed AWS stack)
+docker build -f docker/Dockerfile --build-arg EXTRAS=bedrock,aws,postgres -t monkeybot:latest .
 
 # Add sandbox support to any of the above
 docker build -f docker/Dockerfile --build-arg EXTRAS=gemini,gcs,postgres,sandbox -t monkeybot:latest .

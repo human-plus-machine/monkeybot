@@ -12,7 +12,9 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_TOOL_RESULT_MAX_CHARS = 32_768
 _DEFAULT_SUMMARY_TOOL_RESULT_MAX_CHARS = 8_192
-_DEFAULT_JSON_FIELD_MAX_CHARS = 512
+# Only applies to denylisted blob keys (data/base64/…), not arbitrary text fields
+# like browser ``tree``. Whole-result size is handled by spill + TOOL_RESULT_MAX_CHARS.
+_DEFAULT_BLOB_JSON_FIELD_MAX_CHARS = 512
 _MIN_BASE64_RUN = 800
 
 _DATA_URL_RE = re.compile(
@@ -85,7 +87,14 @@ def summary_tool_result_max_chars_from_env() -> int:
 
 
 def json_field_max_chars_from_env() -> int:
-    return _int_from_env("MONKEYBOT_TOOL_RESULT_JSON_FIELD_MAX", _DEFAULT_JSON_FIELD_MAX_CHARS)
+    """Max length for *denylisted* JSON blob fields before omission.
+
+    Does **not** apply to ordinary text fields (``tree``, ``result``, etc.).
+    Env: ``MONKEYBOT_TOOL_RESULT_JSON_FIELD_MAX`` (legacy name kept).
+    """
+    return _int_from_env(
+        "MONKEYBOT_TOOL_RESULT_JSON_FIELD_MAX", _DEFAULT_BLOB_JSON_FIELD_MAX_CHARS
+    )
 
 
 def _looks_like_base64(value: str) -> bool:
@@ -131,18 +140,19 @@ def _replace_long_b64(match: re.Match[str]) -> str:
     return f"[omitted ~{len(run)} char base64 run]"
 
 
-def _redact_long_string(key: str, value: str, *, max_field: int) -> str:
-    if len(value) <= max_field and not (
-        key.lower() in _REDACT_JSON_KEYS and _looks_like_base64(value)
-    ):
-        return value
-    return f"[omitted {len(value)} chars from {key!r}]"
+def _should_redact_blob_field(key: str, value: str, *, max_field: int) -> bool:
+    """True only for denylisted blob keys that look like binary/base64 or are oversized."""
+    if key.lower() not in _REDACT_JSON_KEYS:
+        return False
+    if _looks_like_base64(value):
+        return True
+    return max_field > 0 and len(value) > max_field
 
 
 def _redact_json_value(key: str, value: Any, *, max_field: int) -> Any:
     if isinstance(value, str):
-        if key.lower() in _REDACT_JSON_KEYS or len(value) > max_field:
-            return _redact_long_string(key, value, max_field=max_field)
+        if _should_redact_blob_field(key, value, max_field=max_field):
+            return f"[omitted {len(value)} chars from {key!r}]"
         return value
     if isinstance(value, dict):
         return {k: _redact_json_value(str(k), v, max_field=max_field) for k, v in value.items()}
@@ -167,7 +177,13 @@ def _redact_json_text(text: str, *, max_field: int) -> str:
 
 
 def sanitize_tool_result_text(text: str, *, enabled: bool | None = None) -> str:
-    """Strip embedded binary/base64 payloads from tool result strings."""
+    """Strip embedded binary/base64 payloads from tool result strings.
+
+    Ordinary long text fields (e.g. browser ``tree``) are left intact; size is
+    controlled later by spill (``MONKEYBOT_SPILL_MIN_CHARS``) and
+    ``MONKEYBOT_TOOL_RESULT_MAX_CHARS``. Only denylisted blob keys are
+    field-redacted here.
+    """
     if not text:
         return text
     if enabled is None:

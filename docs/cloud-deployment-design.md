@@ -3,6 +3,22 @@
 **Status:** Complete — Steps **1**, **1.5**, **2**, **3**, **4**, and **5** are done.  
 **Purpose:** Single source of truth for the multi-cloud deployment work. Open this in any new chat before starting a step to ensure nothing in that step breaks a later one.
 
+## Positioning
+
+monkeybot is **multi-cloud by architecture**, **GCP-first in documentation**. The harness layer is cloud-neutral: inject SQLite, Postgres, or Firestore for session storage; use `local://`, `gcs://`, or `s3://` for memory; pick any shipped LLM adapter (Gemini/Vertex, OpenAI, Anthropic, Bedrock, HuggingFace, Ollama, NVIDIA NIM). This is not a "100+ provider integrations" framework — it is a single owned runtime with three deployment patterns and explicit extras per cloud SDK.
+
+| Area | GCP (most detailed guides) | AWS (shipped) | Azure / other |
+|---|---|---|---|
+| LLM | Vertex / Gemini — primary examples | Bedrock (`monkeybot[bedrock]`) | OpenAI-compat providers where applicable |
+| Object memory | GCS (`monkeybot[gcs]`) | S3 (`monkeybot[aws]`) | Azure Blob — planned ([BACKLOG](../BACKLOG.md)) |
+| Session DB | Cloud SQL, Firestore | RDS + Postgres URI | Azure Database for PostgreSQL (Pattern A addendum) |
+| Platform adapters | Cloud Run, Vertex AI Agent Engine | AgentCore, ECS, Lambda | Container Apps / Functions — thinner addenda |
+| Local dev | SQLite + `local://` — **no cloud account required** | Same | Same |
+
+**If you are not on GCP:** start with [Pattern A](deploy-pattern-a-container.md) or [Pattern B](deploy-pattern-b-serverless.md), set `DB_URL` and `MEMORY_STORAGE_URI` for your managed Postgres and object store, install the provider extra you need (`bedrock`, `openai`, …) — GCS and Vertex are not required to run the harness.
+
+Per-target sections in the Pattern guides often **lead with GCP** service names (Cloud SQL, Secret Manager, Cloud Run) because that is the primary production target; the **env-var contract is the same** on AWS and Azure — swap managed-service names and IAM syntax using the per-target addenda in each guide.
+
 ---
 
 ## Architecture Model
