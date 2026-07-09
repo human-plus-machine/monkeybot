@@ -151,15 +151,18 @@ def test_fit_preserves_read_file_content_through_budgeter() -> None:
     assert "omitted" not in out
 
 
-def test_fit_still_sanitizes_run_command_large_json_fields() -> None:
-    payload = json.dumps({"ok": True, "stdout": "x" * 2000})
+def test_fit_still_sanitizes_run_command_blob_json_fields() -> None:
+    """run_command is not on the sanitize skip list; denylisted blob keys still redact."""
+    payload = json.dumps({"ok": True, "stdout": "x" * 2000, "data": "y" * 2000})
     budgeter = ContextBudgeter(window_tokens=200_000, used_tokens=10_000, safety_fraction=0.8)
     blocks = [
         ToolResponse(id="1", tool_name="run_command", result=[Text(text=payload)]),
     ]
     trimmed, _ = budgeter.fit_content_blocks(blocks)
     out = _text(trimmed[0])
-    assert "omitted" in out
+    parsed = json.loads(out)
+    assert parsed["stdout"] == "x" * 2000
+    assert "omitted" in parsed["data"]
 
 
 def test_invalid_pressure_ratio_logs_warning(monkeypatch, caplog) -> None:

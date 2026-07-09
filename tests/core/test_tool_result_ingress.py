@@ -51,6 +51,31 @@ def test_sanitize_keeps_short_plain_text_in_json_data_field() -> None:
     assert parsed["data"] == "not base64 text"
 
 
+def test_sanitize_keeps_long_non_blob_text_fields() -> None:
+    """browser_get_elements ``tree`` must survive sanitize; spill/cap handle size."""
+    tree = "\n".join(f"[{i}]<button>Item {i}</button>" for i in range(200))
+    assert len(tree) > 512
+    payload = {
+        "ok": True,
+        "url": "https://example.com",
+        "elementCount": 200,
+        "tree": tree,
+    }
+    out = sanitize_tool_result_text(json.dumps(payload))
+    parsed = json.loads(out)
+    assert parsed["tree"] == tree
+    assert parsed["elementCount"] == 200
+
+
+def test_sanitize_keeps_long_result_string_field() -> None:
+    result = json.dumps([{"tag": "A", "text": "x" * 40} for _ in range(50)])
+    assert len(result) > 512
+    payload = {"ok": True, "result": result}
+    out = sanitize_tool_result_text(json.dumps(payload))
+    parsed = json.loads(out)
+    assert parsed["result"] == result
+
+
 def test_sanitize_redacts_long_bare_base64_run() -> None:
     alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
     blob = (alphabet * 20)[:1200]
