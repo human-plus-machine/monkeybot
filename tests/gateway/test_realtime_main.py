@@ -7,7 +7,7 @@ from monkeybot.gateway.realtime_main import app
 
 def test_realtime_main_app_imports() -> None:
     assert app is not None
-    assert app.title == "MonkeyBot v2 Gateway"
+    assert app.title == "monkeybot v2 Gateway"
 
 
 def test_realtime_app_has_realtime_route() -> None:
