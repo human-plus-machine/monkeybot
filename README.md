@@ -171,7 +171,7 @@ Tables below reflect what **shipped in v2.0.0** (see [CHANGELOG](CHANGELOG.md)).
 | **Web search** | Shipped | DuckDuckGo (default, `monkeybot[web-search]`); Tavily / Firecrawl / Vertex grounding |
 | **OpenTelemetry** | Shipped | `monkeybot[observability]` |
 | **Docker / Cloud Run** | Shipped | Pattern A — [deploy guide](docs/deploy-pattern-a-container.md) |
-| **AWS Bedrock AgentCore** | Shipped | Pattern C — `examples/agentcore/` |
+| **Pattern C adapters** | Shipped | Agent platforms — e.g. AWS Bedrock AgentCore (`examples/agentcore/`), Vertex AI Agent Engine |
 
 ### Roadmap (near-term)
 
