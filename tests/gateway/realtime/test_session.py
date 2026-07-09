@@ -8,6 +8,7 @@ import pytest
 
 from monkeybot.core.llm.realtime_provider import (
     AudioFormat,
+    RealtimePartialTranscript,
     RealtimeSession,
     RealtimeUsage,
 )
@@ -156,3 +157,17 @@ def test_enqueue_idle_delivery() -> None:
     state.enqueue_idle_delivery("hook context")
     assert state.idle_delivery_queue.qsize() == 1
     assert state.idle_delivery_queue.get_nowait() == "hook context"
+
+
+def test_final_transcript_updates_buffer_after_audio_end() -> None:
+    """Gemini final transcripts arrive after PTT audio_stream_end."""
+    state = _state()
+    chunk = b"\x00" * 9600  # 200ms of 24kHz mono s16le
+    state.buffer.add_user_audio(chunk, fmt=state.realtime_session.input_format)
+    state.buffer.mark_user_turn_boundary()
+    assert state.buffer.current_user_text() == ""
+    state.apply_provider_event(
+        RealtimePartialTranscript(text="spoken question", is_final=True)
+    )
+    assert state.buffer.current_user_text() == "spoken question"
+    assert state.buffer.consume_user_text_for_commit() == "spoken question"

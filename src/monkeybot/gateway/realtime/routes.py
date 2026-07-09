@@ -48,6 +48,7 @@ from .errors import (
     ProviderConnectionError,
     ProviderStreamError,
     RealtimeError,
+    SessionConflictError,
     SubagentDispatchError,
 )
 from .guardrails import run_guardrails
@@ -266,7 +267,9 @@ async def _handle_assistant_boundary(
     tool_executor = _create_tool_executor(deps, attachment_store, attachment_catalog)
     tool_results: list[Any] = []
     inject_texts: list[str] = []
-    user_text = state.buffer.current_user_text().strip()
+    # Consume once per utterance so tool-call then prose boundaries do not
+    # duplicate the same user row in HistoryStore.
+    user_text = state.buffer.consume_user_text_for_commit().strip()
     turn_error: str | None = None
     try:
         async for event in run_realtime_turn(
@@ -294,25 +297,29 @@ async def _handle_assistant_boundary(
             ws,
             ServerErrorFrame(error="Failed to process realtime turn"),
         )
+        if state.state == "tool_running":
+            state.transition("listening")
         return
 
     if turn_error:
         await _send_frame(ws, ServerErrorFrame(error=turn_error))
 
-    if tool_results:
-        # Outstanding tool calls must be answered immediately or Gemini Live hangs.
-        # Also enqueue for idle flush so any follow-up context is ordered correctly.
-        await _inject_tool_results(state, tool_results)
+    try:
+        if tool_results:
+            # Outstanding tool calls must be answered immediately or Gemini Live hangs.
+            # Also enqueue for idle flush so any follow-up context is ordered correctly.
+            await _inject_tool_results(state, tool_results)
+
+        for text in inject_texts:
+            if state.is_idle():
+                await state.realtime_session.send_context(text)
+            else:
+                state.enqueue_idle_delivery(text)
+
+        await _flush_idle_deliveries(state)
+    finally:
         if state.state == "tool_running":
             state.transition("listening")
-
-    for text in inject_texts:
-        if state.is_idle():
-            await state.realtime_session.send_context(text)
-        else:
-            state.enqueue_idle_delivery(text)
-
-    await _flush_idle_deliveries(state)
 
 
 async def _process_provider_events(
@@ -549,7 +556,7 @@ async def _close_session(
     state.metrics.close(reason=reason)
     state.metrics.emit_summary()
     manager.release_slot(state.session_id)
-    manager.remove(state.session_id)
+    manager.remove(state.session_id, state)
 
 
 async def _safe_client_notify(ws: WebSocket, coro: Any) -> None:
@@ -648,7 +655,13 @@ def create_realtime_router(
                 opened_at=time.monotonic(),
                 last_activity_at=time.monotonic(),
             )
-            manager.register(session_id, state)
+            try:
+                manager.register(session_id, state)
+            except ValueError as exc:
+                raise SessionConflictError(
+                    str(exc),
+                    details="session_already_active",
+                ) from exc
 
             await _send_frame(
                 ws,

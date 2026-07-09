@@ -237,24 +237,25 @@ async def run_realtime_turn(
     )
 
     try:
-        # 1. Commit user message to history.
-        await history.append(ctx.thread_id, Message(role="user", content=list(blocks)))
-        await _fire_hook(
-            hook_manager,
-            event=HookEvent.USER_MESSAGE,
-            ctx=ctx,
-            timeout_s=0,
-            user_message=user_text,
-        )
-
-        if transcript_writer is not None:
-            await transcript_writer.write_user_message(
-                request_id=ctx.request_id,
-                content=user_text,
+        # 1. Commit user message to history (skip empty audio-only placeholders).
+        if user_text or any(not isinstance(b, Text) for b in blocks):
+            await history.append(ctx.thread_id, Message(role="user", content=list(blocks)))
+            await _fire_hook(
+                hook_manager,
+                event=HookEvent.USER_MESSAGE,
+                ctx=ctx,
+                timeout_s=0,
+                user_message=user_text,
             )
 
-        # 2. Refresh memory index for the next system prompt.
-        ctx = await refresh_memory_index(ctx)
+            if transcript_writer is not None:
+                await transcript_writer.write_user_message(
+                    request_id=ctx.request_id,
+                    content=user_text,
+                )
+
+            # 2. Refresh memory index for the next system prompt.
+            ctx = await refresh_memory_index(ctx)
 
         yield Thinking(request_id=ctx.request_id)
 
@@ -285,6 +286,23 @@ async def run_realtime_turn(
         # 4. Dispatch tools sequentially (v1: no parallel subagent dispatch here).
         for rtc in assistant_tool_calls:
             call = _realtime_tool_call_to_tool_call(rtc)
+
+            # Provider couldn't parse streamed tool JSON: surface as a tool error
+            # so the model can self-correct instead of executing with empty args.
+            if call.parse_error:
+                yield ToolCallStarted(
+                    request_id=ctx.request_id,
+                    tool=call.name,
+                    label=call.name,
+                    args=dict(call.args),
+                    parse_error=call.parse_error,
+                )
+                event, response = _tool_outcome(
+                    call, ctx.request_id, ToolExecutionResult.err(call.parse_error)
+                )
+                yield event
+                tool_results.append(response)
+                continue
 
             # Inspectors (tool confirmation / deny) are applied if provided.
             allowed = True

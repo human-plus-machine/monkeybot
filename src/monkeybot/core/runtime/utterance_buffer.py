@@ -64,12 +64,33 @@ class UtteranceBuffer:
         self._in_user_turn = False
         self._in_assistant_turn = False
         self._last_user_text: str = ""
+        self._user_committed = False
         self._last_assistant_turn: AssistantTurn = AssistantTurn()
 
     def add_user_text(self, text: str) -> None:
         """Add a partial or final user text chunk."""
         self._in_user_turn = True
         self._user_text_parts.append(text)
+
+    def apply_final_user_transcript(self, text: str) -> None:
+        """Attach a provider final transcript to the current or just-finished utterance.
+
+        Push-to-talk often finalizes the audio turn before Gemini emits the final
+        input transcription. In that case update ``_last_user_text`` so history
+        commit still sees the spoken content.
+        """
+        cleaned = text.strip()
+        if not cleaned:
+            return
+        if self._in_user_turn:
+            self._user_text_parts.append(cleaned)
+            return
+        if self._last_user_text:
+            self._last_user_text = f"{self._last_user_text} {cleaned}".strip()
+        else:
+            self._last_user_text = cleaned
+        # A late transcript means the prior empty commit (if any) was incomplete.
+        self._user_committed = False
 
     def add_user_audio(self, chunk: bytes, *, fmt: AudioFormat) -> None:
         """Add a user audio chunk; tracks duration only."""
@@ -91,10 +112,28 @@ class UtteranceBuffer:
         self._in_user_turn = False
         text = "".join(self._user_text_parts).strip()
         self._last_user_text = text
+        self._user_committed = False
         duration = self._user_audio_duration_ms
         self._user_text_parts = []
         self._user_audio_duration_ms = 0
         return FinalizedUtterance(text=text, audio_duration_ms=duration)
+
+    def consume_user_text_for_commit(self) -> str:
+        """Return finalized user text once per utterance for HistoryStore commit.
+
+        Subsequent assistant boundaries (e.g. tool-call then prose) return ``""``
+        so the same spoken turn is not duplicated in history. Empty results do
+        not mark the utterance committed, so a late final transcript can still
+        be picked up on the next boundary.
+        """
+        if self._in_user_turn:
+            return "".join(self._user_text_parts).strip()
+        if self._user_committed:
+            return ""
+        text = self._last_user_text
+        if text:
+            self._user_committed = True
+        return text
 
     def mark_assistant_turn_boundary(self) -> AssistantTurn:
         """Finalize the current assistant turn and reset assistant state."""

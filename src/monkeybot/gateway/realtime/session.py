@@ -92,9 +92,13 @@ class RealtimeConnectionState:
         if self.state == "closing":
             return
         if isinstance(event, RealtimePartialTranscript):
-            if not event.is_final:
+            if event.is_final:
+                # Gemini Live emits input transcription as final-only, often after
+                # the client already sent audio_stream_end. Attach it to the
+                # just-finished utterance so history commit sees spoken text.
+                self.buffer.apply_final_user_transcript(event.text)
+            else:
                 self.buffer.add_user_text(event.text)
-            # Final transcripts are reflected by the turn boundary.
         elif isinstance(event, (RealtimeAudioDelta, RealtimeTextDelta)):
             if isinstance(event, RealtimeAudioDelta):
                 self.metrics.mark_model_audio_sec(

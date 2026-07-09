@@ -160,3 +160,51 @@ class TestRunRealtimeTurn:
             )
         )
         assert inject_texts == ["remember this"]
+
+    async def test_parse_error_short_circuits_execution(self) -> None:
+        history = FakeHistory()
+        executor = RecordingExecutor()
+        ctx = _ctx()
+        tool_results: list[ToolResponse] = []
+        events = await _collect_events(
+            run_realtime_turn(
+                "broken call",
+                "",
+                [
+                    RealtimeToolCall(
+                        call_id="c1",
+                        name="read_file",
+                        args={},
+                        parse_error="Failed to parse tool args: not-json",
+                    )
+                ],
+                ctx,
+                history=history,
+                tool_executor=executor,
+                tool_results_out=tool_results,
+            )
+        )
+        assert executor.calls == []
+        started = next(e for e in events if isinstance(e, ToolCallStarted))
+        assert started.parse_error == "Failed to parse tool args: not-json"
+        result = next(e for e in events if isinstance(e, ToolCallResult))
+        assert result.error == "Failed to parse tool args: not-json"
+        assert len(tool_results) == 1
+        assert tool_results[0].is_error is True
+
+    async def test_skips_empty_user_content(self) -> None:
+        history = FakeHistory()
+        executor = RecordingExecutor()
+        ctx = _ctx()
+        await _collect_events(
+            run_realtime_turn(
+                "",
+                "assistant only",
+                [],
+                ctx,
+                history=history,
+                tool_executor=executor,
+            )
+        )
+        assert len(history.rows) == 1
+        assert history.rows[0].role == "assistant"

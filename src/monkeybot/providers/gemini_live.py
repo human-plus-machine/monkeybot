@@ -118,16 +118,16 @@ class GeminiLiveSession(RealtimeSession):
 
     def __init__(
         self,
-        model: str,
-        system_prompt: str,
-        tools: Sequence[ToolDef],
         *,
+        config: RealtimeSessionConfig,
         api_key: str | None = None,
     ) -> None:
-        self._model = model
-        self._system_prompt = system_prompt
-        self._tools = list(tools)
+        self._config = config
+        self._model = config.model
+        self._system_prompt = config.system_prompt
+        self._tools = list(config.tools)
         self._api_key = api_key
+        # Gemini Live currently requires 24kHz PCM s16le mono for I/O.
         self._input_format = _GEMINI_LIVE_INPUT_FORMAT
         self._output_format = _GEMINI_LIVE_OUTPUT_FORMAT
         self._session: Any | None = None
@@ -155,14 +155,8 @@ class GeminiLiveSession(RealtimeSession):
             project, location = _vertex_project_and_location(model_param)
             client = genai.Client(vertexai=True, project=project, location=location)
 
-        live_config = _build_live_config(
-            RealtimeSessionConfig(
-                model=self._model,
-                system_prompt=self._system_prompt,
-                tools=self._tools,
-            ),
-            types,
-        )
+        # Pass the full harness config so voice / max_output_tokens are honored.
+        live_config = _build_live_config(self._config, types)
 
         cm = client.aio.live.connect(model=model_param, config=live_config)
         self._session_cm = cm
@@ -397,9 +391,7 @@ class GeminiLiveProvider(RealtimeProvider):
 
     async def connect(self, *, config: RealtimeSessionConfig) -> RealtimeSession:
         session = GeminiLiveSession(
-            model=config.model,
-            system_prompt=config.system_prompt,
-            tools=config.tools,
+            config=config,
             api_key=self._api_key,
         )
         await session._connect()

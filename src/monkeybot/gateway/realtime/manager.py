@@ -53,17 +53,21 @@ class RealtimeSessionManager:
         )
 
     def register(self, session_id: str, state: RealtimeConnectionState) -> None:
+        """Register a live connection. Raises if ``session_id`` is already active."""
         if session_id in self._sessions:
-            logger.warning(
-                "replacing existing realtime session %s",
-                kv(session_id=session_id),
-            )
+            raise ValueError(f"Realtime session already active: {session_id}")
         self._sessions[session_id] = state
 
     def get(self, session_id: str) -> RealtimeConnectionState | None:
         return self._sessions.get(session_id)
 
-    def remove(self, session_id: str) -> None:
+    def remove(self, session_id: str, state: RealtimeConnectionState | None = None) -> None:
+        """Remove a session. When ``state`` is given, only remove that exact connection."""
+        current = self._sessions.get(session_id)
+        if current is None:
+            return
+        if state is not None and current is not state:
+            return
         self._sessions.pop(session_id, None)
 
     def snapshot_metrics(self) -> dict[str, Any]:

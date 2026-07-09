@@ -8,7 +8,7 @@ Nova Sonic) are persistent duplex sessions, not request/response-per-call stream
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Protocol, TypeAlias
 
 from monkeybot.core.types.types_tools import ToolDef
@@ -80,7 +80,7 @@ class RealtimeToolCall:
     kind: Literal["RealtimeToolCall"] = "RealtimeToolCall"
     call_id: str = ""
     name: str = ""
-    args: dict[str, object] = None  # type: ignore[assignment]
+    args: dict[str, object] = field(default_factory=dict)
     parse_error: str | None = None
 
 

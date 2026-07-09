@@ -29,10 +29,14 @@ except ImportError:
 
 
 def _make_session() -> GeminiLiveSession:
+    from monkeybot.core.llm.realtime_provider import RealtimeSessionConfig
+
     return GeminiLiveSession(
-        model="gemini-3.1-flash-live-preview",
-        system_prompt="You are a test assistant.",
-        tools=[],
+        config=RealtimeSessionConfig(
+            model="gemini-3.1-flash-live-preview",
+            system_prompt="You are a test assistant.",
+            tools=[],
+        ),
     )
 
 
@@ -229,3 +233,40 @@ class TestGeminiLiveEventMapping:
             and e.output_tokens == 17
             for e in events
         )
+
+
+@pytest.mark.skipif(not _GENAI_AVAILABLE, reason="google-genai not installed")
+class TestGeminiLiveConfigWiring:
+    def test_build_live_config_honors_voice_and_max_tokens(self) -> None:
+        from google.genai import types
+
+        from monkeybot.core.llm.realtime_provider import RealtimeSessionConfig
+        from monkeybot.providers.gemini_live import _build_live_config
+
+        cfg = RealtimeSessionConfig(
+            model="gemini-3.1-flash-live-preview",
+            system_prompt="hi",
+            tools=[],
+            voice="Charon",
+            max_output_tokens=256,
+        )
+        live = _build_live_config(cfg, types)
+        voice_name = (
+            live.speech_config.voice_config.prebuilt_voice_config.voice_name
+        )
+        assert voice_name == "Charon"
+        assert live.max_output_tokens == 256
+
+    def test_session_stores_full_config_for_connect(self) -> None:
+        from monkeybot.core.llm.realtime_provider import RealtimeSessionConfig
+
+        cfg = RealtimeSessionConfig(
+            model="gemini-3.1-flash-live-preview",
+            system_prompt="hi",
+            tools=[],
+            voice="Kore",
+            max_output_tokens=128,
+        )
+        session = GeminiLiveSession(config=cfg)
+        assert session._config.voice == "Kore"
+        assert session._config.max_output_tokens == 128

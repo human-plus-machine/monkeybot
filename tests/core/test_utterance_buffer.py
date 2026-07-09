@@ -71,3 +71,36 @@ class TestUtteranceBuffer:
         assert turn.text == "one"
         utterance = buf.mark_user_turn_boundary()
         assert utterance.text == "two"
+
+    def test_final_transcript_after_audio_boundary(self) -> None:
+        buf = UtteranceBuffer()
+        chunk = _chunk_for_duration_ms(200, _PCM_24K)
+        buf.add_user_audio(chunk, fmt=_PCM_24K)
+        utterance = buf.mark_user_turn_boundary()
+        assert utterance.text == ""
+        assert utterance.audio_duration_ms == 200
+        buf.apply_final_user_transcript("hello from speech")
+        assert buf.current_user_text() == "hello from speech"
+        assert buf.consume_user_text_for_commit() == "hello from speech"
+        # Second assistant boundary must not re-commit the same utterance.
+        assert buf.consume_user_text_for_commit() == ""
+
+    def test_consume_user_text_for_commit_is_once_per_utterance(self) -> None:
+        buf = UtteranceBuffer()
+        buf.add_user_text("read the file")
+        buf.mark_user_turn_boundary()
+        assert buf.consume_user_text_for_commit() == "read the file"
+        assert buf.consume_user_text_for_commit() == ""
+        buf.add_user_text("next turn")
+        buf.mark_user_turn_boundary()
+        assert buf.consume_user_text_for_commit() == "next turn"
+
+    def test_empty_consume_allows_late_transcript(self) -> None:
+        buf = UtteranceBuffer()
+        chunk = _chunk_for_duration_ms(200, _PCM_24K)
+        buf.add_user_audio(chunk, fmt=_PCM_24K)
+        buf.mark_user_turn_boundary()
+        assert buf.consume_user_text_for_commit() == ""
+        buf.apply_final_user_transcript("late transcript")
+        assert buf.consume_user_text_for_commit() == "late transcript"
+        assert buf.consume_user_text_for_commit() == ""

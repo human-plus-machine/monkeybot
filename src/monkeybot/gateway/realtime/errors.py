@@ -72,3 +72,10 @@ class ConcurrencyLimitError(RealtimeError):
 
     close_code = 1013  # Try Again Later
     log_level = "warning"
+
+
+class SessionConflictError(RealtimeError):
+    """A live WebSocket already exists for this session_id."""
+
+    close_code = 1008
+    log_level = "warning"
