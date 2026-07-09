@@ -171,3 +171,41 @@ def test_final_transcript_updates_buffer_after_audio_end() -> None:
     )
     assert state.buffer.current_user_text() == "spoken question"
     assert state.buffer.consume_user_text_for_commit() == "spoken question"
+
+
+def test_typed_text_finalizes_user_turn_for_idle_and_history() -> None:
+    """ClientTextFrame must finalize the user turn (Gemini has no user boundary).
+
+    Leaving in_user_turn true blocks is_idle() / idle delivery flush and causes
+    the same typed text to be committed again at later assistant/tool boundaries.
+    """
+    from monkeybot.core.llm.realtime_provider import (
+        RealtimeTextDelta,
+        RealtimeToolCall,
+        RealtimeTurnBoundary,
+    )
+
+    state = _state()
+    state.enqueue_idle_delivery("queued hook context")
+
+    # Mirror routes._handle_client_frames ClientTextFrame handling.
+    state.buffer.add_user_text("read README")
+    state.buffer.mark_user_turn_boundary()
+    assert not state.buffer.in_user_turn
+    assert state.is_idle()
+    assert state.idle_delivery_queue.qsize() == 1
+
+    # Tool-call boundary then prose continuation (typed tool → follow-up path).
+    state.apply_provider_event(
+        RealtimeToolCall(call_id="c1", name="read_file", args={"path": "README"})
+    )
+    state.apply_provider_event(RealtimeTurnBoundary(role="assistant"))
+    assert state.state == "tool_running"
+    assert state.buffer.consume_user_text_for_commit() == "read README"
+
+    state.transition("listening")
+    state.apply_provider_event(RealtimeTextDelta(text="File contents here."))
+    state.apply_provider_event(RealtimeTurnBoundary(role="assistant"))
+    assert state.state == "listening"
+    assert state.buffer.consume_user_text_for_commit() == ""
+    assert state.is_idle()

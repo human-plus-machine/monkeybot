@@ -450,8 +450,14 @@ async def _handle_client_frames(
             raise ClientProtocolError(str(exc), details="malformed_client_frame") from exc
 
         if isinstance(frame, ClientTextFrame):
+            # Typed turns have no provider user-boundary event (Gemini only emits
+            # assistant boundaries). Finalize here so history commit is once-per
+            # utterance and idle delivery can flush after tool/hook work.
             state.buffer.add_user_text(frame.text)
             await state.realtime_session.send_text(frame.text)
+            state.buffer.mark_user_turn_boundary()
+            if state.is_idle():
+                await _flush_idle_deliveries(state)
         elif isinstance(frame, ClientAudioStreamEndFrame):
             # Push-to-talk release: tell the provider speech ended so it responds
             # immediately instead of waiting on VAD silence timeout.

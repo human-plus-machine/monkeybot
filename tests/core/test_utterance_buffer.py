@@ -95,6 +95,31 @@ class TestUtteranceBuffer:
         buf.mark_user_turn_boundary()
         assert buf.consume_user_text_for_commit() == "next turn"
 
+    def test_typed_text_tool_then_prose_commits_user_once(self) -> None:
+        """Typed turns must finalize before assistant tool/prose boundaries.
+
+        Without mark_user_turn_boundary(), in_user_turn stays true and
+        consume_user_text_for_commit() re-returns the same text on every
+        assistant boundary (tool-call then follow-up prose).
+        """
+        buf = UtteranceBuffer()
+        buf.add_user_text("list files in workspace")
+        buf.mark_user_turn_boundary()
+        assert not buf.in_user_turn
+
+        buf.add_assistant_tool_call(
+            RealtimeToolCall(call_id="c1", name="list_dir", args={"path": "."})
+        )
+        tool_turn = buf.mark_assistant_turn_boundary()
+        assert len(tool_turn.tool_calls) == 1
+        assert buf.consume_user_text_for_commit() == "list files in workspace"
+
+        buf.add_assistant_text("Here are the files.")
+        prose_turn = buf.mark_assistant_turn_boundary()
+        assert prose_turn.text == "Here are the files."
+        # Second boundary must not re-commit the typed user utterance.
+        assert buf.consume_user_text_for_commit() == ""
+
     def test_empty_consume_allows_late_transcript(self) -> None:
         buf = UtteranceBuffer()
         chunk = _chunk_for_duration_ms(200, _PCM_24K)
