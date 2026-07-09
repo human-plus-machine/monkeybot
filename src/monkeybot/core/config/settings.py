@@ -133,6 +133,23 @@ def get_provider_config(
             ),
             resolved_model,
         )
+    if provider_key == "google_genai":
+        api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
+        if not api_key:
+            raise ValueError(
+                "MODEL_PROVIDER=google_genai requires GEMINI_API_KEY. "
+                "Set it in your environment or .env file."
+            )
+        return ProviderConfig(
+            GeminiProvider(
+                temperature=sampling.temperature,
+                max_tokens=sampling.max_tokens,
+                thinking_budget=thinking_budget,
+                cache_enabled=resolved_cache,
+                api_key=api_key,
+            ),
+            resolved_model,
+        )
     if provider_key == "openai":
         return ProviderConfig(
             OpenAIProvider(

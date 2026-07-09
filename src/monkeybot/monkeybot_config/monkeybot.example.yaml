@@ -32,6 +32,40 @@ runtime:
   # (env: MONKEYBOT_TRANSCRIPT_ENABLED)
   transcript_enabled: false
 
+# Required: choose the conversational harness for this deployment.
+#   turn_based  - existing HTTP POST /reply + SSE (default, backwards-compatible)
+#   realtime    - WebSocket /realtime with full-duplex audio/text (requires monkeybot[realtime])
+harness:
+  mode: turn_based
+
+# Realtime settings are validated at startup even when mode is turn_based, but only
+# take effect when harness.mode is realtime. Requires monkeybot[realtime] (or the
+# vendor-specific extra, e.g. monkeybot[realtime-gemini]).
+realtime:
+  # Optional model override for the realtime session. Live-only models (e.g.
+  # gemini-3.1-flash-live-preview) cannot be used for turn-based work, so the
+  # realtime session can point to a different model than model.name. When omitted,
+  # the realtime session falls back to model.name and MODEL_PROVIDER.
+  # model:
+  #   name: gemini-3.1-flash-live-preview
+  #   provider: google_genai
+  websocket:
+    enabled: true
+    # port defaults to runtime.port when unset
+    # port: 8080
+  audio:
+    input_format: pcm_s16le_24khz_mono
+    output_format: pcm_s16le_24khz_mono
+    chunk_ms: 200
+    max_utterance_sec: 60
+  session:
+    max_duration_sec: 1800
+    idle_timeout_sec: 120
+    max_response_turn_sec: 300
+    max_concurrent_sessions: 100
+  metrics:
+    emit_summary_on_close: true
+
 paths:
   agent_md: ./monkeybot_config/AGENT.md
   memory_storage_uri: local://./data/memory
@@ -46,7 +80,7 @@ paths:
 model:
   # gemini | openai | anthropic | vertex-claude | huggingface | ollama | nvidia | aws_bedrock | fake
   provider: gemini
-  name: gemini-3-flash
+  name: gemini-3.1-flash-live-preview
   temperature: 0.7
   max_tokens: 60000
   # Gemini: -1 = model default, 0 = off, N = token budget

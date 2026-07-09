@@ -220,3 +220,4 @@ Decision → config map:
 | `doctor` | Python, provider extra, credentials, port |
 | `run` | Start SSE gateway subprocess |
 | `chat` | Interactive terminal client (SSE) |
+| `talk` | Realtime WebSocket client (audio/text) |

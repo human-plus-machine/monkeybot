@@ -83,6 +83,18 @@ ENV_MAP: dict[tuple[str, str], str] = {
     ("fake_provider", "events_json"): "MONKEYBOT_FAKE_PROVIDER_EVENTS",
     ("emission", "style"): "MONKEYBOT_EMISSION_STYLE",
     ("runtime", "transcript_enabled"): "MONKEYBOT_TRANSCRIPT_ENABLED",
+    ("harness", "mode"): "MONKEYBOT_HARNESS_MODE",
+    ("realtime", "websocket.enabled"): "MONKEYBOT_REALTIME_WS_ENABLED",
+    ("realtime", "websocket.port"): "MONKEYBOT_REALTIME_WS_PORT",
+    ("realtime", "audio.input_format"): "MONKEYBOT_REALTIME_AUDIO_INPUT_FORMAT",
+    ("realtime", "audio.output_format"): "MONKEYBOT_REALTIME_AUDIO_OUTPUT_FORMAT",
+    ("realtime", "audio.chunk_ms"): "MONKEYBOT_REALTIME_AUDIO_CHUNK_MS",
+    ("realtime", "audio.max_utterance_sec"): "MONKEYBOT_REALTIME_AUDIO_MAX_UTTERANCE_SEC",
+    ("realtime", "session.max_duration_sec"): "MONKEYBOT_REALTIME_SESSION_MAX_DURATION_SEC",
+    ("realtime", "session.idle_timeout_sec"): "MONKEYBOT_REALTIME_SESSION_IDLE_TIMEOUT_SEC",
+    ("realtime", "session.max_response_turn_sec"): "MONKEYBOT_REALTIME_SESSION_MAX_RESPONSE_TURN_SEC",
+    ("realtime", "session.max_concurrent_sessions"): "MONKEYBOT_REALTIME_SESSION_MAX_CONCURRENT_SESSIONS",
+    ("realtime", "metrics.emit_summary_on_close"): "MONKEYBOT_REALTIME_METRICS_EMIT_SUMMARY_ON_CLOSE",
 }
 
 # Backward-compatible alias for internal/tests.
@@ -128,15 +140,26 @@ def _denied_patterns_to_env(value: Any) -> str | None:
     return None
 
 
+def _get_nested(mapping: Mapping[str, Any], dotted_key: str) -> Any:
+    current: Any = mapping
+    for part in dotted_key.split("."):
+        if not isinstance(current, dict):
+            return None
+        current = current.get(part)
+        if current is None:
+            return None
+    return current
+
+
 def _flatten_config(data: Mapping[str, Any]) -> dict[str, str]:
     out: dict[str, str] = {}
     for (section, key), env_name in ENV_MAP.items():
         sec = data.get(section)
         if not isinstance(sec, dict):
             continue
-        if key not in sec:
+        raw = _get_nested(sec, key)
+        if raw is None:
             continue
-        raw = sec[key]
         if env_name == "MONKEYBOT_TOOL_DENIED_PATTERNS":
             s = _denied_patterns_to_env(raw)
         else:

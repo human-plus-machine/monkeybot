@@ -423,7 +423,8 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 | `monkeybot validate` | YAML, paths, MCP, provider env |
 | `monkeybot doctor` | Python, extras, credentials, port |
 | `monkeybot run` | Foreground gateway |
-| `monkeybot chat` | Spawn gateway + REPL |
+| `monkeybot chat` | Spawn SSE gateway + REPL |
+| `monkeybot talk` | Realtime WebSocket client (audio/text) |
 
 **Interpreter resolution:** agent `.venv` → `uv run` → CLI interpreter (legacy).
 

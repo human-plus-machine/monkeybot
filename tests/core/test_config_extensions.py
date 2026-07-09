@@ -16,13 +16,14 @@ from monkeybot.core.config import (
     auto_schema_enabled_from_config,
     cache_enabled_from_env,
     get_provider_config,
+    get_realtime_config,
     get_subagent_configs,
     get_subagent_registry,
     normalize_model_provider,
     reset_runtime_env_state_for_tests,
+    subagent_vertex_google_search_from_config,
     validate_monkeybot_yaml_doc,
     validate_provider_env,
-    subagent_vertex_google_search_from_config,
     vertex_google_search_enabled_from_config,
 )
 from monkeybot.core.config.runtime_env import ENV_MAP
@@ -353,3 +354,97 @@ class TestAutoSchemaConfig:
 
     def test_not_mapped_to_env(self) -> None:
         assert ("paths", "auto_schema") not in ENV_MAP
+
+
+class TestRealtimeConfig:
+    def _write_config(self, tmp_path: Path, yaml_text: str) -> Path:
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text(yaml_text, encoding="utf-8")
+        return config_path
+
+    def test_defaults_when_missing(self) -> None:
+        cfg = get_realtime_config("/nonexistent/monkeybot.yaml")
+        assert cfg.enabled is False
+        assert cfg.websocket.enabled is True
+        assert cfg.websocket.port is None
+        assert cfg.audio.input_format == "pcm_s16le_24khz_mono"
+        assert cfg.session.max_duration_sec == 1800
+
+    def test_parses_realtime_mode(self, tmp_path: Path) -> None:
+        path = self._write_config(
+            tmp_path,
+            "harness:\n  mode: realtime\n"
+            "realtime:\n  session:\n    max_duration_sec: 900\n",
+        )
+        cfg = get_realtime_config(str(path))
+        assert cfg.enabled is True
+        assert cfg.session.max_duration_sec == 900
+
+    def test_parses_nested_values(self, tmp_path: Path) -> None:
+        path = self._write_config(
+            tmp_path,
+            "harness:\n  mode: realtime\n"
+            "realtime:\n"
+            "  websocket:\n    enabled: false\n    port: 9090\n"
+            "  audio:\n    input_format: pcm_s16le_16khz_mono\n"
+            "    chunk_ms: 100\n"
+            "  session:\n    max_concurrent_sessions: 50\n",
+        )
+        cfg = get_realtime_config(str(path))
+        assert cfg.enabled is True
+        assert cfg.websocket.enabled is False
+        assert cfg.websocket.port == 9090
+        assert cfg.audio.input_format == "pcm_s16le_16khz_mono"
+        assert cfg.audio.chunk_ms == 100
+        assert cfg.session.max_concurrent_sessions == 50
+
+    def test_parses_realtime_model_override(self, tmp_path: Path) -> None:
+        path = self._write_config(
+            tmp_path,
+            "harness:\n  mode: realtime\n"
+            "model:\n  provider: google_genai\n  name: gemini-2.5-flash\n"
+            "realtime:\n"
+            "  model:\n    name: gemini-3.1-flash-live-preview\n"
+            "    provider: google_genai\n",
+        )
+        cfg = get_realtime_config(str(path))
+        assert cfg.model.name == "gemini-3.1-flash-live-preview"
+        assert cfg.model.provider == "google_genai"
+
+
+class TestHarnessModeValidation:
+    def test_default_mode_is_turn_based(self) -> None:
+        validate_monkeybot_yaml_doc({"model": {"provider": "gemini", "name": "x"}})
+
+    def test_accepts_realtime_with_gemini(self) -> None:
+        validate_monkeybot_yaml_doc(
+            {"harness": {"mode": "realtime"}, "model": {"provider": "gemini", "name": "x"}}
+        )
+
+    def test_rejects_realtime_with_non_gemini(self) -> None:
+        with pytest.raises(ConfigError, match="not a Gemini family provider"):
+            validate_monkeybot_yaml_doc(
+                {
+                    "harness": {"mode": "realtime"},
+                    "model": {"provider": "openai", "name": "x"},
+                }
+            )
+
+    def test_rejects_invalid_mode(self) -> None:
+        with pytest.raises(ConfigError, match="not supported"):
+            validate_monkeybot_yaml_doc({"harness": {"mode": "both"}})
+
+    def test_rejects_invalid_audio_format(self) -> None:
+        with pytest.raises(ConfigError, match="not supported"):
+            validate_monkeybot_yaml_doc(
+                {
+                    "harness": {"mode": "turn_based"},
+                    "realtime": {"audio": {"input_format": "mp3"}},
+                }
+            )
+
+    def test_rejects_non_positive_session_value(self) -> None:
+        with pytest.raises(ConfigError, match="positive number"):
+            validate_monkeybot_yaml_doc(
+                {"realtime": {"session": {"max_duration_sec": -1}}}
+            )

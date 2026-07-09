@@ -87,6 +87,13 @@ def test_validate_missing_config(tmp_path: Path) -> None:
     assert any(c["id"] == "config.file.exists" for c in data["checks"])
 
 
+def test_talk_help_lists_realtime_flags() -> None:
+    result = _run_cli("talk", "--help")
+    assert result.returncode == 0
+    assert "--gateway-url" in result.stdout
+    assert "--text" in result.stdout
+
+
 def test_load_agent_dotenv_from_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(CLI_ROOT)
     (tmp_path / ".env").write_text("GOOGLE_CLOUD_PROJECT=cli-test-project\n")
