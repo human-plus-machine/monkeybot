@@ -1,0 +1,57 @@
+{
+  "feature_name": "cli-demoability",
+  "current_phase": "lite_complete",
+  "phase_status": {
+    "design_1a": "completed",
+    "design_1b": "not_planned",
+    "design_1c": "not_planned",
+    "user_stories": "completed",
+    "code_spec": "not_planned",
+    "implementation": "not_started",
+    "verification": "not_started",
+    "integration": "not_started"
+  },
+  "artifacts": {
+    "design": ".monkeymode/cli-demoability/design.md",
+    "user_stories": ".monkeymode/cli-demoability/user-stories.md",
+    "acceptance": ".monkeymode/cli-demoability/acceptance.md"
+  },
+  "stories": {},
+  "parallel_execution": {
+    "enabled": false,
+    "max_concurrent": 4,
+    "batches": [],
+    "current_batch": null
+  },
+  "rework_history": [
+    {
+      "id": "rework-001",
+      "trigger": "feedback-design",
+      "origin_phase": "1a",
+      "scope": "targeted",
+      "description": "Replace the multi-phase plan with three concise planning artifacts.",
+      "affected_artifacts": [
+        ".monkeymode/cli-demoability/design.md",
+        ".monkeymode/cli-demoability/user-stories.md",
+        ".monkeymode/cli-demoability/acceptance.md"
+      ],
+      "affected_stories": ["trustworthy-first-run-cli-demo"],
+      "status": "completed",
+      "created_at": "2026-07-09T20:37:36-04:00",
+      "completed_at": "2026-07-09T20:37:36-04:00"
+    }
+  ],
+  "integration": {
+    "status": "not_started",
+    "shared_files_merged": [],
+    "integration_tests_added": 0,
+    "completed_at": null
+  },
+  "context": {
+    "save_qa_log": false,
+    "mode": "artifact-only-lite",
+    "scope": "Exactly one design file, one user-story file, and one acceptance file; no phase artifacts.",
+    "next_step": "Await explicit user direction to implement."
+  },
+  "last_updated": "2026-07-09T20:37:36-04:00"
+}
