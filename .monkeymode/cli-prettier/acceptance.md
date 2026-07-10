@@ -1,42 +1,45 @@
 # Acceptance
 
-## Phase A — prompt_toolkit shell
+## Phase A — prompt_toolkit REPL (atomic terminal ownership)
 
-- `monkeybot chat` on a TTY uses prompt_toolkit for the user prompt (not
+- On a TTY, `monkeybot chat` uses prompt_toolkit for the user prompt (not
   thread-wrapped `input()`).
-- Up-arrow recalls prior submissions within the session; history persists
-  across chat restarts for the same agent project.
+- Context-window ring is shown via prompt_toolkit `bottom_toolbar` (or
+  equivalent). DECSTBM scroll-region status bar is not active on that path —
+  no dual terminal owners.
+- Session banner prints provider, model, gateway target, auto-spawned vs
+  attached, and a one-line keybinding hint before the first prompt.
+- History persists at `<agent_root>/data/chat_history` (`FileHistory`);
+  up-arrow recalls prior submissions across chat restarts for that project.
 - Multiline paste does not submit early; documented submit binding works.
 - Ctrl-D on an empty buffer exits equivalently to `/bye`.
-- Ctrl-C behavior is defined and tested: interrupt current prompt / turn
-  without leaving the terminal in a broken cooked/raw state.
-- Tool confirmation and elicitation prompts use the same REPL session.
-- Non-TTY (or explicit fallback) still completes the existing pexpect e2e
-  round-trip; CI does not require a real TTY for that test.
+- Ctrl-C follows the design state machine and is tested separately for:
+  - idle empty prompt → exit
+  - idle non-empty prompt → clear buffer, stay
+  - active SSE turn → local abort, clean return to prompt
+  - HITL prompt → cancel/deny path, return to prompt
+- Exit commands remain exactly `/bye`, `/quit`, `/exit` (no command registry).
+- Tool confirmation and elicitation use the same REPL session.
+- HITL response POSTs check HTTP success (`raise_for_status` or equivalent).
+  Failed confirmation and failed elicitation each have a test: CLI reports the
+  error and does not claim success.
+- Non-TTY fallback completes the existing pexpect e2e round-trip without a
+  real TTY; toolbar/DECSTBM off on that path.
 - `prompt-toolkit` is a declared direct dependency of `monkeybot-cli`.
+- Existing spinner → tool activity → 🐵 stream loop still functions between
+  prompts.
 
-## Phase B — toolbar + banner
+## Phase B — hardening (only if needed)
 
-- Context-window ring appears in prompt_toolkit `bottom_toolbar` (or
-  equivalent) and remains correct across turns.
-- DECSTBM scroll-region status bar is removed; no dual status owners.
-- Welcome banner shows provider, model, gateway target, and whether the
-  gateway was auto-spawned, plus a one-line keybinding hint.
-- Existing spinner → tool activity → 🐵 stream loop still functions.
+- Toolbar refresh/resize issues found after A are fixed without reintroducing
+  DECSTBM or a second status owner.
 
-## Phase C — readiness colors
+## Out of scope (follow-up PR)
 
-- On a TTY without `NO_COLOR`, `validate`/`doctor` use green pass, yellow
-  warning, red error; `--json` unchanged and colorless.
-- Passing checks never render as `id: pass` only because `message` was empty.
-
-## Phase D — optional markdown
-
-- If shipped: streamed assistant markdown on a TTY gets light styling without
-  breaking chunked SSE deltas; non-TTY stays plain.
+- validate/doctor colors, `--quiet`, streaming markdown styling.
 
 ## Cross-cutting
 
-- No Textual/fullscreen app; no `talk`/`loop` migration in this feature.
+- No Textual/fullscreen app; no `talk`/`loop` migration.
 - Relevant `cli/tests/` pass, including updated chat e2e and new REPL unit
-  tests for history path, fallback, and toolbar formatting.
+  tests listed above.

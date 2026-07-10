@@ -44,6 +44,26 @@
       "status": "completed",
       "created_at": "2026-07-10T11:57:00Z",
       "completed_at": "2026-07-10T11:57:00Z"
+    },
+    {
+      "id": "rework-002",
+      "trigger": "pr-review",
+      "origin_phase": "1a",
+      "scope": "targeted",
+      "description": "Address PR #86 review: atomic PromptSession+toolbar/DECSTBM removal in Phase A; explicit Ctrl-C state machine; HITL HTTP failure handling; single history path; drop slash-command speculation; move validate/doctor/markdown to follow-up.",
+      "affected_artifacts": [
+        ".monkeymode/cli-prettier/design.md",
+        ".monkeymode/cli-prettier/user-stories.md",
+        ".monkeymode/cli-prettier/acceptance.md"
+      ],
+      "affected_stories": [
+        "product-repl",
+        "hitl-same-shell",
+        "demo-and-ci"
+      ],
+      "status": "completed",
+      "created_at": "2026-07-10T12:12:00Z",
+      "completed_at": "2026-07-10T12:12:00Z"
     }
   ],
   "integration": {
@@ -57,10 +77,10 @@
     "mode": "artifact-only-lite",
     "scope": "Exactly one design file, one user-story file, and one acceptance file; no phase artifacts.",
     "related": [
-      "cli-demoability (truthful fake readiness; correctness before cosmetics)"
+      "cli-demoability (truthful fake readiness; separate from this REPL plan)"
     ],
-    "primary_stack": "prompt_toolkit PromptSession (async) + bottom_toolbar; print-based turn renderer retained",
+    "primary_stack": "prompt_toolkit PromptSession (async) + bottom_toolbar; DECSTBM removed in same phase; print-based turn renderer retained",
     "next_step": "Await explicit user direction to implement Phase A."
   },
-  "last_updated": "2026-07-10T11:57:00Z"
+  "last_updated": "2026-07-10T12:12:00Z"
 }
