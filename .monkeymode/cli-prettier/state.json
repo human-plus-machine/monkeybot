@@ -23,7 +23,29 @@
     "batches": [],
     "current_batch": null
   },
-  "rework_history": [],
+  "rework_history": [
+    {
+      "id": "rework-001",
+      "trigger": "feedback-design",
+      "origin_phase": "1a",
+      "scope": "targeted",
+      "description": "Pivot from ANSI-only cosmetics to a prompt_toolkit real REPL as the primary design; keep output polish as secondary phases.",
+      "affected_artifacts": [
+        ".monkeymode/cli-prettier/design.md",
+        ".monkeymode/cli-prettier/user-stories.md",
+        ".monkeymode/cli-prettier/acceptance.md"
+      ],
+      "affected_stories": [
+        "product-repl",
+        "hitl-same-shell",
+        "demo-and-ci",
+        "readiness-readable"
+      ],
+      "status": "completed",
+      "created_at": "2026-07-10T11:57:00Z",
+      "completed_at": "2026-07-10T11:57:00Z"
+    }
+  ],
   "integration": {
     "status": "not_started",
     "shared_files_merged": [],
@@ -37,7 +59,8 @@
     "related": [
       "cli-demoability (truthful fake readiness; correctness before cosmetics)"
     ],
-    "next_step": "Await explicit user direction to implement phases 1–3."
+    "primary_stack": "prompt_toolkit PromptSession (async) + bottom_toolbar; print-based turn renderer retained",
+    "next_step": "Await explicit user direction to implement Phase A."
   },
-  "last_updated": "2026-07-10T11:51:00Z"
+  "last_updated": "2026-07-10T11:57:00Z"
 }

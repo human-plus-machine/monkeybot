@@ -1,12 +1,13 @@
-# CLI prettier (demo polish)
+# CLI real REPL (prompt_toolkit)
 
 ## Goal
 
-Make the first-demo path look intentional on a projector: readiness checks read as
-a clean green light, and `chat` looks like a product REPL rather than a debug
-console — without rewriting the CLI into a TUI framework.
+Replace the thread-wrapped `input()` chat loop with a real terminal REPL built on
+**prompt_toolkit**, so `monkeybot chat` feels like a product shell: history,
+multiline paste, clean keybindings, and a first-class status/toolbar — while
+keeping the existing SSE turn renderer (spinner → tools → 🐵 stream).
 
-Demo path this polish supports:
+Demo path this supports:
 
 ```bash
 monkeybot new --provider fake --model fake-model --dest ./demo --yes
@@ -15,73 +16,130 @@ monkeybot doctor --cwd ./demo
 monkeybot chat --cwd ./demo
 ```
 
-## Principles
+## Why prompt_toolkit (now)
 
-- Correctness stays ahead of cosmetics (pair with `cli-demoability` readiness work).
-- Extend the existing hand-rolled ANSI style in `chat`; do not introduce Rich,
-  prompt_toolkit, Textual, or a full TUI rewrite.
-- `--json` output stays machine-stable: no ANSI, no layout changes to the schema.
-- Honor non-TTY and `NO_COLOR`: plain text fallback, no broken escape sequences.
-- Prefer small, reversible layers over one big visual redesign.
+The previous polish plan avoided prompt_toolkit because it only touched output
+cosmetics. A real REPL is an **input-stack** change: history, multiline,
+interrupt handling, and bottom UI belong in a library that owns the prompt
+lifecycle. Extending more ANSI/`input()` helpers would fight that.
 
-## Phases
+Rich remains out of scope for v1 (optional later for markdown). prompt_toolkit
+is the dependency we add.
 
-### Phase 1 — Readiness output (`validate` / `doctor`)
+## Current state (what we replace)
 
-Surface: `cli/src/monkeybot_cli/output.py` (shared `CommandReport.print_human`).
+- `_read_line` runs `input()` on a worker thread and races an asyncio interrupt
+  event (`chat.py`).
+- HITL (`tool-confirmations`, elicitations) also uses raw `input()`.
+- Welcome is a one-line dim exit hint.
+- Status is a custom DECSTBM pinned bar (`chat_status_bar.py`) that fights any
+  fullscreen/application input library.
+- Streaming assistant text is print-based `MarkdownPlainStream` (strip markers).
+- E2E uses pexpect against the current prompt (`cli/tests/test_chat_e2e.py`).
 
-- Colorize when stdout is a TTY and `NO_COLOR` is unset:
-  - pass → green `✓`
-  - warning fail → yellow `!` (or `⚠`)
-  - error fail → red `✗`
-  - header `OK` / `FAILED` matches severity
-- On full success, keep the checklist (useful on a projector) but tighten copy:
-  - never print bare `: pass` when `message` is empty — use a short affirmative
-    or omit the trailing message
-  - keep remediation only on fails (already true for human; leave JSON as-is)
-- Optional `--quiet`: one summary line on full success
-  (`validate: OK (N checks)`); full checklist on any warning/error.
-  Out of the critical path for v1 if time-boxed — checklist + color alone is
-  enough for demos.
+## Design
 
-### Phase 2 — Chat session presence
+### Architecture
 
-Surface: `cli/src/monkeybot_cli/commands/chat.py`.
+Keep the asyncio session loop and SSE consumer. Swap only the **prompt /
+HITL / chrome** layer:
 
-- Replace the dim exit-only welcome with a short session banner:
-  provider, model, gateway URL/port, and whether the gateway was auto-spawned.
-- Keep 🧑 / 🐵 turn markers; do not add badge clutter.
-- Unify error styling (red on TTY for user-visible failures; stderr stays plain
-  when not a TTY).
+```
+┌─────────────────────────────────────────────┐
+│  prompt_toolkit PromptSession (async)       │
+│  - history, multiline, keybindings          │
+│  - bottom_toolbar = context ring (+ tokens) │
+│  - styled 🧑 prompt                         │
+└─────────────────┬───────────────────────────┘
+                  │ user line
+                  ▼
+┌─────────────────────────────────────────────┐
+│  existing turn runner (mostly unchanged)    │
+│  - POST /reply, SSE events                  │
+│  - spinner / tool activity / 🐵 stream      │
+│  - print-based output between prompts       │
+└─────────────────────────────────────────────┘
+```
 
-### Phase 3 — Chat markdown + status (bounded)
+Between prompts, continue to print freely (spinner, tools, deltas). Do **not**
+move the whole chat into a prompt_toolkit `Application` fullscreen layout in
+v1 — `PromptSession.prompt_async()` + `bottom_toolbar` is enough and preserves
+the current stream-printing model.
 
-Surfaces: `terminal_markdown.py`, `chat_status_bar.py`, `chat.py`.
+Retire the DECSTBM `ChatStatusBar` scroll-region approach once the toolbar
+carries the same context-ring signal (avoids two owners of the alternate
+screen geometry).
 
-- Upgrade streaming markdown from “strip markers” to light ANSI styling on TTY:
-  bold, dim headers, dim/cyan inline code. Still line-oriented and stream-safe;
-  no full CommonMark, no syntax-highlighted fences in v1.
-- Status bar: keep the context ring as the primary signal; optionally append
-  compact `in/out` token counts when `--usage` is set (or a small always-on
-  token pair if it stays ≤ one terminal row). No cost on the bar by default.
-- Handle terminal resize for the pinned bar (recompute scroll region) — only if
-  a focused fix is cheap; otherwise document as known limitation.
+### REPL features (v1)
+
+- **History**: in-memory + file under the agent project
+  (e.g. `data/chat_history` or `~/.monkeybot/chat_history`), surviving restarts.
+- **Multiline**: paste and explicit continue (e.g. meta+enter / escape+enter);
+  Enter submits a non-empty buffer. Document the binding in the banner.
+- **Keybindings**: Ctrl-C cancels the prompt / signals interrupt consistently
+  with today’s “exit or abort turn” behavior; Ctrl-D on empty buffer exits
+  like `/bye`.
+- **Slash commands**: keep `/bye` `/quit` `/exit`; structure bindings so more
+  `/…` commands can land later without another input rewrite.
+- **HITL**: route confirmations and elicitations through the same session
+  (yes/no and free-text prompts), not bare `input()`.
+- **Non-TTY / CI**: if stdin or stdout is not a TTY, fall back to the current
+  line reader (or prompt_toolkit’s plain mode) so pexpect/pipes keep working.
+- **Dependency**: add `prompt-toolkit` to `cli/pyproject.toml` (direct dep).
+
+### Still in scope (output polish, secondary)
+
+Land after or with the REPL shell — do not block the input migration on these:
+
+1. **Session banner** — provider, model, gateway URL, auto-spawned vs attached,
+   short keybinding hint.
+2. **validate/doctor colors** — TTY color + distinct warning/error icons in
+   `output.py`; `--json` unchanged; honor `NO_COLOR`.
+3. **Light markdown styling** — optional follow-on: ANSI bold/headers/code in
+   `terminal_markdown.py`, or a later Rich renderer. Not required to call the
+   REPL done.
+
+### Phases
+
+| Phase | Deliverable |
+|-------|-------------|
+| **A** | prompt_toolkit `PromptSession` wired into `chat`; history + multiline + Ctrl-D/Ctrl-C; non-TTY fallback; HITL via same session |
+| **B** | Move context ring into `bottom_toolbar`; remove DECSTBM status bar; session banner |
+| **C** | Readiness output colors (`validate`/`doctor`); optional quiet mode |
+| **D** | (Optional) styled streaming markdown |
 
 ## Boundaries
 
-- No Rich / prompt_toolkit / Textual adoption.
-- No `talk` or `loop` visual redesign (first demo still leads with `chat`).
-- No `demo_agent` / Docker / observability stack work.
-- No change to SSE protocol, gateway behavior, or check IDs.
-- No multiline editor / history / completion in the REPL for v1.
-- Do not block on `cli-demoability` correctness fixes, but prefer landing
-  readiness truthfulness before or with Phase 1 so green checks are honest.
+- No Textual / fullscreen TUI app in v1.
+- No Rich requirement in v1 (may revisit in Phase D).
+- No `talk` / `loop` REPL migration.
+- No gateway/SSE protocol changes; check IDs unchanged.
+- No change to `--json` schema for validate/doctor.
+- Do not require `cli-demoability` to merge first, but honest green checks
+  still matter for demos.
+
+## Risks
+
+- **pexpect e2e**: prompt_toolkit cursor-position requests can confuse dumb
+  pipes — gate on TTY, set known env (e.g. disable CPR) in tests, and keep a
+  non-TTY fallback path covered by CI.
+- **SIGINT**: today a custom asyncio signal handler races `input()`; with
+  prompt_toolkit, prefer its interrupt/`KeyboardInterrupt` model and one
+  clear “abort turn vs exit” policy.
+- **Status bar migration**: toolbar updates must refresh without corrupting
+  mid-turn prints; update toolbar between turns (and on usage fetch), not on
+  every streamed delta unless proven safe.
+- **History path**: must respect agent `--cwd` / project root and stay
+  gitignore-friendly under `data/`.
 
 ## Affected code
 
-- `cli/src/monkeybot_cli/output.py`
-- `cli/src/monkeybot_cli/commands/chat.py`
-- `cli/src/monkeybot_cli/terminal_markdown.py`
-- `cli/src/monkeybot_cli/chat_status_bar.py`
-- Focused tests under `cli/tests/` (`test_cli.py`, `test_terminal_markdown.py`,
-  `test_chat_status_bar.py`, plus small banner/color helpers as needed)
+- `cli/pyproject.toml` / `cli/uv.lock` — add `prompt-toolkit`
+- `cli/src/monkeybot_cli/commands/chat.py` — session loop, `_read_line`, HITL
+- New helper module e.g. `cli/src/monkeybot_cli/chat_repl.py` — session factory,
+  history, toolbar, keybindings
+- `cli/src/monkeybot_cli/chat_status_bar.py` — shrink to pure formatting helpers
+  used by the toolbar; remove DECSTBM owner logic in Phase B
+- `cli/src/monkeybot_cli/output.py` — Phase C colors
+- Tests: `test_chat_e2e.py`, `test_chat_errors.py`, `test_chat_status_bar.py`,
+  new REPL unit tests (history path, non-TTY fallback, toolbar formatting)

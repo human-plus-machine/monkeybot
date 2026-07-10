@@ -1,30 +1,42 @@
 # Acceptance
 
-## Phase 1 — readiness output
+## Phase A — prompt_toolkit shell
 
-- On a TTY without `NO_COLOR`, `validate`/`doctor` human output uses green pass,
-  yellow warning, and red error icons; header color matches overall status.
-- With `NO_COLOR=1` or non-TTY stdout, output has no ANSI escapes.
-- `--json` schema and field values are unchanged (no color keys, no layout
-  fields).
-- Passing checks never render as `id: pass` solely because `message` was empty.
-- If `--quiet` ships: full success prints one summary line; any warning/error
-  still prints the checklist.
+- `monkeybot chat` on a TTY uses prompt_toolkit for the user prompt (not
+  thread-wrapped `input()`).
+- Up-arrow recalls prior submissions within the session; history persists
+  across chat restarts for the same agent project.
+- Multiline paste does not submit early; documented submit binding works.
+- Ctrl-D on an empty buffer exits equivalently to `/bye`.
+- Ctrl-C behavior is defined and tested: interrupt current prompt / turn
+  without leaving the terminal in a broken cooked/raw state.
+- Tool confirmation and elicitation prompts use the same REPL session.
+- Non-TTY (or explicit fallback) still completes the existing pexpect e2e
+  round-trip; CI does not require a real TTY for that test.
+- `prompt-toolkit` is a declared direct dependency of `monkeybot-cli`.
 
-## Phase 2 — chat banner
+## Phase B — toolbar + banner
 
-- `chat` prints a one-block welcome including provider, model, and gateway
-  target before the first prompt.
-- Auto-spawned vs attached gateway is distinguishable in that banner.
-- Existing turn markers (🧑 / 🐵), spinner, and tool activity lines still work.
+- Context-window ring appears in prompt_toolkit `bottom_toolbar` (or
+  equivalent) and remains correct across turns.
+- DECSTBM scroll-region status bar is removed; no dual status owners.
+- Welcome banner shows provider, model, gateway target, and whether the
+  gateway was auto-spawned, plus a one-line keybinding hint.
+- Existing spinner → tool activity → 🐵 stream loop still functions.
 
-## Phase 3 — markdown + status
+## Phase C — readiness colors
 
-- Streamed assistant markdown on a TTY applies bold / header / inline-code
-  styling without breaking mid-stream chunks; non-TTY remains plain stripped
-  text.
-- Context ring remains on the status bar; optional token counts stay on one row
-  and do not displace the ring.
-- Existing `cli/tests/` chat/markdown/status-bar coverage still passes; new
-  cases cover color gating, empty-message pass labels, banner fields, and
-  styled vs plain markdown paths.
+- On a TTY without `NO_COLOR`, `validate`/`doctor` use green pass, yellow
+  warning, red error; `--json` unchanged and colorless.
+- Passing checks never render as `id: pass` only because `message` was empty.
+
+## Phase D — optional markdown
+
+- If shipped: streamed assistant markdown on a TTY gets light styling without
+  breaking chunked SSE deltas; non-TTY stays plain.
+
+## Cross-cutting
+
+- No Textual/fullscreen app; no `talk`/`loop` migration in this feature.
+- Relevant `cli/tests/` pass, including updated chat e2e and new REPL unit
+  tests for history path, fallback, and toolbar formatting.

@@ -1,19 +1,25 @@
-# User stories: prettier CLI demo
+# User stories: real CLI REPL
 
-## Presenter-ready readiness
+## Product REPL
 
-As a presenter, when I run `validate` and `doctor` on a healthy fake scaffold,
-I see a short, color-coded success report that reads as “ready” at a glance —
-not a wall of identical `!` marks or `: pass` placeholders.
+As a presenter or daily user, I use `monkeybot chat` as a real terminal REPL:
+arrow-key history, multiline paste, Ctrl-D to leave, and a stable bottom
+status line — not a bare `input()` prompt that resets every turn.
 
-## Product-feeling chat
+## HITL without breaking the shell
 
-As a presenter, when I open `monkeybot chat`, I immediately see which
-provider/model/gateway I am talking to, then the familiar spinner → tool
-activity → 🐵 streamed reply loop, with lightly styled markdown on a TTY so
-headings and code do not look like raw markup.
+As a user approving a tool or answering an elicitation, I stay inside the same
+REPL chrome (prompt_toolkit), with clear yes/no or free-text prompts, instead
+of dropping into raw `input()` that ignores history and keybindings.
 
-## Automation unchanged
+## Demo + CI both work
 
-As a script or CI job, `--json` and non-TTY pipes stay plain, stable, and
-parseable; visual polish never becomes a required dependency for machines.
+As a presenter on a TTY, the REPL looks intentional (banner, toolbar, styled
+prompt). As CI/pexpect on a pipe, chat still round-trips without requiring a
+real terminal capability database or CPR dance.
+
+## Readiness still readable
+
+As a presenter, `validate` / `doctor` on a healthy scaffold read as a clean
+color-coded ready state before I enter the REPL (secondary to the REPL work,
+but part of the same demo path).
