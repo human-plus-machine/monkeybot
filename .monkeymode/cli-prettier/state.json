@@ -1,0 +1,43 @@
+{
+  "feature_name": "cli-prettier",
+  "current_phase": "lite_complete",
+  "phase_status": {
+    "design_1a": "completed",
+    "design_1b": "not_planned",
+    "design_1c": "not_planned",
+    "user_stories": "completed",
+    "code_spec": "not_planned",
+    "implementation": "not_started",
+    "verification": "not_started",
+    "integration": "not_started"
+  },
+  "artifacts": {
+    "design": ".monkeymode/cli-prettier/design.md",
+    "user_stories": ".monkeymode/cli-prettier/user-stories.md",
+    "acceptance": ".monkeymode/cli-prettier/acceptance.md"
+  },
+  "stories": {},
+  "parallel_execution": {
+    "enabled": false,
+    "max_concurrent": 4,
+    "batches": [],
+    "current_batch": null
+  },
+  "rework_history": [],
+  "integration": {
+    "status": "not_started",
+    "shared_files_merged": [],
+    "integration_tests_added": 0,
+    "completed_at": null
+  },
+  "context": {
+    "save_qa_log": false,
+    "mode": "artifact-only-lite",
+    "scope": "Exactly one design file, one user-story file, and one acceptance file; no phase artifacts.",
+    "related": [
+      "cli-demoability (truthful fake readiness; correctness before cosmetics)"
+    ],
+    "next_step": "Await explicit user direction to implement phases 1–3."
+  },
+  "last_updated": "2026-07-10T11:51:00Z"
+}
