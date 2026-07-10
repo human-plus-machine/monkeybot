@@ -58,7 +58,8 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
         (),
         credentials_optional=True,
     ),
-    "fake": ProviderSpec(("fake",), None, ()),
+    # No API key needed — a local echo provider for zero-setup demos/tests.
+    "fake": ProviderSpec(("fake",), None, (), credentials_optional=True),
 }
 
 

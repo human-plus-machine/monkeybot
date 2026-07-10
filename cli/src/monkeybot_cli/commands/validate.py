@@ -155,7 +155,7 @@ def run_validate(args: argparse.Namespace) -> int:
         category="config",
         severity="error",
         passed=bool(model_name),
-        message="model.name is required",
+        message="" if model_name else "model.name is required",
         field="model.name",
     )
 
@@ -164,13 +164,14 @@ def run_validate(args: argparse.Namespace) -> int:
     if isinstance(paths, dict):
         memory_uri = str(paths.get("memory_storage_uri", ""))
     memory_backend = "gcs" if memory_uri.startswith("gcs://") else "local"
+    memory_backend_ok = memory_backend in {"local", "gcs", "drive"}
     check(
         report,
         id="memory.backend.supported",
         category="config",
         severity="error",
-        passed=memory_backend in {"local", "gcs", "drive"},
-        message=f"Unsupported memory backend from uri: {memory_uri}",
+        passed=memory_backend_ok,
+        message="" if memory_backend_ok else f"Unsupported memory backend from uri: {memory_uri}",
     )
 
     flat = _flatten_to_env(merged)
@@ -211,48 +212,52 @@ def run_validate(args: argparse.Namespace) -> int:
         agent_md = str(paths.get("agent_md", ""))
         if agent_md:
             ap = _resolve_path(base, agent_md)
+            ap_ok = ap.is_file()
             check(
                 report,
                 id="paths.agent_md.exists",
                 category="paths",
                 severity="error",
-                passed=ap.is_file(),
-                message=f"Missing AGENT.md at {ap}",
+                passed=ap_ok,
+                message="" if ap_ok else f"Missing AGENT.md at {ap}",
                 field="paths.agent_md",
             )
         skills = str(paths.get("skills_path", ""))
         if skills:
             sp = _resolve_path(base, skills)
+            sp_ok = sp.is_dir()
             check(
                 report,
                 id="paths.skills_path.exists",
                 category="paths",
                 severity="warning",
-                passed=sp.is_dir(),
-                message=f"Skills path missing: {sp}",
+                passed=sp_ok,
+                message="" if sp_ok else f"Skills path missing: {sp}",
             )
         mcp_cfg = str(paths.get("mcp_config", ""))
         mcp_path: Path | None = None
         if mcp_cfg:
             mcp_path = _resolve_path(base, mcp_cfg)
+            mcp_path_ok = mcp_path.is_file()
             check(
                 report,
                 id="paths.mcp_config.exists",
                 category="paths",
                 severity="error",
-                passed=mcp_path.is_file(),
-                message=f"Missing MCP config: {mcp_path}",
+                passed=mcp_path_ok,
+                message="" if mcp_path_ok else f"Missing MCP config: {mcp_path}",
             )
         allow = str(paths.get("command_allowlist_config", ""))
         if allow:
             ap = _resolve_path(base, allow)
+            allow_ok = ap.is_file()
             check(
                 report,
                 id="paths.command_allowlist.exists",
                 category="paths",
                 severity="warning",
-                passed=ap.is_file(),
-                message=f"Missing command allowlist: {ap}",
+                passed=allow_ok,
+                message="" if allow_ok else f"Missing command allowlist: {ap}",
             )
             if ap.is_file():
                 try:
