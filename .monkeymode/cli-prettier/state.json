@@ -1,0 +1,86 @@
+{
+  "feature_name": "cli-prettier",
+  "current_phase": "lite_complete",
+  "phase_status": {
+    "design_1a": "completed",
+    "design_1b": "not_planned",
+    "design_1c": "not_planned",
+    "user_stories": "completed",
+    "code_spec": "not_planned",
+    "implementation": "not_started",
+    "verification": "not_started",
+    "integration": "not_started"
+  },
+  "artifacts": {
+    "design": ".monkeymode/cli-prettier/design.md",
+    "user_stories": ".monkeymode/cli-prettier/user-stories.md",
+    "acceptance": ".monkeymode/cli-prettier/acceptance.md"
+  },
+  "stories": {},
+  "parallel_execution": {
+    "enabled": false,
+    "max_concurrent": 4,
+    "batches": [],
+    "current_batch": null
+  },
+  "rework_history": [
+    {
+      "id": "rework-001",
+      "trigger": "feedback-design",
+      "origin_phase": "1a",
+      "scope": "targeted",
+      "description": "Pivot from ANSI-only cosmetics to a prompt_toolkit real REPL as the primary design; keep output polish as secondary phases.",
+      "affected_artifacts": [
+        ".monkeymode/cli-prettier/design.md",
+        ".monkeymode/cli-prettier/user-stories.md",
+        ".monkeymode/cli-prettier/acceptance.md"
+      ],
+      "affected_stories": [
+        "product-repl",
+        "hitl-same-shell",
+        "demo-and-ci",
+        "readiness-readable"
+      ],
+      "status": "completed",
+      "created_at": "2026-07-10T11:57:00Z",
+      "completed_at": "2026-07-10T11:57:00Z"
+    },
+    {
+      "id": "rework-002",
+      "trigger": "pr-review",
+      "origin_phase": "1a",
+      "scope": "targeted",
+      "description": "Address PR #86 review: atomic PromptSession+toolbar/DECSTBM removal in Phase A; explicit Ctrl-C state machine; HITL HTTP failure handling; single history path; drop slash-command speculation; move validate/doctor/markdown to follow-up.",
+      "affected_artifacts": [
+        ".monkeymode/cli-prettier/design.md",
+        ".monkeymode/cli-prettier/user-stories.md",
+        ".monkeymode/cli-prettier/acceptance.md"
+      ],
+      "affected_stories": [
+        "product-repl",
+        "hitl-same-shell",
+        "demo-and-ci"
+      ],
+      "status": "completed",
+      "created_at": "2026-07-10T12:12:00Z",
+      "completed_at": "2026-07-10T12:12:00Z"
+    }
+  ],
+  "integration": {
+    "status": "not_started",
+    "shared_files_merged": [],
+    "integration_tests_added": 0,
+    "completed_at": null
+  },
+  "context": {
+    "save_qa_log": false,
+    "mode": "artifact-only-lite",
+    "scope": "Exactly one design file, one user-story file, and one acceptance file; no phase artifacts.",
+    "related": [
+      "cli-demoability (truthful fake readiness; separate from this REPL plan)"
+    ],
+    "primary_stack": "prompt_toolkit PromptSession (async) + bottom_toolbar; DECSTBM removed in same phase; print-based turn renderer retained",
+    "next_step": "Await explicit user direction to implement Phase A."
+  },
+  "last_updated": "2026-07-10T12:12:00Z"
+}
