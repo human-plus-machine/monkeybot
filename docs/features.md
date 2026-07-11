@@ -170,7 +170,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 **Invariants:**
 - Exactly one overlapping `stream()` per provider instance is undefined.
 - `Message.role` is only `user` | `assistant` | `system`.
-- Prompt caching: stable prefix = `AGENT.md` + harness + attachments; `MODEL_ENABLE_CACHING` toggles explicit Anthropic `cache_control`.
+- Prompt caching: stable prefix = `AGENT.md` + harness + attachments; Anthropic providers always use explicit `cache_control` on the stable prefix.
 - Cost estimation via `providers/pricing.estimate_cost()` on usage events.
 
 ---

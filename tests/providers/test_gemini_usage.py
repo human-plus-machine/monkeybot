@@ -1,11 +1,10 @@
-"""Gemini usage telemetry and cache_enabled constructor contract."""
+"""Gemini usage telemetry."""
 
 from __future__ import annotations
 
 import sys
 import types
 from collections.abc import AsyncIterator
-from pathlib import Path
 from types import ModuleType
 from typing import Any
 
@@ -19,9 +18,6 @@ from monkeybot.providers.gemini import (
     _grounding_metadata_to_dict,
     _usage_from_response,
 )
-
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-_GEMINI_SRC = _REPO_ROOT / "src/monkeybot/providers/gemini.py"
 
 
 def test_usage_maps_cached_count_to_split_fields() -> None:
@@ -81,50 +77,6 @@ def test_usage_invariant_total_equals_read_plus_creation() -> None:
 
 def test_usage_none_metadata_returns_none() -> None:
     assert _usage_from_response(None) is None
-
-
-def test_init_defaults_cache_enabled_true() -> None:
-    provider = GeminiProvider()
-    assert provider._cache_enabled is True
-
-
-def test_init_stores_cache_enabled_false() -> None:
-    provider = GeminiProvider(cache_enabled=False)
-    assert provider._cache_enabled is False
-
-
-def test_init_cache_enabled_is_keyword_only() -> None:
-    with pytest.raises(TypeError):
-        GeminiProvider(True)  # type: ignore[misc]
-
-
-def test_request_config_identical_regardless_of_cache_flag() -> None:
-    enabled = GeminiProvider(
-        temperature=0.5,
-        max_output_tokens=4096,
-        thinking_budget=1024,
-        cache_enabled=True,
-    )
-    disabled = GeminiProvider(
-        temperature=0.5,
-        max_output_tokens=4096,
-        thinking_budget=1024,
-        cache_enabled=False,
-    )
-    for attr in (
-        "_temperature",
-        "_max_tokens",
-        "_thinking_budget",
-        "_supports_streaming",
-    ):
-        assert getattr(enabled, attr) == getattr(disabled, attr)
-
-    src = _GEMINI_SRC.read_text(encoding="utf-8")
-    init_end = src.index("    @property")
-    init_block = src[:init_end]
-    remainder = src[init_end:]
-    assert init_block.count("self._cache_enabled") == 1
-    assert "self._cache_enabled" not in remainder
 
 
 def test_grounding_metadata_to_dict_none_returns_none() -> None:

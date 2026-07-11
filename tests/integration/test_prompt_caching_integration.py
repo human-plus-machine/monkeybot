@@ -66,8 +66,8 @@ async def test_cache_split_and_cost_flow_through_loop_to_turn_complete() -> None
 
 
 @pytest.mark.integration
-def test_config_cache_flag_threads_to_provider_constructor() -> None:
-    """Stories 1+8: get_provider_config(cache_enabled=) resolves for session model pick."""
+def test_get_provider_config_builds_openai_provider() -> None:
+    """get_provider_config resolves OpenAI provider without cache toggle."""
     mock_instance = MagicMock()
     with patch(
         "monkeybot.core.config.settings.OpenAIProvider",
@@ -78,14 +78,12 @@ def test_config_cache_flag_threads_to_provider_constructor() -> None:
         cfg = get_provider_config(
             provider="openai",
             model_name="gpt-5",
-            cache_enabled=False,
         )
         assert cfg.provider is mock_instance
         assert cfg.model == "gpt-5"
         mock_cls.assert_called_once_with(
             temperature=DEFAULT_MODEL_TEMPERATURE,
             max_tokens=DEFAULT_MODEL_MAX_TOKENS,
-            cache_enabled=False,
         )
 
 

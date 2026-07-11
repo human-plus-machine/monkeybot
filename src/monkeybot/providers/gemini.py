@@ -420,7 +420,6 @@ class GeminiProvider:
         max_tokens: int | None = None,
         max_output_tokens: int | None = None,
         thinking_budget: int | None = None,
-        cache_enabled: bool = True,
         api_key: str | None = None,
     ) -> None:
         """Gemini streaming provider (Vertex AI or Google AI Studio).
@@ -428,14 +427,6 @@ class GeminiProvider:
         When ``api_key`` is provided, the provider connects to Google AI Studio
         (``generativelanguage.googleapis.com``). Otherwise it connects to Vertex AI
         using application default credentials or the project/location environment variables.
-
-        ``cache_enabled`` is accepted for interface symmetry with the other providers
-        (Story 1 constructor contract) but is intentionally **inert** for Gemini: Vertex
-        serves implicit prompt caching provider-side, so there is no request flag to toggle.
-        The flag does **not** disable implicit caching and does **not** change the outbound
-        request config; it only reserves the switch for explicit ``CachedContent`` (out of
-        scope, see design 1A "Out of Scope"). Implicit-cache token counts are always reported
-        in the usage telemetry regardless of this flag.
 
         ``max_output_tokens`` is a backward-compatible alias for ``max_tokens``.
 
@@ -452,7 +443,6 @@ class GeminiProvider:
         self._temperature = sampling.temperature
         self._max_tokens = sampling.max_tokens
         self._thinking_budget = thinking_budget
-        self._cache_enabled = cache_enabled
         self._api_key = api_key
 
     def _client(self, model_param: str) -> Any:

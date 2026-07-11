@@ -41,7 +41,6 @@ ENV_MAP: dict[tuple[str, str], str] = {
     ("model", "temperature"): "MODEL_TEMPERATURE",
     ("model", "max_tokens"): "MODEL_MAX_TOKENS",
     ("model", "thinking_budget"): "MODEL_THINKING_BUDGET",
-    ("model", "enable_caching"): "MODEL_ENABLE_CACHING",
     ("model", "context_window"): "MODEL_CONTEXT_WINDOW",
     ("model", "summarization_model"): "CONTEXT_SUMMARIZATION_MODEL",
     ("model", "max_turns"): "MAX_TURNS",
