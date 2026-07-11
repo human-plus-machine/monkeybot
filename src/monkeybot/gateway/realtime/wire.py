@@ -8,7 +8,7 @@ different format internally, but the client contract is stable.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from monkeybot.core.llm.realtime_provider import AudioFormat
@@ -52,12 +52,30 @@ class ClientCloseFrame:
     reason: str = "client_close"
 
 
+@dataclass(frozen=True)
+class ClientToolConfirmationResponseFrame:
+    kind: Literal["tool_confirmation_response"] = "tool_confirmation_response"
+    tool_call_id: str = ""
+    approved: bool = False
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class ClientElicitationResponseFrame:
+    kind: Literal["elicitation_response"] = "elicitation_response"
+    elicitation_id: str = ""
+    user_data: Any = None
+    cancelled: bool = False
+
+
 ClientFrame = (
     ClientConnectFrame
     | ClientTextFrame
     | ClientInterruptFrame
     | ClientAudioStreamEndFrame
     | ClientCloseFrame
+    | ClientToolConfirmationResponseFrame
+    | ClientElicitationResponseFrame
 )
 
 
@@ -103,6 +121,47 @@ class ServerToolCallFrame:
 
 
 @dataclass(frozen=True)
+class ServerToolResultFrame:
+    kind: Literal["tool_result"] = "tool_result"
+    call_id: str = ""
+    name: str = ""
+    result: str = ""
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class ServerUserTranscriptFrame:
+    kind: Literal["user_transcript"] = "user_transcript"
+    text: str = ""
+    is_final: bool = True
+
+
+@dataclass(frozen=True)
+class ServerUsageFrame:
+    kind: Literal["usage"] = "usage"
+    usage: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ServerToolConfirmationFrame:
+    kind: Literal["tool_confirmation"] = "tool_confirmation"
+    tool_call_id: str = ""
+    tool_name: str = ""
+    prompt: str = ""
+    arguments: dict[str, Any] = field(default_factory=dict)
+    timeout_sec: float | None = None
+
+
+@dataclass(frozen=True)
+class ServerElicitationFrame:
+    kind: Literal["elicitation"] = "elicitation"
+    elicitation_id: str = ""
+    prompt: str = ""
+    schema: dict[str, Any] | None = None
+    timeout_sec: float | None = None
+
+
+@dataclass(frozen=True)
 class ServerErrorFrame:
     kind: Literal["error"] = "error"
     error: str = ""
@@ -121,6 +180,11 @@ ServerFrame = (
     | ServerInterruptedFrame
     | ServerTurnBoundaryFrame
     | ServerToolCallFrame
+    | ServerToolResultFrame
+    | ServerUserTranscriptFrame
+    | ServerUsageFrame
+    | ServerToolConfirmationFrame
+    | ServerElicitationFrame
     | ServerErrorFrame
     | ServerSessionEndedFrame
 )
@@ -163,6 +227,18 @@ def parse_client_frame(data: str | bytes) -> ClientFrame:
         return ClientAudioStreamEndFrame()
     if kind == "close":
         return ClientCloseFrame(reason=str(payload.get("reason", "client_close")))
+    if kind == "tool_confirmation_response":
+        return ClientToolConfirmationResponseFrame(
+            tool_call_id=str(payload.get("tool_call_id", "")),
+            approved=bool(payload.get("approved", False)),
+            reason=str(payload.get("reason", "")),
+        )
+    if kind == "elicitation_response":
+        return ClientElicitationResponseFrame(
+            elicitation_id=str(payload.get("elicitation_id", "")),
+            user_data=payload.get("user_data"),
+            cancelled=bool(payload.get("cancelled", False)),
+        )
     raise ProtocolError(f"Unknown client frame kind: {kind!r}")
 
 
@@ -198,6 +274,41 @@ def parse_server_frame(data: str) -> ServerFrame:
             name=str(payload.get("name", "")),
             args=dict(payload.get("args") or {}),
         )
+    if kind == "tool_result":
+        err = payload.get("error")
+        return ServerToolResultFrame(
+            call_id=str(payload.get("call_id", "")),
+            name=str(payload.get("name") or payload.get("tool") or ""),
+            result=str(payload.get("result", "")),
+            error=None if err is None else str(err),
+        )
+    if kind == "user_transcript":
+        return ServerUserTranscriptFrame(
+            text=str(payload.get("text", "")),
+            is_final=bool(payload.get("is_final", True)),
+        )
+    if kind == "usage":
+        usage = payload.get("usage")
+        return ServerUsageFrame(usage=dict(usage) if isinstance(usage, dict) else dict(payload))
+    if kind == "tool_confirmation":
+        args = payload.get("arguments") or payload.get("args") or {}
+        timeout = payload.get("timeout_sec")
+        return ServerToolConfirmationFrame(
+            tool_call_id=str(payload.get("tool_call_id", "")),
+            tool_name=str(payload.get("tool_name") or payload.get("tool") or ""),
+            prompt=str(payload.get("prompt") or payload.get("message") or ""),
+            arguments=dict(args) if isinstance(args, dict) else {},
+            timeout_sec=float(timeout) if timeout is not None else None,
+        )
+    if kind == "elicitation":
+        schema = payload.get("schema") or payload.get("requestedSchema")
+        timeout = payload.get("timeout_sec")
+        return ServerElicitationFrame(
+            elicitation_id=str(payload.get("elicitation_id", "")),
+            prompt=str(payload.get("prompt") or payload.get("message") or ""),
+            schema=dict(schema) if isinstance(schema, dict) else None,
+            timeout_sec=float(timeout) if timeout is not None else None,
+        )
     if kind == "error":
         return ServerErrorFrame(error=str(payload.get("error", "")))
     if kind == "session_ended":
@@ -209,25 +320,61 @@ def encode_server_frame(frame: ServerFrame) -> str | bytes:
     """Encode a server frame to JSON text or binary audio."""
     if isinstance(frame, ServerAudioFrame):
         return frame.chunk
-    return json.dumps(
-        {
-            "kind": frame.kind,
-            **(
-                {"session_id": frame.session_id, "input_format": frame.input_format,
-                 "output_format": frame.output_format, "chunk_ms": frame.chunk_ms}
-                if isinstance(frame, ServerConnectedFrame)
-                else {}
-            ),
-            **({"delta": frame.delta, "is_final": frame.is_final} if isinstance(frame, ServerTextDeltaFrame) else {}),
-            **({"role": frame.role} if isinstance(frame, ServerTurnBoundaryFrame) else {}),
-            **({"call_id": frame.call_id, "name": frame.name, "args": frame.args}
-               if isinstance(frame, ServerToolCallFrame) else {}),
-            **({"error": frame.error} if isinstance(frame, ServerErrorFrame) else {}),
-            **({"reason": frame.reason} if isinstance(frame, ServerSessionEndedFrame) else {}),
-        },
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
+    payload: dict[str, Any] = {"kind": frame.kind}
+    if isinstance(frame, ServerConnectedFrame):
+        payload.update(
+            {
+                "session_id": frame.session_id,
+                "input_format": frame.input_format,
+                "output_format": frame.output_format,
+                "chunk_ms": frame.chunk_ms,
+            }
+        )
+    elif isinstance(frame, ServerTextDeltaFrame):
+        payload.update({"delta": frame.delta, "is_final": frame.is_final})
+    elif isinstance(frame, ServerTurnBoundaryFrame):
+        payload["role"] = frame.role
+    elif isinstance(frame, ServerToolCallFrame):
+        payload.update(
+            {"call_id": frame.call_id, "name": frame.name, "args": frame.args or {}}
+        )
+    elif isinstance(frame, ServerToolResultFrame):
+        payload.update(
+            {
+                "call_id": frame.call_id,
+                "name": frame.name,
+                "result": frame.result,
+                "error": frame.error,
+            }
+        )
+    elif isinstance(frame, ServerUserTranscriptFrame):
+        payload.update({"text": frame.text, "is_final": frame.is_final})
+    elif isinstance(frame, ServerUsageFrame):
+        payload["usage"] = frame.usage
+    elif isinstance(frame, ServerToolConfirmationFrame):
+        payload.update(
+            {
+                "tool_call_id": frame.tool_call_id,
+                "tool_name": frame.tool_name,
+                "prompt": frame.prompt,
+                "arguments": frame.arguments,
+                "timeout_sec": frame.timeout_sec,
+            }
+        )
+    elif isinstance(frame, ServerElicitationFrame):
+        payload.update(
+            {
+                "elicitation_id": frame.elicitation_id,
+                "prompt": frame.prompt,
+                "schema": frame.schema,
+                "timeout_sec": frame.timeout_sec,
+            }
+        )
+    elif isinstance(frame, ServerErrorFrame):
+        payload["error"] = frame.error
+    elif isinstance(frame, ServerSessionEndedFrame):
+        payload["reason"] = frame.reason
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 class ProtocolError(Exception):
@@ -238,19 +385,26 @@ __all__ = [
     "ClientAudioStreamEndFrame",
     "ClientCloseFrame",
     "ClientConnectFrame",
+    "ClientElicitationResponseFrame",
     "ClientFrame",
     "ClientInterruptFrame",
     "ClientTextFrame",
+    "ClientToolConfirmationResponseFrame",
     "ProtocolError",
     "ServerAudioFrame",
     "ServerConnectedFrame",
+    "ServerElicitationFrame",
     "ServerErrorFrame",
     "ServerFrame",
     "ServerInterruptedFrame",
     "ServerSessionEndedFrame",
     "ServerTextDeltaFrame",
     "ServerToolCallFrame",
+    "ServerToolConfirmationFrame",
+    "ServerToolResultFrame",
     "ServerTurnBoundaryFrame",
+    "ServerUsageFrame",
+    "ServerUserTranscriptFrame",
     "audio_duration_sec",
     "encode_server_frame",
     "parse_client_frame",

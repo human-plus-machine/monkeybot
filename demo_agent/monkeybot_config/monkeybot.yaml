@@ -7,7 +7,7 @@
 
 runtime:
   log_level: INFO
-  port: 8787
+  port: 8080
   transcript_enabled: true
 
 paths:
@@ -31,8 +31,8 @@ model:
   # Main turn-based model: used for context curation, memory, and tool execution.
   # Use a non-Live model that supports generateContent.
   provider: nvidia
-  name: z-ai/glm-5.2
-  context_window: 1000000
+  name: deepseek-ai/deepseek-v4-pro
+  context_window: 200000
   thinking_budget: 0
   # summarization_model: gemini-2.5-flash  # optional; env CONTEXT_SUMMARIZATION_MODEL overrides
 

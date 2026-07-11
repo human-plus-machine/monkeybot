@@ -47,6 +47,19 @@ class RealtimeMetrics:
         self.input_tokens += max(0, input_tokens)
         self.output_tokens += max(0, output_tokens)
 
+    def to_usage_payload(self, *, context_window_tokens: int = 128_000) -> dict[str, Any]:
+        """Shape compatible with ``GET /sessions/{id}/usage`` / ``parse_usage_response``."""
+        estimated = self.input_tokens
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cost_usd": 0.0,
+            "last_prompt_tokens": self.input_tokens,
+            "estimated_prompt_tokens": estimated,
+            "context_window_tokens": context_window_tokens,
+            "summarization_threshold_tokens": max(1, int(context_window_tokens * 0.85)),
+        }
+
     def start_turn(self, now: float | None = None) -> None:
         """Call when a user turn boundary is finalized (model is about to respond)."""
         self._current_turn_started_at = now or time.monotonic()

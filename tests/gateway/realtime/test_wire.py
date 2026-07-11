@@ -180,6 +180,68 @@ def test_parse_server_unknown_kind_raises() -> None:
         parse_server_frame(json.dumps({"kind": "unknown"}))
 
 
+def test_tool_result_user_transcript_usage_hitl_roundtrip() -> None:
+    from monkeybot.gateway.realtime.wire import (
+        ClientElicitationResponseFrame,
+        ClientToolConfirmationResponseFrame,
+        ServerElicitationFrame,
+        ServerToolConfirmationFrame,
+        ServerToolResultFrame,
+        ServerUsageFrame,
+        ServerUserTranscriptFrame,
+    )
+
+    tool_result = ServerToolResultFrame(
+        call_id="c1", name="read", result="ok", error=None
+    )
+    parsed = parse_server_frame(encode_server_frame(tool_result))
+    assert isinstance(parsed, ServerToolResultFrame)
+    assert parsed.call_id == "c1"
+    assert parsed.result == "ok"
+
+    ut = ServerUserTranscriptFrame(text="hello", is_final=True)
+    assert parse_server_frame(encode_server_frame(ut)).text == "hello"
+
+    usage = ServerUsageFrame(usage={"input_tokens": 3, "output_tokens": 1})
+    parsed_u = parse_server_frame(encode_server_frame(usage))
+    assert isinstance(parsed_u, ServerUsageFrame)
+    assert parsed_u.usage["input_tokens"] == 3
+
+    conf = ServerToolConfirmationFrame(
+        tool_call_id="c1", tool_name="shell", prompt="Allow?", arguments={"cmd": "ls"}
+    )
+    assert parse_server_frame(encode_server_frame(conf)).tool_name == "shell"
+
+    elicit = ServerElicitationFrame(elicitation_id="e1", prompt="Name?", schema={"type": "object"})
+    assert parse_server_frame(encode_server_frame(elicit)).elicitation_id == "e1"
+
+    c_resp = parse_client_frame(
+        json.dumps(
+            {
+                "kind": "tool_confirmation_response",
+                "tool_call_id": "c1",
+                "approved": True,
+                "reason": "",
+            }
+        )
+    )
+    assert isinstance(c_resp, ClientToolConfirmationResponseFrame)
+    assert c_resp.approved is True
+
+    e_resp = parse_client_frame(
+        json.dumps(
+            {
+                "kind": "elicitation_response",
+                "elicitation_id": "e1",
+                "user_data": "Ada",
+                "cancelled": False,
+            }
+        )
+    )
+    assert isinstance(e_resp, ClientElicitationResponseFrame)
+    assert e_resp.user_data == "Ada"
+
+
 def test_audio_duration_sec() -> None:
     fmt = AudioFormat(encoding="pcm_s16le", sample_rate_hz=24000, channels=1, frame_ms=200)
     # 24000 samples/sec * 2 bytes = 48000 bytes/sec; 4800 bytes => 0.1s

@@ -122,7 +122,7 @@ python -m monkeybot.gateway.realtime_main
 Connect a client:
 
 ```javascript
-const ws = new WebSocket("ws://localhost:8787/sessions/session-123/realtime");
+const ws = new WebSocket("ws://localhost:8080/sessions/session-123/realtime");
 ws.onopen = () => ws.send(JSON.stringify({ kind: "connect", session_id: "session-123" }));
 ws.onmessage = (msg) => console.log(msg.data);
 ```
@@ -139,12 +139,12 @@ monkeybot talk
 monkeybot talk --text
 
 # Override defaults
-monkeybot talk --gateway-url ws://localhost:8787 --session-id session-123
+monkeybot talk --gateway-url ws://localhost:8080 --session-id session-123
 ```
 
 All arguments are optional and can be set via environment variables:
 
-- `MONKEYBOT_GATEWAY_URL` — default `ws://localhost:8787`
+- `MONKEYBOT_GATEWAY_URL` — default `ws://127.0.0.1:8080` (or `runtime.port` from yaml)
 - `MONKEYBOT_SESSION_ID` — auto-generated if not provided
 
 In text mode, type messages and press Enter. The agent still responds through audio if your system can play it; transcripts are printed as well. Special commands:

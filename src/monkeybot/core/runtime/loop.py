@@ -615,6 +615,7 @@ def _tool_outcome(
         tool=call.name,
         result=body,
         error=result.error,
+        call_id=call.call_id,
     )
     response = ToolResponse(
         id=call.call_id,
@@ -1328,6 +1329,7 @@ async def _run_inner_core(
                             label=call.name,
                             args=dict(call.args),
                             parse_error=call.parse_error,
+                            call_id=call.call_id,
                         )
                         result_evt, tool_resp = _tool_outcome(
                             call, ctx.request_id, ToolExecutionResult.err(call.parse_error)
@@ -1430,6 +1432,7 @@ async def _run_inner_core(
                             tool=call.name,
                             label=call.name,
                             args=dict(call.args),
+                            call_id=call.call_id,
                         )
                         result_evt, tool_resp = _tool_outcome(
                             call, ctx.request_id, ToolExecutionResult.err(msg)
@@ -1443,6 +1446,7 @@ async def _run_inner_core(
                         tool=call.name,
                         label=call.name,
                         args=dict(call.args),
+                        call_id=call.call_id,
                     )
                     allowed_exec.append(call)
 

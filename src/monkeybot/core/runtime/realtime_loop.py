@@ -16,7 +16,7 @@ from typing import Any
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.attachments.freeze import freeze_attachments_in_history
 from monkeybot.core.attachments.store import AttachmentStore
-from monkeybot.core.context import TurnContext, refresh_memory_index
+from monkeybot.core.context import PendingResponseBusPort, TurnContext, refresh_memory_index
 from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
 from monkeybot.core.llm.provider import Message, ToolCall
 from monkeybot.core.llm.realtime_provider import RealtimeToolCall
@@ -31,6 +31,7 @@ from monkeybot.core.runtime.events import (
     Thinking,
     ToolCallResult,
     ToolCallStarted,
+    ToolConfirmationRequestEvent,
     TurnComplete,
     UsageTotals,
 )
@@ -42,7 +43,7 @@ from monkeybot.core.types.content_blocks import (
     ToolResponse,
 )
 
-from .loop import ToolExecutorPort
+from .loop import ToolExecutorPort, _await_user_response_any
 
 logger = logging.getLogger("monkeybot.core.runtime.realtime_loop")
 
@@ -110,6 +111,7 @@ def _tool_outcome(
         tool=call.name,
         result=body,
         error=result.error,
+        call_id=call.call_id,
     )
     response = ToolResponse(
         id=call.call_id,
@@ -205,6 +207,7 @@ async def run_realtime_turn(
     transcript_writer: TranscriptWriter | None = None,
     tool_results_out: list[ContentBlock] | None = None,
     inject_texts_out: list[str] | None = None,
+    pending_bus: PendingResponseBusPort | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Process a finalized realtime user utterance + assistant response.
 
@@ -296,6 +299,7 @@ async def run_realtime_turn(
                     label=call.name,
                     args=dict(call.args),
                     parse_error=call.parse_error,
+                    call_id=call.call_id,
                 )
                 event, response = _tool_outcome(
                     call, ctx.request_id, ToolExecutionResult.err(call.parse_error)
@@ -319,11 +323,72 @@ async def run_realtime_turn(
                     denial_message = decision.message
                     break
                 if decision.kind == "confirm":
-                    # Realtime mode does not support interactive confirmation in v1.
-                    allowed = False
-                    denial_message = (
-                        decision.message or "Confirmation required but not supported in realtime"
+                    if pending_bus is None:
+                        allowed = False
+                        denial_message = (
+                            decision.message
+                            or "Confirmation required but realtime HITL is unavailable"
+                        )
+                        logger.warning(
+                            "realtime HITL unavailable %s",
+                            kv(
+                                request_id=ctx.request_id,
+                                thread_id=ctx.thread_id,
+                                call_id=call.call_id,
+                                tool=call.name,
+                            ),
+                        )
+                        break
+                    fut = pending_bus.register_pending(call.call_id)
+                    yield ToolConfirmationRequestEvent(
+                        request_id=ctx.request_id,
+                        tool_call_id=call.call_id,
+                        tool_name=call.name,
+                        arguments=dict(call.args),
+                        prompt=decision.message,
                     )
+                    try:
+                        payload = await _await_user_response_any(
+                            pending_bus, fut, call.call_id, timeout_sec=None
+                        )
+                    except asyncio.CancelledError:
+                        allowed = False
+                        denial_message = "cancelled by user"
+                        break
+                    if payload.get("_timeout"):
+                        allowed = False
+                        denial_message = "user did not respond in time"
+                        logger.info(
+                            "realtime HITL timeout %s",
+                            kv(
+                                request_id=ctx.request_id,
+                                thread_id=ctx.thread_id,
+                                call_id=call.call_id,
+                                approved=False,
+                                reason="timeout",
+                            ),
+                        )
+                        break
+                    if payload.get("approved"):
+                        allowed = True
+                    else:
+                        allowed = False
+                        reason_raw = payload.get("reason")
+                        denial_message = (
+                            (reason_raw if isinstance(reason_raw, str) else None)
+                            or decision.message
+                            or "denied by user"
+                        )
+                        logger.info(
+                            "realtime HITL denied %s",
+                            kv(
+                                request_id=ctx.request_id,
+                                thread_id=ctx.thread_id,
+                                call_id=call.call_id,
+                                approved=False,
+                                reason=denial_message,
+                            ),
+                        )
                     break
 
             if not allowed:
@@ -335,6 +400,7 @@ async def run_realtime_turn(
                     tool=call.name,
                     label=call.name,
                     args=dict(call.args),
+                    call_id=call.call_id,
                 )
                 result, inject_text = await _execute_tool(
                     call,

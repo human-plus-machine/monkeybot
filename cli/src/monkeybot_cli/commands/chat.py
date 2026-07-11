@@ -1,57 +1,53 @@
-"""monkeybot chat — terminal SSE client for the gateway."""
+"""monkeybot chat — gateway client (Textual TUI or plain fallback)."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
 import contextlib
-import json
 import os
 import signal
 import subprocess
 import sys
 import tempfile
 import threading
-import time
-import uuid
-from collections.abc import AsyncIterator
+from collections.abc import Coroutine
 from pathlib import Path
 from typing import Any, NamedTuple, TextIO
 
 import httpx
-from monkeybot.core.runtime.events import (
-    ActionRequiredEvent,
-    AssistantDelta,
-    ContextSummarized,
-    ContextSummarizing,
-    Error,
-    FrontendToolRequestEvent,
-    GroundingEvent,
-    ToolCallResult,
-    ToolCallStarted,
-    ToolConfirmationRequestEvent,
-    TurnComplete,
-    event_from_json,
-)
 
-from monkeybot_cli.chat_status_bar import ChatStatusBar, parse_usage_response
-from monkeybot_cli.terminal_markdown import MarkdownPlainStream
+from monkeybot_cli.chat_session import (
+    ChatSessionController,
+    ChatUiEvent,
+    HitlAnswer,
+    format_hitl_plain_prompt,
+)
+from monkeybot_cli.chat_status_bar import (
+    SessionUsageView,
+    format_context_ring,
+    format_context_ring_plain,
+)
+from monkeybot_cli.chat_tool_display import (
+    tool_display,
+    tool_spinner_prefix,
+)
+from monkeybot_cli.chat_tui import is_exit_command, run_chat_tui
 from monkeybot_cli.config_resolve import (
     load_agent_dotenv,
     load_config_doc,
     resolve_agent_root,
     resolve_config,
 )
+from monkeybot_cli.gateway_health import wait_for_health as _wait_for_health
 from monkeybot_cli.opensandbox_lifecycle import (
     ensure_opensandbox_for_agent,
     is_sandbox_enabled,
     server_url_from_config,
 )
-from monkeybot_cli.runtime_python import gateway_argv, resolve_runtime_python
+from monkeybot_cli.runtime_python import DEFAULT_PORT, gateway_argv, resolve_runtime_python
+from monkeybot_cli.terminal_markdown import MarkdownPlainStream
 
-DEFAULT_PORT = 8080
-_SUBAGENT_HINT_MAX = 60
-_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _DIM = "\x1b[2m"
 _GREEN = "\x1b[32m"
 _RED = "\x1b[31m"
@@ -60,16 +56,46 @@ _USER_PROMPT = "🧑"
 _ASSISTANT_PREFIX = "🐵 "
 _CYAN = "\x1b[36m"
 _UNDERLINE = "\x1b[4m"
+_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _GROUNDING_SOURCES_MAX = 5
 
+def _hyperlink(url: str, label: str) -> str:
+    """OSC 8 terminal hyperlink; falls back to a plain URL on non-TTY streams."""
+    if not url:
+        return label
+    if not sys.stdout.isatty():
+        return f"{label} ({url})" if label and label != url else url
+    return f"\x1b]8;;{url}\x1b\\{label or url}\x1b]8;;\x1b\\"
 
-def _format_http_error(operation: str, exc: httpx.HTTPError) -> str:
-    return f"{operation} failed: {exc}"
+
+def _print_grounding(evt: Any) -> None:
+    if not getattr(evt, "sources", None) and not getattr(evt, "search_queries", None):
+        return
+    header = "grounded search"
+    queries = getattr(evt, "search_queries", None) or []
+    if queries:
+        header += " — " + ", ".join(f'"{q}"' for q in queries)
+    print(f"{_DIM}  🔎 {header}{_RESET}", flush=True)
+    sources = list(getattr(evt, "sources", None) or [])
+    for source in sources[:_GROUNDING_SOURCES_MAX]:
+        title = source.get("title", "").strip()
+        uri = source.get("uri", "").strip()
+        if not uri:
+            continue
+        link = _hyperlink(uri, title or uri)
+        print(f"{_DIM}    {_CYAN}{_UNDERLINE}{link}{_RESET}", flush=True)
+    remaining = len(sources) - _GROUNDING_SOURCES_MAX
+    if remaining > 0:
+        print(f"{_DIM}    … and {remaining} more{_RESET}", flush=True)
+
+
+def use_textual_tui() -> bool:
+    if os.environ.get("MONKEYBOT_CHAT_PLAIN", "").strip().lower() in ("1", "true", "yes"):
+        return False
+    return sys.stdin.isatty() and sys.stdout.isatty()
 
 
 class _SpinnerLine:
-    """One animated status line (thinking, tool running, summarizing)."""
-
     def __init__(self, prefix: str) -> None:
         self._prefix = prefix
         self._stop = asyncio.Event()
@@ -104,95 +130,12 @@ class _SpinnerLine:
                 pass
 
 
-def _collapse_hint(text: str) -> str:
-    return " ".join(text.split())
-
-
-def _truncate_subagent_hint(text: str) -> str:
-    """Cap default subagent status-line hints; --verbose still shows full payloads."""
-    collapsed = _collapse_hint(text)
-    if len(collapsed) <= _SUBAGENT_HINT_MAX:
-        return collapsed
-    return collapsed[:_SUBAGENT_HINT_MAX] + "…"
-
-
-def _tool_hint(args: dict[str, object]) -> str:
-    """Summary of tool args for status lines."""
-    argv = args.get("argv")
-    if isinstance(argv, list) and argv:
-        return _collapse_hint(" ".join(str(x) for x in argv))
-
-    cmd = args.get("command")
-    if isinstance(cmd, str) and cmd.strip():
-        extra = args.get("args")
-        if extra is None:
-            extra = args.get("arguments")
-        if isinstance(extra, list) and extra:
-            line = " ".join([cmd.strip(), *[str(x) for x in extra]])
-        else:
-            line = cmd.strip()
-        return _collapse_hint(line)
-
-    for key in ("shell", "script", "path", "query", "url"):
-        val = args.get(key)
-        if isinstance(val, str) and val.strip():
-            return _collapse_hint(val.strip())
-    keys = list(args.keys())
-    if len(keys) == 1:
-        key = keys[0]
-        val = args[key]
-        if isinstance(val, (str, int, bool, float)):
-            return _collapse_hint(f"{key}: {val}")
-    if keys:
-        return f"{len(keys)} arg{'s' if len(keys) != 1 else ''}"
-    return ""
-
-
-def _task_subagent_label(args: dict[str, object]) -> str:
-    for key in ("subagent_type", "type", "persona"):
-        val = args.get(key)
-        if isinstance(val, str) and val.strip():
-            return f"subagent:{val.strip()}"
-    return "subagent"
-
-
-def _task_hint(args: dict[str, object]) -> str:
-    for key in ("task", "instructions", "prompt", "objective"):
-        val = args.get(key)
-        if isinstance(val, str) and val.strip():
-            return _truncate_subagent_hint(val.strip())
-    return ""
-
-
-def _tool_display(tool: str, label: str, args: dict[str, object]) -> str:
-    if tool == "task":
-        hint = _task_hint(args)
-        if not hint and label.strip() and label.strip() != tool:
-            hint = _truncate_subagent_hint(label.strip())
-        base = _task_subagent_label(args)
-        return base + (f" — {hint}" if hint else "")
-    hint = _tool_hint(args)
-    if not hint and label.strip() and label.strip() != tool:
-        hint = label.strip()
-    return tool + (f" — {hint}" if hint else "")
-
-
-def _tool_spinner_prefix(tool: str, label: str, args: dict[str, object]) -> str:
-    if tool == "task":
-        hint = _task_hint(args)
-        if not hint and label.strip() and label.strip() != tool:
-            hint = _truncate_subagent_hint(label.strip())
-        base = "spawning " + _task_subagent_label(args)
-        return base + (f" — {hint}" if hint else "")
-    return _tool_display(tool, label, args)
-
-
 class _TurnActivity:
-    """Animated status lines for tools and context actions (playground-style)."""
+    """Animated status lines for tools (plain path + unit tests)."""
 
     def __init__(self) -> None:
         self._line: _SpinnerLine | None = None
-        self._active_display: str = ""
+        self._active_display = ""
 
     async def _start(self, prefix: str) -> None:
         if self._line is not None:
@@ -200,19 +143,31 @@ class _TurnActivity:
         self._line = _SpinnerLine(prefix)
         self._line.start()
 
-    async def tool_started(self, tool: str, label: str, args: dict[str, object]) -> None:
-        self._active_display = _tool_display(tool, label, args)
-        await self._start(_tool_spinner_prefix(tool, label, args))
+    async def tool_started(
+        self,
+        tool: str,
+        label: str | None = None,
+        args: dict[str, object] | None = None,
+        *,
+        display: str | None = None,
+        prefix: str | None = None,
+    ) -> None:
+        # Compat: tests call tool_started(tool, label, args)
+        if display is None and label is not None and args is not None:
+            display = tool_display(tool, label, args)
+            prefix = tool_spinner_prefix(tool, label, args)
+        self._active_display = display or tool
+        await self._start(prefix or display or tool)
 
     async def tool_finished(
         self,
-        tool: str,
+        tool: str | None = None,
         *,
         error: str | None = None,
         verbose: bool = False,
         result: str = "",
     ) -> None:
-        display = self._active_display or tool
+        display = self._active_display or tool or "tool"
         if error:
             err = " ".join(error.split())
             line = f"{_DIM}  {_RED}✗{_RESET}{_DIM} {display} — {err}{_RESET}"
@@ -225,10 +180,8 @@ class _TurnActivity:
         else:
             sys.stdout.write(f"{line}\n")
             sys.stdout.flush()
-        if verbose:
-            payload = error or result or ""
-            if payload:
-                print(f"{_DIM}    {payload}{_RESET}")
+        if verbose and (error or result):
+            print(f"{_DIM}    {error or result}{_RESET}")
 
     async def summarizing(self, tokens: int) -> None:
         await self._start(f"summarizing context ({tokens:,} tokens)")
@@ -249,23 +202,31 @@ class _TurnActivity:
             self._line = None
 
 
-async def _fetch_session_usage(
-    client: httpx.AsyncClient,
-    base: str,
-    session_id: str,
+def _finish_assistant_turn(
     *,
-    status_bar: ChatStatusBar,
+    md_stream: MarkdownPlainStream,
+    assistant_label_shown: bool,
+    show_usage: bool,
+    usage: Any | None = None,
+    error: str | None = None,
 ) -> None:
-    try:
-        resp = await client.get(f"{base}/sessions/{session_id}/usage")
-        resp.raise_for_status()
-    except httpx.HTTPError:
-        return
-    status_bar.update(parse_usage_response(resp.json()))
+    if assistant_label_shown:
+        tail = md_stream.flush()
+        if tail:
+            print(tail, end="", flush=True)
+    if error:
+        print(f"\n{_RED}Error: {error}{_RESET}", flush=True)
+    elif assistant_label_shown or error:
+        print()
+    if show_usage and usage is not None:
+        print(
+            f"{_DIM}[usage] in={usage.get('input_tokens')} out={usage.get('output_tokens')} "
+            f"cost=${usage.get('cost_usd'):.4f} {usage.get('duration_ms')}ms{_RESET}"
+        )
+    print()
 
 
 async def _read_line(prompt: str, interrupt: asyncio.Event) -> str | None:
-    """Read a line from stdin without blocking process exit on Ctrl+C."""
     if interrupt.is_set():
         return None
     loop = asyncio.get_running_loop()
@@ -294,22 +255,7 @@ async def _read_line(prompt: str, interrupt: asyncio.Event) -> str | None:
         return None
 
 
-_EXIT_COMMANDS = frozenset({"/bye", "/quit", "/exit"})
-
-
-def _is_exit_command(line: str) -> bool:
-    return line.strip().lower() in _EXIT_COMMANDS
-
-
-def _print_welcome(*, spawned_gateway: bool) -> None:
-    hint = "Type /bye to exit"
-    if spawned_gateway:
-        hint += " (stops the gateway)"
-    print(f"{_DIM}{hint}. Ctrl-C also exits.{_RESET}\n")
-
-
 def _port_from_config(config_path: Path | None) -> int:
-    """Read runtime.port from the resolved monkeybot.yaml (falls back to the gateway default)."""
     if config_path is None:
         return DEFAULT_PORT
     _, doc = load_config_doc(str(config_path))
@@ -321,351 +267,338 @@ def _port_from_config(config_path: Path | None) -> int:
 
 
 def _resolve_base_url(args: argparse.Namespace, config_path: Path | None) -> str:
-    """Explicit --url wins; otherwise derive host:port from config."""
     if args.url:
         return args.url.rstrip("/")
     port = args.port if args.port else _port_from_config(config_path)
     return f"http://127.0.0.1:{port}"
 
 
-async def _iter_sse_lines(resp: httpx.Response) -> AsyncIterator[str]:
-    data_lines: list[str] = []
-    async for line in resp.aiter_lines():
-        if line.startswith(":"):
-            continue
-        if line.startswith("data:"):
-            data_lines.append(line[5:].lstrip())
-            continue
-        if line == "" and data_lines:
-            yield "\n".join(data_lines)
-            data_lines = []
-    if data_lines:
-        yield "\n".join(data_lines)
+def _model_banner_fields(
+    args: argparse.Namespace, config_path: Path | None
+) -> tuple[str, str]:
+    provider = (args.model_provider or "").strip()
+    model = (args.model_name or "").strip()
+    if config_path is not None and (not provider or not model):
+        _, doc = load_config_doc(str(config_path))
+        model_cfg = doc.get("model") if isinstance(doc.get("model"), dict) else {}
+        if not provider:
+            provider = str(model_cfg.get("provider") or "").strip()
+        if not model:
+            model = str(model_cfg.get("name") or "").strip()
+    return provider or "?", model or "?"
 
 
-def _hyperlink(url: str, label: str) -> str:
-    """OSC 8 terminal hyperlink; falls back to a plain URL on non-TTY streams."""
-    if not url:
-        return label
-    if not sys.stdout.isatty():
-        return f"{label} ({url})" if label and label != url else url
-    return f"\x1b]8;;{url}\x1b\\{label or url}\x1b]8;;\x1b\\"
+def _print_context_ring(usage: SessionUsageView) -> None:
+    """Print a context-window ring line for the plain path."""
+    if sys.stdout.isatty():
+        ring = format_context_ring(
+            estimated_prompt_tokens=usage.estimated_prompt_tokens,
+            last_prompt_tokens=usage.last_prompt_tokens,
+            context_window_tokens=usage.context_window_tokens,
+            summarization_threshold_tokens=usage.summarization_threshold_tokens,
+        )
+        print(ring, flush=True)
+    else:
+        print(format_context_ring_plain(usage), flush=True)
 
 
-def _print_grounding(evt: GroundingEvent) -> None:
-    """Render Gemini `google_search` grounding sources as clickable links."""
-    if not evt.sources and not evt.search_queries:
-        return
-    header = "grounded search"
-    if evt.search_queries:
-        queries = ", ".join(f'"{q}"' for q in evt.search_queries)
-        header += f" — {queries}"
-    print(f"{_DIM}  🔎 {header}{_RESET}", flush=True)
-    for source in evt.sources[:_GROUNDING_SOURCES_MAX]:
-        title = source.get("title", "").strip()
-        uri = source.get("uri", "").strip()
-        if not uri:
-            continue
-        link = _hyperlink(uri, title or uri)
-        print(f"{_DIM}    {_CYAN}{_UNDERLINE}{link}{_RESET}", flush=True)
-    remaining = len(evt.sources) - _GROUNDING_SOURCES_MAX
-    if remaining > 0:
-        print(f"{_DIM}    … and {remaining} more{_RESET}", flush=True)
+class _PlainRenderer:
+    """Print-based sink for the non-TTY / CI path."""
 
+    def __init__(self, *, animations_enabled: bool = True) -> None:
+        self.animations_enabled = animations_enabled
+        self.spinner = _SpinnerLine("thinking…")
+        self.activity = _TurnActivity()
+        self.md = MarkdownPlainStream()
+        self.assistant_open = False
+        self.hitl_prompt: str | None = None
+        self._pending_hitl: asyncio.Future[HitlAnswer] | None = None
+        self._last_usage: SessionUsageView | None = None
+        self._io_queue: asyncio.Queue[Coroutine[Any, Any, None] | None] = asyncio.Queue()
+        self._io_worker: asyncio.Task[None] | None = None
 
-def _print_event(
-    evt: Any,
-    *,
-    show_thinking: bool,
-    request_id: str,
-) -> None:
-    """Render auxiliary stream events (thinking traces)."""
-    if show_thinking and evt.request_id == request_id:
-        kind = getattr(evt, "kind", "")
-        if kind in ("Thinking", "ThinkingBlockDelta"):
-            text = getattr(evt, "text", "") or getattr(evt, "delta", "")
-            if text:
-                print(f"{_DIM}[thinking] {text}{_RESET}", flush=True)
+    def start_io_worker(self) -> None:
+        self._io_worker = asyncio.create_task(self._drain_io())
 
+    async def stop_io_worker(self) -> None:
+        await self._io_queue.put(None)
+        if self._io_worker is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._io_worker
+            self._io_worker = None
 
-def _finish_assistant_turn(
-    *,
-    md_stream: MarkdownPlainStream,
-    assistant_label_shown: bool,
-    show_usage: bool,
-    usage: Any | None = None,
-    error: str | None = None,
-) -> None:
-    """Flush streamed assistant text and leave a blank line before the next prompt."""
-    if assistant_label_shown:
-        tail = md_stream.flush()
-        if tail:
-            print(tail, end="", flush=True)
-    if error:
-        print(f"\n{_RED}Error: {error}{_RESET}", flush=True)
-    elif assistant_label_shown or error:
+    def _schedule(self, coro: Coroutine[Any, Any, None]) -> None:
+        self._io_queue.put_nowait(coro)
+
+    async def _drain_io(self) -> None:
+        while True:
+            item = await self._io_queue.get()
+            if item is None:
+                return
+            await item
+
+    def on_event(self, event: ChatUiEvent, controller: Any) -> None:
+        handler = getattr(self, f"_on_{event.kind}", None)
+        if handler is not None:
+            handler(event.payload, controller)
+
+    def _on_turn_started(self, _p: dict, _controller: Any) -> None:
+        self.assistant_open = False
+        self.md = MarkdownPlainStream()
         print()
-    if show_usage and usage is not None:
-        print(
-            f"{_DIM}[usage] in={usage.input_tokens} out={usage.output_tokens} "
-            f"cost=${usage.cost_usd:.4f} {usage.duration_ms}ms{_RESET}"
+        self.spinner = _SpinnerLine("thinking…")
+        if self.animations_enabled:
+            self.spinner.start()
+        else:
+            print(f"{_DIM}  thinking…{_RESET}", flush=True)
+        self.activity = _TurnActivity()
+
+    def _on_thinking_clear(self, _p: dict, _controller: Any) -> None:
+        self._schedule(self.spinner.clear())
+        self._schedule(self.activity.cancel())
+
+    def _on_assistant_start(self, _p: dict, _controller: Any) -> None:
+        print(_ASSISTANT_PREFIX, end="", flush=True)
+        self.assistant_open = True
+
+    def _on_assistant_delta(self, p: dict, _controller: Any) -> None:
+        rendered = self.md.feed(str(p.get("delta", "")))
+        if rendered:
+            print(rendered, end="", flush=True)
+
+    def _on_tool_started(self, p: dict, _controller: Any) -> None:
+        tool = str(p.get("tool") or "tool")
+        label = str(p.get("label") or tool)
+        raw_args = p.get("args")
+        args = dict(raw_args) if isinstance(raw_args, dict) else {}
+        self._schedule(
+            self.activity.tool_started(
+                tool,
+                display=tool_display(tool, label, args),
+                prefix=tool_spinner_prefix(tool, label, args),
+            )
         )
-    print()
+
+    def _on_tool_finished(self, p: dict, _controller: Any) -> None:
+        self._schedule(
+            self.activity.tool_finished(
+                str(p.get("tool") or "tool"),
+                error=p.get("error"),
+                verbose=bool(p.get("verbose")),
+                result=str(p.get("result") or ""),
+            )
+        )
+
+    def _on_summarizing(self, p: dict, _controller: Any) -> None:
+        self._schedule(self.activity.summarizing(int(p.get("tokens") or 0)))
+
+    def _on_summarized(self, p: dict, _controller: Any) -> None:
+        self._schedule(self.activity.summarized(int(p.get("turns") or 0)))
+
+    def _on_grounding(self, p: dict, _controller: Any) -> None:
+        queries = p.get("search_queries") or []
+        header = "grounded search"
+        if queries:
+            header += " — " + ", ".join(f'"{q}"' for q in queries)
+        print(f"{_DIM}  🔎 {header}{_RESET}", flush=True)
+        for source in (p.get("sources") or [])[:5]:
+            if isinstance(source, dict) and source.get("uri"):
+                title = str(source.get("title") or "").strip()
+                uri = str(source.get("uri") or "").strip()
+                print(f"{_DIM}    {_CYAN}{_UNDERLINE}{title or uri} ({uri}){_RESET}", flush=True)
+
+    def _on_turn_error(self, p: dict, _controller: Any) -> None:
+        _finish_assistant_turn(
+            md_stream=self.md,
+            assistant_label_shown=self.assistant_open,
+            show_usage=False,
+            error=str(p.get("error") or ""),
+        )
+
+    def _on_turn_complete(self, p: dict, _controller: Any) -> None:
+        _finish_assistant_turn(
+            md_stream=self.md,
+            assistant_label_shown=self.assistant_open,
+            show_usage=bool(p.get("usage")),
+            usage=p.get("usage"),
+        )
+
+    def _on_turn_aborted(self, p: dict, _controller: Any) -> None:
+        cancel_ok = p.get("cancel_ok")
+        if cancel_ok is False:
+            print(f"{_DIM}Turn aborted locally (cancel failed){_RESET}\n", flush=True)
+        else:
+            print(
+                f"{_DIM}Turn aborted — cancel sent; server may still finish{_RESET}\n",
+                flush=True,
+            )
+
+    def _on_hitl_required(self, p: dict, _controller: Any) -> None:
+        from monkeybot_cli.chat_session import HitlRequest
+
+        kind = str(p.get("hitl_kind") or "confirm")
+        if kind not in ("confirm", "elicit", "frontend_unsupported"):
+            kind = "confirm"
+        raw_schema = p.get("schema")
+        schema = dict(raw_schema) if isinstance(raw_schema, dict) else None
+        raw_args = p.get("arguments")
+        arguments = dict(raw_args) if isinstance(raw_args, dict) else {}
+        timeout_raw = p.get("timeout_sec")
+        try:
+            timeout_sec = float(timeout_raw) if timeout_raw is not None else None
+        except (TypeError, ValueError):
+            timeout_sec = None
+        req = HitlRequest(
+            kind=kind,  # type: ignore[arg-type]
+            prompt=str(p.get("prompt") or ""),
+            tool_call_id=str(p.get("tool_call_id") or ""),
+            elicitation_id=str(p.get("elicitation_id") or ""),
+            tool_name=str(p.get("tool_name") or ""),
+            schema=schema,
+            arguments=arguments,
+            timeout_sec=timeout_sec,
+        )
+        self.hitl_prompt = format_hitl_plain_prompt(req)
+        print(f"{_DIM}{self.hitl_prompt}{_RESET}", flush=True)
+
+    def _on_hitl_failed(self, p: dict, _controller: Any) -> None:
+        print(f"{_RED}{p.get('message')}{_RESET}", flush=True)
+
+    def _on_hitl_frontend_unsupported(self, p: dict, _controller: Any) -> None:
+        print(
+            f"\x1b[33mFrontend tool '{p.get('name')}' requires a UI — "
+            f"not supported in terminal chat.\x1b[0m"
+        )
+
+    def _on_session_busy(self, _p: dict, _controller: Any) -> None:
+        print("Session busy — wait for the current turn to finish.", file=sys.stderr)
+
+    def _on_error(self, p: dict, _controller: Any) -> None:
+        print(str(p.get("message") or ""), file=sys.stderr)
+
+    def _on_stream_failed(self, p: dict, _controller: Any) -> None:
+        print(str(p.get("message") or ""), file=sys.stderr)
+
+    def _on_thinking_trace(self, p: dict, _controller: Any) -> None:
+        print(f"{_DIM}[thinking] {p.get('text')}{_RESET}", flush=True)
+
+    def _on_usage_updated(self, p: dict, _controller: Any) -> None:
+        usage = p.get("usage")
+        if isinstance(usage, SessionUsageView):
+            self._last_usage = usage
+            _print_context_ring(usage)
+
+    # Intentional no-ops for TUI-only / optional plain events (parity with EVENT_KINDS).
+    def _on_session_ready(self, _p: dict, _controller: Any) -> None:
+        return
+
+    def _on_connection_state(self, _p: dict, _controller: Any) -> None:
+        return
+
+    def _on_transcript_backfill(self, _p: dict, _controller: Any) -> None:
+        return
+
+    def _on_thinking(self, _p: dict, _controller: Any) -> None:
+        return
+
+    def _on_stream_ended(self, _p: dict, _controller: Any) -> None:
+        return
+
+    def _on_voice_state(self, _p: dict, _controller: Any) -> None:
+        return
+
+    def _on_audio_chunk(self, _p: dict, _controller: Any) -> None:
+        return
+
+    def _on_device_error(self, p: dict, _controller: Any) -> None:
+        msg = str(p.get("message") or "Audio device error")
+        hint = p.get("hint")
+        print(f"{_DIM}{msg}{_RESET}", flush=True)
+        if hint:
+            print(f"{_DIM}{hint}{_RESET}", flush=True)
+
+    def _on_user_transcript(self, p: dict, _controller: Any) -> None:
+        text = str(p.get("text") or "").strip()
+        if text and p.get("is_final", True):
+            print(f"{_USER_PROMPT} {text}", flush=True)
 
 
-async def _handle_hitl(
-    client: httpx.AsyncClient,
+async def _plain_chat_session(
+    args: argparse.Namespace,
     base: str,
-    session_id: str,
-    evt: Any,
-) -> None:
-    if isinstance(evt, ToolConfirmationRequestEvent):
-        prompt = evt.prompt or f"Approve tool {evt.tool_name}?"
-        try:
-            ans = input(f"{prompt} [y/N]: ").strip().lower()
-        except EOFError:
-            ans = "n"
-        approved = ans in ("y", "yes")
-        await client.post(
-            f"{base}/sessions/{session_id}/tool-confirmations/{evt.tool_call_id}",
-            json={"approved": approved, "reason": None if approved else "denied by user"},
-        )
-    elif isinstance(evt, ActionRequiredEvent):
-        try:
-            raw = input("Agent requests input (JSON or text): ").strip()
-        except EOFError:
-            raw = ""
-        user_data: Any = raw
-        if raw.startswith("{"):
-            try:
-                user_data = json.loads(raw)
-            except json.JSONDecodeError:
-                pass
-        await client.post(
-            f"{base}/sessions/{session_id}/elicitations/{evt.id}",
-            json={"user_data": user_data},
-        )
-    elif isinstance(evt, FrontendToolRequestEvent):
-        print(
-            f"\x1b[33mFrontend tool '{evt.name}' requires a UI — not supported in terminal chat.\x1b[0m"
-        )
-
-
-async def _chat_session(args: argparse.Namespace, base: str, *, spawned_gateway: bool) -> int:
-    timeout = httpx.Timeout(connect=10.0, read=None, write=30.0, pool=10.0)
+    *,
+    spawned_gateway: bool,
+) -> int:
     interrupt = asyncio.Event()
     loop = asyncio.get_running_loop()
     with contextlib.suppress(NotImplementedError):
         loop.add_signal_handler(signal.SIGINT, interrupt.set)
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        try:
-            health = await client.get(f"{base}/health")
-            health.raise_for_status()
-        except httpx.HTTPError as exc:
-            print(f"Gateway not reachable at {base}: {exc}", file=sys.stderr)
-            return 1
+    animations_enabled = not (
+        bool(getattr(args, "no_animations", False))
+        or os.environ.get("MONKEYBOT_CHAT_NO_ANIMATIONS", "").strip().lower()
+        in ("1", "true", "yes")
+    )
+    renderer = _PlainRenderer(animations_enabled=animations_enabled)
+    renderer.start_io_worker()
 
-        body: dict[str, Any] = {}
-        if args.model_provider:
-            body["model_provider"] = args.model_provider
-        if args.model_name:
-            body["model_name"] = args.model_name
-        try:
-            create = await client.post(f"{base}/sessions", json=body)
-            create.raise_for_status()
-        except httpx.HTTPError as exc:
-            print(_format_http_error("Session creation", exc), file=sys.stderr)
-            return 1
-        session_id = create.json()["session_id"]
+    async def hitl_reader(req: Any) -> HitlAnswer:
+        from monkeybot_cli.chat_session import HitlRequest
 
-        stream_task: asyncio.Task[None] | None = None
-        event_queue: asyncio.Queue[str | None] = asyncio.Queue()
-        stream_alive = True
-        stream_error = False
+        assert isinstance(req, HitlRequest)
+        # Prompt already printed via _on_hitl_required; short line for input.
+        label = "y/n" if req.kind == "confirm" else "input"
+        ans = await _read_line(f"{label}: ", interrupt)
+        if ans is None or interrupt.is_set():
+            return HitlAnswer(cancelled=True)
+        lower = ans.strip().lower()
+        if req.kind == "confirm":
+            if lower in ("y", "yes"):
+                return HitlAnswer(approved=True, text=ans)
+            return HitlAnswer(approved=False, text=ans)
+        return HitlAnswer(text=ans)
 
-        async def _consume_stream() -> None:
-            nonlocal stream_alive, stream_error
-            try:
-                async with client.stream("GET", f"{base}/sessions/{session_id}/events") as resp:
-                    resp.raise_for_status()
-                    async for payload in _iter_sse_lines(resp):
-                        await event_queue.put(payload)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                stream_alive = False
-                stream_error = True
-                print(_format_http_error("Event stream", exc), file=sys.stderr)
-                await event_queue.put(None)
+    controller = ChatSessionController(
+        base=base,
+        model_provider=args.model_provider,
+        model_name=args.model_name,
+        show_thinking=args.show_thinking,
+        verbose=args.verbose,
+        show_usage=args.usage,
+        emit=lambda e: renderer.on_event(e, controller),
+        hitl_reader=hitl_reader,
+        resume_session_id=getattr(args, "session", None),
+    )
+    try:
+        await controller.connect()
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        await renderer.stop_io_worker()
+        return 1
 
-        stream_task = asyncio.create_task(_consume_stream())
-        status_bar = ChatStatusBar()
-        status_bar.activate()
-        _print_welcome(spawned_gateway=spawned_gateway)
+    hint = "Type /bye to exit"
+    if spawned_gateway:
+        hint += " (stops the gateway)"
+    print(f"{_DIM}{hint}. Ctrl-C also exits.{_RESET}\n")
 
-        try:
-            while not interrupt.is_set():
-                user_line = await _read_line(_USER_PROMPT, interrupt)
-                if user_line is None or interrupt.is_set():
-                    break
-                if not user_line.strip():
-                    continue
-                if _is_exit_command(user_line):
-                    if spawned_gateway:
-                        print(f"\n{_DIM}Goodbye — shutting down gateway…{_RESET}")
-                    else:
-                        print(f"\n{_DIM}Goodbye.{_RESET}")
-                    break
-                request_id = str(uuid.uuid4())
-                try:
-                    reply = await client.post(
-                        f"{base}/sessions/{session_id}/reply",
-                        json={"request_id": request_id, "message": user_line},
-                    )
-                    if reply.status_code == 409:
-                        print(
-                            "Session busy — wait for the current turn to finish.", file=sys.stderr
-                        )
-                        continue
-                    reply.raise_for_status()
-                except httpx.HTTPError as exc:
-                    print(_format_http_error("Reply", exc), file=sys.stderr)
-                    continue
-                print()
-
-                spinner = _SpinnerLine("thinking…")
-                spinner.start()
-                activity = _TurnActivity()
-                assistant_label_shown = False
-                md_stream = MarkdownPlainStream()
-                done = False
-                while not done and not interrupt.is_set():
-                    try:
-                        payload = await asyncio.wait_for(event_queue.get(), timeout=0.15)
-                    except TimeoutError:
-                        continue
-                    if payload is None:
-                        await spinner.clear()
-                        await activity.cancel()
-                        break
-                    try:
-                        data = json.loads(payload)
-                    except json.JSONDecodeError:
-                        continue
-                    if data.get("type") == "ActiveRequests":
-                        continue
-                    try:
-                        evt = event_from_json(payload)
-                    except Exception:
-                        continue
-                    if isinstance(
-                        evt,
-                        (
-                            ToolConfirmationRequestEvent,
-                            ActionRequiredEvent,
-                            FrontendToolRequestEvent,
-                        ),
-                    ):
-                        await spinner.clear()
-                        await activity.cancel()
-                        await _handle_hitl(client, base, session_id, evt)
-                        spinner.start()
-                        continue
-                    if isinstance(evt, GroundingEvent) and evt.request_id == request_id:
-                        if assistant_label_shown:
-                            tail = md_stream.flush()
-                            if tail:
-                                print(tail, end="", flush=True)
-                            print()
-                        else:
-                            await spinner.clear()
-                        _print_grounding(evt)
-                        continue
-                    if isinstance(evt, ToolCallStarted) and evt.request_id == request_id:
-                        if assistant_label_shown:
-                            tail = md_stream.flush()
-                            if tail:
-                                print(tail, end="", flush=True)
-                            print()
-                        else:
-                            await spinner.clear()
-                        await activity.tool_started(evt.tool, evt.label, evt.args)
-                        continue
-                    if isinstance(evt, ToolCallResult) and evt.request_id == request_id:
-                        await activity.tool_finished(
-                            evt.tool,
-                            error=evt.error,
-                            verbose=args.verbose,
-                            result=evt.result or "",
-                        )
-                        continue
-                    if isinstance(evt, ContextSummarizing) and evt.request_id == request_id:
-                        if not assistant_label_shown:
-                            await spinner.clear()
-                        status_bar.update_context_hint(
-                            estimated_prompt_tokens=evt.estimated_tokens,
-                            context_window_tokens=evt.context_window_tokens,
-                        )
-                        await activity.summarizing(evt.estimated_tokens)
-                        continue
-                    if isinstance(evt, ContextSummarized) and evt.request_id == request_id:
-                        await activity.summarized(evt.turns_summarized)
-                        await _fetch_session_usage(client, base, session_id, status_bar=status_bar)
-                        continue
-                    if isinstance(evt, AssistantDelta) and evt.request_id == request_id:
-                        if not assistant_label_shown:
-                            await spinner.clear()
-                            await activity.cancel()
-                            print(_ASSISTANT_PREFIX, end="", flush=True)
-                            assistant_label_shown = True
-                        rendered = md_stream.feed(evt.delta)
-                        if rendered:
-                            print(rendered, end="", flush=True)
-                        continue
-                    if isinstance(evt, Error) and evt.request_id == request_id:
-                        if not assistant_label_shown:
-                            await spinner.clear()
-                        await activity.cancel()
-                        _finish_assistant_turn(
-                            md_stream=md_stream,
-                            assistant_label_shown=assistant_label_shown,
-                            show_usage=False,
-                            error=evt.error,
-                        )
-                        done = True
-                        continue
-                    if isinstance(evt, TurnComplete) and evt.request_id == request_id:
-                        if not assistant_label_shown:
-                            await spinner.clear()
-                        await activity.cancel()
-                        _finish_assistant_turn(
-                            md_stream=md_stream,
-                            assistant_label_shown=assistant_label_shown,
-                            show_usage=args.usage,
-                            usage=evt.usage,
-                        )
-                        await _fetch_session_usage(client, base, session_id, status_bar=status_bar)
-                        done = True
-                        continue
-                    _print_event(
-                        evt,
-                        show_thinking=args.show_thinking,
-                        request_id=request_id,
-                    )
-                if interrupt.is_set():
-                    await spinner.clear()
-                    await activity.cancel()
-                    break
-                if not stream_alive:
-                    break
-        finally:
-            status_bar.deactivate()
-            if stream_task:
-                stream_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
-                    await asyncio.wait_for(stream_task, timeout=0.5)
-    return 1 if stream_error else 0
+    try:
+        while not interrupt.is_set() and controller.stream_alive:
+            user_line = await _read_line(_USER_PROMPT, interrupt)
+            if user_line is None or interrupt.is_set():
+                break
+            if not user_line.strip():
+                continue
+            if is_exit_command(user_line):
+                if spawned_gateway:
+                    print(f"\n{_DIM}Goodbye — shutting down gateway…{_RESET}")
+                else:
+                    print(f"\n{_DIM}Goodbye.{_RESET}")
+                break
+            await controller.submit(user_line)
+    finally:
+        await controller.close()
+        await renderer.stop_io_worker()
+    return 1 if controller.stream_error else 0
 
 
 class _SpawnedGateway(NamedTuple):
@@ -729,24 +662,6 @@ def _spawn_gateway(config_path: Path | None, agent_root: Path, port: int) -> _Sp
     return _SpawnedGateway(proc=proc, log_path=Path(log_file.name), log_file=log_file)
 
 
-def _wait_for_health(
-    base: str, proc: subprocess.Popen[str] | None, timeout_s: float = 30.0
-) -> bool:
-    """Poll the gateway /health until it responds or the spawned process exits."""
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        if proc is not None and proc.poll() is not None:
-            return False
-        try:
-            resp = httpx.get(f"{base}/health", timeout=2.0)
-            if resp.status_code == 200:
-                return True
-        except httpx.HTTPError:
-            pass
-        time.sleep(0.3)
-    return False
-
-
 def run_chat(args: argparse.Namespace) -> int:
     cwd = Path(args.cwd).expanduser().resolve() if args.cwd else None
     config_path = resolve_config(args.config, cwd=cwd)
@@ -795,8 +710,31 @@ def run_chat(args: argparse.Namespace) -> int:
             _cleanup_gateway_log(spawned)
             return 1
 
+    provider, model = _model_banner_fields(args, config_path)
+    animations_enabled = not (
+        bool(getattr(args, "no_animations", False))
+        or os.environ.get("MONKEYBOT_CHAT_NO_ANIMATIONS", "").strip().lower()
+        in ("1", "true", "yes")
+    )
+    theme_choice = str(getattr(args, "theme", "auto") or "auto")
     try:
-        return asyncio.run(_chat_session(args, base, spawned_gateway=not attach))
+        if use_textual_tui():
+            return run_chat_tui(
+                base=base,
+                agent_root=agent_root,
+                provider=provider,
+                model=model,
+                spawned_gateway=not attach,
+                model_provider=args.model_provider,
+                model_name=args.model_name,
+                show_thinking=args.show_thinking,
+                verbose=args.verbose,
+                show_usage=args.usage,
+                resume_session_id=getattr(args, "session", None),
+                animations_enabled=animations_enabled,
+                theme_choice=theme_choice,
+            )
+        return asyncio.run(_plain_chat_session(args, base, spawned_gateway=not attach))
     except KeyboardInterrupt:
         sys.stdout.write("\n")
         sys.stdout.flush()
@@ -836,7 +774,23 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
     )
     p.add_argument("--usage", action="store_true", help="Show token usage after each turn")
     p.add_argument(
+        "--session",
+        dest="session",
+        help="Resume an existing gateway session id (with transcript backfill when available)",
+    )
+    p.add_argument(
         "--model-provider", dest="model_provider", help="Override model provider for session"
     )
     p.add_argument("--model-name", dest="model_name", help="Override model name for session")
+    p.add_argument(
+        "--no-animations",
+        action="store_true",
+        help="Disable decorative spinners / batched markdown flush (also: MONKEYBOT_CHAT_NO_ANIMATIONS=1)",
+    )
+    p.add_argument(
+        "--theme",
+        choices=("auto", "dark", "light"),
+        default="auto",
+        help="Chat TUI theme (auto uses COLORFGBG when set; default dark)",
+    )
     p.set_defaults(func=run_chat)
