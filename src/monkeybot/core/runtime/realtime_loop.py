@@ -9,7 +9,9 @@ is managed by the gateway.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import uuid
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
@@ -24,6 +26,7 @@ from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.runtime.events import (
+    ActionRequiredEvent,
     AgentEvent,
     AssistantDelta,
     AttachmentDescriptorEvent,
@@ -37,7 +40,9 @@ from monkeybot.core.runtime.events import (
 )
 from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.types.content_blocks import (
+    ActionRequired,
     ContentBlock,
+    ElicitationAction,
     Text,
     ToolRequest,
     ToolResponse,
@@ -55,6 +60,76 @@ def _user_text_from_content(blocks: Sequence[ContentBlock]) -> str:
     return " ".join(
         b.text.strip() for b in blocks if isinstance(b, Text) and b.text.strip()
     )
+
+
+def _elicitation_user_data_text(user_data: object) -> str:
+    if user_data is None:
+        return ""
+    if isinstance(user_data, str):
+        return user_data
+    try:
+        return json.dumps(user_data, sort_keys=True)
+    except (TypeError, ValueError):
+        return str(user_data)
+
+
+async def _resolve_elicitation_blocks(
+    blocks: Sequence[ContentBlock],
+    *,
+    ctx: TurnContext,
+    pending_bus: PendingResponseBusPort | None,
+) -> AsyncIterator[AgentEvent | list[ContentBlock]]:
+    """Yield ``ActionRequiredEvent``s for elicitation blocks, then the resolved block list.
+
+    Tools may return :class:`ActionRequired` / :class:`ElicitationAction` blocks to pause
+    the realtime turn until the client answers via ``elicitation_response``.
+    """
+    out: list[ContentBlock] = []
+    for block in blocks:
+        if not (
+            isinstance(block, ActionRequired) and isinstance(block.data, ElicitationAction)
+        ):
+            out.append(block)
+            continue
+        action = block.data
+        elicitation_id = action.id.strip() or str(uuid.uuid4())
+        if pending_bus is None:
+            logger.warning(
+                "realtime elicitation unavailable %s",
+                kv(
+                    request_id=ctx.request_id,
+                    thread_id=ctx.thread_id,
+                    elicitation_id=elicitation_id,
+                ),
+            )
+            out.append(
+                Text(text=f"{action.message} (elicitation unavailable)")
+            )
+            continue
+        fut = pending_bus.register_pending(elicitation_id)
+        yield ActionRequiredEvent(
+            request_id=ctx.request_id,
+            action_type="elicitation",
+            id=elicitation_id,
+            payload={
+                "message": action.message,
+                "requestedSchema": dict(action.requested_schema or {}),
+            },
+        )
+        try:
+            payload = await _await_user_response_any(
+                pending_bus, fut, elicitation_id, timeout_sec=None
+            )
+        except asyncio.CancelledError:
+            raise
+        if payload.get("_timeout"):
+            out.append(Text(text="User did not respond to elicitation in time"))
+            continue
+        if payload.get("cancelled"):
+            out.append(Text(text="User cancelled elicitation"))
+            continue
+        out.append(Text(text=_elicitation_user_data_text(payload.get("user_data"))))
+    yield out
 
 
 async def _fire_hook(
@@ -352,9 +427,10 @@ async def run_realtime_turn(
                             pending_bus, fut, call.call_id, timeout_sec=None
                         )
                     except asyncio.CancelledError:
-                        allowed = False
-                        denial_message = "cancelled by user"
-                        break
+                        # Do not swallow cancellation into a normal deny path —
+                        # re-raise so the outer handler tears down the turn and
+                        # the generator stops (client disconnect / abort).
+                        raise
                     if payload.get("_timeout"):
                         allowed = False
                         denial_message = "user did not respond in time"
@@ -409,6 +485,19 @@ async def run_realtime_turn(
                     hook_manager=hook_manager,
                     request_id=ctx.request_id,
                 )
+                if result.error is None and result.blocks:
+                    resolved_blocks: list[ContentBlock] | None = None
+                    async for item in _resolve_elicitation_blocks(
+                        result.blocks,
+                        ctx=ctx,
+                        pending_bus=pending_bus,
+                    ):
+                        if isinstance(item, ActionRequiredEvent):
+                            yield item
+                        elif isinstance(item, list):
+                            resolved_blocks = item
+                    if resolved_blocks is not None:
+                        result = ToolExecutionResult.ok_blocks(resolved_blocks)
 
             if inject_text and inject_texts_out is not None:
                 inject_texts_out.append(inject_text)

@@ -91,6 +91,7 @@ class RealtimeSessionController:
         self._tui_ptt_held = False
         self._voice_state: VoiceState | None = None
         self._pending_hitl: dict[str, Any] | None = None
+        self._background_tasks: set[asyncio.Task[None]] = set()
         self._out_chunk_n = 0
         self._in_chunk_n = 0
         self._last_usage_payload: dict[str, Any] | None = None
@@ -385,6 +386,17 @@ class RealtimeSessionController:
         except Exception as exc:
             self._emit("error", message=f"Send failed: {exc}")
 
+    def _spawn_background(self, coro: Any, *, name: str) -> None:
+        """Schedule ``coro`` and retain the task so it is not GC'd mid-flight."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.debug("%s called with no running event loop", name)
+            return
+        task = loop.create_task(coro, name=name)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
     def abort_turn(self) -> None:
         if self._ws is None:
             return
@@ -396,12 +408,7 @@ class RealtimeSessionController:
             except Exception:
                 logger.warning("failed to send interrupt frame", exc_info=True)
 
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            logger.debug("abort_turn called with no running event loop")
-            return
-        loop.create_task(_interrupt())
+        self._spawn_background(_interrupt(), name="rt-abort")
 
     def provide_hitl_answer(self, answer: HitlAnswer) -> None:
         if self._ws is None or self._pending_hitl is None:
@@ -442,12 +449,7 @@ class RealtimeSessionController:
                 logger.warning("failed to send HITL response frame", exc_info=True)
                 self._emit("error", message="Failed to send confirmation response")
 
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            logger.debug("provide_hitl_answer called with no running event loop")
-            return
-        loop.create_task(_send())
+        self._spawn_background(_send(), name="rt-hitl")
 
     async def restart_session(self) -> None:
         self._emit("error", message="Session restart is not supported in realtime mode")
@@ -489,6 +491,11 @@ class RealtimeSessionController:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+        for task in list(self._background_tasks):
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        self._background_tasks.clear()
         self._audio_task = None
         self._recv_task = None
         self._stream_alive = False

@@ -105,6 +105,30 @@ def test_encode_tool_call_frame() -> None:
     assert encoded["args"] == {"q": "x"}
 
 
+def test_tool_call_frame_default_args_is_empty_dict() -> None:
+    frame = ServerToolCallFrame(call_id="c1", name="search")
+    assert frame.args == {}
+    encoded = json.loads(encode_server_frame(frame))
+    assert encoded["args"] == {}
+
+
+def test_encode_tool_confirmation_includes_timeout() -> None:
+    from monkeybot.gateway.realtime.wire import ServerToolConfirmationFrame
+
+    frame = ServerToolConfirmationFrame(
+        tool_call_id="tc1",
+        tool_name="run_command",
+        prompt="Allow?",
+        arguments={"cmd": "ls"},
+        timeout_sec=300.0,
+    )
+    encoded = json.loads(encode_server_frame(frame))
+    assert encoded["timeout_sec"] == 300.0
+    parsed = parse_server_frame(json.dumps(encoded))
+    assert isinstance(parsed, ServerToolConfirmationFrame)
+    assert parsed.timeout_sec == 300.0
+
+
 def test_encode_turn_boundary_frame() -> None:
     frame = ServerTurnBoundaryFrame(role="assistant")
     encoded = json.loads(encode_server_frame(frame))

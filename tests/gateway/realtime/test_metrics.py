@@ -58,9 +58,27 @@ def test_mark_usage(metrics: RealtimeMetrics) -> None:
     metrics.mark_usage(input_tokens=5, output_tokens=0)
     assert metrics.input_tokens == 15
     assert metrics.output_tokens == 20
+    assert metrics.last_prompt_tokens == 5
     summary = metrics.as_dict()
     assert summary["realtime_session_input_tokens"] == 15
     assert summary["realtime_session_output_tokens"] == 20
+
+
+def test_to_usage_payload_uses_last_prompt_not_cumulative(metrics: RealtimeMetrics) -> None:
+    metrics.mark_usage(input_tokens=1_000, output_tokens=50)
+    metrics.mark_usage(input_tokens=2_500, output_tokens=80)
+    payload = metrics.to_usage_payload(context_window_tokens=200_000)
+    assert payload["input_tokens"] == 3_500
+    assert payload["output_tokens"] == 130
+    assert payload["last_prompt_tokens"] == 2_500
+    assert payload["estimated_prompt_tokens"] == 2_500
+    assert payload["context_window_tokens"] == 200_000
+    assert payload["summarization_threshold_tokens"] == 170_000
+
+
+def test_to_usage_payload_default_context_window(metrics: RealtimeMetrics) -> None:
+    payload = metrics.to_usage_payload()
+    assert payload["context_window_tokens"] == 200_000
 
 
 def test_close_and_summary(metrics: RealtimeMetrics) -> None:

@@ -27,6 +27,7 @@ class RealtimeMetrics:
     turn_count: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    last_prompt_tokens: int = 0
     turn_latencies_ms: list[float] = field(default_factory=list)
     turn_model_durations_ms: list[float] = field(default_factory=list)
     turn_tool_counts: list[int] = field(default_factory=list)
@@ -44,18 +45,28 @@ class RealtimeMetrics:
         self.interrupt_count += 1
 
     def mark_usage(self, *, input_tokens: int = 0, output_tokens: int = 0) -> None:
-        self.input_tokens += max(0, input_tokens)
-        self.output_tokens += max(0, output_tokens)
+        """Accumulate session totals; keep last turn's prompt size for the context meter."""
+        inp = max(0, input_tokens)
+        out = max(0, output_tokens)
+        self.input_tokens += inp
+        self.output_tokens += out
+        # Provider usage events report per-turn (or current-context) prompt size.
+        # The CLI context ring must use that latest value, not the session sum.
+        self.last_prompt_tokens = inp
 
-    def to_usage_payload(self, *, context_window_tokens: int = 128_000) -> dict[str, Any]:
-        """Shape compatible with ``GET /sessions/{id}/usage`` / ``parse_usage_response``."""
-        estimated = self.input_tokens
+    def to_usage_payload(self, *, context_window_tokens: int = 200_000) -> dict[str, Any]:
+        """Shape compatible with ``GET /sessions/{id}/usage`` / ``parse_usage_response``.
+
+        ``input_tokens`` / ``output_tokens`` are session cumulatives.
+        ``last_prompt_tokens`` / ``estimated_prompt_tokens`` are the most recent
+        provider-reported prompt size (realtime has no separate preflight count).
+        """
         return {
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "cost_usd": 0.0,
-            "last_prompt_tokens": self.input_tokens,
-            "estimated_prompt_tokens": estimated,
+            "last_prompt_tokens": self.last_prompt_tokens,
+            "estimated_prompt_tokens": self.last_prompt_tokens,
             "context_window_tokens": context_window_tokens,
             "summarization_threshold_tokens": max(1, int(context_window_tokens * 0.85)),
         }

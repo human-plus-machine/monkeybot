@@ -208,3 +208,73 @@ class TestRunRealtimeTurn:
         )
         assert len(history.rows) == 1
         assert history.rows[0].role == "assistant"
+
+    async def test_tool_elicitation_block_awaits_user_response(self) -> None:
+        import asyncio
+
+        from monkeybot.core.runtime.events import ActionRequiredEvent
+        from monkeybot.core.types.content_blocks import ActionRequired, ElicitationAction
+
+        class ElicitingExecutor:
+            async def execute(self, *, call: ToolCall, ctx: TurnContext) -> ToolExecutionResult:
+                del call, ctx
+                return ToolExecutionResult.ok_blocks(
+                    [
+                        ActionRequired(
+                            data=ElicitationAction(
+                                id="el-1",
+                                message="What is your name?",
+                                requested_schema={"type": "object"},
+                            )
+                        )
+                    ]
+                )
+
+        class FakeBus:
+            def __init__(self) -> None:
+                self._futs: dict[str, asyncio.Future[object]] = {}
+
+            def register_pending(self, pending_key: str) -> asyncio.Future[object]:
+                fut: asyncio.Future[object] = asyncio.get_running_loop().create_future()
+                self._futs[pending_key] = fut
+                return fut
+
+            def resolve(self, pending_key: str, payload: dict[str, object]) -> None:
+                self._futs[pending_key].set_result(payload)
+
+        history = FakeHistory()
+        bus = FakeBus()
+        ctx = _ctx()
+
+        async def _drive() -> list[object]:
+            gen = run_realtime_turn(
+                "hi",
+                "calling tool",
+                [RealtimeToolCall(call_id="c1", name="ask", args={})],
+                ctx,
+                history=history,
+                tool_executor=ElicitingExecutor(),
+                pending_bus=bus,
+            )
+            events: list[object] = []
+            while True:
+                try:
+                    ev = await gen.__anext__()
+                except StopAsyncIteration:
+                    break
+                events.append(ev)
+                if isinstance(ev, ActionRequiredEvent):
+                    bus.resolve(
+                        ev.id,
+                        {"user_data": {"name": "Ada"}, "cancelled": False, "approved": True},
+                    )
+            return events
+
+        events = await _drive()
+        elicit = next(e for e in events if isinstance(e, ActionRequiredEvent))
+        assert elicit.id == "el-1"
+        assert elicit.action_type == "elicitation"
+        result = next(e for e in events if isinstance(e, ToolCallResult))
+        assert result.error is None
+        assert "Ada" in (result.result or "")
+
