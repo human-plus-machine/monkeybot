@@ -239,7 +239,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - `MCP_STRICT_LOAD=1` fails startup on connection errors (default: log and continue).
 - Runtime `add_mcp_server` / `remove_mcp_server` mutate live connections.
 - Lazy-imports `mcp` SDK to keep core importable without MCP installed.
-- Realtime sessions: MCP registry mutations refresh harness `ctx.tools`, but vendor tool schemas update only after session reconnect.
+- Realtime sessions: MCP registry mutations refresh harness `ctx.tools`, but vendor tool schemas update only after starting a new session (v1 has no reconnect/resume).
 
 **Invariants:**
 - MCP tool names: `server__tool` (double underscore).

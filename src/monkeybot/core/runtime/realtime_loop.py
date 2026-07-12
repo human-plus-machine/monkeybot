@@ -61,10 +61,10 @@ logger = logging.getLogger("monkeybot.core.runtime.realtime_loop")
 
 _HOOK_PRE_TOOL_TIMEOUT_S = 1.5
 
-_REALTIME_MCP_RECONNECT_NOTE = (
+_REALTIME_MCP_NEW_SESSION_NOTE = (
     "MCP registry updated on the harness. Newly enabled MCP tool schemas are not "
-    "pushed into the live voice session; reconnect the realtime session to advertise "
-    "them to the model."
+    "pushed into the live voice session; start a new realtime session to advertise "
+    "them to the model (v1 has no reconnect/resume)."
 )
 
 
@@ -544,9 +544,9 @@ async def run_realtime_turn(
                 ),
             )
             # Live vendor sessions fix tools at connect time; schemas are not
-            # updated mid-session. Tell the model to reconnect if it needs them.
+            # updated mid-session. Tell the model to start a new session if needed.
             if inject_texts_out is not None:
-                inject_texts_out.append(_REALTIME_MCP_RECONNECT_NOTE)
+                inject_texts_out.append(_REALTIME_MCP_NEW_SESSION_NOTE)
 
         # 5. Append all tool responses as one user message (reuses loop.py semantics).
         if tool_results:

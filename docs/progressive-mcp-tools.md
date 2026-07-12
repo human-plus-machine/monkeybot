@@ -235,9 +235,10 @@ Same machine, same model (e.g. Ollama `ornith:9b`):
 ### Known limitation — realtime / voice
 
 `realtime_loop` refreshes harness `ctx.tools` after successful MCP registry mutations and
-injects a reconnect note. Live vendor sessions (Gemini Live, etc.) fix tool schemas at
-`RealtimeSessionConfig` connect time and do not yet support mid-session tool updates.
-Newly enabled MCP tools become usable on the next realtime session reconnect.
+injects a note that a new session is required. Live vendor sessions (Gemini Live, etc.)
+fix tool schemas at `RealtimeSessionConfig` connect time and do not yet support
+mid-session tool updates. Newly enabled MCP tools become usable only after starting a
+new realtime session (v1 has no reconnect/resume).
 
 ---
 

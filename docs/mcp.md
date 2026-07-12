@@ -77,7 +77,8 @@ update skills to call `enable_mcp("name")` first.
 
 **Realtime / voice:** `enable_mcp` / `disable_mcp` still mutate the harness MCP client and
 refresh `ctx.tools`, but live vendor sessions fix tool schemas at connect time. Newly
-enabled schemas apply after reconnecting the realtime session.
+enabled schemas apply only after starting a new realtime session (v1 has no
+reconnect/resume).
 
 See [Progressive MCP tool disclosure](progressive-mcp-tools.md).
 

@@ -210,7 +210,7 @@ class TestRunRealtimeTurn:
         assert history.rows[0].role == "assistant"
 
     async def test_refreshes_tools_after_successful_enable_mcp(self) -> None:
-        from monkeybot.core.runtime.realtime_loop import _REALTIME_MCP_RECONNECT_NOTE
+        from monkeybot.core.runtime.realtime_loop import _REALTIME_MCP_NEW_SESSION_NOTE
 
         class _Mcp:
             def known_server_names(self) -> list[str]:
@@ -244,7 +244,7 @@ class TestRunRealtimeTurn:
             )
         )
         assert any(t.name == "browser__goto" for t in ctx.tools)
-        assert _REALTIME_MCP_RECONNECT_NOTE in inject_texts
+        assert _REALTIME_MCP_NEW_SESSION_NOTE in inject_texts
 
     async def test_failed_enable_mcp_does_not_refresh_tools(self) -> None:
         class _Mcp:
