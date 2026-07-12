@@ -206,6 +206,25 @@ class AttachmentDescriptorEvent:
     description: str = ""
 
 
+@dataclass(frozen=True)
+class UserSteered:
+    """User text injected mid-turn at a safe loop boundary (steer queue)."""
+
+    kind: Literal["UserSteered"] = "UserSteered"
+    request_id: str = ""
+    text: str = ""
+
+
+@dataclass(frozen=True)
+class QueuedInputAccepted:
+    """Steer or follow-up prompt accepted into a session admission queue."""
+
+    kind: Literal["QueuedInputAccepted"] = "QueuedInputAccepted"
+    request_id: str = ""
+    queue: Literal["steer", "follow_up"] = "follow_up"
+    position: int = 0
+
+
 AgentEvent: TypeAlias = (
     Thinking
     | AssistantDelta
@@ -226,6 +245,8 @@ AgentEvent: TypeAlias = (
     | SystemNotificationEvent
     | AttachmentDescriptorEvent
     | GroundingEvent
+    | UserSteered
+    | QueuedInputAccepted
 )
 
 
@@ -321,6 +342,10 @@ def _story5_event_dict(event: AgentEvent) -> dict[str, object]:
             "sources": [dict(s) for s in event.sources],
             "search_queries": list(event.search_queries),
         }
+    if isinstance(event, UserSteered):
+        return {**base, "text": event.text}
+    if isinstance(event, QueuedInputAccepted):
+        return {**base, "queue": event.queue, "position": event.position}
     raise AssertionError(f"_story5_event_dict: unsupported type {type(event)!r}")
 
 
@@ -383,6 +408,8 @@ def event_to_json(event: AgentEvent) -> str:
             SystemNotificationEvent,
             AttachmentDescriptorEvent,
             GroundingEvent,
+            UserSteered,
+            QueuedInputAccepted,
         ),
     ):
         payload = _story5_event_dict(event)
@@ -613,4 +640,16 @@ def event_from_json(raw: str) -> AgentEvent:
             filename=fname if isinstance(fname, str) else "",
             description=desc if isinstance(desc, str) else "",
         )
+    if t == "UserSteered":
+        text_raw = payload.get("text", "")
+        text = text_raw if isinstance(text_raw, str) else ""
+        return UserSteered(request_id=rid, text=text)
+    if t == "QueuedInputAccepted":
+        q_raw = payload.get("queue", "follow_up")
+        if q_raw not in ("steer", "follow_up"):
+            raise EventDecodeError("QueuedInputAccepted queue must be steer or follow_up")
+        q = cast(Literal["steer", "follow_up"], q_raw)
+        pos_raw = payload.get("position", 0)
+        pos = int(pos_raw) if isinstance(pos_raw, (int, float)) else 0
+        return QueuedInputAccepted(request_id=rid, queue=q, position=pos)
     raise EventDecodeError(f"unknown AgentEvent type: {t!r}")

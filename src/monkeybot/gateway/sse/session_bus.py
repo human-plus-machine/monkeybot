@@ -11,6 +11,7 @@ from typing import Any, Literal
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.persistence.transcript import TranscriptWriter
+from monkeybot.core.runtime.input_admission import InputAdmission
 
 from .sse import format_data_event
 
@@ -58,6 +59,8 @@ class SessionBus:
         self.attachment_catalog: SessionAttachmentCatalog | None = None
         self.transcript_writer: TranscriptWriter | None = None
         """Lazily-created ``TranscriptWriter`` (internal debugging only); None when disabled."""
+        self.admission = InputAdmission()
+        """Process-local steer + follow-up queues (not shared across gateway replicas)."""
 
     def register_pending(self, pending_key: str) -> asyncio.Future[Any]:
         fut = asyncio.get_running_loop().create_future()
@@ -202,6 +205,7 @@ class SessionRegistry:
         if bus is None:
             return False
         bus.abandon_pending_cancel_all()
+        bus.admission.clear_all()
 
         from monkeybot.core.context.memory_prompt import evict_curation_cache
 

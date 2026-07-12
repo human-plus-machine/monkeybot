@@ -91,7 +91,9 @@ from .events import (
     ToolConfirmationRequestEvent,
     TurnComplete,
     UsageTotals,
+    UserSteered,
 )
+from .input_admission import InputAdmission, preview_text
 
 logger = logging.getLogger("monkeybot.core.runtime.loop")
 
@@ -118,9 +120,10 @@ def _effective_max_turns(max_turns: int | None) -> int:
 
 
 def _effective_doom_loop_threshold() -> int:
-    """Consecutive identical failing tool calls before doom-loop recovery.
+    """Consecutive identical tool calls before doom-loop recovery.
 
-    Default 3. Set ``DOOM_LOOP_THRESHOLD=0`` to disable.
+    Default 3. Set ``DOOM_LOOP_THRESHOLD=0`` to disable. Applies whether the
+    calls succeed or fail — identical name+args with no progress is the signal.
     """
     raw = os.getenv("DOOM_LOOP_THRESHOLD")
     if raw is None or raw.strip() == "":
@@ -142,12 +145,12 @@ def _tool_call_fingerprint(name: str, args: dict[str, Any]) -> str:
 def _doom_loop_texts(tool_name: str, threshold: int) -> tuple[str, str]:
     """Return ``(error_event_text, recovery_system_note)``."""
     error = (
-        f"Doom loop detected: tool {tool_name!r} failed identically "
+        f"Doom loop detected: tool {tool_name!r} called identically "
         f"{threshold} times"
     )
     note = (
-        f"[Harness] {error}. Do not retry the same call. Explain the failure "
-        "to the user and propose a different approach."
+        f"[Harness] {error}. Do not repeat the same call. Explain the situation "
+        "to the user and take a different approach (different tool or args)."
     )
     return error, note
 
@@ -189,7 +192,11 @@ def _rejected_tool_batch_error(
 
 @dataclasses.dataclass
 class _DoomLoopTracker:
-    """Tracks consecutive identical failing tool calls within one user message.
+    """Tracks consecutive identical tool calls within one user message.
+
+    Fingerprint is tool name + args. Outcome (ok vs error) does not reset the
+    streak — successful no-progress loops (e.g. repeated screenshots) must trip
+    the same guard as repeated failures.
 
     After a recovery turn is consumed, the tracker re-arms so a later streak in
     the same user message can trigger again. While ``triggered`` is set (between
@@ -206,12 +213,8 @@ class _DoomLoopTracker:
     triggered_tool: str | None = None
     _pending_error: str | None = None
 
-    def record(self, name: str, args: dict[str, Any], *, is_error: bool) -> None:
+    def record(self, name: str, args: dict[str, Any]) -> None:
         if self.threshold <= 0 or self.triggered:
-            return
-        if not is_error:
-            self.streak_fp = None
-            self.streak_count = 0
             return
         fp = _tool_call_fingerprint(name, args)
         if fp == self.streak_fp:
@@ -239,8 +242,8 @@ class _DoomLoopTracker:
         self.force_no_tools = False
         self.recovery_note = None
         if force:
-            # Re-arm so a second identical-failure streak later in this user
-            # message can trigger another recovery turn.
+            # Re-arm so a second identical streak later in this user message
+            # can trigger another recovery turn.
             self.triggered = False
             self.streak_fp = None
             self.streak_count = 0
@@ -343,6 +346,24 @@ def _provider_messages_prompt_summary(messages: Sequence[Message]) -> str:
 
 _HOOK_READ_TIMEOUT_S = 2.0
 _HOOK_PRE_TOOL_TIMEOUT_S = 1.5
+_HOOK_SETTLEMENT_TIMEOUT_S = 2.0
+
+
+def _settlement_timeout_s() -> float:
+    raw = os.environ.get("MONKEYBOT_HOOK_SETTLEMENT_TIMEOUT_S")
+    if raw is None or raw.strip() == "":
+        return _HOOK_SETTLEMENT_TIMEOUT_S
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return _HOOK_SETTLEMENT_TIMEOUT_S
+
+
+async def _drain_hook_settlement(hook_manager: HookManager | None) -> None:
+    """Wait for fire-and-forget hooks before the next provider call / TurnComplete."""
+    if hook_manager is None:
+        return
+    await hook_manager.drain_settlement(timeout_s=_settlement_timeout_s())
 
 
 def _record_tool_hook_span_event(phase: str, tool_name: str) -> None:
@@ -410,6 +431,22 @@ def _combine_extras(*parts: str | None) -> str | None:
 
 # Max concurrent ``task`` (subagent) subprocesses per single model tool batch.
 _MAX_CONCURRENT_SUBAGENTS = 10
+_MAX_CONCURRENT_PARALLEL_TOOLS = 10
+
+
+def _parallel_tool_concurrency() -> int:
+    raw = os.environ.get("MONKEYBOT_PARALLEL_TOOL_CONCURRENCY")
+    if raw is None or raw.strip() == "":
+        return _MAX_CONCURRENT_PARALLEL_TOOLS
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return _MAX_CONCURRENT_PARALLEL_TOOLS
+
+
+def _parallel_safe_names(tools: Sequence[ToolDef]) -> frozenset[str]:
+    """Names marked ``parallel_safe`` (read-only / concurrent-safe tools)."""
+    return frozenset(t.name for t in tools if t.parallel_safe)
 
 _SPILL_REL = Path(".monkeybot") / "spill"
 SUMMARY_TRIGGER_RATIO = summarization_trigger_ratio_from_env()
@@ -823,20 +860,36 @@ def _image_events(
     return events
 
 
-def _chunk_tool_calls(ordered: Sequence[ToolCall]) -> list[list[ToolCall]]:
-    """Split into maximal runs of consecutive ``task`` tools vs single non-``task`` tools.
+def _chunk_tool_calls(
+    ordered: Sequence[ToolCall],
+    *,
+    parallel_safe: frozenset[str] | None = None,
+) -> list[list[ToolCall]]:
+    """Split into maximal runs of consecutive parallelizable tools vs serial singles.
 
-    Consecutive ``task`` calls may run concurrently (bounded by :data:`_MAX_CONCURRENT_SUBAGENTS`);
-    other tools stay sequential chunk-by-chunk to preserve cancellation and side-effect ordering.
+    * Consecutive ``task`` calls may run concurrently (bounded by
+      :data:`_MAX_CONCURRENT_SUBAGENTS`).
+    * Consecutive tools in ``parallel_safe`` (read-only) may run concurrently
+      (bounded by :func:`_parallel_tool_concurrency`).
+    * ``task`` never mixes with other parallel-safe tools in one chunk.
+    * Mutating / unmarked tools stay sequential chunk-by-chunk.
     """
+    safe = parallel_safe or frozenset()
     seq = list(ordered)
     chunks: list[list[ToolCall]] = []
     i = 0
     n = len(seq)
     while i < n:
-        if seq[i].name == "task":
+        name = seq[i].name
+        if name == "task":
             j = i + 1
             while j < n and seq[j].name == "task":
+                j += 1
+            chunks.append(seq[i:j])
+            i = j
+        elif name in safe:
+            j = i + 1
+            while j < n and seq[j].name in safe and seq[j].name != "task":
                 j += 1
             chunks.append(seq[i:j])
             i = j
@@ -870,14 +923,18 @@ async def run(
     attachment_catalog: SessionAttachmentCatalog | None = None,
     transcript_writer: TranscriptWriter | None = None,
     vertex_google_search: bool = False,
+    input_admission: InputAdmission | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Stream agent events for one user message; ends with ``TurnComplete`` (never raises).
 
     Provider chunks are handled in Gemini-style batches: tool calls accumulate until ``Done``,
     then execute in lexicographic ``call_id`` order for deterministic replay.
 
-    Consecutive ``task`` tool calls in one batch run concurrently (at most 10 at a time);
-    other tools run one chunk at a time in order.
+    Consecutive ``task`` tool calls and consecutive ``parallel_safe`` tools in one batch run
+    concurrently (capped); mutating tools run one chunk at a time in order.
+
+    ``input_admission`` (optional) supplies mid-turn steer injections drained at safe
+    boundaries (after tool batches / before the next provider call).
 
     ``curator_provider`` is an optional dedicated provider for context curation (e.g. with
     ``thinking_budget=0``). Falls back to ``provider`` when not supplied.
@@ -917,6 +974,7 @@ async def run(
             attachment_catalog=attachment_catalog,
             transcript_writer=transcript_writer,
             vertex_google_search=vertex_google_search,
+            input_admission=input_admission,
         ):
             yield evt
     except asyncio.CancelledError:
@@ -938,6 +996,7 @@ async def run(
         )
         yield Error(request_id=ctx.request_id, error=str(exc))
     finally:
+        await _drain_hook_settlement(hook_manager)
         logger.debug(
             "harness run end %s",
             kv(
@@ -972,6 +1031,7 @@ async def _run_inner(
     attachment_catalog: SessionAttachmentCatalog | None = None,
     transcript_writer: TranscriptWriter | None = None,
     vertex_google_search: bool = False,
+    input_admission: InputAdmission | None = None,
 ) -> AsyncIterator[AgentEvent]:
     from monkeybot.observability.spans import set_run_output, span_run
 
@@ -995,6 +1055,7 @@ async def _run_inner(
             attachment_catalog=attachment_catalog,
             transcript_writer=transcript_writer,
             vertex_google_search=vertex_google_search,
+            input_admission=input_admission,
         ):
             yield evt
         set_run_output(last_assistant[0])
@@ -1029,6 +1090,7 @@ async def _run_inner_core(
     attachment_catalog: SessionAttachmentCatalog | None = None,
     transcript_writer: TranscriptWriter | None = None,
     vertex_google_search: bool = False,
+    input_admission: InputAdmission | None = None,
 ) -> AsyncIterator[AgentEvent]:
     from monkeybot.observability.spans import (
         begin_turn_span,
@@ -1077,18 +1139,43 @@ async def _run_inner_core(
         result: ToolExecutionResult,
     ) -> tuple[ToolCallResult, ToolResponse]:
         event, response = _tool_outcome(call, ctx.request_id, result)
-        doom_tracker.record(
-            call.name,
-            dict(call.args),
-            is_error=result.error is not None,
-        )
+        doom_tracker.record(call.name, dict(call.args))
         return event, response
+
+    async def _drain_steers() -> AsyncIterator[AgentEvent]:
+        """Inject queued steer messages at a safe boundary (before next provider call)."""
+        if input_admission is None:
+            return
+        while True:
+            steered = input_admission.pop_steer()
+            if steered is None:
+                break
+            await history.append(
+                ctx.thread_id, Message(role="user", content=list(steered))
+            )
+            preview = preview_text(steered)
+            logger.info(
+                "steer injected %s",
+                kv(
+                    request_id=ctx.request_id,
+                    thread_id=ctx.thread_id,
+                    preview=preview[:80],
+                ),
+            )
+            yield UserSteered(request_id=ctx.request_id, text=preview)
 
     while turn_index < effective_max:
         if cancelled is not None and cancelled.is_set():
             yield Error(request_id=ctx.request_id, error="Request cancelled")
             needs_followup_after_tools = False
             break
+
+        async for steer_evt in _drain_steers():
+            yield steer_evt
+
+        # Settlement barrier: fire-and-forget hooks from the prior tool batch
+        # must finish (or time out) before the next provider call.
+        await _drain_hook_settlement(hook_manager)
 
         turn_index += 1
         turn_input_text = user_text
@@ -1554,7 +1641,9 @@ async def _run_inner_core(
                     yield result_evt
                     all_tool_responses.append(tool_resp)
 
-            for chunk in (() if reject_batch else _chunk_tool_calls(ordered)):
+            for chunk in (() if reject_batch else _chunk_tool_calls(
+                ordered, parallel_safe=_parallel_safe_names(ctx.tools)
+            )):
                 if cancelled is not None and cancelled.is_set():
                     yield Error(request_id=ctx.request_id, error="Request cancelled")
                     needs_followup_after_tools = False
@@ -1708,8 +1797,17 @@ async def _run_inner_core(
                     all_tool_responses.extend(chunk_responses)
                     continue
 
-                parallel_tasks = all(c.name == "task" for c in allowed_exec)
-                dispatch_mode = "parallel" if parallel_tasks else "serial"
+                # ToolCallStarted already published via async-gen consumer;
+                # PRE_TOOL is awaited inside _execute_one_tool_call.
+                safe_names = _parallel_safe_names(ctx.tools)
+                parallel_chunk = (
+                    all(c.name == "task" for c in allowed_exec)
+                    or (
+                        len(allowed_exec) > 1
+                        and all(c.name in safe_names for c in allowed_exec)
+                    )
+                )
+                dispatch_mode = "parallel" if parallel_chunk else "serial"
                 logger.debug(
                     "tool dispatch %s",
                     kv(
@@ -1791,7 +1889,7 @@ async def _run_inner_core(
                         _record_tool_hook_span_event("post_tool", call.name)
                     return tool_result
 
-                if not parallel_tasks:
+                if not parallel_chunk:
                     call = allowed_exec[0]
                     try:
                         tool_result = await _execute_one_tool_call(call)
@@ -1816,9 +1914,14 @@ async def _run_inner_core(
                         needs_followup_after_tools = False
                         return
 
-                    sem = asyncio.Semaphore(_MAX_CONCURRENT_SUBAGENTS)
+                    conc = (
+                        _MAX_CONCURRENT_SUBAGENTS
+                        if all(c.name == "task" for c in allowed_exec)
+                        else _parallel_tool_concurrency()
+                    )
+                    sem = asyncio.Semaphore(conc)
 
-                    async def _run_task(
+                    async def _run_parallel(
                         call: ToolCall,
                         *,
                         _sem: asyncio.Semaphore = sem,
@@ -1829,7 +1932,7 @@ async def _run_inner_core(
 
                     try:
                         outcomes = await asyncio.gather(
-                            *[_run_task(c) for c in allowed_exec],
+                            *[_run_parallel(c) for c in allowed_exec],
                             return_exceptions=True,
                         )
                     except asyncio.CancelledError:
@@ -1983,3 +2086,5 @@ async def _run_inner_core(
         ctx=ctx,
         timeout_s=0,
     )
+    # Settlement for POST_TURN / lingering POST_TOOL runs in run() finally
+    # before TurnComplete — do not drain twice here.

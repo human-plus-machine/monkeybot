@@ -15,6 +15,7 @@ from monkeybot.core.runtime.events import (
     FrontendToolRequestEvent,
     GroundingEvent,
     ImageBlock,
+    QueuedInputAccepted,
     RedactedThinkingBlock,
     SystemNotificationEvent,
     Thinking,
@@ -25,6 +26,7 @@ from monkeybot.core.runtime.events import (
     ToolConfirmationRequestEvent,
     TurnComplete,
     UsageTotals,
+    UserSteered,
     event_from_json,
     event_to_json,
 )
@@ -260,4 +262,16 @@ def test_sse_system_notification_event_roundtrip(data: dict[str, object] | None)
         msg="out of credits",
         data=data,
     )
+    assert event_from_json(event_to_json(ev)) == ev
+
+
+def test_agent_event_roundtrip_user_steered() -> None:
+    ev = UserSteered(request_id="r1", text="nudge")
+    assert event_from_json(event_to_json(ev)) == ev
+
+
+@pytest.mark.parametrize("queue", ("steer", "follow_up"))
+def test_agent_event_roundtrip_queued_input_accepted(queue: str) -> None:
+    q = cast(Literal["steer", "follow_up"], queue)
+    ev = QueuedInputAccepted(request_id="r1", queue=q, position=2)
     assert event_from_json(event_to_json(ev)) == ev

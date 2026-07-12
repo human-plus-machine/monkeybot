@@ -11,8 +11,14 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class ToolDef:
-    """Tool schema surfaced to providers (JSON-schema ``input_schema``)."""
+    """Tool schema surfaced to providers (JSON-schema ``input_schema``).
+
+    ``parallel_safe`` marks read-only (or otherwise concurrent-safe) tools that
+    the harness may execute together in one batch. Mutating tools stay serial
+    unless explicitly opted in. Providers ignore this field.
+    """
 
     name: str
     description: str
     input_schema: dict[str, object]
+    parallel_safe: bool = False

@@ -5,13 +5,14 @@ FastAPI routes and app factory for the v2 SSE gateway.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from fastapi import APIRouter, Depends, FastAPI, File, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
@@ -27,14 +28,17 @@ from monkeybot.core.attachments.store import (
     AttachmentTooLargeError,
     UnsupportedAttachmentTypeError,
 )
-from monkeybot.core.types.content_blocks import ContentBlock
+from monkeybot.core.logging_utils import kv
 from monkeybot.core.runtime.context_budget import summarization_trigger_ratio_from_env
+from monkeybot.core.runtime.events import QueuedInputAccepted, event_to_json
+from monkeybot.core.runtime.input_admission import AdmissionQueueFullError
 from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService
+from monkeybot.core.types.content_blocks import ContentBlock
 
 from .loop_port import LoopPort, UsagePort
-from .scheduler_routes import build_scheduler_router
 from .models import (
     APIError,
+    AdmissionAcceptedResponse,
     AttachmentUploadResponse,
     CancelRequest,
     CreateSessionRequest,
@@ -42,16 +46,22 @@ from .models import (
     ElicitationPOST,
     FrontendToolResultPOST,
     HealthResponse,
+    QueueRequest,
+    ReplyBodyFields,
     ReplyRequest,
     ReplyResponse,
     SessionUsageResponse,
+    SteerRequest,
     ToolConfirmationPOST,
     error_payload_dict,
 )
 from .reply_body import ReplyBodyError, normalize_reply_to_user_content
+from .scheduler_routes import build_scheduler_router
 from .session_bus import SessionAlreadyExistsError, SessionBus, SessionRegistry
 from .sse import format_active_requests, format_ping
 from .workspace_layout import resolve_agent_workspace_root
+
+logger = logging.getLogger(__name__)
 
 
 def get_registry(request: Request) -> SessionRegistry:
@@ -79,6 +89,169 @@ def _default_loop_port(registry: SessionRegistry) -> LoopPort:
                 bus.current_request_id = None
 
     return _DefaultLoop()
+
+
+def _require_bus(reg: SessionRegistry, session_id: str) -> SessionBus:
+    bus = reg.get(session_id)
+    if bus is None:
+        raise APIError(
+            404,
+            "SESSION_NOT_FOUND",
+            "Unknown session",
+            uuid.uuid4().hex,
+        )
+    return bus
+
+
+def _parse_user_content(
+    *,
+    body: ReplyBodyFields,
+    session_id: str,
+    request: Request,
+) -> list[ContentBlock]:
+    try:
+        return normalize_reply_to_user_content(
+            message=body.message,
+            content=body.content,
+            session_id=session_id,
+            attachment_store=_attachment_store(request),
+        )
+    except ReplyBodyError as exc:
+        status = 404 if exc.code == "ATTACHMENT_NOT_FOUND" else 400
+        raise APIError(status, exc.code, str(exc), uuid.uuid4().hex) from exc
+
+
+async def _try_acquire_turn(
+    *,
+    bus: SessionBus,
+    storage: Any,
+    session_id: str,
+    request_id: str,
+    busy_is_error: bool,
+) -> bool:
+    """Acquire the session turn lock. Return True if acquired.
+
+    When ``busy_is_error`` is True, raise ``SESSION_BUSY`` instead of returning False.
+    """
+    if storage is None:
+        if bus.current_request_id is not None:
+            if busy_is_error:
+                raise APIError(
+                    409,
+                    "SESSION_BUSY",
+                    "Session already processing a request",
+                    uuid.uuid4().hex,
+                )
+            return False
+        return True
+    acquired = await storage.session_turns().try_acquire(session_id, request_id)
+    if acquired:
+        return True
+    if busy_is_error:
+        raise APIError(
+            409,
+            "SESSION_BUSY",
+            "Session already processing a request",
+            uuid.uuid4().hex,
+        )
+    return False
+
+
+def _schedule_turn(
+    *,
+    bus: SessionBus,
+    loop_ref: LoopPort,
+    storage: Any,
+    session_id: str,
+    request_id: str,
+    user_content: list[ContentBlock],
+) -> None:
+    """Background a turn and drain follow-up queue when it finishes."""
+
+    async def _turn() -> None:
+        try:
+            await loop_ref.start_turn(session_id, request_id, user_content)
+        finally:
+            if storage is not None:
+                await storage.session_turns().release(session_id, request_id)
+            if bus.current_request_id == request_id:
+                bus.current_request_id = None
+            await _drain_follow_up(
+                bus=bus,
+                loop_ref=loop_ref,
+                storage=storage,
+                session_id=session_id,
+            )
+
+    asyncio.create_task(_turn())
+
+
+async def _drain_follow_up(
+    *,
+    bus: SessionBus,
+    loop_ref: LoopPort,
+    storage: Any,
+    session_id: str,
+) -> None:
+    """Start the next queued follow-up if the session is idle.
+
+    Queues are process-local (same as ``SessionBus``); multi-replica gateways
+    do not share steer/follow-up state across instances.
+    """
+    if bus.current_request_id is not None:
+        return
+    item = bus.admission.pop_follow_up()
+    if item is None:
+        return
+    if storage is not None:
+        acquired = await storage.session_turns().try_acquire(
+            session_id, item.request_id
+        )
+        if not acquired:
+            logger.warning(
+                "follow-up requeued; lock held elsewhere %s",
+                kv(session_id=session_id, request_id=item.request_id),
+            )
+            bus.admission.requeue_follow_up_front(item)
+            return
+    bus.current_request_id = item.request_id
+    logger.info(
+        "follow-up promoted %s",
+        kv(session_id=session_id, request_id=item.request_id),
+    )
+    _schedule_turn(
+        bus=bus,
+        loop_ref=loop_ref,
+        storage=storage,
+        session_id=session_id,
+        request_id=item.request_id,
+        user_content=item.content,
+    )
+
+
+async def _publish_admission_accepted(
+    bus: SessionBus,
+    *,
+    request_id: str,
+    queue: Literal["steer", "follow_up"],
+    position: int,
+) -> AdmissionAcceptedResponse:
+    await bus.publish_data(
+        event_to_json(
+            QueuedInputAccepted(
+                request_id=request_id,
+                queue=queue,
+                position=position,
+            )
+        )
+    )
+    logger.info(
+        "admission accepted %s",
+        kv(request_id=request_id, queue=queue, position=position),
+    )
+    return AdmissionAcceptedResponse(
+        request_id=request_id, queue=queue, position=position
+    )
 
 
 class _StaticUsagePort:
@@ -287,59 +460,131 @@ def create_app(
         reg_dep: SessionRegistry = Depends(get_registry),
     ) -> ReplyResponse:
         """Accept a user message and schedule the agent loop in the background."""
-        bus = reg_dep.get(session_id)
-        if bus is None:
+        bus = _require_bus(reg_dep, session_id)
+        storage = getattr(request.app.state, "storage", None)
+        await _try_acquire_turn(
+            bus=bus,
+            storage=storage,
+            session_id=session_id,
+            request_id=body.request_id,
+            busy_is_error=True,
+        )
+        user_content = _parse_user_content(
+            body=body, session_id=session_id, request=request
+        )
+        bus.current_request_id = body.request_id
+        _schedule_turn(
+            bus=bus,
+            loop_ref=request.app.state.loop,
+            storage=storage,
+            session_id=session_id,
+            request_id=body.request_id,
+            user_content=user_content,
+        )
+        return ReplyResponse(request_id=body.request_id)
+
+    @api.post(
+        "/sessions/{session_id}/steer",
+        response_model=AdmissionAcceptedResponse,
+        status_code=202,
+    )
+    async def post_steer(
+        session_id: str,
+        body: SteerRequest,
+        request: Request,
+        reg_dep: SessionRegistry = Depends(get_registry),
+    ) -> AdmissionAcceptedResponse:
+        """Enqueue mid-turn user text; injected after the current tool batch."""
+        bus = _require_bus(reg_dep, session_id)
+        if bus.current_request_id is None:
             raise APIError(
-                404,
-                "SESSION_NOT_FOUND",
-                "Unknown session",
+                409,
+                "SESSION_IDLE",
+                "Session is idle; use POST /reply instead of /steer",
                 uuid.uuid4().hex,
             )
-        storage = getattr(request.app.state, "storage", None)
-        if storage is None:
-            if bus.current_request_id is not None:
-                raise APIError(
-                    409,
-                    "SESSION_BUSY",
-                    "Session already processing a request",
-                    uuid.uuid4().hex,
-                )
-        else:
-            turn_locks = storage.session_turns()
-            acquired = await turn_locks.try_acquire(session_id, body.request_id)
-            if not acquired:
-                raise APIError(
-                    409,
-                    "SESSION_BUSY",
-                    "Session already processing a request",
-                    uuid.uuid4().hex,
-                )
-        loop_ref: LoopPort = request.app.state.loop
-        bus.current_request_id = body.request_id
-        store = _attachment_store(request)
-
+        user_content = _parse_user_content(
+            body=body, session_id=session_id, request=request
+        )
         try:
-            user_content = normalize_reply_to_user_content(
-                message=body.message,
-                content=body.content,
-                session_id=session_id,
-                attachment_store=store,
+            position = bus.admission.enqueue_steer(user_content)
+        except AdmissionQueueFullError as exc:
+            logger.warning(
+                "steer queue full %s",
+                kv(session_id=session_id, max_size=exc.max_size),
             )
-        except ReplyBodyError as exc:
-            status = 404 if exc.code == "ATTACHMENT_NOT_FOUND" else 400
-            raise APIError(status, exc.code, str(exc), uuid.uuid4().hex) from exc
+            raise APIError(
+                429,
+                "STEER_QUEUE_FULL",
+                str(exc),
+                uuid.uuid4().hex,
+            ) from exc
+        return await _publish_admission_accepted(
+            bus,
+            request_id=bus.current_request_id,
+            queue="steer",
+            position=position,
+        )
 
-        async def _turn() -> None:
-            try:
-                await loop_ref.start_turn(session_id, body.request_id, user_content)
-            finally:
-                if storage is not None:
-                    await storage.session_turns().release(session_id, body.request_id)
-                if bus.current_request_id == body.request_id:
-                    bus.current_request_id = None
-
-        asyncio.create_task(_turn())
-        return ReplyResponse(request_id=body.request_id)
+    @api.post(
+        "/sessions/{session_id}/queue",
+        response_model=AdmissionAcceptedResponse,
+        status_code=202,
+    )
+    async def post_queue(
+        session_id: str,
+        body: QueueRequest,
+        request: Request,
+        reg_dep: SessionRegistry = Depends(get_registry),
+    ) -> AdmissionAcceptedResponse:
+        """Enqueue a follow-up, or start immediately when the session is idle."""
+        bus = _require_bus(reg_dep, session_id)
+        user_content = _parse_user_content(
+            body=body, session_id=session_id, request=request
+        )
+        storage = getattr(request.app.state, "storage", None)
+        acquired = await _try_acquire_turn(
+            bus=bus,
+            storage=storage,
+            session_id=session_id,
+            request_id=body.request_id,
+            busy_is_error=False,
+        )
+        if acquired:
+            bus.current_request_id = body.request_id
+            _schedule_turn(
+                bus=bus,
+                loop_ref=request.app.state.loop,
+                storage=storage,
+                session_id=session_id,
+                request_id=body.request_id,
+                user_content=user_content,
+            )
+            return await _publish_admission_accepted(
+                bus,
+                request_id=body.request_id,
+                queue="follow_up",
+                position=0,
+            )
+        try:
+            position = bus.admission.enqueue_follow_up(body.request_id, user_content)
+        except AdmissionQueueFullError as exc:
+            logger.warning(
+                "follow-up queue full %s",
+                kv(session_id=session_id, max_size=exc.max_size),
+            )
+            raise APIError(
+                429,
+                "FOLLOW_UP_QUEUE_FULL",
+                str(exc),
+                uuid.uuid4().hex,
+            ) from exc
+        return await _publish_admission_accepted(
+            bus,
+            request_id=body.request_id,
+            queue="follow_up",
+            position=position,
+        )
 
     @api.post(
         "/sessions/{session_id}/attachments",
@@ -457,6 +702,7 @@ def create_app(
                 uuid.uuid4().hex,
             )
         bus.cancel_requested_for = body.request_id
+        bus.admission.clear_steer()
         for fut in list(bus.pending_responses.values()):
             if not fut.done():
                 fut.cancel()
