@@ -18,7 +18,13 @@ from typing import Any
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.attachments.freeze import freeze_attachments_in_history
 from monkeybot.core.attachments.store import AttachmentStore
-from monkeybot.core.context import PendingResponseBusPort, TurnContext, refresh_memory_index
+from monkeybot.core.context import (
+    PendingResponseBusPort,
+    TurnContext,
+    MCP_REGISTRY_MUTATING_TOOLS,
+    refresh_memory_index,
+    refresh_tools_after_mcp_change,
+)
 from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
 from monkeybot.core.llm.provider import Message, ToolCall
 from monkeybot.core.llm.realtime_provider import RealtimeToolCall
@@ -54,6 +60,12 @@ logger = logging.getLogger("monkeybot.core.runtime.realtime_loop")
 
 
 _HOOK_PRE_TOOL_TIMEOUT_S = 1.5
+
+_REALTIME_MCP_NEW_SESSION_NOTE = (
+    "MCP registry updated on the harness. Newly enabled MCP tool schemas are not "
+    "pushed into the live voice session; start a new realtime session to advertise "
+    "them to the model (v1 has no reconnect/resume)."
+)
 
 
 def _user_text_from_content(blocks: Sequence[ContentBlock]) -> str:
@@ -362,6 +374,7 @@ async def run_realtime_turn(
             )
 
         # 4. Dispatch tools sequentially (v1: no parallel subagent dispatch here).
+        mcp_registry_mutated = False
         for rtc in assistant_tool_calls:
             call = _realtime_tool_call_to_tool_call(rtc)
 
@@ -498,6 +511,11 @@ async def run_realtime_turn(
                             resolved_blocks = item
                     if resolved_blocks is not None:
                         result = ToolExecutionResult.ok_blocks(resolved_blocks)
+                if (
+                    result.error is None
+                    and call.name in MCP_REGISTRY_MUTATING_TOOLS
+                ):
+                    mcp_registry_mutated = True
 
             if inject_text and inject_texts_out is not None:
                 inject_texts_out.append(inject_text)
@@ -505,6 +523,30 @@ async def run_realtime_turn(
             event, response = _tool_outcome(call, ctx.request_id, result)
             yield event
             tool_results.append(response)
+
+        if mcp_registry_mutated:
+            mcp_client = getattr(tool_executor, "mcp", None)
+            if mcp_client is None:
+                logger.error(
+                    "MCP registry mutated but tool executor has no mcp client %s",
+                    kv(request_id=ctx.request_id, thread_id=ctx.thread_id),
+                )
+                raise RuntimeError(
+                    "tool executor missing mcp client after MCP registry mutation"
+                )
+            ctx = refresh_tools_after_mcp_change(ctx, mcp_client)
+            logger.info(
+                "refreshed ctx.tools after MCP registry change (realtime) %s",
+                kv(
+                    request_id=ctx.request_id,
+                    thread_id=ctx.thread_id,
+                    tool_count=len(ctx.tools),
+                ),
+            )
+            # Live vendor sessions fix tools at connect time; schemas are not
+            # updated mid-session. Tell the model to start a new session if needed.
+            if inject_texts_out is not None:
+                inject_texts_out.append(_REALTIME_MCP_NEW_SESSION_NOTE)
 
         # 5. Append all tool responses as one user message (reuses loop.py semantics).
         if tool_results:

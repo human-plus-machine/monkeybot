@@ -17,7 +17,12 @@ from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.attachments.freeze import freeze_attachments_in_history
 from monkeybot.core.attachments.resolve import resolve_messages_for_provider
 from monkeybot.core.attachments.store import AttachmentStore
-from monkeybot.core.context import TurnContext, refresh_memory_index
+from monkeybot.core.context import (
+    MCP_REGISTRY_MUTATING_TOOLS,
+    TurnContext,
+    refresh_memory_index,
+    refresh_tools_after_mcp_change,
+)
 from monkeybot.core.context.memory_prompt import (
     MemoryPromptSelection,
     memory_index_fingerprint,
@@ -891,6 +896,7 @@ async def _run_inner_core(
     turn_index = 0
     needs_followup_after_tools = False
     provider_messages_written = 0
+    tools_dirty = False
     # Final assistant write is backgrounded off the streaming path; awaited at the
     # turn tail before any history load/reset so the row is never lost.
     assistant_write_task: asyncio.Task[None] | None = None
@@ -1133,7 +1139,7 @@ async def _run_inner_core(
                     delta_messages = provider_messages[provider_messages_written:]
                     message_offset = provider_messages_written
                     messages_reset = False
-                include_tools = turn_index == 1 or messages_reset
+                include_tools = turn_index == 1 or messages_reset or tools_dirty
                 await transcript_writer.write_provider_request(
                     request_id=ctx.request_id,
                     inner_turn=turn_index,
@@ -1145,6 +1151,7 @@ async def _run_inner_core(
                     thinking_budget=stream_thinking,
                 )
                 provider_messages_written = len(provider_messages)
+                tools_dirty = False
             try:
                 async with span_llm(ctx=ctx, vertex_google_search=vertex_google_search):
                     async with aclosing(
@@ -1336,6 +1343,7 @@ async def _run_inner_core(
             # preceding model turn; serial non-task tools are separate chunks but
             # must still share a single user row.
             all_tool_responses: list[ContentBlock] = []
+            mcp_registry_mutated = False
 
             for chunk in _chunk_tool_calls(ordered):
                 if cancelled is not None and cancelled.is_set():
@@ -1588,6 +1596,11 @@ async def _run_inner_core(
                     for img_evt in _image_events(ctx.request_id, call.call_id, tool_result):
                         yield img_evt
                     chunk_responses.append(response)
+                    if (
+                        tool_result.error is None
+                        and call.name in MCP_REGISTRY_MUTATING_TOOLS
+                    ):
+                        mcp_registry_mutated = True
                 else:
                     if cancelled is not None and cancelled.is_set():
                         yield Error(request_id=ctx.request_id, error="Request cancelled")
@@ -1641,6 +1654,11 @@ async def _run_inner_core(
                         for img_evt in _image_events(ctx.request_id, call.call_id, tool_result):
                             yield img_evt
                         chunk_responses.append(response)
+                        if (
+                            tool_result.error is None
+                            and call.name in MCP_REGISTRY_MUTATING_TOOLS
+                        ):
+                            mcp_registry_mutated = True
 
                 all_tool_responses.extend(chunk_responses)
 
@@ -1681,6 +1699,27 @@ async def _run_inner_core(
                     vertex_google_search=vertex_google_search,
                 ):
                     yield budget_evt
+
+            if mcp_registry_mutated:
+                mcp_client = getattr(tool_executor, "mcp", None)
+                if mcp_client is None:
+                    logger.error(
+                        "MCP registry mutated but tool executor has no mcp client %s",
+                        kv(request_id=ctx.request_id, thread_id=ctx.thread_id),
+                    )
+                    raise RuntimeError(
+                        "tool executor missing mcp client after MCP registry mutation"
+                    )
+                ctx = refresh_tools_after_mcp_change(ctx, mcp_client)
+                tools_dirty = True
+                logger.info(
+                    "refreshed ctx.tools after MCP registry change %s",
+                    kv(
+                        request_id=ctx.request_id,
+                        thread_id=ctx.thread_id,
+                        tool_count=len(ctx.tools),
+                    ),
+                )
 
         finally:
             set_turn_prompt_tokens(usage.estimated_prompt_tokens)

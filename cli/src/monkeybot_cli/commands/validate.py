@@ -335,7 +335,7 @@ def run_validate(args: argparse.Namespace) -> int:
                     )
                     if args.check_mcp:
                         for name, srv in servers.items():
-                            if not isinstance(srv, dict) or srv.get("enabled") is False:
+                            if not isinstance(srv, dict):
                                 continue
                             url = srv.get("url")
                             if isinstance(url, str) and url.startswith("http"):

@@ -234,9 +234,12 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **How it works:**
 - Loaded at gateway startup from `MCP_CONFIG`; `${VAR}` interpolation in config.
+- Listed servers are **catalogued** by default (not connected); activate with `enable_mcp` / drop with `disable_mcp`. Mid-turn tool refresh applies in the text loop.
+- `"enabled": false` excludes a server from the catalog (not model-connectable). `"autoConnect": true` restores eager startup connect for that server.
 - `MCP_STRICT_LOAD=1` fails startup on connection errors (default: log and continue).
 - Runtime `add_mcp_server` / `remove_mcp_server` mutate live connections.
 - Lazy-imports `mcp` SDK to keep core importable without MCP installed.
+- Realtime sessions: MCP registry mutations refresh harness `ctx.tools`, but vendor tool schemas update only after starting a new session (v1 has no reconnect/resume).
 
 **Invariants:**
 - MCP tool names: `server__tool` (double underscore).

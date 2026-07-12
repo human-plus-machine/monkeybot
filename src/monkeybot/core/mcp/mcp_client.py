@@ -31,6 +31,7 @@ from monkeybot.core.context.tool_result_ingress import (
     format_mcp_content_block,
     sanitize_tool_result_text,
 )
+from monkeybot.core.logging_utils import kv
 from monkeybot.core.types.types_tools import ToolDef
 
 logger = logging.getLogger(__name__)
@@ -488,6 +489,11 @@ class MCPClient:
         """Create a manager; optionally pass ``hooks`` for tests."""
         self._hooks: MCPStdioHooks = hooks if hooks is not None else _ProductionStdioHooks()
         self._servers: dict[str, _ServerRecord] = {}
+        # Catalogued mcp.json servers; connected only via enable_mcp / connect_from_catalog.
+        self._catalog: dict[str, dict[str, Any]] = {}
+        self._config_path: Path | None = None
+        # Catalog + ever-connected names (including ad-hoc); used for tool-list refresh.
+        self._seen_servers: set[str] = set()
 
     def all_tools(self) -> list[ToolDef]:
         """Return every MCP tool snapshot, grouped by sorted server then tool names."""
@@ -496,6 +502,18 @@ class MCPClient:
             rec = self._servers[name]
             out.extend(sorted(rec.tools, key=lambda t: t.name))
         return out
+
+    def catalog_names(self) -> list[str]:
+        """Return sorted names of servers known from the last ``load_from_config``."""
+        return sorted(self._catalog.keys())
+
+    def known_server_names(self) -> list[str]:
+        """Return sorted catalog + ever-connected server names."""
+        return sorted(self._seen_servers)
+
+    def is_connected(self, name: str) -> bool:
+        """True when ``name`` has an active MCP session."""
+        return name in self._servers
 
     def split_prefixed_tool(self, prefixed_name: str) -> tuple[str, str] | None:
         """If ``prefixed_name`` matches a connected server, return ``(server_name, tool_name)``.
@@ -549,6 +567,7 @@ class MCPClient:
                 defs.append(ToolDef(name=prefixed, description=desc, input_schema=schema))
 
             self._servers[name] = _ServerRecord(stack=stack, session=session, tools=list(defs))
+            self._seen_servers.add(name)
             register_mcp_tool_names(t.name for t in defs)
             return list(defs)
         except MCPConnectionError:
@@ -613,6 +632,7 @@ class MCPClient:
                 defs.append(ToolDef(name=prefixed, description=desc, input_schema=schema))
 
             self._servers[name] = _ServerRecord(stack=stack, session=session, tools=list(defs))
+            self._seen_servers.add(name)
             register_mcp_tool_names(t.name for t in defs)
             return list(defs)
         except MCPConnectionError:
@@ -687,6 +707,127 @@ class MCPClient:
         result = await rec.session.call_tool(tool_name, arguments=dict(args))
         return _normalize_call_tool_result(result)
 
+    async def connect_from_catalog(self, name: str) -> list[ToolDef]:
+        """Connect a server previously registered by :meth:`load_from_config`.
+
+        Already-connected servers return their current tool list (no-op reconnect).
+        Raises :class:`MCPDiagnosticError` when ``name`` is not in the catalog.
+        """
+        if name in self._servers:
+            return list(self._servers[name].tools)
+        spec = self._catalog.get(name)
+        if spec is None:
+            known = self.catalog_names()
+            known_msg = ", ".join(known) if known else "(none)"
+            raise MCPDiagnosticError(
+                name,
+                f"Unknown MCP server {name!r}. Known configured servers: {known_msg}",
+                remedy=(
+                    "Use a name from mcp.json (after load_from_config), or connect an "
+                    "ad-hoc stdio server with add_mcp_server."
+                ),
+            )
+        defs = await self._connect_from_spec(
+            name, spec, mcp_json_path=self._config_path, raise_on_error=True
+        )
+        return defs
+
+    def _log_connect_failure(
+        self,
+        exc: BaseException,
+        *,
+        server_name: str,
+        config_path: Path,
+    ) -> None:
+        log_mcp_startup_diagnostic(exc, server_name=server_name, mcp_json_path=config_path)
+        logger.error(
+            "mcp connect failed for server %s (config %s)",
+            server_name,
+            config_path,
+            exc_info=True,
+        )
+
+    async def _connect_from_spec(
+        self,
+        server_name: str,
+        spec: Mapping[str, Any],
+        *,
+        mcp_json_path: Path | None,
+        raise_on_error: bool,
+    ) -> list[ToolDef]:
+        """Connect stdio or Streamable HTTP from one mcpServers entry."""
+        config_path = mcp_json_path if mcp_json_path is not None else Path("<unknown>")
+        url = spec.get("url")
+        if isinstance(url, str) and url.strip():
+            headers_any = spec.get("headers") or {}
+            headers_out: dict[str, str] = {}
+            if isinstance(headers_any, dict):
+                for k, val in headers_any.items():
+                    headers_out[str(k)] = "" if val is None else str(val)
+
+            auth_handler: Any | None = None
+            auth_any = spec.get("auth")
+            if isinstance(auth_any, dict) and auth_any:
+                handler_cls = _mcp_auth_handler_cls()
+                auth_handler = handler_cls(server_name, auth_any)
+                headers_out.pop("Authorization", None)
+                headers_out.pop("authorization", None)
+
+            try:
+                defs = await self.connect_streamable_http(
+                    server_name,
+                    url.strip(),
+                    headers_out if headers_out else None,
+                    auth=auth_handler,
+                )
+            except Exception as exc:
+                self._log_connect_failure(exc, server_name=server_name, config_path=config_path)
+                if raise_on_error:
+                    raise
+                return []
+            logger.info(
+                "mcp catalog server connected %s",
+                kv(server=server_name, tools=len(defs), transport="http"),
+            )
+            return defs
+
+        command = spec.get("command")
+        if not isinstance(command, str) or not command:
+            logger.error(
+                "mcp config server %s in %s: missing command or url",
+                server_name,
+                config_path,
+            )
+            if raise_on_error:
+                raise MCPDiagnosticError(
+                    server_name,
+                    f"MCP server {server_name!r} is missing command or url",
+                    remedy="Add a stdio command/args or a Streamable HTTP url in mcp.json.",
+                )
+            return []
+        args_raw = spec.get("args")
+        args_list = list(args_raw) if isinstance(args_raw, list) else []
+        args_out = [str(x) for x in args_list]
+
+        env_src = spec.get("env")
+        env_out: dict[str, str] = {}
+        if isinstance(env_src, dict):
+            for k, val in env_src.items():
+                env_out[str(k)] = "" if val is None else str(val)
+
+        try:
+            defs = await self.connect(server_name, command, args_out, env_out)
+        except Exception as exc:
+            self._log_connect_failure(exc, server_name=server_name, config_path=config_path)
+            if raise_on_error:
+                raise
+            return []
+        logger.info(
+            "mcp catalog server connected %s",
+            kv(server=server_name, tools=len(defs), transport="stdio"),
+        )
+        return defs
+
     async def load_from_config(
         self,
         mcp_json_path: Path,
@@ -700,10 +841,17 @@ class MCPClient:
         Streamable HTTP entries may include an ``auth`` object with ``flow`` set to
         ``client_credentials`` or ``password`` plus ``token_url`` and related fields.
 
+        Every server under ``mcpServers`` is registered in the catalog for
+        :meth:`connect_from_catalog` / ``enable_mcp`` unless ``"enabled": false``.
+        Catalogued servers are **not** connected at startup by default (progressive
+        disclosure — the model opts in via ``enable_mcp``). Set ``"autoConnect": true``
+        to restore eager startup connect for that server. Remove an entry from the
+        file to drop it from the catalog.
+
         Args:
             mcp_json_path: Path to ``mcp.json``.
-            raise_on_error: When True, abort on the first per-server startup failure after
-                emitting a diagnostic banner. When False, log and continue with other servers.
+            raise_on_error: When True, invalid JSON or structure raises
+                :class:`MCPDiagnosticError` instead of logging and returning.
         """
         if not mcp_json_path.is_file():
             return
@@ -711,14 +859,26 @@ class MCPClient:
         raw_text = mcp_json_path.read_text(encoding="utf-8")
         try:
             raw = json.loads(raw_text)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
             logger.error("invalid mcp JSON in %s", mcp_json_path)
+            if raise_on_error:
+                raise MCPDiagnosticError(
+                    "<mcp.json>",
+                    f"Invalid MCP JSON in {mcp_json_path}: {exc}",
+                    remedy="Fix mcp.json so it parses as JSON.",
+                ) from exc
             return
 
         if isinstance(raw, dict):
             raw = interpolate_env_vars(raw)
         else:
             logger.error("mcp config invalid in %s: expected top-level object", mcp_json_path)
+            if raise_on_error:
+                raise MCPDiagnosticError(
+                    "<mcp.json>",
+                    f"MCP config in {mcp_json_path} must be a JSON object",
+                    remedy="Wrap servers under a top-level object with mcpServers.",
+                )
             return
 
         servers_any = raw.get("mcpServers")
@@ -727,7 +887,16 @@ class MCPClient:
                 "mcp config invalid in %s: expected object mcpServers",
                 mcp_json_path,
             )
+            if raise_on_error:
+                raise MCPDiagnosticError(
+                    "<mcp.json>",
+                    f"MCP config in {mcp_json_path} must include an object mcpServers",
+                    remedy="Add a mcpServers object mapping server names to specs.",
+                )
             return
+
+        self._config_path = mcp_json_path
+        self._catalog.clear()
 
         for server_name in sorted(servers_any.keys()):
             spec = servers_any[server_name]
@@ -737,111 +906,34 @@ class MCPClient:
                     server_name,
                     mcp_json_path,
                 )
+                if raise_on_error:
+                    raise MCPDiagnosticError(
+                        server_name,
+                        f"MCP server {server_name!r} entry must be an object",
+                        remedy="Fix the server entry in mcp.json.",
+                    )
                 continue
             if spec.get("enabled") is False:
-                continue
-            url = spec.get("url")
-            if isinstance(url, str) and url.strip():
-                headers_any = spec.get("headers") or {}
-                headers_out: dict[str, str] = {}
-                if isinstance(headers_any, dict):
-                    for k, val in headers_any.items():
-                        headers_out[str(k)] = "" if val is None else str(val)
-
-                auth_handler: Any | None = None
-                auth_any = spec.get("auth")
-                if isinstance(auth_any, dict) and auth_any:
-                    handler_cls = _mcp_auth_handler_cls()
-                    auth_handler = handler_cls(server_name, auth_any)
-                    headers_out.pop("Authorization", None)
-                    headers_out.pop("authorization", None)
-
-                try:
-                    await self.connect_streamable_http(
-                        server_name,
-                        url.strip(),
-                        headers_out if headers_out else None,
-                        auth=auth_handler,
-                    )
-                except MCPAuthError as exc:
-                    log_mcp_startup_diagnostic(
-                        exc, server_name=server_name, mcp_json_path=mcp_json_path
-                    )
-                    logger.error(
-                        "mcp startup connect failed for server %s (config %s)",
-                        server_name,
-                        mcp_json_path,
-                        exc_info=True,
-                    )
-                    if raise_on_error:
-                        raise
-                except MCPConnectionError as exc:
-                    log_mcp_startup_diagnostic(
-                        exc, server_name=server_name, mcp_json_path=mcp_json_path
-                    )
-                    logger.error(
-                        "mcp startup connect failed for server %s (config %s)",
-                        server_name,
-                        mcp_json_path,
-                        exc_info=True,
-                    )
-                    if raise_on_error:
-                        raise
-                except Exception as exc:
-                    log_mcp_startup_diagnostic(
-                        exc, server_name=server_name, mcp_json_path=mcp_json_path
-                    )
-                    logger.error(
-                        "mcp startup connect failed for server %s (config %s)",
-                        server_name,
-                        mcp_json_path,
-                        exc_info=True,
-                    )
-                    if raise_on_error:
-                        raise
-                continue
-
-            command = spec.get("command")
-            if not isinstance(command, str) or not command:
-                logger.error(
-                    "mcp config server %s in %s: missing command or url",
-                    server_name,
-                    mcp_json_path,
+                logger.info(
+                    "mcp server skipped (enabled: false) %s",
+                    kv(server=server_name),
                 )
                 continue
-            args_raw = spec.get("args")
-            args_list = list(args_raw) if isinstance(args_raw, list) else []
-            args_out = [str(x) for x in args_list]
-
-            env_src = spec.get("env")
-            env_out: dict[str, str] = {}
-            if isinstance(env_src, dict):
-                for k, val in env_src.items():
-                    env_out[str(k)] = "" if val is None else str(val)
-
-            try:
-                await self.connect(server_name, command, args_out, env_out)
-            except MCPConnectionError as exc:
-                log_mcp_startup_diagnostic(
-                    exc, server_name=server_name, mcp_json_path=mcp_json_path
-                )
-                logger.error(
-                    "mcp startup connect failed for server %s (config %s)",
+            self._catalog[server_name] = dict(spec)
+            self._seen_servers.add(server_name)
+            if spec.get("autoConnect") is True:
+                logger.info(
+                    "mcp autoConnect server=%s (connecting at startup)",
                     server_name,
-                    mcp_json_path,
-                    exc_info=True,
                 )
-                if raise_on_error:
-                    raise
-            except Exception as exc:
-                log_mcp_startup_diagnostic(
-                    exc, server_name=server_name, mcp_json_path=mcp_json_path
-                )
-                logger.error(
-                    "mcp startup connect failed for server %s (config %s)",
+                await self._connect_from_spec(
                     server_name,
-                    mcp_json_path,
-                    exc_info=True,
+                    spec,
+                    mcp_json_path=mcp_json_path,
+                    raise_on_error=raise_on_error,
                 )
-                if raise_on_error:
-                    raise
+            else:
+                logger.info(
+                    "mcp catalog registered server=%s (connect via enable_mcp)",
+                    server_name,
+                )

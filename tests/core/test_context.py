@@ -71,12 +71,26 @@ class FakeMCPClient:
     def all_tools(self) -> list[ToolDef]:
         return list(self._tools)
 
+    def catalog_names(self) -> list[str]:
+        return []
+
+    def known_server_names(self) -> list[str]:
+        return []
+
+    def is_connected(self, name: str) -> bool:
+        del name
+        return False
+
     def split_prefixed_tool(self, prefixed_name: str) -> tuple[str, str] | None:
         del prefixed_name
         return None
 
+    async def connect_from_catalog(self, name: str) -> list[ToolDef]:
+        del name
+        return []
+
     async def load_from_config(self, path: Path, *, raise_on_error: bool = False) -> None:
-        del path
+        del path, raise_on_error
 
 
 # Standard layout used by demo_agent/workspace/skills/* — regression for list_skills descriptions.
@@ -202,6 +216,8 @@ async def test_build_context_merges_core_and_mcp_tools(tmp_path: Path) -> None:
         "search_memory",
         "list_skills",
         "task",
+        "enable_mcp",
+        "disable_mcp",
         "add_mcp_server",
         "remove_mcp_server",
         "start_loop",
@@ -215,7 +231,7 @@ async def test_build_context_merges_core_and_mcp_tools(tmp_path: Path) -> None:
     assert core_names.issubset(set(names))
     assert "db__query" in names
     assert "wiki__search" in names
-    assert len(ctx.tools) == 17 + 2
+    assert len(ctx.tools) == 19 + 2
     for t in ctx.tools:
         assert t.description.strip()
 
