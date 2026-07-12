@@ -285,6 +285,7 @@ async def _handle_assistant_boundary(
             attachment_catalog=attachment_catalog,
             tool_results_out=tool_results,
             inject_texts_out=inject_texts,
+            truncated=turn.truncated,
         ):
             if isinstance(event, AgentError):
                 turn_error = event.error

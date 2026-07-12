@@ -106,9 +106,13 @@ class RealtimeError:
 
 @dataclass(frozen=True)
 class RealtimeDone:
-    """Provider has finished emitting output for the current turn."""
+    """Provider has finished emitting output for the current turn.
+
+    ``truncated`` means the vendor hit an output length limit; tool args may be incomplete.
+    """
 
     kind: Literal["RealtimeDone"] = "RealtimeDone"
+    truncated: bool = False
 
 
 RealtimeEvent: TypeAlias = (

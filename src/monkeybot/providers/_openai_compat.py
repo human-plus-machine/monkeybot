@@ -213,6 +213,7 @@ async def iter_openai_compat_stream(
     output_tokens = 0
     cached_tokens = 0
     tool_buf: dict[int, dict[str, Any]] = {}
+    finish_reason: str | None = None
 
     try:
         stream = await client.chat.completions.create(**req)
@@ -225,6 +226,9 @@ async def iter_openai_compat_stream(
             if not chunk.choices:
                 continue
             choice = chunk.choices[0]
+            fr = getattr(choice, "finish_reason", None)
+            if fr:
+                finish_reason = str(fr)
             delta = choice.delta
             if delta is None:
                 continue
@@ -279,7 +283,7 @@ async def iter_openai_compat_stream(
         cache_read_tokens=cached_tokens,
         cache_creation_tokens=0,
     )
-    yield Done()
+    yield Done(truncated=finish_reason == "length")
 
 
 async def count_input_tokens_tiktoken(

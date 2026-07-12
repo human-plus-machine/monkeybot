@@ -47,6 +47,27 @@ Client (CLI / chat UI / serverless handler)
 
 **Core must not import gateway.** Gateway imports core via ports (`LoopPort`, `PendingResponseBusPort`, `ToolExecutorPort`). New features in `core/` must stay gateway-agnostic.
 
+### Harness ownership boundaries
+
+Use this table before adding features so PRs do not thicken the wrong layer: say what the harness owns, what it deliberately does not, and what must live outside the process.
+
+| Concern | Ownership | Guidance |
+|---------|-----------|----------|
+| Turn semantics (`loop.run`), tool batching, doom-loop, truncated-batch reject, history compaction | **In core** | Single source of truth; keep gateway-agnostic |
+| System prompt composition + tool-call protocol | **In core** | Protocol lives in `harness_prompt.py`, not `AGENT.md` |
+| Built-in tools, path confinement, command allowlists, tool inspectors, HITL confirm events | **In core** | Policy-rich by design |
+| MCP client + `server__tool` naming | **In core** | First-class harness infrastructure |
+| Subagent `task` (subprocess `loop.run`, no nested task) | **In core** | Product multi-agent via extensions/OS is out of scope here |
+| History / usage / storage backends, memory hooks | **In core** | Persist via ports; backends are pluggable |
+| LLM vendor adapters | **In core (thin)** | Normalize stream/count tokens only; no product policy |
+| HTTP/SSE, session bus, CORS, pending UI responses | **Not in core — gateway** | Transport only; call ports into the harness |
+| Chat UI, CLI chrome, deploy manifests, billing | **Not in core — product / OS** | Consume events and APIs; do not fork loop semantics |
+| Operator persona, domain procedures, skill playbooks | **Not in core — `AGENT.md` / skills** | Content the harness injects; not harness code |
+| Domain / third-party tools | **Extension — `CustomTool` / MCP / hooks** | Prefer these over editing `loop.py` or core tool tables |
+| Strong isolation for untrusted or unattended work | **OS / container / VM** | Optional OpenSandbox + allowlists are defense-in-depth, not a full trust boundary; real isolation is external |
+
+**PR smell checks:** new HTTP concerns in `core/` → wrong layer; new turn semantics only in the gateway → wrong layer; security that assumes “sandbox = safe” without an OS boundary → document the gap instead of implying a stronger guarantee.
+
 ---
 
 ## Turn lifecycle
@@ -62,6 +83,7 @@ One **user message** may span multiple **inner turns** (model → tools → mode
    - Optionally summarize history or shape tool outputs under context pressure.
    - Stream provider; accumulate tool calls until `Done`.
    - Execute tools (inspectors → hooks → executor); append assistant + tool rows.
+   - Doom-loop check: identical failing tool streak may force a no-tools recovery turn.
    - Repeat until final assistant text or max turns.
 3. Emit `TurnComplete` with usage totals and optional trace id.
 
@@ -116,6 +138,9 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - `run()` **never raises** to callers; errors become `Error` events; `TurnComplete` always emitted.
 - Cooperative cancellation via `asyncio.Event`, checked at loop boundaries.
 - Silent-model guard: whitespace-only assistant after tools → loop continues until budget.
+- **Doom-loop guard:** `DOOM_LOOP_THRESHOLD` consecutive identical *failing* tool calls (same name + args) within a user message emit an `Error`, inject a harness system note, and force the next provider call with an empty tool list (`toolChoice`-none equivalent) so the model must reply in text. Default threshold `3`; set `0` to disable.
+- **Truncated tool batch:** When `Done.truncated` is true (provider length/max-tokens stop) **or** every tool call in the batch has `parse_error`, the harness fails the whole batch with tool error results and does **not** execute any call — even if some args parsed as JSON (they may still be silently incomplete).
+- **History summarization:** When preflight tokens exceed the trigger ratio and history is long enough, the middle of the transcript is compressed via a dedicated summarizer call into one assistant row prefixed `[Context Summary]:`. The summarizer is instructed to emit a fixed Markdown template (Objective, Important Details, Work State with Completed/Active/Blocked, Next Move, Relevant Files) — not freeform prose. Head/tail messages are kept; the summary replaces the middle.
 
 ---
 
@@ -159,6 +184,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **How it works:**
 - `stream(messages, tools, model=..., thinking_budget=...)` yields `TextDelta`, `ThinkingDelta`, `ToolCall`, `UsageEvent`, `Done`.
+- `Done.truncated` is set when the vendor reports an output length limit (OpenAI `finish_reason=length`, Anthropic `stop_reason=max_tokens`, Gemini `MAX_TOKENS`). The loop treats that as an unsafe tool batch.
 - `count_input_tokens()` must match the same payload shape as `stream()` (summarization triggers, tool budgets).
 - Provider resolution via `MODEL_PROVIDER` aliases (`gemini` → `google_vertexai`, `vertex-claude` → `vertex_anthropic`).
 - Optional extras in `pyproject.toml`: `gemini`, `openai`, `claude`, `vertex-claude`, `bedrock`, `huggingface`, `ollama`, `nvidia`.
@@ -549,6 +575,9 @@ Use this when reviewing PRs or designing new features.
 | Area | Rule |
 |------|------|
 | **Loop** | Never raise from `run()`; always emit `TurnComplete` |
+| **Doom loop** | Identical failing tool streak ≥ `DOOM_LOOP_THRESHOLD` → Error + no-tools recovery turn |
+| **Truncated tools** | `Done.truncated` or all-`parse_error` batch → fail all; never execute partial args |
+| **Compaction summary** | Middle-history summary uses fixed Markdown template (Objective / Details / Work State / Next Move / Files); stored as `[Context Summary]:` |
 | **Tools** | Native function-call channel only; no JSON-in-prose tool calls |
 | **History** | `ToolRequest`/`ToolResponse` pairing must survive provider replay |
 | **Tool ordering** | Lexicographic `call_id`; one user row per tool batch |
@@ -576,6 +605,7 @@ Use this when reviewing PRs or designing new features.
 | Setting | Default | Env / config |
 |---------|---------|--------------|
 | Max inner turns | 50 | `MAX_TURNS` / `model.max_turns` |
+| Doom-loop threshold | 3 (0 = off) | `DOOM_LOOP_THRESHOLD` |
 | Context window | 200000 (example yaml: 1M) | `MODEL_CONTEXT_WINDOW` |
 | Summarization trigger | ratio from compression config | `SUMMARY_TRIGGER_RATIO` |
 | Read max lines | 5000 | `MONKEYBOT_READ_MAX_LINES` |

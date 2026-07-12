@@ -192,6 +192,32 @@ class TestRunRealtimeTurn:
         assert len(tool_results) == 1
         assert tool_results[0].is_error is True
 
+    async def test_truncated_batch_rejects_without_executing(self) -> None:
+        history = FakeHistory()
+        executor = RecordingExecutor()
+        ctx = _ctx()
+        events = await _collect_events(
+            run_realtime_turn(
+                "truncated",
+                "",
+                [
+                    RealtimeToolCall(
+                        call_id="c1",
+                        name="read_file",
+                        args={"path": "x.md"},
+                    )
+                ],
+                ctx,
+                history=history,
+                tool_executor=executor,
+                truncated=True,
+            )
+        )
+        assert executor.calls == []
+        result = next(e for e in events if isinstance(e, ToolCallResult))
+        assert result.error is not None
+        assert "output token limit" in result.error
+
     async def test_skips_empty_user_content(self) -> None:
         history = FakeHistory()
         executor = RecordingExecutor()

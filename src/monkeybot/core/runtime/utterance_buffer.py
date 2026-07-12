@@ -43,6 +43,7 @@ class AssistantTurn:
 
     text: str = ""
     tool_calls: list[RealtimeToolCall] = field(default_factory=list)
+    truncated: bool = False
 
     @property
     def is_empty(self) -> bool:
@@ -135,12 +136,17 @@ class UtteranceBuffer:
             self._user_committed = True
         return text
 
+    def mark_assistant_truncated(self) -> None:
+        """Record that the in-flight assistant turn hit an output length limit."""
+        self._assistant.truncated = True
+
     def mark_assistant_turn_boundary(self) -> AssistantTurn:
         """Finalize the current assistant turn and reset assistant state."""
         self._in_assistant_turn = False
         turn = AssistantTurn(
             text=self._assistant.text.strip(),
             tool_calls=list(self._assistant.tool_calls),
+            truncated=self._assistant.truncated,
         )
         self._last_assistant_turn = turn
         self._assistant = AssistantTurn()
@@ -175,5 +181,6 @@ class UtteranceBuffer:
             return AssistantTurn(
                 text=self._assistant.text.strip(),
                 tool_calls=list(self._assistant.tool_calls),
+                truncated=self._assistant.truncated,
             )
         return self._last_assistant_turn

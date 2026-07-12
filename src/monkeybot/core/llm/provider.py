@@ -148,7 +148,10 @@ class UsageEvent:
 
 @dataclass(frozen=True)
 class Done:
+    """End of a provider stream. ``truncated`` means the vendor hit an output length limit."""
+
     kind: Literal["done"] = "done"
+    truncated: bool = False
 
 
 ProviderEvent: TypeAlias = TextDelta | ThinkingDelta | ToolCall | GroundingEvent | UsageEvent | Done

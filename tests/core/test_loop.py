@@ -167,6 +167,7 @@ class FakeProvider:
         self._name = name
         self.stream_calls = 0
         self.stream_models: list[str] = []
+        self.stream_messages: list[list[Message]] = []
         self.count_thinking_budgets: list[int | None] = []
         self.vertex_google_search_calls: list[bool] = []
 
@@ -187,7 +188,8 @@ class FakeProvider:
         thinking_budget: int | None = None,
         vertex_google_search: bool = False,
     ) -> AsyncIterator[ProviderEvent]:
-        del messages, tools, thinking_budget
+        del tools, thinking_budget
+        self.stream_messages.append(list(messages))
         self.stream_models.append(model)
         self.vertex_google_search_calls.append(vertex_google_search)
         idx = self.stream_calls
@@ -1030,8 +1032,13 @@ async def test_run_emits_context_summarize_events_when_over_cap(
     assert prov.stream_calls == 2
     assert prov.stream_models == ["gemini-2.5-flash", "gemini-2.5-flash"]
     assert len(hist.reset_calls) == 1
+    summarizer_msgs = prov.stream_messages[0]
+    assert summarizer_msgs[0].role == "system"
+    assert isinstance(summarizer_msgs[0].content[0], Text)
+    assert "## Objective" in summarizer_msgs[0].content[0].text
+    assert "## Relevant Files" in summarizer_msgs[0].content[0].text
     assert any(
-        isinstance(x, Text) and "[Context Summary]" in x.text
+        isinstance(x, Text) and x.text.startswith("[Context Summary]:\n")
         for m in hist.rows
         for x in m.content
     )
