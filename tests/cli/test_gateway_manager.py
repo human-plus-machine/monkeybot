@@ -36,11 +36,12 @@ def test_find_workspace_dir_missing(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "url,expected",
     [
-        ("ws://localhost:8787", True),
-        ("ws://127.0.0.1:8787", True),
-        ("wss://localhost:8787", True),
-        ("ws://example.com:8787", False),
+        ("ws://localhost:8080", True),
+        ("ws://127.0.0.1:8080", True),
+        ("wss://localhost:8080", True),
+        ("ws://example.com:8080", False),
         ("wss://api.example.com/realtime", False),
+        ("ws://localhost:8787", True),
     ],
 )
 def test_url_is_local(url: str, expected: bool) -> None:

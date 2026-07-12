@@ -105,6 +105,30 @@ def test_encode_tool_call_frame() -> None:
     assert encoded["args"] == {"q": "x"}
 
 
+def test_tool_call_frame_default_args_is_empty_dict() -> None:
+    frame = ServerToolCallFrame(call_id="c1", name="search")
+    assert frame.args == {}
+    encoded = json.loads(encode_server_frame(frame))
+    assert encoded["args"] == {}
+
+
+def test_encode_tool_confirmation_includes_timeout() -> None:
+    from monkeybot.gateway.realtime.wire import ServerToolConfirmationFrame
+
+    frame = ServerToolConfirmationFrame(
+        tool_call_id="tc1",
+        tool_name="run_command",
+        prompt="Allow?",
+        arguments={"cmd": "ls"},
+        timeout_sec=300.0,
+    )
+    encoded = json.loads(encode_server_frame(frame))
+    assert encoded["timeout_sec"] == 300.0
+    parsed = parse_server_frame(json.dumps(encoded))
+    assert isinstance(parsed, ServerToolConfirmationFrame)
+    assert parsed.timeout_sec == 300.0
+
+
 def test_encode_turn_boundary_frame() -> None:
     frame = ServerTurnBoundaryFrame(role="assistant")
     encoded = json.loads(encode_server_frame(frame))
@@ -178,6 +202,68 @@ def test_parse_server_error_and_session_ended_frames() -> None:
 def test_parse_server_unknown_kind_raises() -> None:
     with pytest.raises(ProtocolError, match="Unknown server frame kind"):
         parse_server_frame(json.dumps({"kind": "unknown"}))
+
+
+def test_tool_result_user_transcript_usage_hitl_roundtrip() -> None:
+    from monkeybot.gateway.realtime.wire import (
+        ClientElicitationResponseFrame,
+        ClientToolConfirmationResponseFrame,
+        ServerElicitationFrame,
+        ServerToolConfirmationFrame,
+        ServerToolResultFrame,
+        ServerUsageFrame,
+        ServerUserTranscriptFrame,
+    )
+
+    tool_result = ServerToolResultFrame(
+        call_id="c1", name="read", result="ok", error=None
+    )
+    parsed = parse_server_frame(encode_server_frame(tool_result))
+    assert isinstance(parsed, ServerToolResultFrame)
+    assert parsed.call_id == "c1"
+    assert parsed.result == "ok"
+
+    ut = ServerUserTranscriptFrame(text="hello", is_final=True)
+    assert parse_server_frame(encode_server_frame(ut)).text == "hello"
+
+    usage = ServerUsageFrame(usage={"input_tokens": 3, "output_tokens": 1})
+    parsed_u = parse_server_frame(encode_server_frame(usage))
+    assert isinstance(parsed_u, ServerUsageFrame)
+    assert parsed_u.usage["input_tokens"] == 3
+
+    conf = ServerToolConfirmationFrame(
+        tool_call_id="c1", tool_name="shell", prompt="Allow?", arguments={"cmd": "ls"}
+    )
+    assert parse_server_frame(encode_server_frame(conf)).tool_name == "shell"
+
+    elicit = ServerElicitationFrame(elicitation_id="e1", prompt="Name?", schema={"type": "object"})
+    assert parse_server_frame(encode_server_frame(elicit)).elicitation_id == "e1"
+
+    c_resp = parse_client_frame(
+        json.dumps(
+            {
+                "kind": "tool_confirmation_response",
+                "tool_call_id": "c1",
+                "approved": True,
+                "reason": "",
+            }
+        )
+    )
+    assert isinstance(c_resp, ClientToolConfirmationResponseFrame)
+    assert c_resp.approved is True
+
+    e_resp = parse_client_frame(
+        json.dumps(
+            {
+                "kind": "elicitation_response",
+                "elicitation_id": "e1",
+                "user_data": "Ada",
+                "cancelled": False,
+            }
+        )
+    )
+    assert isinstance(e_resp, ClientElicitationResponseFrame)
+    assert e_resp.user_data == "Ada"
 
 
 def test_audio_duration_sec() -> None:

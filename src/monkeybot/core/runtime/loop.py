@@ -79,6 +79,8 @@ from .events import (
     ImageBlock,
     SystemPromptSnapshot,
     Thinking,
+    ThinkingBlockComplete,
+    ThinkingBlockDelta,
     ToolCallResult,
     ToolCallStarted,
     ToolConfirmationRequestEvent,
@@ -615,6 +617,7 @@ def _tool_outcome(
         tool=call.name,
         result=body,
         error=result.error,
+        call_id=call.call_id,
     )
     response = ToolResponse(
         id=call.call_id,
@@ -1103,6 +1106,18 @@ async def _run_inner_core(
             assistant_text = ""
             thinking_text = ""
             thinking_signature: str | None = None
+            thinking_streamed = False
+            thinking_closed = False
+
+            def _close_thinking_block() -> ThinkingBlockComplete | None:
+                nonlocal thinking_closed
+                if not thinking_streamed or thinking_closed:
+                    return None
+                thinking_closed = True
+                return ThinkingBlockComplete(
+                    request_id=ctx.request_id,
+                    signature=thinking_signature or "",
+                )
 
             llm_input = 0
             llm_output = 0
@@ -1147,6 +1162,9 @@ async def _run_inner_core(
                     ) as stream:
                         async for ev in stream:
                             if isinstance(ev, TextDelta):
+                                closed = _close_thinking_block()
+                                if closed is not None:
+                                    yield closed
                                 assistant_text += ev.text
                                 if ev.text:
                                     yield AssistantDelta(request_id=ctx.request_id, delta=ev.text)
@@ -1154,6 +1172,13 @@ async def _run_inner_core(
                                 thinking_text += ev.text
                                 if ev.signature:
                                     thinking_signature = ev.signature
+                                if ev.text:
+                                    thinking_streamed = True
+                                    yield ThinkingBlockDelta(
+                                        request_id=ctx.request_id,
+                                        text=ev.text,
+                                        signature=ev.signature,
+                                    )
                             elif isinstance(ev, UsageEvent):
                                 _merge_usage_event(usage, ev)
                                 usage.cost_usd += estimate_cost(
@@ -1169,6 +1194,9 @@ async def _run_inner_core(
                                 llm_cache_read += ev.cache_read_tokens
                                 llm_cache_creation += ev.cache_creation_tokens
                             elif isinstance(ev, ToolCall):
+                                closed = _close_thinking_block()
+                                if closed is not None:
+                                    yield closed
                                 pending[ev.call_id] = ev
                             elif isinstance(ev, ProviderGroundingEvent):
                                 yield GroundingEvent(
@@ -1178,6 +1206,9 @@ async def _run_inner_core(
                                 )
                             elif isinstance(ev, Done):
                                 break
+                    closed = _close_thinking_block()
+                    if closed is not None:
+                        yield closed
                     set_llm_usage(
                         input_tokens=llm_input,
                         output_tokens=llm_output,
@@ -1221,10 +1252,16 @@ async def _run_inner_core(
                     ),
                 )
             except asyncio.CancelledError:
+                closed = _close_thinking_block()
+                if closed is not None:
+                    yield closed
                 yield Error(request_id=ctx.request_id, error="Request cancelled")
                 needs_followup_after_tools = False
                 return
             except Exception as exc:
+                closed = _close_thinking_block()
+                if closed is not None:
+                    yield closed
                 logger.exception(
                     "provider stream failed %s",
                     kv(request_id=ctx.request_id, thread_id=ctx.thread_id, model=ctx.model),
@@ -1328,6 +1365,7 @@ async def _run_inner_core(
                             label=call.name,
                             args=dict(call.args),
                             parse_error=call.parse_error,
+                            call_id=call.call_id,
                         )
                         result_evt, tool_resp = _tool_outcome(
                             call, ctx.request_id, ToolExecutionResult.err(call.parse_error)
@@ -1382,9 +1420,10 @@ async def _run_inner_core(
                                         bus, fut, call.call_id, timeout_sec=None
                                     )
                                 except asyncio.CancelledError:
-                                    allowed = False
-                                    denial_message = "cancelled by user"
-                                    break
+                                    # Re-raise so turn cancellation (client disconnect /
+                                    # abort) propagates; do not continue the tool loop
+                                    # on a dead session.
+                                    raise
                                 if payload.get("_timeout"):
                                     allowed = False
                                     to = int(
@@ -1430,6 +1469,7 @@ async def _run_inner_core(
                             tool=call.name,
                             label=call.name,
                             args=dict(call.args),
+                            call_id=call.call_id,
                         )
                         result_evt, tool_resp = _tool_outcome(
                             call, ctx.request_id, ToolExecutionResult.err(msg)
@@ -1443,6 +1483,7 @@ async def _run_inner_core(
                         tool=call.name,
                         label=call.name,
                         args=dict(call.args),
+                        call_id=call.call_id,
                     )
                     allowed_exec.append(call)
 

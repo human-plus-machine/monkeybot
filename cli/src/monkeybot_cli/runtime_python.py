@@ -20,6 +20,10 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+DEFAULT_PORT = 8080
+SSE_GATEWAY_MODULE = "monkeybot.gateway.main"
+COMBINED_GATEWAY_MODULE = "monkeybot.gateway.realtime_main"
+
 
 def _venv_python(agent_root: Path) -> Path | None:
     """Return the project venv interpreter if it exists, else ``None``."""
@@ -34,7 +38,7 @@ def _venv_python(agent_root: Path) -> Path | None:
 class RuntimePython:
     """Resolved Python runtime for an agent project.
 
-    ``argv`` is the prefix to prepend to ``-m monkeybot.gateway.main`` or
+    ``argv`` is the prefix to prepend to ``-m monkeybot.gateway.*`` or
     ``-c "…"`` doctor probes. ``source`` is for diagnostics/remediation text.
     ``agent_root`` is set for ``uv run`` resolution (probes need the project cwd).
     """
@@ -54,9 +58,17 @@ def resolve_runtime_python(agent_root: Path) -> RuntimePython:
     return RuntimePython([sys.executable], "cli", agent_root)
 
 
-def gateway_argv(runtime: RuntimePython) -> list[str]:
-    """Full argv to launch ``monkeybot.gateway.main`` under ``runtime``."""
-    return [*runtime.argv, "-m", "monkeybot.gateway.main"]
+def gateway_argv(
+    runtime: RuntimePython,
+    *,
+    module: str = COMBINED_GATEWAY_MODULE,
+) -> list[str]:
+    """Full argv to launch a gateway module under ``runtime``.
+
+    CLI auto-start defaults to the combined SSE+WebSocket entrypoint
+    (``realtime_main``) so ``chat`` and ``talk`` share one process/port.
+    """
+    return [*runtime.argv, "-m", module]
 
 
 def run_probe(runtime: RuntimePython, code: str, *, timeout: float = 15.0) -> bool:

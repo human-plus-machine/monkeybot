@@ -24,7 +24,7 @@ def test_uses_venv_python_when_present(tmp_path: Path) -> None:
 
     assert runtime.source == "venv"
     assert runtime.argv == [str(py)]
-    assert gateway_argv(runtime) == [str(py), "-m", "monkeybot.gateway.main"]
+    assert gateway_argv(runtime) == [str(py), "-m", "monkeybot.gateway.realtime_main"]
 
 
 def test_falls_back_to_uv_run_when_pyproject_present(tmp_path: Path) -> None:
@@ -34,7 +34,13 @@ def test_falls_back_to_uv_run_when_pyproject_present(tmp_path: Path) -> None:
 
     assert runtime.source == "uv"
     assert runtime.argv == ["uv", "run", "python"]
-    assert gateway_argv(runtime) == ["uv", "run", "python", "-m", "monkeybot.gateway.main"]
+    assert gateway_argv(runtime) == [
+        "uv",
+        "run",
+        "python",
+        "-m",
+        "monkeybot.gateway.realtime_main",
+    ]
 
 
 def test_falls_back_to_cli_executable_for_config_only_tree(tmp_path: Path) -> None:
@@ -43,8 +49,22 @@ def test_falls_back_to_cli_executable_for_config_only_tree(tmp_path: Path) -> No
 
     assert runtime.source == "cli"
     assert runtime.argv == [sys.executable]
-    assert gateway_argv(runtime) == [sys.executable, "-m", "monkeybot.gateway.main"]
+    assert gateway_argv(runtime) == [
+        sys.executable,
+        "-m",
+        "monkeybot.gateway.realtime_main",
+    ]
 
+
+def test_gateway_argv_sse_only_module(tmp_path: Path) -> None:
+    from monkeybot_cli.runtime_python import SSE_GATEWAY_MODULE
+
+    runtime = resolve_runtime_python(tmp_path)
+    assert gateway_argv(runtime, module=SSE_GATEWAY_MODULE) == [
+        sys.executable,
+        "-m",
+        "monkeybot.gateway.main",
+    ]
 
 def test_venv_takes_precedence_over_pyproject(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text('[project]\nname = "agent"\n', encoding="utf-8")

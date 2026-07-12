@@ -10,11 +10,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
+from monkeybot_cli.chat_session import format_http_error
 from monkeybot_cli.commands.chat import (
-    _chat_session,
     _finish_assistant_turn,
     _format_gateway_log_tail,
-    _format_http_error,
+    _plain_chat_session,
     _SpawnedGateway,
     _tail_gateway_log,
     run_chat,
@@ -41,7 +41,7 @@ def test_format_http_error_status() -> None:
     response = httpx.Response(500, request=request, text="internal error")
     exc = httpx.HTTPStatusError("server error", request=request, response=response)
 
-    message = _format_http_error("Session creation", exc)
+    message = format_http_error("Session creation", exc)
 
     assert message == "Session creation failed: server error"
 
@@ -50,14 +50,21 @@ def test_format_http_error_transport() -> None:
     request = httpx.Request("GET", "http://localhost:8080/health")
     exc = httpx.ConnectError("connection refused", request=request)
 
-    message = _format_http_error("Gateway health check", exc)
+    message = format_http_error("Gateway health check", exc)
 
     assert "Gateway health check failed" in message
     assert "connection refused" in message
 
 
 def test_chat_session_create_failure_returns_readable_error(capsys: pytest.CaptureFixture[str]) -> None:
-    args = MagicMock(model_provider=None, model_name=None)
+    args = MagicMock(
+        model_provider=None,
+        model_name=None,
+        show_thinking=False,
+        verbose=False,
+        usage=False,
+        session=None,
+    )
 
     async def fake_get(url: str) -> httpx.Response:
         return httpx.Response(200, request=httpx.Request("GET", url))
@@ -69,11 +76,10 @@ def test_chat_session_create_failure_returns_readable_error(capsys: pytest.Captu
     mock_client = AsyncMock()
     mock_client.get = fake_get
     mock_client.post = fake_post
-    mock_client.__aenter__.return_value = mock_client
-    mock_client.__aexit__.return_value = None
+    mock_client.aclose = AsyncMock()
 
-    with patch("monkeybot_cli.commands.chat.httpx.AsyncClient", return_value=mock_client):
-        code = asyncio.run(_chat_session(args, "http://localhost:8080", spawned_gateway=False))
+    with patch("monkeybot_cli.chat_session.httpx.AsyncClient", return_value=mock_client):
+        code = asyncio.run(_plain_chat_session(args, "http://localhost:8080", spawned_gateway=False))
 
     assert code == 1
     err = capsys.readouterr().err
@@ -88,6 +94,7 @@ def test_chat_session_stream_failure_exits_turn(capsys: pytest.CaptureFixture[st
         show_thinking=False,
         verbose=False,
         usage=False,
+        session=None,
     )
 
     async def fake_get(url: str) -> httpx.Response:
@@ -120,8 +127,7 @@ def test_chat_session_stream_failure_exits_turn(capsys: pytest.CaptureFixture[st
     mock_client.get = fake_get
     mock_client.post = fake_post
     mock_client.stream = MagicMock(return_value=FailingStream())
-    mock_client.__aenter__.return_value = mock_client
-    mock_client.__aexit__.return_value = None
+    mock_client.aclose = AsyncMock()
 
     read_lines = iter(["hello", None])
 
@@ -129,17 +135,18 @@ def test_chat_session_stream_failure_exits_turn(capsys: pytest.CaptureFixture[st
         return next(read_lines)
 
     with (
-        patch("monkeybot_cli.commands.chat.httpx.AsyncClient", return_value=mock_client),
+        patch("monkeybot_cli.chat_session.httpx.AsyncClient", return_value=mock_client),
         patch("monkeybot_cli.commands.chat._read_line", fake_read_line),
-        patch("monkeybot_cli.commands.chat._print_welcome"),
+        patch("monkeybot_cli.chat_session._RECONNECT_MAX_ATTEMPTS", 1),
+        patch("monkeybot_cli.chat_session._RECONNECT_INITIAL_DELAY", 0.01),
+        patch("monkeybot_cli.chat_session._RECONNECT_MAX_DELAY", 0.01),
     ):
-        code = asyncio.run(_chat_session(args, "http://localhost:8080", spawned_gateway=False))
+        code = asyncio.run(_plain_chat_session(args, "http://localhost:8080", spawned_gateway=False))
 
-    # A failed event stream must surface a non-zero exit so callers can
-    # distinguish it from a clean /bye.
     assert code == 1
     err = capsys.readouterr().err
-    assert "Event stream failed" in err
+    # Fatal after reconnect gives up; message may be the last stream error or exhaustion text.
+    assert "Event stream" in err or "reconnect" in err.lower() or "Stream failed" in err
 
 
 def test_format_gateway_log_tail_limits_lines(tmp_path) -> None:
@@ -167,7 +174,9 @@ def test_tail_gateway_log_reads_captured_stderr(tmp_path) -> None:
     assert log_file.closed
 
 
-def test_run_chat_prints_gateway_log_on_startup_failure(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_run_chat_prints_gateway_log_on_startup_failure(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     cfg_dir = tmp_path / "monkeybot_config"
     cfg_dir.mkdir()
     (cfg_dir / "monkeybot.yaml").write_text(

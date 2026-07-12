@@ -43,6 +43,7 @@ def test_chat_repl_round_trip_with_fake_gateway(tmp_path: Path) -> None:
             "MODEL_PROVIDER": "fake",
             "PORT": str(port),
             "SKILLS_PATH": str(tmp_path / "skills"),
+            "MONKEYBOT_CHAT_PLAIN": "1",
         }
     )
 

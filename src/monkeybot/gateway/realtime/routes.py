@@ -27,11 +27,14 @@ from monkeybot.core.llm.realtime_provider import (
     RealtimeTextDelta,
     RealtimeToolCall,
     RealtimeTurnBoundary,
+    RealtimeUsage,
 )
 from monkeybot.core.llm.realtime_provider import RealtimeError as ProviderError
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.backends import HistoryStore
+from monkeybot.core.runtime.events import ActionRequiredEvent
 from monkeybot.core.runtime.events import Error as AgentError
+from monkeybot.core.runtime.events import ToolCallResult, ToolConfirmationRequestEvent
 from monkeybot.core.runtime.realtime_loop import run_realtime_turn
 from monkeybot.core.runtime.utterance_buffer import UtteranceBuffer
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
@@ -58,17 +61,24 @@ from .wire import (
     ClientAudioStreamEndFrame,
     ClientCloseFrame,
     ClientConnectFrame,
+    ClientElicitationResponseFrame,
     ClientInterruptFrame,
     ClientTextFrame,
+    ClientToolConfirmationResponseFrame,
     ProtocolError,
     ServerAudioFrame,
     ServerConnectedFrame,
+    ServerElicitationFrame,
     ServerErrorFrame,
     ServerInterruptedFrame,
     ServerSessionEndedFrame,
     ServerTextDeltaFrame,
     ServerToolCallFrame,
+    ServerToolConfirmationFrame,
+    ServerToolResultFrame,
     ServerTurnBoundaryFrame,
+    ServerUsageFrame,
+    ServerUserTranscriptFrame,
     audio_duration_sec,
     encode_server_frame,
     parse_client_frame,
@@ -83,6 +93,13 @@ def _env_context_window_tokens() -> int:
         return max(1, int(cap_raw))
     except ValueError:
         return 200_000
+
+
+def _pending_response_timeout_sec() -> float:
+    try:
+        return max(1.0, float(os.environ.get("PENDING_RESPONSE_TIMEOUT_SEC", "300")))
+    except ValueError:
+        return 300.0
 
 
 def _resolved_workspace_paths() -> tuple[Path, Path]:
@@ -285,9 +302,54 @@ async def _handle_assistant_boundary(
             attachment_catalog=attachment_catalog,
             tool_results_out=tool_results,
             inject_texts_out=inject_texts,
+            pending_bus=state,
         ):
             if isinstance(event, AgentError):
                 turn_error = event.error
+            elif isinstance(event, ToolCallResult):
+                await _send_frame(
+                    ws,
+                    ServerToolResultFrame(
+                        call_id=event.call_id,
+                        name=event.tool,
+                        result=event.result or "",
+                        error=event.error,
+                    ),
+                )
+            elif isinstance(event, ToolConfirmationRequestEvent):
+                await _send_frame(
+                    ws,
+                    ServerToolConfirmationFrame(
+                        tool_call_id=event.tool_call_id,
+                        tool_name=event.tool_name,
+                        prompt=event.prompt or f"Allow tool `{event.tool_name}`?",
+                        arguments=dict(event.arguments or {}),
+                        timeout_sec=_pending_response_timeout_sec(),
+                    ),
+                )
+            elif isinstance(event, ActionRequiredEvent) and event.action_type == "elicitation":
+                payload = dict(event.payload or {})
+                prompt_raw = payload.get("message") or payload.get("prompt")
+                prompt = (
+                    prompt_raw.strip()
+                    if isinstance(prompt_raw, str) and prompt_raw.strip()
+                    else "Agent requests input"
+                )
+                schema_raw = (
+                    payload.get("requestedSchema")
+                    or payload.get("requested_schema")
+                    or payload.get("schema")
+                )
+                schema = dict(schema_raw) if isinstance(schema_raw, dict) else None
+                await _send_frame(
+                    ws,
+                    ServerElicitationFrame(
+                        elicitation_id=event.id,
+                        prompt=prompt,
+                        schema=schema,
+                        timeout_sec=_pending_response_timeout_sec(),
+                    ),
+                )
     except Exception:
         logger.exception(
             "run_realtime_turn failed %s",
@@ -386,7 +448,7 @@ async def _handle_provider_event(
     if isinstance(event, RealtimePartialTranscript):
         await _send_frame(
             ws,
-            ServerTextDeltaFrame(delta=event.text, is_final=event.is_final),
+            ServerUserTranscriptFrame(text=event.text, is_final=event.is_final),
         )
     elif isinstance(event, RealtimeTextDelta):
         await _send_frame(
@@ -401,11 +463,28 @@ async def _handle_provider_event(
             await _handle_assistant_boundary(
                 ws, state, ctx, history, deps, attachment_store, attachment_catalog
             )
+            await _send_frame(
+                ws,
+                ServerUsageFrame(
+                    usage=state.metrics.to_usage_payload(
+                        context_window_tokens=_env_context_window_tokens()
+                    )
+                ),
+            )
     elif isinstance(event, RealtimeToolCall):
         await _send_frame(
             ws,
             ServerToolCallFrame(
                 call_id=event.call_id, name=event.name, args=event.args
+            ),
+        )
+    elif isinstance(event, RealtimeUsage):
+        await _send_frame(
+            ws,
+            ServerUsageFrame(
+                usage=state.metrics.to_usage_payload(
+                    context_window_tokens=_env_context_window_tokens()
+                )
             ),
         )
     elif isinstance(event, RealtimeInterrupted):
@@ -471,6 +550,20 @@ async def _handle_client_frames(
             state.handle_user_interrupt()
             await state.realtime_session.interrupt()
             await _send_frame(ws, ServerInterruptedFrame())
+        elif isinstance(frame, ClientToolConfirmationResponseFrame):
+            state.resolve_pending(
+                frame.tool_call_id,
+                {"approved": frame.approved, "reason": frame.reason},
+            )
+        elif isinstance(frame, ClientElicitationResponseFrame):
+            state.resolve_pending(
+                frame.elicitation_id,
+                {
+                    "user_data": frame.user_data,
+                    "cancelled": frame.cancelled,
+                    "approved": not frame.cancelled,
+                },
+            )
         elif isinstance(frame, ClientCloseFrame):
             # Client requested a clean exit (/bye). End the reader so the session
             # loop tears down provider + guardrail tasks.
@@ -551,6 +644,7 @@ async def _close_session(
     manager: RealtimeSessionManager,
     reason: str = "session_end",
 ) -> None:
+    state.abandon_pending_cancel_all()
     state.close()
     try:
         await state.realtime_session.close(reason=reason)

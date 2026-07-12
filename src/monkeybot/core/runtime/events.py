@@ -56,6 +56,7 @@ class ToolCallStarted:
     label: str = ""
     args: dict[str, object] = field(default_factory=dict)
     parse_error: str | None = None
+    call_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,7 @@ class ToolCallResult:
     tool: str = ""
     result: str = ""
     error: str | None = None
+    call_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -333,8 +335,12 @@ def event_to_json(event: AgentEvent) -> str:
         payload = {**base, "tool": event.tool, "label": event.label, "args": dict(event.args)}
         if event.parse_error is not None:
             payload["parse_error"] = event.parse_error
+        if event.call_id:
+            payload["call_id"] = event.call_id
     elif isinstance(event, ToolCallResult):
         payload = {**base, "tool": event.tool, "result": event.result, "error": event.error}
+        if event.call_id:
+            payload["call_id"] = event.call_id
     elif isinstance(event, TurnComplete):
         u = event.usage
         payload = {
@@ -419,7 +425,16 @@ def event_from_json(raw: str) -> AgentEvent:
         args = _args_from_obj(payload.get("args"))
         pe_raw = payload.get("parse_error")
         parse_error: str | None = pe_raw if isinstance(pe_raw, str) else None
-        return ToolCallStarted(request_id=rid, tool=tool, label=label, args=args, parse_error=parse_error)
+        call_id_raw = payload.get("call_id", "")
+        call_id = call_id_raw if isinstance(call_id_raw, str) else ""
+        return ToolCallStarted(
+            request_id=rid,
+            tool=tool,
+            label=label,
+            args=args,
+            parse_error=parse_error,
+            call_id=call_id,
+        )
     if t == "ToolCallResult":
         tool_raw = payload.get("tool", "")
         result_raw = payload.get("result", "")
@@ -433,7 +448,11 @@ def event_from_json(raw: str) -> AgentEvent:
             err = err_raw
         else:
             raise EventDecodeError("ToolCallResult error must be a string or null")
-        return ToolCallResult(request_id=rid, tool=tool, result=result, error=err)
+        call_id_raw = payload.get("call_id", "")
+        call_id = call_id_raw if isinstance(call_id_raw, str) else ""
+        return ToolCallResult(
+            request_id=rid, tool=tool, result=result, error=err, call_id=call_id
+        )
     if t == "TurnComplete":
         usage = _usage_from_obj(payload.get("usage"))
         trace_id_raw = payload.get("trace_id")

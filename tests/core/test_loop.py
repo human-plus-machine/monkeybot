@@ -22,6 +22,7 @@ from monkeybot.core.llm.provider import (
     Message,
     ProviderEvent,
     TextDelta,
+    ThinkingDelta,
     ToolCall,
     UsageEvent,
 )
@@ -34,7 +35,10 @@ from monkeybot.core.runtime.events import (
     ImageBlock,
     SystemPromptSnapshot,
     Thinking,
+    ThinkingBlockComplete,
+    ThinkingBlockDelta,
     ToolCallResult,
+    ToolCallStarted,
     TurnComplete,
 )
 from monkeybot.core.runtime.loop import (
@@ -336,6 +340,82 @@ async def test_run_no_tools_yields_assistant_then_turn_complete() -> None:
     assert events[-1].usage.output_tokens == 2
     assert events[-1].usage.cached_tokens == 3
 
+
+@pytest.mark.asyncio
+async def test_run_streams_thinking_block_deltas_before_assistant() -> None:
+    prov = FakeProvider(
+        [
+            [
+                ThinkingDelta(text="consider greeting"),
+                ThinkingDelta(text=" then reply", signature="sig-1"),
+                TextDelta(text="Hello!"),
+                UsageEvent(input_tokens=1, output_tokens=2),
+                Done(),
+            ]
+        ]
+    )
+    hist = FakeHistory()
+    events = []
+    async for e in run(
+        "hello",
+        _ctx(),
+        provider=prov,
+        history=hist,
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(),
+        max_turns=3,
+    ):
+        events.append(e)
+
+    thinking_deltas = [e for e in events if isinstance(e, ThinkingBlockDelta)]
+    assert [e.text for e in thinking_deltas] == ["consider greeting", " then reply"]
+    assert thinking_deltas[-1].signature == "sig-1"
+
+    complete = next(e for e in events if isinstance(e, ThinkingBlockComplete))
+    assert complete.signature == "sig-1"
+
+    assistant = [e for e in events if isinstance(e, AssistantDelta)]
+    assert [e.delta for e in assistant] == ["Hello!"]
+    # Thinking block must close before the first assistant text delta.
+    complete_idx = events.index(complete)
+    assistant_idx = events.index(assistant[0])
+    assert complete_idx < assistant_idx
+
+
+@pytest.mark.asyncio
+async def test_run_closes_thinking_block_when_tools_follow() -> None:
+    prov = FakeProvider(
+        [
+            [
+                ThinkingDelta(text="need a tool"),
+                ToolCall(call_id="c1", name="run_command", args={"command": "echo hi"}),
+                UsageEvent(input_tokens=1, output_tokens=1),
+                Done(),
+            ],
+            [
+                TextDelta(text="done"),
+                UsageEvent(input_tokens=1, output_tokens=1),
+                Done(),
+            ],
+        ]
+    )
+    hist = FakeHistory()
+    events = []
+    async for e in run(
+        "hello",
+        _ctx(),
+        provider=prov,
+        history=hist,
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(),
+        max_turns=5,
+    ):
+        events.append(e)
+
+    assert any(isinstance(e, ThinkingBlockDelta) and e.text == "need a tool" for e in events)
+    complete = next(e for e in events if isinstance(e, ThinkingBlockComplete))
+    tool_started = next(e for e in events if isinstance(e, ToolCallStarted))
+    assert events.index(complete) < events.index(tool_started)
 
 def test_merge_usage_event_accumulates_cache_fields() -> None:
     usage = Usage()
