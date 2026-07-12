@@ -32,6 +32,7 @@ from monkeybot.core.llm.realtime_provider import (
 from monkeybot.core.llm.realtime_provider import RealtimeError as ProviderError
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.backends import HistoryStore
+from monkeybot.core.runtime.events import ActionRequiredEvent
 from monkeybot.core.runtime.events import Error as AgentError
 from monkeybot.core.runtime.events import ToolCallResult, ToolConfirmationRequestEvent
 from monkeybot.core.runtime.realtime_loop import run_realtime_turn
@@ -67,6 +68,7 @@ from .wire import (
     ProtocolError,
     ServerAudioFrame,
     ServerConnectedFrame,
+    ServerElicitationFrame,
     ServerErrorFrame,
     ServerInterruptedFrame,
     ServerSessionEndedFrame,
@@ -91,6 +93,13 @@ def _env_context_window_tokens() -> int:
         return max(1, int(cap_raw))
     except ValueError:
         return 200_000
+
+
+def _pending_response_timeout_sec() -> float:
+    try:
+        return max(1.0, float(os.environ.get("PENDING_RESPONSE_TIMEOUT_SEC", "300")))
+    except ValueError:
+        return 300.0
 
 
 def _resolved_workspace_paths() -> tuple[Path, Path]:
@@ -315,6 +324,30 @@ async def _handle_assistant_boundary(
                         tool_name=event.tool_name,
                         prompt=event.prompt or f"Allow tool `{event.tool_name}`?",
                         arguments=dict(event.arguments or {}),
+                        timeout_sec=_pending_response_timeout_sec(),
+                    ),
+                )
+            elif isinstance(event, ActionRequiredEvent) and event.action_type == "elicitation":
+                payload = dict(event.payload or {})
+                prompt_raw = payload.get("message") or payload.get("prompt")
+                prompt = (
+                    prompt_raw.strip()
+                    if isinstance(prompt_raw, str) and prompt_raw.strip()
+                    else "Agent requests input"
+                )
+                schema_raw = (
+                    payload.get("requestedSchema")
+                    or payload.get("requested_schema")
+                    or payload.get("schema")
+                )
+                schema = dict(schema_raw) if isinstance(schema_raw, dict) else None
+                await _send_frame(
+                    ws,
+                    ServerElicitationFrame(
+                        elicitation_id=event.id,
+                        prompt=prompt,
+                        schema=schema,
+                        timeout_sec=_pending_response_timeout_sec(),
                     ),
                 )
     except Exception:
@@ -432,7 +465,11 @@ async def _handle_provider_event(
             )
             await _send_frame(
                 ws,
-                ServerUsageFrame(usage=state.metrics.to_usage_payload()),
+                ServerUsageFrame(
+                    usage=state.metrics.to_usage_payload(
+                        context_window_tokens=_env_context_window_tokens()
+                    )
+                ),
             )
     elif isinstance(event, RealtimeToolCall):
         await _send_frame(
@@ -444,7 +481,11 @@ async def _handle_provider_event(
     elif isinstance(event, RealtimeUsage):
         await _send_frame(
             ws,
-            ServerUsageFrame(usage=state.metrics.to_usage_payload()),
+            ServerUsageFrame(
+                usage=state.metrics.to_usage_payload(
+                    context_window_tokens=_env_context_window_tokens()
+                )
+            ),
         )
     elif isinstance(event, RealtimeInterrupted):
         await _send_frame(ws, ServerInterruptedFrame())

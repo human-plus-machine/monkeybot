@@ -1428,9 +1428,10 @@ async def _run_inner_core(
                                         bus, fut, call.call_id, timeout_sec=None
                                     )
                                 except asyncio.CancelledError:
-                                    allowed = False
-                                    denial_message = "cancelled by user"
-                                    break
+                                    # Re-raise so turn cancellation (client disconnect /
+                                    # abort) propagates; do not continue the tool loop
+                                    # on a dead session.
+                                    raise
                                 if payload.get("_timeout"):
                                     allowed = False
                                     to = int(

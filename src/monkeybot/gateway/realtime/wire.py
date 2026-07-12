@@ -117,7 +117,7 @@ class ServerToolCallFrame:
     kind: Literal["tool_call"] = "tool_call"
     call_id: str = ""
     name: str = ""
-    args: dict[str, Any] = None  # type: ignore[assignment]
+    args: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
