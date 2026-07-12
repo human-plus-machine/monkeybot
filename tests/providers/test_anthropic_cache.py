@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -97,10 +96,6 @@ def _expected_cached_system() -> list[dict[str, Any]]:
     ]
 
 
-def _assert_no_cache_control(value: object) -> None:
-    assert "cache_control" not in str(value)
-
-
 # --- Task 1: _utils helpers ---
 
 
@@ -154,7 +149,7 @@ async def test_claude_enabled_system_is_cached_block_list(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
-    provider = ClaudeProvider(cache_enabled=True)
+    provider = ClaudeProvider()
     client = make_anthropic_stream_mock(_minimal_stream_events())
 
     with patch("anthropic.AsyncAnthropic", return_value=client):
@@ -169,7 +164,7 @@ async def test_claude_enabled_last_tool_marked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
-    provider = ClaudeProvider(cache_enabled=True)
+    provider = ClaudeProvider()
     client = make_anthropic_stream_mock(_minimal_stream_events())
 
     with patch("anthropic.AsyncAnthropic", return_value=client):
@@ -181,49 +176,13 @@ async def test_claude_enabled_last_tool_marked(
 
 
 @pytest.mark.asyncio
-async def test_claude_disabled_system_is_plain_string(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
-    provider = ClaudeProvider(cache_enabled=False)
-    client = make_anthropic_stream_mock(_minimal_stream_events())
-
-    with patch("anthropic.AsyncAnthropic", return_value=client):
-        await _usage_from_stream(provider, _messages_with_system(), _TWO_TOOLS)
-
-    captured_system = client.messages.stream.call_args.kwargs["system"]
-    captured_tools = client.messages.stream.call_args.kwargs["tools"]
-    assert captured_system == SYSTEM_TEXT
-    _assert_no_cache_control(captured_system)
-    _assert_no_cache_control(captured_tools)
-
-
-@pytest.mark.asyncio
-async def test_claude_disabled_byte_identical_no_tools(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import anthropic
-
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
-    provider = ClaudeProvider(cache_enabled=False)
-    client = make_anthropic_stream_mock(_minimal_stream_events())
-
-    with patch("anthropic.AsyncAnthropic", return_value=client):
-        await _usage_from_stream(provider, _messages_with_system(), [])
-
-    kwargs = client.messages.stream.call_args.kwargs
-    assert kwargs["system"] == SYSTEM_TEXT
-    assert kwargs["tools"] is anthropic.NOT_GIVEN
-
-
-@pytest.mark.asyncio
 async def test_claude_enabled_empty_system_uses_not_given(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import anthropic
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
-    provider = ClaudeProvider(cache_enabled=True)
+    provider = ClaudeProvider()
     client = make_anthropic_stream_mock(_minimal_stream_events())
 
     with patch("anthropic.AsyncAnthropic", return_value=client):
@@ -239,7 +198,7 @@ async def test_claude_usage_maps_cache_read_and_creation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
-    provider = ClaudeProvider(cache_enabled=True)
+    provider = ClaudeProvider()
     events = _cache_usage_stream_events()
     client = make_anthropic_stream_mock(events)
 
@@ -258,7 +217,7 @@ async def test_claude_usage_missing_cache_fields_reads_zero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
-    provider = ClaudeProvider(cache_enabled=True)
+    provider = ClaudeProvider()
     events = _cache_usage_stream_events(cache_read=None, cache_creation=None)
     client = make_anthropic_stream_mock(events)
 
@@ -277,7 +236,7 @@ async def test_claude_usage_cache_fields_on_message_delta(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
-    provider = ClaudeProvider(cache_enabled=True)
+    provider = ClaudeProvider()
     events = _cache_usage_stream_events(
         cache_read=None,
         cache_creation=None,
@@ -298,7 +257,7 @@ async def test_claude_count_input_tokens_unaffected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
-    provider = ClaudeProvider(cache_enabled=True)
+    provider = ClaudeProvider()
     mock_client = MagicMock()
     mock_client.messages.count_tokens = AsyncMock(
         return_value=SimpleNamespace(input_tokens=42)
@@ -319,7 +278,7 @@ async def test_claude_count_input_tokens_unaffected(
 
 @pytest.mark.asyncio
 async def test_vertex_count_input_tokens_falls_back_when_unsupported() -> None:
-    provider = VertexClaudeProvider(project_id="p", region="us-east5", cache_enabled=True)
+    provider = VertexClaudeProvider(project_id="p", region="us-east5")
     mock_client = MagicMock()
     mock_client.messages.count_tokens = AsyncMock(
         side_effect=Exception(
@@ -342,7 +301,7 @@ async def test_vertex_count_input_tokens_falls_back_when_unsupported() -> None:
 
 @pytest.mark.asyncio
 async def test_vertex_enabled_system_is_cached_block_list() -> None:
-    provider = VertexClaudeProvider(project_id="p", cache_enabled=True)
+    provider = VertexClaudeProvider(project_id="p")
     client = make_anthropic_stream_mock(_minimal_stream_events())
 
     with patch("anthropic.AsyncAnthropicVertex", return_value=client):
@@ -354,7 +313,7 @@ async def test_vertex_enabled_system_is_cached_block_list() -> None:
 
 @pytest.mark.asyncio
 async def test_vertex_enabled_last_tool_marked() -> None:
-    provider = VertexClaudeProvider(project_id="p", cache_enabled=True)
+    provider = VertexClaudeProvider(project_id="p")
     client = make_anthropic_stream_mock(_minimal_stream_events())
 
     with patch("anthropic.AsyncAnthropicVertex", return_value=client):
@@ -366,23 +325,8 @@ async def test_vertex_enabled_last_tool_marked() -> None:
 
 
 @pytest.mark.asyncio
-async def test_vertex_disabled_byte_identical() -> None:
-    provider = VertexClaudeProvider(project_id="p", cache_enabled=False)
-    client = make_anthropic_stream_mock(_minimal_stream_events())
-
-    with patch("anthropic.AsyncAnthropicVertex", return_value=client):
-        await _usage_from_stream(provider, _messages_with_system(), _TWO_TOOLS)
-
-    captured_system = client.messages.stream.call_args.kwargs["system"]
-    captured_tools = client.messages.stream.call_args.kwargs["tools"]
-    assert captured_system == SYSTEM_TEXT
-    _assert_no_cache_control(captured_system)
-    _assert_no_cache_control(captured_tools)
-
-
-@pytest.mark.asyncio
 async def test_vertex_usage_maps_cache_read_and_creation() -> None:
-    provider = VertexClaudeProvider(project_id="p", cache_enabled=True)
+    provider = VertexClaudeProvider(project_id="p")
     client = make_anthropic_stream_mock(_cache_usage_stream_events())
 
     with patch("anthropic.AsyncAnthropicVertex", return_value=client):
@@ -397,7 +341,7 @@ async def test_vertex_usage_maps_cache_read_and_creation() -> None:
 
 @pytest.mark.asyncio
 async def test_vertex_usage_missing_cache_fields_reads_zero() -> None:
-    provider = VertexClaudeProvider(project_id="p", cache_enabled=True)
+    provider = VertexClaudeProvider(project_id="p")
     client = make_anthropic_stream_mock(
         _cache_usage_stream_events(cache_read=None, cache_creation=None)
     )
@@ -417,7 +361,7 @@ async def test_vertex_usage_missing_cache_fields_reads_zero() -> None:
 
 @pytest.mark.asyncio
 async def test_bedrock_enabled_system_is_cached_block_list() -> None:
-    provider = BedrockClaudeProvider(aws_region="us-east-1", cache_enabled=True)
+    provider = BedrockClaudeProvider(aws_region="us-east-1")
     client = make_anthropic_stream_mock(_minimal_stream_events())
     provider._client = lambda: client  # type: ignore[method-assign]
 
@@ -429,7 +373,7 @@ async def test_bedrock_enabled_system_is_cached_block_list() -> None:
 
 @pytest.mark.asyncio
 async def test_bedrock_enabled_last_tool_marked() -> None:
-    provider = BedrockClaudeProvider(aws_region="us-east-1", cache_enabled=True)
+    provider = BedrockClaudeProvider(aws_region="us-east-1")
     client = make_anthropic_stream_mock(_minimal_stream_events())
     provider._client = lambda: client  # type: ignore[method-assign]
 
@@ -441,23 +385,8 @@ async def test_bedrock_enabled_last_tool_marked() -> None:
 
 
 @pytest.mark.asyncio
-async def test_bedrock_disabled_byte_identical() -> None:
-    provider = BedrockClaudeProvider(aws_region="us-east-1", cache_enabled=False)
-    client = make_anthropic_stream_mock(_minimal_stream_events())
-    provider._client = lambda: client  # type: ignore[method-assign]
-
-    await _usage_from_stream(provider, _messages_with_system(), _TWO_TOOLS)
-
-    captured_system = client.messages.stream.call_args.kwargs["system"]
-    captured_tools = client.messages.stream.call_args.kwargs["tools"]
-    assert captured_system == SYSTEM_TEXT
-    _assert_no_cache_control(captured_system)
-    _assert_no_cache_control(captured_tools)
-
-
-@pytest.mark.asyncio
 async def test_bedrock_usage_maps_cache_read_and_creation() -> None:
-    provider = BedrockClaudeProvider(aws_region="us-east-1", cache_enabled=True)
+    provider = BedrockClaudeProvider(aws_region="us-east-1")
     client = make_anthropic_stream_mock(_cache_usage_stream_events())
     provider._client = lambda: client  # type: ignore[method-assign]
 
@@ -472,7 +401,7 @@ async def test_bedrock_usage_maps_cache_read_and_creation() -> None:
 
 @pytest.mark.asyncio
 async def test_bedrock_usage_missing_cache_fields_reads_zero() -> None:
-    provider = BedrockClaudeProvider(aws_region="us-east-1", cache_enabled=True)
+    provider = BedrockClaudeProvider(aws_region="us-east-1")
     client = make_anthropic_stream_mock(
         _cache_usage_stream_events(cache_read=None, cache_creation=None)
     )
@@ -492,16 +421,12 @@ async def test_bedrock_usage_missing_cache_fields_reads_zero() -> None:
 
 def _provider_factories(
     monkeypatch: pytest.MonkeyPatch,
-) -> dict[str, Callable[[bool], ClaudeProvider | VertexClaudeProvider | BedrockClaudeProvider]]:
+) -> dict[str, ClaudeProvider | VertexClaudeProvider | BedrockClaudeProvider]:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
     return {
-        "claude": lambda enabled: ClaudeProvider(cache_enabled=enabled),
-        "vertex": lambda enabled: VertexClaudeProvider(
-            project_id="p", cache_enabled=enabled
-        ),
-        "bedrock": lambda enabled: BedrockClaudeProvider(
-            aws_region="us-east-1", cache_enabled=enabled
-        ),
+        "claude": ClaudeProvider(),
+        "vertex": VertexClaudeProvider(project_id="p"),
+        "bedrock": BedrockClaudeProvider(aws_region="us-east-1"),
     }
 
 
@@ -512,7 +437,7 @@ async def test_all_three_providers_identical_markers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     factories = _provider_factories(monkeypatch)
-    provider = factories[provider_key](True)
+    provider = factories[provider_key]
     client = make_anthropic_stream_mock(_minimal_stream_events())
 
     if provider_key == "claude":
@@ -534,34 +459,3 @@ async def test_all_three_providers_identical_markers(
     assert captured_system == _expected_cached_system()
     assert "cache_control" not in captured_tools[0]
     assert captured_tools[1]["cache_control"] == {"type": "ephemeral"}
-
-
-@pytest.mark.parametrize("provider_key", ["claude", "vertex", "bedrock"])
-@pytest.mark.asyncio
-async def test_all_three_providers_disabled_identical(
-    provider_key: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    factories = _provider_factories(monkeypatch)
-    provider = factories[provider_key](False)
-    client = make_anthropic_stream_mock(_minimal_stream_events())
-
-    if provider_key == "claude":
-        patch_target = "anthropic.AsyncAnthropic"
-    elif provider_key == "vertex":
-        patch_target = "anthropic.AsyncAnthropicVertex"
-    else:
-        provider._client = lambda: client  # type: ignore[method-assign]
-        patch_target = ""
-
-    if patch_target:
-        with patch(patch_target, return_value=client):
-            await _usage_from_stream(provider, _messages_with_system(), _TWO_TOOLS)
-    else:
-        await _usage_from_stream(provider, _messages_with_system(), _TWO_TOOLS)
-
-    captured_system = client.messages.stream.call_args.kwargs["system"]
-    captured_tools = client.messages.stream.call_args.kwargs["tools"]
-    assert captured_system == SYSTEM_TEXT
-    _assert_no_cache_control(captured_system)
-    _assert_no_cache_control(captured_tools)

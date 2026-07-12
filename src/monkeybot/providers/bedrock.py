@@ -42,7 +42,6 @@ class BedrockClaudeProvider:
         aws_region: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
-        cache_enabled: bool = True,
     ) -> None:
         self._aws_region = (
             (aws_region or "").strip()
@@ -50,7 +49,6 @@ class BedrockClaudeProvider:
             or os.environ.get("AWS_DEFAULT_REGION", "").strip()
             or "us-east-1"
         )
-        self._cache_enabled = cache_enabled
         sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens)
         self._temperature = sampling.temperature
         self._max_tokens = sampling.max_tokens
@@ -113,15 +111,8 @@ class BedrockClaudeProvider:
         system, msgs = split_leading_system(messages)
         converted_messages = build_anthropic_messages(msgs)
         converted = anthropic_tool_defs(tools) if tools else None
-        if self._cache_enabled and system:
-            system_param: Any = build_cached_system_blocks(system)
-        else:
-            system_param = system or anthropic.NOT_GIVEN
-
-        if self._cache_enabled and converted:
-            tools_param: Any = mark_last_tool_cached(converted)
-        else:
-            tools_param = converted if converted else anthropic.NOT_GIVEN
+        system_param: Any = build_cached_system_blocks(system) if system else anthropic.NOT_GIVEN
+        tools_param: Any = mark_last_tool_cached(converted) if converted else anthropic.NOT_GIVEN
 
         client = self._client()
         stream_kwargs: dict[str, Any] = {

@@ -84,12 +84,6 @@ class ProviderConfig:
     model: str
 
 
-def cache_enabled_from_env() -> bool:
-    """True unless MODEL_ENABLE_CACHING is a falsey string."""
-    raw = os.getenv("MODEL_ENABLE_CACHING", "true").strip().lower()
-    return raw not in {"0", "false", "no", "off", ""}
-
-
 def _resolve_gcp_project_id() -> str:
     """GCP project for Vertex providers."""
     return (
@@ -106,7 +100,6 @@ def get_provider_config(
     temperature: float | None = None,
     max_tokens: int | None = None,
     thinking_budget: int | None = None,
-    cache_enabled: bool | None = None,
 ) -> ProviderConfig:
     """Resolve a Provider and model id from environment or explicit parameters."""
     raw_provider = str(provider or os.getenv("MODEL_PROVIDER") or "google_vertexai")
@@ -121,15 +114,12 @@ def get_provider_config(
     thinking_budget = (
         thinking_budget if thinking_budget is not None else int(os.getenv("MODEL_THINKING_BUDGET", "-1"))
     )
-    resolved_cache = cache_enabled_from_env() if cache_enabled is None else cache_enabled
-
     if provider_key == "google_vertexai":
         return ProviderConfig(
             GeminiProvider(
                 temperature=sampling.temperature,
                 max_tokens=sampling.max_tokens,
                 thinking_budget=thinking_budget,
-                cache_enabled=resolved_cache,
             ),
             resolved_model,
         )
@@ -145,7 +135,6 @@ def get_provider_config(
                 temperature=sampling.temperature,
                 max_tokens=sampling.max_tokens,
                 thinking_budget=thinking_budget,
-                cache_enabled=resolved_cache,
                 api_key=api_key,
             ),
             resolved_model,
@@ -155,7 +144,6 @@ def get_provider_config(
             OpenAIProvider(
                 temperature=sampling.temperature,
                 max_tokens=sampling.max_tokens,
-                cache_enabled=resolved_cache,
             ),
             resolved_model,
         )
@@ -164,7 +152,6 @@ def get_provider_config(
             ClaudeProvider(
                 temperature=sampling.temperature,
                 max_tokens=sampling.max_tokens,
-                cache_enabled=resolved_cache,
             ),
             resolved_model,
         )
@@ -188,7 +175,6 @@ def get_provider_config(
                 region=region,
                 temperature=sampling.temperature,
                 max_tokens=sampling.max_tokens,
-                cache_enabled=resolved_cache,
             ),
             resolved_model,
         )
@@ -197,7 +183,6 @@ def get_provider_config(
             HuggingFaceProvider(
                 temperature=sampling.temperature,
                 max_tokens=sampling.max_tokens,
-                cache_enabled=resolved_cache,
             ),
             resolved_model,
         )
@@ -207,7 +192,6 @@ def get_provider_config(
                 temperature=sampling.temperature,
                 max_tokens=sampling.max_tokens,
                 thinking_budget=thinking_budget,
-                cache_enabled=resolved_cache,
             ),
             resolved_model,
         )
@@ -216,7 +200,6 @@ def get_provider_config(
             NvidiaProvider(
                 temperature=sampling.temperature,
                 max_tokens=sampling.max_tokens,
-                cache_enabled=resolved_cache,
             ),
             resolved_model,
         )
@@ -229,7 +212,6 @@ def get_provider_config(
                 aws_region=aws_region,
                 temperature=sampling.temperature,
                 max_tokens=sampling.max_tokens,
-                cache_enabled=resolved_cache,
             ),
             resolved_model,
         )

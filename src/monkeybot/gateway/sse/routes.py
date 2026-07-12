@@ -233,13 +233,12 @@ def create_app(
         session_provider = None
         session_model = None
         if body.model_provider or body.model_name:
-            from monkeybot.core.config.settings import cache_enabled_from_env, get_provider_config
+            from monkeybot.core.config.settings import get_provider_config
 
             try:
                 cfg = get_provider_config(
                     provider=body.model_provider,
                     model_name=body.model_name,
-                    cache_enabled=cache_enabled_from_env(),
                 )
                 session_provider = cfg.provider
                 session_model = cfg.model

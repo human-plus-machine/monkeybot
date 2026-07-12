@@ -14,7 +14,6 @@ from monkeybot.core.config import (
     SubagentConfig,
     apply_monkeybot_runtime_env,
     auto_schema_enabled_from_config,
-    cache_enabled_from_env,
     get_provider_config,
     get_realtime_config,
     get_subagent_configs,
@@ -119,7 +118,6 @@ class TestVertexAnthropicProvider:
                 region="us-central1",
                 temperature=0.7,
                 max_tokens=60_000,
-                cache_enabled=True,
             )
 
     def test_get_provider_config_vertex_anthropic_missing_project(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -272,38 +270,7 @@ class TestGetSubagentRegistry:
         assert reg["legacy"].agent_md == "./agents/legacy.md"
 
 
-class TestCacheEnabled:
-    def test_cache_enabled_from_env_default_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("MODEL_ENABLE_CACHING", raising=False)
-        assert cache_enabled_from_env() is True
-
-    @pytest.mark.parametrize("value", ["0", "false", "no", "off", "", "FALSE", " off "])
-    def test_cache_enabled_from_env_falsey_values(self, monkeypatch: pytest.MonkeyPatch, value: str) -> None:
-        monkeypatch.setenv("MODEL_ENABLE_CACHING", value)
-        assert cache_enabled_from_env() is False
-
-    def test_enable_caching_from_monkeybot_yaml(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        cfg_dir = tmp_path / "monkeybot_config"
-        cfg_dir.mkdir(parents=True)
-        (cfg_dir / "monkeybot.yaml").write_text(
-            "model:\n  provider: gemini\n  name: test\n  enable_caching: false\n",
-            encoding="utf-8",
-        )
-        env_before = os.environ.get("MODEL_ENABLE_CACHING")
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.delenv("MODEL_ENABLE_CACHING", raising=False)
-        reset_runtime_env_state_for_tests()
-        try:
-            apply_monkeybot_runtime_env()
-            assert os.environ["MODEL_ENABLE_CACHING"] == "false"
-            assert cache_enabled_from_env() is False
-        finally:
-            reset_runtime_env_state_for_tests()
-            if env_before is None:
-                os.environ.pop("MODEL_ENABLE_CACHING", None)
-            else:
-                os.environ["MODEL_ENABLE_CACHING"] = env_before
-
+class TestSandboxConfig:
     def test_sandbox_from_monkeybot_yaml(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         cfg_dir = tmp_path / "monkeybot_config"
         cfg_dir.mkdir(parents=True)
