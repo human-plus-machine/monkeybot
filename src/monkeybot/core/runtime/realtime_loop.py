@@ -54,7 +54,12 @@ from monkeybot.core.types.content_blocks import (
     ToolResponse,
 )
 
-from .loop import ToolExecutorPort, _await_user_response_any
+from .loop import (
+    ToolExecutorPort,
+    _await_user_response_any,
+    _rejected_tool_batch_error,
+    _should_reject_tool_batch,
+)
 
 logger = logging.getLogger("monkeybot.core.runtime.realtime_loop")
 
@@ -307,6 +312,9 @@ async def run_realtime_turn(
     The caller is responsible for injecting the collected tool results back into the
     live realtime session via ``RealtimeSession.send_tool_results()`` /
     ``send_context()`` when the session is idle.
+
+    Truncation (``Done.truncated``) is text-loop only — Gemini Live does not expose an
+    output length-limit signal. Realtime still rejects all-``parse_error`` batches.
     """
     usage = UsageTotals()
     # attachment_store is accepted for symmetry with loop.run and future resolve paths;
@@ -375,8 +383,34 @@ async def run_realtime_turn(
 
         # 4. Dispatch tools sequentially (v1: no parallel subagent dispatch here).
         mcp_registry_mutated = False
-        for rtc in assistant_tool_calls:
-            call = _realtime_tool_call_to_tool_call(rtc)
+        pending_calls = [_realtime_tool_call_to_tool_call(rtc) for rtc in assistant_tool_calls]
+        # Realtime has no vendor length-limit signal; reject only all-parse_error batches.
+        reject_batch = _should_reject_tool_batch(pending_calls, truncated=False)
+        if reject_batch:
+            logger.warning(
+                "rejecting incomplete realtime tool batch %s",
+                kv(
+                    request_id=ctx.request_id,
+                    thread_id=ctx.thread_id,
+                    n_calls=len(pending_calls),
+                ),
+            )
+        for call in pending_calls:
+            if reject_batch:
+                err = _rejected_tool_batch_error(call, truncated=False)
+                yield ToolCallStarted(
+                    request_id=ctx.request_id,
+                    tool=call.name,
+                    label=call.name,
+                    args=dict(call.args),
+                    parse_error=call.parse_error,
+                )
+                event, response = _tool_outcome(
+                    call, ctx.request_id, ToolExecutionResult.err(err)
+                )
+                yield event
+                tool_results.append(response)
+                continue
 
             # Provider couldn't parse streamed tool JSON: surface as a tool error
             # so the model can self-correct instead of executing with empty args.

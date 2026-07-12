@@ -117,6 +117,137 @@ def _effective_max_turns(max_turns: int | None) -> int:
     return int(os.getenv("MAX_TURNS", "50"))
 
 
+def _effective_doom_loop_threshold() -> int:
+    """Consecutive identical failing tool calls before doom-loop recovery.
+
+    Default 3. Set ``DOOM_LOOP_THRESHOLD=0`` to disable.
+    """
+    raw = os.getenv("DOOM_LOOP_THRESHOLD")
+    if raw is None or raw.strip() == "":
+        return 3
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        logger.warning(
+            "invalid DOOM_LOOP_THRESHOLD %s; using default 3",
+            kv(value=raw),
+        )
+        return 3
+
+
+def _tool_call_fingerprint(name: str, args: dict[str, Any]) -> str:
+    return f"{name}:{json.dumps(args, sort_keys=True, default=str)}"
+
+
+def _doom_loop_texts(tool_name: str, threshold: int) -> tuple[str, str]:
+    """Return ``(error_event_text, recovery_system_note)``."""
+    error = (
+        f"Doom loop detected: tool {tool_name!r} failed identically "
+        f"{threshold} times"
+    )
+    note = (
+        f"[Harness] {error}. Do not retry the same call. Explain the failure "
+        "to the user and propose a different approach."
+    )
+    return error, note
+
+
+def _should_reject_tool_batch(
+    calls: Sequence[ToolCall],
+    *,
+    truncated: bool,
+) -> bool:
+    """True when no tool in this provider turn is safe to execute.
+
+    A length/max-tokens stop means every tool call may carry silently
+    incomplete args. Also reject when every call already has ``parse_error``
+    (incomplete JSON).
+    """
+    if not calls:
+        return False
+    if truncated:
+        return True
+    return all(c.parse_error for c in calls)
+
+
+def _rejected_tool_batch_error(
+    call: ToolCall,
+    *,
+    truncated: bool,
+) -> str:
+    if truncated:
+        return (
+            f'Tool call "{call.name}" was not executed: the response hit the '
+            "output token limit, so its arguments may be truncated. Re-issue "
+            "the tool call with complete arguments."
+        )
+    return call.parse_error or (
+        f'Tool call "{call.name}" was not executed: incomplete tool arguments '
+        "in this batch. Re-issue with complete arguments."
+    )
+
+
+@dataclasses.dataclass
+class _DoomLoopTracker:
+    """Tracks consecutive identical failing tool calls within one user message.
+
+    After a recovery turn is consumed, the tracker re-arms so a later streak in
+    the same user message can trigger again. While ``triggered`` is set (between
+    detection and ``consume_recovery``), further ``record`` calls are ignored so
+    the same streak cannot re-fire mid-batch.
+    """
+
+    threshold: int
+    streak_fp: str | None = None
+    streak_count: int = 0
+    triggered: bool = False
+    force_no_tools: bool = False
+    recovery_note: str | None = None
+    triggered_tool: str | None = None
+    _pending_error: str | None = None
+
+    def record(self, name: str, args: dict[str, Any], *, is_error: bool) -> None:
+        if self.threshold <= 0 or self.triggered:
+            return
+        if not is_error:
+            self.streak_fp = None
+            self.streak_count = 0
+            return
+        fp = _tool_call_fingerprint(name, args)
+        if fp == self.streak_fp:
+            self.streak_count += 1
+        else:
+            self.streak_fp = fp
+            self.streak_count = 1
+        if self.streak_count < self.threshold:
+            return
+        self.triggered = True
+        self.triggered_tool = name
+        error, note = _doom_loop_texts(name, self.threshold)
+        self._pending_error = error
+        self.force_no_tools = True
+        self.recovery_note = note
+
+    def take_error(self) -> str | None:
+        msg = self._pending_error
+        self._pending_error = None
+        return msg
+
+    def consume_recovery(self) -> tuple[bool, str | None]:
+        force = self.force_no_tools
+        note = self.recovery_note
+        self.force_no_tools = False
+        self.recovery_note = None
+        if force:
+            # Re-arm so a second identical-failure streak later in this user
+            # message can trigger another recovery turn.
+            self.triggered = False
+            self.streak_fp = None
+            self.streak_count = 0
+            self.triggered_tool = None
+        return force, note
+
+
 def _usage_to_totals(u: Usage) -> UsageTotals:
     return UsageTotals(
         input_tokens=u.input_tokens,
@@ -286,6 +417,44 @@ SUMMARY_TRIGGER_RATIO = summarization_trigger_ratio_from_env()
 _SUMMARY_TRIGGER_RATIO = SUMMARY_TRIGGER_RATIO
 _SUMMARY_KEEP_HEAD = 1
 _SUMMARY_KEEP_TAIL = 6
+
+# Fixed Markdown template for middle-history compression.
+_COMPACTION_SUMMARY_SYSTEM = """\
+Output exactly the Markdown structure shown inside <template> and keep the \
+section order unchanged. Do not include the <template> tags in your response.
+<template>
+## Objective
+- [one or two brief sentences describing what the user is trying to accomplish]
+
+## Important Details
+- [constraints/preferences, decisions and why, important facts/assumptions, \
+exact context needed to continue, or "(none)"]
+
+## Work State
+### Completed
+- [finished work, verified facts, or changes made; otherwise "(none)"]
+
+### Active
+- [current work, partial changes, or investigation state; otherwise "(none)"]
+
+### Blocked
+- [blockers, failing commands, or unknowns; otherwise "(none)"]
+
+## Next Move
+1. [immediate concrete action, or "(none)"]
+2. [next action if known, or "(none)"]
+
+## Relevant Files
+- [file or directory path: why it matters, or "(none)"]
+</template>
+
+Rules:
+- Keep every section, even when empty.
+- Use terse bullets, not prose paragraphs.
+- Preserve exact file paths, symbols, commands, error strings, URLs, and \
+identifiers when known.
+- Do not mention the summary process or that context was compacted.\
+"""
 
 
 async def _await_user_response_any(
@@ -541,20 +710,17 @@ async def _summarize_history(
     summarize_messages = [
         Message(
             role="system",
-            content=[
-                Text(
-                    text=(
-                        "You compress prior agent conversation turns into one dense factual summary. "
-                        "Preserve decisions, file paths, errors, tool outcomes, and open tasks. "
-                        "Output prose only, no markdown headings unless essential."
-                    )
-                )
-            ],
+            content=[Text(text=_COMPACTION_SUMMARY_SYSTEM)],
         ),
         Message(
             role="user",
             content=[
-                Text(text="Summarize the following conversation segment:\n\n" + blob)
+                Text(
+                    text=(
+                        "Create a structured summary from the conversation "
+                        "segment below.\n\n" + blob
+                    )
+                )
             ],
         ),
     ]
@@ -572,7 +738,7 @@ async def _summarize_history(
         *head,
         Message(
             role="assistant",
-            content=[Text(text=f"[Context Summary]: {summary_text}")],
+            content=[Text(text=f"[Context Summary]:\n{summary_text}")],
         ),
         *tail,
     ]
@@ -904,6 +1070,19 @@ async def _run_inner_core(
     memory_selection_fingerprint: str | None = None
     pre_turn_extra: str | None = None
     pre_tool_extra_next: str | None = None
+    doom_tracker = _DoomLoopTracker(threshold=_effective_doom_loop_threshold())
+
+    def _finish_tool(
+        call: ToolCall,
+        result: ToolExecutionResult,
+    ) -> tuple[ToolCallResult, ToolResponse]:
+        event, response = _tool_outcome(call, ctx.request_id, result)
+        doom_tracker.record(
+            call.name,
+            dict(call.args),
+            is_error=result.error is not None,
+        )
+        return event, response
 
     while turn_index < effective_max:
         if cancelled is not None and cancelled.is_set():
@@ -991,8 +1170,11 @@ async def _run_inner_core(
                 attachment_catalog=attachment_catalog,
             )
             combined_extra = _combine_extras(pre_turn_extra, pre_tool_extra_next)
+            force_no_tools, doom_loop_note = doom_tracker.consume_recovery()
+            combined_extra = _combine_extras(combined_extra, doom_loop_note)
             system = _append_extra_system_text(system, combined_extra)
             pre_tool_extra_next = None
+            turn_tools: Sequence[ToolDef] = () if force_no_tools else ctx.tools
             resolved_messages = resolve_messages_for_provider(
                 chat_messages,
                 attachment_store=attachment_store,
@@ -1004,7 +1186,7 @@ async def _run_inner_core(
             preflight = await _provider_prompt_input_tokens(
                 provider,
                 provider_messages,
-                ctx.tools,
+                turn_tools,
                 model=ctx.model,
                 thinking_budget=stream_thinking,
                 vertex_google_search=vertex_google_search,
@@ -1078,7 +1260,7 @@ async def _run_inner_core(
                 post = await _provider_prompt_input_tokens(
                     provider,
                     provider_messages,
-                    ctx.tools,
+                    turn_tools,
                     model=ctx.model,
                     thinking_budget=_stream_thinking_budget(provider, resolved_messages),
                     vertex_google_search=vertex_google_search,
@@ -1112,6 +1294,7 @@ async def _run_inner_core(
             assistant_text = ""
             thinking_text = ""
             thinking_signature: str | None = None
+            stream_truncated = False
             thinking_streamed = False
             thinking_closed = False
 
@@ -1147,7 +1330,7 @@ async def _run_inner_core(
                     messages=[m.to_dict() for m in delta_messages],
                     message_offset=message_offset,
                     messages_reset=messages_reset,
-                    tools=[dataclasses.asdict(t) for t in ctx.tools] if include_tools else None,
+                    tools=[dataclasses.asdict(t) for t in turn_tools] if include_tools else None,
                     thinking_budget=stream_thinking,
                 )
                 provider_messages_written = len(provider_messages)
@@ -1160,7 +1343,7 @@ async def _run_inner_core(
                             provider_stream(
                                 provider,
                                 provider_messages,
-                                ctx.tools,
+                                turn_tools,
                                 model=ctx.model,
                                 thinking_budget=stream_thinking,
                                 vertex_google_search=vertex_google_search,
@@ -1212,6 +1395,7 @@ async def _run_inner_core(
                                     search_queries=list(ev.search_queries),
                                 )
                             elif isinstance(ev, Done):
+                                stream_truncated = ev.truncated
                                 break
                     closed = _close_thinking_block()
                     if closed is not None:
@@ -1344,8 +1528,33 @@ async def _run_inner_core(
             # must still share a single user row.
             all_tool_responses: list[ContentBlock] = []
             mcp_registry_mutated = False
+            reject_batch = _should_reject_tool_batch(ordered, truncated=stream_truncated)
+            if reject_batch:
+                logger.warning(
+                    "rejecting truncated/incomplete tool batch %s",
+                    kv(
+                        request_id=ctx.request_id,
+                        thread_id=ctx.thread_id,
+                        truncated=stream_truncated,
+                        n_calls=len(ordered),
+                    ),
+                )
+                for call in ordered:
+                    err = _rejected_tool_batch_error(call, truncated=stream_truncated)
+                    yield ToolCallStarted(
+                        request_id=ctx.request_id,
+                        tool=call.name,
+                        label=call.name,
+                        args=dict(call.args),
+                        parse_error=call.parse_error,
+                    )
+                    result_evt, tool_resp = _finish_tool(
+                        call, ToolExecutionResult.err(err)
+                    )
+                    yield result_evt
+                    all_tool_responses.append(tool_resp)
 
-            for chunk in _chunk_tool_calls(ordered):
+            for chunk in (() if reject_batch else _chunk_tool_calls(ordered)):
                 if cancelled is not None and cancelled.is_set():
                     yield Error(request_id=ctx.request_id, error="Request cancelled")
                     needs_followup_after_tools = False
@@ -1375,8 +1584,8 @@ async def _run_inner_core(
                             parse_error=call.parse_error,
                             call_id=call.call_id,
                         )
-                        result_evt, tool_resp = _tool_outcome(
-                            call, ctx.request_id, ToolExecutionResult.err(call.parse_error)
+                        result_evt, tool_resp = _finish_tool(
+                            call, ToolExecutionResult.err(call.parse_error)
                         )
                         yield result_evt
                         chunk_responses.append(tool_resp)
@@ -1479,8 +1688,8 @@ async def _run_inner_core(
                             args=dict(call.args),
                             call_id=call.call_id,
                         )
-                        result_evt, tool_resp = _tool_outcome(
-                            call, ctx.request_id, ToolExecutionResult.err(msg)
+                        result_evt, tool_resp = _finish_tool(
+                            call, ToolExecutionResult.err(msg)
                         )
                         yield result_evt
                         chunk_responses.append(tool_resp)
@@ -1591,7 +1800,7 @@ async def _run_inner_core(
                         needs_followup_after_tools = False
                         return
 
-                    event, response = _tool_outcome(call, ctx.request_id, tool_result)
+                    event, response = _finish_tool(call, tool_result)
                     yield event
                     for img_evt in _image_events(ctx.request_id, call.call_id, tool_result):
                         yield img_evt
@@ -1649,7 +1858,7 @@ async def _run_inner_core(
                         else:
                             _, tool_result = cast(tuple[ToolCall, ToolExecutionResult], outcome)
 
-                        event, response = _tool_outcome(call, ctx.request_id, tool_result)
+                        event, response = _finish_tool(call, tool_result)
                         yield event
                         for img_evt in _image_events(ctx.request_id, call.call_id, tool_result):
                             yield img_evt
@@ -1661,6 +1870,18 @@ async def _run_inner_core(
                             mcp_registry_mutated = True
 
                 all_tool_responses.extend(chunk_responses)
+            doom_msg = doom_tracker.take_error()
+            if doom_msg is not None:
+                logger.warning(
+                    "doom loop detected %s",
+                    kv(
+                        request_id=ctx.request_id,
+                        thread_id=ctx.thread_id,
+                        tool=doom_tracker.triggered_tool,
+                        threshold=doom_tracker.threshold,
+                    ),
+                )
+                yield Error(request_id=ctx.request_id, error=doom_msg)
 
             if all_tool_responses:
                 chat_for_budget = await _load_repaired_chat_history(history, ctx.thread_id)

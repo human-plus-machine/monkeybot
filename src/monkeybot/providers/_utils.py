@@ -114,6 +114,7 @@ async def iter_anthropic_sdk_stream(
     output_tokens = 0
     cache_read = 0
     cache_creation = 0
+    stop_reason: str | None = None
 
     try:
         async with client.messages.stream(**stream_kwargs) as stream:
@@ -153,6 +154,10 @@ async def iter_anthropic_sdk_stream(
                             )
                             tool_id = tool_name = tool_input_buf = ""
                     case "message_delta":
+                        delta = getattr(event, "delta", None)
+                        sr = getattr(delta, "stop_reason", None) if delta is not None else None
+                        if sr:
+                            stop_reason = str(sr)
                         if hasattr(event, "usage"):
                             output_tokens = int(getattr(event.usage, "output_tokens", 0) or 0)
                             read = int(
@@ -195,7 +200,7 @@ async def iter_anthropic_sdk_stream(
         cache_creation_tokens=cache_creation,
         cached_tokens=cache_read + cache_creation,
     )
-    yield Done()
+    yield Done(truncated=stop_reason == "max_tokens")
 
 
 def _anthropic_tool_result_content(result: list[ContentBlock]) -> list[dict[str, Any]]:
