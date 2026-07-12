@@ -46,18 +46,26 @@ def test_agent_event_roundtrip_tool_call_started() -> None:
         tool="run_command",
         label="Run",
         args={"cmd": "ls"},
+        call_id="c1",
     )
     assert event_from_json(event_to_json(ev)) == ev
 
 
 def test_agent_event_roundtrip_tool_call_result_no_error() -> None:
-    ev = ToolCallResult(request_id="r1", tool="t", result="ok", error=None)
+    ev = ToolCallResult(request_id="r1", tool="t", result="ok", error=None, call_id="c1")
     assert event_from_json(event_to_json(ev)) == ev
 
 
 def test_agent_event_roundtrip_tool_call_result_with_error() -> None:
-    ev = ToolCallResult(request_id="r1", tool="t", result="partial", error="x")
+    ev = ToolCallResult(request_id="r1", tool="t", result="partial", error="x", call_id="c9")
     assert event_from_json(event_to_json(ev)) == ev
+
+
+def test_tool_call_started_without_call_id_defaults_empty() -> None:
+    payload = '{"type":"ToolCallStarted","request_id":"r1","tool":"x","label":"L","args":{}}'
+    out = event_from_json(payload)
+    assert isinstance(out, ToolCallStarted)
+    assert out.call_id == ""
 
 
 def test_agent_event_roundtrip_turn_complete() -> None:

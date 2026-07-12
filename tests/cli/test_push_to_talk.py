@@ -6,13 +6,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from monkeybot.cli.push_to_talk import PushToTalkError, PushToTalkGate
+from monkeybot_cli.realtime.push_to_talk import PushToTalkError, PushToTalkGate
+
+_MOD = "monkeybot_cli.realtime.push_to_talk"
 
 
 def test_resolve_cmd_keys() -> None:
-    with patch("monkeybot.cli.push_to_talk._HAS_PYNPUT", True), patch(
-        "monkeybot.cli.push_to_talk.keyboard"
-    ) as kb:
+    with patch(f"{_MOD}._HAS_PYNPUT", True), patch(f"{_MOD}.keyboard") as kb:
         kb.Key.cmd = object()
         kb.Key.cmd_l = object()
         kb.Key.cmd_r = object()
@@ -22,17 +22,13 @@ def test_resolve_cmd_keys() -> None:
 
 
 def test_unsupported_key_raises() -> None:
-    with patch("monkeybot.cli.push_to_talk._HAS_PYNPUT", True), patch(
-        "monkeybot.cli.push_to_talk.keyboard"
-    ):
+    with patch(f"{_MOD}._HAS_PYNPUT", True), patch(f"{_MOD}.keyboard"):
         with pytest.raises(PushToTalkError, match="Unsupported"):
             PushToTalkGate(key_name="f13")
 
 
 def test_press_release_toggles_held() -> None:
-    with patch("monkeybot.cli.push_to_talk._HAS_PYNPUT", True), patch(
-        "monkeybot.cli.push_to_talk.keyboard"
-    ) as kb:
+    with patch(f"{_MOD}._HAS_PYNPUT", True), patch(f"{_MOD}.keyboard") as kb:
         cmd = object()
         kb.Key.cmd = cmd
         kb.Key.cmd_l = object()
@@ -45,15 +41,13 @@ def test_press_release_toggles_held() -> None:
 
 
 def test_missing_pynput_raises() -> None:
-    with patch("monkeybot.cli.push_to_talk._HAS_PYNPUT", False):
+    with patch(f"{_MOD}._HAS_PYNPUT", False):
         with pytest.raises(PushToTalkError, match="pynput"):
             PushToTalkGate(key_name="cmd")
 
 
 def test_start_and_stop() -> None:
-    with patch("monkeybot.cli.push_to_talk._HAS_PYNPUT", True), patch(
-        "monkeybot.cli.push_to_talk.keyboard"
-    ) as kb:
+    with patch(f"{_MOD}._HAS_PYNPUT", True), patch(f"{_MOD}.keyboard") as kb:
         kb.Key.cmd = object()
         kb.Key.cmd_l = object()
         kb.Key.cmd_r = object()

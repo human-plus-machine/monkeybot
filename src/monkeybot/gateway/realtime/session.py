@@ -56,6 +56,7 @@ class RealtimeConnectionState:
     # string for send_context (e.g. hook inject_text).
     idle_delivery_queue: asyncio.Queue[Any] = field(default_factory=asyncio.Queue)
     metrics: RealtimeMetrics = field(init=False)
+    pending_responses: dict[str, asyncio.Future[Any]] = field(default_factory=dict)
     _closed: bool = False
 
     def __post_init__(self) -> None:
@@ -64,6 +65,37 @@ class RealtimeConnectionState:
             request_id=self.request_id,
             opened_at=self.opened_at,
         )
+
+    def register_pending(self, key: str) -> asyncio.Future[Any]:
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[Any] = loop.create_future()
+        self.pending_responses[key] = fut
+        return fut
+
+    def resolve_pending(self, key: str, payload: dict[str, Any]) -> bool:
+        fut = self.pending_responses.pop(key, None)
+        if fut is None or fut.done():
+            return False
+        fut.set_result(payload)
+        return True
+
+    def abandon_pending_timeout(self, key: str) -> None:
+        fut = self.pending_responses.pop(key, None)
+        if fut is not None and not fut.done():
+            fut.set_result({"_timeout": True})
+
+    def abandon_pending_cancel_all(self) -> None:
+        for key in list(self.pending_responses):
+            fut = self.pending_responses.pop(key, None)
+            if fut is not None and not fut.done():
+                fut.cancel()
+
+    def is_pending_or_terminal(
+        self, key: str
+    ) -> Literal["pending", "terminated", "unknown"]:
+        if key in self.pending_responses:
+            return "pending"
+        return "unknown"
 
     def transition(self, new_state: RealtimeSessionState) -> None:
         """Validate and apply a state transition."""

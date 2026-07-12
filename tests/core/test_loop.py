@@ -22,6 +22,7 @@ from monkeybot.core.llm.provider import (
     Message,
     ProviderEvent,
     TextDelta,
+    ThinkingDelta,
     ToolCall,
     UsageEvent,
 )
@@ -34,7 +35,10 @@ from monkeybot.core.runtime.events import (
     ImageBlock,
     SystemPromptSnapshot,
     Thinking,
+    ThinkingBlockComplete,
+    ThinkingBlockDelta,
     ToolCallResult,
+    ToolCallStarted,
     TurnComplete,
 )
 from monkeybot.core.runtime.loop import (
@@ -338,6 +342,82 @@ async def test_run_no_tools_yields_assistant_then_turn_complete() -> None:
     assert events[-1].usage.output_tokens == 2
     assert events[-1].usage.cached_tokens == 3
 
+
+@pytest.mark.asyncio
+async def test_run_streams_thinking_block_deltas_before_assistant() -> None:
+    prov = FakeProvider(
+        [
+            [
+                ThinkingDelta(text="consider greeting"),
+                ThinkingDelta(text=" then reply", signature="sig-1"),
+                TextDelta(text="Hello!"),
+                UsageEvent(input_tokens=1, output_tokens=2),
+                Done(),
+            ]
+        ]
+    )
+    hist = FakeHistory()
+    events = []
+    async for e in run(
+        "hello",
+        _ctx(),
+        provider=prov,
+        history=hist,
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(),
+        max_turns=3,
+    ):
+        events.append(e)
+
+    thinking_deltas = [e for e in events if isinstance(e, ThinkingBlockDelta)]
+    assert [e.text for e in thinking_deltas] == ["consider greeting", " then reply"]
+    assert thinking_deltas[-1].signature == "sig-1"
+
+    complete = next(e for e in events if isinstance(e, ThinkingBlockComplete))
+    assert complete.signature == "sig-1"
+
+    assistant = [e for e in events if isinstance(e, AssistantDelta)]
+    assert [e.delta for e in assistant] == ["Hello!"]
+    # Thinking block must close before the first assistant text delta.
+    complete_idx = events.index(complete)
+    assistant_idx = events.index(assistant[0])
+    assert complete_idx < assistant_idx
+
+
+@pytest.mark.asyncio
+async def test_run_closes_thinking_block_when_tools_follow() -> None:
+    prov = FakeProvider(
+        [
+            [
+                ThinkingDelta(text="need a tool"),
+                ToolCall(call_id="c1", name="run_command", args={"command": "echo hi"}),
+                UsageEvent(input_tokens=1, output_tokens=1),
+                Done(),
+            ],
+            [
+                TextDelta(text="done"),
+                UsageEvent(input_tokens=1, output_tokens=1),
+                Done(),
+            ],
+        ]
+    )
+    hist = FakeHistory()
+    events = []
+    async for e in run(
+        "hello",
+        _ctx(),
+        provider=prov,
+        history=hist,
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(),
+        max_turns=5,
+    ):
+        events.append(e)
+
+    assert any(isinstance(e, ThinkingBlockDelta) and e.text == "need a tool" for e in events)
+    complete = next(e for e in events if isinstance(e, ThinkingBlockComplete))
+    tool_started = next(e for e in events if isinstance(e, ToolCallStarted))
+    assert events.index(complete) < events.index(tool_started)
 
 def test_merge_usage_event_accumulates_cache_fields() -> None:
     usage = Usage()
@@ -2085,3 +2165,146 @@ async def test_compact_history_does_not_persist_synthetic_tool_repairs() -> None
             if isinstance(block, ToolResponse):
                 texts = [b.text for b in block.result if isinstance(b, Text)]
                 assert synthetic_marker not in " ".join(texts)
+
+
+@pytest.mark.asyncio
+async def test_run_refreshes_tools_after_enable_mcp_same_turn() -> None:
+    """After enable_mcp, the next provider_stream sees newly connected MCP tools."""
+
+    class ToolRecordingProvider(FakeProvider):
+        def __init__(self, scripted: list[list[object]]) -> None:
+            super().__init__(scripted)
+            self.tools_seen: list[list[str]] = []
+
+        async def stream(
+            self,
+            messages: Sequence[Message],
+            tools: Sequence[ToolDef],
+            *,
+            model: str,
+            thinking_budget: int | None = None,
+            vertex_google_search: bool = False,
+        ) -> AsyncIterator[ProviderEvent]:
+            self.tools_seen.append([t.name for t in tools])
+            async for ev in super().stream(
+                messages,
+                tools,
+                model=model,
+                thinking_budget=thinking_budget,
+                vertex_google_search=vertex_google_search,
+            ):
+                yield ev
+
+    class CatalogMCP:
+        def __init__(self) -> None:
+            self._connected: dict[str, list[ToolDef]] = {}
+
+        async def connect(self, *a: object, **k: object) -> list[ToolDef]:
+            return []
+
+        async def connect_streamable_http(self, *a: object, **k: object) -> list[ToolDef]:
+            return []
+
+        async def disconnect(self, name: str) -> None:
+            self._connected.pop(name, None)
+
+        async def call_tool(self, *a: object, **k: object) -> str:
+            return ""
+
+        def all_tools(self) -> list[ToolDef]:
+            out: list[ToolDef] = []
+            for tools in self._connected.values():
+                out.extend(tools)
+            return out
+
+        def catalog_names(self) -> list[str]:
+            return ["browser"]
+
+        def known_server_names(self) -> list[str]:
+            return ["browser"]
+
+        def is_connected(self, name: str) -> bool:
+            return name in self._connected
+
+        def split_prefixed_tool(self, prefixed_name: str) -> tuple[str, str] | None:
+            return None
+
+        async def connect_from_catalog(self, name: str) -> list[ToolDef]:
+            defs = [ToolDef("browser__goto", "Navigate", {"type": "object"})]
+            self._connected[name] = defs
+            return defs
+
+        async def load_from_config(self, *a: object, **k: object) -> None:
+            return None
+
+    class EnableThenAnswerExecutor(RecordingExecutor):
+        def __init__(self, mcp: CatalogMCP) -> None:
+            super().__init__(("ok", None))
+            self._mcp = mcp
+
+        @property
+        def mcp(self) -> CatalogMCP:
+            return self._mcp
+
+        async def execute(self, *, call: ToolCall, ctx: TurnContext) -> ToolExecutionResult:
+            self.calls.append(call)
+            if call.name == "enable_mcp":
+                defs = await self._mcp.connect_from_catalog("browser")
+                return ToolExecutionResult.ok_text(
+                    json.dumps(
+                        {
+                            "ok": True,
+                            "server": "browser",
+                            "tools": [{"name": t.name, "description": t.description} for t in defs],
+                        }
+                    )
+                )
+            return self.result
+
+    mcp = CatalogMCP()
+    exe = EnableThenAnswerExecutor(mcp)
+    prov = ToolRecordingProvider(
+        [
+            [
+                ToolCall(name="enable_mcp", args={"name": "browser"}, call_id="c1"),
+                Done(),
+            ],
+            [
+                TextDelta(text="done"),
+                UsageEvent(input_tokens=1, output_tokens=1, cached_tokens=0),
+                Done(),
+            ],
+        ]
+    )
+    ctx = TurnContext(
+        thread_id="t1",
+        request_id="r1",
+        agent_md="# Agent",
+        memory_index=[],
+        skills=[],
+        tools=[
+            ToolDef("enable_mcp", "Enable MCP", {}),
+            ToolDef("run_command", "Run shell", {}),
+        ],
+        user_id=None,
+        parent_run_id=None,
+        model="gemini-2.5-flash",
+        catalog_mcp_servers=("browser",),
+    )
+    events = []
+    async for e in run(
+        "open the site",
+        ctx,
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[AllowInspector()],
+        tool_executor=exe,
+        max_turns=5,
+    ):
+        events.append(e)
+
+    assert isinstance(events[-1], TurnComplete)
+    assert len(prov.tools_seen) >= 2
+    assert "browser__goto" not in prov.tools_seen[0]
+    assert "browser__goto" in prov.tools_seen[1]
+    assert any(c.name == "enable_mcp" for c in exe.calls)

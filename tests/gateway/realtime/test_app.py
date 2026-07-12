@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from monkeybot.gateway.realtime.app import create_realtime_app
+from monkeybot.gateway.sse.app import GatewayLoopPort
 
 
 def test_create_realtime_app_exposes_sse_routes() -> None:
@@ -19,3 +20,10 @@ def test_create_realtime_app_exposes_sse_routes() -> None:
 def test_create_realtime_app_uses_combined_lifespan() -> None:
     app = create_realtime_app()
     assert app.router.lifespan_context is not None
+
+
+def test_create_realtime_app_wires_gateway_loop_port() -> None:
+    """Chat /reply must use GatewayLoopPort, not the no-op default loop."""
+    app = create_realtime_app()
+    assert isinstance(app.state.loop, GatewayLoopPort)
+    assert app.state.loop._serving_app() is app

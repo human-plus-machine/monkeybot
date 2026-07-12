@@ -92,6 +92,7 @@ def test_talk_help_lists_realtime_flags() -> None:
     assert result.returncode == 0
     assert "--gateway-url" in result.stdout
     assert "--text" in result.stdout
+    assert "8080" in result.stdout
 
 
 def test_load_agent_dotenv_from_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -159,6 +159,25 @@ async def test_iter_openai_compat_stream_yields_reasoning_delta() -> None:
 
 
 @pytest.mark.asyncio
+async def test_iter_openai_compat_stream_reads_thinking_from_model_extra() -> None:
+    delta = SimpleNamespace(
+        content=None,
+        reasoning=None,
+        tool_calls=None,
+        model_extra={"thinking": "hidden plan"},
+    )
+    chunk = SimpleNamespace(
+        usage=None,
+        choices=[SimpleNamespace(delta=delta)],
+    )
+    client = _fake_client([chunk])
+    events = [ev async for ev in iter_openai_compat_stream(client, {})]
+    thinking = [ev for ev in events if isinstance(ev, ThinkingDelta)]
+    assert len(thinking) == 1
+    assert thinking[0].text == "hidden plan"
+
+
+@pytest.mark.asyncio
 async def test_stream_chat_completions_forwards_reasoning_effort(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

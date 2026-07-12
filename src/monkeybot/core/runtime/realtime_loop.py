@@ -9,14 +9,22 @@ is managed by the gateway.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import uuid
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.attachments.freeze import freeze_attachments_in_history
 from monkeybot.core.attachments.store import AttachmentStore
-from monkeybot.core.context import TurnContext, refresh_memory_index
+from monkeybot.core.context import (
+    PendingResponseBusPort,
+    TurnContext,
+    MCP_REGISTRY_MUTATING_TOOLS,
+    refresh_memory_index,
+    refresh_tools_after_mcp_change,
+)
 from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
 from monkeybot.core.llm.provider import Message, ToolCall
 from monkeybot.core.llm.realtime_provider import RealtimeToolCall
@@ -24,6 +32,7 @@ from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.runtime.events import (
+    ActionRequiredEvent,
     AgentEvent,
     AssistantDelta,
     AttachmentDescriptorEvent,
@@ -31,12 +40,15 @@ from monkeybot.core.runtime.events import (
     Thinking,
     ToolCallResult,
     ToolCallStarted,
+    ToolConfirmationRequestEvent,
     TurnComplete,
     UsageTotals,
 )
 from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.types.content_blocks import (
+    ActionRequired,
     ContentBlock,
+    ElicitationAction,
     Text,
     ToolRequest,
     ToolResponse,
@@ -44,6 +56,7 @@ from monkeybot.core.types.content_blocks import (
 
 from .loop import (
     ToolExecutorPort,
+    _await_user_response_any,
     _rejected_tool_batch_error,
     _should_reject_tool_batch,
 )
@@ -53,11 +66,87 @@ logger = logging.getLogger("monkeybot.core.runtime.realtime_loop")
 
 _HOOK_PRE_TOOL_TIMEOUT_S = 1.5
 
+_REALTIME_MCP_NEW_SESSION_NOTE = (
+    "MCP registry updated on the harness. Newly enabled MCP tool schemas are not "
+    "pushed into the live voice session; start a new realtime session to advertise "
+    "them to the model (v1 has no reconnect/resume)."
+)
+
 
 def _user_text_from_content(blocks: Sequence[ContentBlock]) -> str:
     return " ".join(
         b.text.strip() for b in blocks if isinstance(b, Text) and b.text.strip()
     )
+
+
+def _elicitation_user_data_text(user_data: object) -> str:
+    if user_data is None:
+        return ""
+    if isinstance(user_data, str):
+        return user_data
+    try:
+        return json.dumps(user_data, sort_keys=True)
+    except (TypeError, ValueError):
+        return str(user_data)
+
+
+async def _resolve_elicitation_blocks(
+    blocks: Sequence[ContentBlock],
+    *,
+    ctx: TurnContext,
+    pending_bus: PendingResponseBusPort | None,
+) -> AsyncIterator[AgentEvent | list[ContentBlock]]:
+    """Yield ``ActionRequiredEvent``s for elicitation blocks, then the resolved block list.
+
+    Tools may return :class:`ActionRequired` / :class:`ElicitationAction` blocks to pause
+    the realtime turn until the client answers via ``elicitation_response``.
+    """
+    out: list[ContentBlock] = []
+    for block in blocks:
+        if not (
+            isinstance(block, ActionRequired) and isinstance(block.data, ElicitationAction)
+        ):
+            out.append(block)
+            continue
+        action = block.data
+        elicitation_id = action.id.strip() or str(uuid.uuid4())
+        if pending_bus is None:
+            logger.warning(
+                "realtime elicitation unavailable %s",
+                kv(
+                    request_id=ctx.request_id,
+                    thread_id=ctx.thread_id,
+                    elicitation_id=elicitation_id,
+                ),
+            )
+            out.append(
+                Text(text=f"{action.message} (elicitation unavailable)")
+            )
+            continue
+        fut = pending_bus.register_pending(elicitation_id)
+        yield ActionRequiredEvent(
+            request_id=ctx.request_id,
+            action_type="elicitation",
+            id=elicitation_id,
+            payload={
+                "message": action.message,
+                "requestedSchema": dict(action.requested_schema or {}),
+            },
+        )
+        try:
+            payload = await _await_user_response_any(
+                pending_bus, fut, elicitation_id, timeout_sec=None
+            )
+        except asyncio.CancelledError:
+            raise
+        if payload.get("_timeout"):
+            out.append(Text(text="User did not respond to elicitation in time"))
+            continue
+        if payload.get("cancelled"):
+            out.append(Text(text="User cancelled elicitation"))
+            continue
+        out.append(Text(text=_elicitation_user_data_text(payload.get("user_data"))))
+    yield out
 
 
 async def _fire_hook(
@@ -114,6 +203,7 @@ def _tool_outcome(
         tool=call.name,
         result=body,
         error=result.error,
+        call_id=call.call_id,
     )
     response = ToolResponse(
         id=call.call_id,
@@ -209,6 +299,7 @@ async def run_realtime_turn(
     transcript_writer: TranscriptWriter | None = None,
     tool_results_out: list[ContentBlock] | None = None,
     inject_texts_out: list[str] | None = None,
+    pending_bus: PendingResponseBusPort | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Process a finalized realtime user utterance + assistant response.
 
@@ -291,6 +382,7 @@ async def run_realtime_turn(
             )
 
         # 4. Dispatch tools sequentially (v1: no parallel subagent dispatch here).
+        mcp_registry_mutated = False
         pending_calls = [_realtime_tool_call_to_tool_call(rtc) for rtc in assistant_tool_calls]
         # Realtime has no vendor length-limit signal; reject only all-parse_error batches.
         reject_batch = _should_reject_tool_batch(pending_calls, truncated=False)
@@ -329,6 +421,7 @@ async def run_realtime_turn(
                     label=call.name,
                     args=dict(call.args),
                     parse_error=call.parse_error,
+                    call_id=call.call_id,
                 )
                 event, response = _tool_outcome(
                     call, ctx.request_id, ToolExecutionResult.err(call.parse_error)
@@ -352,11 +445,73 @@ async def run_realtime_turn(
                     denial_message = decision.message
                     break
                 if decision.kind == "confirm":
-                    # Realtime mode does not support interactive confirmation in v1.
-                    allowed = False
-                    denial_message = (
-                        decision.message or "Confirmation required but not supported in realtime"
+                    if pending_bus is None:
+                        allowed = False
+                        denial_message = (
+                            decision.message
+                            or "Confirmation required but realtime HITL is unavailable"
+                        )
+                        logger.warning(
+                            "realtime HITL unavailable %s",
+                            kv(
+                                request_id=ctx.request_id,
+                                thread_id=ctx.thread_id,
+                                call_id=call.call_id,
+                                tool=call.name,
+                            ),
+                        )
+                        break
+                    fut = pending_bus.register_pending(call.call_id)
+                    yield ToolConfirmationRequestEvent(
+                        request_id=ctx.request_id,
+                        tool_call_id=call.call_id,
+                        tool_name=call.name,
+                        arguments=dict(call.args),
+                        prompt=decision.message,
                     )
+                    try:
+                        payload = await _await_user_response_any(
+                            pending_bus, fut, call.call_id, timeout_sec=None
+                        )
+                    except asyncio.CancelledError:
+                        # Do not swallow cancellation into a normal deny path —
+                        # re-raise so the outer handler tears down the turn and
+                        # the generator stops (client disconnect / abort).
+                        raise
+                    if payload.get("_timeout"):
+                        allowed = False
+                        denial_message = "user did not respond in time"
+                        logger.info(
+                            "realtime HITL timeout %s",
+                            kv(
+                                request_id=ctx.request_id,
+                                thread_id=ctx.thread_id,
+                                call_id=call.call_id,
+                                approved=False,
+                                reason="timeout",
+                            ),
+                        )
+                        break
+                    if payload.get("approved"):
+                        allowed = True
+                    else:
+                        allowed = False
+                        reason_raw = payload.get("reason")
+                        denial_message = (
+                            (reason_raw if isinstance(reason_raw, str) else None)
+                            or decision.message
+                            or "denied by user"
+                        )
+                        logger.info(
+                            "realtime HITL denied %s",
+                            kv(
+                                request_id=ctx.request_id,
+                                thread_id=ctx.thread_id,
+                                call_id=call.call_id,
+                                approved=False,
+                                reason=denial_message,
+                            ),
+                        )
                     break
 
             if not allowed:
@@ -368,6 +523,7 @@ async def run_realtime_turn(
                     tool=call.name,
                     label=call.name,
                     args=dict(call.args),
+                    call_id=call.call_id,
                 )
                 result, inject_text = await _execute_tool(
                     call,
@@ -376,6 +532,24 @@ async def run_realtime_turn(
                     hook_manager=hook_manager,
                     request_id=ctx.request_id,
                 )
+                if result.error is None and result.blocks:
+                    resolved_blocks: list[ContentBlock] | None = None
+                    async for item in _resolve_elicitation_blocks(
+                        result.blocks,
+                        ctx=ctx,
+                        pending_bus=pending_bus,
+                    ):
+                        if isinstance(item, ActionRequiredEvent):
+                            yield item
+                        elif isinstance(item, list):
+                            resolved_blocks = item
+                    if resolved_blocks is not None:
+                        result = ToolExecutionResult.ok_blocks(resolved_blocks)
+                if (
+                    result.error is None
+                    and call.name in MCP_REGISTRY_MUTATING_TOOLS
+                ):
+                    mcp_registry_mutated = True
 
             if inject_text and inject_texts_out is not None:
                 inject_texts_out.append(inject_text)
@@ -383,6 +557,30 @@ async def run_realtime_turn(
             event, response = _tool_outcome(call, ctx.request_id, result)
             yield event
             tool_results.append(response)
+
+        if mcp_registry_mutated:
+            mcp_client = getattr(tool_executor, "mcp", None)
+            if mcp_client is None:
+                logger.error(
+                    "MCP registry mutated but tool executor has no mcp client %s",
+                    kv(request_id=ctx.request_id, thread_id=ctx.thread_id),
+                )
+                raise RuntimeError(
+                    "tool executor missing mcp client after MCP registry mutation"
+                )
+            ctx = refresh_tools_after_mcp_change(ctx, mcp_client)
+            logger.info(
+                "refreshed ctx.tools after MCP registry change (realtime) %s",
+                kv(
+                    request_id=ctx.request_id,
+                    thread_id=ctx.thread_id,
+                    tool_count=len(ctx.tools),
+                ),
+            )
+            # Live vendor sessions fix tools at connect time; schemas are not
+            # updated mid-session. Tell the model to start a new session if needed.
+            if inject_texts_out is not None:
+                inject_texts_out.append(_REALTIME_MCP_NEW_SESSION_NOTE)
 
         # 5. Append all tool responses as one user message (reuses loop.py semantics).
         if tool_results:

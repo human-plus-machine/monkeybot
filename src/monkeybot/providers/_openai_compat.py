@@ -31,6 +31,25 @@ from monkeybot.providers._utils import safe_parse_tool_args
 _log = logging.getLogger(__name__)
 
 
+def _delta_reasoning_text(delta: Any) -> str:
+    """Extract thinking/reasoning text from an OpenAI-compat stream delta.
+
+    Ollama and some other servers put reasoning on ``delta.reasoning`` (or
+    ``thinking``). Pydantic models may park unknown fields in ``model_extra``.
+    """
+    for key in ("reasoning", "thinking", "reasoning_content"):
+        value = getattr(delta, key, None)
+        if isinstance(value, str) and value:
+            return value
+    extra = getattr(delta, "model_extra", None)
+    if isinstance(extra, dict):
+        for key in ("reasoning", "thinking", "reasoning_content"):
+            value = extra.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return ""
+
+
 def _system_prompt_from_message(message: Message) -> str:
     texts = [b.text for b in message.content if isinstance(b, Text)]
     return "\n\n".join(texts)
@@ -234,7 +253,7 @@ async def iter_openai_compat_stream(
                 continue
             if delta.content:
                 yield TextDelta(text=delta.content)
-            reasoning = getattr(delta, "reasoning", None)
+            reasoning = _delta_reasoning_text(delta)
             if reasoning:
                 yield ThinkingDelta(text=reasoning)
             if delta.tool_calls:

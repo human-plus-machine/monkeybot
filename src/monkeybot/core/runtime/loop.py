@@ -17,7 +17,12 @@ from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.attachments.freeze import freeze_attachments_in_history
 from monkeybot.core.attachments.resolve import resolve_messages_for_provider
 from monkeybot.core.attachments.store import AttachmentStore
-from monkeybot.core.context import TurnContext, refresh_memory_index
+from monkeybot.core.context import (
+    MCP_REGISTRY_MUTATING_TOOLS,
+    TurnContext,
+    refresh_memory_index,
+    refresh_tools_after_mcp_change,
+)
 from monkeybot.core.context.memory_prompt import (
     MemoryPromptSelection,
     memory_index_fingerprint,
@@ -79,6 +84,8 @@ from .events import (
     ImageBlock,
     SystemPromptSnapshot,
     Thinking,
+    ThinkingBlockComplete,
+    ThinkingBlockDelta,
     ToolCallResult,
     ToolCallStarted,
     ToolConfirmationRequestEvent,
@@ -781,6 +788,7 @@ def _tool_outcome(
         tool=call.name,
         result=body,
         error=result.error,
+        call_id=call.call_id,
     )
     response = ToolResponse(
         id=call.call_id,
@@ -1054,6 +1062,7 @@ async def _run_inner_core(
     turn_index = 0
     needs_followup_after_tools = False
     provider_messages_written = 0
+    tools_dirty = False
     # Final assistant write is backgrounded off the streaming path; awaited at the
     # turn tail before any history load/reset so the row is never lost.
     assistant_write_task: asyncio.Task[None] | None = None
@@ -1286,6 +1295,18 @@ async def _run_inner_core(
             thinking_text = ""
             thinking_signature: str | None = None
             stream_truncated = False
+            thinking_streamed = False
+            thinking_closed = False
+
+            def _close_thinking_block() -> ThinkingBlockComplete | None:
+                nonlocal thinking_closed
+                if not thinking_streamed or thinking_closed:
+                    return None
+                thinking_closed = True
+                return ThinkingBlockComplete(
+                    request_id=ctx.request_id,
+                    signature=thinking_signature or "",
+                )
 
             llm_input = 0
             llm_output = 0
@@ -1301,7 +1322,7 @@ async def _run_inner_core(
                     delta_messages = provider_messages[provider_messages_written:]
                     message_offset = provider_messages_written
                     messages_reset = False
-                include_tools = turn_index == 1 or messages_reset
+                include_tools = turn_index == 1 or messages_reset or tools_dirty
                 await transcript_writer.write_provider_request(
                     request_id=ctx.request_id,
                     inner_turn=turn_index,
@@ -1313,6 +1334,7 @@ async def _run_inner_core(
                     thinking_budget=stream_thinking,
                 )
                 provider_messages_written = len(provider_messages)
+                tools_dirty = False
             try:
                 async with span_llm(ctx=ctx, vertex_google_search=vertex_google_search):
                     async with aclosing(
@@ -1330,6 +1352,9 @@ async def _run_inner_core(
                     ) as stream:
                         async for ev in stream:
                             if isinstance(ev, TextDelta):
+                                closed = _close_thinking_block()
+                                if closed is not None:
+                                    yield closed
                                 assistant_text += ev.text
                                 if ev.text:
                                     yield AssistantDelta(request_id=ctx.request_id, delta=ev.text)
@@ -1337,6 +1362,13 @@ async def _run_inner_core(
                                 thinking_text += ev.text
                                 if ev.signature:
                                     thinking_signature = ev.signature
+                                if ev.text:
+                                    thinking_streamed = True
+                                    yield ThinkingBlockDelta(
+                                        request_id=ctx.request_id,
+                                        text=ev.text,
+                                        signature=ev.signature,
+                                    )
                             elif isinstance(ev, UsageEvent):
                                 _merge_usage_event(usage, ev)
                                 usage.cost_usd += estimate_cost(
@@ -1352,6 +1384,9 @@ async def _run_inner_core(
                                 llm_cache_read += ev.cache_read_tokens
                                 llm_cache_creation += ev.cache_creation_tokens
                             elif isinstance(ev, ToolCall):
+                                closed = _close_thinking_block()
+                                if closed is not None:
+                                    yield closed
                                 pending[ev.call_id] = ev
                             elif isinstance(ev, ProviderGroundingEvent):
                                 yield GroundingEvent(
@@ -1362,6 +1397,9 @@ async def _run_inner_core(
                             elif isinstance(ev, Done):
                                 stream_truncated = ev.truncated
                                 break
+                    closed = _close_thinking_block()
+                    if closed is not None:
+                        yield closed
                     set_llm_usage(
                         input_tokens=llm_input,
                         output_tokens=llm_output,
@@ -1405,10 +1443,16 @@ async def _run_inner_core(
                     ),
                 )
             except asyncio.CancelledError:
+                closed = _close_thinking_block()
+                if closed is not None:
+                    yield closed
                 yield Error(request_id=ctx.request_id, error="Request cancelled")
                 needs_followup_after_tools = False
                 return
             except Exception as exc:
+                closed = _close_thinking_block()
+                if closed is not None:
+                    yield closed
                 logger.exception(
                     "provider stream failed %s",
                     kv(request_id=ctx.request_id, thread_id=ctx.thread_id, model=ctx.model),
@@ -1483,6 +1527,7 @@ async def _run_inner_core(
             # preceding model turn; serial non-task tools are separate chunks but
             # must still share a single user row.
             all_tool_responses: list[ContentBlock] = []
+            mcp_registry_mutated = False
             reject_batch = _should_reject_tool_batch(ordered, truncated=stream_truncated)
             if reject_batch:
                 logger.warning(
@@ -1537,6 +1582,7 @@ async def _run_inner_core(
                             label=call.name,
                             args=dict(call.args),
                             parse_error=call.parse_error,
+                            call_id=call.call_id,
                         )
                         result_evt, tool_resp = _finish_tool(
                             call, ToolExecutionResult.err(call.parse_error)
@@ -1591,9 +1637,10 @@ async def _run_inner_core(
                                         bus, fut, call.call_id, timeout_sec=None
                                     )
                                 except asyncio.CancelledError:
-                                    allowed = False
-                                    denial_message = "cancelled by user"
-                                    break
+                                    # Re-raise so turn cancellation (client disconnect /
+                                    # abort) propagates; do not continue the tool loop
+                                    # on a dead session.
+                                    raise
                                 if payload.get("_timeout"):
                                     allowed = False
                                     to = int(
@@ -1639,6 +1686,7 @@ async def _run_inner_core(
                             tool=call.name,
                             label=call.name,
                             args=dict(call.args),
+                            call_id=call.call_id,
                         )
                         result_evt, tool_resp = _finish_tool(
                             call, ToolExecutionResult.err(msg)
@@ -1652,6 +1700,7 @@ async def _run_inner_core(
                         tool=call.name,
                         label=call.name,
                         args=dict(call.args),
+                        call_id=call.call_id,
                     )
                     allowed_exec.append(call)
 
@@ -1756,6 +1805,11 @@ async def _run_inner_core(
                     for img_evt in _image_events(ctx.request_id, call.call_id, tool_result):
                         yield img_evt
                     chunk_responses.append(response)
+                    if (
+                        tool_result.error is None
+                        and call.name in MCP_REGISTRY_MUTATING_TOOLS
+                    ):
+                        mcp_registry_mutated = True
                 else:
                     if cancelled is not None and cancelled.is_set():
                         yield Error(request_id=ctx.request_id, error="Request cancelled")
@@ -1809,6 +1863,11 @@ async def _run_inner_core(
                         for img_evt in _image_events(ctx.request_id, call.call_id, tool_result):
                             yield img_evt
                         chunk_responses.append(response)
+                        if (
+                            tool_result.error is None
+                            and call.name in MCP_REGISTRY_MUTATING_TOOLS
+                        ):
+                            mcp_registry_mutated = True
 
                 all_tool_responses.extend(chunk_responses)
             doom_msg = doom_tracker.take_error()
@@ -1861,6 +1920,27 @@ async def _run_inner_core(
                     vertex_google_search=vertex_google_search,
                 ):
                     yield budget_evt
+
+            if mcp_registry_mutated:
+                mcp_client = getattr(tool_executor, "mcp", None)
+                if mcp_client is None:
+                    logger.error(
+                        "MCP registry mutated but tool executor has no mcp client %s",
+                        kv(request_id=ctx.request_id, thread_id=ctx.thread_id),
+                    )
+                    raise RuntimeError(
+                        "tool executor missing mcp client after MCP registry mutation"
+                    )
+                ctx = refresh_tools_after_mcp_change(ctx, mcp_client)
+                tools_dirty = True
+                logger.info(
+                    "refreshed ctx.tools after MCP registry change %s",
+                    kv(
+                        request_id=ctx.request_id,
+                        thread_id=ctx.thread_id,
+                        tool_count=len(ctx.tools),
+                    ),
+                )
 
         finally:
             set_turn_prompt_tokens(usage.estimated_prompt_tokens)

@@ -42,8 +42,20 @@ class _FakeMCP:
     def all_tools(self) -> list[ToolDef]:
         return []
 
+    def catalog_names(self) -> list[str]:
+        return []
+
+    def known_server_names(self) -> list[str]:
+        return []
+
+    def is_connected(self, name: str) -> bool:
+        return False
+
     def split_prefixed_tool(self, name: str) -> tuple[str, str] | None:
         return None
+
+    async def connect_from_catalog(self, name: str) -> list[ToolDef]:
+        return []
 
     async def load_from_config(self, path: Path, *, raise_on_error: bool = False) -> None:
         pass
