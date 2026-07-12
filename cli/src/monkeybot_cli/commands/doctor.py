@@ -227,7 +227,7 @@ def run_doctor(args: argparse.Namespace) -> int:
                 servers = mcp_doc.get("mcpServers", {})
                 if isinstance(servers, dict):
                     for name, srv in servers.items():
-                        if not isinstance(srv, dict) or srv.get("enabled") is False:
+                        if not isinstance(srv, dict):
                             continue
                         url = srv.get("url")
                         if isinstance(url, str) and url.startswith("http"):

@@ -2,19 +2,20 @@
 
 monkeybot fully supports the Model Context Protocol (MCP), enabling your agents to interact with external tools, APIs, and data sources. Both local `stdio` subprocess transport and remote `Streamable HTTP` SSE transports are supported.
 
+**See also:** [Progressive MCP tool disclosure](progressive-mcp-tools.md) (on-demand `enable_mcp` + mid-turn tool refresh for TTFT).
+
 ---
 
 ## Configuration
 
 By default, monkeybot loads its MCP servers map from a JSON file specified under `paths.mcp_config` in `monkeybot.yaml` (typically `./monkeybot_config/mcp.json`).
 
-A template `mcp.json` looks like this:
+A template `mcp.json` looks like this. Every entry under `mcpServers` is catalogued at startup; the model calls `enable_mcp("name")` before those tools appear. Delete an entry to remove it from the catalog.
 
 ```json
 {
   "mcpServers": {
-    "my-stdio-server": {
-      "enabled": true,
+    "filesystem": {
       "command": "npx",
       "args": [
         "-y",
@@ -26,20 +27,35 @@ A template `mcp.json` looks like this:
         "API_SECRET": "${MY_SECRET_ENV_VAR}"
       }
     },
-    "my-http-server": {
-      "enabled": true,
-      "url": "https://mcp.example.com/mcp",
-      "headers": {
-        "Authorization": "Bearer ${STATIC_TOKEN}"
+    "browser": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--project",
+        "/path/to/monkeybot/integrations/browser-mcp",
+        "python",
+        "-m",
+        "browser_mcp.server"
+      ],
+      "env": {
+        "BU_NAME": "monkeybot",
+        "BROWSER_MCP_PLAYBOOKS_DIR": "./workspace/skills/browser/playbooks",
+        "BROWSER_MCP_SCREENSHOTS_DIR": "${MONKEYBOT_WORKSPACE_ROOT}/browser/Screenshots"
       }
     }
   }
 }
 ```
 
+Demo agent: copy `demo_agent/monkeybot_config/mcp.json.example` → `mcp.json` (the live file is gitignored). Scaffolded agents get stdio / HTTP / OAuth / browser examples from the packaged `monkeybot_config/mcp.json` — keep only the servers you want and fix placeholder paths.
+
 ---
 
 ## Features
+
+### 0. Progressive MCP (always on-demand)
+
+Servers listed in `mcp.json` are **catalogued at startup but not connected**. Schemas stay out of the provider payload until the model calls `enable_mcp("name")`; tools then appear on the **next model step of the same turn**. Prefer that over inventing `add_mcp_server` command/args for servers already in config. To stop offering a server, remove its entry from the file. See [Progressive MCP tool disclosure](progressive-mcp-tools.md).
 
 ### 1. Environment Variable Interpolation
 
@@ -58,7 +74,6 @@ Add an optional `"auth"` block to your server specification inside `mcp.json`:
 
 ```json
 "langchain-docs": {
-  "enabled": true,
   "url": "https://mcp-server.example.com/mcp",
   "auth": {
     "flow": "client_credentials",
@@ -75,7 +90,6 @@ Add an optional `"auth"` block to your server specification inside `mcp.json`:
 
 ```json
 "internal-admin-tool": {
-  "enabled": true,
   "url": "https://admin-mcp.internal.net",
   "auth": {
     "flow": "password",

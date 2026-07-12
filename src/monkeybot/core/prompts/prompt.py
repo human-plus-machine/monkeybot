@@ -141,6 +141,7 @@ def compose_system_prompt(
         run_command_opensandbox=SandboxConfig.from_env().enabled,
         subagent_personas=ctx.subagent_personas,
         emission_style=emission_style_terse_from_env(),
+        catalog_mcp_servers=ctx.catalog_mcp_servers,
     )
 
     attachments = _session_attachments_block(attachment_catalog)

@@ -60,8 +60,20 @@ class _NoMCP:
     def all_tools(self) -> list:
         return []
 
+    def catalog_names(self) -> list:
+        return []
+
+    def known_server_names(self) -> list:
+        return []
+
+    def is_connected(self, *_a: object) -> bool:
+        return False
+
     def split_prefixed_tool(self, *_a: object) -> None:
         return None
+
+    async def connect_from_catalog(self, *_a: object) -> list:
+        return []
 
     async def load_from_config(self, *_a: object, **_kw: object) -> None:
         return None

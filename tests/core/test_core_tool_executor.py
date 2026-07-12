@@ -70,12 +70,26 @@ class _NoMCP:
     def all_tools(self) -> list[ToolDef]:
         return []
 
+    def catalog_names(self) -> list[str]:
+        return []
+
+    def known_server_names(self) -> list[str]:
+        return []
+
+    def is_connected(self, name: str) -> bool:
+        del name
+        return False
+
     def split_prefixed_tool(self, prefixed_name: str) -> tuple[str, str] | None:
         del prefixed_name
         return None
 
+    async def connect_from_catalog(self, name: str) -> list[ToolDef]:
+        del name
+        return []
+
     async def load_from_config(self, path: Path, *, raise_on_error: bool = False) -> None:
-        del path
+        del path, raise_on_error
 
 
 class _MCPWithBlob:
@@ -119,10 +133,24 @@ class _MCPWithBlob:
     def all_tools(self) -> list[ToolDef]:
         return []
 
+    def catalog_names(self) -> list[str]:
+        return []
+
+    def known_server_names(self) -> list[str]:
+        return []
+
+    def is_connected(self, name: str) -> bool:
+        del name
+        return False
+
     def split_prefixed_tool(self, prefixed_name: str) -> tuple[str, str] | None:
         if prefixed_name == "srv__capture":
             return ("srv", "capture")
         return None
+
+    async def connect_from_catalog(self, name: str) -> list[ToolDef]:
+        del name
+        return []
 
     async def load_from_config(self, path: Path, *, raise_on_error: bool = False) -> None:
         del path, raise_on_error
@@ -1453,3 +1481,73 @@ async def test_custom_tool_tool_execution_result_passthrough(tmp_path: Path) -> 
     assert result.error is None
     assert any(isinstance(b, Image) for b in result.blocks)
 
+
+
+class _CatalogMCP(_NoMCP):
+    def __init__(self) -> None:
+        self.connected: dict[str, list[ToolDef]] = {}
+        self._catalog = {"browser": True}
+
+    def catalog_names(self) -> list[str]:
+        return sorted(self._catalog)
+
+    def known_server_names(self) -> list[str]:
+        return ["browser"]
+
+    def is_connected(self, name: str) -> bool:
+        return name in self.connected
+
+    async def connect_from_catalog(self, name: str) -> list[ToolDef]:
+        if name not in self._catalog:
+            from monkeybot.core.mcp.mcp_client import MCPDiagnosticError
+
+            raise MCPDiagnosticError(name, f"Unknown MCP server {name!r}")
+        defs = [ToolDef("browser__goto", "Go", {"type": "object"})]
+        self.connected[name] = defs
+        return defs
+
+    def all_tools(self) -> list[ToolDef]:
+        out: list[ToolDef] = []
+        for tools in self.connected.values():
+            out.extend(tools)
+        return out
+
+
+@pytest.mark.asyncio
+async def test_enable_mcp_connects_from_catalog(tmp_path: Path) -> None:
+    mcp = _CatalogMCP()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=mcp,
+    )
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    result = await ex.execute(
+        call=ToolCall(name="enable_mcp", args={"name": "browser"}, call_id="1"),
+        ctx=_ctx(),
+    )
+    assert result.error is None
+    body = json.loads(result.blocks[0].text)  # type: ignore[index]
+    assert body["ok"] is True
+    assert body["server"] == "browser"
+    assert body["tools"][0]["name"] == "browser__goto"
+    assert "next model step" in body["note"]
+
+
+@pytest.mark.asyncio
+async def test_enable_mcp_unknown_server_errors(tmp_path: Path) -> None:
+    mcp = _CatalogMCP()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=mcp,
+    )
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    result = await ex.execute(
+        call=ToolCall(name="enable_mcp", args={"name": "missing"}, call_id="1"),
+        ctx=_ctx(),
+    )
+    assert result.error is not None
+    assert "Unknown MCP server" in result.error

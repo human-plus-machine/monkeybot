@@ -20,7 +20,6 @@ Add to `monkeybot_config/mcp.json`:
 
 ```json
 "browser": {
-  "enabled": true,
   "command": "uv",
   "args": ["run", "--project", "../integrations/browser-mcp", "python", "-m", "browser_mcp.server"],
   "env": {
@@ -30,6 +29,8 @@ Add to `monkeybot_config/mcp.json`:
   }
 }
 ```
+
+Startup does **not** advertise `browser__*` schemas. The agent calls `enable_mcp("browser")` first (see [Progressive MCP tool disclosure](progressive-mcp-tools.md)).
 
 Tools appear as `browser__*` (MCP server name + tool name). Copy `demo_agent/workspace/skills/browser/` into your `SKILLS_PATH` so the agent gets workflow instructions and a playbooks directory. See also [Skills](skills.md).
 

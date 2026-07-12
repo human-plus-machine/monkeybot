@@ -1,7 +1,6 @@
 {
   "mcpServers": {
-    "example-stdio-server": {
-      "enabled": false,
+    "filesystem": {
       "command": "npx",
       "args": [
         "-y",
@@ -13,15 +12,13 @@
         "EXAMPLE_SECRET": "${MY_SECRET_ENV_VAR}"
       }
     },
-    "example-streamable-http-server": {
-      "enabled": false,
+    "remote-http": {
       "url": "https://your-mcp-host.example.com/mcp",
       "headers": {
         "Authorization": "Bearer ${MY_STATIC_BEARER_TOKEN}"
       }
     },
-    "example-oauth-client-credentials-server": {
-      "enabled": false,
+    "remote-oauth": {
       "url": "https://your-mcp-host.example.com/mcp",
       "auth": {
         "flow": "client_credentials",
@@ -32,16 +29,20 @@
         "client_auth_method": "body"
       }
     },
-    "example-oauth-password-server": {
-      "enabled": false,
-      "url": "https://your-mcp-host.example.com/mcp",
-      "auth": {
-        "flow": "password",
-        "token_url": "https://identity.provider.example.com/oauth2/token",
-        "username": "${BOT_USERNAME}",
-        "password": "${BOT_PASSWORD}",
-        "client_id": "${OAUTH_CLIENT_ID}",
-        "client_secret": "${OAUTH_CLIENT_SECRET}"
+    "browser": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--project",
+        "/path/to/monkeybot/integrations/browser-mcp",
+        "python",
+        "-m",
+        "browser_mcp.server"
+      ],
+      "env": {
+        "BU_NAME": "monkeybot",
+        "BROWSER_MCP_PLAYBOOKS_DIR": "./workspace/skills/browser/playbooks",
+        "BROWSER_MCP_SCREENSHOTS_DIR": "${MONKEYBOT_WORKSPACE_ROOT}/browser/Screenshots"
       }
     }
   }

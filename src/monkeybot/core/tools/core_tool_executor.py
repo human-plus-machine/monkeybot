@@ -26,7 +26,11 @@ from monkeybot.core.context.tool_result_ingress import (
 )
 from monkeybot.core.llm.provider import ToolCall
 from monkeybot.core.logging_utils import kv
-from monkeybot.core.mcp.mcp_client import MCPConnectionError, MCPServerNotConnectedError
+from monkeybot.core.mcp.mcp_client import (
+    MCPConnectionError,
+    MCPDiagnosticError,
+    MCPServerNotConnectedError,
+)
 from monkeybot.core.mcp.ports_mcp import MCPClientPort
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.persistence.backends import RunStore, ScheduledLoopStore
@@ -89,6 +93,8 @@ _CORE_TOOL_NAMES = frozenset(
         "run_command",
         "add_mcp_server",
         "remove_mcp_server",
+        "enable_mcp",
+        "disable_mcp",
         "start_loop",
         "loop_status",
         "pause_loop",
@@ -388,6 +394,11 @@ class CoreToolExecutor(ToolExecutorPort):
             ct.tool_def.name: ct for ct in (extra_tools or [])
         }
 
+    @property
+    def mcp(self) -> MCPClientPort:
+        """MCP client used for built-in MCP tools and ``server__tool`` dispatch."""
+        return self._mcp
+
     def _run_command_security_envelope(self, exc: SecurityError) -> str:
         raw = str(exc)
         if raw.startswith("Command '") and "not allowed" in raw:
@@ -463,6 +474,10 @@ class CoreToolExecutor(ToolExecutorPort):
                 result_text, err_text = await self._tool_add_mcp_server(args)
             elif name == "remove_mcp_server":
                 result_text, err_text = await self._tool_remove_mcp_server(args)
+            elif name == "enable_mcp":
+                result_text, err_text = await self._tool_enable_mcp(args)
+            elif name == "disable_mcp":
+                result_text, err_text = await self._tool_disable_mcp(args)
             elif name == "start_loop":
                 result_text, err_text = await self._tool_start_loop(args, ctx)
             elif name == "loop_status":
@@ -516,6 +531,8 @@ class CoreToolExecutor(ToolExecutorPort):
                     )
         except WorkspaceError as exc:
             result_text, err_text = None, _workspace_error_envelope(exc)
+        except MCPDiagnosticError as exc:
+            result_text, err_text = None, str(exc)
         except MCPConnectionError as exc:
             result_text, err_text = None, str(exc)
         except SecurityError as exc:
@@ -1105,24 +1122,77 @@ class CoreToolExecutor(ToolExecutorPort):
             for k, val in env_src.items():
                 env[str(k)] = "" if val is None else str(val)
         defs = await self._mcp.connect(sname, command, arg_list, env)
+        logger.info(
+            "add_mcp_server ok %s",
+            kv(server=sname, tools=len(defs)),
+        )
         return (
             _j(
                 {
                     "ok": True,
                     "server": sname,
                     "tools": [{"name": t.name, "description": t.description} for t in defs],
-                    "note": "New tools apply on the next user message (context is built per turn).",
+                    "note": "New tools apply on the next model step this turn.",
+                }
+            ),
+            None,
+        )
+
+    async def _disconnect_mcp_server(
+        self, *, tool_name: str, args: dict[str, Any]
+    ) -> tuple[str | None, str | None]:
+        sname = _str_arg(args, "name", "server_name", "server")
+        if not sname:
+            return (None, f"{tool_name} requires name (or server_name / server)")
+        await self._mcp.disconnect(sname)
+        logger.info("%s ok %s", tool_name, kv(server=sname, disconnected=True))
+        return (
+            _j(
+                {
+                    "ok": True,
+                    "server": sname,
+                    "disconnected": True,
+                    "note": "Tools drop on the next model step this turn.",
                 }
             ),
             None,
         )
 
     async def _tool_remove_mcp_server(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+        return await self._disconnect_mcp_server(tool_name="remove_mcp_server", args=args)
+
+    async def _tool_enable_mcp(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
         sname = _str_arg(args, "name", "server_name", "server")
         if not sname:
-            return (None, "remove_mcp_server requires name (or server_name / server)")
-        await self._mcp.disconnect(sname)
-        return (_j({"ok": True, "server": sname, "disconnected": True}), None)
+            return (None, "enable_mcp requires name (or server_name / server)")
+        already = self._mcp.is_connected(sname)
+        try:
+            defs = await self._mcp.connect_from_catalog(sname)
+        except MCPDiagnosticError as exc:
+            logger.warning("enable_mcp failed %s", kv(server=sname, error=str(exc)))
+            return (None, str(exc))
+        except MCPConnectionError as exc:
+            logger.warning("enable_mcp failed %s", kv(server=sname, error=str(exc)))
+            return (None, str(exc))
+        logger.info(
+            "enable_mcp ok %s",
+            kv(server=sname, already_connected=already, tools=len(defs)),
+        )
+        return (
+            _j(
+                {
+                    "ok": True,
+                    "server": sname,
+                    "already_connected": already,
+                    "tools": [{"name": t.name, "description": t.description} for t in defs],
+                    "note": "New tools apply on the next model step this turn.",
+                }
+            ),
+            None,
+        )
+
+    async def _tool_disable_mcp(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+        return await self._disconnect_mcp_server(tool_name="disable_mcp", args=args)
 
     def _require_loop_store(self) -> ScheduledLoopStore | tuple[None, str]:
         if self._scheduled_loop_store is None:

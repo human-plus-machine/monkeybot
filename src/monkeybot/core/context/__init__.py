@@ -107,9 +107,39 @@ class TurnContext:
     """Gateway session bus for Story 5 pending UI responses; None for CLI / harness."""
     subagent_personas: tuple[tuple[str, str], ...] = ()
     """Named subagent types (name, description) advertised to the parent in the harness."""
+    catalog_mcp_servers: tuple[str, ...] = ()
+    """Configured MCP server names available via ``enable_mcp`` (not connected until activated)."""
 
 
 _log = logging.getLogger(__name__)
+
+# Built-in tools that mutate the live MCP registry; loop refreshes ctx.tools after these.
+MCP_REGISTRY_MUTATING_TOOLS = frozenset(
+    {
+        "add_mcp_server",
+        "remove_mcp_server",
+        "enable_mcp",
+        "disable_mcp",
+    }
+)
+
+
+def refresh_tools_after_mcp_change(
+    ctx: TurnContext,
+    mcp_client: Any,
+) -> TurnContext:
+    """Rebuild ``ctx.tools`` after add/remove/enable/disable MCP (same user turn).
+
+    Drops tools prefixed with any known MCP server name (catalog + ever-connected),
+    then appends the current ``mcp_client.all_tools()`` snapshot.
+    """
+    prefixes = set(mcp_client.known_server_names())
+    kept = [
+        t
+        for t in ctx.tools
+        if not any(t.name.startswith(f"{prefix}__") for prefix in prefixes)
+    ]
+    return dataclasses.replace(ctx, tools=kept + list(mcp_client.all_tools()))
 
 
 def _core_tool_defs(
@@ -199,6 +229,27 @@ def _core_tool_defs(
         "properties": {"name": {"type": "string"}, "server_name": {"type": "string"}},
         "required": [],
     }
+    enable_mcp_schema: dict[str, object] = {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Server name from mcp.json (e.g. browser).",
+            },
+            "server_name": {"type": "string"},
+            "server": {"type": "string"},
+        },
+        "required": [],
+    }
+    disable_mcp_schema: dict[str, object] = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "server_name": {"type": "string"},
+            "server": {"type": "string"},
+        },
+        "required": [],
+    }
     list_skills_schema: dict[str, object] = {"type": "object", "properties": {}}
     task_props: dict[str, object] = {
         "task": {
@@ -278,13 +329,28 @@ def _core_tool_defs(
     tools.extend(
         [
             ToolDef(
+                "enable_mcp",
+                "Connect a configured MCP server by name from mcp.json (e.g. browser). "
+                "Prefer this over add_mcp_server for known servers. New tools appear on "
+                "the next model step this turn.",
+                enable_mcp_schema,
+            ),
+            ToolDef(
+                "disable_mcp",
+                "Disconnect a connected MCP server by name and drop its tools from the "
+                "next model step this turn.",
+                disable_mcp_schema,
+            ),
+            ToolDef(
                 "add_mcp_server",
-                "Connect an MCP stdio server by name; tools appear as name__tool on later turns.",
+                "Connect an ad-hoc MCP stdio server by name/command; tools appear as "
+                "name__tool on the next model step this turn. Prefer enable_mcp for "
+                "servers already listed in mcp.json.",
                 mcp_add_schema,
             ),
             ToolDef(
                 "remove_mcp_server",
-                "Disconnect an MCP server by name and drop its tools.",
+                "Disconnect an MCP server by name and drop its tools (next model step).",
                 mcp_rm_schema,
             ),
             ToolDef(
@@ -505,6 +571,7 @@ async def build_context(
     tools.extend(mcp_client.all_tools())
     for ct in extra_tools or []:
         tools.append(ct.tool_def)
+    catalog_names = tuple(mcp_client.catalog_names())
     return TurnContext(
         thread_id=thread_id,
         request_id=request_id,
@@ -523,6 +590,7 @@ async def build_context(
         context_curation_enabled=enable_context_curation,
         sse_bus=sse_bus,
         subagent_personas=personas,
+        catalog_mcp_servers=catalog_names,
     )
 
 

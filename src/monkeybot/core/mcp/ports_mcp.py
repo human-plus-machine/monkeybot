@@ -51,8 +51,24 @@ class MCPClientPort(Protocol):
         """Aggregate tool list for the provider / tool-calling layer (sync snapshot)."""
         ...
 
+    def catalog_names(self) -> list[str]:
+        """Names of servers known from the last ``load_from_config``."""
+        ...
+
+    def known_server_names(self) -> list[str]:
+        """Catalog + ever-connected server names (for tool-list refresh prefixes)."""
+        ...
+
+    def is_connected(self, name: str) -> bool:
+        """True when ``name`` has an active session."""
+        ...
+
     def split_prefixed_tool(self, prefixed_name: str) -> tuple[str, str] | None:
         """If ``prefixed_name`` belongs to a connected server, return ``(server_name, tool_name)``."""
+        ...
+
+    async def connect_from_catalog(self, name: str) -> list[ToolDef]:
+        """Connect a catalogued server by name (no-op if already connected)."""
         ...
 
     async def load_from_config(
