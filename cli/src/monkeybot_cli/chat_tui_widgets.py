@@ -631,6 +631,65 @@ class HitlCard(Static):
         self._render_card()
 
 
+class ComposerBusySpinner(Static):
+    """One-glyph spinner beside the composer while the agent turn is running."""
+
+    DEFAULT_CSS = """
+    ComposerBusySpinner {
+        width: 2;
+        height: 1;
+        min-height: 1;
+        content-align: center middle;
+        color: $muted;
+        padding: 0;
+    }
+    ComposerBusySpinner.-busy {
+        color: $accent;
+    }
+    """
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(" ", **kwargs)  # type: ignore[arg-type]
+        self._spin_i = 0
+        self._timer: Timer | None = None
+        self._busy = False
+
+    @property
+    def busy(self) -> bool:
+        return self._busy
+
+    def set_busy(self, busy: bool) -> None:
+        if busy == self._busy:
+            return
+        self._busy = busy
+        if self._timer is not None:
+            self._timer.stop()
+            self._timer = None
+        if not busy:
+            self.remove_class("-busy")
+            self.update(" ")
+            return
+        self.add_class("-busy")
+        self._spin_i = 0
+        if bool(getattr(self.app, "animations_enabled", True)):
+            self._timer = self.set_interval(0.08, self._tick)
+            self._tick()
+        else:
+            self.update("●")
+
+    def _tick(self) -> None:
+        if not self._busy:
+            return
+        glyph = _SPIN[self._spin_i % len(_SPIN)]
+        self._spin_i += 1
+        self.update(glyph)
+
+    def on_unmount(self) -> None:
+        if self._timer is not None:
+            self._timer.stop()
+            self._timer = None
+
+
 class Composer(TextArea):
     """Growing multiline input: Enter sends, Shift+Enter/Ctrl+J newline, history, slash."""
 

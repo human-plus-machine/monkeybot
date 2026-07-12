@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.widgets import Button, OptionList, Static, TextArea
@@ -30,6 +30,7 @@ from monkeybot_cli.chat_tool_display import tool_collapsed_title
 from monkeybot_cli.chat_tui_widgets import (
     AssistantTurn,
     Composer,
+    ComposerBusySpinner,
     EarlierTurns,
     EmptyHint,
     GroundingBlock,
@@ -200,6 +201,17 @@ class ChatApp(App[int]):
     #composer-wrap.hitl {
         border-top: solid $warning;
     }
+    #composer-row {
+        height: auto;
+        min-height: 1;
+        width: 1fr;
+        align: left middle;
+    }
+    #composer-busy {
+        width: 2;
+        height: 1;
+        min-height: 1;
+    }
     #slash-palette {
         height: auto;
         max-height: 6;
@@ -213,6 +225,7 @@ class ChatApp(App[int]):
         height: 1;
         min-height: 1;
         max-height: 8;
+        width: 1fr;
         background: $surface;
         color: $foreground;
         border: none;
@@ -328,7 +341,9 @@ class ChatApp(App[int]):
         yield Button("↓ Jump to latest", id="jump-bottom", compact=True, flat=True)
         with Vertical(id="composer-wrap"):
             yield OptionList(id="slash-palette", compact=True)
-            yield Composer(load_history_lines(self.agent_root))
+            with Horizontal(id="composer-row"):
+                yield ComposerBusySpinner(id="composer-busy")
+                yield Composer(load_history_lines(self.agent_root))
         yield Static(self._status_line(), id="statusbar", markup=True)
 
     def _make_empty_hint(self) -> EmptyHint:
@@ -363,7 +378,7 @@ class ChatApp(App[int]):
         if self._hitl_status_flash:
             parts.append(self._hitl_status_flash)
         if self._turn_active and not self._hitl_active:
-            parts.append("Ctrl-C interrupt")
+            parts.append("working · Ctrl-C interrupt")
         elif self._hitl_active:
             if self._hitl_kind == "elicit":
                 parts.append("Enter submit · Ctrl-C cancel")
@@ -377,9 +392,14 @@ class ChatApp(App[int]):
             parts.append("F1 hints")
         return "  ·  ".join(parts)
 
+    def _set_composer_busy(self, busy: bool) -> None:
+        with contextlib.suppress(NoMatches):
+            self.query_one("#composer-busy", ComposerBusySpinner).set_busy(busy)
+
     def _refresh_status(self) -> None:
         with contextlib.suppress(NoMatches):
             self.query_one("#statusbar", Static).update(self._status_line())
+        self._set_composer_busy(self._turn_active and not self._hitl_active)
 
     def _set_ring(self, text: str) -> None:
         self._ring_text = text

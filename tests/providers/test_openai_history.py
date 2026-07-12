@@ -5,7 +5,13 @@ from __future__ import annotations
 import json
 
 from monkeybot.core.llm.provider import Message
-from monkeybot.core.types.content_blocks import Text, ToolRequest, ToolResponse
+from monkeybot.core.types.content_blocks import (
+    RedactedThinking,
+    Text,
+    Thinking,
+    ToolRequest,
+    ToolResponse,
+)
 from monkeybot.providers.openai import _messages_to_openai
 from tests.providers.conftest import typed_messages_four_turn, typed_messages_turn_2b_tool_only
 
@@ -68,6 +74,36 @@ def test_openai_assistant_toolrequest_only() -> None:
             "id": "c2",
             "type": "function",
             "function": {"name": "ls", "arguments": "{}"},
+        }
+    ]
+
+
+def test_openai_skips_thinking_blocks() -> None:
+    """Ollama/HF must not crash when history contains Thinking from a prior turn."""
+    m = Message(
+        role="assistant",
+        content=[
+            Thinking(thinking="plan the tool call", signature="sig"),
+            RedactedThinking(data="opaque"),
+            Text(text="calling shell"),
+            ToolRequest(id="c1", name="run_command", args={"argv": ["ls"]}),
+        ],
+    )
+    _sys, rows = _messages_to_openai([m])
+    assert rows == [
+        {
+            "role": "assistant",
+            "content": "calling shell",
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {
+                        "name": "run_command",
+                        "arguments": json.dumps({"argv": ["ls"]}, ensure_ascii=False),
+                    },
+                }
+            ],
         }
     ]
 
