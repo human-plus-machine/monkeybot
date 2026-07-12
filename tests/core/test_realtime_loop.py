@@ -278,3 +278,64 @@ class TestRunRealtimeTurn:
         assert result.error is None
         assert "Ada" in (result.result or "")
 
+    async def test_tool_confirm_cancelled_error_propagates(self) -> None:
+        import asyncio
+
+        from monkeybot.core.runtime.events import Error, ToolConfirmationRequestEvent
+        from monkeybot.core.tools.inspector import Decision
+
+        class ConfirmInspector:
+            async def check(self, call, ctx):  # type: ignore[no-untyped-def]
+                del call, ctx
+                return Decision(kind="confirm", message="Allow?")
+
+        class NeverResolveBus:
+            def register_pending(self, pending_key: str) -> asyncio.Future[object]:
+                del pending_key
+                return asyncio.get_running_loop().create_future()
+
+        history = FakeHistory()
+        ctx = _ctx()
+        agen = run_realtime_turn(
+            "hi",
+            "calling",
+            [RealtimeToolCall(call_id="c1", name="shell", args={"cmd": "ls"})],
+            ctx,
+            history=history,
+            tool_executor=RecordingExecutor(),
+            inspectors=[ConfirmInspector()],
+            pending_bus=NeverResolveBus(),
+        )
+
+        while True:
+            ev = await agen.__anext__()
+            if isinstance(ev, ToolConfirmationRequestEvent):
+                break
+
+        # Next __anext__ resumes into the HITL await. Cancellation must not fall
+        # through as a normal tool deny — either CancelledError or a cancel Error.
+        wait_task = asyncio.create_task(agen.__anext__())
+        await asyncio.sleep(0)
+        assert not wait_task.done()
+        wait_task.cancel()
+        try:
+            result = await wait_task
+        except asyncio.CancelledError:
+            result = None
+        else:
+            assert isinstance(result, Error)
+            assert "cancel" in result.error.lower()
+            # Generator should stop after cancel rather than continuing tools.
+            trailing = []
+            try:
+                while True:
+                    trailing.append(await asyncio.wait_for(agen.__anext__(), timeout=0.05))
+            except (StopAsyncIteration, TimeoutError, asyncio.CancelledError):
+                pass
+            assert not any(isinstance(e, ToolCallResult) for e in trailing)
+        # Best-effort cleanup; a half-cancelled async gen may ignore GeneratorExit.
+        try:
+            await asyncio.wait_for(agen.aclose(), timeout=0.05)
+        except (TimeoutError, RuntimeError, asyncio.CancelledError):
+            pass
+
