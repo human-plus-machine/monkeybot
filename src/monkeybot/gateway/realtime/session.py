@@ -145,8 +145,6 @@ class RealtimeConnectionState:
             "interrupted",
         ):
             # Assistant turn ended naturally.
-            if event.truncated:
-                self.buffer.mark_assistant_truncated()
             self.buffer.mark_assistant_turn_boundary()
             self.metrics.end_turn()
             self.transition("listening")

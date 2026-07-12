@@ -138,8 +138,8 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - `run()` **never raises** to callers; errors become `Error` events; `TurnComplete` always emitted.
 - Cooperative cancellation via `asyncio.Event`, checked at loop boundaries.
 - Silent-model guard: whitespace-only assistant after tools → loop continues until budget.
-- **Doom-loop guard:** `DOOM_LOOP_THRESHOLD` consecutive identical *failing* tool calls (same name + args) within a user message emit an `Error`, inject a harness system note, and force the next provider call with an empty tool list (`toolChoice`-none equivalent) so the model must reply in text. Default threshold `3`; set `0` to disable.
-- **Truncated tool batch:** When `Done.truncated` is true (provider length/max-tokens stop) **or** every tool call in the batch has `parse_error`, the harness fails the whole batch with tool error results and does **not** execute any call — even if some args parsed as JSON (they may still be silently incomplete).
+- **Doom-loop guard:** `DOOM_LOOP_THRESHOLD` consecutive identical *failing* tool calls (same name + args) within a user message emit an `Error`, inject a harness system note, and force the next provider call with an empty tool list (`toolChoice`-none equivalent) so the model must reply in text. Default threshold `3`; set `0` to disable. Applies to the text agent loop only (not realtime); after each recovery turn the guard re-arms for later streaks in the same message.
+- **Truncated tool batch:** When `Done.truncated` is true (provider length/max-tokens stop) **or** every tool call in the batch has `parse_error`, the harness fails the whole batch with tool error results and does **not** execute any call — even if some args parsed as JSON (they may still be silently incomplete). Realtime has no vendor length-limit signal today (Gemini Live), so it only applies the all-`parse_error` reject path.
 - **History summarization:** When preflight tokens exceed the trigger ratio and history is long enough, the middle of the transcript is compressed via a dedicated summarizer call into one assistant row prefixed `[Context Summary]:`. The summarizer is instructed to emit a fixed Markdown template (Objective, Important Details, Work State with Completed/Active/Blocked, Next Move, Relevant Files) — not freeform prose. Head/tail messages are kept; the summary replaces the middle.
 
 ---
@@ -184,7 +184,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **How it works:**
 - `stream(messages, tools, model=..., thinking_budget=...)` yields `TextDelta`, `ThinkingDelta`, `ToolCall`, `UsageEvent`, `Done`.
-- `Done.truncated` is set when the vendor reports an output length limit (OpenAI `finish_reason=length`, Anthropic `stop_reason=max_tokens`, Gemini `MAX_TOKENS`). The loop treats that as an unsafe tool batch.
+- `Done.truncated` is set when the vendor reports an output length limit (OpenAI `finish_reason=length`, Anthropic `stop_reason=max_tokens`, Gemini `MAX_TOKENS`). The text loop treats that as an unsafe tool batch. Gemini Live does not expose an equivalent signal, so realtime rejects incomplete tool batches via all-`parse_error` only.
 - `count_input_tokens()` must match the same payload shape as `stream()` (summarization triggers, tool budgets).
 - Provider resolution via `MODEL_PROVIDER` aliases (`gemini` → `google_vertexai`, `vertex-claude` → `vertex_anthropic`).
 - Optional extras in `pyproject.toml`: `gemini`, `openai`, `claude`, `vertex-claude`, `bedrock`, `huggingface`, `ollama`, `nvidia`.
@@ -575,8 +575,8 @@ Use this when reviewing PRs or designing new features.
 | Area | Rule |
 |------|------|
 | **Loop** | Never raise from `run()`; always emit `TurnComplete` |
-| **Doom loop** | Identical failing tool streak ≥ `DOOM_LOOP_THRESHOLD` → Error + no-tools recovery turn |
-| **Truncated tools** | `Done.truncated` or all-`parse_error` batch → fail all; never execute partial args |
+| **Doom loop** | Text loop: identical failing streak ≥ `DOOM_LOOP_THRESHOLD` → Error + no-tools recovery; re-arms after each recovery |
+| **Truncated tools** | Text loop: `Done.truncated` or all-`parse_error` → fail all; realtime: all-`parse_error` only (no Live length-limit signal) |
 | **Compaction summary** | Middle-history summary uses fixed Markdown template (Objective / Details / Work State / Next Move / Files); stored as `[Context Summary]:` |
 | **Tools** | Native function-call channel only; no JSON-in-prose tool calls |
 | **History** | `ToolRequest`/`ToolResponse` pairing must survive provider replay |

@@ -87,9 +87,30 @@ def test_doom_loop_tracker_triggers_on_identical_failures() -> None:
     assert tracker.force_no_tools is True
     assert tracker.recovery_note == note
     assert tracker.take_error() is None
-    # Further records are no-ops once triggered.
+    # While triggered (before consume_recovery), further records are no-ops.
     tracker.record("run_command", args, is_error=True)
     assert tracker.take_error() is None
+
+
+def test_doom_loop_tracker_rearms_after_recovery() -> None:
+    """A second identical-failure streak after recovery must trigger again."""
+    tracker = _DoomLoopTracker(threshold=2)
+    args = {"command": "echo hi"}
+    tracker.record("run_command", args, is_error=True)
+    tracker.record("run_command", args, is_error=True)
+    assert tracker.take_error() is not None
+    force, note = tracker.consume_recovery()
+    assert force is True
+    assert note is not None
+    assert tracker.triggered is False
+    assert tracker.streak_count == 0
+
+    tracker.record("run_command", args, is_error=True)
+    assert tracker.take_error() is None
+    tracker.record("run_command", args, is_error=True)
+    assert tracker.take_error() is not None
+    assert tracker.force_no_tools is True
+    assert tracker.consume_recovery()[0] is True
 
 
 def test_doom_loop_tracker_consume_recovery() -> None:
@@ -100,6 +121,7 @@ def test_doom_loop_tracker_consume_recovery() -> None:
     assert force is True
     assert note is not None and "Doom loop detected" in note
     assert tracker.consume_recovery() == (False, None)
+    assert tracker.triggered is False
 
 
 def test_doom_loop_tracker_resets_on_success_or_different_args() -> None:
@@ -175,6 +197,57 @@ async def test_run_doom_loop_emits_error_and_forces_no_tools(
     assert prov.stream_calls == 4
     assert prov.stream_tools[:3] == [["run_command"]] * 3
     assert prov.stream_tools[3] == []
+
+
+@pytest.mark.asyncio
+async def test_run_doom_loop_triggers_again_after_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After recovery, a second identical-failure streak must fire again.
+
+    Uses a whitespace-only recovery reply so the silent-model guard continues the
+    same user message (a normal text reply would end the turn after the first
+    recovery).
+    """
+    monkeypatch.setenv("DOOM_LOOP_THRESHOLD", "2")
+    fail = [_failing_call("c1"), Done()]
+    scripts = [
+        fail,
+        fail,
+        [TextDelta(text="   "), Done()],
+        fail,
+        fail,
+        [TextDelta(text="stopping for real."), Done()],
+    ]
+    prov = ToolsRecordingProvider(scripts)
+    events = []
+    async for e in run(
+        "u",
+        _ctx(),
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(ToolExecutionResult.err("boom")),
+        max_turns=20,
+    ):
+        events.append(e)
+
+    doom_errors = [
+        e
+        for e in events
+        if isinstance(e, Error) and e.error.startswith("Doom loop detected:")
+    ]
+    assert len(doom_errors) == 2
+    assert isinstance(events[-1], TurnComplete)
+    # fail, fail, recovery(no tools), fail, fail, recovery(no tools)
+    assert prov.stream_tools == [
+        ["run_command"],
+        ["run_command"],
+        [],
+        ["run_command"],
+        ["run_command"],
+        [],
+    ]
 
 
 @pytest.mark.asyncio

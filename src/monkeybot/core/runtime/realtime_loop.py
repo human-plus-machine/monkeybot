@@ -209,7 +209,6 @@ async def run_realtime_turn(
     transcript_writer: TranscriptWriter | None = None,
     tool_results_out: list[ContentBlock] | None = None,
     inject_texts_out: list[str] | None = None,
-    truncated: bool = False,
 ) -> AsyncIterator[AgentEvent]:
     """Process a finalized realtime user utterance + assistant response.
 
@@ -222,6 +221,9 @@ async def run_realtime_turn(
     The caller is responsible for injecting the collected tool results back into the
     live realtime session via ``RealtimeSession.send_tool_results()`` /
     ``send_context()`` when the session is idle.
+
+    Truncation (``Done.truncated``) is text-loop only — Gemini Live does not expose an
+    output length-limit signal. Realtime still rejects all-``parse_error`` batches.
     """
     usage = UsageTotals()
     # attachment_store is accepted for symmetry with loop.run and future resolve paths;
@@ -290,20 +292,20 @@ async def run_realtime_turn(
 
         # 4. Dispatch tools sequentially (v1: no parallel subagent dispatch here).
         pending_calls = [_realtime_tool_call_to_tool_call(rtc) for rtc in assistant_tool_calls]
-        reject_batch = _should_reject_tool_batch(pending_calls, truncated=truncated)
+        # Realtime has no vendor length-limit signal; reject only all-parse_error batches.
+        reject_batch = _should_reject_tool_batch(pending_calls, truncated=False)
         if reject_batch:
             logger.warning(
-                "rejecting truncated/incomplete realtime tool batch %s",
+                "rejecting incomplete realtime tool batch %s",
                 kv(
                     request_id=ctx.request_id,
                     thread_id=ctx.thread_id,
-                    truncated=truncated,
                     n_calls=len(pending_calls),
                 ),
             )
         for call in pending_calls:
             if reject_batch:
-                err = _rejected_tool_batch_error(call, truncated=truncated)
+                err = _rejected_tool_batch_error(call, truncated=False)
                 yield ToolCallStarted(
                     request_id=ctx.request_id,
                     tool=call.name,

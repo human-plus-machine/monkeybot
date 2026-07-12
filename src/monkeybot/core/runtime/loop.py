@@ -182,7 +182,13 @@ def _rejected_tool_batch_error(
 
 @dataclasses.dataclass
 class _DoomLoopTracker:
-    """Tracks consecutive identical failing tool calls within one user message."""
+    """Tracks consecutive identical failing tool calls within one user message.
+
+    After a recovery turn is consumed, the tracker re-arms so a later streak in
+    the same user message can trigger again. While ``triggered`` is set (between
+    detection and ``consume_recovery``), further ``record`` calls are ignored so
+    the same streak cannot re-fire mid-batch.
+    """
 
     threshold: int
     streak_fp: str | None = None
@@ -225,6 +231,13 @@ class _DoomLoopTracker:
         note = self.recovery_note
         self.force_no_tools = False
         self.recovery_note = None
+        if force:
+            # Re-arm so a second identical-failure streak later in this user
+            # message can trigger another recovery turn.
+            self.triggered = False
+            self.streak_fp = None
+            self.streak_count = 0
+            self.triggered_tool = None
         return force, note
 
 

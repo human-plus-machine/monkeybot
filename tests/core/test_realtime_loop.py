@@ -192,31 +192,40 @@ class TestRunRealtimeTurn:
         assert len(tool_results) == 1
         assert tool_results[0].is_error is True
 
-    async def test_truncated_batch_rejects_without_executing(self) -> None:
+    async def test_all_parse_error_batch_rejects_without_executing(self) -> None:
+        """Realtime rejects all-parse_error batches (no Done.truncated path)."""
         history = FakeHistory()
         executor = RecordingExecutor()
         ctx = _ctx()
         events = await _collect_events(
             run_realtime_turn(
-                "truncated",
+                "broken batch",
                 "",
                 [
                     RealtimeToolCall(
                         call_id="c1",
                         name="read_file",
-                        args={"path": "x.md"},
-                    )
+                        args={},
+                        parse_error="Failed to parse tool args: {",
+                    ),
+                    RealtimeToolCall(
+                        call_id="c2",
+                        name="write_file",
+                        args={},
+                        parse_error="Failed to parse tool args: [",
+                    ),
                 ],
                 ctx,
                 history=history,
                 tool_executor=executor,
-                truncated=True,
             )
         )
         assert executor.calls == []
-        result = next(e for e in events if isinstance(e, ToolCallResult))
-        assert result.error is not None
-        assert "output token limit" in result.error
+        results = [e for e in events if isinstance(e, ToolCallResult)]
+        assert len(results) == 2
+        assert all(r.error is not None for r in results)
+        assert results[0].error == "Failed to parse tool args: {"
+        assert results[1].error == "Failed to parse tool args: ["
 
     async def test_skips_empty_user_content(self) -> None:
         history = FakeHistory()
