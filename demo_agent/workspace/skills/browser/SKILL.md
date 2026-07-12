@@ -7,6 +7,10 @@ description: Control a real browser via CDP for web tasks; check and write site 
 
 Use the **browser** MCP tools (`browser__*` in the active tool list) for any web interaction: automation, scraping, testing, or site work. These come from the **`browser` MCP server** (stdio process), not from monkeybot core built-ins.
 
+## Before any browser tool
+
+If `browser__*` tools are not in the active tool list yet, call **`enable_mcp("browser")` first**. That connects the configured server from `mcp.json` and advertises browser tools on the next model step (same user turn). Do not invent `uv`/`command` args via `add_mcp_server` for this server.
+
 ## Default: indexed DOM (prefer this)
 
 Do **not** start with screenshots. Use the indexed element tree:
@@ -61,4 +65,4 @@ When you finish a task on a host without a playbook—or discover selectors, wai
 
 ## Setup (operators)
 
-Enable the `browser` MCP server in `monkeybot_config/mcp.json` (`enabled: true`). Full install, production deployment (local dev, self-hosted headless, Browser Use Cloud), env vars, and troubleshooting: **`docs/browser-mcp.md`** in the monkeybot repo (also linked from `docs/mcp.md`).
+Add the `browser` MCP server to `monkeybot_config/mcp.json`. Schemas are not advertised until the agent calls `enable_mcp("browser")`. Full install, production deployment (local dev, self-hosted headless, Browser Use Cloud), env vars, and troubleshooting: **`docs/browser-mcp.md`** in the monkeybot repo (also linked from `docs/mcp.md`).
