@@ -1144,6 +1144,13 @@ class CoreToolExecutor(ToolExecutorPort):
         sname = _str_arg(args, "name", "server_name", "server")
         if not sname:
             return (None, f"{tool_name} requires name (or server_name / server)")
+        known = list(self._mcp.known_server_names())
+        if sname not in known and not self._mcp.is_connected(sname):
+            known_msg = ", ".join(known) if known else "(none)"
+            return (
+                None,
+                f"Unknown MCP server {sname!r}. Known servers: {known_msg}",
+            )
         await self._mcp.disconnect(sname)
         logger.info("%s ok %s", tool_name, kv(server=sname, disconnected=True))
         return (

@@ -780,7 +780,7 @@ class MCPClient:
                     headers_out if headers_out else None,
                     auth=auth_handler,
                 )
-            except (MCPAuthError, MCPConnectionError, Exception) as exc:
+            except Exception as exc:
                 self._log_connect_failure(exc, server_name=server_name, config_path=config_path)
                 if raise_on_error:
                     raise
@@ -817,7 +817,7 @@ class MCPClient:
 
         try:
             defs = await self.connect(server_name, command, args_out, env_out)
-        except (MCPConnectionError, Exception) as exc:
+        except Exception as exc:
             self._log_connect_failure(exc, server_name=server_name, config_path=config_path)
             if raise_on_error:
                 raise
@@ -842,9 +842,11 @@ class MCPClient:
         ``client_credentials`` or ``password`` plus ``token_url`` and related fields.
 
         Every server under ``mcpServers`` is registered in the catalog for
-        :meth:`connect_from_catalog` / ``enable_mcp`` and is **not** connected at
-        startup (progressive disclosure — the model opts in per turn). Remove an
-        entry from the file to drop it from the catalog.
+        :meth:`connect_from_catalog` / ``enable_mcp`` unless ``"enabled": false``.
+        Catalogued servers are **not** connected at startup by default (progressive
+        disclosure — the model opts in via ``enable_mcp``). Set ``"autoConnect": true``
+        to restore eager startup connect for that server. Remove an entry from the
+        file to drop it from the catalog.
 
         Args:
             mcp_json_path: Path to ``mcp.json``.
@@ -911,9 +913,27 @@ class MCPClient:
                         remedy="Fix the server entry in mcp.json.",
                     )
                 continue
+            if spec.get("enabled") is False:
+                logger.info(
+                    "mcp server skipped (enabled: false) %s",
+                    kv(server=server_name),
+                )
+                continue
             self._catalog[server_name] = dict(spec)
             self._seen_servers.add(server_name)
-            logger.info(
-                "mcp catalog registered server=%s (connect via enable_mcp)",
-                server_name,
-            )
+            if spec.get("autoConnect") is True:
+                logger.info(
+                    "mcp autoConnect server=%s (connecting at startup)",
+                    server_name,
+                )
+                await self._connect_from_spec(
+                    server_name,
+                    spec,
+                    mcp_json_path=mcp_json_path,
+                    raise_on_error=raise_on_error,
+                )
+            else:
+                logger.info(
+                    "mcp catalog registered server=%s (connect via enable_mcp)",
+                    server_name,
+                )

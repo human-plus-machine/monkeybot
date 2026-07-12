@@ -132,6 +132,10 @@ def refresh_tools_after_mcp_change(
 
     Drops tools prefixed with any known MCP server name (catalog + ever-connected),
     then appends the current ``mcp_client.all_tools()`` snapshot.
+
+    Mutates ``ctx.tools`` in place (frozen dataclass allows mutating the list) so
+    callers that hold the same ``TurnContext`` — including the realtime gateway —
+    observe the update without needing a returned replacement object.
     """
     prefixes = set(mcp_client.known_server_names())
     kept = [
@@ -139,7 +143,8 @@ def refresh_tools_after_mcp_change(
         for t in ctx.tools
         if not any(t.name.startswith(f"{prefix}__") for prefix in prefixes)
     ]
-    return dataclasses.replace(ctx, tools=kept + list(mcp_client.all_tools()))
+    ctx.tools[:] = kept + list(mcp_client.all_tools())
+    return ctx
 
 
 def _core_tool_defs(

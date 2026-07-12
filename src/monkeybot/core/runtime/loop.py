@@ -1493,8 +1493,6 @@ async def _run_inner_core(
                         call_id=call.call_id,
                     )
                     allowed_exec.append(call)
-                    if call.name in MCP_REGISTRY_MUTATING_TOOLS:
-                        mcp_registry_mutated = True
 
                 if not allowed_exec:
                     all_tool_responses.extend(chunk_responses)
@@ -1597,6 +1595,11 @@ async def _run_inner_core(
                     for img_evt in _image_events(ctx.request_id, call.call_id, tool_result):
                         yield img_evt
                     chunk_responses.append(response)
+                    if (
+                        tool_result.error is None
+                        and call.name in MCP_REGISTRY_MUTATING_TOOLS
+                    ):
+                        mcp_registry_mutated = True
                 else:
                     if cancelled is not None and cancelled.is_set():
                         yield Error(request_id=ctx.request_id, error="Request cancelled")
@@ -1650,6 +1653,11 @@ async def _run_inner_core(
                         for img_evt in _image_events(ctx.request_id, call.call_id, tool_result):
                             yield img_evt
                         chunk_responses.append(response)
+                        if (
+                            tool_result.error is None
+                            and call.name in MCP_REGISTRY_MUTATING_TOOLS
+                        ):
+                            mcp_registry_mutated = True
 
                 all_tool_responses.extend(chunk_responses)
 

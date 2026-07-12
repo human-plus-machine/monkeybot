@@ -10,7 +10,10 @@ monkeybot fully supports the Model Context Protocol (MCP), enabling your agents 
 
 By default, monkeybot loads its MCP servers map from a JSON file specified under `paths.mcp_config` in `monkeybot.yaml` (typically `./monkeybot_config/mcp.json`).
 
-A template `mcp.json` looks like this. Every entry under `mcpServers` is catalogued at startup; the model calls `enable_mcp("name")` before those tools appear. Delete an entry to remove it from the catalog.
+A template `mcp.json` looks like this. Every entry under `mcpServers` is catalogued at
+startup (unless `"enabled": false`); the model calls `enable_mcp("name")` before those
+tools appear. Use `"autoConnect": true` when a server must connect at startup. Delete an
+entry to remove it from the catalog.
 
 ```json
 {
@@ -55,7 +58,28 @@ Demo agent: copy `demo_agent/monkeybot_config/mcp.json.example` → `mcp.json` (
 
 ### 0. Progressive MCP (always on-demand)
 
-Servers listed in `mcp.json` are **catalogued at startup but not connected**. Schemas stay out of the provider payload until the model calls `enable_mcp("name")`; tools then appear on the **next model step of the same turn**. Prefer that over inventing `add_mcp_server` command/args for servers already in config. To stop offering a server, remove its entry from the file. See [Progressive MCP tool disclosure](progressive-mcp-tools.md).
+Servers listed in `mcp.json` are **catalogued at startup but not connected** by default.
+Schemas stay out of the provider payload until the model calls `enable_mcp("name")`; tools
+then appear on the **next model step of the same turn** (text/SSE loop). Prefer that over
+inventing `add_mcp_server` command/args for servers already in config.
+
+**Config flags (per server):**
+
+| Flag | Effect |
+|------|--------|
+| *(default)* | Catalog only; model must `enable_mcp` |
+| `"enabled": false` | Skip entirely — not catalogued, not connectable by the model (trust gate) |
+| `"autoConnect": true` | Connect at startup and advertise tools immediately (escape hatch for skills that predate `enable_mcp`) |
+
+**Breaking change:** servers that used to auto-connect when listed (unless `enabled: false`)
+now stay catalog-only. Set `"autoConnect": true` to restore the old startup behavior, or
+update skills to call `enable_mcp("name")` first.
+
+**Realtime / voice:** `enable_mcp` / `disable_mcp` still mutate the harness MCP client and
+refresh `ctx.tools`, but live vendor sessions fix tool schemas at connect time. Newly
+enabled schemas apply after reconnecting the realtime session.
+
+See [Progressive MCP tool disclosure](progressive-mcp-tools.md).
 
 ### 1. Environment Variable Interpolation
 

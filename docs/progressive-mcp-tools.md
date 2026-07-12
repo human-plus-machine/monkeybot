@@ -131,14 +131,26 @@ Keep raw `add_mcp_server` for ad-hoc / user-supplied servers not in `mcp.json`.
 
 ---
 
-## Config: presence = available
+## Config: catalog by default
 
 Every server under `mcpServers` is:
 
-- **Known** to `enable_mcp` (catalogued from `mcp.json`)
-- **Not** connected or advertised until the model activates it
+- **Known** to `enable_mcp` (catalogued from `mcp.json`) unless `"enabled": false`
+- **Not** connected or advertised until the model activates it (or `"autoConnect": true`)
 
-There is no `enabled` / `lazy` flag — listing a server means you intend to use it; delete the entry to remove it.
+Flags:
+
+| Key | Meaning |
+|-----|---------|
+| *(omit)* | Catalog only — model calls `enable_mcp` |
+| `"enabled": false` | Not catalogued; model cannot connect (trust gate for inert/admin entries) |
+| `"autoConnect": true` | Connect at startup (compat for skills that never call `enable_mcp`) |
+
+**Breaking change vs pre-progressive-MCP:** listing a server no longer auto-connects at
+startup. Migrate by either teaching skills to call `enable_mcp("name")` or setting
+`"autoConnect": true` on servers that must stay hot.
+
+There is no separate `lazy` flag — progressive disclosure is the default.
 
 Demo browser entry:
 
@@ -219,6 +231,13 @@ Same machine, same model (e.g. Ollama `ornith:9b`):
 2. `"go to auriga-os.com…"` performs `enable_mcp("browser")` then browser tools in the **same** user turn.
 3. Transcript `ProviderRequest.tools`: ~core-sized on hello; browser tools appear only after activate.
 4. Model never needs to supply `command`/`args` for configured servers.
+
+### Known limitation — realtime / voice
+
+`realtime_loop` refreshes harness `ctx.tools` after successful MCP registry mutations and
+injects a reconnect note. Live vendor sessions (Gemini Live, etc.) fix tool schemas at
+`RealtimeSessionConfig` connect time and do not yet support mid-session tool updates.
+Newly enabled MCP tools become usable on the next realtime session reconnect.
 
 ---
 

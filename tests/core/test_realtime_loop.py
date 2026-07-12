@@ -208,3 +208,72 @@ class TestRunRealtimeTurn:
         )
         assert len(history.rows) == 1
         assert history.rows[0].role == "assistant"
+
+    async def test_refreshes_tools_after_successful_enable_mcp(self) -> None:
+        from monkeybot.core.runtime.realtime_loop import _REALTIME_MCP_RECONNECT_NOTE
+
+        class _Mcp:
+            def known_server_names(self) -> list[str]:
+                return ["browser"]
+
+            def all_tools(self) -> list[ToolDef]:
+                return [ToolDef("browser__goto", "Go", {})]
+
+        class _Exec(RecordingExecutor):
+            def __init__(self) -> None:
+                super().__init__(
+                    ToolExecutionResult.ok_text(
+                        '{"ok": true, "server": "browser", "tools": []}'
+                    )
+                )
+                self.mcp = _Mcp()
+
+        history = FakeHistory()
+        executor = _Exec()
+        ctx = _ctx()
+        inject_texts: list[str] = []
+        await _collect_events(
+            run_realtime_turn(
+                "browse",
+                "",
+                [RealtimeToolCall(call_id="c1", name="enable_mcp", args={"name": "browser"})],
+                ctx,
+                history=history,
+                tool_executor=executor,
+                inject_texts_out=inject_texts,
+            )
+        )
+        assert any(t.name == "browser__goto" for t in ctx.tools)
+        assert _REALTIME_MCP_RECONNECT_NOTE in inject_texts
+
+    async def test_failed_enable_mcp_does_not_refresh_tools(self) -> None:
+        class _Mcp:
+            def known_server_names(self) -> list[str]:
+                return ["browser"]
+
+            def all_tools(self) -> list[ToolDef]:
+                return [ToolDef("browser__goto", "Go", {})]
+
+        class _Exec(RecordingExecutor):
+            def __init__(self) -> None:
+                super().__init__(ToolExecutionResult.err("Unknown MCP server 'missing'"))
+                self.mcp = _Mcp()
+
+        history = FakeHistory()
+        executor = _Exec()
+        ctx = _ctx()
+        before = list(ctx.tools)
+        inject_texts: list[str] = []
+        await _collect_events(
+            run_realtime_turn(
+                "browse",
+                "",
+                [RealtimeToolCall(call_id="c1", name="enable_mcp", args={"name": "missing"})],
+                ctx,
+                history=history,
+                tool_executor=executor,
+                inject_texts_out=inject_texts,
+            )
+        )
+        assert [t.name for t in ctx.tools] == [t.name for t in before]
+        assert inject_texts == []

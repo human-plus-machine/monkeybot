@@ -1487,12 +1487,13 @@ class _CatalogMCP(_NoMCP):
     def __init__(self) -> None:
         self.connected: dict[str, list[ToolDef]] = {}
         self._catalog = {"browser": True}
+        self.disconnected: list[str] = []
 
     def catalog_names(self) -> list[str]:
         return sorted(self._catalog)
 
     def known_server_names(self) -> list[str]:
-        return ["browser"]
+        return sorted(set(self._catalog) | set(self.connected))
 
     def is_connected(self, name: str) -> bool:
         return name in self.connected
@@ -1505,6 +1506,10 @@ class _CatalogMCP(_NoMCP):
         defs = [ToolDef("browser__goto", "Go", {"type": "object"})]
         self.connected[name] = defs
         return defs
+
+    async def disconnect(self, name: str) -> None:
+        self.disconnected.append(name)
+        self.connected.pop(name, None)
 
     def all_tools(self) -> list[ToolDef]:
         out: list[ToolDef] = []
@@ -1551,3 +1556,65 @@ async def test_enable_mcp_unknown_server_errors(tmp_path: Path) -> None:
     )
     assert result.error is not None
     assert "Unknown MCP server" in result.error
+
+
+@pytest.mark.asyncio
+async def test_disable_mcp_disconnects_known_server(tmp_path: Path) -> None:
+    mcp = _CatalogMCP()
+    await mcp.connect_from_catalog("browser")
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=mcp,
+    )
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    result = await ex.execute(
+        call=ToolCall(name="disable_mcp", args={"name": "browser"}, call_id="1"),
+        ctx=_ctx(),
+    )
+    assert result.error is None
+    body = json.loads(result.blocks[0].text)  # type: ignore[index]
+    assert body["ok"] is True
+    assert body["disconnected"] is True
+    assert mcp.disconnected == ["browser"]
+    assert not mcp.is_connected("browser")
+
+
+@pytest.mark.asyncio
+async def test_disable_mcp_unknown_server_errors(tmp_path: Path) -> None:
+    mcp = _CatalogMCP()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=mcp,
+    )
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    result = await ex.execute(
+        call=ToolCall(name="disable_mcp", args={"name": "typo-browser"}, call_id="1"),
+        ctx=_ctx(),
+    )
+    assert result.error is not None
+    assert "Unknown MCP server" in result.error
+    assert "typo-browser" in result.error
+    assert mcp.disconnected == []
+
+
+@pytest.mark.asyncio
+async def test_remove_mcp_server_unknown_server_errors(tmp_path: Path) -> None:
+    mcp = _CatalogMCP()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=mcp,
+    )
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    result = await ex.execute(
+        call=ToolCall(name="remove_mcp_server", args={"name": "nope"}, call_id="1"),
+        ctx=_ctx(),
+    )
+    assert result.error is not None
+    assert "Unknown MCP server" in result.error
+    assert mcp.disconnected == []

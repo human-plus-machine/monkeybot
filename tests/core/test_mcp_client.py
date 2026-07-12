@@ -704,6 +704,72 @@ async def test_load_from_config_always_catalog_only_until_enable(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_load_from_config_skips_enabled_false(tmp_path: Path) -> None:
+    """``enabled: false`` keeps a server out of the catalog (not model-connectable)."""
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "browser": {"command": "python", "args": ["b.py"], "env": {}},
+                    "admin": {
+                        "command": "python",
+                        "args": ["a.py"],
+                        "env": {},
+                        "enabled": False,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    client = MCPClient(hooks=_CrashHooks())
+    await client.load_from_config(cfg)
+    assert client.catalog_names() == ["browser"]
+    assert "admin" not in client.known_server_names()
+    with pytest.raises(mc.MCPDiagnosticError, match="Unknown MCP server"):
+        await client.connect_from_catalog("admin")
+
+
+@pytest.mark.asyncio
+async def test_load_from_config_autoconnect_connects_at_startup(tmp_path: Path) -> None:
+    """``autoConnect: true`` restores eager startup connect for that server."""
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "eager": {
+                        "command": "python",
+                        "args": ["e.py"],
+                        "env": {},
+                        "autoConnect": True,
+                    },
+                    "lazy": {"command": "python", "args": ["l.py"], "env": {}},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    sess = SimpleNamespace()
+    sess.initialize = AsyncMock()
+    sess.list_tools = AsyncMock(
+        return_value=SimpleNamespace(
+            tools=[SimpleNamespace(name="ping", description="Ping", inputSchema={})]
+        )
+    )
+
+    client = MCPClient(hooks=_stub_hooks(sess))
+    await client.load_from_config(cfg)
+    assert client.catalog_names() == ["eager", "lazy"]
+    assert "eager" in client._servers
+    assert "lazy" not in client._servers
+    assert any(t.name == "eager__ping" for t in client.all_tools())
+
+
+@pytest.mark.asyncio
 async def test_connect_from_catalog_unknown_raises(tmp_path: Path) -> None:
     client = MCPClient(hooks=_CrashHooks())
     with pytest.raises(mc.MCPDiagnosticError, match="Unknown MCP server"):
