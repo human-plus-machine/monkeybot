@@ -12,6 +12,7 @@ from monkeybot.core.llm.provider import (
     Message,
     ProviderEvent,
     TextDelta,
+    ThinkingDelta,
     ToolCall,
     UsageEvent,
 )
@@ -126,6 +127,14 @@ async def iter_anthropic_sdk_stream(
                     case "content_block_delta":
                         if event.delta.type == "text_delta":
                             yield TextDelta(text=event.delta.text)
+                        elif event.delta.type == "thinking_delta":
+                            thought = getattr(event.delta, "thinking", None) or ""
+                            if thought:
+                                yield ThinkingDelta(text=thought)
+                        elif event.delta.type == "signature_delta":
+                            sig = getattr(event.delta, "signature", None) or ""
+                            if sig:
+                                yield ThinkingDelta(text="", signature=sig)
                         elif event.delta.type == "input_json_delta":
                             tool_input_buf += event.delta.partial_json
                     case "content_block_stop":

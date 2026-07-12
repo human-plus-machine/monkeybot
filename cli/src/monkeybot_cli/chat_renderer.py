@@ -36,6 +36,8 @@ EVENT_KINDS: frozenset[str] = frozenset(
         "stream_failed",
         "stream_ended",
         "thinking_trace",
+        "thinking_block_delta",
+        "thinking_block_complete",
         "voice_state",
         "audio_chunk",
         "device_error",

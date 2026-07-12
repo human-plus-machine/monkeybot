@@ -105,6 +105,57 @@ class ThinkingLine(Static):
             self.update(Text(f"{self._label}  {elapsed}s", style="dim italic"))
 
 
+class ThinkingTrace(Vertical):
+    """OpenCode-style thinking block: ``Thinking...`` / body / ``...done thinking.``"""
+
+    DEFAULT_CSS = """
+    ThinkingTrace {
+        width: 1fr;
+        height: auto;
+        margin-top: 1;
+        padding: 0 1;
+    }
+    ThinkingTrace > .header {
+        height: 1;
+        color: $muted;
+        text-style: bold dim;
+    }
+    ThinkingTrace > .body {
+        height: auto;
+        color: $muted;
+        text-style: dim;
+    }
+    ThinkingTrace > .footer {
+        height: 1;
+        color: $muted;
+        text-style: bold dim;
+        display: none;
+    }
+    ThinkingTrace.-done > .footer {
+        display: block;
+    }
+    """
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self._raw = ""
+
+    def compose(self) -> ComposeResult:
+        yield Static("Thinking...", classes="header")
+        yield Static("", classes="body")
+        yield Static("...done thinking.", classes="footer")
+
+    def append_delta(self, chunk: str) -> None:
+        if not chunk:
+            return
+        self._raw += chunk
+        with contextlib.suppress(NoMatches):
+            self.query_one(".body", Static).update(Text(self._raw, style="dim"))
+
+    def finish(self) -> None:
+        self.add_class("-done")
+
+
 class SystemLine(Static):
     """Dim full-width system / error line."""
 

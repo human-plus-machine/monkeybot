@@ -49,6 +49,7 @@ from monkeybot_cli.runtime_python import DEFAULT_PORT, gateway_argv, resolve_run
 from monkeybot_cli.terminal_markdown import MarkdownPlainStream
 
 _DIM = "\x1b[2m"
+_BOLD = "\x1b[1m"
 _GREEN = "\x1b[32m"
 _RED = "\x1b[31m"
 _RESET = "\x1b[0m"
@@ -314,6 +315,7 @@ class _PlainRenderer:
         self.hitl_prompt: str | None = None
         self._pending_hitl: asyncio.Future[HitlAnswer] | None = None
         self._last_usage: SessionUsageView | None = None
+        self._thinking_open = False
         self._io_queue: asyncio.Queue[Coroutine[Any, Any, None] | None] = asyncio.Queue()
         self._io_worker: asyncio.Task[None] | None = None
 
@@ -344,6 +346,7 @@ class _PlainRenderer:
 
     def _on_turn_started(self, _p: dict, _controller: Any) -> None:
         self.assistant_open = False
+        self._thinking_open = False
         self.md = MarkdownPlainStream()
         print()
         self.spinner = _SpinnerLine("thinking…")
@@ -358,6 +361,8 @@ class _PlainRenderer:
         self._schedule(self.activity.cancel())
 
     def _on_assistant_start(self, _p: dict, _controller: Any) -> None:
+        if self._thinking_open:
+            self._on_thinking_block_complete({}, _controller)
         print(_ASSISTANT_PREFIX, end="", flush=True)
         self.assistant_open = True
 
@@ -481,6 +486,22 @@ class _PlainRenderer:
 
     def _on_thinking_trace(self, p: dict, _controller: Any) -> None:
         print(f"{_DIM}[thinking] {p.get('text')}{_RESET}", flush=True)
+
+    def _on_thinking_block_delta(self, p: dict, _controller: Any) -> None:
+        text = str(p.get("text") or "")
+        if not text:
+            return
+        if not self._thinking_open:
+            self.spinner.stop()
+            print(f"{_DIM}{_BOLD}Thinking...{_RESET}", flush=True)
+            self._thinking_open = True
+        print(f"{_DIM}{text}{_RESET}", end="", flush=True)
+
+    def _on_thinking_block_complete(self, _p: dict, _controller: Any) -> None:
+        if self._thinking_open:
+            print(flush=True)
+            print(f"{_DIM}{_BOLD}...done thinking.{_RESET}", flush=True)
+            self._thinking_open = False
 
     def _on_usage_updated(self, p: dict, _controller: Any) -> None:
         usage = p.get("usage")

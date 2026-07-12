@@ -16,6 +16,7 @@ from monkeybot_cli.chat_tui import (
     Composer,
     HitlCard,
     SystemLine,
+    ThinkingTrace,
     ToolCallBlock,
     UserTurn,
     _COMPOSER_PLACEHOLDER,
@@ -988,6 +989,43 @@ def test_realtime_barge_in_skips_queue(monkeypatch) -> None:
     assert aborted["n"] == 1
     assert sent == ["barge in now"]
     assert app._pending == []
+
+
+def test_thinking_trace_streams_and_finishes(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="fake-model",
+            spawned_gateway=False,
+            animations_enabled=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            app._ev_thinking_block_delta({"text": "The user said hello"})
+            await pilot.pause()
+            assert app._thinking_trace is not None
+            assert "The user said hello" in app._thinking_trace._raw
+            header = app._thinking_trace.query_one(".header")
+            assert "Thinking" in str(header.render())
+            assert not app._thinking_trace.has_class("-done")
+
+            app._ev_thinking_block_delta({"text": " — reply briefly."})
+            await pilot.pause()
+            assert "reply briefly" in app._thinking_trace._raw
+
+            app._ev_thinking_block_complete({})
+            await pilot.pause()
+            # Finished block stays in the transcript; app clears the active pointer.
+            assert app._thinking_trace is None
+            traces = list(app.query(ThinkingTrace))
+            assert len(traces) == 1
+            assert traces[0].has_class("-done")
+            assert "The user said hello — reply briefly." in traces[0]._raw
+
+    asyncio.run(_run())
 
 
 def test_jump_to_bottom_reenables_auto_scroll(tmp_path: Path) -> None:

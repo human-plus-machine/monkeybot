@@ -22,6 +22,8 @@ from monkeybot.core.runtime.events import (
     Error,
     FrontendToolRequestEvent,
     GroundingEvent,
+    ThinkingBlockComplete,
+    ThinkingBlockDelta,
     ToolCallResult,
     ToolCallStarted,
     ToolConfirmationRequestEvent,
@@ -624,6 +626,12 @@ class ChatSessionController:
         if isinstance(evt, AssistantDelta):
             self._on_assistant_delta(evt, state)
             return
+        if isinstance(evt, ThinkingBlockDelta):
+            self._on_thinking_block_delta(evt)
+            return
+        if isinstance(evt, ThinkingBlockComplete):
+            self._emit("thinking_block_complete")
+            return
         if isinstance(evt, Error):
             self._emit("thinking_clear")
             self._emit("turn_error", error=evt.error)
@@ -650,6 +658,16 @@ class ChatSessionController:
             self._emit("assistant_start")
             state.assistant_started = True
         self._emit("assistant_delta", delta=evt.delta)
+
+    def _on_thinking_block_delta(self, evt: ThinkingBlockDelta) -> None:
+        text = evt.text or ""
+        if not text:
+            return
+        # Clear the transient spinner once real thinking text arrives.
+        self._emit("thinking_clear")
+        self._emit("thinking_block_delta", text=text)
+        if self.show_thinking:
+            self._emit("thinking_trace", text=text)
 
     def _maybe_thinking_trace(self, evt: Any, request_id: str) -> None:
         if not self.show_thinking:

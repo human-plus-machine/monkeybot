@@ -36,6 +36,7 @@ from monkeybot_cli.chat_tui_widgets import (
     HitlCard,
     SystemLine,
     ThinkingLine,
+    ThinkingTrace,
     ToolCallBlock,
     TranscriptPane,
     UserTurn,
@@ -293,6 +294,7 @@ class ChatApp(App[int]):
         self._exit_code = 0
         self._assistant: AssistantTurn | None = None
         self._thinking: ThinkingLine | None = None
+        self._thinking_trace: ThinkingTrace | None = None
         self._hitl_card: HitlCard | None = None
         self._hitl_status_flash: str | None = None
         self._ring_text = "[dim]○ 0%[/]"
@@ -468,7 +470,15 @@ class ChatApp(App[int]):
     def _is_counted_turn(self, widget: object) -> bool:
         return isinstance(
             widget,
-            (UserTurn, AssistantTurn, ToolCallBlock, SystemLine, HitlCard, GroundingBlock),
+            (
+                UserTurn,
+                AssistantTurn,
+                ToolCallBlock,
+                SystemLine,
+                HitlCard,
+                GroundingBlock,
+                ThinkingTrace,
+            ),
         )
 
     def _turn_digest(self, widget: object) -> str:
@@ -478,6 +488,9 @@ class ChatApp(App[int]):
         if isinstance(widget, AssistantTurn):
             preview = widget._raw.strip().replace("\n", " ")[:60]
             return f"assistant: {preview}"
+        if isinstance(widget, ThinkingTrace):
+            preview = widget._raw.strip().replace("\n", " ")[:60]
+            return f"thinking: {preview}"
         if isinstance(widget, ToolCallBlock):
             return f"tool: {widget.display_label}"
         if isinstance(widget, SystemLine):
@@ -498,7 +511,7 @@ class ChatApp(App[int]):
                 if isinstance(child, EarlierTurns):
                     earlier = child
                     continue
-                if child is self._assistant or child is self._thinking or child is self._hitl_card:
+                if child is self._assistant or child is self._thinking or child is self._thinking_trace or child is self._hitl_card:
                     continue
                 if isinstance(child, ToolCallBlock) and (
                     child in self._open_tools.values() or child in self._anon_tools
@@ -543,6 +556,12 @@ class ChatApp(App[int]):
         if self._thinking is not None and self._thinking.is_attached:
             self._thinking.remove()
         self._thinking = None
+
+    def _finish_thinking_trace(self) -> None:
+        if self._thinking_trace is not None and self._thinking_trace.is_attached:
+            if not self._thinking_trace.has_class("-done"):
+                self._thinking_trace.finish()
+        self._thinking_trace = None
 
     def _mount_user(self, body: str) -> None:
         self._mount(UserTurn(body, show_timestamp=self.show_timestamps))
@@ -820,12 +839,14 @@ class ChatApp(App[int]):
 
     def _ev_turn_error(self, p: dict) -> None:
         self._close_assistant()
+        self._finish_thinking_trace()
         self._clear_thinking()
         self._mount_system(f"Error: {p.get('error')}", error=True)
         self._finish_turn_ui()
 
     def _ev_turn_complete(self, p: dict) -> None:
         self._close_assistant()
+        self._finish_thinking_trace()
         self._clear_thinking()
         usage = p.get("usage")
         if isinstance(usage, dict) and self.show_usage:
@@ -834,6 +855,7 @@ class ChatApp(App[int]):
 
     def _ev_turn_aborted(self, p: dict) -> None:
         self._close_assistant()
+        self._finish_thinking_trace()
         self._clear_thinking()
         cancel_ok = p.get("cancel_ok")
         if cancel_ok is True:
@@ -909,8 +931,24 @@ class ChatApp(App[int]):
         self._exit_code = 1 if self._controller.stream_error else self._exit_code
 
     def _ev_thinking_trace(self, p: dict) -> None:
+        # Legacy --show-thinking path; prefer thinking_block_* when present.
         self._show_thinking(f"thinking  {p.get('text')}")
 
+    def _ev_thinking_block_delta(self, p: dict) -> None:
+        text = str(p.get("text") or "")
+        if not text:
+            return
+        self._clear_thinking()
+        if self._thinking_trace is None or not self._thinking_trace.is_attached:
+            block = ThinkingTrace()
+            self._thinking_trace = block
+            self._mount(block)
+        self._thinking_trace.append_delta(text)
+        self._follow_scroll()
+
+    def _ev_thinking_block_complete(self, _p: dict) -> None:
+        self._finish_thinking_trace()
+        self._follow_scroll()
 
     def _ev_voice_state(self, p: dict) -> None:
         state = str(p.get("state") or "")
@@ -1130,6 +1168,7 @@ class ChatApp(App[int]):
             child.remove()
         self._assistant = None
         self._thinking = None
+        self._thinking_trace = None
         self._hitl_card = None
         self._clear_open_tools()
         self._last_assistant_text = ""
@@ -1195,6 +1234,8 @@ class ChatApp(App[int]):
                 lines.extend(["## You", "", child.body, ""])
             elif isinstance(child, AssistantTurn):
                 lines.extend(["## Assistant", "", child._raw, ""])
+            elif isinstance(child, ThinkingTrace):
+                lines.extend(["## Thinking", "", child._raw, ""])
             elif isinstance(child, SystemLine):
                 lines.extend([f"*{child.body}*", ""])
             elif isinstance(child, GroundingBlock):
@@ -1334,6 +1375,8 @@ _TUI_EVENT_HANDLERS = {
     "stream_failed": ChatApp._ev_stream_failed,
     "stream_ended": ChatApp._ev_stream_ended,
     "thinking_trace": ChatApp._ev_thinking_trace,
+    "thinking_block_delta": ChatApp._ev_thinking_block_delta,
+    "thinking_block_complete": ChatApp._ev_thinking_block_complete,
     "voice_state": ChatApp._ev_voice_state,
     "audio_chunk": ChatApp._ev_audio_chunk,
     "device_error": ChatApp._ev_device_error,

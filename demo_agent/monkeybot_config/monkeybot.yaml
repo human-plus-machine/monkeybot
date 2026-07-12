@@ -30,10 +30,10 @@ harness:
 model:
   # Main turn-based model: used for context curation, memory, and tool execution.
   # Use a non-Live model that supports generateContent.
-  provider: nvidia
-  name: deepseek-ai/deepseek-v4-pro
-  context_window: 200000
-  thinking_budget: 0
+  provider: ollama
+  name: ornith:9b
+  context_window: 256000
+  thinking_budget: -1
   # summarization_model: gemini-2.5-flash  # optional; env CONTEXT_SUMMARIZATION_MODEL overrides
 
 realtime:
@@ -68,7 +68,7 @@ context_curation:
   memory_window_lines: 12
   memory_index_cap: 200
   memory_token_threshold: 2000
-  curator_model: z-ai/glm-5.2
+  curator_model: ornith:9b
   timeout_sec: 10
 
 memory_hook:
