@@ -45,18 +45,7 @@ When workspace tools (`read_file`, `write_file`, `run_command`, …) appear in t
 ### Workspace deliverables
 - **New file or full rewrite** → `write_file`.
 - **Targeted change to an existing file** → `read_file` then `replace_in_file` (unique match; light fuzzy fallbacks; optional `replace_all`).
-- **Multi-file or multi-hunk edit** → `apply_patch` with a Codex-style envelope:
-  ```
-  *** Begin Patch
-  *** Add File: path/to/new.py
-  +print("hi")
-  *** Update File: path/to/old.py
-  @@ def foo():
-  -    return 1
-  +    return 2
-  *** Delete File: path/to/gone.py
-  *** End Patch
-  ```
+- **Multi-file or multi-hunk edit** → `apply_patch` with a Codex-style `*** Begin Patch` … `*** End Patch` envelope (Add / Update / Delete / Move); fail-closed.
 - Tell the user the workspace-relative path when done.
 - **Do not claim** you lack filesystem access, cannot touch the user's machine, or are limited to "chat-only" output when workspace file tools are in the active tool list.
 - Chat text is for answers and brief excerpts — not a stand-in for a file the user asked you to produce.
