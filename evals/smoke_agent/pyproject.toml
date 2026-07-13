@@ -1,0 +1,13 @@
+[project]
+name = "monkeybot-evals-smoke-agent"
+version = "0.1.0"
+description = "Minimal agent fixture for live eval smoke runs. Not a general-purpose demo."
+requires-python = ">=3.11"
+dependencies = [
+    "monkeybot[nvidia,web-search]",
+    "monkeybot-cli",
+]
+
+[tool.uv.sources]
+monkeybot = { path = "../..", editable = true }
+monkeybot-cli = { path = "../../cli", editable = true }

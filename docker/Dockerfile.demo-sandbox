@@ -1,8 +1,0 @@
-# OpenSandbox worker image for demo agent skills (image-generator, etc.).
-# Built automatically by demo_agent/run.sh when missing.
-#
-#   docker build -f docker/Dockerfile.demo-sandbox -t monkeybot-demo-sandbox:local .
-FROM python:3.12-slim
-
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir "google-genai>=1.0.0"

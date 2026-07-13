@@ -1,6 +1,8 @@
 # Pattern D — Realtime WebSocket Deployment
 
-Run MonkeyBot in realtime (full-duplex audio/text) mode alongside the existing SSE gateway. This pattern uses the new WebSocket harness at `WS /sessions/{session_id}/realtime` while preserving the existing HTTP `/reply` + SSE path for turn-based clients.
+Run MonkeyBot in realtime (full-duplex audio/text) mode alongside the existing SSE gateway. This pattern uses the WebSocket harness at `WS /sessions/{session_id}/realtime` while preserving the existing HTTP `/reply` + SSE path for turn-based clients.
+
+Realtime is a **parallel control path** to turn-based `loop.run()` (duplex transport, audio, micro-turn session lifecycle). Use this guide for deploy/config; see [Features](features.md) for harness ownership boundaries and [SSE gateway](sse-gateway-ui.md) for the turn-based HTTP API.
 
 **Use this pattern when:**
 

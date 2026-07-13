@@ -1,0 +1,52 @@
+# Live-eval smoke agent defaults (cwd: evals/smoke_agent/).
+# CI overrides MODEL_* / PORT via environment variables.
+
+runtime:
+  log_level: INFO
+  port: 8080
+  transcript_enabled: true
+
+paths:
+  agent_md: ./monkeybot_config/AGENT.md
+  memory_storage_uri: local://./workspace/data/memory
+  skills_path: ./workspace/skills
+  workspace_root: ./workspace
+  db_url: sqlite:///./workspace/data/monkeybot.db
+  command_allowlist_config: ./monkeybot_config/command_allowlist.yaml
+
+harness:
+  mode: turn_based
+
+model:
+  provider: nvidia
+  name: meta/llama-3.3-70b-instruct
+  context_window: 128000
+  thinking_budget: -1
+
+gateway:
+  pending_response_timeout_sec: 300
+  sse_replay_max: 256
+  graceful_shutdown_timeout_sec: 5
+
+context_curation:
+  enabled: true
+  memory_window_lines: 12
+  memory_index_cap: 200
+  memory_token_threshold: 2000
+  curator_model: meta/llama-3.3-70b-instruct
+  timeout_sec: 10
+
+memory_hook:
+  enabled: true
+
+subagent:
+  timeout_sec: 600
+  max_turns: 25
+  agent_md: ./monkeybot_config/AGENT.md
+
+web_search:
+  backend: duckduckgo
+  max_results: 5
+
+sandbox:
+  enabled: false

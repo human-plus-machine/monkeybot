@@ -1,5 +1,5 @@
 # Explicit smoke suite membership — not implicitly "every scenario in the tree". Add a scenario
-# here only once it's stable enough to gate merges. See docs/eval-pr-scorecard.md.
+# here only once it's stable enough to gate merges. See docs/live-evals.md.
 id: smoke
 scenarios:
   - tools/core_read

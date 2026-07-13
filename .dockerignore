@@ -7,9 +7,6 @@
 **/.pytest_cache
 **/.mypy_cache
 **/.ruff_cache
-demo_agent/.emonk
-demo_agent/workspace/data/*.db
-demo_agent/workspace/data/*.db-*
 **/.env
 **/*.db-shm
 **/*.db-wal

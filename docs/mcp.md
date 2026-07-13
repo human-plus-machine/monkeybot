@@ -50,7 +50,7 @@ entry to remove it from the catalog.
 }
 ```
 
-Demo agent: `./run.sh` copies `monkeybot_config_example/mcp.example.json` → `demo_agent/monkeybot_config/mcp.json` if missing (live config is gitignored). Scaffolded agents get stdio / HTTP / OAuth / browser examples from the packaged `monkeybot_config/mcp.json` — keep only the servers you want and fix placeholder paths.
+Scaffolded agents get stdio / HTTP / OAuth / browser examples from the packaged `monkeybot_config/mcp.json` — keep only the servers you want and fix placeholder paths.
 
 ---
 

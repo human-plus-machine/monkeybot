@@ -489,11 +489,20 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **How it works:**
 - `MONKEYBOT_TASK_QUEUE=1` enqueues via `record_pending`; workers run `python -m monkeybot.subagents.worker`.
-- Requires `DB_URL`.
-- Stale claim window: `MONKEYBOT_WORKER_STALE_CLAIM_MS` (default 10 min).
+- Requires `DB_URL` / storage — queue mode without storage raises at enqueue time.
+- Production: standalone `python -m monkeybot.subagents.worker`. Development only: `MONKEYBOT_WORKER_POOL=1` on the gateway (same event loop as SSE — do not use in production). See [Cloud deployment](cloud-deployment-design.md) for multi-process notes.
+
+**Worker tuning:**
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `MONKEYBOT_WORKER_STALE_CLAIM_MS` | `600000` (10 min) | Reclaim `running` rows with no heartbeat after this window; another worker may re-execute the run |
+| `MONKEYBOT_WORKER_POLL_INTERVAL_S` | `2` | Poll interval for `pending_runs()` |
+| `MONKEYBOT_WORKER_CONCURRENCY` | `1` | Max concurrent claimed runs per worker |
+| `MONKEYBOT_WORKER_ID` | auto | Worker identity for claim attribution |
 
 **Invariants:**
-- No claim heartbeat yet — long runs risk duplicate execution.
+- No claim heartbeat yet — subagent runs longer than `MONKEYBOT_WORKER_STALE_CLAIM_MS` risk duplicate execution. Increase the limit for long LLM workloads or keep runs under the window.
 - Queue mode without storage raises at enqueue time.
 
 ---
@@ -537,7 +546,13 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 | `monkeybot chat` | Spawn SSE gateway + REPL |
 | `monkeybot talk` | Realtime WebSocket client (audio/text) |
 
-**Interpreter resolution:** agent `.venv` → `uv run` → CLI interpreter (legacy).
+**Agent-first dependencies:** The CLI is thin — provider/storage extras (`bedrock`, `postgres`, …) are declared on the **agent** `pyproject.toml`, not the global CLI. `monkeybot run` / `chat` / `talk` / `doctor` resolve the interpreter as:
+
+1. `<agent>/.venv/bin/python` when a project venv exists
+2. `uv run python -m monkeybot.gateway.main` when `<agent>/pyproject.toml` exists but no `.venv`
+3. `sys.executable` (CLI interpreter) — legacy fallback for config-only trees
+
+`monkeybot doctor` remediation points at adding `monkeybot[<extra>]` to the agent project, then `uv sync`.
 
 ---
 
