@@ -547,7 +547,7 @@ def test_trim_earlier_turns(tmp_path: Path) -> None:
     asyncio.run(_run())
 
 
-def test_empty_hint_shows_context(tmp_path: Path) -> None:
+def test_empty_hint_shows_welcome(tmp_path: Path) -> None:
     async def _run() -> None:
         from monkeybot_cli.chat_tui import EmptyHint
 
@@ -562,8 +562,8 @@ def test_empty_hint_shows_context(tmp_path: Path) -> None:
         async with app.run_test() as pilot:
             hints = list(app.query(EmptyHint))
             assert len(hints) == 1
-            assert hints[0].provider == "fake"
             await pilot.pause()
+            assert "Welcome to monkeybot" in str(hints[0].render())
 
     asyncio.run(_run())
 
@@ -1047,12 +1047,90 @@ def test_thinking_trace_streams_and_finishes(tmp_path: Path) -> None:
 
             app._ev_thinking_block_complete({})
             await pilot.pause()
-            # Finished block stays in the transcript; app clears the active pointer.
-            assert app._thinking_trace is None
+            # Finished block stays mounted; pointer kept for late re-entry.
+            assert app._thinking_trace is not None
+            assert app._thinking_trace.has_class("-done")
             traces = list(app.query(ThinkingTrace))
             assert len(traces) == 1
             assert traces[0].has_class("-done")
             assert "The user said hello — reply briefly." in traces[0]._raw
+
+            app._ev_turn_complete({})
+            await pilot.pause()
+            assert app._thinking_trace is None
+
+    asyncio.run(_run())
+
+
+def test_late_thinking_delta_reopens_same_block(tmp_path: Path) -> None:
+    """Thinking that re-enters after assistant text must not mount below the reply."""
+
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="fake-model",
+            spawned_gateway=False,
+            animations_enabled=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            app._ev_thinking_block_delta({"text": "ask what they'd like me to"})
+            app._ev_thinking_block_complete({})
+            await pilot.pause()
+            assert app._thinking_trace is not None
+            assert app._thinking_trace.has_class("-done")
+
+            app._ev_assistant_start({})
+            app._ev_assistant_delta({"delta": "Yes, I can write code."})
+            await pilot.pause()
+            assert app._assistant is not None
+
+            # Late fragment that belongs to the earlier thought.
+            app._ev_thinking_block_delta({"text": " build."})
+            app._ev_thinking_block_complete({})
+            await pilot.pause()
+
+            traces = list(app.query(ThinkingTrace))
+            assert len(traces) == 1
+            assert "ask what they'd like me to build." in traces[0]._raw
+            assert traces[0].has_class("-done")
+
+            # Thinking block must still sit above the assistant turn.
+            children = list(app._transcript().children)
+            assert children.index(traces[0]) < children.index(app._assistant)
+
+    asyncio.run(_run())
+
+
+def test_scrollbar_thumb_tracks_scroll_position(tmp_path: Path) -> None:
+    """TranscriptPane must update the scrollbar thumb when scroll_y changes."""
+
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="fake-model",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            for i in range(40):
+                app._mount(SystemLine(f"line {i} " + ("x" * 40)))
+            await pilot.pause()
+            transcript = app._transcript()
+            assert transcript.is_vertical_scroll_end
+            assert transcript.vertical_scrollbar.position == transcript.scroll_y
+
+            transcript.scroll_relative(y=-20, animate=False, immediate=True)
+            await pilot.pause()
+            assert not transcript.is_vertical_scroll_end
+            assert app._auto_scroll is False
+            assert transcript.vertical_scrollbar.position == transcript.scroll_y
 
     asyncio.run(_run())
 
@@ -1075,6 +1153,7 @@ def test_jump_to_bottom_reenables_auto_scroll(tmp_path: Path) -> None:
             transcript = app._transcript()
             assert transcript.max_scroll_y > 0
             assert app._auto_scroll is True
+            assert transcript.is_vertical_scroll_end
 
             transcript.scroll_home(animate=False)
             await pilot.pause()
@@ -1095,5 +1174,70 @@ def test_jump_to_bottom_reenables_auto_scroll(tmp_path: Path) -> None:
             app._scroll_to_latest()
             await pilot.pause()
             assert transcript.is_vertical_scroll_end
+
+    asyncio.run(_run())
+
+
+def test_batch_mount_sticks_to_bottom(tmp_path: Path) -> None:
+    """Rapid mounts must land at the true bottom after a single refresh."""
+
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="fake-model",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            for i in range(40):
+                app._mount(SystemLine(f"line {i} " + ("x" * 40)))
+            await pilot.pause()
+            transcript = app._transcript()
+            assert transcript.max_scroll_y > 0
+            assert app._auto_scroll is True
+            assert transcript.is_vertical_scroll_end
+            assert transcript.scroll_y == transcript.max_scroll_y
+
+    asyncio.run(_run())
+
+
+def test_follow_scroll_does_not_yank_after_scroll_up(tmp_path: Path) -> None:
+    """Deferred follow must not jump back down after the user scrolls up."""
+
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="fake-model",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.pause()
+            for i in range(40):
+                app._mount(SystemLine(f"line {i} " + ("x" * 40)))
+            await pilot.pause()
+            transcript = app._transcript()
+            assert transcript.is_vertical_scroll_end
+
+            # Schedule follow while still at bottom (auto=True), then scroll up
+            # before the refresh callback runs — the old scroll_end path yanked.
+            app._follow_scroll()
+            transcript.scroll_relative(y=-20, animate=False, immediate=True)
+            await pilot.pause()
+            y_after_user = float(transcript.scroll_y)
+            assert app._auto_scroll is False
+            assert not transcript.is_vertical_scroll_end
+
+            app._mount(SystemLine("new content while reading history"))
+            app._follow_scroll()
+            await pilot.pause()
+            await pilot.pause()
+            assert app._auto_scroll is False
+            assert float(transcript.scroll_y) <= y_after_user + 0.5
 
     asyncio.run(_run())
