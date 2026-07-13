@@ -6,6 +6,10 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Scaffold layout: skills live under `workspace/skills/` (real directory, no symlink to a project-root `skills/`); local memory defaults to project-root `memory/` (`local://./memory`). `list_skills` returns a workspace-relative path instead of a host absolute path.
+
 ## [0.2.1] - 2026-07-13
 
 ### Added

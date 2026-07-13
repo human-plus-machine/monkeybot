@@ -64,7 +64,7 @@ model:
 | `VERTEX_AI_PROJECT_ID` | Yes (Vertex) | — | GCP project for Vertex AI. |
 | `VERTEX_AI_LOCATION` | No | `us-central1` | Vertex region. |
 | `DB_URL` | No | `sqlite:////app/data/monkeybot.db` | Storage backend. Postgres or Firestore recommended for production. |
-| `MEMORY_STORAGE_URI` | No | `local:///app/data/memory` | Workspace/memory backend. GCS/S3 for multi-instance. |
+| `MEMORY_STORAGE_URI` | No | `local:///app/memory` | Memory backend. GCS/S3 for multi-instance. |
 | `MCP_CONFIG` | No | `/app/monkeybot_config/mcp.json` | Path to MCP server config. |
 | `LOG_LEVEL` | No | `info` | Logging verbosity. |
 | `PORT` / `GATEWAY_PORT` | No | `8000` | Port the gateway listens on. |

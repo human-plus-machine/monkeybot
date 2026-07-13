@@ -85,7 +85,7 @@ monkeybot new --dest /path/to/bot --provider openai --yes
 # monkeybot new --dest /path/to/bot --provider openai --with postgres,sandbox --yes
 ```
 
-Creates `monkeybot_config/`, `workspace/` (file-tool sandbox), `workspace/skills` → `skills/`, `data/memory/`, `.env.example`, `scripts/setup-workspace.sh`, and an agent `pyproject.toml`. Use `--force` only when overwriting is explicitly requested.
+Creates `monkeybot_config/`, `workspace/` (file-tool sandbox with `workspace/skills/`), `memory/`, `.env.example`, `scripts/setup-workspace.sh`, and an agent `pyproject.toml`. Use `--force` only when overwriting is explicitly requested.
 
 Then:
 
@@ -189,7 +189,7 @@ uv tool install --editable .
 
 | Command | Purpose |
 |---------|---------|
-| `new` | Scaffold `monkeybot_config/`, `workspace/`, `data/memory/`, `skills/`, `pyproject.toml`, `.env.example` |
+| `new` | Scaffold `monkeybot_config/`, `workspace/` (+ `skills/`), `memory/`, `pyproject.toml`, `.env.example` |
 | `validate` | Config + paths + MCP shape (`--check-mcp` for network) |
 | `doctor` | Python, provider extra, credentials, port |
 | `run` | Start SSE gateway subprocess |

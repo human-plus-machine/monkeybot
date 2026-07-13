@@ -891,12 +891,19 @@ class CoreToolExecutor(ToolExecutorPort):
             _j(
                 {
                     "ok": True,
-                    "skills_path": str(self._skills_path),
+                    "skills_path": self._skills_path_for_agent(),
                     "skills": rows,
                 }
             ),
             None,
         )
+
+    def _skills_path_for_agent(self) -> str:
+        """Workspace-relative skills root for tool results (never a host absolute path)."""
+        try:
+            return self._skills_path.resolve().relative_to(self._workspace.repo_root).as_posix()
+        except ValueError:
+            return "skills"
 
     async def _tool_task(self, call: ToolCall, ctx: TurnContext) -> tuple[str | None, str | None]:
         args = dict(call.args)

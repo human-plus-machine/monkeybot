@@ -14,7 +14,7 @@ Security Model:
 
 Example:
     >>> executor = TerminalExecutor()
-    >>> result = await executor.execute("ls", ["./data/memory/"])
+    >>> result = await executor.execute("ls", ["./skills/"])
     >>> print(result.stdout)
 """
 
@@ -46,14 +46,15 @@ ALLOWED_COMMANDS = [
 
 # SECURITY: Path allowlist - modify with extreme caution
 # Only add paths that are safe for agent access
+# Defaults assume shell cwd is workspace_root (skills under workspace; memory at project root).
 ALLOWED_PATHS = [
-    "./data/memory/",    # Memory storage directory
-    "./data/memory",     # Same, when callers omit trailing slash
-    "./skills/",         # Skills directory
-    "./skills",          # Same, when callers omit trailing slash
+    "../memory/",        # Project-root memory (cwd is workspace/)
+    "../memory",
+    "./skills/",         # Skills under workspace
+    "./skills",
     "./test-data/",      # Test data directory (for tests only)
     "./code/",           # Reference / cloned repos (explicit ./ paths in argv)
-    "./code",            # Same, when callers omit trailing slash
+    "./code",
 ]
 
 
@@ -136,7 +137,7 @@ class TerminalExecutor:
         >>> executor = TerminalExecutor()
         >>> 
         >>> # Allowed command + allowed path - succeeds
-        >>> result = await executor.execute("cat", ["./data/memory/file.txt"])
+        >>> result = await executor.execute("cat", ["./skills/browser/SKILL.md"])
         >>> print(result.stdout)
         >>> 
         >>> # Blocked command - raises SecurityError
@@ -201,7 +202,7 @@ class TerminalExecutor:
         
         Example:
             >>> executor = TerminalExecutor()
-            >>> result = await executor.execute("ls", ["-la", "./data/memory/"])
+            >>> result = await executor.execute("ls", ["-la", "./skills/"])
             >>> if result.exit_code == 0:
             >>>     print(f"Files: {result.stdout}")
         
@@ -326,7 +327,7 @@ class TerminalExecutor:
         
         for arg in args:
             # Check if this argument is a file path
-            if arg.startswith("./") or arg.startswith("/"):
+            if arg.startswith("./") or arg.startswith("../") or arg.startswith("/"):
                 # Allow test directories (pytest tmp_path)
                 # macOS: /private/var/folders/, Linux: /tmp/
                 if (arg.startswith("/tmp/") or 

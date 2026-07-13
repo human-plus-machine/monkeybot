@@ -4,7 +4,7 @@ Example skills and deploy adapters for the monkeybot harness.
 
 ## Skills
 
-Copy into your agent `SKILLS_PATH` (scaffolded default: `./skills`, often mirrored at `workspace/skills`):
+Copy into your agent `SKILLS_PATH` (scaffolded default: `./workspace/skills`):
 
 | Skill | Purpose |
 |---|---|

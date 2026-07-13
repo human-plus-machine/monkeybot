@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-import shutil
 import stat
 from importlib import resources
 from importlib.resources.abc import Traversable
@@ -104,61 +103,40 @@ def write_active_config(
 
 
 def ensure_memory(dest: Path, *, force: bool) -> list[str]:
-    memory = dest / "data" / "memory"
+    memory = dest / "memory"
     memory.mkdir(parents=True, exist_ok=True)
     idx = memory / "INDEX.md"
     if not idx.exists() or force:
         existed = idx.exists()
         idx.write_text(_MEMORY_INDEX, encoding="utf-8")
-        return [f"  data/memory/INDEX.md: {'overwritten' if existed else 'created'}"]
-    return ["  data/memory/INDEX.md: skipped"]
+        return [f"  memory/INDEX.md: {'overwritten' if existed else 'created'}"]
+    return ["  memory/INDEX.md: skipped"]
 
 
 def ensure_workspace(dest: Path, *, force: bool) -> list[str]:
-    """Create workspace/ sandbox and workspace/skills -> ../skills symlink."""
+    """Create workspace/ sandbox with a real ``workspace/skills`` directory (no symlink)."""
     lines: list[str] = []
     workspace = dest / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
-    gitkeep = workspace / ".gitkeep"
-    if not gitkeep.exists() or force:
-        gitkeep.touch(exist_ok=True)
-        lines.append(
-            f"  workspace/.gitkeep: {'overwritten' if force and gitkeep.exists() else 'created'}"
-        )
-    else:
-        lines.append("  workspace/.gitkeep: skipped")
+    lines.append("  workspace/: created" if not any(workspace.iterdir()) else "  workspace/: skipped")
 
-    dest.joinpath("skills").mkdir(parents=True, exist_ok=True)
-    link = workspace / "skills"
-    expected = (dest / "skills").resolve()
-
-    if link.is_symlink():
-        if link.resolve() == expected:
-            lines.append("  workspace/skills: skipped (symlink ok)")
-            return lines
-        link.unlink()
-
-    if link.exists() and not link.is_symlink():
+    skills = workspace / "skills"
+    if skills.is_symlink():
+        skills.unlink()
+        skills.mkdir(parents=True, exist_ok=True)
+        lines.append("  workspace/skills: created (replaced symlink)")
+    elif skills.is_dir():
+        lines.append("  workspace/skills: skipped")
+    elif skills.exists():
         if not force:
             lines.append("  workspace/skills: skipped (path exists)")
             return lines
-        if link.is_dir():
-            shutil.rmtree(link)
-        else:
-            link.unlink()
-
-    try:
-        link.symlink_to("../skills", target_is_directory=True)
-        lines.append("  workspace/skills: symlink -> ../skills")
-    except OSError:
-        readme = workspace / "SKILLS_README.txt"
-        readme.write_text(
-            "Could not create workspace/skills symlink on this platform.\n"
-            "Run: bash scripts/setup-workspace.sh\n"
-            "Or copy/symlink skills/ into workspace/skills manually.\n",
-            encoding="utf-8",
-        )
-        lines.append("  workspace/skills: symlink failed (see workspace/SKILLS_README.txt)")
+        skills.unlink()
+        skills.mkdir(parents=True, exist_ok=True)
+        lines.append("  workspace/skills: created")
+    else:
+        skills.mkdir(parents=True, exist_ok=True)
+        lines.append("  workspace/skills: created")
 
     return lines
 

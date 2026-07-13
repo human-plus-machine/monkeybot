@@ -12,9 +12,10 @@ allowed_commands:
   - bash
 
 # Path prefixes permitted in run_command argv (./ and / arguments).
+# Shell cwd is workspace_root, so skills are ./skills and project memory is ../memory.
 allowed_path_prefixes:
-  - ./data/memory/
-  - ./data/memory
+  - ../memory/
+  - ../memory
   - ./skills/
   - ./skills
   - ./test-data/

@@ -38,7 +38,7 @@ monkeybot new --dest ./my-agent --provider openai --yes
 cd my-agent
 ```
 
-This creates `monkeybot_config/`, `workspace/`, `data/memory/`, `.env.example`, and an agent `pyproject.toml` that depends on `monkeybot[<provider>]` (plus any `--with` extras).
+This creates `monkeybot_config/`, `workspace/` (with `workspace/skills/`), `memory/`, `.env.example`, and an agent `pyproject.toml` that depends on `monkeybot[<provider>]` (plus any `--with` extras).
 
 ---
 
@@ -57,8 +57,8 @@ Important knobs (see **`monkeybot_config/monkeybot.example.yaml`** for all secti
 |---|---|
 | `paths.workspace_root` | File-tool sandbox (default `./workspace` when scaffolded via CLI). |
 | `paths.agent_md` | System prompt file (default `./monkeybot_config/AGENT.md`). |
-| `paths.memory_storage_uri` | Durable markdown memory root (`local://…`, `gcs://…`, `s3://…`); optional `INDEX.md` is surfaced in the prompt. Legacy `paths.memory_path` still maps to `MEMORY_PATH`. |
-| `paths.skills_path` | Skill bundle root. |
+| `paths.memory_storage_uri` | Durable markdown memory root (`local://./memory`, `gcs://…`, `s3://…`); optional `INDEX.md` is surfaced in the prompt. Legacy `paths.memory_path` still maps to `MEMORY_PATH`. |
+| `paths.skills_path` | Skill bundle root (scaffolded default `./workspace/skills`). |
 | `paths.db_url` | SQLite URL for conversation + usage. |
 | `paths.mcp_config` / `paths.command_allowlist_config` | MCP map and run_command allowlist policy path. |
 | `subagent.agent_md` | Subagent prompt file (defaults to same as `paths.agent_md`). Relative paths use project root, not `workspace/`. |

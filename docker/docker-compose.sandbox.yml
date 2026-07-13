@@ -38,12 +38,13 @@ services:
       - MONKEYBOT_WORKSPACE_ROOT=/tmp/monkeybot-workspace
       - SKILLS_PATH=/tmp/monkeybot-workspace/skills
       - DB_URL=sqlite:////tmp/monkeybot-workspace/data/monkeybot.db
-      - MEMORY_STORAGE_URI=local:///tmp/monkeybot-workspace/data/memory
+      - MEMORY_STORAGE_URI=local:///tmp/monkeybot-memory
     volumes:
       - /tmp/monkeybot-workspace:/tmp/monkeybot-workspace
+      - /tmp/monkeybot-memory:/tmp/monkeybot-memory
     command: >
-      sh -c "mkdir -p /tmp/monkeybot-workspace/skills /tmp/monkeybot-workspace/data/memory &&
-             cp -rn /app/skills/. /tmp/monkeybot-workspace/skills/ 2>/dev/null || true &&
+      sh -c "mkdir -p /tmp/monkeybot-workspace/skills /tmp/monkeybot-memory &&
+             cp -rn /app/workspace/skills/. /tmp/monkeybot-workspace/skills/ 2>/dev/null || true &&
              python -m monkeybot.gateway.main"
     depends_on:
       - opensandbox-server

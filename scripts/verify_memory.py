@@ -8,8 +8,8 @@ Checks three things:
      suspiciously short (< 20 chars), which often indicates a truncation bug.
 
 Usage:
-    uv run scripts/verify_memory.py evals/smoke_agent/workspace/data/memory
-    # or any other memory root under a local agent workspace
+    uv run scripts/verify_memory.py evals/smoke_agent/memory
+    # or any other memory root under a local agent project
     uv run scripts/verify_memory.py /path/to/any/memory/dir
 """
 

@@ -18,10 +18,10 @@ ARG EXTRAS=gemini
 RUN pip install --no-cache-dir ".[$EXTRAS]" \
     && pip install --no-cache-dir ./cli \
     && python -c "from pathlib import Path; from monkeybot_cli.scaffold import run_new; run_new(dest=Path('/app'), force=True)" \
-    && mkdir -p /app/data /app/skills
+    && mkdir -p /app/data /app/workspace/skills /app/memory
 
-# Matches scaffolded monkeybot.yaml paths.skills_path (./skills).
-ENV SKILLS_PATH=/app/skills
+# Matches scaffolded monkeybot.yaml paths.skills_path (./workspace/skills).
+ENV SKILLS_PATH=/app/workspace/skills
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"

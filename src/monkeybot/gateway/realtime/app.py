@@ -60,7 +60,7 @@ def _memory_storage_uri() -> str:
         logger.info(
             "memory: deriving storage URI from MEMORY_PATH; prefer paths.memory_storage_uri in monkeybot.yaml"
         )
-    legacy = (raw_mp or "data/memory").strip()
+    legacy = (raw_mp or "memory").strip()
     mem = Path(legacy)
     resolved = mem.resolve() if mem.is_absolute() else (Path.cwd().resolve() / mem).resolve()
     return f"local://{resolved}"

@@ -105,8 +105,8 @@ async def _run_turn(event):
 DB_URL             = postgresql://user:pass@rds-proxy:5432/monkeybot?sslmode=require
 MEMORY_STORAGE_URI = s3://my-bucket/monkeybot-memory
 AGENT_MD_PATH      = /app/monkeybot_config/AGENT.md
-SKILLS_PATH        = /app/skills
-WORKSPACE_ROOT     = /app
+SKILLS_PATH        = /app/workspace/skills
+WORKSPACE_ROOT     = /app/workspace
 MODEL_PROVIDER     = aws_bedrock
 MODEL_NAME         = (your Bedrock model id)
 ```

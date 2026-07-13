@@ -27,16 +27,18 @@ def test_new_scaffolds(tmp_path: Path) -> None:
     assert result.returncode == 0
     assert (tmp_path / "monkeybot_config" / "monkeybot.yaml").is_file()
     assert (tmp_path / ".env.example").is_file()
-    assert (tmp_path / "workspace" / ".gitkeep").is_file()
+    assert (tmp_path / "workspace").is_dir()
     assert (tmp_path / "scripts" / "setup-workspace.sh").is_file()
-    skills_link = tmp_path / "workspace" / "skills"
-    if skills_link.is_symlink():
-        assert skills_link.resolve() == (tmp_path / "skills").resolve()
-    else:
-        assert (tmp_path / "workspace" / "SKILLS_README.txt").is_file()
+    skills_dir = tmp_path / "workspace" / "skills"
+    assert skills_dir.is_dir()
+    assert not skills_dir.is_symlink()
+    assert (tmp_path / "memory" / "INDEX.md").is_file()
+    assert not (tmp_path / "skills").exists()
     text = (tmp_path / "monkeybot_config" / "monkeybot.yaml").read_text()
     assert "test-model" in text
     assert "workspace_root: ./workspace" in text
+    assert "skills_path: ./workspace/skills" in text
+    assert "memory_storage_uri: local://./memory" in text
     env_text = (tmp_path / ".env.example").read_text()
     assert "MONKEYBOT_WORKSPACE_ROOT" not in env_text
     assert "AGENT_MD" not in env_text

@@ -105,7 +105,7 @@ def _pending_response_timeout_sec() -> float:
 def _resolved_workspace_paths() -> tuple[Path, Path]:
     root = resolve_agent_workspace_root()
     cwd = Path.cwd().resolve()
-    skills = Path(os.environ.get("SKILLS_PATH", "skills"))
+    skills = Path(os.environ.get("SKILLS_PATH", "workspace/skills"))
     skills_p = skills.resolve() if skills.is_absolute() else (cwd / skills).resolve()
     return root, skills_p
 

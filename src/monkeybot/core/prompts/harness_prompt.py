@@ -60,6 +60,7 @@ When workspace tools (`read_file`, `write_file`, `run_command`, …) appear in t
 
 ### Runtime paths
 - workspace root: `{workspace_root}`
+- skills: under the workspace at `skills/` (use `list_skills`, then `read_file` on `skills/<name>/SKILL.md`)
 - memory storage: `{memory_storage_uri}` — always use `search_memory` to query; only use this URI/path directly in `run_command` for low-level inspection.
 
 ### MCP tools
@@ -70,7 +71,8 @@ When workspace tools (`read_file`, `write_file`, `run_command`, …) appear in t
 - When an MCP tool fails: state what failed in one sentence, then stop — do **not** fabricate, infer, or summarize content that the tool was supposed to fetch. If a fallback tool is available and meaningfully different, try it once; otherwise tell the user what is needed to proceed (e.g. correct credentials, a public URL, pasting the content directly).
 
 ### Skills
-- Installed skill names are listed under `## Skills` in this prompt. When a task matches one, use `list_skills` to get the skills root, then `read_file` on that skill's `SKILL.md` for procedure before running commands or steps it documents."""
+- Installed skill names are listed under `## Skills` in this prompt. When a task matches one, use `list_skills` then `read_file` on the workspace-relative path `skills/<name>/SKILL.md` before running commands or steps it documents. Prefer those relative paths — do not use host absolute paths.
+"""
 
 
 _TASK_LINE = (

@@ -454,6 +454,7 @@ async def test_list_skills_echoes_context_skill_refs(tmp_path: Path) -> None:
     assert err is None and out is not None
     payload = json.loads(out)
     assert payload["skills"] == [{"name": "n", "description": "d"}]
+    assert payload["skills_path"] == "skills"
 
 
 @pytest.mark.asyncio
@@ -506,9 +507,10 @@ async def test_list_skills_returns_descriptions_from_discovered_skill_md(tmp_pat
 async def test_run_command_cat_under_memory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     agent_dir = tmp_path / "agent"
     ws = agent_dir / "workspace"
-    (ws / "data" / "memory").mkdir(parents=True)
-    (ws / "data" / "memory" / "f.md").write_text("inside", encoding="utf-8")
-    mem = ws / "data" / "memory"
+    ws.mkdir(parents=True)
+    mem = agent_dir / "memory"
+    mem.mkdir(parents=True)
+    (mem / "f.md").write_text("inside", encoding="utf-8")
     skills = ws / "skills"
     skills.mkdir()
     monkeypatch.chdir(agent_dir)
@@ -522,7 +524,7 @@ async def test_run_command_cat_under_memory(tmp_path: Path, monkeypatch: pytest.
         call=ToolCall(
             call_id="1",
             name="run_command",
-            args={"argv": ["cat", "./data/memory/f.md"]},
+            args={"argv": ["cat", "../memory/f.md"]},
         ),
         ctx=_ctx(),
     ))

@@ -8,7 +8,7 @@ runtime:
 
 paths:
   agent_md: ./monkeybot_config/AGENT.md
-  memory_storage_uri: local://./workspace/data/memory
+  memory_storage_uri: local://./memory
   skills_path: ./workspace/skills
   workspace_root: ./workspace
   db_url: sqlite:///./workspace/data/monkeybot.db

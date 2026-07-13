@@ -111,7 +111,7 @@ def _resolved_workspace_paths() -> tuple[Path, Path]:
     """Resolve agent workspace root and skills dir (relative paths use process ``cwd``)."""
     root = resolve_agent_workspace_root()
     cwd = Path.cwd().resolve()
-    skills = Path(os.environ.get("SKILLS_PATH", "skills"))
+    skills = Path(os.environ.get("SKILLS_PATH", "workspace/skills"))
     skills_p = skills.resolve() if skills.is_absolute() else (cwd / skills).resolve()
     return root, skills_p
 
@@ -126,7 +126,7 @@ def _memory_storage_uri() -> str:
         logger.info(
             "memory: deriving storage URI from MEMORY_PATH; prefer paths.memory_storage_uri in monkeybot.yaml"
         )
-    legacy = (raw_mp or "data/memory").strip()
+    legacy = (raw_mp or "memory").strip()
     mem = Path(legacy)
     resolved = mem.resolve() if mem.is_absolute() else (Path.cwd().resolve() / mem).resolve()
     return f"local://{resolved}"
