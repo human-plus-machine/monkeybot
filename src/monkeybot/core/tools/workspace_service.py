@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TypedDict
 
+from monkeybot.core.tools.text_normalize import normalize_unicode_punctuation
+
 # Directories skipped when walking for grep: noisy, large, or not source content.
 _GREP_IGNORE_DIRS = frozenset(
     {
@@ -228,6 +230,29 @@ def _indentation_flexible_spans(content: str, find: str) -> list[tuple[int, int]
     return spans
 
 
+def _unicode_normalized_spans(content: str, find: str) -> list[tuple[int, int]]:
+    """Match after stripping and mapping smart quotes/dashes (shared with apply_patch)."""
+    original_lines = content.split("\n")
+    search_lines = find.split("\n")
+    if search_lines and search_lines[-1] == "":
+        search_lines = search_lines[:-1]
+    if not search_lines:
+        return []
+    spans: list[tuple[int, int]] = []
+    for i in range(0, len(original_lines) - len(search_lines) + 1):
+        if all(
+            normalize_unicode_punctuation(original_lines[i + j].strip())
+            == normalize_unicode_punctuation(search_lines[j].strip())
+            for j in range(len(search_lines))
+        ):
+            start = sum(len(original_lines[k]) + 1 for k in range(i))
+            end = start + sum(len(original_lines[i + j]) for j in range(len(search_lines)))
+            if len(search_lines) > 1:
+                end += len(search_lines) - 1
+            spans.append((start, end))
+    return spans
+
+
 def _find_replace_span(
     text: str,
     old_string: str,
@@ -248,6 +273,7 @@ def _find_replace_span(
         ("line_trimmed", _line_trimmed_spans),
         ("whitespace_normalized", _whitespace_normalized_spans),
         ("indentation_flexible", _indentation_flexible_spans),
+        ("unicode_normalized", _unicode_normalized_spans),
     ):
         spans = finder(text, old_string)
         if not spans:

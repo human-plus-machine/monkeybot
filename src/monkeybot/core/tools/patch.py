@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.tools.text_normalize import normalize_unicode_punctuation
 from monkeybot.core.tools.workspace_service import WorkspaceError
 
 if TYPE_CHECKING:
@@ -193,27 +194,6 @@ def parse_patch(patch_text: str) -> list[Hunk]:
     return hunks
 
 
-def _normalize_unicode(s: str) -> str:
-    return (
-        s.replace("\u2018", "'")
-        .replace("\u2019", "'")
-        .replace("\u201a", "'")
-        .replace("\u201b", "'")
-        .replace("\u201c", '"')
-        .replace("\u201d", '"')
-        .replace("\u201e", '"')
-        .replace("\u201f", '"')
-        .replace("\u2010", "-")
-        .replace("\u2011", "-")
-        .replace("\u2012", "-")
-        .replace("\u2013", "-")
-        .replace("\u2014", "-")
-        .replace("\u2015", "-")
-        .replace("\u2026", "...")
-        .replace("\u00a0", " ")
-    )
-
-
 def _try_match(
     lines: list[str],
     pattern: list[str],
@@ -247,7 +227,10 @@ def seek_sequence(
         (lambda a, b: a == b),
         (lambda a, b: a.rstrip() == b.rstrip()),
         (lambda a, b: a.strip() == b.strip()),
-        (lambda a, b: _normalize_unicode(a.strip()) == _normalize_unicode(b.strip())),
+        (
+            lambda a, b: normalize_unicode_punctuation(a.strip())
+            == normalize_unicode_punctuation(b.strip())
+        ),
     ):
         found = _try_match(lines, pattern, start_index, compare, eof)
         if found != -1:
@@ -268,6 +251,7 @@ def derive_new_contents(
     replacements: list[tuple[int, int, list[str]]] = []
     line_index = 0
     for chunk in chunks:
+        context_matched = False
         if chunk.change_context:
             ctx_idx = seek_sequence(original_lines, [chunk.change_context], line_index)
             if ctx_idx == -1:
@@ -276,13 +260,19 @@ def derive_new_contents(
                     code="context_not_found",
                 )
             line_index = ctx_idx + 1
+            context_matched = True
 
         if not chunk.old_lines:
-            insertion_idx = (
-                len(original_lines) - 1
-                if original_lines and original_lines[-1] == ""
-                else len(original_lines)
-            )
+            # Pure insertion: place after the @@ context anchor when present;
+            # otherwise append at EOF (Codex-style "insert at end").
+            if context_matched:
+                insertion_idx = line_index
+            else:
+                insertion_idx = (
+                    len(original_lines) - 1
+                    if original_lines and original_lines[-1] == ""
+                    else len(original_lines)
+                )
             replacements.append((insertion_idx, 0, list(chunk.new_lines)))
             continue
 
@@ -435,11 +425,14 @@ def _apply_ops(
             elif op.action == "move":
                 if op.content is None or op.move_path is None:
                     raise PatchError("move op missing content or move_path", code="internal")
+                # Record after the dest write so rollback can remove it if delete fails.
                 workspace.write_file(op.move_path, op.content)
+                done.append(op)
                 workspace.delete_file(op.path)
                 files.append(
                     {"path": op.move_path, "action": "move", "from": op.path}
                 )
+                continue
             elif op.action == "delete":
                 workspace.delete_file(op.path)
                 files.append({"path": op.path, "action": "delete"})

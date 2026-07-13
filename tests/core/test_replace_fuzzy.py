@@ -31,6 +31,16 @@ def test_replace_line_trimmed_fuzzy(tmp_path: Path) -> None:
     assert "return 2" in (tmp_path / "f.py").read_text(encoding="utf-8")
 
 
+def test_replace_unicode_normalized_fuzzy(tmp_path: Path) -> None:
+    ws = WorkspaceFileService(tmp_path)
+    # File has curly quotes; caller uses ASCII.
+    (tmp_path / "f.txt").write_text("say \u201chello\u201d\n", encoding="utf-8")
+    out = ws.replace_in_file("f.txt", 'say "hello"', 'say "hi"')
+    assert out["ok"]
+    assert out["match_mode"] == "unicode_normalized"
+    assert (tmp_path / "f.txt").read_text(encoding="utf-8") == 'say "hi"\n'
+
+
 def test_replace_all(tmp_path: Path) -> None:
     ws = WorkspaceFileService(tmp_path)
     (tmp_path / "f.txt").write_text("aa aa aa\n", encoding="utf-8")

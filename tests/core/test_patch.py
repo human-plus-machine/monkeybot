@@ -143,6 +143,55 @@ def test_apply_move(tmp_path: Path) -> None:
     assert (tmp_path / "b.py").read_text(encoding="utf-8") == "x = 2\n"
 
 
+def test_derive_context_pure_insertion() -> None:
+    """@@ context + only '+' lines inserts after the anchor, not at EOF."""
+    original = "def a():\n  x\ndef b():\n  y\n"
+    chunks = (
+        UpdateChunk(
+            old_lines=(),
+            new_lines=("  inserted",),
+            change_context="def a():",
+        ),
+    )
+    out = derive_new_contents("f.py", chunks, original)
+    assert out == "def a():\n  inserted\n  x\ndef b():\n  y\n"
+
+
+def test_derive_pure_insertion_without_context_goes_to_eof() -> None:
+    original = "a\nb\n"
+    chunks = (UpdateChunk(old_lines=(), new_lines=("c",)),)
+    out = derive_new_contents("f.txt", chunks, original)
+    assert out == "a\nb\nc\n"
+
+
+def test_move_delete_failure_rolls_back_dest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If move's delete_file(src) fails after writing dest, dest must be cleaned up."""
+    ws = WorkspaceFileService(tmp_path)
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    patch = """*** Begin Patch
+*** Update File: a.py
+*** Move to: b.py
+@@
+-x = 1
++x = 2
+*** End Patch
+"""
+    real_delete = ws.delete_file
+
+    def flaky_delete(path: str):
+        if path == "a.py":
+            raise WorkspaceError("delete blocked", code="write_failed")
+        return real_delete(path)
+
+    monkeypatch.setattr(ws, "delete_file", flaky_delete)
+    with pytest.raises(PatchError, match="delete blocked"):
+        plan_and_apply_patch(ws, parse_patch(patch))
+    assert (tmp_path / "a.py").read_text(encoding="utf-8") == "x = 1\n"
+    assert not (tmp_path / "b.py").exists()
+
+
 def test_mid_apply_rollback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ws = WorkspaceFileService(tmp_path)
     (tmp_path / "old.txt").write_text("old\n", encoding="utf-8")
