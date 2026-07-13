@@ -6,6 +6,8 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-07-13
+
 ### Added
 
 - Repo-root `monkeybot_config_example/` — full-option human-readable config templates (`.example` filenames).
