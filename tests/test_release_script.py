@@ -149,3 +149,42 @@ def test_changelog_sections_remain_distinct_for_matching_versions(
 
     assert "- Core release." in release.changelog_section("core", "0.3.0")
     assert "- Browser release." in release.changelog_section("browser", "0.3.0")
+
+
+def test_publish_force_packages_rethrows_existing_tags(
+    release, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_text(
+        "## [core v2.2.0] - 2026-07-13\n\n- Core notes.\n\n"
+        "## [browser v0.2.0] - 2026-07-13\n\n- Browser notes.\n\n"
+        "## [cli v0.3.0] - 2026-07-13\n\n- CLI notes.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(release, "CHANGELOG", changelog)
+    monkeypatch.setenv("FORCE_PACKAGES", "browser,cli")
+    monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
+
+    versions = {"core": "2.2.0", "browser": "0.2.0", "cli": "0.3.0"}
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(*args: str, **_kw: object) -> str:
+        calls.append(args)
+        if args[:3] == ("git", "tag", "--list"):
+            return "core-v2.2.0\nbrowser-v0.2.0\ncli-v0.3.0"
+        raise AssertionError(f"unexpected run call: {args}")
+
+    def read_version(path: Path) -> str:
+        for name, pyproject in release.PACKAGES.items():
+            if path == pyproject:
+                return versions[name]
+        raise AssertionError(path)
+
+    monkeypatch.setattr(release, "run", fake_run)
+    monkeypatch.setattr(release, "read_version", read_version)
+    release.cmd_publish(None)  # type: ignore[arg-type]
+    out = capsys.readouterr().out
+    assert "Re-publishing browser-v0.2.0" in out
+    assert "Re-publishing cli-v0.3.0" in out
+    assert "released_packages=browser,cli" in out
+    assert not any(c[:2] == ("git", "merge") for c in calls)

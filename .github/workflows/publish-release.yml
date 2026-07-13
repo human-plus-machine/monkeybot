@@ -4,14 +4,18 @@ name: Publish release
 # Branch protection on main (require PR + restrict merges to admins) is the
 # actual access control; this tags + GitHub-Releases + Trusted-Publishes to PyPI.
 #
-# PyPI Pending Trusted Publishers (one per project — environments must differ):
-#   monkeybot:     Owner human-plus-machine / Repo monkeybot /
-#                  Workflow publish-release.yml / Environment pypi
-#   monkeybot-cli: Owner human-plus-machine / Repo monkeybot /
-#                  Workflow publish-release.yml / Environment pypi-cli
-#   monkeybot-browser-mcp: same workflow / Environment pypi-browser
+# Also supports workflow_dispatch republish for already-tagged packages (e.g.
+# after fixing a Trusted Publisher or sandbox image failure).
 #
-# GitHub: create Environments named exactly `pypi` and `pypi-cli`.
+# PyPI Pending Trusted Publishers (one per project — environments must differ):
+#   monkeybot:             Owner human-plus-machine / Repo monkeybot /
+#                          Workflow publish-release.yml / Environment pypi
+#   monkeybot-cli:         Owner human-plus-machine / Repo monkeybot /
+#                          Workflow publish-release.yml / Environment pypi-cli
+#   monkeybot-browser-mcp: Owner human-plus-machine / Repo monkeybot /
+#                          Workflow publish-release.yml / Environment pypi-browser
+#
+# GitHub: create Environments named exactly `pypi`, `pypi-cli`, and `pypi-browser`.
 on:
   push:
     branches: [main]
@@ -21,6 +25,13 @@ on:
       - "integrations/browser-mcp/pyproject.toml"
       - "docker/sandbox.Dockerfile"
       - "CHANGELOG.md"
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: "Comma-separated packages to (re)publish even if already tagged (core,browser,cli)"
+        required: true
+        type: string
+        default: "browser,cli"
 
 permissions:
   contents: write
@@ -44,6 +55,7 @@ jobs:
         run: python3 scripts/release.py publish
         env:
           GH_TOKEN: ${{ github.token }}
+          FORCE_PACKAGES: ${{ github.event.inputs.packages || '' }}
 
   # Core before CLI (separate jobs / environments — required for two pending publishers).
   pypi-core:
@@ -70,10 +82,35 @@ jobs:
           packages-dir: dist/core
           skip-existing: true
 
+  pypi-browser:
+    needs: publish
+    if: contains(format(',{0},', needs.publish.outputs.packages), ',browser,')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi-browser
+      url: https://pypi.org/p/monkeybot-browser-mcp
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build browser MCP
+        run: uv build --out-dir dist/browser integrations/browser-mcp
+      - name: Publish browser MCP to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/browser
+          skip-existing: true
+
   pypi-cli:
     needs: [publish, pypi-core, pypi-browser]
-    # Run when cli is in the release set. If core wasn't released this run,
-    # pypi-core is skipped — treat that as success so cli can still publish.
+    # Run when cli is in the release set. Core/browser may be skipped on a
+    # cli-only republish; treat skipped as success. A failed browser publish
+    # still blocks cli because monkeybot-cli depends on monkeybot-browser-mcp.
     if: |
       always() &&
       needs.publish.result == 'success' &&
@@ -101,30 +138,6 @@ jobs:
           packages-dir: dist/cli
           skip-existing: true
 
-  pypi-browser:
-    needs: publish
-    if: contains(format(',{0},', needs.publish.outputs.packages), ',browser,')
-    runs-on: ubuntu-latest
-    environment:
-      name: pypi-browser
-      url: https://pypi.org/p/monkeybot-browser-mcp
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Build browser MCP
-        run: uv build --out-dir dist/browser integrations/browser-mcp
-      - name: Publish browser MCP to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: dist/browser
-          skip-existing: true
-
   sandbox-image:
     needs: publish
     if: contains(format(',{0},', needs.publish.outputs.packages), ',core,')
@@ -140,7 +153,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: version
-        run: echo "value=$(python -c \"import re; print(re.search(r'^version = \\\"([^\\\"]+)', open('pyproject.toml').read(), re.M).group(1))\")" >> "$GITHUB_OUTPUT"
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import re
+          from pathlib import Path
+
+          text = Path("pyproject.toml").read_text(encoding="utf-8")
+          match = re.search(r'^version = "([^"]+)"', text, re.M)
+          if match is None:
+              raise SystemExit("no version field in pyproject.toml")
+          print(f"value={match.group(1)}")
+          PY
       - uses: docker/build-push-action@v6
         with:
           context: .
