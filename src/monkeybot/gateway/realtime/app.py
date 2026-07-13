@@ -10,7 +10,6 @@ import contextlib
 import logging
 import os
 from collections.abc import AsyncIterator
-from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
@@ -26,6 +25,7 @@ from monkeybot.core.config.settings import (
     vertex_google_search_enabled_from_config,
 )
 from monkeybot.core.hooks import HookManager
+from monkeybot.core.layout import AgentLayout
 from monkeybot.core.llm.provider import Provider
 from monkeybot.core.mcp.mcp_client import MCPClient
 from monkeybot.core.memory.subsystem import MemorySubsystem
@@ -33,9 +33,7 @@ from monkeybot.core.persistence.backends import create_storage_backend
 from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector
 from monkeybot.core.tools.permission import try_load_permission_inspector
 from monkeybot.core.workspace import create_workspace_storage
-from monkeybot.gateway.bootstrap import ensure_gateway_runtime_env
 from monkeybot.gateway.sse.routes import create_app as build_sse_app
-from monkeybot.gateway.sse.workspace_layout import resolve_agent_workspace_root
 from monkeybot.providers.gemini_live import GeminiLiveProvider
 from monkeybot.web_search import WebSearchTool, build_backend
 
@@ -52,18 +50,7 @@ def _memory_enabled() -> bool:
 
 
 def _memory_storage_uri() -> str:
-    uri = os.environ.get("MEMORY_STORAGE_URI", "").strip()
-    if uri:
-        return uri
-    raw_mp = os.environ.get("MEMORY_PATH")
-    if raw_mp is not None:
-        logger.info(
-            "memory: deriving storage URI from MEMORY_PATH; prefer paths.memory_storage_uri in monkeybot.yaml"
-        )
-    legacy = (raw_mp or "data/memory").strip()
-    mem = Path(legacy)
-    resolved = mem.resolve() if mem.is_absolute() else (Path.cwd().resolve() / mem).resolve()
-    return f"local://{resolved}"
+    return AgentLayout.from_environment().memory_storage_uri
 
 
 def _tool_denied_patterns() -> list[str]:
@@ -90,7 +77,8 @@ async def _realtime_lifespan(
     config: RealtimeConfig,
 ) -> AsyncIterator[None]:
     """Wire storage, MCP, inspectors, memory, and realtime provider."""
-    db_url = os.environ.get("DB_URL", "sqlite:///data/monkeybot.db")
+    layout = AgentLayout.from_environment()
+    db_url = layout.db_url
     backend = create_storage_backend(db_url)
     await backend.open(run_schema=auto_schema_enabled_from_config())
     app.state.storage = backend
@@ -98,16 +86,14 @@ async def _realtime_lifespan(
 
     mcp = MCPClient()
     deps.mcp = mcp
-    mcp_config = Path(os.environ.get("MCP_CONFIG", "/app/monkeybot_config/mcp.json"))
+    mcp_config = layout.mcp_config_path
     strict = os.environ.get("MCP_STRICT_LOAD", "").strip().lower() in ("1", "true", "yes")
     try:
         await mcp.load_from_config(mcp_config, raise_on_error=strict)
     except OSError as exc:
         logger.info("MCP config skipped (%s): %s", mcp_config, exc)
 
-    tiers_path = Path(
-        os.environ.get("COMMAND_ALLOWLIST_CONFIG", "/app/monkeybot_config/command_allowlist.yaml")
-    )
+    tiers_path = layout.command_allowlist_path
     deps.run_command_allowed_commands = None
     deps.run_command_allowed_path_prefixes = None
     inspectors: list[Any] = []
@@ -125,9 +111,7 @@ async def _realtime_lifespan(
     if denied:
         inspectors.append(RulesInspector(denied))
 
-    perm_path = Path(
-        os.environ.get("PERMISSION_CONFIG", "/app/monkeybot_config/permissions.yaml")
-    )
+    perm_path = layout.permission_config_path
     perm_insp = try_load_permission_inspector(perm_path)
     if perm_insp is not None:
         inspectors.append(perm_insp)
@@ -192,7 +176,7 @@ async def _realtime_lifespan(
 
     if attachments_enabled_from_env():
         try:
-            deps.attachment_store = FilesystemAttachmentStore(resolve_agent_workspace_root())
+            deps.attachment_store = FilesystemAttachmentStore(AgentLayout.from_environment().workspace_root)
             app.state.attachment_store = deps.attachment_store
             logger.info("attachments enabled")
         except Exception as exc:
@@ -272,8 +256,6 @@ def create_realtime_app(**kwargs: Any) -> FastAPI:
 
     Extra keyword arguments are forwarded to the underlying SSE app factory.
     """
-    ensure_gateway_runtime_env()
-
     config = get_realtime_config()
     manager = RealtimeSessionManager(config)
     deps = RealtimeDependencies()

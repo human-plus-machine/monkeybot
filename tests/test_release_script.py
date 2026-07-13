@@ -24,8 +24,8 @@ def release():
     return _load_release()
 
 
-def test_packages_order_core_before_cli(release) -> None:
-    assert list(release.PACKAGES) == ["core", "cli"]
+def test_packages_order_core_and_browser_before_cli(release) -> None:
+    assert list(release.PACKAGES) == ["core", "browser", "cli"]
 
 
 def test_write_github_output_appends(release, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -39,3 +39,25 @@ def test_write_github_output_appends(release, tmp_path: Path, monkeypatch: pytes
 def test_write_github_output_noop_without_env(release, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("GITHUB_OUTPUT", raising=False)
     release.write_github_output("packages", "core")  # must not raise
+
+
+def test_cut_changelog_writes_exact_sections_for_coordinated_release(
+    release, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_text(
+        "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Coordinated release.\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(release, "CHANGELOG", changelog)
+
+    release.cut_changelog(["2.2.0", "0.2.0", "0.3.0"])
+
+    text = changelog.read_text(encoding="utf-8")
+    assert "## [Unreleased]\n\n## [2.2.0]" in text
+    assert "## [0.2.0]" in text
+    assert "## [0.3.0]" in text
+    assert text.count("- Coordinated release.") == 3
+    assert release.changelog_section("2.2.0") is not None
+    assert release.changelog_section("0.2.0") is not None
+    assert release.changelog_section("0.3.0") is not None

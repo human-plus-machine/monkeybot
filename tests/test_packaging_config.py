@@ -58,6 +58,8 @@ def test_cli_wheel_includes_scaffold_defaults(tmp_path: Path) -> None:
         assert any(n.endswith("scaffold_defaults/AGENT.md") for n in names)
         assert any(n.endswith("scaffold_defaults/monkeybot.example.yaml") for n in names)
         assert any(n.endswith("scaffold_defaults/env.example") for n in names)
+        assert any(n.endswith("scaffold_defaults/browser/SKILL.md") for n in names)
+        assert any(n.endswith("scaffold_defaults/Dockerfile") for n in names)
         meta = next(n for n in names if n.endswith("METADATA"))
         requires = [
             line
@@ -65,4 +67,5 @@ def test_cli_wheel_includes_scaffold_defaults(tmp_path: Path) -> None:
             if line.startswith("Requires-Dist: monkeybot")
         ]
         assert any("monkeybot[cli]" in line for line in requires)
-        assert any(">=2.1.0" in line and "<3" in line for line in requires)
+        assert any(">=2.2.0" in line and "<3" in line for line in requires)
+        assert any("monkeybot-browser-mcp" in line for line in requires)

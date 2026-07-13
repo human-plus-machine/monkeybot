@@ -1,38 +1,40 @@
 # Browser MCP
 
-Stdio MCP server for monkeybot that wraps [browser-harness](https://github.com/browser-use/browser-harness) for real-browser control (CDP) and agent-writable site playbooks.
+Stdio MCP server for MonkeyBot that wraps [browser-harness](https://github.com/browser-use/browser-harness) for real-browser control (CDP) and agent-writable site playbooks.
 
-Package location: `integrations/browser-mcp/`.
-
----
-
-## Install
-
-```bash
-uv sync --project integrations/browser-mcp
-```
+The server package and the static browser skill are bundled with every new agent.
+They are present but deliberately disabled until the operator enables the browser
+entry in `monkeybot_config/mcp.json`.
 
 ---
 
-## Wire into monkeybot
+## Enable browser controls
 
-Add to `monkeybot_config/mcp.json`:
+New agents already contain this `monkeybot_config/mcp.json` entry:
 
 ```json
 "browser": {
-  "command": "uv",
-  "args": ["run", "--project", "../integrations/browser-mcp", "python", "-m", "browser_mcp.server"],
+  "enabled": false,
+  "command": "python",
+  "args": ["-m", "browser_mcp.server"],
   "env": {
     "BU_NAME": "monkeybot",
-    "BROWSER_MCP_PLAYBOOKS_DIR": "./workspace/skills/browser/playbooks",
+    "BROWSER_MCP_PLAYBOOKS_DIR": "${MONKEYBOT_WORKSPACE_ROOT}/browser/playbooks",
     "BROWSER_MCP_SCREENSHOTS_DIR": "${MONKEYBOT_WORKSPACE_ROOT}/browser/Screenshots"
   }
 }
 ```
 
-Startup does **not** advertise `browser__*` schemas. The agent calls `enable_mcp("browser")` first (see [Progressive MCP tool disclosure](progressive-mcp-tools.md)).
+Change `"enabled"` to `true` when the browser is approved for this agent. The
+gateway exports the absolute `MONKEYBOT_WORKSPACE_ROOT` before spawning MCP
+subprocesses, so the browser's writable paths do not depend on its current
+directory. Startup does **not** advertise `browser__*` schemas; the model calls
+`enable_mcp("browser")` first (see [Progressive MCP tool disclosure](progressive-mcp-tools.md)).
 
-Tools appear as `browser__*` (MCP server name + tool name). Copy [`examples/skills/browser/`](../examples/skills/browser/) into your `SKILLS_PATH` so the agent gets workflow instructions and a playbooks directory. See also [Skills](skills.md).
+Tools appear as `browser__*` (MCP server name + tool name). The browser skill is
+already in `skills/browser/`; it provides workflow instructions only. Playbooks
+and screenshots are data under `workspace/browser/`, not skills. See also
+[Skills](skills.md) and [Agent project layout](agent-layout.md).
 
 ---
 
@@ -71,12 +73,17 @@ google-chrome \
 "env": {
   "BU_NAME": "monkeybot",
   "BU_CDP_URL": "http://127.0.0.1:9222",
-  "BROWSER_MCP_PLAYBOOKS_DIR": "./workspace/skills/browser/playbooks",
+  "BROWSER_MCP_PLAYBOOKS_DIR": "${MONKEYBOT_WORKSPACE_ROOT}/browser/playbooks",
   "BROWSER_MCP_SCREENSHOTS_DIR": "${MONKEYBOT_WORKSPACE_ROOT}/browser/Screenshots"
 }
 ```
 
-**Container pattern:** start Chromium in the same pod (sidecar or entrypoint) before the gateway so the MCP process can reach `127.0.0.1:9222`. Install `google-chrome-stable` or `chromium` in the image; avoid Snap-packaged Chromium on Linux (CDP binding issues — see [browser-harness snap docs](https://github.com/browser-use/browser-harness/blob/main/docs/snap-linux-headless.md)).
+**Container pattern:** build the scaffolded agent image with
+`--build-arg INSTALL_CHROMIUM=1`, then start Chromium in the same pod (sidecar
+or entrypoint) before the gateway so the MCP process can reach `127.0.0.1:9222`.
+Without that build argument, configure a reachable CDP endpoint or Browser Use
+Cloud. Avoid Snap-packaged Chromium on Linux (CDP binding issues — see
+[browser-harness snap docs](https://github.com/browser-use/browser-harness/blob/main/docs/snap-linux-headless.md)).
 
 If you already have a WebSocket URL, set `BU_CDP_WS` instead of `BU_CDP_URL`.
 
@@ -93,7 +100,7 @@ No Chrome in your image. [Browser Use Cloud](https://cloud.browser-use.com/) hos
   "BU_NAME": "monkeybot-prod",
   "BROWSER_USE_API_KEY": "${BROWSER_USE_API_KEY}",
   "BU_CDP_WS": "${BU_CDP_WS}",
-  "BROWSER_MCP_PLAYBOOKS_DIR": "./workspace/skills/browser/playbooks",
+  "BROWSER_MCP_PLAYBOOKS_DIR": "${MONKEYBOT_WORKSPACE_ROOT}/browser/playbooks",
   "BROWSER_MCP_SCREENSHOTS_DIR": "${MONKEYBOT_WORKSPACE_ROOT}/browser/Screenshots"
 }
 ```
@@ -114,8 +121,18 @@ For syncing cookies from a local Chrome profile into cloud browsers, see [browse
 | `BROWSER_USE_API_KEY` | Browser Use Cloud auth |
 | `BROWSER_MCP_PLAYBOOKS_DIR` | Playbooks directory (agent-written site notes) |
 | `BROWSER_MCP_SCREENSHOTS_DIR` | Screenshot output directory (default: `{workspace}/browser/Screenshots`) |
+| `BROWSER_MCP_SCREENSHOTS_MAX_FILES` | Retain at most this many PNGs (default `200`; `0` disables the cap) |
+| `BROWSER_MCP_SCREENSHOTS_MAX_BYTES` | Retain at most this many total screenshot bytes (default `104857600`; `0` disables the cap) |
 
 All `BU_*` vars are passed through to `browser-harness` unchanged.
+
+Playbooks are intentionally per-instance cache data. On Cloud Run, Fargate, and
+other ephemeral-workspace targets they reset when the instance is recycled. Use
+the memory storage contract for durable knowledge rather than adding a workspace
+synchronization layer.
+
+For Cloud Run and other in-memory filesystems, set both screenshot caps to a
+small value appropriate to the service memory limit.
 
 ---
 
@@ -141,7 +158,7 @@ This is the default, preferred workflow: no image tokens, no coordinate-guessing
 
 ### Fallback: screenshots + coordinates
 
-`browser_screenshot` + `browser_click(x, y)` is a **last-resort fallback**, for cases `browser_get_elements` can't handle: canvas-based apps, heavy shadow-DOM UIs, drag-and-drop, or visually confirming layout/rendering. `browser_screenshot` saves a PNG under **`./browser/Screenshots/`** in the agent workspace and returns JSON with a workspace-relative `path` (for `render_image` on vision models), `screenshots_dir`, url, title, and viewport — not inline base64 image bytes. This keeps tool results small for text-only models (Ollama) and avoids context-window blowups. Text-only models should use `browser_get_elements` (or `browser_js` for ad hoc extraction) instead of screenshots entirely, since they can't view images.
+`browser_screenshot` + `browser_click(x, y)` is a **last-resort fallback**, for cases `browser_get_elements` can't handle: canvas-based apps, heavy shadow-DOM UIs, drag-and-drop, or visually confirming layout/rendering. `browser_screenshot` saves a PNG under **`workspace/browser/Screenshots/`** and returns JSON with a workspace-relative `path` (for `render_image` on vision models), `screenshots_dir`, url, title, and viewport — not inline base64 image bytes. This keeps tool results small for text-only models (Ollama) and avoids context-window blowups. Text-only models should use `browser_get_elements` (or `browser_js` for ad hoc extraction) instead of screenshots entirely, since they can't view images.
 
 `browser-harness` is imported lazily on first browser tool call so listing MCP tools does not require Chrome to be running.
 
@@ -150,7 +167,7 @@ This is the default, preferred workflow: no image tokens, no coordinate-guessing
 ## Troubleshooting
 
 ```bash
-uv run --project integrations/browser-mcp browser-harness --doctor
+uv run browser-harness --doctor
 ```
 
 Common issues:

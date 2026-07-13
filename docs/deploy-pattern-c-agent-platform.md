@@ -6,7 +6,12 @@ Same harness-as-library approach as Pattern B, but the platform imposes its own 
 
 **Guide depth:** This guide documents **both** shipped platform adapters side by side. You need only the section for your target — AgentCore does not require Vertex, and vice versa. See [Positioning](cloud-deployment-design.md#positioning).
 
-**Sandbox:** Not supported. These platforms manage their own execution environments and do not provide a Docker socket.
+**Status:** Both platform sections are **pattern only**. They describe the
+adapter and layout contract; they are not managed-platform CI deployments.
+
+**Sandbox:** These platforms provide no Docker socket. Disable sandbox unless a
+separately hosted compute-only sandbox is explicitly appropriate; it cannot
+mount the adapter's workspace or skills paths.
 
 ---
 
@@ -45,7 +50,8 @@ The adapter is thin — it does not contain agent logic. All agent logic lives i
 pip install "monkeybot[gemini,postgres,gcs]"
 ```
 
-No `[sandbox]` extra needed. Use only the storage extras appropriate for your platform (GCS for GCP, S3/postgres for AWS).
+No sandbox package setup is needed. Use only the storage extras appropriate for
+your platform (GCS for GCP, S3/postgres for AWS).
 
 ---
 
@@ -93,7 +99,7 @@ async def _run_turn(event):
         request_id=event.get("request_id", "req-1"),
         agent_md_path=Path(os.environ["AGENT_MD_PATH"]),
         skills_path=Path(os.environ["SKILLS_PATH"]),
-        workspace_root=Path(os.environ["WORKSPACE_ROOT"]),
+        workspace_root=Path(os.environ["MONKEYBOT_WORKSPACE_ROOT"]),
     )
 ```
 
@@ -106,10 +112,17 @@ DB_URL             = postgresql://user:pass@rds-proxy:5432/monkeybot?sslmode=req
 MEMORY_STORAGE_URI = s3://my-bucket/monkeybot-memory
 AGENT_MD_PATH      = /app/monkeybot_config/AGENT.md
 SKILLS_PATH        = /app/skills
-WORKSPACE_ROOT     = /app
+MONKEYBOT_WORKSPACE_ROOT = /agent/workspace
 MODEL_PROVIDER     = aws_bedrock
 MODEL_NAME         = (your Bedrock model id)
 ```
+
+**Layout:** Package `monkeybot_config/` and `skills/` with the handler bundle as
+read-only inputs. AgentCore workspace is ephemeral unless you explicitly use
+[AgentCore filesystem mounts](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-filesystem-configurations.html).
+Use `DB_URL` and `MEMORY_STORAGE_URI` for durable state. Browser automation on
+this target should use Browser Use Cloud; local Chromium and shared sandbox
+mounts are not portable to this runtime.
 
 **Session continuity:** AgentCore manages session routing externally. The `sessionId` it provides maps directly to monkeybot's `session_id` — history and memory are keyed on it. You do not need to implement session management yourself.
 
@@ -117,7 +130,10 @@ MODEL_NAME         = (your Bedrock model id)
 
 ### GCP Vertex AI Agent Engine
 
-Vertex AI Agent Engine manages session routing and invokes your handler via its custom agent framework. You register a Python callable that the platform wraps.
+Vertex AI Agent Engine manages session routing and invokes your handler via its
+custom agent framework. You register a Python callable that the platform wraps.
+Package the agent as a source artifact: this is not a container-image or
+filesystem-mount deployment model.
 
 **IAM — service account roles:**
 
@@ -204,6 +220,6 @@ remote_app.query(
 
 **Session continuity:** Agent Engine provides the `session_id`. monkeybot uses it as the history and memory key — no additional session management is needed in your adapter.
 
-**Environment variables:** Set these on the reasoning engine at creation time via `env_vars` in the SDK, or read them from Secret Manager at cold start using the service account's credentials.
+**Environment variables:** Set these on the reasoning engine at creation time via `env_vars` in the SDK, or read them from Secret Manager at cold start using the service account's credentials. Treat the local workspace as ephemeral temporary storage and use URI-backed data services for durable state. Browser automation uses Browser Use Cloud; sandbox execution is disabled or remote compute-only.
 
 **Note:** The Vertex AI Agent Engine (formerly Reasoning Engine) API surface is evolving. Check the [Vertex AI Agent Engine documentation](https://cloud.google.com/vertex-ai/generative-ai/docs/agent-engine/overview) for the current callable registration contract before deploying to production.

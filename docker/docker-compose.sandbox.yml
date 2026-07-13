@@ -14,8 +14,9 @@
 #
 # This file overlays only what changes from docker-compose.yml:
 #   - Adds the opensandbox-server sidecar
-#   - Rebuilds monkeybot with [sandbox] extra
 #   - Sets workspace to /tmp/monkeybot-workspace (host-accessible path)
+#   - Copies trusted skills to a second host-accessible path for a read-only
+#     sandbox mount (the demo image itself still owns /app/skills)
 #   - Enables sandbox and points it at the sidecar
 
 services:
@@ -29,21 +30,20 @@ services:
     restart: unless-stopped
 
   monkeybot:
-    build:
-      args:
-        EXTRAS: "gemini,sandbox"
     environment:
       - SANDBOX_ENABLED=true
       - SANDBOX_SERVER_URL=http://opensandbox-server:8080
       - MONKEYBOT_WORKSPACE_ROOT=/tmp/monkeybot-workspace
-      - SKILLS_PATH=/tmp/monkeybot-workspace/skills
-      - DB_URL=sqlite:////tmp/monkeybot-workspace/data/monkeybot.db
-      - MEMORY_STORAGE_URI=local:///tmp/monkeybot-workspace/data/memory
+      - SKILLS_PATH=/tmp/monkeybot-skills
+      - DB_URL=sqlite:////tmp/monkeybot-data/monkeybot.db
+      - MEMORY_STORAGE_URI=local:///tmp/monkeybot-data/memory
     volumes:
       - /tmp/monkeybot-workspace:/tmp/monkeybot-workspace
+      - /tmp/monkeybot-skills:/tmp/monkeybot-skills
+      - /tmp/monkeybot-data:/tmp/monkeybot-data
     command: >
-      sh -c "mkdir -p /tmp/monkeybot-workspace/skills /tmp/monkeybot-workspace/data/memory &&
-             cp -rn /app/skills/. /tmp/monkeybot-workspace/skills/ 2>/dev/null || true &&
+      sh -c "mkdir -p /tmp/monkeybot-workspace /tmp/monkeybot-skills /tmp/monkeybot-data/memory &&
+             cp -rn /app/skills/. /tmp/monkeybot-skills/ 2>/dev/null || true &&
              python -m monkeybot.gateway.main"
     depends_on:
       - opensandbox-server

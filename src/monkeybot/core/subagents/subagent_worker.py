@@ -11,8 +11,6 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, cast
 
-from dotenv import load_dotenv
-
 from monkeybot.core.config.settings import (
     auto_schema_enabled_from_config,
     get_provider_config,
@@ -20,6 +18,7 @@ from monkeybot.core.config.settings import (
     subagent_vertex_google_search_from_config,
 )
 from monkeybot.core.context import TurnContext, build_context
+from monkeybot.core.layout import AgentLayout, bootstrap_agent_layout
 from monkeybot.core.llm.provider import (
     Done,
     Provider,
@@ -35,7 +34,6 @@ from monkeybot.core.runtime.events import AgentEvent, Error, event_to_json
 from monkeybot.core.runtime.loop import run as run_loop
 from monkeybot.core.subagents.subagent_proto import (
     SubagentEnvelope,
-    normalize_sqlite_db_url,
     resolve_agent_project_root,
     resolve_project_path,
     resolve_subagent_agent_md_path,
@@ -231,15 +229,12 @@ async def _async_main() -> None:
         print(event_to_json(Error(request_id="", error="subagent_worker: empty stdin")), flush=True)
         raise SystemExit(1)
 
+    bootstrap_agent_layout()
     envelope = SubagentEnvelope.from_json(raw)
     attach_token: object | None = _attach_trace_from_envelope(envelope)
     reset_token: object | None = None
 
     agent_root = resolve_agent_project_root()
-    dotenv_path = agent_root / ".env"
-    if dotenv_path.is_file():
-        load_dotenv(dotenv_path)
-
     ws = Path(os.environ["MONKEYBOT_SUBAGENT_WORKSPACE"]).resolve()
     os.chdir(ws)
 
@@ -256,9 +251,7 @@ async def _async_main() -> None:
             "AGENT.md", agent_root
         )
 
-    db_url = normalize_sqlite_db_url(
-        os.environ.get("DB_URL", "sqlite:///data/monkeybot.db"), agent_root
-    )
+    db_url = AgentLayout.from_environment(agent_root=agent_root).db_url
     backend = create_storage_backend(db_url)
     mcp: MCPClient | None = None
     executor: CoreToolExecutor | None = None

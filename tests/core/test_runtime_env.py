@@ -130,7 +130,7 @@ def test_paths_workspace_root_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     )
     monkeypatch.delenv("MONKEYBOT_WORKSPACE_ROOT", raising=False)
     runtime_env.apply_monkeybot_runtime_env()
-    assert os.environ.get("MONKEYBOT_WORKSPACE_ROOT") == "./agent-ws"
+    assert os.environ.get("MONKEYBOT_WORKSPACE_ROOT") == str((tmp_path / "agent-ws").resolve())
 
 
 def test_model_summarization_model_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -172,7 +172,7 @@ def test_legacy_memory_path_still_sets_memory_path_env(
     monkeypatch.delenv("MEMORY_PATH", raising=False)
     monkeypatch.delenv("MEMORY_STORAGE_URI", raising=False)
     runtime_env.apply_monkeybot_runtime_env()
-    assert os.environ.get("MEMORY_PATH") == "./legacy/mem"
+    assert os.environ.get("MEMORY_PATH") == str((tmp_path / "legacy" / "mem").resolve())
     assert os.environ.get("MEMORY_STORAGE_URI") is None
 
 

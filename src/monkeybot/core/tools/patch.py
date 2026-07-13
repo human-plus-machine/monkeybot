@@ -326,13 +326,13 @@ def _plan_ops(workspace: WorkspaceFileService, hunks: list[Hunk]) -> list[_Plann
     planned: list[_PlannedOp] = []
     for hunk in hunks:
         if isinstance(hunk, AddHunk):
-            workspace.resolve_workspace_path(hunk.path)
+            workspace.require_writable_path(hunk.path)
             content = hunk.contents
             if content and not content.endswith("\n"):
                 content = content + "\n"
             planned.append(_PlannedOp(action="add", path=hunk.path, content=content))
         elif isinstance(hunk, DeleteHunk):
-            fp = workspace.resolve_workspace_path(hunk.path)
+            fp = workspace.require_writable_path(hunk.path)
             if not fp.is_file():
                 raise PatchError(
                     f"apply_patch verification failed: Failed to read file to delete: {hunk.path}",
@@ -343,14 +343,14 @@ def _plan_ops(workspace: WorkspaceFileService, hunks: list[Hunk]) -> list[_Plann
                 _PlannedOp(action="delete", path=hunk.path, old_content=old)
             )
         else:
-            fp = workspace.resolve_workspace_path(hunk.path)
+            fp = workspace.require_writable_path(hunk.path)
             if not fp.is_file():
                 raise PatchError(
                     f"apply_patch verification failed: Failed to read file to update: {hunk.path}",
                     code="not_found",
                 )
             if hunk.move_path:
-                workspace.resolve_workspace_path(hunk.move_path)
+                workspace.require_writable_path(hunk.move_path)
             old = fp.read_text(encoding="utf-8", errors="replace")
             new_content = derive_new_contents(hunk.path, hunk.chunks, old)
             if hunk.move_path:

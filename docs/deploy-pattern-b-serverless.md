@@ -1,12 +1,20 @@
 # Pattern B — FaaS / Serverless Deployment
 
-Import `monkeybot.core` directly in your own handler. No FastAPI, no SSE, no long-lived process. You wire storage and workspace backends, call `run_loop()`, collect events, and return them in whatever format the platform expects.
+Import `monkeybot.core` directly in your own handler. No FastAPI, no SSE, no
+long-lived process. Initialize the agent layout at cold start, wire storage and
+workspace backends, call `run_loop()`, collect events, and return them in
+whatever format the platform expects.
 
 **Targets covered:** AWS Lambda · GCP Cloud Functions · Azure Functions · Cloudflare Workers
 
 **Guide depth:** Examples below often use **GCP Cloud Functions** or **AWS Lambda** first; the harness-as-library pattern is identical — inject your storage/workspace backends and return events in your platform's response shape. See [Positioning](cloud-deployment-design.md#positioning).
 
-**Sandbox:** Not supported on any FaaS platform. Functions have no Docker socket and hard execution time limits. Disable sandbox (`SANDBOX_ENABLED=false` or omit it).
+**Status:** This is a **pattern-only** deployment guide; no managed FaaS target
+is exercised in MonkeyBot CI.
+
+**Sandbox:** Not supported on FaaS platforms. Functions have no Docker socket
+and hard execution time limits. Disable sandbox (`SANDBOX_ENABLED=false` or omit
+it).
 
 ---
 
@@ -38,7 +46,7 @@ async def _cold_start():
     await _backend.open()
     _workspace = create_workspace_storage(os.environ["MEMORY_STORAGE_URI"])
     _mcp = MCPClient()
-    await _mcp.load_from_config(os.environ.get("MCP_CONFIG_PATH"))
+    await _mcp.load_from_config(os.environ.get("MCP_CONFIG"))
     _provider = GeminiProvider()
 
 asyncio.get_event_loop().run_until_complete(_cold_start())
@@ -81,6 +89,20 @@ async def handle(session_id, message):
 ```
 
 Opening and closing per invocation adds ~20–50 ms of latency and connection churn. Prefer Postgres connection poolers (RDS Proxy, Cloud SQL Proxy, PgBouncer) when running in this mode.
+
+## Agent layout in a function
+
+Package `monkeybot_config/` and `skills/` with the function artifact as
+read-only files. Use the agent root to resolve YAML paths; never rely on the
+function's working directory. `workspace/` is ephemeral, so use an absolute
+`MONKEYBOT_WORKSPACE_ROOT` only when the platform gives you a suitable temporary
+location. Durable history and memory must use `DB_URL` and
+`MEMORY_STORAGE_URI`.
+
+The static browser skill can be packaged with the artifact, but browser
+playbooks are workspace cache data. For an ephemeral function, use Browser Use
+Cloud only when its network and request-lifetime constraints fit the function;
+this remains a deployment pattern, not a tested FaaS configuration.
 
 ---
 

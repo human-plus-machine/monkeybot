@@ -1,7 +1,9 @@
 """Load ``monkeybot_config/monkeybot.yaml`` into ``os.environ`` for unset keys only.
 
 Precedence: existing process environment (including ``.env`` via dotenv) wins.
-Discovery: ``MONKEYBOT_CONFIG`` if set, else ``<cwd>/monkeybot_config/monkeybot.yaml``.
+Discovery: ``MONKEYBOT_CONFIG`` if set, else the nearest parent directory with
+``monkeybot_config/monkeybot.yaml``. Relative ``paths.*`` values are anchored
+at the agent root, never the process working directory.
 Optional ``includes``: list of paths relative to the primary config file's directory.
 """
 
@@ -81,6 +83,7 @@ ENV_MAP: dict[tuple[str, str], str] = {
     ("sandbox", "server_url"): "SANDBOX_SERVER_URL",
     ("sandbox", "image"): "SANDBOX_IMAGE",
     ("sandbox", "ttl_seconds"): "SANDBOX_TTL_SECONDS",
+    ("sandbox", "shared_filesystem"): "SANDBOX_SHARED_FILESYSTEM",
     ("fake_provider", "events_json"): "MONKEYBOT_FAKE_PROVIDER_EVENTS",
     ("emission", "style"): "MONKEYBOT_EMISSION_STYLE",
     ("runtime", "transcript_enabled"): "MONKEYBOT_TRANSCRIPT_ENABLED",
@@ -171,18 +174,22 @@ def _flatten_config(data: Mapping[str, Any]) -> dict[str, str]:
     return out
 
 
-def _resolve_config_path() -> Path | None:
+def _resolve_config_path(*, agent_root: Path | None = None) -> Path | None:
     explicit = os.environ.get("MONKEYBOT_CONFIG", "").strip()
     if explicit:
         p = Path(explicit).expanduser()
+        if not p.is_absolute() and agent_root is not None:
+            p = agent_root / p
         if p.is_file():
             return p.resolve()
         logger.warning("MONKEYBOT_CONFIG is set but not a file: %s", p)
         return None
-    default = Path.cwd() / "monkeybot_config" / "monkeybot.yaml"
-    if default.is_file():
-        return default.resolve()
-    return None
+    if agent_root is None:
+        from monkeybot.core.layout import resolve_agent_root
+
+        agent_root = resolve_agent_root()
+    default = agent_root / "monkeybot_config" / "monkeybot.yaml"
+    return default.resolve() if default.is_file() else None
 
 
 def _load_yaml_file(path: Path) -> dict[str, Any]:
@@ -222,13 +229,15 @@ def _merge_with_includes(primary_path: Path, root: dict[str, Any]) -> dict[str, 
     return merged
 
 
-def apply_monkeybot_runtime_env() -> Path | None:
+def apply_monkeybot_runtime_env(
+    *, config_path: Path | None = None, agent_root: Path | None = None
+) -> Path | None:
     """Apply YAML-backed defaults to ``os.environ`` (unset keys only). Safe to call twice."""
     global _RUNTIME_ENV_APPLIED
     if _RUNTIME_ENV_APPLIED:
         return None
 
-    path = _resolve_config_path()
+    path = config_path or _resolve_config_path(agent_root=agent_root)
     if path is None:
         _RUNTIME_ENV_APPLIED = True
         logger.debug(
@@ -247,7 +256,11 @@ def apply_monkeybot_runtime_env() -> Path | None:
     _RUNTIME_ENV_APPLIED = True
     google_cloud_project = (os.environ.get("GOOGLE_CLOUD_PROJECT") or "").strip()
     for env_key, env_val in flat.items():
-        if env_key in os.environ:
+        # WORKSPACE_ROOT remains a supported legacy process override.  Do not
+        # let a YAML default materialize MONKEYBOT_WORKSPACE_ROOT ahead of it.
+        if env_key in os.environ or (
+            env_key == "MONKEYBOT_WORKSPACE_ROOT" and os.environ.get("WORKSPACE_ROOT")
+        ):
             continue
         if env_key in _GCP_PROJECT_ENV_KEYS and google_cloud_project:
             os.environ[env_key] = google_cloud_project
@@ -255,6 +268,27 @@ def apply_monkeybot_runtime_env() -> Path | None:
                 "Set from GOOGLE_CLOUD_PROJECT: %s=%s", env_key, google_cloud_project
             )
             continue
+        if env_key in {
+            "AGENT_MD",
+            "MEMORY_PATH",
+            "SKILLS_PATH",
+            "MCP_CONFIG",
+            "COMMAND_ALLOWLIST_CONFIG",
+            "PERMISSION_CONFIG",
+            "MONKEYBOT_WORKSPACE_ROOT",
+        }:
+            from monkeybot.core.layout import resolve_agent_path
+
+            anchor = agent_root or path.parent.parent
+            env_val = str(resolve_agent_path(env_val, anchor))
+        elif env_key == "DB_URL":
+            from monkeybot.core.layout import resolve_sqlite_url
+
+            env_val = resolve_sqlite_url(env_val, agent_root or path.parent.parent)
+        elif env_key == "MEMORY_STORAGE_URI":
+            from monkeybot.core.layout import resolve_memory_storage_uri
+
+            env_val = resolve_memory_storage_uri(env_val, agent_root or path.parent.parent)
         os.environ[env_key] = env_val
         logger.debug("Set from monkeybot.yaml: %s=%s", env_key, env_val)
 

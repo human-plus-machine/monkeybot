@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from monkeybot.gateway.realtime.app import create_realtime_app
+from fastapi import FastAPI
+
 from monkeybot.gateway.realtime.deps import RealtimeDependencies
 from monkeybot.gateway.realtime.errors import RealtimeError
 from monkeybot.gateway.realtime.guardrails import run_guardrails
@@ -15,6 +16,18 @@ from monkeybot.gateway.realtime.wire import (
     encode_server_frame,
     parse_client_frame,
 )
+
+
+def create_realtime_app(*args: object, **kwargs: object) -> FastAPI:
+    """Construct the realtime app without bootstrapping on package import.
+
+    CLI parser construction imports realtime wire helpers. Keeping the app
+    import lazy ensures a later ``--cwd`` or ``--config`` still selects the
+    target agent rather than the CLI launch directory.
+    """
+    from monkeybot.gateway.realtime.app import create_realtime_app as factory
+
+    return factory(*args, **kwargs)
 
 __all__ = [
     "RealtimeConnectionState",

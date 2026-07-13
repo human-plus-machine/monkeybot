@@ -31,6 +31,7 @@ from monkeybot.core.llm.realtime_provider import (
 )
 from monkeybot.core.llm.realtime_provider import RealtimeError as ProviderError
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.layout import AgentLayout
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.runtime.events import ActionRequiredEvent
 from monkeybot.core.runtime.events import Error as AgentError
@@ -39,8 +40,6 @@ from monkeybot.core.runtime.realtime_loop import run_realtime_turn
 from monkeybot.core.runtime.utterance_buffer import UtteranceBuffer
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.types.content_blocks import Text
-from monkeybot.gateway.sse.workspace_layout import resolve_agent_workspace_root
-
 from .deps import RealtimeDependencies
 from .errors import (
     AudioFormatError,
@@ -103,11 +102,8 @@ def _pending_response_timeout_sec() -> float:
 
 
 def _resolved_workspace_paths() -> tuple[Path, Path]:
-    root = resolve_agent_workspace_root()
-    cwd = Path.cwd().resolve()
-    skills = Path(os.environ.get("SKILLS_PATH", "skills"))
-    skills_p = skills.resolve() if skills.is_absolute() else (cwd / skills).resolve()
-    return root, skills_p
+    layout = AgentLayout.from_environment()
+    return layout.workspace_root, layout.skills_path
 
 
 async def _build_realtime_context(
@@ -118,9 +114,7 @@ async def _build_realtime_context(
     if deps.mcp is None:
         raise RuntimeError("MCP client is not initialized")
     workspace_root, skills_path = _resolved_workspace_paths()
-    agent_path = Path(os.environ.get("AGENT_MD", "monkeybot_config/AGENT.md"))
-    if not agent_path.is_absolute():
-        agent_path = Path.cwd().resolve() / agent_path
+    agent_path = AgentLayout.from_environment().agent_md_path
     model = os.environ.get("MODEL_NAME", "gemini-2.5-flash")
     return await build_context(
         thread_id=session_id,

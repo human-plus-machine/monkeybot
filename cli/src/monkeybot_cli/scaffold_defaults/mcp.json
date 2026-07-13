@@ -30,18 +30,15 @@
       }
     },
     "browser": {
-      "command": "uv",
+      "enabled": false,
+      "command": "${MONKEYBOT_PYTHON}",
       "args": [
-        "run",
-        "--project",
-        "/path/to/monkeybot/integrations/browser-mcp",
-        "python",
         "-m",
         "browser_mcp.server"
       ],
       "env": {
         "BU_NAME": "monkeybot",
-        "BROWSER_MCP_PLAYBOOKS_DIR": "./workspace/skills/browser/playbooks",
+        "BROWSER_MCP_PLAYBOOKS_DIR": "${MONKEYBOT_WORKSPACE_ROOT}/browser/playbooks",
         "BROWSER_MCP_SCREENSHOTS_DIR": "${MONKEYBOT_WORKSPACE_ROOT}/browser/Screenshots"
       }
     }

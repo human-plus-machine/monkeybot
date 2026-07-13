@@ -14,7 +14,8 @@ Generate images using **Vertex AI** Gemini image models (default: `gemini-3-pro-
 
 ## How to run
 
-Shell commands start in **workspace root**. Use workspace-relative paths only.
+Shell commands start in **workspace root**. The trusted generator script is in
+the separate read-only `SKILLS_PATH`; generated output remains workspace-relative.
 
 1. Confirm `list_skills` includes `image-generator`.
 2. Run the generator with `run_command` and `argv`:
@@ -22,12 +23,9 @@ Shell commands start in **workspace root**. Use workspace-relative paths only.
 ```json
 {
   "argv": [
-    "python3",
-    "./skills/image-generator/generate_image.py",
-    "--prompt",
-    "A minimalist logo of a monkey astronaut, flat vector style",
-    "--aspect-ratio",
-    "16:9"
+    "bash",
+    "-c",
+    "python3 \"$SKILLS_PATH/image-generator/generate_image.py\" --prompt \"A minimalist logo of a monkey astronaut, flat vector style\" --aspect-ratio 16:9"
   ],
   "timeout": 180
 }

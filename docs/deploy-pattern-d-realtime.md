@@ -11,6 +11,11 @@ Realtime is a **parallel control path** to turn-based `loop.run()` (duplex trans
 
 **Targets covered:** GCP Cloud Run / GKE / GCE · AWS ECS / EKS / EC2 · Azure Container Apps / AKS / Azure VM · Vertex AI Agent Engine · Amazon Bedrock AgentCore (WebSocket) · self-hosted container
 
+**Status:** Realtime behavior has automated coverage; generated Docker/Compose
+configuration is validated but not a completed local container run. Managed-cloud
+and agent-platform variants in this guide are **pattern only**. They inherit the
+same agent-root layout and remote-sandbox constraints as [Pattern A](deploy-pattern-a-container.md).
+
 ---
 
 ## 1. Required Configuration
@@ -63,9 +68,10 @@ model:
 | `GEMINI_API_KEY` | Yes (Google AI Studio) | — | API key when using `google_genai`. |
 | `VERTEX_AI_PROJECT_ID` | Yes (Vertex) | — | GCP project for Vertex AI. |
 | `VERTEX_AI_LOCATION` | No | `us-central1` | Vertex region. |
-| `DB_URL` | No | `sqlite:////app/data/monkeybot.db` | Storage backend. Postgres or Firestore recommended for production. |
-| `MEMORY_STORAGE_URI` | No | `local:///app/data/memory` | Workspace/memory backend. GCS/S3 for multi-instance. |
-| `MCP_CONFIG` | No | `/app/monkeybot_config/mcp.json` | Path to MCP server config. |
+| `DB_URL` | No | `sqlite:///data/monkeybot.db` | Storage backend. Postgres or Firestore recommended for production. |
+| `MEMORY_STORAGE_URI` | No | `local://./data/memory` | Durable memory backend. GCS/S3 for multi-instance. |
+| `MCP_CONFIG` | No | `./monkeybot_config/mcp.json` | MCP server config, resolved from the agent root. |
+| `MONKEYBOT_WORKSPACE_ROOT` | No | layout's `workspace/` | Absolute workspace override for a platform mount. |
 | `LOG_LEVEL` | No | `info` | Logging verbosity. |
 | `PORT` / `GATEWAY_PORT` | No | `8000` | Port the gateway listens on. |
 | `GRACEFUL_SHUTDOWN_TIMEOUT_SEC` | No | `5` | Seconds to wait for open connections during shutdown. |
@@ -80,8 +86,8 @@ Realtime needs the `realtime` base extra plus a vendor-specific extra. For Gemin
 # local development
 pip install -e ".[realtime-gemini]"
 
-# production container build (see Dockerfile example below)
-# EXTRAS=realtime-gemini,postgres,gcs
+# agent project: add monkeybot realtime/storage extras to pyproject.toml,
+# then run uv lock before building its Dockerfile.
 ```
 
 `realtime` includes `websockets`. `realtime-gemini` includes `realtime` + `google-genai`.
@@ -106,7 +112,7 @@ uv tool install monkeybot-cli
 ## 4. Run Locally
 
 ```bash
-# Ensure monkeybot.yaml is configured for realtime mode
+# Run from an agent root whose monkeybot_config/monkeybot.yaml enables realtime.
 
 # Google AI Studio (gemini-3.1-flash-live-preview)
 export MODEL_PROVIDER=google_genai
@@ -166,11 +172,9 @@ The same process also serves the existing SSE routes (`POST /sessions`, `POST /r
 ## 5. Build and Deploy the Container
 
 ```bash
-# Base realtime image with Gemini Live
-docker build -f docker/Dockerfile --build-arg EXTRAS=realtime-gemini -t monkeybot:realtime .
-
-# With managed Postgres and GCS memory
-docker build -f docker/Dockerfile --build-arg EXTRAS=realtime-gemini,postgres,gcs -t monkeybot:realtime .
+# The generated agent Dockerfile installs the locked agent dependencies.
+uv lock
+docker build -t my-agent:realtime .
 ```
 
 Override the container command to start the realtime entrypoint:
@@ -181,12 +185,13 @@ docker run -p 8000:8000 \
   -e VERTEX_AI_PROJECT_ID=your-project \
   -e DB_URL=postgresql://... \
   -e MEMORY_STORAGE_URI=gcs://your-bucket/monkeybot-memory \
-  -e harness__mode=realtime \
-  monkeybot:realtime \
+  my-agent:realtime \
   python -m monkeybot.gateway.realtime_main
 ```
 
-**Note:** The Dockerfile's default `CMD` is `python -m monkeybot.gateway.main` (SSE-only). For realtime deployments, override the command to `python -m monkeybot.gateway.realtime_main`.
+**Note:** The generated Dockerfile's default `CMD` starts the SSE gateway. For
+realtime deployments, set `harness.mode: realtime` in `monkeybot.yaml` and
+override it with `python -m monkeybot.gateway.realtime_main`.
 
 ---
 

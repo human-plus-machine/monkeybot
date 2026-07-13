@@ -13,7 +13,7 @@ class PlaybookError(ValueError):
 
 
 def playbooks_dir() -> Path:
-    """Resolve playbooks root from BROWSER_MCP_PLAYBOOKS_DIR or a package-local default."""
+    """Resolve playbooks root from env or the agent's writable workspace."""
     raw = os.environ.get("BROWSER_MCP_PLAYBOOKS_DIR", "").strip()
     if raw:
         p = Path(raw).expanduser()
@@ -22,7 +22,9 @@ def playbooks_dir() -> Path:
         else:
             p = p.resolve()
         return p
-    return (Path(__file__).resolve().parent / "playbooks").resolve()
+    workspace = os.environ.get("MONKEYBOT_WORKSPACE_ROOT") or os.environ.get("WORKSPACE_ROOT")
+    root = Path(workspace).expanduser() if workspace else Path.cwd() / "workspace"
+    return (root / "browser" / "playbooks").resolve()
 
 
 def host_slug(host_or_url: str) -> str:

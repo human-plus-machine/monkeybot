@@ -1,25 +1,37 @@
 # Pattern A — Managed Container Deployment
 
-Run monkeybot as a long-lived container process. The FastAPI SSE gateway handles sessions, streaming, and the agent loop. Storage and memory backends are selected via env vars. Sandbox (OpenSandbox) runs as a sidecar or as a separate service in the same private network.
+Run MonkeyBot as a long-lived container process. The FastAPI SSE gateway handles
+sessions, streaming, and the agent loop. Build the agent project's generated
+`Dockerfile`, which bakes its read-only config and skills into the image. Use
+managed backends for state on cloud targets.
 
 **Targets covered:** GCP Cloud Run · GKE · GCE (VM) · AWS ECS · EKS · EC2 (VM) · Azure Container Apps · AKS · Azure VM · NVIDIA / other container hosts
 
-**Guide depth:** Per-target sections below **lead with GCP** (the most exercised production path). AWS and Azure subsections use the **same environment variables** — substitute RDS/S3 or your platform's managed Postgres and object store. See [Positioning](cloud-deployment-design.md#positioning).
+**Status:** Local CLI has been tested against the generated agent and local
+Docker/Compose configuration has been validated. Cloud Run, ECS/Fargate,
+Container Apps, Kubernetes, and VM instructions below are **pattern only**;
+validate them in your account before production use. See the [deployment
+matrix](agent-layout.md#deployment-matrix).
 
 ---
 
 ## 1. Environment Variables
 
-Set these in your platform's secret/env management. Values shown are the defaults baked into `monkeybot_config/monkeybot.yaml`; set them explicitly when deploying to override the baked-in config.
+Set these in your platform's secret/env management. Relative YAML values resolve
+from the agent root. Use absolute override values only when the platform mounts a
+zone somewhere else.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `GEMINI_API_KEY` | Yes (Gemini) | — | LLM provider key. Swap for `VERTEX_AI_PROJECT_ID` when using Vertex. |
-| `DB_URL` | No | `sqlite:////app/data/monkeybot.db` | Storage backend. Use `postgresql://user:pass@host:5432/db` for managed Postgres or `firestore://PROJECT/(default)` for Firestore (`pip install 'monkeybot[firestore]'`). |
-| `MEMORY_STORAGE_URI` | No | `local:///app/data/memory` | Workspace/memory backend. Use `gcs://bucket/prefix` or `s3://bucket/prefix` for cloud object storage. |
+| `DB_URL` | No | `sqlite:///data/monkeybot.db` | Storage backend. Use `postgresql://user:pass@host:5432/db` for managed Postgres or `firestore://PROJECT/(default)` for Firestore. |
+| `MEMORY_STORAGE_URI` | No | `local://./data/memory` | Durable memory backend. Use `gcs://bucket/prefix` or `s3://bucket/prefix` for cloud object storage. |
+| `MONKEYBOT_WORKSPACE_ROOT` | No | layout's `workspace/` | Absolute workspace override for a container or platform mount. |
 | `SANDBOX_ENABLED` | No | `false` | Set `true` to enable the OpenSandbox code-execution environment. |
 | `SANDBOX_SERVER_URL` | If sandbox enabled | — | URL of the OpenSandbox server (e.g. `http://localhost:8080` for a sidecar, or a private IP for a VPC-separated service). |
-| `SANDBOX_AUTH_TOKEN` | No | — | Bearer token forwarded to OpenSandbox as `Authorization: Bearer <token>`. Only needed when OpenSandbox is outside the private network. |
+| `SANDBOX_IMAGE` | No | published MonkeyBot sandbox tag | Override the bundled sandbox execution image. |
+| `SANDBOX_API_KEY` | No | — | Canonical API key supplied to OpenSandbox when the server requires one. `SANDBOX_AUTH_TOKEN` is accepted as a compatibility alias. |
+| `SANDBOX_SHARED_FILESYSTEM` | No | `true` | Set `false` for a remote sandbox; it then runs compute-only with no workspace or skills mounts. |
 
 **Managed Postgres (SSL):** Cloud SQL, RDS, and Azure Database for PostgreSQL require TLS. Append the SSL parameter your provider documents to `DB_URL`:
 
@@ -37,32 +49,27 @@ monkeybot passes the URL through to asyncpg unchanged after normalizing `postgre
 
 ## 2. Build the Image
 
+From the agent root:
+
 ```bash
-# Default — Gemini provider, SQLite + local FS (no cloud SDKs)
-docker build -f docker/Dockerfile -t monkeybot:latest .
+# Lock the dependencies declared by this agent, then build its generated image.
+uv lock
+docker build -t my-agent:latest .
 
-# Gemini + GCS memory
-docker build -f docker/Dockerfile --build-arg EXTRAS=gemini,gcs -t monkeybot:latest .
-
-# Gemini + Postgres storage
-docker build -f docker/Dockerfile --build-arg EXTRAS=gemini,postgres -t monkeybot:latest .
-
-# Vertex AI + GCS memory + Postgres storage (typical managed GCP stack)
-docker build -f docker/Dockerfile --build-arg EXTRAS=vertex,gcs,postgres -t monkeybot:latest .
-
-# Bedrock + S3 memory + Postgres storage (typical managed AWS stack)
-docker build -f docker/Dockerfile --build-arg EXTRAS=bedrock,aws,postgres -t monkeybot:latest .
-
-# Add sandbox support to any of the above
-docker build -f docker/Dockerfile --build-arg EXTRAS=gemini,gcs,postgres,sandbox -t monkeybot:latest .
+# Include Chromium for self-hosted headless browser MCP.
+docker build --build-arg INSTALL_CHROMIUM=1 -t my-agent:browser .
 ```
 
-`EXTRAS` maps directly to pip install extras defined in `pyproject.toml`. Only install what you use — the base image has zero cloud-provider SDKs.
+Add provider, storage, or realtime extras to the agent's `pyproject.toml` before
+running `uv lock`. The image installs the lockfile's dependencies; it does not
+install the agent project as a Python package. A missing `uv.lock` fails the
+build deliberately. The repository `docker/Dockerfile` is a MonkeyBot CI/demo
+image, not the build recipe for a generated agent.
 
 Push to your registry before deploying:
 
 ```bash
-docker tag monkeybot:latest <registry>/<image>:<tag>
+docker tag my-agent:latest <registry>/<image>:<tag>
 docker push <registry>/<image>:<tag>
 ```
 
@@ -70,7 +77,7 @@ docker push <registry>/<image>:<tag>
 
 ## 3. Connect a Managed Postgres Database
 
-1. Install the `[postgres]` extra at build time (`EXTRAS=...,postgres`).
+1. Add the `[postgres]` extra to the agent's `pyproject.toml`, then update `uv.lock`.
 2. Set `DB_URL` to a `postgresql://` connection string pointing at your managed instance.
 3. By default monkeybot applies the schema on startup (`paths.auto_schema: true` in monkeybot.yaml). For DML-only runtime users, pre-create the schema via your migration tool and set `paths.auto_schema: false`.
 4. The gateway opens the connection pool once at startup and closes it on shutdown.
@@ -95,21 +102,44 @@ The factory (`create_workspace_storage`) reads the URI scheme and returns the ri
 
 ---
 
-## 5. OpenSandbox Deployment
+## 5. OpenSandbox deployment
 
-OpenSandbox always runs as a separate service. monkeybot connects to it via `SANDBOX_SERVER_URL`. Where OpenSandbox runs is an infrastructure decision, not a monkeybot config concern.
+`SANDBOX_ENABLED=true` enables the published MonkeyBot sandbox image by default.
+MonkeyBot connects to OpenSandbox through `SANDBOX_SERVER_URL`; override the
+image only when you need a custom execution environment.
 
 | Infrastructure | Where OpenSandbox runs | `SANDBOX_SERVER_URL` |
 |---|---|---|
 | Local Docker Compose | Sidecar (see `docker/docker-compose.sandbox.yml`) | `http://opensandbox-server:8080` |
 | ECS (EC2 launch type) | Sidecar container in same task definition | `http://localhost:8080` |
-| EKS / GKE | Sidecar container in same pod | `http://localhost:8080` |
-| GCE / EC2 / Azure VM | Same host, sidecar container | `http://localhost:8080` |
-| Cloud Run / ECS Fargate / Container Apps | Separate VM in same VPC | Private IP of the OpenSandbox VM |
+| EKS / GKE | Sidecar container in same pod (compute-only by default) | `http://localhost:8080` |
+| GCE / EC2 / Azure VM | Same host, sidecar container (compute-only by default) | `http://localhost:8080` |
+| Cloud Run / ECS Fargate / Container Apps | Remote VM in the VPC, compute-only | Private IP of the OpenSandbox VM |
 
-**Authentication:** Network-layer isolation (VPC / private subnet) is the default and is sufficient for most deployments. If OpenSandbox must be reachable across a network boundary, set `SANDBOX_AUTH_TOKEN` in monkeybot's env — it is forwarded as `Authorization: Bearer <token>`. Configure OpenSandbox to require the token on its end.
+**Authentication:** Network-layer isolation (VPC / private subnet) is the
+default and is sufficient for most deployments. When the OpenSandbox server
+requires a credential, set the canonical `SANDBOX_API_KEY` in MonkeyBot's
+environment and configure the same credential at the server.
 
-**Note:** OpenSandbox requires access to the Docker daemon (`/var/run/docker.sock`). Platforms with no Docker socket (Cloud Run, ECS Fargate, Container Apps) cannot run OpenSandbox as a sidecar — deploy it on a separate VM/node in the same VPC.
+**Mounted-path boundary:** OpenSandbox bind mounts work only where the sandbox
+host shares the gateway filesystem. The local Compose host-path setup is
+Compose-only. On Cloud Run, ECS Fargate, and Container Apps, a remote sandbox is
+**compute-only**: set `SANDBOX_SHARED_FILESYSTEM=false`; commands can exchange
+data via arguments, stdin, and stdout, but cannot access mounted workspace or
+skills paths. MonkeyBot returns a capability error instead of pretending those
+mounts work.
+
+A Docker socket alone does not create a shared workspace: it lets OpenSandbox
+ask the host daemon to create containers, but the agent's `/agent/workspace`
+and `/agent/skills` paths still exist only inside the gateway container. The
+GKE and VM snippets below therefore use compute-only mode. Full mounted-path
+behavior needs both zones exposed as identical, permitted host paths (the local
+Compose `/tmp` topology is the reference), which is not a portable cloud
+default.
+
+**Note:** Platforms with no Docker socket (Cloud Run, ECS Fargate, Container
+Apps) cannot run OpenSandbox as a co-located Docker-socket sidecar — deploy it
+on a separate VM/node in the VPC and use the compute-only contract.
 
 ---
 
@@ -144,9 +174,9 @@ SERVICE=monkeybot
 IMAGE=gcr.io/${PROJECT_ID}/${SERVICE}
 SA=${SERVICE}-sa@${PROJECT_ID}.iam.gserviceaccount.com
 
-# Build with Cloud Build (no local Docker needed)
-gcloud builds submit --tag ${IMAGE}:latest --project ${PROJECT_ID} \
-  --build-arg EXTRAS=vertex,gcs,postgres .
+# Build the generated agent image (its pyproject.toml and uv.lock already include
+# the required provider/storage extras).
+gcloud builds submit --tag ${IMAGE}:latest --project ${PROJECT_ID} .
 
 # Create service account (first deploy only)
 gcloud iam service-accounts create ${SERVICE}-sa \
@@ -166,7 +196,7 @@ gcloud run deploy ${SERVICE} \
   --region ${REGION} \
   --project ${PROJECT_ID} \
   --service-account ${SA} \
-  --memory 512Mi \
+  --memory 1Gi \
   --cpu 1 \
   --timeout 300 \
   --concurrency 1 \
@@ -176,7 +206,11 @@ gcloud run deploy ${SERVICE} \
   --set-env-vars DB_URL=postgresql://...,MEMORY_STORAGE_URI=gcs://...
 ```
 
-**Sandbox on Cloud Run:** Cloud Run has no Docker socket. Deploy OpenSandbox on a GCE VM or GKE node in the same VPC. Set `SANDBOX_SERVER_URL` to the private IP of that VM. Use `SANDBOX_AUTH_TOKEN` if the service is not fully isolated by firewall rules.
+**Workspace and sandbox on Cloud Run:** Cloud Run's filesystem is in memory, so
+workspace files, browser screenshots, and browser profiles count against the
+service memory limit. Use managed `DB_URL` and `MEMORY_STORAGE_URI` for durable
+state. Cloud Run has no Docker socket; a remote OpenSandbox VM is compute-only
+and cannot receive workspace or skills mounts.
 
 ---
 
@@ -205,6 +239,8 @@ containers:
         value: "true"
       - name: SANDBOX_SERVER_URL
         value: "http://localhost:8081"
+      - name: SANDBOX_SHARED_FILESYSTEM
+        value: "false"
   - name: opensandbox
     image: opensandbox/server:latest
     ports:
@@ -257,6 +293,7 @@ docker run -d \
   -p 8080:8080 \
   --link opensandbox \
   -e SANDBOX_ENABLED=true \
+  -e SANDBOX_SHARED_FILESYSTEM=false \
   -e SANDBOX_SERVER_URL=http://opensandbox:8080 \
   ...
   <registry>/monkeybot:latest
@@ -280,7 +317,10 @@ docker run -d \
 
 **Memory:** S3 bucket with `MEMORY_STORAGE_URI=s3://bucket/prefix`. Requires `[aws]` extra.
 
-**Sandbox on ECS Fargate:** Not supported (no Docker socket). Deploy OpenSandbox on an EC2 instance in the same VPC. On EC2 launch type, add OpenSandbox as a sidecar container in the task definition and set `SANDBOX_SERVER_URL=http://localhost:8080`.
+**Sandbox on ECS Fargate:** A remote OpenSandbox on EC2 is compute-only (no
+workspace or skills mounts). On ECS-EC2 launch type, a co-located
+Docker-socket sidecar can use mounted paths when it shares the required
+filesystem.
 
 **Task definition excerpt:**
 
@@ -350,7 +390,8 @@ az containerapp identity assign --name monkeybot --resource-group my-rg --system
 az keyvault set-policy --name my-vault --object-id <identity-object-id> --secret-permissions get list
 ```
 
-**Sandbox on Container Apps:** No Docker socket available. Deploy OpenSandbox on an Azure VM in the same VNet. Set `SANDBOX_SERVER_URL` to the VM's private IP.
+**Sandbox on Container Apps:** A remote OpenSandbox on an Azure VM is
+compute-only; Container Apps has no Docker socket for mounted-path execution.
 
 ---
 

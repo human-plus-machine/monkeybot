@@ -18,14 +18,19 @@ def test_run_new_creates_bundle(tmp_path: Path) -> None:
     assert (cfg / "permissions.yaml").is_file()
     assert (cfg / "AGENT.md").is_file()
     assert (cfg / "otel-collector.example.yaml").is_file()
-    assert (cfg / "env.example").is_file()
+    assert not (cfg / "env.example").exists()
     assert (tmp_path / ".env.example").is_file()
     assert (tmp_path / "data" / "memory" / "INDEX.md").is_file()
     assert (tmp_path / "skills").is_dir()
+    assert (tmp_path / "skills" / "browser" / "SKILL.md").is_file()
     assert (tmp_path / "workspace" / ".gitkeep").is_file()
-    assert (tmp_path / "scripts" / "setup-workspace.sh").is_file()
+    assert not (tmp_path / "workspace" / "skills").exists()
+    assert (tmp_path / "Dockerfile").is_file()
+    assert (tmp_path / ".dockerignore").is_file()
     pyproject = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
     assert f"monkeybot[gemini]{COMPATIBLE_CORE_RANGE}" in pyproject
+    assert '"monkeybot-browser-mcp>=0.2.0,<1"' in pyproject
+    assert "[tool.uv]\npackage = false" in pyproject
     assert "[tool.uv.sources]" not in pyproject
 
 

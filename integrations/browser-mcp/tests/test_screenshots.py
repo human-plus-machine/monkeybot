@@ -49,3 +49,43 @@ def test_allocate_screenshot_path_creates_unique_names(
     assert rel_path.startswith("./browser/Screenshots/shot-")
     assert rel_path.endswith(".png")
     assert abs_path.parent.is_dir()
+
+
+def test_env_paths_remain_stable_after_cwd_changes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "agent" / "workspace"
+    shots = workspace / "browser" / "Screenshots"
+    monkeypatch.setenv("MONKEYBOT_WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("BROWSER_MCP_SCREENSHOTS_DIR", str(shots))
+    other = tmp_path / "other"
+    other.mkdir()
+    monkeypatch.chdir(other)
+    assert screenshots.screenshots_dir() == shots.resolve()
+    assert screenshots.workspace_root() == workspace.resolve()
+
+
+def test_screenshot_retention_prunes_oldest_before_allocating(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shots = tmp_path / "workspace" / "browser" / "Screenshots"
+    shots.mkdir(parents=True)
+    for index in range(3):
+        path = shots / f"old-{index}.png"
+        path.write_bytes(b"x")
+        os.utime(path, (index + 1, index + 1))
+    monkeypatch.setenv("BROWSER_MCP_SCREENSHOTS_DIR", str(shots))
+    monkeypatch.setenv("BROWSER_MCP_SCREENSHOTS_MAX_FILES", "2")
+
+    screenshots.allocate_screenshot_path()
+    assert [path.name for path in sorted(shots.glob("old-*.png"))] == ["old-2.png"]
+
+
+def test_zero_screenshot_limits_disable_retention(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    shots = tmp_path / "workspace" / "browser" / "Screenshots"
+    shots.mkdir(parents=True)
+    (shots / "old.png").write_bytes(b"x")
+    monkeypatch.setenv("BROWSER_MCP_SCREENSHOTS_DIR", str(shots))
+    monkeypatch.setenv("BROWSER_MCP_SCREENSHOTS_MAX_FILES", "0")
+    monkeypatch.setenv("BROWSER_MCP_SCREENSHOTS_MAX_BYTES", "0")
+
+    screenshots.allocate_screenshot_path()
+    assert (shots / "old.png").is_file()

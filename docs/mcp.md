@@ -31,18 +31,12 @@ entry to remove it from the catalog.
       }
     },
     "browser": {
-      "command": "uv",
-      "args": [
-        "run",
-        "--project",
-        "/path/to/monkeybot/integrations/browser-mcp",
-        "python",
-        "-m",
-        "browser_mcp.server"
-      ],
+      "enabled": false,
+      "command": "python",
+      "args": ["-m", "browser_mcp.server"],
       "env": {
         "BU_NAME": "monkeybot",
-        "BROWSER_MCP_PLAYBOOKS_DIR": "./workspace/skills/browser/playbooks",
+        "BROWSER_MCP_PLAYBOOKS_DIR": "${MONKEYBOT_WORKSPACE_ROOT}/browser/playbooks",
         "BROWSER_MCP_SCREENSHOTS_DIR": "${MONKEYBOT_WORKSPACE_ROOT}/browser/Screenshots"
       }
     }
@@ -50,7 +44,12 @@ entry to remove it from the catalog.
 }
 ```
 
-Scaffolded agents get stdio / HTTP / OAuth / browser examples from the packaged `monkeybot_config/mcp.json` — keep only the servers you want and fix placeholder paths.
+Every scaffold includes the browser entry and the browser MCP package, but it is
+disabled by default. Set `"enabled": true` to catalogue it, then the model can
+call `enable_mcp("browser")` before using its tools. The entry uses the installed
+`browser_mcp` module rather than a path into a MonkeyBot repository. Its browser
+data paths are absolute after `MONKEYBOT_WORKSPACE_ROOT` interpolation, so they
+do not depend on the child process's current directory. See [Browser MCP](browser-mcp.md).
 
 ---
 
@@ -173,7 +172,7 @@ If startup fails under strict load, monkeybot prints a high-signal diagnostic ba
 ======================================================================
 [MCP_STARTUP_FAILURE_DIAGNOSTIC]
 ======================================================================
-Config file: /app/monkeybot_config/mcp.json
+Config file: /agent/monkeybot_config/mcp.json
 Server name: langchain-docs
 Exception:   MCPAuthError: Token endpoint returned 400 (invalid_client): Client authentication failed
 Remedy:      Verify client_id and client_secret (or Basic-auth client credentials) against your identity provider.

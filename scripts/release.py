@@ -6,7 +6,7 @@
   publish  - CI only, runs on push to `main`: tag whichever package
              versions aren't tagged yet and cut a GitHub Release per tag.
              Emits ``packages`` via ``GITHUB_OUTPUT`` (comma-separated,
-             core before cli) so the same workflow can Trusted-Publish to PyPI.
+             core, browser, then cli) so the same workflow can Trusted-Publish to PyPI.
 
 Branch protection on `main` (require PR + restrict merge to admins) is what
 actually gates the promotion - this script just does the busywork around it.
@@ -19,19 +19,23 @@ import os
 import re
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 CHANGELOG = ROOT / "CHANGELOG.md"
-# Insertion order matters: publish core before cli (cli depends on core on PyPI).
+# Insertion order matters: publish core/browser before CLI (the scaffold uses both).
 PACKAGES = {
     "core": ROOT / "pyproject.toml",
+    "browser": ROOT / "integrations" / "browser-mcp" / "pyproject.toml",
     "cli": ROOT / "cli" / "pyproject.toml",
 }
 
 
-def run(*args: str, **kw) -> str:
-    return subprocess.run(args, cwd=ROOT, check=True, text=True, capture_output=True, **kw).stdout.strip()
+def run(*args: str, **kw: Any) -> str:
+    completed = subprocess.run(args, cwd=ROOT, check=True, text=True, capture_output=True, **kw)
+    return str(completed.stdout).strip()
 
 
 def read_version(pyproject: Path) -> str:
@@ -56,8 +60,16 @@ def write_version(pyproject: Path, new_version: str) -> None:
     pyproject.write_text(text)
 
 
-def cut_changelog(version: str) -> None:
-    """Move everything under [Unreleased] into a new dated [version] section."""
+def cut_changelog(versions: Sequence[str]) -> None:
+    """Move [Unreleased] notes into dated sections for one or more packages.
+
+    A coordinated release may bump core, browser MCP, and CLI to different
+    semantic versions.  Each package still needs an exact changelog heading so
+    ``publish`` can create its tag and release independently.
+    """
+    unique_versions = tuple(dict.fromkeys(versions))
+    if not unique_versions:
+        raise SystemExit("no release versions supplied")
     text = CHANGELOG.read_text()
     today = datetime.date.today().isoformat()
     m = re.search(r"## \[Unreleased\]\n(.*?)(?=\n## \[|\Z)", text, re.S)
@@ -66,7 +78,10 @@ def cut_changelog(version: str) -> None:
     body = m.group(1).strip("\n")
     if not body:
         raise SystemExit("Unreleased section is empty - nothing to release")
-    new_section = f"## [Unreleased]\n\n## [{version}] - {today}\n\n{body}\n"
+    sections = "\n\n".join(
+        f"## [{version}] - {today}\n\n{body}" for version in unique_versions
+    )
+    new_section = f"## [Unreleased]\n\n{sections}\n"
     text = text[: m.start()] + new_section + text[m.end() :]
     CHANGELOG.write_text(text)
 
@@ -87,27 +102,41 @@ def write_github_output(key: str, value: str) -> None:
 
 
 def cmd_prepare(args: argparse.Namespace) -> None:
-    pyproject = PACKAGES[args.package]
-    old = read_version(pyproject)
-    new = bump(old, args.bump)
-    branch = f"release/{args.package}-v{new}"
+    names = list(PACKAGES) if args.package == "all" else [args.package]
+    old_versions = {name: read_version(PACKAGES[name]) for name in names}
+    new_versions = {name: bump(version, args.bump) for name, version in old_versions.items()}
+    branch = (
+        f"release/all-v{new_versions['core']}"
+        if args.package == "all"
+        else f"release/{args.package}-v{new_versions[args.package]}"
+    )
 
     # Cut on a throwaway branch, not develop directly: if the PR is closed
     # without merging, develop is untouched.
     run("git", "checkout", "-b", branch)
-    write_version(pyproject, new)
-    cut_changelog(new)
-    run("git", "add", str(pyproject), str(CHANGELOG))
-    run("git", "commit", "-m", f"chore(release): {args.package} v{new}")
+    for name, version in new_versions.items():
+        write_version(PACKAGES[name], version)
+    cut_changelog(list(new_versions.values()))
+    run("git", "add", *(str(PACKAGES[name]) for name in names), str(CHANGELOG))
+    release_labels = ", ".join(f"{name} v{version}" for name, version in new_versions.items())
+    run("git", "commit", "-m", f"chore(release): {release_labels}")
     run("git", "push", "-u", "origin", branch)
     run(
         "gh", "pr", "create",
         "--base", "main",
         "--head", branch,
-        "--title", f"Release {args.package} v{new}",
-        "--body", f"## {args.package} v{new}\n\n{changelog_section(new)}",
+        "--title", f"Release {release_labels}",
+        "--body", "\n".join(
+            f"## {name} v{version}\n\n{changelog_section(version)}"
+            for name, version in new_versions.items()
+        ),
     )
-    print(f"Opened release PR: {args.package} {old} -> {new}")
+    print(
+        "Opened release PR: "
+        + ", ".join(
+            f"{name} {old_versions[name]} -> {new_versions[name]}" for name in names
+        )
+    )
 
 
 def cmd_publish(_: argparse.Namespace) -> None:
@@ -150,7 +179,7 @@ def main() -> None:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("prepare", help="bump version + cut changelog + open release PR")
-    p.add_argument("package", choices=PACKAGES)
+    p.add_argument("package", choices=[*PACKAGES, "all"])
     p.add_argument("bump", choices=["major", "minor", "patch"])
     p.set_defaults(func=cmd_prepare)
 
