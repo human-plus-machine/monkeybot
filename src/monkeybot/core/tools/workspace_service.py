@@ -3,11 +3,32 @@
 from __future__ import annotations
 
 import fnmatch
+import os
 import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypedDict
+
+# Directories skipped when walking for grep: noisy, large, or not source content.
+_GREP_IGNORE_DIRS = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        "node_modules",
+        "__pycache__",
+        ".venv",
+        "venv",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".tox",
+        "dist",
+        "build",
+        ".next",
+    }
+)
 
 
 class ReadFileResult(TypedDict):
@@ -593,48 +614,51 @@ class WorkspaceFileService:
         files_scanned = 0
         truncated = False
         t0 = time.monotonic()
-        for fp in sorted(base.rglob("*")):
-            if len(matches) >= max_m:
-                truncated = True
-                break
-            if files_scanned >= max_files:
-                truncated = True
-                break
-            if not fp.is_file():
-                continue
-            try:
-                fp.resolve().relative_to(self._root)
-            except ValueError:
-                continue
-            rel = self._as_repo_rel(fp)
-            if file_glob and not fnmatch.fnmatch(fp.name, file_glob):
-                continue
-            try:
-                st = fp.stat()
-            except OSError:
-                continue
-            if st.st_size > max_file_bytes:
-                continue
-            files_scanned += 1
-            try:
-                data = fp.read_bytes()
-            except OSError:
-                continue
-            if b"\x00" in data[:8192]:
-                continue
-            text = data.decode("utf-8", errors="replace")
-            for line_no, line in enumerate(text.splitlines(), start=1):
+        for dirpath, dirnames, filenames in os.walk(base):
+            dirnames[:] = sorted(d for d in dirnames if d not in _GREP_IGNORE_DIRS)
+            for name in sorted(filenames):
                 if len(matches) >= max_m:
                     truncated = True
                     break
-                if regex.search(line):
-                    matches.append(
-                        {
-                            "path": rel,
-                            "line": line_no,
-                            "text": line[:2000],
-                        }
-                    )
+                if files_scanned >= max_files:
+                    truncated = True
+                    break
+                fp = Path(dirpath) / name
+                try:
+                    fp.resolve().relative_to(self._root)
+                except ValueError:
+                    continue
+                rel = self._as_repo_rel(fp)
+                if file_glob and not fnmatch.fnmatch(fp.name, file_glob):
+                    continue
+                try:
+                    st = fp.stat()
+                except OSError:
+                    continue
+                if st.st_size > max_file_bytes:
+                    continue
+                files_scanned += 1
+                try:
+                    data = fp.read_bytes()
+                except OSError:
+                    continue
+                if b"\x00" in data[:8192]:
+                    continue
+                text = data.decode("utf-8", errors="replace")
+                for line_no, line in enumerate(text.splitlines(), start=1):
+                    if len(matches) >= max_m:
+                        truncated = True
+                        break
+                    if regex.search(line):
+                        matches.append(
+                            {
+                                "path": rel,
+                                "line": line_no,
+                                "text": line[:2000],
+                            }
+                        )
+                if truncated:
+                    break
             if truncated:
                 break
         duration_ms = int((time.monotonic() - t0) * 1000)

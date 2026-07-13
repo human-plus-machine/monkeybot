@@ -314,6 +314,42 @@ async def test_grep(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_grep_skips_noise_directories(tmp_path: Path) -> None:
+    root = tmp_path
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    (root / "a.py").write_text("def foo():\n    pass\n", encoding="utf-8")
+    for noisy_dir in ("node_modules", ".git", "__pycache__", ".venv"):
+        d = root / noisy_dir
+        d.mkdir()
+        (d / "junk.py").write_text("def foo():\n    pass\n", encoding="utf-8")
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    ctx = _ctx()
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="1",
+                name="grep",
+                args={"pattern": "def foo"},
+            ),
+            ctx=ctx,
+        )
+    )
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert payload["ok"] is True
+    matched_paths = {m["path"] for m in payload["matches"]}
+    assert matched_paths == {"a.py"}
+
+
+@pytest.mark.asyncio
 async def test_apply_patch_tool(tmp_path: Path) -> None:
     root = tmp_path
     mem = tmp_path / "mem"

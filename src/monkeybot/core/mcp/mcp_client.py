@@ -421,7 +421,17 @@ def _dump_mcp_model(obj: Any) -> dict[str, Any]:
     if isinstance(obj, dict):
         return dict(obj)
     raw = getattr(obj, "__dict__", None)
-    if not isinstance(raw, dict) or not raw:
+    if not isinstance(raw, dict):
+        raw = {}
+    slots = getattr(type(obj), "__slots__", None)
+    if isinstance(slots, str):
+        slots = (slots,)
+    if slots:
+        raw = dict(raw)
+        for key in slots:
+            if key not in raw and hasattr(obj, key):
+                raw[key] = getattr(obj, key)
+    if not raw:
         return {}
     out: dict[str, Any] = {}
     for key, val in raw.items():
