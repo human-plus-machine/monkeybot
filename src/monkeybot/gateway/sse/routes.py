@@ -496,7 +496,12 @@ def create_app(
     ) -> AdmissionAcceptedResponse:
         """Enqueue mid-turn user text; injected after the current tool batch."""
         bus = _require_bus(reg_dep, session_id)
-        if bus.current_request_id is None:
+        # Capture once: subsequent awaits (parsing, enqueue) may cross a turn
+        # boundary if the in-flight turn completes concurrently, so the id
+        # reported back to the caller must reflect the turn that was busy at
+        # acceptance time, not whatever is current when we respond.
+        current_request_id = bus.current_request_id
+        if current_request_id is None:
             raise APIError(
                 409,
                 "SESSION_IDLE",
@@ -521,7 +526,7 @@ def create_app(
             ) from exc
         return await _publish_admission_accepted(
             bus,
-            request_id=bus.current_request_id,
+            request_id=current_request_id,
             queue="steer",
             position=position,
         )

@@ -1615,6 +1615,10 @@ async def _run_inner_core(
             # must still share a single user row.
             all_tool_responses: list[ContentBlock] = []
             mcp_registry_mutated = False
+            # Computed once per batch and reused for both chunking and dispatch
+            # so the two stay consistent even if ctx.tools were ever mutated
+            # mid-batch (e.g. by an MCP registry reload).
+            safe_names = _parallel_safe_names(ctx.tools)
             reject_batch = _should_reject_tool_batch(ordered, truncated=stream_truncated)
             if reject_batch:
                 logger.warning(
@@ -1642,7 +1646,7 @@ async def _run_inner_core(
                     all_tool_responses.append(tool_resp)
 
             for chunk in (() if reject_batch else _chunk_tool_calls(
-                ordered, parallel_safe=_parallel_safe_names(ctx.tools)
+                ordered, parallel_safe=safe_names
             )):
                 if cancelled is not None and cancelled.is_set():
                     yield Error(request_id=ctx.request_id, error="Request cancelled")
@@ -1799,7 +1803,6 @@ async def _run_inner_core(
 
                 # ToolCallStarted already published via async-gen consumer;
                 # PRE_TOOL is awaited inside _execute_one_tool_call.
-                safe_names = _parallel_safe_names(ctx.tools)
                 parallel_chunk = (
                     all(c.name == "task" for c in allowed_exec)
                     or (
