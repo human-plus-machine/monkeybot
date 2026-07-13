@@ -866,6 +866,8 @@ def create_app(
         payload: dict[str, Any] = {"approved": body.approved}
         if body.reason is not None:
             payload["reason"] = body.reason
+        if body.always:
+            payload["always"] = True
         if not bus.resolve_pending(tool_call_id, payload):
             raise APIError(
                 409,

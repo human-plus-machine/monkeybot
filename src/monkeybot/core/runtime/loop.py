@@ -39,9 +39,11 @@ from monkeybot.core.llm.provider import (
     Done,
     Message,
     Provider,
+    ProviderCallHints,
     TextDelta,
     ToolCall,
     UsageEvent,
+    cache_retention_from_env,
     provider_count_input_tokens,
     provider_stream,
 )
@@ -64,6 +66,7 @@ from monkeybot.core.runtime.context_budget import (
 )
 from monkeybot.core.runtime.provider_stream_mapper import ProviderStreamMapper
 from monkeybot.core.tools.inspector import InspectorToolCall, ToolInspector
+from monkeybot.core.tools.permission import remember_always_approval, resource_for_call
 from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.types.content_blocks import (
     ContentBlock,
@@ -683,6 +686,7 @@ async def _provider_prompt_input_tokens(
     model: str,
     thinking_budget: int | None = None,
     vertex_google_search: bool = False,
+    hints: ProviderCallHints | None = None,
 ) -> int:
     return await provider_count_input_tokens(
         provider,
@@ -691,6 +695,14 @@ async def _provider_prompt_input_tokens(
         model=model,
         thinking_budget=thinking_budget,
         vertex_google_search=vertex_google_search,
+        hints=hints,
+    )
+
+
+def _provider_call_hints(ctx: TurnContext) -> ProviderCallHints:
+    return ProviderCallHints(
+        session_id=ctx.thread_id,
+        cache_retention=cache_retention_from_env(),
     )
 
 
@@ -746,6 +758,7 @@ async def _prompt_input_tokens_for_history(
     return await _provider_prompt_input_tokens(
         provider, provider_messages, ctx.tools, model=ctx.model,
         vertex_google_search=vertex_google_search,
+        hints=_provider_call_hints(ctx),
     )
 
 
@@ -1410,6 +1423,7 @@ async def _run_inner_core(
                 model=ctx.model,
                 thinking_budget=stream_thinking,
                 vertex_google_search=vertex_google_search,
+                hints=_provider_call_hints(ctx),
             )
             usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, preflight)
             cap = max(1, int(ctx.context_window_tokens * _SUMMARY_TRIGGER_RATIO))
@@ -1498,6 +1512,7 @@ async def _run_inner_core(
                     model=ctx.model,
                     thinking_budget=_stream_thinking_budget(provider, resolved_messages),
                     vertex_google_search=vertex_google_search,
+                    hints=_provider_call_hints(ctx),
                 )
                 usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, post)
 
@@ -1565,6 +1580,7 @@ async def _run_inner_core(
                                 model=ctx.model,
                                 thinking_budget=stream_thinking,
                                 vertex_google_search=vertex_google_search,
+                                hints=_provider_call_hints(ctx),
                             ),
                         )
                     ) as stream:
@@ -1851,6 +1867,20 @@ async def _run_inner_core(
                                     break
                                 if payload.get("approved"):
                                     allowed = True
+                                    if payload.get("always"):
+                                        remember_always_approval(
+                                            bus, call.name, resource_for_call(inspector_call)
+                                        )
+                                        logger.debug(
+                                            "tool inspector confirm %s",
+                                            kv(
+                                                request_id=ctx.request_id,
+                                                thread_id=ctx.thread_id,
+                                                tool=call.name,
+                                                call_id=call.call_id,
+                                                decision="confirm_always",
+                                            ),
+                                        )
                                     logger.debug(
                                         "tool inspector confirm %s",
                                         kv(

@@ -23,6 +23,7 @@ def test_mapper_emits_text_bounds_around_deltas() -> None:
     assert evs[1].delta == "hi"
     finish = m.finish()
     assert isinstance(finish[0], AssistantTextEnded)
+    assert finish[0].text == "hi"
     assert m.assistant_text == "hi"
 
 

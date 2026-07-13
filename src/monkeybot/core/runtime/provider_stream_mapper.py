@@ -141,7 +141,7 @@ class ProviderStreamMapper:
         if not self._text_open:
             return None
         self._text_open = False
-        return AssistantTextEnded(request_id=self.request_id)
+        return AssistantTextEnded(request_id=self.request_id, text=self.assistant_text)
 
     def _ensure_thinking_started(self) -> ThinkingBlockStarted | None:
         if self._thinking_open:

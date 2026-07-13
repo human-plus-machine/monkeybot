@@ -75,6 +75,8 @@ paths:
   auto_schema: true
   mcp_config: ./monkeybot_config/mcp.json
   command_allowlist_config: ./monkeybot_config/command_allowlist.yaml
+  # Soft permission ruleset (allow/ask/deny). Hard allowlists stay in command_allowlist.yaml.
+  permission_config: ./monkeybot_config/permissions.yaml
   workspace_root: ./workspace
 
 model:
@@ -89,6 +91,8 @@ model:
   # Summarisation trigger (tokens)
   context_window: 1000000
   max_turns: 50
+  # Prompt-cache session hints: none | short | long (env: MODEL_CACHE_RETENTION)
+  # cache_retention: short
   # Optional cheaper model for sync history summarization (env: CONTEXT_SUMMARIZATION_MODEL); omit = main model
   # summarization_model: gemini-3-flash
 

@@ -110,9 +110,44 @@ class GroundingEvent:
     search_queries: list[str]
 
 
+@dataclass(frozen=True, kw_only=True)
+class ProviderCallHints:
+    """Optional transport metadata for prompt-cache / session affinity.
+
+    Content strategy (stable/volatile split + epoch) lives in prompts; these
+    hints are provider-specific request options layered on top.
+    """
+
+    session_id: str | None = None
+    cache_retention: Literal["none", "short", "long"] = "short"
+
+
+def cache_retention_from_env() -> Literal["none", "short", "long"]:
+    """Resolve ``MODEL_CACHE_RETENTION`` (default ``short``)."""
+    import os
+
+    raw = os.environ.get("MODEL_CACHE_RETENTION", "short").strip().lower()
+    if raw in ("none", "short", "long"):
+        return raw  # type: ignore[return-value]
+    return "short"
+
+
 def gemini_extra_kwargs(provider: Provider, *, vertex_google_search: bool) -> dict[str, bool]:
     if vertex_google_search and provider.name == "gemini":
         return {"vertex_google_search": True}
+    return {}
+
+
+def provider_call_hints_kwargs(
+    provider: Provider,
+    hints: ProviderCallHints | None,
+) -> dict[str, Any]:
+    """Return kwargs accepted by providers that opt into ``ProviderCallHints``."""
+    if hints is None:
+        return {}
+    # Anthropic-family + OpenAI accept hints; others ignore via Protocol default.
+    if provider.name in ("claude", "vertex-claude", "bedrock", "openai"):
+        return {"hints": hints}
     return {}
 
 
@@ -124,12 +159,14 @@ async def provider_count_input_tokens(
     model: str,
     thinking_budget: int | None = None,
     vertex_google_search: bool = False,
+    hints: ProviderCallHints | None = None,
 ) -> int:
     kwargs: dict[str, Any] = {"model": model, "thinking_budget": thinking_budget}
-    extra = gemini_extra_kwargs(provider, vertex_google_search=vertex_google_search)
-    if extra:
+    kwargs.update(gemini_extra_kwargs(provider, vertex_google_search=vertex_google_search))
+    kwargs.update(provider_call_hints_kwargs(provider, hints))
+    if kwargs.keys() - {"model", "thinking_budget"}:
         return int(
-            await cast(Any, provider).count_input_tokens(messages, tools, **kwargs, **extra)
+            await cast(Any, provider).count_input_tokens(messages, tools, **kwargs)
         )
     return await provider.count_input_tokens(messages, tools, **kwargs)
 
@@ -142,13 +179,15 @@ def provider_stream(
     model: str,
     thinking_budget: int | None = None,
     vertex_google_search: bool = False,
+    hints: ProviderCallHints | None = None,
 ) -> AsyncIterator[ProviderEvent]:
     kwargs: dict[str, Any] = {"model": model, "thinking_budget": thinking_budget}
-    extra = gemini_extra_kwargs(provider, vertex_google_search=vertex_google_search)
-    if extra:
+    kwargs.update(gemini_extra_kwargs(provider, vertex_google_search=vertex_google_search))
+    kwargs.update(provider_call_hints_kwargs(provider, hints))
+    if kwargs.keys() - {"model", "thinking_budget"}:
         return cast(
             AsyncIterator[ProviderEvent],
-            cast(Any, provider).stream(messages, tools, **kwargs, **extra),
+            cast(Any, provider).stream(messages, tools, **kwargs),
         )
     return provider.stream(messages, tools, **kwargs)
 
@@ -238,6 +277,7 @@ __all__ = [
     "GroundingEvent",
     "Message",
     "Provider",
+    "ProviderCallHints",
     "ProviderEvent",
     "Role",
     "Text",
@@ -248,7 +288,9 @@ __all__ = [
     "ToolRequest",
     "ToolResponse",
     "UsageEvent",
+    "cache_retention_from_env",
     "gemini_extra_kwargs",
+    "provider_call_hints_kwargs",
     "provider_count_input_tokens",
     "provider_stream",
 ]

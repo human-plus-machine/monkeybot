@@ -44,6 +44,8 @@ from monkeybot.core.runtime.events import (
     TurnComplete,
     UsageTotals,
 )
+from monkeybot.core.tools.inspector import InspectorToolCall
+from monkeybot.core.tools.permission import remember_always_approval, resource_for_call
 from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.types.content_blocks import (
     ActionRequired,
@@ -433,13 +435,11 @@ async def run_realtime_turn(
             # Inspectors (tool confirmation / deny) are applied if provided.
             allowed = True
             denial_message: str | None = None
+            inspector_call = InspectorToolCall(
+                call_id=call.call_id, name=call.name, args=dict(call.args)
+            )
             for insp in inspectors or []:
-                from monkeybot.core.tools.inspector import InspectorToolCall
-
-                decision = await insp.check(
-                    InspectorToolCall(call_id=call.call_id, name=call.name, args=dict(call.args)),
-                    ctx,
-                )
+                decision = await insp.check(inspector_call, ctx)
                 if decision.kind == "deny":
                     allowed = False
                     denial_message = decision.message
@@ -494,6 +494,20 @@ async def run_realtime_turn(
                         break
                     if payload.get("approved"):
                         allowed = True
+                        if payload.get("always"):
+                            remember_always_approval(
+                                pending_bus, call.name, resource_for_call(inspector_call)
+                            )
+                            logger.debug(
+                                "realtime HITL always %s",
+                                kv(
+                                    request_id=ctx.request_id,
+                                    thread_id=ctx.thread_id,
+                                    call_id=call.call_id,
+                                    tool=call.name,
+                                    decision="confirm_always",
+                                ),
+                            )
                     else:
                         allowed = False
                         reason_raw = payload.get("reason")
