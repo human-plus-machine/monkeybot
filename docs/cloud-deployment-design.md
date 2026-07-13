@@ -39,7 +39,7 @@ Gateway / platform handler  →  harness (run_loop, tools, MCP, providers)
 | **C — Agent platform** | Thin adapter for AgentCore / Vertex Agent Engine | [deploy-pattern-c-agent-platform.md](deploy-pattern-c-agent-platform.md) · [AgentCore HTTP](deploy-aws-agentcore.md) |
 | **D — Realtime WebSocket** | Full-duplex audio/text alongside SSE | [deploy-pattern-d-realtime.md](deploy-pattern-d-realtime.md) |
 
-Local baseline: [`docker/Dockerfile`](../docker/Dockerfile) + [`docker-compose.yml`](../docker-compose.yml).
+Local baseline: [`docker/Dockerfile`](../docker/Dockerfile). For day-to-day local runs, prefer the CLI (`monkeybot new` / gateway) rather than Compose.
 
 ## Multi-process storage and task queue
 

@@ -27,7 +27,7 @@ uv run mypy src/monkeybot
 `ruff` is useful locally but is not a CI gate today.
 
 > [!NOTE]
-> Do not run the root pytest suite with a scaffolded `monkeybot_config/` + `workspace/` at the repo root — that layout can make a couple of workspace-resolution tests fail. CI uses a clean tree. See [AGENTS.md](AGENTS.md).
+> Do not run the root pytest suite with a scaffolded `monkeybot_config/` + `workspace/` at the repo root — that layout can make a couple of workspace-resolution tests fail. CI uses a clean tree.
 
 ## Releasing
 
