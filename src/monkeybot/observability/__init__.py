@@ -1,4 +1,4 @@
-"""OpenTelemetry tracing for MonkeyBot (optional ``[observability]`` extra).
+"""OpenTelemetry tracing for monkeybot (optional ``[observability]`` extra).
 
 Master switch: ``MONKEYBOT_OTEL_ENABLED`` must be truthy to opt in. When unset,
 tracing stays disabled even if OTel packages are installed (explicit rollout).

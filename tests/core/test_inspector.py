@@ -33,7 +33,7 @@ def _minimal_ctx() -> TurnContext:
 
 def _write_policy(tmp_path: Path) -> Path:
     """Copy packaged policy into tmp_path for isolated inspector construction."""
-    content = (resources.files("monkeybot.monkeybot_config") / "command_allowlist.yaml").read_text(encoding="utf-8")
+    content = (resources.files("monkeybot_cli.scaffold_defaults") / "command_allowlist.yaml").read_text(encoding="utf-8")
     dest = tmp_path / "policy.yaml"
     dest.write_text(content, encoding="utf-8")
     return dest

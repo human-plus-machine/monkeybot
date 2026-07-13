@@ -1,4 +1,4 @@
-"""MonkeyBot setup CLI — create, configure, validate, and chat with agents."""
+"""monkeybot setup CLI — create, configure, validate, and chat with agents."""
 
 from importlib.metadata import PackageNotFoundError, version
 

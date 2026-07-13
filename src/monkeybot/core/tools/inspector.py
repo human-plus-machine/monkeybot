@@ -91,7 +91,7 @@ def _optional_nonempty_str_list(path: Path, data: dict[str, Any], key: str) -> l
     return out
 
 
-def _norm_run_command_line(args: dict[str, object]) -> str | None:
+def norm_run_command_line(args: dict[str, object]) -> str | None:
     """Build one line for deny-regex checks (mirrors ``run_command`` argv shapes)."""
     argv_raw = args.get("argv")
     if isinstance(argv_raw, list) and argv_raw:
@@ -197,7 +197,7 @@ class CommandTierInspector:
         if call.name != "run_command":
             return Decision(kind="allow")
 
-        cmd_norm = _norm_run_command_line(call.args)
+        cmd_norm = norm_run_command_line(call.args)
         if not cmd_norm:
             return Decision(
                 kind="deny",

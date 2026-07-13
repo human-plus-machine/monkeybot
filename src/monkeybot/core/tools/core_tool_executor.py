@@ -10,7 +10,7 @@ import logging
 import os
 import shlex
 import uuid
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +26,11 @@ from monkeybot.core.context.tool_result_ingress import (
 )
 from monkeybot.core.llm.provider import ToolCall
 from monkeybot.core.logging_utils import kv
-from monkeybot.core.mcp.mcp_client import MCPConnectionError, MCPServerNotConnectedError
+from monkeybot.core.mcp.mcp_client import (
+    MCPConnectionError,
+    MCPDiagnosticError,
+    MCPServerNotConnectedError,
+)
 from monkeybot.core.mcp.ports_mcp import MCPClientPort
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.persistence.backends import RunStore, ScheduledLoopStore
@@ -83,12 +87,22 @@ _CORE_TOOL_NAMES = frozenset(
         "write_file",
         "replace_in_file",
         "glob",
+        "grep",
+        "apply_patch",
         "search_memory",
         "list_skills",
         "task",
         "run_command",
         "add_mcp_server",
         "remove_mcp_server",
+        "enable_mcp",
+        "disable_mcp",
+        "mcp_status",
+        "list_mcp_resources",
+        "list_mcp_resource_templates",
+        "read_mcp_resource",
+        "list_mcp_prompts",
+        "get_mcp_prompt",
         "start_loop",
         "loop_status",
         "pause_loop",
@@ -219,9 +233,13 @@ def _workspace_error_envelope(exc: WorkspaceError) -> str:
         hint = "Write only under the configured write scope, or ask the operator to adjust policy."
     elif code == "not_found":
         hint = "Create the file with write_file first, or fix the path spelling."
+    elif code == "not_found_replace":
+        hint = "Re-read the file and provide an exact unique old_string (or rely on fuzzy match with more context)."
+    elif code == "ambiguous_replace":
+        hint = "Widen old_string until unique, or set replace_all=true."
     elif code == "invalid_offset":
         hint = 'Use "offset" as a positive integer (1 = first line).'
-    elif code in ("write_failed", "glob_failed"):
+    elif code in ("write_failed", "glob_failed", "delete_failed"):
         hint = "Check disk permissions and path; retry after fixing the underlying issue."
     else:
         hint = "Fix the path or arguments per read_file/write_file rules, then retry once."
@@ -388,6 +406,11 @@ class CoreToolExecutor(ToolExecutorPort):
             ct.tool_def.name: ct for ct in (extra_tools or [])
         }
 
+    @property
+    def mcp(self) -> MCPClientPort:
+        """MCP client used for built-in MCP tools and ``server__tool`` dispatch."""
+        return self._mcp
+
     def _run_command_security_envelope(self, exc: SecurityError) -> str:
         raw = str(exc)
         if raw.startswith("Command '") and "not allowed" in raw:
@@ -451,6 +474,10 @@ class CoreToolExecutor(ToolExecutorPort):
                 result_text, err_text = self._tool_replace_in_file(args)
             elif name == "glob":
                 result_text, err_text = self._tool_glob(args)
+            elif name == "grep":
+                result_text, err_text = self._tool_grep(args)
+            elif name == "apply_patch":
+                result_text, err_text = self._tool_apply_patch(args)
             elif name == "search_memory":
                 result_text, err_text = await self._tool_search_memory(args)
             elif name == "list_skills":
@@ -463,6 +490,22 @@ class CoreToolExecutor(ToolExecutorPort):
                 result_text, err_text = await self._tool_add_mcp_server(args)
             elif name == "remove_mcp_server":
                 result_text, err_text = await self._tool_remove_mcp_server(args)
+            elif name == "enable_mcp":
+                result_text, err_text = await self._tool_enable_mcp(args)
+            elif name == "disable_mcp":
+                result_text, err_text = await self._tool_disable_mcp(args)
+            elif name == "mcp_status":
+                result_text, err_text = self._tool_mcp_status(args)
+            elif name == "list_mcp_resources":
+                result_text, err_text = await self._tool_list_mcp_resources(args)
+            elif name == "list_mcp_resource_templates":
+                result_text, err_text = await self._tool_list_mcp_resource_templates(args)
+            elif name == "read_mcp_resource":
+                result_text, err_text = await self._tool_read_mcp_resource(args)
+            elif name == "list_mcp_prompts":
+                result_text, err_text = await self._tool_list_mcp_prompts(args)
+            elif name == "get_mcp_prompt":
+                result_text, err_text = await self._tool_get_mcp_prompt(args)
             elif name == "start_loop":
                 result_text, err_text = await self._tool_start_loop(args, ctx)
             elif name == "loop_status":
@@ -516,6 +559,8 @@ class CoreToolExecutor(ToolExecutorPort):
                     )
         except WorkspaceError as exc:
             result_text, err_text = None, _workspace_error_envelope(exc)
+        except MCPDiagnosticError as exc:
+            result_text, err_text = None, str(exc)
         except MCPConnectionError as exc:
             result_text, err_text = None, str(exc)
         except SecurityError as exc:
@@ -716,8 +761,13 @@ class CoreToolExecutor(ToolExecutorPort):
             new_string = args.get("new", "")
         if not isinstance(new_string, str):
             new_string = str(new_string)
+        replace_all = args.get("replace_all", False)
+        if not isinstance(replace_all, bool):
+            replace_all = str(replace_all).strip().lower() in ("1", "true", "yes", "on")
         try:
-            payload = self._workspace.replace_in_file(path, old_string, new_string)
+            payload = self._workspace.replace_in_file(
+                path, old_string, new_string, replace_all=replace_all
+            )
             return (_j(payload), None)
         except WorkspaceError as exc:
             return (None, _workspace_error_envelope(exc))
@@ -738,6 +788,71 @@ class CoreToolExecutor(ToolExecutorPort):
         try:
             payload = self._workspace.glob_paths(pattern, root=root)
             return (_j(payload), None)
+        except WorkspaceError as exc:
+            return (None, _workspace_error_envelope(exc))
+
+    def _tool_grep(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+        pattern = _str_arg(args, "pattern", "regex", "query")
+        if not pattern:
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "grep requires a pattern argument.",
+                    'Pass a regex pattern, e.g. {"pattern": "TODO", "file_glob": "*.py"}.',
+                    {"field": "pattern", "example": {"pattern": "def main", "file_glob": "*.py"}},
+                ),
+            )
+        root = _str_arg(args, "root", "path")
+        ignore_case = args.get("ignore_case", False)
+        if not isinstance(ignore_case, bool):
+            ignore_case = str(ignore_case).strip().lower() in ("1", "true", "yes", "on")
+        file_glob = _str_arg(args, "file_glob", "include", "glob")
+        max_matches = _coerce_int(args.get("max_matches"), None)
+        try:
+            payload = self._workspace.grep(
+                pattern,
+                root=root,
+                ignore_case=ignore_case,
+                file_glob=file_glob,
+                max_matches=max_matches,
+            )
+            return (_j(payload), None)
+        except WorkspaceError as exc:
+            return (None, _workspace_error_envelope(exc))
+
+    def _tool_apply_patch(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+        from monkeybot.core.tools.patch import PatchError, parse_patch, plan_and_apply_patch
+
+        patch_text = args.get("patch_text")
+        if patch_text is None:
+            patch_text = args.get("patch") or args.get("text") or ""
+        if not isinstance(patch_text, str):
+            patch_text = str(patch_text)
+        if not patch_text.strip():
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "apply_patch requires non-empty patch_text.",
+                    "Pass a Codex-style patch between *** Begin Patch and *** End Patch.",
+                    {"field": "patch_text"},
+                ),
+            )
+        try:
+            hunks = parse_patch(patch_text)
+            payload = plan_and_apply_patch(self._workspace, hunks)
+            return (_j(payload), None)
+        except PatchError as exc:
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    str(exc),
+                    "Fix the patch (markers, paths, or hunk context) and retry once.",
+                    {"code": getattr(exc, "code", "patch_error")},
+                ),
+            )
         except WorkspaceError as exc:
             return (None, _workspace_error_envelope(exc))
 
@@ -1105,24 +1220,181 @@ class CoreToolExecutor(ToolExecutorPort):
             for k, val in env_src.items():
                 env[str(k)] = "" if val is None else str(val)
         defs = await self._mcp.connect(sname, command, arg_list, env)
+        logger.info(
+            "add_mcp_server ok %s",
+            kv(server=sname, tools=len(defs)),
+        )
         return (
             _j(
                 {
                     "ok": True,
                     "server": sname,
                     "tools": [{"name": t.name, "description": t.description} for t in defs],
-                    "note": "New tools apply on the next user message (context is built per turn).",
+                    "note": "New tools apply on the next model step this turn.",
+                }
+            ),
+            None,
+        )
+
+    async def _disconnect_mcp_server(
+        self, *, tool_name: str, args: dict[str, Any]
+    ) -> tuple[str | None, str | None]:
+        sname = _str_arg(args, "name", "server_name", "server")
+        if not sname:
+            return (None, f"{tool_name} requires name (or server_name / server)")
+        known = list(self._mcp.known_server_names())
+        if sname not in known and not self._mcp.is_connected(sname):
+            known_msg = ", ".join(known) if known else "(none)"
+            return (
+                None,
+                f"Unknown MCP server {sname!r}. Known servers: {known_msg}",
+            )
+        await self._mcp.disconnect(sname)
+        logger.info("%s ok %s", tool_name, kv(server=sname, disconnected=True))
+        return (
+            _j(
+                {
+                    "ok": True,
+                    "server": sname,
+                    "disconnected": True,
+                    "note": "Tools drop on the next model step this turn.",
                 }
             ),
             None,
         )
 
     async def _tool_remove_mcp_server(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+        return await self._disconnect_mcp_server(tool_name="remove_mcp_server", args=args)
+
+    async def _tool_enable_mcp(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
         sname = _str_arg(args, "name", "server_name", "server")
         if not sname:
-            return (None, "remove_mcp_server requires name (or server_name / server)")
-        await self._mcp.disconnect(sname)
-        return (_j({"ok": True, "server": sname, "disconnected": True}), None)
+            return (None, "enable_mcp requires name (or server_name / server)")
+        already = self._mcp.is_connected(sname)
+        try:
+            defs = await self._mcp.connect_from_catalog(sname)
+        except MCPDiagnosticError as exc:
+            logger.warning("enable_mcp failed %s", kv(server=sname, error=str(exc)))
+            return (None, str(exc))
+        except MCPConnectionError as exc:
+            logger.warning("enable_mcp failed %s", kv(server=sname, error=str(exc)))
+            return (None, str(exc))
+        logger.info(
+            "enable_mcp ok %s",
+            kv(server=sname, already_connected=already, tools=len(defs)),
+        )
+        return (
+            _j(
+                {
+                    "ok": True,
+                    "server": sname,
+                    "already_connected": already,
+                    "tools": [{"name": t.name, "description": t.description} for t in defs],
+                    "note": "New tools apply on the next model step this turn.",
+                }
+            ),
+            None,
+        )
+
+    async def _tool_disable_mcp(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+        return await self._disconnect_mcp_server(tool_name="disable_mcp", args=args)
+
+    def _tool_mcp_status(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+        sname = _str_arg(args, "server", "name", "server_name")
+        snapshot = self._mcp.status(sname or None)
+        return (
+            _j(
+                {
+                    "ok": True,
+                    "servers": snapshot if isinstance(snapshot, list) else [snapshot],
+                }
+            ),
+            None,
+        )
+
+    async def _mcp_meta_call(
+        self,
+        tool_name: str,
+        coro: Awaitable[Any],
+        *,
+        ok_payload: Callable[[Any], dict[str, Any]] | None = None,
+    ) -> tuple[str | None, str | None]:
+        """Run an MCP meta-tool coroutine; log and surface typed failures like enable_mcp."""
+        try:
+            result = await coro
+        except MCPServerNotConnectedError as exc:
+            logger.warning("%s failed %s", tool_name, kv(error=str(exc)))
+            return (None, str(exc))
+        except MCPDiagnosticError as exc:
+            logger.warning(
+                "%s failed %s",
+                tool_name,
+                kv(server=exc.server_name, error=str(exc)),
+            )
+            return (None, str(exc))
+        except Exception as exc:
+            logger.warning("%s failed %s", tool_name, kv(error=str(exc)))
+            return (None, f"{tool_name} failed: {exc}")
+        if ok_payload is None:
+            return (_j({"ok": True, **result}), None)
+        return (_j({"ok": True, **ok_payload(result)}), None)
+
+    async def _tool_list_mcp_resources(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+        sname = _str_arg(args, "server", "name", "server_name") or None
+        return await self._mcp_meta_call(
+            "list_mcp_resources",
+            self._mcp.list_resources(sname),
+            ok_payload=lambda resources: {"resources": resources, "count": len(resources)},
+        )
+
+    async def _tool_list_mcp_resource_templates(
+        self, args: dict[str, Any]
+    ) -> tuple[str | None, str | None]:
+        sname = _str_arg(args, "server", "name", "server_name") or None
+        return await self._mcp_meta_call(
+            "list_mcp_resource_templates",
+            self._mcp.list_resource_templates(sname),
+            ok_payload=lambda templates: {
+                "resourceTemplates": templates,
+                "count": len(templates),
+            },
+        )
+
+    async def _tool_read_mcp_resource(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+        sname = _str_arg(args, "server", "name", "server_name")
+        uri = _str_arg(args, "uri", "resource_uri", "resource")
+        if not sname:
+            return (None, "read_mcp_resource requires server (or name / server_name)")
+        if not uri:
+            return (None, "read_mcp_resource requires uri")
+        return await self._mcp_meta_call(
+            "read_mcp_resource",
+            self._mcp.read_resource(sname, uri),
+        )
+
+    async def _tool_list_mcp_prompts(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+        sname = _str_arg(args, "server", "name", "server_name") or None
+        return await self._mcp_meta_call(
+            "list_mcp_prompts",
+            self._mcp.list_prompts(sname),
+            ok_payload=lambda prompts: {"prompts": prompts, "count": len(prompts)},
+        )
+
+    async def _tool_get_mcp_prompt(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+        sname = _str_arg(args, "server", "server_name")
+        prompt_name = _str_arg(args, "prompt", "name", "prompt_name")
+        if not sname:
+            return (None, "get_mcp_prompt requires server (or server_name)")
+        if not prompt_name:
+            return (None, "get_mcp_prompt requires prompt (or name / prompt_name)")
+        raw_args = args.get("arguments")
+        prompt_args: dict[str, str] = {}
+        if isinstance(raw_args, dict):
+            prompt_args = {str(k): "" if v is None else str(v) for k, v in raw_args.items()}
+        return await self._mcp_meta_call(
+            "get_mcp_prompt",
+            self._mcp.get_prompt(sname, prompt_name, prompt_args or None),
+        )
 
     def _require_loop_store(self) -> ScheduledLoopStore | tuple[None, str]:
         if self._scheduled_loop_store is None:

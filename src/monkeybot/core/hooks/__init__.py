@@ -1,8 +1,9 @@
 """In-process lifecycle hooks for the agent loop.
 
 Hooks are async callbacks registered against well-known points in the agent
-loop (turn start/end, tool call before/after, etc.). They are the extensibility
-point used by the memory subsystem, but the manager itself is memory-agnostic.
+loop (turn start/end, tool call before/after, provider request/response, etc.).
+They are the extensibility point used by the memory subsystem, but the manager
+itself is memory-agnostic.
 
 Design rules (mirrored from rohitg00/agentmemory's hook contract):
 
@@ -14,7 +15,8 @@ Design rules (mirrored from rohitg00/agentmemory's hook contract):
   trigger hooks; the inner call returns the payload unchanged.
 * **Mutable payload.** Hooks may set ``inject_text`` / ``inject_memory_lines``
   on the shared :class:`HookPayload`; later hooks for the same event observe
-  and may extend those fields.
+  and may extend those fields. Provider/tool hooks may also replace
+  ``provider_messages`` / ``tools``.
 
 This module has no dependency on :mod:`monkeybot.core.memory` or the agent
 loop; both consume it.
@@ -32,6 +34,8 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from monkeybot.core.context import TurnContext
+    from monkeybot.core.llm.provider import Message
+    from monkeybot.core.types.types_tools import ToolDef
 
 _log = logging.getLogger(__name__)
 
@@ -39,10 +43,12 @@ _log = logging.getLogger(__name__)
 class HookEvent(StrEnum):
     """Lifecycle points at which hooks may fire.
 
-    Read-side events (``USER_MESSAGE``, ``PRE_TURN``, ``PRE_TOOL``) run
-    synchronously with a short timeout and may set injection fields on the
-    payload. Write-side events (``POST_TOOL``, ``POST_TURN``, ``SESSION_END``)
-    are fire-and-forget; their return values are ignored.
+    Read-side events (``USER_MESSAGE``, ``PRE_TURN``, ``PRE_TOOL``,
+    ``TOOL_DEFINITION``, ``BEFORE_PROVIDER_REQUEST``) run synchronously with a
+    short timeout and may mutate the payload (injection fields, tools, or
+    provider messages). Write-side events (``POST_TOOL``, ``POST_TURN``,
+    ``SESSION_END``, ``AFTER_PROVIDER_RESPONSE``) are fire-and-forget; their
+    return values are ignored.
     """
 
     USER_MESSAGE = "user_message"
@@ -51,6 +57,9 @@ class HookEvent(StrEnum):
     POST_TOOL = "post_tool"
     POST_TURN = "post_turn"
     SESSION_END = "session_end"
+    TOOL_DEFINITION = "tool.definition"
+    BEFORE_PROVIDER_REQUEST = "before_provider_request"
+    AFTER_PROVIDER_RESPONSE = "after_provider_response"
 
 
 @dataclass
@@ -61,9 +70,13 @@ class HookPayload:
     ``inject_memory_lines`` to surface context to the loop. The loop reads
     those fields after ``fire()`` returns.
 
-    Event-specific fields (``user_message``, ``tool_*``) are populated by the
-    caller based on which event is firing; hooks for an unrelated event should
-    ignore them.
+    Event-specific fields (``user_message``, ``tool_*``, ``provider_messages``,
+    ``tools``, response fields) are populated by the caller based on which
+    event is firing; hooks for an unrelated event should ignore them.
+
+    ``TOOL_DEFINITION`` / ``BEFORE_PROVIDER_REQUEST`` may replace ``tools``
+    and/or ``provider_messages`` (``Message`` is frozen — replace list entries,
+    do not assign to message fields).
     """
 
     event: HookEvent
@@ -76,6 +89,18 @@ class HookPayload:
     tool_args: dict[str, Any] | None = None
     tool_result: str | None = None
     tool_error: str | None = None
+
+    # TOOL_DEFINITION / BEFORE_PROVIDER_REQUEST (mutable; replace list to filter)
+    tools: list["ToolDef"] | None = None
+    provider_messages: list["Message"] | None = None
+    inner_turn: int | None = None
+
+    # AFTER_PROVIDER_RESPONSE (observational)
+    assistant_text: str | None = None
+    thinking_text: str | None = None
+    tool_requests: list[dict[str, Any]] | None = None
+    usage: dict[str, int] | None = None
+    provider_error: str | None = None
 
     inject_text: str | None = None
     inject_memory_lines: list[str] = field(default_factory=list)
@@ -98,10 +123,15 @@ class HookManager:
     One ``HookManager`` is constructed per agent (gateway-owned), shared by
     the loop and any subscribers (e.g. the memory hook). Subagents receive a
     no-op manager so duplicate writes do not race the parent's hooks.
+
+    Fire-and-forget handlers (``timeout_s == 0``) are tracked so
+    :meth:`drain_settlement` can wait for them before ``TurnComplete`` or the
+    next provider call — without requiring SSE client ACKs.
     """
 
     def __init__(self) -> None:
         self._handlers: dict[HookEvent, list[HookFn]] = {}
+        self._pending: set[asyncio.Task[None]] = set()
 
     def register(self, event: HookEvent, fn: HookFn) -> None:
         """Append ``fn`` to the handler list for ``event``.
@@ -136,7 +166,8 @@ class HookManager:
               Detached tasks may not finish before the process exits; in
               short-lived handlers (Lambda, Cloud Functions) pass
               ``hook_manager=None`` or use ``timeout_s > 0`` so hooks complete
-              before returning.
+              before returning. Call :meth:`drain_settlement` before idle
+              boundaries when side effects must land.
 
         Hooks may not recursively trigger this method; nested calls return
         ``payload`` unchanged (after a single debug log line).
@@ -162,6 +193,24 @@ class HookManager:
             _in_hook.reset(token)
         return payload
 
+    async def drain_settlement(self, *, timeout_s: float = _DEFAULT_TIMEOUT_S) -> None:
+        """Await outstanding fire-and-forget hook tasks up to ``timeout_s``.
+
+        Does not cancel slow hooks (they may still finish after the barrier).
+        Never raises for hook failures — only logs a warning on timeout.
+        Safe to call when no tasks are pending.
+        """
+        pending = [t for t in self._pending if not t.done()]
+        if not pending:
+            return
+        _done, still = await asyncio.wait(pending, timeout=max(0.0, timeout_s))
+        if still:
+            _log.warning(
+                "hook settlement timed out pending=%d timeout_s=%.2f",
+                len(still),
+                timeout_s,
+            )
+
     @staticmethod
     async def _run_one(fn: HookFn, payload: HookPayload, timeout_s: float) -> None:
         try:
@@ -183,8 +232,7 @@ class HookManager:
                 exc,
             )
 
-    @staticmethod
-    def _schedule_background(fn: HookFn, payload: HookPayload) -> None:
+    def _schedule_background(self, fn: HookFn, payload: HookPayload) -> None:
         async def _wrap() -> None:
             token = _in_hook.set(True)
             try:
@@ -201,7 +249,13 @@ class HookManager:
             finally:
                 _in_hook.reset(token)
 
-        asyncio.create_task(_wrap())
+        task = asyncio.create_task(_wrap())
+        self._pending.add(task)
+
+        def _done(t: asyncio.Task[None]) -> None:
+            self._pending.discard(t)
+
+        task.add_done_callback(_done)
 
 
 __all__ = ["HookEvent", "HookPayload", "HookFn", "HookManager"]

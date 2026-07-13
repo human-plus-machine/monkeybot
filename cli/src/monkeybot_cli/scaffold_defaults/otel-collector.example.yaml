@@ -1,0 +1,57 @@
+# OpenTelemetry Collector — dual export (Phoenix + Langfuse)
+#
+# Prerequisites:
+#   - otel/opentelemetry-collector-contrib image (or core collector with otlphttp)
+#   - Langfuse: set LANGFUSE_OTEL_BASIC_AUTH to "Basic <base64(public_key:secret_key)>"
+#     (same value you would put in OTEL_EXPORTER_OTLP_HEADERS for direct export)
+#   - Phoenix: substitute PHOENIX_HOST (local Docker often phoenix:6006 or localhost:6006)
+#
+# Run collector (adjust mount path):
+#   docker run --rm -p 4318:4318 \
+#     -e LANGFUSE_OTEL_BASIC_AUTH \
+#     -v "$(pwd)/monkeybot_config/otel-collector.example.yaml:/etc/otelcol/config.yaml:ro" \
+#     otel/opentelemetry-collector-contrib:latest \
+#     --config=/etc/otelcol/config.yaml
+#
+# Point monkeybot at the collector (HTTP/protobuf, no path suffix on endpoint):
+#   export MONKEYBOT_OTEL_ENABLED=true
+#   export OTEL_TRACES_EXPORTER=otlp
+#   export OTEL_METRICS_EXPORTER=none
+#   export OTEL_LOGS_EXPORTER=none
+#   export OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318
+#
+# Optional: gRPC ingest on 4317 — add protocols.grpc.endpoint: 0.0.0.0:4317 under receivers.otlp
+# Manual verification (AC-012): send one chat turn; confirm the same trace in Phoenix and Langfuse UIs.
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+      # grpc:
+      #   endpoint: 0.0.0.0:4317
+
+processors:
+  batch: {}
+  # memory_limiter:  # enable if large batches cause OOM on small hosts
+  #   check_interval: 1s
+  #   limit_mib: 512
+
+exporters:
+  otlphttp/phoenix:
+    # otlphttp appends /v1/traces — do not include it in endpoint
+    endpoint: http://PHOENIX_HOST:6006
+    # Local Phoenix often needs no auth; Phoenix Cloud may use OTEL_EXPORTER_OTLP_HEADERS on the collector.
+
+  otlphttp/langfuse:
+    endpoint: https://cloud.langfuse.com/api/public/otel
+    # Self-hosted: e.g. https://langfuse.example.com/api/public/otel
+    headers:
+      Authorization: ${env:LANGFUSE_OTEL_BASIC_AUTH}
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/phoenix, otlphttp/langfuse]

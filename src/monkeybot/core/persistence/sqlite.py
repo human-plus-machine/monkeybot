@@ -1,4 +1,4 @@
-"""SQLite connection helpers and schema DDL for MonkeyBot persistence."""
+"""SQLite connection helpers and schema DDL for monkeybot persistence."""
 
 from __future__ import annotations
 

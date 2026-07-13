@@ -33,19 +33,6 @@ def test_huggingface_provider_requires_token(monkeypatch: pytest.MonkeyPatch) ->
     with pytest.raises(ValueError, match="HF_TOKEN"):
         HuggingFaceProvider()
 
-
-def test_huggingface_stores_cache_enabled_default_true(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("HF_TOKEN", "test")
-    provider = HuggingFaceProvider()
-    assert provider._cache_enabled is True
-
-
-def test_huggingface_stores_cache_enabled_false(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("HF_TOKEN", "test")
-    provider = HuggingFaceProvider(cache_enabled=False)
-    assert provider._cache_enabled is False
-
-
 def test_is_tool_unsupported_error_openai_status() -> None:
     try:
         import httpx

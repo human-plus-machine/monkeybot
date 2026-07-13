@@ -1,6 +1,6 @@
 # Diagnostics Skill Example
 
-This example demonstrates how to create an async skill entry point for monkey-bot.
+This example demonstrates how to create an async skill entry point for monkeybot.
 
 ## What It Does
 

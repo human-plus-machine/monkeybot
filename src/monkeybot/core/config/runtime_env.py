@@ -35,16 +35,17 @@ ENV_MAP: dict[tuple[str, str], str] = {
     ("paths", "db_url"): "DB_URL",
     ("paths", "mcp_config"): "MCP_CONFIG",
     ("paths", "command_allowlist_config"): "COMMAND_ALLOWLIST_CONFIG",
+    ("paths", "permission_config"): "PERMISSION_CONFIG",
     ("paths", "workspace_root"): "MONKEYBOT_WORKSPACE_ROOT",
     ("model", "provider"): "MODEL_PROVIDER",
     ("model", "name"): "MODEL_NAME",
     ("model", "temperature"): "MODEL_TEMPERATURE",
     ("model", "max_tokens"): "MODEL_MAX_TOKENS",
     ("model", "thinking_budget"): "MODEL_THINKING_BUDGET",
-    ("model", "enable_caching"): "MODEL_ENABLE_CACHING",
     ("model", "context_window"): "MODEL_CONTEXT_WINDOW",
     ("model", "summarization_model"): "CONTEXT_SUMMARIZATION_MODEL",
     ("model", "max_turns"): "MAX_TURNS",
+    ("model", "cache_retention"): "MODEL_CACHE_RETENTION",
     ("gcp", "project_id"): "VERTEX_AI_PROJECT_ID",
     ("gcp", "location"): "VERTEX_AI_LOCATION",
     ("anthropic_vertex", "project_id"): "ANTHROPIC_VERTEX_PROJECT_ID",
@@ -54,15 +55,11 @@ ENV_MAP: dict[tuple[str, str], str] = {
     ("gateway", "graceful_shutdown_timeout_sec"): "GRACEFUL_SHUTDOWN_TIMEOUT_SEC",
     ("gateway", "cors_allow_origins"): "MONKEYBOT_CORS_ALLOW_ORIGINS",
     ("context_curation", "enabled"): "CONTEXT_CURATION_ENABLED",
-    ("context_curation", "mode"): "CONTEXT_CURATION_MODE",
     ("context_curation", "memory_window_lines"): "CONTEXT_CURATION_MEMORY_WINDOW_LINES",
     ("context_curation", "memory_index_cap"): "MEMORY_INDEX_CAP",
-    ("context_curation", "memory_threshold"): "CONTEXT_CURATION_MEMORY_THRESHOLD",
     ("context_curation", "memory_token_threshold"): "CONTEXT_CURATION_MEMORY_TOKEN_THRESHOLD",
     ("context_curation", "curator_model"): "CONTEXT_CURATOR_MODEL",
     ("context_curation", "timeout_sec"): "CONTEXT_CURATION_TIMEOUT_SEC",
-    ("context_curation", "max_memory_lines"): "CONTEXT_CURATION_MAX_MEMORY_LINES",
-    ("context_curation", "search_max_hits"): "CONTEXT_CURATION_SEARCH_MAX_HITS",
     ("memory_hook", "enabled"): "MONKEYBOT_MEMORY_HOOK_ENABLED",
     ("subagent", "timeout_sec"): "SUBAGENT_TIMEOUT_SEC",
     ("subagent", "max_turns"): "SUBAGENT_MAX_TURNS",
@@ -87,6 +84,19 @@ ENV_MAP: dict[tuple[str, str], str] = {
     ("fake_provider", "events_json"): "MONKEYBOT_FAKE_PROVIDER_EVENTS",
     ("emission", "style"): "MONKEYBOT_EMISSION_STYLE",
     ("runtime", "transcript_enabled"): "MONKEYBOT_TRANSCRIPT_ENABLED",
+    ("runtime", "transcript_include_live"): "MONKEYBOT_TRANSCRIPT_INCLUDE_LIVE",
+    ("harness", "mode"): "MONKEYBOT_HARNESS_MODE",
+    ("realtime", "websocket.enabled"): "MONKEYBOT_REALTIME_WS_ENABLED",
+    ("realtime", "websocket.port"): "MONKEYBOT_REALTIME_WS_PORT",
+    ("realtime", "audio.input_format"): "MONKEYBOT_REALTIME_AUDIO_INPUT_FORMAT",
+    ("realtime", "audio.output_format"): "MONKEYBOT_REALTIME_AUDIO_OUTPUT_FORMAT",
+    ("realtime", "audio.chunk_ms"): "MONKEYBOT_REALTIME_AUDIO_CHUNK_MS",
+    ("realtime", "audio.max_utterance_sec"): "MONKEYBOT_REALTIME_AUDIO_MAX_UTTERANCE_SEC",
+    ("realtime", "session.max_duration_sec"): "MONKEYBOT_REALTIME_SESSION_MAX_DURATION_SEC",
+    ("realtime", "session.idle_timeout_sec"): "MONKEYBOT_REALTIME_SESSION_IDLE_TIMEOUT_SEC",
+    ("realtime", "session.max_response_turn_sec"): "MONKEYBOT_REALTIME_SESSION_MAX_RESPONSE_TURN_SEC",
+    ("realtime", "session.max_concurrent_sessions"): "MONKEYBOT_REALTIME_SESSION_MAX_CONCURRENT_SESSIONS",
+    ("realtime", "metrics.emit_summary_on_close"): "MONKEYBOT_REALTIME_METRICS_EMIT_SUMMARY_ON_CLOSE",
 }
 
 # Backward-compatible alias for internal/tests.
@@ -132,15 +142,26 @@ def _denied_patterns_to_env(value: Any) -> str | None:
     return None
 
 
+def _get_nested(mapping: Mapping[str, Any], dotted_key: str) -> Any:
+    current: Any = mapping
+    for part in dotted_key.split("."):
+        if not isinstance(current, dict):
+            return None
+        current = current.get(part)
+        if current is None:
+            return None
+    return current
+
+
 def _flatten_config(data: Mapping[str, Any]) -> dict[str, str]:
     out: dict[str, str] = {}
     for (section, key), env_name in ENV_MAP.items():
         sec = data.get(section)
         if not isinstance(sec, dict):
             continue
-        if key not in sec:
+        raw = _get_nested(sec, key)
+        if raw is None:
             continue
-        raw = sec[key]
         if env_name == "MONKEYBOT_TOOL_DENIED_PATTERNS":
             s = _denied_patterns_to_env(raw)
         else:

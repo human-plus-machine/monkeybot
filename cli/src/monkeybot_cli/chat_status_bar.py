@@ -1,9 +1,7 @@
-"""Pinned bottom status bar for ``monkeybot chat`` (context window ring)."""
+"""Context-window ring formatting for ``monkeybot chat``."""
 
 from __future__ import annotations
 
-import shutil
-import sys
 from dataclasses import dataclass
 
 _DIM = "\x1b[2m"
@@ -64,13 +62,23 @@ def _ring_color(ring_numerator: int, threshold: int) -> str:
     return _GREEN
 
 
-def format_context_ring(
+def _ring_markup_color(ring_numerator: int, threshold: int) -> str:
+    """Rich markup color name for the same thresholds as :func:`_ring_color`."""
+    if ring_numerator >= threshold:
+        return "red"
+    if ring_numerator >= int(threshold * 0.75):
+        return "yellow"
+    return "green"
+
+
+def _ring_parts(
     *,
     estimated_prompt_tokens: int,
     last_prompt_tokens: int,
     context_window_tokens: int,
     summarization_threshold_tokens: int,
-) -> str:
+) -> tuple[str, int, int, int]:
+    """Return ``(glyph, pct_used, ring_numerator, thresh)``."""
     cap = max(1, context_window_tokens)
     ring_numerator = estimated_prompt_tokens if estimated_prompt_tokens > 0 else last_prompt_tokens
     thresh = max(
@@ -80,9 +88,51 @@ def format_context_ring(
         else int(cap * 0.85),
     )
     pct_used = min(100, max(0, round((ring_numerator / cap) * 100)))
-    glyph = _ring_glyph(pct_used)
+    return _ring_glyph(pct_used), pct_used, ring_numerator, thresh
+
+
+def format_context_ring(
+    *,
+    estimated_prompt_tokens: int,
+    last_prompt_tokens: int,
+    context_window_tokens: int,
+    summarization_threshold_tokens: int,
+) -> str:
+    glyph, pct_used, ring_numerator, thresh = _ring_parts(
+        estimated_prompt_tokens=estimated_prompt_tokens,
+        last_prompt_tokens=last_prompt_tokens,
+        context_window_tokens=context_window_tokens,
+        summarization_threshold_tokens=summarization_threshold_tokens,
+    )
     color = _ring_color(ring_numerator, thresh)
     return f"{color}{glyph} {pct_used}%{_RESET}"
+
+
+def format_context_ring_plain(usage: SessionUsageView | None) -> str:
+    """Ring text without ANSI (for plain / non-color contexts)."""
+    if usage is None:
+        return "○ 0%"
+    glyph, pct_used, _, _ = _ring_parts(
+        estimated_prompt_tokens=usage.estimated_prompt_tokens,
+        last_prompt_tokens=usage.last_prompt_tokens,
+        context_window_tokens=usage.context_window_tokens,
+        summarization_threshold_tokens=usage.summarization_threshold_tokens,
+    )
+    return f"{glyph} {pct_used}%"
+
+
+def format_context_ring_markup(usage: SessionUsageView | None) -> str:
+    """Ring text with Rich markup colors for the Textual status bar."""
+    if usage is None:
+        return "[dim]○ 0%[/]"
+    glyph, pct_used, ring_numerator, thresh = _ring_parts(
+        estimated_prompt_tokens=usage.estimated_prompt_tokens,
+        last_prompt_tokens=usage.last_prompt_tokens,
+        context_window_tokens=usage.context_window_tokens,
+        summarization_threshold_tokens=usage.summarization_threshold_tokens,
+    )
+    color = _ring_markup_color(ring_numerator, thresh)
+    return f"[{color}]{glyph} {pct_used}%[/]"
 
 
 def format_status_line(usage: SessionUsageView | None, *, width: int) -> str:
@@ -100,55 +150,18 @@ def format_status_line(usage: SessionUsageView | None, *, width: int) -> str:
     return line[:visible_budget]
 
 
-def _terminal_rows() -> int:
-    return max(2, shutil.get_terminal_size(fallback=(80, 24)).lines)
-
-
-class ChatStatusBar:
-    """Renders session usage on a dedicated bottom terminal row (TTY only).
-
-    Uses DECSTBM to keep chat output in lines 1..rows-1 so the status bar never
-    scrolls away with conversation text.
-    """
+class UsageStore:
+    """Holds session usage for footer / plain status (no DECSTBM)."""
 
     def __init__(self) -> None:
         self._usage: SessionUsageView | None = None
-        self._active = False
-        self._bottom_row = 0
 
     @property
     def usage(self) -> SessionUsageView | None:
         return self._usage
 
-    @property
-    def active(self) -> bool:
-        return self._active
-
-    def activate(self) -> None:
-        if not sys.stdout.isatty() or self._active:
-            return
-        rows = _terminal_rows()
-        self._bottom_row = rows
-        # Chat scrolls on lines 1..rows-1; bottom row is reserved for the status bar.
-        sys.stdout.write(f"\x1b[1;{rows - 1}r")
-        sys.stdout.write(f"\x1b[{rows - 1};1H")
-        sys.stdout.flush()
-        self._active = True
-        self.render()
-
-    def deactivate(self) -> None:
-        if not sys.stdout.isatty() or not self._active:
-            return
-        rows = _terminal_rows()
-        self._write_bottom_line(rows, "")
-        sys.stdout.write("\x1b[r")
-        sys.stdout.flush()
-        self._active = False
-        self._bottom_row = 0
-
     def update(self, usage: SessionUsageView) -> None:
         self._usage = usage
-        self.render()
 
     def update_context_hint(
         self,
@@ -173,20 +186,20 @@ class ChatStatusBar:
             summarization_threshold_tokens=thresh,
             context_window_tokens=cap,
         )
-        self.render()
 
-    def render(self) -> None:
-        if not sys.stdout.isatty():
-            return
-        if not self._active:
-            return
-        rows = self._bottom_row or _terminal_rows()
-        cols = shutil.get_terminal_size(fallback=(80, 24)).columns
-        line = format_status_line(self._usage, width=cols)
-        self._write_bottom_line(rows, line)
 
-    def _write_bottom_line(self, row: int, text: str) -> None:
-        sys.stdout.write("\x1b7")
-        sys.stdout.write(f"\x1b[{row};1H\x1b[2K{text}")
-        sys.stdout.write("\x1b8")
-        sys.stdout.flush()
+def format_voice_status(state: str, level_db: float | None = None) -> str:
+    """Rich markup voice indicator for the chat status bar."""
+    labels = {
+        "listening": "[green]● listening[/]",
+        "muted": "[dim]◌ muted[/]",
+        "ptt_held": "[cyan]⏺ PTT[/]",
+        "speaking": "[magenta]▶ speaking[/]",
+    }
+    base = labels.get(state, f"[dim]{state}[/]")
+    if level_db is None:
+        return base
+    # Map -40..0 dBFS to 0..4 bars
+    bars = max(0, min(4, int((level_db + 40) / 10)))
+    meter = "▁▂▃▄▅"[bars] if bars < 5 else "▅"
+    return f"{base} [dim]{meter}[/]"

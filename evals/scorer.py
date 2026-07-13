@@ -68,8 +68,8 @@ def resolve_judge_provider_model() -> tuple[str, str]:
 def _build_judge_model() -> Any | None:
     """Return a deepeval judge model, or ``None`` to use deepeval defaults.
 
-    This runs inside the **evals** service (separate image from the MonkeyBot gateway). The
-    gateway uses MonkeyBot's provider stack; scoring uses deepeval's ``GeminiModel`` / etc.,
+    This runs inside the **evals** service (separate image from the monkeybot gateway). The
+    gateway uses monkeybot's provider stack; scoring uses deepeval's ``GeminiModel`` / etc.,
     which require their own deps (e.g. ``google-genai`` for Gemini judges).
     """
     provider, model = resolve_judge_provider_model()
@@ -86,7 +86,7 @@ def _build_judge_model() -> Any | None:
         _log.warning("deepeval models unavailable: %s", exc)
         return None
 
-    # MonkeyBot YAML may use ``vertex`` / ``gemini`` aliases or canonical ``google_vertexai``.
+    # monkeybot YAML may use ``vertex`` / ``gemini`` aliases or canonical ``google_vertexai``.
     if provider in ("vertex", "gemini", "google", "google_vertexai", "google-vertexai"):
         project = (
             os.environ.get("GOOGLE_CLOUD_PROJECT")

@@ -1,0 +1,49 @@
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/path/to/workspace-readable-by-this-server"
+      ],
+      "env": {
+        "NODE_ENV": "production",
+        "EXAMPLE_SECRET": "${MY_SECRET_ENV_VAR}"
+      }
+    },
+    "remote-http": {
+      "url": "https://your-mcp-host.example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${MY_STATIC_BEARER_TOKEN}"
+      }
+    },
+    "remote-oauth": {
+      "url": "https://your-mcp-host.example.com/mcp",
+      "auth": {
+        "flow": "client_credentials",
+        "token_url": "https://identity.provider.example.com/oauth2/token",
+        "client_id": "${OAUTH_CLIENT_ID}",
+        "client_secret": "${OAUTH_CLIENT_SECRET}",
+        "scope": "read:tools write:tools",
+        "client_auth_method": "body"
+      }
+    },
+    "browser": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--project",
+        "../integrations/browser-mcp",
+        "python",
+        "-m",
+        "browser_mcp.server"
+      ],
+      "env": {
+        "BU_NAME": "monkeybot",
+        "BROWSER_MCP_PLAYBOOKS_DIR": "./workspace/skills/browser/playbooks",
+        "BROWSER_MCP_SCREENSHOTS_DIR": "${MONKEYBOT_WORKSPACE_ROOT}/browser/Screenshots"
+      }
+    }
+  }
+}

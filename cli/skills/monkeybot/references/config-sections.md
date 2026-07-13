@@ -1,6 +1,6 @@
 # monkeybot.yaml configuration reference
 
-Deep reference for every `monkeybot.yaml` section. Load this only when a user needs to customize beyond Tier 1. The canonical, fully-commented template lives at `src/monkeybot/monkeybot_config/monkeybot.example.yaml` in the monkeybot repo (copied to `monkeybot_config/monkeybot.example.yaml` when you scaffold); this file adds the **"when would I change this?"** context the comments don't.
+Deep reference for every `monkeybot.yaml` section. Load this only when a user needs to customize beyond Tier 1. The canonical, fully-commented template lives at `cli/src/monkeybot_cli/scaffold_defaults/monkeybot.example.yaml` in the monkeybot repo (copied to `monkeybot_config/monkeybot.example.yaml` when you scaffold); this file adds the **"when would I change this?"** context the comments don't.
 
 **Precedence:** env vars and `.env` win over YAML. The YAML→env mapping is `ENV_MAP` in `src/monkeybot/core/config/runtime_env.py`. If a YAML edit has no effect, check for a shadowing env var.
 
@@ -40,7 +40,6 @@ Validate check ids: `paths.agent_md.exists`, `paths.skills_path.exists`, `paths.
 | `temperature` | `0.7` | Lower for deterministic output, higher for creative |
 | `max_tokens` | `60000` | Cap per-response length |
 | `thinking_budget` | `-1` | Gemini: `-1` model default, `0` off, `N` token budget. Ollama reasoning models: `-1` server default, `0` off (`reasoning_effort: none`) |
-| `enable_caching` | `true` | Toggles explicit Anthropic prompt caching of the stable prefix |
 | `context_window` | `1000000` | Summarization trigger threshold (tokens) |
 | `max_turns` | `50` | Hard cap on turns per run |
 | `summarization_model` | (main model) | Cheaper model for history summarization (env `CONTEXT_SUMMARIZATION_MODEL`) |
@@ -75,17 +74,15 @@ Required when `memory_storage_uri` is `gcs://…` or `provider: vertex-claude` (
 
 Trims memory injected into context. `enabled: true` by default.
 
+Recent window by default; LLM curator only when the index is token-heavy. On curator failure, falls back to the window.
+
 | Field | Default | Notes |
 |---|---|---|
-| `mode` | `hybrid` | `window` (recent slice only), `curator` (LLM pick), or `hybrid` (window + curator when token-heavy) |
-| `memory_window_lines` | `12` | Recent index lines injected in window/hybrid modes |
+| `memory_window_lines` | `12` | Recent index lines injected; also caps curator-selected lines |
 | `memory_index_cap` | `200` | Organizer keeps this many INDEX.md entries; older rows move to `INDEX.archive.md` |
-| `memory_threshold` | `8` | Curate when index line count exceeds this |
-| `memory_token_threshold` | `2000` | Also curate when estimated index tokens exceed this |
+| `memory_token_threshold` | `2000` | Call curator when estimated index tokens exceed this |
 | `curator_model` | `gemini-3-flash` | Separate small model; empty = main model |
 | `timeout_sec` | `10` | Curator call timeout |
-| `max_memory_lines` | `12` | Cap curator-selected lines |
-| `search_max_hits` | `8` | Cap search hits in curator pool |
 
 When the prompt shows fewer entries than exist, a structural confidence score triggers a `search_memory` nudge. Skill names are always shown in full in the prompt; use `list_skills` to get the skills root path.
 

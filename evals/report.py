@@ -222,7 +222,7 @@ def build_markdown_report(
     )
 
     lines = [
-        "## MonkeyBot Eval Scorecard",
+        "## monkeybot Eval Scorecard",
         "",
         f"Run: `{record.run_id}`",
         f"Commit: `{record.git_sha or 'unknown'}`",

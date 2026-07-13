@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from monkeybot.core.context import SkillRef, TurnContext
+from monkeybot.core.context import TurnContext
 from monkeybot.core.context.curator import (
     CuratedPromptParts,
-    curation_threshold_met,
-    memory_index_token_estimate,
     run_context_curator,
 )
 from monkeybot.core.llm.provider import Done, TextDelta
@@ -35,13 +33,13 @@ class _FakeCuratorProvider:
         yield Done()
 
 
-def _ctx(*, memory: list[str], skills: list[SkillRef] | None = None) -> TurnContext:
+def _ctx(*, memory: list[str]) -> TurnContext:
     return TurnContext(
         thread_id="t",
         request_id="r",
         agent_md="# Bot",
         memory_index=memory,
-        skills=skills or [],
+        skills=[],
         tools=[ToolDef("read_file", "read", {})],
         user_id=None,
         parent_run_id=None,
@@ -60,6 +58,7 @@ async def test_curator_accepts_index_selection() -> None:
         provider=prov,
         curator_model="gemini-2.5-flash",
         user_message="about alpha",
+        max_memory_lines=12,
     )
     assert isinstance(out, CuratedPromptParts)
     assert out.success
@@ -75,6 +74,7 @@ async def test_curator_partial_indices_succeed() -> None:
         provider=prov,
         curator_model="m",
         user_message="x",
+        max_memory_lines=12,
     )
     assert out.success
     assert out.memory_lines == ["alpha note"]
@@ -89,6 +89,7 @@ async def test_curator_invalid_indices_fail() -> None:
         provider=prov,
         curator_model="m",
         user_message="x",
+        max_memory_lines=12,
     )
     assert not out.success
     assert out.memory_lines == []
@@ -98,25 +99,7 @@ async def test_curator_invalid_indices_fail() -> None:
 async def test_curator_bad_json_fails() -> None:
     prov = _FakeCuratorProvider("not json")
     ctx = _ctx(memory=[])
-    out = await run_context_curator(ctx=ctx, provider=prov, curator_model="m", user_message="")
+    out = await run_context_curator(
+        ctx=ctx, provider=prov, curator_model="m", user_message="", max_memory_lines=12
+    )
     assert not out.success
-
-
-def test_curation_threshold_ignores_skill_count(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CONTEXT_CURATION_MEMORY_THRESHOLD", "8")
-    monkeypatch.setenv("CONTEXT_CURATION_MEMORY_TOKEN_THRESHOLD", "2000")
-    many_skills = [SkillRef(name=f"s{i}", description="d") for i in range(20)]
-    ctx = _ctx(memory=["m1", "m2"], skills=many_skills)
-    assert not curation_threshold_met(ctx)
-
-    ctx_large_mem = _ctx(memory=[f"m{i}" for i in range(10)], skills=many_skills)
-    assert curation_threshold_met(ctx_large_mem)
-
-
-def test_curation_threshold_by_token_estimate(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CONTEXT_CURATION_MEMORY_THRESHOLD", "100")
-    monkeypatch.setenv("CONTEXT_CURATION_MEMORY_TOKEN_THRESHOLD", "50")
-    long_line = "x" * 400
-    ctx = _ctx(memory=[long_line])
-    assert memory_index_token_estimate([long_line]) > 50
-    assert curation_threshold_met(ctx)

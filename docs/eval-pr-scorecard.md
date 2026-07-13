@@ -3,7 +3,7 @@
 ## Why this matters
 
 Right now, when a harness PR changes prompts, tool wiring, MCP integration, memory,
-context summarization, or model config, nobody can answer "did this make MonkeyBot better
+context summarization, or model config, nobody can answer "did this make monkeybot better
 or worse, and did it break anything?" without eyeballing a demo. The eval service already
 runs scenarios and scores them, but nothing persists a run, nothing compares two runs, no
 one has wired it into CI, and — most importantly — the 3 scenarios that exist today only
@@ -18,7 +18,7 @@ subsystem still does what it's supposed to.
 
 ## Relationship to `tests/evals/` (T2 loop evals)
 
-MonkeyBot already has a **second eval system** that the live eval service plan must not
+monkeybot already has a **second eval system** that the live eval service plan must not
 duplicate blindly.
 
 | | `tests/evals/` (T2) | `evals/` (live E2E) |
@@ -225,7 +225,7 @@ Live evals in CI are the capstone, not the foundation. Get steps 1–5 working l
 
 Before adding the workflow job, document and implement:
 
-1. **Agent boot:** start MonkeyBot gateway in the workflow (e.g. `uv run monkeybot serve`
+1. **Agent boot:** start monkeybot gateway in the workflow (e.g. `uv run monkeybot serve`
    against `demo_agent/` or a minimal eval fixture config) and wait for `/health`.
 2. **Secrets:** provider API key for the agent model + judge model (today `evals/scorer.py`
    uses deepeval/Gemini — pin `JUDGE_PROVIDER` / `JUDGE_MODEL` env vars in the workflow).
@@ -336,7 +336,7 @@ Warn only (report, no block) when:
 ## Report template
 
 ```markdown
-## MonkeyBot Eval Scorecard
+## monkeybot Eval Scorecard
 
 Run: `<run_id>`
 Commit: `<git_sha>`

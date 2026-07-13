@@ -1,4 +1,4 @@
-"""Drive the live MonkeyBot v2 gateway (sessions + SSE) for eval runs."""
+"""Drive the live monkeybot v2 gateway (sessions + SSE) for eval runs."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Shared interfaces for monkey-bot agent components.
+"""Shared interfaces for monkeybot agent components.
 
 This module defines interfaces and data structures used across the project.
 The default **SSE gateway** path uses native :class:`~monkeybot.core.llm.provider.Provider`

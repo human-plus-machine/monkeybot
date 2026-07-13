@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "monkeybot-evals"
 version = "0.1.0"
-description = "T3 quality eval service (FastAPI + deepeval + Langfuse) for MonkeyBot"
+description = "T3 quality eval service (FastAPI + deepeval + Langfuse) for monkeybot"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",

@@ -1,4 +1,4 @@
-"""MonkeyBot — thin owned agent harness."""
+"""monkeybot — thin owned agent harness."""
 
 from importlib.metadata import PackageNotFoundError, version
 

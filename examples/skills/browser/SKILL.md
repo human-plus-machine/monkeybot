@@ -9,6 +9,6 @@ See the demo agent copy at `demo_agent/workspace/skills/browser/SKILL.md` for th
 
 Copy this folder into your configured `SKILLS_PATH` (needs `SKILL.md` and a `playbooks/` subdirectory).
 
-Enable the `browser` MCP server in `monkeybot_config/mcp.json` and install the separate `integrations/browser-mcp` package (`uv sync --project integrations/browser-mcp`).
+Add the `browser` MCP server to `monkeybot_config/mcp.json`, install `integrations/browser-mcp` (`uv sync --project integrations/browser-mcp`), and have the agent call `enable_mcp("browser")` before `browser__*` tools. See `docs/browser-mcp.md`.
 
-Operator reference: `docs/browser-mcp.md` in the MonkeyBot repo.
+Operator reference: `docs/browser-mcp.md` in the monkeybot repo.

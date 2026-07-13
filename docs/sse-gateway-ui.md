@@ -1,6 +1,6 @@
 # SSE gateway: HTTP API and custom UI integration
 
-This document describes the **MonkeyBot v2 FastAPI gateway** endpoints used for chat, streaming, and workspace/history helpers, so you can wire your own frontend.
+This document describes the **monkeybot v2 FastAPI gateway** endpoints used for chat, streaming, and workspace/history helpers, so you can wire your own frontend.
 
 **Reference implementation**
 
@@ -11,8 +11,8 @@ This document describes the **MonkeyBot v2 FastAPI gateway** endpoints used for 
 
 **Base URL**
 
-- Default local gateway port is **8787** (see `demo_agent/monkeybot_config/monkeybot.yaml`).
-- All paths below are relative to the gateway origin, e.g. `http://127.0.0.1:8787`.
+- Default local gateway port is **8080** (see `monkeybot_config_example/monkeybot.example.yaml`).
+- All paths below are relative to the gateway origin, e.g. `http://127.0.0.1:8080`.
 
 ---
 
@@ -25,7 +25,7 @@ This document describes the **MonkeyBot v2 FastAPI gateway** endpoints used for 
 
 **Local dev (same origin)**
 
-- If your UI dev server proxies API calls (e.g. a Vite `server.proxy` entry), point it at the gateway origin (default `http://127.0.0.1:8787`) and strip your chosen prefix before forwarding.
+- If your UI dev server proxies API calls (e.g. a Vite `server.proxy` entry), point it at the gateway origin (default `http://127.0.0.1:8080`) and strip your chosen prefix before forwarding.
 - Same-origin proxying avoids CORS entirely; set `MONKEYBOT_CORS_ALLOW_ORIGINS` only when calling the gateway cross-origin.
 
 ---
@@ -259,14 +259,14 @@ Files are stored under `{workspace}/.monkeybot/attachments/{session_id}/{attachm
 
 ```bash
 # Health
-curl -sS http://127.0.0.1:8787/health
+curl -sS http://127.0.0.1:8080/health
 
 # Session + first line of SSE (will include pings and JSON frames)
 curl -sS -N -H 'Accept: text/event-stream' \
-  http://127.0.0.1:8787/sessions/$(curl -sS -X POST http://127.0.0.1:8787/sessions \
+  http://127.0.0.1:8080/sessions/$(curl -sS -X POST http://127.0.0.1:8080/sessions \
   -H 'Content-Type: application/json' -d '{}' | jq -r .session_id)/events | head -n 20
 # Usage JSON (replace SID; meaningful after at least one completed turn)
-curl -sS "http://127.0.0.1:8787/sessions/SID/usage" | jq .
+curl -sS "http://127.0.0.1:8080/sessions/SID/usage" | jq .
 ```
 
 For a full scripted walkthrough of sessions and tools from the shell, see [Getting Started](getting-started.md).
