@@ -14,13 +14,15 @@ Verify the agent harness, shell allowlist, and Python runtime are wired correctl
 
 ## How to run
 
-Shell commands start in **workspace root** (see harness Runtime paths). Use **workspace-relative** paths only — not absolute container paths unless they match an allowed prefix.
+Shell commands start in **workspace root**. Trusted skill files live in the
+separate, read-only `SKILLS_PATH`; use that environment variable when invoking
+a bundled script.
 
 1. `list_skills` should include `diagnostics`.
-2. Run the script with `run_command` and `argv` (scaffolded `SKILLS_PATH` is `./skills`):
+2. Run the script with `run_command`:
 
 ```json
-{"argv": ["python3", "./skills/diagnostics/diagnostics.py"]}
+{"argv": ["bash", "-c", "python3 \"$SKILLS_PATH/diagnostics/diagnostics.py\""]}
 ```
 3. Parse the JSON stdout; `status` should be `healthy` when required env vars are set.
 

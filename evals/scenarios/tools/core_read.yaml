@@ -1,7 +1,6 @@
-# read_file is workspace-relative (WorkspaceFileService is rooted at paths.workspace_root),
-# so the target must live under the agent's workspace, not monkeybot_config/. This scenario
-# targets evals/smoke_agent/workspace/skills/browser/SKILL.md, which is committed and always present.
-description: "Agent reads a real workspace file via the read_file core tool"
+# `skills/` is the read-only virtual file-tool prefix. This scenario targets
+# evals/smoke_agent/skills/browser/SKILL.md, which is committed and always present.
+description: "Agent reads a trusted skill via the read_file core tool"
 tags: [tools, core]
 messages:
   - "Read the file skills/browser/SKILL.md in this workspace and tell me the first heading in it."

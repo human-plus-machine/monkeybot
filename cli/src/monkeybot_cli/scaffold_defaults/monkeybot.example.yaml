@@ -1,8 +1,8 @@
-# monkeybot harness — copy to monkeybot.yaml and edit (paths relative to process cwd).
+# monkeybot harness — copy to monkeybot.yaml and edit (all relative paths use agent root).
 #
 #   cp monkeybot_config/monkeybot.example.yaml monkeybot_config/monkeybot.yaml
 #
-# Precedence: environment variables (and optional `.env` in cwd) win over values here.
+# Precedence: environment variables (and optional root `.env`) win over values here.
 #
 # Secrets are not committed here. Create a `.env` in the repo root when you need keys or
 # machine-local paths, for example:
@@ -182,6 +182,9 @@ sandbox:
   server_url: http://localhost:8080
   image: python:3.12
   ttl_seconds: 1800
+  # Set false only for a remote sandbox server with no shared filesystem. It
+  # then runs compute-only commands and refuses workspace/skills file access.
+  shared_filesystem: true
 
 # Optional JSON for MODEL_PROVIDER=fake tests (env: MONKEYBOT_FAKE_PROVIDER_EVENTS)
 # fake_provider:

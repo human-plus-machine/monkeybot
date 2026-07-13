@@ -309,15 +309,26 @@ def _apply_replace_spans(
 
 
 class WorkspaceFileService:
-    """All paths are repo-relative POSIX strings; resolved under ``repo_root``."""
+    """Virtual workspace paths with a separately mounted read-only ``skills/`` root."""
 
-    def __init__(self, repo_root: Path, settings: object | None = None) -> None:
+    def __init__(
+        self,
+        repo_root: Path,
+        settings: object | None = None,
+        *,
+        skills_root: Path | None = None,
+    ) -> None:
         self._root = Path(repo_root).resolve()
+        self._skills_root = Path(skills_root).resolve() if skills_root is not None else None
         self._settings = _coerce_workspace_settings(settings)
 
     @property
     def repo_root(self) -> Path:
         return self._root
+
+    @property
+    def skills_root(self) -> Path | None:
+        return self._skills_root
 
     @staticmethod
     def _normalize_rel_segments(rel: str, *, label: str) -> tuple[str, ...]:
@@ -337,8 +348,36 @@ class WorkspaceFileService:
                 stack.append(part)
         return tuple(stack)
 
-    def _join_under_root(self, segments: tuple[str, ...]) -> Path:
-        return self._root.joinpath(*segments) if segments else self._root
+    def _path_root_and_segments(self, segments: tuple[str, ...]) -> tuple[Path, tuple[str, ...]]:
+        if segments[:1] == ("skills",) and self._skills_root is not None:
+            return self._skills_root, segments[1:]
+        return self._root, segments
+
+    @staticmethod
+    def _assert_realpath_under(path: Path, root: Path, *, label: str) -> Path:
+        resolved = path.resolve()
+        try:
+            resolved.relative_to(root.resolve())
+        except ValueError as exc:
+            raise WorkspaceError(f"Invalid {label}: path escapes its root", code="path_escape") from exc
+        return path
+
+    def _join_under_root(self, segments: tuple[str, ...], *, label: str) -> Path:
+        root, child_segments = self._path_root_and_segments(segments)
+        candidate = root.joinpath(*child_segments) if child_segments else root
+        return self._assert_realpath_under(candidate, root, label=label)
+
+    def _is_skills_path(self, rel: str) -> bool:
+        return bool(self._normalize_rel_segments(rel, label="path")[:1] == ("skills",))
+
+    def _require_writable_path(self, rel: str) -> None:
+        if self._is_skills_path(rel):
+            raise WorkspaceError("skills are read-only", code="skills_read_only")
+
+    def require_writable_path(self, rel: str) -> Path:
+        """Validate a virtual path is writable and return its safe physical path."""
+        self._require_writable_path(rel)
+        return self._resolve_under_root(rel)
 
     def _resolve_under_root(self, rel: str, *, label: str = "path") -> Path:
         if rel is None or not str(rel).strip():
@@ -347,9 +386,7 @@ class WorkspaceFileService:
         if s.startswith("~") or s.startswith("/"):
             raise WorkspaceError(f"Invalid {label}: absolute or home not allowed", code="invalid_path")
         segs = self._normalize_rel_segments(s.lstrip("/"), label=label)
-        # Lexical join (no final .resolve()) so symlinks under the workspace may point outside
-        # the physical root — e.g. demo agent ``workspace/data`` when linked to sibling dirs.
-        return self._join_under_root(segs)
+        return self._join_under_root(segs, label=label)
 
     def resolve_workspace_path(self, rel: str, *, label: str = "path") -> Path:
         """Public path preflight: repo-relative → absolute path under the workspace root."""
@@ -362,7 +399,7 @@ class WorkspaceFileService:
         if s.startswith("~") or s.startswith("/"):
             raise WorkspaceError("Invalid root: absolute or home not allowed", code="invalid_path")
         segs = self._normalize_rel_segments(s.lstrip("/"), label="root")
-        return self._join_under_root(segs)
+        return self._join_under_root(segs, label="root")
 
     def _write_scope_root(self) -> Path | None:
         rel = self._settings.WORKSPACE_WRITE_SCOPE_REL
@@ -413,8 +450,8 @@ class WorkspaceFileService:
                 continue
             full = base / ch.name
             try:
-                rel_p = full.relative_to(self._root).as_posix()
-            except ValueError:
+                rel_p = self._as_repo_rel(full)
+            except WorkspaceError:
                 continue
             try:
                 kind = "dir" if full.is_dir() else "file"
@@ -485,6 +522,7 @@ class WorkspaceFileService:
                 f"Content exceeds WORKSPACE_WRITE_MAX_BYTES ({self._settings.WORKSPACE_WRITE_MAX_BYTES})",
                 code="payload_too_large",
             )
+        self._require_writable_path(path)
         fp = self._resolve_under_root(path)
         self._require_under_write_scope(fp)
         fp.parent.mkdir(parents=True, exist_ok=True)
@@ -506,6 +544,7 @@ class WorkspaceFileService:
         }
 
     def delete_file(self, path: str) -> DeleteResult:
+        self._require_writable_path(path)
         fp = self._resolve_under_root(path)
         self._require_under_write_scope(fp)
         if not fp.exists():
@@ -543,6 +582,7 @@ class WorkspaceFileService:
                 "Provide the exact text to replace, or use write_file for a full rewrite.",
                 code="empty_old_string",
             )
+        self._require_writable_path(path)
         fp = self._resolve_under_root(path)
         self._require_under_write_scope(fp)
         if not fp.is_file():
@@ -581,22 +621,29 @@ class WorkspaceFileService:
         pattern = pattern.strip()
         if pattern.startswith("/") or ".." in pattern:
             raise WorkspaceError("Invalid glob pattern", code="invalid_pattern")
-        base = self._resolve_root_dir(root)
+        # ``glob("skills/**/*.md")`` follows the same virtual routing rule as
+        # read_file; callers may alternatively pass ``root="skills"``.
+        effective_pattern = pattern
+        effective_root = root
+        if root is None and self._skills_root is not None and pattern.startswith("skills/"):
+            effective_root = "skills"
+            effective_pattern = pattern.removeprefix("skills/") or "**/*"
+        base = self._resolve_root_dir(effective_root)
         deadline = time.monotonic() + self._settings.WORKSPACE_GLOB_TIMEOUT_SEC
         max_paths = self._settings.WORKSPACE_GLOB_MAX_PATHS
         paths: list[str] = []
         truncated = False
         t0 = time.monotonic()
         try:
-            for p in base.glob(pattern):
+            for p in base.glob(effective_pattern):
                 if time.monotonic() > deadline:
                     truncated = True
                     break
                 if not p.is_file():
                     continue
                 try:
-                    p.resolve().relative_to(self._root)
-                except ValueError:
+                    self._as_repo_rel(p)
+                except WorkspaceError:
                     continue
                 paths.append(self._as_repo_rel(p))
                 if len(paths) >= max_paths:
@@ -651,10 +698,9 @@ class WorkspaceFileService:
                     break
                 fp = Path(dirpath) / name
                 try:
-                    fp.resolve().relative_to(self._root)
-                except ValueError:
+                    rel = self._as_repo_rel(fp)
+                except WorkspaceError:
                     continue
-                rel = self._as_repo_rel(fp)
                 if file_glob and not fnmatch.fnmatch(fp.name, file_glob):
                     continue
                 try:
@@ -700,11 +746,19 @@ class WorkspaceFileService:
         }
 
     def _as_repo_rel(self, p: Path) -> str:
+        if self._skills_root is not None:
+            try:
+                rel = p.resolve().relative_to(self._skills_root.resolve()).as_posix()
+                return "skills" if rel == "." else f"skills/{rel}"
+            except ValueError:
+                pass
         try:
-            return p.relative_to(self._root).as_posix()
+            rel = p.relative_to(self._root).as_posix()
+            return rel or "."
         except ValueError:
             pass
         try:
-            return p.resolve().relative_to(self._root).as_posix()
+            rel = p.resolve().relative_to(self._root).as_posix()
+            return rel or "."
         except ValueError as e:
             raise WorkspaceError("path escapes workspace root", code="path_escape") from e

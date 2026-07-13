@@ -9,6 +9,7 @@ name: Publish release
 #                  Workflow publish-release.yml / Environment pypi
 #   monkeybot-cli: Owner human-plus-machine / Repo monkeybot /
 #                  Workflow publish-release.yml / Environment pypi-cli
+#   monkeybot-browser-mcp: same workflow / Environment pypi-browser
 #
 # GitHub: create Environments named exactly `pypi` and `pypi-cli`.
 on:
@@ -17,6 +18,8 @@ on:
     paths:
       - "pyproject.toml"
       - "cli/pyproject.toml"
+      - "integrations/browser-mcp/pyproject.toml"
+      - "docker/sandbox.Dockerfile"
       - "CHANGELOG.md"
 
 permissions:
@@ -68,14 +71,15 @@ jobs:
           skip-existing: true
 
   pypi-cli:
-    needs: [publish, pypi-core]
+    needs: [publish, pypi-core, pypi-browser]
     # Run when cli is in the release set. If core wasn't released this run,
     # pypi-core is skipped — treat that as success so cli can still publish.
     if: |
       always() &&
       needs.publish.result == 'success' &&
       contains(format(',{0},', needs.publish.outputs.packages), ',cli,') &&
-      (needs.pypi-core.result == 'success' || needs.pypi-core.result == 'skipped')
+      (needs.pypi-core.result == 'success' || needs.pypi-core.result == 'skipped') &&
+      (needs.pypi-browser.result == 'success' || needs.pypi-browser.result == 'skipped')
     runs-on: ubuntu-latest
     environment:
       name: pypi-cli
@@ -96,3 +100,50 @@ jobs:
         with:
           packages-dir: dist/cli
           skip-existing: true
+
+  pypi-browser:
+    needs: publish
+    if: contains(format(',{0},', needs.publish.outputs.packages), ',browser,')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi-browser
+      url: https://pypi.org/p/monkeybot-browser-mcp
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build browser MCP
+        run: uv build --out-dir dist/browser integrations/browser-mcp
+      - name: Publish browser MCP to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/browser
+          skip-existing: true
+
+  sandbox-image:
+    needs: publish
+    if: contains(format(',{0},', needs.publish.outputs.packages), ',core,')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: version
+        run: echo "value=$(python -c \"import re; print(re.search(r'^version = \\\"([^\\\"]+)', open('pyproject.toml').read(), re.M).group(1))\")" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/sandbox.Dockerfile
+          push: true
+          tags: ghcr.io/human-plus-machine/monkeybot-sandbox:${{ steps.version.outputs.value }}

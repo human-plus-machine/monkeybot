@@ -20,6 +20,7 @@ from monkeybot.core.config import (
 from monkeybot.core.config.runtime_env import ENV_MAP
 from monkeybot.core.config.settings import ConfigError, normalize_model_provider
 from monkeybot.core.config.yaml_loader import load_monkeybot_yaml_dict
+from monkeybot.core.layout import resolve_agent_root
 
 from monkeybot_cli.config_resolve import load_agent_dotenv, resolve_config
 from monkeybot_cli.output import CommandReport, check
@@ -84,7 +85,7 @@ def run_validate(args: argparse.Namespace) -> int:
         return report.emit(as_json=args.json)
 
     report.config_path = str(config_path.resolve())
-    base = config_path.parent.parent if config_path.parent.name == "monkeybot_config" else Path.cwd()
+    base = resolve_agent_root(config_path=config_path)
 
     try:
         raw = config_path.read_text(encoding="utf-8")

@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from monkeybot.core.layout import resolve_agent_root, resolve_config_path as resolve_layout_config_path
 from monkeybot.core.config.runtime_env import _load_yaml_file, _merge_with_includes
 
 logger = logging.getLogger(__name__)
@@ -21,18 +22,11 @@ def resolve_monkeybot_config_path(
     if explicit is not None:
         p = Path(explicit).expanduser()
         return p.resolve() if p.is_file() else None
-    env_path = os.environ.get("MONKEYBOT_CONFIG", "").strip()
-    if env_path:
-        p = Path(env_path).expanduser()
-        if p.is_file():
-            return p.resolve()
-        logger.warning("MONKEYBOT_CONFIG is set but not a file: %s", p)
-        return None
-    base = (cwd if cwd is not None else Path.cwd()).expanduser().resolve()
-    default = base / "monkeybot_config" / "monkeybot.yaml"
-    if default.is_file():
-        return default.resolve()
-    return None
+    root = resolve_agent_root(cwd=cwd)
+    resolved = resolve_layout_config_path(agent_root=root)
+    if resolved is None and os.environ.get("MONKEYBOT_CONFIG", "").strip():
+        logger.warning("MONKEYBOT_CONFIG is set but not a file: %s", os.environ["MONKEYBOT_CONFIG"])
+    return resolved
 
 
 def load_monkeybot_yaml_dict(config_path: str | Path | None = None) -> tuple[Path | None, dict[str, Any]]:

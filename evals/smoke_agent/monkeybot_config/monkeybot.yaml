@@ -8,10 +8,10 @@ runtime:
 
 paths:
   agent_md: ./monkeybot_config/AGENT.md
-  memory_storage_uri: local://./workspace/data/memory
-  skills_path: ./workspace/skills
+  memory_storage_uri: local://./data/memory
+  skills_path: ./skills
   workspace_root: ./workspace
-  db_url: sqlite:///./workspace/data/monkeybot.db
+  db_url: sqlite:///data/monkeybot.db
   command_allowlist_config: ./monkeybot_config/command_allowlist.yaml
 
 harness:

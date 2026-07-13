@@ -16,10 +16,7 @@ def workspace_root() -> Path:
         raw = os.environ.get(env_name, "").strip()
         if raw:
             p = Path(raw).expanduser()
-            if not p.is_absolute():
-                p = (Path.cwd() / p).resolve()
-            else:
-                p = p.resolve()
+            p = (Path.cwd() / p).resolve() if not p.is_absolute() else p.resolve()
             return p
     return (Path.cwd() / "workspace").resolve()
 
@@ -29,10 +26,7 @@ def screenshots_dir() -> Path:
     raw = os.environ.get("BROWSER_MCP_SCREENSHOTS_DIR", "").strip()
     if raw:
         p = Path(raw).expanduser()
-        if not p.is_absolute():
-            p = (Path.cwd() / p).resolve()
-        else:
-            p = p.resolve()
+        p = (Path.cwd() / p).resolve() if not p.is_absolute() else p.resolve()
         return p
     return (workspace_root() / _SCREENSHOTS_REL).resolve()
 

@@ -31,10 +31,11 @@ def create_workspace_file_tools(
     repo_root: Path,
     *,
     settings: object | None = None,
+    skills_root: Path | None = None,
 ) -> list[Any]:
     """Return five tool instances registered with the orchestrator."""
     root = Path(repo_root).resolve()
-    svc = WorkspaceFileService(root, settings=settings)
+    svc = WorkspaceFileService(root, settings=settings, skills_root=skills_root)
 
     @tool
     def workspace_read_file(

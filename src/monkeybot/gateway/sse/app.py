@@ -19,11 +19,11 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from monkeybot.gateway.bootstrap import ensure_gateway_runtime_env
+from monkeybot.gateway.bootstrap import ensure_gateway_runtime_env, log_gateway_startup
 
-ensure_gateway_runtime_env()
 from monkeybot.core.attachments.config import attachments_enabled_from_env
 from monkeybot.core.attachments.store import AttachmentStore, FilesystemAttachmentStore
+from monkeybot.core.layout import AgentLayout
 from monkeybot.core.config.settings import (
     ConfigError,
     SubagentConfig,
@@ -66,7 +66,6 @@ from monkeybot.core.workspace import create_workspace_storage
 from monkeybot.gateway.sse.loop_port import UsagePort
 from monkeybot.gateway.sse.routes import create_app as build_sse_app
 from monkeybot.gateway.sse.session_bus import SessionBus, SessionRegistry
-from monkeybot.gateway.sse.workspace_layout import resolve_agent_workspace_root
 from monkeybot.providers.gemini import GeminiProvider
 from monkeybot.web_search import WebSearchTool
 from monkeybot.web_search import build_backend as _build_web_search_backend
@@ -108,28 +107,14 @@ def _env_context_window_tokens() -> int:
 
 
 def _resolved_workspace_paths() -> tuple[Path, Path]:
-    """Resolve agent workspace root and skills dir (relative paths use process ``cwd``)."""
-    root = resolve_agent_workspace_root()
-    cwd = Path.cwd().resolve()
-    skills = Path(os.environ.get("SKILLS_PATH", "skills"))
-    skills_p = skills.resolve() if skills.is_absolute() else (cwd / skills).resolve()
-    return root, skills_p
+    """Resolve writable workspace and read-only skills from the agent layout."""
+    layout = AgentLayout.from_environment()
+    return layout.workspace_root, layout.skills_path
 
 
 def _memory_storage_uri() -> str:
     """Effective memory storage URI (``MEMORY_STORAGE_URI`` or legacy ``MEMORY_PATH``)."""
-    uri = os.environ.get("MEMORY_STORAGE_URI", "").strip()
-    if uri:
-        return uri
-    raw_mp = os.environ.get("MEMORY_PATH")
-    if raw_mp is not None:
-        logger.info(
-            "memory: deriving storage URI from MEMORY_PATH; prefer paths.memory_storage_uri in monkeybot.yaml"
-        )
-    legacy = (raw_mp or "data/memory").strip()
-    mem = Path(legacy)
-    resolved = mem.resolve() if mem.is_absolute() else (Path.cwd().resolve() / mem).resolve()
-    return f"local://{resolved}"
+    return AgentLayout.from_environment().memory_storage_uri
 
 
 class _UsageStoreAdapter(UsagePort):
@@ -496,6 +481,11 @@ def _tool_denied_patterns() -> list[str]:
 
 async def _startup(fastapi_app: FastAPI) -> None:
     """Wire storage backend, MCP, inspectors, and provider."""
+    # The root .env and YAML defaults must be available before any optional
+    # initializer reads its environment (notably OpenTelemetry in ASGI mode).
+    layout = ensure_gateway_runtime_env()
+    log_gateway_startup(layout)
+
     from monkeybot.observability import init_observability
 
     otel_enabled = init_observability()
@@ -504,7 +494,7 @@ async def _startup(fastapi_app: FastAPI) -> None:
     else:
         logger.info("OpenTelemetry tracing not enabled")
 
-    db_url = os.environ.get("DB_URL", "sqlite:///data/monkeybot.db")
+    db_url = layout.db_url
 
     backend = create_storage_backend(db_url)
     await backend.open(run_schema=auto_schema_enabled_from_config())
@@ -513,16 +503,14 @@ async def _startup(fastapi_app: FastAPI) -> None:
 
     mcp = MCPClient()
     _deps.mcp = mcp
-    mcp_config = Path(os.environ.get("MCP_CONFIG", "/app/monkeybot_config/mcp.json"))
+    mcp_config = layout.mcp_config_path
     strict = os.environ.get("MCP_STRICT_LOAD", "").strip().lower() in ("1", "true", "yes")
     try:
         await mcp.load_from_config(mcp_config, raise_on_error=strict)
     except OSError as exc:
         logger.info("MCP config skipped (%s): %s", mcp_config, exc)
 
-    tiers_path = Path(
-        os.environ.get("COMMAND_ALLOWLIST_CONFIG", "/app/monkeybot_config/command_allowlist.yaml")
-    )
+    tiers_path = layout.command_allowlist_path
     _deps.run_command_allowed_commands = None
     _deps.run_command_allowed_path_prefixes = None
     inspectors: list[ToolInspector] = []
@@ -540,9 +528,7 @@ async def _startup(fastapi_app: FastAPI) -> None:
     if denied:
         inspectors.append(RulesInspector(denied))
 
-    perm_path = Path(
-        os.environ.get("PERMISSION_CONFIG", "/app/monkeybot_config/permissions.yaml")
-    )
+    perm_path = layout.permission_config_path
     perm_insp = try_load_permission_inspector(perm_path)
     if perm_insp is not None:
         inspectors.append(perm_insp)
@@ -610,7 +596,7 @@ async def _startup(fastapi_app: FastAPI) -> None:
     if attachments_enabled_from_env():
         try:
             fastapi_app.state.attachment_store = FilesystemAttachmentStore(
-                resolve_agent_workspace_root()
+                AgentLayout.from_environment().workspace_root
             )
             logger.info("attachments enabled")
         except Exception as exc:

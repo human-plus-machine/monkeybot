@@ -33,9 +33,9 @@ uv run mypy src/monkeybot
 
 `develop` is the working branch; `main` always reflects the latest release.
 
-1. Anyone runs the **Prepare release** workflow (Actions tab → Prepare release → Run workflow), choosing `core` or `cli` and a version bump. It bumps the package's `pyproject.toml`, moves the `CHANGELOG.md` `Unreleased` section into a dated entry on a `release/<package>-v<version>` branch, and opens a PR from that branch into `main` (`develop` itself is untouched until the PR merges, so an abandoned release PR leaves no trace).
+1. Anyone runs the **Prepare release** workflow (Actions tab → Prepare release → Run workflow), choosing `core`, `browser`, or `cli` and a version bump. It bumps the package's `pyproject.toml`, moves the `CHANGELOG.md` `Unreleased` section into a dated entry on a `release/<package>-v<version>` branch, and opens a PR from that branch into `main` (`develop` itself is untouched until the PR merges, so an abandoned release PR leaves no trace).
 2. An admin reviews and **merges the PR** (branch protection on `main` restricts who can merge). Use a regular merge commit, not squash, so `main`'s history and the release tag line up with what was reviewed.
-3. The **Publish release** workflow runs automatically on that merge: it tags the new version, creates a GitHub Release from the changelog entry, Trusted-Publishes the released package(s) to PyPI (core before CLI when both ship), and merges `main` back into `develop` so the two branches don't drift apart.
+3. The **Publish release** workflow runs automatically on that merge: it tags the new version, creates a GitHub Release from the changelog entry, Trusted-Publishes the released package(s) to PyPI (core and browser before CLI when both ship), publishes the sandbox image with a core release, and merges `main` back into `develop` so the two branches don't drift apart.
 
 One-time setup (repo Settings → Branches → add rule for `main`): require a pull request before merging, and restrict who can push to matching branches to Admins. That's the only access control needed — anyone can prepare a release, only admins can promote it to `main`.
 

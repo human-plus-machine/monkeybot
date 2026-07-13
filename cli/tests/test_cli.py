@@ -28,12 +28,10 @@ def test_new_scaffolds(tmp_path: Path) -> None:
     assert (tmp_path / "monkeybot_config" / "monkeybot.yaml").is_file()
     assert (tmp_path / ".env.example").is_file()
     assert (tmp_path / "workspace" / ".gitkeep").is_file()
-    assert (tmp_path / "scripts" / "setup-workspace.sh").is_file()
-    skills_link = tmp_path / "workspace" / "skills"
-    if skills_link.is_symlink():
-        assert skills_link.resolve() == (tmp_path / "skills").resolve()
-    else:
-        assert (tmp_path / "workspace" / "SKILLS_README.txt").is_file()
+    assert not (tmp_path / "workspace" / "skills").exists()
+    assert (tmp_path / "skills" / "browser" / "SKILL.md").is_file()
+    assert (tmp_path / "Dockerfile").is_file()
+    assert (tmp_path / ".dockerignore").is_file()
     text = (tmp_path / "monkeybot_config" / "monkeybot.yaml").read_text()
     assert "test-model" in text
     assert "workspace_root: ./workspace" in text
@@ -43,7 +41,9 @@ def test_new_scaffolds(tmp_path: Path) -> None:
     assert "MONKEYBOT_SUBAGENT_AGENT_MD" not in env_text
     assert "DB_URL" in env_text
     pyproject = (tmp_path / "pyproject.toml").read_text()
-    assert "monkeybot[gemini]>=2.1.0,<3" in pyproject
+    assert "monkeybot[gemini,sandbox]>=2.2.0,<3" in pyproject
+    assert "monkeybot-browser-mcp>=0.2.0,<1" in pyproject
+    assert "package = false" in pyproject
     assert "[tool.uv.sources]" not in pyproject
     assert "uv sync" in result.stdout
     assert "pyproject.toml: created" in result.stdout
@@ -92,6 +92,33 @@ def test_validate_missing_config(tmp_path: Path) -> None:
     assert any(c["id"] == "config.file.exists" for c in data["checks"])
 
 
+def test_validate_custom_config_anchors_paths_at_its_parent(tmp_path: Path) -> None:
+    config_dir = tmp_path / "custom-config"
+    config_dir.mkdir()
+    (config_dir / "AGENT.md").write_text("# Agent\n", encoding="utf-8")
+    (config_dir / "skills").mkdir()
+    config = config_dir / "agent.yaml"
+    config.write_text(
+        "model:\n"
+        "  provider: fake\n"
+        "  name: fake\n"
+        "paths:\n"
+        "  agent_md: AGENT.md\n"
+        "  skills_path: skills\n"
+        "  db_url: sqlite:///data/monkeybot.db\n"
+        "  memory_storage_uri: local://data/memory\n",
+        encoding="utf-8",
+    )
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
+
+    result = _run_cli("validate", "--json", "--config", str(config), cwd=unrelated)
+
+    checks = {check["id"]: check for check in json.loads(result.stdout)["checks"]}
+    assert checks["paths.agent_md.exists"]["status"] == "pass"
+    assert checks["paths.skills_path.exists"]["status"] == "pass"
+
+
 def test_talk_help_lists_realtime_flags() -> None:
     result = _run_cli("talk", "--help")
     assert result.returncode == 0
@@ -130,3 +157,33 @@ def test_doctor_loads_agent_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     data = json.loads(result.stdout)
     cred = next(c for c in data["checks"] if c["id"] == "provider.credentials.present")
     assert cred["status"] == "pass"
+
+
+def test_doctor_reports_layout_browser_sandbox_and_legacy_migration(tmp_path: Path) -> None:
+    cfg = tmp_path / "monkeybot_config"
+    cfg.mkdir()
+    (cfg / "monkeybot.yaml").write_text(
+        "model:\n  provider: fake\n  name: fake\npaths:\n  workspace_root: ./workspace\n",
+        encoding="utf-8",
+    )
+    workspace = tmp_path / "workspace"
+    (workspace / "skills").mkdir(parents=True)
+    (tmp_path / "skills").mkdir()
+    (tmp_path / "skills" / "existing.md").write_text("trusted skill\n", encoding="utf-8")
+    (cfg / "mcp.json").write_text('{"mcpServers": {"browser": {"enabled": false}}}', encoding="utf-8")
+
+    result = _run_cli("doctor", "--json", "--cwd", str(tmp_path))
+    assert result.returncode == 0, result.stderr
+    checks = {item["id"]: item for item in json.loads(result.stdout)["checks"]}
+    assert checks["layout.resolved"]["status"] == "pass"
+    assert checks["layout.resolved"]["value"]["workspace"] == str(workspace.resolve()), result.stdout
+    assert checks["layout.legacy_nested_skills"]["status"] == "fail"
+    assert checks["layout.legacy_nested_skills"]["value"] == {
+        "source": str((workspace / "skills").resolve()),
+        "destination": str((tmp_path / "skills").resolve()),
+        "collision": True,
+        "action": None,
+    }
+    assert "do not move automatically" in checks["layout.legacy_nested_skills"]["remediation"]
+    assert "disabled (bundled)" in checks["browser.bundled"]["message"]
+    assert checks["sandbox.status"]["status"] == "pass"

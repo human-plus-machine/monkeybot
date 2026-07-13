@@ -123,7 +123,7 @@ def _opensandbox_sys_modules(osb):
 class TestSandboxConfigFromEnv:
     def test_defaults_when_no_env_vars_set(self, monkeypatch):
         for key in ("SANDBOX_ENABLED", "SANDBOX_SERVER_URL", "SANDBOX_IMAGE",
-                    "SANDBOX_API_KEY", "SANDBOX_TTL_SECONDS", "SANDBOX_USE_SERVER_PROXY"):
+                    "SANDBOX_API_KEY", "SANDBOX_AUTH_TOKEN", "SANDBOX_TTL_SECONDS", "SANDBOX_USE_SERVER_PROXY", "SANDBOX_SHARED_FILESYSTEM"):
             monkeypatch.delenv(key, raising=False)
 
         cfg = SandboxConfig.from_env()
@@ -134,6 +134,7 @@ class TestSandboxConfigFromEnv:
         assert cfg.api_key is None
         assert cfg.ttl_seconds == 1800
         assert cfg.use_server_proxy is True
+        assert cfg.shared_filesystem is True
 
     def test_use_server_proxy_false_when_env_disabled(self, monkeypatch):
         for key in ("SANDBOX_ENABLED", "SANDBOX_SERVER_URL", "SANDBOX_IMAGE",
@@ -183,6 +184,14 @@ class TestSandboxConfigFromEnv:
     def test_custom_ttl(self, monkeypatch):
         monkeypatch.setenv("SANDBOX_TTL_SECONDS", "600")
         assert SandboxConfig.from_env().ttl_seconds == 600
+
+    def test_auth_token_alias_and_remote_compute_mode(self, monkeypatch):
+        monkeypatch.delenv("SANDBOX_API_KEY", raising=False)
+        monkeypatch.setenv("SANDBOX_AUTH_TOKEN", "token")
+        monkeypatch.setenv("SANDBOX_SHARED_FILESYSTEM", "false")
+        cfg = SandboxConfig.from_env()
+        assert cfg.api_key == "token"
+        assert cfg.shared_filesystem is False
 
     def test_invalid_ttl_raises_value_error(self, monkeypatch):
         # Bad config must fail loudly at startup, not silently default to 0.
@@ -301,6 +310,91 @@ class TestSandboxExecutorLazyCreation:
             await executor.aclose()  # no sandbox yet — must not raise
 
         mock_cls.create.assert_not_called()
+
+
+class TestSandboxExecutorLayoutMounts:
+    @pytest.mark.asyncio
+    async def test_mounts_workspace_rw_and_skills_ro(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        skills = tmp_path / "skills"
+        workspace.mkdir()
+        skills.mkdir()
+        cfg = SandboxConfig(True, "http://localhost:8080", None, "test", 30)
+        executor = SandboxExecutor(cfg, workspace, skills_path=skills)
+        mock_cls, _ = _make_create_mock()
+        osb = _make_opensandbox_module(mock_cls)
+
+        with patch.dict(sys.modules, _opensandbox_sys_modules(osb)):
+            await executor.execute("echo", ["ok"])
+
+        volumes = mock_cls.create.call_args.kwargs["volumes"]
+        assert [(v.host.path, v.readOnly) for v in volumes[:2]] == [
+            (str(workspace.resolve()), False),
+            (str(skills.resolve()), True),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_remote_compute_mode_never_mounts_and_uses_tmp(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        skills = tmp_path / "skills"
+        workspace.mkdir()
+        skills.mkdir()
+        cfg = SandboxConfig(
+            True, "https://remote.example", None, "test", 30, shared_filesystem=False
+        )
+        executor = SandboxExecutor(cfg, workspace, skills_path=skills)
+        mock_cls, sandbox = _make_create_mock()
+        osb = _make_opensandbox_module(mock_cls)
+
+        with patch.dict(sys.modules, _opensandbox_sys_modules(osb)):
+            await executor.execute("echo", ["ok"])
+
+        assert mock_cls.create.call_args.kwargs["volumes"] == []
+        assert sandbox.commands.run.call_args.kwargs["opts"].working_directory == "/tmp"
+
+    @pytest.mark.asyncio
+    async def test_remote_compute_mode_rejects_paths_under_workspace_or_skills(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        skills = tmp_path / "skills"
+        workspace.mkdir()
+        skills.mkdir()
+        cfg = SandboxConfig(
+            True, "https://remote.example", None, "test", 30, shared_filesystem=False
+        )
+        executor = SandboxExecutor(cfg, workspace, skills_path=skills)
+        mock_cls, _ = _make_create_mock()
+        osb = _make_opensandbox_module(mock_cls)
+
+        with patch.dict(sys.modules, _opensandbox_sys_modules(osb)):
+            with pytest.raises(SecurityError, match="compute-only"):
+                await executor.execute("echo", ["ok"], cwd=workspace / "nested")
+            with pytest.raises(SecurityError, match="compute-only"):
+                await executor.execute("cat", [str(skills / "SKILL.md")])
+            with pytest.raises(SecurityError, match="compute-only"):
+                await executor.execute("bash", ["-c", f"cat {workspace / 'input.txt'}"])
+
+        mock_cls.create.assert_not_called()
+
+    def test_remote_compute_mode_only_rejects_absolute_mounted_paths(self, tmp_path):
+        workspace = tmp_path / "agent"
+        skills = workspace / "skills"
+        workspace.mkdir()
+        skills.mkdir()
+        cfg = SandboxConfig(
+            True, "https://remote.example", None, "test", 30, shared_filesystem=False
+        )
+        executor = SandboxExecutor(cfg, workspace, skills_path=skills)
+        input_file = workspace / "input.txt"
+
+        assert executor._remote_requests_mounted_path(
+            ["-c", f'python -c \'open("{input_file}")\''], None
+        )
+        assert executor._remote_requests_mounted_path(
+            ["-c", "cat ./skills/browser/SKILL.md"], None
+        ) is False
+        assert executor._remote_requests_mounted_path(
+            ["-c", f"cat {workspace}-extra/input.txt"], None
+        ) is False
 
 
 # ---------------------------------------------------------------------------

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import re
-import shutil
-import stat
 from importlib import resources
 from importlib.resources.abc import Traversable
 from pathlib import Path
@@ -26,12 +24,11 @@ _CONFIG_BUNDLE: Final[tuple[tuple[str, str], ...]] = (
     ("command_allowlist.yaml", "command_allowlist.yaml"),
     ("permissions.yaml", "permissions.yaml"),
     ("AGENT.md", "AGENT.md"),
-    ("env.example", "env.example"),
     ("otel-collector.example.yaml", "otel-collector.example.yaml"),
 )
 
 _MEMORY_INDEX: Final = (
-    "# Memory index\n\nAdd sections here or let memory tools populate this file.\n"
+    "# Memory Index\n\nAdd sections here or let memory tools populate this file.\n"
 )
 
 
@@ -115,7 +112,7 @@ def ensure_memory(dest: Path, *, force: bool) -> list[str]:
 
 
 def ensure_workspace(dest: Path, *, force: bool) -> list[str]:
-    """Create workspace/ sandbox and workspace/skills -> ../skills symlink."""
+    """Create the writable workspace and a separate trusted skills root."""
     lines: list[str] = []
     workspace = dest / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
@@ -129,52 +126,14 @@ def ensure_workspace(dest: Path, *, force: bool) -> list[str]:
         lines.append("  workspace/.gitkeep: skipped")
 
     dest.joinpath("skills").mkdir(parents=True, exist_ok=True)
-    link = workspace / "skills"
-    expected = (dest / "skills").resolve()
-
-    if link.is_symlink():
-        if link.resolve() == expected:
-            lines.append("  workspace/skills: skipped (symlink ok)")
-            return lines
-        link.unlink()
-
-    if link.exists() and not link.is_symlink():
-        if not force:
-            lines.append("  workspace/skills: skipped (path exists)")
-            return lines
-        if link.is_dir():
-            shutil.rmtree(link)
-        else:
-            link.unlink()
-
-    try:
-        link.symlink_to("../skills", target_is_directory=True)
-        lines.append("  workspace/skills: symlink -> ../skills")
-    except OSError:
-        readme = workspace / "SKILLS_README.txt"
-        readme.write_text(
-            "Could not create workspace/skills symlink on this platform.\n"
-            "Run: bash scripts/setup-workspace.sh\n"
-            "Or copy/symlink skills/ into workspace/skills manually.\n",
-            encoding="utf-8",
-        )
-        lines.append("  workspace/skills: symlink failed (see workspace/SKILLS_README.txt)")
-
     return lines
 
 
-def install_setup_script(dest: Path, *, force: bool) -> str:
-    scripts = dest / "scripts"
-    scripts.mkdir(parents=True, exist_ok=True)
-    dest_script = scripts / "setup-workspace.sh"
-    if dest_script.exists() and not force:
-        return "skipped"
-    existed = dest_script.exists()
-    dest_script.write_bytes(
-        (resources.files(_DEFAULTS_PKG) / "setup-workspace.sh").read_bytes()
-    )
-    dest_script.chmod(dest_script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    return "overwritten" if existed else "created"
+def install_browser_skill(dest: Path, *, force: bool) -> str:
+    """Install the bundled, trusted browser procedure into ``skills/browser``."""
+    target = dest / "skills" / "browser" / "SKILL.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return _install_file(target, resources.files(_DEFAULTS_PKG) / "browser" / "SKILL.md", force=force)
 
 
 def install_env_example(dest: Path, *, force: bool) -> str:
@@ -184,6 +143,17 @@ def install_env_example(dest: Path, *, force: bool) -> str:
     existed = env_example.exists()
     _install_file(env_example, resources.files(_DEFAULTS_PKG) / "env.example", force=True)
     return "overwritten" if existed else "created"
+
+
+def install_container_files(dest: Path, *, force: bool) -> list[str]:
+    """Install a deployable agent image definition, never the repo demo image."""
+    files = (("Dockerfile", "Dockerfile"), ("dockerignore", ".dockerignore"))
+    lines: list[str] = []
+    for source, target_name in files:
+        target = dest / target_name
+        status = _install_file(target, resources.files(_DEFAULTS_PKG) / source, force=force)
+        lines.append(f"  {target_name}: {status}")
+    return lines
 
 
 def _sanitize_project_name(raw: str) -> str:
@@ -244,7 +214,9 @@ def write_agent_pyproject(
     if path.exists() and not force:
         return "skipped"
     existed = path.exists()
-    dep = monkeybot_requirement(provider=provider, extras=extras)
+    # Sandbox is configured in every generated agent, so install its SDK with
+    # the provider dependencies rather than imposing it on every core install.
+    dep = monkeybot_requirement(provider=provider, extras=["sandbox", *(extras or [])])
     name = _sanitize_project_name(dest.name)
     path.write_text(
         (
@@ -254,7 +226,10 @@ def write_agent_pyproject(
             'requires-python = ">=3.11"\n'
             "dependencies = [\n"
             f'  "{dep}",\n'
+            '  "monkeybot-browser-mcp>=0.2.0,<1",\n'
             "]\n"
+            "\n[tool.uv]\n"
+            "package = false\n"
         ),
         encoding="utf-8",
     )
@@ -269,7 +244,7 @@ def run_new(
     model: str | None = None,
     extras: list[str] | None = None,
 ) -> list[str]:
-    """Full scaffold: config bundle, workspace, env example, and setup script."""
+    """Full scaffold: config bundle, trusted skills, writable state, and image files."""
     cfg_dir = dest / "monkeybot_config"
     report = install_config_bundle(cfg_dir, force=force)
     report.append(
@@ -278,8 +253,9 @@ def run_new(
     )
     report.extend(ensure_memory(dest, force=force))
     report.extend(ensure_workspace(dest, force=force))
-    report.append(f"  scripts/setup-workspace.sh: {install_setup_script(dest, force=force)}")
+    report.append(f"  skills/browser/SKILL.md: {install_browser_skill(dest, force=force)}")
     report.append(f"  .env.example: {install_env_example(dest, force=force)}")
+    report.extend(install_container_files(dest, force=force))
     report.append(
         f"  pyproject.toml: "
         f"{write_agent_pyproject(dest, provider=provider, extras=extras, force=force)}"

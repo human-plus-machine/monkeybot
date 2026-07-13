@@ -261,7 +261,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 | Tool | Role |
 |------|------|
-| `read_file` / `write_file` | Workspace-relative paths |
+| `read_file` / `write_file` | `skills/...` read-only or workspace-relative paths |
 | `replace_in_file` | Unique (or `replace_all`) substring edit; exact then light fuzzy match |
 | `glob` / `grep` | Path discovery / content regex search (prefer over shell) |
 | `apply_patch` | Multi-file Codex-style Add/Update/Delete/Move; fail-closed before any write |
@@ -283,7 +283,8 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 **Depends on:** `WorkspaceStorage`, `MCPClientPort`, optional `MemorySubsystem`, `RunStore` for task queue.
 
 **Invariants:**
-- Workspace paths: no `..`, no `~`; resolved under `workspace_root`.
+- `skills/...` paths resolve only below the read-only skills root; all other relative paths resolve only below `workspace_root`.
+- Writes, edits, and patches reject `skills/...`; real-path checks reject symlink escapes from either root.
 - `apply_patch` validates all hunks before writing; a mid-apply failure rolls back completed ops in reverse order.
 - Large tool results may spill to `.monkeybot/spill/{thread_id}/`.
 - `task` omitted in subagent workers (`include_task_tool=False`).
@@ -407,7 +408,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Invariants:**
 - Lazy backend imports.
-- Relative `sqlite:///` paths normalized against `MONKEYBOT_AGENT_ROOT` for subagents.
+- All relative storage and config paths resolve once against the agent root, including subagents.
 - `ToolRequest`/`ToolResponse` pairing must survive provider replay.
 - Integrity repair on load only — never persisted.
 
@@ -519,7 +520,9 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Precedence:** `.env` (dotenv) → existing `os.environ` wins → yaml fills **unset** keys only.
 
-**Discovery:** `MONKEYBOT_CONFIG` or `<cwd>/monkeybot_config/monkeybot.yaml`.
+**Discovery:** `MONKEYBOT_CONFIG`, otherwise the nearest ancestor of the launch
+directory that contains `monkeybot_config/`. The discovered agent root loads
+its `.env` before YAML values fill still-unset environment variables.
 
 **Major sections:** `runtime`, `paths`, `model`, `gateway`, `context_curation`, `memory_hook`, `subagent`, `subagents`, `tools`, `compression`, `web_search`, `sandbox`, `emission`, `fake_provider`, `includes`.
 
@@ -528,6 +531,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - `apply_monkeybot_runtime_env()` is idempotent.
 - Subagent registry: duplicate names → `ConfigError`.
 - YAML maps to env once at startup; runtime reads `os.environ`.
+- Every relative YAML path is anchored at the agent root, not the process working directory.
 
 ---
 
@@ -590,7 +594,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Key files:** `skills/*/SKILL.md`, `docs/skills.md`
 
-**Invariants:** Skills are filesystem docs, not auto-executed Python (legacy loader exists but primary path is doc-driven).
+**Invariants:** Skills are filesystem docs, not auto-executed Python (legacy loader exists but primary path is doc-driven). They live outside the writable workspace and are addressed by file tools through the `skills/` virtual prefix; writes to that prefix are rejected.
 
 ---
 

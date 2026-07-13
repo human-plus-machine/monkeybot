@@ -152,13 +152,17 @@ startup. Migrate by either teaching skills to call `enable_mcp("name")` or setti
 
 There is no separate `lazy` flag — progressive disclosure is the default.
 
-Demo browser entry:
+Bundled browser entry (disabled until approved):
 
 ```json
 "browser": {
-  "command": "uv",
-  "args": ["run", "--project", "../integrations/browser-mcp", "python", "-m", "browser_mcp.server"],
-  "env": { ... }
+  "enabled": false,
+  "command": "python",
+  "args": ["-m", "browser_mcp.server"],
+  "env": {
+    "BROWSER_MCP_PLAYBOOKS_DIR": "${MONKEYBOT_WORKSPACE_ROOT}/browser/playbooks",
+    "BROWSER_MCP_SCREENSHOTS_DIR": "${MONKEYBOT_WORKSPACE_ROOT}/browser/Screenshots"
+  }
 }
 ```
 

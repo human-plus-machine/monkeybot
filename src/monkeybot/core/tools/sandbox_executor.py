@@ -31,14 +31,22 @@ import os
 import re
 import shlex
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from monkeybot.core.tools.terminal import ALLOWED_PATHS, ALLOWED_COMMANDS, ExecutionResult, SecurityError, build_skill_runtime_env
+from monkeybot.core.tools.terminal import (
+    ALLOWED_COMMANDS,
+    ALLOWED_PATHS,
+    ExecutionResult,
+    SecurityError,
+    build_skill_runtime_env,
+)
 
 logger = logging.getLogger(__name__)
+_ABSOLUTE_PATH_FRAGMENT = re.compile(r"(?<![\w.-])/(?:[^\s'\"`;()]+)")
 
 
 @dataclass
@@ -55,26 +63,32 @@ class SandboxConfig:
     image: str
     ttl_seconds: int
     use_server_proxy: bool = True
+    shared_filesystem: bool = True
 
     @classmethod
-    def from_env(cls) -> "SandboxConfig":
+    def from_env(cls) -> SandboxConfig:
         raw_ttl = os.getenv("SANDBOX_TTL_SECONDS", "1800")
         try:
             ttl = int(raw_ttl)
         except ValueError:
             raise ValueError(
                 f"SANDBOX_TTL_SECONDS must be an integer, got: {raw_ttl!r}"
-            )
-        api_key = os.getenv("SANDBOX_API_KEY") or None
+            ) from None
+        api_key = os.getenv("SANDBOX_API_KEY") or os.getenv("SANDBOX_AUTH_TOKEN") or None
         proxy_raw = os.getenv("SANDBOX_USE_SERVER_PROXY", "true").strip().lower()
         use_server_proxy = proxy_raw not in ("0", "false", "no", "off")
+        shared_raw = os.getenv("SANDBOX_SHARED_FILESYSTEM", "true").strip().lower()
+        shared_filesystem = shared_raw not in ("0", "false", "no", "off")
         return cls(
             enabled=os.getenv("SANDBOX_ENABLED", "false").lower() == "true",
             server_url=os.getenv("SANDBOX_SERVER_URL", "http://localhost:8080"),
             api_key=api_key,
-            image=os.getenv("SANDBOX_IMAGE", "python:3.12"),
+            image=os.getenv(
+                "SANDBOX_IMAGE", "python:3.12"
+            ),
             ttl_seconds=ttl,
             use_server_proxy=use_server_proxy,
+            shared_filesystem=shared_filesystem,
         )
 
 
@@ -99,10 +113,12 @@ class SandboxExecutor:
         config: SandboxConfig,
         workspace_root: Path,
         *,
+        skills_path: Path | None = None,
         allowed_commands: Sequence[str] | None = None,
     ) -> None:
         self._config = config
         self._workspace_root = Path(workspace_root).resolve()
+        self._skills_path = Path(skills_path).resolve() if skills_path is not None else None
         self._sandbox: Any = None
         self._allowed_commands: tuple[str, ...] = (
             tuple(allowed_commands) if allowed_commands is not None else tuple(ALLOWED_COMMANDS)
@@ -116,6 +132,41 @@ class SandboxExecutor:
     def allowed_path_prefixes(self) -> tuple[str, ...]:
         """Path prefixes allowed for ``run_command`` error hints (host uses :class:`TerminalExecutor`)."""
         return tuple(ALLOWED_PATHS)
+
+    def _remote_requests_mounted_path(self, args: list[str], cwd: Path | str | None) -> bool:
+        """Detect host layout paths before dispatching to a compute-only sandbox.
+
+        Shell commands commonly place a pathname inside ``bash -c`` rather
+        than pass it as a standalone argument, so inspect shell tokens as well
+        as direct absolute arguments. Relative paths are intentionally allowed:
+        a remote sandbox resolves them below its own ``/tmp`` workdir.
+        """
+        mounted_roots = tuple(
+            root for root in (self._workspace_root, self._skills_path) if root is not None
+        )
+        raw_values = [str(cwd)] if cwd is not None else []
+        raw_values.extend(args)
+        for raw in raw_values:
+            tokens = [raw]
+            with suppress(ValueError):
+                tokens.extend(shlex.split(raw))
+            tokens.extend(_ABSOLUTE_PATH_FRAGMENT.findall(raw))
+            if any(
+                re.search(rf"(?<![\w.-]){re.escape(str(root))}(?=$|[\s/'\"`;,)])", raw)
+                for root in mounted_roots
+            ):
+                return True
+            for token in tokens:
+                # Cover shell assignments and long options, e.g. ``PATH=/host/x``.
+                candidates = (token, token.split("=", 1)[1]) if "=" in token else (token,)
+                for candidate in candidates:
+                    path = Path(candidate).expanduser()
+                    if not path.is_absolute():
+                        continue
+                    resolved = path.resolve()
+                    if any(resolved == root or root in resolved.parents for root in mounted_roots):
+                        return True
+        return False
 
     async def _ensure_sandbox(self) -> None:
         if self._sandbox is not None:
@@ -155,35 +206,69 @@ class SandboxExecutor:
             use_server_proxy=self._config.use_server_proxy,
         )
 
-        # Derive a DNS-safe volume name from the workspace path (max 63 chars).
-        vol_name = re.sub(r"[^a-z0-9-]", "-", workspace_str.lower()).strip("-")[:63]
-
         runtime_env = build_skill_runtime_env(cwd=self._workspace_root)
-        volumes = [
-            Volume(
-                name=vol_name or "workspace",
-                host=Host(path=workspace_str),
-                mountPath=workspace_str,
-                readOnly=False,
-            )
-        ]
-        mounted_paths = {workspace_str}
-        for cred_env in ("GOOGLE_APPLICATION_CREDENTIALS", "GCP_AUTH_FILE"):
-            cred_path = runtime_env.get(cred_env, "").strip()
-            if not cred_path or cred_path in mounted_paths:
-                continue
-            if not Path(cred_path).is_file():
-                continue
-            cred_vol_name = re.sub(r"[^a-z0-9-]", "-", cred_path.lower()).strip("-")[:63]
+        volumes: list[Any] = []
+        mounted_paths: set[str] = set()
+        if self._config.shared_filesystem:
+            # Derive DNS-safe names from host paths (max 63 chars).
+            vol_name = re.sub(r"[^a-z0-9-]", "-", workspace_str.lower()).strip("-")[:63]
             volumes.append(
                 Volume(
-                    name=cred_vol_name or "gcp-creds",
-                    host=Host(path=cred_path),
-                    mountPath=cred_path,
-                    readOnly=True,
+                    name=vol_name or "workspace",
+                    host=Host(path=workspace_str),
+                    mountPath=workspace_str,
+                    readOnly=False,
                 )
             )
-            mounted_paths.add(cred_path)
+            mounted_paths.add(workspace_str)
+            if self._skills_path is not None:
+                skills_str = str(self._skills_path)
+                skills_vol_name = re.sub(r"[^a-z0-9-]", "-", skills_str.lower()).strip("-")[:63]
+                volumes.append(
+                    Volume(
+                        name=skills_vol_name or "skills",
+                        host=Host(path=skills_str),
+                        mountPath=skills_str,
+                        readOnly=True,
+                    )
+                )
+                mounted_paths.add(skills_str)
+            for cred_env in ("GOOGLE_APPLICATION_CREDENTIALS", "GCP_AUTH_FILE"):
+                cred_path = runtime_env.get(cred_env, "").strip()
+                if not cred_path or cred_path in mounted_paths:
+                    continue
+                if not Path(cred_path).is_file():
+                    continue
+                cred_vol_name = re.sub(r"[^a-z0-9-]", "-", cred_path.lower()).strip("-")[:63]
+                volumes.append(
+                    Volume(
+                        name=cred_vol_name or "gcp-creds",
+                        host=Host(path=cred_path),
+                        mountPath=cred_path,
+                        readOnly=True,
+                    )
+                )
+                mounted_paths.add(cred_path)
+        else:
+            # A remote OpenSandbox cannot read host paths.  Avoid exporting
+            # invalid credentials or layout paths as though they were mounted.
+            runtime_env.update(
+                {
+                    "MONKEYBOT_WORKSPACE_ROOT": "/tmp",
+                    "WORKSPACE_ROOT": "/tmp",
+                }
+            )
+            for key in (
+                "GOOGLE_APPLICATION_CREDENTIALS",
+                "GCP_AUTH_FILE",
+                "MONKEYBOT_AGENT_ROOT",
+                "SKILLS_PATH",
+                "AGENT_MD",
+                "MCP_CONFIG",
+                "COMMAND_ALLOWLIST_CONFIG",
+                "PERMISSION_CONFIG",
+            ):
+                runtime_env.pop(key, None)
 
         self._sandbox = await Sandbox.create(
             self._config.image,
@@ -211,6 +296,11 @@ class SandboxExecutor:
         if command not in self._allowed_commands:
             raise SecurityError(f"Command '{command}' not allowed")
 
+        if not self._config.shared_filesystem and self._remote_requests_mounted_path(args, cwd):
+            raise SecurityError(
+                "remote sandbox is compute-only and cannot access workspace or skills files"
+            )
+
         await self._ensure_sandbox()
 
         full_cmd = " ".join([command] + [shlex.quote(a) for a in args])
@@ -218,7 +308,11 @@ class SandboxExecutor:
 
         from opensandbox.models.execd import RunCommandOpts
 
-        workdir = str(Path(cwd).resolve()) if cwd is not None else str(self._workspace_root)
+        workdir = (
+            str(Path(cwd).resolve())
+            if cwd is not None and self._config.shared_filesystem
+            else "/tmp"
+        )
         execution = await self._sandbox.commands.run(
             full_cmd,
             opts=RunCommandOpts(

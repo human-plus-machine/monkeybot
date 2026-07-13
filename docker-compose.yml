@@ -1,0 +1,13 @@
+services:
+  monkeybot:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    environment:
+      # A self-contained health-checkable demo. Production deployments provide
+      # their provider credentials and model configuration through `.env`.
+      MODEL_PROVIDER: fake
+      MODEL_NAME: fake
+      WEB_SEARCH_BACKEND: none
+    ports:
+      - "8080:8080"
