@@ -12,6 +12,7 @@ from typing import Any, Literal
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.runtime.input_admission import InputAdmission
+from monkeybot.core.tools.permission import SessionApprovals
 
 from .sse import format_data_event
 
@@ -61,6 +62,8 @@ class SessionBus:
         """Lazily-created ``TranscriptWriter`` (internal debugging only); None when disabled."""
         self.admission = InputAdmission()
         """Process-local steer + follow-up queues (not shared across gateway replicas)."""
+        self.session_approvals = SessionApprovals()
+        """Process-local 'always allow' rememberies (not shared across gateway replicas)."""
         self.follow_up_retry_task: asyncio.Task[None] | None = None
         """Scheduled drain retry after a failed durable turn-lock acquire."""
 

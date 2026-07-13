@@ -205,13 +205,28 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 **Purpose:** Thin streaming boundary between harness and LLM vendors.
 
 **Key files:**
-- `core/llm/provider.py` — `Provider` protocol, `Message`, `ProviderEvent`
+- `core/llm/provider.py` — `Provider` protocol, `Message`, `ProviderEvent`, `ProviderCallHints`
 - `providers/gemini.py`, `openai.py`, `claude.py`, `vertex_claude.py`, `bedrock.py`, `huggingface.py`, `ollama.py`, `nvidia.py`
 - `core/config/settings.py` — `get_provider_config()`
 
+**Provider catalog** (canonical ids → protocol family):
+
+| Id | Aliases | Protocol | Cache hints |
+|----|---------|----------|-------------|
+| `google_vertexai` | gemini, vertex | google-genai | implicit prefix |
+| `google_genai` | — | google-genai | implicit prefix |
+| `openai` | — | openai-chat | session affinity + `prompt_cache_retention` when long |
+| `anthropic` | — | anthropic-messages | `cache_control` + `x-session-affinity` |
+| `vertex_anthropic` | vertex-claude | anthropic-messages | `cache_control` |
+| `aws_bedrock` | — | anthropic-messages | `cache_control` |
+| `huggingface` / `nvidia` / `ollama` | — | openai-compat | none |
+| `fake` | — | fake | gateway/test only |
+
+**Auth:** see CLI `monkeybot doctor` and `cli/.../providers.py` (`PROVIDER_SPECS`).
+
 **How it works:**
-- `stream(messages, tools, model=..., thinking_budget=...)` yields `TextDelta`, optional `ToolInputDelta`, `ThinkingDelta`, `ToolCall`, `UsageEvent`, `Done`.
-- Loop synthesizes `AssistantTextStarted`/`AssistantTextEnded`/`ThinkingBlockStarted` from deltas via `ProviderStreamMapper`; Anthropic streams `ToolInputDelta` from `input_json_delta`.
+- `stream(messages, tools, model=..., thinking_budget=..., hints=...)` yields `TextDelta`, optional `ToolInputDelta`, `ThinkingDelta`, `ToolCall`, `UsageEvent`, `Done`.
+- Loop synthesizes `AssistantTextStarted`/`AssistantTextEnded`/`ThinkingBlockStarted` from deltas via `ProviderStreamMapper`; Anthropic streams `ToolInputDelta` from `input_json_delta`. `AssistantTextEnded.text` carries the full settled block for durable replay.
 - `Done.truncated` is set when the vendor reports an output length limit (OpenAI `finish_reason=length`, Anthropic `stop_reason=max_tokens`, Gemini `MAX_TOKENS`). The text loop treats that as an unsafe tool batch. Gemini Live does not expose an equivalent signal, so realtime rejects incomplete tool batches via all-`parse_error` only.
 - `count_input_tokens()` must match the same payload shape as `stream()` (summarization triggers, tool budgets).
 - Provider resolution via `MODEL_PROVIDER` aliases (`gemini` → `google_vertexai`, `vertex-claude` → `vertex_anthropic`).
@@ -219,13 +234,20 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - `ollama`, `huggingface`, and `nvidia` share the OpenAI-compatible streaming core (`providers/_openai_compat.py`) and only differ in base URL / auth; `ollama` runs against a local server (`OLLAMA_BASE_URL`, default `http://localhost:11434`) and needs no API key; `nvidia` hits `https://integrate.api.nvidia.com/v1` and needs a free `NVIDIA_API_KEY` from build.nvidia.com.
 - `MODEL_PROVIDER=fake` is gateway/test-only; unit tests inject `ScriptedFakeProvider` directly.
 
+**Prompt-cache session hints (`ProviderCallHints`):**
+- Loop passes `session_id=thread_id` and `cache_retention` from `MODEL_CACHE_RETENTION` / `model.cache_retention` (`none` | `short` | `long`, default `short`).
+- Anthropic family: `cache_control` on stable system prefix + last tool when retention ≠ `none`; optional `x-session-affinity` header.
+- OpenAI: `x-session-affinity` when retention ≠ `none`; `prompt_cache_retention=24h` when `long`.
+- Gemini: relies on implicit prefix caching (epoch keeps stable baseline byte-identical); hints accepted as no-ops.
+
 **Depends on:** `ToolDef`, `ContentBlock` serialization per adapter.
 
 **Invariants:**
 - Exactly one overlapping `stream()` per provider instance is undefined.
 - `Message.role` is only `user` | `assistant` | `system`.
-- Prompt caching: stable prefix = `AGENT.md` + harness + attachments; Anthropic providers always use explicit `cache_control` on the stable prefix. Epoch keeps that prefix byte-identical across volatile-only updates.
+- Prompt caching: stable prefix = `AGENT.md` + harness + attachments; Anthropic providers use explicit `cache_control` on the stable prefix when retention is enabled. Epoch keeps that prefix byte-identical across volatile-only updates.
 - Cost estimation via `providers/pricing.estimate_cost()` on usage events.
+- Hints are optional and provider-specific; unknown providers ignore them.
 
 ---
 
@@ -266,17 +288,30 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Purpose:** Pre-flight policy gates; supports user confirmation via SSE.
 
-**Key files:** `core/tools/inspector.py`
+**Key files:** `core/tools/inspector.py`, `core/tools/permission.py`, `core/tools/loop_inspector.py`
 
-**Inspectors wired at gateway startup:**
-1. `CommandTierInspector` — `command_allowlist.yaml`
-2. `RulesInspector` — `MONKEYBOT_TOOL_DENIED_PATTERNS` substring deny list
+**Inspectors wired at gateway startup (order matters — first deny/confirm wins):**
+1. `CommandTierInspector` — `command_allowlist.yaml` deny-regex preflight; execution allowlists stay on the executor
+2. `RulesInspector` — `MONKEYBOT_TOOL_DENIED_PATTERNS` substring deny list (backward compat)
+3. `PermissionInspector` — `permissions.yaml` last-match-wins `allow` / `ask` / `deny` ruleset (`PERMISSION_CONFIG`)
+4. `LoopStartInspector` — `start_loop` always asks for confirmation (rich plan preview)
+
+**Permission ruleset (`permissions.yaml`):**
+- Rules are ordered; **last match wins** (OpenCode-style).
+- `tool` and `pattern` support `fnmatch` wildcards (`*`, `?`).
+- Resource string: normalized `run_command` line, `path` arg, or `str(args)` fallback.
+- `default:` applies when nothing matches (shipped default: `allow`).
+- Session approvals: POST tool-confirmation with `{approved: true, always: true}` remembers tool+resource for the rest of the session (`SessionBus.session_approvals`).
 
 **Decision kinds:** `allow` | `deny` | `confirm` (requires `ctx.sse_bus` for pending UI response).
 
+**Hard constraints underneath soft asks:** `allowed_commands` / `allowed_path_prefixes` + sandbox still enforce at execution time — permission `ask`/`allow` cannot bypass them.
+
 **Invariants:**
-- Missing allowlist file → all tools allowed (logged).
+- Missing allowlist file → tier inspector skipped (logged); executor falls back to code defaults.
+- Missing `permissions.yaml` → soft ruleset disabled (logged).
 - Default deny patterns block package installs (`pip install`, `npm install`, etc.).
+- Confirm without `sse_bus` → deny.
 
 ---
 
@@ -345,11 +380,19 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Purpose:** Persist `Message` rows (typed `ContentBlock` JSON) per `thread_id`.
 
-**Key files:** `core/persistence/backends.py`, `history.py`, `sqlite_backend.py`, `postgres.py`, `firestore.py`, `core/messages/tool_integrity.py`, `core/messages/transform_context.py`, `core/messages/convert_provider.py`
+**Key files:** `core/persistence/backends.py`, `history.py`, `sqlite_backend.py`, `postgres.py`, `firestore.py`, `core/messages/tool_integrity.py`, `core/messages/transform_context.py`, `core/messages/convert_provider.py`, `core/persistence/transcript.py`, `core/runtime/events.py`
 
 **DB URL schemes:** `sqlite://`, `postgresql://` / `postgres://`, `firestore://PROJECT/DATABASE`
 
 **Auto schema:** SQLite and Postgres run idempotent DDL on `open()` when `paths.auto_schema` is `true` in monkeybot.yaml (default). Set `paths.auto_schema: false` when a migration process owns the schema. Firestore is schemaless — no DDL on `open()`.
+
+**Durable vs live events (OpenCode V2-aligned):**
+- **Conversation durability** lives in history (`Message` / `ContentBlock`), not an event ledger.
+- **AgentEvent taxonomy:** `events.DURABLE_EVENT_KINDS` + `is_durable_event()` (non-members are live-only).
+  - Durable boundaries: `ToolCallStarted`, `ToolCallResult`, `TurnComplete`, `Error`, `ContextSummarized`, `AssistantTextEnded` (with `text`), `ThinkingBlockComplete`, epoch/steer admissions, etc.
+  - Live-only: streaming deltas (`AssistantDelta`, `ToolInputDelta`, `ThinkingBlockDelta`, …), progress heartbeats, playground snapshots.
+- **Tool settlement:** live `ToolCallResult` mirrors durable `ToolResponse` blocks appended after the tool batch (one user row per model tool-call turn, call-order preserved). Crash between assistant `ToolRequest` append and batched responses is repaired in-memory on load (`tool_integrity`).
+- **Optional NDJSON transcript** (`MONKEYBOT_TRANSCRIPT_ENABLED`): writes durable events by default; set `MONKEYBOT_TRANSCRIPT_INCLUDE_LIVE=1` for full SSE fidelity.
 
 **Invariants:**
 - Lazy backend imports.

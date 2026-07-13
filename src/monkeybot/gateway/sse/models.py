@@ -117,6 +117,8 @@ class ToolConfirmationPOST(BaseModel):
 
     approved: bool
     reason: str | None = None
+    always: bool = False
+    """When true with approved, remember this tool+resource for the rest of the session."""
 
 
 class ElicitationPOST(BaseModel):

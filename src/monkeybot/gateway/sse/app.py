@@ -59,6 +59,7 @@ from monkeybot.core.runtime.loop import run as run_loop
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector, ToolInspector
+from monkeybot.core.tools.permission import try_load_permission_inspector
 from monkeybot.core.tools.loop_inspector import LoopStartInspector
 from monkeybot.core.types.content_blocks import ContentBlock, Text
 from monkeybot.core.workspace import create_workspace_storage
@@ -538,6 +539,14 @@ async def _startup(fastapi_app: FastAPI) -> None:
     denied = _tool_denied_patterns()
     if denied:
         inspectors.append(RulesInspector(denied))
+
+    perm_path = Path(
+        os.environ.get("PERMISSION_CONFIG", "/app/monkeybot_config/permissions.yaml")
+    )
+    perm_insp = try_load_permission_inspector(perm_path)
+    if perm_insp is not None:
+        inspectors.append(perm_insp)
+
     inspectors.append(LoopStartInspector())
     _deps.inspectors = inspectors
 

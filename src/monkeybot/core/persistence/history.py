@@ -1,4 +1,10 @@
-"""SQLite-backed conversation history store."""
+"""SQLite-backed conversation history store.
+
+Durable conversation facts live here as ``Message`` rows with typed
+``ContentBlock`` JSON (not as ``AgentEvent`` rows). Tool settlement is the
+``ToolResponse`` block(s) on a user row after a tool batch; the live SSE
+``ToolCallResult`` event is the progress mirror (see ``events.is_durable_event``).
+"""
 
 from __future__ import annotations
 

@@ -6,7 +6,7 @@ import os
 from collections.abc import AsyncIterator, Sequence
 from typing import Any, cast
 
-from monkeybot.core.llm.provider import Message, ProviderEvent
+from monkeybot.core.llm.provider import Message, ProviderCallHints, ProviderEvent
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._utils import (
     anthropic_tool_defs,
@@ -50,8 +50,9 @@ class ClaudeProvider:
         *,
         model: str,
         thinking_budget: int | None = None,
+        hints: ProviderCallHints | None = None,
     ) -> int:
-        del thinking_budget
+        del thinking_budget, hints
         import anthropic  # noqa: PLC0415
 
         system, msgs = split_leading_system(messages)
@@ -72,14 +73,26 @@ class ClaudeProvider:
         *,
         model: str,
         thinking_budget: int | None = None,
+        hints: ProviderCallHints | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         import anthropic  # noqa: PLC0415
+
+        retention = hints.cache_retention if hints is not None else "short"
+        session_id = hints.session_id if hints is not None else None
 
         system, msgs = split_leading_system(messages)
         converted_messages = build_anthropic_messages(msgs)
         converted = anthropic_tool_defs(tools) if tools else None
-        system_param: Any = build_cached_system_blocks(system) if system else anthropic.NOT_GIVEN
-        tools_param: Any = mark_last_tool_cached(converted) if converted else anthropic.NOT_GIVEN
+        system_param: Any = (
+            build_cached_system_blocks(system, cache_retention=retention)
+            if system
+            else anthropic.NOT_GIVEN
+        )
+        tools_param: Any = (
+            mark_last_tool_cached(converted, cache_retention=retention)
+            if converted
+            else anthropic.NOT_GIVEN
+        )
 
         stream_kwargs: dict[str, Any] = {
             "model": model,
@@ -97,7 +110,10 @@ class ClaudeProvider:
             # Anthropic requires temperature=1 when extended thinking is enabled.
             stream_kwargs["temperature"] = 1
 
-        client = anthropic.AsyncAnthropic()
+        client_kwargs: dict[str, Any] = {}
+        if session_id and retention != "none":
+            client_kwargs["default_headers"] = {"x-session-affinity": session_id}
+        client = anthropic.AsyncAnthropic(**client_kwargs)
         async for event in iter_anthropic_sdk_stream(
             client,
             stream_kwargs,

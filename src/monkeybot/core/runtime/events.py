@@ -255,10 +255,15 @@ class AssistantTextStarted:
 
 @dataclass(frozen=True)
 class AssistantTextEnded:
-    """End of an assistant text block (additive)."""
+    """End of an assistant text block (additive).
+
+    When ``text`` is set, this is a durable settlement boundary (full block text
+    for replay). Streaming clients may still reconstruct from ``AssistantDelta``.
+    """
 
     kind: Literal["AssistantTextEnded"] = "AssistantTextEnded"
     request_id: str = ""
+    text: str = ""
 
 
 @dataclass(frozen=True)
@@ -315,6 +320,36 @@ AgentEvent: TypeAlias = (
     | ThinkingBlockStarted
     | ToolInputDeltaEvent
 )
+
+# Durable vs live-only (OpenCode V2-style). Conversation history persists
+# Message/ContentBlock rows separately; this set classifies AgentEvent kinds for
+# transcript filtering and replay semantics.
+#
+# Durable = settlement / boundary events that should survive for debugging replay.
+# Everything else is live-only (streaming fragments and ephemeral UI progress).
+DURABLE_EVENT_KINDS: frozenset[str] = frozenset(
+    {
+        "ToolCallStarted",  # tool input finalized (args known); history mirror = ToolRequest
+        "ToolCallResult",  # tool success/failure settlement; history mirror = ToolResponse
+        "TurnComplete",
+        "Error",
+        "ContextSummarized",
+        "ThinkingBlockComplete",
+        "RedactedThinkingBlock",
+        "AssistantTextEnded",  # when text is set, full settled prose
+        "ToolConfirmationRequest",
+        "GroundingEvent",
+        "UserSteered",
+        "QueuedInputAccepted",
+        "ContextEpochStarted",
+        "SystemContextUpdated",
+    }
+)
+
+
+def is_durable_event(event: AgentEvent) -> bool:
+    """Return True when ``event`` is a durable settlement/boundary event."""
+    return event.kind in DURABLE_EVENT_KINDS
 
 
 def _usage_from_obj(raw: object | None) -> UsageTotals:
@@ -425,7 +460,12 @@ def _story5_event_dict(event: AgentEvent) -> dict[str, object]:
             "epoch_id": event.epoch_id,
             "changed_sources": list(event.changed_sources),
         }
-    if isinstance(event, (AssistantTextStarted, AssistantTextEnded, ThinkingBlockStarted)):
+    if isinstance(event, AssistantTextEnded):
+        out = dict(base)
+        if event.text:
+            out["text"] = event.text
+        return out
+    if isinstance(event, (AssistantTextStarted, ThinkingBlockStarted)):
         return base
     if isinstance(event, ToolInputDeltaEvent):
         return {
@@ -761,7 +801,9 @@ def event_from_json(raw: str) -> AgentEvent:
     if t == "AssistantTextStarted":
         return AssistantTextStarted(request_id=rid)
     if t == "AssistantTextEnded":
-        return AssistantTextEnded(request_id=rid)
+        text_raw = payload.get("text", "")
+        text = text_raw if isinstance(text_raw, str) else ""
+        return AssistantTextEnded(request_id=rid, text=text)
     if t == "ThinkingBlockStarted":
         return ThinkingBlockStarted(request_id=rid)
     if t == "ToolInputDelta":

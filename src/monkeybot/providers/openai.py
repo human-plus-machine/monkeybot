@@ -8,6 +8,7 @@ from typing import Any
 
 from monkeybot.core.llm.provider import (
     Message,
+    ProviderCallHints,
     ProviderEvent,
 )
 from monkeybot.core.types.types_tools import ToolDef
@@ -85,6 +86,7 @@ class OpenAIProvider:
         *,
         model: str,
         thinking_budget: int | None = None,
+        hints: ProviderCallHints | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         del thinking_budget
         from openai import AsyncOpenAI  # noqa: PLC0415
@@ -95,7 +97,12 @@ class OpenAIProvider:
         if system:
             oai_messages = [{"role": "system", "content": system}, *oai_messages]
 
-        client = AsyncOpenAI()
+        retention = hints.cache_retention if hints is not None else "short"
+        session_id = hints.session_id if hints is not None else None
+        client_kwargs: dict[str, Any] = {}
+        if session_id and retention != "none":
+            client_kwargs["default_headers"] = {"x-session-affinity": session_id}
+        client = AsyncOpenAI(**client_kwargs)
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": oai_messages,
@@ -106,6 +113,8 @@ class OpenAIProvider:
         if tools:
             kwargs["tools"] = openai_tools(tools)
             kwargs["parallel_" + "tool" + "_calls"] = True
+        if retention == "long":
+            kwargs["prompt_cache_retention"] = "24h"
 
         async for event in iter_openai_compat_stream(
             client,

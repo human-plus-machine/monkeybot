@@ -84,7 +84,7 @@ async def test_write_user_message(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_write_event_matches_sse_wire_shape(tmp_path: Path) -> None:
-    writer = TranscriptWriter("sess-1", workspace_root=tmp_path)
+    writer = TranscriptWriter("sess-1", workspace_root=tmp_path, include_live=True)
     await writer.write_event(AssistantDelta(request_id="r1", delta="hi"))
     await writer.write_event(
         ToolCallStarted(request_id="r1", tool="read_file", label="Read x", args={"path": "x"})
@@ -100,6 +100,17 @@ async def test_write_event_matches_sse_wire_shape(tmp_path: Path) -> None:
     assert lines[2]["type"] == "TurnComplete"
     assert lines[2]["usage"]["input_tokens"] == 5
 
+
+@pytest.mark.asyncio
+async def test_write_event_durable_only_skips_deltas(tmp_path: Path) -> None:
+    writer = TranscriptWriter("sess-1", workspace_root=tmp_path, include_live=False)
+    await writer.write_event(AssistantDelta(request_id="r1", delta="hi"))
+    await writer.write_event(
+        ToolCallStarted(request_id="r1", tool="read_file", label="Read x", args={"path": "x"})
+    )
+    lines = _read_lines(writer.path)
+    assert len(lines) == 1
+    assert lines[0]["type"] == "ToolCallStarted"
 
 @pytest.mark.asyncio
 async def test_write_provider_request_and_response(tmp_path: Path) -> None:
@@ -163,7 +174,7 @@ async def test_write_provider_request_delta_only(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_seq_is_monotonic_across_manifest_and_events(tmp_path: Path) -> None:
-    writer = TranscriptWriter("sess-1", workspace_root=tmp_path)
+    writer = TranscriptWriter("sess-1", workspace_root=tmp_path, include_live=True)
     await writer.ensure_manifest(model="gpt-5")
     await writer.write_user_message(request_id="r1", content="hi")
     await writer.write_event(AssistantDelta(request_id="r1", delta="hey"))

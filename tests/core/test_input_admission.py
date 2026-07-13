@@ -76,13 +76,14 @@ async def test_steer_injected_after_tool_batch_before_next_provider_call() -> No
         ) -> AsyncIterator[ProviderEvent]:
             del tools, model, thinking_budget
             self.calls += 1
-            # Capture latest user text visible to the provider.
-            for m in reversed(list(messages)):
-                if m.role == "user" and m.content:
-                    block = m.content[0]
+            # Capture user Text visible to the provider (steer may be coalesced
+            # into the trailing tool-response user row after transform_context).
+            for m in messages:
+                if m.role != "user":
+                    continue
+                for block in m.content:
                     if isinstance(block, Text):
                         seen_user_msgs.append(block.text)
-                        break
             if self.calls == 1:
                 yield ToolCall(call_id="c1", name="read_file", args={"path": "x.md"})
                 yield Done()
