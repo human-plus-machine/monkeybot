@@ -10,7 +10,7 @@ requires-python = ">=3.11"
 dependencies = [
     # `cli` pulls realtime + typer so `monkeybot talk` works out of the box (text mode).
     # Audio mic/PTT needs the agent (or this env) to also install monkeybot[cli-realtime].
-    "monkeybot[cli]",
+    "monkeybot[cli]>=2.1.0,<3",
     "httpx>=0.27.0",
     "pyyaml>=6.0.2",
     "python-dotenv>=1.0.0",
@@ -32,9 +32,6 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/monkeybot_cli"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"src/monkeybot_cli/scaffold_defaults" = "monkeybot_cli/scaffold_defaults"
 
 [tool.ruff]
 line-length = 100

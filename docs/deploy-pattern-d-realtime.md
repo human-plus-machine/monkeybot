@@ -87,13 +87,16 @@ pip install -e ".[realtime-gemini]"
 Install the unified CLI (`monkeybot-cli` in `cli/`) plus harness extras for talk:
 
 ```bash
-# From repo root: harness extras used by `monkeybot talk`
-pip install -e ".[cli]"              # text-only talk (no microphone deps)
-pip install -e ".[cli-realtime]"     # audio talk (requires PortAudio)
+# Agent project (preferred): include extras in pyproject.toml, then uv sync
+#   monkeybot[cli]            — text-only talk
+#   monkeybot[cli-realtime]   — audio talk (requires PortAudio)
 
-# User-facing `monkeybot` binary (chat + talk + scaffold/validate/…)
-pip install -e ./cli
-# or: cd cli && uv tool install --editable .
+# Global CLI on PATH
+uv tool install monkeybot-cli
+
+# Harness contributors only (editable checkout):
+#   uv sync --extra cli            # or cli-realtime
+#   cd cli && uv tool install --editable .
 ```
 
 ---
