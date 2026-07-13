@@ -162,7 +162,7 @@ def test_load_permissions_invalid_effect(tmp_path: Path) -> None:
 def test_packaged_permissions_loads() -> None:
     from importlib import resources
 
-    path = Path(str(resources.files("monkeybot.monkeybot_config") / "permissions.yaml"))
+    path = Path(str(resources.files("monkeybot_cli.scaffold_defaults") / "permissions.yaml"))
     ruleset = load_permissions(path)
     assert ruleset.default == "allow"
     assert ruleset.rules == ()

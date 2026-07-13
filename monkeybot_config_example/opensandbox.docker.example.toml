@@ -1,6 +1,9 @@
-# OpenSandbox control plane — default for docker compose sandbox overlay.
-# Override path with OPENSANDBOX_CONFIG (e.g. monkeybot_config_example/opensandbox.docker.example.toml).
+# OpenSandbox control plane — Docker runtime example for local agents.
+# Override path with OPENSANDBOX_CONFIG (e.g. monkeybot_config/opensandbox.docker.toml).
 # Based on OpenSandbox server/opensandbox_server/examples/example.config.toml
+#
+# All [server], [log], [runtime], [storage], [store], [docker], [ingress],
+# [egress], and [renew_intent] keys used by the local Docker control plane are below.
 
 [server]
 host = "0.0.0.0"
@@ -15,9 +18,11 @@ type = "docker"
 execd_image = "opensandbox/execd:v1.0.16"
 
 [storage]
-# Restrictive default for open-source: bind mounts must be under /tmp only.
-# For full local dev (repo on your home volume), set OPENSANDBOX_CONFIG to a config with broader allowed_host_paths.
-allowed_host_paths = ["/tmp"]
+# Bind mounts from the MCP host must be under one of these prefixes (empty = deny all on current OpenSandbox).
+# Include /private/Users — macOS often resolves realpaths there while the agent still uses /Users/... .
+# Demo defaults cover typical macOS/Linux home layouts; add a prefix if your repo lives elsewhere.
+# For a restrictive compose default, use only ["/tmp"] (see docker/opensandbox.docker.toml).
+allowed_host_paths = ["/Users", "/private/Users", "/home", "/tmp"]
 # Required by upstream example.toml for a complete [storage] table (K8s PVC default size).
 volume_default_size = "1Gi"
 

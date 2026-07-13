@@ -11,10 +11,13 @@ RUN pip install --no-cache-dir --upgrade pip
 COPY pyproject.toml README.md ./
 COPY src ./src
 COPY .agents ./.agents
+COPY cli/pyproject.toml ./cli/pyproject.toml
+COPY cli/src ./cli/src
 
 ARG EXTRAS=gemini
 RUN pip install --no-cache-dir ".[$EXTRAS]" \
-    && python -c "from pathlib import Path; from monkeybot.scaffold import run_new; run_new(dest=Path('/app'), force=True)" \
+    && pip install --no-cache-dir ./cli \
+    && python -c "from pathlib import Path; from monkeybot_cli.scaffold import run_new; run_new(dest=Path('/app'), force=True)" \
     && mkdir -p /app/data /app/skills
 
 ENV SKILLS_PATH=/app/.agents/skills

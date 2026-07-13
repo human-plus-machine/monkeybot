@@ -126,7 +126,7 @@ There is no claim heartbeat yet — subagent runs longer than `MONKEYBOT_WORKER_
 **Docker:** baseline production-style image — [`docker/Dockerfile`](docker/Dockerfile) + [`docker-compose.yml`](docker-compose.yml). Optional Cloud Run helpers may live in gitignored `internal/` for private forks; see **Step 3** in that doc.
 ---
 
-**Config:** copy or scaffold **`monkeybot_config/monkeybot.yaml`** from **`monkeybot_config/monkeybot.example.yaml`**. Secrets go in **`.env`** — see the YAML header for variable names.
+**Config:** copy or scaffold **`monkeybot_config/monkeybot.yaml`** from **`monkeybot_config_example/monkeybot.example.yaml`** (or the packaged scaffold template). Secrets go in **`.env`** — see the YAML header for variable names.
 
 ## Documentation
 
@@ -190,7 +190,7 @@ Tables below reflect what **shipped in v2.0.0** (see [CHANGELOG](CHANGELOG.md)).
 
 Azure, Microsoft Teams, Telegram, DynamoDB, CosmosDB, and managed secret resolvers (AWS Secrets Manager, Azure Key Vault, full GCP Secret Manager wiring) are tracked under **Future platforms** in [BACKLOG.md](BACKLOG.md).
 
-For provider and cloud wiring, start from **`monkeybot_config/monkeybot.example.yaml`** and the [Cloud deployment](docs/cloud-deployment-design.md) guide.
+For provider and cloud wiring, start from **`monkeybot_config_example/monkeybot.example.yaml`** and the [Cloud deployment](docs/cloud-deployment-design.md) guide.
 
 ## Development
 

@@ -6,7 +6,15 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Repo-root `monkeybot_config_example/` — full-option human-readable config templates (`.example` filenames).
+- `monkeybot new` also scaffolds `permissions.yaml`.
+
 ### Changed
+
+- Scaffold templates and `run_new` moved into **monkeybot-cli** (`monkeybot_cli.scaffold` / `scaffold_defaults`). Harness `monkeybot.scaffold` is a compatibility shim; Docker installs the CLI to scaffold at image build.
+- **monkeybot-cli** version bumped to **0.2.0**.
 
 - README integrations tables aligned with v2.0.0 shipped scope (per CHANGELOG); removed speculative "Coming Soon" items to BACKLOG.md with a short near-term roadmap.
 - Reframed public positioning: multi-cloud-capable harness with **GCP-first** docs (README, cloud deployment design, getting started, features, Pattern A guide). Clarifies this is not a universal integration catalog; documents AWS shipped paths alongside GCP examples.

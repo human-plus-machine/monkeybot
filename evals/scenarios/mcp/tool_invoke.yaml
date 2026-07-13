@@ -1,4 +1,4 @@
-# Requires an MCP server configured on the agent under test (e.g. demo_agent/monkeybot_config/mcp.json
+# Requires an MCP server configured on the agent under test (e.g. monkeybot_config_example/mcp.example.json
 # with browser-mcp wired up) and MODEL_PROVIDER pointed at a real model that can pick an MCP tool.
 # Not part of the CI smoke suite yet — no in-process MCP fixture exists in the workflow (see
 # docs/eval-pr-scorecard.md, "MCP strategy"). Run locally with `tags: [local-only]` scenarios included.
