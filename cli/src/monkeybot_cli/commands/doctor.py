@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import socket
 import subprocess
 import tomllib
 from pathlib import Path
@@ -18,19 +17,10 @@ from monkeybot_cli.config_resolve import (
     resolve_agent_root,
     resolve_config,
 )
+from monkeybot_cli.gateway_health import port_free as _port_free
 from monkeybot_cli.output import CommandReport, check
 from monkeybot_cli.providers import credentials_present, extra_module, spec_for_provider
 from monkeybot_cli.runtime_python import resolve_runtime_python, run_probe
-
-
-def _port_free(port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            s.bind(("127.0.0.1", port))
-            return True
-        except OSError:
-            return False
 
 
 def _runtime_python_version(runtime, agent_root: Path) -> tuple[int, int, int]:
