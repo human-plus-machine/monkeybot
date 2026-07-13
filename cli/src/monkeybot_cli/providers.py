@@ -58,7 +58,7 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
         (),
         credentials_optional=True,
     ),
-    "fake": ProviderSpec(("fake",), None, ()),
+    "fake": ProviderSpec(("fake",), None, (), credentials_optional=True),
 }
 
 

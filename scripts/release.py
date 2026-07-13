@@ -5,6 +5,8 @@
              develop -> main PR. Touches `develop` only.
   publish  - CI only, runs on push to `main`: tag whichever package
              versions aren't tagged yet and cut a GitHub Release per tag.
+             Emits ``packages`` via ``GITHUB_OUTPUT`` (comma-separated,
+             core before cli) so the same workflow can Trusted-Publish to PyPI.
 
 Branch protection on `main` (require PR + restrict merge to admins) is what
 actually gates the promotion - this script just does the busywork around it.
@@ -13,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import os
 import re
 import subprocess
 import sys
@@ -20,6 +23,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CHANGELOG = ROOT / "CHANGELOG.md"
+# Insertion order matters: publish core before cli (cli depends on core on PyPI).
 PACKAGES = {
     "core": ROOT / "pyproject.toml",
     "cli": ROOT / "cli" / "pyproject.toml",
@@ -73,6 +77,15 @@ def changelog_section(version: str) -> str | None:
     return m.group(1).strip() if m else None
 
 
+def write_github_output(key: str, value: str) -> None:
+    """Append a ``key=value`` line to ``GITHUB_OUTPUT`` when running in Actions."""
+    path = os.environ.get("GITHUB_OUTPUT")
+    if not path:
+        return
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(f"{key}={value}\n")
+
+
 def cmd_prepare(args: argparse.Namespace) -> None:
     pyproject = PACKAGES[args.package]
     old = read_version(pyproject)
@@ -99,7 +112,7 @@ def cmd_prepare(args: argparse.Namespace) -> None:
 
 def cmd_publish(_: argparse.Namespace) -> None:
     existing_tags = set(run("git", "tag", "--list").splitlines())
-    published = False
+    released: list[str] = []
     for name, pyproject in PACKAGES.items():
         version = read_version(pyproject)
         tag = f"{name}-v{version}"
@@ -116,9 +129,14 @@ def cmd_publish(_: argparse.Namespace) -> None:
         run("git", "push", "origin", tag)
         run("gh", "release", "create", tag, "--title", f"{name} v{version}", "--notes", notes)
         print(f"Published {tag}")
-        published = True
+        released.append(name)
 
-    if published:
+    # Always emit packages (possibly empty) so the PyPI job can gate cleanly.
+    packages_csv = ",".join(released)
+    write_github_output("packages", packages_csv)
+    print(f"released_packages={packages_csv or '(none)'}")
+
+    if released:
         # Keep develop from drifting behind main now that releases land via
         # a release/* branch instead of develop itself.
         run("git", "fetch", "origin", "develop")

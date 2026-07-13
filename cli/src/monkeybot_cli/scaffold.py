@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import stat
 from importlib import resources
@@ -11,7 +12,12 @@ from typing import Final
 
 import yaml
 
+from monkeybot_cli.compat import COMPATIBLE_CORE_RANGE
+from monkeybot_cli.extras_catalog import normalize_extra_token, provider_extra_name
+
 _DEFAULTS_PKG: Final = "monkeybot_cli.scaffold_defaults"
+# Matches packaged monkeybot.example.yaml default when ``--provider`` is omitted.
+_DEFAULT_PROVIDER: Final = "gemini"
 
 # (filename in packaged defaults, output name under <dest>/monkeybot_config/)
 _CONFIG_BUNDLE: Final[tuple[tuple[str, str], ...]] = (
@@ -180,12 +186,88 @@ def install_env_example(dest: Path, *, force: bool) -> str:
     return "overwritten" if existed else "created"
 
 
+def _sanitize_project_name(raw: str) -> str:
+    name = re.sub(r"[^a-z0-9._-]+", "-", raw.strip().lower()).strip("-._")
+    return name or "agent"
+
+
+def collect_extras(
+    *,
+    provider: str | None = None,
+    extras: list[str] | None = None,
+) -> list[str]:
+    """Return unique package extras: primary provider first, then extras."""
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    def _add(extra: str | None) -> None:
+        if not extra or extra in seen:
+            return
+        seen.add(extra)
+        ordered.append(extra)
+
+    effective = provider if provider is not None else _DEFAULT_PROVIDER
+    _add(provider_extra_name(effective))
+    for raw in extras or ():
+        token = normalize_extra_token(raw)
+        if token is not None:
+            _add(token)
+    return ordered
+
+
+def monkeybot_requirement(
+    *,
+    provider: str | None = None,
+    extras: list[str] | None = None,
+) -> str:
+    """Return a PyPI ``monkeybot`` / ``monkeybot[a,b]`` requirement string."""
+    ordered = collect_extras(provider=provider, extras=extras)
+    if ordered:
+        return f"monkeybot[{','.join(ordered)}]{COMPATIBLE_CORE_RANGE}"
+    return f"monkeybot{COMPATIBLE_CORE_RANGE}"
+
+
+def monkeybot_dep_for_provider(provider: str | None) -> str:
+    """Backward-compatible wrapper: provider-only requirement."""
+    return monkeybot_requirement(provider=provider)
+
+
+def write_agent_pyproject(
+    dest: Path,
+    *,
+    provider: str | None = None,
+    extras: list[str] | None = None,
+    force: bool = False,
+) -> str:
+    """Write agent-project ``pyproject.toml`` with a PyPI ``monkeybot[…]`` dep."""
+    path = dest / "pyproject.toml"
+    if path.exists() and not force:
+        return "skipped"
+    existed = path.exists()
+    dep = monkeybot_requirement(provider=provider, extras=extras)
+    name = _sanitize_project_name(dest.name)
+    path.write_text(
+        (
+            "[project]\n"
+            f'name = "{name}"\n'
+            'version = "0.1.0"\n'
+            'requires-python = ">=3.11"\n'
+            "dependencies = [\n"
+            f'  "{dep}",\n'
+            "]\n"
+        ),
+        encoding="utf-8",
+    )
+    return "overwritten" if existed else "created"
+
+
 def run_new(
     *,
     dest: Path,
     force: bool,
     provider: str | None = None,
     model: str | None = None,
+    extras: list[str] | None = None,
 ) -> list[str]:
     """Full scaffold: config bundle, workspace, env example, and setup script."""
     cfg_dir = dest / "monkeybot_config"
@@ -198,4 +280,8 @@ def run_new(
     report.extend(ensure_workspace(dest, force=force))
     report.append(f"  scripts/setup-workspace.sh: {install_setup_script(dest, force=force)}")
     report.append(f"  .env.example: {install_env_example(dest, force=force)}")
+    report.append(
+        f"  pyproject.toml: "
+        f"{write_agent_pyproject(dest, provider=provider, extras=extras, force=force)}"
+    )
     return report

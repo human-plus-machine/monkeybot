@@ -13,7 +13,7 @@ export OTEL_SERVICE_NAME=monkeybot-gateway
 export OTEL_EXPORTER_OTLP_ENDPOINT=https://your-collector:4318
 ```
 
-Install the optional extra: `uv sync --extra observability`.
+Install the optional extra: add `monkeybot[observability]` to the agent `pyproject.toml` dependencies, then run `uv sync`. (Harness checkout: `uv sync --extra observability`.)
 
 ## Sampling
 

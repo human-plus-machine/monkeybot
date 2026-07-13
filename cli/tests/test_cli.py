@@ -42,6 +42,11 @@ def test_new_scaffolds(tmp_path: Path) -> None:
     assert "AGENT_MD" not in env_text
     assert "MONKEYBOT_SUBAGENT_AGENT_MD" not in env_text
     assert "DB_URL" in env_text
+    pyproject = (tmp_path / "pyproject.toml").read_text()
+    assert "monkeybot[gemini]>=2.1.0,<3" in pyproject
+    assert "[tool.uv.sources]" not in pyproject
+    assert "uv sync" in result.stdout
+    assert "pyproject.toml: created" in result.stdout
 
 
 def test_new_force_reports_overwritten_config(tmp_path: Path) -> None:

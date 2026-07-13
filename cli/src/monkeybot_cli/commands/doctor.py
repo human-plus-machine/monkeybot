@@ -7,6 +7,7 @@ import json
 import os
 import socket
 import subprocess
+import tomllib
 from pathlib import Path
 
 import httpx
@@ -56,11 +57,35 @@ def _runtime_python_version(runtime, agent_root: Path) -> tuple[int, int, int]:
         return (0, 0, 0)
 
 
+def _agent_defines_project_extra(agent_root: Path, extra: str) -> bool:
+    """True when the agent ``pyproject.toml`` declares ``extra`` as a project optional."""
+    path = agent_root / "pyproject.toml"
+    if not path.is_file():
+        return False
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return False
+    project = data.get("project")
+    if not isinstance(project, dict):
+        return False
+    optional = project.get("optional-dependencies")
+    return isinstance(optional, dict) and extra in optional
+
+
 def _extra_remediation(extra: str, agent_root: Path, runtime) -> str:
     """Remediation text pointing at the agent project, not the CLI env."""
     if runtime.source == "cli":
-        return f"Config-only tree: install in the CLI env — uv tool install --with 'monkeybot[{extra}]' monkeybot-cli"
-    return f"Install in the agent project: cd {agent_root} && uv sync --extra {extra}"
+        return (
+            "Config-only tree: install in the CLI env — "
+            f"uv tool install --with 'monkeybot[{extra}]' monkeybot-cli"
+        )
+    if _agent_defines_project_extra(agent_root, extra):
+        return f"Install in the agent project: cd {agent_root} && uv sync --extra {extra}"
+    return (
+        f"Add monkeybot[{extra}] to {agent_root}/pyproject.toml dependencies, "
+        f"then run: cd {agent_root} && uv sync"
+    )
 
 
 def run_doctor(args: argparse.Namespace) -> int:
