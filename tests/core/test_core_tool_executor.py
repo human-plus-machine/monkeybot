@@ -281,6 +281,134 @@ async def test_glob(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_grep(tmp_path: Path) -> None:
+    root = tmp_path
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    (root / "a.py").write_text("def foo():\n    pass\n", encoding="utf-8")
+    (root / "b.md").write_text("no match here\n", encoding="utf-8")
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    ctx = _ctx()
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="1",
+                name="grep",
+                args={"pattern": "def foo", "file_glob": "*.py"},
+            ),
+            ctx=ctx,
+        )
+    )
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert payload["ok"] is True
+    assert payload["match_count"] >= 1
+    assert any(m["path"] == "a.py" for m in payload["matches"])
+
+
+@pytest.mark.asyncio
+async def test_grep_skips_noise_directories(tmp_path: Path) -> None:
+    root = tmp_path
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    (root / "a.py").write_text("def foo():\n    pass\n", encoding="utf-8")
+    for noisy_dir in ("node_modules", ".git", "__pycache__", ".venv"):
+        d = root / noisy_dir
+        d.mkdir()
+        (d / "junk.py").write_text("def foo():\n    pass\n", encoding="utf-8")
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    ctx = _ctx()
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="1",
+                name="grep",
+                args={"pattern": "def foo"},
+            ),
+            ctx=ctx,
+        )
+    )
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert payload["ok"] is True
+    matched_paths = {m["path"] for m in payload["matches"]}
+    assert matched_paths == {"a.py"}
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_tool(tmp_path: Path) -> None:
+    root = tmp_path
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    (root / "old.txt").write_text("old\n", encoding="utf-8")
+    (root / "gone.txt").write_text("bye\n", encoding="utf-8")
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    ctx = _ctx()
+    patch = """*** Begin Patch
+*** Add File: new.txt
++hello
+*** Update File: old.txt
+@@
+-old
++new
+*** Delete File: gone.txt
+*** End Patch
+"""
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="1", name="apply_patch", args={"patch_text": patch}),
+            ctx=ctx,
+        )
+    )
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert payload["ok"] is True
+    assert (root / "new.txt").read_text(encoding="utf-8") == "hello\n"
+    assert (root / "old.txt").read_text(encoding="utf-8") == "new\n"
+    assert not (root / "gone.txt").exists()
+
+    # Fail-closed: bad hunk must not create partial files.
+    bad = """*** Begin Patch
+*** Add File: should_not_exist.txt
++x
+*** Update File: missing.txt
+@@
+-a
++b
+*** End Patch
+"""
+    out2, err2 = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="2", name="apply_patch", args={"patch_text": bad}),
+            ctx=ctx,
+        )
+    )
+    assert err2 is not None
+    assert not (root / "should_not_exist.txt").exists()
+
+
+@pytest.mark.asyncio
 async def test_search_memory(tmp_path: Path) -> None:
     root = tmp_path
     mem = tmp_path / "mem"
@@ -1618,3 +1746,116 @@ async def test_remove_mcp_server_unknown_server_errors(tmp_path: Path) -> None:
     assert result.error is not None
     assert "Unknown MCP server" in result.error
     assert mcp.disconnected == []
+
+
+class _ResourcesMCP(_NoMCP):
+    def __init__(self) -> None:
+        self._connected = True
+
+    def is_connected(self, name: str) -> bool:
+        return self._connected and name == "docs"
+
+    def known_server_names(self) -> list[str]:
+        return ["docs"]
+
+    def status(self, name: str | None = None):
+        entry = {
+            "name": "docs",
+            "status": "connected",
+            "capabilities": {"tools": True, "resources": True, "prompts": True},
+        }
+        if name:
+            return entry
+        return [entry]
+
+    async def list_resources(self, server_name: str | None = None):
+        del server_name
+        return [{"server": "docs", "name": "readme", "uri": "docs://readme"}]
+
+    async def list_resource_templates(self, server_name: str | None = None):
+        del server_name
+        return [{"server": "docs", "name": "file", "uriTemplate": "file:///{path}"}]
+
+    async def read_resource(self, server_name: str, uri: str):
+        return {
+            "server": server_name,
+            "uri": uri,
+            "text": "hello resource",
+            "contents": [{"uri": uri, "text": "hello resource"}],
+        }
+
+    async def list_prompts(self, server_name: str | None = None):
+        del server_name
+        return [{"server": "docs", "name": "summarize", "description": "Sum"}]
+
+    async def get_prompt(
+        self,
+        server_name: str,
+        prompt_name: str,
+        arguments: dict[str, str] | None = None,
+    ):
+        return {
+            "server": server_name,
+            "name": prompt_name,
+            "description": "Sum",
+            "messages": [{"role": "user", "content": {"type": "text", "text": "hi"}}],
+            "arguments": arguments or {},
+        }
+
+
+@pytest.mark.asyncio
+async def test_mcp_resource_and_prompt_tools(tmp_path: Path) -> None:
+    (tmp_path / "mem").mkdir(exist_ok=True)
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_ResourcesMCP(),
+    )
+    ctx = _ctx()
+
+    status = await ex.execute(
+        call=ToolCall(name="mcp_status", args={}, call_id="s1"),
+        ctx=ctx,
+    )
+    assert status.error is None
+    assert json.loads(status.blocks[0].text)["servers"][0]["status"] == "connected"  # type: ignore[index]
+
+    listed = await ex.execute(
+        call=ToolCall(name="list_mcp_resources", args={}, call_id="r1"),
+        ctx=ctx,
+    )
+    assert listed.error is None
+    body = json.loads(listed.blocks[0].text)  # type: ignore[index]
+    assert body["count"] == 1
+    assert body["resources"][0]["uri"] == "docs://readme"
+
+    read = await ex.execute(
+        call=ToolCall(
+            name="read_mcp_resource",
+            args={"server": "docs", "uri": "docs://readme"},
+            call_id="r2",
+        ),
+        ctx=ctx,
+    )
+    assert read.error is None
+    assert json.loads(read.blocks[0].text)["text"] == "hello resource"  # type: ignore[index]
+
+    prompts = await ex.execute(
+        call=ToolCall(name="list_mcp_prompts", args={"server": "docs"}, call_id="p1"),
+        ctx=ctx,
+    )
+    assert prompts.error is None
+    assert json.loads(prompts.blocks[0].text)["prompts"][0]["name"] == "summarize"  # type: ignore[index]
+
+    got = await ex.execute(
+        call=ToolCall(
+            name="get_mcp_prompt",
+            args={"server": "docs", "prompt": "summarize", "arguments": {"topic": "x"}},
+            call_id="p2",
+        ),
+        ctx=ctx,
+    )
+    assert got.error is None
+    assert json.loads(got.blocks[0].text)["name"] == "summarize"  # type: ignore[index]

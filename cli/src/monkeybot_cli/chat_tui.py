@@ -167,8 +167,7 @@ class ChatApp(App[int]):
     }
     #empty-hint {
         width: 100%;
-        height: auto;
-        margin-top: 4;
+        height: 100%;
         content-align: center middle;
         color: $disabled;
         text-style: dim;
@@ -247,6 +246,8 @@ class ChatApp(App[int]):
         Binding("ctrl+c", "ctrl_c", "Cancel/Exit", show=False, priority=True),
         Binding("f1", "toggle_hints", "Hints", show=False),
         Binding("ctrl+u", "toggle_usage", "Usage", show=False),
+        Binding("pageup", "transcript_page_up", "Scroll up", show=False),
+        Binding("pagedown", "transcript_page_down", "Scroll down", show=False),
         Binding("y", "hitl_approve", "Approve", show=False, priority=True),
         Binding("n", "hitl_deny", "Deny", show=False, priority=True),
         Binding("space", "toggle_ptt", "PTT", show=False),
@@ -347,12 +348,7 @@ class ChatApp(App[int]):
         yield Static(self._status_line(), id="statusbar", markup=True)
 
     def _make_empty_hint(self) -> EmptyHint:
-        return EmptyHint(
-            agent_name=self.agent_root.name,
-            workspace=self.agent_root / "workspace",
-            provider=self.provider,
-            model=self.model,
-        )
+        return EmptyHint()
 
     def watch_show_hints(self, _value: bool) -> None:
         with contextlib.suppress(NoMatches):
@@ -451,24 +447,53 @@ class ChatApp(App[int]):
     def _should_follow(self) -> bool:
         return self._auto_scroll
 
+    def _set_transcript_follow(self, enabled: bool) -> None:
+        """Enable/disable sticky bottom follow via Textual scroll anchoring."""
+        self._auto_scroll = enabled
+        with contextlib.suppress(NoMatches):
+            transcript = self._transcript()
+            if enabled:
+                # anchor() scrolls to end with immediate=True (no deferred yank race).
+                transcript.anchor(True)
+            else:
+                transcript.release_anchor()
+
     def _scroll_to_latest(self) -> None:
-        if self._auto_scroll:
-            with contextlib.suppress(NoMatches):
-                self._transcript().scroll_end(animate=False)
+        """Stick to the bottom if follow is still enabled (re-checks at call time)."""
+        if not self._auto_scroll:
+            return
+        with contextlib.suppress(NoMatches):
+            transcript = self._transcript()
+            # If the user has released the anchor, never call scroll_end/anchor —
+            # Textual's scroll_end clears _anchor_released and yanks back to bottom.
+            if transcript._anchor_released:
+                self._auto_scroll = False
+                self._refresh_jump_button()
+                return
+            # immediate=True avoids nesting an unconditional call_after_refresh.
+            transcript.scroll_end(animate=False, immediate=True)
 
     def _follow_scroll(self) -> None:
         if not self._auto_scroll:
             return
-        # Layout may grow after the current frame; stick again post-refresh.
-        self._scroll_to_latest()
+        # Defer one frame so on_mount sizing / markdown layout are reflected in
+        # max_scroll_y; the callback re-checks _auto_scroll before scrolling.
         self.call_after_refresh(self._scroll_to_latest)
 
     def _on_transcript_scroll(self) -> None:
         """Enable auto-scroll at the bottom; pause it when the user scrolls up."""
-        at_end = self._transcript().is_vertical_scroll_end
+        transcript = self._transcript()
+        at_end = transcript.is_vertical_scroll_end
         self._auto_scroll = at_end
+        if at_end:
+            # Re-engage compositor stickiness when the user returns to the bottom.
+            if transcript.is_anchored and transcript._anchor_released:
+                transcript._anchor_released = False
+        else:
+            # Ensure growth / follow cannot fight the user while reading history.
+            if transcript.is_anchored and not transcript._anchor_released:
+                transcript.release_anchor()
         self._refresh_jump_button()
-
     def _refresh_jump_button(self) -> None:
         with contextlib.suppress(NoMatches):
             btn = self.query_one("#jump-bottom", Button)
@@ -476,9 +501,18 @@ class ChatApp(App[int]):
 
     def action_jump_bottom(self) -> None:
         """Scroll to the latest turn and re-enable sticky auto-scroll."""
-        self._auto_scroll = True
-        self._follow_scroll()
+        self._set_transcript_follow(True)
         self._refresh_jump_button()
+
+    def action_transcript_page_up(self) -> None:
+        """Page the transcript up (composer keeps focus)."""
+        with contextlib.suppress(NoMatches):
+            self._transcript().action_page_up()
+
+    def action_transcript_page_down(self) -> None:
+        """Page the transcript down (composer keeps focus)."""
+        with contextlib.suppress(NoMatches):
+            self._transcript().action_page_down()
 
     @on(Button.Pressed, "#jump-bottom")
     def on_jump_bottom_pressed(self) -> None:
@@ -577,12 +611,16 @@ class ChatApp(App[int]):
             self._thinking.remove()
         self._thinking = None
 
-    def _finish_thinking_trace(self) -> None:
+    def _finish_thinking_trace(self, *, clear: bool = False) -> None:
         if self._thinking_trace is not None and self._thinking_trace.is_attached:
             if not self._thinking_trace.has_class("-done"):
                 self._thinking_trace.finish()
-        self._thinking_trace = None
+        if clear:
+            self._thinking_trace = None
 
+    def _seal_thinking_trace(self) -> None:
+        """Finish the current thinking block and start fresh on the next delta."""
+        self._finish_thinking_trace(clear=True)
     def _mount_user(self, body: str) -> None:
         self._mount(UserTurn(body, show_timestamp=self.show_timestamps))
 
@@ -702,6 +740,9 @@ class ChatApp(App[int]):
     async def on_mount(self) -> None:
         self.query_one("#prompt", Composer).focus()
         self._hide_slash_palette()
+        # Native Textual anchoring keeps the transcript at the bottom as content
+        # grows, until the user scrolls away (see _on_transcript_scroll).
+        self._set_transcript_follow(True)
         self._connect_session()
 
     @on(TextArea.Changed, "#prompt")
@@ -789,6 +830,7 @@ class ChatApp(App[int]):
     def _ev_turn_started(self, _p: dict) -> None:
         self._turn_active = True
         self._assistant = None
+        self._seal_thinking_trace()
         self._clear_open_tools()
         self._show_thinking("thinking…")
         self._refresh_status()
@@ -806,6 +848,8 @@ class ChatApp(App[int]):
     def _ev_tool_started(self, p: dict) -> None:
         self._close_assistant()
         self._clear_thinking()
+        # Next thinking phase (e.g. after tools) should open a new block.
+        self._seal_thinking_trace()
         raw_args = p.get("args")
         args = dict(raw_args) if isinstance(raw_args, dict) else {}
         tool = str(p.get("tool") or "tool")
@@ -859,14 +903,14 @@ class ChatApp(App[int]):
 
     def _ev_turn_error(self, p: dict) -> None:
         self._close_assistant()
-        self._finish_thinking_trace()
+        self._finish_thinking_trace(clear=True)
         self._clear_thinking()
         self._mount_system(f"Error: {p.get('error')}", error=True)
         self._finish_turn_ui()
 
     def _ev_turn_complete(self, p: dict) -> None:
         self._close_assistant()
-        self._finish_thinking_trace()
+        self._finish_thinking_trace(clear=True)
         self._clear_thinking()
         usage = p.get("usage")
         if isinstance(usage, dict) and self.show_usage:
@@ -875,7 +919,7 @@ class ChatApp(App[int]):
 
     def _ev_turn_aborted(self, p: dict) -> None:
         self._close_assistant()
-        self._finish_thinking_trace()
+        self._finish_thinking_trace(clear=True)
         self._clear_thinking()
         cancel_ok = p.get("cancel_ok")
         if cancel_ok is True:
@@ -959,7 +1003,12 @@ class ChatApp(App[int]):
         if not text:
             return
         self._clear_thinking()
-        if self._thinking_trace is None or not self._thinking_trace.is_attached:
+        if self._thinking_trace is not None and self._thinking_trace.is_attached:
+            # Provider may reopen thinking after text started; append to the same
+            # block above the reply instead of mounting a stray card below it.
+            if self._thinking_trace.has_class("-done"):
+                self._thinking_trace.reopen()
+        else:
             block = ThinkingTrace()
             self._thinking_trace = block
             self._mount(block)
@@ -967,7 +1016,8 @@ class ChatApp(App[int]):
         self._follow_scroll()
 
     def _ev_thinking_block_complete(self, _p: dict) -> None:
-        self._finish_thinking_trace()
+        # Keep the pointer so late re-entered deltas can reopen this block.
+        self._finish_thinking_trace(clear=False)
         self._follow_scroll()
 
     def _ev_voice_state(self, p: dict) -> None:

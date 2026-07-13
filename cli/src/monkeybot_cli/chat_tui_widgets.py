@@ -7,7 +7,6 @@ import contextlib
 import logging
 import time
 from datetime import datetime
-from pathlib import Path
 
 from rich.text import Text
 from textual.app import App, ComposeResult
@@ -27,11 +26,6 @@ from monkeybot_cli.chat_tool_display import format_tool_expand_body
 _SPIN = "⠋⠙⠹⠸⠴⠦⠧⠇⠏"
 _HISTORY_LIMIT = 500
 _COMPOSER_PLACEHOLDER = "Message the agent — / for commands"
-_EMPTY_EXAMPLES = (
-    "Summarize this repo",
-    "Run the tests",
-    "Explain the last error",
-)
 
 
 def write_osc52_clipboard(app: App[object], text: str) -> bool:
@@ -154,6 +148,10 @@ class ThinkingTrace(Vertical):
 
     def finish(self) -> None:
         self.add_class("-done")
+
+    def reopen(self) -> None:
+        """Allow late thinking deltas to continue this block after a premature close."""
+        self.remove_class("-done")
 
 
 class SystemLine(Static):
@@ -486,42 +484,24 @@ class ToolCallBlock(Collapsible):
 
 
 class EmptyHint(Static):
-    """First-run empty state with workspace context and example prompts."""
+    """First-run empty state."""
 
     DEFAULT_CSS = """
     EmptyHint {
         width: 1fr;
-        height: auto;
-        margin-top: 2;
+        height: 100%;
         padding: 0 2;
         color: $muted;
+        content-align: center middle;
+        text-align: center;
     }
     """
 
-    def __init__(
-        self,
-        *,
-        agent_name: str,
-        workspace: Path,
-        provider: str,
-        model: str,
-        **kwargs: object,
-    ) -> None:
+    def __init__(self, **kwargs: object) -> None:
         super().__init__(id="empty-hint", **kwargs)  # type: ignore[arg-type]
-        self.agent_name = agent_name
-        self.workspace = workspace
-        self.provider = provider
-        self.model = model
 
     def on_mount(self) -> None:
-        content = Text()
-        content.append(f"{self.agent_name}\n", style="bold")
-        content.append(f"{self.workspace}\n", style="dim")
-        content.append(f"{self.provider} / {self.model}\n\n", style="dim")
-        content.append("Message the agent to start — try:\n", style="dim italic")
-        for example in _EMPTY_EXAMPLES:
-            content.append(f"  · {example}\n", style="dim")
-        self.update(content)
+        self.update(Text("Welcome to monkeybot", style="dim"))
 
 
 class HitlCard(Static):
@@ -997,7 +977,19 @@ class Composer(TextArea):
 class TranscriptPane(VerticalScroll):
     """Transcript scroller that syncs sticky auto-follow from scroll position."""
 
-    def watch_scroll_y(self, _old: float, _new: float) -> None:
+    def on_mount(self) -> None:
+        # Stick to bottom as turns stream in; ChatApp releases on user scroll-up.
+        self.anchor(True)
+
+    def watch_scroll_y(self, old: float, new: float) -> None:
+        # Must preserve Widget.watch_scroll_y behavior — overriding without this
+        # leaves the scrollbar thumb stuck and skips _refresh_scroll.
+        if self.show_vertical_scrollbar:
+            self.vertical_scrollbar.position = new
+        if self._anchored and self._anchor_released:
+            self._check_anchor()
+        if round(old) != round(new):
+            self._refresh_scroll()
         app = self.app
         on_scroll = getattr(app, "_on_transcript_scroll", None)
         if callable(on_scroll):

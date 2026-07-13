@@ -2,17 +2,21 @@
 
 Verifies that:
 
-* All five hook events fire at the expected lifecycle points.
+* Lifecycle hook events fire at the expected points.
 * ``PRE_TURN.inject_text`` lands in the system prompt for the current turn.
 * ``PRE_TURN.inject_memory_lines`` are added to ``ctx.memory_index``.
 * ``PRE_TOOL.inject_text`` lands in the **next** system prompt (not the tool result).
 * Tool results sent to the provider are unmodified (ground truth).
+* ``TOOL_DEFINITION`` can filter tools before the provider call.
+* ``BEFORE_PROVIDER_REQUEST`` can rewrite provider messages.
+* ``AFTER_PROVIDER_RESPONSE`` fires with assistant text / usage (fire-and-forget).
 * Hooks are optional: omitting ``hook_manager`` leaves loop behavior unchanged.
 """
 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
@@ -31,7 +35,7 @@ from monkeybot.core.runtime.loop import run
 from monkeybot.core.testing.mocks_provider import fake_provider_prompt_tokens
 from monkeybot.core.tools.inspector import Decision
 from monkeybot.core.tools.types import ToolExecutionResult
-from monkeybot.core.types.content_blocks import Text, ToolResponse
+from monkeybot.core.types.content_blocks import ContentBlock, Text, ToolResponse
 from monkeybot.core.types.types_tools import ToolDef
 
 
@@ -72,6 +76,8 @@ class CapturingProvider:
     def __init__(self, scripted: list[list[ProviderEvent]]) -> None:
         self._scripted = scripted
         self.system_texts: list[str] = []
+        self.tool_names: list[list[str]] = []
+        self.message_snapshots: list[list[Message]] = []
         self._idx = 0
 
     @property
@@ -90,12 +96,14 @@ class CapturingProvider:
         model: str,
         thinking_budget: int | None = None,
     ) -> AsyncIterator[ProviderEvent]:
-        del tools, model, thinking_budget
+        del model, thinking_budget
         system = next((m for m in messages if m.role == "system"), None)
         text = ""
         if system is not None:
             text = "".join(b.text for b in system.content if isinstance(b, Text))
         self.system_texts.append(text)
+        self.tool_names.append([t.name for t in tools])
+        self.message_snapshots.append(list(messages))
         idx = self._idx
         self._idx += 1
         if idx >= len(self._scripted):
@@ -464,3 +472,111 @@ async def test_post_tool_payload_contains_result_text() -> None:
 
     await asyncio.sleep(0.02)
     assert seen == [("RESULTBODY", None)]
+
+
+@pytest.mark.asyncio
+async def test_tool_definition_hook_filters_tools_sent_to_provider() -> None:
+    mgr = HookManager()
+
+    async def observe_only(p: HookPayload) -> None:
+        assert p.tools is not None
+        p.tools = [t for t in p.tools if t.name != "run_command"]
+
+    mgr.register(HookEvent.TOOL_DEFINITION, observe_only)
+
+    ctx = _ctx()
+    ctx = dataclasses.replace(
+        ctx,
+        tools=[
+            ToolDef("run_command", "Run shell", {}),
+            ToolDef("read_file", "Read a file", {}),
+        ],
+    )
+    prov = CapturingProvider([[TextDelta(text="ok"), Done()]])
+    async for _ in run(
+        "hi",
+        ctx,
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(),
+        max_turns=2,
+        hook_manager=mgr,
+    ):
+        pass
+
+    assert prov.tool_names == [["read_file"]]
+
+
+@pytest.mark.asyncio
+async def test_before_provider_request_can_rewrite_messages() -> None:
+    mgr = HookManager()
+
+    async def scrub(p: HookPayload) -> None:
+        assert p.provider_messages is not None
+        rewritten: list[Message] = []
+        for m in p.provider_messages:
+            if m.role != "user":
+                rewritten.append(m)
+                continue
+            parts: list[ContentBlock] = []
+            for b in m.content:
+                if isinstance(b, Text):
+                    parts.append(Text(text=b.text.replace("SECRET", "[redacted]")))
+                else:
+                    parts.append(b)
+            rewritten.append(Message(role="user", content=parts))
+        p.provider_messages = rewritten
+
+    mgr.register(HookEvent.BEFORE_PROVIDER_REQUEST, scrub)
+
+    prov = CapturingProvider([[TextDelta(text="ok"), Done()]])
+    async for _ in run(
+        "token SECRET here",
+        _ctx(),
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(),
+        max_turns=2,
+        hook_manager=mgr,
+    ):
+        pass
+
+    assert prov.message_snapshots
+    user = next(m for m in prov.message_snapshots[0] if m.role == "user")
+    body = "".join(b.text for b in user.content if isinstance(b, Text))
+    assert "SECRET" not in body
+    assert "[redacted]" in body
+
+
+@pytest.mark.asyncio
+async def test_after_provider_response_fires_with_usage() -> None:
+    mgr = HookManager()
+    seen: list[HookPayload] = []
+
+    async def capture(p: HookPayload) -> None:
+        seen.append(p)
+
+    mgr.register(HookEvent.AFTER_PROVIDER_RESPONSE, capture)
+
+    prov = CapturingProvider([[TextDelta(text="hello world"), Done()]])
+    async for _ in run(
+        "hi",
+        _ctx(),
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(),
+        max_turns=2,
+        hook_manager=mgr,
+    ):
+        pass
+
+    await asyncio.sleep(0.02)
+    assert len(seen) == 1
+    assert seen[0].assistant_text == "hello world"
+    assert seen[0].provider_error is None
+    assert seen[0].usage is not None
+    assert "input_tokens" in seen[0].usage
+    assert seen[0].tool_requests == []
