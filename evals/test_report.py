@@ -6,6 +6,7 @@ Run: python evals/test_report.py
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -15,8 +16,9 @@ from persistence import (  # noqa: E402
     RunRecord,
     ScenarioAggregate,
     build_suite_aggregate,
+    save_run,
 )
-from report import compare_to_baseline  # noqa: E402
+from report import compare_to_baseline, main  # noqa: E402
 
 
 def _agg(**kwargs) -> ScenarioAggregate:
@@ -101,6 +103,38 @@ def test_tool_error_increase_is_hard_fail() -> None:
     current = _record([_agg(tool_errors_count=1)])
     hard, _ = compare_to_baseline(baseline, current)
     assert any("tool errors" in h for h in hard)
+
+
+def test_cli_fail_on_regression_does_not_require_baseline() -> None:
+    """--fail-on-regression alone (no --require-baseline, no baseline file committed yet)
+    must not hard-fail just because the baseline is missing — that's the whole point of
+    decoupling the two flags. It must still fail on this run's own scenario failures."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        no_baseline = tmp_path / "does-not-exist.json"
+
+        passing = _record([_agg(status="passed")])
+        run_path = save_run(passing, runs_dir=tmp_path)
+        rc = main(["--suite", "smoke", "--run", str(run_path), "--baseline", str(no_baseline), "--fail-on-regression"])
+        assert rc == 0
+
+        failing = _record([_agg(status="failed", requirement_failures=["nope"])])
+        run_path = save_run(failing, runs_dir=tmp_path)
+        rc = main(["--suite", "smoke", "--run", str(run_path), "--baseline", str(no_baseline), "--fail-on-regression"])
+        assert rc == 1
+
+
+def test_cli_require_baseline_hard_fails_when_missing() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        no_baseline = tmp_path / "does-not-exist.json"
+        passing = _record([_agg(status="passed")])
+        run_path = save_run(passing, runs_dir=tmp_path)
+        rc = main([
+            "--suite", "smoke", "--run", str(run_path), "--baseline", str(no_baseline),
+            "--fail-on-regression", "--require-baseline",
+        ])
+        assert rc == 1
 
 
 def test_suite_aggregate_p95_and_means() -> None:

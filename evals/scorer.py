@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-
 from models import Scenario, TurnResult
 
 _log = logging.getLogger(__name__)
@@ -28,7 +27,13 @@ _METRIC_CLASS_ALIASES: dict[str, str] = {
 
 
 def _read_agent_model_config() -> tuple[str, str]:
-    """Read ``model.provider`` + ``model.name`` from mounted monkeybot.yaml."""
+    """Agent model provider/name: ``MODEL_PROVIDER``/``MODEL_NAME`` env (same override
+    the gateway honors) > mounted monkeybot.yaml > defaults."""
+    if os.environ.get("MODEL_PROVIDER"):
+        return (
+            os.environ["MODEL_PROVIDER"].strip().lower(),
+            os.environ.get("MODEL_NAME", "").strip(),
+        )
     config_path = os.environ.get("MONKEYBOT_AGENT_CONFIG", "/config/monkeybot.yaml")
     try:
         with open(config_path, encoding="utf-8") as f:
@@ -68,9 +73,9 @@ def resolve_judge_provider_model() -> tuple[str, str]:
 def _build_judge_model() -> Any | None:
     """Return a deepeval judge model, or ``None`` to use deepeval defaults.
 
-    This runs inside the **evals** service (separate image from the monkeybot gateway). The
-    gateway uses monkeybot's provider stack; scoring uses deepeval's ``GeminiModel`` / etc.,
-    which require their own deps (e.g. ``google-genai`` for Gemini judges).
+    The gateway uses monkeybot's provider stack; scoring uses deepeval's ``GeminiModel`` /
+    etc., which require their own deps (``google-genai`` for Gemini judges — included in
+    the root ``evals`` extra).
     """
     provider, model = resolve_judge_provider_model()
 
@@ -112,6 +117,15 @@ def _build_judge_model() -> Any | None:
         )
     if provider in ("openai", "azure", "azure_openai"):
         return GPTModel(model=model)
+    if provider in ("nvidia", "nim"):
+        # build.nvidia.com models via NVIDIA's OpenAI-compatible endpoint — same
+        # NVIDIA_API_KEY and base URL the monkeybot nvidia provider uses.
+        api_key = (os.environ.get("NVIDIA_API_KEY") or "").strip()
+        if not api_key:
+            _log.warning("JUDGE_PROVIDER=nvidia requires NVIDIA_API_KEY; skipping judge")
+            return None
+        base_url = (os.environ.get("NVIDIA_BASE_URL") or "https://integrate.api.nvidia.com/v1").rstrip("/")
+        return GPTModel(model=model, api_key=api_key, base_url=base_url, temperature=0)
     if provider in ("claude", "anthropic", "vertex-claude"):
         return AnthropicModel(model=model)
     if provider in ("bedrock", "aws"):
@@ -159,24 +173,14 @@ def _resolve_metrics(metric_names: list[str], judge: Any | None) -> list[Any]:
 
 
 def _instantiate_metric(cls: type, judge: Any | None) -> Any | None:
-    attempts: list[dict[str, Any]] = []
+    kwargs: dict[str, Any] = {"include_reason": True}
     if judge is not None:
-        attempts.extend(
-            [
-                {"model": judge, "include_reason": True},
-                {"model": judge},
-                {"llm": judge, "include_reason": True},
-                {"llm": judge},
-            ]
-        )
-    attempts.extend([{"include_reason": True}, {}])
-    for kwargs in attempts:
-        try:
-            return cls(**kwargs)  # type: ignore[misc]
-        except TypeError:
-            continue
-    _log.warning("Could not construct metric %s", cls.__name__)
-    return None
+        kwargs["model"] = judge
+    try:
+        return cls(**kwargs)  # type: ignore[misc]
+    except TypeError as exc:
+        _log.warning("Could not construct metric %s: %s", cls.__name__, exc)
+        return None
 
 
 def _turns_to_conversational_test_case(scenario: Scenario, turns: list[TurnResult]) -> Any:
@@ -226,6 +230,24 @@ def _extract_scores_and_details(eval_result: Any) -> tuple[dict[str, float], lis
 _JUDGE_DISABLED_PROVIDERS = frozenset({"fake", "mock", "none", "disabled"})
 
 
+def judge_expected(scenario: Scenario) -> bool:
+    """True when this scenario's assertions imply judge scores should come back.
+
+    False for an explicitly empty ``metrics: []`` or a disabled judge provider — the two
+    *intentional* skip paths ``score_scenario`` also checks below. Callers use this to
+    tell "no judge configured on purpose" apart from "judge call flaked and produced
+    nothing", which should count as a failure rather than a silent pass.
+    """
+    assertions = scenario.assertions or {}
+    metric_names = assertions.get("metrics", ["turn_relevancy"])
+    if isinstance(metric_names, str):
+        metric_names = [metric_names]
+    if not metric_names:
+        return False
+    judge_provider, _ = resolve_judge_provider_model()
+    return judge_provider not in _JUDGE_DISABLED_PROVIDERS
+
+
 def score_scenario(
     scenario: Scenario,
     turns: list[TurnResult],
@@ -237,16 +259,13 @@ def score_scenario(
     no credentials needed — so the local/offline loop (requirement + cap assertions only)
     works without a judge configured.
     """
+    if not judge_expected(scenario):
+        return {}, [], None
+
     assertions = scenario.assertions or {}
     metric_names = assertions.get("metrics", ["turn_relevancy"])
     if isinstance(metric_names, str):
         metric_names = [metric_names]
-    if not metric_names:
-        return {}, [], None
-
-    judge_provider, _ = resolve_judge_provider_model()
-    if judge_provider in _JUDGE_DISABLED_PROVIDERS:
-        return {}, [], None
 
     judge = _build_judge_model()
     metrics = _resolve_metrics([str(m) for m in metric_names], judge)
@@ -338,5 +357,5 @@ def push_langfuse_scores(
 
     try:
         client.flush()
-    except Exception:
-        pass
+    except Exception as exc:
+        _log.warning("Langfuse flush failed; scores may not have been delivered: %s", exc)

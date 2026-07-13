@@ -27,6 +27,7 @@ from persistence import (  # noqa: E402
     BaselineFile,
     RunRecord,
     ScenarioAggregate,
+    TurnLog,
     baseline_from_run,
     build_suite_aggregate,
     git_metadata,
@@ -40,6 +41,7 @@ from runner import run_scenario_live  # noqa: E402
 from scenario_loader import EVAL_ROOT, load_scenarios_by_id, load_suite  # noqa: E402
 from scorer import (  # noqa: E402
     _read_agent_model_config,
+    judge_expected,
     resolve_judge_provider_model,
     score_scenario,
 )
@@ -71,6 +73,10 @@ async def _run_scenario(scenario: Scenario, agent_url: str) -> ScenarioAggregate
     reasons = {d["metric"]: d["reason"] for d in details if d.get("reason")}
     run = EvalRun(run_id=run_id, scenario_id=scenario.id, turns=turns, scores=scores)
     requirement_failures = evaluate_assertions(scenario, run)
+    if judge_expected(scenario) and not scores:
+        requirement_failures.append(
+            "judge_scores_missing: metrics were requested but the judge returned no scores"
+        )
     usage = run.usage_total()
     status = "failed" if requirement_failures else "passed"
 
@@ -98,6 +104,10 @@ async def _run_scenario(scenario: Scenario, agent_url: str) -> ScenarioAggregate
         subagent_calls_count=run.subagent_calls_count(),
         trace_ids=[t.trace_id for t in turns if t.trace_id],
         requirement_failures=requirement_failures,
+        turns=[
+            TurnLog(input=t.input, output=t.output, duration_ms=t.usage.duration_ms)
+            for t in turns
+        ],
     )
 
 
@@ -135,10 +145,13 @@ def compare_to_baseline(
 ) -> tuple[list[str], list[str]]:
     """Return ``(hard_failures, warnings)`` per the ticket's regression-gate table.
 
-    ``require_baseline`` is set from ``--fail-on-regression``: without a baseline there is
-    nothing to diff token/cost/latency/p95 against, so a silent no-op there would let the
-    very first gated merge through with no regression check at all. With the flag, a missing
-    baseline is itself a hard failure telling the author to run ``--update-baseline``.
+    Scenario errors/failures in ``current`` are always hard failures, baseline or not —
+    that's this run's own result, not a comparison. ``require_baseline`` (a separate flag
+    from ``--fail-on-regression``) controls only whether a *missing* baseline file is itself
+    a hard failure: without a baseline there is nothing to diff token/cost/latency/p95
+    against, so once a trusted baseline exists, pass ``--require-baseline`` too so a missing
+    file doesn't silently skip that comparison. Until then, a missing baseline is a no-op
+    warning-free pass here — the caller may still print a Warnings line for it.
     """
     hard: list[str] = []
     warn: list[str] = []
@@ -296,6 +309,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--run", type=Path, default=None, help="Load an existing run JSON instead of executing")
     parser.add_argument("--agent-url", default=None, help="Override AGENT_URL env var")
     parser.add_argument("--fail-on-regression", action="store_true")
+    parser.add_argument(
+        "--require-baseline",
+        action="store_true",
+        help="Treat a missing baseline file as a hard failure (separate from --fail-on-regression, "
+        "which always still blocks on this run's own scenario errors/failures regardless of "
+        "baseline presence).",
+    )
     parser.add_argument("--update-baseline", action="store_true", help="Write this run as the new baseline")
     args = parser.parse_args(argv)
 
@@ -316,7 +336,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     baseline = load_baseline(baseline_path)
-    hard, warn = compare_to_baseline(baseline, record, require_baseline=args.fail_on_regression)
+    hard, warn = compare_to_baseline(baseline, record, require_baseline=args.require_baseline)
     print(build_markdown_report(record, baseline, hard, warn))
 
     if args.fail_on_regression and hard:

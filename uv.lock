@@ -2007,6 +2007,7 @@ council = [
 ]
 evals = [
     { name = "deepeval" },
+    { name = "google-genai" },
     { name = "langfuse" },
 ]
 firestore = [
@@ -2107,6 +2108,7 @@ requires-dist = [
     { name = "google-cloud-storage", marker = "extra == 'council'", specifier = ">=2.18.0" },
     { name = "google-cloud-storage", marker = "extra == 'gcs'", specifier = ">=2.18.0" },
     { name = "google-genai", specifier = ">=1.0.0" },
+    { name = "google-genai", marker = "extra == 'evals'", specifier = ">=1.0.0" },
     { name = "google-genai", marker = "extra == 'gemini'", specifier = ">=1.0.0" },
     { name = "google-genai", marker = "extra == 'realtime-gemini'", specifier = ">=1.0.0" },
     { name = "google-genai", marker = "extra == 'vertex'", specifier = ">=1.0.0" },

@@ -1,8 +1,8 @@
-"""Pydantic models for the evals HTTP API."""
+"""Pydantic models shared by the eval runner, scorer, and report CLI."""
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -21,7 +21,6 @@ class Scenario(BaseModel):
     # organizer (POST_TURN hook) has time to promote writes before the next session probes.
     session_pause_sec: float = 5.0
     assertions: dict[str, Any] = Field(default_factory=dict)
-    source: Literal["builtin", "operator"] = "builtin"
 
     def message_groups(self) -> list[list[str]]:
         """Resolve ``sessions`` (if set) or wrap ``messages`` as a single session."""
@@ -52,27 +51,18 @@ class TurnResult(BaseModel):
     input: str
     output: str
     trace_id: str | None = None
-    # Per-turn metric scores when the metric API exposes them (optional).
-    scores: dict[str, float] = Field(default_factory=dict)
-    reasons: dict[str, str] = Field(default_factory=dict)
     usage: UsageSummary = Field(default_factory=UsageSummary)
     tool_calls: list[ToolCallRecord] = Field(default_factory=list)
     summarizations_count: int = 0
 
 
 class EvalRun(BaseModel):
+    """One scenario's turns + judge scores, aggregated for assertion checks."""
+
     run_id: str
     scenario_id: str
-    status: Literal["running", "completed", "failed"] = "running"
     turns: list[TurnResult] = Field(default_factory=list)
     scores: dict[str, float] = Field(default_factory=dict)
-    pass_rate: float | None = None
-    created_at: str = ""
-    error: str | None = None
-    # Flat list of {metric, score, reason?, turn_index?} for UI expansion.
-    score_details: list[dict[str, Any]] = Field(default_factory=list)
-    # Requirement/cap assertion failures (empty when all pass); see evals/assertions.py.
-    requirement_failures: list[str] = Field(default_factory=list)
 
     def tool_calls_count(self) -> int:
         return sum(len(t.tool_calls) for t in self.turns)
@@ -105,21 +95,3 @@ class EvalRun(BaseModel):
             total.cost_usd += u.cost_usd
             total.duration_ms += u.duration_ms
         return total
-
-
-class CreateRunRequest(BaseModel):
-    scenario_id: str | None = None
-    scenario_ids: list[str] | None = None
-
-
-class CreateRunResponse(BaseModel):
-    run_id: str
-
-
-class CreateScenarioBody(BaseModel):
-    yaml: str = Field(..., description="Full scenario YAML document")
-
-
-class HealthResponse(BaseModel):
-    status: str = "ok"
-    service: str = "monkeybot-evals"

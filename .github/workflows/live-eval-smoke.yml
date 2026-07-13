@@ -1,22 +1,30 @@
 name: Live eval smoke
 
 # Runs the live eval smoke suite (see docs/eval-pr-scorecard.md) and posts a Markdown
-# scorecard as a PR comment. Only two trigger points, gated in the `gate` job below —
-# LLM-judge calls cost money and take minutes, so this does not run on ordinary
-# feature-branch -> develop PRs:
-#   (a) any PR from develop into main (release-promotion gate)
+# scorecard. LLM-judge calls cost money and take minutes, so this does not run on
+# ordinary feature-branch -> develop PRs. Trigger points:
+#   (a) any PR from develop into main (release-promotion gate; --fail-on-regression)
 #   (b) any PR that touches a dependency lockfile (catches silent SDK breakage,
 #       e.g. provider request/response shape changes, that code review won't see)
+#   (c) every push to main (scores the new release; report-only, never fails the build)
+#   (d) manual: Actions tab -> Live eval smoke -> Run workflow
+# The scorecard always lands on the workflow run's Summary page; PR events also get it
+# as a PR comment. The run JSON is uploaded as an artifact — download two of them and
+# compare with `uv run python -m evals.diff <old.json> <new.json>`.
 #
 # Cost/time budget: smoke suite is ~7 scenarios x 2-5 turns x (agent call + judge call).
 # Expect roughly $0.50-2.00 and 5-10 minutes per run depending on model pricing.
 #
-# Secrets required: NVIDIA_API_KEY (agent model, matches demo_agent's default free-tier
-# provider) and OPENAI_API_KEY (deepeval judge model — JUDGE_PROVIDER/JUDGE_MODEL below
-# pin it explicitly so scoring doesn't silently drift with deepeval's own default).
+# Secrets required: NVIDIA_API_KEY only (https://build.nvidia.com — free tier). The agent
+# and the judge both run on NVIDIA-hosted models through the same key, pinned to two
+# *different* models below so the judge isn't grading its own output and scoring doesn't
+# silently drift.
 
 on:
   pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -34,21 +42,27 @@ jobs:
 
       - id: decide
         env:
+          EVENT_NAME: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref }}
           HEAD_REF: ${{ github.head_ref }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           run=false
-          if [[ "$BASE_REF" == "main" && "$HEAD_REF" == "develop" ]]; then
+          # Push to main and manual dispatch always run; PRs are gated below.
+          if [[ "$EVENT_NAME" != "pull_request" ]]; then
             run=true
-          fi
-          changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
-          for f in uv.lock cli/uv.lock demo_agent/uv.lock; do
-            if grep -qxF "$f" <<<"$changed"; then
+          else
+            if [[ "$BASE_REF" == "main" && "$HEAD_REF" == "develop" ]]; then
               run=true
             fi
-          done
+            changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
+            for f in uv.lock cli/uv.lock demo_agent/uv.lock; do
+              if grep -qxF "$f" <<<"$changed"; then
+                run=true
+              fi
+            done
+          fi
           echo "run=$run" >> "$GITHUB_OUTPUT"
 
   secrets:
@@ -59,14 +73,9 @@ jobs:
       - name: Require live-eval secrets
         env:
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          missing=()
-          [[ -z "$NVIDIA_API_KEY" ]] && missing+=("NVIDIA_API_KEY (agent model, https://build.nvidia.com)")
-          [[ -z "$OPENAI_API_KEY" ]] && missing+=("OPENAI_API_KEY (deepeval judge model)")
-          if [[ ${#missing[@]} -gt 0 ]]; then
-            echo "::error::Live eval smoke requires repository secrets that are not configured:"
-            for m in "${missing[@]}"; do echo "::error::  - $m"; done
+          if [[ -z "$NVIDIA_API_KEY" ]]; then
+            echo "::error::Live eval smoke requires the NVIDIA_API_KEY repository secret (agent + judge models, https://build.nvidia.com)"
             exit 1
           fi
 
@@ -93,6 +102,13 @@ jobs:
         working-directory: demo_agent
         env:
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          # Override demo_agent's committed model config (ollama, local-only) with a
+          # free build.nvidia.com model; env beats monkeybot.yaml.
+          MODEL_PROVIDER: nvidia
+          MODEL_NAME: meta/llama-3.3-70b-instruct
+          # demo_agent's monkeybot.yaml sets runtime.port: 8080; the health check and
+          # AGENT_URL below expect 8787, so pin PORT explicitly (env beats yaml).
+          PORT: "8787"
           SANDBOX_ENABLED: "false" # no Docker socket in this runner
           # Small context window so context/summarization_trigger.yaml actually crosses the
           # real summarization threshold; the other smoke scenarios are short enough to fit.
@@ -114,18 +130,44 @@ jobs:
       - name: Run smoke suite report
         env:
           AGENT_URL: http://127.0.0.1:8787
-          JUDGE_PROVIDER: openai
-          JUDGE_MODEL: gpt-4o-mini
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # Judge on a different free NVIDIA-hosted model than the agent (same key).
+          JUDGE_PROVIDER: nvidia
+          JUDGE_MODEL: nvidia/llama-3.3-nemotron-super-49b-v1
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          # Scorecard metadata: report the model the gateway actually ran.
+          MODEL_PROVIDER: nvidia
+          MODEL_NAME: meta/llama-3.3-70b-instruct
+          EVENT_NAME: ${{ github.event_name }}
         run: |
+          # PRs are a gate and must block on regressions; main pushes and manual runs
+          # just score the build and always report. --fail-on-regression always blocks on
+          # this run's own scenario errors/failures. It does NOT require evals/baselines/
+          # smoke.json to exist (that's the separate --require-baseline flag, intentionally
+          # omitted below) — no trusted baseline has been committed yet. Once one has
+          # (`uv run python -m evals.report --suite smoke --update-baseline`, committed),
+          # add --require-baseline here too so a missing/deleted file can't silently skip
+          # the token/cost/latency drift checks.
+          flags=""
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            flags="--fail-on-regression"
+          fi
           uv run python -m evals.report \
             --suite smoke \
             --baseline evals/baselines/smoke.json \
-            --fail-on-regression \
+            $flags \
             | tee eval-report.md
 
-      - name: Post report as PR comment
+      - name: Publish report to run summary
         if: always()
+        run: |
+          if [[ -f eval-report.md ]]; then
+            cat eval-report.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '`FAIL` — no report produced; see the job logs.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Post report as PR comment
+        if: always() && github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
           script: |
