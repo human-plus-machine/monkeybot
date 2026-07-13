@@ -28,7 +28,7 @@ def test_run_new_creates_bundle(tmp_path: Path) -> None:
     assert (tmp_path / "Dockerfile").is_file()
     assert (tmp_path / ".dockerignore").is_file()
     pyproject = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
-    assert f"monkeybot[gemini]{COMPATIBLE_CORE_RANGE}" in pyproject
+    assert f"monkeybot[gemini,sandbox]{COMPATIBLE_CORE_RANGE}" in pyproject
     assert '"monkeybot-browser-mcp>=0.2.0,<1"' in pyproject
     assert "[tool.uv]\npackage = false" in pyproject
     assert "[tool.uv.sources]" not in pyproject
@@ -58,7 +58,7 @@ def test_write_agent_pyproject_maps_provider_extra(tmp_path: Path) -> None:
     assert status == "created"
     text = (dest / "pyproject.toml").read_text(encoding="utf-8")
     assert 'name = "my-cool-bot"' in text
-    assert f'"monkeybot[claude]{COMPATIBLE_CORE_RANGE}"' in text
+    assert f'"monkeybot[claude,sandbox]{COMPATIBLE_CORE_RANGE}"' in text
     assert "[tool.uv.sources]" not in text
 
 
@@ -71,23 +71,22 @@ def test_write_agent_pyproject_merges_feature_extras(tmp_path: Path) -> None:
     )
     text = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
     assert (
-        f'"monkeybot[openai,postgres,sandbox,observability]{COMPATIBLE_CORE_RANGE}"'
+        f'"monkeybot[openai,sandbox,postgres,observability]{COMPATIBLE_CORE_RANGE}"'
         in text
     )
 
 
-def test_write_agent_pyproject_fake_has_no_extra(tmp_path: Path) -> None:
+def test_write_agent_pyproject_fake_includes_sandbox(tmp_path: Path) -> None:
     status = write_agent_pyproject(tmp_path, provider="fake", force=False)
     assert status == "created"
     text = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
-    assert f'"monkeybot{COMPATIBLE_CORE_RANGE}"' in text
-    assert "monkeybot[" not in text
+    assert f'"monkeybot[sandbox]{COMPATIBLE_CORE_RANGE}"' in text
 
 
 def test_write_agent_pyproject_fake_with_features(tmp_path: Path) -> None:
     write_agent_pyproject(tmp_path, provider="fake", extras=["postgres"], force=False)
     text = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
-    assert f'"monkeybot[postgres]{COMPATIBLE_CORE_RANGE}"' in text
+    assert f'"monkeybot[sandbox,postgres]{COMPATIBLE_CORE_RANGE}"' in text
 
 
 def test_write_agent_pyproject_skips_without_force(tmp_path: Path) -> None:
@@ -102,7 +101,7 @@ def test_write_agent_pyproject_force_overwrites(tmp_path: Path) -> None:
     status = write_agent_pyproject(tmp_path, provider="aws_bedrock", force=True)
     assert status == "overwritten"
     text = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
-    assert f'"monkeybot[bedrock]{COMPATIBLE_CORE_RANGE}"' in text
+    assert f'"monkeybot[bedrock,sandbox]{COMPATIBLE_CORE_RANGE}"' in text
 
 
 def test_monkeybot_dep_for_provider_aliases() -> None:

@@ -81,10 +81,11 @@ def test_bootstrap_layout_is_identical_from_every_launch_cwd(
         # Every launch surface must agree with the canonical layout after the
         # same bootstrap, regardless of whether it started at root, a nested
         # workspace path, or an unrelated launcher cwd with MONKEYBOT_CONFIG.
+        from monkeybot_cli.config_resolve import resolve_agent_root as cli_agent_root
+
         from monkeybot.core.subagents import subagent_worker
         from monkeybot.gateway.realtime.routes import _resolved_workspace_paths as realtime_paths
         from monkeybot.gateway.sse.app import _resolved_workspace_paths as sse_paths
-        from monkeybot_cli.config_resolve import resolve_agent_root as cli_agent_root
 
         assert sse_paths() == (layout.workspace_root, layout.skills_path)
         assert realtime_paths() == (layout.workspace_root, layout.skills_path)
@@ -156,7 +157,8 @@ def test_startup_layout_log_redacts_secrets(
         assert "db.example" in message
         assert secret not in message
         assert "user:" not in message
-        assert "agent_root=" not in message
+        assert str(layout.agent_root) not in message
+        assert str(layout.config_path) not in message
     finally:
         os.environ.clear()
         os.environ.update(before)

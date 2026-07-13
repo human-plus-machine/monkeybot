@@ -49,7 +49,9 @@ def test_run_run_derives_agent_root_from_off_tree_config(
     assert captured["cmd"][0] == str(venv_py.resolve())
 
 
-def test_run_run_uses_explicit_config_agent_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_run_preserves_explicit_cwd_with_explicit_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     agent = tmp_path / "agent"
     cfg_dir = agent / "monkeybot_config"
     cfg_dir.mkdir(parents=True)
@@ -75,6 +77,4 @@ def test_run_run_uses_explicit_config_agent_root(tmp_path: Path, monkeypatch: py
     with patch("monkeybot_cli.commands.run_cmd.subprocess.run", side_effect=fake_run):
         run_run(args)
 
-    # An explicit config selects its own agent root; ``--cwd`` only participates
-    # in config discovery when no explicit config was supplied.
-    assert Path(captured["cwd"]).resolve() == agent.resolve()
+    assert Path(captured["cwd"]).resolve() == explicit_cwd.resolve()

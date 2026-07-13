@@ -12,6 +12,7 @@ from monkeybot.core.logging_utils import kv
 from monkeybot.core.tools.sandbox_executor import SandboxConfig
 
 logger = logging.getLogger(__name__)
+# Process-local: each gateway worker emits one startup layout event.
 _startup_layout_logged = False
 
 
@@ -52,7 +53,7 @@ def log_gateway_startup(layout: AgentLayout, *, force: bool = False) -> None:
     logger.info(
         "gateway_startup_layout %s",
         kv(
-            config_source=layout.config_path,
+            config_source="configured" if layout.config_path else "defaults",
             agent_root_fingerprint=fingerprint,
             workspace_mode=workspace_mode,
             db_backend=_storage_kind(layout.db_url),

@@ -121,8 +121,6 @@ For syncing cookies from a local Chrome profile into cloud browsers, see [browse
 | `BROWSER_USE_API_KEY` | Browser Use Cloud auth |
 | `BROWSER_MCP_PLAYBOOKS_DIR` | Playbooks directory (agent-written site notes) |
 | `BROWSER_MCP_SCREENSHOTS_DIR` | Screenshot output directory (default: `{workspace}/browser/Screenshots`) |
-| `BROWSER_MCP_SCREENSHOTS_MAX_FILES` | Retain at most this many PNGs (default `200`; `0` disables the cap) |
-| `BROWSER_MCP_SCREENSHOTS_MAX_BYTES` | Retain at most this many total screenshot bytes (default `104857600`; `0` disables the cap) |
 
 All `BU_*` vars are passed through to `browser-harness` unchanged.
 
@@ -130,11 +128,6 @@ Playbooks are intentionally per-instance cache data. On Cloud Run, Fargate, and
 other ephemeral-workspace targets they reset when the instance is recycled. Use
 the memory storage contract for durable knowledge rather than adding a workspace
 synchronization layer.
-
-For Cloud Run and other in-memory filesystems, set both screenshot caps to a
-small value appropriate to the service memory limit.
-
----
 
 ## Tools
 

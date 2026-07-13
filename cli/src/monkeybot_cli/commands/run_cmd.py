@@ -20,9 +20,8 @@ def run_run(args: argparse.Namespace) -> int:
         env["MONKEYBOT_CONFIG"] = str(config_path)
     if args.port:
         env["PORT"] = str(args.port)
-    # Derive the agent root from --cwd when given, else from --config so an
-    # off-tree config selects the right project venv / `uv run` cwd — matching
-    # `monkeybot doctor`. Falls back to cwd when neither is provided.
+    # --cwd intentionally pins the subprocess and runtime directory. Without
+    # it, an explicit config determines the agent root.
     agent_root = resolve_agent_root(cwd=cwd, config_path=config_path)
     runtime = resolve_runtime_python(agent_root)
     cmd = gateway_argv(runtime)

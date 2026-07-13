@@ -2012,7 +2012,6 @@ dependencies = [
     { name = "google-genai" },
     { name = "httpx" },
     { name = "mcp" },
-    { name = "opensandbox" },
     { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "python-ulid" },
@@ -2090,6 +2089,9 @@ realtime-gemini = [
     { name = "google-genai" },
     { name = "websockets" },
 ]
+sandbox = [
+    { name = "opensandbox" },
+]
 scheduler = [
     { name = "croniter" },
 ]
@@ -2158,7 +2160,7 @@ requires-dist = [
     { name = "openai", marker = "extra == 'nvidia'", specifier = ">=1.0" },
     { name = "openai", marker = "extra == 'ollama'", specifier = ">=1.0" },
     { name = "openai", marker = "extra == 'openai'", specifier = ">=1.0" },
-    { name = "opensandbox", specifier = ">=0.1.7" },
+    { name = "opensandbox", marker = "extra == 'sandbox'", specifier = ">=0.1.7" },
     { name = "opentelemetry-api", marker = "extra == 'observability'", specifier = ">=1.28" },
     { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'observability'", specifier = ">=1.28" },
     { name = "opentelemetry-instrumentation-fastapi", marker = "extra == 'observability'", specifier = ">=0.62b1" },

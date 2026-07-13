@@ -14,7 +14,9 @@ from monkeybot.core.layout import resolve_agent_root as _resolve_agent_root
 
 def resolve_agent_root(*, cwd: Path | None = None, config_path: Path | None = None) -> Path:
     """Return the agent project root (directory containing monkeybot_config/ or .env)."""
-    return _resolve_agent_root(cwd=cwd, config_path=config_path)
+    if cwd is not None:
+        return cwd.expanduser().resolve()
+    return _resolve_agent_root(config_path=config_path)
 
 
 def load_agent_dotenv(*, cwd: Path | None = None, config_path: Path | None = None) -> Path | None:
@@ -36,8 +38,10 @@ def resolve_config(explicit: str | None, *, cwd: Path | None = None) -> Path | N
     if explicit:
         p = Path(explicit).expanduser()
         return p.resolve() if p.is_file() else None
-    resolved_cwd = cwd.expanduser().resolve() if cwd is not None else None
-    return resolve_monkeybot_config_path(cwd=resolved_cwd)
+    if cwd is not None:
+        candidate = cwd.expanduser().resolve() / "monkeybot_config" / "monkeybot.yaml"
+        return candidate.resolve() if candidate.is_file() else None
+    return resolve_monkeybot_config_path()
 
 
 def load_config_doc(config_path: str | Path | None = None) -> tuple[Path | None, dict]:

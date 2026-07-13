@@ -255,6 +255,14 @@ def apply_monkeybot_runtime_env(
 
     _RUNTIME_ENV_APPLIED = True
     google_cloud_project = (os.environ.get("GOOGLE_CLOUD_PROJECT") or "").strip()
+    from monkeybot.core.layout import (
+        resolve_agent_path,
+        resolve_agent_root,
+        resolve_memory_storage_uri,
+        resolve_sqlite_url,
+    )
+
+    anchor = agent_root or resolve_agent_root(config_path=path)
     for env_key, env_val in flat.items():
         # WORKSPACE_ROOT remains a supported legacy process override.  Do not
         # let a YAML default materialize MONKEYBOT_WORKSPACE_ROOT ahead of it.
@@ -277,18 +285,11 @@ def apply_monkeybot_runtime_env(
             "PERMISSION_CONFIG",
             "MONKEYBOT_WORKSPACE_ROOT",
         }:
-            from monkeybot.core.layout import resolve_agent_path
-
-            anchor = agent_root or path.parent.parent
             env_val = str(resolve_agent_path(env_val, anchor))
         elif env_key == "DB_URL":
-            from monkeybot.core.layout import resolve_sqlite_url
-
-            env_val = resolve_sqlite_url(env_val, agent_root or path.parent.parent)
+            env_val = resolve_sqlite_url(env_val, anchor)
         elif env_key == "MEMORY_STORAGE_URI":
-            from monkeybot.core.layout import resolve_memory_storage_uri
-
-            env_val = resolve_memory_storage_uri(env_val, agent_root or path.parent.parent)
+            env_val = resolve_memory_storage_uri(env_val, anchor)
         os.environ[env_key] = env_val
         logger.debug("Set from monkeybot.yaml: %s=%s", env_key, env_val)
 

@@ -214,7 +214,9 @@ def write_agent_pyproject(
     if path.exists() and not force:
         return "skipped"
     existed = path.exists()
-    dep = monkeybot_requirement(provider=provider, extras=extras)
+    # Sandbox is configured in every generated agent, so install its SDK with
+    # the provider dependencies rather than imposing it on every core install.
+    dep = monkeybot_requirement(provider=provider, extras=["sandbox", *(extras or [])])
     name = _sanitize_project_name(dest.name)
     path.write_text(
         (

@@ -41,7 +41,7 @@ def test_new_scaffolds(tmp_path: Path) -> None:
     assert "MONKEYBOT_SUBAGENT_AGENT_MD" not in env_text
     assert "DB_URL" in env_text
     pyproject = (tmp_path / "pyproject.toml").read_text()
-    assert "monkeybot[gemini]>=2.2.0,<3" in pyproject
+    assert "monkeybot[gemini,sandbox]>=2.2.0,<3" in pyproject
     assert "monkeybot-browser-mcp>=0.2.0,<1" in pyproject
     assert "package = false" in pyproject
     assert "[tool.uv.sources]" not in pyproject
@@ -90,6 +90,33 @@ def test_validate_missing_config(tmp_path: Path) -> None:
     data = json.loads(result.stdout)
     assert data["ok"] is False
     assert any(c["id"] == "config.file.exists" for c in data["checks"])
+
+
+def test_validate_custom_config_anchors_paths_at_its_parent(tmp_path: Path) -> None:
+    config_dir = tmp_path / "custom-config"
+    config_dir.mkdir()
+    (config_dir / "AGENT.md").write_text("# Agent\n", encoding="utf-8")
+    (config_dir / "skills").mkdir()
+    config = config_dir / "agent.yaml"
+    config.write_text(
+        "model:\n"
+        "  provider: fake\n"
+        "  name: fake\n"
+        "paths:\n"
+        "  agent_md: AGENT.md\n"
+        "  skills_path: skills\n"
+        "  db_url: sqlite:///data/monkeybot.db\n"
+        "  memory_storage_uri: local://data/memory\n",
+        encoding="utf-8",
+    )
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
+
+    result = _run_cli("validate", "--json", "--config", str(config), cwd=unrelated)
+
+    checks = {check["id"]: check for check in json.loads(result.stdout)["checks"]}
+    assert checks["paths.agent_md.exists"]["status"] == "pass"
+    assert checks["paths.skills_path.exists"]["status"] == "pass"
 
 
 def test_talk_help_lists_realtime_flags() -> None:

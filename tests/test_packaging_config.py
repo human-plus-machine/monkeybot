@@ -36,6 +36,12 @@ def test_wheel_force_include_does_not_duplicate_packaged_files() -> None:
     _assert_no_duplicate_force_include(ROOT / "cli" / "pyproject.toml")
 
 
+def test_opensandbox_is_only_a_sandbox_extra() -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    assert all(not dependency.startswith("opensandbox") for dependency in project["dependencies"])
+    assert project["optional-dependencies"]["sandbox"] == ["opensandbox>=0.1.7"]
+
+
 def test_cli_wheel_includes_scaffold_defaults(tmp_path: Path) -> None:
     """Published CLI wheel must ship scaffold_defaults for ``monkeybot new``."""
     if shutil.which("uv") is None:
