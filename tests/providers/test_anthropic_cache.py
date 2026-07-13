@@ -9,8 +9,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from monkeybot.core.context.epoch import SYSTEM_CONTEXT_UPDATE_HEADING
 from monkeybot.core.llm.provider import Message, UsageEvent
+from monkeybot.core.prompts.prompt import (
+    CURRENT_REQUEST_HEADING,
+    MEMORY_INDEX_HEADING,
+    MEMORY_NUDGE_HEADING,
+    RUNTIME_NOTES_HEADING,
+    SKILLS_HEADING,
+)
 from monkeybot.providers._utils import (
+    _VOLATILE_SYSTEM_MARKERS,
     build_anthropic_messages,
     build_cached_system_blocks,
     mark_last_tool_cached,
@@ -103,6 +112,25 @@ def test_build_cached_system_blocks_shape() -> None:
     assert build_cached_system_blocks("SYS") == [
         {"type": "text", "text": "SYS", "cache_control": {"type": "ephemeral"}}
     ]
+
+
+def test_volatile_markers_match_heading_constants() -> None:
+    """_VOLATILE_SYSTEM_MARKERS cannot import the owning modules directly (circular
+
+    import via core.context -> core.config.settings -> providers.claude), so the
+    literals are duplicated by hand. This test is the enforcement mechanism: any
+    heading rename/addition in the owning module must be mirrored here or this
+    test fails, catching drift that would otherwise silently break the Anthropic
+    cache-block split.
+    """
+    assert set(_VOLATILE_SYSTEM_MARKERS) == {
+        MEMORY_INDEX_HEADING,
+        MEMORY_NUDGE_HEADING,
+        SKILLS_HEADING,
+        CURRENT_REQUEST_HEADING,
+        RUNTIME_NOTES_HEADING,
+        SYSTEM_CONTEXT_UPDATE_HEADING,
+    }
 
 
 def test_build_cached_system_blocks_splits_volatile_tail() -> None:

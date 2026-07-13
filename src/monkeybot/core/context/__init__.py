@@ -176,9 +176,16 @@ def _core_tool_defs(
             "path": {"type": "string", "description": "Repo-relative path under the workspace root."},
             "old_string": {
                 "type": "string",
-                "description": "Exact substring to replace (must match once).",
+                "description": (
+                    "Substring to replace. Prefer an exact unique match; the tool also "
+                    "tries light fuzzy matching (line-trim / whitespace) when exact fails."
+                ),
             },
             "new_string": {"type": "string", "description": "Replacement text (may be empty)."},
+            "replace_all": {
+                "type": "boolean",
+                "description": "When true, replace every match (default false: require a unique match).",
+            },
         },
         "required": ["path", "old_string", "new_string"],
     }
@@ -195,6 +202,45 @@ def _core_tool_defs(
             },
         },
         "required": ["pattern"],
+    }
+    grep_schema: dict[str, object] = {
+        "type": "object",
+        "properties": {
+            "pattern": {
+                "type": "string",
+                "description": "Python regex to search for in file contents.",
+            },
+            "root": {
+                "type": "string",
+                "description": "Optional repo-relative directory to search under (default workspace root).",
+            },
+            "ignore_case": {
+                "type": "boolean",
+                "description": "Case-insensitive search (default false).",
+            },
+            "file_glob": {
+                "type": "string",
+                "description": 'Optional filename filter (e.g. "*.py", "*.{ts,tsx}").',
+            },
+            "max_matches": {
+                "type": "integer",
+                "description": "Cap on returned matches (default server limit).",
+            },
+        },
+        "required": ["pattern"],
+    }
+    apply_patch_schema: dict[str, object] = {
+        "type": "object",
+        "properties": {
+            "patch_text": {
+                "type": "string",
+                "description": (
+                    "Full Codex-style patch between *** Begin Patch and *** End Patch, "
+                    "with *** Add File: / *** Update File: / *** Delete File: sections."
+                ),
+            },
+        },
+        "required": ["patch_text"],
     }
     search_schema: dict[str, object] = {
         "type": "object",
@@ -255,6 +301,67 @@ def _core_tool_defs(
         },
         "required": [],
     }
+    mcp_server_filter_schema: dict[str, object] = {
+        "type": "object",
+        "properties": {
+            "server": {
+                "type": "string",
+                "description": "Optional MCP server name. Omit to query all connected servers.",
+            },
+            "name": {"type": "string"},
+            "server_name": {"type": "string"},
+        },
+        "required": [],
+    }
+    read_mcp_resource_schema: dict[str, object] = {
+        "type": "object",
+        "properties": {
+            "server": {
+                "type": "string",
+                "description": "MCP server name exactly as returned by list_mcp_resources.",
+            },
+            "uri": {
+                "type": "string",
+                "description": "Resource URI from list_mcp_resources (not necessarily a file URL).",
+            },
+            "name": {"type": "string"},
+            "server_name": {"type": "string"},
+        },
+        "required": ["uri"],
+    }
+    get_mcp_prompt_schema: dict[str, object] = {
+        "type": "object",
+        "properties": {
+            "server": {
+                "type": "string",
+                "description": "MCP server name exactly as returned by list_mcp_prompts.",
+            },
+            "prompt": {
+                "type": "string",
+                "description": "Prompt name from list_mcp_prompts.",
+            },
+            "name": {"type": "string", "description": "Alias for prompt."},
+            "server_name": {"type": "string"},
+            "arguments": {
+                "type": "object",
+                "description": "Optional string arguments for the prompt template.",
+                "additionalProperties": {"type": "string"},
+            },
+        },
+        "required": [],
+    }
+    mcp_status_schema: dict[str, object] = {
+        "type": "object",
+        "properties": {
+            "server": {
+                "type": "string",
+                "description": "Optional server name; omit to list all tracked servers.",
+            },
+            "name": {"type": "string"},
+            "server_name": {"type": "string"},
+        },
+        "required": [],
+    }
     list_skills_schema: dict[str, object] = {"type": "object", "properties": {}}
     task_props: dict[str, object] = {
         "task": {
@@ -292,6 +399,7 @@ def _core_tool_defs(
             "read_file",
             "Read a UTF-8 text file from the workspace with path validation.",
             read_schema,
+            parallel_safe=True,
         ),
         ToolDef(
             "write_file",
@@ -300,24 +408,39 @@ def _core_tool_defs(
         ),
         ToolDef(
             "replace_in_file",
-            "Replace exactly one occurrence of old_string with new_string in an existing file. "
-            "Fails if old_string is missing or matches more than once.",
+            "Replace old_string with new_string in an existing file. Requires a unique match "
+            "unless replace_all is true. Uses exact match first, then light fuzzy fallbacks.",
             replace_schema,
         ),
         ToolDef(
             "glob",
             "List workspace file paths matching a glob pattern. Prefer over run_command+ls for discovery.",
             glob_schema,
+            parallel_safe=True,
+        ),
+        ToolDef(
+            "grep",
+            "Search workspace file contents with a Python regex. Prefer over run_command+grep.",
+            grep_schema,
+            parallel_safe=True,
+        ),
+        ToolDef(
+            "apply_patch",
+            "Apply a multi-file Codex-style patch (Add / Update / Delete / Move). "
+            "Fail-closed: nothing is written if any hunk fails to validate.",
+            apply_patch_schema,
         ),
         ToolDef(
             "search_memory",
             "Search markdown/text under the memory directory for a keyword or phrase.",
             search_schema,
+            parallel_safe=True,
         ),
         ToolDef(
             "list_skills",
             "List installed skills with names, descriptions, and entry points.",
             list_skills_schema,
+            parallel_safe=True,
         ),
     ]
     if include_task_tool:
@@ -357,6 +480,44 @@ def _core_tool_defs(
                 "remove_mcp_server",
                 "Disconnect an MCP server by name and drop its tools (next model step).",
                 mcp_rm_schema,
+            ),
+            ToolDef(
+                "mcp_status",
+                "Show MCP server lifecycle status (catalogued / connected / failed / "
+                "needs_auth / disabled). Optional server name filters to one entry.",
+                mcp_status_schema,
+                parallel_safe=True,
+            ),
+            ToolDef(
+                "list_mcp_resources",
+                "List MCP resources from connected servers. Optional server filter. "
+                "Connect with enable_mcp first when the server is only catalogued.",
+                mcp_server_filter_schema,
+                parallel_safe=True,
+            ),
+            ToolDef(
+                "list_mcp_resource_templates",
+                "List MCP resource URI templates from connected servers. Optional server filter.",
+                mcp_server_filter_schema,
+                parallel_safe=True,
+            ),
+            ToolDef(
+                "read_mcp_resource",
+                "Read one MCP resource by server name and URI from list_mcp_resources.",
+                read_mcp_resource_schema,
+                parallel_safe=True,
+            ),
+            ToolDef(
+                "list_mcp_prompts",
+                "List MCP prompt templates from connected servers. Optional server filter.",
+                mcp_server_filter_schema,
+                parallel_safe=True,
+            ),
+            ToolDef(
+                "get_mcp_prompt",
+                "Fetch a named MCP prompt template (optional string arguments) from a connected server.",
+                get_mcp_prompt_schema,
+                parallel_safe=True,
             ),
             ToolDef(
                 "start_loop",
@@ -404,6 +565,8 @@ def _core_tool_defs(
                     "properties": {"loop_id": {"type": "string"}},
                     "required": [],
                 },
+                parallel_safe=True,
+                doom_loop_exempt=True,
             ),
             ToolDef(
                 "pause_loop",

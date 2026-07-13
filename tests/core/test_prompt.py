@@ -71,6 +71,27 @@ def test_compose_last_message_user_skips_duplicate_task() -> None:
     assert "## Current request" not in out
 
 
+def test_compose_stable_and_volatile_split() -> None:
+    from monkeybot.core.prompts.prompt import (
+        compose_stable_baseline,
+        compose_volatile_tail,
+    )
+
+    ctx = _minimal_ctx(
+        memory_index=["fact-a"],
+        skills=[SkillRef(name="s1", description="d1")],
+    )
+    stable = compose_stable_baseline(ctx)
+    volatile = compose_volatile_tail(ctx)
+    assert "You are TestBot." in stable
+    assert "monkeybot harness" in stable
+    assert "\n\n## Memory index\n" not in stable
+    assert "\n\n## Skills\n" not in stable
+    assert "- fact-a" in volatile
+    assert "\n\n## Skills\n- s1" in volatile
+    assert compose_system_prompt(ctx) == f"{stable}{volatile}"
+
+
 def test_compose_injects_current_request_after_tool_round() -> None:
     ctx = _minimal_ctx()
     msgs = [
@@ -139,7 +160,8 @@ def test_task_truncation() -> None:
     ]
     out = compose_system_prompt(ctx, chat_messages=msgs)
     assert "…(truncated)" in out
-    assert len(out) < len(long_user) + 5500
+    # Current-request body is capped at 8k; fixed harness + agent overhead stays bounded.
+    assert len(out) < len(long_user) + 7000
 
 
 def test_compose_harness_reflects_sandbox_env(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -53,7 +53,7 @@ def test_new_force_reports_overwritten_config(tmp_path: Path) -> None:
 
 
 def test_write_active_config_reports_overwritten_on_force(tmp_path: Path) -> None:
-    from monkeybot.scaffold import write_active_config
+    from monkeybot_cli.scaffold import write_active_config
 
     cfg_dir = tmp_path / "monkeybot_config"
     cfg_dir.mkdir()
@@ -67,7 +67,7 @@ def test_write_active_config_reports_overwritten_on_force(tmp_path: Path) -> Non
 
 
 def test_write_active_config_reports_created(tmp_path: Path) -> None:
-    from monkeybot.scaffold import write_active_config
+    from monkeybot_cli.scaffold import write_active_config
 
     cfg_dir = tmp_path / "monkeybot_config"
     cfg_dir.mkdir()

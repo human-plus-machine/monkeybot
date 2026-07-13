@@ -46,6 +46,7 @@ from monkeybot.core.runtime.loop import (
     _compact_history_if_needed,
     _image_events,
     _merge_usage_event,
+    _messages_for_provider,
     _usage_to_totals,
     run,
 )
@@ -171,6 +172,7 @@ class FakeProvider:
         self._name = name
         self.stream_calls = 0
         self.stream_models: list[str] = []
+        self.stream_messages: list[list[Message]] = []
         self.count_thinking_budgets: list[int | None] = []
         self.vertex_google_search_calls: list[bool] = []
 
@@ -191,7 +193,8 @@ class FakeProvider:
         thinking_budget: int | None = None,
         vertex_google_search: bool = False,
     ) -> AsyncIterator[ProviderEvent]:
-        del messages, tools, thinking_budget
+        del tools, thinking_budget
+        self.stream_messages.append(list(messages))
         self.stream_models.append(model)
         self.vertex_google_search_calls.append(vertex_google_search)
         idx = self.stream_calls
@@ -911,6 +914,80 @@ def test_chunk_tool_calls_groups_consecutive_tasks() -> None:
     assert chunks[2] == [d]
 
 
+def test_chunk_tool_calls_groups_consecutive_parallel_safe() -> None:
+    a = ToolCall(call_id="a", name="read_file", args={"path": "a"})
+    b = ToolCall(call_id="b", name="glob", args={"pattern": "*"})
+    c = ToolCall(call_id="c", name="write_file", args={"path": "x", "content": ""})
+    d = ToolCall(call_id="d", name="search_memory", args={"query": "q"})
+    safe = frozenset({"read_file", "glob", "search_memory"})
+    chunks = _chunk_tool_calls([a, b, c, d], parallel_safe=safe)
+    assert [len(ch) for ch in chunks] == [2, 1, 1]
+    assert [x.name for x in chunks[0]] == ["read_file", "glob"]
+    assert chunks[1][0].name == "write_file"
+    assert chunks[2][0].name == "search_memory"
+
+
+@pytest.mark.asyncio
+async def test_parallel_safe_tools_results_in_call_id_order() -> None:
+    """Parallel-safe read tools run concurrently; results persist in call_id order."""
+    delays = {"c1": 0.04, "a1": 0.01, "b1": 0.02}
+    concurrent = {"n": 0, "max": 0}
+    lock = asyncio.Lock()
+
+    class SlowReadExecutor:
+        async def execute(self, *, call: ToolCall, ctx: TurnContext) -> ToolExecutionResult:
+            del ctx
+            async with lock:
+                concurrent["n"] += 1
+                concurrent["max"] = max(concurrent["max"], concurrent["n"])
+            await asyncio.sleep(delays.get(call.call_id, 0.01))
+            async with lock:
+                concurrent["n"] -= 1
+            return ToolExecutionResult.ok_text(f"result:{call.call_id}")
+
+    prov = FakeProvider(
+        [
+            [
+                ToolCall(call_id="c1", name="read_file", args={"path": "c"}),
+                ToolCall(call_id="a1", name="glob", args={"pattern": "*"}),
+                ToolCall(call_id="b1", name="search_memory", args={"query": "q"}),
+                Done(),
+            ],
+            [TextDelta(text="done"), Done()],
+        ]
+    )
+    hist = FakeHistory()
+    tools = [
+        ToolDef("read_file", "r", {"type": "object"}, parallel_safe=True),
+        ToolDef("glob", "g", {"type": "object"}, parallel_safe=True),
+        ToolDef("search_memory", "s", {"type": "object"}, parallel_safe=True),
+    ]
+    ctx = TurnContext(**{**_ctx().__dict__, "tools": tools})
+    events: list[object] = []
+    async for e in run(
+        "go",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[AllowInspector()],
+        tool_executor=SlowReadExecutor(),
+        max_turns=4,
+    ):
+        events.append(e)
+
+    assert concurrent["max"] >= 2
+    tool_resp_messages = [
+        m
+        for m in hist.rows
+        if m.role == "user" and m.content and isinstance(m.content[0], ToolResponse)
+    ]
+    assert len(tool_resp_messages) == 1
+    assert [b.id for b in tool_resp_messages[0].content] == ["a1", "b1", "c1"]
+
+    result_events = [e for e in events if isinstance(e, ToolCallResult)]
+    assert [e.result for e in result_events] == ["result:a1", "result:b1", "result:c1"]
+
+
 @pytest.mark.asyncio
 async def test_parallel_task_tools_cap_concurrent_executions() -> None:
     """Up to 12 ``task`` calls in one batch; at most 10 run inside the semaphore at once."""
@@ -996,10 +1073,10 @@ async def test_run_provider_raises_wrapped_as_error() -> None:
     ):
         events.append(e)
     assert isinstance(events[0], Thinking)
-    assert isinstance(events[1], SystemPromptSnapshot)
-    assert isinstance(events[2], Error)
-    assert "boom" in events[2].error
-    assert isinstance(events[3], TurnComplete)
+    assert any(isinstance(e, SystemPromptSnapshot) for e in events)
+    err = next(e for e in events if isinstance(e, Error))
+    assert "boom" in err.error
+    assert isinstance(events[-1], TurnComplete)
 
 
 @pytest.mark.asyncio
@@ -1110,8 +1187,13 @@ async def test_run_emits_context_summarize_events_when_over_cap(
     assert prov.stream_calls == 2
     assert prov.stream_models == ["gemini-2.5-flash", "gemini-2.5-flash"]
     assert len(hist.reset_calls) == 1
+    summarizer_msgs = prov.stream_messages[0]
+    assert summarizer_msgs[0].role == "system"
+    assert isinstance(summarizer_msgs[0].content[0], Text)
+    assert "## Objective" in summarizer_msgs[0].content[0].text
+    assert "## Relevant Files" in summarizer_msgs[0].content[0].text
     assert any(
-        isinstance(x, Text) and "[Context Summary]" in x.text
+        isinstance(x, Text) and x.text.startswith("[Context Summary]:\n")
         for m in hist.rows
         for x in m.content
     )
@@ -1298,6 +1380,53 @@ async def test_run_no_context_summarize_events_when_under_cap(tmp_path: Path) ->
     assert hist.reset_calls == []
 
 
+def test_messages_for_provider_no_update_is_passthrough() -> None:
+    system = Message(role="system", content=[Text(text="SYS")])
+    history = [Message(role="user", content=[Text(text="hi")])]
+    out = _messages_for_provider(system, history)
+    assert [m.role for m in out] == ["system", "user"]
+
+
+def test_messages_for_provider_folds_update_into_trailing_user_message() -> None:
+    """History ending in "user" (e.g. a tool-response row) must not gain a second
+
+    trailing "user" row — Anthropic/Gemini both reject consecutive same-role
+    messages.
+    """
+    system = Message(role="system", content=[Text(text="SYS")])
+    tool_response_row = Message(
+        role="user",
+        content=[
+            ToolResponse(id="c1", tool_name="run_command", result=[Text(text="ok")], is_error=False)
+        ],
+    )
+    history = [
+        Message(role="user", content=[Text(text="hi")]),
+        Message(role="assistant", content=[ToolRequest(id="c1", name="run_command", args={})]),
+        tool_response_row,
+    ]
+    out = _messages_for_provider(system, history, mid_conversation_update="## System context update\n...")
+    roles = [m.role for m in out]
+    assert all(a != b for a, b in zip(roles, roles[1:])), roles
+    assert len(out) == len(history) + 1  # system + history rows, no extra message
+    last = out[-1]
+    assert last.role == "user"
+    assert any(isinstance(b, ToolResponse) for b in last.content)
+    assert any(isinstance(b, Text) and "System context update" in b.text for b in last.content)
+
+
+def test_messages_for_provider_appends_update_after_trailing_assistant_message() -> None:
+    system = Message(role="system", content=[Text(text="SYS")])
+    history = [
+        Message(role="user", content=[Text(text="hi")]),
+        Message(role="assistant", content=[Text(text="ok, thinking...")]),
+    ]
+    out = _messages_for_provider(system, history, mid_conversation_update="## System context update\n...")
+    roles = [m.role for m in out]
+    assert roles == ["system", "user", "assistant", "user"]
+    assert all(a != b for a, b in zip(roles, roles[1:]))
+
+
 @pytest.mark.asyncio
 async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> None:
     mem = tmp_path / "memory"
@@ -1403,10 +1532,28 @@ async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> N
 
     assert len(prov.captured_messages) == 2
     sys1 = _flatten_text_from_message(prov.captured_messages[0][0])
-    sys2 = _flatten_text_from_message(prov.captured_messages[1][0])
+    turn2 = prov.captured_messages[1]
+    turn2_texts = [_flatten_text_from_message(m) for m in turn2]
+    all2 = "\n".join(turn2_texts)
     assert "initial line" in sys1
     assert "new memory from tool" not in sys1
-    assert "new memory from tool" in sys2
+    # Volatile memory refresh arrives as a mid-conversation system-context update
+    # (leading epoch baseline stays cache-stable).
+    assert "new memory from tool" in all2
+    # Regression guard: the mid-conversation update must never create two
+    # consecutive same-role messages (Anthropic/Gemini both reject this shape).
+    roles = [m.role for m in turn2]
+    assert all(a != b for a, b in zip(roles, roles[1:])), (
+        f"consecutive same-role messages in provider payload: {roles}"
+    )
+    # History ends in a tool-response "user" row; the update must be folded
+    # into that same message, not appended as a second trailing "user" row.
+    last = turn2[-1]
+    assert last.role == "user"
+    assert any(isinstance(b, ToolResponse) for b in last.content)
+    assert any(
+        isinstance(b, Text) and "new memory from tool" in b.text for b in last.content
+    )
 
 
 @pytest.mark.asyncio

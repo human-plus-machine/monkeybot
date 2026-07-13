@@ -47,6 +47,27 @@ Client (CLI / chat UI / serverless handler)
 
 **Core must not import gateway.** Gateway imports core via ports (`LoopPort`, `PendingResponseBusPort`, `ToolExecutorPort`). New features in `core/` must stay gateway-agnostic.
 
+### Harness ownership boundaries
+
+Use this table before adding features so PRs do not thicken the wrong layer: say what the harness owns, what it deliberately does not, and what must live outside the process.
+
+| Concern | Ownership | Guidance |
+|---------|-----------|----------|
+| Turn semantics (`loop.run`), tool batching, doom-loop, truncated-batch reject, history compaction | **In core** | Single source of truth; keep gateway-agnostic |
+| System prompt composition + tool-call protocol | **In core** | Protocol lives in `harness_prompt.py`, not `AGENT.md` |
+| Built-in tools, path confinement, command allowlists, tool inspectors, HITL confirm events | **In core** | Policy-rich by design |
+| MCP client + `server__tool` naming | **In core** | First-class harness infrastructure |
+| Subagent `task` (subprocess `loop.run`, no nested task) | **In core** | Product multi-agent via extensions/OS is out of scope here |
+| History / usage / storage backends, memory hooks | **In core** | Persist via ports; backends are pluggable |
+| LLM vendor adapters | **In core (thin)** | Normalize stream/count tokens only; no product policy |
+| HTTP/SSE, session bus, CORS, pending UI responses | **Not in core — gateway** | Transport only; call ports into the harness |
+| Chat UI, CLI chrome, deploy manifests, billing | **Not in core — product / OS** | Consume events and APIs; do not fork loop semantics |
+| Operator persona, domain procedures, skill playbooks | **Not in core — `AGENT.md` / skills** | Content the harness injects; not harness code |
+| Domain / third-party tools | **Extension — `CustomTool` / MCP / hooks** | Prefer these over editing `loop.py` or core tool tables |
+| Strong isolation for untrusted or unattended work | **OS / container / VM** | Optional OpenSandbox + allowlists are defense-in-depth, not a full trust boundary; real isolation is external |
+
+**PR smell checks:** new HTTP concerns in `core/` → wrong layer; new turn semantics only in the gateway → wrong layer; security that assumes “sandbox = safe” without an OS boundary → document the gap instead of implying a stronger guarantee.
+
 ---
 
 ## Turn lifecycle
@@ -57,18 +78,36 @@ One **user message** may span multiple **inner turns** (model → tools → mode
 
 1. Append user message to history; fire `USER_MESSAGE` hook.
 2. **Inner turn loop** (up to `MAX_TURNS`, default 50):
+   - Drain **steer** queue (mid-turn user injections) into history; emit `UserSteered`.
+   - Await hook **settlement** (fire-and-forget `POST_TOOL` / prior write-side hooks) with bounded timeout.
    - Refresh memory index; optional context curation (turn 1 only).
    - Compose system prompt; resolve attachments; preflight token count.
    - Optionally summarize history or shape tool outputs under context pressure.
    - Stream provider; accumulate tool calls until `Done`.
-   - Execute tools (inspectors → hooks → executor); append assistant + tool rows.
+   - Execute tools (inspectors → `ToolCallStarted` → await settlement/`PRE_TOOL` → executor); append assistant + tool rows.
+   - Doom-loop check: identical tool streak (ok or error) may force a no-tools recovery turn.
    - Repeat until final assistant text or max turns.
-3. Emit `TurnComplete` with usage totals and optional trace id.
+3. Fire `POST_TURN`; settle fire-and-forget hooks (bounded); emit `TurnComplete` with usage totals and optional trace id.
+4. Gateway drains **follow-up** queue (if any) and starts the next turn under the same session lock.
+
+### Input admission (steer vs follow-up)
+
+| Mode | Endpoint | When accepted | When applied |
+|------|----------|---------------|--------------|
+| Reply | `POST /sessions/{id}/reply` | Session idle | Starts a turn immediately (`SESSION_BUSY` if busy) |
+| Steer | `POST /sessions/{id}/steer` | Session busy | Injected after current tool batch / before next provider call |
+| Follow-up | `POST /sessions/{id}/queue` | Busy → enqueue; idle → start | FIFO drain after `TurnComplete` / lock release |
+
+Do **not** conflate with HITL `ToolConfirmationRequest`. Cancel clears pending steer; follow-ups survive. Caps: `MONKEYBOT_STEER_QUEUE_MAX` (default 8), `MONKEYBOT_FOLLOW_UP_QUEUE_MAX` (default 16).
+
+**Process-local only:** steer/follow-up queues live on the in-process `SessionBus` (same constraint as the SSE registry). Multi-replica gateways do not share admission queues across instances — pin sticky sessions to one replica, or treat `/queue` as best-effort for single-process deployments. If drain cannot acquire the durable turn lock (another replica / stale claim), the item is requeued and retried on an interval (`MONKEYBOT_FOLLOW_UP_LOCK_RETRY_S`, default 1s) until the lock frees or the wait budget expires (`MONKEYBOT_FOLLOW_UP_LOCK_WAIT_MS`, default = session-turn stale window), after which that follow-up is dropped so the queue cannot wedge forever.
 
 ### Inner-turn phases
 
 | Phase | When | Key files |
 |-------|------|-----------|
+| Steer drain | Start of each inner turn | `core/runtime/input_admission.py`, `loop.py` |
+| Hook settlement | Before provider call / `TurnComplete` | `core/hooks/`, `loop.py` |
 | Hooks (`PRE_TURN`) | Turn 1 of user message | `core/hooks/` |
 | Context curation | Turn 1, if enabled + thresholds met | `core/context/curator.py` |
 | System prompt build | Every inner turn | `core/prompts/prompt.py` |
@@ -85,8 +124,9 @@ One **user message** may span multiple **inner turns** (model → tools → mode
 1. `POST /sessions` → create session
 2. `GET /sessions/{id}/events` → SSE stream
 3. `POST /sessions/{id}/reply` → `start_turn()` (background)
-4. Events: `Thinking`, `AssistantDelta`, `ToolCallStarted`, `ToolCallResult`, `ContextSummarizing`, `SystemPromptSnapshot`, `TurnComplete`, `Error`
-5. `POST /sessions/{id}/cancel` → cooperative cancellation
+4. Events: `Thinking`, `AssistantDelta`, `AssistantTextStarted`, `AssistantTextEnded`, `ToolCallStarted`, `ToolCallResult`, `ToolInputDelta`, `ThinkingBlockStarted`, `UserSteered`, `QueuedInputAccepted`, `ContextEpochStarted`, `SystemContextUpdated`, `ContextSummarizing`, `SystemPromptSnapshot`, `TurnComplete`, `Error`
+5. `POST /sessions/{id}/steer` / `queue` → mid-turn inject / idle FIFO (see above)
+6. `POST /sessions/{id}/cancel` → cooperative cancellation (+ clear steer)
 
 ---
 
@@ -105,10 +145,10 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 **How it works:**
 - `run()` is an async generator yielding `AgentEvent` until `TurnComplete`.
 - Tool calls accumulate during streaming until `Done`, then execute in **lexicographic `call_id` order**.
-- Consecutive `task` tools in one batch run **in parallel** (max 10); all other tools run as **serial chunks**.
+- Consecutive `task` tools and consecutive `parallel_safe` tools in one batch run **in parallel** (capped; default 10); mutating / unmarked tools run as **serial chunks**.
 - One user `Message` per model tool-call turn — all `ToolResponse` blocks grouped together (required for Gemini replay).
 - Final assistant history write is backgrounded but **awaited at turn tail** before freeze/reset.
-- `repair_tool_turn_integrity()` runs on every `history.load()` (in-memory only, never persisted).
+- `transform_context()` (tool-integrity repair + UI-block strip) runs on every `history.load()` (in-memory only, never persisted); `convert_to_provider()` resolves attachments / pressure-shapes for the provider view.
 
 **Depends on:** Provider, HistoryStore, ToolExecutorPort, inspectors, optional hooks/curator/attachments.
 
@@ -116,6 +156,15 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - `run()` **never raises** to callers; errors become `Error` events; `TurnComplete` always emitted.
 - Cooperative cancellation via `asyncio.Event`, checked at loop boundaries.
 - Silent-model guard: whitespace-only assistant after tools → loop continues until budget.
+- **Doom-loop guard:** `DOOM_LOOP_THRESHOLD` consecutive identical tool calls (same name + args) within a user message — whether they succeed or fail — emit an `Error`, inject a harness system note, and force the next provider call with an empty tool list (`toolChoice`-none equivalent) so the model must reply in text. Default threshold `3`; set `0` to disable. Applies to the text agent loop only (not realtime); after each recovery turn the guard re-arms for later streaks in the same message. This catches both repeated failures and successful no-progress loops (e.g. the same screenshot call over and over). Tools marked `ToolDef.doom_loop_exempt=True` (currently `loop_status`) are skipped so identical-args polling does not force a recovery turn.
+- **Truncated tool batch:** When `Done.truncated` is true (provider length/max-tokens stop) **or** every tool call in the batch has `parse_error`, the harness fails the whole batch with tool error results and does **not** execute any call — even if some args parsed as JSON (they may still be silently incomplete). Realtime has no vendor length-limit signal today (Gemini Live), so it only applies the all-`parse_error` reject path.
+- **History summarization:** When preflight tokens exceed the trigger ratio and history is long enough, the middle of the transcript is compressed via a dedicated summarizer call into one assistant row prefixed `[Context Summary]:`. The summarizer is instructed to emit a fixed Markdown template (Objective, Important Details, Work State with Completed/Active/Blocked, Next Move, Relevant Files) — not freeform prose. Head/tail messages are kept; the summary replaces the middle.
+- **Steer / follow-up:** Mid-turn steer injects at safe boundaries only; follow-up FIFO drains only when idle. One reply-in-flight lock still applies to `/reply`.
+- **Settlement barrier:** `PRE_TOOL` is awaited before execute; fire-and-forget hooks are drained (bounded by `MONKEYBOT_HOOK_SETTLEMENT_TIMEOUT_S`, default 2s) before the next provider call and before `TurnComplete` (`run()` finally). Settlement does **not** wait on SSE client ACKs (avoids deadlock).
+- **Parallel-safe tools:** `ToolDef.parallel_safe=True` for read-only core tools (`read_file`, `glob`, `grep`, `search_memory`, `list_skills`, `loop_status`, `read_attachment`). Mutating tools (`write_file`, `replace_in_file`, `apply_patch`, …) stay serial. MCP tools default serial. Results always append in `call_id` order.
+- **Context Epoch:** At each safe provider-turn boundary the harness reconciles stable vs volatile system-context sources. The leading system message keeps an immutable epoch baseline (cache prefix). Volatile changes emit a chronological mid-conversation update (user-role, not persisted) and a `SystemContextUpdated` event. Compaction / stable-source change opens a new epoch (`ContextEpochStarted`).
+- **Message pipeline:** `history → transform_context() → convert_to_provider() → Provider.stream`. Transform repairs tool integrity and strips UI-only blocks; convert resolves attachments and applies pressure shaping without mutating persisted history.
+- **Streaming grammar (additive):** `AssistantTextStarted` / `AssistantTextEnded`, `ThinkingBlockStarted`, and `ToolInputDelta` supplement existing `AssistantDelta` / `ThinkingBlockDelta` / `ToolCallStarted`. Clients may ignore the new events.
 
 ---
 
@@ -123,15 +172,17 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Purpose:** Combine operator-authored base prompt with runtime-owned harness and volatile context.
 
-**Key files:** `core/prompts/prompt.py`, `core/prompts/harness_prompt.py`, `paths.agent_md` → `AGENT.md`
+**Key files:** `core/prompts/prompt.py`, `core/prompts/harness_prompt.py`, `core/context/epoch.py`, `paths.agent_md` → `AGENT.md`
 
 **Section order (cache-friendly):**
 
-1. **Stable prefix:** `AGENT.md` + harness + session attachments
+1. **Stable prefix (epoch baseline):** `AGENT.md` + harness + session attachments
 2. **Volatile tail:** memory index + skills + "Current request" anchor
+3. **Mid-conversation updates (within epoch):** chronological user message with `## System context update` when volatile sources change; leading baseline stays byte-identical for prompt cache
 
 **How it works:**
-- `compose_system_prompt()` builds the full system string each inner turn.
+- `compose_stable_baseline()` / `compose_volatile_tail()` split the prompt; `compose_system_prompt()` remains the full-string helper for tests/tools.
+- `ContextEpochTracker.reconcile()` admits sources at each provider-turn boundary (after steer drain / settlement).
 - Harness lines for `task`, `web_search`, subagent personas, and `run_command` execution mode are conditional on active tool list.
 - Emission-style block (Levers 1–2: minimum code, terse prose) is injected into the stable prefix when `MONKEYBOT_EMISSION_STYLE=terse`; its dense agent-to-agent sub-block (Lever 3) is additionally gated on the `task` tool being active. Default off. See [§21](#21-emission-style-terse-output-guidance).
 - `HARNESS_TOOL_CALL_PROTOCOL` enforces native tool-call channel, evidence rule, no-repeat rule.
@@ -143,7 +194,8 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 **Invariants:**
 - Harness text lives in **code** (`harness_prompt.py`), not `AGENT.md` — do not duplicate tool protocol in operator prompts.
 - `_MAX_CURRENT_REQUEST_CHARS = 8000` caps injected user text.
-- Stable prefix before volatile tail for prompt caching.
+- Stable prefix before volatile tail for prompt caching; epoch baseline is immutable until compaction or stable-source change.
+- Mid-conversation system updates are provider-view only (not written to history).
 - Model should prefer **active tool list** over stale harness summaries.
 
 ---
@@ -153,25 +205,49 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 **Purpose:** Thin streaming boundary between harness and LLM vendors.
 
 **Key files:**
-- `core/llm/provider.py` — `Provider` protocol, `Message`, `ProviderEvent`
+- `core/llm/provider.py` — `Provider` protocol, `Message`, `ProviderEvent`, `ProviderCallHints`
 - `providers/gemini.py`, `openai.py`, `claude.py`, `vertex_claude.py`, `bedrock.py`, `huggingface.py`, `ollama.py`, `nvidia.py`
 - `core/config/settings.py` — `get_provider_config()`
 
+**Provider catalog** (canonical ids → protocol family):
+
+| Id | Aliases | Protocol | Cache hints |
+|----|---------|----------|-------------|
+| `google_vertexai` | gemini, vertex | google-genai | implicit prefix |
+| `google_genai` | — | google-genai | implicit prefix |
+| `openai` | — | openai-chat | session affinity + `prompt_cache_retention` when long |
+| `anthropic` | — | anthropic-messages | `cache_control` + `x-session-affinity` |
+| `vertex_anthropic` | vertex-claude | anthropic-messages | `cache_control` |
+| `aws_bedrock` | — | anthropic-messages | `cache_control` |
+| `huggingface` / `nvidia` / `ollama` | — | openai-compat | none |
+| `fake` | — | fake | gateway/test only |
+
+**Auth:** see CLI `monkeybot doctor` and `cli/.../providers.py` (`PROVIDER_SPECS`).
+
 **How it works:**
-- `stream(messages, tools, model=..., thinking_budget=...)` yields `TextDelta`, `ThinkingDelta`, `ToolCall`, `UsageEvent`, `Done`.
+- `stream(messages, tools, model=..., thinking_budget=..., hints=...)` yields `TextDelta`, optional `ToolInputDelta`, `ThinkingDelta`, `ToolCall`, `UsageEvent`, `Done`.
+- Loop synthesizes `AssistantTextStarted`/`AssistantTextEnded`/`ThinkingBlockStarted` from deltas via `ProviderStreamMapper`; Anthropic streams `ToolInputDelta` from `input_json_delta`. `AssistantTextEnded.text` carries the full settled block for durable replay.
+- `Done.truncated` is set when the vendor reports an output length limit (OpenAI `finish_reason=length`, Anthropic `stop_reason=max_tokens`, Gemini `MAX_TOKENS`). The text loop treats that as an unsafe tool batch. Gemini Live does not expose an equivalent signal, so realtime rejects incomplete tool batches via all-`parse_error` only.
 - `count_input_tokens()` must match the same payload shape as `stream()` (summarization triggers, tool budgets).
 - Provider resolution via `MODEL_PROVIDER` aliases (`gemini` → `google_vertexai`, `vertex-claude` → `vertex_anthropic`).
 - Optional extras in `pyproject.toml`: `gemini`, `openai`, `claude`, `vertex-claude`, `bedrock`, `huggingface`, `ollama`, `nvidia`.
 - `ollama`, `huggingface`, and `nvidia` share the OpenAI-compatible streaming core (`providers/_openai_compat.py`) and only differ in base URL / auth; `ollama` runs against a local server (`OLLAMA_BASE_URL`, default `http://localhost:11434`) and needs no API key; `nvidia` hits `https://integrate.api.nvidia.com/v1` and needs a free `NVIDIA_API_KEY` from build.nvidia.com.
 - `MODEL_PROVIDER=fake` is gateway/test-only; unit tests inject `ScriptedFakeProvider` directly.
 
+**Prompt-cache session hints (`ProviderCallHints`):**
+- Loop passes `session_id=thread_id` and `cache_retention` from `MODEL_CACHE_RETENTION` / `model.cache_retention` (`none` | `short` | `long`, default `short`).
+- Anthropic family: `cache_control` on stable system prefix + last tool when retention ≠ `none`; optional `x-session-affinity` header.
+- OpenAI: `x-session-affinity` when retention ≠ `none`; `prompt_cache_retention=24h` when `long`.
+- Gemini: relies on implicit prefix caching (epoch keeps stable baseline byte-identical); hints accepted as no-ops.
+
 **Depends on:** `ToolDef`, `ContentBlock` serialization per adapter.
 
 **Invariants:**
 - Exactly one overlapping `stream()` per provider instance is undefined.
 - `Message.role` is only `user` | `assistant` | `system`.
-- Prompt caching: stable prefix = `AGENT.md` + harness + attachments; Anthropic providers always use explicit `cache_control` on the stable prefix.
+- Prompt caching: stable prefix = `AGENT.md` + harness + attachments; Anthropic providers use explicit `cache_control` on the stable prefix when retention is enabled. Epoch keeps that prefix byte-identical across volatile-only updates.
 - Cost estimation via `providers/pricing.estimate_cost()` on usage events.
+- Hints are optional and provider-specific; unknown providers ignore them.
 
 ---
 
@@ -179,18 +255,25 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Purpose:** Default `ToolExecutorPort` — built-ins, MCP, custom tools, subagents.
 
-**Key files:** `core/tools/core_tool_executor.py`, `terminal.py`, `workspace_service.py`, `sandbox_executor.py`, `spill_inventory.py`
+**Key files:** `core/tools/core_tool_executor.py`, `terminal.py`, `workspace_service.py`, `patch.py`, `sandbox_executor.py`, `spill_inventory.py`
 
 **Built-in tools** (from `context._core_tool_defs`):
 
 | Tool | Role |
 |------|------|
 | `read_file` / `write_file` | Workspace-relative paths |
+| `replace_in_file` | Unique (or `replace_all`) substring edit; exact then light fuzzy match |
+| `glob` / `grep` | Path discovery / content regex search (prefer over shell) |
+| `apply_patch` | Multi-file Codex-style Add/Update/Delete/Move; fail-closed before any write |
 | `search_memory` | Keyword search in memory tree |
 | `list_skills` | Skill discovery |
 | `run_command` | Allowlisted shell (host or OpenSandbox) |
 | `task` | Subagent subprocess (parent only) |
 | `add_mcp_server` / `remove_mcp_server` | Runtime MCP registration |
+| `enable_mcp` / `disable_mcp` | Catalog connect / disconnect |
+| `mcp_status` | Server lifecycle + capabilities |
+| `list_mcp_resources` / `list_mcp_resource_templates` / `read_mcp_resource` | MCP resources |
+| `list_mcp_prompts` / `get_mcp_prompt` | MCP prompt templates |
 | `render_image` / `read_attachment` | When attachments enabled |
 
 **Dispatch order:** core → `extra_tools` (e.g. `WebSearchTool`) → MCP (`server__tool` naming).
@@ -201,6 +284,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Invariants:**
 - Workspace paths: no `..`, no `~`; resolved under `workspace_root`.
+- `apply_patch` validates all hunks before writing; a mid-apply failure rolls back completed ops in reverse order.
 - Large tool results may spill to `.monkeybot/spill/{thread_id}/`.
 - `task` omitted in subagent workers (`include_task_tool=False`).
 - Nested `task` disabled inside subagents.
@@ -212,17 +296,30 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Purpose:** Pre-flight policy gates; supports user confirmation via SSE.
 
-**Key files:** `core/tools/inspector.py`
+**Key files:** `core/tools/inspector.py`, `core/tools/permission.py`, `core/tools/loop_inspector.py`
 
-**Inspectors wired at gateway startup:**
-1. `CommandTierInspector` — `command_allowlist.yaml`
-2. `RulesInspector` — `MONKEYBOT_TOOL_DENIED_PATTERNS` substring deny list
+**Inspectors wired at gateway startup (order matters — first deny/confirm wins):**
+1. `CommandTierInspector` — `command_allowlist.yaml` deny-regex preflight; execution allowlists stay on the executor
+2. `RulesInspector` — `MONKEYBOT_TOOL_DENIED_PATTERNS` substring deny list (backward compat)
+3. `PermissionInspector` — `permissions.yaml` last-match-wins `allow` / `ask` / `deny` ruleset (`PERMISSION_CONFIG`)
+4. `LoopStartInspector` — `start_loop` always asks for confirmation (rich plan preview)
+
+**Permission ruleset (`permissions.yaml`):**
+- Rules are ordered; **last match wins** (OpenCode-style).
+- `tool` and `pattern` support `fnmatch` wildcards (`*`, `?`).
+- Resource string: normalized `run_command` line, `path` arg, or `str(args)` fallback.
+- `default:` applies when nothing matches (shipped default: `allow`).
+- Session approvals: POST tool-confirmation with `{approved: true, always: true}` remembers tool+resource for the rest of the session (`SessionBus.session_approvals`).
 
 **Decision kinds:** `allow` | `deny` | `confirm` (requires `ctx.sse_bus` for pending UI response).
 
+**Hard constraints underneath soft asks:** `allowed_commands` / `allowed_path_prefixes` + sandbox still enforce at execution time — permission `ask`/`allow` cannot bypass them.
+
 **Invariants:**
-- Missing allowlist file → all tools allowed (logged).
+- Missing allowlist file → tier inspector skipped (logged); executor falls back to code defaults.
+- Missing `permissions.yaml` → soft ruleset disabled (logged).
 - Default deny patterns block package installs (`pip install`, `npm install`, etc.).
+- Confirm without `sse_bus` → deny.
 
 ---
 
@@ -238,12 +335,15 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - `"enabled": false` excludes a server from the catalog (not model-connectable). `"autoConnect": true` restores eager startup connect for that server.
 - `MCP_STRICT_LOAD=1` fails startup on connection errors (default: log and continue).
 - Runtime `add_mcp_server` / `remove_mcp_server` mutate live connections.
+- **Resources / prompts:** built-in tools `list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource`, `list_mcp_prompts`, `get_mcp_prompt` surface MCP resources and prompt templates (server must already be connected).
+- **Status:** `mcp_status` reports per-server lifecycle (`catalogued` / `connected` / `disconnected` / `disabled` / `failed` / `needs_auth`) plus capability flags when connected.
 - Lazy-imports `mcp` SDK to keep core importable without MCP installed.
 - Realtime sessions: MCP registry mutations refresh harness `ctx.tools`, but vendor tool schemas update only after starting a new session (v1 has no reconnect/resume).
 
 **Invariants:**
 - MCP tool names: `server__tool` (double underscore).
 - MCP tool errors are plain text (not structured JSON).
+- Resource/prompt meta-tools return structured JSON (`ok`, lists/payloads); connect/disconnect tools keep the same shape.
 - Teardown noise from AnyIO is swallowed on disconnect.
 
 ---
@@ -291,11 +391,19 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Purpose:** Persist `Message` rows (typed `ContentBlock` JSON) per `thread_id`.
 
-**Key files:** `core/persistence/backends.py`, `history.py`, `sqlite_backend.py`, `postgres.py`, `firestore.py`, `core/messages/tool_integrity.py`
+**Key files:** `core/persistence/backends.py`, `history.py`, `sqlite_backend.py`, `postgres.py`, `firestore.py`, `core/messages/tool_integrity.py`, `core/messages/transform_context.py`, `core/messages/convert_provider.py`, `core/persistence/transcript.py`, `core/runtime/events.py`
 
 **DB URL schemes:** `sqlite://`, `postgresql://` / `postgres://`, `firestore://PROJECT/DATABASE`
 
 **Auto schema:** SQLite and Postgres run idempotent DDL on `open()` when `paths.auto_schema` is `true` in monkeybot.yaml (default). Set `paths.auto_schema: false` when a migration process owns the schema. Firestore is schemaless — no DDL on `open()`.
+
+**Durable vs live events (OpenCode V2-aligned):**
+- **Conversation durability** lives in history (`Message` / `ContentBlock`), not an event ledger.
+- **AgentEvent taxonomy:** `events.DURABLE_EVENT_KINDS` + `is_durable_event()` (non-members are live-only).
+  - Durable boundaries: `ToolCallStarted`, `ToolCallResult`, `TurnComplete`, `Error`, `ContextSummarized`, `AssistantTextEnded` (with `text`), `ThinkingBlockComplete`, epoch/steer admissions, etc.
+  - Live-only: streaming deltas (`AssistantDelta`, `ToolInputDelta`, `ThinkingBlockDelta`, …), progress heartbeats, playground snapshots.
+- **Tool settlement:** live `ToolCallResult` mirrors durable `ToolResponse` blocks appended after the tool batch (one user row per model tool-call turn, call-order preserved). Crash between assistant `ToolRequest` append and batched responses is repaired in-memory on load (`tool_integrity`).
+- **Optional NDJSON transcript** (`MONKEYBOT_TRANSCRIPT_ENABLED`): writes durable events by default; set `MONKEYBOT_TRANSCRIPT_INCLUDE_LIVE=1` for full SSE fidelity.
 
 **Invariants:**
 - Lazy backend imports.
@@ -395,7 +503,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 **Purpose:** Declarative agent config; secrets in `.env`.
 
 **Key files:**
-- Packaged defaults: `src/monkeybot/monkeybot_config/monkeybot.example.yaml` (scaffolded to `monkeybot_config/monkeybot.example.yaml`)
+- Packaged defaults: `cli/src/monkeybot_cli/scaffold_defaults/monkeybot.example.yaml` (scaffolded to `monkeybot_config/monkeybot.example.yaml`)
 - `core/config/runtime_env.py` — `ENV_MAP`, `apply_monkeybot_runtime_env()`
 - `core/config/yaml_loader.py` — includes/deep-merge
 - `core/config/validation.py`
@@ -446,12 +554,18 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 | `PRE_TOOL` | Before each tool execution |
 | `POST_TOOL` | After each tool execution (fire-and-forget) |
 | `POST_TURN` | End of user message turn |
+| `TOOL_DEFINITION` (`tool.definition`) | Before each provider call; may filter/replace `payload.tools` |
+| `BEFORE_PROVIDER_REQUEST` | After messages are finalized; may rewrite `provider_messages` / `tools` |
+| `AFTER_PROVIDER_RESPONSE` | After stream success or failure (fire-and-forget); observational |
 
-**Extension API:** `HookManager.register(HookEvent, fn)` with `HookPayload.inject_text` / `inject_memory_lines`.
+**Extension API:** `HookManager.register(HookEvent, fn)` with `HookPayload.inject_text` / `inject_memory_lines`. Provider hooks also use `tools`, `provider_messages`, `assistant_text`, `usage`, `provider_error`.
 
 **Invariants:**
 - Bounded timeout; errors never propagate; no re-entrancy.
-- `POST_TOOL` is fire-and-forget — may not complete before `run()` returns.
+- `POST_TOOL` / `POST_TURN` / `AFTER_PROVIDER_RESPONSE` are fire-and-forget at fire time, but `HookManager.drain_settlement()` waits for them (bounded) before the next provider call and before `TurnComplete` (`run()` finally).
+- Settlement never waits on SSE subscribers — only in-process hook tasks.
+- `Message` is frozen: rewrite by replacing list entries, not mutating message fields.
+- Prefer these hooks over editing `loop.py` for product concerns (drive-mode tool filtering, redaction, metering).
 
 ---
 
@@ -552,6 +666,9 @@ Use this when reviewing PRs or designing new features.
 | Area | Rule |
 |------|------|
 | **Loop** | Never raise from `run()`; always emit `TurnComplete` |
+| **Doom loop** | Text loop: identical name+args streak ≥ `DOOM_LOOP_THRESHOLD` (ok or error) → Error + no-tools recovery; re-arms after each recovery; `ToolDef.doom_loop_exempt` skips (e.g. `loop_status`) |
+| **Truncated tools** | Text loop: `Done.truncated` or all-`parse_error` → fail all; realtime: all-`parse_error` only (no Live length-limit signal) |
+| **Compaction summary** | Middle-history summary uses fixed Markdown template (Objective / Details / Work State / Next Move / Files); stored as `[Context Summary]:` |
 | **Tools** | Native function-call channel only; no JSON-in-prose tool calls |
 | **History** | `ToolRequest`/`ToolResponse` pairing must survive provider replay |
 | **Tool ordering** | Lexicographic `call_id`; one user row per tool batch |
@@ -579,6 +696,7 @@ Use this when reviewing PRs or designing new features.
 | Setting | Default | Env / config |
 |---------|---------|--------------|
 | Max inner turns | 50 | `MAX_TURNS` / `model.max_turns` |
+| Doom-loop threshold | 3 (0 = off) | `DOOM_LOOP_THRESHOLD` |
 | Context window | 200000 (example yaml: 1M) | `MODEL_CONTEXT_WINDOW` |
 | Summarization trigger | ratio from compression config | `SUMMARY_TRIGGER_RATIO` |
 | Read max lines | 5000 | `MONKEYBOT_READ_MAX_LINES` |
@@ -589,6 +707,13 @@ Use this when reviewing PRs or designing new features.
 | Pending response timeout | 300s | `gateway.pending_response_timeout_sec` |
 | Subagent timeout | 600s | `subagent.timeout_sec` |
 | Subagent max turns | 25 | `subagent.max_turns` |
+| Steer queue depth | 8 | `MONKEYBOT_STEER_QUEUE_MAX` |
+| Follow-up queue depth | 16 | `MONKEYBOT_FOLLOW_UP_QUEUE_MAX` |
+| Follow-up lock retry interval | 1s | `MONKEYBOT_FOLLOW_UP_LOCK_RETRY_S` |
+| Follow-up lock wait budget | session-turn stale ms | `MONKEYBOT_FOLLOW_UP_LOCK_WAIT_MS` |
+| Hook settlement timeout | 2s | `MONKEYBOT_HOOK_SETTLEMENT_TIMEOUT_S` |
+| Parallel-safe tool concurrency | 10 | `MONKEYBOT_PARALLEL_TOOL_CONCURRENCY` |
+| Parallel `task` concurrency | 10 | code constant (`_MAX_CONCURRENT_SUBAGENTS`) |
 
 ---
 
@@ -638,7 +763,7 @@ two runs with `python -m evals.diff`).
 | System prompt | `src/monkeybot/core/prompts/prompt.py`, `harness_prompt.py` |
 | Gateway wiring | `src/monkeybot/gateway/sse/app.py` |
 | Tool dispatch | `src/monkeybot/core/tools/core_tool_executor.py` |
-| Config | `core/config/runtime_env.py`, `src/monkeybot/monkeybot_config/monkeybot.example.yaml` |
+| Config | `core/config/runtime_env.py`, `cli/src/monkeybot_cli/scaffold_defaults/monkeybot.example.yaml` |
 | MCP | `core/mcp/mcp_client.py`, `docs/mcp.md` |
 | Memory | `core/memory/subsystem.py`, `core/memory/hook.py` |
 | Library embed | `core/bootstrap.py` |

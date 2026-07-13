@@ -11,7 +11,7 @@ This document describes the **monkeybot v2 FastAPI gateway** endpoints used for 
 
 **Base URL**
 
-- Default local gateway port is **8080** (see `demo_agent/monkeybot_config/monkeybot.yaml`).
+- Default local gateway port is **8080** (see `monkeybot_config_example/monkeybot.example.yaml`).
 - All paths below are relative to the gateway origin, e.g. `http://127.0.0.1:8080`.
 
 ---

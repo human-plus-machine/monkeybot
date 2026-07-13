@@ -140,7 +140,13 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
         run: |
           # PRs are a gate and must block on regressions; main pushes and manual runs
-          # just score the build and always report.
+          # just score the build and always report. --fail-on-regression always blocks on
+          # this run's own scenario errors/failures. It does NOT require evals/baselines/
+          # smoke.json to exist (that's the separate --require-baseline flag, intentionally
+          # omitted below) — no trusted baseline has been committed yet. Once one has
+          # (`uv run python -m evals.report --suite smoke --update-baseline`, committed),
+          # add --require-baseline here too so a missing/deleted file can't silently skip
+          # the token/cost/latency drift checks.
           flags=""
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
             flags="--fail-on-regression"

@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from monkeybot.core.types.types_tools import ToolDef
 
@@ -69,6 +69,37 @@ class MCPClientPort(Protocol):
 
     async def connect_from_catalog(self, name: str) -> list[ToolDef]:
         """Connect a catalogued server by name (no-op if already connected)."""
+        ...
+
+    def status(self, name: str | None = None) -> list[dict[str, Any]] | dict[str, Any]:
+        """Return server status snapshot(s) (connected / catalogued / failed / …)."""
+        ...
+
+    async def list_resources(self, server_name: str | None = None) -> list[dict[str, Any]]:
+        """List MCP resources from connected servers."""
+        ...
+
+    async def list_resource_templates(
+        self, server_name: str | None = None
+    ) -> list[dict[str, Any]]:
+        """List MCP resource templates from connected servers."""
+        ...
+
+    async def read_resource(self, server_name: str, uri: str) -> dict[str, Any]:
+        """Read one MCP resource by server name and URI."""
+        ...
+
+    async def list_prompts(self, server_name: str | None = None) -> list[dict[str, Any]]:
+        """List MCP prompts from connected servers."""
+        ...
+
+    async def get_prompt(
+        self,
+        server_name: str,
+        prompt_name: str,
+        arguments: Mapping[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Fetch a named MCP prompt (optional string arguments)."""
         ...
 
     async def load_from_config(

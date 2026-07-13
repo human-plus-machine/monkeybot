@@ -1,10 +1,10 @@
-"""Tests for ``monkeybot.scaffold``."""
+"""Tests for CLI scaffolding (``monkeybot_cli.scaffold``)."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from monkeybot.scaffold import run_new
+from monkeybot_cli.scaffold import run_new
 
 
 def test_run_new_creates_bundle(tmp_path: Path) -> None:
@@ -14,6 +14,7 @@ def test_run_new_creates_bundle(tmp_path: Path) -> None:
     assert (cfg / "monkeybot.example.yaml").is_file()
     assert (cfg / "mcp.json").read_text(encoding="utf-8").strip().startswith("{")
     assert (cfg / "command_allowlist.yaml").is_file()
+    assert (cfg / "permissions.yaml").is_file()
     assert (cfg / "AGENT.md").is_file()
     assert (cfg / "otel-collector.example.yaml").is_file()
     assert (cfg / "env.example").is_file()

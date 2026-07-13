@@ -11,12 +11,17 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 - Evals: `response_regex` and `response_not_contains` deterministic assertions; run files now persist per-turn prompt/response text, and `python -m evals.diff` pinpoints the exact turn behind a regression between two runs.
 - Live eval smoke workflow now also runs on every push to `main` (report-only, scorecard on the run Summary page) and on manual dispatch, in addition to the existing PR gates.
 - Live evals need only `NVIDIA_API_KEY`: the deepeval judge can now run on build.nvidia.com models (`JUDGE_PROVIDER=nvidia`) via NVIDIA's OpenAI-compatible endpoint, and CI pins agent (`meta/llama-3.3-70b-instruct`) and judge (`nvidia/llama-3.3-nemotron-super-49b-v1`) to two different free NVIDIA-hosted models. The workflow also now sets `MODEL_PROVIDER`/`MODEL_NAME` explicitly — previously it booted whatever `demo_agent`'s committed config said (ollama, which doesn't exist in CI).
+- Repo-root `monkeybot_config_example/` — full-option human-readable config templates (`.example` filenames).
+- `monkeybot new` also scaffolds `permissions.yaml`.
 
 ### Removed
 
 - Evals FastAPI service (`evals/main.py`, in-memory store, WebSocket fan-out, Dockerfile, `docker-compose.evals.yml`) — nothing consumed its HTTP/WS API; `python -m evals.report` is the single execution path. `google-genai` (Gemini judge dep) moved into the root `evals` extra.
 
 ### Changed
+
+- Scaffold templates and `run_new` moved into **monkeybot-cli** (`monkeybot_cli.scaffold` / `scaffold_defaults`). Harness `monkeybot.scaffold` is a compatibility shim; Docker installs the CLI to scaffold at image build.
+- **monkeybot-cli** version bumped to **0.2.0**.
 
 - README integrations tables aligned with v2.0.0 shipped scope (per CHANGELOG); removed speculative "Coming Soon" items to BACKLOG.md with a short near-term roadmap.
 - Reframed public positioning: multi-cloud-capable harness with **GCP-first** docs (README, cloud deployment design, getting started, features, Pattern A guide). Clarifies this is not a universal integration catalog; documents AWS shipped paths alongside GCP examples.

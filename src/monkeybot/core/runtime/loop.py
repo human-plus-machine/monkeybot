@@ -15,7 +15,6 @@ from typing import Any, Protocol, cast, runtime_checkable
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.attachments.freeze import freeze_attachments_in_history
-from monkeybot.core.attachments.resolve import resolve_messages_for_provider
 from monkeybot.core.attachments.store import AttachmentStore
 from monkeybot.core.context import (
     MCP_REGISTRY_MUTATING_TOOLS,
@@ -23,6 +22,7 @@ from monkeybot.core.context import (
     refresh_memory_index,
     refresh_tools_after_mcp_change,
 )
+from monkeybot.core.context.epoch import ContextEpochTracker, EpochAdmit, fingerprint_text
 from monkeybot.core.context.memory_prompt import (
     MemoryPromptSelection,
     memory_index_fingerprint,
@@ -32,34 +32,41 @@ from monkeybot.core.context.tool_output_policy import resolve_tool_budget
 from monkeybot.core.context.tool_result_ingress import summarize_tool_result_text
 from monkeybot.core.context.tool_shapers import (
     exceeds_tool_output_budget,
-    shape_messages_tool_results,
     shape_tool_text,
 )
 from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
 from monkeybot.core.llm.provider import (
     Done,
-    GroundingEvent as ProviderGroundingEvent,
     Message,
     Provider,
+    ProviderCallHints,
     TextDelta,
-    ThinkingDelta,
     ToolCall,
     UsageEvent,
+    cache_retention_from_env,
     provider_count_input_tokens,
     provider_stream,
 )
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.logging_utils import kv
-from monkeybot.core.messages.tool_integrity import repair_tool_turn_integrity
+from monkeybot.core.messages import convert_to_provider, transform_context
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.persistence.transcript import TranscriptWriter
-from monkeybot.core.prompts.prompt import compose_system_prompt, latest_user_message_text
+from monkeybot.core.prompts.prompt import (
+    RUNTIME_NOTES_HEADING,
+    compose_stable_baseline,
+    compose_volatile_tail,
+    compose_volatile_tail_parts,
+    latest_user_message_text,
+)
 from monkeybot.core.runtime.context_budget import (
     ContextBudgeter,
     compute_context_pressure_tier,
     summarization_trigger_ratio_from_env,
 )
+from monkeybot.core.runtime.provider_stream_mapper import ProviderStreamMapper
 from monkeybot.core.tools.inspector import InspectorToolCall, ToolInspector
+from monkeybot.core.tools.permission import remember_always_approval, resource_for_call
 from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.types.content_blocks import (
     ContentBlock,
@@ -75,23 +82,23 @@ from monkeybot.providers.pricing import estimate_cost
 
 from .events import (
     AgentEvent,
-    AssistantDelta,
     AttachmentDescriptorEvent,
+    ContextEpochStarted,
     ContextSummarized,
     ContextSummarizing,
     Error,
-    GroundingEvent,
     ImageBlock,
+    SystemContextUpdated,
     SystemPromptSnapshot,
     Thinking,
-    ThinkingBlockComplete,
-    ThinkingBlockDelta,
     ToolCallResult,
     ToolCallStarted,
     ToolConfirmationRequestEvent,
     TurnComplete,
     UsageTotals,
+    UserSteered,
 )
+from .input_admission import InputAdmission, preview_text
 
 logger = logging.getLogger("monkeybot.core.runtime.loop")
 
@@ -115,6 +122,147 @@ def _effective_max_turns(max_turns: int | None) -> int:
     if max_turns is not None:
         return max_turns
     return int(os.getenv("MAX_TURNS", "50"))
+
+
+def _effective_doom_loop_threshold() -> int:
+    """Consecutive identical tool calls before doom-loop recovery.
+
+    Default 3. Set ``DOOM_LOOP_THRESHOLD=0`` to disable. Applies whether the
+    calls succeed or fail — identical name+args with no progress is the signal.
+    """
+    raw = os.getenv("DOOM_LOOP_THRESHOLD")
+    if raw is None or raw.strip() == "":
+        return 3
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        logger.warning(
+            "invalid DOOM_LOOP_THRESHOLD %s; using default 3",
+            kv(value=raw),
+        )
+        return 3
+
+
+def _tool_call_fingerprint(name: str, args: dict[str, Any]) -> str:
+    return f"{name}:{json.dumps(args, sort_keys=True, default=str)}"
+
+
+def _doom_loop_texts(tool_name: str, threshold: int) -> tuple[str, str]:
+    """Return ``(error_event_text, recovery_system_note)``."""
+    error = (
+        f"Doom loop detected: tool {tool_name!r} called identically "
+        f"{threshold} times"
+    )
+    note = (
+        f"[Harness] {error}. Do not repeat the same call. Explain the situation "
+        "to the user and take a different approach (different tool or args)."
+    )
+    return error, note
+
+
+def _should_reject_tool_batch(
+    calls: Sequence[ToolCall],
+    *,
+    truncated: bool,
+) -> bool:
+    """True when no tool in this provider turn is safe to execute.
+
+    A length/max-tokens stop means every tool call may carry silently
+    incomplete args. Also reject when every call already has ``parse_error``
+    (incomplete JSON).
+    """
+    if not calls:
+        return False
+    if truncated:
+        return True
+    return all(c.parse_error for c in calls)
+
+
+def _rejected_tool_batch_error(
+    call: ToolCall,
+    *,
+    truncated: bool,
+) -> str:
+    if truncated:
+        return (
+            f'Tool call "{call.name}" was not executed: the response hit the '
+            "output token limit, so its arguments may be truncated. Re-issue "
+            "the tool call with complete arguments."
+        )
+    return call.parse_error or (
+        f'Tool call "{call.name}" was not executed: incomplete tool arguments '
+        "in this batch. Re-issue with complete arguments."
+    )
+
+
+def _doom_loop_exempt_names(tools: Sequence[ToolDef]) -> frozenset[str]:
+    """Tool names marked ``doom_loop_exempt`` (identical-args polling is expected)."""
+    return frozenset(t.name for t in tools if t.doom_loop_exempt)
+
+
+@dataclasses.dataclass
+class _DoomLoopTracker:
+    """Tracks consecutive identical tool calls within one user message.
+
+    Fingerprint is tool name + args. Outcome (ok vs error) does not reset the
+    streak — successful no-progress loops (e.g. repeated screenshots) must trip
+    the same guard as repeated failures.
+
+    Tools in ``exempt_names`` (from ``ToolDef.doom_loop_exempt``) are ignored so
+    legitimate polling (e.g. ``loop_status``) does not force a recovery turn.
+
+    After a recovery turn is consumed, the tracker re-arms so a later streak in
+    the same user message can trigger again. While ``triggered`` is set (between
+    detection and ``consume_recovery``), further ``record`` calls are ignored so
+    the same streak cannot re-fire mid-batch.
+    """
+
+    threshold: int
+    exempt_names: frozenset[str] = dataclasses.field(default_factory=frozenset)
+    streak_fp: str | None = None
+    streak_count: int = 0
+    triggered: bool = False
+    force_no_tools: bool = False
+    recovery_note: str | None = None
+    triggered_tool: str | None = None
+    _pending_error: str | None = None
+
+    def record(self, name: str, args: dict[str, Any]) -> None:
+        if self.threshold <= 0 or self.triggered or name in self.exempt_names:
+            return
+        fp = _tool_call_fingerprint(name, args)
+        if fp == self.streak_fp:
+            self.streak_count += 1
+        else:
+            self.streak_fp = fp
+            self.streak_count = 1
+        if self.streak_count < self.threshold:
+            return
+        self.triggered = True
+        self.triggered_tool = name
+        error, note = _doom_loop_texts(name, self.threshold)
+        self._pending_error = error
+        self.force_no_tools = True
+        self.recovery_note = note
+
+    def take_error(self) -> str | None:
+        msg = self._pending_error
+        self._pending_error = None
+        return msg
+
+    def consume_recovery(self) -> tuple[bool, str | None]:
+        force = self.force_no_tools
+        note = self.recovery_note
+        self.force_no_tools = False
+        self.recovery_note = None
+        if force:
+            # Re-arm so a second identical streak later in this user message
+            # can trigger another recovery turn.
+            self.triggered = False
+            self.streak_fp = None
+            self.streak_count = 0
+            self.triggered_tool = None
+        return force, note
 
 
 def _usage_to_totals(u: Usage) -> UsageTotals:
@@ -164,32 +312,103 @@ def _blocks_to_sse_summary(blocks: Sequence[ContentBlock]) -> str:
     return "\n".join(parts)
 
 
-def _system_message(
+def _system_message_from_text(body: str) -> Message:
+    return Message(role="system", content=[Text(text=body)])
+
+
+def _admit_system_context(
+    epoch: ContextEpochTracker,
     ctx: TurnContext,
     chat_messages: Sequence[Message],
     *,
     memory_selection: MemoryPromptSelection | None = None,
     attachment_catalog: SessionAttachmentCatalog | None = None,
-) -> Message:
-    """System message: AGENT.md base plus runtime memory, skills, harness, and task anchor."""
-    body = compose_system_prompt(
-        ctx,
-        chat_messages=chat_messages,
-        memory_selection=memory_selection,
-        attachment_catalog=(
-            attachment_catalog.list_records() if attachment_catalog is not None else None
+) -> EpochAdmit:
+    """Compose stable/volatile tails and reconcile against the current context epoch."""
+    catalog = (
+        attachment_catalog.list_records() if attachment_catalog is not None else None
+    )
+    stable = compose_stable_baseline(ctx, attachment_catalog=catalog)
+    volatile_parts = compose_volatile_tail_parts(
+        ctx, chat_messages=chat_messages, memory_selection=memory_selection
+    )
+    volatile = "".join(volatile_parts.values())
+    return epoch.reconcile(
+        stable_baseline=stable,
+        volatile_text=volatile,
+        stable_fingerprint=fingerprint_text(stable),
+        volatile_fingerprint=fingerprint_text(volatile),
+        volatile_part_fingerprints={
+            name: fingerprint_text(text) for name, text in volatile_parts.items()
+        },
+    )
+
+
+def _messages_for_provider(
+    system: Message,
+    history: Sequence[Message],
+    *,
+    mid_conversation_update: str = "",
+) -> list[Message]:
+    """Leading system + history + optional chronological system-context update.
+
+    The update is user-role so all providers accept mid-conversation updates
+    (system is leading-only for Anthropic/Gemini/OpenAI adapters). When history
+    already ends in a ``user`` row (e.g. a tool-response turn), the update is
+    folded into that same message instead of appended as a new one — Anthropic
+    and Gemini both reject (or, for Anthropic, only sometimes silently coalesce)
+    two consecutive same-role messages.
+    """
+    out: list[Message] = [system, *list(history)]
+    update = mid_conversation_update.strip()
+    if not update:
+        return out
+    update_block = Text(text=mid_conversation_update)
+    if out[-1].role == "user":
+        out[-1] = Message(role="user", content=[*out[-1].content, update_block])
+    else:
+        out.append(Message(role="user", content=[update_block]))
+    return out
+
+
+async def _load_agent_chat_history(history: HistoryStore, thread_id: str) -> list[Message]:
+    """Load transcript rows and apply agent-facing transforms (integrity + strip UI)."""
+    return transform_context(await history.load(thread_id))
+
+
+def _epoch_events(
+    admit: EpochAdmit,
+    *,
+    request_id: str,
+    thread_id: str,
+) -> list[AgentEvent]:
+    if admit.kind == "unchanged":
+        return []
+    logger.debug(
+        "context epoch %s",
+        kv(
+            request_id=request_id,
+            thread_id=thread_id,
+            kind=admit.kind,
+            epoch_id=admit.epoch_id,
+            changed_sources=",".join(admit.changed_sources),
         ),
     )
-    return Message(role="system", content=[Text(text=body)])
-
-
-def _messages_for_provider(system: Message, history: Sequence[Message]) -> list[Message]:
-    return [system, *list(history)]
-
-
-async def _load_repaired_chat_history(history: HistoryStore, thread_id: str) -> list[Message]:
-    """Load transcript rows and repair broken tool turns in memory before provider replay."""
-    return repair_tool_turn_integrity(await history.load(thread_id))
+    if admit.kind == "new_epoch":
+        return [
+            ContextEpochStarted(
+                request_id=request_id,
+                epoch_id=admit.epoch_id,
+                changed_sources=list(admit.changed_sources),
+            )
+        ]
+    return [
+        SystemContextUpdated(
+            request_id=request_id,
+            epoch_id=admit.epoch_id,
+            changed_sources=list(admit.changed_sources),
+        )
+    ]
 
 
 def _provider_messages_prompt_summary(messages: Sequence[Message]) -> str:
@@ -212,6 +431,24 @@ def _provider_messages_prompt_summary(messages: Sequence[Message]) -> str:
 
 _HOOK_READ_TIMEOUT_S = 2.0
 _HOOK_PRE_TOOL_TIMEOUT_S = 1.5
+_HOOK_SETTLEMENT_TIMEOUT_S = 2.0
+
+
+def _settlement_timeout_s() -> float:
+    raw = os.environ.get("MONKEYBOT_HOOK_SETTLEMENT_TIMEOUT_S")
+    if raw is None or raw.strip() == "":
+        return _HOOK_SETTLEMENT_TIMEOUT_S
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return _HOOK_SETTLEMENT_TIMEOUT_S
+
+
+async def _drain_hook_settlement(hook_manager: HookManager | None) -> None:
+    """Wait for fire-and-forget hooks before the next provider call / TurnComplete."""
+    if hook_manager is None:
+        return
+    await hook_manager.drain_settlement(timeout_s=_settlement_timeout_s())
 
 
 def _record_tool_hook_span_event(phase: str, tool_name: str) -> None:
@@ -237,6 +474,14 @@ async def _fire_hook(
     tool_args: dict[str, Any] | None = None,
     tool_result: str | None = None,
     tool_error: str | None = None,
+    tools: list[ToolDef] | None = None,
+    provider_messages: list[Message] | None = None,
+    inner_turn: int | None = None,
+    assistant_text: str | None = None,
+    thinking_text: str | None = None,
+    tool_requests: list[dict[str, Any]] | None = None,
+    usage: dict[str, int] | None = None,
+    provider_error: str | None = None,
 ) -> HookPayload | None:
     """Construct + fire a payload when ``hook_manager`` is configured; else return ``None``."""
     if hook_manager is None:
@@ -251,8 +496,59 @@ async def _fire_hook(
         tool_args=tool_args,
         tool_result=tool_result,
         tool_error=tool_error,
+        tools=tools,
+        provider_messages=provider_messages,
+        inner_turn=inner_turn,
+        assistant_text=assistant_text,
+        thinking_text=thinking_text,
+        tool_requests=tool_requests,
+        usage=usage,
+        provider_error=provider_error,
     )
     return await hook_manager.fire(payload, timeout_s=timeout_s)
+
+
+def _apply_before_provider_hook(
+    payload: HookPayload | None,
+    provider_messages: list[Message],
+    turn_tools: Sequence[ToolDef],
+) -> tuple[list[Message], Sequence[ToolDef], bool]:
+    """Return (messages, tools, tools_replaced) after ``BEFORE_PROVIDER_REQUEST``."""
+    if payload is None:
+        return provider_messages, turn_tools, False
+    messages = (
+        list(payload.provider_messages)
+        if payload.provider_messages is not None
+        else provider_messages
+    )
+    if payload.tools is None:
+        return messages, turn_tools, False
+    return messages, list(payload.tools), True
+
+
+async def _fire_after_provider_response(
+    hook_manager: HookManager | None,
+    *,
+    ctx: TurnContext,
+    inner_turn: int,
+    assistant_text: str | None = None,
+    thinking_text: str | None = None,
+    tool_requests: list[dict[str, Any]] | None = None,
+    usage: dict[str, int] | None = None,
+    provider_error: str | None = None,
+) -> None:
+    await _fire_hook(
+        hook_manager,
+        event=HookEvent.AFTER_PROVIDER_RESPONSE,
+        ctx=ctx,
+        timeout_s=0,
+        inner_turn=inner_turn,
+        assistant_text=assistant_text,
+        thinking_text=thinking_text,
+        tool_requests=tool_requests,
+        usage=usage,
+        provider_error=provider_error,
+    )
 
 
 def _append_extra_system_text(system: Message, extra: str | None) -> Message:
@@ -265,7 +561,7 @@ def _append_extra_system_text(system: Message, extra: str | None) -> Message:
     if not extra:
         return system
     base = "".join(b.text for b in system.content if isinstance(b, Text))
-    wrapped = f"{base}\n\n## Runtime notes\n\n{extra.strip()}\n"
+    wrapped = f"{base}{RUNTIME_NOTES_HEADING}\n{extra.strip()}\n"
     return Message(role="system", content=[Text(text=wrapped)])
 
 
@@ -279,6 +575,22 @@ def _combine_extras(*parts: str | None) -> str | None:
 
 # Max concurrent ``task`` (subagent) subprocesses per single model tool batch.
 _MAX_CONCURRENT_SUBAGENTS = 10
+_MAX_CONCURRENT_PARALLEL_TOOLS = 10
+
+
+def _parallel_tool_concurrency() -> int:
+    raw = os.environ.get("MONKEYBOT_PARALLEL_TOOL_CONCURRENCY")
+    if raw is None or raw.strip() == "":
+        return _MAX_CONCURRENT_PARALLEL_TOOLS
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return _MAX_CONCURRENT_PARALLEL_TOOLS
+
+
+def _parallel_safe_names(tools: Sequence[ToolDef]) -> frozenset[str]:
+    """Names marked ``parallel_safe`` (read-only / concurrent-safe tools)."""
+    return frozenset(t.name for t in tools if t.parallel_safe)
 
 _SPILL_REL = Path(".monkeybot") / "spill"
 SUMMARY_TRIGGER_RATIO = summarization_trigger_ratio_from_env()
@@ -286,6 +598,44 @@ SUMMARY_TRIGGER_RATIO = summarization_trigger_ratio_from_env()
 _SUMMARY_TRIGGER_RATIO = SUMMARY_TRIGGER_RATIO
 _SUMMARY_KEEP_HEAD = 1
 _SUMMARY_KEEP_TAIL = 6
+
+# Fixed Markdown template for middle-history compression.
+_COMPACTION_SUMMARY_SYSTEM = """\
+Output exactly the Markdown structure shown inside <template> and keep the \
+section order unchanged. Do not include the <template> tags in your response.
+<template>
+## Objective
+- [one or two brief sentences describing what the user is trying to accomplish]
+
+## Important Details
+- [constraints/preferences, decisions and why, important facts/assumptions, \
+exact context needed to continue, or "(none)"]
+
+## Work State
+### Completed
+- [finished work, verified facts, or changes made; otherwise "(none)"]
+
+### Active
+- [current work, partial changes, or investigation state; otherwise "(none)"]
+
+### Blocked
+- [blockers, failing commands, or unknowns; otherwise "(none)"]
+
+## Next Move
+1. [immediate concrete action, or "(none)"]
+2. [next action if known, or "(none)"]
+
+## Relevant Files
+- [file or directory path: why it matters, or "(none)"]
+</template>
+
+Rules:
+- Keep every section, even when empty.
+- Use terse bullets, not prose paragraphs.
+- Preserve exact file paths, symbols, commands, error strings, URLs, and \
+identifiers when known.
+- Do not mention the summary process or that context was compacted.\
+"""
 
 
 async def _await_user_response_any(
@@ -336,9 +686,15 @@ def _summary_line_for_message(m: Message) -> str:
     return f"{m.role}: {joined}"
 
 
-def _system_prompt_snapshot_text(system: Message) -> str:
-    """Plain string for :class:`SystemPromptSnapshot` (composed prompt lives in Text blocks)."""
-    return "".join(b.text for b in system.content if isinstance(b, Text))
+def _system_prompt_snapshot_text(
+    system: Message, mid_conversation_update: str = ""
+) -> str:
+    """Plain string for :class:`SystemPromptSnapshot` (composed prompt + mid-epoch update)."""
+    body = "".join(b.text for b in system.content if isinstance(b, Text))
+    update = mid_conversation_update.strip()
+    if not update:
+        return body
+    return f"{body}\n\n{update}"
 
 
 def _is_resume_turn(resolved_messages: Sequence[Message]) -> bool:
@@ -389,6 +745,7 @@ async def _provider_prompt_input_tokens(
     model: str,
     thinking_budget: int | None = None,
     vertex_google_search: bool = False,
+    hints: ProviderCallHints | None = None,
 ) -> int:
     return await provider_count_input_tokens(
         provider,
@@ -397,6 +754,14 @@ async def _provider_prompt_input_tokens(
         model=model,
         thinking_budget=thinking_budget,
         vertex_google_search=vertex_google_search,
+        hints=hints,
+    )
+
+
+def _provider_call_hints(ctx: TurnContext) -> ProviderCallHints:
+    return ProviderCallHints(
+        session_id=ctx.thread_id,
+        cache_retention=cache_retention_from_env(),
     )
 
 
@@ -410,24 +775,49 @@ async def _prompt_input_tokens_for_history(
     memory_selection: MemoryPromptSelection | None = None,
     extra_system_text: str | None = None,
     vertex_google_search: bool = False,
+    epoch: ContextEpochTracker | None = None,
 ) -> int:
-    """Provider-accurate prompt size for history rows already persisted (e.g. post-assistant)."""
-    system = _system_message(
-        ctx,
-        chat_messages,
-        memory_selection=memory_selection,
-        attachment_catalog=attachment_catalog,
+    """Provider-accurate prompt size for history rows already persisted (e.g. post-assistant).
+
+    When ``epoch`` is supplied, the count reflects the true wire shape for the
+    *current* epoch state — leading (cached) baseline plus any pending
+    mid-conversation update — via a non-mutating :meth:`ContextEpochTracker.peek`.
+    Falls back to a flat stable+volatile concatenation when no tracker is given
+    (e.g. summarizer/curator calls that have no epoch of their own). Either way,
+    the live tracker is never mutated by a budget recount.
+    """
+    catalog = (
+        attachment_catalog.list_records() if attachment_catalog is not None else None
     )
-    system = _append_extra_system_text(system, extra_system_text)
-    resolved_messages = resolve_messages_for_provider(
+    stable = compose_stable_baseline(ctx, attachment_catalog=catalog)
+    volatile = compose_volatile_tail(
+        ctx, chat_messages=chat_messages, memory_selection=memory_selection
+    )
+    mid_conversation_update = ""
+    if epoch is not None:
+        admit = epoch.peek(
+            stable_baseline=stable,
+            volatile_text=volatile,
+            stable_fingerprint=fingerprint_text(stable),
+            volatile_fingerprint=fingerprint_text(volatile),
+        )
+        body = admit.leading_system_text
+        mid_conversation_update = admit.mid_conversation_update
+    else:
+        body = stable + volatile
+    system = _append_extra_system_text(_system_message_from_text(body), extra_system_text)
+    resolved_messages = convert_to_provider(
         chat_messages,
         attachment_store=attachment_store,
         session_id=ctx.thread_id,
     )
-    provider_messages = _messages_for_provider(system, resolved_messages)
+    provider_messages = _messages_for_provider(
+        system, resolved_messages, mid_conversation_update=mid_conversation_update
+    )
     return await _provider_prompt_input_tokens(
         provider, provider_messages, ctx.tools, model=ctx.model,
         vertex_google_search=vertex_google_search,
+        hints=_provider_call_hints(ctx),
     )
 
 
@@ -477,6 +867,7 @@ async def _append_budgeted_tool_responses(
     budgeter: ContextBudgeter,
     provider: Provider,
     vertex_google_search: bool = False,
+    epoch: ContextEpochTracker | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Budget tool results against remaining context, append, compact if needed."""
     trimmed, needs_compaction = budgeter.fit_content_blocks(chunk_responses)
@@ -511,12 +902,17 @@ async def _append_budgeted_tool_responses(
         turns_summarized=turns_summarized,
     )
     if turns_summarized > 0:
-        chat_messages = await _load_repaired_chat_history(history, ctx.thread_id)
-        system = _system_message(ctx, chat_messages)
-        provider_messages = _messages_for_provider(system, chat_messages)
-        post = await _provider_prompt_input_tokens(
-            provider, provider_messages, ctx.tools, model=ctx.model,
+        if epoch is not None:
+            epoch.begin_new_epoch()
+        chat_messages = await _load_agent_chat_history(history, ctx.thread_id)
+        post = await _prompt_input_tokens_for_history(
+            ctx=ctx,
+            chat_messages=chat_messages,
+            provider=provider,
+            attachment_store=None,
+            attachment_catalog=None,
             vertex_google_search=vertex_google_search,
+            epoch=epoch,
         )
         usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, post)
 
@@ -541,20 +937,17 @@ async def _summarize_history(
     summarize_messages = [
         Message(
             role="system",
-            content=[
-                Text(
-                    text=(
-                        "You compress prior agent conversation turns into one dense factual summary. "
-                        "Preserve decisions, file paths, errors, tool outcomes, and open tasks. "
-                        "Output prose only, no markdown headings unless essential."
-                    )
-                )
-            ],
+            content=[Text(text=_COMPACTION_SUMMARY_SYSTEM)],
         ),
         Message(
             role="user",
             content=[
-                Text(text="Summarize the following conversation segment:\n\n" + blob)
+                Text(
+                    text=(
+                        "Create a structured summary from the conversation "
+                        "segment below.\n\n" + blob
+                    )
+                )
             ],
         ),
     ]
@@ -572,7 +965,7 @@ async def _summarize_history(
         *head,
         Message(
             role="assistant",
-            content=[Text(text=f"[Context Summary]: {summary_text}")],
+            content=[Text(text=f"[Context Summary]:\n{summary_text}")],
         ),
         *tail,
     ]
@@ -657,20 +1050,36 @@ def _image_events(
     return events
 
 
-def _chunk_tool_calls(ordered: Sequence[ToolCall]) -> list[list[ToolCall]]:
-    """Split into maximal runs of consecutive ``task`` tools vs single non-``task`` tools.
+def _chunk_tool_calls(
+    ordered: Sequence[ToolCall],
+    *,
+    parallel_safe: frozenset[str] | None = None,
+) -> list[list[ToolCall]]:
+    """Split into maximal runs of consecutive parallelizable tools vs serial singles.
 
-    Consecutive ``task`` calls may run concurrently (bounded by :data:`_MAX_CONCURRENT_SUBAGENTS`);
-    other tools stay sequential chunk-by-chunk to preserve cancellation and side-effect ordering.
+    * Consecutive ``task`` calls may run concurrently (bounded by
+      :data:`_MAX_CONCURRENT_SUBAGENTS`).
+    * Consecutive tools in ``parallel_safe`` (read-only) may run concurrently
+      (bounded by :func:`_parallel_tool_concurrency`).
+    * ``task`` never mixes with other parallel-safe tools in one chunk.
+    * Mutating / unmarked tools stay sequential chunk-by-chunk.
     """
+    safe = parallel_safe or frozenset()
     seq = list(ordered)
     chunks: list[list[ToolCall]] = []
     i = 0
     n = len(seq)
     while i < n:
-        if seq[i].name == "task":
+        name = seq[i].name
+        if name == "task":
             j = i + 1
             while j < n and seq[j].name == "task":
+                j += 1
+            chunks.append(seq[i:j])
+            i = j
+        elif name in safe:
+            j = i + 1
+            while j < n and seq[j].name in safe and seq[j].name != "task":
                 j += 1
             chunks.append(seq[i:j])
             i = j
@@ -704,14 +1113,18 @@ async def run(
     attachment_catalog: SessionAttachmentCatalog | None = None,
     transcript_writer: TranscriptWriter | None = None,
     vertex_google_search: bool = False,
+    input_admission: InputAdmission | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Stream agent events for one user message; ends with ``TurnComplete`` (never raises).
 
     Provider chunks are handled in Gemini-style batches: tool calls accumulate until ``Done``,
     then execute in lexicographic ``call_id`` order for deterministic replay.
 
-    Consecutive ``task`` tool calls in one batch run concurrently (at most 10 at a time);
-    other tools run one chunk at a time in order.
+    Consecutive ``task`` tool calls and consecutive ``parallel_safe`` tools in one batch run
+    concurrently (capped); mutating tools run one chunk at a time in order.
+
+    ``input_admission`` (optional) supplies mid-turn steer injections drained at safe
+    boundaries (after tool batches / before the next provider call).
 
     ``curator_provider`` is an optional dedicated provider for context curation (e.g. with
     ``thinking_budget=0``). Falls back to ``provider`` when not supplied.
@@ -751,6 +1164,7 @@ async def run(
             attachment_catalog=attachment_catalog,
             transcript_writer=transcript_writer,
             vertex_google_search=vertex_google_search,
+            input_admission=input_admission,
         ):
             yield evt
     except asyncio.CancelledError:
@@ -772,6 +1186,7 @@ async def run(
         )
         yield Error(request_id=ctx.request_id, error=str(exc))
     finally:
+        await _drain_hook_settlement(hook_manager)
         logger.debug(
             "harness run end %s",
             kv(
@@ -806,6 +1221,7 @@ async def _run_inner(
     attachment_catalog: SessionAttachmentCatalog | None = None,
     transcript_writer: TranscriptWriter | None = None,
     vertex_google_search: bool = False,
+    input_admission: InputAdmission | None = None,
 ) -> AsyncIterator[AgentEvent]:
     from monkeybot.observability.spans import set_run_output, span_run
 
@@ -829,6 +1245,7 @@ async def _run_inner(
             attachment_catalog=attachment_catalog,
             transcript_writer=transcript_writer,
             vertex_google_search=vertex_google_search,
+            input_admission=input_admission,
         ):
             yield evt
         set_run_output(last_assistant[0])
@@ -863,6 +1280,7 @@ async def _run_inner_core(
     attachment_catalog: SessionAttachmentCatalog | None = None,
     transcript_writer: TranscriptWriter | None = None,
     vertex_google_search: bool = False,
+    input_admission: InputAdmission | None = None,
 ) -> AsyncIterator[AgentEvent]:
     from monkeybot.observability.spans import (
         begin_turn_span,
@@ -904,12 +1322,54 @@ async def _run_inner_core(
     memory_selection_fingerprint: str | None = None
     pre_turn_extra: str | None = None
     pre_tool_extra_next: str | None = None
+    doom_tracker = _DoomLoopTracker(
+        threshold=_effective_doom_loop_threshold(),
+        exempt_names=_doom_loop_exempt_names(ctx.tools),
+    )
+    epoch_tracker = ContextEpochTracker()
+
+    def _finish_tool(
+        call: ToolCall,
+        result: ToolExecutionResult,
+    ) -> tuple[ToolCallResult, ToolResponse]:
+        event, response = _tool_outcome(call, ctx.request_id, result)
+        doom_tracker.record(call.name, dict(call.args))
+        return event, response
+
+    async def _drain_steers() -> AsyncIterator[AgentEvent]:
+        """Inject queued steer messages at a safe boundary (before next provider call)."""
+        if input_admission is None:
+            return
+        while True:
+            steered = input_admission.pop_steer()
+            if steered is None:
+                break
+            await history.append(
+                ctx.thread_id, Message(role="user", content=list(steered))
+            )
+            preview = preview_text(steered)
+            logger.info(
+                "steer injected %s",
+                kv(
+                    request_id=ctx.request_id,
+                    thread_id=ctx.thread_id,
+                    preview=preview[:80],
+                ),
+            )
+            yield UserSteered(request_id=ctx.request_id, text=preview)
 
     while turn_index < effective_max:
         if cancelled is not None and cancelled.is_set():
             yield Error(request_id=ctx.request_id, error="Request cancelled")
             needs_followup_after_tools = False
             break
+
+        async for steer_evt in _drain_steers():
+            yield steer_evt
+
+        # Settlement barrier: fire-and-forget hooks from the prior tool batch
+        # must finish (or time out) before the next provider call.
+        await _drain_hook_settlement(hook_manager)
 
         turn_index += 1
         turn_input_text = user_text
@@ -936,7 +1396,7 @@ async def _run_inner_core(
                 needs_followup_after_tools = False
                 break
 
-            chat_messages = await _load_repaired_chat_history(history, ctx.thread_id)
+            chat_messages = await _load_agent_chat_history(history, ctx.thread_id)
             ctx = await refresh_memory_index(ctx)
             turn_input_text = latest_user_message_text(chat_messages) or user_text
             set_turn_io(input_value=turn_input_text)
@@ -984,30 +1444,65 @@ async def _run_inner_core(
                     ),
                 )
 
-            system = _system_message(
+            admit = _admit_system_context(
+                epoch_tracker,
                 ctx,
                 chat_messages,
                 memory_selection=memory_selection,
                 attachment_catalog=attachment_catalog,
             )
+            for epoch_evt in _epoch_events(
+                admit, request_id=ctx.request_id, thread_id=ctx.thread_id
+            ):
+                yield epoch_evt
+            system = _system_message_from_text(admit.leading_system_text)
             combined_extra = _combine_extras(pre_turn_extra, pre_tool_extra_next)
+            force_no_tools, doom_loop_note = doom_tracker.consume_recovery()
+            combined_extra = _combine_extras(combined_extra, doom_loop_note)
             system = _append_extra_system_text(system, combined_extra)
             pre_tool_extra_next = None
-            resolved_messages = resolve_messages_for_provider(
+            turn_tools: Sequence[ToolDef] = () if force_no_tools else ctx.tools
+            tool_def_payload = await _fire_hook(
+                hook_manager,
+                event=HookEvent.TOOL_DEFINITION,
+                ctx=ctx,
+                timeout_s=_HOOK_READ_TIMEOUT_S,
+                tools=list(turn_tools),
+                inner_turn=turn_index,
+            )
+            if tool_def_payload is not None and tool_def_payload.tools is not None:
+                turn_tools = list(tool_def_payload.tools)
+                tools_dirty = True
+                logger.debug(
+                    "tool.definition hook replaced tools %s",
+                    kv(
+                        request_id=ctx.request_id,
+                        thread_id=ctx.thread_id,
+                        turn=turn_index,
+                        tool_count=len(turn_tools),
+                    ),
+                )
+            # Preflight uses unshaped history; pressure shaping applied after token count.
+            resolved_messages = convert_to_provider(
                 chat_messages,
                 attachment_store=attachment_store,
                 session_id=ctx.thread_id,
             )
-            provider_messages = _messages_for_provider(system, resolved_messages)
+            provider_messages = _messages_for_provider(
+                system,
+                resolved_messages,
+                mid_conversation_update=admit.mid_conversation_update,
+            )
 
             stream_thinking = _stream_thinking_budget(provider, resolved_messages)
             preflight = await _provider_prompt_input_tokens(
                 provider,
                 provider_messages,
-                ctx.tools,
+                turn_tools,
                 model=ctx.model,
                 thinking_budget=stream_thinking,
                 vertex_google_search=vertex_google_search,
+                hints=_provider_call_hints(ctx),
             )
             usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, preflight)
             cap = max(1, int(ctx.context_window_tokens * _SUMMARY_TRIGGER_RATIO))
@@ -1060,28 +1555,43 @@ async def _run_inner_core(
                         turns_summarized=turns_summarized,
                     ),
                 )
-                chat_messages = await _load_repaired_chat_history(history, ctx.thread_id)
+                if turns_summarized > 0:
+                    epoch_tracker.begin_new_epoch()
+                chat_messages = await _load_agent_chat_history(history, ctx.thread_id)
                 ctx = await refresh_memory_index(ctx)
-                system = _system_message(
+                admit = _admit_system_context(
+                    epoch_tracker,
                     ctx,
                     chat_messages,
                     memory_selection=memory_selection,
                     attachment_catalog=attachment_catalog,
                 )
-                system = _append_extra_system_text(system, pre_turn_extra)
-                resolved_messages = resolve_messages_for_provider(
+                for epoch_evt in _epoch_events(
+                    admit, request_id=ctx.request_id, thread_id=ctx.thread_id
+                ):
+                    yield epoch_evt
+                system = _append_extra_system_text(
+                    _system_message_from_text(admit.leading_system_text),
+                    pre_turn_extra,
+                )
+                resolved_messages = convert_to_provider(
                     chat_messages,
                     attachment_store=attachment_store,
                     session_id=ctx.thread_id,
                 )
-                provider_messages = _messages_for_provider(system, resolved_messages)
+                provider_messages = _messages_for_provider(
+                    system,
+                    resolved_messages,
+                    mid_conversation_update=admit.mid_conversation_update,
+                )
                 post = await _provider_prompt_input_tokens(
                     provider,
                     provider_messages,
-                    ctx.tools,
+                    turn_tools,
                     model=ctx.model,
                     thinking_budget=_stream_thinking_budget(provider, resolved_messages),
                     vertex_google_search=vertex_google_search,
+                    hints=_provider_call_hints(ctx),
                 )
                 usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, post)
 
@@ -1090,40 +1600,55 @@ async def _run_inner_core(
                 ctx.context_window_tokens,
             )
             if pressure_tier in ("moderate", "aggressive"):
-                shaped_history = shape_messages_tool_results(
+                resolved_messages = convert_to_provider(
                     chat_messages,
-                    protect_recent=_SUMMARY_KEEP_TAIL,
-                    pressure_tier=pressure_tier,
-                )
-                resolved_messages = resolve_messages_for_provider(
-                    shaped_history,
                     attachment_store=attachment_store,
                     session_id=ctx.thread_id,
+                    pressure_tier=pressure_tier,
+                    protect_recent=_SUMMARY_KEEP_TAIL,
                 )
-                provider_messages = _messages_for_provider(system, resolved_messages)
+                provider_messages = _messages_for_provider(
+                    system,
+                    resolved_messages,
+                    mid_conversation_update=admit.mid_conversation_update,
+                )
+
+            before_payload = await _fire_hook(
+                hook_manager,
+                event=HookEvent.BEFORE_PROVIDER_REQUEST,
+                ctx=ctx,
+                timeout_s=_HOOK_READ_TIMEOUT_S,
+                tools=list(turn_tools),
+                provider_messages=list(provider_messages),
+                inner_turn=turn_index,
+            )
+            prev_msg_count = len(provider_messages)
+            provider_messages, turn_tools, tools_replaced = _apply_before_provider_hook(
+                before_payload, provider_messages, turn_tools
+            )
+            if tools_replaced:
+                tools_dirty = True
+            if before_payload is not None and (
+                tools_replaced
+                or before_payload.provider_messages is not None
+            ):
+                logger.debug(
+                    "before_provider_request hook rewrote request %s",
+                    kv(
+                        request_id=ctx.request_id,
+                        thread_id=ctx.thread_id,
+                        turn=turn_index,
+                        tools_replaced=tools_replaced,
+                        message_count=len(provider_messages),
+                        prev_message_count=prev_msg_count,
+                    ),
+                )
 
             yield SystemPromptSnapshot(
                 request_id=ctx.request_id,
                 inner_turn=turn_index,
-                text=_system_prompt_snapshot_text(system),
+                text=_system_prompt_snapshot_text(system, admit.mid_conversation_update),
             )
-
-            pending: dict[str, ToolCall] = {}
-            assistant_text = ""
-            thinking_text = ""
-            thinking_signature: str | None = None
-            thinking_streamed = False
-            thinking_closed = False
-
-            def _close_thinking_block() -> ThinkingBlockComplete | None:
-                nonlocal thinking_closed
-                if not thinking_streamed or thinking_closed:
-                    return None
-                thinking_closed = True
-                return ThinkingBlockComplete(
-                    request_id=ctx.request_id,
-                    signature=thinking_signature or "",
-                )
 
             llm_input = 0
             llm_output = 0
@@ -1147,11 +1672,12 @@ async def _run_inner_core(
                     messages=[m.to_dict() for m in delta_messages],
                     message_offset=message_offset,
                     messages_reset=messages_reset,
-                    tools=[dataclasses.asdict(t) for t in ctx.tools] if include_tools else None,
+                    tools=[dataclasses.asdict(t) for t in turn_tools] if include_tools else None,
                     thinking_budget=stream_thinking,
                 )
                 provider_messages_written = len(provider_messages)
                 tools_dirty = False
+            stream_mapper = ProviderStreamMapper(ctx.request_id)
             try:
                 async with span_llm(ctx=ctx, vertex_google_search=vertex_google_search):
                     async with aclosing(
@@ -1160,33 +1686,16 @@ async def _run_inner_core(
                             provider_stream(
                                 provider,
                                 provider_messages,
-                                ctx.tools,
+                                turn_tools,
                                 model=ctx.model,
                                 thinking_budget=stream_thinking,
                                 vertex_google_search=vertex_google_search,
+                                hints=_provider_call_hints(ctx),
                             ),
                         )
                     ) as stream:
                         async for ev in stream:
-                            if isinstance(ev, TextDelta):
-                                closed = _close_thinking_block()
-                                if closed is not None:
-                                    yield closed
-                                assistant_text += ev.text
-                                if ev.text:
-                                    yield AssistantDelta(request_id=ctx.request_id, delta=ev.text)
-                            elif isinstance(ev, ThinkingDelta):
-                                thinking_text += ev.text
-                                if ev.signature:
-                                    thinking_signature = ev.signature
-                                if ev.text:
-                                    thinking_streamed = True
-                                    yield ThinkingBlockDelta(
-                                        request_id=ctx.request_id,
-                                        text=ev.text,
-                                        signature=ev.signature,
-                                    )
-                            elif isinstance(ev, UsageEvent):
+                            if isinstance(ev, UsageEvent):
                                 _merge_usage_event(usage, ev)
                                 usage.cost_usd += estimate_cost(
                                     ctx.model,
@@ -1200,22 +1709,20 @@ async def _run_inner_core(
                                 llm_cached += ev.cached_tokens
                                 llm_cache_read += ev.cache_read_tokens
                                 llm_cache_creation += ev.cache_creation_tokens
-                            elif isinstance(ev, ToolCall):
-                                closed = _close_thinking_block()
-                                if closed is not None:
-                                    yield closed
-                                pending[ev.call_id] = ev
-                            elif isinstance(ev, ProviderGroundingEvent):
-                                yield GroundingEvent(
-                                    request_id=ctx.request_id,
-                                    sources=[dict(s) for s in ev.sources],
-                                    search_queries=list(ev.search_queries),
-                                )
-                            elif isinstance(ev, Done):
+                                continue
+                            if isinstance(ev, Done):
+                                for aev in stream_mapper.map(ev):
+                                    yield aev
                                 break
-                    closed = _close_thinking_block()
-                    if closed is not None:
-                        yield closed
+                            for aev in stream_mapper.map(ev):
+                                yield aev
+                    for aev in stream_mapper.finish():
+                        yield aev
+                    pending = stream_mapper.pending
+                    assistant_text = stream_mapper.assistant_text
+                    thinking_text = stream_mapper.thinking_text
+                    thinking_signature = stream_mapper.thinking_signature
+                    stream_truncated = stream_mapper.stream_truncated
                     set_llm_usage(
                         input_tokens=llm_input,
                         output_tokens=llm_output,
@@ -1258,20 +1765,48 @@ async def _run_inner_core(
                         tool_calls=len(pending),
                     ),
                 )
+                await _fire_after_provider_response(
+                    hook_manager,
+                    ctx=ctx,
+                    inner_turn=turn_index,
+                    assistant_text=assistant_text,
+                    thinking_text=thinking_text,
+                    tool_requests=[
+                        {"call_id": tc.call_id, "name": tc.name, "args": dict(tc.args)}
+                        for tc in pending.values()
+                    ],
+                    usage={
+                        "input_tokens": llm_input,
+                        "output_tokens": llm_output,
+                        "cached_tokens": llm_cached,
+                        "cache_read_tokens": llm_cache_read,
+                        "cache_creation_tokens": llm_cache_creation,
+                    },
+                )
             except asyncio.CancelledError:
-                closed = _close_thinking_block()
-                if closed is not None:
-                    yield closed
+                for aev in stream_mapper.finish():
+                    yield aev
+                await _fire_after_provider_response(
+                    hook_manager,
+                    ctx=ctx,
+                    inner_turn=turn_index,
+                    provider_error="Request cancelled",
+                )
                 yield Error(request_id=ctx.request_id, error="Request cancelled")
                 needs_followup_after_tools = False
                 return
             except Exception as exc:
-                closed = _close_thinking_block()
-                if closed is not None:
-                    yield closed
+                for aev in stream_mapper.finish():
+                    yield aev
                 logger.exception(
                     "provider stream failed %s",
                     kv(request_id=ctx.request_id, thread_id=ctx.thread_id, model=ctx.model),
+                )
+                await _fire_after_provider_response(
+                    hook_manager,
+                    ctx=ctx,
+                    inner_turn=turn_index,
+                    provider_error=str(exc),
                 )
                 yield Error(request_id=ctx.request_id, error=str(exc))
                 needs_followup_after_tools = False
@@ -1301,7 +1836,7 @@ async def _run_inner_core(
                     break
                 # Model returned no text after tool results (or only whitespace). Without another
                 # provider round the user sees tools then silence — retry until turn budget.
-                rows = await _load_repaired_chat_history(history, ctx.thread_id)
+                rows = await _load_agent_chat_history(history, ctx.thread_id)
                 owes_tool_followup = needs_followup_after_tools or (
                     bool(rows)
                     and rows[-1].role == "user"
@@ -1344,8 +1879,39 @@ async def _run_inner_core(
             # must still share a single user row.
             all_tool_responses: list[ContentBlock] = []
             mcp_registry_mutated = False
+            # Computed once per batch and reused for both chunking and dispatch
+            # so the two stay consistent even if ctx.tools were ever mutated
+            # mid-batch (e.g. by an MCP registry reload).
+            safe_names = _parallel_safe_names(ctx.tools)
+            reject_batch = _should_reject_tool_batch(ordered, truncated=stream_truncated)
+            if reject_batch:
+                logger.warning(
+                    "rejecting truncated/incomplete tool batch %s",
+                    kv(
+                        request_id=ctx.request_id,
+                        thread_id=ctx.thread_id,
+                        truncated=stream_truncated,
+                        n_calls=len(ordered),
+                    ),
+                )
+                for call in ordered:
+                    err = _rejected_tool_batch_error(call, truncated=stream_truncated)
+                    yield ToolCallStarted(
+                        request_id=ctx.request_id,
+                        tool=call.name,
+                        label=call.name,
+                        args=dict(call.args),
+                        parse_error=call.parse_error,
+                    )
+                    result_evt, tool_resp = _finish_tool(
+                        call, ToolExecutionResult.err(err)
+                    )
+                    yield result_evt
+                    all_tool_responses.append(tool_resp)
 
-            for chunk in _chunk_tool_calls(ordered):
+            for chunk in (() if reject_batch else _chunk_tool_calls(
+                ordered, parallel_safe=safe_names
+            )):
                 if cancelled is not None and cancelled.is_set():
                     yield Error(request_id=ctx.request_id, error="Request cancelled")
                     needs_followup_after_tools = False
@@ -1375,8 +1941,8 @@ async def _run_inner_core(
                             parse_error=call.parse_error,
                             call_id=call.call_id,
                         )
-                        result_evt, tool_resp = _tool_outcome(
-                            call, ctx.request_id, ToolExecutionResult.err(call.parse_error)
+                        result_evt, tool_resp = _finish_tool(
+                            call, ToolExecutionResult.err(call.parse_error)
                         )
                         yield result_evt
                         chunk_responses.append(tool_resp)
@@ -1441,6 +2007,20 @@ async def _run_inner_core(
                                     break
                                 if payload.get("approved"):
                                     allowed = True
+                                    if payload.get("always"):
+                                        remember_always_approval(
+                                            bus, call.name, resource_for_call(inspector_call)
+                                        )
+                                        logger.debug(
+                                            "tool inspector confirm %s",
+                                            kv(
+                                                request_id=ctx.request_id,
+                                                thread_id=ctx.thread_id,
+                                                tool=call.name,
+                                                call_id=call.call_id,
+                                                decision="confirm_always",
+                                            ),
+                                        )
                                     logger.debug(
                                         "tool inspector confirm %s",
                                         kv(
@@ -1479,8 +2059,8 @@ async def _run_inner_core(
                             args=dict(call.args),
                             call_id=call.call_id,
                         )
-                        result_evt, tool_resp = _tool_outcome(
-                            call, ctx.request_id, ToolExecutionResult.err(msg)
+                        result_evt, tool_resp = _finish_tool(
+                            call, ToolExecutionResult.err(msg)
                         )
                         yield result_evt
                         chunk_responses.append(tool_resp)
@@ -1499,8 +2079,16 @@ async def _run_inner_core(
                     all_tool_responses.extend(chunk_responses)
                     continue
 
-                parallel_tasks = all(c.name == "task" for c in allowed_exec)
-                dispatch_mode = "parallel" if parallel_tasks else "serial"
+                # ToolCallStarted already published via async-gen consumer;
+                # PRE_TOOL is awaited inside _execute_one_tool_call.
+                parallel_chunk = (
+                    all(c.name == "task" for c in allowed_exec)
+                    or (
+                        len(allowed_exec) > 1
+                        and all(c.name in safe_names for c in allowed_exec)
+                    )
+                )
+                dispatch_mode = "parallel" if parallel_chunk else "serial"
                 logger.debug(
                     "tool dispatch %s",
                     kv(
@@ -1582,7 +2170,7 @@ async def _run_inner_core(
                         _record_tool_hook_span_event("post_tool", call.name)
                     return tool_result
 
-                if not parallel_tasks:
+                if not parallel_chunk:
                     call = allowed_exec[0]
                     try:
                         tool_result = await _execute_one_tool_call(call)
@@ -1591,7 +2179,7 @@ async def _run_inner_core(
                         needs_followup_after_tools = False
                         return
 
-                    event, response = _tool_outcome(call, ctx.request_id, tool_result)
+                    event, response = _finish_tool(call, tool_result)
                     yield event
                     for img_evt in _image_events(ctx.request_id, call.call_id, tool_result):
                         yield img_evt
@@ -1607,9 +2195,14 @@ async def _run_inner_core(
                         needs_followup_after_tools = False
                         return
 
-                    sem = asyncio.Semaphore(_MAX_CONCURRENT_SUBAGENTS)
+                    conc = (
+                        _MAX_CONCURRENT_SUBAGENTS
+                        if all(c.name == "task" for c in allowed_exec)
+                        else _parallel_tool_concurrency()
+                    )
+                    sem = asyncio.Semaphore(conc)
 
-                    async def _run_task(
+                    async def _run_parallel(
                         call: ToolCall,
                         *,
                         _sem: asyncio.Semaphore = sem,
@@ -1620,7 +2213,7 @@ async def _run_inner_core(
 
                     try:
                         outcomes = await asyncio.gather(
-                            *[_run_task(c) for c in allowed_exec],
+                            *[_run_parallel(c) for c in allowed_exec],
                             return_exceptions=True,
                         )
                     except asyncio.CancelledError:
@@ -1649,7 +2242,7 @@ async def _run_inner_core(
                         else:
                             _, tool_result = cast(tuple[ToolCall, ToolExecutionResult], outcome)
 
-                        event, response = _tool_outcome(call, ctx.request_id, tool_result)
+                        event, response = _finish_tool(call, tool_result)
                         yield event
                         for img_evt in _image_events(ctx.request_id, call.call_id, tool_result):
                             yield img_evt
@@ -1661,9 +2254,21 @@ async def _run_inner_core(
                             mcp_registry_mutated = True
 
                 all_tool_responses.extend(chunk_responses)
+            doom_msg = doom_tracker.take_error()
+            if doom_msg is not None:
+                logger.warning(
+                    "doom loop detected %s",
+                    kv(
+                        request_id=ctx.request_id,
+                        thread_id=ctx.thread_id,
+                        tool=doom_tracker.triggered_tool,
+                        threshold=doom_tracker.threshold,
+                    ),
+                )
+                yield Error(request_id=ctx.request_id, error=doom_msg)
 
             if all_tool_responses:
-                chat_for_budget = await _load_repaired_chat_history(history, ctx.thread_id)
+                chat_for_budget = await _load_agent_chat_history(history, ctx.thread_id)
                 budget_used = usage.estimated_prompt_tokens
                 try:
                     budget_used = await _prompt_input_tokens_for_history(
@@ -1675,6 +2280,7 @@ async def _run_inner_core(
                         memory_selection=memory_selection,
                         extra_system_text=pre_turn_extra,
                         vertex_google_search=vertex_google_search,
+                        epoch=epoch_tracker,
                     )
                 except Exception:
                     logger.warning(
@@ -1697,6 +2303,7 @@ async def _run_inner_core(
                     budgeter=budgeter,
                     provider=provider,
                     vertex_google_search=vertex_google_search,
+                    epoch=epoch_tracker,
                 ):
                     yield budget_evt
 
@@ -1712,6 +2319,7 @@ async def _run_inner_core(
                     )
                 ctx = refresh_tools_after_mcp_change(ctx, mcp_client)
                 tools_dirty = True
+                doom_tracker.exempt_names = _doom_loop_exempt_names(ctx.tools)
                 logger.info(
                     "refreshed ctx.tools after MCP registry change %s",
                     kv(
@@ -1762,3 +2370,5 @@ async def _run_inner_core(
         ctx=ctx,
         timeout_s=0,
     )
+    # Settlement for POST_TURN / lingering POST_TOOL runs in run() finally
+    # before TurnComplete — do not drain twice here.

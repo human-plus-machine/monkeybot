@@ -13,14 +13,16 @@ fi
 # OpenSandbox API (matches monkeybot_config/monkeybot.yaml sandbox.server_url default).
 # Set SKIP_OPENSANDBOX=1 to skip. Requires Docker; sandboxes need the host socket.
 SANDBOX_CONTAINER="${SANDBOX_CONTAINER:-monkeybot-demo-opensandbox}"
-SANDBOX_IMAGE="${SANDBOX_IMAGE:-opensandbox/server:latest}"
+# Control-plane server image (do not reuse sandbox.image / SANDBOX_IMAGE — that is the worker).
+SANDBOX_SERVER_IMAGE="${SANDBOX_SERVER_IMAGE:-${OPENSANDBOX_SERVER_IMAGE:-opensandbox/server:latest}}"
+SANDBOX_IMAGE="${SANDBOX_IMAGE:-${SANDBOX_SERVER_IMAGE}}"
 SANDBOX_WORKER_IMAGE="${SANDBOX_WORKER_IMAGE:-monkeybot-demo-sandbox:local}"
 SANDBOX_WORKER_DOCKERFILE="${SANDBOX_WORKER_DOCKERFILE:-${REPO_ROOT}/docker/Dockerfile.demo-sandbox}"
 SANDBOX_HOST_PORT="${SANDBOX_HOST_PORT:-18080}"
 # Docker runtime + bindable API (see monkeybot_config/opensandbox.docker.toml).
 SANDBOX_CONFIG_HOST="${SANDBOX_CONFIG_HOST:-$(pwd)/monkeybot_config/opensandbox.docker.toml}"
 # Seconds to wait for OpenSandbox /health after docker start/run (server pulls images on first boot).
-SANDBOX_HEALTH_WAIT_SECS="${SANDBOX_HEALTH_WAIT_SECS:-5}"
+SANDBOX_HEALTH_WAIT_SECS="${SANDBOX_HEALTH_WAIT_SECS:-60}"
 
 # Firestore emulator (only when db_url uses firestore://). Set SKIP_FIRESTORE_EMULATOR=1 to skip.
 FIRESTORE_CONTAINER="${FIRESTORE_CONTAINER:-monkeybot-demo-firestore}"

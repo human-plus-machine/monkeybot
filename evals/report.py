@@ -145,10 +145,13 @@ def compare_to_baseline(
 ) -> tuple[list[str], list[str]]:
     """Return ``(hard_failures, warnings)`` per the ticket's regression-gate table.
 
-    ``require_baseline`` is set from ``--fail-on-regression``: without a baseline there is
-    nothing to diff token/cost/latency/p95 against, so a silent no-op there would let the
-    very first gated merge through with no regression check at all. With the flag, a missing
-    baseline is itself a hard failure telling the author to run ``--update-baseline``.
+    Scenario errors/failures in ``current`` are always hard failures, baseline or not —
+    that's this run's own result, not a comparison. ``require_baseline`` (a separate flag
+    from ``--fail-on-regression``) controls only whether a *missing* baseline file is itself
+    a hard failure: without a baseline there is nothing to diff token/cost/latency/p95
+    against, so once a trusted baseline exists, pass ``--require-baseline`` too so a missing
+    file doesn't silently skip that comparison. Until then, a missing baseline is a no-op
+    warning-free pass here — the caller may still print a Warnings line for it.
     """
     hard: list[str] = []
     warn: list[str] = []
@@ -306,6 +309,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--run", type=Path, default=None, help="Load an existing run JSON instead of executing")
     parser.add_argument("--agent-url", default=None, help="Override AGENT_URL env var")
     parser.add_argument("--fail-on-regression", action="store_true")
+    parser.add_argument(
+        "--require-baseline",
+        action="store_true",
+        help="Treat a missing baseline file as a hard failure (separate from --fail-on-regression, "
+        "which always still blocks on this run's own scenario errors/failures regardless of "
+        "baseline presence).",
+    )
     parser.add_argument("--update-baseline", action="store_true", help="Write this run as the new baseline")
     args = parser.parse_args(argv)
 
@@ -326,7 +336,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     baseline = load_baseline(baseline_path)
-    hard, warn = compare_to_baseline(baseline, record, require_baseline=args.fail_on_regression)
+    hard, warn = compare_to_baseline(baseline, record, require_baseline=args.require_baseline)
     print(build_markdown_report(record, baseline, hard, warn))
 
     if args.fail_on_regression and hard:

@@ -31,6 +31,7 @@ from monkeybot.core.mcp.mcp_client import MCPClient
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.persistence.backends import create_storage_backend
 from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector
+from monkeybot.core.tools.permission import try_load_permission_inspector
 from monkeybot.core.workspace import create_workspace_storage
 from monkeybot.gateway.bootstrap import ensure_gateway_runtime_env
 from monkeybot.gateway.sse.routes import create_app as build_sse_app
@@ -123,6 +124,14 @@ async def _realtime_lifespan(
     denied = _tool_denied_patterns()
     if denied:
         inspectors.append(RulesInspector(denied))
+
+    perm_path = Path(
+        os.environ.get("PERMISSION_CONFIG", "/app/monkeybot_config/permissions.yaml")
+    )
+    perm_insp = try_load_permission_inspector(perm_path)
+    if perm_insp is not None:
+        inspectors.append(perm_insp)
+
     deps.inspectors = inspectors
 
     # Realtime model can be a Live-only preview while the main turn-based model

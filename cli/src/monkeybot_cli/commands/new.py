@@ -6,7 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from monkeybot.scaffold import run_new
+from monkeybot_cli.scaffold import run_new
 
 
 def run_new_command(args: argparse.Namespace) -> int:

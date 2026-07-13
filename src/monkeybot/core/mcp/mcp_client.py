@@ -382,6 +382,88 @@ class _ServerRecord:
     stack: AsyncExitStack
     session: Any
     tools: list[ToolDef]
+    capabilities: dict[str, bool] | None = None
+
+
+# Status machine values (OpenCode-inspired; progressive-disclosure aware).
+MCP_STATUS_CONNECTED = "connected"
+MCP_STATUS_CATALOGUED = "catalogued"
+MCP_STATUS_DISCONNECTED = "disconnected"
+MCP_STATUS_DISABLED = "disabled"
+MCP_STATUS_FAILED = "failed"
+MCP_STATUS_NEEDS_AUTH = "needs_auth"
+
+
+def _server_capabilities_snapshot(session: Any) -> dict[str, bool]:
+    """Return a flat capability map from an initialized MCP session."""
+    caps = None
+    getter = getattr(session, "get_server_capabilities", None)
+    if callable(getter):
+        caps = getter()
+    if caps is None:
+        return {}
+    out: dict[str, bool] = {}
+    for key in ("tools", "resources", "prompts"):
+        val = getattr(caps, key, None)
+        out[key] = val is not None
+    return out
+
+
+def _dump_mcp_model(obj: Any) -> dict[str, Any]:
+    """Best-effort JSON-friendly dump of an MCP SDK model / namespace."""
+    if obj is None:
+        return {}
+    model_dump = getattr(obj, "model_dump", None)
+    if callable(model_dump):
+        dumped = model_dump(mode="json", by_alias=True, exclude_none=True)
+        if isinstance(dumped, dict):
+            return dumped
+    if isinstance(obj, dict):
+        return dict(obj)
+    raw = getattr(obj, "__dict__", None)
+    if not isinstance(raw, dict):
+        raw = {}
+    slots = getattr(type(obj), "__slots__", None)
+    if isinstance(slots, str):
+        slots = (slots,)
+    if slots:
+        raw = dict(raw)
+        for key in slots:
+            if key not in raw and hasattr(obj, key):
+                raw[key] = getattr(obj, key)
+    if not raw:
+        return {}
+    out: dict[str, Any] = {}
+    for key, val in raw.items():
+        if key.startswith("_") or val is None:
+            continue
+        out[key] = str(val) if key == "uri" else val
+    return out
+
+
+def _normalize_resource_read(result: Any) -> dict[str, Any]:
+    """Flatten ``read_resource`` result into text + structured contents."""
+    contents_raw = getattr(result, "contents", None) or []
+    text_chunks: list[str] = []
+    contents: list[dict[str, Any]] = []
+    for block in contents_raw:
+        entry = _dump_mcp_model(block)
+        text_val = getattr(block, "text", None)
+        blob_val = getattr(block, "blob", None)
+        if isinstance(text_val, str):
+            text_chunks.append(text_val)
+            entry["text"] = text_val
+        elif blob_val is not None:
+            # Keep a short note rather than dumping large base64 into the turn.
+            mime = getattr(block, "mimeType", None) or entry.get("mimeType") or "application/octet-stream"
+            uri = str(getattr(block, "uri", "") or entry.get("uri") or "")
+            note = f"[Binary MCP resource omitted: {uri} ({mime})]"
+            text_chunks.append(note)
+            entry["blob_omitted"] = True
+            entry["mimeType"] = mime
+        contents.append(entry)
+    text = sanitize_tool_result_text("".join(text_chunks))
+    return {"text": text, "contents": contents}
 
 
 @runtime_checkable
@@ -494,6 +576,21 @@ class MCPClient:
         self._config_path: Path | None = None
         # Catalog + ever-connected names (including ad-hoc); used for tool-list refresh.
         self._seen_servers: set[str] = set()
+        # Last-known status per server (catalogued / connected / failed / …).
+        self._statuses: dict[str, dict[str, Any]] = {}
+
+    def _set_status(self, name: str, status: str, **extra: Any) -> None:
+        """Record lifecycle status for ``name`` (overwrites prior entry)."""
+        entry: dict[str, Any] = {"name": name, "status": status}
+        entry.update({k: v for k, v in extra.items() if v is not None})
+        self._statuses[name] = entry
+
+    def _record_connect_failure(self, name: str, exc: BaseException) -> None:
+        """Update status after a failed connect attempt."""
+        if isinstance(exc, MCPAuthError):
+            self._set_status(name, MCP_STATUS_NEEDS_AUTH, error=str(exc))
+        else:
+            self._set_status(name, MCP_STATUS_FAILED, error=str(exc))
 
     def all_tools(self) -> list[ToolDef]:
         """Return every MCP tool snapshot, grouped by sorted server then tool names."""
@@ -514,6 +611,23 @@ class MCPClient:
     def is_connected(self, name: str) -> bool:
         """True when ``name`` has an active MCP session."""
         return name in self._servers
+
+    def status(self, name: str | None = None) -> list[dict[str, Any]] | dict[str, Any]:
+        """Return server status snapshot(s).
+
+        Without ``name``, returns every tracked server sorted by name. With ``name``,
+        returns that server's entry or a synthetic ``disconnected`` stub.
+        """
+        if name is not None:
+            if name in self._statuses:
+                return dict(self._statuses[name])
+            if name in self._servers:
+                return {"name": name, "status": MCP_STATUS_CONNECTED}
+            if name in self._catalog:
+                return {"name": name, "status": MCP_STATUS_CATALOGUED}
+            return {"name": name, "status": MCP_STATUS_DISCONNECTED}
+        names = sorted(set(self._statuses) | set(self._catalog) | set(self._servers))
+        return [self.status(n) for n in names]  # type: ignore[misc]
 
     def split_prefixed_tool(self, prefixed_name: str) -> tuple[str, str] | None:
         """If ``prefixed_name`` matches a connected server, return ``(server_name, tool_name)``.
@@ -566,16 +680,30 @@ class MCPClient:
                 schema = _tool_input_schema(tool)
                 defs.append(ToolDef(name=prefixed, description=desc, input_schema=schema))
 
-            self._servers[name] = _ServerRecord(stack=stack, session=session, tools=list(defs))
+            self._servers[name] = _ServerRecord(
+                stack=stack,
+                session=session,
+                tools=list(defs),
+                capabilities=_server_capabilities_snapshot(session),
+            )
             self._seen_servers.add(name)
             register_mcp_tool_names(t.name for t in defs)
+            self._set_status(
+                name,
+                MCP_STATUS_CONNECTED,
+                tool_count=len(defs),
+                capabilities=self._servers[name].capabilities,
+            )
             return list(defs)
-        except MCPConnectionError:
+        except MCPConnectionError as exc:
             await stack.aclose()
+            self._record_connect_failure(name, exc)
             raise
         except Exception as exc:
             await stack.aclose()
-            raise MCPConnectionError(name, str(exc)) from exc
+            wrapped = MCPConnectionError(name, str(exc))
+            self._record_connect_failure(name, wrapped)
+            raise wrapped from exc
 
     async def connect_streamable_http(
         self,
@@ -631,19 +759,34 @@ class MCPClient:
                 schema = _tool_input_schema(tool)
                 defs.append(ToolDef(name=prefixed, description=desc, input_schema=schema))
 
-            self._servers[name] = _ServerRecord(stack=stack, session=session, tools=list(defs))
+            self._servers[name] = _ServerRecord(
+                stack=stack,
+                session=session,
+                tools=list(defs),
+                capabilities=_server_capabilities_snapshot(session),
+            )
             self._seen_servers.add(name)
             register_mcp_tool_names(t.name for t in defs)
+            self._set_status(
+                name,
+                MCP_STATUS_CONNECTED,
+                tool_count=len(defs),
+                capabilities=self._servers[name].capabilities,
+            )
             return list(defs)
-        except MCPConnectionError:
+        except MCPConnectionError as exc:
             await stack.aclose()
+            self._record_connect_failure(name, exc)
             raise
-        except MCPAuthError:
+        except MCPAuthError as exc:
             await stack.aclose()
+            self._record_connect_failure(name, exc)
             raise
         except Exception as exc:
             await stack.aclose()
-            raise MCPConnectionError(name, str(exc)) from exc
+            wrapped = MCPConnectionError(name, str(exc))
+            self._record_connect_failure(name, wrapped)
+            raise wrapped from exc
 
     async def _stop_remote_session_before_teardown(self, name: str, rec: _ServerRecord) -> None:
         """Best-effort ``browser_stop`` call so cloud-browser billing ends on disconnect.
@@ -673,21 +816,27 @@ class MCPClient:
         if rec is None:
             return
         unregister_mcp_server_tools(name)
-        await self._stop_remote_session_before_teardown(name, rec)
         try:
-            await rec.stack.aclose()
-        except BaseException as exc:
-            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
-                raise
-            if _mcp_disconnect_teardown_noise(exc):
-                logger.debug(
-                    "mcp disconnect %s: suppressed SDK teardown noise (%s)",
-                    name,
-                    exc.__class__.__name__,
-                    exc_info=True,
-                )
-                return
-            raise
+            await self._stop_remote_session_before_teardown(name, rec)
+            try:
+                await rec.stack.aclose()
+            except BaseException as exc:
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    raise
+                if _mcp_disconnect_teardown_noise(exc):
+                    logger.debug(
+                        "mcp disconnect %s: suppressed SDK teardown noise (%s)",
+                        name,
+                        exc.__class__.__name__,
+                        exc_info=True,
+                    )
+                else:
+                    raise
+        finally:
+            if name in self._catalog:
+                self._set_status(name, MCP_STATUS_CATALOGUED)
+            else:
+                self._set_status(name, MCP_STATUS_DISCONNECTED)
 
     async def disconnect_all(self) -> None:
         """Disconnect every connected MCP server."""
@@ -706,6 +855,131 @@ class MCPClient:
             raise MCPServerNotConnectedError(server_name)
         result = await rec.session.call_tool(tool_name, arguments=dict(args))
         return _normalize_call_tool_result(result)
+
+    def _require_connected(self, server_name: str) -> _ServerRecord:
+        rec = self._servers.get(server_name)
+        if rec is None:
+            raise MCPServerNotConnectedError(server_name)
+        return rec
+
+    def _connected_server_names(self, server_name: str | None = None) -> list[str]:
+        if server_name is not None:
+            if server_name not in self._servers:
+                raise MCPServerNotConnectedError(server_name)
+            return [server_name]
+        return sorted(self._servers.keys())
+
+    async def _list_capability_items(
+        self,
+        *,
+        server_name: str | None,
+        capability: str,
+        list_method: str,
+        result_attr: str,
+        missing_remedy: str,
+    ) -> list[dict[str, Any]]:
+        """List resources/prompts/templates from connected servers that advertise ``capability``."""
+        out: list[dict[str, Any]] = []
+        for sname in self._connected_server_names(server_name):
+            rec = self._servers[sname]
+            caps = rec.capabilities or {}
+            if caps and not caps.get(capability, False):
+                if server_name is not None:
+                    raise MCPDiagnosticError(
+                        sname,
+                        f"MCP server {sname!r} does not advertise {capability} capability",
+                        remedy=missing_remedy,
+                    )
+                continue
+            listing = await getattr(rec.session, list_method)()
+            for item in getattr(listing, result_attr, None) or []:
+                entry = _dump_mcp_model(item)
+                entry["server"] = sname
+                if "uri" in entry:
+                    entry["uri"] = str(entry["uri"])
+                out.append(entry)
+        return out
+
+    async def list_resources(self, server_name: str | None = None) -> list[dict[str, Any]]:
+        """List MCP resources from one or all connected servers."""
+        return await self._list_capability_items(
+            server_name=server_name,
+            capability="resources",
+            list_method="list_resources",
+            result_attr="resources",
+            missing_remedy="Use a server that supports resources, or call mcp_status.",
+        )
+
+    async def list_resource_templates(
+        self, server_name: str | None = None
+    ) -> list[dict[str, Any]]:
+        """List MCP resource templates from one or all connected servers."""
+        return await self._list_capability_items(
+            server_name=server_name,
+            capability="resources",
+            list_method="list_resource_templates",
+            result_attr="resourceTemplates",
+            missing_remedy="Use a server that supports resources, or call mcp_status.",
+        )
+
+    async def read_resource(self, server_name: str, uri: str) -> dict[str, Any]:
+        """Read one MCP resource by ``server_name`` + ``uri``."""
+        rec = self._require_connected(server_name)
+        caps = rec.capabilities or {}
+        if caps and not caps.get("resources", False):
+            raise MCPDiagnosticError(
+                server_name,
+                f"MCP server {server_name!r} does not advertise resources capability",
+                remedy="Pick a resource-capable server from list_mcp_resources / mcp_status.",
+            )
+        from pydantic import AnyUrl
+
+        result = await rec.session.read_resource(AnyUrl(uri))
+        normalized = _normalize_resource_read(result)
+        return {
+            "server": server_name,
+            "uri": uri,
+            "text": normalized["text"],
+            "contents": normalized["contents"],
+        }
+
+    async def list_prompts(self, server_name: str | None = None) -> list[dict[str, Any]]:
+        """List MCP prompts from one or all connected servers."""
+        return await self._list_capability_items(
+            server_name=server_name,
+            capability="prompts",
+            list_method="list_prompts",
+            result_attr="prompts",
+            missing_remedy="Use a server that supports prompts, or call mcp_status.",
+        )
+
+    async def get_prompt(
+        self,
+        server_name: str,
+        prompt_name: str,
+        arguments: Mapping[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Fetch a named MCP prompt template (with optional string arguments)."""
+        rec = self._require_connected(server_name)
+        caps = rec.capabilities or {}
+        if caps and not caps.get("prompts", False):
+            raise MCPDiagnosticError(
+                server_name,
+                f"MCP server {server_name!r} does not advertise prompts capability",
+                remedy="Pick a prompt-capable server from list_mcp_prompts / mcp_status.",
+            )
+        args_out = {str(k): str(v) for k, v in dict(arguments or {}).items()}
+        result = await rec.session.get_prompt(prompt_name, arguments=args_out or None)
+        messages: list[dict[str, Any]] = []
+        for msg in getattr(result, "messages", None) or []:
+            messages.append(_dump_mcp_model(msg))
+        description = getattr(result, "description", None)
+        return {
+            "server": server_name,
+            "name": prompt_name,
+            "description": description if isinstance(description, str) else None,
+            "messages": messages,
+        }
 
     async def connect_from_catalog(self, name: str) -> list[ToolDef]:
         """Connect a server previously registered by :meth:`load_from_config`.
@@ -918,6 +1192,7 @@ class MCPClient:
                     "mcp server skipped (enabled: false) %s",
                     kv(server=server_name),
                 )
+                self._set_status(server_name, MCP_STATUS_DISABLED)
                 continue
             self._catalog[server_name] = dict(spec)
             self._seen_servers.add(server_name)
@@ -933,6 +1208,7 @@ class MCPClient:
                     raise_on_error=raise_on_error,
                 )
             else:
+                self._set_status(server_name, MCP_STATUS_CATALOGUED)
                 logger.info(
                     "mcp catalog registered server=%s (connect via enable_mcp)",
                     server_name,

@@ -13,7 +13,9 @@ import httpx
 
 _DEFAULT_SERVER_IMAGE = "opensandbox/server:latest"
 _DEFAULT_CONTAINER = "monkeybot-opensandbox"
-_DEFAULT_HEALTH_WAIT_SECS = 5.0
+# Docker Desktop / first image pull can take well over a few seconds.
+_DEFAULT_DOCKER_WAIT_SECS = 60.0
+_DEFAULT_HEALTH_WAIT_SECS = 60.0
 
 
 def sandbox_section(doc: dict) -> dict:
@@ -65,11 +67,33 @@ def _health_ok(host_port: int) -> bool:
     return '"status"' in body and "healthy" in body
 
 
-def _wait_healthy(host_port: int, *, timeout_secs: float) -> bool:
+def _server_image() -> str:
+    """OpenSandbox *control plane* image (not the session/worker ``SANDBOX_IMAGE``).
+
+    ``sandbox.image`` / ``SANDBOX_IMAGE`` is the container image for agent
+    ``run_command`` sessions. Reusing it here starts a worker that exits
+    immediately and then burns the full health-wait timeout.
+    """
+    for key in ("SANDBOX_SERVER_IMAGE", "OPENSANDBOX_SERVER_IMAGE"):
+        raw = os.environ.get(key, "").strip()
+        if raw:
+            return raw
+    return _DEFAULT_SERVER_IMAGE
+
+
+def _wait_healthy(
+    host_port: int,
+    *,
+    timeout_secs: float,
+    container: str | None = None,
+) -> bool:
     deadline = time.monotonic() + timeout_secs
     while time.monotonic() < deadline:
         if _health_ok(host_port):
             return True
+        # Dead container will never become healthy — don't burn the full wait.
+        if container and _container_exists(container) and not _container_running(container):
+            return False
         time.sleep(0.5)
     return False
 
@@ -89,6 +113,24 @@ def _docker_available() -> bool:
     except OSError:
         return False
     return proc.returncode == 0
+
+
+def _wait_docker_available(*, timeout_secs: float) -> bool:
+    """Retry ``docker info`` until the daemon is up (Docker Desktop cold start)."""
+    if timeout_secs <= 0:
+        return _docker_available()
+    if _docker_available():
+        return True
+    print(
+        f"monkeybot chat: waiting up to {timeout_secs:.0f}s for Docker…",
+        flush=True,
+    )
+    deadline = time.monotonic() + timeout_secs
+    while time.monotonic() < deadline:
+        time.sleep(1.0)
+        if _docker_available():
+            return True
+    return False
 
 
 def _container_running(name: str) -> bool:
@@ -194,7 +236,10 @@ def ensure_opensandbox_for_agent(
     if _health_ok(host_port):
         return True
 
-    if not _docker_available():
+    docker_wait_secs = float(
+        os.environ.get("SANDBOX_DOCKER_WAIT_SECS", str(_DEFAULT_DOCKER_WAIT_SECS))
+    )
+    if not _wait_docker_available(timeout_secs=docker_wait_secs):
         print(
             "monkeybot chat: Docker not available; run_command sandbox will fail "
             "(set sandbox.enabled: false or start Docker).",
@@ -211,7 +256,7 @@ def ensure_opensandbox_for_agent(
         return False
 
     container = os.environ.get("SANDBOX_CONTAINER", _DEFAULT_CONTAINER).strip() or _DEFAULT_CONTAINER
-    image = os.environ.get("SANDBOX_IMAGE", _DEFAULT_SERVER_IMAGE).strip() or _DEFAULT_SERVER_IMAGE
+    image = _server_image()
     wait_secs = float(os.environ.get("SANDBOX_HEALTH_WAIT_SECS", str(_DEFAULT_HEALTH_WAIT_SECS)))
     want_hash = _config_sha256(config_path)
 
@@ -229,7 +274,7 @@ def ensure_opensandbox_for_agent(
             _start_existing(container)
 
     if _container_exists(container):
-        if _wait_healthy(host_port, timeout_secs=wait_secs):
+        if _wait_healthy(host_port, timeout_secs=wait_secs, container=container):
             return True
         print("monkeybot chat: OpenSandbox unhealthy; recreating container", flush=True)
         _remove_container(container)
@@ -251,12 +296,19 @@ def ensure_opensandbox_for_agent(
         )
         return False
 
-    if _wait_healthy(host_port, timeout_secs=wait_secs):
+    if _wait_healthy(host_port, timeout_secs=wait_secs, container=container):
         print(f"monkeybot chat: OpenSandbox ready (127.0.0.1:{host_port})", flush=True)
         return True
 
-    print(
-        f"monkeybot chat: OpenSandbox did not become healthy within {wait_secs:.0f}s.",
-        flush=True,
-    )
+    if _container_exists(container) and not _container_running(container):
+        print(
+            "monkeybot chat: OpenSandbox container exited before becoming healthy "
+            f"(image={image}).",
+            flush=True,
+        )
+    else:
+        print(
+            f"monkeybot chat: OpenSandbox did not become healthy within {wait_secs:.0f}s.",
+            flush=True,
+        )
     return False

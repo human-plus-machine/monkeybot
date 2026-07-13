@@ -578,6 +578,7 @@ class GeminiProvider:
         last_usage: Any = None
         last_signature: str | None = None
         grounding_meta: dict[str, Any] | None = None
+        truncated = False
 
         try:
             stream_it = await client.aio.models.generate_content_stream(
@@ -590,6 +591,11 @@ class GeminiProvider:
                     last_usage = resp.usage_metadata
 
                 for cand in resp.candidates or []:
+                    fr = getattr(cand, "finish_reason", None)
+                    if fr is not None:
+                        fr_name = str(getattr(fr, "name", fr)).upper()
+                        if "MAX_TOKEN" in fr_name:
+                            truncated = True
                     cand_gm = _grounding_metadata_to_dict(getattr(cand, "grounding_metadata", None))
                     if cand_gm is not None:
                         if grounding_meta is not None and cand_gm != grounding_meta:
@@ -668,4 +674,4 @@ class GeminiProvider:
         for call_id in sorted(pending_tools.keys()):
             yield pending_tools[call_id]
 
-        yield Done()
+        yield Done(truncated=truncated)

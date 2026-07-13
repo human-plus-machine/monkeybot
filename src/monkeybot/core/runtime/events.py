@@ -206,6 +206,91 @@ class AttachmentDescriptorEvent:
     description: str = ""
 
 
+@dataclass(frozen=True)
+class UserSteered:
+    """User text injected mid-turn at a safe loop boundary (steer queue)."""
+
+    kind: Literal["UserSteered"] = "UserSteered"
+    request_id: str = ""
+    text: str = ""
+
+
+@dataclass(frozen=True)
+class QueuedInputAccepted:
+    """Steer or follow-up prompt accepted into a session admission queue."""
+
+    kind: Literal["QueuedInputAccepted"] = "QueuedInputAccepted"
+    request_id: str = ""
+    queue: Literal["steer", "follow_up"] = "follow_up"
+    position: int = 0
+
+
+@dataclass(frozen=True)
+class ContextEpochStarted:
+    """New context epoch opened (session start, post-compaction, or stable-source change)."""
+
+    kind: Literal["ContextEpochStarted"] = "ContextEpochStarted"
+    request_id: str = ""
+    epoch_id: int = 0
+    changed_sources: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class SystemContextUpdated:
+    """Volatile system-context sources changed within the current epoch."""
+
+    kind: Literal["SystemContextUpdated"] = "SystemContextUpdated"
+    request_id: str = ""
+    epoch_id: int = 0
+    changed_sources: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class AssistantTextStarted:
+    """Start of an assistant text block (additive; ``AssistantDelta`` still streams)."""
+
+    kind: Literal["AssistantTextStarted"] = "AssistantTextStarted"
+    request_id: str = ""
+
+
+@dataclass(frozen=True)
+class AssistantTextEnded:
+    """End of an assistant text block (additive).
+
+    When ``text`` is set, this is a durable settlement boundary (full block text
+    for replay). Streaming clients may still reconstruct from ``AssistantDelta``.
+    """
+
+    kind: Literal["AssistantTextEnded"] = "AssistantTextEnded"
+    request_id: str = ""
+    text: str = ""
+
+
+@dataclass(frozen=True)
+class ThinkingBlockStarted:
+    """Start of a thinking/reasoning block (additive; deltas still use ThinkingBlockDelta)."""
+
+    kind: Literal["ThinkingBlockStarted"] = "ThinkingBlockStarted"
+    request_id: str = ""
+
+
+@dataclass(frozen=True)
+class ToolInputDeltaEvent:
+    """Incremental tool-argument JSON while the model streams a tool call (additive).
+
+    ``delta`` is a raw, opaque fragment of one streaming JSON document per
+    ``call_id`` — not valid JSON by itself. Clients must buffer fragments by
+    ``call_id`` (in arrival order) and only attempt to parse once the tool call
+    is finalized (``ToolCallStarted``); never parse an individual ``delta``.
+    """
+
+    kind: Literal["ToolInputDelta"] = "ToolInputDelta"
+    request_id: str = ""
+    call_id: str = ""
+    tool: str = ""
+    delta: str = ""
+
+
 AgentEvent: TypeAlias = (
     Thinking
     | AssistantDelta
@@ -226,7 +311,45 @@ AgentEvent: TypeAlias = (
     | SystemNotificationEvent
     | AttachmentDescriptorEvent
     | GroundingEvent
+    | UserSteered
+    | QueuedInputAccepted
+    | ContextEpochStarted
+    | SystemContextUpdated
+    | AssistantTextStarted
+    | AssistantTextEnded
+    | ThinkingBlockStarted
+    | ToolInputDeltaEvent
 )
+
+# Durable vs live-only (OpenCode V2-style). Conversation history persists
+# Message/ContentBlock rows separately; this set classifies AgentEvent kinds for
+# transcript filtering and replay semantics.
+#
+# Durable = settlement / boundary events that should survive for debugging replay.
+# Everything else is live-only (streaming fragments and ephemeral UI progress).
+DURABLE_EVENT_KINDS: frozenset[str] = frozenset(
+    {
+        "ToolCallStarted",  # tool input finalized (args known); history mirror = ToolRequest
+        "ToolCallResult",  # tool success/failure settlement; history mirror = ToolResponse
+        "TurnComplete",
+        "Error",
+        "ContextSummarized",
+        "ThinkingBlockComplete",
+        "RedactedThinkingBlock",
+        "AssistantTextEnded",  # when text is set, full settled prose
+        "ToolConfirmationRequest",
+        "GroundingEvent",
+        "UserSteered",
+        "QueuedInputAccepted",
+        "ContextEpochStarted",
+        "SystemContextUpdated",
+    }
+)
+
+
+def is_durable_event(event: AgentEvent) -> bool:
+    """Return True when ``event`` is a durable settlement/boundary event."""
+    return event.kind in DURABLE_EVENT_KINDS
 
 
 def _usage_from_obj(raw: object | None) -> UsageTotals:
@@ -321,6 +444,36 @@ def _story5_event_dict(event: AgentEvent) -> dict[str, object]:
             "sources": [dict(s) for s in event.sources],
             "search_queries": list(event.search_queries),
         }
+    if isinstance(event, UserSteered):
+        return {**base, "text": event.text}
+    if isinstance(event, QueuedInputAccepted):
+        return {**base, "queue": event.queue, "position": event.position}
+    if isinstance(event, ContextEpochStarted):
+        return {
+            **base,
+            "epoch_id": event.epoch_id,
+            "changed_sources": list(event.changed_sources),
+        }
+    if isinstance(event, SystemContextUpdated):
+        return {
+            **base,
+            "epoch_id": event.epoch_id,
+            "changed_sources": list(event.changed_sources),
+        }
+    if isinstance(event, AssistantTextEnded):
+        out = dict(base)
+        if event.text:
+            out["text"] = event.text
+        return out
+    if isinstance(event, (AssistantTextStarted, ThinkingBlockStarted)):
+        return base
+    if isinstance(event, ToolInputDeltaEvent):
+        return {
+            **base,
+            "call_id": event.call_id,
+            "tool": event.tool,
+            "delta": event.delta,
+        }
     raise AssertionError(f"_story5_event_dict: unsupported type {type(event)!r}")
 
 
@@ -383,6 +536,14 @@ def event_to_json(event: AgentEvent) -> str:
             SystemNotificationEvent,
             AttachmentDescriptorEvent,
             GroundingEvent,
+            UserSteered,
+            QueuedInputAccepted,
+            ContextEpochStarted,
+            SystemContextUpdated,
+            AssistantTextStarted,
+            AssistantTextEnded,
+            ThinkingBlockStarted,
+            ToolInputDeltaEvent,
         ),
     ):
         payload = _story5_event_dict(event)
@@ -612,5 +773,47 @@ def event_from_json(raw: str) -> AgentEvent:
             mime_type=mime if isinstance(mime, str) else "",
             filename=fname if isinstance(fname, str) else "",
             description=desc if isinstance(desc, str) else "",
+        )
+    if t == "UserSteered":
+        text_raw = payload.get("text", "")
+        text = text_raw if isinstance(text_raw, str) else ""
+        return UserSteered(request_id=rid, text=text)
+    if t == "QueuedInputAccepted":
+        q_raw = payload.get("queue", "follow_up")
+        if q_raw not in ("steer", "follow_up"):
+            raise EventDecodeError("QueuedInputAccepted queue must be steer or follow_up")
+        q = cast(Literal["steer", "follow_up"], q_raw)
+        pos_raw = payload.get("position", 0)
+        pos = int(pos_raw) if isinstance(pos_raw, (int, float)) else 0
+        return QueuedInputAccepted(request_id=rid, queue=q, position=pos)
+    if t == "ContextEpochStarted":
+        eid_raw = payload.get("epoch_id", 0)
+        eid = int(eid_raw) if isinstance(eid_raw, (int, float)) else 0
+        src_raw = payload.get("changed_sources")
+        changed: list[str] = [str(s) for s in src_raw] if isinstance(src_raw, list) else []
+        return ContextEpochStarted(request_id=rid, epoch_id=eid, changed_sources=changed)
+    if t == "SystemContextUpdated":
+        eid_raw = payload.get("epoch_id", 0)
+        eid = int(eid_raw) if isinstance(eid_raw, (int, float)) else 0
+        src_raw = payload.get("changed_sources")
+        changed = [str(s) for s in src_raw] if isinstance(src_raw, list) else []
+        return SystemContextUpdated(request_id=rid, epoch_id=eid, changed_sources=changed)
+    if t == "AssistantTextStarted":
+        return AssistantTextStarted(request_id=rid)
+    if t == "AssistantTextEnded":
+        text_raw = payload.get("text", "")
+        text = text_raw if isinstance(text_raw, str) else ""
+        return AssistantTextEnded(request_id=rid, text=text)
+    if t == "ThinkingBlockStarted":
+        return ThinkingBlockStarted(request_id=rid)
+    if t == "ToolInputDelta":
+        cid_raw = payload.get("call_id", "")
+        tool_raw = payload.get("tool", "")
+        delta_raw = payload.get("delta", "")
+        return ToolInputDeltaEvent(
+            request_id=rid,
+            call_id=cid_raw if isinstance(cid_raw, str) else "",
+            tool=tool_raw if isinstance(tool_raw, str) else "",
+            delta=delta_raw if isinstance(delta_raw, str) else "",
         )
     raise EventDecodeError(f"unknown AgentEvent type: {t!r}")
