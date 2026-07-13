@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from monkeybot_cli.scaffold import run_new
+from monkeybot_cli.compat import COMPATIBLE_CORE_RANGE
+from monkeybot_cli.scaffold import monkeybot_dep_for_provider, run_new, write_agent_pyproject
 
 
 def test_run_new_creates_bundle(tmp_path: Path) -> None:
@@ -23,6 +24,9 @@ def test_run_new_creates_bundle(tmp_path: Path) -> None:
     assert (tmp_path / "skills").is_dir()
     assert (tmp_path / "workspace" / ".gitkeep").is_file()
     assert (tmp_path / "scripts" / "setup-workspace.sh").is_file()
+    pyproject = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
+    assert f"monkeybot[gemini]{COMPATIBLE_CORE_RANGE}" in pyproject
+    assert "[tool.uv.sources]" not in pyproject
 
 
 def test_run_new_skips_existing(tmp_path: Path) -> None:
@@ -40,3 +44,72 @@ def test_run_new_force_overwrites(tmp_path: Path) -> None:
     text = p.read_text(encoding="utf-8")
     assert "Making files and code changes" in text
     assert "custom" not in text
+
+
+def test_write_agent_pyproject_maps_provider_extra(tmp_path: Path) -> None:
+    dest = tmp_path / "My Cool Bot"
+    dest.mkdir()
+    status = write_agent_pyproject(dest, provider="anthropic", force=False)
+    assert status == "created"
+    text = (dest / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'name = "my-cool-bot"' in text
+    assert f'"monkeybot[claude]{COMPATIBLE_CORE_RANGE}"' in text
+    assert "[tool.uv.sources]" not in text
+
+
+def test_write_agent_pyproject_merges_feature_extras(tmp_path: Path) -> None:
+    write_agent_pyproject(
+        tmp_path,
+        provider="openai",
+        extras=["postgres", "sandbox", "observability"],
+        force=False,
+    )
+    text = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
+    assert (
+        f'"monkeybot[openai,postgres,sandbox,observability]{COMPATIBLE_CORE_RANGE}"'
+        in text
+    )
+
+
+def test_write_agent_pyproject_fake_has_no_extra(tmp_path: Path) -> None:
+    status = write_agent_pyproject(tmp_path, provider="fake", force=False)
+    assert status == "created"
+    text = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
+    assert f'"monkeybot{COMPATIBLE_CORE_RANGE}"' in text
+    assert "monkeybot[" not in text
+
+
+def test_write_agent_pyproject_fake_with_features(tmp_path: Path) -> None:
+    write_agent_pyproject(tmp_path, provider="fake", extras=["postgres"], force=False)
+    text = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
+    assert f'"monkeybot[postgres]{COMPATIBLE_CORE_RANGE}"' in text
+
+
+def test_write_agent_pyproject_skips_without_force(tmp_path: Path) -> None:
+    write_agent_pyproject(tmp_path, provider="openai", force=False)
+    (tmp_path / "pyproject.toml").write_text("custom\n", encoding="utf-8")
+    assert write_agent_pyproject(tmp_path, provider="openai", force=False) == "skipped"
+    assert (tmp_path / "pyproject.toml").read_text(encoding="utf-8") == "custom\n"
+
+
+def test_write_agent_pyproject_force_overwrites(tmp_path: Path) -> None:
+    write_agent_pyproject(tmp_path, provider="openai", force=False)
+    status = write_agent_pyproject(tmp_path, provider="aws_bedrock", force=True)
+    assert status == "overwritten"
+    text = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
+    assert f'"monkeybot[bedrock]{COMPATIBLE_CORE_RANGE}"' in text
+
+
+def test_monkeybot_dep_for_provider_aliases() -> None:
+    assert monkeybot_dep_for_provider("openai") == f"monkeybot[openai]{COMPATIBLE_CORE_RANGE}"
+    assert monkeybot_dep_for_provider("anthropic") == f"monkeybot[claude]{COMPATIBLE_CORE_RANGE}"
+    assert monkeybot_dep_for_provider("aws_bedrock") == f"monkeybot[bedrock]{COMPATIBLE_CORE_RANGE}"
+    assert monkeybot_dep_for_provider(None) == f"monkeybot[gemini]{COMPATIBLE_CORE_RANGE}"
+    assert monkeybot_dep_for_provider("fake") == f"monkeybot{COMPATIBLE_CORE_RANGE}"
+
+
+def test_monkeybot_requirement_dedupes_provider_in_extras() -> None:
+    from monkeybot_cli.scaffold import monkeybot_requirement
+
+    dep = monkeybot_requirement(provider="openai", extras=["openai", "postgres"])
+    assert dep == f"monkeybot[openai,postgres]{COMPATIBLE_CORE_RANGE}"

@@ -17,39 +17,44 @@ monkeybot is a thin **multi-cloud-capable** harness for tool-using LLM agents: F
 > **Positioning:** monkeybot is an owned agent runtime with a focused provider set — not a universal integration catalog. **Docs and examples are GCP-first** (Vertex, GCS, Cloud Run, Agent Engine); **AWS** paths (Bedrock, S3, AgentCore, ECS/Lambda) are shipped in the Pattern guides; Azure coverage is thinner. See [Cloud deployment — Positioning](docs/cloud-deployment-design.md#positioning).
 
 > [!NOTE]
-> **Not on PyPI yet** — install from a clone of this repository. Skills under `SKILLS_PATH` execute Python code; only add skills from trusted sources.
+> Skills under `SKILLS_PATH` execute Python code; only add skills from trusted sources.
 
 ## Installation
 
+Install [uv](https://docs.astral.sh/uv/), then the global CLI (no repo clone required):
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh   # if needed
+uv tool install monkeybot-cli
+
+monkeybot new --dest ./my-agent --provider openai --yes
+cd my-agent
+uv sync
+cp .env.example .env   # add provider keys
+monkeybot doctor
+monkeybot chat
+```
+
+`monkeybot new` writes an agent `pyproject.toml` with `monkeybot[<provider>]` (plus any `--with` extras). Plain `uv sync` installs the harness into the agent `.venv`. Upgrade the CLI with `uv tool upgrade monkeybot-cli`.
+
+Full walkthrough (config, `.env`, MCP, Docker): **[Getting Started](docs/getting-started.md)**.
+
+### Developing the harness (contributors)
+
+Clone only if you are changing monkeybot itself:
+
 ```bash
 git clone https://github.com/human-plus-machine/monkeybot.git
-cd monkeybot
-uv sync
-cd cli && uv sync && uv run monkeybot new --dest .. --yes && cd ..
-uv run python -m monkeybot.gateway.main
+cd monkeybot && uv sync
+cd cli && uv sync
+uv tool install --editable .
 ```
 
-For a self-contained example agent (own `pyproject.toml` + `.venv`, depends on this harness via an editable path — never modifies it), see **[`demo_agent/`](demo_agent/)**:
-
-```bash
-cd demo_agent && uv sync
-cd ../cli && uv run monkeybot chat --cwd ../demo_agent
-```
-
-Full setup (config, `.env`, MCP, Docker): **[Getting Started](docs/getting-started.md)**.
+For a self-contained example agent that depends on this checkout via an editable path, see **[`demo_agent/`](demo_agent/)**.
 
 ## CLI (`monkeybot`)
 
-The standalone CLI in **[`cli/`](cli/)** scaffolds, validates, and talks to an agent from the terminal. Use `monkeybot chat` for the turn-based SSE gateway, or `monkeybot talk` for the realtime WebSocket gateway (audio/text).
-
-### Install
-
-```bash
-cd cli
-uv tool install --editable .   # puts `monkeybot` on your PATH
-```
-
-Prefer not to install globally? Use `uv run monkeybot <command>` from inside `cli/` instead.
+The CLI scaffolds, validates, and talks to an agent from the terminal. Use `monkeybot chat` for the turn-based SSE gateway, or `monkeybot talk` for the realtime WebSocket gateway (audio/text).
 
 ### Talk to an agent
 
@@ -62,13 +67,13 @@ Type a message and press Enter. `/bye` exits (and stops the gateway if this comm
 
 ### Agent-first dependencies
 
-The CLI is intentionally thin — it depends only on base `monkeybot` and does **not** pull in provider/storage extras (`bedrock`, `postgres`, …) globally. Those extras are declared on the **agent project** (e.g. `pr-review-agent/pyproject.toml` lists `monkeybot[bedrock,postgres]`). `monkeybot run` and `monkeybot chat` spawn the gateway from the agent project's interpreter so the extras resolve correctly:
+The CLI is intentionally thin — it does **not** pull in provider/storage extras (`bedrock`, `postgres`, …) globally. Those extras are declared on the **agent project** (scaffolded `pyproject.toml` lists `monkeybot[…]`). `monkeybot run` and `monkeybot chat` spawn the gateway from the agent project's interpreter so the extras resolve correctly:
 
 1. `<agent>/.venv/bin/python` — used directly when a project venv exists.
 2. `uv run python -m monkeybot.gateway.main` — when `<agent>/pyproject.toml` exists but no `.venv`.
 3. `sys.executable` (the CLI's interpreter) — legacy fallback for config-only trees (just `monkeybot_config/`, no `pyproject.toml`); in this case extras must be installed in the CLI env.
 
-`monkeybot doctor` checks provider extras and Python version in that same interpreter, and its `remediation` field points at the agent project (`uv sync --extra …` there), not the CLI.
+`monkeybot doctor` checks provider extras and Python version in that same interpreter, and its `remediation` field points at the agent project (add `monkeybot[<extra>]` to `pyproject.toml` dependencies, then `uv sync`), not the CLI.
 
 To attach to a gateway you started yourself (e.g. to watch its logs), run it separately and connect with `--attach`:
 
@@ -81,7 +86,7 @@ monkeybot chat --attach  # terminal 2: connect to the running gateway
 
 | Command | Purpose |
 |---|---|
-| `monkeybot new` | Scaffold `monkeybot_config/`, workspace dirs, and `.env.example` |
+| `monkeybot new` | Scaffold `monkeybot_config/`, workspace dirs, agent `pyproject.toml`, and `.env.example` |
 | `monkeybot validate` | Check `monkeybot.yaml`, referenced paths, and MCP config (`--json` for machine output) |
 | `monkeybot doctor` | Verify Python, provider extras, credentials, and port availability (`--json` for machine output) |
 | `monkeybot run` | Start the SSE gateway in the foreground (keeps logs visible) |
@@ -221,7 +226,7 @@ Run checks before submitting: `uv run pytest && uv run ruff check . && uv run my
 
 1. Anyone runs the **Prepare release** workflow (Actions tab → Prepare release → Run workflow), choosing `core` or `cli` and a version bump. It bumps the package's `pyproject.toml`, moves the `CHANGELOG.md` `Unreleased` section into a dated entry on a `release/<package>-v<version>` branch, and opens a PR from that branch into `main` (`develop` itself is untouched until the PR merges, so an abandoned release PR leaves no trace).
 2. An admin reviews and **merges the PR** (branch protection on `main` restricts who can merge — see below). Use a regular merge commit, not squash, so `main`'s history and the release tag line up with what was reviewed.
-3. The **Publish release** workflow runs automatically on that merge: it tags the new version, creates a GitHub Release from the changelog entry, and merges `main` back into `develop` so the two branches don't drift apart.
+3. The **Publish release** workflow runs automatically on that merge: it tags the new version, creates a GitHub Release from the changelog entry, Trusted-Publishes the released package(s) to PyPI (core before CLI when both ship), and merges `main` back into `develop` so the two branches don't drift apart.
 
 One-time setup (repo Settings → Branches → add rule for `main`): require a pull request before merging, and restrict who can push to matching branches to Admins. That's the only access control needed — anyone can prepare a release, only admins can promote it to `main`.
 

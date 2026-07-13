@@ -10,9 +10,18 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 - Repo-root `monkeybot_config_example/` — full-option human-readable config templates (`.example` filenames).
 - `monkeybot new` also scaffolds `permissions.yaml`.
+- `monkeybot new` writes an agent-project `pyproject.toml` with a PyPI `monkeybot[<provider>]>=2.1.0,<3` dependency (plain `uv sync` after scaffold).
+- `monkeybot new` interactive menus (and `--with`) select additional providers/features into that same `monkeybot[…]` dep list.
+- `scripts/smoke_global_cli.sh` — local-wheel stand-in for clean-machine PyPI smoke (`uv tool install` → `new` → `uv sync` → `validate`/`doctor`/`chat`).
+- README / getting-started / onboarding skill lead with `uv tool install monkeybot-cli` (clone is contributor-only).
+- **monkeybot-cli** declares published core bound `monkeybot[cli]>=2.1.0,<3` (local clones still use `[tool.uv.sources]`).
 
 ### Changed
 
+- `monkeybot doctor` remediation for missing extras: add `monkeybot[<extra>]` to agent deps + `uv sync` (keeps `uv sync --extra` only when the agent defines project-level optionals).
+- `fake` provider credentials treated as optional in `doctor` (smoke / no-API-key path).
+- `publish-release.yml` Trusted-Publishes to PyPI (OIDC) packages tagged in that run only — core before cli; `scripts/release.py publish` emits `packages` via `GITHUB_OUTPUT`.
+- Remove redundant CLI hatch `force-include` of `scaffold_defaults` (duplicated wheel paths and broke `uv build`).
 - Scaffold templates and `run_new` moved into **monkeybot-cli** (`monkeybot_cli.scaffold` / `scaffold_defaults`). Harness `monkeybot.scaffold` is a compatibility shim; Docker installs the CLI to scaffold at image build.
 - **monkeybot-cli** version bumped to **0.2.0**.
 
