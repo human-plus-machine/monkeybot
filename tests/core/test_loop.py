@@ -913,6 +913,80 @@ def test_chunk_tool_calls_groups_consecutive_tasks() -> None:
     assert chunks[2] == [d]
 
 
+def test_chunk_tool_calls_groups_consecutive_parallel_safe() -> None:
+    a = ToolCall(call_id="a", name="read_file", args={"path": "a"})
+    b = ToolCall(call_id="b", name="glob", args={"pattern": "*"})
+    c = ToolCall(call_id="c", name="write_file", args={"path": "x", "content": ""})
+    d = ToolCall(call_id="d", name="search_memory", args={"query": "q"})
+    safe = frozenset({"read_file", "glob", "search_memory"})
+    chunks = _chunk_tool_calls([a, b, c, d], parallel_safe=safe)
+    assert [len(ch) for ch in chunks] == [2, 1, 1]
+    assert [x.name for x in chunks[0]] == ["read_file", "glob"]
+    assert chunks[1][0].name == "write_file"
+    assert chunks[2][0].name == "search_memory"
+
+
+@pytest.mark.asyncio
+async def test_parallel_safe_tools_results_in_call_id_order() -> None:
+    """Parallel-safe read tools run concurrently; results persist in call_id order."""
+    delays = {"c1": 0.04, "a1": 0.01, "b1": 0.02}
+    concurrent = {"n": 0, "max": 0}
+    lock = asyncio.Lock()
+
+    class SlowReadExecutor:
+        async def execute(self, *, call: ToolCall, ctx: TurnContext) -> ToolExecutionResult:
+            del ctx
+            async with lock:
+                concurrent["n"] += 1
+                concurrent["max"] = max(concurrent["max"], concurrent["n"])
+            await asyncio.sleep(delays.get(call.call_id, 0.01))
+            async with lock:
+                concurrent["n"] -= 1
+            return ToolExecutionResult.ok_text(f"result:{call.call_id}")
+
+    prov = FakeProvider(
+        [
+            [
+                ToolCall(call_id="c1", name="read_file", args={"path": "c"}),
+                ToolCall(call_id="a1", name="glob", args={"pattern": "*"}),
+                ToolCall(call_id="b1", name="search_memory", args={"query": "q"}),
+                Done(),
+            ],
+            [TextDelta(text="done"), Done()],
+        ]
+    )
+    hist = FakeHistory()
+    tools = [
+        ToolDef("read_file", "r", {"type": "object"}, parallel_safe=True),
+        ToolDef("glob", "g", {"type": "object"}, parallel_safe=True),
+        ToolDef("search_memory", "s", {"type": "object"}, parallel_safe=True),
+    ]
+    ctx = TurnContext(**{**_ctx().__dict__, "tools": tools})
+    events: list[object] = []
+    async for e in run(
+        "go",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[AllowInspector()],
+        tool_executor=SlowReadExecutor(),
+        max_turns=4,
+    ):
+        events.append(e)
+
+    assert concurrent["max"] >= 2
+    tool_resp_messages = [
+        m
+        for m in hist.rows
+        if m.role == "user" and m.content and isinstance(m.content[0], ToolResponse)
+    ]
+    assert len(tool_resp_messages) == 1
+    assert [b.id for b in tool_resp_messages[0].content] == ["a1", "b1", "c1"]
+
+    result_events = [e for e in events if isinstance(e, ToolCallResult)]
+    assert [e.result for e in result_events] == ["result:a1", "result:b1", "result:c1"]
+
+
 @pytest.mark.asyncio
 async def test_parallel_task_tools_cap_concurrent_executions() -> None:
     """Up to 12 ``task`` calls in one batch; at most 10 run inside the semaphore at once."""

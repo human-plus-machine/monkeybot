@@ -98,10 +98,15 @@ class HookManager:
     One ``HookManager`` is constructed per agent (gateway-owned), shared by
     the loop and any subscribers (e.g. the memory hook). Subagents receive a
     no-op manager so duplicate writes do not race the parent's hooks.
+
+    Fire-and-forget handlers (``timeout_s == 0``) are tracked so
+    :meth:`drain_settlement` can wait for them before ``TurnComplete`` or the
+    next provider call — without requiring SSE client ACKs.
     """
 
     def __init__(self) -> None:
         self._handlers: dict[HookEvent, list[HookFn]] = {}
+        self._pending: set[asyncio.Task[None]] = set()
 
     def register(self, event: HookEvent, fn: HookFn) -> None:
         """Append ``fn`` to the handler list for ``event``.
@@ -136,7 +141,8 @@ class HookManager:
               Detached tasks may not finish before the process exits; in
               short-lived handlers (Lambda, Cloud Functions) pass
               ``hook_manager=None`` or use ``timeout_s > 0`` so hooks complete
-              before returning.
+              before returning. Call :meth:`drain_settlement` before idle
+              boundaries when side effects must land.
 
         Hooks may not recursively trigger this method; nested calls return
         ``payload`` unchanged (after a single debug log line).
@@ -162,6 +168,24 @@ class HookManager:
             _in_hook.reset(token)
         return payload
 
+    async def drain_settlement(self, *, timeout_s: float = _DEFAULT_TIMEOUT_S) -> None:
+        """Await outstanding fire-and-forget hook tasks up to ``timeout_s``.
+
+        Does not cancel slow hooks (they may still finish after the barrier).
+        Never raises for hook failures — only logs a warning on timeout.
+        Safe to call when no tasks are pending.
+        """
+        pending = [t for t in self._pending if not t.done()]
+        if not pending:
+            return
+        _done, still = await asyncio.wait(pending, timeout=max(0.0, timeout_s))
+        if still:
+            _log.warning(
+                "hook settlement timed out pending=%d timeout_s=%.2f",
+                len(still),
+                timeout_s,
+            )
+
     @staticmethod
     async def _run_one(fn: HookFn, payload: HookPayload, timeout_s: float) -> None:
         try:
@@ -183,8 +207,7 @@ class HookManager:
                 exc,
             )
 
-    @staticmethod
-    def _schedule_background(fn: HookFn, payload: HookPayload) -> None:
+    def _schedule_background(self, fn: HookFn, payload: HookPayload) -> None:
         async def _wrap() -> None:
             token = _in_hook.set(True)
             try:
@@ -201,7 +224,13 @@ class HookManager:
             finally:
                 _in_hook.reset(token)
 
-        asyncio.create_task(_wrap())
+        task = asyncio.create_task(_wrap())
+        self._pending.add(task)
+
+        def _done(t: asyncio.Task[None]) -> None:
+            self._pending.discard(t)
+
+        task.add_done_callback(_done)
 
 
 __all__ = ["HookEvent", "HookPayload", "HookFn", "HookManager"]

@@ -1,4 +1,4 @@
-"""Doom-loop detection: consecutive identical failing tool calls."""
+"""Doom-loop detection: consecutive identical tool calls (ok or error)."""
 
 from __future__ import annotations
 
@@ -47,24 +47,16 @@ class ToolsRecordingProvider(FakeProvider):
             yield ev
 
 
-class AlternatingExecutor:
-    def __init__(self) -> None:
-        self.n = 0
-
-    async def execute(self, *, call: ToolCall, ctx: object) -> ToolExecutionResult:
-        del call, ctx
-        self.n += 1
-        if self.n < 3:
-            return ToolExecutionResult.err("boom")
-        return ToolExecutionResult.ok_text("ok")
-
-
-def _failing_call(call_id: str) -> ToolCall:
+def _tool_call(call_id: str, *, args: dict[str, object] | None = None) -> ToolCall:
     return ToolCall(
         call_id=call_id,
         name="run_command",
-        args={"command": "echo hi"},
+        args=dict(args or {"command": "echo hi"}),
     )
+
+
+def _failing_call(call_id: str) -> ToolCall:
+    return _tool_call(call_id)
 
 
 def test_tool_call_fingerprint_stable_under_key_order() -> None:
@@ -74,13 +66,105 @@ def test_tool_call_fingerprint_stable_under_key_order() -> None:
     assert a != _tool_call_fingerprint("run_command", {"a": 3, "b": 1})
 
 
+def test_doom_loop_tracker_exempts_polling_tools() -> None:
+    """``doom_loop_exempt`` tools (e.g. loop_status) never trip the guard."""
+    tracker = _DoomLoopTracker(
+        threshold=3,
+        exempt_names=frozenset({"loop_status"}),
+    )
+    args: dict[str, object] = {}
+    for _ in range(10):
+        tracker.record("loop_status", args)
+    assert tracker.triggered is False
+    assert tracker.take_error() is None
+    assert tracker.streak_count == 0
+
+    # Non-exempt tools still trip.
+    tracker.record("run_command", {"command": "x"})
+    tracker.record("run_command", {"command": "x"})
+    tracker.record("run_command", {"command": "x"})
+    assert tracker.take_error() is not None
+
+
+def test_doom_loop_exempt_names_from_tool_defs() -> None:
+    from monkeybot.core.runtime.loop import _doom_loop_exempt_names
+
+    tools = [
+        ToolDef("read_file", "r", {"type": "object"}, parallel_safe=True),
+        ToolDef(
+            "loop_status",
+            "s",
+            {"type": "object"},
+            parallel_safe=True,
+            doom_loop_exempt=True,
+        ),
+    ]
+    assert _doom_loop_exempt_names(tools) == frozenset({"loop_status"})
+
+
+@pytest.mark.asyncio
+async def test_run_does_not_doom_loop_on_loop_status_polling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Documented start_loop / loop_status polling must not force recovery."""
+    monkeypatch.setenv("DOOM_LOOP_THRESHOLD", "3")
+
+    def _status_call(call_id: str) -> ToolCall:
+        return ToolCall(call_id=call_id, name="loop_status", args={})
+
+    scripts = [
+        [_status_call("c1"), Done()],
+        [_status_call("c2"), Done()],
+        [_status_call("c3"), Done()],
+        [_status_call("c4"), Done()],
+        [TextDelta(text="still waiting, will check again later."), Done()],
+    ]
+    prov = ToolsRecordingProvider(scripts)
+    ctx = _ctx()
+    from monkeybot.core.context import TurnContext
+
+    ctx = TurnContext(
+        **{
+            **ctx.__dict__,
+            "tools": [
+                ToolDef(
+                    "loop_status",
+                    "status",
+                    {"type": "object"},
+                    parallel_safe=True,
+                    doom_loop_exempt=True,
+                )
+            ],
+        }
+    )
+    events = []
+    async for e in run(
+        "u",
+        ctx,
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(ToolExecutionResult.ok_text('{"status":"running"}')),
+        max_turns=10,
+    ):
+        events.append(e)
+
+    assert not any(
+        isinstance(e, Error) and e.error.startswith("Doom loop detected:") for e in events
+    )
+    assert isinstance(events[-1], TurnComplete)
+    # Four status polls + final text reply — tools available on every status turn.
+    assert prov.stream_tools[:4] == [["loop_status"]] * 4
+    assert prov.stream_tools[4] == ["loop_status"]
+
+
 def test_doom_loop_tracker_triggers_on_identical_failures() -> None:
     tracker = _DoomLoopTracker(threshold=3)
     args = {"command": "echo hi"}
-    tracker.record("run_command", args, is_error=True)
-    tracker.record("run_command", args, is_error=True)
+    tracker.record("run_command", args)
+    tracker.record("run_command", args)
     assert tracker.take_error() is None
-    tracker.record("run_command", args, is_error=True)
+    tracker.record("run_command", args)
     error, note = _doom_loop_texts("run_command", 3)
     assert tracker.take_error() == error
     assert tracker.triggered is True
@@ -88,16 +172,40 @@ def test_doom_loop_tracker_triggers_on_identical_failures() -> None:
     assert tracker.recovery_note == note
     assert tracker.take_error() is None
     # While triggered (before consume_recovery), further records are no-ops.
-    tracker.record("run_command", args, is_error=True)
+    tracker.record("run_command", args)
     assert tracker.take_error() is None
 
 
+def test_doom_loop_tracker_triggers_on_identical_successes() -> None:
+    """Successful no-progress loops (e.g. screenshot spam) must trip the guard."""
+    tracker = _DoomLoopTracker(threshold=3)
+    args: dict[str, object] = {}
+    tracker.record("browser__browser_screenshot", args)
+    tracker.record("browser__browser_screenshot", args)
+    assert tracker.take_error() is None
+    tracker.record("browser__browser_screenshot", args)
+    assert tracker.take_error() == _doom_loop_texts("browser__browser_screenshot", 3)[0]
+    assert tracker.triggered is True
+    assert tracker.force_no_tools is True
+
+
+def test_doom_loop_tracker_success_does_not_reset_identical_streak() -> None:
+    """Ok vs error does not reset — mixed outcomes with same args still count."""
+    tracker = _DoomLoopTracker(threshold=3)
+    args = {"command": "echo hi"}
+    tracker.record("run_command", args)
+    tracker.record("run_command", args)
+    # Previously a success reset the streak; it must continue now.
+    tracker.record("run_command", args)
+    assert tracker.take_error() is not None
+
+
 def test_doom_loop_tracker_rearms_after_recovery() -> None:
-    """A second identical-failure streak after recovery must trigger again."""
+    """A second identical streak after recovery must trigger again."""
     tracker = _DoomLoopTracker(threshold=2)
     args = {"command": "echo hi"}
-    tracker.record("run_command", args, is_error=True)
-    tracker.record("run_command", args, is_error=True)
+    tracker.record("run_command", args)
+    tracker.record("run_command", args)
     assert tracker.take_error() is not None
     force, note = tracker.consume_recovery()
     assert force is True
@@ -105,9 +213,9 @@ def test_doom_loop_tracker_rearms_after_recovery() -> None:
     assert tracker.triggered is False
     assert tracker.streak_count == 0
 
-    tracker.record("run_command", args, is_error=True)
+    tracker.record("run_command", args)
     assert tracker.take_error() is None
-    tracker.record("run_command", args, is_error=True)
+    tracker.record("run_command", args)
     assert tracker.take_error() is not None
     assert tracker.force_no_tools is True
     assert tracker.consume_recovery()[0] is True
@@ -115,7 +223,7 @@ def test_doom_loop_tracker_rearms_after_recovery() -> None:
 
 def test_doom_loop_tracker_consume_recovery() -> None:
     tracker = _DoomLoopTracker(threshold=1)
-    tracker.record("run_command", {"command": "x"}, is_error=True)
+    tracker.record("run_command", {"command": "x"})
     assert tracker.take_error() is not None
     force, note = tracker.consume_recovery()
     assert force is True
@@ -124,24 +232,24 @@ def test_doom_loop_tracker_consume_recovery() -> None:
     assert tracker.triggered is False
 
 
-def test_doom_loop_tracker_resets_on_success_or_different_args() -> None:
+def test_doom_loop_tracker_resets_on_different_args() -> None:
     tracker = _DoomLoopTracker(threshold=3)
     args = {"command": "echo hi"}
-    tracker.record("run_command", args, is_error=True)
-    tracker.record("run_command", args, is_error=True)
-    tracker.record("run_command", args, is_error=False)
-    assert tracker.streak_count == 0
-    tracker.record("run_command", args, is_error=True)
-    tracker.record("run_command", {"command": "other"}, is_error=True)
+    tracker.record("run_command", args)
+    tracker.record("run_command", args)
+    tracker.record("run_command", {"command": "other"})
     assert tracker.streak_count == 1
     assert tracker.take_error() is None
+    tracker.record("run_command", {"command": "other"})
+    tracker.record("run_command", {"command": "other"})
+    assert tracker.take_error() is not None
 
 
 def test_doom_loop_tracker_disabled_when_threshold_zero() -> None:
     tracker = _DoomLoopTracker(threshold=0)
     args = {"command": "x"}
     for _ in range(5):
-        tracker.record("run_command", args, is_error=True)
+        tracker.record("run_command", args)
     assert tracker.triggered is False
     assert tracker.take_error() is None
 
@@ -200,10 +308,46 @@ async def test_run_doom_loop_emits_error_and_forces_no_tools(
 
 
 @pytest.mark.asyncio
+async def test_run_doom_loop_on_identical_successes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DOOM_LOOP_THRESHOLD", "3")
+    shot = [_tool_call("c1", args={}), Done()]
+    prov = ToolsRecordingProvider(
+        [
+            shot,
+            shot,
+            shot,
+            [TextDelta(text="I will navigate instead."), Done()],
+        ]
+    )
+    events = []
+    async for e in run(
+        "u",
+        _ctx(),
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(ToolExecutionResult.ok_text('{"ok": true}')),
+        max_turns=10,
+    ):
+        events.append(e)
+
+    doom_errors = [
+        e
+        for e in events
+        if isinstance(e, Error) and e.error.startswith("Doom loop detected:")
+    ]
+    assert len(doom_errors) == 1
+    assert isinstance(events[-1], TurnComplete)
+    assert prov.stream_tools[3] == []
+
+
+@pytest.mark.asyncio
 async def test_run_doom_loop_triggers_again_after_recovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """After recovery, a second identical-failure streak must fire again.
+    """After recovery, a second identical streak must fire again.
 
     Uses a whitespace-only recovery reply so the silent-model guard continues the
     same user message (a normal text reply would end the turn after the first
@@ -277,19 +421,17 @@ async def test_run_doom_loop_disabled(
 
 
 @pytest.mark.asyncio
-async def test_run_does_not_trigger_doom_loop_when_success_breaks_streak(
+async def test_run_does_not_trigger_doom_loop_when_args_change(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("DOOM_LOOP_THRESHOLD", "3")
-    call = [_failing_call("c1"), Done()]
-    prov = ToolsRecordingProvider(
-        [
-            call,
-            call,
-            call,
-            [TextDelta(text="done"), Done()],
-        ]
-    )
+    scripts = [
+        [_tool_call("c1", args={"command": "a"}), Done()],
+        [_tool_call("c2", args={"command": "a"}), Done()],
+        [_tool_call("c3", args={"command": "b"}), Done()],
+        [TextDelta(text="done"), Done()],
+    ]
+    prov = ToolsRecordingProvider(scripts)
     events = []
     async for e in run(
         "u",
@@ -297,7 +439,7 @@ async def test_run_does_not_trigger_doom_loop_when_success_breaks_streak(
         provider=prov,
         history=FakeHistory(),
         inspectors=[AllowInspector()],
-        tool_executor=AlternatingExecutor(),
+        tool_executor=RecordingExecutor(ToolExecutionResult.ok_text("ok")),
         max_turns=10,
     ):
         events.append(e)
@@ -306,7 +448,7 @@ async def test_run_does_not_trigger_doom_loop_when_success_breaks_streak(
         isinstance(e, Error) and e.error.startswith("Doom loop detected:") for e in events
     )
     assert isinstance(events[-1], TurnComplete)
-    assert prov.stream_tools[-1] == ["run_command"]
+    assert all(tools == ["run_command"] for tools in prov.stream_tools[:3])
 
 
 @pytest.mark.asyncio

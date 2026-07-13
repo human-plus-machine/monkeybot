@@ -27,6 +27,7 @@ from monkeybot_cli.chat_tui import (
     load_history_lines,
     parse_slash_command,
 )
+from monkeybot_cli.chat_tui_widgets import ComposerBusySpinner
 
 
 def test_is_exit_command() -> None:
@@ -653,6 +654,34 @@ def test_queue_while_busy(tmp_path: Path) -> None:
             assert app._pending == []
             assert sent == ["queued one"]
             assert list(app.query(UserTurn))
+
+    asyncio.run(_run())
+
+
+def test_composer_busy_spinner_tracks_turn(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            spinner = app.query_one("#composer-busy", ComposerBusySpinner)
+            assert spinner.busy is False
+            assert "working" not in app._status_line()
+
+            app._handle_event(ChatUiEvent("turn_started", {}))
+            await pilot.pause()
+            assert spinner.busy is True
+            assert "working · Ctrl-C interrupt" in app._status_line()
+
+            app._handle_event(ChatUiEvent("turn_complete", {}))
+            await pilot.pause()
+            assert spinner.busy is False
+            assert "working" not in app._status_line()
 
     asyncio.run(_run())
 

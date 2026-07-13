@@ -292,6 +292,7 @@ def _core_tool_defs(
             "read_file",
             "Read a UTF-8 text file from the workspace with path validation.",
             read_schema,
+            parallel_safe=True,
         ),
         ToolDef(
             "write_file",
@@ -308,16 +309,19 @@ def _core_tool_defs(
             "glob",
             "List workspace file paths matching a glob pattern. Prefer over run_command+ls for discovery.",
             glob_schema,
+            parallel_safe=True,
         ),
         ToolDef(
             "search_memory",
             "Search markdown/text under the memory directory for a keyword or phrase.",
             search_schema,
+            parallel_safe=True,
         ),
         ToolDef(
             "list_skills",
             "List installed skills with names, descriptions, and entry points.",
             list_skills_schema,
+            parallel_safe=True,
         ),
     ]
     if include_task_tool:
@@ -404,6 +408,8 @@ def _core_tool_defs(
                     "properties": {"loop_id": {"type": "string"}},
                     "required": [],
                 },
+                parallel_safe=True,
+                doom_loop_exempt=True,
             ),
             ToolDef(
                 "pause_loop",

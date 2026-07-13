@@ -24,7 +24,14 @@ from monkeybot.core.llm.provider import (
     UsageEvent,
 )
 from monkeybot.core.logging_utils import kv
-from monkeybot.core.types.content_blocks import ContentBlock, Text, ToolRequest, ToolResponse
+from monkeybot.core.types.content_blocks import (
+    ContentBlock,
+    RedactedThinking,
+    Text,
+    Thinking,
+    ToolRequest,
+    ToolResponse,
+)
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._utils import safe_parse_tool_args
 
@@ -112,6 +119,10 @@ def messages_to_openai(messages: Sequence[Message]) -> tuple[str | None, list[di
                             },
                         }
                     )
+                elif isinstance(block, (Thinking, RedactedThinking)):
+                    # Chat Completions has no thinking wire type; drop so Ollama /
+                    # HF / OpenAI can continue after a turn that stored reasoning.
+                    continue
                 else:
                     raise ValueError(
                         f"unsupported assistant block for OpenAI-compat: {type(block).__name__}"

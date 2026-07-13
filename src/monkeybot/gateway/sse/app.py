@@ -436,6 +436,7 @@ class GatewayLoopPort:
                 attachment_catalog=bus.attachment_catalog,
                 transcript_writer=transcript_writer,
                 vertex_google_search=vertex_google_search_enabled_from_config(),
+                input_admission=bus.admission,
             ):
                 if isinstance(evt, TurnComplete):
                     u = evt.usage

@@ -78,19 +78,36 @@ One **user message** may span multiple **inner turns** (model → tools → mode
 
 1. Append user message to history; fire `USER_MESSAGE` hook.
 2. **Inner turn loop** (up to `MAX_TURNS`, default 50):
+   - Drain **steer** queue (mid-turn user injections) into history; emit `UserSteered`.
+   - Await hook **settlement** (fire-and-forget `POST_TOOL` / prior write-side hooks) with bounded timeout.
    - Refresh memory index; optional context curation (turn 1 only).
    - Compose system prompt; resolve attachments; preflight token count.
    - Optionally summarize history or shape tool outputs under context pressure.
    - Stream provider; accumulate tool calls until `Done`.
-   - Execute tools (inspectors → hooks → executor); append assistant + tool rows.
-   - Doom-loop check: identical failing tool streak may force a no-tools recovery turn.
+   - Execute tools (inspectors → `ToolCallStarted` → await settlement/`PRE_TOOL` → executor); append assistant + tool rows.
+   - Doom-loop check: identical tool streak (ok or error) may force a no-tools recovery turn.
    - Repeat until final assistant text or max turns.
-3. Emit `TurnComplete` with usage totals and optional trace id.
+3. Fire `POST_TURN`; settle fire-and-forget hooks (bounded); emit `TurnComplete` with usage totals and optional trace id.
+4. Gateway drains **follow-up** queue (if any) and starts the next turn under the same session lock.
+
+### Input admission (steer vs follow-up)
+
+| Mode | Endpoint | When accepted | When applied |
+|------|----------|---------------|--------------|
+| Reply | `POST /sessions/{id}/reply` | Session idle | Starts a turn immediately (`SESSION_BUSY` if busy) |
+| Steer | `POST /sessions/{id}/steer` | Session busy | Injected after current tool batch / before next provider call |
+| Follow-up | `POST /sessions/{id}/queue` | Busy → enqueue; idle → start | FIFO drain after `TurnComplete` / lock release |
+
+Do **not** conflate with HITL `ToolConfirmationRequest`. Cancel clears pending steer; follow-ups survive. Caps: `MONKEYBOT_STEER_QUEUE_MAX` (default 8), `MONKEYBOT_FOLLOW_UP_QUEUE_MAX` (default 16).
+
+**Process-local only:** steer/follow-up queues live on the in-process `SessionBus` (same constraint as the SSE registry). Multi-replica gateways do not share admission queues across instances — pin sticky sessions to one replica, or treat `/queue` as best-effort for single-process deployments. If drain cannot acquire the durable turn lock (another replica / stale claim), the item is requeued and retried on an interval (`MONKEYBOT_FOLLOW_UP_LOCK_RETRY_S`, default 1s) until the lock frees or the wait budget expires (`MONKEYBOT_FOLLOW_UP_LOCK_WAIT_MS`, default = session-turn stale window), after which that follow-up is dropped so the queue cannot wedge forever.
 
 ### Inner-turn phases
 
 | Phase | When | Key files |
 |-------|------|-----------|
+| Steer drain | Start of each inner turn | `core/runtime/input_admission.py`, `loop.py` |
+| Hook settlement | Before provider call / `TurnComplete` | `core/hooks/`, `loop.py` |
 | Hooks (`PRE_TURN`) | Turn 1 of user message | `core/hooks/` |
 | Context curation | Turn 1, if enabled + thresholds met | `core/context/curator.py` |
 | System prompt build | Every inner turn | `core/prompts/prompt.py` |
@@ -107,8 +124,9 @@ One **user message** may span multiple **inner turns** (model → tools → mode
 1. `POST /sessions` → create session
 2. `GET /sessions/{id}/events` → SSE stream
 3. `POST /sessions/{id}/reply` → `start_turn()` (background)
-4. Events: `Thinking`, `AssistantDelta`, `ToolCallStarted`, `ToolCallResult`, `ContextSummarizing`, `SystemPromptSnapshot`, `TurnComplete`, `Error`
-5. `POST /sessions/{id}/cancel` → cooperative cancellation
+4. Events: `Thinking`, `AssistantDelta`, `ToolCallStarted`, `ToolCallResult`, `UserSteered`, `QueuedInputAccepted`, `ContextSummarizing`, `SystemPromptSnapshot`, `TurnComplete`, `Error`
+5. `POST /sessions/{id}/steer` / `queue` → mid-turn inject / idle FIFO (see above)
+6. `POST /sessions/{id}/cancel` → cooperative cancellation (+ clear steer)
 
 ---
 
@@ -127,7 +145,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 **How it works:**
 - `run()` is an async generator yielding `AgentEvent` until `TurnComplete`.
 - Tool calls accumulate during streaming until `Done`, then execute in **lexicographic `call_id` order**.
-- Consecutive `task` tools in one batch run **in parallel** (max 10); all other tools run as **serial chunks**.
+- Consecutive `task` tools and consecutive `parallel_safe` tools in one batch run **in parallel** (capped; default 10); mutating / unmarked tools run as **serial chunks**.
 - One user `Message` per model tool-call turn — all `ToolResponse` blocks grouped together (required for Gemini replay).
 - Final assistant history write is backgrounded but **awaited at turn tail** before freeze/reset.
 - `repair_tool_turn_integrity()` runs on every `history.load()` (in-memory only, never persisted).
@@ -138,9 +156,12 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - `run()` **never raises** to callers; errors become `Error` events; `TurnComplete` always emitted.
 - Cooperative cancellation via `asyncio.Event`, checked at loop boundaries.
 - Silent-model guard: whitespace-only assistant after tools → loop continues until budget.
-- **Doom-loop guard:** `DOOM_LOOP_THRESHOLD` consecutive identical *failing* tool calls (same name + args) within a user message emit an `Error`, inject a harness system note, and force the next provider call with an empty tool list (`toolChoice`-none equivalent) so the model must reply in text. Default threshold `3`; set `0` to disable. Applies to the text agent loop only (not realtime); after each recovery turn the guard re-arms for later streaks in the same message.
+- **Doom-loop guard:** `DOOM_LOOP_THRESHOLD` consecutive identical tool calls (same name + args) within a user message — whether they succeed or fail — emit an `Error`, inject a harness system note, and force the next provider call with an empty tool list (`toolChoice`-none equivalent) so the model must reply in text. Default threshold `3`; set `0` to disable. Applies to the text agent loop only (not realtime); after each recovery turn the guard re-arms for later streaks in the same message. This catches both repeated failures and successful no-progress loops (e.g. the same screenshot call over and over). Tools marked `ToolDef.doom_loop_exempt=True` (currently `loop_status`) are skipped so identical-args polling does not force a recovery turn.
 - **Truncated tool batch:** When `Done.truncated` is true (provider length/max-tokens stop) **or** every tool call in the batch has `parse_error`, the harness fails the whole batch with tool error results and does **not** execute any call — even if some args parsed as JSON (they may still be silently incomplete). Realtime has no vendor length-limit signal today (Gemini Live), so it only applies the all-`parse_error` reject path.
 - **History summarization:** When preflight tokens exceed the trigger ratio and history is long enough, the middle of the transcript is compressed via a dedicated summarizer call into one assistant row prefixed `[Context Summary]:`. The summarizer is instructed to emit a fixed Markdown template (Objective, Important Details, Work State with Completed/Active/Blocked, Next Move, Relevant Files) — not freeform prose. Head/tail messages are kept; the summary replaces the middle.
+- **Steer / follow-up:** Mid-turn steer injects at safe boundaries only; follow-up FIFO drains only when idle. One reply-in-flight lock still applies to `/reply`.
+- **Settlement barrier:** `PRE_TOOL` is awaited before execute; fire-and-forget hooks are drained (bounded by `MONKEYBOT_HOOK_SETTLEMENT_TIMEOUT_S`, default 2s) before the next provider call and before `TurnComplete` (`run()` finally). Settlement does **not** wait on SSE client ACKs (avoids deadlock).
+- **Parallel-safe tools:** `ToolDef.parallel_safe=True` for read-only core tools (`read_file`, `glob`, `search_memory`, `list_skills`, `loop_status`, `read_attachment`). MCP tools default serial. Results always append in `call_id` order.
 
 ---
 
@@ -477,7 +498,8 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Invariants:**
 - Bounded timeout; errors never propagate; no re-entrancy.
-- `POST_TOOL` is fire-and-forget — may not complete before `run()` returns.
+- `POST_TOOL` / `POST_TURN` are fire-and-forget at fire time, but `HookManager.drain_settlement()` waits for them (bounded) before the next provider call and before `TurnComplete` (`run()` finally).
+- Settlement never waits on SSE subscribers — only in-process hook tasks.
 
 ---
 
@@ -578,7 +600,7 @@ Use this when reviewing PRs or designing new features.
 | Area | Rule |
 |------|------|
 | **Loop** | Never raise from `run()`; always emit `TurnComplete` |
-| **Doom loop** | Text loop: identical failing streak ≥ `DOOM_LOOP_THRESHOLD` → Error + no-tools recovery; re-arms after each recovery |
+| **Doom loop** | Text loop: identical name+args streak ≥ `DOOM_LOOP_THRESHOLD` (ok or error) → Error + no-tools recovery; re-arms after each recovery; `ToolDef.doom_loop_exempt` skips (e.g. `loop_status`) |
 | **Truncated tools** | Text loop: `Done.truncated` or all-`parse_error` → fail all; realtime: all-`parse_error` only (no Live length-limit signal) |
 | **Compaction summary** | Middle-history summary uses fixed Markdown template (Objective / Details / Work State / Next Move / Files); stored as `[Context Summary]:` |
 | **Tools** | Native function-call channel only; no JSON-in-prose tool calls |
@@ -619,6 +641,13 @@ Use this when reviewing PRs or designing new features.
 | Pending response timeout | 300s | `gateway.pending_response_timeout_sec` |
 | Subagent timeout | 600s | `subagent.timeout_sec` |
 | Subagent max turns | 25 | `subagent.max_turns` |
+| Steer queue depth | 8 | `MONKEYBOT_STEER_QUEUE_MAX` |
+| Follow-up queue depth | 16 | `MONKEYBOT_FOLLOW_UP_QUEUE_MAX` |
+| Follow-up lock retry interval | 1s | `MONKEYBOT_FOLLOW_UP_LOCK_RETRY_S` |
+| Follow-up lock wait budget | session-turn stale ms | `MONKEYBOT_FOLLOW_UP_LOCK_WAIT_MS` |
+| Hook settlement timeout | 2s | `MONKEYBOT_HOOK_SETTLEMENT_TIMEOUT_S` |
+| Parallel-safe tool concurrency | 10 | `MONKEYBOT_PARALLEL_TOOL_CONCURRENCY` |
+| Parallel `task` concurrency | 10 | code constant (`_MAX_CONCURRENT_SUBAGENTS`) |
 
 ---
 
