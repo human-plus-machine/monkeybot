@@ -1,3 +1,8 @@
 """monkeybot setup CLI — create, configure, validate, and chat with agents."""
 
-__version__ = "0.1.10"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("monkeybot-cli")
+except PackageNotFoundError:
+    __version__ = "0.0.0-dev"
