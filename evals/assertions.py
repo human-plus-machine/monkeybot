@@ -86,7 +86,20 @@ def evaluate_assertions(scenario: Scenario, run: EvalRun) -> list[str]:
 
     if "response_regex" in a:
         patterns = _as_list(a["response_regex"])
-        if patterns and not any(re.search(p, combined, re.IGNORECASE) for p in patterns):
+        bad_patterns: list[str] = []
+        matched = False
+        for p in patterns:
+            try:
+                # Every pattern must be checked regardless of `matched` — an `or`
+                # short-circuit here would skip re.search (and its re.error) once a
+                # prior pattern already matched.
+                if re.search(p, combined, re.IGNORECASE):
+                    matched = True
+            except re.error as exc:
+                bad_patterns.append(f"{p!r} ({exc})")
+        if bad_patterns:
+            failures.append(f"response_regex: invalid pattern(s) {bad_patterns}")
+        elif patterns and not matched:
             failures.append(f"response_regex: none of {patterns} matched the agent's output")
 
     return failures

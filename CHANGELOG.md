@@ -10,7 +10,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 - Evals: `response_regex` and `response_not_contains` deterministic assertions; run files now persist per-turn prompt/response text, and `python -m evals.diff` pinpoints the exact turn behind a regression between two runs.
 - Live eval smoke workflow now also runs on every push to `main` (report-only, scorecard on the run Summary page) and on manual dispatch, in addition to the existing PR gates.
-- Live evals need only `NVIDIA_API_KEY`: the deepeval judge can now run on build.nvidia.com models (`JUDGE_PROVIDER=nvidia`) via NVIDIA's OpenAI-compatible endpoint, and CI pins agent (`meta/llama-3.3-70b-instruct`) and judge (`nvidia/llama-3.1-nemotron-70b-instruct`) to two different free NVIDIA-hosted models. The workflow also now sets `MODEL_PROVIDER`/`MODEL_NAME` explicitly — previously it booted whatever `demo_agent`'s committed config said (ollama, which doesn't exist in CI).
+- Live evals need only `NVIDIA_API_KEY`: the deepeval judge can now run on build.nvidia.com models (`JUDGE_PROVIDER=nvidia`) via NVIDIA's OpenAI-compatible endpoint, and CI pins agent (`meta/llama-3.3-70b-instruct`) and judge (`nvidia/llama-3.3-nemotron-super-49b-v1`) to two different free NVIDIA-hosted models. The workflow also now sets `MODEL_PROVIDER`/`MODEL_NAME` explicitly — previously it booted whatever `demo_agent`'s committed config said (ollama, which doesn't exist in CI).
 
 ### Removed
 

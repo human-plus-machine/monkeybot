@@ -41,6 +41,7 @@ from runner import run_scenario_live  # noqa: E402
 from scenario_loader import EVAL_ROOT, load_scenarios_by_id, load_suite  # noqa: E402
 from scorer import (  # noqa: E402
     _read_agent_model_config,
+    judge_expected,
     resolve_judge_provider_model,
     score_scenario,
 )
@@ -72,6 +73,10 @@ async def _run_scenario(scenario: Scenario, agent_url: str) -> ScenarioAggregate
     reasons = {d["metric"]: d["reason"] for d in details if d.get("reason")}
     run = EvalRun(run_id=run_id, scenario_id=scenario.id, turns=turns, scores=scores)
     requirement_failures = evaluate_assertions(scenario, run)
+    if judge_expected(scenario) and not scores:
+        requirement_failures.append(
+            "judge_scores_missing: metrics were requested but the judge returned no scores"
+        )
     usage = run.usage_total()
     status = "failed" if requirement_failures else "passed"
 

@@ -5,7 +5,8 @@
 
 Compares per-scenario status, judge scores, and requirement failures, then prints a
 unified diff of the agent's output for every turn of each regressed scenario. Exits 1
-when any scenario regressed (passed before, not passed now, or newly errored).
+when any scenario regressed (passed before, not passed now, newly errored, or dropped
+out of the new run entirely).
 """
 
 from __future__ import annotations
@@ -69,6 +70,10 @@ def diff_runs(old: RunRecord, new: RunRecord) -> tuple[str, bool]:
         o, n = old_by_id.get(sid), new_by_id.get(sid)
         if o is None or n is None:
             lines.append(f"{sid}: only in {'new' if o is None else 'old'} run")
+            if o is not None:
+                # A scenario present before and gone now is itself a regression worth
+                # blocking on, not just a note (e.g. dropped from the suite manifest).
+                any_regression = True
             continue
 
         notes: list[str] = []

@@ -99,6 +99,12 @@ def test_response_regex() -> None:
     assert len(bad) == 1 and "response_regex" in bad[0]
 
 
+def test_response_regex_invalid_pattern_does_not_crash() -> None:
+    run = _run(output="Total: $42.50 charged.")
+    bad = evaluate_assertions(_scenario({"response_regex": [r"\$\d+\.\d{2}", r"(unclosed["]}), run)
+    assert len(bad) == 1 and "invalid pattern" in bad[0]
+
+
 def test_sessions_message_groups() -> None:
     single = Scenario(id="a", messages=["x", "y"])
     assert single.message_groups() == [["x", "y"]]

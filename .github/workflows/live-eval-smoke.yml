@@ -106,6 +106,9 @@ jobs:
           # free build.nvidia.com model; env beats monkeybot.yaml.
           MODEL_PROVIDER: nvidia
           MODEL_NAME: meta/llama-3.3-70b-instruct
+          # demo_agent's monkeybot.yaml sets runtime.port: 8080; the health check and
+          # AGENT_URL below expect 8787, so pin PORT explicitly (env beats yaml).
+          PORT: "8787"
           SANDBOX_ENABLED: "false" # no Docker socket in this runner
           # Small context window so context/summarization_trigger.yaml actually crosses the
           # real summarization threshold; the other smoke scenarios are short enough to fit.
@@ -129,7 +132,7 @@ jobs:
           AGENT_URL: http://127.0.0.1:8787
           # Judge on a different free NVIDIA-hosted model than the agent (same key).
           JUDGE_PROVIDER: nvidia
-          JUDGE_MODEL: nvidia/llama-3.1-nemotron-70b-instruct
+          JUDGE_MODEL: nvidia/llama-3.3-nemotron-super-49b-v1
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
           # Scorecard metadata: report the model the gateway actually ran.
           MODEL_PROVIDER: nvidia

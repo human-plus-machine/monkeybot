@@ -57,6 +57,22 @@ def test_score_noise_ignored() -> None:
     assert not regression
 
 
+def test_scenario_dropped_from_new_run_is_a_regression() -> None:
+    old = _record("a", "passed", "same")
+    new = RunRecord(run_id="b", suite="smoke", scenarios=[])
+    report, regression = diff_runs(old, new)
+    assert regression
+    assert "only in old run" in report
+
+
+def test_scenario_only_in_new_run_is_not_a_regression() -> None:
+    old = RunRecord(run_id="a", suite="smoke", scenarios=[])
+    new = _record("b", "passed", "same")
+    report, regression = diff_runs(old, new)
+    assert not regression
+    assert "only in new run" in report
+
+
 def test_baseline_strips_turns() -> None:
     baseline = baseline_from_run(_record("a", "passed", "secret turn text"))
     assert baseline.scenarios[0].turns == []

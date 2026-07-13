@@ -230,6 +230,24 @@ def _extract_scores_and_details(eval_result: Any) -> tuple[dict[str, float], lis
 _JUDGE_DISABLED_PROVIDERS = frozenset({"fake", "mock", "none", "disabled"})
 
 
+def judge_expected(scenario: Scenario) -> bool:
+    """True when this scenario's assertions imply judge scores should come back.
+
+    False for an explicitly empty ``metrics: []`` or a disabled judge provider — the two
+    *intentional* skip paths ``score_scenario`` also checks below. Callers use this to
+    tell "no judge configured on purpose" apart from "judge call flaked and produced
+    nothing", which should count as a failure rather than a silent pass.
+    """
+    assertions = scenario.assertions or {}
+    metric_names = assertions.get("metrics", ["turn_relevancy"])
+    if isinstance(metric_names, str):
+        metric_names = [metric_names]
+    if not metric_names:
+        return False
+    judge_provider, _ = resolve_judge_provider_model()
+    return judge_provider not in _JUDGE_DISABLED_PROVIDERS
+
+
 def score_scenario(
     scenario: Scenario,
     turns: list[TurnResult],
@@ -241,16 +259,13 @@ def score_scenario(
     no credentials needed — so the local/offline loop (requirement + cap assertions only)
     works without a judge configured.
     """
+    if not judge_expected(scenario):
+        return {}, [], None
+
     assertions = scenario.assertions or {}
     metric_names = assertions.get("metrics", ["turn_relevancy"])
     if isinstance(metric_names, str):
         metric_names = [metric_names]
-    if not metric_names:
-        return {}, [], None
-
-    judge_provider, _ = resolve_judge_provider_model()
-    if judge_provider in _JUDGE_DISABLED_PROVIDERS:
-        return {}, [], None
 
     judge = _build_judge_model()
     metrics = _resolve_metrics([str(m) for m in metric_names], judge)
