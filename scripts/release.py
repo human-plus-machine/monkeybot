@@ -173,19 +173,29 @@ def cmd_prepare(args: argparse.Namespace) -> None:
 
 
 def cmd_publish(_: argparse.Namespace) -> None:
+    # FORCE_PACKAGES=core,browser,cli re-emits already-tagged packages so the
+    # PyPI / sandbox jobs can retry after a Trusted Publisher or image failure.
+    force = {p.strip() for p in os.environ.get("FORCE_PACKAGES", "").split(",") if p.strip()}
+    unknown_force = force - set(PACKAGES)
+    if unknown_force:
+        raise SystemExit(f"unknown FORCE_PACKAGES: {', '.join(sorted(unknown_force))}")
+
     existing_tags = set(run("git", "tag", "--list").splitlines())
     released: list[str] = []
     for name, pyproject in PACKAGES.items():
         version = read_version(pyproject)
         tag = f"{name}-v{version}"
-        if tag in existing_tags:
-            continue
         notes = changelog_section(name, version)
         if notes is None:
             # No changelog entry for this version - it predates this tooling
             # (e.g. the version already on main when this script was added).
             # Skip rather than publish a release with placeholder notes.
             print(f"Skipping {tag}: no changelog entry found (pre-existing version)")
+            continue
+        if tag in existing_tags:
+            if name in force:
+                print(f"Re-publishing {tag} (tag already exists; FORCE_PACKAGES)")
+                released.append(name)
             continue
         run("git", "tag", tag)
         run("git", "push", "origin", tag)
@@ -198,7 +208,8 @@ def cmd_publish(_: argparse.Namespace) -> None:
     write_github_output("packages", packages_csv)
     print(f"released_packages={packages_csv or '(none)'}")
 
-    if released:
+    # Forced republish retries must not re-merge main into develop.
+    if released and not force:
         # Keep develop from drifting behind main now that releases land via
         # a release/* branch instead of develop itself.
         run("git", "fetch", "origin", "develop")
