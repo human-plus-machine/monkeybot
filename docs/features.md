@@ -124,7 +124,7 @@ Do **not** conflate with HITL `ToolConfirmationRequest`. Cancel clears pending s
 1. `POST /sessions` → create session
 2. `GET /sessions/{id}/events` → SSE stream
 3. `POST /sessions/{id}/reply` → `start_turn()` (background)
-4. Events: `Thinking`, `AssistantDelta`, `ToolCallStarted`, `ToolCallResult`, `UserSteered`, `QueuedInputAccepted`, `ContextSummarizing`, `SystemPromptSnapshot`, `TurnComplete`, `Error`
+4. Events: `Thinking`, `AssistantDelta`, `AssistantTextStarted`, `AssistantTextEnded`, `ToolCallStarted`, `ToolCallResult`, `ToolInputDelta`, `ThinkingBlockStarted`, `UserSteered`, `QueuedInputAccepted`, `ContextEpochStarted`, `SystemContextUpdated`, `ContextSummarizing`, `SystemPromptSnapshot`, `TurnComplete`, `Error`
 5. `POST /sessions/{id}/steer` / `queue` → mid-turn inject / idle FIFO (see above)
 6. `POST /sessions/{id}/cancel` → cooperative cancellation (+ clear steer)
 
@@ -148,7 +148,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - Consecutive `task` tools and consecutive `parallel_safe` tools in one batch run **in parallel** (capped; default 10); mutating / unmarked tools run as **serial chunks**.
 - One user `Message` per model tool-call turn — all `ToolResponse` blocks grouped together (required for Gemini replay).
 - Final assistant history write is backgrounded but **awaited at turn tail** before freeze/reset.
-- `repair_tool_turn_integrity()` runs on every `history.load()` (in-memory only, never persisted).
+- `transform_context()` (tool-integrity repair + UI-block strip) runs on every `history.load()` (in-memory only, never persisted); `convert_to_provider()` resolves attachments / pressure-shapes for the provider view.
 
 **Depends on:** Provider, HistoryStore, ToolExecutorPort, inspectors, optional hooks/curator/attachments.
 
@@ -162,6 +162,9 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - **Steer / follow-up:** Mid-turn steer injects at safe boundaries only; follow-up FIFO drains only when idle. One reply-in-flight lock still applies to `/reply`.
 - **Settlement barrier:** `PRE_TOOL` is awaited before execute; fire-and-forget hooks are drained (bounded by `MONKEYBOT_HOOK_SETTLEMENT_TIMEOUT_S`, default 2s) before the next provider call and before `TurnComplete` (`run()` finally). Settlement does **not** wait on SSE client ACKs (avoids deadlock).
 - **Parallel-safe tools:** `ToolDef.parallel_safe=True` for read-only core tools (`read_file`, `glob`, `search_memory`, `list_skills`, `loop_status`, `read_attachment`). MCP tools default serial. Results always append in `call_id` order.
+- **Context Epoch:** At each safe provider-turn boundary the harness reconciles stable vs volatile system-context sources. The leading system message keeps an immutable epoch baseline (cache prefix). Volatile changes emit a chronological mid-conversation update (user-role, not persisted) and a `SystemContextUpdated` event. Compaction / stable-source change opens a new epoch (`ContextEpochStarted`).
+- **Message pipeline:** `history → transform_context() → convert_to_provider() → Provider.stream`. Transform repairs tool integrity and strips UI-only blocks; convert resolves attachments and applies pressure shaping without mutating persisted history.
+- **Streaming grammar (additive):** `AssistantTextStarted` / `AssistantTextEnded`, `ThinkingBlockStarted`, and `ToolInputDelta` supplement existing `AssistantDelta` / `ThinkingBlockDelta` / `ToolCallStarted`. Clients may ignore the new events.
 
 ---
 
@@ -169,15 +172,17 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Purpose:** Combine operator-authored base prompt with runtime-owned harness and volatile context.
 
-**Key files:** `core/prompts/prompt.py`, `core/prompts/harness_prompt.py`, `paths.agent_md` → `AGENT.md`
+**Key files:** `core/prompts/prompt.py`, `core/prompts/harness_prompt.py`, `core/context/epoch.py`, `paths.agent_md` → `AGENT.md`
 
 **Section order (cache-friendly):**
 
-1. **Stable prefix:** `AGENT.md` + harness + session attachments
+1. **Stable prefix (epoch baseline):** `AGENT.md` + harness + session attachments
 2. **Volatile tail:** memory index + skills + "Current request" anchor
+3. **Mid-conversation updates (within epoch):** chronological user message with `## System context update` when volatile sources change; leading baseline stays byte-identical for prompt cache
 
 **How it works:**
-- `compose_system_prompt()` builds the full system string each inner turn.
+- `compose_stable_baseline()` / `compose_volatile_tail()` split the prompt; `compose_system_prompt()` remains the full-string helper for tests/tools.
+- `ContextEpochTracker.reconcile()` admits sources at each provider-turn boundary (after steer drain / settlement).
 - Harness lines for `task`, `web_search`, subagent personas, and `run_command` execution mode are conditional on active tool list.
 - Emission-style block (Levers 1–2: minimum code, terse prose) is injected into the stable prefix when `MONKEYBOT_EMISSION_STYLE=terse`; its dense agent-to-agent sub-block (Lever 3) is additionally gated on the `task` tool being active. Default off. See [§21](#21-emission-style-terse-output-guidance).
 - `HARNESS_TOOL_CALL_PROTOCOL` enforces native tool-call channel, evidence rule, no-repeat rule.
@@ -189,7 +194,8 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 **Invariants:**
 - Harness text lives in **code** (`harness_prompt.py`), not `AGENT.md` — do not duplicate tool protocol in operator prompts.
 - `_MAX_CURRENT_REQUEST_CHARS = 8000` caps injected user text.
-- Stable prefix before volatile tail for prompt caching.
+- Stable prefix before volatile tail for prompt caching; epoch baseline is immutable until compaction or stable-source change.
+- Mid-conversation system updates are provider-view only (not written to history).
 - Model should prefer **active tool list** over stale harness summaries.
 
 ---
@@ -204,7 +210,8 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - `core/config/settings.py` — `get_provider_config()`
 
 **How it works:**
-- `stream(messages, tools, model=..., thinking_budget=...)` yields `TextDelta`, `ThinkingDelta`, `ToolCall`, `UsageEvent`, `Done`.
+- `stream(messages, tools, model=..., thinking_budget=...)` yields `TextDelta`, optional `ToolInputDelta`, `ThinkingDelta`, `ToolCall`, `UsageEvent`, `Done`.
+- Loop synthesizes `AssistantTextStarted`/`AssistantTextEnded`/`ThinkingBlockStarted` from deltas via `ProviderStreamMapper`; Anthropic streams `ToolInputDelta` from `input_json_delta`.
 - `Done.truncated` is set when the vendor reports an output length limit (OpenAI `finish_reason=length`, Anthropic `stop_reason=max_tokens`, Gemini `MAX_TOKENS`). The text loop treats that as an unsafe tool batch. Gemini Live does not expose an equivalent signal, so realtime rejects incomplete tool batches via all-`parse_error` only.
 - `count_input_tokens()` must match the same payload shape as `stream()` (summarization triggers, tool budgets).
 - Provider resolution via `MODEL_PROVIDER` aliases (`gemini` → `google_vertexai`, `vertex-claude` → `vertex_anthropic`).
@@ -217,7 +224,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 **Invariants:**
 - Exactly one overlapping `stream()` per provider instance is undefined.
 - `Message.role` is only `user` | `assistant` | `system`.
-- Prompt caching: stable prefix = `AGENT.md` + harness + attachments; Anthropic providers always use explicit `cache_control` on the stable prefix.
+- Prompt caching: stable prefix = `AGENT.md` + harness + attachments; Anthropic providers always use explicit `cache_control` on the stable prefix. Epoch keeps that prefix byte-identical across volatile-only updates.
 - Cost estimation via `providers/pricing.estimate_cost()` on usage events.
 
 ---
@@ -338,7 +345,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Purpose:** Persist `Message` rows (typed `ContentBlock` JSON) per `thread_id`.
 
-**Key files:** `core/persistence/backends.py`, `history.py`, `sqlite_backend.py`, `postgres.py`, `firestore.py`, `core/messages/tool_integrity.py`
+**Key files:** `core/persistence/backends.py`, `history.py`, `sqlite_backend.py`, `postgres.py`, `firestore.py`, `core/messages/tool_integrity.py`, `core/messages/transform_context.py`, `core/messages/convert_provider.py`
 
 **DB URL schemes:** `sqlite://`, `postgresql://` / `postgres://`, `firestore://PROJECT/DATABASE`
 

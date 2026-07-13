@@ -89,6 +89,74 @@ def _session_attachments_block(catalog: Sequence[AttachmentRecord] | None) -> st
     return "\n\n## Session attachments\n" + "\n".join(lines)
 
 
+def _memory_block(
+    ctx: TurnContext,
+    memory_selection: MemoryPromptSelection | None,
+) -> str:
+    if memory_selection is not None:
+        mem_lines = list(memory_selection.lines)
+    else:
+        mem_lines = list(ctx.memory_index)
+
+    memory_bullets = "\n".join(f"- {line}" for line in mem_lines) if mem_lines else ""
+    mem_block = f"\n\n## Memory index\n{memory_bullets}" if memory_bullets else ""
+    if memory_selection is not None and memory_selection.nudge_search:
+        shown = len(memory_selection.lines)
+        total = memory_selection.total_lines
+        mem_block += (
+            f"\n\n## Memory\n"
+            f"Showing {shown} of {total} index entries "
+            f"(coverage {memory_selection.coverage:.0%}, confidence {memory_selection.confidence:.0%}). "
+            "Use `search_memory` with keywords when the task may depend on older or unstated context."
+        )
+    return mem_block
+
+
+def _skills_section(ctx: TurnContext) -> str:
+    skill_lines = [f"- {s.name}" for s in ctx.skills]
+    skills_block = "\n".join(skill_lines)
+    return f"\n\n## Skills\n{skills_block}" if skills_block else ""
+
+
+def _harness_text(ctx: TurnContext) -> str:
+    include_task = any(t.name == "task" for t in ctx.tools)
+    include_web_search = any(t.name == "web_search" for t in ctx.tools)
+    return harness_fixed_context(
+        include_task_tool=include_task,
+        include_web_search=include_web_search,
+        workspace_root=str(ctx.workspace_root) if ctx.workspace_root is not None else "(not set)",
+        memory_storage_uri=ctx.memory.uri if ctx.memory is not None else "(not set)",
+        run_command_opensandbox=SandboxConfig.from_env().enabled,
+        subagent_personas=ctx.subagent_personas,
+        emission_style=emission_style_terse_from_env(),
+        catalog_mcp_servers=ctx.catalog_mcp_servers,
+    )
+
+
+def compose_stable_baseline(
+    ctx: TurnContext,
+    *,
+    attachment_catalog: Sequence[AttachmentRecord] | None = None,
+) -> str:
+    """Cacheable prefix: AGENT.md + harness + session attachments."""
+    harness = _harness_text(ctx)
+    attachments = _session_attachments_block(attachment_catalog)
+    return f"{ctx.agent_md}\n\n{harness}{attachments}"
+
+
+def compose_volatile_tail(
+    ctx: TurnContext,
+    *,
+    chat_messages: Sequence[Message] | None = None,
+    memory_selection: MemoryPromptSelection | None = None,
+) -> str:
+    """Volatile tail: memory index + skills + current-request anchor."""
+    mem_block = _memory_block(ctx, memory_selection)
+    skills_section = _skills_section(ctx)
+    task = _current_request_block(chat_messages)
+    return f"{mem_block}{skills_section}{task}"
+
+
 def compose_system_prompt(
     ctx: TurnContext,
     *,
@@ -108,44 +176,8 @@ def compose_system_prompt(
     ``ctx.skills`` (zero-cost discovery); use ``list_skills``/``read_file`` for the
     skills root path and full ``SKILL.md`` procedure.
     """
-    task = _current_request_block(chat_messages)
-
-    if memory_selection is not None:
-        mem_lines = list(memory_selection.lines)
-    else:
-        mem_lines = list(ctx.memory_index)
-
-    memory_bullets = "\n".join(f"- {line}" for line in mem_lines) if mem_lines else ""
-    mem_block = f"\n\n## Memory index\n{memory_bullets}" if memory_bullets else ""
-    if memory_selection is not None and memory_selection.nudge_search:
-        shown = len(memory_selection.lines)
-        total = memory_selection.total_lines
-        mem_block += (
-            f"\n\n## Memory\n"
-            f"Showing {shown} of {total} index entries "
-            f"(coverage {memory_selection.coverage:.0%}, confidence {memory_selection.confidence:.0%}). "
-            "Use `search_memory` with keywords when the task may depend on older or unstated context."
-        )
-
-    skill_lines = [f"- {s.name}" for s in ctx.skills]
-    skills_block = "\n".join(skill_lines)
-    skills_section = f"\n\n## Skills\n{skills_block}" if skills_block else ""
-
-    include_task = any(t.name == "task" for t in ctx.tools)
-    include_web_search = any(t.name == "web_search" for t in ctx.tools)
-    harness = harness_fixed_context(
-        include_task_tool=include_task,
-        include_web_search=include_web_search,
-        workspace_root=str(ctx.workspace_root) if ctx.workspace_root is not None else "(not set)",
-        memory_storage_uri=ctx.memory.uri if ctx.memory is not None else "(not set)",
-        run_command_opensandbox=SandboxConfig.from_env().enabled,
-        subagent_personas=ctx.subagent_personas,
-        emission_style=emission_style_terse_from_env(),
-        catalog_mcp_servers=ctx.catalog_mcp_servers,
+    stable = compose_stable_baseline(ctx, attachment_catalog=attachment_catalog)
+    volatile = compose_volatile_tail(
+        ctx, chat_messages=chat_messages, memory_selection=memory_selection
     )
-
-    attachments = _session_attachments_block(attachment_catalog)
-
-    stable = f"{ctx.agent_md}\n\n{harness}{attachments}"
-    volatile = f"{mem_block}{skills_section}{task}"
     return f"{stable}{volatile}"

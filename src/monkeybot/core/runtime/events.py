@@ -225,6 +225,61 @@ class QueuedInputAccepted:
     position: int = 0
 
 
+@dataclass(frozen=True)
+class ContextEpochStarted:
+    """New context epoch opened (session start, post-compaction, or stable-source change)."""
+
+    kind: Literal["ContextEpochStarted"] = "ContextEpochStarted"
+    request_id: str = ""
+    epoch_id: int = 0
+    changed_sources: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class SystemContextUpdated:
+    """Volatile system-context sources changed within the current epoch."""
+
+    kind: Literal["SystemContextUpdated"] = "SystemContextUpdated"
+    request_id: str = ""
+    epoch_id: int = 0
+    changed_sources: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class AssistantTextStarted:
+    """Start of an assistant text block (additive; ``AssistantDelta`` still streams)."""
+
+    kind: Literal["AssistantTextStarted"] = "AssistantTextStarted"
+    request_id: str = ""
+
+
+@dataclass(frozen=True)
+class AssistantTextEnded:
+    """End of an assistant text block (additive)."""
+
+    kind: Literal["AssistantTextEnded"] = "AssistantTextEnded"
+    request_id: str = ""
+
+
+@dataclass(frozen=True)
+class ThinkingBlockStarted:
+    """Start of a thinking/reasoning block (additive; deltas still use ThinkingBlockDelta)."""
+
+    kind: Literal["ThinkingBlockStarted"] = "ThinkingBlockStarted"
+    request_id: str = ""
+
+
+@dataclass(frozen=True)
+class ToolInputDeltaEvent:
+    """Incremental tool-argument JSON while the model streams a tool call (additive)."""
+
+    kind: Literal["ToolInputDelta"] = "ToolInputDelta"
+    request_id: str = ""
+    call_id: str = ""
+    tool: str = ""
+    delta: str = ""
+
+
 AgentEvent: TypeAlias = (
     Thinking
     | AssistantDelta
@@ -247,6 +302,12 @@ AgentEvent: TypeAlias = (
     | GroundingEvent
     | UserSteered
     | QueuedInputAccepted
+    | ContextEpochStarted
+    | SystemContextUpdated
+    | AssistantTextStarted
+    | AssistantTextEnded
+    | ThinkingBlockStarted
+    | ToolInputDeltaEvent
 )
 
 
@@ -346,6 +407,27 @@ def _story5_event_dict(event: AgentEvent) -> dict[str, object]:
         return {**base, "text": event.text}
     if isinstance(event, QueuedInputAccepted):
         return {**base, "queue": event.queue, "position": event.position}
+    if isinstance(event, ContextEpochStarted):
+        return {
+            **base,
+            "epoch_id": event.epoch_id,
+            "changed_sources": list(event.changed_sources),
+        }
+    if isinstance(event, SystemContextUpdated):
+        return {
+            **base,
+            "epoch_id": event.epoch_id,
+            "changed_sources": list(event.changed_sources),
+        }
+    if isinstance(event, (AssistantTextStarted, AssistantTextEnded, ThinkingBlockStarted)):
+        return base
+    if isinstance(event, ToolInputDeltaEvent):
+        return {
+            **base,
+            "call_id": event.call_id,
+            "tool": event.tool,
+            "delta": event.delta,
+        }
     raise AssertionError(f"_story5_event_dict: unsupported type {type(event)!r}")
 
 
@@ -410,6 +492,12 @@ def event_to_json(event: AgentEvent) -> str:
             GroundingEvent,
             UserSteered,
             QueuedInputAccepted,
+            ContextEpochStarted,
+            SystemContextUpdated,
+            AssistantTextStarted,
+            AssistantTextEnded,
+            ThinkingBlockStarted,
+            ToolInputDeltaEvent,
         ),
     ):
         payload = _story5_event_dict(event)
@@ -652,4 +740,32 @@ def event_from_json(raw: str) -> AgentEvent:
         pos_raw = payload.get("position", 0)
         pos = int(pos_raw) if isinstance(pos_raw, (int, float)) else 0
         return QueuedInputAccepted(request_id=rid, queue=q, position=pos)
+    if t == "ContextEpochStarted":
+        eid_raw = payload.get("epoch_id", 0)
+        eid = int(eid_raw) if isinstance(eid_raw, (int, float)) else 0
+        src_raw = payload.get("changed_sources")
+        changed: list[str] = [str(s) for s in src_raw] if isinstance(src_raw, list) else []
+        return ContextEpochStarted(request_id=rid, epoch_id=eid, changed_sources=changed)
+    if t == "SystemContextUpdated":
+        eid_raw = payload.get("epoch_id", 0)
+        eid = int(eid_raw) if isinstance(eid_raw, (int, float)) else 0
+        src_raw = payload.get("changed_sources")
+        changed = [str(s) for s in src_raw] if isinstance(src_raw, list) else []
+        return SystemContextUpdated(request_id=rid, epoch_id=eid, changed_sources=changed)
+    if t == "AssistantTextStarted":
+        return AssistantTextStarted(request_id=rid)
+    if t == "AssistantTextEnded":
+        return AssistantTextEnded(request_id=rid)
+    if t == "ThinkingBlockStarted":
+        return ThinkingBlockStarted(request_id=rid)
+    if t == "ToolInputDelta":
+        cid_raw = payload.get("call_id", "")
+        tool_raw = payload.get("tool", "")
+        delta_raw = payload.get("delta", "")
+        return ToolInputDeltaEvent(
+            request_id=rid,
+            call_id=cid_raw if isinstance(cid_raw, str) else "",
+            tool=tool_raw if isinstance(tool_raw, str) else "",
+            delta=delta_raw if isinstance(delta_raw, str) else "",
+        )
     raise EventDecodeError(f"unknown AgentEvent type: {t!r}")

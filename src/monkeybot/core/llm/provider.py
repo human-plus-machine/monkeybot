@@ -80,6 +80,16 @@ class ToolCall:
 
 
 @dataclass(frozen=True, kw_only=True)
+class ToolInputDelta:
+    """Incremental tool-argument JSON fragment while args are still streaming."""
+
+    kind: Literal["tool_input_delta"] = "tool_input_delta"
+    call_id: str
+    name: str
+    delta: str
+
+
+@dataclass(frozen=True, kw_only=True)
 class GroundingEvent:
     """Provider-native web-search grounding metadata (e.g. Gemini ``google_search``).
 
@@ -154,7 +164,15 @@ class Done:
     truncated: bool = False
 
 
-ProviderEvent: TypeAlias = TextDelta | ThinkingDelta | ToolCall | GroundingEvent | UsageEvent | Done
+ProviderEvent: TypeAlias = (
+    TextDelta
+    | ThinkingDelta
+    | ToolCall
+    | ToolInputDelta
+    | GroundingEvent
+    | UsageEvent
+    | Done
+)
 
 
 class Provider(Protocol):

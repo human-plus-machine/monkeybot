@@ -275,3 +275,40 @@ def test_agent_event_roundtrip_queued_input_accepted(queue: str) -> None:
     q = cast(Literal["steer", "follow_up"], queue)
     ev = QueuedInputAccepted(request_id="r1", queue=q, position=2)
     assert event_from_json(event_to_json(ev)) == ev
+
+
+def test_agent_event_roundtrip_context_epoch_started() -> None:
+    from monkeybot.core.runtime.events import ContextEpochStarted
+
+    ev = ContextEpochStarted(request_id="r1", epoch_id=2, changed_sources=["epoch"])
+    assert event_from_json(event_to_json(ev)) == ev
+
+
+def test_agent_event_roundtrip_system_context_updated() -> None:
+    from monkeybot.core.runtime.events import SystemContextUpdated
+
+    ev = SystemContextUpdated(request_id="r1", epoch_id=1, changed_sources=["memory"])
+    assert event_from_json(event_to_json(ev)) == ev
+
+
+def test_agent_event_roundtrip_assistant_text_bounds() -> None:
+    from monkeybot.core.runtime.events import AssistantTextEnded, AssistantTextStarted
+
+    started = AssistantTextStarted(request_id="r1")
+    ended = AssistantTextEnded(request_id="r1")
+    assert event_from_json(event_to_json(started)) == started
+    assert event_from_json(event_to_json(ended)) == ended
+
+
+def test_agent_event_roundtrip_thinking_block_started() -> None:
+    from monkeybot.core.runtime.events import ThinkingBlockStarted
+
+    ev = ThinkingBlockStarted(request_id="r1")
+    assert event_from_json(event_to_json(ev)) == ev
+
+
+def test_agent_event_roundtrip_tool_input_delta() -> None:
+    from monkeybot.core.runtime.events import ToolInputDeltaEvent
+
+    ev = ToolInputDeltaEvent(request_id="r1", call_id="c1", tool="read_file", delta='{"p')
+    assert event_from_json(event_to_json(ev)) == ev

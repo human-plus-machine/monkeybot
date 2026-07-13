@@ -1072,10 +1072,10 @@ async def test_run_provider_raises_wrapped_as_error() -> None:
     ):
         events.append(e)
     assert isinstance(events[0], Thinking)
-    assert isinstance(events[1], SystemPromptSnapshot)
-    assert isinstance(events[2], Error)
-    assert "boom" in events[2].error
-    assert isinstance(events[3], TurnComplete)
+    assert any(isinstance(e, SystemPromptSnapshot) for e in events)
+    err = next(e for e in events if isinstance(e, Error))
+    assert "boom" in err.error
+    assert isinstance(events[-1], TurnComplete)
 
 
 @pytest.mark.asyncio
@@ -1484,10 +1484,15 @@ async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> N
 
     assert len(prov.captured_messages) == 2
     sys1 = _flatten_text_from_message(prov.captured_messages[0][0])
-    sys2 = _flatten_text_from_message(prov.captured_messages[1][0])
+    turn2_texts = [
+        _flatten_text_from_message(m) for m in prov.captured_messages[1]
+    ]
+    all2 = "\n".join(turn2_texts)
     assert "initial line" in sys1
     assert "new memory from tool" not in sys1
-    assert "new memory from tool" in sys2
+    # Volatile memory refresh arrives as a mid-conversation system-context update
+    # (leading epoch baseline stays cache-stable).
+    assert "new memory from tool" in all2
 
 
 @pytest.mark.asyncio

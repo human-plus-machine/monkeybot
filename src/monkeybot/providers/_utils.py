@@ -14,6 +14,7 @@ from monkeybot.core.llm.provider import (
     TextDelta,
     ThinkingDelta,
     ToolCall,
+    ToolInputDelta,
     UsageEvent,
 )
 from monkeybot.core.logging_utils import kv
@@ -137,7 +138,14 @@ async def iter_anthropic_sdk_stream(
                             if sig:
                                 yield ThinkingDelta(text="", signature=sig)
                         elif event.delta.type == "input_json_delta":
-                            tool_input_buf += event.delta.partial_json
+                            partial = event.delta.partial_json
+                            tool_input_buf += partial
+                            if tool_id and partial:
+                                yield ToolInputDelta(
+                                    call_id=tool_id,
+                                    name=tool_name,
+                                    delta=partial,
+                                )
                     case "content_block_stop":
                         if tool_id:
                             args, parse_error = safe_parse_tool_args(
@@ -297,6 +305,8 @@ _VOLATILE_SYSTEM_MARKERS = (
     "\n\n## Memory\n",
     "\n\n## Skills\n",
     "\n\n## Current request\n",
+    "\n\n## Runtime notes\n",
+    "\n\n## System context update\n",
 )
 
 
