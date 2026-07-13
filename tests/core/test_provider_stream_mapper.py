@@ -53,3 +53,37 @@ def test_mapper_tool_input_delta_and_done() -> None:
     ]
     assert m.map(Done(truncated=True)) == []
     assert m.stream_truncated is True
+
+
+def test_mapper_closes_text_before_thinking_and_supports_reentry() -> None:
+    """OpenAI-compat can emit TextDelta then ThinkingDelta from one chunk.
+
+    Starting thinking must end the open text block (LIFO), and a later text
+    delta must be allowed to open a fresh text block after thinking closes.
+    """
+    m = ProviderStreamMapper("r1")
+    text1 = m.map(TextDelta(text="hello"))
+    assert [type(e).__name__ for e in text1] == [
+        "AssistantTextStarted",
+        "AssistantDelta",
+    ]
+
+    thinking = m.map(ThinkingDelta(text="reason", signature="sig"))
+    assert [type(e).__name__ for e in thinking] == [
+        "AssistantTextEnded",
+        "ThinkingBlockStarted",
+        "ThinkingBlockDelta",
+    ]
+
+    text2 = m.map(TextDelta(text=" world"))
+    assert [type(e).__name__ for e in text2] == [
+        "ThinkingBlockComplete",
+        "AssistantTextStarted",
+        "AssistantDelta",
+    ]
+    assert text2[0].signature == "sig"  # type: ignore[attr-defined]
+
+    finish = m.finish()
+    assert [type(e).__name__ for e in finish] == ["AssistantTextEnded"]
+    assert m.assistant_text == "hello world"
+    assert m.thinking_text == "reason"

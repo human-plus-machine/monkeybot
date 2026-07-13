@@ -54,8 +54,6 @@ class _EpochState:
     """Volatile text admitted into the leading baseline at epoch start."""
     baseline_volatile: str
     volatile_fingerprint: str
-    """Latest volatile text (may diverge from baseline_volatile after updates)."""
-    current_volatile: str
     """Per-source fingerprints as of the last admitted volatile render (for
 
     diagnosing which specific source changed on the next reconcile — memory,
@@ -154,7 +152,6 @@ class ContextEpochTracker:
                 stable_fingerprint=stable_fingerprint,
                 baseline_volatile=volatile_text,
                 volatile_fingerprint=volatile_fingerprint,
-                current_volatile=volatile_text,
                 volatile_part_fingerprints=parts,
             )
             admit = EpochAdmit(
@@ -181,7 +178,6 @@ class ContextEpochTracker:
         changed = _diff_source_names(state.volatile_part_fingerprints, parts)
         next_state = dataclasses.replace(
             state,
-            current_volatile=volatile_text,
             volatile_fingerprint=volatile_fingerprint,
             volatile_part_fingerprints=parts,
         )

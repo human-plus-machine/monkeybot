@@ -50,6 +50,30 @@ def test_transform_drops_ui_only_turns() -> None:
     assert out[0].role == "user"
 
 
+def test_transform_coalesces_roles_after_dropping_interior_ui_only_turn() -> None:
+    """Dropping an interior UI-only row must not leave adjacent equal roles.
+
+    ``user → assistant → user(UI-only) → assistant`` becomes two adjacent
+    assistant messages after the strip; Anthropic/Gemini reject that shape.
+    """
+    msgs = [
+        Message(role="user", content=[Text(text="hi")]),
+        Message(role="assistant", content=[Text(text="first")]),
+        Message(
+            role="user",
+            content=[
+                SystemNotification(notification_type="inlineMessage", msg="ui only"),
+            ],
+        ),
+        Message(role="assistant", content=[Text(text="second")]),
+    ]
+    out = transform_context(msgs)
+    roles = [m.role for m in out]
+    assert roles == ["user", "assistant"]
+    assert all(a != b for a, b in zip(roles, roles[1:]))
+    assert [b.text for b in out[1].content if isinstance(b, Text)] == ["first", "second"]
+
+
 def test_transform_repairs_missing_tool_result() -> None:
     msgs = [
         Message(

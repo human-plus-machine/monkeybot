@@ -51,12 +51,34 @@ def _strip_provider_excluded(messages: Sequence[Message]) -> list[Message]:
     return out
 
 
+def _coalesce_adjacent_same_role(messages: Sequence[Message]) -> list[Message]:
+    """Merge consecutive same-role messages after UI-only turns are dropped.
+
+    Dropping an interior all-UI row can leave adjacent equal roles
+    (``user → assistant → user(UI) → assistant`` → ``user → assistant → assistant``).
+    Anthropic and Gemini reject that wire shape, so coalesce content into one
+    message per run of the same role.
+    """
+    if not messages:
+        return []
+    out: list[Message] = [messages[0]]
+    for msg in messages[1:]:
+        prev = out[-1]
+        if msg.role == prev.role:
+            out[-1] = Message(role=prev.role, content=[*prev.content, *msg.content])
+        else:
+            out.append(msg)
+    return out
+
+
 def transform_context(messages: Sequence[Message]) -> list[Message]:
     """Agent-facing history → cleaned message list for conversion.
 
     Steps:
     1. Repair broken tool-call / tool-result pairing (in-memory only).
     2. Strip UI-only content blocks that must never reach a provider.
+    3. Coalesce adjacent same-role messages left by dropped UI-only turns.
     """
     repaired = repair_tool_turn_integrity(list(messages))
-    return _strip_provider_excluded(repaired)
+    stripped = _strip_provider_excluded(repaired)
+    return _coalesce_adjacent_same_role(stripped)

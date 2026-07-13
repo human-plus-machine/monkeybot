@@ -30,6 +30,11 @@ class ProviderStreamMapper:
 
     Accumulates assistant/thinking text and pending tool calls. Callers handle
     ``UsageEvent`` cost accounting themselves.
+
+    Text and thinking blocks are mutually exclusive and LIFO: starting one
+    closes the other if open. Blocks may re-enter after being closed (OpenAI-
+    compatible adapters can emit ``TextDelta`` then ``ThinkingDelta`` from the
+    same chunk, and later resume text).
     """
 
     def __init__(self, request_id: str) -> None:
@@ -40,10 +45,8 @@ class ProviderStreamMapper:
         self.thinking_streamed = False
         self.pending: dict[str, ToolCall] = {}
         self.stream_truncated = False
-        self._thinking_closed = False
-        self._thinking_started = False
-        self._text_started = False
-        self._text_ended = False
+        self._text_open = False
+        self._thinking_open = False
 
     def map(self, ev: ProviderEvent) -> list[AgentEvent]:
         """Map one provider event. ``Done`` sets ``stream_truncated`` and returns ``[]``."""
@@ -108,6 +111,9 @@ class ProviderStreamMapper:
 
     def _on_thinking_delta(self, ev: ThinkingDelta) -> list[AgentEvent]:
         out: list[AgentEvent] = []
+        ended = self._ensure_text_ended()
+        if ended is not None:
+            out.append(ended)
         started = self._ensure_thinking_started()
         if started is not None:
             out.append(started)
@@ -126,27 +132,27 @@ class ProviderStreamMapper:
         return out
 
     def _ensure_text_started(self) -> AssistantTextStarted | None:
-        if self._text_started:
+        if self._text_open:
             return None
-        self._text_started = True
+        self._text_open = True
         return AssistantTextStarted(request_id=self.request_id)
 
     def _ensure_text_ended(self) -> AssistantTextEnded | None:
-        if not self._text_started or self._text_ended:
+        if not self._text_open:
             return None
-        self._text_ended = True
+        self._text_open = False
         return AssistantTextEnded(request_id=self.request_id)
 
     def _ensure_thinking_started(self) -> ThinkingBlockStarted | None:
-        if self._thinking_started:
+        if self._thinking_open:
             return None
-        self._thinking_started = True
+        self._thinking_open = True
         return ThinkingBlockStarted(request_id=self.request_id)
 
     def _close_thinking_block(self) -> ThinkingBlockComplete | None:
-        if not self.thinking_streamed or self._thinking_closed:
+        if not self._thinking_open:
             return None
-        self._thinking_closed = True
+        self._thinking_open = False
         return ThinkingBlockComplete(
             request_id=self.request_id,
             signature=self.thinking_signature or "",
