@@ -271,7 +271,13 @@ class ThinkingBlockStarted:
 
 @dataclass(frozen=True)
 class ToolInputDeltaEvent:
-    """Incremental tool-argument JSON while the model streams a tool call (additive)."""
+    """Incremental tool-argument JSON while the model streams a tool call (additive).
+
+    ``delta`` is a raw, opaque fragment of one streaming JSON document per
+    ``call_id`` — not valid JSON by itself. Clients must buffer fragments by
+    ``call_id`` (in arrival order) and only attempt to parse once the tool call
+    is finalized (``ToolCallStarted``); never parse an individual ``delta``.
+    """
 
     kind: Literal["ToolInputDelta"] = "ToolInputDelta"
     request_id: str = ""

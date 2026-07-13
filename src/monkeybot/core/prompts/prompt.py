@@ -18,6 +18,19 @@ from monkeybot.core.types.content_blocks import Text
 # Cap injected user text so long pastes do not dominate the context window.
 _MAX_CURRENT_REQUEST_CHARS = 8000
 
+# Volatile-tail section headings, defined once here (where the sections are
+# actually composed) so callers that need to locate the stable/volatile
+# boundary in a flattened prompt string (e.g. Anthropic cache-block splitting
+# in ``providers._utils.split_system_prompt_for_cache``) import these instead
+# of re-declaring the literal strings and risking drift.
+MEMORY_INDEX_HEADING = "\n\n## Memory index\n"
+MEMORY_NUDGE_HEADING = "\n\n## Memory\n"
+SKILLS_HEADING = "\n\n## Skills\n"
+CURRENT_REQUEST_HEADING = "\n\n## Current request\n"
+# Not composed here, but part of the same volatile-tail-heading vocabulary —
+# defined alongside the others so ``providers._utils`` has one import for all.
+RUNTIME_NOTES_HEADING = "\n\n## Runtime notes\n"
+
 
 def _user_text_flat(m: Message) -> str:
     """Concatenate Text blocks from a user turn (tool results use other block types)."""
@@ -72,7 +85,7 @@ def _current_request_block(chat_messages: Sequence[Message] | None) -> str:
     if len(clipped) > _MAX_CURRENT_REQUEST_CHARS:
         clipped = clipped[:_MAX_CURRENT_REQUEST_CHARS].rstrip() + "\n…(truncated)"
     return (
-        "\n\n## Current request\n"
+        f"{CURRENT_REQUEST_HEADING}"
         "The conversation has continued with assistant or tool messages since this "
         "user message; treat it as the active task.\n\n"
         f"{clipped}"
@@ -99,12 +112,12 @@ def _memory_block(
         mem_lines = list(ctx.memory_index)
 
     memory_bullets = "\n".join(f"- {line}" for line in mem_lines) if mem_lines else ""
-    mem_block = f"\n\n## Memory index\n{memory_bullets}" if memory_bullets else ""
+    mem_block = f"{MEMORY_INDEX_HEADING}{memory_bullets}" if memory_bullets else ""
     if memory_selection is not None and memory_selection.nudge_search:
         shown = len(memory_selection.lines)
         total = memory_selection.total_lines
         mem_block += (
-            f"\n\n## Memory\n"
+            f"{MEMORY_NUDGE_HEADING}"
             f"Showing {shown} of {total} index entries "
             f"(coverage {memory_selection.coverage:.0%}, confidence {memory_selection.confidence:.0%}). "
             "Use `search_memory` with keywords when the task may depend on older or unstated context."
@@ -115,7 +128,7 @@ def _memory_block(
 def _skills_section(ctx: TurnContext) -> str:
     skill_lines = [f"- {s.name}" for s in ctx.skills]
     skills_block = "\n".join(skill_lines)
-    return f"\n\n## Skills\n{skills_block}" if skills_block else ""
+    return f"{SKILLS_HEADING}{skills_block}" if skills_block else ""
 
 
 def _harness_text(ctx: TurnContext) -> str:
@@ -155,6 +168,25 @@ def compose_volatile_tail(
     skills_section = _skills_section(ctx)
     task = _current_request_block(chat_messages)
     return f"{mem_block}{skills_section}{task}"
+
+
+def compose_volatile_tail_parts(
+    ctx: TurnContext,
+    *,
+    chat_messages: Sequence[Message] | None = None,
+    memory_selection: MemoryPromptSelection | None = None,
+) -> dict[str, str]:
+    """Same sections as :func:`compose_volatile_tail`, individually named.
+
+    Lets callers (e.g. ``ContextEpochTracker``) attribute a mid-epoch volatile
+    change to the specific source that moved — memory, skills, or the
+    current-request anchor — instead of a catch-all "volatile" label.
+    """
+    return {
+        "memory": _memory_block(ctx, memory_selection),
+        "skills": _skills_section(ctx),
+        "current_request": _current_request_block(chat_messages),
+    }
 
 
 def compose_system_prompt(

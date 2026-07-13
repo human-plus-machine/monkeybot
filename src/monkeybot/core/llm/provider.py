@@ -81,7 +81,14 @@ class ToolCall:
 
 @dataclass(frozen=True, kw_only=True)
 class ToolInputDelta:
-    """Incremental tool-argument JSON fragment while args are still streaming."""
+    """Incremental tool-argument JSON fragment while args are still streaming.
+
+    ``delta`` is a raw, opaque fragment of a single streaming JSON document keyed
+    by ``call_id`` (e.g. Anthropic ``input_json_delta``). It is not valid JSON on
+    its own — consumers must concatenate all fragments for a given ``call_id``
+    (in arrival order) before attempting to parse the result. The final,
+    validated arguments are delivered separately on :class:`ToolCall`.
+    """
 
     kind: Literal["tool_input_delta"] = "tool_input_delta"
     call_id: str

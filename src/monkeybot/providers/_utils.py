@@ -299,7 +299,19 @@ def _anthropic_assistant_block(block: ContentBlock) -> dict[str, Any]:
     )
 
 
-# Must match volatile section headers emitted by ``compose_system_prompt``.
+# Must match volatile section headers emitted by ``compose_system_prompt``
+# (``core.prompts.prompt``), ``_append_extra_system_text`` (``core.runtime.loop``),
+# and ``_format_system_context_update`` (``core.context.epoch``).
+#
+# These modules cannot be imported here directly: ``core.context`` transitively
+# imports ``core.config.settings``, which imports concrete provider classes
+# from this package, creating a circular import. Each owning module exposes
+# its heading as a module-level ``*_HEADING`` constant (not just an inline
+# literal) specifically so this list — and any other out-of-package consumer —
+# can be kept in sync by grepping for ``_HEADING = "\n\n## `` rather than by
+# re-deriving the split point from prose. A dedicated regression test
+# (``tests/providers/test_anthropic_cache.py::test_volatile_markers_match_heading_constants``)
+# asserts these literals stay byte-identical to the owning constants.
 _VOLATILE_SYSTEM_MARKERS = (
     "\n\n## Memory index\n",
     "\n\n## Memory\n",

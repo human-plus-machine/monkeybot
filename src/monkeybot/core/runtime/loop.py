@@ -51,8 +51,10 @@ from monkeybot.core.messages import convert_to_provider, transform_context
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.prompts.prompt import (
+    RUNTIME_NOTES_HEADING,
     compose_stable_baseline,
     compose_volatile_tail,
+    compose_volatile_tail_parts,
     latest_user_message_text,
 )
 from monkeybot.core.runtime.context_budget import (
@@ -324,14 +326,18 @@ def _admit_system_context(
         attachment_catalog.list_records() if attachment_catalog is not None else None
     )
     stable = compose_stable_baseline(ctx, attachment_catalog=catalog)
-    volatile = compose_volatile_tail(
+    volatile_parts = compose_volatile_tail_parts(
         ctx, chat_messages=chat_messages, memory_selection=memory_selection
     )
+    volatile = "".join(volatile_parts.values())
     return epoch.reconcile(
         stable_baseline=stable,
         volatile_text=volatile,
         stable_fingerprint=fingerprint_text(stable),
         volatile_fingerprint=fingerprint_text(volatile),
+        volatile_part_fingerprints={
+            name: fingerprint_text(text) for name, text in volatile_parts.items()
+        },
     )
 
 
@@ -341,12 +347,24 @@ def _messages_for_provider(
     *,
     mid_conversation_update: str = "",
 ) -> list[Message]:
-    """Leading system + history + optional chronological system-context update."""
+    """Leading system + history + optional chronological system-context update.
+
+    The update is user-role so all providers accept mid-conversation updates
+    (system is leading-only for Anthropic/Gemini/OpenAI adapters). When history
+    already ends in a ``user`` row (e.g. a tool-response turn), the update is
+    folded into that same message instead of appended as a new one — Anthropic
+    and Gemini both reject (or, for Anthropic, only sometimes silently coalesce)
+    two consecutive same-role messages.
+    """
     out: list[Message] = [system, *list(history)]
-    if mid_conversation_update.strip():
-        # User-role so all providers accept mid-conversation updates (system is
-        # leading-only for Anthropic/Gemini/OpenAI adapters).
-        out.append(Message(role="user", content=[Text(text=mid_conversation_update)]))
+    update = mid_conversation_update.strip()
+    if not update:
+        return out
+    update_block = Text(text=mid_conversation_update)
+    if out[-1].role == "user":
+        out[-1] = Message(role="user", content=[*out[-1].content, update_block])
+    else:
+        out.append(Message(role="user", content=[update_block]))
     return out
 
 
@@ -481,7 +499,7 @@ def _append_extra_system_text(system: Message, extra: str | None) -> Message:
     if not extra:
         return system
     base = "".join(b.text for b in system.content if isinstance(b, Text))
-    wrapped = f"{base}\n\n## Runtime notes\n\n{extra.strip()}\n"
+    wrapped = f"{base}{RUNTIME_NOTES_HEADING}\n{extra.strip()}\n"
     return Message(role="system", content=[Text(text=wrapped)])
 
 
@@ -686,28 +704,45 @@ async def _prompt_input_tokens_for_history(
     memory_selection: MemoryPromptSelection | None = None,
     extra_system_text: str | None = None,
     vertex_google_search: bool = False,
+    epoch: ContextEpochTracker | None = None,
 ) -> int:
     """Provider-accurate prompt size for history rows already persisted (e.g. post-assistant).
 
-    Composes the current full system string without reconciling the live epoch
-    tracker (budget recount must not mutate epoch state).
+    When ``epoch`` is supplied, the count reflects the true wire shape for the
+    *current* epoch state — leading (cached) baseline plus any pending
+    mid-conversation update — via a non-mutating :meth:`ContextEpochTracker.peek`.
+    Falls back to a flat stable+volatile concatenation when no tracker is given
+    (e.g. summarizer/curator calls that have no epoch of their own). Either way,
+    the live tracker is never mutated by a budget recount.
     """
     catalog = (
         attachment_catalog.list_records() if attachment_catalog is not None else None
     )
-    body = (
-        compose_stable_baseline(ctx, attachment_catalog=catalog)
-        + compose_volatile_tail(
-            ctx, chat_messages=chat_messages, memory_selection=memory_selection
-        )
+    stable = compose_stable_baseline(ctx, attachment_catalog=catalog)
+    volatile = compose_volatile_tail(
+        ctx, chat_messages=chat_messages, memory_selection=memory_selection
     )
+    mid_conversation_update = ""
+    if epoch is not None:
+        admit = epoch.peek(
+            stable_baseline=stable,
+            volatile_text=volatile,
+            stable_fingerprint=fingerprint_text(stable),
+            volatile_fingerprint=fingerprint_text(volatile),
+        )
+        body = admit.leading_system_text
+        mid_conversation_update = admit.mid_conversation_update
+    else:
+        body = stable + volatile
     system = _append_extra_system_text(_system_message_from_text(body), extra_system_text)
     resolved_messages = convert_to_provider(
         chat_messages,
         attachment_store=attachment_store,
         session_id=ctx.thread_id,
     )
-    provider_messages = _messages_for_provider(system, resolved_messages)
+    provider_messages = _messages_for_provider(
+        system, resolved_messages, mid_conversation_update=mid_conversation_update
+    )
     return await _provider_prompt_input_tokens(
         provider, provider_messages, ctx.tools, model=ctx.model,
         vertex_google_search=vertex_google_search,
@@ -760,6 +795,7 @@ async def _append_budgeted_tool_responses(
     budgeter: ContextBudgeter,
     provider: Provider,
     vertex_google_search: bool = False,
+    epoch: ContextEpochTracker | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Budget tool results against remaining context, append, compact if needed."""
     trimmed, needs_compaction = budgeter.fit_content_blocks(chunk_responses)
@@ -794,6 +830,8 @@ async def _append_budgeted_tool_responses(
         turns_summarized=turns_summarized,
     )
     if turns_summarized > 0:
+        if epoch is not None:
+            epoch.begin_new_epoch()
         chat_messages = await _load_agent_chat_history(history, ctx.thread_id)
         post = await _prompt_input_tokens_for_history(
             ctx=ctx,
@@ -802,6 +840,7 @@ async def _append_budgeted_tool_responses(
             attachment_store=None,
             attachment_catalog=None,
             vertex_google_search=vertex_google_search,
+            epoch=epoch,
         )
         usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, post)
 
@@ -1486,13 +1525,6 @@ async def _run_inner_core(
                 text=_system_prompt_snapshot_text(system, admit.mid_conversation_update),
             )
 
-            pending: dict[str, ToolCall] = {}
-            assistant_text = ""
-            thinking_text = ""
-            thinking_signature: str | None = None
-            stream_truncated = False
-            thinking_streamed = False
-
             llm_input = 0
             llm_output = 0
             llm_cached = 0
@@ -1565,7 +1597,6 @@ async def _run_inner_core(
                     thinking_text = stream_mapper.thinking_text
                     thinking_signature = stream_mapper.thinking_signature
                     stream_truncated = stream_mapper.stream_truncated
-                    thinking_streamed = stream_mapper.thinking_streamed
                     set_llm_usage(
                         input_tokens=llm_input,
                         output_tokens=llm_output,
@@ -2079,6 +2110,7 @@ async def _run_inner_core(
                         memory_selection=memory_selection,
                         extra_system_text=pre_turn_extra,
                         vertex_google_search=vertex_google_search,
+                        epoch=epoch_tracker,
                     )
                 except Exception:
                     logger.warning(
@@ -2101,6 +2133,7 @@ async def _run_inner_core(
                     budgeter=budgeter,
                     provider=provider,
                     vertex_google_search=vertex_google_search,
+                    epoch=epoch_tracker,
                 ):
                     yield budget_evt
 
