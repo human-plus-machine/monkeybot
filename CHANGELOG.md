@@ -6,6 +6,10 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `monkeybot chat` no longer adopts a stale gateway on a busy port: it refuses to spawn when the port is already in use (suggesting `/bye`, stopping `monkeybot run`, or `--attach`), and `wait_for_health` rejects a `/health` 200 if the child process has already exited.
+
 ## [0.2.1] - 2026-07-13
 
 ### Added
