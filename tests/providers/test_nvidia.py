@@ -25,15 +25,3 @@ def test_nvidia_provider_base_url_override(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("NVIDIA_BASE_URL", "https://example.internal/v1/")
     provider = NvidiaProvider()
     assert provider._base_url == "https://example.internal/v1"
-
-
-def test_nvidia_stores_cache_enabled_default_true(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-test")
-    provider = NvidiaProvider()
-    assert provider._cache_enabled is True
-
-
-def test_nvidia_stores_cache_enabled_false(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-test")
-    provider = NvidiaProvider(cache_enabled=False)
-    assert provider._cache_enabled is False

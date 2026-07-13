@@ -2,7 +2,15 @@ name: Publish release
 
 # Fires whenever main moves - i.e. right after an admin merges a release PR.
 # Branch protection on main (require PR + restrict merges to admins) is the
-# actual access control; this just tags + publishes whatever landed.
+# actual access control; this tags + GitHub-Releases + Trusted-Publishes to PyPI.
+#
+# PyPI Pending Trusted Publishers (one per project — environments must differ):
+#   monkeybot:     Owner human-plus-machine / Repo monkeybot /
+#                  Workflow publish-release.yml / Environment pypi
+#   monkeybot-cli: Owner human-plus-machine / Repo monkeybot /
+#                  Workflow publish-release.yml / Environment pypi-cli
+#
+# GitHub: create Environments named exactly `pypi` and `pypi-cli`.
 on:
   push:
     branches: [main]
@@ -17,6 +25,8 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.release.outputs.packages }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -27,6 +37,62 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - run: python3 scripts/release.py publish
+      - id: release
+        run: python3 scripts/release.py publish
         env:
           GH_TOKEN: ${{ github.token }}
+
+  # Core before CLI (separate jobs / environments — required for two pending publishers).
+  pypi-core:
+    needs: publish
+    if: contains(format(',{0},', needs.publish.outputs.packages), ',core,')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/monkeybot
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build core
+        run: uv build --out-dir dist/core .
+      - name: Publish core to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/core
+          skip-existing: true
+
+  pypi-cli:
+    needs: [publish, pypi-core]
+    # Run when cli is in the release set. If core wasn't released this run,
+    # pypi-core is skipped — treat that as success so cli can still publish.
+    if: |
+      always() &&
+      needs.publish.result == 'success' &&
+      contains(format(',{0},', needs.publish.outputs.packages), ',cli,') &&
+      (needs.pypi-core.result == 'success' || needs.pypi-core.result == 'skipped')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi-cli
+      url: https://pypi.org/p/monkeybot-cli
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build cli
+        run: uv build --out-dir dist/cli cli
+      - name: Publish cli to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/cli
+          skip-existing: true

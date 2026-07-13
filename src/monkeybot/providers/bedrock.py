@@ -7,7 +7,7 @@ import os
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
-from monkeybot.core.llm.provider import Message, ProviderEvent
+from monkeybot.core.llm.provider import Message, ProviderCallHints, ProviderEvent
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._utils import (
@@ -42,7 +42,6 @@ class BedrockClaudeProvider:
         aws_region: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
-        cache_enabled: bool = True,
     ) -> None:
         self._aws_region = (
             (aws_region or "").strip()
@@ -50,7 +49,6 @@ class BedrockClaudeProvider:
             or os.environ.get("AWS_DEFAULT_REGION", "").strip()
             or "us-east-1"
         )
-        self._cache_enabled = cache_enabled
         sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens)
         self._temperature = sampling.temperature
         self._max_tokens = sampling.max_tokens
@@ -67,8 +65,9 @@ class BedrockClaudeProvider:
         *,
         model: str,
         thinking_budget: int | None = None,
+        hints: ProviderCallHints | None = None,
     ) -> int:
-        del thinking_budget
+        del thinking_budget, hints
         import anthropic  # noqa: PLC0415
 
         system, msgs = split_leading_system(messages)
@@ -106,22 +105,25 @@ class BedrockClaudeProvider:
         *,
         model: str,
         thinking_budget: int | None = None,
+        hints: ProviderCallHints | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         del thinking_budget
         import anthropic  # noqa: PLC0415
 
+        retention = hints.cache_retention if hints is not None else "short"
         system, msgs = split_leading_system(messages)
         converted_messages = build_anthropic_messages(msgs)
         converted = anthropic_tool_defs(tools) if tools else None
-        if self._cache_enabled and system:
-            system_param: Any = build_cached_system_blocks(system)
-        else:
-            system_param = system or anthropic.NOT_GIVEN
-
-        if self._cache_enabled and converted:
-            tools_param: Any = mark_last_tool_cached(converted)
-        else:
-            tools_param = converted if converted else anthropic.NOT_GIVEN
+        system_param: Any = (
+            build_cached_system_blocks(system, cache_retention=retention)
+            if system
+            else anthropic.NOT_GIVEN
+        )
+        tools_param: Any = (
+            mark_last_tool_cached(converted, cache_retention=retention)
+            if converted
+            else anthropic.NOT_GIVEN
+        )
 
         client = self._client()
         stream_kwargs: dict[str, Any] = {

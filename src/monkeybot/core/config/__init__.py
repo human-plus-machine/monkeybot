@@ -1,7 +1,16 @@
-"""Configuration utilities for the MonkeyBot harness."""
+"""Configuration utilities for the monkeybot harness."""
 
 from __future__ import annotations
 
+from monkeybot.core.config.realtime_config import (
+    RealtimeAudioConfig,
+    RealtimeConfig,
+    RealtimeMetricsConfig,
+    RealtimeModelConfig,
+    RealtimeSessionConfig,
+    RealtimeWebSocketConfig,
+    get_realtime_config,
+)
 from monkeybot.core.config.runtime_env import (
     ENV_MAP,
     apply_monkeybot_runtime_env,
@@ -13,13 +22,12 @@ from monkeybot.core.config.settings import (
     ProviderConfig,
     SubagentConfig,
     auto_schema_enabled_from_config,
-    cache_enabled_from_env,
     get_provider_config,
     get_subagent_configs,
     get_subagent_registry,
     normalize_model_provider,
-    vertex_google_search_enabled_from_config,
     subagent_vertex_google_search_from_config,
+    vertex_google_search_enabled_from_config,
 )
 from monkeybot.core.config.validation import (
     SUPPORTED_MODEL_PROVIDERS,
@@ -42,13 +50,19 @@ __all__ = [
     "SUPPORTED_YAML_MODEL_PROVIDERS",
     "apply_monkeybot_runtime_env",
     "auto_schema_enabled_from_config",
-    "cache_enabled_from_env",
     "get_provider_config",
     "get_subagent_configs",
     "get_subagent_registry",
     "load_monkeybot_yaml_dict",
     "normalize_model_provider",
     "reset_runtime_env_state_for_tests",
+    "RealtimeAudioConfig",
+    "RealtimeConfig",
+    "RealtimeMetricsConfig",
+    "RealtimeModelConfig",
+    "RealtimeSessionConfig",
+    "RealtimeWebSocketConfig",
+    "get_realtime_config",
     "resolve_monkeybot_config_path",
     "validate_monkeybot_yaml_doc",
     "validate_provider_env",

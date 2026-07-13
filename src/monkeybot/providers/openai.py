@@ -8,6 +8,7 @@ from typing import Any
 
 from monkeybot.core.llm.provider import (
     Message,
+    ProviderCallHints,
     ProviderEvent,
 )
 from monkeybot.core.types.types_tools import ToolDef
@@ -53,14 +54,9 @@ class OpenAIProvider:
         *,
         temperature: float | None = None,
         max_tokens: int | None = None,
-        cache_enabled: bool = True,
     ) -> None:
         if not os.environ.get("OPENAI_API_KEY"):
             raise ValueError("OPENAI_API_KEY is not set")
-        # ``cache_enabled`` is accepted for constructor-contract symmetry with the
-        # other providers (Story 1) but is currently inert here: OpenAI's chat
-        # completions request shape has no cache_control-equivalent field to set.
-        self._cache_enabled = cache_enabled
         sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens)
         self._temperature = sampling.temperature
         self._max_tokens = sampling.max_tokens
@@ -72,8 +68,9 @@ class OpenAIProvider:
         *,
         model: str,
         thinking_budget: int | None = None,
+        hints: ProviderCallHints | None = None,
     ) -> int:
-        del thinking_budget
+        del thinking_budget, hints
         import tiktoken  # noqa: PLC0415
 
         msgs = list(messages)
@@ -90,6 +87,7 @@ class OpenAIProvider:
         *,
         model: str,
         thinking_budget: int | None = None,
+        hints: ProviderCallHints | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         del thinking_budget
         from openai import AsyncOpenAI  # noqa: PLC0415
@@ -100,7 +98,12 @@ class OpenAIProvider:
         if system:
             oai_messages = [{"role": "system", "content": system}, *oai_messages]
 
-        client = AsyncOpenAI()
+        retention = hints.cache_retention if hints is not None else "short"
+        session_id = hints.session_id if hints is not None else None
+        client_kwargs: dict[str, Any] = {}
+        if session_id and retention != "none":
+            client_kwargs["default_headers"] = {"x-session-affinity": session_id}
+        client = AsyncOpenAI(**client_kwargs)
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": oai_messages,
@@ -111,6 +114,8 @@ class OpenAIProvider:
         if tools:
             kwargs["tools"] = openai_tools(tools)
             kwargs["parallel_" + "tool" + "_calls"] = True
+        if retention == "long":
+            kwargs["prompt_cache_retention"] = "24h"
 
         async for event in iter_openai_compat_stream(
             client,

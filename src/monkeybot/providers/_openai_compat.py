@@ -24,11 +24,37 @@ from monkeybot.core.llm.provider import (
     UsageEvent,
 )
 from monkeybot.core.logging_utils import kv
-from monkeybot.core.types.content_blocks import ContentBlock, Text, ToolRequest, ToolResponse
+from monkeybot.core.types.content_blocks import (
+    ContentBlock,
+    RedactedThinking,
+    Text,
+    Thinking,
+    ToolRequest,
+    ToolResponse,
+)
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._utils import safe_parse_tool_args
 
 _log = logging.getLogger(__name__)
+
+
+def _delta_reasoning_text(delta: Any) -> str:
+    """Extract thinking/reasoning text from an OpenAI-compat stream delta.
+
+    Ollama and some other servers put reasoning on ``delta.reasoning`` (or
+    ``thinking``). Pydantic models may park unknown fields in ``model_extra``.
+    """
+    for key in ("reasoning", "thinking", "reasoning_content"):
+        value = getattr(delta, key, None)
+        if isinstance(value, str) and value:
+            return value
+    extra = getattr(delta, "model_extra", None)
+    if isinstance(extra, dict):
+        for key in ("reasoning", "thinking", "reasoning_content"):
+            value = extra.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return ""
 
 
 def _system_prompt_from_message(message: Message) -> str:
@@ -93,6 +119,10 @@ def messages_to_openai(messages: Sequence[Message]) -> tuple[str | None, list[di
                             },
                         }
                     )
+                elif isinstance(block, (Thinking, RedactedThinking)):
+                    # Chat Completions has no thinking wire type; drop so Ollama /
+                    # HF / OpenAI can continue after a turn that stored reasoning.
+                    continue
                 else:
                     raise ValueError(
                         f"unsupported assistant block for OpenAI-compat: {type(block).__name__}"
@@ -213,6 +243,7 @@ async def iter_openai_compat_stream(
     output_tokens = 0
     cached_tokens = 0
     tool_buf: dict[int, dict[str, Any]] = {}
+    finish_reason: str | None = None
 
     try:
         stream = await client.chat.completions.create(**req)
@@ -225,12 +256,15 @@ async def iter_openai_compat_stream(
             if not chunk.choices:
                 continue
             choice = chunk.choices[0]
+            fr = getattr(choice, "finish_reason", None)
+            if fr:
+                finish_reason = str(fr)
             delta = choice.delta
             if delta is None:
                 continue
             if delta.content:
                 yield TextDelta(text=delta.content)
-            reasoning = getattr(delta, "reasoning", None)
+            reasoning = _delta_reasoning_text(delta)
             if reasoning:
                 yield ThinkingDelta(text=reasoning)
             if delta.tool_calls:
@@ -279,7 +313,7 @@ async def iter_openai_compat_stream(
         cache_read_tokens=cached_tokens,
         cache_creation_tokens=0,
     )
-    yield Done()
+    yield Done(truncated=finish_reason == "length")
 
 
 async def count_input_tokens_tiktoken(

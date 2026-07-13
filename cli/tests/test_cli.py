@@ -42,6 +42,11 @@ def test_new_scaffolds(tmp_path: Path) -> None:
     assert "AGENT_MD" not in env_text
     assert "MONKEYBOT_SUBAGENT_AGENT_MD" not in env_text
     assert "DB_URL" in env_text
+    pyproject = (tmp_path / "pyproject.toml").read_text()
+    assert "monkeybot[gemini]>=2.1.0,<3" in pyproject
+    assert "[tool.uv.sources]" not in pyproject
+    assert "uv sync" in result.stdout
+    assert "pyproject.toml: created" in result.stdout
 
 
 def test_new_force_reports_overwritten_config(tmp_path: Path) -> None:
@@ -53,7 +58,7 @@ def test_new_force_reports_overwritten_config(tmp_path: Path) -> None:
 
 
 def test_write_active_config_reports_overwritten_on_force(tmp_path: Path) -> None:
-    from monkeybot.scaffold import write_active_config
+    from monkeybot_cli.scaffold import write_active_config
 
     cfg_dir = tmp_path / "monkeybot_config"
     cfg_dir.mkdir()
@@ -67,7 +72,7 @@ def test_write_active_config_reports_overwritten_on_force(tmp_path: Path) -> Non
 
 
 def test_write_active_config_reports_created(tmp_path: Path) -> None:
-    from monkeybot.scaffold import write_active_config
+    from monkeybot_cli.scaffold import write_active_config
 
     cfg_dir = tmp_path / "monkeybot_config"
     cfg_dir.mkdir()
@@ -85,6 +90,14 @@ def test_validate_missing_config(tmp_path: Path) -> None:
     data = json.loads(result.stdout)
     assert data["ok"] is False
     assert any(c["id"] == "config.file.exists" for c in data["checks"])
+
+
+def test_talk_help_lists_realtime_flags() -> None:
+    result = _run_cli("talk", "--help")
+    assert result.returncode == 0
+    assert "--gateway-url" in result.stdout
+    assert "--text" in result.stdout
+    assert "8080" in result.stdout
 
 
 def test_load_agent_dotenv_from_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

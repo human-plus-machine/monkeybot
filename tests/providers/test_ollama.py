@@ -52,16 +52,6 @@ def test_ollama_uses_custom_api_key_when_set(monkeypatch: pytest.MonkeyPatch) ->
     assert provider._api_key == "proxy-secret"
 
 
-def test_ollama_stores_cache_enabled_default_true() -> None:
-    provider = OllamaProvider()
-    assert provider._cache_enabled is True
-
-
-def test_ollama_stores_cache_enabled_false() -> None:
-    provider = OllamaProvider(cache_enabled=False)
-    assert provider._cache_enabled is False
-
-
 def test_ollama_stores_thinking_budget() -> None:
     provider = OllamaProvider(thinking_budget=0)
     assert provider._thinking_budget == 0

@@ -11,6 +11,7 @@ SUPPORTED_SECRETS_PROVIDERS = frozenset({"env", "gcp_secret_manager"})
 SUPPORTED_MODEL_PROVIDERS = frozenset(
     {
         "google_vertexai",
+        "google_genai",
         "openai",
         "anthropic",
         "vertex_anthropic",
@@ -27,6 +28,7 @@ SUPPORTED_YAML_MODEL_PROVIDERS = frozenset(
         "gemini",
         "vertex",
         "google_vertexai",
+        "google_genai",
         "openai",
         "anthropic",
         "vertex-claude",
@@ -37,6 +39,14 @@ SUPPORTED_YAML_MODEL_PROVIDERS = frozenset(
         "nvidia",
         "fake",
         "aws_bedrock",
+    }
+)
+
+SUPPORTED_HARNESS_MODES = frozenset({"turn_based", "realtime"})
+SUPPORTED_REALTIME_AUDIO_FORMATS = frozenset(
+    {
+        "pcm_s16le_24khz_mono",
+        "pcm_s16le_16khz_mono",
     }
 )
 
@@ -116,12 +126,96 @@ def validate_provider_env(config: dict[str, str]) -> None:
         )
 
 
+def _validate_harness_mode(doc: dict[str, Any]) -> None:
+    """Validate ``harness.mode`` if present. Defaults to ``turn_based``."""
+    harness = doc.get("harness")
+    if not isinstance(harness, dict):
+        return
+    mode = str(harness.get("mode", "turn_based")).strip().lower()
+    if mode not in SUPPORTED_HARNESS_MODES:
+        supported = ", ".join(sorted(SUPPORTED_HARNESS_MODES))
+        raise ConfigError(
+            f"harness.mode is set to '{mode}' which is not supported.\n"
+            f"Supported modes: {supported}"
+        )
+
+
+def _validate_realtime_config(doc: dict[str, Any]) -> None:
+    """Validate ``realtime.*`` settings when ``harness.mode`` is ``realtime``."""
+    harness = doc.get("harness")
+    mode = "turn_based"
+    if isinstance(harness, dict):
+        mode = str(harness.get("mode", "turn_based")).strip().lower()
+
+    realtime_raw = doc.get("realtime")
+    if not isinstance(realtime_raw, dict):
+        realtime_raw = {}
+
+    def _require_positive(path: str, default: int) -> None:
+        parts = path.split(".")
+        value: Any = realtime_raw
+        for part in parts:
+            if not isinstance(value, dict):
+                value = None
+                break
+            value = value.get(part)
+        if value is None:
+            return
+        if not isinstance(value, (int, float)) or value <= 0:
+            raise ConfigError(f"realtime.{path} must be a positive number, got {value!r}")
+
+    # Validate audio format strings even when mode is turn_based so misconfigurations
+    # are caught before the mode is flipped.
+    audio_raw = realtime_raw.get("audio")
+    audio: dict[str, Any] = audio_raw if isinstance(audio_raw, dict) else {}
+    for fmt_key in ("input_format", "output_format"):
+        fmt = str(audio.get(fmt_key, "pcm_s16le_24khz_mono")).strip().lower()
+        if fmt and fmt not in SUPPORTED_REALTIME_AUDIO_FORMATS:
+            supported = ", ".join(sorted(SUPPORTED_REALTIME_AUDIO_FORMATS))
+            raise ConfigError(
+                f"realtime.audio.{fmt_key} is set to '{fmt}' which is not supported.\n"
+                f"Supported formats: {supported}"
+            )
+
+    chunk_ms = audio.get("chunk_ms")
+    if chunk_ms is not None and (not isinstance(chunk_ms, int) or chunk_ms <= 0):
+        raise ConfigError(f"realtime.audio.chunk_ms must be a positive integer, got {chunk_ms!r}")
+
+    _require_positive("audio.max_utterance_sec", 60)
+    _require_positive("session.max_duration_sec", 1800)
+    _require_positive("session.idle_timeout_sec", 120)
+    _require_positive("session.max_response_turn_sec", 300)
+
+    max_concurrent = realtime_raw.get("session", {}).get("max_concurrent_sessions")
+    if max_concurrent is not None and (not isinstance(max_concurrent, int) or max_concurrent <= 0):
+        raise ConfigError(
+            f"realtime.session.max_concurrent_sessions must be a positive integer, "
+            f"got {max_concurrent!r}"
+        )
+
+    if mode != "realtime":
+        return
+
+    # Realtime mode requires the provider to be from the Gemini family for v1.
+    model_raw = doc.get("model")
+    model: dict[str, Any] = model_raw if isinstance(model_raw, dict) else {}
+    provider = str(model.get("provider", "gemini")).strip().lower()
+    if provider not in {"gemini", "vertex", "google_vertexai", "google_genai"}:
+        raise ConfigError(
+            "harness.mode is 'realtime' but model.provider is not a Gemini family provider. "
+            "Realtime v1 only supports google_vertexai or google_genai (Gemini Live)."
+        )
+
+
 def validate_monkeybot_yaml_doc(doc: dict[str, Any], *, env: dict[str, str] | None = None) -> None:
     """Validate a parsed monkeybot.yaml document (new schema).
 
     Args:
         doc: Parsed YAML root mapping.
         env: Optional environment for GCP project resolution.
+
+    Raises:
+        ConfigError: If unsupported provider or missing required configuration.
     """
     env = env or {}
     model_raw = doc.get("model")
@@ -133,6 +227,9 @@ def validate_monkeybot_yaml_doc(doc: dict[str, Any], *, env: dict[str, str] | No
             f"model.provider is set to '{provider_raw}' which is not supported.\n"
             f"Currently supported providers: {supported}"
         )
+
+    _validate_harness_mode(doc)
+    _validate_realtime_config(doc)
 
     flat: dict[str, str] = {}
     if isinstance(model, dict) and model.get("provider"):

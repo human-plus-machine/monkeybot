@@ -1,20 +1,24 @@
-# Model Context Protocol (MCP) in MonkeyBot
+# Model Context Protocol (MCP) in monkeybot
 
-MonkeyBot fully supports the Model Context Protocol (MCP), enabling your agents to interact with external tools, APIs, and data sources. Both local `stdio` subprocess transport and remote `Streamable HTTP` SSE transports are supported.
+monkeybot fully supports the Model Context Protocol (MCP), enabling your agents to interact with external tools, APIs, and data sources. Both local `stdio` subprocess transport and remote `Streamable HTTP` SSE transports are supported.
+
+**See also:** [Progressive MCP tool disclosure](progressive-mcp-tools.md) (on-demand `enable_mcp` + mid-turn tool refresh for TTFT).
 
 ---
 
 ## Configuration
 
-By default, MonkeyBot loads its MCP servers map from a JSON file specified under `paths.mcp_config` in `monkeybot.yaml` (typically `./monkeybot_config/mcp.json`).
+By default, monkeybot loads its MCP servers map from a JSON file specified under `paths.mcp_config` in `monkeybot.yaml` (typically `./monkeybot_config/mcp.json`).
 
-A template `mcp.json` looks like this:
+A template `mcp.json` looks like this. Every entry under `mcpServers` is catalogued at
+startup (unless `"enabled": false`); the model calls `enable_mcp("name")` before those
+tools appear. Use `"autoConnect": true` when a server must connect at startup. Delete an
+entry to remove it from the catalog.
 
 ```json
 {
   "mcpServers": {
-    "my-stdio-server": {
-      "enabled": true,
+    "filesystem": {
       "command": "npx",
       "args": [
         "-y",
@@ -26,31 +30,68 @@ A template `mcp.json` looks like this:
         "API_SECRET": "${MY_SECRET_ENV_VAR}"
       }
     },
-    "my-http-server": {
-      "enabled": true,
-      "url": "https://mcp.example.com/mcp",
-      "headers": {
-        "Authorization": "Bearer ${STATIC_TOKEN}"
+    "browser": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--project",
+        "/path/to/monkeybot/integrations/browser-mcp",
+        "python",
+        "-m",
+        "browser_mcp.server"
+      ],
+      "env": {
+        "BU_NAME": "monkeybot",
+        "BROWSER_MCP_PLAYBOOKS_DIR": "./workspace/skills/browser/playbooks",
+        "BROWSER_MCP_SCREENSHOTS_DIR": "${MONKEYBOT_WORKSPACE_ROOT}/browser/Screenshots"
       }
     }
   }
 }
 ```
 
+Demo agent: `./run.sh` copies `monkeybot_config_example/mcp.example.json` → `demo_agent/monkeybot_config/mcp.json` if missing (live config is gitignored). Scaffolded agents get stdio / HTTP / OAuth / browser examples from the packaged `monkeybot_config/mcp.json` — keep only the servers you want and fix placeholder paths.
+
 ---
 
 ## Features
 
+### 0. Progressive MCP (always on-demand)
+
+Servers listed in `mcp.json` are **catalogued at startup but not connected** by default.
+Schemas stay out of the provider payload until the model calls `enable_mcp("name")`; tools
+then appear on the **next model step of the same turn** (text/SSE loop). Prefer that over
+inventing `add_mcp_server` command/args for servers already in config.
+
+**Config flags (per server):**
+
+| Flag | Effect |
+|------|--------|
+| *(default)* | Catalog only; model must `enable_mcp` |
+| `"enabled": false` | Skip entirely — not catalogued, not connectable by the model (trust gate) |
+| `"autoConnect": true` | Connect at startup and advertise tools immediately (escape hatch for skills that predate `enable_mcp`) |
+
+**Breaking change:** servers that used to auto-connect when listed (unless `enabled: false`)
+now stay catalog-only. Set `"autoConnect": true` to restore the old startup behavior, or
+update skills to call `enable_mcp("name")` first.
+
+**Realtime / voice:** `enable_mcp` / `disable_mcp` still mutate the harness MCP client and
+refresh `ctx.tools`, but live vendor sessions fix tool schemas at connect time. Newly
+enabled schemas apply only after starting a new realtime session (v1 has no
+reconnect/resume).
+
+See [Progressive MCP tool disclosure](progressive-mcp-tools.md).
+
 ### 1. Environment Variable Interpolation
 
-To prevent checking secrets or environment-specific paths into version control, MonkeyBot recursively interpolates values in `mcp.json` matching the `${VAR_NAME}` pattern.
+To prevent checking secrets or environment-specific paths into version control, monkeybot recursively interpolates values in `mcp.json` matching the `${VAR_NAME}` pattern.
 
 * Missing environment variables are interpolated as empty strings `""`.
 * Interpolation applies recursively to keys and nested elements under `env`, `headers`, `args`, `url`, and `auth`.
 
 ### 2. OAuth2 / OpenID Connect (OIDC) Authentication
 
-For remote Streamable HTTP MCP endpoints requiring dynamic or short-lived credentials, MonkeyBot can perform background OAuth2 token retrieval and automatic bearer token rotation.
+For remote Streamable HTTP MCP endpoints requiring dynamic or short-lived credentials, monkeybot can perform background OAuth2 token retrieval and automatic bearer token rotation.
 
 Add an optional `"auth"` block to your server specification inside `mcp.json`:
 
@@ -58,7 +99,6 @@ Add an optional `"auth"` block to your server specification inside `mcp.json`:
 
 ```json
 "langchain-docs": {
-  "enabled": true,
   "url": "https://mcp-server.example.com/mcp",
   "auth": {
     "flow": "client_credentials",
@@ -75,7 +115,6 @@ Add an optional `"auth"` block to your server specification inside `mcp.json`:
 
 ```json
 "internal-admin-tool": {
-  "enabled": true,
   "url": "https://admin-mcp.internal.net",
   "auth": {
     "flow": "password",
@@ -104,7 +143,7 @@ Add an optional `"auth"` block to your server specification inside `mcp.json`:
 
 #### Token Refresh and Expiry Behavior:
 
-* **Background Refresh**: Token expiry is calculated based on the `expires_in` response property (default: 3600 seconds). MonkeyBot automatically refreshes the token in the background 60 seconds before it expires.
+* **Background Refresh**: Token expiry is calculated based on the `expires_in` response property (default: 3600 seconds). monkeybot automatically refreshes the token in the background 60 seconds before it expires.
 * **401 Retry**: If the target MCP endpoint returns a `401 Unauthorized` response, the authentication handler immediately discards the current token, issues a fresh token request, and retries the failed request once.
 * **Header Priority**: If an `"auth"` block is provided, static `"Authorization"` / `"authorization"` parameters in the `"headers"` block are automatically popped and ignored to avoid conflict.
 
@@ -128,7 +167,7 @@ When enabled:
 
 ### Actionable Troubleshooting Banners
 
-If startup fails under strict load, MonkeyBot prints a high-signal diagnostic banner to stderr containing user-actionable remedies before exiting:
+If startup fails under strict load, monkeybot prints a high-signal diagnostic banner to stderr containing user-actionable remedies before exiting:
 
 ```
 ======================================================================

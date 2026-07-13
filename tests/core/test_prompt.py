@@ -2,6 +2,7 @@
 
 import pytest
 
+from monkeybot.core.attachments.catalog import AttachmentRecord
 from monkeybot.core.context import SkillRef, TurnContext
 from monkeybot.core.context.memory_prompt import MemoryPromptSelection
 from monkeybot.core.llm.provider import Message
@@ -60,7 +61,7 @@ def test_compose_no_chat_skips_current_request() -> None:
     out = compose_system_prompt(ctx, chat_messages=None)
     assert "You are TestBot." in out
     assert "## Current request" not in out
-    assert "MonkeyBot harness" in out
+    assert "monkeybot harness" in out
 
 
 def test_compose_last_message_user_skips_duplicate_task() -> None:
@@ -68,6 +69,27 @@ def test_compose_last_message_user_skips_duplicate_task() -> None:
     msgs = [Message(role="user", content=[Text(text="Hello")])]
     out = compose_system_prompt(ctx, chat_messages=msgs)
     assert "## Current request" not in out
+
+
+def test_compose_stable_and_volatile_split() -> None:
+    from monkeybot.core.prompts.prompt import (
+        compose_stable_baseline,
+        compose_volatile_tail,
+    )
+
+    ctx = _minimal_ctx(
+        memory_index=["fact-a"],
+        skills=[SkillRef(name="s1", description="d1")],
+    )
+    stable = compose_stable_baseline(ctx)
+    volatile = compose_volatile_tail(ctx)
+    assert "You are TestBot." in stable
+    assert "monkeybot harness" in stable
+    assert "\n\n## Memory index\n" not in stable
+    assert "\n\n## Skills\n" not in stable
+    assert "- fact-a" in volatile
+    assert "\n\n## Skills\n- s1" in volatile
+    assert compose_system_prompt(ctx) == f"{stable}{volatile}"
 
 
 def test_compose_injects_current_request_after_tool_round() -> None:
@@ -107,6 +129,28 @@ def test_memory_section_with_skills_block() -> None:
     assert "list_skills" in out
 
 
+def test_session_attachments_block_present_and_in_stable_prefix() -> None:
+    ctx = _minimal_ctx(memory_index=["Note A"], skills=[SkillRef(name="s1", description="d1")])
+    record = AttachmentRecord(
+        attachment_id="att1",
+        filename="report.pdf",
+        mime_type="application/pdf",
+        description="Q1 report",
+        storage_path=".monkeybot/attachments/t1/att1",
+    )
+    out = compose_system_prompt(ctx, attachment_catalog=[record])
+    assert "\n\n## Session attachments\n- att1 (report.pdf, application/pdf): Q1 report" in out
+    stable, volatile = split_system_prompt_for_cache(out)
+    assert "## Session attachments" in stable
+    assert "## Session attachments" not in volatile
+
+
+def test_no_attachment_catalog_omits_session_attachments_block() -> None:
+    ctx = _minimal_ctx()
+    out = compose_system_prompt(ctx, attachment_catalog=None)
+    assert "## Session attachments" not in out
+
+
 def test_task_truncation() -> None:
     ctx = _minimal_ctx()
     long_user = "x" * 9000
@@ -116,7 +160,8 @@ def test_task_truncation() -> None:
     ]
     out = compose_system_prompt(ctx, chat_messages=msgs)
     assert "…(truncated)" in out
-    assert len(out) < len(long_user) + 5500
+    # Current-request body is capped at 8k; fixed harness + agent overhead stays bounded.
+    assert len(out) < len(long_user) + 7000
 
 
 def test_compose_harness_reflects_sandbox_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -179,7 +224,7 @@ def test_current_request_appears_after_harness() -> None:
     ]
     out = compose_system_prompt(ctx, chat_messages=msgs)
     assert "## Current request" in out
-    assert out.index("## Current request") > out.index("MonkeyBot harness")
+    assert out.index("## Current request") > out.index("monkeybot harness")
 
 
 def test_stable_prefix_byte_identical_across_turns() -> None:
@@ -212,7 +257,7 @@ def test_stable_prefix_byte_identical_across_turns() -> None:
     assert "## Current request" in out_b
     stable_a, _ = split_system_prompt_for_cache(out_a)
     stable_b, _ = split_system_prompt_for_cache(out_b)
-    assert "MonkeyBot harness" in stable_a
+    assert "monkeybot harness" in stable_a
     assert stable_a == stable_b
 
 
@@ -241,7 +286,7 @@ def test_harness_precedes_volatile_sections() -> None:
     ]
     out = compose_system_prompt(ctx, chat_messages=msgs)
     stable, volatile = split_system_prompt_for_cache(out)
-    assert "MonkeyBot harness" in stable
+    assert "monkeybot harness" in stable
     assert "## Memory index" not in stable
     assert "## Current request" not in stable
     mem_idx = volatile.index("## Memory index")

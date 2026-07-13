@@ -1,3 +1,3 @@
-"""MonkeyBot — thin owned agent harness."""
+"""monkeybot — thin owned agent harness."""
 
 __version__ = "2.0.0"

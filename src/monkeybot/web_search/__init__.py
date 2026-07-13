@@ -1,4 +1,4 @@
-"""Pluggable web search for MonkeyBot.
+"""Pluggable web search for monkeybot.
 
 Usage
 -----

@@ -5,14 +5,16 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import AsyncIterator, Sequence
-from typing import Any
+from typing import Any, Literal
 
 from monkeybot.core.llm.provider import (
     Done,
     Message,
     ProviderEvent,
     TextDelta,
+    ThinkingDelta,
     ToolCall,
+    ToolInputDelta,
     UsageEvent,
 )
 from monkeybot.core.logging_utils import kv
@@ -113,6 +115,7 @@ async def iter_anthropic_sdk_stream(
     output_tokens = 0
     cache_read = 0
     cache_creation = 0
+    stop_reason: str | None = None
 
     try:
         async with client.messages.stream(**stream_kwargs) as stream:
@@ -126,8 +129,23 @@ async def iter_anthropic_sdk_stream(
                     case "content_block_delta":
                         if event.delta.type == "text_delta":
                             yield TextDelta(text=event.delta.text)
+                        elif event.delta.type == "thinking_delta":
+                            thought = getattr(event.delta, "thinking", None) or ""
+                            if thought:
+                                yield ThinkingDelta(text=thought)
+                        elif event.delta.type == "signature_delta":
+                            sig = getattr(event.delta, "signature", None) or ""
+                            if sig:
+                                yield ThinkingDelta(text="", signature=sig)
                         elif event.delta.type == "input_json_delta":
-                            tool_input_buf += event.delta.partial_json
+                            partial = event.delta.partial_json
+                            tool_input_buf += partial
+                            if tool_id and partial:
+                                yield ToolInputDelta(
+                                    call_id=tool_id,
+                                    name=tool_name,
+                                    delta=partial,
+                                )
                     case "content_block_stop":
                         if tool_id:
                             args, parse_error = safe_parse_tool_args(
@@ -144,6 +162,10 @@ async def iter_anthropic_sdk_stream(
                             )
                             tool_id = tool_name = tool_input_buf = ""
                     case "message_delta":
+                        delta = getattr(event, "delta", None)
+                        sr = getattr(delta, "stop_reason", None) if delta is not None else None
+                        if sr:
+                            stop_reason = str(sr)
                         if hasattr(event, "usage"):
                             output_tokens = int(getattr(event.usage, "output_tokens", 0) or 0)
                             read = int(
@@ -186,7 +208,7 @@ async def iter_anthropic_sdk_stream(
         cache_creation_tokens=cache_creation,
         cached_tokens=cache_read + cache_creation,
     )
-    yield Done()
+    yield Done(truncated=stop_reason == "max_tokens")
 
 
 def _anthropic_tool_result_content(result: list[ContentBlock]) -> list[dict[str, Any]]:
@@ -277,12 +299,26 @@ def _anthropic_assistant_block(block: ContentBlock) -> dict[str, Any]:
     )
 
 
-# Must match volatile section headers emitted by ``compose_system_prompt``.
+# Must match volatile section headers emitted by ``compose_system_prompt``
+# (``core.prompts.prompt``), ``_append_extra_system_text`` (``core.runtime.loop``),
+# and ``_format_system_context_update`` (``core.context.epoch``).
+#
+# These modules cannot be imported here directly: ``core.context`` transitively
+# imports ``core.config.settings``, which imports concrete provider classes
+# from this package, creating a circular import. Each owning module exposes
+# its heading as a module-level ``*_HEADING`` constant (not just an inline
+# literal) specifically so this list — and any other out-of-package consumer —
+# can be kept in sync by grepping for ``_HEADING = "\n\n## `` rather than by
+# re-deriving the split point from prose. A dedicated regression test
+# (``tests/providers/test_anthropic_cache.py::test_volatile_markers_match_heading_constants``)
+# asserts these literals stay byte-identical to the owning constants.
 _VOLATILE_SYSTEM_MARKERS = (
     "\n\n## Memory index\n",
     "\n\n## Memory\n",
     "\n\n## Skills\n",
     "\n\n## Current request\n",
+    "\n\n## Runtime notes\n",
+    "\n\n## System context update\n",
 )
 
 
@@ -298,23 +334,40 @@ def split_system_prompt_for_cache(system: str) -> tuple[str, str]:
     return system[:split_at], system[split_at:]
 
 
-def build_cached_system_blocks(system: str) -> list[dict[str, Any]]:
+def build_cached_system_blocks(
+    system: str,
+    *,
+    cache_retention: Literal["none", "short", "long"] = "short",
+) -> list[dict[str, Any]]:
     """Return Anthropic system blocks with cache_control only on the stable prefix.
 
     Volatile tail sections (memory, skills, current request) are sent in a second
     uncached block so explicit caching hits across curation turns.
 
+    When ``cache_retention`` is ``none``, no ``cache_control`` markers are applied.
+
     Args:
         system: Non-empty system prompt text. Callers MUST guard empty strings
             and pass anthropic.NOT_GIVEN instead (see provider stream methods).
+        cache_retention: ``none`` disables markers; ``short``/``long`` enable
+            ephemeral ``cache_control`` (Anthropic does not distinguish short/long
+            on the block itself; session affinity is a separate hint).
 
     Returns:
-        One or two text blocks; the stable prefix carries ``cache_control: ephemeral``.
+        One or two text blocks; the stable prefix carries ``cache_control: ephemeral``
+        unless retention is ``none``.
     """
     stable, volatile = split_system_prompt_for_cache(system)
+    if cache_retention == "none":
+        if not volatile.strip():
+            return [{"type": "text", "text": system}]
+        blocks: list[dict[str, Any]] = [{"type": "text", "text": stable}]
+        if volatile:
+            blocks.append({"type": "text", "text": volatile})
+        return blocks
     if not volatile.strip():
         return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
-    blocks: list[dict[str, Any]] = [
+    blocks = [
         {"type": "text", "text": stable, "cache_control": {"type": "ephemeral"}},
     ]
     if volatile:
@@ -322,20 +375,25 @@ def build_cached_system_blocks(system: str) -> list[dict[str, Any]]:
     return blocks
 
 
-def mark_last_tool_cached(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def mark_last_tool_cached(
+    tools: list[dict[str, Any]],
+    *,
+    cache_retention: Literal["none", "short", "long"] = "short",
+) -> list[dict[str, Any]]:
     """Return a copy of ``tools`` with ``cache_control: ephemeral`` on the LAST tool.
 
     Marks the final tool dict so Anthropic caches the entire tools-array prefix.
-    No-ops (returns the list unchanged in content) when ``tools`` is empty.
+    No-ops when ``tools`` is empty or ``cache_retention`` is ``none``.
 
     Args:
         tools: Anthropic tool dicts (output of a provider ``_convert_tools``).
+        cache_retention: When ``none``, returns tools unchanged (no markers).
 
     Returns:
         A new list; only the last element gains a ``cache_control`` key. Input
         list and its dicts are not mutated (shallow-copy the last dict).
     """
-    if not tools:
+    if not tools or cache_retention == "none":
         return tools
     marked_last = {**tools[-1], "cache_control": {"type": "ephemeral"}}
     return [*tools[:-1], marked_last]

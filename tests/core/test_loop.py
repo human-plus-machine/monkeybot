@@ -14,12 +14,15 @@ from typing import Any
 import pytest
 
 import monkeybot.core.runtime.loop as loop_mod
-from monkeybot.core.context import TurnContext
+from monkeybot.core.attachments.catalog import AttachmentRecord, SessionAttachmentCatalog
+from monkeybot.core.context import SkillRef, TurnContext
 from monkeybot.core.llm.provider import (
     Done,
+    GroundingEvent as ProviderGroundingEvent,
     Message,
     ProviderEvent,
     TextDelta,
+    ThinkingDelta,
     ToolCall,
     UsageEvent,
 )
@@ -28,10 +31,14 @@ from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.runtime.events import (
     AssistantDelta,
     Error,
+    GroundingEvent,
     ImageBlock,
     SystemPromptSnapshot,
     Thinking,
+    ThinkingBlockComplete,
+    ThinkingBlockDelta,
     ToolCallResult,
+    ToolCallStarted,
     TurnComplete,
 )
 from monkeybot.core.runtime.loop import (
@@ -39,6 +46,7 @@ from monkeybot.core.runtime.loop import (
     _compact_history_if_needed,
     _image_events,
     _merge_usage_event,
+    _messages_for_provider,
     _usage_to_totals,
     run,
 )
@@ -159,15 +167,18 @@ class FakeHistory:
 
 
 class FakeProvider:
-    def __init__(self, scripted: list[list[object]]) -> None:
+    def __init__(self, scripted: list[list[object]], *, name: str = "fake") -> None:
         self._scripted = scripted
+        self._name = name
         self.stream_calls = 0
         self.stream_models: list[str] = []
+        self.stream_messages: list[list[Message]] = []
         self.count_thinking_budgets: list[int | None] = []
+        self.vertex_google_search_calls: list[bool] = []
 
     @property
     def name(self) -> str:
-        return "fake"
+        return self._name
 
     @property
     def supports_streaming(self) -> bool:
@@ -180,9 +191,12 @@ class FakeProvider:
         *,
         model: str,
         thinking_budget: int | None = None,
+        vertex_google_search: bool = False,
     ) -> AsyncIterator[ProviderEvent]:
-        del messages, tools, thinking_budget
+        del tools, thinking_budget
+        self.stream_messages.append(list(messages))
         self.stream_models.append(model)
+        self.vertex_google_search_calls.append(vertex_google_search)
         idx = self.stream_calls
         self.stream_calls += 1
         if idx >= len(self._scripted):
@@ -197,8 +211,9 @@ class FakeProvider:
         *,
         model: str,
         thinking_budget: int | None = None,
+        vertex_google_search: bool = False,
     ) -> int:
-        del model
+        del model, vertex_google_search
         self.count_thinking_budgets.append(thinking_budget)
         return fake_provider_prompt_tokens(messages, tools)
 
@@ -217,6 +232,7 @@ class CountingFakeProvider(FakeProvider):
         *,
         model: str,
         thinking_budget: int | None = None,
+        vertex_google_search: bool = False,
     ) -> int:
         self.count_snapshots.append(list(messages))
         return await super().count_input_tokens(
@@ -224,6 +240,7 @@ class CountingFakeProvider(FakeProvider):
             tools,
             model=model,
             thinking_budget=thinking_budget,
+            vertex_google_search=vertex_google_search,
         )
 
 
@@ -326,6 +343,82 @@ async def test_run_no_tools_yields_assistant_then_turn_complete() -> None:
     assert events[-1].usage.output_tokens == 2
     assert events[-1].usage.cached_tokens == 3
 
+
+@pytest.mark.asyncio
+async def test_run_streams_thinking_block_deltas_before_assistant() -> None:
+    prov = FakeProvider(
+        [
+            [
+                ThinkingDelta(text="consider greeting"),
+                ThinkingDelta(text=" then reply", signature="sig-1"),
+                TextDelta(text="Hello!"),
+                UsageEvent(input_tokens=1, output_tokens=2),
+                Done(),
+            ]
+        ]
+    )
+    hist = FakeHistory()
+    events = []
+    async for e in run(
+        "hello",
+        _ctx(),
+        provider=prov,
+        history=hist,
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(),
+        max_turns=3,
+    ):
+        events.append(e)
+
+    thinking_deltas = [e for e in events if isinstance(e, ThinkingBlockDelta)]
+    assert [e.text for e in thinking_deltas] == ["consider greeting", " then reply"]
+    assert thinking_deltas[-1].signature == "sig-1"
+
+    complete = next(e for e in events if isinstance(e, ThinkingBlockComplete))
+    assert complete.signature == "sig-1"
+
+    assistant = [e for e in events if isinstance(e, AssistantDelta)]
+    assert [e.delta for e in assistant] == ["Hello!"]
+    # Thinking block must close before the first assistant text delta.
+    complete_idx = events.index(complete)
+    assistant_idx = events.index(assistant[0])
+    assert complete_idx < assistant_idx
+
+
+@pytest.mark.asyncio
+async def test_run_closes_thinking_block_when_tools_follow() -> None:
+    prov = FakeProvider(
+        [
+            [
+                ThinkingDelta(text="need a tool"),
+                ToolCall(call_id="c1", name="run_command", args={"command": "echo hi"}),
+                UsageEvent(input_tokens=1, output_tokens=1),
+                Done(),
+            ],
+            [
+                TextDelta(text="done"),
+                UsageEvent(input_tokens=1, output_tokens=1),
+                Done(),
+            ],
+        ]
+    )
+    hist = FakeHistory()
+    events = []
+    async for e in run(
+        "hello",
+        _ctx(),
+        provider=prov,
+        history=hist,
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(),
+        max_turns=5,
+    ):
+        events.append(e)
+
+    assert any(isinstance(e, ThinkingBlockDelta) and e.text == "need a tool" for e in events)
+    complete = next(e for e in events if isinstance(e, ThinkingBlockComplete))
+    tool_started = next(e for e in events if isinstance(e, ToolCallStarted))
+    assert events.index(complete) < events.index(tool_started)
 
 def test_merge_usage_event_accumulates_cache_fields() -> None:
     usage = Usage()
@@ -821,6 +914,80 @@ def test_chunk_tool_calls_groups_consecutive_tasks() -> None:
     assert chunks[2] == [d]
 
 
+def test_chunk_tool_calls_groups_consecutive_parallel_safe() -> None:
+    a = ToolCall(call_id="a", name="read_file", args={"path": "a"})
+    b = ToolCall(call_id="b", name="glob", args={"pattern": "*"})
+    c = ToolCall(call_id="c", name="write_file", args={"path": "x", "content": ""})
+    d = ToolCall(call_id="d", name="search_memory", args={"query": "q"})
+    safe = frozenset({"read_file", "glob", "search_memory"})
+    chunks = _chunk_tool_calls([a, b, c, d], parallel_safe=safe)
+    assert [len(ch) for ch in chunks] == [2, 1, 1]
+    assert [x.name for x in chunks[0]] == ["read_file", "glob"]
+    assert chunks[1][0].name == "write_file"
+    assert chunks[2][0].name == "search_memory"
+
+
+@pytest.mark.asyncio
+async def test_parallel_safe_tools_results_in_call_id_order() -> None:
+    """Parallel-safe read tools run concurrently; results persist in call_id order."""
+    delays = {"c1": 0.04, "a1": 0.01, "b1": 0.02}
+    concurrent = {"n": 0, "max": 0}
+    lock = asyncio.Lock()
+
+    class SlowReadExecutor:
+        async def execute(self, *, call: ToolCall, ctx: TurnContext) -> ToolExecutionResult:
+            del ctx
+            async with lock:
+                concurrent["n"] += 1
+                concurrent["max"] = max(concurrent["max"], concurrent["n"])
+            await asyncio.sleep(delays.get(call.call_id, 0.01))
+            async with lock:
+                concurrent["n"] -= 1
+            return ToolExecutionResult.ok_text(f"result:{call.call_id}")
+
+    prov = FakeProvider(
+        [
+            [
+                ToolCall(call_id="c1", name="read_file", args={"path": "c"}),
+                ToolCall(call_id="a1", name="glob", args={"pattern": "*"}),
+                ToolCall(call_id="b1", name="search_memory", args={"query": "q"}),
+                Done(),
+            ],
+            [TextDelta(text="done"), Done()],
+        ]
+    )
+    hist = FakeHistory()
+    tools = [
+        ToolDef("read_file", "r", {"type": "object"}, parallel_safe=True),
+        ToolDef("glob", "g", {"type": "object"}, parallel_safe=True),
+        ToolDef("search_memory", "s", {"type": "object"}, parallel_safe=True),
+    ]
+    ctx = TurnContext(**{**_ctx().__dict__, "tools": tools})
+    events: list[object] = []
+    async for e in run(
+        "go",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[AllowInspector()],
+        tool_executor=SlowReadExecutor(),
+        max_turns=4,
+    ):
+        events.append(e)
+
+    assert concurrent["max"] >= 2
+    tool_resp_messages = [
+        m
+        for m in hist.rows
+        if m.role == "user" and m.content and isinstance(m.content[0], ToolResponse)
+    ]
+    assert len(tool_resp_messages) == 1
+    assert [b.id for b in tool_resp_messages[0].content] == ["a1", "b1", "c1"]
+
+    result_events = [e for e in events if isinstance(e, ToolCallResult)]
+    assert [e.result for e in result_events] == ["result:a1", "result:b1", "result:c1"]
+
+
 @pytest.mark.asyncio
 async def test_parallel_task_tools_cap_concurrent_executions() -> None:
     """Up to 12 ``task`` calls in one batch; at most 10 run inside the semaphore at once."""
@@ -906,10 +1073,10 @@ async def test_run_provider_raises_wrapped_as_error() -> None:
     ):
         events.append(e)
     assert isinstance(events[0], Thinking)
-    assert isinstance(events[1], SystemPromptSnapshot)
-    assert isinstance(events[2], Error)
-    assert "boom" in events[2].error
-    assert isinstance(events[3], TurnComplete)
+    assert any(isinstance(e, SystemPromptSnapshot) for e in events)
+    err = next(e for e in events if isinstance(e, Error))
+    assert "boom" in err.error
+    assert isinstance(events[-1], TurnComplete)
 
 
 @pytest.mark.asyncio
@@ -1020,11 +1187,60 @@ async def test_run_emits_context_summarize_events_when_over_cap(
     assert prov.stream_calls == 2
     assert prov.stream_models == ["gemini-2.5-flash", "gemini-2.5-flash"]
     assert len(hist.reset_calls) == 1
+    summarizer_msgs = prov.stream_messages[0]
+    assert summarizer_msgs[0].role == "system"
+    assert isinstance(summarizer_msgs[0].content[0], Text)
+    assert "## Objective" in summarizer_msgs[0].content[0].text
+    assert "## Relevant Files" in summarizer_msgs[0].content[0].text
     assert any(
-        isinstance(x, Text) and "[Context Summary]" in x.text
+        isinstance(x, Text) and x.text.startswith("[Context Summary]:\n")
         for m in hist.rows
         for x in m.content
     )
+
+
+@pytest.mark.asyncio
+async def test_summarization_call_never_receives_vertex_google_search(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """History summarization is an internal harness call, not an agent turn.
+
+    Regression guard: even with ``vertex_google_search=True`` on the main run,
+    the summarization LLM call (``loop.py`` calling ``provider.stream`` directly
+    for the summarizer model) must never receive the flag.
+    """
+    monkeypatch.setenv("CONTEXT_SUMMARIZATION_MODEL", "summarizer-model-x")
+    preload = [
+        Message(
+            role="user" if i % 2 == 0 else "assistant",
+            content=[Text(text="z" * 600)],
+        )
+        for i in range(8)
+    ]
+    hist = FakeHistory(preload)
+    prov = FakeProvider(
+        [
+            [TextDelta(text=" compressed summary "), Done()],
+            [TextDelta(text="final"), Done()],
+        ],
+        name="gemini",
+    )
+    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=800)
+    async for _ in run(
+        "hello",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        max_turns=4,
+        vertex_google_search=True,
+    ):
+        pass
+    assert prov.stream_models == ["summarizer-model-x", "gemini-2.5-flash"]
+    summarizer_call, main_turn_call = prov.vertex_google_search_calls
+    assert summarizer_call is False
+    assert main_turn_call is True
 
 
 @pytest.mark.asyncio
@@ -1164,6 +1380,53 @@ async def test_run_no_context_summarize_events_when_under_cap(tmp_path: Path) ->
     assert hist.reset_calls == []
 
 
+def test_messages_for_provider_no_update_is_passthrough() -> None:
+    system = Message(role="system", content=[Text(text="SYS")])
+    history = [Message(role="user", content=[Text(text="hi")])]
+    out = _messages_for_provider(system, history)
+    assert [m.role for m in out] == ["system", "user"]
+
+
+def test_messages_for_provider_folds_update_into_trailing_user_message() -> None:
+    """History ending in "user" (e.g. a tool-response row) must not gain a second
+
+    trailing "user" row — Anthropic/Gemini both reject consecutive same-role
+    messages.
+    """
+    system = Message(role="system", content=[Text(text="SYS")])
+    tool_response_row = Message(
+        role="user",
+        content=[
+            ToolResponse(id="c1", tool_name="run_command", result=[Text(text="ok")], is_error=False)
+        ],
+    )
+    history = [
+        Message(role="user", content=[Text(text="hi")]),
+        Message(role="assistant", content=[ToolRequest(id="c1", name="run_command", args={})]),
+        tool_response_row,
+    ]
+    out = _messages_for_provider(system, history, mid_conversation_update="## System context update\n...")
+    roles = [m.role for m in out]
+    assert all(a != b for a, b in zip(roles, roles[1:])), roles
+    assert len(out) == len(history) + 1  # system + history rows, no extra message
+    last = out[-1]
+    assert last.role == "user"
+    assert any(isinstance(b, ToolResponse) for b in last.content)
+    assert any(isinstance(b, Text) and "System context update" in b.text for b in last.content)
+
+
+def test_messages_for_provider_appends_update_after_trailing_assistant_message() -> None:
+    system = Message(role="system", content=[Text(text="SYS")])
+    history = [
+        Message(role="user", content=[Text(text="hi")]),
+        Message(role="assistant", content=[Text(text="ok, thinking...")]),
+    ]
+    out = _messages_for_provider(system, history, mid_conversation_update="## System context update\n...")
+    roles = [m.role for m in out]
+    assert roles == ["system", "user", "assistant", "user"]
+    assert all(a != b for a, b in zip(roles, roles[1:]))
+
+
 @pytest.mark.asyncio
 async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> None:
     mem = tmp_path / "memory"
@@ -1269,10 +1532,28 @@ async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> N
 
     assert len(prov.captured_messages) == 2
     sys1 = _flatten_text_from_message(prov.captured_messages[0][0])
-    sys2 = _flatten_text_from_message(prov.captured_messages[1][0])
+    turn2 = prov.captured_messages[1]
+    turn2_texts = [_flatten_text_from_message(m) for m in turn2]
+    all2 = "\n".join(turn2_texts)
     assert "initial line" in sys1
     assert "new memory from tool" not in sys1
-    assert "new memory from tool" in sys2
+    # Volatile memory refresh arrives as a mid-conversation system-context update
+    # (leading epoch baseline stays cache-stable).
+    assert "new memory from tool" in all2
+    # Regression guard: the mid-conversation update must never create two
+    # consecutive same-role messages (Anthropic/Gemini both reject this shape).
+    roles = [m.role for m in turn2]
+    assert all(a != b for a, b in zip(roles, roles[1:])), (
+        f"consecutive same-role messages in provider payload: {roles}"
+    )
+    # History ends in a tool-response "user" row; the update must be folded
+    # into that same message, not appended as a second trailing "user" row.
+    last = turn2[-1]
+    assert last.role == "user"
+    assert any(isinstance(b, ToolResponse) for b in last.content)
+    assert any(
+        isinstance(b, Text) and "new memory from tool" in b.text for b in last.content
+    )
 
 
 @pytest.mark.asyncio
@@ -1653,6 +1934,123 @@ async def test_system_prompt_snapshot_still_plain_string_event() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_vertex_google_search_true_reaches_gemini_provider_stream() -> None:
+    prov = FakeProvider([[TextDelta(text="hi"), Done()]], name="gemini")
+    async for _ in run(
+        "hello",
+        _ctx(),
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        max_turns=3,
+        vertex_google_search=True,
+    ):
+        pass
+    assert prov.vertex_google_search_calls
+    assert all(prov.vertex_google_search_calls)
+
+
+@pytest.mark.asyncio
+async def test_run_vertex_google_search_defaults_false() -> None:
+    prov = FakeProvider([[TextDelta(text="hi"), Done()]], name="gemini")
+    async for _ in run(
+        "hello",
+        _ctx(),
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        max_turns=3,
+    ):
+        pass
+    assert prov.vertex_google_search_calls
+    assert not any(prov.vertex_google_search_calls)
+
+
+@pytest.mark.asyncio
+async def test_provider_grounding_event_translates_sources_and_queries_unchanged() -> None:
+    prov = FakeProvider(
+        [
+            [
+                ProviderGroundingEvent(
+                    sources=[{"title": "Example", "url": "https://example.com"}],
+                    search_queries=["weather today"],
+                ),
+                TextDelta(text="hi"),
+                Done(),
+            ]
+        ],
+        name="gemini",
+    )
+    events = []
+    async for e in run(
+        "hello",
+        _ctx(),
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        max_turns=3,
+        vertex_google_search=True,
+    ):
+        events.append(e)
+    grounding_events = [e for e in events if isinstance(e, GroundingEvent)]
+    assert len(grounding_events) == 1
+    assert grounding_events[0].sources == [{"title": "Example", "url": "https://example.com"}]
+    assert grounding_events[0].search_queries == ["weather today"]
+
+
+@pytest.mark.asyncio
+async def test_system_prompt_snapshot_includes_skills_memory_and_attachments() -> None:
+    """Regression guard for PR #62: skills, memory, and attachments must survive into
+
+    the actual system prompt sent through ``run()`` — not just be non-empty.
+    """
+    catalog = SessionAttachmentCatalog(session_id="t1")
+    catalog.upsert(
+        AttachmentRecord(
+            attachment_id="att1",
+            filename="report.pdf",
+            mime_type="application/pdf",
+            description="Q1 report",
+            storage_path=".monkeybot/attachments/t1/att1",
+        )
+    )
+    ctx = TurnContext(
+        thread_id="t1",
+        request_id="r1",
+        agent_md="# Agent",
+        memory_index=["remembers the sky is blue"],
+        skills=[SkillRef(name="pdf-skill", description="Handles PDFs")],
+        tools=[ToolDef("run_command", "Run shell", {})],
+        user_id=None,
+        parent_run_id=None,
+        model="gemini-2.5-flash",
+    )
+    prov = FakeProvider([[TextDelta(text="hi"), Done()]])
+    events = []
+    async for e in run(
+        "hello",
+        ctx,
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        attachment_catalog=catalog,
+        max_turns=3,
+    ):
+        events.append(e)
+    snaps = [e for e in events if isinstance(e, SystemPromptSnapshot)]
+    assert snaps
+    text = snaps[0].text
+    assert "\n\n## Skills\n- pdf-skill" in text
+    assert "## Memory index" in text
+    assert "- remembers the sky is blue" in text
+    assert "\n\n## Session attachments\n- att1 (report.pdf, application/pdf): Q1 report" in text
+
+
+@pytest.mark.asyncio
 async def test_inspector_dispatches_per_tool_request_block_order() -> None:
     insp = OrderRecordingInspector()
     prov = FakeProvider(
@@ -1907,3 +2305,146 @@ async def test_compact_history_does_not_persist_synthetic_tool_repairs() -> None
             if isinstance(block, ToolResponse):
                 texts = [b.text for b in block.result if isinstance(b, Text)]
                 assert synthetic_marker not in " ".join(texts)
+
+
+@pytest.mark.asyncio
+async def test_run_refreshes_tools_after_enable_mcp_same_turn() -> None:
+    """After enable_mcp, the next provider_stream sees newly connected MCP tools."""
+
+    class ToolRecordingProvider(FakeProvider):
+        def __init__(self, scripted: list[list[object]]) -> None:
+            super().__init__(scripted)
+            self.tools_seen: list[list[str]] = []
+
+        async def stream(
+            self,
+            messages: Sequence[Message],
+            tools: Sequence[ToolDef],
+            *,
+            model: str,
+            thinking_budget: int | None = None,
+            vertex_google_search: bool = False,
+        ) -> AsyncIterator[ProviderEvent]:
+            self.tools_seen.append([t.name for t in tools])
+            async for ev in super().stream(
+                messages,
+                tools,
+                model=model,
+                thinking_budget=thinking_budget,
+                vertex_google_search=vertex_google_search,
+            ):
+                yield ev
+
+    class CatalogMCP:
+        def __init__(self) -> None:
+            self._connected: dict[str, list[ToolDef]] = {}
+
+        async def connect(self, *a: object, **k: object) -> list[ToolDef]:
+            return []
+
+        async def connect_streamable_http(self, *a: object, **k: object) -> list[ToolDef]:
+            return []
+
+        async def disconnect(self, name: str) -> None:
+            self._connected.pop(name, None)
+
+        async def call_tool(self, *a: object, **k: object) -> str:
+            return ""
+
+        def all_tools(self) -> list[ToolDef]:
+            out: list[ToolDef] = []
+            for tools in self._connected.values():
+                out.extend(tools)
+            return out
+
+        def catalog_names(self) -> list[str]:
+            return ["browser"]
+
+        def known_server_names(self) -> list[str]:
+            return ["browser"]
+
+        def is_connected(self, name: str) -> bool:
+            return name in self._connected
+
+        def split_prefixed_tool(self, prefixed_name: str) -> tuple[str, str] | None:
+            return None
+
+        async def connect_from_catalog(self, name: str) -> list[ToolDef]:
+            defs = [ToolDef("browser__goto", "Navigate", {"type": "object"})]
+            self._connected[name] = defs
+            return defs
+
+        async def load_from_config(self, *a: object, **k: object) -> None:
+            return None
+
+    class EnableThenAnswerExecutor(RecordingExecutor):
+        def __init__(self, mcp: CatalogMCP) -> None:
+            super().__init__(("ok", None))
+            self._mcp = mcp
+
+        @property
+        def mcp(self) -> CatalogMCP:
+            return self._mcp
+
+        async def execute(self, *, call: ToolCall, ctx: TurnContext) -> ToolExecutionResult:
+            self.calls.append(call)
+            if call.name == "enable_mcp":
+                defs = await self._mcp.connect_from_catalog("browser")
+                return ToolExecutionResult.ok_text(
+                    json.dumps(
+                        {
+                            "ok": True,
+                            "server": "browser",
+                            "tools": [{"name": t.name, "description": t.description} for t in defs],
+                        }
+                    )
+                )
+            return self.result
+
+    mcp = CatalogMCP()
+    exe = EnableThenAnswerExecutor(mcp)
+    prov = ToolRecordingProvider(
+        [
+            [
+                ToolCall(name="enable_mcp", args={"name": "browser"}, call_id="c1"),
+                Done(),
+            ],
+            [
+                TextDelta(text="done"),
+                UsageEvent(input_tokens=1, output_tokens=1, cached_tokens=0),
+                Done(),
+            ],
+        ]
+    )
+    ctx = TurnContext(
+        thread_id="t1",
+        request_id="r1",
+        agent_md="# Agent",
+        memory_index=[],
+        skills=[],
+        tools=[
+            ToolDef("enable_mcp", "Enable MCP", {}),
+            ToolDef("run_command", "Run shell", {}),
+        ],
+        user_id=None,
+        parent_run_id=None,
+        model="gemini-2.5-flash",
+        catalog_mcp_servers=("browser",),
+    )
+    events = []
+    async for e in run(
+        "open the site",
+        ctx,
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[AllowInspector()],
+        tool_executor=exe,
+        max_turns=5,
+    ):
+        events.append(e)
+
+    assert isinstance(events[-1], TurnComplete)
+    assert len(prov.tools_seen) >= 2
+    assert "browser__goto" not in prov.tools_seen[0]
+    assert "browser__goto" in prov.tools_seen[1]
+    assert any(c.name == "enable_mcp" for c in exe.calls)

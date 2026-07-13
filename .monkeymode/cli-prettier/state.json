@@ -1,0 +1,24 @@
+{
+  "feature_name": "cli-prettier",
+  "current_phase": "implementation",
+  "phase_status": {
+    "design_1a": "completed",
+    "user_stories": "completed",
+    "acceptance_checklist": "completed",
+    "implementation": "completed",
+    "verification": "not_started"
+  },
+  "artifacts": {
+    "design": ".monkeymode/cli-prettier/design.md",
+    "user_stories": ".monkeymode/cli-prettier/user-stories.md",
+    "acceptance": ".monkeymode/cli-prettier/acceptance.md"
+  },
+  "context": {
+    "save_qa_log": false,
+    "mode": "textual-tui-migration",
+    "primary_stack": "textual ChatApp + ChatSessionController",
+    "branch": "cursor/textual-chat-tui",
+    "next_step": "Manual TTY acceptance; commit/PR when ready"
+  },
+  "last_updated": "2026-07-11T19:30:00Z"
+}

@@ -71,12 +71,55 @@ class FakeMCPClient:
     def all_tools(self) -> list[ToolDef]:
         return list(self._tools)
 
+    def catalog_names(self) -> list[str]:
+        return []
+
+    def known_server_names(self) -> list[str]:
+        return []
+
+    def is_connected(self, name: str) -> bool:
+        del name
+        return False
+
     def split_prefixed_tool(self, prefixed_name: str) -> tuple[str, str] | None:
         del prefixed_name
         return None
 
+    async def connect_from_catalog(self, name: str) -> list[ToolDef]:
+        del name
+        return []
+
+    def status(self, name: str | None = None):
+        del name
+        return []
+
+    async def list_resources(self, server_name: str | None = None):
+        del server_name
+        return []
+
+    async def list_resource_templates(self, server_name: str | None = None):
+        del server_name
+        return []
+
+    async def read_resource(self, server_name: str, uri: str):
+        del server_name, uri
+        return {"server": "", "uri": "", "text": "", "contents": []}
+
+    async def list_prompts(self, server_name: str | None = None):
+        del server_name
+        return []
+
+    async def get_prompt(
+        self,
+        server_name: str,
+        prompt_name: str,
+        arguments: dict[str, str] | None = None,
+    ):
+        del server_name, prompt_name, arguments
+        return {"server": "", "name": "", "description": None, "messages": []}
+
     async def load_from_config(self, path: Path, *, raise_on_error: bool = False) -> None:
-        del path
+        del path, raise_on_error
 
 
 # Standard layout used by demo_agent/workspace/skills/* — regression for list_skills descriptions.
@@ -199,11 +242,21 @@ async def test_build_context_merges_core_and_mcp_tools(tmp_path: Path) -> None:
         "write_file",
         "replace_in_file",
         "glob",
+        "grep",
+        "apply_patch",
         "search_memory",
         "list_skills",
         "task",
+        "enable_mcp",
+        "disable_mcp",
         "add_mcp_server",
         "remove_mcp_server",
+        "mcp_status",
+        "list_mcp_resources",
+        "list_mcp_resource_templates",
+        "read_mcp_resource",
+        "list_mcp_prompts",
+        "get_mcp_prompt",
         "start_loop",
         "loop_status",
         "pause_loop",
@@ -215,7 +268,7 @@ async def test_build_context_merges_core_and_mcp_tools(tmp_path: Path) -> None:
     assert core_names.issubset(set(names))
     assert "db__query" in names
     assert "wiki__search" in names
-    assert len(ctx.tools) == 17 + 2
+    assert len(ctx.tools) == len(core_names) + 2
     for t in ctx.tools:
         assert t.description.strip()
 

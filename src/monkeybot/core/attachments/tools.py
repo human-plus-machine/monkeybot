@@ -39,6 +39,7 @@ def read_attachment_tool_def() -> ToolDef:
             "Ids are listed under ## Session attachments when present."
         ),
         READ_ATTACHMENT_SCHEMA,
+        parallel_safe=True,
     )
 
 

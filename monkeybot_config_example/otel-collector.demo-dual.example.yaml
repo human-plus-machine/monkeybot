@@ -1,0 +1,46 @@
+# OTel Collector example — Phoenix + Langfuse (set LANGFUSE_OTEL_BASIC_AUTH in .env).
+# Create Langfuse API keys at http://localhost:3000 -> project settings -> API keys.
+# Value: Basic base64(public_key:secret_key)
+#
+# Point monkeybot at the collector (HTTP/protobuf, no path suffix on endpoint):
+#   export MONKEYBOT_OTEL_ENABLED=true
+#   export OTEL_TRACES_EXPORTER=otlp
+#   export OTEL_METRICS_EXPORTER=none
+#   export OTEL_LOGS_EXPORTER=none
+#   export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
+#
+# Optional: gRPC ingest on 4317 — uncomment protocols.grpc below.
+# Optional: memory_limiter processor — uncomment under processors if batches OOM.
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+      # grpc:
+      #   endpoint: 0.0.0.0:4317
+
+processors:
+  batch: {}
+  # memory_limiter:
+  #   check_interval: 1s
+  #   limit_mib: 512
+
+exporters:
+  otlphttp/phoenix:
+    # otlphttp appends /v1/traces — do not include it in endpoint
+    endpoint: http://phoenix:6006
+    # Local Phoenix often needs no auth; Phoenix Cloud may use headers on the collector.
+
+  otlphttp/langfuse:
+    endpoint: http://langfuse-web:3000/api/public/otel
+    # Cloud Langfuse: https://cloud.langfuse.com/api/public/otel
+    headers:
+      Authorization: ${env:LANGFUSE_OTEL_BASIC_AUTH}
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/phoenix, otlphttp/langfuse]

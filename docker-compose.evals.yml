@@ -20,5 +20,5 @@ services:
       AWS_BEDROCK_REGION: ${AWS_BEDROCK_REGION:-}
     volumes:
       - ${GCP_AUTH_FILE:-/dev/null}:/run/secrets/gcp_creds:ro
-      - ./demo_agent/monkeybot_config/monkeybot.yaml:/config/monkeybot.yaml:ro
+      - ./monkeybot_config_example/monkeybot.example.yaml:/config/monkeybot.yaml:ro
       - ${OPERATOR_SCENARIOS_PATH:-./evals/scenarios/operator}:/app/scenarios/operator:ro

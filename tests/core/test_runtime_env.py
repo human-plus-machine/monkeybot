@@ -248,3 +248,33 @@ def test_invalid_yaml_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     (cfg_dir / "monkeybot.yaml").write_text("runtime: [", encoding="utf-8")
     with pytest.raises((yaml.YAMLError, ValueError)):
         runtime_env.apply_monkeybot_runtime_env()
+
+
+def test_realtime_nested_keys_flattened_to_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    (cfg_dir / "monkeybot.yaml").write_text(
+        "harness:\n  mode: realtime\n"
+        "realtime:\n"
+        "  websocket:\n    enabled: true\n    port: 9090\n"
+        "  session:\n    max_duration_sec: 900\n"
+        "  metrics:\n    emit_summary_on_close: false\n",
+        encoding="utf-8",
+    )
+    for key in (
+        "MONKEYBOT_HARNESS_MODE",
+        "MONKEYBOT_REALTIME_WS_ENABLED",
+        "MONKEYBOT_REALTIME_WS_PORT",
+        "MONKEYBOT_REALTIME_SESSION_MAX_DURATION_SEC",
+        "MONKEYBOT_REALTIME_METRICS_EMIT_SUMMARY_ON_CLOSE",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    runtime_env.apply_monkeybot_runtime_env()
+    assert os.environ.get("MONKEYBOT_HARNESS_MODE") == "realtime"
+    assert os.environ.get("MONKEYBOT_REALTIME_WS_ENABLED") == "true"
+    assert os.environ.get("MONKEYBOT_REALTIME_WS_PORT") == "9090"
+    assert os.environ.get("MONKEYBOT_REALTIME_SESSION_MAX_DURATION_SEC") == "900"
+    assert os.environ.get("MONKEYBOT_REALTIME_METRICS_EMIT_SUMMARY_ON_CLOSE") == "false"

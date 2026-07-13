@@ -223,3 +223,31 @@ async def test_gemini_stream_smoke_integration() -> None:
         chunks.append(ev)
     assert chunks
     assert isinstance(chunks[-1], Done)
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    os.environ.get("MONKEYBOT_GEMINI_INTEGRATION") != "1",
+    reason="Set MONKEYBOT_GEMINI_INTEGRATION=1 and GCP credentials to hit Vertex (costs apply).",
+)
+async def test_gemini_stream_accepts_google_search_with_function_declarations_live() -> None:
+    """Some Gemini model generations have historically rejected mixing native
+
+    ``google_search`` grounding with function-call tools in the same request. This is
+    the only test in the suite that actually calls Vertex to confirm the combination is
+    accepted for the configured model — everything else in the ``vertex_google_search``
+    coverage is mocked wiring checks (see tests/providers/test_gemini_usage.py).
+    """
+    p = GeminiProvider()
+    tool = ToolDef(name="noop", description="noop", input_schema={})
+    chunks: list[ProviderEvent] = []
+    async for ev in p.stream(
+        [Message(role="user", content="Say only: ok.")],
+        [tool],
+        model="gemini-2.5-flash",
+        vertex_google_search=True,
+    ):
+        chunks.append(ev)
+    assert chunks
+    assert isinstance(chunks[-1], Done)

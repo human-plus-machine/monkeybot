@@ -3,11 +3,34 @@
 from __future__ import annotations
 
 import fnmatch
+import os
 import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TypedDict
+
+from monkeybot.core.tools.text_normalize import normalize_unicode_punctuation
+
+# Directories skipped when walking for grep: noisy, large, or not source content.
+_GREP_IGNORE_DIRS = frozenset(
+    {
+        ".git",
+        ".hg",
+        ".svn",
+        "node_modules",
+        "__pycache__",
+        ".venv",
+        "venv",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".tox",
+        "dist",
+        "build",
+        ".next",
+    }
+)
 
 
 class ReadFileResult(TypedDict):
@@ -31,6 +54,12 @@ class ReplaceResult(TypedDict):
     path: str
     replacements: int
     bytes: int
+    match_mode: str
+
+
+class DeleteResult(TypedDict):
+    ok: bool
+    path: str
 
 
 class GrepMatch(TypedDict):
@@ -111,6 +140,174 @@ def _coerce_workspace_settings(settings: object | None) -> WorkspaceSettings:
     return out
 
 
+def _is_disproportionate_match(search: str, old_string: str) -> bool:
+    """Reject fuzzy spans that are much larger than the caller's old_string."""
+    old_lines = old_string.split("\n")
+    search_lines = search.split("\n")
+    old_n = len(old_lines)
+    search_n = len(search_lines)
+    if search_n >= max(old_n + 3, old_n * 2):
+        return True
+    if old_n == 1:
+        return False
+    return len(search.strip()) > max(len(old_string.strip()) + 500, len(old_string.strip()) * 4)
+
+
+def _collect_exact_spans(text: str, needle: str) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    start = 0
+    while True:
+        idx = text.find(needle, start)
+        if idx == -1:
+            break
+        spans.append((idx, idx + len(needle)))
+        start = idx + max(len(needle), 1)
+    return spans
+
+
+def _line_trimmed_spans(content: str, find: str) -> list[tuple[int, int]]:
+    original_lines = content.split("\n")
+    search_lines = find.split("\n")
+    if search_lines and search_lines[-1] == "":
+        search_lines = search_lines[:-1]
+    if not search_lines:
+        return []
+    spans: list[tuple[int, int]] = []
+    for i in range(0, len(original_lines) - len(search_lines) + 1):
+        if all(
+            original_lines[i + j].strip() == search_lines[j].strip()
+            for j in range(len(search_lines))
+        ):
+            start = sum(len(original_lines[k]) + 1 for k in range(i))
+            end = start + sum(len(original_lines[i + j]) for j in range(len(search_lines)))
+            if len(search_lines) > 1:
+                end += len(search_lines) - 1
+            spans.append((start, end))
+    return spans
+
+
+def _whitespace_normalized_spans(content: str, find: str) -> list[tuple[int, int]]:
+    def norm(s: str) -> str:
+        return re.sub(r"\s+", " ", s).strip()
+
+    normalized_find = norm(find)
+    spans: list[tuple[int, int]] = []
+    lines = content.split("\n")
+    for i, line in enumerate(lines):
+        if norm(line) == normalized_find:
+            start = sum(len(lines[k]) + 1 for k in range(i))
+            spans.append((start, start + len(line)))
+    find_lines = find.split("\n")
+    if len(find_lines) > 1:
+        for i in range(0, len(lines) - len(find_lines) + 1):
+            block = "\n".join(lines[i : i + len(find_lines)])
+            if norm(block) == normalized_find:
+                start = sum(len(lines[k]) + 1 for k in range(i))
+                spans.append((start, start + len(block)))
+    return spans
+
+
+def _indentation_flexible_spans(content: str, find: str) -> list[tuple[int, int]]:
+    def deindent(text: str) -> str:
+        lines = text.split("\n")
+        nonempty = [ln for ln in lines if ln.strip()]
+        if not nonempty:
+            return text
+        min_indent = min(len(ln) - len(ln.lstrip()) for ln in nonempty)
+        return "\n".join(
+            ln if not ln.strip() else ln[min_indent:] for ln in lines
+        )
+
+    normalized_find = deindent(find)
+    content_lines = content.split("\n")
+    find_lines = find.split("\n")
+    spans: list[tuple[int, int]] = []
+    for i in range(0, len(content_lines) - len(find_lines) + 1):
+        block = "\n".join(content_lines[i : i + len(find_lines)])
+        if deindent(block) == normalized_find:
+            start = sum(len(content_lines[k]) + 1 for k in range(i))
+            spans.append((start, start + len(block)))
+    return spans
+
+
+def _unicode_normalized_spans(content: str, find: str) -> list[tuple[int, int]]:
+    """Match after stripping and mapping smart quotes/dashes (shared with apply_patch)."""
+    original_lines = content.split("\n")
+    search_lines = find.split("\n")
+    if search_lines and search_lines[-1] == "":
+        search_lines = search_lines[:-1]
+    if not search_lines:
+        return []
+    spans: list[tuple[int, int]] = []
+    for i in range(0, len(original_lines) - len(search_lines) + 1):
+        if all(
+            normalize_unicode_punctuation(original_lines[i + j].strip())
+            == normalize_unicode_punctuation(search_lines[j].strip())
+            for j in range(len(search_lines))
+        ):
+            start = sum(len(original_lines[k]) + 1 for k in range(i))
+            end = start + sum(len(original_lines[i + j]) for j in range(len(search_lines)))
+            if len(search_lines) > 1:
+                end += len(search_lines) - 1
+            spans.append((start, end))
+    return spans
+
+
+def _find_replace_span(
+    text: str,
+    old_string: str,
+    *,
+    replace_all: bool,
+) -> tuple[list[tuple[int, int]], str]:
+    """Return (spans, match_mode). Raises :class:`WorkspaceError` if missing or ambiguous."""
+    exact = _collect_exact_spans(text, old_string)
+    if exact:
+        if len(exact) > 1 and not replace_all:
+            raise WorkspaceError(
+                "old_string is not unique; widen the snippet or set replace_all=true",
+                code="ambiguous_replace",
+            )
+        return (exact if replace_all else exact[:1]), "exact"
+
+    for mode, finder in (
+        ("line_trimmed", _line_trimmed_spans),
+        ("whitespace_normalized", _whitespace_normalized_spans),
+        ("indentation_flexible", _indentation_flexible_spans),
+        ("unicode_normalized", _unicode_normalized_spans),
+    ):
+        spans = finder(text, old_string)
+        if not spans:
+            continue
+        kept: list[tuple[int, int]] = []
+        for start, end in spans:
+            matched = text[start:end]
+            if _is_disproportionate_match(matched, old_string):
+                continue
+            kept.append((start, end))
+        if not kept:
+            continue
+        if len(kept) > 1 and not replace_all:
+            raise WorkspaceError(
+                "old_string is not unique; widen the snippet or set replace_all=true",
+                code="ambiguous_replace",
+            )
+        return (kept if replace_all else kept[:1]), mode
+
+    raise WorkspaceError("old_string not found in file", code="not_found_replace")
+
+
+def _apply_replace_spans(
+    text: str,
+    spans: list[tuple[int, int]],
+    new_string: str,
+) -> str:
+    """Apply replacements from end to start so offsets stay valid."""
+    out = text
+    for start, end in sorted(spans, key=lambda s: s[0], reverse=True):
+        out = out[:start] + new_string + out[end:]
+    return out
+
+
 class WorkspaceFileService:
     """All paths are repo-relative POSIX strings; resolved under ``repo_root``."""
 
@@ -153,6 +350,10 @@ class WorkspaceFileService:
         # Lexical join (no final .resolve()) so symlinks under the workspace may point outside
         # the physical root — e.g. demo agent ``workspace/data`` when linked to sibling dirs.
         return self._join_under_root(segs)
+
+    def resolve_workspace_path(self, rel: str, *, label: str = "path") -> Path:
+        """Public path preflight: repo-relative → absolute path under the workspace root."""
+        return self._resolve_under_root(rel, label=label)
 
     def _resolve_root_dir(self, rel: str | None) -> Path:
         if rel is None or not str(rel).strip() or str(rel).strip() in (".", "./"):
@@ -304,25 +505,51 @@ class WorkspaceFileService:
             "bytes": len(raw),
         }
 
-    def replace_in_file(self, path: str, old_string: str, new_string: str) -> ReplaceResult:
+    def delete_file(self, path: str) -> DeleteResult:
+        fp = self._resolve_under_root(path)
+        self._require_under_write_scope(fp)
+        if not fp.exists():
+            raise WorkspaceError(f"Not a file: {path}", code="not_found")
+        if fp.is_dir():
+            raise WorkspaceError(f"Path is a directory, not a file: {path}", code="is_directory")
+        if not fp.is_file():
+            raise WorkspaceError(f"Not a file: {path}", code="not_found")
+        try:
+            fp.unlink()
+        except OSError as e:
+            raise WorkspaceError(f"Delete failed: {e}", code="delete_failed") from e
+        return {"ok": True, "path": self._as_repo_rel(fp)}
+
+    def replace_in_file(
+        self,
+        path: str,
+        old_string: str,
+        new_string: str,
+        *,
+        replace_all: bool = False,
+    ) -> ReplaceResult:
         if old_string is None:
             old_string = ""
         if new_string is None:
             new_string = ""
+        if old_string == new_string:
+            raise WorkspaceError(
+                "No changes to apply: old_string and new_string are identical.",
+                code="no_change",
+            )
+        if old_string == "":
+            raise WorkspaceError(
+                "old_string cannot be empty when editing an existing file. "
+                "Provide the exact text to replace, or use write_file for a full rewrite.",
+                code="empty_old_string",
+            )
         fp = self._resolve_under_root(path)
         self._require_under_write_scope(fp)
         if not fp.is_file():
             raise WorkspaceError(f"Not a file: {path}", code="not_found")
         text = fp.read_text(encoding="utf-8", errors="replace")
-        count = text.count(old_string)
-        if count == 0:
-            raise WorkspaceError("old_string not found in file", code="not_found_replace")
-        if count > 1:
-            raise WorkspaceError(
-                f"old_string is not unique ({count} matches); widen the snippet",
-                code="ambiguous_replace",
-            )
-        new_text = text.replace(old_string, new_string, 1)
+        spans, match_mode = _find_replace_span(text, old_string, replace_all=replace_all)
+        new_text = _apply_replace_spans(text, spans, new_string)
         raw = new_text.encode("utf-8")
         if len(raw) > self._settings.WORKSPACE_WRITE_MAX_BYTES:
             raise WorkspaceError(
@@ -343,8 +570,9 @@ class WorkspaceFileService:
         return {
             "ok": True,
             "path": self._as_repo_rel(fp),
-            "replacements": 1,
+            "replacements": len(spans),
             "bytes": len(raw),
+            "match_mode": match_mode,
         }
 
     def glob_paths(self, pattern: str, root: str | None = None) -> GlobResult:
@@ -412,48 +640,51 @@ class WorkspaceFileService:
         files_scanned = 0
         truncated = False
         t0 = time.monotonic()
-        for fp in sorted(base.rglob("*")):
-            if len(matches) >= max_m:
-                truncated = True
-                break
-            if files_scanned >= max_files:
-                truncated = True
-                break
-            if not fp.is_file():
-                continue
-            try:
-                fp.resolve().relative_to(self._root)
-            except ValueError:
-                continue
-            rel = self._as_repo_rel(fp)
-            if file_glob and not fnmatch.fnmatch(fp.name, file_glob):
-                continue
-            try:
-                st = fp.stat()
-            except OSError:
-                continue
-            if st.st_size > max_file_bytes:
-                continue
-            files_scanned += 1
-            try:
-                data = fp.read_bytes()
-            except OSError:
-                continue
-            if b"\x00" in data[:8192]:
-                continue
-            text = data.decode("utf-8", errors="replace")
-            for line_no, line in enumerate(text.splitlines(), start=1):
+        for dirpath, dirnames, filenames in os.walk(base):
+            dirnames[:] = sorted(d for d in dirnames if d not in _GREP_IGNORE_DIRS)
+            for name in sorted(filenames):
                 if len(matches) >= max_m:
                     truncated = True
                     break
-                if regex.search(line):
-                    matches.append(
-                        {
-                            "path": rel,
-                            "line": line_no,
-                            "text": line[:2000],
-                        }
-                    )
+                if files_scanned >= max_files:
+                    truncated = True
+                    break
+                fp = Path(dirpath) / name
+                try:
+                    fp.resolve().relative_to(self._root)
+                except ValueError:
+                    continue
+                rel = self._as_repo_rel(fp)
+                if file_glob and not fnmatch.fnmatch(fp.name, file_glob):
+                    continue
+                try:
+                    st = fp.stat()
+                except OSError:
+                    continue
+                if st.st_size > max_file_bytes:
+                    continue
+                files_scanned += 1
+                try:
+                    data = fp.read_bytes()
+                except OSError:
+                    continue
+                if b"\x00" in data[:8192]:
+                    continue
+                text = data.decode("utf-8", errors="replace")
+                for line_no, line in enumerate(text.splitlines(), start=1):
+                    if len(matches) >= max_m:
+                        truncated = True
+                        break
+                    if regex.search(line):
+                        matches.append(
+                            {
+                                "path": rel,
+                                "line": line_no,
+                                "text": line[:2000],
+                            }
+                        )
+                if truncated:
+                    break
             if truncated:
                 break
         duration_ms = int((time.monotonic() - t0) * 1000)

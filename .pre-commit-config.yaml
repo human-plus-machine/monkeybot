@@ -1,4 +1,4 @@
-# Pre-commit hooks for MonkeyBot
+# Pre-commit hooks for monkeybot
 # Install: uv run pre-commit install
 # Run manually: uv run pre-commit run --all-files
 

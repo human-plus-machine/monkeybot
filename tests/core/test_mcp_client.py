@@ -257,7 +257,7 @@ async def test_disconnect_suppresses_anyio_cancel_scope_teardown_noise() -> None
 
 @pytest.mark.asyncio
 async def test_load_from_config_streamable_http_url(tmp_path: Path) -> None:
-    """``url`` entries call :meth:`MCPClient.connect_streamable_http` (no subprocess)."""
+    """``url`` entries are catalogued; connect happens via ``connect_from_catalog``."""
     cfg = tmp_path / "mcp.json"
     cfg.write_text(
         json.dumps(
@@ -274,38 +274,38 @@ async def test_load_from_config_streamable_http_url(tmp_path: Path) -> None:
     with patch.object(client, "connect_streamable_http", new_callable=AsyncMock) as m:
         m.return_value = []
         await client.load_from_config(cfg)
+        assert "docs" in client.catalog_names()
+        assert "docs" not in client._servers
+        m.assert_not_awaited()
+        await client.connect_from_catalog("docs")
     m.assert_awaited_once_with("docs", "https://docs.langchain.com/mcp", None, auth=None)
 
 
 @pytest.mark.asyncio
-async def test_load_from_config_skips_enabled_false_servers(tmp_path: Path) -> None:
-    """Servers with ``enabled: false`` are ignored (template examples stay inert)."""
+async def test_load_from_config_catalogs_every_listed_server(tmp_path: Path) -> None:
+    """Any server listed under mcpServers is catalogued (delete the entry to remove it)."""
     cfg = tmp_path / "mcp.json"
     cfg.write_text(
         json.dumps(
             {
                 "mcpServers": {
-                    "off": {
-                        "enabled": False,
+                    "stdio": {
                         "command": "npx",
                         "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
                         "env": {"FOO": "1"},
                     },
-                    "on": {"command": "python", "args": ["x.py"], "env": {}},
+                    "other": {"command": "python", "args": ["x.py"], "env": {}},
                 },
             }
         ),
         encoding="utf-8",
     )
 
-    sess = SimpleNamespace()
-    sess.initialize = AsyncMock()
-    sess.list_tools = AsyncMock(return_value=SimpleNamespace(tools=[]))
-
-    client = MCPClient(hooks=_stub_hooks(sess))
+    client = MCPClient(hooks=_CrashHooks())
     await client.load_from_config(cfg)
-    assert "off" not in client._servers
-    assert "on" in client._servers
+    assert client.catalog_names() == ["other", "stdio"]
+    assert client._servers == {}
+    assert client.all_tools() == []
 
 
 @pytest.mark.asyncio
@@ -319,12 +319,10 @@ async def test_load_from_config_missing_file_noop(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_load_from_config_logs_and_continues_on_one_bad_server(
+async def test_load_from_config_catalogs_without_connecting(
     tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """One rotten server yields ERROR logs yet later servers stay connected."""
-
+    """Listed servers are catalogued only; none are connected until enable_mcp."""
     cfg = tmp_path / "mcp.json"
     cfg.write_text(
         json.dumps(
@@ -338,37 +336,11 @@ async def test_load_from_config_logs_and_continues_on_one_bad_server(
         encoding="utf-8",
     )
 
-    good_sess = SimpleNamespace()
-    good_sess.initialize = AsyncMock()
-    good_sess.list_tools = AsyncMock(
-        return_value=SimpleNamespace(tools=[SimpleNamespace(name="noop", description="x")])
-    )
-
-    hooked = MCPClient(hooks=_stub_hooks(good_sess))
-    base_connect = MCPClient.connect
-
-    async def patched_connect(
-        self: MCPClient,
-        name: str,
-        command: str,
-        args: list[str],
-        env: dict[str, str],
-    ) -> object:
-        if name == "first":
-            raise MCPConnectionError(name)
-        return await base_connect(self, name, command, args, env)
-
-    hooked.connect = MethodType(patched_connect, hooked)  # type: ignore[method-assign]
-
-    with caplog.at_level(logging.ERROR, logger="monkeybot.core.mcp.mcp_client"):
-        await hooked.load_from_config(cfg)
-
-    assert len(caplog.records) >= 1
-    msgs = [(r.msg % r.args if r.args else r.msg) + (r.exc_text or "") for r in caplog.records]
-    merged = "\n".join(str(m) for m in msgs).lower()
-    assert "startup connect failed for server first" in merged
-    tool_names = [t.name for t in hooked.all_tools()]
-    assert tool_names == ["good__noop"]
+    client = MCPClient(hooks=_CrashHooks())
+    await client.load_from_config(cfg)
+    assert client.catalog_names() == ["first", "good"]
+    assert client._servers == {}
+    assert client.all_tools() == []
 
 
 @pytest.mark.asyncio
@@ -511,9 +483,8 @@ async def test_mcp_auth_async_auth_flow_retries_on_401() -> None:
 
 
 @pytest.mark.asyncio
-async def test_load_from_config_raise_on_error_propagates_mcp_auth_error(
-    tmp_path: Path,
-) -> None:
+async def test_connect_from_catalog_propagates_mcp_auth_error(tmp_path: Path) -> None:
+    """Auth failures surface on enable/connect_from_catalog, not on catalog load."""
     cfg = tmp_path / "mcp.json"
     cfg.write_text(
         json.dumps(
@@ -535,6 +506,8 @@ async def test_load_from_config_raise_on_error_propagates_mcp_auth_error(
     )
 
     client = MCPClient(hooks=_CrashHooks())
+    await client.load_from_config(cfg)
+    assert "bad" in client.catalog_names()
 
     async def _boom(
         *_a: object,
@@ -547,7 +520,7 @@ async def test_load_from_config_raise_on_error_propagates_mcp_auth_error(
         )
 
     with patch.object(client, "connect_streamable_http", _boom), pytest.raises(MCPAuthError):
-        await client.load_from_config(cfg, raise_on_error=True)
+        await client.connect_from_catalog("bad")
 
 
 def test_interpolate_env_vars_whitespace(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -685,3 +658,239 @@ async def test_mcp_auth_concurrent_stampede_prevention() -> None:
         assert refreshes == 2
         for r_req in results:
             assert r_req.headers.get("Authorization") == "Bearer tok-2"
+
+
+@pytest.mark.asyncio
+async def test_load_from_config_always_catalog_only_until_enable(tmp_path: Path) -> None:
+    """All listed servers stay catalog-only until ``connect_from_catalog`` / enable_mcp."""
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "browser": {
+                        "command": "python",
+                        "args": ["x.py"],
+                        "env": {},
+                    },
+                    "other": {"command": "python", "args": ["y.py"], "env": {}},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    sess = SimpleNamespace()
+    sess.initialize = AsyncMock()
+    sess.list_tools = AsyncMock(
+        return_value=SimpleNamespace(
+            tools=[SimpleNamespace(name="goto", description="Go", inputSchema={"type": "object"})]
+        )
+    )
+
+    client = MCPClient(hooks=_stub_hooks(sess))
+    await client.load_from_config(cfg)
+    assert client.catalog_names() == ["browser", "other"]
+    assert client.known_server_names() == ["browser", "other"]
+    assert client._servers == {}
+    assert client.all_tools() == []
+
+    defs = await client.connect_from_catalog("browser")
+    assert "browser" in client._servers
+    assert any(t.name == "browser__goto" for t in defs)
+    again = await client.connect_from_catalog("browser")
+    assert [t.name for t in again] == [t.name for t in defs]
+    assert client.known_server_names() == ["browser", "other"]
+
+
+@pytest.mark.asyncio
+async def test_load_from_config_skips_enabled_false(tmp_path: Path) -> None:
+    """``enabled: false`` keeps a server out of the catalog (not model-connectable)."""
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "browser": {"command": "python", "args": ["b.py"], "env": {}},
+                    "admin": {
+                        "command": "python",
+                        "args": ["a.py"],
+                        "env": {},
+                        "enabled": False,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    client = MCPClient(hooks=_CrashHooks())
+    await client.load_from_config(cfg)
+    assert client.catalog_names() == ["browser"]
+    assert "admin" not in client.known_server_names()
+    with pytest.raises(mc.MCPDiagnosticError, match="Unknown MCP server"):
+        await client.connect_from_catalog("admin")
+
+
+@pytest.mark.asyncio
+async def test_load_from_config_autoconnect_connects_at_startup(tmp_path: Path) -> None:
+    """``autoConnect: true`` restores eager startup connect for that server."""
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "eager": {
+                        "command": "python",
+                        "args": ["e.py"],
+                        "env": {},
+                        "autoConnect": True,
+                    },
+                    "lazy": {"command": "python", "args": ["l.py"], "env": {}},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    sess = SimpleNamespace()
+    sess.initialize = AsyncMock()
+    sess.list_tools = AsyncMock(
+        return_value=SimpleNamespace(
+            tools=[SimpleNamespace(name="ping", description="Ping", inputSchema={})]
+        )
+    )
+
+    client = MCPClient(hooks=_stub_hooks(sess))
+    await client.load_from_config(cfg)
+    assert client.catalog_names() == ["eager", "lazy"]
+    assert "eager" in client._servers
+    assert "lazy" not in client._servers
+    assert any(t.name == "eager__ping" for t in client.all_tools())
+
+
+@pytest.mark.asyncio
+async def test_connect_from_catalog_unknown_raises(tmp_path: Path) -> None:
+    client = MCPClient(hooks=_CrashHooks())
+    with pytest.raises(mc.MCPDiagnosticError, match="Unknown MCP server"):
+        await client.connect_from_catalog("nope")
+
+
+@pytest.mark.asyncio
+async def test_status_catalogued_connected_and_disabled(tmp_path: Path) -> None:
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "lazy": {"command": "python", "args": ["-m", "srv"]},
+                    "off": {"command": "python", "args": ["-m", "x"], "enabled": False},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    sess = SimpleNamespace()
+    sess.initialize = AsyncMock()
+    sess.list_tools = AsyncMock(
+        return_value=SimpleNamespace(
+            tools=[SimpleNamespace(name="ping", description="", inputSchema={})]
+        )
+    )
+    sess.get_server_capabilities = lambda: SimpleNamespace(
+        tools={}, resources={}, prompts=None, logging=None, completions=None
+    )
+
+    client = MCPClient(hooks=_stub_hooks(sess))
+    await client.load_from_config(cfg)
+
+    statuses = {s["name"]: s["status"] for s in client.status()}  # type: ignore[union-attr]
+    assert statuses["lazy"] == mc.MCP_STATUS_CATALOGUED
+    assert statuses["off"] == mc.MCP_STATUS_DISABLED
+
+    await client.connect_from_catalog("lazy")
+    assert client.status("lazy")["status"] == mc.MCP_STATUS_CONNECTED  # type: ignore[index]
+    assert client.status("lazy")["capabilities"]["resources"] is True  # type: ignore[index]
+
+    await client.disconnect("lazy")
+    assert client.status("lazy")["status"] == mc.MCP_STATUS_CATALOGUED  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_list_and_read_resources() -> None:
+    listing = SimpleNamespace(
+        tools=[SimpleNamespace(name="noop", description="", inputSchema={})]
+    )
+    resource = SimpleNamespace(
+        name="docs",
+        uri="docs://readme",
+        description="Readme",
+        mimeType="text/plain",
+        title=None,
+        size=None,
+        arguments=None,
+    )
+    sess = SimpleNamespace()
+    sess.initialize = AsyncMock()
+    sess.list_tools = AsyncMock(return_value=listing)
+    sess.get_server_capabilities = lambda: SimpleNamespace(
+        tools={}, resources={}, prompts={}, logging=None, completions=None
+    )
+    sess.list_resources = AsyncMock(return_value=SimpleNamespace(resources=[resource]))
+    sess.list_resource_templates = AsyncMock(
+        return_value=SimpleNamespace(
+            resourceTemplates=[
+                SimpleNamespace(
+                    name="file",
+                    uriTemplate="file:///{path}",
+                    description="A file",
+                    mimeType=None,
+                    title=None,
+                )
+            ]
+        )
+    )
+    sess.read_resource = AsyncMock(
+        return_value=SimpleNamespace(
+            contents=[SimpleNamespace(uri="docs://readme", mimeType="text/plain", text="hello")]
+        )
+    )
+    sess.list_prompts = AsyncMock(
+        return_value=SimpleNamespace(
+            prompts=[SimpleNamespace(name="summarize", description="Sum", arguments=None, title=None)]
+        )
+    )
+    sess.get_prompt = AsyncMock(
+        return_value=SimpleNamespace(
+            description="Sum",
+            messages=[SimpleNamespace(role="user", content={"type": "text", "text": "hi"})],
+        )
+    )
+
+    client = MCPClient(hooks=_stub_hooks(sess))
+    await client.connect("docs", "python", [], {})
+
+    resources = await client.list_resources()
+    assert resources == [
+        {
+            "name": "docs",
+            "uri": "docs://readme",
+            "description": "Readme",
+            "mimeType": "text/plain",
+            "server": "docs",
+        }
+    ]
+    templates = await client.list_resource_templates("docs")
+    assert templates[0]["uriTemplate"] == "file:///{path}"
+    assert templates[0]["server"] == "docs"
+
+    read = await client.read_resource("docs", "docs://readme")
+    assert read["text"] == "hello"
+    assert read["server"] == "docs"
+
+    prompts = await client.list_prompts()
+    assert prompts[0]["name"] == "summarize"
+    got = await client.get_prompt("docs", "summarize", {"topic": "x"})
+    assert got["name"] == "summarize"
+    assert got["messages"]
+    sess.get_prompt.assert_awaited_once_with("summarize", arguments={"topic": "x"})

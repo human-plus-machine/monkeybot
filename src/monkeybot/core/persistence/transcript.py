@@ -2,8 +2,12 @@
 
 Writes one append-only NDJSON file per session under
 ``{workspace_root}/.monkeybot/transcripts/{session_id}.ndjson``: a manifest
-record on the first write, followed by every :class:`~monkeybot.core.runtime.events.AgentEvent`
-and raw provider request/response record for the life of the session.
+record on the first write, followed by durable :class:`~monkeybot.core.runtime.events.AgentEvent`
+boundaries (OpenCode V2-style), plus raw provider request/response records.
+
+Live-only streaming deltas (``AssistantDelta``, ``ToolInputDelta``, …) are
+skipped by default so the transcript is a replay-grade durable log. Set
+``MONKEYBOT_TRANSCRIPT_INCLUDE_LIVE=1`` to capture every SSE event.
 
 Not surfaced to the agent or any tool; gated by ``MONKEYBOT_TRANSCRIPT_ENABLED``
 (default off) and wired only from the gateway loop (``GatewayLoopPort.start_turn``
@@ -21,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from monkeybot.core.path_safety import sanitize_path_component
-from monkeybot.core.runtime.events import AgentEvent, event_to_json
+from monkeybot.core.runtime.events import AgentEvent, event_to_json, is_durable_event
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +35,12 @@ _TRANSCRIPT_REL_DIR = Path(".monkeybot") / "transcripts"
 def transcript_enabled_from_env() -> bool:
     """Opt-in only; default off (``MONKEYBOT_TRANSCRIPT_ENABLED``)."""
     raw = os.environ.get("MONKEYBOT_TRANSCRIPT_ENABLED", "false").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def transcript_include_live_from_env() -> bool:
+    """When true, write live-only streaming events too (default durable-only)."""
+    raw = os.environ.get("MONKEYBOT_TRANSCRIPT_INCLUDE_LIVE", "false").strip().lower()
     return raw in ("1", "true", "yes", "on")
 
 
@@ -45,13 +55,22 @@ class TranscriptWriter:
     session via an internal lock. All file I/O runs in ``asyncio.to_thread``.
     """
 
-    def __init__(self, session_id: str, *, workspace_root: Path) -> None:
+    def __init__(
+        self,
+        session_id: str,
+        *,
+        workspace_root: Path,
+        include_live: bool | None = None,
+    ) -> None:
         self._session_id = session_id
         safe_id = sanitize_path_component(session_id)
         self._path = workspace_root.resolve() / _TRANSCRIPT_REL_DIR / f"{safe_id}.ndjson"
         self._lock = asyncio.Lock()
         self._manifest_written = False
         self._seq = 0
+        self._include_live = (
+            transcript_include_live_from_env() if include_live is None else include_live
+        )
 
     @property
     def path(self) -> Path:
@@ -73,6 +92,7 @@ class TranscriptWriter:
                     "type": "SessionManifest",
                     "session_id": self._session_id,
                     "started_at": _now_iso(),
+                    "durable_only": not self._include_live,
                     **manifest_fields,
                 }
                 line = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
@@ -107,7 +127,9 @@ class TranscriptWriter:
         )
 
     async def write_event(self, event: AgentEvent) -> None:
-        """Append one harness ``AgentEvent`` (same JSON shape as the SSE wire)."""
+        """Append one harness ``AgentEvent`` (durable by default; same JSON as SSE)."""
+        if not self._include_live and not is_durable_event(event):
+            return
         payload = json.loads(event_to_json(event))
         await self._append_line({"ts": _now_iso(), **payload})
 
@@ -165,4 +187,8 @@ class TranscriptWriter:
         )
 
 
-__all__ = ["TranscriptWriter", "transcript_enabled_from_env"]
+__all__ = [
+    "TranscriptWriter",
+    "transcript_enabled_from_env",
+    "transcript_include_live_from_env",
+]

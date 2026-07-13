@@ -63,7 +63,6 @@ class HuggingFaceProvider:
         *,
         temperature: float | None = None,
         max_tokens: int | None = None,
-        cache_enabled: bool = True,
     ) -> None:
         token = os.environ.get("HF_TOKEN", "")
         if not token:
@@ -74,10 +73,6 @@ class HuggingFaceProvider:
         self._token = token
         self._endpoint_url = (os.environ.get("HF_ENDPOINT_URL") or "").rstrip("/")
         self._host = (os.environ.get("HF_BASE_URL") or _DEFAULT_HOST).rstrip("/")
-        # ``cache_enabled`` is accepted for constructor-contract symmetry with the
-        # other providers (Story 1) but is currently inert here: the OpenAI-compatible
-        # request shape has no cache_control-equivalent field to set.
-        self._cache_enabled = cache_enabled
         sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens)
         self._temperature = sampling.temperature
         self._max_tokens = sampling.max_tokens

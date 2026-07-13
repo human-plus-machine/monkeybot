@@ -1,5 +1,5 @@
 """
-Run system diagnostics to verify monkey-bot deployment health.
+Run system diagnostics to verify monkeybot deployment health.
 
 This skill checks environment configuration, Python runtime, and basic
 computation to confirm the full deployment pipeline is working.
@@ -45,7 +45,7 @@ class DiagnosticResult:
 async def run_diagnostics(
     check_type: str = "full",
 ) -> str:
-    """Run system diagnostics to verify the monkey-bot deployment is working.
+    """Run system diagnostics to verify the monkeybot deployment is working.
 
     Checks environment variables, Python runtime, and basic computation
     to confirm the full deployment pipeline is operational. Results are

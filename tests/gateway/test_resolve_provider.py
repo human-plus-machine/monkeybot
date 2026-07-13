@@ -46,6 +46,20 @@ def test_resolve_provider_gemini_alias(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(provider, GeminiProvider)
 
 
+def test_resolve_provider_google_genai(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MODEL_PROVIDER", "google_genai")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-api-key")
+    provider = gateway_app._resolve_provider()
+    assert isinstance(provider, GeminiProvider)
+
+
+def test_resolve_provider_google_genai_missing_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MODEL_PROVIDER", "google_genai")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    with pytest.raises(ValueError, match="GEMINI_API_KEY"):
+        gateway_app._resolve_provider()
+
+
 def test_resolve_curator_reuses_main_for_vertex_anthropic(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

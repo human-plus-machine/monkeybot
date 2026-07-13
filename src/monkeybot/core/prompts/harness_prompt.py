@@ -25,22 +25,27 @@ _RUN_COMMAND_EXEC_NOTE_SANDBOX = (
     "The workspace root is bind-mounted at the **same absolute path**; still subject to the allowlist."
 )
 
-_HARNESS_BODY = """## MonkeyBot harness (fixed)
+_HARNESS_BODY = """## monkeybot harness (fixed)
 
 This block is injected by the host every turn. Prefer the **active tool list** the model receives over any stale summary here.
 
 When workspace tools (`read_file`, `write_file`, `run_command`, …) appear in that list, you **have a writable workspace** — not a read-only chat window. Fulfill file and code requests with tools; do not paste full artifacts and instruct the user to save manually unless they explicitly asked to see code in chat.
 
 ### Core built-in tools (when present in the active tool list)
-- `read_file` / `write_file` / `replace_in_file` / `glob` — paths are **workspace-relative** under the workspace root below. **`glob`** lists matching files; prefer it over `run_command` + `ls` for discovery. Do not substitute a code block in chat for a file deliverable.
+- `read_file` / `write_file` / `replace_in_file` / `glob` / `grep` / `apply_patch` — paths are **workspace-relative** under the workspace root below. **`glob`** lists matching files (prefer over `run_command` + `ls`). **`grep`** searches file contents with a regex (prefer over `run_command` + `grep`). **`apply_patch`** applies a multi-file Codex-style patch (Add / Update / Delete / Move) fail-closed. Do not substitute a code block in chat for a file deliverable.
 - `search_memory` — keyword search under the configured memory directory; prefer this over shell commands for any memory lookup.
 - `list_skills` — resolves the skills root path for installed skills listed under `## Skills` below; read each skill's `SKILL.md` under that root for procedure.
 - `run_command` — allowlisted shell with optional `timeout` (seconds). {run_command_exec_note} Shell starts in **workspace root**; use the paths listed under Runtime paths below — do NOT guess directory names. `cd` is a shell builtin and cannot be used as a bare command; use `bash -c "cd <dir> && <cmd>"` instead. Pass **`argv` as a list** with the binary first (e.g. `{{"argv": ["ls", "."]}}`); do not pass `{{"command": "ls -R", "args": []}}` — that treats `ls -R` as the binary name.
-- `add_mcp_server` / `remove_mcp_server` — register or drop MCP stdio servers; new tools appear on later turns.
-{web_search_line}{task_line}
+- `enable_mcp` / `disable_mcp` — connect or drop a server declared in mcp.json by name (e.g. `browser`). Prefer `enable_mcp` over inventing `add_mcp_server` command/args for known servers. New tools appear on the **next model step this turn**.
+- `add_mcp_server` / `remove_mcp_server` — ad-hoc stdio MCP connect/disconnect when the server is not in mcp.json; same next-step refresh.
+- `mcp_status` — lifecycle status for catalogued/connected/failed/needs_auth/disabled servers.
+- `list_mcp_resources` / `list_mcp_resource_templates` / `read_mcp_resource` — browse and read MCP resources (server must be connected; use `enable_mcp` first when catalogued).
+- `list_mcp_prompts` / `get_mcp_prompt` — list and fetch MCP prompt templates from connected servers.
+{catalog_mcp_line}{web_search_line}{task_line}
 ### Workspace deliverables
 - **New file or full rewrite** → `write_file`.
-- **Targeted change to an existing file** → `read_file` then `replace_in_file` (`old_string` must match exactly once).
+- **Targeted change to an existing file** → `read_file` then `replace_in_file` (unique match; light fuzzy fallbacks; optional `replace_all`).
+- **Multi-file or multi-hunk edit** → `apply_patch` with a Codex-style `*** Begin Patch` … `*** End Patch` envelope (Add / Update / Delete / Move); fail-closed.
 - Tell the user the workspace-relative path when done.
 - **Do not claim** you lack filesystem access, cannot touch the user's machine, or are limited to "chat-only" output when workspace file tools are in the active tool list.
 - Chat text is for answers and brief excerpts — not a stand-in for a file the user asked you to produce.
@@ -59,6 +64,8 @@ When workspace tools (`read_file`, `write_file`, `run_command`, …) appear in t
 
 ### MCP tools
 - Names look like `server__tool` (double underscore).
+- Heavy MCP servers are **on-demand**: call `enable_mcp("name")` before using their `server__*` tools when they are not yet in the active tool list.
+- For server-published context (not callable tools), use `list_mcp_resources` / `read_mcp_resource` and `list_mcp_prompts` / `get_mcp_prompt` after the server is connected. Check `mcp_status` when unsure.
 - MCP tool errors are returned as plain error text (not structured JSON). Any response containing an HTTP error code (4xx / 5xx), "not found", "unauthorized", "forbidden", "permission denied", or similar access/availability signals means the tool **did not return usable data**.
 - When an MCP tool fails: state what failed in one sentence, then stop — do **not** fabricate, infer, or summarize content that the tool was supposed to fetch. If a fallback tool is available and meaningfully different, try it once; otherwise tell the user what is needed to proceed (e.g. correct credentials, a public URL, pasting the content directly).
 
@@ -149,6 +156,7 @@ def harness_fixed_context(
     run_command_opensandbox: bool = False,
     subagent_personas: Sequence[tuple[str, str]] | None = None,
     emission_style: bool = False,
+    catalog_mcp_servers: Sequence[str] | None = None,
 ) -> str:
     """Runtime-owned description of core tools, paths, MCP naming, and strict tool-call rules.
 
@@ -161,10 +169,21 @@ def harness_fixed_context(
     ``emission_style`` opts in the terse emission-guidance block (env
     ``MONKEYBOT_EMISSION_STYLE``); the dense agent-to-agent sub-block is also gated
     on ``include_task_tool`` so it only appears when the ``task`` tool is active.
+    ``catalog_mcp_servers`` lists mcp.json servers available via ``enable_mcp`` but not
+    connected until the model activates them.
     """
     exec_note = _RUN_COMMAND_EXEC_NOTE_SANDBOX if run_command_opensandbox else _RUN_COMMAND_EXEC_NOTE_HOST
+    catalog = [n.strip() for n in (catalog_mcp_servers or ()) if n and str(n).strip()]
+    if catalog:
+        names = ", ".join(f"`{n}`" for n in catalog)
+        catalog_mcp_line = (
+            f"- Configured MCP servers (call `enable_mcp` before use): {names}.\n"
+        )
+    else:
+        catalog_mcp_line = ""
     body = _HARNESS_BODY.format(
         run_command_exec_note=exec_note,
+        catalog_mcp_line=catalog_mcp_line,
         web_search_line=_WEB_SEARCH_LINE if include_web_search else "",
         task_line=_TASK_LINE if include_task_tool else "",
         workspace_root=workspace_root,

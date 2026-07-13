@@ -96,8 +96,9 @@ async def test_start_turn_writes_transcript_when_enabled(
     lines = _read_lines(transcript_path)
     types = [line["type"] for line in lines]
     assert types[0] == "SessionManifest"
+    assert lines[0].get("durable_only") is True
     assert "UserMessage" in types
-    assert "AssistantDelta" in types
+    assert "AssistantDelta" not in types  # live-only skipped by default
     assert "TurnComplete" in types
 
 

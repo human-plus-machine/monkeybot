@@ -59,12 +59,27 @@ class CreateSessionResponse(BaseModel):
     created_at: int = Field(..., description="Unix time in milliseconds.")
 
 
-class ReplyRequest(BaseModel):
+class ReplyBodyFields(BaseModel):
+    """Shared ``message`` / ``content`` fields for reply, steer, and queue."""
+
+    message: str | None = Field(default=None, max_length=32000)
+    content: list[dict[str, Any]] | None = None
+
+
+class ReplyRequest(ReplyBodyFields):
     """POST /sessions/{id}/reply body."""
 
     request_id: str
-    message: str | None = Field(default=None, max_length=32000)
-    content: list[dict[str, Any]] | None = None
+
+
+class SteerRequest(ReplyBodyFields):
+    """POST /sessions/{id}/steer — mid-turn user injection (requires busy session)."""
+
+
+class QueueRequest(ReplyBodyFields):
+    """POST /sessions/{id}/queue — follow-up prompt drained when the session goes idle."""
+
+    request_id: str
 
 
 class AttachmentUploadResponse(BaseModel):
@@ -83,6 +98,14 @@ class ReplyResponse(BaseModel):
     request_id: str
 
 
+class AdmissionAcceptedResponse(BaseModel):
+    """POST /steer or /queue acceptance."""
+
+    request_id: str
+    queue: Literal["steer", "follow_up"]
+    position: int
+
+
 class CancelRequest(BaseModel):
     """POST /sessions/{id}/cancel body."""
 
@@ -94,6 +117,8 @@ class ToolConfirmationPOST(BaseModel):
 
     approved: bool
     reason: str | None = None
+    always: bool = False
+    """When true with approved, remember this tool+resource for the rest of the session."""
 
 
 class ElicitationPOST(BaseModel):

@@ -59,6 +59,7 @@ from monkeybot.core.runtime.loop import run as run_loop
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector, ToolInspector
+from monkeybot.core.tools.permission import try_load_permission_inspector
 from monkeybot.core.tools.loop_inspector import LoopStartInspector
 from monkeybot.core.types.content_blocks import ContentBlock, Text
 from monkeybot.core.workspace import create_workspace_storage
@@ -294,6 +295,15 @@ class GatewayLoopPort:
 
     def __init__(self, registry: SessionRegistry) -> None:
         self._registry = registry
+        # Bound when this port is used by a non-module app (e.g. create_realtime_app).
+        self._fastapi_app: FastAPI | None = None
+
+    def bind_app(self, fastapi_app: FastAPI) -> None:
+        """Point storage/memory lookups at the serving FastAPI app."""
+        self._fastapi_app = fastapi_app
+
+    def _serving_app(self) -> FastAPI:
+        return self._fastapi_app if self._fastapi_app is not None else app
 
     async def start_turn(
         self,
@@ -319,7 +329,8 @@ class GatewayLoopPort:
             )
             return
 
-        backend: StorageBackend = app.state.storage
+        serving = self._serving_app()
+        backend: StorageBackend = serving.state.storage
         history = backend.history()
         usage_store = backend.usage()
 
@@ -356,7 +367,7 @@ class GatewayLoopPort:
                 )
 
             attachment_store: AttachmentStore | None = getattr(
-                app.state, "attachment_store", None
+                serving.state, "attachment_store", None
             )
             if bus.attachment_catalog is not None:
                 rows = await history.load(session_id)
@@ -369,7 +380,7 @@ class GatewayLoopPort:
                     session_id,
                     request_id,
                     agent_md_path=agent_path,
-                    memory=getattr(app.state, "memory", None),
+                    memory=getattr(serving.state, "memory", None),
                     skills_path=skills_resolved,
                     mcp_client=mcp,
                     model=model_name,
@@ -390,10 +401,10 @@ class GatewayLoopPort:
                 )
                 return
 
-            storage_backend = getattr(app.state, "storage", None)
+            storage_backend = getattr(serving.state, "storage", None)
             executor = CoreToolExecutor(
                 workspace_root=workspace_root,
-                memory=getattr(app.state, "memory", None),
+                memory=getattr(serving.state, "memory", None),
                 skills_path=skills_resolved,
                 mcp=mcp,
                 extra_tools=extra_tools,
@@ -426,6 +437,7 @@ class GatewayLoopPort:
                 attachment_catalog=bus.attachment_catalog,
                 transcript_writer=transcript_writer,
                 vertex_google_search=vertex_google_search_enabled_from_config(),
+                input_admission=bus.admission,
             ):
                 if isinstance(evt, TurnComplete):
                     u = evt.usage
@@ -527,6 +539,14 @@ async def _startup(fastapi_app: FastAPI) -> None:
     denied = _tool_denied_patterns()
     if denied:
         inspectors.append(RulesInspector(denied))
+
+    perm_path = Path(
+        os.environ.get("PERMISSION_CONFIG", "/app/monkeybot_config/permissions.yaml")
+    )
+    perm_insp = try_load_permission_inspector(perm_path)
+    if perm_insp is not None:
+        inspectors.append(perm_insp)
+
     inspectors.append(LoopStartInspector())
     _deps.inspectors = inspectors
 
