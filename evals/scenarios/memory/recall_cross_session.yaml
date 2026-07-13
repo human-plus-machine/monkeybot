@@ -1,4 +1,4 @@
-# Requires a stable workspace across the run (e.g. demo_agent/workspace or a temp dir wired
+# Requires a stable workspace across the run (e.g. evals/smoke_agent/workspace or a temp dir wired
 # through agent config) — not ephemeral /tmp that vanishes between sessions — since memory is
 # scoped to the agent's configured workspace, not to an individual session.
 description: "A fact stated in one session is recallable from a brand-new session afterward"

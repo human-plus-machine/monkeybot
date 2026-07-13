@@ -7,3 +7,4 @@ workspace/data/*.db
 workspace/data/*.db-shm
 workspace/data/*.db-wal
 workspace/generated-media/
+workspace/.monkeybot/

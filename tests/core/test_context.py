@@ -122,7 +122,7 @@ class FakeMCPClient:
         del path, raise_on_error
 
 
-# Standard layout used by demo_agent/workspace/skills/* — regression for list_skills descriptions.
+# Standard layout used by workspace/skills/* (e.g. evals/smoke_agent) — regression for list_skills descriptions.
 _IMAGE_GENERATOR_SKILL_MD = """---
 name: image-generator
 description: Generate images with Vertex AI Nano Banana Pro (Gemini image models) and display them in chat.

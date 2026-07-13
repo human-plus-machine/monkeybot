@@ -29,13 +29,13 @@ def test_host_port_from_server_url() -> None:
 
 
 def test_server_image_ignores_worker_sandbox_image(monkeypatch) -> None:
-    monkeypatch.setenv("SANDBOX_IMAGE", "monkeybot-demo-sandbox:local")
+    monkeypatch.setenv("SANDBOX_IMAGE", "monkeybot-sandbox:local")
     monkeypatch.delenv("SANDBOX_SERVER_IMAGE", raising=False)
     monkeypatch.delenv("OPENSANDBOX_SERVER_IMAGE", raising=False)
     assert _server_image() == _DEFAULT_SERVER_IMAGE
 
 
 def test_server_image_prefers_explicit_server_env(monkeypatch) -> None:
-    monkeypatch.setenv("SANDBOX_IMAGE", "monkeybot-demo-sandbox:local")
+    monkeypatch.setenv("SANDBOX_IMAGE", "monkeybot-sandbox:local")
     monkeypatch.setenv("SANDBOX_SERVER_IMAGE", "opensandbox/server:v9")
     assert _server_image() == "opensandbox/server:v9"

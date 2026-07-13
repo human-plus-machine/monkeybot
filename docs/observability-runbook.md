@@ -1,19 +1,28 @@
-# Observability runbook (production)
+# Observability runbook
 
-Operator guide for OpenTelemetry tracing in monkeybot. See also [observability-plan.md](./observability-plan.md) for the full env var table and Phoenix/Langfuse setup.
+Operator guide for OpenTelemetry tracing in monkeybot. Install `monkeybot[observability]` on the agent (or `uv sync --extra observability` in a harness checkout).
 
 ## Enable tracing
 
+| Variable | Purpose |
+|---|---|
+| `MONKEYBOT_OTEL_ENABLED` | Master switch (`true` / `1` / `yes`) — required to opt in |
+| `OTEL_TRACES_EXPORTER` | `otlp` (production) or `console` (local debug) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Collector URL (e.g. `https://your-collector:4318`) |
+| `OTEL_SERVICE_NAME` | Defaults to `monkeybot`; subagent workers use `monkeybot-subagent` |
+| `OTEL_METRICS_EXPORTER` / `OTEL_LOGS_EXPORTER` | Usually `none` unless you wire those signals |
+| `OTEL_SDK_DISABLED` | Force-disable the OpenTelemetry SDK even if enabled above |
+
 ```bash
 export MONKEYBOT_OTEL_ENABLED=true
-export OTEL_TRACES_EXPORTER=otlp   # or console for local debug
+export OTEL_TRACES_EXPORTER=otlp
 export OTEL_METRICS_EXPORTER=none
 export OTEL_LOGS_EXPORTER=none
 export OTEL_SERVICE_NAME=monkeybot-gateway
 export OTEL_EXPORTER_OTLP_ENDPOINT=https://your-collector:4318
 ```
 
-Install the optional extra: add `monkeybot[observability]` to the agent `pyproject.toml` dependencies, then run `uv sync`. (Harness checkout: `uv sync --extra observability`.)
+Example collector config: [`otel-collector.example.yaml`](otel-collector.example.yaml). The same template ships in CLI scaffold defaults (`monkeybot new` → `monkeybot_config/`).
 
 ## Sampling
 
@@ -21,8 +30,6 @@ Install the optional extra: add `monkeybot[observability]` to the agent `pyproje
 |-------------|-------------------------|---------------------------|
 | **Production** | `parentbased_traceidratio` | `0.1` (10% of root traces; children follow parent) |
 | **Staging / dev** | unset or `parentbased_always_on` | `1.0` or unset |
-
-Production example:
 
 ```bash
 export OTEL_TRACES_SAMPLER=parentbased_traceidratio
@@ -40,7 +47,7 @@ export OTEL_TRACES_SAMPLER_ARG=0.1
 ## Cost and volume
 
 - Lower production volume with sampling (above).
-- Use an OpenTelemetry Collector for fan-out and optional filtering (see `docs/otel-collector.example.yaml`).
+- Use an OpenTelemetry Collector for fan-out and optional filtering.
 - Tune backend retention (Phoenix / Langfuse) per your compliance budget.
 
 ## Troubleshooting
@@ -50,7 +57,7 @@ export OTEL_TRACES_SAMPLER_ARG=0.1
 1. Confirm `MONKEYBOT_OTEL_ENABLED=true` and `OTEL_TRACES_EXPORTER` is `otlp` or `console`.
 2. Check gateway logs for `observability enabled` vs `disabled` messages.
 3. Verify OTLP endpoint reachability and TLS.
-4. For subagent spans: confirm `traceparent` in task envelope and `OTEL_SERVICE_NAME=monkeybot-subagent` in child process.
+4. For subagent spans: confirm `traceparent` in the task envelope and `OTEL_SERVICE_NAME=monkeybot-subagent` in the child process.
 
 **Double LLM spans**
 

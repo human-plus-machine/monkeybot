@@ -17,10 +17,11 @@ _LEGACY_SCHEMA_MESSAGE = """Legacy conversation_history schema detected (tool_na
 tool_call_id columns present). The on-disk format changed in the
 typed-message-content release. Choose one:
 
-  Dev / demo agent:
-    rm -f demo_agent/workspace/data/monkeybot.db
-    rm -f demo_agent/workspace/data/monkeybot.db-shm
-    rm -f demo_agent/workspace/data/monkeybot.db-wal
+  Local SQLite (dev / smoke agent):
+    rm -f data/monkeybot.db
+    rm -f data/monkeybot.db-shm
+    rm -f data/monkeybot.db-wal
+  (or the same files under your configured workspace data dir)
 
   Other deployments: there is no automated migration. The legacy format is
   a JSON tail inside a TEXT column; transcribing it to typed blocks must

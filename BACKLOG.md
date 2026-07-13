@@ -13,7 +13,7 @@
 - **Memory accuracy verification** — script exists (`scripts/verify_memory.py`) but needs a real eval strategy, not a one-off script.
 
 ### 3. Scheduler
-- Wire a `Scheduler` into the FastAPI lifespan as an optional background task when `config.yaml` has `scheduler.jobs` (reference: `legacy/src/monkeybot/core/scheduler.py`).
+- Wire a `Scheduler` into the FastAPI lifespan as an optional background task when `config.yaml` has `scheduler.jobs`.
 - Needs significant design work for cloud runtimes: Lambda/Cloud Functions have no persistent process, GKE/ECS can use sidecar or CronJob, etc. Think through heartbeat / self-scheduling before implementing.
 
 ### 4. Sandbox Workspace Protection
@@ -30,8 +30,8 @@
 - Worker pool: standalone `python -m monkeybot.subagents.worker` consumes queued runs with atomic `claim()` (recommended for production — its own event loop, scales independently of the gateway). `MONKEYBOT_WORKER_POOL=1` runs the same loop in-process on the gateway and is development-only (competes with the SSE event loop).
 
 ### 7. CLI-managed optional service dependencies
-- `monkeybot chat` / `run` only spawn the gateway process; they don't start the Docker-backed optional services some `monkeybot.yaml` configs require: OpenSandbox (`sandbox.enabled`), Firestore emulator (`paths.db_url: firestore://...`), or the observability stack (Phoenix/Langfuse/OTel collector). `demo_agent/run.sh` currently does this orchestration via bash (build/start/health-check/cleanup), which means the CLI alone can't fully run an agent that uses those features.
-- Decide and implement: should the CLI (`doctor`, `run`, `chat`) detect these from config and actually start/stop the containers (matching `run.sh` behavior, retiring the bash script), or just validate/warn with remediation hints while the user manages Docker manually?
+- `monkeybot chat` / `run` only spawn the gateway process; they don't start the Docker-backed optional services some `monkeybot.yaml` configs require: OpenSandbox (`sandbox.enabled`), Firestore emulator (`paths.db_url: firestore://...`), or the observability stack (Phoenix/Langfuse/OTel collector). Those used to be orchestrated by a demo `run.sh`; the CLI alone still can't fully run an agent that uses those features.
+- Decide and implement: should the CLI (`doctor`, `run`, `chat`) detect these from config and actually start/stop the containers, or just validate/warn with remediation hints while the user manages Docker manually?
 - Open sub-questions if going the "CLI starts services" route: where do per-project Docker assets live (`opensandbox.docker.toml`, OTel collector yaml, compose files) — agent-project-owned files referenced from `monkeybot.yaml`, or CLI-shipped generic templates; and is the sandbox worker image (project-specific extra deps) something the CLI should build, or stay manual/documented.
 
 ---
@@ -39,9 +39,9 @@
 ## Do Later
 
 ### Connectors
-- **CLI gateway** — interactive stdin/stdout (reference: `legacy/src/monkeybot/gateway/cli.py`).
-- **Webhook gateway** — generic HTTP + HMAC (reference: `legacy/src/monkeybot/gateway/webhook.py`).
-- **`python -m monkeybot` CLI** — `run` / `serve` / `usage` / `schedule` subcommands (reference: `legacy/src/monkeybot/cli.py`).
+- **CLI gateway** — interactive stdin/stdout beyond the existing `monkeybot chat` / `talk` clients.
+- **Webhook gateway** — generic HTTP + HMAC ingress for third-party chat products.
+- **Expanded `python -m monkeybot` surface** — additional operator subcommands (`usage` / `schedule`, etc.) as needed.
 
 ### Cloud Deployments
 - **GCP server** — GCE / GKE deployment option (docs + examples exist; no IaC).
@@ -56,7 +56,7 @@
 - **INDEX.md size cap** *(deferred 2026-05-15)* — `MemoryOrganizer` appends without bound; acceptable for now via `ContextCurator` selection. When indices grow wastefully large, cap with a sliding window (N=200, archive to `INDEX.archive.md`) in `core/memory_organizer.py`.
 
 ### MCP
-- **MCP distro linkage** — confirm `monkeybot_config_example/monkeybot.example.yaml` paths (`paths.mcp_config`, `paths.skills_path`) match deployment; smoke-test against real MCP servers beyond the bundled LangChain docs URL.
+- **MCP distro linkage** — confirm scaffolded `monkeybot.yaml` paths (`paths.mcp_config`, `paths.skills_path`) match deployment; smoke-test against real MCP servers beyond the bundled examples.
 
 ### Future platforms *(not scheduled)*
 

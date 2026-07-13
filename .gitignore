@@ -9,9 +9,6 @@ internal/
 # Local scaffolded harness config (defaults ship in monkeybot-cli scaffold_defaults/)
 /monkeybot_config/
 
-# Demo agent live config (materialized from monkeybot_config_example/ by demo_agent/run.sh)
-demo_agent/monkeybot_config/
-
 # Live eval run artifacts (only evals/baselines/ is versioned)
 /evals/runs/
 
