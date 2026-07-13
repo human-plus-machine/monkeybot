@@ -190,6 +190,11 @@ def _rejected_tool_batch_error(
     )
 
 
+def _doom_loop_exempt_names(tools: Sequence[ToolDef]) -> frozenset[str]:
+    """Tool names marked ``doom_loop_exempt`` (identical-args polling is expected)."""
+    return frozenset(t.name for t in tools if t.doom_loop_exempt)
+
+
 @dataclasses.dataclass
 class _DoomLoopTracker:
     """Tracks consecutive identical tool calls within one user message.
@@ -198,6 +203,9 @@ class _DoomLoopTracker:
     streak — successful no-progress loops (e.g. repeated screenshots) must trip
     the same guard as repeated failures.
 
+    Tools in ``exempt_names`` (from ``ToolDef.doom_loop_exempt``) are ignored so
+    legitimate polling (e.g. ``loop_status``) does not force a recovery turn.
+
     After a recovery turn is consumed, the tracker re-arms so a later streak in
     the same user message can trigger again. While ``triggered`` is set (between
     detection and ``consume_recovery``), further ``record`` calls are ignored so
@@ -205,6 +213,7 @@ class _DoomLoopTracker:
     """
 
     threshold: int
+    exempt_names: frozenset[str] = dataclasses.field(default_factory=frozenset)
     streak_fp: str | None = None
     streak_count: int = 0
     triggered: bool = False
@@ -214,7 +223,7 @@ class _DoomLoopTracker:
     _pending_error: str | None = None
 
     def record(self, name: str, args: dict[str, Any]) -> None:
-        if self.threshold <= 0 or self.triggered:
+        if self.threshold <= 0 or self.triggered or name in self.exempt_names:
             return
         fp = _tool_call_fingerprint(name, args)
         if fp == self.streak_fp:
@@ -1132,7 +1141,10 @@ async def _run_inner_core(
     memory_selection_fingerprint: str | None = None
     pre_turn_extra: str | None = None
     pre_tool_extra_next: str | None = None
-    doom_tracker = _DoomLoopTracker(threshold=_effective_doom_loop_threshold())
+    doom_tracker = _DoomLoopTracker(
+        threshold=_effective_doom_loop_threshold(),
+        exempt_names=_doom_loop_exempt_names(ctx.tools),
+    )
 
     def _finish_tool(
         call: ToolCall,
@@ -2039,6 +2051,7 @@ async def _run_inner_core(
                     )
                 ctx = refresh_tools_after_mcp_change(ctx, mcp_client)
                 tools_dirty = True
+                doom_tracker.exempt_names = _doom_loop_exempt_names(ctx.tools)
                 logger.info(
                     "refreshed ctx.tools after MCP registry change %s",
                     kv(

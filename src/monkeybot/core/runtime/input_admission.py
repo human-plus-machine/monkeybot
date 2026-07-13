@@ -40,10 +40,15 @@ def _queue_limit(env_name: str, default: int) -> int:
 
 @dataclass(frozen=True)
 class FollowUpItem:
-    """One queued prompt waiting for an idle session."""
+    """One queued prompt waiting for an idle session.
+
+    ``first_lock_fail_at_ms`` is set when a drain attempt fails to acquire the
+    durable session turn lock; used to bound how long we retry before dropping.
+    """
 
     request_id: str
     content: list[ContentBlock]
+    first_lock_fail_at_ms: int | None = None
 
 
 class InputAdmission:
@@ -71,6 +76,10 @@ class InputAdmission:
     @property
     def steer_depth(self) -> int:
         return len(self._steer)
+
+    @property
+    def follow_up_depth(self) -> int:
+        return len(self._follow_up)
 
     def enqueue_steer(self, content: list[ContentBlock]) -> int:
         """Append steer content; return 0-based queue position.

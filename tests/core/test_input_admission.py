@@ -260,3 +260,127 @@ async def test_queue_while_idle_starts_immediately(registry: SessionRegistry) ->
         assert r.json()["position"] == 0
         await asyncio.sleep(0.05)
         assert started == ["q1"]
+
+
+class _FlakyTurnLocks:
+    """Turn lock store that fails N acquires then succeeds."""
+
+    def __init__(self, fail_count: int) -> None:
+        self._remaining_fails = fail_count
+        self.acquires: list[str] = []
+        self.releases: list[str] = []
+
+    async def try_acquire(self, session_id: str, request_id: str) -> bool:
+        _ = session_id
+        self.acquires.append(request_id)
+        if self._remaining_fails > 0:
+            self._remaining_fails -= 1
+            return False
+        return True
+
+    async def release(self, session_id: str, request_id: str) -> None:
+        _ = session_id
+        self.releases.append(request_id)
+
+
+class _AlwaysHeldTurnLocks:
+    async def try_acquire(self, session_id: str, request_id: str) -> bool:
+        _ = (session_id, request_id)
+        return False
+
+    async def release(self, session_id: str, request_id: str) -> None:
+        _ = (session_id, request_id)
+
+
+class _FakeStorage:
+    def __init__(self, locks: object) -> None:
+        self._locks = locks
+
+    def session_turns(self) -> object:
+        return self._locks
+
+
+@pytest.mark.asyncio
+async def test_follow_up_retries_after_transient_lock_hold(
+    registry: SessionRegistry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed try_acquire must schedule a retry so the queue cannot wedge."""
+    monkeypatch.setenv("MONKEYBOT_FOLLOW_UP_LOCK_RETRY_S", "0.05")
+    started: list[str] = []
+    locks = _FlakyTurnLocks(fail_count=2)
+
+    class TrackingLoop:
+        async def start_turn(
+            self,
+            session_id: str,
+            request_id: str,
+            user_content: list[Text],
+        ) -> None:
+            _ = (session_id, user_content)
+            started.append(request_id)
+
+    app = create_app(loop_port=TrackingLoop(), registry=registry)
+    app.state.storage = _FakeStorage(locks)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        cr = await client.post("/sessions", json={})
+        sid = cr.json()["session_id"]
+        r = await client.post(
+            f"/sessions/{sid}/queue",
+            json={"request_id": "fu-1", "message": "queued"},
+        )
+        assert r.status_code == 202
+
+        for _ in range(80):
+            if started == ["fu-1"]:
+                break
+            await asyncio.sleep(0.05)
+        assert started == ["fu-1"]
+        assert len(locks.acquires) >= 3  # 2 failures + success
+
+
+@pytest.mark.asyncio
+async def test_follow_up_dropped_after_lock_wait_budget(
+    registry: SessionRegistry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Past the wait budget, a lock-blocked follow-up is dropped (no permanent wedge)."""
+    monkeypatch.setenv("MONKEYBOT_FOLLOW_UP_LOCK_RETRY_S", "0.05")
+    monkeypatch.setenv("MONKEYBOT_FOLLOW_UP_LOCK_WAIT_MS", "80")
+    started: list[str] = []
+
+    class TrackingLoop:
+        async def start_turn(
+            self,
+            session_id: str,
+            request_id: str,
+            user_content: list[Text],
+        ) -> None:
+            _ = (session_id, user_content)
+            started.append(request_id)
+
+    app = create_app(loop_port=TrackingLoop(), registry=registry)
+    app.state.storage = _FakeStorage(_AlwaysHeldTurnLocks())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        cr = await client.post("/sessions", json={})
+        sid = cr.json()["session_id"]
+        r = await client.post(
+            f"/sessions/{sid}/queue",
+            json={"request_id": "fu-drop", "message": "stuck"},
+        )
+        assert r.status_code == 202
+        bus = registry.get(sid)
+        assert bus is not None
+
+        for _ in range(80):
+            if bus.admission.follow_up_depth == 0 and (
+                bus.follow_up_retry_task is None or bus.follow_up_retry_task.done()
+            ):
+                break
+            await asyncio.sleep(0.05)
+
+        assert started == []
+        assert bus.admission.follow_up_depth == 0
+        assert bus.current_request_id is None

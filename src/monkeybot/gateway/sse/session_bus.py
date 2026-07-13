@@ -61,6 +61,15 @@ class SessionBus:
         """Lazily-created ``TranscriptWriter`` (internal debugging only); None when disabled."""
         self.admission = InputAdmission()
         """Process-local steer + follow-up queues (not shared across gateway replicas)."""
+        self.follow_up_retry_task: asyncio.Task[None] | None = None
+        """Scheduled drain retry after a failed durable turn-lock acquire."""
+
+    def cancel_follow_up_retry(self) -> None:
+        """Cancel any pending follow-up lock-retry task."""
+        task = self.follow_up_retry_task
+        self.follow_up_retry_task = None
+        if task is not None and not task.done():
+            task.cancel()
 
     def register_pending(self, pending_key: str) -> asyncio.Future[Any]:
         fut = asyncio.get_running_loop().create_future()
@@ -205,6 +214,7 @@ class SessionRegistry:
         if bus is None:
             return False
         bus.abandon_pending_cancel_all()
+        bus.cancel_follow_up_retry()
         bus.admission.clear_all()
 
         from monkeybot.core.context.memory_prompt import evict_curation_cache

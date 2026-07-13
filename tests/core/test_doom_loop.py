@@ -66,6 +66,98 @@ def test_tool_call_fingerprint_stable_under_key_order() -> None:
     assert a != _tool_call_fingerprint("run_command", {"a": 3, "b": 1})
 
 
+def test_doom_loop_tracker_exempts_polling_tools() -> None:
+    """``doom_loop_exempt`` tools (e.g. loop_status) never trip the guard."""
+    tracker = _DoomLoopTracker(
+        threshold=3,
+        exempt_names=frozenset({"loop_status"}),
+    )
+    args: dict[str, object] = {}
+    for _ in range(10):
+        tracker.record("loop_status", args)
+    assert tracker.triggered is False
+    assert tracker.take_error() is None
+    assert tracker.streak_count == 0
+
+    # Non-exempt tools still trip.
+    tracker.record("run_command", {"command": "x"})
+    tracker.record("run_command", {"command": "x"})
+    tracker.record("run_command", {"command": "x"})
+    assert tracker.take_error() is not None
+
+
+def test_doom_loop_exempt_names_from_tool_defs() -> None:
+    from monkeybot.core.runtime.loop import _doom_loop_exempt_names
+
+    tools = [
+        ToolDef("read_file", "r", {"type": "object"}, parallel_safe=True),
+        ToolDef(
+            "loop_status",
+            "s",
+            {"type": "object"},
+            parallel_safe=True,
+            doom_loop_exempt=True,
+        ),
+    ]
+    assert _doom_loop_exempt_names(tools) == frozenset({"loop_status"})
+
+
+@pytest.mark.asyncio
+async def test_run_does_not_doom_loop_on_loop_status_polling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Documented start_loop / loop_status polling must not force recovery."""
+    monkeypatch.setenv("DOOM_LOOP_THRESHOLD", "3")
+
+    def _status_call(call_id: str) -> ToolCall:
+        return ToolCall(call_id=call_id, name="loop_status", args={})
+
+    scripts = [
+        [_status_call("c1"), Done()],
+        [_status_call("c2"), Done()],
+        [_status_call("c3"), Done()],
+        [_status_call("c4"), Done()],
+        [TextDelta(text="still waiting, will check again later."), Done()],
+    ]
+    prov = ToolsRecordingProvider(scripts)
+    ctx = _ctx()
+    from monkeybot.core.context import TurnContext
+
+    ctx = TurnContext(
+        **{
+            **ctx.__dict__,
+            "tools": [
+                ToolDef(
+                    "loop_status",
+                    "status",
+                    {"type": "object"},
+                    parallel_safe=True,
+                    doom_loop_exempt=True,
+                )
+            ],
+        }
+    )
+    events = []
+    async for e in run(
+        "u",
+        ctx,
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(ToolExecutionResult.ok_text('{"status":"running"}')),
+        max_turns=10,
+    ):
+        events.append(e)
+
+    assert not any(
+        isinstance(e, Error) and e.error.startswith("Doom loop detected:") for e in events
+    )
+    assert isinstance(events[-1], TurnComplete)
+    # Four status polls + final text reply — tools available on every status turn.
+    assert prov.stream_tools[:4] == [["loop_status"]] * 4
+    assert prov.stream_tools[4] == ["loop_status"]
+
+
 def test_doom_loop_tracker_triggers_on_identical_failures() -> None:
     tracker = _DoomLoopTracker(threshold=3)
     args = {"command": "echo hi"}

@@ -31,7 +31,7 @@ from monkeybot.core.attachments.store import (
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.runtime.context_budget import summarization_trigger_ratio_from_env
 from monkeybot.core.runtime.events import QueuedInputAccepted, event_to_json
-from monkeybot.core.runtime.input_admission import AdmissionQueueFullError
+from monkeybot.core.runtime.input_admission import AdmissionQueueFullError, FollowUpItem
 from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService
 from monkeybot.core.types.content_blocks import ContentBlock
 
@@ -197,6 +197,11 @@ async def _drain_follow_up(
 
     Queues are process-local (same as ``SessionBus``); multi-replica gateways
     do not share steer/follow-up state across instances.
+
+    When the durable turn lock cannot be acquired (e.g. held by another replica
+    or a crashed claim that has not yet gone stale), the item is requeued and a
+    delayed retry is scheduled. After waiting longer than the session-turn stale
+    window the item is dropped so the queue cannot wedge permanently.
     """
     if bus.current_request_id is not None:
         return
@@ -208,12 +213,52 @@ async def _drain_follow_up(
             session_id, item.request_id
         )
         if not acquired:
+            now_ms = int(time.time() * 1000)
+            first_fail = item.first_lock_fail_at_ms or now_ms
+            waited_ms = now_ms - first_fail
+            give_up_ms = _follow_up_lock_wait_ms()
+            if waited_ms >= give_up_ms:
+                logger.error(
+                    "follow-up dropped; turn lock held past wait budget %s",
+                    kv(
+                        session_id=session_id,
+                        request_id=item.request_id,
+                        waited_ms=waited_ms,
+                        give_up_ms=give_up_ms,
+                    ),
+                )
+                # Continue with the next queued item (if any).
+                await _drain_follow_up(
+                    bus=bus,
+                    loop_ref=loop_ref,
+                    storage=storage,
+                    session_id=session_id,
+                )
+                return
             logger.warning(
                 "follow-up requeued; lock held elsewhere %s",
-                kv(session_id=session_id, request_id=item.request_id),
+                kv(
+                    session_id=session_id,
+                    request_id=item.request_id,
+                    waited_ms=waited_ms,
+                    retry_s=_follow_up_lock_retry_s(),
+                ),
             )
-            bus.admission.requeue_follow_up_front(item)
+            bus.admission.requeue_follow_up_front(
+                FollowUpItem(
+                    request_id=item.request_id,
+                    content=item.content,
+                    first_lock_fail_at_ms=first_fail,
+                )
+            )
+            _schedule_follow_up_retry(
+                bus=bus,
+                loop_ref=loop_ref,
+                storage=storage,
+                session_id=session_id,
+            )
             return
+    bus.cancel_follow_up_retry()
     bus.current_request_id = item.request_id
     logger.info(
         "follow-up promoted %s",
@@ -227,6 +272,72 @@ async def _drain_follow_up(
         request_id=item.request_id,
         user_content=item.content,
     )
+
+
+def _follow_up_lock_retry_s() -> float:
+    """Delay between follow-up drain retries when the turn lock is held."""
+    raw = os.environ.get("MONKEYBOT_FOLLOW_UP_LOCK_RETRY_S", "").strip()
+    if not raw:
+        return 1.0
+    try:
+        return max(0.05, float(raw))
+    except ValueError:
+        return 1.0
+
+
+def _follow_up_lock_wait_ms() -> int:
+    """Max time to retry a follow-up blocked on the durable turn lock.
+
+    Defaults to the session-turn stale window so a crashed claim can expire and
+    be released on the next ``try_acquire`` before we give up.
+    """
+    raw = os.environ.get("MONKEYBOT_FOLLOW_UP_LOCK_WAIT_MS", "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    try:
+        from monkeybot.core.persistence.session_turn_locks import session_turn_stale_ms
+
+        return session_turn_stale_ms()
+    except Exception:
+        return 600_000
+
+
+def _schedule_follow_up_retry(
+    *,
+    bus: SessionBus,
+    loop_ref: LoopPort,
+    storage: Any,
+    session_id: str,
+) -> None:
+    """Schedule a single delayed ``_drain_follow_up`` (deduped per bus).
+
+    When called from inside the active retry task (lock still held after a drain
+    attempt), replace that task so another delay is scheduled after we return.
+    """
+    existing = bus.follow_up_retry_task
+    current = asyncio.current_task()
+    if existing is not None and not existing.done() and existing is not current:
+        return
+
+    async def _retry() -> None:
+        try:
+            await asyncio.sleep(_follow_up_lock_retry_s())
+            await _drain_follow_up(
+                bus=bus,
+                loop_ref=loop_ref,
+                storage=storage,
+                session_id=session_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        finally:
+            if bus.follow_up_retry_task is asyncio.current_task():
+                bus.follow_up_retry_task = None
+
+    bus.follow_up_retry_task = asyncio.create_task(_retry())
 
 
 async def _publish_admission_accepted(
@@ -584,6 +695,15 @@ def create_app(
                 str(exc),
                 uuid.uuid4().hex,
             ) from exc
+        # Idle locally but durable lock held elsewhere: schedule retries so the
+        # queue cannot sit forever waiting for a turn-complete that never comes
+        # on this replica.
+        _schedule_follow_up_retry(
+            bus=bus,
+            loop_ref=request.app.state.loop,
+            storage=storage,
+            session_id=session_id,
+        )
         return await _publish_admission_accepted(
             bus,
             request_id=body.request_id,

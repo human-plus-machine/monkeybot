@@ -16,9 +16,14 @@ class ToolDef:
     ``parallel_safe`` marks read-only (or otherwise concurrent-safe) tools that
     the harness may execute together in one batch. Mutating tools stay serial
     unless explicitly opted in. Providers ignore this field.
+
+    ``doom_loop_exempt`` skips the identical name+args doom-loop guard for tools
+    that are expected to repeat with the same arguments (e.g. ``loop_status``
+    polling). Providers ignore this field.
     """
 
     name: str
     description: str
     input_schema: dict[str, object]
     parallel_safe: bool = False
+    doom_loop_exempt: bool = False

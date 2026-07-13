@@ -409,6 +409,7 @@ def _core_tool_defs(
                     "required": [],
                 },
                 parallel_safe=True,
+                doom_loop_exempt=True,
             ),
             ToolDef(
                 "pause_loop",
