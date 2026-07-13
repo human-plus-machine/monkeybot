@@ -125,8 +125,9 @@ Write one JSON file per run (run metadata + per-scenario data + suite aggregate 
 list below) under `evals/runs/`. Add `evals/runs/` to `.gitignore` — only baselines are
 committed, never individual run artifacts.
 
-Keep `store.py`'s in-memory store as-is for the live UI; the disk file is what PR
-comparison reads.
+The disk file is what PR comparison reads. (The FastAPI eval service and its in-memory
+`store.py` were removed in 2026-07 — nothing consumed the HTTP/WebSocket API; the report
+CLI is the only execution path.)
 
 Include `schema_version` at the top of every run file and baseline file so the report
 command can evolve fields without breaking old baselines.
