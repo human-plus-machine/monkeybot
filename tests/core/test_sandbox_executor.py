@@ -130,7 +130,7 @@ class TestSandboxConfigFromEnv:
 
         assert cfg.enabled is False
         assert cfg.server_url == "http://localhost:8080"
-        assert cfg.image == "ghcr.io/human-plus-machine/monkeybot-sandbox:2.2.0"
+        assert cfg.image == "python:3.12"
         assert cfg.api_key is None
         assert cfg.ttl_seconds == 1800
         assert cfg.use_server_proxy is True
@@ -372,10 +372,29 @@ class TestSandboxExecutorLayoutMounts:
                 await executor.execute("cat", [str(skills / "SKILL.md")])
             with pytest.raises(SecurityError, match="compute-only"):
                 await executor.execute("bash", ["-c", f"cat {workspace / 'input.txt'}"])
-            with pytest.raises(SecurityError, match="compute-only"):
-                await executor.execute("bash", ["-c", "cat ./skills/browser/SKILL.md"])
 
         mock_cls.create.assert_not_called()
+
+    def test_remote_compute_mode_only_rejects_absolute_mounted_paths(self, tmp_path):
+        workspace = tmp_path / "agent"
+        skills = workspace / "skills"
+        workspace.mkdir()
+        skills.mkdir()
+        cfg = SandboxConfig(
+            True, "https://remote.example", None, "test", 30, shared_filesystem=False
+        )
+        executor = SandboxExecutor(cfg, workspace, skills_path=skills)
+        input_file = workspace / "input.txt"
+
+        assert executor._remote_requests_mounted_path(
+            ["-c", f'python -c \'open("{input_file}")\''], None
+        )
+        assert executor._remote_requests_mounted_path(
+            ["-c", "cat ./skills/browser/SKILL.md"], None
+        ) is False
+        assert executor._remote_requests_mounted_path(
+            ["-c", f"cat {workspace}-extra/input.txt"], None
+        ) is False
 
 
 # ---------------------------------------------------------------------------

@@ -16,7 +16,7 @@ is never invoked.
 Configuration (all via env vars or monkeybot.yaml sandbox.*):
     SANDBOX_ENABLED            - "true" to activate (default: "false")
     SANDBOX_SERVER_URL         - OpenSandbox server URL (default: http://localhost:8080)
-    SANDBOX_IMAGE              - Container image to run (default: published monkeybot sandbox)
+    SANDBOX_IMAGE              - Container image to run (default: python:3.12)
     SANDBOX_API_KEY            - API key for the server (env-only, optional)
     SANDBOX_TTL_SECONDS        - Sandbox lifetime in seconds (env-only, default: 1800)
     SANDBOX_USE_SERVER_PROXY   - default "true": route health/exec via OpenSandbox HTTP API
@@ -31,14 +31,22 @@ import os
 import re
 import shlex
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from monkeybot.core.tools.terminal import ALLOWED_PATHS, ALLOWED_COMMANDS, ExecutionResult, SecurityError, build_skill_runtime_env
+from monkeybot.core.tools.terminal import (
+    ALLOWED_COMMANDS,
+    ALLOWED_PATHS,
+    ExecutionResult,
+    SecurityError,
+    build_skill_runtime_env,
+)
 
 logger = logging.getLogger(__name__)
+_ABSOLUTE_PATH_FRAGMENT = re.compile(r"(?<![\w.-])/(?:[^\s'\"`;()]+)")
 
 
 @dataclass
@@ -58,14 +66,14 @@ class SandboxConfig:
     shared_filesystem: bool = True
 
     @classmethod
-    def from_env(cls) -> "SandboxConfig":
+    def from_env(cls) -> SandboxConfig:
         raw_ttl = os.getenv("SANDBOX_TTL_SECONDS", "1800")
         try:
             ttl = int(raw_ttl)
         except ValueError:
             raise ValueError(
                 f"SANDBOX_TTL_SECONDS must be an integer, got: {raw_ttl!r}"
-            )
+            ) from None
         api_key = os.getenv("SANDBOX_API_KEY") or os.getenv("SANDBOX_AUTH_TOKEN") or None
         proxy_raw = os.getenv("SANDBOX_USE_SERVER_PROXY", "true").strip().lower()
         use_server_proxy = proxy_raw not in ("0", "false", "no", "off")
@@ -76,7 +84,7 @@ class SandboxConfig:
             server_url=os.getenv("SANDBOX_SERVER_URL", "http://localhost:8080"),
             api_key=api_key,
             image=os.getenv(
-                "SANDBOX_IMAGE", "ghcr.io/human-plus-machine/monkeybot-sandbox:2.2.0"
+                "SANDBOX_IMAGE", "python:3.12"
             ),
             ttl_seconds=ttl,
             use_server_proxy=use_server_proxy,
@@ -129,27 +137,35 @@ class SandboxExecutor:
         """Detect host layout paths before dispatching to a compute-only sandbox.
 
         Shell commands commonly place a pathname inside ``bash -c`` rather
-        than pass it as a standalone argument, so inspect both direct absolute
-        arguments and path-shaped fragments in every argument.
+        than pass it as a standalone argument, so inspect shell tokens as well
+        as direct absolute arguments. Relative paths are intentionally allowed:
+        a remote sandbox resolves them below its own ``/tmp`` workdir.
         """
         mounted_roots = tuple(
             root for root in (self._workspace_root, self._skills_path) if root is not None
         )
         raw_values = [str(cwd)] if cwd is not None else []
         raw_values.extend(args)
-        relative_layout_path = re.compile(
-            r"(?:^|[\s\"'=])(?:\.\.?/)*(?:workspace|skills)/"
-        )
         for raw in raw_values:
-            if any(str(root) in raw for root in mounted_roots):
+            tokens = [raw]
+            with suppress(ValueError):
+                tokens.extend(shlex.split(raw))
+            tokens.extend(_ABSOLUTE_PATH_FRAGMENT.findall(raw))
+            if any(
+                re.search(rf"(?<![\w.-]){re.escape(str(root))}(?=$|[\s/'\"`;,)])", raw)
+                for root in mounted_roots
+            ):
                 return True
-            candidate = Path(raw).expanduser()
-            if candidate.is_absolute():
-                resolved = candidate.resolve()
-                if any(resolved == root or root in resolved.parents for root in mounted_roots):
-                    return True
-            if relative_layout_path.search(raw):
-                return True
+            for token in tokens:
+                # Cover shell assignments and long options, e.g. ``PATH=/host/x``.
+                candidates = (token, token.split("=", 1)[1]) if "=" in token else (token,)
+                for candidate in candidates:
+                    path = Path(candidate).expanduser()
+                    if not path.is_absolute():
+                        continue
+                    resolved = path.resolve()
+                    if any(resolved == root or root in resolved.parents for root in mounted_roots):
+                        return True
         return False
 
     async def _ensure_sandbox(self) -> None:

@@ -13,6 +13,7 @@ def test_run_new_creates_bundle(tmp_path: Path) -> None:
     cfg = tmp_path / "monkeybot_config"
     assert (cfg / "monkeybot.yaml").is_file()
     assert (cfg / "monkeybot.example.yaml").is_file()
+    assert "image: python:3.12" in (cfg / "monkeybot.example.yaml").read_text(encoding="utf-8")
     assert (cfg / "mcp.json").read_text(encoding="utf-8").strip().startswith("{")
     assert (cfg / "command_allowlist.yaml").is_file()
     assert (cfg / "permissions.yaml").is_file()

@@ -41,23 +41,111 @@ def test_write_github_output_noop_without_env(release, monkeypatch: pytest.Monke
     release.write_github_output("packages", "core")  # must not raise
 
 
-def test_cut_changelog_writes_exact_sections_for_coordinated_release(
+def test_cut_changelog_attributes_notes_to_each_package(
     release, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     changelog = tmp_path / "CHANGELOG.md"
     changelog.write_text(
-        "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- Coordinated release.\n",
+        """# Changelog
+
+## [Unreleased]
+
+### Core
+
+### Added
+
+- Core release.
+
+### Browser MCP
+
+### Added
+
+- Browser release.
+
+### CLI
+
+### Fixed
+
+- CLI release.
+""",
         encoding="utf-8",
     )
     monkeypatch.setattr(release, "CHANGELOG", changelog)
 
-    release.cut_changelog(["2.2.0", "0.2.0", "0.3.0"])
+    release.cut_changelog({"core": "2.2.0", "browser": "0.2.0", "cli": "0.3.0"})
 
     text = changelog.read_text(encoding="utf-8")
-    assert "## [Unreleased]\n\n## [2.2.0]" in text
-    assert "## [0.2.0]" in text
-    assert "## [0.3.0]" in text
-    assert text.count("- Coordinated release.") == 3
-    assert release.changelog_section("2.2.0") is not None
-    assert release.changelog_section("0.2.0") is not None
-    assert release.changelog_section("0.3.0") is not None
+    assert "## [Unreleased]\n\n## [core v2.2.0]" in text
+    assert "## [browser v0.2.0]" in text
+    assert "## [cli v0.3.0]" in text
+    assert text.count("- Core release.") == 1
+    assert text.count("- Browser release.") == 1
+    assert text.count("- CLI release.") == 1
+    assert release.changelog_section("core", "2.2.0") is not None
+    assert release.changelog_section("browser", "0.2.0") is not None
+    assert release.changelog_section("cli", "0.3.0") is not None
+
+
+def test_cut_changelog_leaves_other_package_notes_unreleased(
+    release, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_text(
+        """# Changelog
+
+## [Unreleased]
+
+### Core
+
+### Added
+
+- Core release.
+
+### CLI
+
+### Fixed
+
+- CLI release.
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(release, "CHANGELOG", changelog)
+
+    release.cut_changelog({"core": "2.2.0"})
+
+    text = changelog.read_text(encoding="utf-8")
+    assert "## [core v2.2.0]" in text
+    assert "- Core release." in release.changelog_section("core", "2.2.0")
+    assert "### CLI" in text
+    assert "- CLI release." in text
+
+
+def test_changelog_sections_remain_distinct_for_matching_versions(
+    release, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_text(
+        """# Changelog
+
+## [Unreleased]
+
+### Core
+
+### Added
+
+- Core release.
+
+### Browser MCP
+
+### Added
+
+- Browser release.
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(release, "CHANGELOG", changelog)
+
+    release.cut_changelog({"core": "0.3.0", "browser": "0.3.0"})
+
+    assert "- Core release." in release.changelog_section("core", "0.3.0")
+    assert "- Browser release." in release.changelog_section("browser", "0.3.0")

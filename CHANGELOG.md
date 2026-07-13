@@ -6,35 +6,31 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [2.2.0] - 2026-07-13
+## [core v2.2.0] - 2026-07-13
 
 ### Added
 
-- Canonical agent-root layout, read-only virtual `skills/` root, scaffolded agent Dockerfile, bundled disabled browser MCP, and a published sandbox-image release path.
+- Canonical agent-root layout and a read-only virtual `skills/` root.
 
 ### Changed
 
-- Sandbox runtime support is now installed with the core package; remote sandboxes require an explicit compute-only capability setting.
+- Remote sandboxes require an explicit compute-only capability setting.
 
-## [0.2.0] - 2026-07-13
+### Breaking
+
+- Workspace or skills symlinks that resolve outside their respective roots are now rejected. Move their targets inside the agent's `workspace/`, `data/`, or `skills/` layout.
+
+## [browser v0.2.0] - 2026-07-13
 
 ### Added
 
-- Canonical agent-root layout, read-only virtual `skills/` root, scaffolded agent Dockerfile, bundled disabled browser MCP, and a published sandbox-image release path.
+- Browser MCP package release supporting the canonical agent layout.
 
-### Changed
-
-- Sandbox runtime support is now installed with the core package; remote sandboxes require an explicit compute-only capability setting.
-
-## [0.3.0] - 2026-07-13
+## [cli v0.3.0] - 2026-07-13
 
 ### Added
 
-- Canonical agent-root layout, read-only virtual `skills/` root, scaffolded agent Dockerfile, bundled disabled browser MCP, and a published sandbox-image release path.
-
-### Changed
-
-- Sandbox runtime support is now installed with the core package; remote sandboxes require an explicit compute-only capability setting.
+- Agent scaffolds now include the canonical layout, Dockerfile, and disabled browser MCP configuration.
 
 ### Fixed
 

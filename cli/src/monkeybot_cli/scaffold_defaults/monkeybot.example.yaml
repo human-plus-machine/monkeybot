@@ -180,7 +180,7 @@ web_search:
 sandbox:
   enabled: false
   server_url: http://localhost:8080
-  image: ghcr.io/human-plus-machine/monkeybot-sandbox:2.2.0
+  image: python:3.12
   ttl_seconds: 1800
   # Set false only for a remote sandbox server with no shared filesystem. It
   # then runs compute-only commands and refuses workspace/skills file access.

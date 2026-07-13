@@ -18,8 +18,7 @@ import datetime
 import os
 import re
 import subprocess
-import sys
-from collections.abc import Sequence
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +29,11 @@ PACKAGES = {
     "core": ROOT / "pyproject.toml",
     "browser": ROOT / "integrations" / "browser-mcp" / "pyproject.toml",
     "cli": ROOT / "cli" / "pyproject.toml",
+}
+PACKAGE_CHANGELOG_TITLES = {
+    "core": "Core",
+    "browser": "Browser MCP",
+    "cli": "CLI",
 }
 
 
@@ -60,35 +64,64 @@ def write_version(pyproject: Path, new_version: str) -> None:
     pyproject.write_text(text)
 
 
-def cut_changelog(versions: Sequence[str]) -> None:
-    """Move [Unreleased] notes into dated sections for one or more packages.
+def _split_package_notes(body: str) -> dict[str, str]:
+    """Return package-specific notes from the structured Unreleased section."""
+    titles = "|".join(re.escape(title) for title in PACKAGE_CHANGELOG_TITLES.values())
+    matches = list(re.finditer(rf"^### ({titles})\n(.*?)(?=^### (?:{titles})\n|\Z)", body, re.M | re.S))
+    if not matches:
+        raise SystemExit("Unreleased notes must be grouped under ### Core, ### Browser MCP, or ### CLI")
+    notes = {title: content.strip() for title, content in (m.groups() for m in matches)}
+    if len(notes) != len(matches):
+        raise SystemExit("Unreleased package headings must not be repeated")
+    return {
+        package: notes.get(title, "")
+        for package, title in PACKAGE_CHANGELOG_TITLES.items()
+    }
 
-    A coordinated release may bump core, browser MCP, and CLI to different
-    semantic versions.  Each package still needs an exact changelog heading so
-    ``publish`` can create its tag and release independently.
-    """
-    unique_versions = tuple(dict.fromkeys(versions))
-    if not unique_versions:
+
+def _format_unreleased(notes: Mapping[str, str]) -> str:
+    blocks = [
+        f"### {PACKAGE_CHANGELOG_TITLES[package]}\n\n{body}"
+        for package, body in notes.items()
+        if body
+    ]
+    return "## [Unreleased]" + ("\n\n" + "\n\n".join(blocks) if blocks else "")
+
+
+def _changelog_heading(package: str, version: str) -> str:
+    return f"{package} v{version}"
+
+
+def cut_changelog(versions: Mapping[str, str]) -> None:
+    """Cut only each package's own Unreleased notes into its version section."""
+    if not versions:
         raise SystemExit("no release versions supplied")
+    unknown = set(versions) - set(PACKAGES)
+    if unknown:
+        raise SystemExit(f"unknown packages: {', '.join(sorted(unknown))}")
     text = CHANGELOG.read_text()
     today = datetime.date.today().isoformat()
     m = re.search(r"## \[Unreleased\]\n(.*?)(?=\n## \[|\Z)", text, re.S)
     if not m:
         raise SystemExit("CHANGELOG.md has no [Unreleased] section to cut")
-    body = m.group(1).strip("\n")
-    if not body:
-        raise SystemExit("Unreleased section is empty - nothing to release")
+    notes = _split_package_notes(m.group(1).strip("\n"))
+    selected = {package: notes[package] for package in versions}
+    if not all(selected.values()):
+        raise SystemExit("each released package needs notes in the Unreleased section")
     sections = "\n\n".join(
-        f"## [{version}] - {today}\n\n{body}" for version in unique_versions
+        f"## [{_changelog_heading(package, version)}] - {today}\n\n{selected[package]}"
+        for package, version in versions.items()
     )
-    new_section = f"## [Unreleased]\n\n{sections}\n"
+    remaining = {package: body for package, body in notes.items() if package not in versions}
+    new_section = f"{_format_unreleased(remaining)}\n\n{sections}\n"
     text = text[: m.start()] + new_section + text[m.end() :]
     CHANGELOG.write_text(text)
 
 
-def changelog_section(version: str) -> str | None:
+def changelog_section(package: str, version: str) -> str | None:
     text = CHANGELOG.read_text()
-    m = re.search(rf"## \[{re.escape(version)}\].*?\n(.*?)(?=\n## \[|\Z)", text, re.S)
+    heading = re.escape(_changelog_heading(package, version))
+    m = re.search(rf"## \[{heading}\].*?\n(.*?)(?=\n## \[|\Z)", text, re.S)
     return m.group(1).strip() if m else None
 
 
@@ -116,7 +149,7 @@ def cmd_prepare(args: argparse.Namespace) -> None:
     run("git", "checkout", "-b", branch)
     for name, version in new_versions.items():
         write_version(PACKAGES[name], version)
-    cut_changelog(list(new_versions.values()))
+    cut_changelog(new_versions)
     run("git", "add", *(str(PACKAGES[name]) for name in names), str(CHANGELOG))
     release_labels = ", ".join(f"{name} v{version}" for name, version in new_versions.items())
     run("git", "commit", "-m", f"chore(release): {release_labels}")
@@ -127,7 +160,7 @@ def cmd_prepare(args: argparse.Namespace) -> None:
         "--head", branch,
         "--title", f"Release {release_labels}",
         "--body", "\n".join(
-            f"## {name} v{version}\n\n{changelog_section(version)}"
+            f"## {name} v{version}\n\n{changelog_section(name, version)}"
             for name, version in new_versions.items()
         ),
     )
@@ -147,7 +180,7 @@ def cmd_publish(_: argparse.Namespace) -> None:
         tag = f"{name}-v{version}"
         if tag in existing_tags:
             continue
-        notes = changelog_section(version)
+        notes = changelog_section(name, version)
         if notes is None:
             # No changelog entry for this version - it predates this tooling
             # (e.g. the version already on main when this script was added).

@@ -29,7 +29,7 @@ zone somewhere else.
 | `MONKEYBOT_WORKSPACE_ROOT` | No | layout's `workspace/` | Absolute workspace override for a container or platform mount. |
 | `SANDBOX_ENABLED` | No | `false` | Set `true` to enable the OpenSandbox code-execution environment. |
 | `SANDBOX_SERVER_URL` | If sandbox enabled | — | URL of the OpenSandbox server (e.g. `http://localhost:8080` for a sidecar, or a private IP for a VPC-separated service). |
-| `SANDBOX_IMAGE` | No | published MonkeyBot sandbox tag | Override the bundled sandbox execution image. |
+| `SANDBOX_IMAGE` | No | `python:3.12` | Override with a published MonkeyBot sandbox image or another execution image. |
 | `SANDBOX_API_KEY` | No | — | Canonical API key supplied to OpenSandbox when the server requires one. `SANDBOX_AUTH_TOKEN` is accepted as a compatibility alias. |
 | `SANDBOX_SHARED_FILESYSTEM` | No | `true` | Set `false` for a remote sandbox; it then runs compute-only with no workspace or skills mounts. |
 
@@ -104,9 +104,9 @@ The factory (`create_workspace_storage`) reads the URI scheme and returns the ri
 
 ## 5. OpenSandbox deployment
 
-`SANDBOX_ENABLED=true` enables the published MonkeyBot sandbox image by default.
-MonkeyBot connects to OpenSandbox through `SANDBOX_SERVER_URL`; override the
-image only when you need a custom execution environment.
+`SANDBOX_ENABLED=true` uses `python:3.12` by default. MonkeyBot connects to
+OpenSandbox through `SANDBOX_SERVER_URL`; set `SANDBOX_IMAGE` when a custom
+execution environment is needed.
 
 | Infrastructure | Where OpenSandbox runs | `SANDBOX_SERVER_URL` |
 |---|---|---|

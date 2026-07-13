@@ -65,9 +65,11 @@ before using `browser__*` tools. Browser playbooks and screenshots belong below
 `workspace/browser/`; on ephemeral-workspace deployments they are an
 instance-local cache and disappear when the instance is recycled.
 
-The sandbox execution image is also bundled in the scaffold configuration.
-`sandbox.enabled` (or `SANDBOX_ENABLED`) remains the only switch: enabling it
-uses the published MonkeyBot sandbox image unless `SANDBOX_IMAGE` overrides it.
+The sandbox recipe is bundled in the repository, while the scaffold keeps the
+known-pullable `python:3.12` default until the versioned MonkeyBot image is
+published. `sandbox.enabled` (or `SANDBOX_ENABLED`) remains the only switch;
+set `SANDBOX_IMAGE` to a published MonkeyBot image or another custom image when
+the additional sandbox tools are needed.
 See [Browser MCP](browser-mcp.md) and [Pattern A](deploy-pattern-a-container.md)
 for runtime details.
 
