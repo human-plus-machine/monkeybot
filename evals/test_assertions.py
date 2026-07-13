@@ -83,6 +83,22 @@ def test_response_contains_fail() -> None:
     assert "response_contains" in bad[0]
 
 
+def test_response_not_contains() -> None:
+    run = _run(output="As an AI, I cannot do that.")
+    bad = evaluate_assertions(_scenario({"response_not_contains": ["as an ai"]}), run)
+    assert len(bad) == 1 and "response_not_contains" in bad[0]
+    ok = evaluate_assertions(_scenario({"response_not_contains": ["refuse"]}), run)
+    assert ok == []
+
+
+def test_response_regex() -> None:
+    run = _run(output="Total: $42.50 charged.")
+    ok = evaluate_assertions(_scenario({"response_regex": r"\$\d+\.\d{2}"}), run)
+    assert ok == []
+    bad = evaluate_assertions(_scenario({"response_regex": [r"^\d+$"]}), run)
+    assert len(bad) == 1 and "response_regex" in bad[0]
+
+
 def test_sessions_message_groups() -> None:
     single = Scenario(id="a", messages=["x", "y"])
     assert single.message_groups() == [["x", "y"]]

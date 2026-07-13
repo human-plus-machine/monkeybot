@@ -624,7 +624,9 @@ YAML-driven scenarios asserting harness behavior without live LLM.
 
 ### Judge-based evals (`evals/`)
 
-Separate harness at repo root for higher-level agent evaluation (`evals/main.py`).
+Separate harness at repo root for higher-level agent evaluation, run as a CLI against a
+live gateway: `uv run python -m evals.report --suite smoke` (see `evals/report.py`; diff
+two runs with `python -m evals.diff`).
 
 ---
 

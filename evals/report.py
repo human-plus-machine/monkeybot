@@ -27,6 +27,7 @@ from persistence import (  # noqa: E402
     BaselineFile,
     RunRecord,
     ScenarioAggregate,
+    TurnLog,
     baseline_from_run,
     build_suite_aggregate,
     git_metadata,
@@ -98,6 +99,10 @@ async def _run_scenario(scenario: Scenario, agent_url: str) -> ScenarioAggregate
         subagent_calls_count=run.subagent_calls_count(),
         trace_ids=[t.trace_id for t in turns if t.trace_id],
         requirement_failures=requirement_failures,
+        turns=[
+            TurnLog(input=t.input, output=t.output, duration_ms=t.usage.duration_ms)
+            for t in turns
+        ],
     )
 
 

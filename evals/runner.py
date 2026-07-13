@@ -34,6 +34,7 @@ def _parse_sse_blocks(buffer: str) -> tuple[list[dict[str, Any]], str]:
             try:
                 events.append(json.loads(raw))
             except json.JSONDecodeError:
+                _log.debug("dropping malformed SSE data line: %r", raw[:200])
                 continue
     return events, rest
 
@@ -151,6 +152,12 @@ async def _collect_turn_output(
                         usage.duration_ms = int(u.get("duration_ms", 0) or 0)
                     return _result(), None
 
+    _log.warning(
+        "SSE ended before TurnComplete session=%s request=%s partial_output_chars=%d",
+        session_id,
+        request_id,
+        sum(len(p) for p in out_parts),
+    )
     return _result(), (err_msg or "SSE ended before TurnComplete")
 
 
@@ -168,6 +175,7 @@ async def _run_session(
     r = await client.post(f"{base}/sessions", json={})
     r.raise_for_status()
     session_id = str(r.json()["session_id"])
+    _log.info("eval session opened session=%s messages=%d", session_id, len(messages))
 
     turns: list[TurnResult] = []
     for offset, msg in enumerate(messages):
@@ -177,6 +185,13 @@ async def _run_session(
         )
         if err:
             raise RuntimeError(err)
+        _log.info(
+            "turn complete session=%s turn=%d duration_ms=%d tool_calls=%d",
+            session_id,
+            start_index + offset,
+            tr.usage.duration_ms,
+            len(tr.tool_calls),
+        )
         turns.append(tr)
         if on_turn_complete is not None:
             await on_turn_complete(start_index + offset, tr)

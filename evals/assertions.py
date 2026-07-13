@@ -1,13 +1,22 @@
 """Requirement + cap assertions evaluated against SSE telemetry, independent of judge score.
 
 Caps (``max_*`` / ``min_score``) and requirements (``required_tools``, ``min_tool_calls``,
-``min_subagent_calls``, ``min_summarizations``, ``response_contains``) are read straight from
-a scenario's ``assertions`` mapping; keys that aren't present are simply not checked.
+``min_subagent_calls``, ``min_summarizations``, ``response_contains``, ``response_regex``,
+``response_not_contains``) are read straight from a scenario's ``assertions`` mapping;
+keys that aren't present are simply not checked.
 """
 
 from __future__ import annotations
 
+import re
+
 from models import EvalRun, Scenario
+
+
+def _as_list(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    return [str(v) for v in value]  # type: ignore[union-attr]
 
 
 def evaluate_assertions(scenario: Scenario, run: EvalRun) -> list[str]:
@@ -62,10 +71,22 @@ def evaluate_assertions(scenario: Scenario, run: EvalRun) -> list[str]:
             f"min_summarizations: {run.summarizations_count()} < {a['min_summarizations']}"
         )
 
+    combined = " ".join(t.output for t in run.turns)
+    combined_lower = combined.lower()
+
     if "response_contains" in a:
-        phrases = [str(p).lower() for p in a["response_contains"]]
-        combined = " ".join(t.output for t in run.turns).lower()
-        if phrases and not any(p in combined for p in phrases):
+        phrases = [p.lower() for p in _as_list(a["response_contains"])]
+        if phrases and not any(p in combined_lower for p in phrases):
             failures.append(f"response_contains: none of {phrases} found in the agent's output")
+
+    if "response_not_contains" in a:
+        hits = [p for p in _as_list(a["response_not_contains"]) if p.lower() in combined_lower]
+        if hits:
+            failures.append(f"response_not_contains: forbidden phrases {hits} found in the agent's output")
+
+    if "response_regex" in a:
+        patterns = _as_list(a["response_regex"])
+        if patterns and not any(re.search(p, combined, re.IGNORECASE) for p in patterns):
+            failures.append(f"response_regex: none of {patterns} matched the agent's output")
 
     return failures

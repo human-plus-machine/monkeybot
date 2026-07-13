@@ -20,6 +20,15 @@ RUNS_DIR = Path(__file__).resolve().parent / "runs"
 BASELINES_DIR = Path(__file__).resolve().parent / "baselines"
 
 
+class TurnLog(BaseModel):
+    """Prompt/response pair kept in run files (gitignored) so a slip can be diffed to the
+    exact turn that caused it (``python -m evals.diff``). Stripped from baselines."""
+
+    input: str
+    output: str
+    duration_ms: int = 0
+
+
 class ScenarioAggregate(BaseModel):
     scenario_id: str
     description: str = ""
@@ -40,12 +49,12 @@ class ScenarioAggregate(BaseModel):
     tool_calls_count: int = 0
     tool_calls_by_name: dict[str, int] = Field(default_factory=dict)
     tool_errors_count: int = 0
-    llm_calls_count: int = 0  # not exposed on SSE yet; stays 0 until a stream event carries it
     summarizations_count: int = 0
     subagent_calls_count: int = 0
     trace_ids: list[str] = Field(default_factory=list)
     failure_reason: str | None = None
     requirement_failures: list[str] = Field(default_factory=list)
+    turns: list[TurnLog] = Field(default_factory=list)
 
 
 class SuiteAggregate(BaseModel):
@@ -58,9 +67,6 @@ class SuiteAggregate(BaseModel):
     total_tokens: int = 0
     total_cost_usd: float = 0.0
     mean_quality_by_metric: dict[str, float] = Field(default_factory=dict)
-    worst_regressed_scenarios: list[str] = Field(default_factory=list)
-    best_improved_scenarios: list[str] = Field(default_factory=list)
-    warnings: list[str] = Field(default_factory=list)
 
 
 class RunRecord(BaseModel):
@@ -161,7 +167,8 @@ def baseline_from_run(record: RunRecord) -> BaselineFile:
         git_sha=record.git_sha,
         suite=record.suite,
         suite_aggregate=record.suite_aggregate,
-        scenarios=record.scenarios,
+        # Baselines are committed; keep them aggregate-only (no turn text).
+        scenarios=[s.model_copy(update={"turns": []}) for s in record.scenarios],
     )
 
 

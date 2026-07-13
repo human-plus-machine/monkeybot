@@ -1,10 +1,9 @@
-"""YAML scenario parsing + disk discovery, shared by the FastAPI service and the CLI report."""
+"""YAML scenario parsing + disk discovery for the eval report CLI."""
 
 from __future__ import annotations
 
 import uuid
 from pathlib import Path
-from typing import Literal
 
 import yaml
 from models import Scenario
@@ -12,9 +11,7 @@ from models import Scenario
 EVAL_ROOT = Path(__file__).resolve().parent
 
 
-def parse_scenario_yaml(
-    text: str, *, sid: str | None, source: Literal["builtin", "operator"]
-) -> Scenario:
+def parse_scenario_yaml(text: str, *, sid: str | None) -> Scenario:
     data = yaml.safe_load(text) or {}
     if not isinstance(data, dict):
         raise ValueError("YAML must be a mapping at the top level")
@@ -50,30 +47,22 @@ def parse_scenario_yaml(
         sessions=sessions,
         session_pause_sec=float(data.get("session_pause_sec", 5.0)),
         assertions=dict(assertions),
-        source=source,
     )
 
 
 def load_disk_scenarios(root: Path = EVAL_ROOT / "scenarios") -> list[Scenario]:
-    """Load built-in scenarios from subsystem folders (``tools/``, ``memory/``, ...) plus operator/.
+    """Load scenarios from subsystem folders (``tools/``, ``memory/``, ...).
 
-    A built-in scenario id is its path relative to ``scenarios/`` without the ``.yaml``
+    A scenario id is its path relative to ``scenarios/`` without the ``.yaml``
     extension (e.g. ``tools/core_read``), matching how ``evals/suites/*.yaml`` reference them.
     """
     scenarios: list[Scenario] = []
     if not root.is_dir():
         return scenarios
-    op = root / "operator"
     for path in sorted(root.rglob("*.yaml")):
-        if op in path.parents:
-            continue
         raw = path.read_text(encoding="utf-8")
         rel_id = path.relative_to(root).with_suffix("").as_posix()
-        scenarios.append(parse_scenario_yaml(raw, sid=rel_id, source="builtin"))
-    if op.is_dir():
-        for path in sorted(op.glob("*.yaml")):
-            raw = path.read_text(encoding="utf-8")
-            scenarios.append(parse_scenario_yaml(raw, sid=path.stem, source="operator"))
+        scenarios.append(parse_scenario_yaml(raw, sid=rel_id))
     return scenarios
 
 
