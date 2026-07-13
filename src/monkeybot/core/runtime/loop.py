@@ -15,7 +15,6 @@ from typing import Any, Protocol, cast, runtime_checkable
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.attachments.freeze import freeze_attachments_in_history
-from monkeybot.core.attachments.resolve import resolve_messages_for_provider
 from monkeybot.core.attachments.store import AttachmentStore
 from monkeybot.core.context import (
     MCP_REGISTRY_MUTATING_TOOLS,
@@ -23,6 +22,7 @@ from monkeybot.core.context import (
     refresh_memory_index,
     refresh_tools_after_mcp_change,
 )
+from monkeybot.core.context.epoch import ContextEpochTracker, EpochAdmit, fingerprint_text
 from monkeybot.core.context.memory_prompt import (
     MemoryPromptSelection,
     memory_index_fingerprint,
@@ -32,17 +32,14 @@ from monkeybot.core.context.tool_output_policy import resolve_tool_budget
 from monkeybot.core.context.tool_result_ingress import summarize_tool_result_text
 from monkeybot.core.context.tool_shapers import (
     exceeds_tool_output_budget,
-    shape_messages_tool_results,
     shape_tool_text,
 )
 from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
 from monkeybot.core.llm.provider import (
     Done,
-    GroundingEvent as ProviderGroundingEvent,
     Message,
     Provider,
     TextDelta,
-    ThinkingDelta,
     ToolCall,
     UsageEvent,
     provider_count_input_tokens,
@@ -50,15 +47,22 @@ from monkeybot.core.llm.provider import (
 )
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.logging_utils import kv
-from monkeybot.core.messages.tool_integrity import repair_tool_turn_integrity
+from monkeybot.core.messages import convert_to_provider, transform_context
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.persistence.transcript import TranscriptWriter
-from monkeybot.core.prompts.prompt import compose_system_prompt, latest_user_message_text
+from monkeybot.core.prompts.prompt import (
+    RUNTIME_NOTES_HEADING,
+    compose_stable_baseline,
+    compose_volatile_tail,
+    compose_volatile_tail_parts,
+    latest_user_message_text,
+)
 from monkeybot.core.runtime.context_budget import (
     ContextBudgeter,
     compute_context_pressure_tier,
     summarization_trigger_ratio_from_env,
 )
+from monkeybot.core.runtime.provider_stream_mapper import ProviderStreamMapper
 from monkeybot.core.tools.inspector import InspectorToolCall, ToolInspector
 from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.types.content_blocks import (
@@ -75,17 +79,15 @@ from monkeybot.providers.pricing import estimate_cost
 
 from .events import (
     AgentEvent,
-    AssistantDelta,
     AttachmentDescriptorEvent,
+    ContextEpochStarted,
     ContextSummarized,
     ContextSummarizing,
     Error,
-    GroundingEvent,
     ImageBlock,
+    SystemContextUpdated,
     SystemPromptSnapshot,
     Thinking,
-    ThinkingBlockComplete,
-    ThinkingBlockDelta,
     ToolCallResult,
     ToolCallStarted,
     ToolConfirmationRequestEvent,
@@ -307,32 +309,103 @@ def _blocks_to_sse_summary(blocks: Sequence[ContentBlock]) -> str:
     return "\n".join(parts)
 
 
-def _system_message(
+def _system_message_from_text(body: str) -> Message:
+    return Message(role="system", content=[Text(text=body)])
+
+
+def _admit_system_context(
+    epoch: ContextEpochTracker,
     ctx: TurnContext,
     chat_messages: Sequence[Message],
     *,
     memory_selection: MemoryPromptSelection | None = None,
     attachment_catalog: SessionAttachmentCatalog | None = None,
-) -> Message:
-    """System message: AGENT.md base plus runtime memory, skills, harness, and task anchor."""
-    body = compose_system_prompt(
-        ctx,
-        chat_messages=chat_messages,
-        memory_selection=memory_selection,
-        attachment_catalog=(
-            attachment_catalog.list_records() if attachment_catalog is not None else None
+) -> EpochAdmit:
+    """Compose stable/volatile tails and reconcile against the current context epoch."""
+    catalog = (
+        attachment_catalog.list_records() if attachment_catalog is not None else None
+    )
+    stable = compose_stable_baseline(ctx, attachment_catalog=catalog)
+    volatile_parts = compose_volatile_tail_parts(
+        ctx, chat_messages=chat_messages, memory_selection=memory_selection
+    )
+    volatile = "".join(volatile_parts.values())
+    return epoch.reconcile(
+        stable_baseline=stable,
+        volatile_text=volatile,
+        stable_fingerprint=fingerprint_text(stable),
+        volatile_fingerprint=fingerprint_text(volatile),
+        volatile_part_fingerprints={
+            name: fingerprint_text(text) for name, text in volatile_parts.items()
+        },
+    )
+
+
+def _messages_for_provider(
+    system: Message,
+    history: Sequence[Message],
+    *,
+    mid_conversation_update: str = "",
+) -> list[Message]:
+    """Leading system + history + optional chronological system-context update.
+
+    The update is user-role so all providers accept mid-conversation updates
+    (system is leading-only for Anthropic/Gemini/OpenAI adapters). When history
+    already ends in a ``user`` row (e.g. a tool-response turn), the update is
+    folded into that same message instead of appended as a new one — Anthropic
+    and Gemini both reject (or, for Anthropic, only sometimes silently coalesce)
+    two consecutive same-role messages.
+    """
+    out: list[Message] = [system, *list(history)]
+    update = mid_conversation_update.strip()
+    if not update:
+        return out
+    update_block = Text(text=mid_conversation_update)
+    if out[-1].role == "user":
+        out[-1] = Message(role="user", content=[*out[-1].content, update_block])
+    else:
+        out.append(Message(role="user", content=[update_block]))
+    return out
+
+
+async def _load_agent_chat_history(history: HistoryStore, thread_id: str) -> list[Message]:
+    """Load transcript rows and apply agent-facing transforms (integrity + strip UI)."""
+    return transform_context(await history.load(thread_id))
+
+
+def _epoch_events(
+    admit: EpochAdmit,
+    *,
+    request_id: str,
+    thread_id: str,
+) -> list[AgentEvent]:
+    if admit.kind == "unchanged":
+        return []
+    logger.debug(
+        "context epoch %s",
+        kv(
+            request_id=request_id,
+            thread_id=thread_id,
+            kind=admit.kind,
+            epoch_id=admit.epoch_id,
+            changed_sources=",".join(admit.changed_sources),
         ),
     )
-    return Message(role="system", content=[Text(text=body)])
-
-
-def _messages_for_provider(system: Message, history: Sequence[Message]) -> list[Message]:
-    return [system, *list(history)]
-
-
-async def _load_repaired_chat_history(history: HistoryStore, thread_id: str) -> list[Message]:
-    """Load transcript rows and repair broken tool turns in memory before provider replay."""
-    return repair_tool_turn_integrity(await history.load(thread_id))
+    if admit.kind == "new_epoch":
+        return [
+            ContextEpochStarted(
+                request_id=request_id,
+                epoch_id=admit.epoch_id,
+                changed_sources=list(admit.changed_sources),
+            )
+        ]
+    return [
+        SystemContextUpdated(
+            request_id=request_id,
+            epoch_id=admit.epoch_id,
+            changed_sources=list(admit.changed_sources),
+        )
+    ]
 
 
 def _provider_messages_prompt_summary(messages: Sequence[Message]) -> str:
@@ -426,7 +499,7 @@ def _append_extra_system_text(system: Message, extra: str | None) -> Message:
     if not extra:
         return system
     base = "".join(b.text for b in system.content if isinstance(b, Text))
-    wrapped = f"{base}\n\n## Runtime notes\n\n{extra.strip()}\n"
+    wrapped = f"{base}{RUNTIME_NOTES_HEADING}\n{extra.strip()}\n"
     return Message(role="system", content=[Text(text=wrapped)])
 
 
@@ -551,9 +624,15 @@ def _summary_line_for_message(m: Message) -> str:
     return f"{m.role}: {joined}"
 
 
-def _system_prompt_snapshot_text(system: Message) -> str:
-    """Plain string for :class:`SystemPromptSnapshot` (composed prompt lives in Text blocks)."""
-    return "".join(b.text for b in system.content if isinstance(b, Text))
+def _system_prompt_snapshot_text(
+    system: Message, mid_conversation_update: str = ""
+) -> str:
+    """Plain string for :class:`SystemPromptSnapshot` (composed prompt + mid-epoch update)."""
+    body = "".join(b.text for b in system.content if isinstance(b, Text))
+    update = mid_conversation_update.strip()
+    if not update:
+        return body
+    return f"{body}\n\n{update}"
 
 
 def _is_resume_turn(resolved_messages: Sequence[Message]) -> bool:
@@ -625,21 +704,45 @@ async def _prompt_input_tokens_for_history(
     memory_selection: MemoryPromptSelection | None = None,
     extra_system_text: str | None = None,
     vertex_google_search: bool = False,
+    epoch: ContextEpochTracker | None = None,
 ) -> int:
-    """Provider-accurate prompt size for history rows already persisted (e.g. post-assistant)."""
-    system = _system_message(
-        ctx,
-        chat_messages,
-        memory_selection=memory_selection,
-        attachment_catalog=attachment_catalog,
+    """Provider-accurate prompt size for history rows already persisted (e.g. post-assistant).
+
+    When ``epoch`` is supplied, the count reflects the true wire shape for the
+    *current* epoch state — leading (cached) baseline plus any pending
+    mid-conversation update — via a non-mutating :meth:`ContextEpochTracker.peek`.
+    Falls back to a flat stable+volatile concatenation when no tracker is given
+    (e.g. summarizer/curator calls that have no epoch of their own). Either way,
+    the live tracker is never mutated by a budget recount.
+    """
+    catalog = (
+        attachment_catalog.list_records() if attachment_catalog is not None else None
     )
-    system = _append_extra_system_text(system, extra_system_text)
-    resolved_messages = resolve_messages_for_provider(
+    stable = compose_stable_baseline(ctx, attachment_catalog=catalog)
+    volatile = compose_volatile_tail(
+        ctx, chat_messages=chat_messages, memory_selection=memory_selection
+    )
+    mid_conversation_update = ""
+    if epoch is not None:
+        admit = epoch.peek(
+            stable_baseline=stable,
+            volatile_text=volatile,
+            stable_fingerprint=fingerprint_text(stable),
+            volatile_fingerprint=fingerprint_text(volatile),
+        )
+        body = admit.leading_system_text
+        mid_conversation_update = admit.mid_conversation_update
+    else:
+        body = stable + volatile
+    system = _append_extra_system_text(_system_message_from_text(body), extra_system_text)
+    resolved_messages = convert_to_provider(
         chat_messages,
         attachment_store=attachment_store,
         session_id=ctx.thread_id,
     )
-    provider_messages = _messages_for_provider(system, resolved_messages)
+    provider_messages = _messages_for_provider(
+        system, resolved_messages, mid_conversation_update=mid_conversation_update
+    )
     return await _provider_prompt_input_tokens(
         provider, provider_messages, ctx.tools, model=ctx.model,
         vertex_google_search=vertex_google_search,
@@ -692,6 +795,7 @@ async def _append_budgeted_tool_responses(
     budgeter: ContextBudgeter,
     provider: Provider,
     vertex_google_search: bool = False,
+    epoch: ContextEpochTracker | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Budget tool results against remaining context, append, compact if needed."""
     trimmed, needs_compaction = budgeter.fit_content_blocks(chunk_responses)
@@ -726,12 +830,17 @@ async def _append_budgeted_tool_responses(
         turns_summarized=turns_summarized,
     )
     if turns_summarized > 0:
-        chat_messages = await _load_repaired_chat_history(history, ctx.thread_id)
-        system = _system_message(ctx, chat_messages)
-        provider_messages = _messages_for_provider(system, chat_messages)
-        post = await _provider_prompt_input_tokens(
-            provider, provider_messages, ctx.tools, model=ctx.model,
+        if epoch is not None:
+            epoch.begin_new_epoch()
+        chat_messages = await _load_agent_chat_history(history, ctx.thread_id)
+        post = await _prompt_input_tokens_for_history(
+            ctx=ctx,
+            chat_messages=chat_messages,
+            provider=provider,
+            attachment_store=None,
+            attachment_catalog=None,
             vertex_google_search=vertex_google_search,
+            epoch=epoch,
         )
         usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, post)
 
@@ -1145,6 +1254,7 @@ async def _run_inner_core(
         threshold=_effective_doom_loop_threshold(),
         exempt_names=_doom_loop_exempt_names(ctx.tools),
     )
+    epoch_tracker = ContextEpochTracker()
 
     def _finish_tool(
         call: ToolCall,
@@ -1214,7 +1324,7 @@ async def _run_inner_core(
                 needs_followup_after_tools = False
                 break
 
-            chat_messages = await _load_repaired_chat_history(history, ctx.thread_id)
+            chat_messages = await _load_agent_chat_history(history, ctx.thread_id)
             ctx = await refresh_memory_index(ctx)
             turn_input_text = latest_user_message_text(chat_messages) or user_text
             set_turn_io(input_value=turn_input_text)
@@ -1262,24 +1372,35 @@ async def _run_inner_core(
                     ),
                 )
 
-            system = _system_message(
+            admit = _admit_system_context(
+                epoch_tracker,
                 ctx,
                 chat_messages,
                 memory_selection=memory_selection,
                 attachment_catalog=attachment_catalog,
             )
+            for epoch_evt in _epoch_events(
+                admit, request_id=ctx.request_id, thread_id=ctx.thread_id
+            ):
+                yield epoch_evt
+            system = _system_message_from_text(admit.leading_system_text)
             combined_extra = _combine_extras(pre_turn_extra, pre_tool_extra_next)
             force_no_tools, doom_loop_note = doom_tracker.consume_recovery()
             combined_extra = _combine_extras(combined_extra, doom_loop_note)
             system = _append_extra_system_text(system, combined_extra)
             pre_tool_extra_next = None
             turn_tools: Sequence[ToolDef] = () if force_no_tools else ctx.tools
-            resolved_messages = resolve_messages_for_provider(
+            # Preflight uses unshaped history; pressure shaping applied after token count.
+            resolved_messages = convert_to_provider(
                 chat_messages,
                 attachment_store=attachment_store,
                 session_id=ctx.thread_id,
             )
-            provider_messages = _messages_for_provider(system, resolved_messages)
+            provider_messages = _messages_for_provider(
+                system,
+                resolved_messages,
+                mid_conversation_update=admit.mid_conversation_update,
+            )
 
             stream_thinking = _stream_thinking_budget(provider, resolved_messages)
             preflight = await _provider_prompt_input_tokens(
@@ -1341,21 +1462,35 @@ async def _run_inner_core(
                         turns_summarized=turns_summarized,
                     ),
                 )
-                chat_messages = await _load_repaired_chat_history(history, ctx.thread_id)
+                if turns_summarized > 0:
+                    epoch_tracker.begin_new_epoch()
+                chat_messages = await _load_agent_chat_history(history, ctx.thread_id)
                 ctx = await refresh_memory_index(ctx)
-                system = _system_message(
+                admit = _admit_system_context(
+                    epoch_tracker,
                     ctx,
                     chat_messages,
                     memory_selection=memory_selection,
                     attachment_catalog=attachment_catalog,
                 )
-                system = _append_extra_system_text(system, pre_turn_extra)
-                resolved_messages = resolve_messages_for_provider(
+                for epoch_evt in _epoch_events(
+                    admit, request_id=ctx.request_id, thread_id=ctx.thread_id
+                ):
+                    yield epoch_evt
+                system = _append_extra_system_text(
+                    _system_message_from_text(admit.leading_system_text),
+                    pre_turn_extra,
+                )
+                resolved_messages = convert_to_provider(
                     chat_messages,
                     attachment_store=attachment_store,
                     session_id=ctx.thread_id,
                 )
-                provider_messages = _messages_for_provider(system, resolved_messages)
+                provider_messages = _messages_for_provider(
+                    system,
+                    resolved_messages,
+                    mid_conversation_update=admit.mid_conversation_update,
+                )
                 post = await _provider_prompt_input_tokens(
                     provider,
                     provider_messages,
@@ -1371,41 +1506,24 @@ async def _run_inner_core(
                 ctx.context_window_tokens,
             )
             if pressure_tier in ("moderate", "aggressive"):
-                shaped_history = shape_messages_tool_results(
+                resolved_messages = convert_to_provider(
                     chat_messages,
-                    protect_recent=_SUMMARY_KEEP_TAIL,
-                    pressure_tier=pressure_tier,
-                )
-                resolved_messages = resolve_messages_for_provider(
-                    shaped_history,
                     attachment_store=attachment_store,
                     session_id=ctx.thread_id,
+                    pressure_tier=pressure_tier,
+                    protect_recent=_SUMMARY_KEEP_TAIL,
                 )
-                provider_messages = _messages_for_provider(system, resolved_messages)
+                provider_messages = _messages_for_provider(
+                    system,
+                    resolved_messages,
+                    mid_conversation_update=admit.mid_conversation_update,
+                )
 
             yield SystemPromptSnapshot(
                 request_id=ctx.request_id,
                 inner_turn=turn_index,
-                text=_system_prompt_snapshot_text(system),
+                text=_system_prompt_snapshot_text(system, admit.mid_conversation_update),
             )
-
-            pending: dict[str, ToolCall] = {}
-            assistant_text = ""
-            thinking_text = ""
-            thinking_signature: str | None = None
-            stream_truncated = False
-            thinking_streamed = False
-            thinking_closed = False
-
-            def _close_thinking_block() -> ThinkingBlockComplete | None:
-                nonlocal thinking_closed
-                if not thinking_streamed or thinking_closed:
-                    return None
-                thinking_closed = True
-                return ThinkingBlockComplete(
-                    request_id=ctx.request_id,
-                    signature=thinking_signature or "",
-                )
 
             llm_input = 0
             llm_output = 0
@@ -1434,6 +1552,7 @@ async def _run_inner_core(
                 )
                 provider_messages_written = len(provider_messages)
                 tools_dirty = False
+            stream_mapper = ProviderStreamMapper(ctx.request_id)
             try:
                 async with span_llm(ctx=ctx, vertex_google_search=vertex_google_search):
                     async with aclosing(
@@ -1450,25 +1569,7 @@ async def _run_inner_core(
                         )
                     ) as stream:
                         async for ev in stream:
-                            if isinstance(ev, TextDelta):
-                                closed = _close_thinking_block()
-                                if closed is not None:
-                                    yield closed
-                                assistant_text += ev.text
-                                if ev.text:
-                                    yield AssistantDelta(request_id=ctx.request_id, delta=ev.text)
-                            elif isinstance(ev, ThinkingDelta):
-                                thinking_text += ev.text
-                                if ev.signature:
-                                    thinking_signature = ev.signature
-                                if ev.text:
-                                    thinking_streamed = True
-                                    yield ThinkingBlockDelta(
-                                        request_id=ctx.request_id,
-                                        text=ev.text,
-                                        signature=ev.signature,
-                                    )
-                            elif isinstance(ev, UsageEvent):
+                            if isinstance(ev, UsageEvent):
                                 _merge_usage_event(usage, ev)
                                 usage.cost_usd += estimate_cost(
                                     ctx.model,
@@ -1482,23 +1583,20 @@ async def _run_inner_core(
                                 llm_cached += ev.cached_tokens
                                 llm_cache_read += ev.cache_read_tokens
                                 llm_cache_creation += ev.cache_creation_tokens
-                            elif isinstance(ev, ToolCall):
-                                closed = _close_thinking_block()
-                                if closed is not None:
-                                    yield closed
-                                pending[ev.call_id] = ev
-                            elif isinstance(ev, ProviderGroundingEvent):
-                                yield GroundingEvent(
-                                    request_id=ctx.request_id,
-                                    sources=[dict(s) for s in ev.sources],
-                                    search_queries=list(ev.search_queries),
-                                )
-                            elif isinstance(ev, Done):
-                                stream_truncated = ev.truncated
+                                continue
+                            if isinstance(ev, Done):
+                                for aev in stream_mapper.map(ev):
+                                    yield aev
                                 break
-                    closed = _close_thinking_block()
-                    if closed is not None:
-                        yield closed
+                            for aev in stream_mapper.map(ev):
+                                yield aev
+                    for aev in stream_mapper.finish():
+                        yield aev
+                    pending = stream_mapper.pending
+                    assistant_text = stream_mapper.assistant_text
+                    thinking_text = stream_mapper.thinking_text
+                    thinking_signature = stream_mapper.thinking_signature
+                    stream_truncated = stream_mapper.stream_truncated
                     set_llm_usage(
                         input_tokens=llm_input,
                         output_tokens=llm_output,
@@ -1542,16 +1640,14 @@ async def _run_inner_core(
                     ),
                 )
             except asyncio.CancelledError:
-                closed = _close_thinking_block()
-                if closed is not None:
-                    yield closed
+                for aev in stream_mapper.finish():
+                    yield aev
                 yield Error(request_id=ctx.request_id, error="Request cancelled")
                 needs_followup_after_tools = False
                 return
             except Exception as exc:
-                closed = _close_thinking_block()
-                if closed is not None:
-                    yield closed
+                for aev in stream_mapper.finish():
+                    yield aev
                 logger.exception(
                     "provider stream failed %s",
                     kv(request_id=ctx.request_id, thread_id=ctx.thread_id, model=ctx.model),
@@ -1584,7 +1680,7 @@ async def _run_inner_core(
                     break
                 # Model returned no text after tool results (or only whitespace). Without another
                 # provider round the user sees tools then silence — retry until turn budget.
-                rows = await _load_repaired_chat_history(history, ctx.thread_id)
+                rows = await _load_agent_chat_history(history, ctx.thread_id)
                 owes_tool_followup = needs_followup_after_tools or (
                     bool(rows)
                     and rows[-1].role == "user"
@@ -2002,7 +2098,7 @@ async def _run_inner_core(
                 yield Error(request_id=ctx.request_id, error=doom_msg)
 
             if all_tool_responses:
-                chat_for_budget = await _load_repaired_chat_history(history, ctx.thread_id)
+                chat_for_budget = await _load_agent_chat_history(history, ctx.thread_id)
                 budget_used = usage.estimated_prompt_tokens
                 try:
                     budget_used = await _prompt_input_tokens_for_history(
@@ -2014,6 +2110,7 @@ async def _run_inner_core(
                         memory_selection=memory_selection,
                         extra_system_text=pre_turn_extra,
                         vertex_google_search=vertex_google_search,
+                        epoch=epoch_tracker,
                     )
                 except Exception:
                     logger.warning(
@@ -2036,6 +2133,7 @@ async def _run_inner_core(
                     budgeter=budgeter,
                     provider=provider,
                     vertex_google_search=vertex_google_search,
+                    epoch=epoch_tracker,
                 ):
                     yield budget_evt
 

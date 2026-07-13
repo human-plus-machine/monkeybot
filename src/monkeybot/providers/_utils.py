@@ -14,6 +14,7 @@ from monkeybot.core.llm.provider import (
     TextDelta,
     ThinkingDelta,
     ToolCall,
+    ToolInputDelta,
     UsageEvent,
 )
 from monkeybot.core.logging_utils import kv
@@ -137,7 +138,14 @@ async def iter_anthropic_sdk_stream(
                             if sig:
                                 yield ThinkingDelta(text="", signature=sig)
                         elif event.delta.type == "input_json_delta":
-                            tool_input_buf += event.delta.partial_json
+                            partial = event.delta.partial_json
+                            tool_input_buf += partial
+                            if tool_id and partial:
+                                yield ToolInputDelta(
+                                    call_id=tool_id,
+                                    name=tool_name,
+                                    delta=partial,
+                                )
                     case "content_block_stop":
                         if tool_id:
                             args, parse_error = safe_parse_tool_args(
@@ -291,12 +299,26 @@ def _anthropic_assistant_block(block: ContentBlock) -> dict[str, Any]:
     )
 
 
-# Must match volatile section headers emitted by ``compose_system_prompt``.
+# Must match volatile section headers emitted by ``compose_system_prompt``
+# (``core.prompts.prompt``), ``_append_extra_system_text`` (``core.runtime.loop``),
+# and ``_format_system_context_update`` (``core.context.epoch``).
+#
+# These modules cannot be imported here directly: ``core.context`` transitively
+# imports ``core.config.settings``, which imports concrete provider classes
+# from this package, creating a circular import. Each owning module exposes
+# its heading as a module-level ``*_HEADING`` constant (not just an inline
+# literal) specifically so this list — and any other out-of-package consumer —
+# can be kept in sync by grepping for ``_HEADING = "\n\n## `` rather than by
+# re-deriving the split point from prose. A dedicated regression test
+# (``tests/providers/test_anthropic_cache.py::test_volatile_markers_match_heading_constants``)
+# asserts these literals stay byte-identical to the owning constants.
 _VOLATILE_SYSTEM_MARKERS = (
     "\n\n## Memory index\n",
     "\n\n## Memory\n",
     "\n\n## Skills\n",
     "\n\n## Current request\n",
+    "\n\n## Runtime notes\n",
+    "\n\n## System context update\n",
 )
 
 

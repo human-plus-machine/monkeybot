@@ -46,6 +46,7 @@ from monkeybot.core.runtime.loop import (
     _compact_history_if_needed,
     _image_events,
     _merge_usage_event,
+    _messages_for_provider,
     _usage_to_totals,
     run,
 )
@@ -1072,10 +1073,10 @@ async def test_run_provider_raises_wrapped_as_error() -> None:
     ):
         events.append(e)
     assert isinstance(events[0], Thinking)
-    assert isinstance(events[1], SystemPromptSnapshot)
-    assert isinstance(events[2], Error)
-    assert "boom" in events[2].error
-    assert isinstance(events[3], TurnComplete)
+    assert any(isinstance(e, SystemPromptSnapshot) for e in events)
+    err = next(e for e in events if isinstance(e, Error))
+    assert "boom" in err.error
+    assert isinstance(events[-1], TurnComplete)
 
 
 @pytest.mark.asyncio
@@ -1379,6 +1380,53 @@ async def test_run_no_context_summarize_events_when_under_cap(tmp_path: Path) ->
     assert hist.reset_calls == []
 
 
+def test_messages_for_provider_no_update_is_passthrough() -> None:
+    system = Message(role="system", content=[Text(text="SYS")])
+    history = [Message(role="user", content=[Text(text="hi")])]
+    out = _messages_for_provider(system, history)
+    assert [m.role for m in out] == ["system", "user"]
+
+
+def test_messages_for_provider_folds_update_into_trailing_user_message() -> None:
+    """History ending in "user" (e.g. a tool-response row) must not gain a second
+
+    trailing "user" row — Anthropic/Gemini both reject consecutive same-role
+    messages.
+    """
+    system = Message(role="system", content=[Text(text="SYS")])
+    tool_response_row = Message(
+        role="user",
+        content=[
+            ToolResponse(id="c1", tool_name="run_command", result=[Text(text="ok")], is_error=False)
+        ],
+    )
+    history = [
+        Message(role="user", content=[Text(text="hi")]),
+        Message(role="assistant", content=[ToolRequest(id="c1", name="run_command", args={})]),
+        tool_response_row,
+    ]
+    out = _messages_for_provider(system, history, mid_conversation_update="## System context update\n...")
+    roles = [m.role for m in out]
+    assert all(a != b for a, b in zip(roles, roles[1:])), roles
+    assert len(out) == len(history) + 1  # system + history rows, no extra message
+    last = out[-1]
+    assert last.role == "user"
+    assert any(isinstance(b, ToolResponse) for b in last.content)
+    assert any(isinstance(b, Text) and "System context update" in b.text for b in last.content)
+
+
+def test_messages_for_provider_appends_update_after_trailing_assistant_message() -> None:
+    system = Message(role="system", content=[Text(text="SYS")])
+    history = [
+        Message(role="user", content=[Text(text="hi")]),
+        Message(role="assistant", content=[Text(text="ok, thinking...")]),
+    ]
+    out = _messages_for_provider(system, history, mid_conversation_update="## System context update\n...")
+    roles = [m.role for m in out]
+    assert roles == ["system", "user", "assistant", "user"]
+    assert all(a != b for a, b in zip(roles, roles[1:]))
+
+
 @pytest.mark.asyncio
 async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> None:
     mem = tmp_path / "memory"
@@ -1484,10 +1532,28 @@ async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> N
 
     assert len(prov.captured_messages) == 2
     sys1 = _flatten_text_from_message(prov.captured_messages[0][0])
-    sys2 = _flatten_text_from_message(prov.captured_messages[1][0])
+    turn2 = prov.captured_messages[1]
+    turn2_texts = [_flatten_text_from_message(m) for m in turn2]
+    all2 = "\n".join(turn2_texts)
     assert "initial line" in sys1
     assert "new memory from tool" not in sys1
-    assert "new memory from tool" in sys2
+    # Volatile memory refresh arrives as a mid-conversation system-context update
+    # (leading epoch baseline stays cache-stable).
+    assert "new memory from tool" in all2
+    # Regression guard: the mid-conversation update must never create two
+    # consecutive same-role messages (Anthropic/Gemini both reject this shape).
+    roles = [m.role for m in turn2]
+    assert all(a != b for a, b in zip(roles, roles[1:])), (
+        f"consecutive same-role messages in provider payload: {roles}"
+    )
+    # History ends in a tool-response "user" row; the update must be folded
+    # into that same message, not appended as a second trailing "user" row.
+    last = turn2[-1]
+    assert last.role == "user"
+    assert any(isinstance(b, ToolResponse) for b in last.content)
+    assert any(
+        isinstance(b, Text) and "new memory from tool" in b.text for b in last.content
+    )
 
 
 @pytest.mark.asyncio
