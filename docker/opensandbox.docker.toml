@@ -1,5 +1,5 @@
 # OpenSandbox control plane — default for docker compose sandbox overlay.
-# Override path with OPENSANDBOX_CONFIG (e.g. monkeybot_config_example/opensandbox.docker.example.toml).
+# Override path with OPENSANDBOX_CONFIG if needed.
 # Based on OpenSandbox server/opensandbox_server/examples/example.config.toml
 
 [server]

@@ -137,7 +137,7 @@ cd cli && uv sync
 uv tool install --editable .
 ```
 
-See also [`demo_agent/`](../demo_agent/) for an in-repo example agent.
+For live eval smoke against this checkout, see [`evals/smoke_agent/`](../evals/smoke_agent/).
 
 ---
 

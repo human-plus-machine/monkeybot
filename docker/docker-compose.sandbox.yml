@@ -43,7 +43,7 @@ services:
       - /tmp/monkeybot-workspace:/tmp/monkeybot-workspace
     command: >
       sh -c "mkdir -p /tmp/monkeybot-workspace/skills /tmp/monkeybot-workspace/data/memory &&
-             cp -rn /app/.agents/skills/. /tmp/monkeybot-workspace/skills/ 2>/dev/null || true &&
+             cp -rn /app/skills/. /tmp/monkeybot-workspace/skills/ 2>/dev/null || true &&
              python -m monkeybot.gateway.main"
     depends_on:
       - opensandbox-server

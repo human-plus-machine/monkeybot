@@ -17,18 +17,11 @@ Verify the agent harness, shell allowlist, and Python runtime are wired correctl
 Shell commands start in **workspace root** (see harness Runtime paths). Use **workspace-relative** paths only — not absolute container paths unless they match an allowed prefix.
 
 1. `list_skills` should include `diagnostics`.
-2. Run the script with `run_command` and `argv`, for example when skills are under `.agents/skills/`:
-
-```json
-{"argv": ["python3", ".agents/skills/diagnostics/diagnostics.py"]}
-```
-
-If your `SKILLS_PATH` is `./skills/` instead, use:
+2. Run the script with `run_command` and `argv` (scaffolded `SKILLS_PATH` is `./skills`):
 
 ```json
 {"argv": ["python3", "./skills/diagnostics/diagnostics.py"]}
 ```
-
 3. Parse the JSON stdout; `status` should be `healthy` when required env vars are set.
 
 ## Expected env vars (full check)

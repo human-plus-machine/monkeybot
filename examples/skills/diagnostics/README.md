@@ -16,7 +16,7 @@ The diagnostics skill runs system health checks including:
 
 ```bash
 # Copy the skill into the default SKILLS_PATH
-cp -r examples/skills/diagnostics/ ./.agents/skills/
+cp -r examples/skills/diagnostics/ ./skills/
 ```
 
 ### 2. Import in Your Agent

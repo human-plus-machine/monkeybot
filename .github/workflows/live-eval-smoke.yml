@@ -1,6 +1,6 @@
 name: Live eval smoke
 
-# Runs the live eval smoke suite (see docs/eval-pr-scorecard.md) and posts a Markdown
+# Runs the live eval smoke suite (see docs/live-evals.md) and posts a Markdown
 # scorecard. LLM-judge calls cost money and take minutes, so this does not run on
 # ordinary feature-branch -> develop PRs. Trigger points:
 #   (a) any PR from develop into main (release-promotion gate; --fail-on-regression)
@@ -57,7 +57,7 @@ jobs:
               run=true
             fi
             changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
-            for f in uv.lock cli/uv.lock demo_agent/uv.lock; do
+            for f in uv.lock cli/uv.lock evals/smoke_agent/uv.lock; do
               if grep -qxF "$f" <<<"$changed"; then
                 run=true
               fi
@@ -94,19 +94,18 @@ jobs:
       - name: Sync root deps (evals/report.py needs deepeval, langfuse)
         run: uv sync --extra evals
 
-      - name: Sync demo_agent deps
-        working-directory: demo_agent
+      - name: Sync smoke_agent deps
+        working-directory: evals/smoke_agent
         run: uv sync
 
-      - name: Boot monkeybot gateway (demo_agent workspace)
-        working-directory: demo_agent
+      - name: Boot monkeybot gateway (evals/smoke_agent workspace)
+        working-directory: evals/smoke_agent
         env:
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
-          # Override demo_agent's committed model config (ollama, local-only) with a
-          # free build.nvidia.com model; env beats monkeybot.yaml.
+          # Pin agent model for CI; env beats monkeybot.yaml.
           MODEL_PROVIDER: nvidia
           MODEL_NAME: meta/llama-3.3-70b-instruct
-          # demo_agent's monkeybot.yaml sets runtime.port: 8080; the health check and
+          # smoke_agent monkeybot.yaml sets runtime.port: 8080; the health check and
           # AGENT_URL below expect 8787, so pin PORT explicitly (env beats yaml).
           PORT: "8787"
           SANDBOX_ENABLED: "false" # no Docker socket in this runner
@@ -196,5 +195,5 @@ jobs:
 
       - name: Stop gateway
         if: always()
-        working-directory: demo_agent
+        working-directory: evals/smoke_agent
         run: kill "$(cat /tmp/gateway.pid)" 2>/dev/null || true
