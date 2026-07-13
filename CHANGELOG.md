@@ -6,6 +6,13 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-13
+
+### Added
+
+- First PyPI release of **monkeybot-cli** (Trusted Publishing) — install with `uv tool install monkeybot-cli`.
+
+
 ## [2.1.1] - 2026-07-13
 
 ### Added

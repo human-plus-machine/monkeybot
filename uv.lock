@@ -1966,7 +1966,7 @@ wheels = [
 
 [[package]]
 name = "monkeybot"
-version = "2.1.0"
+version = "2.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
@@ -2163,7 +2163,7 @@ dev = [
 
 [[package]]
 name = "monkeybot-cli"
-version = "0.2.0"
+version = "0.2.1"
 source = { editable = "cli" }
 dependencies = [
     { name = "httpx" },
