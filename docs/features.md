@@ -161,7 +161,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - **History summarization:** When preflight tokens exceed the trigger ratio and history is long enough, the middle of the transcript is compressed via a dedicated summarizer call into one assistant row prefixed `[Context Summary]:`. The summarizer is instructed to emit a fixed Markdown template (Objective, Important Details, Work State with Completed/Active/Blocked, Next Move, Relevant Files) — not freeform prose. Head/tail messages are kept; the summary replaces the middle.
 - **Steer / follow-up:** Mid-turn steer injects at safe boundaries only; follow-up FIFO drains only when idle. One reply-in-flight lock still applies to `/reply`.
 - **Settlement barrier:** `PRE_TOOL` is awaited before execute; fire-and-forget hooks are drained (bounded by `MONKEYBOT_HOOK_SETTLEMENT_TIMEOUT_S`, default 2s) before the next provider call and before `TurnComplete` (`run()` finally). Settlement does **not** wait on SSE client ACKs (avoids deadlock).
-- **Parallel-safe tools:** `ToolDef.parallel_safe=True` for read-only core tools (`read_file`, `glob`, `search_memory`, `list_skills`, `loop_status`, `read_attachment`). MCP tools default serial. Results always append in `call_id` order.
+- **Parallel-safe tools:** `ToolDef.parallel_safe=True` for read-only core tools (`read_file`, `glob`, `grep`, `search_memory`, `list_skills`, `loop_status`, `read_attachment`). Mutating tools (`write_file`, `replace_in_file`, `apply_patch`, …) stay serial. MCP tools default serial. Results always append in `call_id` order.
 - **Context Epoch:** At each safe provider-turn boundary the harness reconciles stable vs volatile system-context sources. The leading system message keeps an immutable epoch baseline (cache prefix). Volatile changes emit a chronological mid-conversation update (user-role, not persisted) and a `SystemContextUpdated` event. Compaction / stable-source change opens a new epoch (`ContextEpochStarted`).
 - **Message pipeline:** `history → transform_context() → convert_to_provider() → Provider.stream`. Transform repairs tool integrity and strips UI-only blocks; convert resolves attachments and applies pressure shaping without mutating persisted history.
 - **Streaming grammar (additive):** `AssistantTextStarted` / `AssistantTextEnded`, `ThinkingBlockStarted`, and `ToolInputDelta` supplement existing `AssistantDelta` / `ThinkingBlockDelta` / `ToolCallStarted`. Clients may ignore the new events.
@@ -255,18 +255,25 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Purpose:** Default `ToolExecutorPort` — built-ins, MCP, custom tools, subagents.
 
-**Key files:** `core/tools/core_tool_executor.py`, `terminal.py`, `workspace_service.py`, `sandbox_executor.py`, `spill_inventory.py`
+**Key files:** `core/tools/core_tool_executor.py`, `terminal.py`, `workspace_service.py`, `patch.py`, `sandbox_executor.py`, `spill_inventory.py`
 
 **Built-in tools** (from `context._core_tool_defs`):
 
 | Tool | Role |
 |------|------|
 | `read_file` / `write_file` | Workspace-relative paths |
+| `replace_in_file` | Unique (or `replace_all`) substring edit; exact then light fuzzy match |
+| `glob` / `grep` | Path discovery / content regex search (prefer over shell) |
+| `apply_patch` | Multi-file Codex-style Add/Update/Delete/Move; fail-closed before any write |
 | `search_memory` | Keyword search in memory tree |
 | `list_skills` | Skill discovery |
 | `run_command` | Allowlisted shell (host or OpenSandbox) |
 | `task` | Subagent subprocess (parent only) |
 | `add_mcp_server` / `remove_mcp_server` | Runtime MCP registration |
+| `enable_mcp` / `disable_mcp` | Catalog connect / disconnect |
+| `mcp_status` | Server lifecycle + capabilities |
+| `list_mcp_resources` / `list_mcp_resource_templates` / `read_mcp_resource` | MCP resources |
+| `list_mcp_prompts` / `get_mcp_prompt` | MCP prompt templates |
 | `render_image` / `read_attachment` | When attachments enabled |
 
 **Dispatch order:** core → `extra_tools` (e.g. `WebSearchTool`) → MCP (`server__tool` naming).
@@ -277,6 +284,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Invariants:**
 - Workspace paths: no `..`, no `~`; resolved under `workspace_root`.
+- `apply_patch` validates all hunks before writing; a mid-apply failure rolls back completed ops in reverse order.
 - Large tool results may spill to `.monkeybot/spill/{thread_id}/`.
 - `task` omitted in subagent workers (`include_task_tool=False`).
 - Nested `task` disabled inside subagents.
@@ -327,12 +335,15 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - `"enabled": false` excludes a server from the catalog (not model-connectable). `"autoConnect": true` restores eager startup connect for that server.
 - `MCP_STRICT_LOAD=1` fails startup on connection errors (default: log and continue).
 - Runtime `add_mcp_server` / `remove_mcp_server` mutate live connections.
+- **Resources / prompts:** built-in tools `list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource`, `list_mcp_prompts`, `get_mcp_prompt` surface MCP resources and prompt templates (server must already be connected).
+- **Status:** `mcp_status` reports per-server lifecycle (`catalogued` / `connected` / `disconnected` / `disabled` / `failed` / `needs_auth`) plus capability flags when connected.
 - Lazy-imports `mcp` SDK to keep core importable without MCP installed.
 - Realtime sessions: MCP registry mutations refresh harness `ctx.tools`, but vendor tool schemas update only after starting a new session (v1 has no reconnect/resume).
 
 **Invariants:**
 - MCP tool names: `server__tool` (double underscore).
 - MCP tool errors are plain text (not structured JSON).
+- Resource/prompt meta-tools return structured JSON (`ok`, lists/payloads); connect/disconnect tools keep the same shape.
 - Teardown noise from AnyIO is swallowed on disconnect.
 
 ---
@@ -543,13 +554,18 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 | `PRE_TOOL` | Before each tool execution |
 | `POST_TOOL` | After each tool execution (fire-and-forget) |
 | `POST_TURN` | End of user message turn |
+| `TOOL_DEFINITION` (`tool.definition`) | Before each provider call; may filter/replace `payload.tools` |
+| `BEFORE_PROVIDER_REQUEST` | After messages are finalized; may rewrite `provider_messages` / `tools` |
+| `AFTER_PROVIDER_RESPONSE` | After stream success or failure (fire-and-forget); observational |
 
-**Extension API:** `HookManager.register(HookEvent, fn)` with `HookPayload.inject_text` / `inject_memory_lines`.
+**Extension API:** `HookManager.register(HookEvent, fn)` with `HookPayload.inject_text` / `inject_memory_lines`. Provider hooks also use `tools`, `provider_messages`, `assistant_text`, `usage`, `provider_error`.
 
 **Invariants:**
 - Bounded timeout; errors never propagate; no re-entrancy.
-- `POST_TOOL` / `POST_TURN` are fire-and-forget at fire time, but `HookManager.drain_settlement()` waits for them (bounded) before the next provider call and before `TurnComplete` (`run()` finally).
+- `POST_TOOL` / `POST_TURN` / `AFTER_PROVIDER_RESPONSE` are fire-and-forget at fire time, but `HookManager.drain_settlement()` waits for them (bounded) before the next provider call and before `TurnComplete` (`run()` finally).
 - Settlement never waits on SSE subscribers — only in-process hook tasks.
+- `Message` is frozen: rewrite by replacing list entries, not mutating message fields.
+- Prefer these hooks over editing `loop.py` for product concerns (drive-mode tool filtering, redaction, metering).
 
 ---
 

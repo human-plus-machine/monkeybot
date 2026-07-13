@@ -474,6 +474,14 @@ async def _fire_hook(
     tool_args: dict[str, Any] | None = None,
     tool_result: str | None = None,
     tool_error: str | None = None,
+    tools: list[ToolDef] | None = None,
+    provider_messages: list[Message] | None = None,
+    inner_turn: int | None = None,
+    assistant_text: str | None = None,
+    thinking_text: str | None = None,
+    tool_requests: list[dict[str, Any]] | None = None,
+    usage: dict[str, int] | None = None,
+    provider_error: str | None = None,
 ) -> HookPayload | None:
     """Construct + fire a payload when ``hook_manager`` is configured; else return ``None``."""
     if hook_manager is None:
@@ -488,8 +496,59 @@ async def _fire_hook(
         tool_args=tool_args,
         tool_result=tool_result,
         tool_error=tool_error,
+        tools=tools,
+        provider_messages=provider_messages,
+        inner_turn=inner_turn,
+        assistant_text=assistant_text,
+        thinking_text=thinking_text,
+        tool_requests=tool_requests,
+        usage=usage,
+        provider_error=provider_error,
     )
     return await hook_manager.fire(payload, timeout_s=timeout_s)
+
+
+def _apply_before_provider_hook(
+    payload: HookPayload | None,
+    provider_messages: list[Message],
+    turn_tools: Sequence[ToolDef],
+) -> tuple[list[Message], Sequence[ToolDef], bool]:
+    """Return (messages, tools, tools_replaced) after ``BEFORE_PROVIDER_REQUEST``."""
+    if payload is None:
+        return provider_messages, turn_tools, False
+    messages = (
+        list(payload.provider_messages)
+        if payload.provider_messages is not None
+        else provider_messages
+    )
+    if payload.tools is None:
+        return messages, turn_tools, False
+    return messages, list(payload.tools), True
+
+
+async def _fire_after_provider_response(
+    hook_manager: HookManager | None,
+    *,
+    ctx: TurnContext,
+    inner_turn: int,
+    assistant_text: str | None = None,
+    thinking_text: str | None = None,
+    tool_requests: list[dict[str, Any]] | None = None,
+    usage: dict[str, int] | None = None,
+    provider_error: str | None = None,
+) -> None:
+    await _fire_hook(
+        hook_manager,
+        event=HookEvent.AFTER_PROVIDER_RESPONSE,
+        ctx=ctx,
+        timeout_s=0,
+        inner_turn=inner_turn,
+        assistant_text=assistant_text,
+        thinking_text=thinking_text,
+        tool_requests=tool_requests,
+        usage=usage,
+        provider_error=provider_error,
+    )
 
 
 def _append_extra_system_text(system: Message, extra: str | None) -> Message:
@@ -1403,6 +1462,26 @@ async def _run_inner_core(
             system = _append_extra_system_text(system, combined_extra)
             pre_tool_extra_next = None
             turn_tools: Sequence[ToolDef] = () if force_no_tools else ctx.tools
+            tool_def_payload = await _fire_hook(
+                hook_manager,
+                event=HookEvent.TOOL_DEFINITION,
+                ctx=ctx,
+                timeout_s=_HOOK_READ_TIMEOUT_S,
+                tools=list(turn_tools),
+                inner_turn=turn_index,
+            )
+            if tool_def_payload is not None and tool_def_payload.tools is not None:
+                turn_tools = list(tool_def_payload.tools)
+                tools_dirty = True
+                logger.debug(
+                    "tool.definition hook replaced tools %s",
+                    kv(
+                        request_id=ctx.request_id,
+                        thread_id=ctx.thread_id,
+                        turn=turn_index,
+                        tool_count=len(turn_tools),
+                    ),
+                )
             # Preflight uses unshaped history; pressure shaping applied after token count.
             resolved_messages = convert_to_provider(
                 chat_messages,
@@ -1534,6 +1613,37 @@ async def _run_inner_core(
                     mid_conversation_update=admit.mid_conversation_update,
                 )
 
+            before_payload = await _fire_hook(
+                hook_manager,
+                event=HookEvent.BEFORE_PROVIDER_REQUEST,
+                ctx=ctx,
+                timeout_s=_HOOK_READ_TIMEOUT_S,
+                tools=list(turn_tools),
+                provider_messages=list(provider_messages),
+                inner_turn=turn_index,
+            )
+            prev_msg_count = len(provider_messages)
+            provider_messages, turn_tools, tools_replaced = _apply_before_provider_hook(
+                before_payload, provider_messages, turn_tools
+            )
+            if tools_replaced:
+                tools_dirty = True
+            if before_payload is not None and (
+                tools_replaced
+                or before_payload.provider_messages is not None
+            ):
+                logger.debug(
+                    "before_provider_request hook rewrote request %s",
+                    kv(
+                        request_id=ctx.request_id,
+                        thread_id=ctx.thread_id,
+                        turn=turn_index,
+                        tools_replaced=tools_replaced,
+                        message_count=len(provider_messages),
+                        prev_message_count=prev_msg_count,
+                    ),
+                )
+
             yield SystemPromptSnapshot(
                 request_id=ctx.request_id,
                 inner_turn=turn_index,
@@ -1655,9 +1765,33 @@ async def _run_inner_core(
                         tool_calls=len(pending),
                     ),
                 )
+                await _fire_after_provider_response(
+                    hook_manager,
+                    ctx=ctx,
+                    inner_turn=turn_index,
+                    assistant_text=assistant_text,
+                    thinking_text=thinking_text,
+                    tool_requests=[
+                        {"call_id": tc.call_id, "name": tc.name, "args": dict(tc.args)}
+                        for tc in pending.values()
+                    ],
+                    usage={
+                        "input_tokens": llm_input,
+                        "output_tokens": llm_output,
+                        "cached_tokens": llm_cached,
+                        "cache_read_tokens": llm_cache_read,
+                        "cache_creation_tokens": llm_cache_creation,
+                    },
+                )
             except asyncio.CancelledError:
                 for aev in stream_mapper.finish():
                     yield aev
+                await _fire_after_provider_response(
+                    hook_manager,
+                    ctx=ctx,
+                    inner_turn=turn_index,
+                    provider_error="Request cancelled",
+                )
                 yield Error(request_id=ctx.request_id, error="Request cancelled")
                 needs_followup_after_tools = False
                 return
@@ -1667,6 +1801,12 @@ async def _run_inner_core(
                 logger.exception(
                     "provider stream failed %s",
                     kv(request_id=ctx.request_id, thread_id=ctx.thread_id, model=ctx.model),
+                )
+                await _fire_after_provider_response(
+                    hook_manager,
+                    ctx=ctx,
+                    inner_turn=turn_index,
+                    provider_error=str(exc),
                 )
                 yield Error(request_id=ctx.request_id, error=str(exc))
                 needs_followup_after_tools = False

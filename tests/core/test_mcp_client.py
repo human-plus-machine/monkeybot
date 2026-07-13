@@ -774,3 +774,123 @@ async def test_connect_from_catalog_unknown_raises(tmp_path: Path) -> None:
     client = MCPClient(hooks=_CrashHooks())
     with pytest.raises(mc.MCPDiagnosticError, match="Unknown MCP server"):
         await client.connect_from_catalog("nope")
+
+
+@pytest.mark.asyncio
+async def test_status_catalogued_connected_and_disabled(tmp_path: Path) -> None:
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "lazy": {"command": "python", "args": ["-m", "srv"]},
+                    "off": {"command": "python", "args": ["-m", "x"], "enabled": False},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    sess = SimpleNamespace()
+    sess.initialize = AsyncMock()
+    sess.list_tools = AsyncMock(
+        return_value=SimpleNamespace(
+            tools=[SimpleNamespace(name="ping", description="", inputSchema={})]
+        )
+    )
+    sess.get_server_capabilities = lambda: SimpleNamespace(
+        tools={}, resources={}, prompts=None, logging=None, completions=None
+    )
+
+    client = MCPClient(hooks=_stub_hooks(sess))
+    await client.load_from_config(cfg)
+
+    statuses = {s["name"]: s["status"] for s in client.status()}  # type: ignore[union-attr]
+    assert statuses["lazy"] == mc.MCP_STATUS_CATALOGUED
+    assert statuses["off"] == mc.MCP_STATUS_DISABLED
+
+    await client.connect_from_catalog("lazy")
+    assert client.status("lazy")["status"] == mc.MCP_STATUS_CONNECTED  # type: ignore[index]
+    assert client.status("lazy")["capabilities"]["resources"] is True  # type: ignore[index]
+
+    await client.disconnect("lazy")
+    assert client.status("lazy")["status"] == mc.MCP_STATUS_CATALOGUED  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_list_and_read_resources() -> None:
+    listing = SimpleNamespace(
+        tools=[SimpleNamespace(name="noop", description="", inputSchema={})]
+    )
+    resource = SimpleNamespace(
+        name="docs",
+        uri="docs://readme",
+        description="Readme",
+        mimeType="text/plain",
+        title=None,
+        size=None,
+        arguments=None,
+    )
+    sess = SimpleNamespace()
+    sess.initialize = AsyncMock()
+    sess.list_tools = AsyncMock(return_value=listing)
+    sess.get_server_capabilities = lambda: SimpleNamespace(
+        tools={}, resources={}, prompts={}, logging=None, completions=None
+    )
+    sess.list_resources = AsyncMock(return_value=SimpleNamespace(resources=[resource]))
+    sess.list_resource_templates = AsyncMock(
+        return_value=SimpleNamespace(
+            resourceTemplates=[
+                SimpleNamespace(
+                    name="file",
+                    uriTemplate="file:///{path}",
+                    description="A file",
+                    mimeType=None,
+                    title=None,
+                )
+            ]
+        )
+    )
+    sess.read_resource = AsyncMock(
+        return_value=SimpleNamespace(
+            contents=[SimpleNamespace(uri="docs://readme", mimeType="text/plain", text="hello")]
+        )
+    )
+    sess.list_prompts = AsyncMock(
+        return_value=SimpleNamespace(
+            prompts=[SimpleNamespace(name="summarize", description="Sum", arguments=None, title=None)]
+        )
+    )
+    sess.get_prompt = AsyncMock(
+        return_value=SimpleNamespace(
+            description="Sum",
+            messages=[SimpleNamespace(role="user", content={"type": "text", "text": "hi"})],
+        )
+    )
+
+    client = MCPClient(hooks=_stub_hooks(sess))
+    await client.connect("docs", "python", [], {})
+
+    resources = await client.list_resources()
+    assert resources == [
+        {
+            "name": "docs",
+            "uri": "docs://readme",
+            "description": "Readme",
+            "mimeType": "text/plain",
+            "server": "docs",
+        }
+    ]
+    templates = await client.list_resource_templates("docs")
+    assert templates[0]["uriTemplate"] == "file:///{path}"
+    assert templates[0]["server"] == "docs"
+
+    read = await client.read_resource("docs", "docs://readme")
+    assert read["text"] == "hello"
+    assert read["server"] == "docs"
+
+    prompts = await client.list_prompts()
+    assert prompts[0]["name"] == "summarize"
+    got = await client.get_prompt("docs", "summarize", {"topic": "x"})
+    assert got["name"] == "summarize"
+    assert got["messages"]
+    sess.get_prompt.assert_awaited_once_with("summarize", arguments={"topic": "x"})
