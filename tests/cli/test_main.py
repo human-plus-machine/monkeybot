@@ -10,9 +10,11 @@ runner = CliRunner()
 
 
 def test_version_command() -> None:
+    from importlib.metadata import version as get_installed_version
+
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
-    assert result.output.strip() == "2.1.0"
+    assert result.output.strip() == get_installed_version("monkeybot")
 
 
 def test_talk_help() -> None:
