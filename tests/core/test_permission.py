@@ -124,6 +124,34 @@ async def test_session_approvals_short_circuit() -> None:
     assert d.kind == "allow"
 
 
+@pytest.mark.asyncio
+async def test_inspector_ask_denies_when_interactive_disallowed(tmp_path: Path) -> None:
+    """Subagents (no session to prompt) must never surface a confirm; ``ask`` -> deny."""
+    p = tmp_path / "permissions.yaml"
+    p.write_text(
+        yaml.dump(
+            {
+                "default": "allow",
+                "rules": [
+                    {
+                        "tool": "write_file",
+                        "pattern": "*",
+                        "effect": "ask",
+                        "message": "Approve write?",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    insp = PermissionInspector(load_permissions(p), allow_ask=False)
+    d = await insp.check(
+        InspectorToolCall("1", "write_file", {"path": "a"}), _ctx()
+    )
+    assert d.kind == "deny"
+    assert d.message == "Approve write?"
+
+
 def test_load_permissions_invalid_effect(tmp_path: Path) -> None:
     p = tmp_path / "permissions.yaml"
     p.write_text("default: maybe\nrules: []\n", encoding="utf-8")

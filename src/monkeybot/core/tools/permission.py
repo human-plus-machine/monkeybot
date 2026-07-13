@@ -8,6 +8,7 @@ a normalized resource string.
 from __future__ import annotations
 
 import fnmatch
+import json
 import logging
 import shlex
 from dataclasses import dataclass, field
@@ -21,7 +22,7 @@ from monkeybot.core.logging_utils import kv
 from monkeybot.core.tools.inspector import (
     Decision,
     InspectorToolCall,
-    _norm_run_command_line,
+    norm_run_command_line,
 )
 from monkeybot.core.types.interfaces import MonkeybotError
 
@@ -60,7 +61,7 @@ class PermissionRuleset:
 def resource_for_call(call: InspectorToolCall) -> str:
     """Normalize a tool call into a single resource string for pattern matching."""
     if call.name == "run_command":
-        line = _norm_run_command_line(call.args)
+        line = norm_run_command_line(call.args)
         if line:
             return line
     path = call.args.get("path")
@@ -72,8 +73,10 @@ def resource_for_call(call: InspectorToolCall) -> str:
     command = call.args.get("command")
     if isinstance(command, str) and command.strip():
         return " ".join(command.strip().split())
-    # Stable fallback so wildcards still match something deterministic.
-    return str(call.args)
+    # Stable fallback for tool calls with none of the recognized shapes above.
+    # Sort keys so the same logical args produce the same resource string
+    # regardless of dict insertion order (e.g. across provider round-trips).
+    return json.dumps(call.args, sort_keys=True, default=str)
 
 
 def _match(rule: PermissionRule, tool: str, resource: str) -> bool:
@@ -166,6 +169,18 @@ class SessionApprovals:
         self._keys.add((tool, resource))
 
 
+def remember_always_approval(bus: object | None, tool: str, resource: str) -> None:
+    """Record a session "always allow" approval on ``bus.session_approvals`` if present.
+
+    Shared by the text (``loop.py``) and realtime (``realtime_loop.py``) HITL confirm
+    paths so the ``payload.get("always")`` handling isn't duplicated across both.
+    No-op when ``bus`` is ``None`` or has no ``session_approvals`` attribute.
+    """
+    approvals = getattr(bus, "session_approvals", None)
+    if approvals is not None:
+        approvals.remember(tool, resource)
+
+
 def _decision_from_effect(effect: Effect, message: str | None) -> Decision:
     if effect == "allow":
         return Decision(kind="allow")
@@ -179,10 +194,17 @@ class PermissionInspector:
 
     Session approvals (when present on ``ctx.sse_bus.session_approvals``) short-circuit
     to allow before ruleset evaluation.
+
+    ``allow_ask`` controls whether an ``ask`` effect may prompt interactively
+    (``confirm``, the default) or must resolve deterministically. Set
+    ``allow_ask=False`` for non-interactive callers (e.g. subagents) that have
+    no session to prompt: ``ask`` is then treated as ``deny`` rather than
+    surfacing a confirmation that can never be answered.
     """
 
-    def __init__(self, ruleset: PermissionRuleset) -> None:
+    def __init__(self, ruleset: PermissionRuleset, *, allow_ask: bool = True) -> None:
         self._ruleset = ruleset
+        self._allow_ask = allow_ask
 
     @property
     def ruleset(self) -> PermissionRuleset:
@@ -203,16 +225,29 @@ class PermissionInspector:
                 return Decision(kind="allow")
 
         matched = evaluate(call.name, resource, self._ruleset.rules)
-        if matched is None:
-            return _decision_from_effect(self._ruleset.default, None)
-        return _decision_from_effect(matched.effect, matched.message)
+        effect = self._ruleset.default if matched is None else matched.effect
+        message = None if matched is None else matched.message
+        if effect == "ask" and not self._allow_ask:
+            logger.debug(
+                "permission ask->deny (no interactive session) %s",
+                kv(tool=call.name, call_id=call.call_id, resource=resource),
+            )
+            return Decision(
+                kind="deny",
+                message=message or "ask effect requires an interactive session; denied",
+            )
+        return _decision_from_effect(effect, message)
 
 
-def try_load_permission_inspector(path: Path) -> PermissionInspector | None:
+def try_load_permission_inspector(
+    path: Path, *, allow_ask: bool = True
+) -> PermissionInspector | None:
     """Load ``permissions.yaml`` into an inspector, or ``None`` if missing/invalid.
 
     Missing file → ``None`` (logged at info). Invalid YAML → ``None`` (logged at
     exception). Soft ruleset is fail-open; hard allowlists/sandbox still apply.
+    ``allow_ask`` is forwarded to :class:`PermissionInspector` (set ``False`` for
+    non-interactive callers such as subagents; ``ask`` then resolves to ``deny``).
     """
     try:
         ruleset = load_permissions(path)
@@ -226,11 +261,12 @@ def try_load_permission_inspector(path: Path) -> PermissionInspector | None:
         logger.exception("permission ruleset load failed (%s)", path)
         return None
     logger.info(
-        "permission ruleset loaded (%s rules, default=%s)",
+        "permission ruleset loaded (%s rules, default=%s, allow_ask=%s)",
         len(ruleset.rules),
         ruleset.default,
+        allow_ask,
     )
-    return PermissionInspector(ruleset)
+    return PermissionInspector(ruleset, allow_ask=allow_ask)
 
 
 __all__ = [
@@ -242,6 +278,7 @@ __all__ = [
     "SessionApprovals",
     "evaluate",
     "load_permissions",
+    "remember_always_approval",
     "resource_for_call",
     "try_load_permission_inspector",
 ]

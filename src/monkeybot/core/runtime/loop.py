@@ -66,7 +66,7 @@ from monkeybot.core.runtime.context_budget import (
 )
 from monkeybot.core.runtime.provider_stream_mapper import ProviderStreamMapper
 from monkeybot.core.tools.inspector import InspectorToolCall, ToolInspector
-from monkeybot.core.tools.permission import resource_for_call
+from monkeybot.core.tools.permission import remember_always_approval, resource_for_call
 from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.types.content_blocks import (
     ContentBlock,
@@ -1868,22 +1868,19 @@ async def _run_inner_core(
                                 if payload.get("approved"):
                                     allowed = True
                                     if payload.get("always"):
-                                        approvals = getattr(bus, "session_approvals", None)
-                                        if approvals is not None:
-                                            approvals.remember(
-                                                call.name,
-                                                resource_for_call(inspector_call),
-                                            )
-                                            logger.debug(
-                                                "tool inspector confirm %s",
-                                                kv(
-                                                    request_id=ctx.request_id,
-                                                    thread_id=ctx.thread_id,
-                                                    tool=call.name,
-                                                    call_id=call.call_id,
-                                                    decision="confirm_always",
-                                                ),
-                                            )
+                                        remember_always_approval(
+                                            bus, call.name, resource_for_call(inspector_call)
+                                        )
+                                        logger.debug(
+                                            "tool inspector confirm %s",
+                                            kv(
+                                                request_id=ctx.request_id,
+                                                thread_id=ctx.thread_id,
+                                                tool=call.name,
+                                                call_id=call.call_id,
+                                                decision="confirm_always",
+                                            ),
+                                        )
                                     logger.debug(
                                         "tool inspector confirm %s",
                                         kv(

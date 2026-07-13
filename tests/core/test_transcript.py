@@ -112,6 +112,7 @@ async def test_write_event_durable_only_skips_deltas(tmp_path: Path) -> None:
     assert len(lines) == 1
     assert lines[0]["type"] == "ToolCallStarted"
 
+
 @pytest.mark.asyncio
 async def test_write_provider_request_and_response(tmp_path: Path) -> None:
     writer = TranscriptWriter("sess-1", workspace_root=tmp_path)

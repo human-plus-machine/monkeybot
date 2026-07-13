@@ -305,7 +305,10 @@ async def _async_main() -> None:
             os.environ.get("PERMISSION_CONFIG", "monkeybot_config/permissions.yaml"),
             agent_root,
         )
-        perm_insp = try_load_permission_inspector(perm_path)
+        # Subagents have no interactive session to prompt: reuse the parent's
+        # ruleset, but resolve "ask" to deny instead of a confirm that can
+        # never be answered.
+        perm_insp = try_load_permission_inspector(perm_path, allow_ask=False)
         if perm_insp is not None:
             inspectors.append(perm_insp)
 

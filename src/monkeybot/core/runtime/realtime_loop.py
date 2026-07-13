@@ -45,7 +45,7 @@ from monkeybot.core.runtime.events import (
     UsageTotals,
 )
 from monkeybot.core.tools.inspector import InspectorToolCall
-from monkeybot.core.tools.permission import resource_for_call
+from monkeybot.core.tools.permission import remember_always_approval, resource_for_call
 from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.types.content_blocks import (
     ActionRequired,
@@ -495,22 +495,19 @@ async def run_realtime_turn(
                     if payload.get("approved"):
                         allowed = True
                         if payload.get("always"):
-                            approvals = getattr(pending_bus, "session_approvals", None)
-                            if approvals is not None:
-                                approvals.remember(
-                                    call.name,
-                                    resource_for_call(inspector_call),
-                                )
-                                logger.debug(
-                                    "realtime HITL always %s",
-                                    kv(
-                                        request_id=ctx.request_id,
-                                        thread_id=ctx.thread_id,
-                                        call_id=call.call_id,
-                                        tool=call.name,
-                                        decision="confirm_always",
-                                    ),
-                                )
+                            remember_always_approval(
+                                pending_bus, call.name, resource_for_call(inspector_call)
+                            )
+                            logger.debug(
+                                "realtime HITL always %s",
+                                kv(
+                                    request_id=ctx.request_id,
+                                    thread_id=ctx.thread_id,
+                                    call_id=call.call_id,
+                                    tool=call.name,
+                                    decision="confirm_always",
+                                ),
+                            )
                     else:
                         allowed = False
                         reason_raw = payload.get("reason")

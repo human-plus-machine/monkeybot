@@ -68,8 +68,9 @@ class OpenAIProvider:
         *,
         model: str,
         thinking_budget: int | None = None,
+        hints: ProviderCallHints | None = None,
     ) -> int:
-        del thinking_budget
+        del thinking_budget, hints
         import tiktoken  # noqa: PLC0415
 
         msgs = list(messages)
