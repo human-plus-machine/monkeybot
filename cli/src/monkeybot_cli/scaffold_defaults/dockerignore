@@ -1,0 +1,5 @@
+workspace/
+data/
+.env
+.venv/
+.git/

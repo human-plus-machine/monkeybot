@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
-
 from browser_mcp import screenshots
 
 
@@ -49,3 +47,15 @@ def test_allocate_screenshot_path_creates_unique_names(
     assert rel_path.startswith("./browser/Screenshots/shot-")
     assert rel_path.endswith(".png")
     assert abs_path.parent.is_dir()
+
+
+def test_env_paths_remain_stable_after_cwd_changes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "agent" / "workspace"
+    shots = workspace / "browser" / "Screenshots"
+    monkeypatch.setenv("MONKEYBOT_WORKSPACE_ROOT", str(workspace))
+    monkeypatch.setenv("BROWSER_MCP_SCREENSHOTS_DIR", str(shots))
+    other = tmp_path / "other"
+    other.mkdir()
+    monkeypatch.chdir(other)
+    assert screenshots.screenshots_dir() == shots.resolve()
+    assert screenshots.workspace_root() == workspace.resolve()

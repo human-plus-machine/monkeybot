@@ -133,6 +133,7 @@ def test_generate_image_script_success_mocked_vertex(
     mock_vertex_genai["install"]()
     monkeypatch.setenv("VERTEX_AI_PROJECT_ID", "test-project")
     monkeypatch.setenv("VERTEX_AI_LOCATION", "global")
+    monkeypatch.setenv("MONKEYBOT_WORKSPACE_ROOT", str(tmp_path))
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(sys, "argv", ["generate_image.py", "--prompt", "a red circle"])
 

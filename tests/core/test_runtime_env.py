@@ -88,6 +88,26 @@ def test_monkeybot_config_explicit_path(tmp_path: Path, monkeypatch: pytest.Monk
     assert os.environ.get("MODEL_PROVIDER") == "fake"
 
 
+def test_custom_config_paths_anchor_at_its_parent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    config = tmp_path / "custom" / "agent.yaml"
+    config.parent.mkdir()
+    config.write_text(
+        "paths:\n"
+        "  workspace_root: workspace\n"
+        "  db_url: sqlite:///data/monkeybot.db\n"
+        "  memory_storage_uri: local://data/memory\n",
+        encoding="utf-8",
+    )
+    for key in ("MONKEYBOT_WORKSPACE_ROOT", "DB_URL", "MEMORY_STORAGE_URI"):
+        monkeypatch.delenv(key, raising=False)
+
+    runtime_env.apply_monkeybot_runtime_env(config_path=config)
+
+    assert os.environ["MONKEYBOT_WORKSPACE_ROOT"] == str(config.parent / "workspace")
+    assert os.environ["DB_URL"] == f"sqlite:///{config.parent / 'data' / 'monkeybot.db'}"
+    assert os.environ["MEMORY_STORAGE_URI"] == f"local://{config.parent / 'data' / 'memory'}"
+
+
 def test_includes_merge_overrides_base(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     cfg_dir = tmp_path / "monkeybot_config"
@@ -130,7 +150,7 @@ def test_paths_workspace_root_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     )
     monkeypatch.delenv("MONKEYBOT_WORKSPACE_ROOT", raising=False)
     runtime_env.apply_monkeybot_runtime_env()
-    assert os.environ.get("MONKEYBOT_WORKSPACE_ROOT") == "./agent-ws"
+    assert os.environ.get("MONKEYBOT_WORKSPACE_ROOT") == str((tmp_path / "agent-ws").resolve())
 
 
 def test_model_summarization_model_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -172,7 +192,7 @@ def test_legacy_memory_path_still_sets_memory_path_env(
     monkeypatch.delenv("MEMORY_PATH", raising=False)
     monkeypatch.delenv("MEMORY_STORAGE_URI", raising=False)
     runtime_env.apply_monkeybot_runtime_env()
-    assert os.environ.get("MEMORY_PATH") == "./legacy/mem"
+    assert os.environ.get("MEMORY_PATH") == str((tmp_path / "legacy" / "mem").resolve())
     assert os.environ.get("MEMORY_STORAGE_URI") is None
 
 

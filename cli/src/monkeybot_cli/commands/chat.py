@@ -39,7 +39,10 @@ from monkeybot_cli.config_resolve import (
     resolve_agent_root,
     resolve_config,
 )
-from monkeybot_cli.gateway_health import wait_for_health as _wait_for_health
+from monkeybot_cli.gateway_health import (
+    occupied_gateway_message as _occupied_gateway_message,
+    wait_for_health as _wait_for_health,
+)
 from monkeybot_cli.opensandbox_lifecycle import (
     ensure_opensandbox_for_agent,
     is_sandbox_enabled,
@@ -713,6 +716,10 @@ def run_chat(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
         port = args.port if args.port else _port_from_config(config_path)
+        occupied = _occupied_gateway_message(base, port)
+        if occupied is not None:
+            print(occupied, file=sys.stderr)
+            return 1
         spawned = _spawn_gateway(config_path, agent_root, port)
         proc = spawned.proc
         if not _wait_for_health(base, proc):

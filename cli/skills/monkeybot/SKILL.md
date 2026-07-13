@@ -85,7 +85,9 @@ monkeybot new --dest /path/to/bot --provider openai --yes
 # monkeybot new --dest /path/to/bot --provider openai --with postgres,sandbox --yes
 ```
 
-Creates `monkeybot_config/`, `workspace/` (file-tool sandbox), `workspace/skills` → `skills/`, `data/memory/`, `.env.example`, `scripts/setup-workspace.sh`, and an agent `pyproject.toml`. Use `--force` only when overwriting is explicitly requested.
+Creates `monkeybot_config/`, read-only `skills/`, writable `workspace/`,
+`data/memory/`, `.env.example`, a Dockerfile, and an agent `pyproject.toml`.
+Use `--force` only when overwriting is explicitly requested.
 
 Then:
 

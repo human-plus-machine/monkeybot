@@ -7,7 +7,7 @@ on:
         description: "Which package to release"
         required: true
         type: choice
-        options: [core, cli]
+        options: [core, browser, cli, all]
       bump:
         description: "Version bump"
         required: true

@@ -101,3 +101,10 @@ def test_list_playbook_names_empty_when_dir_missing(tmp_path: Path, monkeypatch:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("BROWSER_MCP_PLAYBOOKS_DIR", str(missing))
     assert playbooks.list_playbook_names() == []
+
+
+def test_playbooks_default_to_workspace_browser_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = tmp_path / "agent" / "workspace"
+    monkeypatch.delenv("BROWSER_MCP_PLAYBOOKS_DIR", raising=False)
+    monkeypatch.setenv("MONKEYBOT_WORKSPACE_ROOT", str(workspace))
+    assert playbooks.playbooks_dir() == workspace / "browser" / "playbooks"

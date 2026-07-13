@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from monkeybot.core.config.settings import SubagentConfig
+from monkeybot.core.layout import resolve_agent_path, resolve_agent_root, resolve_sqlite_url
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.runtime.events import (
     AgentEvent,
@@ -58,19 +59,13 @@ def resolve_subagent_script() -> Path:
 
 def resolve_agent_project_root() -> Path:
     """Bot project root (config, AGENT.md, data/) — not the workspace file-tool sandbox."""
-    raw = os.environ.get("MONKEYBOT_AGENT_ROOT", "").strip()
-    if raw:
-        return Path(raw).expanduser().resolve()
-    return Path.cwd().resolve()
+    return resolve_agent_root()
 
 
 def resolve_project_path(raw: str, agent_root: Path | None = None) -> Path:
     """Resolve a config path relative to ``agent_root`` (default: env or cwd)."""
     root = agent_root if agent_root is not None else resolve_agent_project_root()
-    p = Path(raw).expanduser()
-    if p.is_absolute():
-        return p.resolve()
-    return (root / p).resolve()
+    return resolve_agent_path(raw, root)
 
 
 def resolve_subagent_agent_md_path(agent_root: Path | None = None) -> Path | None:
@@ -120,20 +115,9 @@ def resolve_task_agent_md_path(
 
 
 def normalize_sqlite_db_url(db_url: str, agent_root: Path | None = None) -> str:
-    """Rewrite relative ``sqlite:///`` paths against project root (not workspace cwd)."""
+    """Compatibility wrapper for the central layout resolver."""
     root = agent_root if agent_root is not None else resolve_agent_project_root()
-    stripped = db_url.strip()
-    prefix = "sqlite:///"
-    if not stripped.lower().startswith(prefix):
-        return db_url
-    remainder = stripped[len(prefix) :]
-    if not remainder or remainder == ":memory:":
-        return db_url
-    p = Path(remainder)
-    if p.is_absolute():
-        return db_url
-    abs_path = (root / p).resolve()
-    return f"sqlite:///{abs_path}"
+    return resolve_sqlite_url(db_url, root)
 
 
 @dataclass(frozen=True)

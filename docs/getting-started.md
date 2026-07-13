@@ -38,7 +38,12 @@ monkeybot new --dest ./my-agent --provider openai --yes
 cd my-agent
 ```
 
-This creates `monkeybot_config/`, `workspace/`, `data/memory/`, `.env.example`, and an agent `pyproject.toml` that depends on `monkeybot[<provider>]` (plus any `--with` extras).
+This creates an agent-root layout: `monkeybot_config/` and `skills/` are
+committed inputs; `workspace/` is agent-writable; `data/memory/` is local
+runtime state; and the project includes a `Dockerfile`, `.dockerignore`, and
+non-packaged agent `pyproject.toml`. The browser MCP package and browser skill
+are bundled but disabled by default. See [Agent project layout](agent-layout.md)
+for the complete zone, deployment, and migration contract.
 
 ---
 
@@ -55,17 +60,23 @@ Important knobs (see **`monkeybot_config/monkeybot.example.yaml`** for all secti
 
 | YAML section | Purpose |
 |---|---|
-| `paths.workspace_root` | File-tool sandbox (default `./workspace` when scaffolded via CLI). |
+| `paths.workspace_root` | Agent-writable file-tool sandbox (default `./workspace`). |
 | `paths.agent_md` | System prompt file (default `./monkeybot_config/AGENT.md`). |
 | `paths.memory_storage_uri` | Durable markdown memory root (`local://…`, `gcs://…`, `s3://…`); optional `INDEX.md` is surfaced in the prompt. Legacy `paths.memory_path` still maps to `MEMORY_PATH`. |
-| `paths.skills_path` | Skill bundle root. |
+| `paths.skills_path` | Read-only trusted skill bundle root (default `./skills`). |
 | `paths.db_url` | SQLite URL for conversation + usage. |
 | `paths.mcp_config` / `paths.command_allowlist_config` | MCP map and run_command allowlist policy path. |
-| `subagent.agent_md` | Subagent prompt file (defaults to same as `paths.agent_md`). Relative paths use project root, not `workspace/`. |
+| `subagent.agent_md` | Subagent prompt file (defaults to same as `paths.agent_md`). |
 | `model.provider` / `model.name` | Provider and model id (`gemini`, `openai`, `anthropic`, …). |
 | `runtime.port` | Gateway listen port. |
 
-The gateway loads `.env` first, then applies `monkeybot_config/monkeybot.yaml` for any environment variable that is **still unset**. Use `MONKEYBOT_CONFIG` to point at a different YAML file.
+All relative YAML paths resolve from the agent root — the directory containing
+`monkeybot_config/` — not from the command's current directory. Startup finds
+the root from `MONKEYBOT_CONFIG` or the nearest parent containing
+`monkeybot_config/`, loads that root's `.env`, then applies YAML values only to
+environment variables that are still unset. `MONKEYBOT_CONFIG` and the other
+environment overrides are absolute-path escape hatches for containers; see
+[Agent project layout](agent-layout.md#path-resolution).
 
 ---
 
@@ -76,6 +87,11 @@ monkeybot validate
 monkeybot doctor
 monkeybot chat            # spawns the gateway, connects, cleans up on exit
 ```
+
+`monkeybot doctor` also prints the resolved agent root, zone paths, storage
+backends, browser state, and sandbox mode. If it finds a legacy `skills`
+directory nested in `workspace`, use its migration preview and resolve any
+reported collisions before moving files.
 
 To watch gateway logs in another terminal:
 
@@ -143,5 +159,7 @@ For live eval smoke against this checkout, see [`evals/smoke_agent/`](../evals/s
 
 ## Next steps
 
-- [Skills](skills.md) — layout under `SKILLS_PATH` and `SKILL.md` per skill folder.
+- [Skills](skills.md) — trusted skills, read-only file-tool access, and `SKILL.md` layout.
+- [Browser MCP](browser-mcp.md) — bundled-but-disabled browser controls and CDP modes.
+- [Agent project layout](agent-layout.md) — zones, Docker, remote sandbox contract, and deployment matrix.
 - [Model Context Protocol](mcp.md) — configuration, environment variable interpolation, OAuth2 flows, and startup diagnostics.

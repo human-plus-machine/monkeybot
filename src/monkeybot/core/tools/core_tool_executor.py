@@ -367,11 +367,13 @@ class CoreToolExecutor(ToolExecutorPort):
         subagent_registry: dict[str, SubagentConfig] | None = None,
     ) -> None:
         ws_settings = workspace_settings_from_env()
-        self._workspace = WorkspaceFileService(Path(workspace_root).resolve(), settings=ws_settings)
+        self._skills_path = Path(skills_path).resolve()
+        self._workspace = WorkspaceFileService(
+            Path(workspace_root).resolve(), settings=ws_settings, skills_root=self._skills_path
+        )
         self._spill_read_max_lines = ws_settings.WORKSPACE_SPILL_READ_MAX_LINES
         self._spill_min_chars = spill_min_chars_from_env()
         self._memory = memory
-        self._skills_path = Path(skills_path).resolve()
         self._mcp = mcp
         self._attachment_store = attachment_store
         self._attachment_catalog = attachment_catalog
@@ -398,7 +400,7 @@ class CoreToolExecutor(ToolExecutorPort):
             self._run_cmd_allowed_paths = paths
             _scfg = SandboxConfig.from_env()
             self._terminal = (
-                SandboxExecutor(_scfg, workspace_root, allowed_commands=cmds)
+                SandboxExecutor(_scfg, workspace_root, skills_path=self._skills_path, allowed_commands=cmds)
                 if _scfg.enabled
                 else TerminalExecutor(allowed_commands=cmds, allowed_path_prefixes=paths)
             )
@@ -1545,4 +1547,3 @@ class CoreToolExecutor(ToolExecutorPort):
         if not ok:
             return (None, f"unknown loop: {loop_id}")
         return (_j({"ok": True, "loop_id": loop_id, "status": "completed"}), None)
-

@@ -5,32 +5,25 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import socket
+import shlex
 import subprocess
 import tomllib
 from pathlib import Path
 
 import httpx
 
+from monkeybot.core.layout import AgentLayout, bootstrap_agent_layout
+from monkeybot.core.tools.sandbox_executor import SandboxConfig
 from monkeybot_cli.config_resolve import (
     load_agent_dotenv,
     load_config_doc,
     resolve_agent_root,
     resolve_config,
 )
+from monkeybot_cli.gateway_health import port_free as _port_free
 from monkeybot_cli.output import CommandReport, check
 from monkeybot_cli.providers import credentials_present, extra_module, spec_for_provider
 from monkeybot_cli.runtime_python import resolve_runtime_python, run_probe
-
-
-def _port_free(port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            s.bind(("127.0.0.1", port))
-            return True
-        except OSError:
-            return False
 
 
 def _runtime_python_version(runtime, agent_root: Path) -> tuple[int, int, int]:
@@ -88,6 +81,105 @@ def _extra_remediation(extra: str, agent_root: Path, runtime) -> str:
     )
 
 
+def _storage_kind(uri: str) -> str:
+    """Render storage kind without leaking URL credentials or filesystem details."""
+    if "://" not in uri:
+        return "unknown"
+    scheme, remainder = uri.split("://", 1)
+    if scheme == "sqlite":
+        return "sqlite"
+    host = remainder.split("@")[-1].split("/")[0]
+    return f"{scheme}://{host}" if host else scheme
+
+
+def _add_layout_checks(report: CommandReport, layout: AgentLayout) -> None:
+    check(
+        report,
+        id="layout.resolved",
+        category="layout",
+        severity="error",
+        passed=True,
+        message="Canonical agent layout resolved",
+        value={
+            "agent_root": str(layout.agent_root),
+            "workspace": str(layout.workspace_root),
+            "skills": str(layout.skills_path),
+            "data": str(layout.data_root),
+            "db": _storage_kind(layout.db_url),
+            "memory": _storage_kind(layout.memory_storage_uri),
+        },
+    )
+
+    legacy_skills = layout.workspace_root / "skills"
+    populated_skills = layout.skills_path.exists() and any(layout.skills_path.iterdir())
+    legacy_exists = legacy_skills.exists() or legacy_skills.is_symlink()
+    collision = legacy_exists and populated_skills
+    source = str(legacy_skills)
+    destination = str(layout.skills_path)
+    check(
+        report,
+        id="layout.legacy_nested_skills",
+        category="layout",
+        severity="warning",
+        passed=not legacy_exists,
+        message=(
+            "Legacy workspace/skills detected"
+            + ("; destination skills/ is populated (resolve collision manually)" if collision else "")
+            if legacy_exists
+            else "No legacy nested skills directory"
+        ),
+        remediation=(
+            "Collision detected: do not move automatically; reconcile the two skill trees first."
+            if collision
+            else (
+                "Preview only (not executed): "
+                f"mv {shlex.quote(source)} {shlex.quote(destination)}"
+            )
+            if legacy_exists
+            else None
+        ),
+        value=(
+            {
+                "source": source,
+                "destination": destination,
+                "collision": collision,
+                "action": None if collision else "mv",
+            }
+            if legacy_exists
+            else None
+        ),
+    )
+
+    browser_enabled = False
+    if layout.mcp_config_path.is_file():
+        try:
+            servers = json.loads(layout.mcp_config_path.read_text(encoding="utf-8")).get("mcpServers", {})
+            browser = servers.get("browser", {}) if isinstance(servers, dict) else {}
+            browser_enabled = bool(browser.get("enabled")) if isinstance(browser, dict) else False
+        except (OSError, json.JSONDecodeError):
+            pass
+    check(
+        report,
+        id="browser.bundled",
+        category="layout",
+        severity="warning",
+        passed=True,
+        message="browser: enabled" if browser_enabled else "browser: disabled (bundled)",
+    )
+
+    sandbox = SandboxConfig.from_env()
+    sandbox_mode = "remote (compute-only)" if not sandbox.shared_filesystem else "shared-filesystem"
+    check(
+        report,
+        id="sandbox.status",
+        category="layout",
+        severity="warning",
+        passed=True,
+        message=f"sandbox: {'enabled' if sandbox.enabled else 'disabled'} ({sandbox_mode})",
+        value={"image": sandbox.image, "mode": sandbox_mode},
+    )
+
+
 def run_doctor(args: argparse.Namespace) -> int:
     cwd = Path(args.cwd).expanduser().resolve() if args.cwd else None
     config_path = resolve_config(args.config, cwd=cwd)
@@ -97,6 +189,14 @@ def run_doctor(args: argparse.Namespace) -> int:
         report.config_path = str(config_path.resolve())
 
     agent_root = resolve_agent_root(cwd=cwd, config_path=config_path)
+    layout = bootstrap_agent_layout(cwd=agent_root, config_path=config_path)
+    _add_layout_checks(report, layout)
+    if not args.json:
+        print("layout:")
+        print(f"  agent_root: {layout.agent_root}")
+        print(f"  workspace: {layout.workspace_root}")
+        print(f"  skills: {layout.skills_path}")
+        print(f"  data: {layout.data_root}")
     runtime = resolve_runtime_python(agent_root)
 
     py_version = _runtime_python_version(runtime, agent_root)

@@ -36,6 +36,12 @@ def test_wheel_force_include_does_not_duplicate_packaged_files() -> None:
     _assert_no_duplicate_force_include(ROOT / "cli" / "pyproject.toml")
 
 
+def test_opensandbox_is_only_a_sandbox_extra() -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    assert all(not dependency.startswith("opensandbox") for dependency in project["dependencies"])
+    assert project["optional-dependencies"]["sandbox"] == ["opensandbox>=0.1.7"]
+
+
 def test_cli_wheel_includes_scaffold_defaults(tmp_path: Path) -> None:
     """Published CLI wheel must ship scaffold_defaults for ``monkeybot new``."""
     if shutil.which("uv") is None:
@@ -58,6 +64,8 @@ def test_cli_wheel_includes_scaffold_defaults(tmp_path: Path) -> None:
         assert any(n.endswith("scaffold_defaults/AGENT.md") for n in names)
         assert any(n.endswith("scaffold_defaults/monkeybot.example.yaml") for n in names)
         assert any(n.endswith("scaffold_defaults/env.example") for n in names)
+        assert any(n.endswith("scaffold_defaults/browser/SKILL.md") for n in names)
+        assert any(n.endswith("scaffold_defaults/Dockerfile") for n in names)
         meta = next(n for n in names if n.endswith("METADATA"))
         requires = [
             line
@@ -65,4 +73,5 @@ def test_cli_wheel_includes_scaffold_defaults(tmp_path: Path) -> None:
             if line.startswith("Requires-Dist: monkeybot")
         ]
         assert any("monkeybot[cli]" in line for line in requires)
-        assert any(">=2.1.0" in line and "<3" in line for line in requires)
+        assert any(">=2.2.0" in line and "<3" in line for line in requires)
+        assert any("monkeybot-browser-mcp" in line for line in requires)

@@ -6,6 +6,36 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [core v2.2.0] - 2026-07-13
+
+### Added
+
+- Canonical agent-root layout and a read-only virtual `skills/` root.
+
+### Changed
+
+- Remote sandboxes require an explicit compute-only capability setting.
+
+### Breaking
+
+- Workspace or skills symlinks that resolve outside their respective roots are now rejected. Move their targets inside the agent's `workspace/`, `data/`, or `skills/` layout.
+
+## [browser v0.2.0] - 2026-07-13
+
+### Added
+
+- Browser MCP package release supporting the canonical agent layout.
+
+## [cli v0.3.0] - 2026-07-13
+
+### Added
+
+- Agent scaffolds now include the canonical layout, Dockerfile, and disabled browser MCP configuration.
+
+### Fixed
+
+- `monkeybot chat` no longer adopts a stale gateway on a busy port: it refuses to spawn when the port is already in use (suggesting `/bye`, stopping `monkeybot run`, or `--attach`), and `wait_for_health` rejects a `/health` 200 if the child process has already exited.
+
 ## [0.2.1] - 2026-07-13
 
 ### Added

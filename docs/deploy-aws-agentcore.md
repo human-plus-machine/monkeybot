@@ -1,6 +1,9 @@
 # Deploy on AWS Bedrock AgentCore Runtime
 
-[AgentCore Runtime](https://docs.aws.amazon.com/bedrock/latest/userguide/agents-core.html) is a managed **HTTP container** runtime (linux/arm64). monkeybot ships Pattern C wiring via `monkeybot.core.bootstrap` and `examples/agentcore/`.
+[AgentCore Runtime](https://docs.aws.amazon.com/bedrock/latest/userguide/agents-core.html) is a managed **HTTP container** runtime (linux/arm64). MonkeyBot ships Pattern C wiring via `monkeybot.core.bootstrap` and `examples/agentcore/`.
+
+**Status: pattern only.** This page documents an adapter and deployment shape;
+it is not an AgentCore CI integration test.
 
 For Lambda-style action groups, see `docs/deploy-pattern-c-agent-platform.md`. This page covers the **container HTTP** contract and CLI pitfalls.
 
@@ -66,12 +69,15 @@ Minimum for bootstrap examples:
 | `DB_URL` | SQLite or Postgres history |
 | `AGENT_MD_PATH` | Path to `AGENT.md` |
 | `SKILLS_PATH` | Skills root (each subfolder needs `SKILL.md`) |
-| `WORKSPACE_ROOT` | Workspace for `read_file` / `run_command` cwd (alias: `MONKEYBOT_WORKSPACE_ROOT`; handlers use `resolve_agent_workspace_root()`) |
+| `MONKEYBOT_WORKSPACE_ROOT` | Absolute writable workspace override (legacy `WORKSPACE_ROOT` remains an alias). |
 | `MODEL_PROVIDER` | e.g. `aws_bedrock` with `monkeybot[bedrock]` |
 | `MODEL_NAME` | Bedrock model id |
 | `COMMAND_ALLOWLIST_CONFIG` | Optional; path to `command_allowlist.yaml` |
 
 Set `LOG_LEVEL` to `INFO` or `info` (case-insensitive).
+
+Package `monkeybot_config/` and `skills/` as read-only handler inputs. AgentCore
+workspace is ephemeral unless you opt into [AgentCore filesystem mounts](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-filesystem-configurations.html); use `DB_URL` and `MEMORY_STORAGE_URI` for durable state. There is no Docker-socket sandbox. A remote sandbox, if configured, is compute-only and cannot mount workspace or skills paths; Browser Use Cloud is the portable browser option.
 
 ---
 

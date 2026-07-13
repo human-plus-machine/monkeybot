@@ -49,7 +49,9 @@ def test_run_run_derives_agent_root_from_off_tree_config(
     assert captured["cmd"][0] == str(venv_py.resolve())
 
 
-def test_run_run_prefers_explicit_cwd_over_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_run_preserves_explicit_cwd_with_explicit_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     agent = tmp_path / "agent"
     cfg_dir = agent / "monkeybot_config"
     cfg_dir.mkdir(parents=True)
@@ -75,5 +77,4 @@ def test_run_run_prefers_explicit_cwd_over_config(tmp_path: Path, monkeypatch: p
     with patch("monkeybot_cli.commands.run_cmd.subprocess.run", side_effect=fake_run):
         run_run(args)
 
-    # --cwd wins: the gateway runs from the explicit cwd, not the config's agent root.
     assert Path(captured["cwd"]).resolve() == explicit_cwd.resolve()

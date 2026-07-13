@@ -338,8 +338,12 @@ async def test_workspace_tree_and_file(
     tmp_path,
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "hello.txt").write_text("alpha\nbeta\n", encoding="utf-8")
-    sub = tmp_path / "nested"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("MONKEYBOT_AGENT_ROOT", str(tmp_path))
+    monkeypatch.setenv("MONKEYBOT_WORKSPACE_ROOT", str(workspace))
+    (workspace / "hello.txt").write_text("alpha\nbeta\n", encoding="utf-8")
+    sub = workspace / "nested"
     sub.mkdir()
     (sub / "inner.txt").write_text("inside", encoding="utf-8")
 
@@ -383,6 +387,8 @@ async def test_workspace_prefers_workspace_subdirectory(
     (tmp_path / "monkeybot_config" / "secret.yaml").write_text("nope", encoding="utf-8")
     ws = tmp_path / "workspace"
     ws.mkdir()
+    monkeypatch.setenv("MONKEYBOT_AGENT_ROOT", str(tmp_path))
+    monkeypatch.setenv("MONKEYBOT_WORKSPACE_ROOT", str(ws))
     (ws / "hello.txt").write_text("in-workspace", encoding="utf-8")
 
     app = create_app(loop_port=FakeLoopPort(registry), registry=registry)

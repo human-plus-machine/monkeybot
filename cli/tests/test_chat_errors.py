@@ -206,6 +206,7 @@ def test_run_chat_prints_gateway_log_on_startup_failure(
     with (
         patch("monkeybot_cli.commands.chat.resolve_config", return_value=cfg_dir / "monkeybot.yaml"),
         patch("monkeybot_cli.commands.chat.load_agent_dotenv", return_value=None),
+        patch("monkeybot_cli.commands.chat._occupied_gateway_message", return_value=None),
         patch("monkeybot_cli.commands.chat._spawn_gateway", return_value=spawned),
         patch("monkeybot_cli.commands.chat._wait_for_health", return_value=False),
     ):
