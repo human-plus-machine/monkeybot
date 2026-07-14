@@ -135,7 +135,6 @@ async def _build_realtime_context(
 def _create_tool_executor(
     deps: RealtimeDependencies,
     attachment_store: Any | None = None,
-    attachment_catalog: Any | None = None,
 ) -> CoreToolExecutor:
     if deps.mcp is None:
         raise RuntimeError("MCP client is not initialized")
@@ -150,7 +149,6 @@ def _create_tool_executor(
         run_command_allowed_commands=deps.run_command_allowed_commands,
         run_command_allowed_path_prefixes=deps.run_command_allowed_path_prefixes,
         attachment_store=attachment_store,
-        attachment_catalog=attachment_catalog,
         run_store=storage.runs() if storage is not None else None,
         scheduled_loop_store=storage.scheduled_loops() if storage is not None else None,
         subagent_registry=deps.subagent_registry,
@@ -275,7 +273,7 @@ async def _handle_assistant_boundary(
     if turn.is_empty:
         return
 
-    tool_executor = _create_tool_executor(deps, attachment_store, attachment_catalog)
+    tool_executor = _create_tool_executor(deps, attachment_store)
     tool_results: list[Any] = []
     inject_texts: list[str] = []
     # Consume once per utterance so tool-call then prose boundaries do not

@@ -60,12 +60,9 @@ Want to create your own skill? Follow this pattern:
 cp skills/diagnostics/diagnostics.py skills/my-skill/my-skill.py
 ```
 
-### 2. Modify the @tool Function
+### 2. Modify the Entry Function
 
 ```python
-from monkeybot.core.tools.workspace_tools import tool
-
-@tool
 async def my_custom_tool(param1: str, param2: int = 10) -> str:
     """Tool description that the LLM reads to understand when to use it.
     
@@ -105,25 +102,21 @@ print(result)
 
 ## Key Patterns Demonstrated
 
-### 1. Using @tool Decorator
+### 1. Plain async entry point
 
 ```python
-from monkeybot.core.tools.workspace_tools import tool
-
-@tool
 async def my_tool(param: str) -> str:
     """Tool description."""
     return f"Result: {param}"
 ```
 
-The `@tool` decorator:
-- Marks the function for tooling-style discovery in simple orchestrators
-- Preserves the original name and docstring for documentation
+Skills are ordinary Python callables. The harness discovers them via `SKILL.md`
+and runs them with `run_command` (or imports them in tests) — no `@tool`
+decorator is required.
 
 ### 2. Async Execution
 
 ```python
-@tool
 async def my_tool():  # ← Note: async
     result = await some_async_operation()
     return result
@@ -145,7 +138,6 @@ class Result:
     status: str
     data: dict
 
-@tool
 async def my_tool() -> str:
     result = Result(status="success", data={"key": "value"})
     return json.dumps(asdict(result), indent=2)
@@ -156,7 +148,6 @@ Return JSON strings for structured data that the LLM can parse and present to us
 ### 4. Error Handling
 
 ```python
-@tool
 async def my_tool(param: str) -> str:
     """Tool that handles errors gracefully."""
     try:
@@ -181,7 +172,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-@tool
 async def my_tool():
     logger.info("Tool started")
     result = do_work()
@@ -195,7 +185,6 @@ Log key events to help debug issues in production.
 
 **System Monitoring:**
 ```python
-@tool
 async def check_disk_space() -> str:
     """Check available disk space."""
     # Implementation
@@ -203,7 +192,6 @@ async def check_disk_space() -> str:
 
 **External API Calls:**
 ```python
-@tool
 async def fetch_weather(city: str) -> str:
     """Get weather forecast for a city."""
     # Implementation with httpx
@@ -211,7 +199,6 @@ async def fetch_weather(city: str) -> str:
 
 **Database Queries:**
 ```python
-@tool
 async def count_users() -> str:
     """Count total users in database."""
     # Implementation with async DB client
@@ -219,7 +206,6 @@ async def count_users() -> str:
 
 **File Operations:**
 ```python
-@tool
 async def read_config_file(filename: str) -> str:
     """Read configuration from file."""
     # Implementation with pathlib

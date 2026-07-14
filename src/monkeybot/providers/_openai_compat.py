@@ -165,17 +165,20 @@ def messages_to_openai(messages: Sequence[Message]) -> tuple[str | None, list[di
 
 
 def openai_tools(tools: Sequence[ToolDef]) -> list[dict[str, Any]]:
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": t.name,
-                "description": t.description,
-                "parameters": t.input_schema,
-            },
-        }
-        for t in tools
-    ]
+    out: list[dict[str, Any]] = []
+    for t in tools:
+        schema = t.to_model_schema()
+        out.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": schema["name"],
+                    "description": schema["description"],
+                    "parameters": schema["input_schema"],
+                },
+            }
+        )
+    return out
 
 
 def openai_messages_token_count(encoding: Any, oai_messages: list[dict[str, Any]]) -> int:

@@ -37,18 +37,15 @@ Supported `--aspect-ratio` values: `1:1`, `2:3`, `3:2`, `3:4`, `4:3`, `4:5`, `5:
    - Success: `{"ok": true, "path": "./generated-media/images/<uuid>.png", ...}`
    - Failure: `{"ok": false, "error": "..."}`
 
-4. Call **`render_image`** with the returned `path` to show the image inline in chat:
+4. Call **`load_file`** with the returned `path` so the image is in model context (chat may also render it):
 
-```json
-{
-  "path": "./generated-media/images/<uuid>.png",
-  "caption": "Optional short caption for the user"
-}
+```
+load_file(path="<path from script>")
 ```
 
 ## Notes
 
 - Output files are written under `./generated-media/images/` (allowed by `run_command` policy).
-- Do not paste raw base64 in chat; always use `render_image` after generation.
-- On failure, report the `error` field and do not call `render_image`.
+- Do not paste raw base64 in chat; always use `load_file` after generation.
+- On failure, report the `error` field and do not call `load_file`.
 - If the script reports a missing dependency (e.g. `google-genai package not installed`), **do not** run `pip install`, `uv pip install`, or any other package install via `run_command` — installs are blocked by policy. Install `google-genai` in the agent / sandbox environment (e.g. via `monkeybot[gemini]` or the sandbox worker image) and restart the gateway.

@@ -1529,7 +1529,7 @@ async def test_task_tool_queue_mode_enqueues_pending_run(
 
 
 @pytest.mark.asyncio
-async def test_render_image_returns_image_block(tmp_path: Path) -> None:
+async def test_load_file_from_path_returns_image_block(tmp_path: Path) -> None:
     from monkeybot.core.attachments.store import FilesystemAttachmentStore
     from monkeybot.core.types.content_blocks import Image
 
@@ -1556,7 +1556,7 @@ async def test_render_image_returns_image_block(tmp_path: Path) -> None:
     )
 
     result = await ex.execute(
-        call=ToolCall(call_id="ri1", name="render_image", args={"path": rel}),
+        call=ToolCall(call_id="lf1", name="load_file", args={"path": rel}),
         ctx=_ctx(),
     )
     assert result.error is None
@@ -1568,17 +1568,135 @@ async def test_render_image_returns_image_block(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_render_image_rejects_non_image(tmp_path: Path) -> None:
+async def test_load_file_rejects_plain_text_path(tmp_path: Path) -> None:
     (tmp_path / "mem").mkdir(exist_ok=True)
     (tmp_path / "skills").mkdir(exist_ok=True)
     (tmp_path / "notes.txt").write_text("hello", encoding="utf-8")
     ex = _make_executor(tmp_path)
     result = await ex.execute(
-        call=ToolCall(call_id="ri2", name="render_image", args={"path": "./notes.txt"}),
+        call=ToolCall(call_id="lf2", name="load_file", args={"path": "./notes.txt"}),
         ctx=_ctx(),
     )
     assert result.error is not None
-    assert "image" in result.error.lower()
+    assert "read_file" in result.error.lower() or "pdf" in result.error.lower()
+
+
+@pytest.mark.asyncio
+async def test_load_file_from_path_returns_pdf_file_block(tmp_path: Path) -> None:
+    from monkeybot.core.types.content_blocks import File
+
+    (tmp_path / "mem").mkdir(exist_ok=True)
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    pdf_bytes = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n"
+    (tmp_path / "doc.pdf").write_bytes(pdf_bytes)
+    ex = _make_executor(tmp_path)
+    result = await ex.execute(
+        call=ToolCall(call_id="lf3", name="load_file", args={"path": "./doc.pdf"}),
+        ctx=_ctx(),
+    )
+    assert result.error is None
+    assert any(isinstance(b, File) for b in result.blocks)
+    block = next(b for b in result.blocks if isinstance(b, File))
+    assert block.mime_type == "application/pdf"
+
+
+@pytest.mark.asyncio
+async def test_load_file_from_attachment_id_returns_image_block(tmp_path: Path) -> None:
+    from monkeybot.core.attachments.store import FilesystemAttachmentStore
+    from monkeybot.core.types.content_blocks import Image
+
+    png = (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
+        b"\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc"
+        b"\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    ctx = _ctx()
+    store = FilesystemAttachmentStore(tmp_path)
+    stored = store.save(ctx.thread_id, data=png, mime_type="image/png", filename="up.png")
+
+    (tmp_path / "mem").mkdir(exist_ok=True)
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_NoMCP(),
+        attachment_store=store,
+    )
+
+    result = await ex.execute(
+        call=ToolCall(
+            call_id="lf4",
+            name="load_file",
+            args={"attachment_id": stored.attachment_id},
+        ),
+        ctx=ctx,
+    )
+    assert result.error is None
+    assert any(isinstance(b, Image) for b in result.blocks)
+    img = next(b for b in result.blocks if isinstance(b, Image))
+    assert img.mime_type == "image/png"
+    assert img.metadata is not None
+    assert img.metadata.get("attachment_id") == stored.attachment_id
+
+
+@pytest.mark.asyncio
+async def test_load_file_from_attachment_id_unknown_id_errors(tmp_path: Path) -> None:
+    from monkeybot.core.attachments.store import FilesystemAttachmentStore
+
+    (tmp_path / "mem").mkdir(exist_ok=True)
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_NoMCP(),
+        attachment_store=FilesystemAttachmentStore(tmp_path),
+    )
+
+    result = await ex.execute(
+        call=ToolCall(call_id="lf5", name="load_file", args={"attachment_id": "att_missing"}),
+        ctx=_ctx(),
+    )
+    assert result.error is not None
+    assert "att_missing" in result.error
+
+
+@pytest.mark.asyncio
+async def test_load_file_attachment_id_without_store_errors(tmp_path: Path) -> None:
+    ex = _make_executor(tmp_path)
+    result = await ex.execute(
+        call=ToolCall(call_id="lf6", name="load_file", args={"attachment_id": "att_x"}),
+        ctx=_ctx(),
+    )
+    assert result.error is not None
+    assert "not enabled" in result.error.lower()
+
+
+@pytest.mark.asyncio
+async def test_load_file_rejects_both_attachment_id_and_path(tmp_path: Path) -> None:
+    ex = _make_executor(tmp_path)
+    result = await ex.execute(
+        call=ToolCall(
+            call_id="lf7",
+            name="load_file",
+            args={"attachment_id": "att_x", "path": "./notes.txt"},
+        ),
+        ctx=_ctx(),
+    )
+    assert result.error is not None
+    assert "not both" in result.error.lower()
+
+
+@pytest.mark.asyncio
+async def test_load_file_requires_attachment_id_or_path(tmp_path: Path) -> None:
+    ex = _make_executor(tmp_path)
+    result = await ex.execute(
+        call=ToolCall(call_id="lf8", name="load_file", args={}),
+        ctx=_ctx(),
+    )
+    assert result.error is not None
+    assert "requires" in result.error.lower()
 
 
 @pytest.mark.asyncio

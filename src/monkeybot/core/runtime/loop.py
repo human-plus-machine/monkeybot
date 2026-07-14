@@ -1676,7 +1676,7 @@ async def _run_inner_core(
                     messages=[m.to_dict() for m in delta_messages],
                     message_offset=message_offset,
                     messages_reset=messages_reset,
-                    tools=[dataclasses.asdict(t) for t in turn_tools] if include_tools else None,
+                    tools=[t.to_model_schema() for t in turn_tools] if include_tools else None,
                     thinking_budget=stream_thinking,
                 )
                 provider_messages_written = len(provider_messages)

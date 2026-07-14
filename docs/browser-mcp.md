@@ -151,7 +151,7 @@ This is the default, preferred workflow: no image tokens, no coordinate-guessing
 
 ### Fallback: screenshots + coordinates
 
-`browser_screenshot` + `browser_click(x, y)` is a **last-resort fallback**, for cases `browser_get_elements` can't handle: canvas-based apps, heavy shadow-DOM UIs, drag-and-drop, or visually confirming layout/rendering. `browser_screenshot` saves a PNG under **`workspace/browser/Screenshots/`** and returns JSON with a workspace-relative `path` (for `render_image` on vision models), `screenshots_dir`, url, title, and viewport — not inline base64 image bytes. This keeps tool results small for text-only models (Ollama) and avoids context-window blowups. Text-only models should use `browser_get_elements` (or `browser_js` for ad hoc extraction) instead of screenshots entirely, since they can't view images.
+`browser_screenshot` + `browser_click(x, y)` is a **last-resort fallback**, for cases `browser_get_elements` can't handle: canvas-based apps, heavy shadow-DOM UIs, drag-and-drop, or visually confirming layout/rendering. `browser_screenshot` saves a PNG under **`workspace/browser/Screenshots/`** and returns JSON with a workspace-relative `path` (for `load_file` on vision models), `screenshots_dir`, url, title, and viewport — not inline base64 image bytes. This keeps tool results small for text-only models (Ollama) and avoids context-window blowups. Text-only models should use `browser_get_elements` (or `browser_js` for ad hoc extraction) instead of screenshots entirely, since they can't view images.
 
 `browser-harness` is imported lazily on first browser tool call so listing MCP tools does not require Chrome to be running.
 

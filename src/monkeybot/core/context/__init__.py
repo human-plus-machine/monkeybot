@@ -13,7 +13,7 @@ from typing import Any, Literal, Protocol, runtime_checkable
 import yaml
 
 from monkeybot.core.attachments.config import attachments_enabled_from_env
-from monkeybot.core.attachments.tools import read_attachment_tool_def, render_image_tool_def
+from monkeybot.core.attachments.tools import load_file_tool_def
 from monkeybot.core.config.settings import SubagentConfig
 from monkeybot.core.mcp.ports_mcp import MCPClientPort
 from monkeybot.core.memory.subsystem import MemorySubsystem
@@ -734,8 +734,7 @@ async def build_context(
         )
     )
     if attachments_enabled_from_env():
-        tools.append(render_image_tool_def())
-        tools.append(read_attachment_tool_def())
+        tools.append(load_file_tool_def())
     tools.extend(mcp_client.all_tools())
     for ct in extra_tools or []:
         tools.append(ct.tool_def)

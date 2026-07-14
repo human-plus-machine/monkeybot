@@ -14,8 +14,6 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from monkeybot.core.tools.workspace_tools import tool
-
 logger = logging.getLogger(__name__)
 
 # Environment variables to check (never log values, only presence)
@@ -41,7 +39,6 @@ class DiagnosticResult:
     computation_check: Optional[str] = None
 
 
-@tool
 async def run_diagnostics(
     check_type: str = "full",
 ) -> str:
