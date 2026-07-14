@@ -274,6 +274,16 @@ class SessionRegistry:
         return RemoveResult(deleted=True, transcript_report_dir=report_dir)
 
     async def remove_all_async(self) -> None:
-        """Best-effort analyze + remove every remaining session (gateway shutdown)."""
-        for sid in list(self._sessions):
-            await self.remove_async(sid)
+        """Best-effort analyze + remove every remaining session (gateway shutdown).
+
+        Detaches are synchronous and instantaneous; the transcript analysis for
+        each session runs concurrently via ``asyncio.gather`` so shutdown time
+        doesn't scale linearly with the number of open sessions.
+        """
+        results = await asyncio.gather(
+            *(self.remove_async(sid) for sid in list(self._sessions)),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, Exception):
+                logger.warning("transcript analysis on shutdown failed", exc_info=result)

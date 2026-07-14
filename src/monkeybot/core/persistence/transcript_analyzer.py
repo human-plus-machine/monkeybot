@@ -438,7 +438,7 @@ def _smell_orphan_tools(
         return []
     return [
         Finding(
-            kind="orphan_tool_calls",
+            kind="tool_call_orphans",
             severity="error",
             summary=f"{len(orphan_evidence)} tool call(s) without matching ToolCallResult",
             evidence=orphan_evidence[:8],
