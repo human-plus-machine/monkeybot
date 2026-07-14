@@ -128,7 +128,7 @@ async def test_duplicate_session_returns_409(
 
 
 @pytest.mark.asyncio
-async def test_delete_session_returns_204_and_removes_it(
+async def test_delete_session_returns_200_and_removes_it(
     client: AsyncClient,
     registry: SessionRegistry,
 ) -> None:
@@ -137,16 +137,55 @@ async def test_delete_session_returns_204_and_removes_it(
     assert registry.get(sid) is not None
 
     r = await client.delete(f"/sessions/{sid}")
-    assert r.status_code == 204
+    assert r.status_code == 200
+    body = r.json()
+    assert body["deleted"] is True
+    assert body["transcript_report_dir"] is None
     assert registry.get(sid) is None
 
 
 @pytest.mark.asyncio
-async def test_delete_unknown_session_is_idempotent_204(
+async def test_delete_unknown_session_is_idempotent_200(
     client: AsyncClient,
 ) -> None:
     r = await client.delete("/sessions/does-not-exist")
-    assert r.status_code == 204
+    assert r.status_code == 200
+    body = r.json()
+    assert body["deleted"] is False
+    assert body["transcript_report_dir"] is None
+
+
+@pytest.mark.asyncio
+async def test_delete_session_writes_transcript_report(
+    client: AsyncClient,
+    registry: SessionRegistry,
+    tmp_path,
+) -> None:
+    from pathlib import Path
+
+    from monkeybot.core.persistence.transcript import TranscriptWriter
+
+    cr = await client.post("/sessions", json={})
+    sid = cr.json()["session_id"]
+    bus = registry.get(sid)
+    assert bus is not None
+    writer = TranscriptWriter(sid, workspace_root=Path(tmp_path))
+    await writer.ensure_manifest(model="gpt-test", provider="fake")
+    await writer.write_user_message(request_id="r1", content="hello")
+    bus.transcript_writer = writer
+
+    r = await client.delete(f"/sessions/{sid}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["deleted"] is True
+    assert body["transcript_report_dir"] is not None
+    report_dir = Path(body["transcript_report_dir"])
+    assert (report_dir / "transcript.ndjson").is_file()
+    assert (report_dir / "brief.md").is_file()
+    assert (report_dir / "report.json").is_file()
+    assert (report_dir / "meta.json").is_file()
+    brief = (report_dir / "brief.md").read_text(encoding="utf-8")
+    assert "## Session summary" in brief
 
 
 @pytest.mark.asyncio

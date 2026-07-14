@@ -5,18 +5,37 @@ In-memory per-session SSE bus with replay buffer and live subscribers.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import logging
 import os
 from collections import deque
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
+from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.transcript import TranscriptWriter
+from monkeybot.core.persistence.transcript_analyzer import analyze_transcript
 from monkeybot.core.runtime.input_admission import InputAdmission
 from monkeybot.core.tools.permission import SessionApprovals
 
 from .sse import format_data_event
 
+logger = logging.getLogger(__name__)
+
 PENDING_RESPONSE_TIMEOUT_SEC: float = float(os.environ.get("PENDING_RESPONSE_TIMEOUT_SEC", "300"))
+# Soft-cancel wait before hard-cancelling an in-flight turn on session delete.
+_QUIESCE_TURN_TIMEOUT_SEC: float = float(os.environ.get("MONKEYBOT_QUIESCE_TURN_TIMEOUT_SEC", "30"))
+_QUIESCE_HARD_CANCEL_TIMEOUT_SEC: float = 5.0
+
+
+@dataclass(frozen=True)
+class RemoveResult:
+    """Outcome of removing a session from the registry."""
+
+    deleted: bool
+    transcript_report_dir: str | None = None
 
 
 def _replay_maxlen_from_env() -> int:
@@ -66,6 +85,8 @@ class SessionBus:
         """Process-local 'always allow' rememberies (not shared across gateway replicas)."""
         self.follow_up_retry_task: asyncio.Task[None] | None = None
         """Scheduled drain retry after a failed durable turn-lock acquire."""
+        self.active_turn_task: asyncio.Task[None] | None = None
+        """Background turn task scheduled by ``_schedule_turn``; awaited on DELETE."""
 
     def cancel_follow_up_retry(self) -> None:
         """Cancel any pending follow-up lock-retry task."""
@@ -149,6 +170,36 @@ class SessionBus:
         async with self._lock:
             self._subscribers.discard(queue)
 
+    async def quiesce_active_turn(
+        self,
+        *,
+        timeout_sec: float | None = None,
+    ) -> None:
+        """Soft-cancel the in-flight turn, await it, then drain the transcript writer.
+
+        Analysis must not race late ``ToolCallResult`` / ``TurnComplete`` appends.
+        """
+        rid = self.current_request_id
+        if rid is not None:
+            self.cancel_requested_for = rid
+        task = self.active_turn_task
+        wait_sec = _QUIESCE_TURN_TIMEOUT_SEC if timeout_sec is None else timeout_sec
+        if task is not None and not task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=wait_sec)
+            except TimeoutError:
+                logger.warning(
+                    "active turn did not finish before quiesce timeout; hard-cancelling"
+                )
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, TimeoutError):
+                    await asyncio.wait_for(task, timeout=_QUIESCE_HARD_CANCEL_TIMEOUT_SEC)
+            except asyncio.CancelledError:
+                pass
+        writer = self.transcript_writer
+        if writer is not None:
+            await writer.drain()
+
 
 async def _await_user_response(
     bus: SessionBus,
@@ -203,19 +254,11 @@ class SessionRegistry:
         self._sessions[session_id] = bus
         return bus
 
-    def remove(self, session_id: str) -> bool:
-        """Drop a session bus and any auxiliary per-session state keyed by it.
-
-        Cancels outstanding pending-response futures so awaiting callers don't
-        hang, then evicts the memory-curation cache entry for this thread id
-        (see ``memory_prompt._curation_cache``) so both structures share the
-        same lifecycle instead of growing unbounded for the life of the process.
-
-        Returns True if a session was found and removed, False otherwise.
-        """
+    def _detach(self, session_id: str) -> SessionBus | None:
+        """Pop a session and clear in-process auxiliaries; does not analyze transcripts."""
         bus = self._sessions.pop(session_id, None)
         if bus is None:
-            return False
+            return None
         bus.abandon_pending_cancel_all()
         bus.cancel_follow_up_retry()
         bus.admission.clear_all()
@@ -223,4 +266,61 @@ class SessionRegistry:
         from monkeybot.core.context.memory_prompt import evict_curation_cache
 
         evict_curation_cache(session_id)
-        return True
+        return bus
+
+    @staticmethod
+    def _report_dir_for_path(path: Path) -> str | None:
+        """Run offline transcript analysis; never raises."""
+        try:
+            out = analyze_transcript(path)
+        except Exception:
+            logger.warning(
+                "transcript analysis failed %s",
+                kv(path=path),
+                exc_info=True,
+            )
+            return None
+        return str(out) if out is not None else None
+
+    def remove(self, session_id: str) -> RemoveResult:
+        """Drop a session bus and any auxiliary per-session state keyed by it.
+
+        Cancels outstanding pending-response futures so awaiting callers don't
+        hang, then evicts the memory-curation cache entry for this thread id
+        (see ``memory_prompt._curation_cache``) so both structures share the
+        same lifecycle instead of growing unbounded for the life of the process.
+
+        Does not run transcript analysis — use :meth:`remove_async` for that
+        (DELETE /sessions and gateway shutdown).
+        """
+        bus = self._detach(session_id)
+        if bus is None:
+            return RemoveResult(deleted=False)
+        return RemoveResult(deleted=True)
+
+    async def remove_async(self, session_id: str) -> RemoveResult:
+        """Detach session, quiesce any in-flight turn, then analyze its transcript."""
+        bus = self._detach(session_id)
+        if bus is None:
+            return RemoveResult(deleted=False)
+        await bus.quiesce_active_turn()
+        writer = bus.transcript_writer
+        if writer is None:
+            return RemoveResult(deleted=True)
+        report_dir = await asyncio.to_thread(self._report_dir_for_path, writer.path)
+        return RemoveResult(deleted=True, transcript_report_dir=report_dir)
+
+    async def remove_all_async(self) -> None:
+        """Best-effort analyze + remove every remaining session (gateway shutdown).
+
+        Detaches are synchronous and instantaneous; the transcript analysis for
+        each session runs concurrently via ``asyncio.gather`` so shutdown time
+        doesn't scale linearly with the number of open sessions.
+        """
+        results = await asyncio.gather(
+            *(self.remove_async(sid) for sid in list(self._sessions)),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, Exception):
+                logger.warning("transcript analysis on shutdown failed", exc_info=result)

@@ -91,7 +91,11 @@ async def test_start_turn_writes_transcript_when_enabled(
 
     assert captured_run.get("transcript_writer") is not None
 
-    transcript_path = tmp_path / ".monkeybot" / "transcripts" / "s1.ndjson"
+    bus = registry.get("s1")
+    assert bus is not None and bus.transcript_writer is not None
+    transcript_path = bus.transcript_writer.path
+    assert transcript_path.name == "transcript.ndjson"
+    assert transcript_path.parent.name.endswith("_s1")
     assert transcript_path.is_file()
     lines = _read_lines(transcript_path)
     types = [line["type"] for line in lines]
@@ -142,7 +146,9 @@ async def test_start_turn_reuses_transcript_writer_across_turns(
 
     assert bus.transcript_writer is writer_after_first
 
-    transcript_path = tmp_path / ".monkeybot" / "transcripts" / "s3.ndjson"
+    assert writer_after_first is not None
+    transcript_path = writer_after_first.path
+    assert transcript_path.name == "transcript.ndjson"
     lines = _read_lines(transcript_path)
     manifest_lines = [line for line in lines if line.get("type") == "SessionManifest"]
     assert len(manifest_lines) == 1

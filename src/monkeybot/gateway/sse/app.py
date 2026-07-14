@@ -666,6 +666,12 @@ async def _shutdown(fastapi_app: FastAPI) -> None:
     except Exception as exc:
         logger.warning("observability shutdown failed: %s", exc)
 
+    # Analyze any remaining session transcripts before the process exits.
+    try:
+        await _registry.remove_all_async()
+    except Exception:
+        logger.warning("transcript analysis on shutdown failed", exc_info=True)
+
     mcp = _deps.mcp
     if mcp is not None:
         for name in list(getattr(mcp, "_servers", {}).keys()):
