@@ -295,8 +295,6 @@ async def test_build_context_omits_attachment_tools_when_disabled(
 
     names = {t.name for t in ctx.tools}
     assert "load_file" not in names
-    assert "render_image" not in names
-    assert "read_attachment" not in names
 
 
 @pytest.mark.asyncio

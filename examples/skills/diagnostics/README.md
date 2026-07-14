@@ -138,7 +138,6 @@ class Result:
     status: str
     data: dict
 
-@tool
 async def my_tool() -> str:
     result = Result(status="success", data={"key": "value"})
     return json.dumps(asdict(result), indent=2)
@@ -149,7 +148,6 @@ Return JSON strings for structured data that the LLM can parse and present to us
 ### 4. Error Handling
 
 ```python
-@tool
 async def my_tool(param: str) -> str:
     """Tool that handles errors gracefully."""
     try:
@@ -174,7 +172,6 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-@tool
 async def my_tool():
     logger.info("Tool started")
     result = do_work()
@@ -188,7 +185,6 @@ Log key events to help debug issues in production.
 
 **System Monitoring:**
 ```python
-@tool
 async def check_disk_space() -> str:
     """Check available disk space."""
     # Implementation
@@ -196,7 +192,6 @@ async def check_disk_space() -> str:
 
 **External API Calls:**
 ```python
-@tool
 async def fetch_weather(city: str) -> str:
     """Get weather forecast for a city."""
     # Implementation with httpx
@@ -204,7 +199,6 @@ async def fetch_weather(city: str) -> str:
 
 **Database Queries:**
 ```python
-@tool
 async def count_users() -> str:
     """Count total users in database."""
     # Implementation with async DB client
@@ -212,7 +206,6 @@ async def count_users() -> str:
 
 **File Operations:**
 ```python
-@tool
 async def read_config_file(filename: str) -> str:
     """Read configuration from file."""
     # Implementation with pathlib
