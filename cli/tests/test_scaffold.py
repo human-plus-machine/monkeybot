@@ -24,6 +24,7 @@ def test_run_new_creates_bundle(tmp_path: Path) -> None:
     assert (tmp_path / "data" / "memory" / "INDEX.md").is_file()
     assert (tmp_path / "skills").is_dir()
     assert (tmp_path / "skills" / "browser" / "SKILL.md").is_file()
+    assert (tmp_path / "skills" / "loop" / "SKILL.md").is_file()
     assert (tmp_path / "workspace" / ".gitkeep").is_file()
     assert not (tmp_path / "workspace" / "skills").exists()
     assert (tmp_path / "Dockerfile").is_file()

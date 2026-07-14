@@ -22,7 +22,12 @@ from monkeybot.core.attachments.config import (
 )
 from monkeybot.core.attachments.store import AttachmentStore, sniff_mime
 from monkeybot.core.config.settings import SubagentConfig
-from monkeybot.core.context import CustomTool, TurnContext
+from monkeybot.core.context import (
+    SCHEDULED_LOOP_TOOL_DEFS,
+    CustomTool,
+    LoopsToolRegistry,
+    TurnContext,
+)
 from monkeybot.core.context.tool_result_ingress import (
     cap_tool_result_text,
     sanitize_tool_result_text,
@@ -98,6 +103,8 @@ _CORE_TOOL_NAMES = frozenset(
         "run_command",
         "enable_mcp",
         "disable_mcp",
+        "enable_loops",
+        "disable_loops",
         "list_mcp_resources",
         "read_mcp_resource",
         "list_mcp_prompts",
@@ -363,6 +370,7 @@ class CoreToolExecutor(ToolExecutorPort):
         run_store: RunStore | None = None,
         scheduled_loop_store: ScheduledLoopStore | None = None,
         subagent_registry: dict[str, SubagentConfig] | None = None,
+        loops_registry: LoopsToolRegistry | None = None,
     ) -> None:
         ws_settings = workspace_settings_from_env()
         self._skills_path = Path(skills_path).resolve()
@@ -376,6 +384,7 @@ class CoreToolExecutor(ToolExecutorPort):
         self._attachment_store = attachment_store
         self._run_store = run_store
         self._scheduled_loop_store = scheduled_loop_store
+        self._loops_registry = loops_registry if loops_registry is not None else LoopsToolRegistry()
         self._subagent_registry = dict(subagent_registry or {})
         self._terminal: TerminalExecutor | SandboxExecutor
         if terminal is not None:
@@ -409,6 +418,16 @@ class CoreToolExecutor(ToolExecutorPort):
     def mcp(self) -> MCPClientPort:
         """MCP client used for built-in MCP tools and ``server__tool`` dispatch."""
         return self._mcp
+
+    @property
+    def loops_advertised(self) -> bool:
+        """Whether scheduled-loop lifecycle tools are advertised to the model."""
+        return self._loops_registry.advertised
+
+    @property
+    def loops_registry(self) -> LoopsToolRegistry:
+        """Shared progressive-loop advertisement registry (process-scoped when wired by gateway)."""
+        return self._loops_registry
 
     def _run_command_security_envelope(self, exc: SecurityError) -> str:
         raw = str(exc)
@@ -487,6 +506,10 @@ class CoreToolExecutor(ToolExecutorPort):
                 result_text, err_text = await self._tool_enable_mcp(args)
             elif name == "disable_mcp":
                 result_text, err_text = await self._tool_disable_mcp(args)
+            elif name == "enable_loops":
+                result_text, err_text = await self._tool_enable_loops()
+            elif name == "disable_loops":
+                result_text, err_text = await self._tool_disable_loops()
             elif name == "list_mcp_resources":
                 result_text, err_text = await self._tool_list_mcp_resources(args)
             elif name == "read_mcp_resource":
@@ -1272,6 +1295,48 @@ class CoreToolExecutor(ToolExecutorPort):
                     "server": sname,
                     "disconnected": True,
                     "note": "Tools drop on the next model step this turn.",
+                }
+            ),
+            None,
+        )
+
+    async def _tool_enable_loops(self) -> tuple[str | None, str | None]:
+        store_or_err = self._require_loop_store()
+        if isinstance(store_or_err, tuple):
+            return None, store_or_err[1]
+        already = self._loops_registry.advertised
+        self._loops_registry.advertised = True
+        tools = [{"name": t.name, "description": t.description} for t in SCHEDULED_LOOP_TOOL_DEFS]
+        logger.info(
+            "enable_loops ok %s",
+            kv(already_advertised=already, tools=len(tools)),
+        )
+        return (
+            _j(
+                {
+                    "ok": True,
+                    "already_advertised": already,
+                    "tools": tools,
+                    "note": "New tools apply on the next model step this turn.",
+                }
+            ),
+            None,
+        )
+
+    async def _tool_disable_loops(self) -> tuple[str | None, str | None]:
+        already = self._loops_registry.advertised
+        self._loops_registry.advertised = False
+        logger.info("disable_loops ok %s", kv(was_advertised=already))
+        return (
+            _j(
+                {
+                    "ok": True,
+                    "was_advertised": already,
+                    "disconnected": True,
+                    "note": (
+                        "Scheduled-loop tools drop on the next model step this turn. "
+                        "Running loops keep their scheduler state."
+                    ),
                 }
             ),
             None,

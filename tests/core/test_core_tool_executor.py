@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from monkeybot.core.config.settings import SubagentConfig
-from monkeybot.core.context import SkillRef, TurnContext, _discover_skills
+from monkeybot.core.context import LoopsToolRegistry, SkillRef, TurnContext, _discover_skills
 from monkeybot.core.llm.provider import Done, TextDelta, ToolCall, UsageEvent
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
@@ -1862,6 +1862,78 @@ async def test_disable_mcp_unknown_server_errors(tmp_path: Path) -> None:
     assert "Unknown MCP server" in result.error
     assert "typo-browser" in result.error
     assert mcp.disconnected == []
+
+
+@pytest.mark.asyncio
+async def test_enable_loops_requires_store(tmp_path: Path) -> None:
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_NoMCP(),
+    )
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    result = await ex.execute(
+        call=ToolCall(name="enable_loops", args={}, call_id="1"),
+        ctx=_ctx(),
+    )
+    assert result.error is not None
+    assert "durable storage" in result.error
+
+
+@pytest.mark.asyncio
+async def test_enable_and_disable_loops_toggle_advertisement(tmp_path: Path) -> None:
+    registry = LoopsToolRegistry()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_NoMCP(),
+        scheduled_loop_store=object(),  # type: ignore[arg-type]
+        loops_registry=registry,
+    )
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    assert ex.loops_advertised is False
+    enabled = await ex.execute(
+        call=ToolCall(name="enable_loops", args={}, call_id="1"),
+        ctx=_ctx(),
+    )
+    assert enabled.error is None
+    body = json.loads(enabled.blocks[0].text)  # type: ignore[index]
+    assert body["ok"] is True
+    assert body["already_advertised"] is False
+    assert {t["name"] for t in body["tools"]} >= {
+        "start_loop",
+        "loop_status",
+        "pause_loop",
+        "resume_loop",
+        "stop_loop",
+        "disable_loops",
+    }
+    assert ex.loops_advertised is True
+    assert registry.advertised is True
+
+    # Same registry shared across a fresh executor (next user turn).
+    ex2 = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_NoMCP(),
+        scheduled_loop_store=object(),  # type: ignore[arg-type]
+        loops_registry=registry,
+    )
+    assert ex2.loops_advertised is True
+
+    disabled = await ex2.execute(
+        call=ToolCall(name="disable_loops", args={}, call_id="2"),
+        ctx=_ctx(),
+    )
+    assert disabled.error is None
+    dbody = json.loads(disabled.blocks[0].text)  # type: ignore[index]
+    assert dbody["ok"] is True
+    assert dbody["was_advertised"] is True
+    assert ex2.loops_advertised is False
+    assert registry.advertised is False
 
 
 class _ResourcesMCP(_NoMCP):

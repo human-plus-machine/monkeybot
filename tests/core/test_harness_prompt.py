@@ -31,6 +31,8 @@ def test_harness_includes_core_tools_and_protocol() -> None:
     assert "`list_mcp_prompts`" in out
     assert "`get_mcp_prompt`" in out
     assert "appear only after `enable_mcp`" in out
+    assert "`enable_loops`" in out
+    assert "appear only after `enable_loops`" in out
     assert "`mcp_status`" not in out
     assert "`add_mcp_server`" not in out
     assert "`remove_mcp_server`" not in out
@@ -89,6 +91,15 @@ def test_harness_injects_runtime_paths() -> None:
     )
     assert "`/srv/bot`" in out
     assert "local:///srv/bot/data/memory" in out
+
+
+def test_harness_lists_scheduled_loops_when_available() -> None:
+    out = harness_fixed_context(
+        include_task_tool=False,
+        scheduled_loops_available=True,
+    )
+    assert "Scheduled loops available" in out
+    assert "`enable_loops`" in out
 
 
 def test_harness_default_paths_shown_when_not_provided() -> None:
