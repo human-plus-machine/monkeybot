@@ -184,7 +184,14 @@ def _schedule_turn(
                 session_id=session_id,
             )
 
-    asyncio.create_task(_turn())
+    task = asyncio.create_task(_turn())
+    bus.active_turn_task = task
+
+    def _clear(done: asyncio.Task[None]) -> None:
+        if bus.active_turn_task is done:
+            bus.active_turn_task = None
+
+    task.add_done_callback(_clear)
 
 
 async def _drain_follow_up(

@@ -222,3 +222,21 @@ async def test_second_writer_reuses_existing_session_dir(tmp_path: Path) -> None
     w2 = TranscriptWriter("sess-reuse", workspace_root=tmp_path)
     assert w2.session_dir == w1.session_dir
     assert w2.path == w1.path
+
+
+@pytest.mark.asyncio
+async def test_second_writer_continues_seq_from_existing_file(tmp_path: Path) -> None:
+    """Resumed writers must not emit duplicate seq evidence pointers."""
+    w1 = TranscriptWriter("sess-reuse", workspace_root=tmp_path, include_live=True)
+    await w1.ensure_manifest(model="gpt-5")
+    await w1.write_user_message(request_id="r1", content="hello")
+    await w1.write_event(AssistantDelta(request_id="r1", delta="hi"))
+
+    w2 = TranscriptWriter("sess-reuse", workspace_root=tmp_path, include_live=True)
+    await w2.write_user_message(request_id="r2", content="again")
+
+    lines = _read_lines(w1.path)
+    seqs = [line["seq"] for line in lines if "seq" in line]
+    assert seqs == [1, 2, 3]
+    assert lines[-1]["type"] == "UserMessage"
+    assert lines[-1]["request_id"] == "r2"

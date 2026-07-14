@@ -159,29 +159,6 @@ def load_ndjson(path: Path) -> list[dict[str, Any]]:
     return records
 
 
-def reconstruct_messages(records: list[dict[str, Any]]) -> dict[tuple[str, int], list[dict[str, Any]]]:
-    """Rebuild full message lists from delta-encoded ProviderRequest records."""
-    rebuilt: dict[tuple[str, int], list[dict[str, Any]]] = {}
-    state_by_request: dict[str, list[dict[str, Any]]] = {}
-    for rec in records:
-        if rec.get("type") != "ProviderRequest":
-            continue
-        request_id = str(rec.get("request_id") or "")
-        inner_turn = int(rec.get("inner_turn") or 0)
-        delta = list(rec.get("messages") or [])
-        offset = int(rec.get("message_offset") or 0)
-        reset = bool(rec.get("messages_reset"))
-        if reset or request_id not in state_by_request:
-            state_by_request[request_id] = list(delta)
-        else:
-            prev = state_by_request[request_id]
-            state_by_request[request_id] = (
-                prev[:offset] + list(delta) if offset <= len(prev) else prev + list(delta)
-            )
-        rebuilt[(request_id, inner_turn)] = list(state_by_request[request_id])
-    return rebuilt
-
-
 @dataclass
 class Finding:
     kind: str
@@ -824,5 +801,4 @@ def analyze_transcript(ndjson_path: Path) -> Path | None:
 __all__ = [
     "analyze_transcript",
     "analyze_records",
-    "reconstruct_messages",
 ]

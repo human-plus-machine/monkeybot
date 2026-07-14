@@ -8,7 +8,6 @@ from pathlib import Path
 from monkeybot.core.persistence.transcript_analyzer import (
     analyze_records,
     analyze_transcript,
-    reconstruct_messages,
 )
 
 
@@ -241,16 +240,6 @@ def _sample_records() -> list[dict[str, object]]:
             },
         },
     ]
-
-
-def test_reconstruct_messages_delta_encoding() -> None:
-    records = _sample_records()
-    rebuilt = reconstruct_messages(records)
-    assert ("r1", 1) in rebuilt
-    assert ("r1", 2) in rebuilt
-    assert len(rebuilt[("r1", 1)]) == 1
-    assert len(rebuilt[("r1", 2)]) == 3
-    assert rebuilt[("r1", 2)][0]["role"] == "user"
 
 
 def test_analyze_records_timeline_perf_and_smells() -> None:

@@ -131,3 +131,50 @@ async def test_registry_remove_async_analyzes_transcript(tmp_path: Path) -> None
     assert (report_dir / "report.json").is_file()
     assert (report_dir / "meta.json").is_file()
 
+
+@pytest.mark.asyncio
+async def test_registry_remove_async_awaits_active_turn_before_analysis(
+    tmp_path: Path,
+) -> None:
+    """DELETE during a running turn must not analyze until the turn finishes writing."""
+    import json
+
+    from monkeybot.core.runtime.events import TurnComplete, UsageTotals
+
+    reg = SessionRegistry()
+    bus = reg.create("s-race", agent_md=None, created_at_ms=0)
+    writer = TranscriptWriter("s-race", workspace_root=tmp_path)
+    await writer.ensure_manifest(model="gpt-test", provider="fake")
+    await writer.write_user_message(request_id="r1", content="hi")
+    bus.transcript_writer = writer
+    bus.current_request_id = "r1"
+
+    wrote_late = asyncio.Event()
+
+    async def _slow_turn() -> None:
+        # Simulate a turn that still has work after DELETE detaches the session.
+        await asyncio.sleep(0.05)
+        assert bus.cancel_requested_for == "r1"
+        await writer.write_event(
+            TurnComplete(request_id="r1", usage=UsageTotals(duration_ms=12))
+        )
+        bus.current_request_id = None
+        wrote_late.set()
+
+    bus.active_turn_task = asyncio.create_task(_slow_turn())
+
+    result = await reg.remove_async("s-race")
+    assert result.deleted is True
+    assert wrote_late.is_set()
+    assert result.transcript_report_dir is not None
+
+    lines = [
+        json.loads(line)
+        for line in writer.path.read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    types = [line.get("type") for line in lines]
+    assert "TurnComplete" in types
+    report = json.loads((Path(result.transcript_report_dir) / "report.json").read_text())
+    # Analysis ran after the late TurnComplete, so the turn is closed cleanly.
+    assert report["scorecard"]["turn_count"] >= 1

@@ -72,6 +72,30 @@ def _find_existing_session_dir(transcripts_root: Path, safe_id: str) -> Path | N
     return matches[0] if matches else None
 
 
+def _max_seq_in_transcript(path: Path) -> int:
+    """Return the highest ``seq`` already written to an NDJSON transcript, or 0."""
+    if not path.is_file():
+        return 0
+    max_seq = 0
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(obj, dict):
+                    seq = obj.get("seq")
+                    if isinstance(seq, int) and seq > max_seq:
+                        max_seq = seq
+    except OSError:
+        return 0
+    return max_seq
+
+
 class TranscriptWriter:
     """Append-only NDJSON transcript writer for one gateway session.
 
@@ -98,8 +122,10 @@ class TranscriptWriter:
             self._session_dir = transcripts_root / folder
         self._path = self._session_dir / _TRANSCRIPT_FILENAME
         self._lock = asyncio.Lock()
-        self._manifest_written = False
-        self._seq = 0
+        self._manifest_written = self._path.is_file()
+        # Resume from the highest seq already on disk so reused session dirs
+        # never emit duplicate evidence pointers.
+        self._seq = _max_seq_in_transcript(self._path) if existing is not None else 0
         self._include_live = (
             transcript_include_live_from_env() if include_live is None else include_live
         )
@@ -140,6 +166,14 @@ class TranscriptWriter:
             except OSError:
                 logger.warning("transcript manifest write failed for %s", self._session_id, exc_info=True)
             self._manifest_written = True
+
+    async def drain(self) -> None:
+        """Wait until any in-flight append holds the lock (then release).
+
+        Used by session removal so offline analysis does not race a late write.
+        """
+        async with self._lock:
+            return
 
     async def _append_line(self, record: dict[str, Any]) -> None:
         async with self._lock:

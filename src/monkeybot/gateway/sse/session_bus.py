@@ -5,6 +5,7 @@ In-memory per-session SSE bus with replay buffer and live subscribers.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 from collections import deque
@@ -24,6 +25,9 @@ from .sse import format_data_event
 logger = logging.getLogger(__name__)
 
 PENDING_RESPONSE_TIMEOUT_SEC: float = float(os.environ.get("PENDING_RESPONSE_TIMEOUT_SEC", "300"))
+# Soft-cancel wait before hard-cancelling an in-flight turn on session delete.
+_QUIESCE_TURN_TIMEOUT_SEC: float = float(os.environ.get("MONKEYBOT_QUIESCE_TURN_TIMEOUT_SEC", "30"))
+_QUIESCE_HARD_CANCEL_TIMEOUT_SEC: float = 5.0
 
 
 @dataclass(frozen=True)
@@ -81,6 +85,8 @@ class SessionBus:
         """Process-local 'always allow' rememberies (not shared across gateway replicas)."""
         self.follow_up_retry_task: asyncio.Task[None] | None = None
         """Scheduled drain retry after a failed durable turn-lock acquire."""
+        self.active_turn_task: asyncio.Task[None] | None = None
+        """Background turn task scheduled by ``_schedule_turn``; awaited on DELETE."""
 
     def cancel_follow_up_retry(self) -> None:
         """Cancel any pending follow-up lock-retry task."""
@@ -163,6 +169,36 @@ class SessionBus:
         """Remove a subscriber queue (call from SSE disconnect finally)."""
         async with self._lock:
             self._subscribers.discard(queue)
+
+    async def quiesce_active_turn(
+        self,
+        *,
+        timeout_sec: float | None = None,
+    ) -> None:
+        """Soft-cancel the in-flight turn, await it, then drain the transcript writer.
+
+        Analysis must not race late ``ToolCallResult`` / ``TurnComplete`` appends.
+        """
+        rid = self.current_request_id
+        if rid is not None:
+            self.cancel_requested_for = rid
+        task = self.active_turn_task
+        wait_sec = _QUIESCE_TURN_TIMEOUT_SEC if timeout_sec is None else timeout_sec
+        if task is not None and not task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=wait_sec)
+            except TimeoutError:
+                logger.warning(
+                    "active turn did not finish before quiesce timeout; hard-cancelling"
+                )
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, TimeoutError):
+                    await asyncio.wait_for(task, timeout=_QUIESCE_HARD_CANCEL_TIMEOUT_SEC)
+            except asyncio.CancelledError:
+                pass
+        writer = self.transcript_writer
+        if writer is not None:
+            await writer.drain()
 
 
 async def _await_user_response(
@@ -263,10 +299,11 @@ class SessionRegistry:
         return RemoveResult(deleted=True)
 
     async def remove_async(self, session_id: str) -> RemoveResult:
-        """Detach session and analyze its transcript (via ``asyncio.to_thread``)."""
+        """Detach session, quiesce any in-flight turn, then analyze its transcript."""
         bus = self._detach(session_id)
         if bus is None:
             return RemoveResult(deleted=False)
+        await bus.quiesce_active_turn()
         writer = bus.transcript_writer
         if writer is None:
             return RemoveResult(deleted=True)
