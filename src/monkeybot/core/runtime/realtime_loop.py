@@ -21,8 +21,6 @@ from monkeybot.core.attachments.store import AttachmentStore
 from monkeybot.core.context import (
     PendingResponseBusPort,
     TurnContext,
-    LOOPS_REGISTRY_MUTATING_TOOLS,
-    MCP_REGISTRY_MUTATING_TOOLS,
     refresh_memory_index,
     refresh_tools_after_loops_change,
     refresh_tools_after_mcp_change,
@@ -61,6 +59,7 @@ from monkeybot.core.types.content_blocks import (
 from .loop import (
     ToolExecutorPort,
     _await_user_response_any,
+    _note_registry_mutation,
     _rejected_tool_batch_error,
     _should_reject_tool_batch,
 )
@@ -568,16 +567,12 @@ async def run_realtime_turn(
                             resolved_blocks = item
                     if resolved_blocks is not None:
                         result = ToolExecutionResult.ok_blocks(resolved_blocks)
-                if (
-                    result.error is None
-                    and call.name in MCP_REGISTRY_MUTATING_TOOLS
-                ):
-                    mcp_registry_mutated = True
-                if (
-                    result.error is None
-                    and call.name in LOOPS_REGISTRY_MUTATING_TOOLS
-                ):
-                    loops_registry_mutated = True
+                mcp_registry_mutated, loops_registry_mutated = _note_registry_mutation(
+                    call,
+                    result,
+                    mcp_mutated=mcp_registry_mutated,
+                    loops_mutated=loops_registry_mutated,
+                )
 
             if inject_text and inject_texts_out is not None:
                 inject_texts_out.append(inject_text)

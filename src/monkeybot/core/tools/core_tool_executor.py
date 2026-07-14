@@ -1326,12 +1326,17 @@ class CoreToolExecutor(ToolExecutorPort):
     async def _tool_disable_loops(self) -> tuple[str | None, str | None]:
         already = self._loops_registry.advertised
         self._loops_registry.advertised = False
-        logger.info("disable_loops ok %s", kv(was_advertised=already))
+        dropped = len(SCHEDULED_LOOP_TOOL_DEFS) if already else 0
+        logger.info(
+            "disable_loops ok %s",
+            kv(was_advertised=already, tools=dropped),
+        )
         return (
             _j(
                 {
                     "ok": True,
                     "was_advertised": already,
+                    "tools_dropped": dropped,
                     "disconnected": True,
                     "note": (
                         "Scheduled-loop tools drop on the next model step this turn. "

@@ -134,10 +134,14 @@ LOOPS_REGISTRY_MUTATING_TOOLS = frozenset(
 
 @dataclass
 class LoopsToolRegistry:
-    """Process-shared progressive-loop advertisement (mirrors MCP client connection state).
+    """Process-local progressive-loop advertisement (mirrors MCP client connection state).
 
     Gateway deps hold one instance for the process lifetime so ``enable_loops`` sticks
     across user turns until ``disable_loops`` (or process restart).
+
+    Not shared across gateway replicas: multi-instance deploys need a single replica
+    or sticky routing so enable/disable stays consistent for a session (same tradeoff
+    as in-process MCP connections).
     """
 
     advertised: bool = False

@@ -1932,6 +1932,7 @@ async def test_enable_and_disable_loops_toggle_advertisement(tmp_path: Path) -> 
     dbody = json.loads(disabled.blocks[0].text)  # type: ignore[index]
     assert dbody["ok"] is True
     assert dbody["was_advertised"] is True
+    assert dbody["tools_dropped"] == len(body["tools"])
     assert ex2.loops_advertised is False
     assert registry.advertised is False
 

@@ -7,7 +7,7 @@
 
 1. **Meta-tool by default** — only `enable_loops` stays in the core tool list.
 2. **Lifecycle tools on demand** — `start_loop`, `loop_status`, `pause_loop`, `resume_loop`, `stop_loop`, and `disable_loops` stay out of the provider payload until activated.
-3. **Activate with `enable_loops`** — requires durable storage (`DB_URL`). Success returns the tool list; new schemas appear on the **next model step this turn**. Advertisement is process-shared (like MCP connections): it sticks across user turns until `disable_loops` or process restart.
+3. **Activate with `enable_loops`** — requires durable storage (`DB_URL`). Success returns the tool list; new schemas appear on the **next model step this turn**. Advertisement is process-local (like MCP connections): it sticks across user turns on that gateway process until `disable_loops` or process restart. Multi-replica gateways need a single instance or sticky routing so enable/disable stays consistent for a session.
 4. **Deactivate with `disable_loops`** — drops progressive loop tools (including itself) from the next model step. Running loops keep scheduler state; call `stop_loop` first to end them.
 5. **Default skill** — `monkeybot new` installs `skills/loop/SKILL.md` with the procedure (plan → guards → confirm → manage).
 
