@@ -1529,7 +1529,7 @@ async def test_task_tool_queue_mode_enqueues_pending_run(
 
 
 @pytest.mark.asyncio
-async def test_render_image_returns_image_block(tmp_path: Path) -> None:
+async def test_load_file_from_path_returns_image_block(tmp_path: Path) -> None:
     from monkeybot.core.attachments.store import FilesystemAttachmentStore
     from monkeybot.core.types.content_blocks import Image
 
@@ -1556,7 +1556,7 @@ async def test_render_image_returns_image_block(tmp_path: Path) -> None:
     )
 
     result = await ex.execute(
-        call=ToolCall(call_id="ri1", name="render_image", args={"path": rel}),
+        call=ToolCall(call_id="lf1", name="load_file", args={"path": rel}),
         ctx=_ctx(),
     )
     assert result.error is None
@@ -1568,17 +1568,36 @@ async def test_render_image_returns_image_block(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_render_image_rejects_non_image(tmp_path: Path) -> None:
+async def test_load_file_rejects_plain_text_path(tmp_path: Path) -> None:
     (tmp_path / "mem").mkdir(exist_ok=True)
     (tmp_path / "skills").mkdir(exist_ok=True)
     (tmp_path / "notes.txt").write_text("hello", encoding="utf-8")
     ex = _make_executor(tmp_path)
     result = await ex.execute(
-        call=ToolCall(call_id="ri2", name="render_image", args={"path": "./notes.txt"}),
+        call=ToolCall(call_id="lf2", name="load_file", args={"path": "./notes.txt"}),
         ctx=_ctx(),
     )
     assert result.error is not None
-    assert "image" in result.error.lower()
+    assert "read_file" in result.error.lower() or "pdf" in result.error.lower()
+
+
+@pytest.mark.asyncio
+async def test_load_file_from_path_returns_pdf_file_block(tmp_path: Path) -> None:
+    from monkeybot.core.types.content_blocks import File
+
+    (tmp_path / "mem").mkdir(exist_ok=True)
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    pdf_bytes = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n"
+    (tmp_path / "doc.pdf").write_bytes(pdf_bytes)
+    ex = _make_executor(tmp_path)
+    result = await ex.execute(
+        call=ToolCall(call_id="lf3", name="load_file", args={"path": "./doc.pdf"}),
+        ctx=_ctx(),
+    )
+    assert result.error is None
+    assert any(isinstance(b, File) for b in result.blocks)
+    block = next(b for b in result.blocks if isinstance(b, File))
+    assert block.mime_type == "application/pdf"
 
 
 @pytest.mark.asyncio

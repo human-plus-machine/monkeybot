@@ -216,7 +216,7 @@ Files are stored under `{workspace}/.monkeybot/attachments/{session_id}/{attachm
 1. Upload via `POST /attachments`.
 2. Reply with `attachmentRef` — provider sees pixels on that turn only.
 3. Turn end — history rewrites refs to frozen `text` descriptors; gateway emits `AttachmentDescriptor` SSE per attachment.
-4. Later turns — agent uses `read_attachment` tool to reload pixels when needed.
+4. Later turns — agent uses `load_file` tool to reload pixels when needed.
 
 ---
 

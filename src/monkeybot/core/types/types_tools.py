@@ -6,20 +6,28 @@ architecture docs; defining it once avoids import cycles across those modules.
 See Story 2 ``types_tools`` task for canonical fields.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
 class ToolDef:
-    """Tool schema surfaced to providers (JSON-schema ``input_schema``).
+    """Tool schema for providers plus harness-only execution flags.
+
+    Model-facing payloads must use :meth:`to_model_schema` (name, description,
+    input_schema only). ``parallel_safe`` and ``doom_loop_exempt`` are harness
+    metadata and must not be sent to providers or recorded as model tool schemas
+    in transcripts.
 
     ``parallel_safe`` marks read-only (or otherwise concurrent-safe) tools that
     the harness may execute together in one batch. Mutating tools stay serial
-    unless explicitly opted in. Providers ignore this field.
+    unless explicitly opted in.
 
     ``doom_loop_exempt`` skips the identical name+args doom-loop guard for tools
     that are expected to repeat with the same arguments (e.g. ``loop_status``
-    polling). Providers ignore this field.
+    polling).
     """
 
     name: str
@@ -27,3 +35,11 @@ class ToolDef:
     input_schema: dict[str, object]
     parallel_safe: bool = False
     doom_loop_exempt: bool = False
+
+    def to_model_schema(self) -> dict[str, Any]:
+        """JSON shape advertised to the model (excludes harness-only flags)."""
+        return {
+            "name": self.name,
+            "description": self.description,
+            "input_schema": self.input_schema,
+        }

@@ -828,7 +828,7 @@ async def test_run_tool_image_result_yields_image_block() -> None:
     prov = FakeProvider(
         [
             [
-                ToolCall(call_id="c1", name="render_image", args={"path": "./x.png"}),
+                ToolCall(call_id="c1", name="load_file", args={"path": "./x.png"}),
                 Done(),
             ],
             [TextDelta(text="done"), Done()],

@@ -60,12 +60,9 @@ Want to create your own skill? Follow this pattern:
 cp skills/diagnostics/diagnostics.py skills/my-skill/my-skill.py
 ```
 
-### 2. Modify the @tool Function
+### 2. Modify the Entry Function
 
 ```python
-from monkeybot.core.tools.workspace_tools import tool
-
-@tool
 async def my_custom_tool(param1: str, param2: int = 10) -> str:
     """Tool description that the LLM reads to understand when to use it.
     
@@ -105,25 +102,21 @@ print(result)
 
 ## Key Patterns Demonstrated
 
-### 1. Using @tool Decorator
+### 1. Plain async entry point
 
 ```python
-from monkeybot.core.tools.workspace_tools import tool
-
-@tool
 async def my_tool(param: str) -> str:
     """Tool description."""
     return f"Result: {param}"
 ```
 
-The `@tool` decorator:
-- Marks the function for tooling-style discovery in simple orchestrators
-- Preserves the original name and docstring for documentation
+Skills are ordinary Python callables. The harness discovers them via `SKILL.md`
+and runs them with `run_command` (or imports them in tests) — no `@tool`
+decorator is required.
 
 ### 2. Async Execution
 
 ```python
-@tool
 async def my_tool():  # ← Note: async
     result = await some_async_operation()
     return result

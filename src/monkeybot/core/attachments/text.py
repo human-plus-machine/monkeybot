@@ -14,9 +14,11 @@ class ParsedAttachmentDescriptor:
     description: str
 
 
+# Accept current load_file wording and legacy read_attachment descriptors.
 _ATTACHMENT_LINE_RE = re.compile(
     r'^\[attachment\s+(?P<id>\S+)\s+(?P<filename>.+?)\s+\((?P<mime>[^)]+)\):\s+'
-    r'(?P<desc>.+?)\.\s+Call read_attachment\("(?P=id)"\)\s+to view pixels again\.\]$'
+    r'(?P<desc>.+?)\.\s+Call (?:load_file(?:\(attachment_id=)?|read_attachment\()'
+    r'"(?P=id)"\)?\s+to (?:reload|view pixels again)\.\]$'
 )
 
 
@@ -32,7 +34,7 @@ def render_attachment_descriptor_text(
         desc = desc[:497].rstrip() + "..."
     return (
         f'[attachment {attachment_id} {filename} ({mime_type}): {desc}. '
-        f'Call read_attachment("{attachment_id}") to view pixels again.]'
+        f'Call load_file(attachment_id="{attachment_id}") to reload.]'
     )
 
 
@@ -57,7 +59,7 @@ def render_tool_media_freeze_text(
     if attachment_id:
         return (
             f"[{tool_name} {attachment_id} result: {kind} shown earlier; "
-            f'call read_attachment("{attachment_id}") to reload.]'
+            f'call load_file(attachment_id="{attachment_id}") to reload.]'
         )
     return f"[{tool_name} result: {kind} shown earlier; call tool again to reload.]"
 

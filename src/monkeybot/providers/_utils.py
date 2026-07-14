@@ -67,10 +67,7 @@ def safe_parse_tool_args(
 
 
 def anthropic_tool_defs(tools: Sequence[Any]) -> list[dict[str, Any]]:
-    return [
-        {"name": t.name, "description": t.description, "input_schema": t.input_schema}
-        for t in tools
-    ]
+    return [t.to_model_schema() for t in tools]
 
 
 def split_leading_system(messages: Sequence[Message]) -> tuple[str, list[Message]]:
