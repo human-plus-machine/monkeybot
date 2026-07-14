@@ -361,3 +361,36 @@ def test_turn_aborted_includes_cancel_ok() -> None:
         assert aborted[0].payload.get("cancel_ok") is True
 
     asyncio.run(_run())
+
+
+def test_close_deletes_session_and_captures_report_dir() -> None:
+    async def _run() -> None:
+        controller = ChatSessionController(base="http://localhost:8080")
+        controller.session_id = "sess-close"
+        client = AsyncMock()
+        request = httpx.Request("DELETE", "http://localhost:8080/sessions/sess-close")
+        client.delete = AsyncMock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "deleted": True,
+                    "transcript_report_dir": "/tmp/ws/.monkeybot/transcripts/20260714T150000Z_sess-close",
+                },
+                request=request,
+            )
+        )
+        client.aclose = AsyncMock()
+        controller._client = client
+
+        await controller.close()
+        client.delete.assert_awaited_once_with("http://localhost:8080/sessions/sess-close")
+        assert (
+            controller.transcript_report_dir
+            == "/tmp/ws/.monkeybot/transcripts/20260714T150000Z_sess-close"
+        )
+        client.aclose.assert_awaited_once()
+        # Idempotent
+        await controller.close()
+        assert client.delete.await_count == 1
+
+    asyncio.run(_run())

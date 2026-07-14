@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
 from monkeybot.core.context.memory_prompt import _curation_cache, reset_curation_cache_for_tests
+from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.runtime.events import Thinking
 from monkeybot.gateway.sse.session_bus import SessionBus, SessionRegistry
 from monkeybot.gateway.sse.sse import agent_event_to_wire_dict, format_active_requests
@@ -74,13 +76,15 @@ def test_registry_remove_drops_session_and_returns_true() -> None:
     reg.create("s1", agent_md=None, created_at_ms=0)
     assert reg.get("s1") is not None
 
-    assert reg.remove("s1") is True
+    result = reg.remove("s1")
+    assert result.deleted is True
+    assert result.transcript_report_dir is None
     assert reg.get("s1") is None
 
 
 def test_registry_remove_unknown_session_returns_false() -> None:
     reg = SessionRegistry()
-    assert reg.remove("nope") is False
+    assert reg.remove("nope").deleted is False
 
 
 def test_registry_remove_evicts_curation_cache_entry() -> None:
@@ -108,4 +112,22 @@ async def test_registry_remove_cancels_pending_responses() -> None:
     reg.remove("s1")
 
     assert fut.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_registry_remove_async_analyzes_transcript(tmp_path: Path) -> None:
+    reg = SessionRegistry()
+    bus = reg.create("s-tx", agent_md=None, created_at_ms=0)
+    writer = TranscriptWriter("s-tx", workspace_root=tmp_path)
+    await writer.ensure_manifest(model="gpt-test", provider="fake")
+    await writer.write_user_message(request_id="r1", content="hi")
+    bus.transcript_writer = writer
+
+    result = await reg.remove_async("s-tx")
+    assert result.deleted is True
+    assert result.transcript_report_dir is not None
+    report_dir = Path(result.transcript_report_dir)
+    assert (report_dir / "brief.md").is_file()
+    assert (report_dir / "report.json").is_file()
+    assert (report_dir / "meta.json").is_file()
 

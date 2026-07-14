@@ -1,9 +1,10 @@
 """Session transcript capture for harness debugging (internal use only).
 
 Writes one append-only NDJSON file per session under
-``{workspace_root}/.monkeybot/transcripts/{session_id}.ndjson``: a manifest
-record on the first write, followed by durable :class:`~monkeybot.core.runtime.events.AgentEvent`
-boundaries (OpenCode V2-style), plus raw provider request/response records.
+``{workspace_root}/.monkeybot/transcripts/{UTC_compact}_{session_id}/transcript.ndjson``:
+a manifest record on the first write, followed by durable
+:class:`~monkeybot.core.runtime.events.AgentEvent` boundaries (OpenCode V2-style),
+plus raw provider request/response records.
 
 Live-only streaming deltas (``AssistantDelta``, ``ToolInputDelta``, …) are
 skipped by default so the transcript is a replay-grade durable log. Set
@@ -30,6 +31,7 @@ from monkeybot.core.runtime.events import AgentEvent, event_to_json, is_durable_
 logger = logging.getLogger(__name__)
 
 _TRANSCRIPT_REL_DIR = Path(".monkeybot") / "transcripts"
+_TRANSCRIPT_FILENAME = "transcript.ndjson"
 
 
 def transcript_enabled_from_env() -> bool:
@@ -48,6 +50,28 @@ def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + f".{int(time.time() * 1000) % 1000:03d}Z"
 
 
+def _utc_compact_from_iso(started_at: str) -> str:
+    """Derive ``YYYYMMDDTHHMMSSZ`` from an ISO-ish UTC timestamp."""
+    # "2026-07-14T15:42:01.123Z" -> "20260714T154201Z"
+    bare = started_at.rstrip("Z")
+    date_part, _, time_part = bare.partition("T")
+    hhmmss = time_part.split(".", 1)[0] if time_part else "000000"
+    return f"{date_part.replace('-', '')}T{hhmmss.replace(':', '')}Z"
+
+
+def _find_existing_session_dir(transcripts_root: Path, safe_id: str) -> Path | None:
+    """Reuse an existing ``*_{safe_id}`` session folder when present."""
+    if not transcripts_root.is_dir():
+        return None
+    suffix = f"_{safe_id}"
+    matches = sorted(
+        (p for p in transcripts_root.iterdir() if p.is_dir() and p.name.endswith(suffix)),
+        key=lambda p: p.name,
+        reverse=True,
+    )
+    return matches[0] if matches else None
+
+
 class TranscriptWriter:
     """Append-only NDJSON transcript writer for one gateway session.
 
@@ -64,7 +88,15 @@ class TranscriptWriter:
     ) -> None:
         self._session_id = session_id
         safe_id = sanitize_path_component(session_id)
-        self._path = workspace_root.resolve() / _TRANSCRIPT_REL_DIR / f"{safe_id}.ndjson"
+        self._started_at = _now_iso()
+        transcripts_root = workspace_root.resolve() / _TRANSCRIPT_REL_DIR
+        existing = _find_existing_session_dir(transcripts_root, safe_id)
+        if existing is not None:
+            self._session_dir = existing
+        else:
+            folder = f"{_utc_compact_from_iso(self._started_at)}_{safe_id}"
+            self._session_dir = transcripts_root / folder
+        self._path = self._session_dir / _TRANSCRIPT_FILENAME
         self._lock = asyncio.Lock()
         self._manifest_written = False
         self._seq = 0
@@ -75,6 +107,10 @@ class TranscriptWriter:
     @property
     def path(self) -> Path:
         return self._path
+
+    @property
+    def session_dir(self) -> Path:
+        return self._session_dir
 
     async def ensure_manifest(self, **manifest_fields: Any) -> None:
         """Write the manifest as line 1 if this is a new transcript file (idempotent)."""
@@ -91,7 +127,7 @@ class TranscriptWriter:
                 record = {
                     "type": "SessionManifest",
                     "session_id": self._session_id,
-                    "started_at": _now_iso(),
+                    "started_at": self._started_at,
                     "durable_only": not self._include_live,
                     **manifest_fields,
                 }

@@ -558,7 +558,7 @@ async def test_run_usage_defaults_when_missing_usage_events() -> None:
     assert tc.usage.input_tokens == 0
     assert tc.usage.output_tokens == 0
     assert tc.usage.cached_tokens == 0
-    assert tc.usage.duration_ms == 0
+    assert tc.usage.duration_ms >= 0
 
 
 @pytest.mark.asyncio

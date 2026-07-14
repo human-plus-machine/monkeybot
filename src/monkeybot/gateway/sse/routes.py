@@ -43,6 +43,7 @@ from .models import (
     CancelRequest,
     CreateSessionRequest,
     CreateSessionResponse,
+    DeleteSessionResponse,
     ElicitationPOST,
     FrontendToolResultPOST,
     HealthResponse,
@@ -550,18 +551,23 @@ def create_app(
             ) from None
         return CreateSessionResponse(session_id=sid, created_at=created_at_ms)
 
-    @api.delete("/sessions/{session_id}", status_code=204)
+    @api.delete("/sessions/{session_id}", response_model=DeleteSessionResponse)
     async def delete_session(
         session_id: str,
         reg_dep: SessionRegistry = Depends(get_registry),
-    ) -> Response:
+    ) -> DeleteSessionResponse:
         """End a session: cancel pending work and free its in-process state.
 
-        Idempotent — deleting an unknown or already-deleted session_id is a no-op
-        204 rather than a 404, since the end state (no session) is identical.
+        Idempotent — deleting an unknown or already-deleted session_id returns
+        ``deleted=false`` rather than a 404, since the end state (no session) is
+        identical. When transcripts were enabled for the session, runs offline
+        analysis and returns ``transcript_report_dir``.
         """
-        reg_dep.remove(session_id)
-        return Response(status_code=204)
+        result = await reg_dep.remove_async(session_id)
+        return DeleteSessionResponse(
+            deleted=result.deleted,
+            transcript_report_dir=result.transcript_report_dir,
+        )
 
     @api.post("/sessions/{session_id}/reply", response_model=ReplyResponse)
     async def post_reply(

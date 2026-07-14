@@ -59,6 +59,16 @@ class CreateSessionResponse(BaseModel):
     created_at: int = Field(..., description="Unix time in milliseconds.")
 
 
+class DeleteSessionResponse(BaseModel):
+    """DELETE /sessions/{id} response (200)."""
+
+    deleted: bool
+    transcript_report_dir: str | None = Field(
+        default=None,
+        description="Absolute path to the session transcript folder when analysis ran.",
+    )
+
+
 class ReplyBodyFields(BaseModel):
     """Shared ``message`` / ``content`` fields for reply, steer, and queue."""
 

@@ -5,18 +5,33 @@ In-memory per-session SSE bus with replay buffer and live subscribers.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from collections import deque
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
+from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.transcript import TranscriptWriter
+from monkeybot.core.persistence.transcript_analyzer import analyze_transcript
 from monkeybot.core.runtime.input_admission import InputAdmission
 from monkeybot.core.tools.permission import SessionApprovals
 
 from .sse import format_data_event
 
+logger = logging.getLogger(__name__)
+
 PENDING_RESPONSE_TIMEOUT_SEC: float = float(os.environ.get("PENDING_RESPONSE_TIMEOUT_SEC", "300"))
+
+
+@dataclass(frozen=True)
+class RemoveResult:
+    """Outcome of removing a session from the registry."""
+
+    deleted: bool
+    transcript_report_dir: str | None = None
 
 
 def _replay_maxlen_from_env() -> int:
@@ -203,19 +218,11 @@ class SessionRegistry:
         self._sessions[session_id] = bus
         return bus
 
-    def remove(self, session_id: str) -> bool:
-        """Drop a session bus and any auxiliary per-session state keyed by it.
-
-        Cancels outstanding pending-response futures so awaiting callers don't
-        hang, then evicts the memory-curation cache entry for this thread id
-        (see ``memory_prompt._curation_cache``) so both structures share the
-        same lifecycle instead of growing unbounded for the life of the process.
-
-        Returns True if a session was found and removed, False otherwise.
-        """
+    def _detach(self, session_id: str) -> SessionBus | None:
+        """Pop a session and clear in-process auxiliaries; does not analyze transcripts."""
         bus = self._sessions.pop(session_id, None)
         if bus is None:
-            return False
+            return None
         bus.abandon_pending_cancel_all()
         bus.cancel_follow_up_retry()
         bus.admission.clear_all()
@@ -223,4 +230,50 @@ class SessionRegistry:
         from monkeybot.core.context.memory_prompt import evict_curation_cache
 
         evict_curation_cache(session_id)
-        return True
+        return bus
+
+    @staticmethod
+    def _report_dir_for_path(path: Path) -> str | None:
+        """Run offline transcript analysis; never raises."""
+        try:
+            out = analyze_transcript(path)
+        except Exception:
+            logger.warning(
+                "transcript analysis failed %s",
+                kv(path=path),
+                exc_info=True,
+            )
+            return None
+        return str(out) if out is not None else None
+
+    def remove(self, session_id: str) -> RemoveResult:
+        """Drop a session bus and any auxiliary per-session state keyed by it.
+
+        Cancels outstanding pending-response futures so awaiting callers don't
+        hang, then evicts the memory-curation cache entry for this thread id
+        (see ``memory_prompt._curation_cache``) so both structures share the
+        same lifecycle instead of growing unbounded for the life of the process.
+
+        Does not run transcript analysis — use :meth:`remove_async` for that
+        (DELETE /sessions and gateway shutdown).
+        """
+        bus = self._detach(session_id)
+        if bus is None:
+            return RemoveResult(deleted=False)
+        return RemoveResult(deleted=True)
+
+    async def remove_async(self, session_id: str) -> RemoveResult:
+        """Detach session and analyze its transcript (via ``asyncio.to_thread``)."""
+        bus = self._detach(session_id)
+        if bus is None:
+            return RemoveResult(deleted=False)
+        writer = bus.transcript_writer
+        if writer is None:
+            return RemoveResult(deleted=True)
+        report_dir = await asyncio.to_thread(self._report_dir_for_path, writer.path)
+        return RemoveResult(deleted=True, transcript_report_dir=report_dir)
+
+    async def remove_all_async(self) -> None:
+        """Best-effort analyze + remove every remaining session (gateway shutdown)."""
+        for sid in list(self._sessions):
+            await self.remove_async(sid)

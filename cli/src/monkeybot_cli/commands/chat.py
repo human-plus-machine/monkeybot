@@ -621,6 +621,11 @@ async def _plain_chat_session(
             await controller.submit(user_line)
     finally:
         await controller.close()
+        if controller.transcript_report_dir:
+            print(
+                f"{_DIM}Transcript report → {controller.transcript_report_dir}{_RESET}",
+                flush=True,
+            )
         await renderer.stop_io_worker()
     return 1 if controller.stream_error else 0
 
@@ -771,9 +776,16 @@ def run_chat(args: argparse.Namespace) -> int:
         return 130
     finally:
         if proc and proc.poll() is None:
-            proc.kill()
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                proc.wait(timeout=1)
+            # Prefer graceful shutdown so gateway lifespan can analyze open sessions.
+            with contextlib.suppress(ProcessLookupError):
+                proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    proc.wait(timeout=1)
         if spawned is not None:
             _cleanup_gateway_log(spawned)
 

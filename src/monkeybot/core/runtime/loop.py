@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import shutil
+import time
 from collections.abc import AsyncIterator, Sequence
 from contextlib import aclosing
 from pathlib import Path
@@ -1134,6 +1135,7 @@ async def run(
     internal harness calls (history summarization, memory organizer) never set this flag.
     """
     usage = Usage()
+    t0 = time.monotonic()
     trace_id_capture: list[str | None] = [None]
     blocks = _normalize_user_content(user_content)
     effective_max = _effective_max_turns(max_turns)
@@ -1187,6 +1189,7 @@ async def run(
         yield Error(request_id=ctx.request_id, error=str(exc))
     finally:
         await _drain_hook_settlement(hook_manager)
+        usage.duration_ms = int((time.monotonic() - t0) * 1000)
         logger.debug(
             "harness run end %s",
             kv(
@@ -1194,6 +1197,7 @@ async def run(
                 thread_id=ctx.thread_id,
                 input_tokens=usage.input_tokens,
                 output_tokens=usage.output_tokens,
+                duration_ms=usage.duration_ms,
             ),
         )
         yield TurnComplete(

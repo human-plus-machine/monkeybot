@@ -191,9 +191,12 @@ async def test_file_created_under_dot_monkeybot_transcripts(tmp_path: Path) -> N
     writer = TranscriptWriter("abc-123", workspace_root=tmp_path)
     await writer.ensure_manifest(model="gpt-5")
 
-    expected = tmp_path / ".monkeybot" / "transcripts" / "abc-123.ndjson"
-    assert writer.path == expected
-    assert expected.is_file()
+    transcripts_root = tmp_path / ".monkeybot" / "transcripts"
+    assert writer.path.parent.parent == transcripts_root
+    assert writer.path.name == "transcript.ndjson"
+    assert writer.session_dir.name.endswith("_abc-123")
+    assert writer.path == writer.session_dir / "transcript.ndjson"
+    assert writer.path.is_file()
 
 
 @pytest.mark.asyncio
@@ -203,7 +206,19 @@ async def test_transcript_path_sanitizes_session_id(tmp_path: Path) -> None:
     writer = TranscriptWriter(malicious, workspace_root=tmp_path)
     await writer.ensure_manifest(model="gpt-5")
 
-    expected = tmp_path / ".monkeybot" / "transcripts" / f"{sanitize_path_component(malicious)}.ndjson"
-    assert writer.path == expected
-    assert expected.is_file()
+    safe = sanitize_path_component(malicious)
+    transcripts_root = tmp_path / ".monkeybot" / "transcripts"
+    assert writer.path.parent.parent == transcripts_root
+    assert writer.session_dir.name.endswith(f"_{safe}")
+    assert writer.path.name == "transcript.ndjson"
+    assert writer.path.is_file()
     assert not (tmp_path.parent.parent / "tmp" / "pwned.ndjson").exists()
+
+
+@pytest.mark.asyncio
+async def test_second_writer_reuses_existing_session_dir(tmp_path: Path) -> None:
+    w1 = TranscriptWriter("sess-reuse", workspace_root=tmp_path)
+    await w1.ensure_manifest(model="gpt-5")
+    w2 = TranscriptWriter("sess-reuse", workspace_root=tmp_path)
+    assert w2.session_dir == w1.session_dir
+    assert w2.path == w1.path
