@@ -14,7 +14,6 @@ from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any
 
-from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.attachments.config import (
     ALLOWED_MIME_TYPES,
     IMAGE_MIME_TYPES,
@@ -365,7 +364,6 @@ class CoreToolExecutor(ToolExecutorPort):
         run_command_allowed_commands: list[str] | tuple[str, ...] | None = None,
         run_command_allowed_path_prefixes: list[str] | tuple[str, ...] | None = None,
         attachment_store: AttachmentStore | None = None,
-        attachment_catalog: SessionAttachmentCatalog | None = None,
         run_store: RunStore | None = None,
         scheduled_loop_store: ScheduledLoopStore | None = None,
         subagent_registry: dict[str, SubagentConfig] | None = None,
@@ -380,7 +378,6 @@ class CoreToolExecutor(ToolExecutorPort):
         self._memory = memory
         self._mcp = mcp
         self._attachment_store = attachment_store
-        self._attachment_catalog = attachment_catalog
         self._run_store = run_store
         self._scheduled_loop_store = scheduled_loop_store
         self._subagent_registry = dict(subagent_registry or {})
@@ -621,16 +618,24 @@ class CoreToolExecutor(ToolExecutorPort):
             "load_file requires attachment_id or path"
         )
 
+    @staticmethod
+    def _media_result(
+        mime: str, data_b64: str, meta: dict[str, object]
+    ) -> ToolExecutionResult:
+        if mime in IMAGE_MIME_TYPES:
+            return ToolExecutionResult.ok_blocks(
+                [Image(mime_type=mime, data=data_b64, metadata=meta)]
+            )
+        return ToolExecutionResult.ok_blocks(
+            [File(mime_type=mime, data=data_b64, metadata=meta)]
+        )
+
     def _load_file_from_attachment(
         self, attachment_id: str, ctx: TurnContext
     ) -> ToolExecutionResult:
         if self._attachment_store is None:
             return ToolExecutionResult.err("Attachments are not enabled for this session")
-        catalog = self._attachment_catalog
-        if catalog is not None and not catalog.contains(attachment_id):
-            if not self._attachment_store.exists(ctx.thread_id, attachment_id):
-                return ToolExecutionResult.err(f"Unknown attachment_id: {attachment_id}")
-        elif not self._attachment_store.exists(ctx.thread_id, attachment_id):
+        if not self._attachment_store.exists(ctx.thread_id, attachment_id):
             return ToolExecutionResult.err(f"Unknown attachment_id: {attachment_id}")
         try:
             data_b64, mime, filename = self._attachment_store.read_base64(
@@ -641,13 +646,7 @@ class CoreToolExecutor(ToolExecutorPort):
                 f"Attachment {attachment_id} expired or removed; ask user to re-upload"
             )
         meta: dict[str, object] = {"attachment_id": attachment_id, "filename": filename}
-        if mime in IMAGE_MIME_TYPES:
-            return ToolExecutionResult.ok_blocks(
-                [Image(mime_type=mime, data=data_b64, metadata=meta)]
-            )
-        return ToolExecutionResult.ok_blocks(
-            [File(mime_type=mime, data=data_b64, metadata=meta)]
-        )
+        return self._media_result(mime, data_b64, meta)
 
     def _load_file_from_path(self, path: str, ctx: TurnContext) -> ToolExecutionResult:
         try:
@@ -696,16 +695,18 @@ class CoreToolExecutor(ToolExecutorPort):
                     filename=filename,
                 )
                 meta["attachment_id"] = stored.attachment_id
-            except Exception as exc:
-                logger.warning("load_file attachment save failed: %s", exc)
+            except Exception:
+                logger.warning(
+                    "load_file attachment save failed %s",
+                    kv(
+                        request_id=ctx.request_id,
+                        thread_id=ctx.thread_id,
+                        path=path,
+                    ),
+                    exc_info=True,
+                )
 
-        if mime in IMAGE_MIME_TYPES:
-            return ToolExecutionResult.ok_blocks(
-                [Image(mime_type=mime, data=data_b64, metadata=meta)]
-            )
-        return ToolExecutionResult.ok_blocks(
-            [File(mime_type=mime, data=data_b64, metadata=meta)]
-        )
+        return self._media_result(mime, data_b64, meta)
 
     def _tool_read_file(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
         path = _str_arg(args, "path", "file_path", "file")

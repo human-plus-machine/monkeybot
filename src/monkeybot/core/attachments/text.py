@@ -14,11 +14,14 @@ class ParsedAttachmentDescriptor:
     description: str
 
 
-# Accept current load_file wording and legacy read_attachment descriptors.
+# Exact current load_file wording | exact legacy read_attachment wording.
 _ATTACHMENT_LINE_RE = re.compile(
     r'^\[attachment\s+(?P<id>\S+)\s+(?P<filename>.+?)\s+\((?P<mime>[^)]+)\):\s+'
-    r'(?P<desc>.+?)\.\s+Call (?:load_file(?:\(attachment_id=)?|read_attachment\()'
-    r'"(?P=id)"\)?\s+to (?:reload|view pixels again)\.\]$'
+    r'(?P<desc>.+?)\.\s+Call (?:'
+    r'load_file\(attachment_id="(?P=id)"\) to reload'
+    r'|'
+    r'read_attachment\("(?P=id)"\) to view pixels again'
+    r')\.\]$'
 )
 
 

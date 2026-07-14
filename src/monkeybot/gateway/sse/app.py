@@ -396,7 +396,6 @@ class GatewayLoopPort:
                 run_command_allowed_commands=_deps.run_command_allowed_commands,
                 run_command_allowed_path_prefixes=_deps.run_command_allowed_path_prefixes,
                 attachment_store=attachment_store,
-                attachment_catalog=bus.attachment_catalog,
                 run_store=storage_backend.runs() if storage_backend is not None else None,
                 scheduled_loop_store=(
                     storage_backend.scheduled_loops() if storage_backend is not None else None
