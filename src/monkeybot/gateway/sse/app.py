@@ -33,7 +33,7 @@ from monkeybot.core.config.settings import (
     normalize_model_provider,
     vertex_google_search_enabled_from_config,
 )
-from monkeybot.core.context import LoopsToolRegistry, build_context, loops_auto_advertise_from_env
+from monkeybot.core.context import LoopsToolRegistry, build_context
 from monkeybot.core.hooks import HookManager
 from monkeybot.core.llm.provider import (
     Done,
@@ -363,8 +363,6 @@ class GatewayLoopPort:
 
             storage_backend = getattr(serving.state, "storage", None)
             loops_available = storage_backend is not None
-            if loops_available and loops_auto_advertise_from_env():
-                _deps.loops_registry.advertised = True
             loops_advertised = loops_available and _deps.loops_registry.advertised
 
             try:
@@ -383,7 +381,7 @@ class GatewayLoopPort:
                     extra_tools=extra_tools,
                     subagent_registry=_deps.subagent_registry,
                     scheduled_loops_available=loops_available,
-                    loops_auto_advertise=loops_advertised,
+                    loops_advertised=loops_advertised,
                 )
             except Exception as exc:
                 logger.exception("build_context failed")

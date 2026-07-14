@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
-import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -143,11 +142,6 @@ class LoopsToolRegistry:
 
     advertised: bool = False
 
-
-def loops_auto_advertise_from_env() -> bool:
-    """True when ``MONKEYBOT_LOOPS_AUTO_ADVERTISE`` opts into eager loop-tool schemas."""
-    raw = os.environ.get("MONKEYBOT_LOOPS_AUTO_ADVERTISE", "").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
 
 # Resource/prompt meta-tools — advertised only after an MCP server is connected.
 _MCP_SERVER_FILTER_SCHEMA: dict[str, object] = {
@@ -709,7 +703,7 @@ async def build_context(
     extra_tools: Sequence[CustomTool] | None = None,
     subagent_registry: dict[str, SubagentConfig] | None = None,
     scheduled_loops_available: bool = False,
-    loops_auto_advertise: bool | None = None,
+    loops_advertised: bool = False,
 ) -> TurnContext:
     """Assemble a TurnContext from filesystem paths and the MCP client snapshot.
 
@@ -735,8 +729,8 @@ async def build_context(
             their ``execute`` method is dispatched by :class:`CoreToolExecutor`.
         subagent_registry: Optional map of named subagent personas from monkeybot.yaml.
         scheduled_loops_available: True when durable loop storage is wired (shows harness hint).
-        loops_auto_advertise: When True, include scheduled-loop lifecycle tools immediately.
-            Defaults to ``MONKEYBOT_LOOPS_AUTO_ADVERTISE`` when ``None``.
+        loops_advertised: True when the caller's ``LoopsToolRegistry`` has ``enable_loops``
+            active; includes scheduled-loop lifecycle tools immediately for this turn.
 
     Returns:
         Frozen :class:`TurnContext`.
@@ -761,10 +755,7 @@ async def build_context(
     tools.extend(mcp_client.all_tools())
     if _any_mcp_connected(mcp_client):
         tools.extend(MCP_PROGRESSIVE_META_TOOL_DEFS)
-    advertise_loops = (
-        loops_auto_advertise_from_env() if loops_auto_advertise is None else loops_auto_advertise
-    )
-    if advertise_loops and scheduled_loops_available:
+    if loops_advertised and scheduled_loops_available:
         tools.extend(SCHEDULED_LOOP_TOOL_DEFS)
     for ct in extra_tools or []:
         tools.append(ct.tool_def)

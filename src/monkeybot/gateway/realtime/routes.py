@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.config.realtime_config import RealtimeConfig
-from monkeybot.core.context import TurnContext, build_context, loops_auto_advertise_from_env
+from monkeybot.core.context import TurnContext, build_context
 from monkeybot.core.llm.realtime_provider import (
     AudioFormat,
     RealtimeAudioDelta,
@@ -117,8 +117,6 @@ async def _build_realtime_context(
     agent_path = AgentLayout.from_environment().agent_md_path
     model = os.environ.get("MODEL_NAME", "gemini-2.5-flash")
     loops_available = deps.storage is not None
-    if loops_available and loops_auto_advertise_from_env():
-        deps.loops_registry.advertised = True
     loops_advertised = loops_available and deps.loops_registry.advertised
     return await build_context(
         thread_id=session_id,
@@ -134,7 +132,7 @@ async def _build_realtime_context(
         extra_tools=[deps.web_search_tool] if deps.web_search_tool is not None else [],
         subagent_registry=deps.subagent_registry,
         scheduled_loops_available=loops_available,
-        loops_auto_advertise=loops_advertised,
+        loops_advertised=loops_advertised,
     )
 
 
@@ -146,8 +144,6 @@ def _create_tool_executor(
         raise RuntimeError("MCP client is not initialized")
     workspace_root, skills_path = _resolved_workspace_paths()
     storage = deps.storage
-    if storage is not None and loops_auto_advertise_from_env():
-        deps.loops_registry.advertised = True
     return CoreToolExecutor(
         workspace_root=workspace_root,
         memory=deps.memory,

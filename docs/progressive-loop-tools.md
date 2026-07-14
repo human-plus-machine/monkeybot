@@ -16,10 +16,9 @@
 | Key | Meaning |
 |-----|---------|
 | *(default)* | Loop progressive tools hidden until `enable_loops` |
-| `MONKEYBOT_LOOPS_AUTO_ADVERTISE=1` | Eager: advertise progressive loop tools at context build when loop storage is wired |
 | `DB_URL` / `paths.db_url` | Required for `enable_loops` / `start_loop` |
 | `MONKEYBOT_SCHEDULER_ENABLED` | Scheduler worker must run for ticks to fire |
 
 ## Why
 
-The progressive loop schemas are ~2k characters. Most chats never start a loop. Keep default turns on core tools + `enable_loops` only; pay schema cost when the model (or auto-advertise) opts in. `disable_loops` is useless until tools are advertised, so it stays progressive too.
+The progressive loop schemas are ~2k characters. Most chats never start a loop. Keep default turns on core tools + `enable_loops` only; pay schema cost only when the model opts in via `enable_loops`. `disable_loops` is useless until tools are advertised, so it stays progressive too.

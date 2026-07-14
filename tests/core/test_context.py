@@ -406,7 +406,7 @@ def test_refresh_tools_after_loops_change_adds_and_drops_lifecycle_tools() -> No
 
 
 @pytest.mark.asyncio
-async def test_build_context_auto_advertises_loop_tools_when_available(
+async def test_build_context_advertises_loop_tools_when_enabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("ATTACHMENTS_ENABLED", "false")
@@ -425,7 +425,7 @@ async def test_build_context_auto_advertises_loop_tools_when_available(
         skills_path=skills,
         mcp_client=FakeMCPClient([]),
         scheduled_loops_available=True,
-        loops_auto_advertise=True,
+        loops_advertised=True,
     )
     names = {t.name for t in ctx.tools}
     assert SCHEDULED_LOOP_TOOL_NAMES.issubset(names)

@@ -38,7 +38,7 @@ When workspace tools (`read_file`, `write_file`, `run_command`, …) appear in t
 - `run_command` — allowlisted shell with optional `timeout` (seconds). {run_command_exec_note} Shell starts in **workspace root**; use the paths listed under Runtime paths below — do NOT guess directory names. `cd` is a shell builtin and cannot be used as a bare command; use `bash -c "cd <dir> && <cmd>"` instead. Pass **`argv` as a list** with the binary first (e.g. `{{"argv": ["ls", "."]}}`); do not pass `{{"command": "ls -R", "args": []}}` — that treats `ls -R` as the binary name.
 - `enable_mcp` / `disable_mcp` — connect or drop a server declared in mcp.json by name (e.g. `browser`). Success returns connection status + tools; failure returns the error (no separate status tool). New tools appear on the **next model step this turn**.
 - `list_mcp_resources` / `read_mcp_resource` / `list_mcp_prompts` / `get_mcp_prompt` — appear only after `enable_mcp` succeeds; browse MCP resources and prompt templates from connected servers.
-- `enable_loops` — advertise scheduled-loop tools (`start_loop`, `loop_status`, `pause_loop`, `resume_loop`, `stop_loop`, `disable_loops`). New tools appear on the **next model step this turn**. Prefer the `loop` skill for procedure before starting a loop.
+- `enable_loops` — advertise scheduled-loop tools (`start_loop`, `loop_status`, `pause_loop`, `resume_loop`, `stop_loop`, `disable_loops`); they appear only after `enable_loops`, on the **next model step this turn**. Requires durable storage (`DB_URL`) and a running scheduler worker. Read the `loop` skill for procedure (guards, confirmation) before calling `start_loop`.
 {catalog_mcp_line}{catalog_loops_line}{web_search_line}{task_line}
 ### Workspace deliverables
 - **New file or full rewrite** → `write_file`.
@@ -66,13 +66,7 @@ When workspace tools (`read_file`, `write_file`, `run_command`, …) appear in t
 - For server-published context (not callable tools), resource/prompt tools (`list_mcp_resources` / `read_mcp_resource`, `list_mcp_prompts` / `get_mcp_prompt`) appear in the tool list only after `enable_mcp`.
 - MCP tool errors are returned as plain error text (not structured JSON). Any response containing an HTTP error code (4xx / 5xx), "not found", "unauthorized", "forbidden", "permission denied", or similar access/availability signals means the tool **did not return usable data**.
 - When an MCP tool fails: state what failed in one sentence, then stop — do **not** fabricate, infer, or summarize content that the tool was supposed to fetch. If a fallback tool is available and meaningfully different, try it once; otherwise tell the user what is needed to proceed (e.g. correct credentials, a public URL, pasting the content directly).
-
-### Scheduled loops
-- Loop lifecycle tools (and `disable_loops`) appear only after `enable_loops` (unless auto-advertise is configured).
-- Agree the tick plan with the user, then call `start_loop` (user confirmation is required). Prefer `max_ticks` or `max_runtime` over `unbounded`.
-- Soft stop criteria ("stop when CI is green") belong in the tick `prompt`; call `stop_loop` when met. Hard caps are harness-enforced.
-- Requires durable storage (`DB_URL`) and a running scheduler worker (`MONKEYBOT_SCHEDULER_ENABLED`).
-- Call `disable_loops` when finished to drop loop tools from later turns.
+- Scheduled loops: agree the tick plan with the user, then call `start_loop` (requires confirmation); prefer `max_ticks`/`max_runtime` over `unbounded`. Put soft stop criteria in the tick `prompt` and call `stop_loop` when met. Call `disable_loops` when finished.
 
 ### Skills
 - Installed skill names are listed under `## Skills` in this prompt. When a task matches one, use `list_skills` to get the skills root, then `read_file` on that skill's `SKILL.md` for procedure before running commands or steps it documents."""
