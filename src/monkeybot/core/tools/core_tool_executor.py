@@ -96,13 +96,9 @@ _CORE_TOOL_NAMES = frozenset(
         "list_skills",
         "task",
         "run_command",
-        "add_mcp_server",
-        "remove_mcp_server",
         "enable_mcp",
         "disable_mcp",
-        "mcp_status",
         "list_mcp_resources",
-        "list_mcp_resource_templates",
         "read_mcp_resource",
         "list_mcp_prompts",
         "get_mcp_prompt",
@@ -487,20 +483,12 @@ class CoreToolExecutor(ToolExecutorPort):
                 result_text, err_text = await self._tool_task(call, ctx)
             elif name == "run_command":
                 result_text, err_text = await self._tool_run_command(args)
-            elif name == "add_mcp_server":
-                result_text, err_text = await self._tool_add_mcp_server(args)
-            elif name == "remove_mcp_server":
-                result_text, err_text = await self._tool_remove_mcp_server(args)
             elif name == "enable_mcp":
                 result_text, err_text = await self._tool_enable_mcp(args)
             elif name == "disable_mcp":
                 result_text, err_text = await self._tool_disable_mcp(args)
-            elif name == "mcp_status":
-                result_text, err_text = self._tool_mcp_status(args)
             elif name == "list_mcp_resources":
                 result_text, err_text = await self._tool_list_mcp_resources(args)
-            elif name == "list_mcp_resource_templates":
-                result_text, err_text = await self._tool_list_mcp_resource_templates(args)
             elif name == "read_mcp_resource":
                 result_text, err_text = await self._tool_read_mcp_resource(args)
             elif name == "list_mcp_prompts":
@@ -1232,71 +1220,10 @@ class CoreToolExecutor(ToolExecutorPort):
             None,
         )
 
-    async def _tool_add_mcp_server(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
-        sname = _str_arg(args, "name", "server_name", "server")
-        if not sname:
-            return (None, "add_mcp_server requires name (or server_name / server)")
-        command = _str_arg(args, "command", "cmd")
-        if not command:
-            return (None, "add_mcp_server requires command")
-        raw_args = args.get("args")
-        arg_list = [str(x) for x in raw_args] if isinstance(raw_args, list) else []
-        env: dict[str, str] = {}
-        env_src = args.get("env")
-        if isinstance(env_src, dict):
-            for k, val in env_src.items():
-                env[str(k)] = "" if val is None else str(val)
-        defs = await self._mcp.connect(sname, command, arg_list, env)
-        logger.info(
-            "add_mcp_server ok %s",
-            kv(server=sname, tools=len(defs)),
-        )
-        return (
-            _j(
-                {
-                    "ok": True,
-                    "server": sname,
-                    "tools": [{"name": t.name, "description": t.description} for t in defs],
-                    "note": "New tools apply on the next model step this turn.",
-                }
-            ),
-            None,
-        )
-
-    async def _disconnect_mcp_server(
-        self, *, tool_name: str, args: dict[str, Any]
-    ) -> tuple[str | None, str | None]:
-        sname = _str_arg(args, "name", "server_name", "server")
-        if not sname:
-            return (None, f"{tool_name} requires name (or server_name / server)")
-        known = list(self._mcp.known_server_names())
-        if sname not in known and not self._mcp.is_connected(sname):
-            known_msg = ", ".join(known) if known else "(none)"
-            return (
-                None,
-                f"Unknown MCP server {sname!r}. Known servers: {known_msg}",
-            )
-        await self._mcp.disconnect(sname)
-        logger.info("%s ok %s", tool_name, kv(server=sname, disconnected=True))
-        return (
-            _j(
-                {
-                    "ok": True,
-                    "server": sname,
-                    "disconnected": True,
-                    "note": "Tools drop on the next model step this turn.",
-                }
-            ),
-            None,
-        )
-
-    async def _tool_remove_mcp_server(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
-        return await self._disconnect_mcp_server(tool_name="remove_mcp_server", args=args)
-
     async def _tool_enable_mcp(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
-        sname = _str_arg(args, "name", "server_name", "server")
+        sname = _str_arg(args, "name")
         if not sname:
-            return (None, "enable_mcp requires name (or server_name / server)")
+            return (None, "enable_mcp requires name")
         already = self._mcp.is_connected(sname)
         try:
             defs = await self._mcp.connect_from_catalog(sname)
@@ -1306,6 +1233,7 @@ class CoreToolExecutor(ToolExecutorPort):
         except MCPConnectionError as exc:
             logger.warning("enable_mcp failed %s", kv(server=sname, error=str(exc)))
             return (None, str(exc))
+        status_snap = self._mcp.status(sname)
         logger.info(
             "enable_mcp ok %s",
             kv(server=sname, already_connected=already, tools=len(defs)),
@@ -1315,6 +1243,7 @@ class CoreToolExecutor(ToolExecutorPort):
                 {
                     "ok": True,
                     "server": sname,
+                    "status": status_snap,
                     "already_connected": already,
                     "tools": [{"name": t.name, "description": t.description} for t in defs],
                     "note": "New tools apply on the next model step this turn.",
@@ -1324,16 +1253,25 @@ class CoreToolExecutor(ToolExecutorPort):
         )
 
     async def _tool_disable_mcp(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
-        return await self._disconnect_mcp_server(tool_name="disable_mcp", args=args)
-
-    def _tool_mcp_status(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
-        sname = _str_arg(args, "server", "name", "server_name")
-        snapshot = self._mcp.status(sname or None)
+        sname = _str_arg(args, "name")
+        if not sname:
+            return (None, "disable_mcp requires name")
+        known = list(self._mcp.known_server_names())
+        if sname not in known and not self._mcp.is_connected(sname):
+            known_msg = ", ".join(known) if known else "(none)"
+            return (
+                None,
+                f"Unknown MCP server {sname!r}. Known servers: {known_msg}",
+            )
+        await self._mcp.disconnect(sname)
+        logger.info("disable_mcp ok %s", kv(server=sname, disconnected=True))
         return (
             _j(
                 {
                     "ok": True,
-                    "servers": snapshot if isinstance(snapshot, list) else [snapshot],
+                    "server": sname,
+                    "disconnected": True,
+                    "note": "Tools drop on the next model step this turn.",
                 }
             ),
             None,
@@ -1367,31 +1305,18 @@ class CoreToolExecutor(ToolExecutorPort):
         return (_j({"ok": True, **ok_payload(result)}), None)
 
     async def _tool_list_mcp_resources(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
-        sname = _str_arg(args, "server", "name", "server_name") or None
+        sname = _str_arg(args, "server") or None
         return await self._mcp_meta_call(
             "list_mcp_resources",
             self._mcp.list_resources(sname),
             ok_payload=lambda resources: {"resources": resources, "count": len(resources)},
         )
 
-    async def _tool_list_mcp_resource_templates(
-        self, args: dict[str, Any]
-    ) -> tuple[str | None, str | None]:
-        sname = _str_arg(args, "server", "name", "server_name") or None
-        return await self._mcp_meta_call(
-            "list_mcp_resource_templates",
-            self._mcp.list_resource_templates(sname),
-            ok_payload=lambda templates: {
-                "resourceTemplates": templates,
-                "count": len(templates),
-            },
-        )
-
     async def _tool_read_mcp_resource(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
-        sname = _str_arg(args, "server", "name", "server_name")
-        uri = _str_arg(args, "uri", "resource_uri", "resource")
+        sname = _str_arg(args, "server")
+        uri = _str_arg(args, "uri")
         if not sname:
-            return (None, "read_mcp_resource requires server (or name / server_name)")
+            return (None, "read_mcp_resource requires server")
         if not uri:
             return (None, "read_mcp_resource requires uri")
         return await self._mcp_meta_call(
@@ -1400,7 +1325,7 @@ class CoreToolExecutor(ToolExecutorPort):
         )
 
     async def _tool_list_mcp_prompts(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
-        sname = _str_arg(args, "server", "name", "server_name") or None
+        sname = _str_arg(args, "server") or None
         return await self._mcp_meta_call(
             "list_mcp_prompts",
             self._mcp.list_prompts(sname),
@@ -1408,12 +1333,12 @@ class CoreToolExecutor(ToolExecutorPort):
         )
 
     async def _tool_get_mcp_prompt(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
-        sname = _str_arg(args, "server", "server_name")
-        prompt_name = _str_arg(args, "prompt", "name", "prompt_name")
+        sname = _str_arg(args, "server")
+        prompt_name = _str_arg(args, "prompt")
         if not sname:
-            return (None, "get_mcp_prompt requires server (or server_name)")
+            return (None, "get_mcp_prompt requires server")
         if not prompt_name:
-            return (None, "get_mcp_prompt requires prompt (or name / prompt_name)")
+            return (None, "get_mcp_prompt requires prompt")
         raw_args = args.get("arguments")
         prompt_args: dict[str, str] = {}
         if isinstance(raw_args, dict):

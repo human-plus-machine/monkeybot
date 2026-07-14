@@ -837,19 +837,6 @@ async def test_list_and_read_resources() -> None:
         tools={}, resources={}, prompts={}, logging=None, completions=None
     )
     sess.list_resources = AsyncMock(return_value=SimpleNamespace(resources=[resource]))
-    sess.list_resource_templates = AsyncMock(
-        return_value=SimpleNamespace(
-            resourceTemplates=[
-                SimpleNamespace(
-                    name="file",
-                    uriTemplate="file:///{path}",
-                    description="A file",
-                    mimeType=None,
-                    title=None,
-                )
-            ]
-        )
-    )
     sess.read_resource = AsyncMock(
         return_value=SimpleNamespace(
             contents=[SimpleNamespace(uri="docs://readme", mimeType="text/plain", text="hello")]
@@ -880,9 +867,6 @@ async def test_list_and_read_resources() -> None:
             "server": "docs",
         }
     ]
-    templates = await client.list_resource_templates("docs")
-    assert templates[0]["uriTemplate"] == "file:///{path}"
-    assert templates[0]["server"] == "docs"
 
     read = await client.read_resource("docs", "docs://readme")
     assert read["text"] == "hello"

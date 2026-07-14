@@ -907,19 +907,7 @@ class MCPClient:
             capability="resources",
             list_method="list_resources",
             result_attr="resources",
-            missing_remedy="Use a server that supports resources, or call mcp_status.",
-        )
-
-    async def list_resource_templates(
-        self, server_name: str | None = None
-    ) -> list[dict[str, Any]]:
-        """List MCP resource templates from one or all connected servers."""
-        return await self._list_capability_items(
-            server_name=server_name,
-            capability="resources",
-            list_method="list_resource_templates",
-            result_attr="resourceTemplates",
-            missing_remedy="Use a server that supports resources, or call mcp_status.",
+            missing_remedy="Use a server that supports resources, or call enable_mcp first.",
         )
 
     async def read_resource(self, server_name: str, uri: str) -> dict[str, Any]:
@@ -930,7 +918,7 @@ class MCPClient:
             raise MCPDiagnosticError(
                 server_name,
                 f"MCP server {server_name!r} does not advertise resources capability",
-                remedy="Pick a resource-capable server from list_mcp_resources / mcp_status.",
+                remedy="Pick a resource-capable server from list_mcp_resources, or call enable_mcp.",
             )
         from pydantic import AnyUrl
 
@@ -950,7 +938,7 @@ class MCPClient:
             capability="prompts",
             list_method="list_prompts",
             result_attr="prompts",
-            missing_remedy="Use a server that supports prompts, or call mcp_status.",
+            missing_remedy="Use a server that supports prompts, or call enable_mcp first.",
         )
 
     async def get_prompt(
@@ -966,7 +954,7 @@ class MCPClient:
             raise MCPDiagnosticError(
                 server_name,
                 f"MCP server {server_name!r} does not advertise prompts capability",
-                remedy="Pick a prompt-capable server from list_mcp_prompts / mcp_status.",
+                remedy="Pick a prompt-capable server from list_mcp_prompts, or call enable_mcp.",
             )
         args_out = {str(k): str(v) for k, v in dict(arguments or {}).items()}
         result = await rec.session.get_prompt(prompt_name, arguments=args_out or None)
@@ -997,8 +985,7 @@ class MCPClient:
                 name,
                 f"Unknown MCP server {name!r}. Known configured servers: {known_msg}",
                 remedy=(
-                    "Use a name from mcp.json (after load_from_config), or connect an "
-                    "ad-hoc stdio server with add_mcp_server."
+                    "Use a name from mcp.json (after load_from_config), then call enable_mcp."
                 ),
             )
         defs = await self._connect_from_spec(

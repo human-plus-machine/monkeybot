@@ -26,11 +26,15 @@ def test_harness_includes_core_tools_and_protocol() -> None:
     assert "`apply_patch`" in out
     assert "*** Begin Patch" in out
     assert "`enable_mcp`" in out
-    assert "`mcp_status`" in out
     assert "`list_mcp_resources`" in out
     assert "`read_mcp_resource`" in out
     assert "`list_mcp_prompts`" in out
     assert "`get_mcp_prompt`" in out
+    assert "appear only after `enable_mcp`" in out
+    assert "`mcp_status`" not in out
+    assert "`add_mcp_server`" not in out
+    assert "`remove_mcp_server`" not in out
+    assert "`list_mcp_resource_templates`" not in out
     assert "`run_command`" in out
     assert "argv" in out
     assert "`task` —" not in out

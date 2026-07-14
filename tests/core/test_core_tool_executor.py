@@ -1765,6 +1765,20 @@ class _CatalogMCP(_NoMCP):
             out.extend(tools)
         return out
 
+    def status(self, name: str | None = None):
+        if name is None:
+            return [
+                {
+                    "name": n,
+                    "status": "connected" if n in self.connected else "catalogued",
+                }
+                for n in sorted(set(self._catalog) | set(self.connected))
+            ]
+        return {
+            "name": name,
+            "status": "connected" if name in self.connected else "catalogued",
+        }
+
 
 @pytest.mark.asyncio
 async def test_enable_mcp_connects_from_catalog(tmp_path: Path) -> None:
@@ -1784,6 +1798,7 @@ async def test_enable_mcp_connects_from_catalog(tmp_path: Path) -> None:
     body = json.loads(result.blocks[0].text)  # type: ignore[index]
     assert body["ok"] is True
     assert body["server"] == "browser"
+    assert body["status"]["status"] == "connected"
     assert body["tools"][0]["name"] == "browser__goto"
     assert "next model step" in body["note"]
 
@@ -1849,25 +1864,6 @@ async def test_disable_mcp_unknown_server_errors(tmp_path: Path) -> None:
     assert mcp.disconnected == []
 
 
-@pytest.mark.asyncio
-async def test_remove_mcp_server_unknown_server_errors(tmp_path: Path) -> None:
-    mcp = _CatalogMCP()
-    ex = CoreToolExecutor(
-        workspace_root=tmp_path,
-        memory=_mem_sub(tmp_path / "mem"),
-        skills_path=tmp_path / "skills",
-        mcp=mcp,
-    )
-    (tmp_path / "skills").mkdir(exist_ok=True)
-    result = await ex.execute(
-        call=ToolCall(name="remove_mcp_server", args={"name": "nope"}, call_id="1"),
-        ctx=_ctx(),
-    )
-    assert result.error is not None
-    assert "Unknown MCP server" in result.error
-    assert mcp.disconnected == []
-
-
 class _ResourcesMCP(_NoMCP):
     def __init__(self) -> None:
         self._connected = True
@@ -1891,10 +1887,6 @@ class _ResourcesMCP(_NoMCP):
     async def list_resources(self, server_name: str | None = None):
         del server_name
         return [{"server": "docs", "name": "readme", "uri": "docs://readme"}]
-
-    async def list_resource_templates(self, server_name: str | None = None):
-        del server_name
-        return [{"server": "docs", "name": "file", "uriTemplate": "file:///{path}"}]
 
     async def read_resource(self, server_name: str, uri: str):
         return {
@@ -1934,13 +1926,6 @@ async def test_mcp_resource_and_prompt_tools(tmp_path: Path) -> None:
         mcp=_ResourcesMCP(),
     )
     ctx = _ctx()
-
-    status = await ex.execute(
-        call=ToolCall(name="mcp_status", args={}, call_id="s1"),
-        ctx=ctx,
-    )
-    assert status.error is None
-    assert json.loads(status.blocks[0].text)["servers"][0]["status"] == "connected"  # type: ignore[index]
 
     listed = await ex.execute(
         call=ToolCall(name="list_mcp_resources", args={}, call_id="r1"),

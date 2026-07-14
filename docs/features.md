@@ -269,11 +269,9 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 | `list_skills` | Skill discovery |
 | `run_command` | Allowlisted shell (host or OpenSandbox) |
 | `task` | Subagent subprocess (parent only) |
-| `add_mcp_server` / `remove_mcp_server` | Runtime MCP registration |
-| `enable_mcp` / `disable_mcp` | Catalog connect / disconnect |
-| `mcp_status` | Server lifecycle + capabilities |
-| `list_mcp_resources` / `list_mcp_resource_templates` / `read_mcp_resource` | MCP resources |
-| `list_mcp_prompts` / `get_mcp_prompt` | MCP prompt templates |
+| `enable_mcp` / `disable_mcp` | Catalog connect / disconnect (success includes status) |
+| `list_mcp_resources` / `read_mcp_resource` | MCP resources (progressive — only while an MCP server is connected) |
+| `list_mcp_prompts` / `get_mcp_prompt` | MCP prompt templates (progressive — only while an MCP server is connected) |
 | `load_file` | When attachments enabled (images/PDF into model context) |
 
 **Dispatch order:** core → `extra_tools` (e.g. `WebSearchTool`) → MCP (`server__tool` naming).
@@ -335,9 +333,8 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - Listed servers are **catalogued** by default (not connected); activate with `enable_mcp` / drop with `disable_mcp`. Mid-turn tool refresh applies in the text loop.
 - `"enabled": false` excludes a server from the catalog (not model-connectable). `"autoConnect": true` restores eager startup connect for that server.
 - `MCP_STRICT_LOAD=1` fails startup on connection errors (default: log and continue).
-- Runtime `add_mcp_server` / `remove_mcp_server` mutate live connections.
-- **Resources / prompts:** built-in tools `list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource`, `list_mcp_prompts`, `get_mcp_prompt` surface MCP resources and prompt templates (server must already be connected).
-- **Status:** `mcp_status` reports per-server lifecycle (`catalogued` / `connected` / `disconnected` / `disabled` / `failed` / `needs_auth`) plus capability flags when connected.
+- **Resources / prompts:** `list_mcp_resources` / `read_mcp_resource` and `list_mcp_prompts` / `get_mcp_prompt` appear only while at least one MCP server is connected (after `enable_mcp`, dropped on last `disable_mcp`).
+- **Status:** folded into `enable_mcp` — success returns connection status + tools; failure returns the error (no separate `mcp_status` tool).
 - Lazy-imports `mcp` SDK to keep core importable without MCP installed.
 - Realtime sessions: MCP registry mutations refresh harness `ctx.tools`, but vendor tool schemas update only after starting a new session (v1 has no reconnect/resume).
 
@@ -666,7 +663,7 @@ Shared serde for SQLite persistence and provider adapters.
 | Extension | Mechanism | Key API |
 |-----------|-----------|---------|
 | Custom in-process tools | `extra_tools: Sequence[CustomTool]` in `build_context` | `CustomTool` protocol |
-| MCP servers | Static `mcp.json` or runtime `add_mcp_server` | `MCPClient` |
+| MCP servers | Static `mcp.json` + `enable_mcp` / `disable_mcp` | `MCPClient` |
 | Hooks | `HookManager.register(HookEvent, fn)` | `HookPayload` |
 | Memory | `MemorySubsystem.register_hooks()` | Automatic via hooks |
 | Tool inspectors | Implement `ToolInspector.check()` | Pass list to `loop.run()` |

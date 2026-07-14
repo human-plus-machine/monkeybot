@@ -251,6 +251,9 @@ class TestRunRealtimeTurn:
             def known_server_names(self) -> list[str]:
                 return ["browser"]
 
+            def is_connected(self, name: str) -> bool:
+                return name == "browser"
+
             def all_tools(self) -> list[ToolDef]:
                 return [ToolDef("browser__goto", "Go", {})]
 
@@ -279,12 +282,19 @@ class TestRunRealtimeTurn:
             )
         )
         assert any(t.name == "browser__goto" for t in ctx.tools)
+        assert any(t.name == "list_mcp_resources" for t in ctx.tools)
+        assert any(t.name == "read_mcp_resource" for t in ctx.tools)
+        assert any(t.name == "list_mcp_prompts" for t in ctx.tools)
+        assert any(t.name == "get_mcp_prompt" for t in ctx.tools)
         assert _REALTIME_MCP_NEW_SESSION_NOTE in inject_texts
 
     async def test_failed_enable_mcp_does_not_refresh_tools(self) -> None:
         class _Mcp:
             def known_server_names(self) -> list[str]:
                 return ["browser"]
+
+            def is_connected(self, name: str) -> bool:
+                return False
 
             def all_tools(self) -> list[ToolDef]:
                 return [ToolDef("browser__goto", "Go", {})]

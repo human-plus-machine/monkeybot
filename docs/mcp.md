@@ -59,8 +59,7 @@ do not depend on the child process's current directory. See [Browser MCP](browse
 
 Servers listed in `mcp.json` are **catalogued at startup but not connected** by default.
 Schemas stay out of the provider payload until the model calls `enable_mcp("name")`; tools
-then appear on the **next model step of the same turn** (text/SSE loop). Prefer that over
-inventing `add_mcp_server` command/args for servers already in config.
+then appear on the **next model step of the same turn** (text/SSE loop).
 
 **Config flags (per server):**
 
