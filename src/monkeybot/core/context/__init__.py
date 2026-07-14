@@ -121,91 +121,80 @@ MCP_REGISTRY_MUTATING_TOOLS = frozenset(
     }
 )
 
-# Meta-tools advertised only while at least one MCP server is connected.
-MCP_PROGRESSIVE_META_TOOLS = frozenset(
-    {
+# Resource/prompt meta-tools — advertised only after an MCP server is connected.
+_MCP_SERVER_FILTER_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "server": {
+            "type": "string",
+            "description": "Optional MCP server name. Omit to query all connected servers.",
+        },
+    },
+    "required": [],
+}
+MCP_PROGRESSIVE_META_TOOL_DEFS: tuple[ToolDef, ...] = (
+    ToolDef(
         "list_mcp_resources",
+        "List MCP resources from connected servers. Optional server filter.",
+        _MCP_SERVER_FILTER_SCHEMA,
+        parallel_safe=True,
+    ),
+    ToolDef(
         "read_mcp_resource",
+        "Read one MCP resource by server name and URI from list_mcp_resources.",
+        {
+            "type": "object",
+            "properties": {
+                "server": {
+                    "type": "string",
+                    "description": "MCP server name from list_mcp_resources.",
+                },
+                "uri": {
+                    "type": "string",
+                    "description": "Resource URI from list_mcp_resources.",
+                },
+            },
+            "required": ["server", "uri"],
+        },
+        parallel_safe=True,
+    ),
+    ToolDef(
         "list_mcp_prompts",
+        "List MCP prompt templates from connected servers. Optional server filter.",
+        _MCP_SERVER_FILTER_SCHEMA,
+        parallel_safe=True,
+    ),
+    ToolDef(
         "get_mcp_prompt",
-    }
+        "Fetch a named MCP prompt template (optional string arguments) from a connected server.",
+        {
+            "type": "object",
+            "properties": {
+                "server": {
+                    "type": "string",
+                    "description": "MCP server name from list_mcp_prompts.",
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "Prompt name from list_mcp_prompts.",
+                },
+                "arguments": {
+                    "type": "object",
+                    "description": "Optional string arguments for the prompt template.",
+                    "additionalProperties": {"type": "string"},
+                },
+            },
+            "required": ["server", "prompt"],
+        },
+        parallel_safe=True,
+    ),
 )
+MCP_PROGRESSIVE_META_TOOLS = frozenset(t.name for t in MCP_PROGRESSIVE_META_TOOL_DEFS)
 
 
 def _any_mcp_connected(mcp_client: Any) -> bool:
     """True when any known MCP server has an active session."""
     return any(mcp_client.is_connected(name) for name in mcp_client.known_server_names())
-
-
-def _mcp_progressive_meta_tool_defs() -> list[ToolDef]:
-    """Resource/prompt meta-tools — advertised only after an MCP server is connected."""
-    server_filter: dict[str, object] = {
-        "type": "object",
-        "properties": {
-            "server": {
-                "type": "string",
-                "description": "Optional MCP server name. Omit to query all connected servers.",
-            },
-        },
-        "required": [],
-    }
-    return [
-        ToolDef(
-            "list_mcp_resources",
-            "List MCP resources from connected servers. Optional server filter.",
-            server_filter,
-            parallel_safe=True,
-        ),
-        ToolDef(
-            "read_mcp_resource",
-            "Read one MCP resource by server name and URI from list_mcp_resources.",
-            {
-                "type": "object",
-                "properties": {
-                    "server": {
-                        "type": "string",
-                        "description": "MCP server name from list_mcp_resources.",
-                    },
-                    "uri": {
-                        "type": "string",
-                        "description": "Resource URI from list_mcp_resources.",
-                    },
-                },
-                "required": ["server", "uri"],
-            },
-            parallel_safe=True,
-        ),
-        ToolDef(
-            "list_mcp_prompts",
-            "List MCP prompt templates from connected servers. Optional server filter.",
-            server_filter,
-            parallel_safe=True,
-        ),
-        ToolDef(
-            "get_mcp_prompt",
-            "Fetch a named MCP prompt template (optional string arguments) from a connected server.",
-            {
-                "type": "object",
-                "properties": {
-                    "server": {
-                        "type": "string",
-                        "description": "MCP server name from list_mcp_prompts.",
-                    },
-                    "prompt": {
-                        "type": "string",
-                        "description": "Prompt name from list_mcp_prompts.",
-                    },
-                    "arguments": {
-                        "type": "object",
-                        "description": "Optional string arguments for the prompt template.",
-                        "additionalProperties": {"type": "string"},
-                    },
-                },
-                "required": ["server", "prompt"],
-            },
-            parallel_safe=True,
-        ),
-    ]
 
 
 def refresh_tools_after_mcp_change(
@@ -231,7 +220,7 @@ def refresh_tools_after_mcp_change(
     ]
     rebuilt = kept + list(mcp_client.all_tools())
     if _any_mcp_connected(mcp_client):
-        rebuilt.extend(_mcp_progressive_meta_tool_defs())
+        rebuilt.extend(MCP_PROGRESSIVE_META_TOOL_DEFS)
     ctx.tools[:] = rebuilt
     return ctx
 
@@ -699,7 +688,7 @@ async def build_context(
         tools.append(load_file_tool_def())
     tools.extend(mcp_client.all_tools())
     if _any_mcp_connected(mcp_client):
-        tools.extend(_mcp_progressive_meta_tool_defs())
+        tools.extend(MCP_PROGRESSIVE_META_TOOL_DEFS)
     for ct in extra_tools or []:
         tools.append(ct.tool_def)
     catalog_names = tuple(mcp_client.catalog_names())
