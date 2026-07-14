@@ -116,22 +116,107 @@ _log = logging.getLogger(__name__)
 # Built-in tools that mutate the live MCP registry; loop refreshes ctx.tools after these.
 MCP_REGISTRY_MUTATING_TOOLS = frozenset(
     {
-        "add_mcp_server",
-        "remove_mcp_server",
         "enable_mcp",
         "disable_mcp",
     }
 )
+
+# Meta-tools advertised only while at least one MCP server is connected.
+MCP_PROGRESSIVE_META_TOOLS = frozenset(
+    {
+        "list_mcp_resources",
+        "read_mcp_resource",
+        "list_mcp_prompts",
+        "get_mcp_prompt",
+    }
+)
+
+
+def _any_mcp_connected(mcp_client: Any) -> bool:
+    """True when any known MCP server has an active session."""
+    return any(mcp_client.is_connected(name) for name in mcp_client.known_server_names())
+
+
+def _mcp_progressive_meta_tool_defs() -> list[ToolDef]:
+    """Resource/prompt meta-tools — advertised only after an MCP server is connected."""
+    server_filter: dict[str, object] = {
+        "type": "object",
+        "properties": {
+            "server": {
+                "type": "string",
+                "description": "Optional MCP server name. Omit to query all connected servers.",
+            },
+        },
+        "required": [],
+    }
+    return [
+        ToolDef(
+            "list_mcp_resources",
+            "List MCP resources from connected servers. Optional server filter.",
+            server_filter,
+            parallel_safe=True,
+        ),
+        ToolDef(
+            "read_mcp_resource",
+            "Read one MCP resource by server name and URI from list_mcp_resources.",
+            {
+                "type": "object",
+                "properties": {
+                    "server": {
+                        "type": "string",
+                        "description": "MCP server name from list_mcp_resources.",
+                    },
+                    "uri": {
+                        "type": "string",
+                        "description": "Resource URI from list_mcp_resources.",
+                    },
+                },
+                "required": ["server", "uri"],
+            },
+            parallel_safe=True,
+        ),
+        ToolDef(
+            "list_mcp_prompts",
+            "List MCP prompt templates from connected servers. Optional server filter.",
+            server_filter,
+            parallel_safe=True,
+        ),
+        ToolDef(
+            "get_mcp_prompt",
+            "Fetch a named MCP prompt template (optional string arguments) from a connected server.",
+            {
+                "type": "object",
+                "properties": {
+                    "server": {
+                        "type": "string",
+                        "description": "MCP server name from list_mcp_prompts.",
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "Prompt name from list_mcp_prompts.",
+                    },
+                    "arguments": {
+                        "type": "object",
+                        "description": "Optional string arguments for the prompt template.",
+                        "additionalProperties": {"type": "string"},
+                    },
+                },
+                "required": ["server", "prompt"],
+            },
+            parallel_safe=True,
+        ),
+    ]
 
 
 def refresh_tools_after_mcp_change(
     ctx: TurnContext,
     mcp_client: Any,
 ) -> TurnContext:
-    """Rebuild ``ctx.tools`` after add/remove/enable/disable MCP (same user turn).
+    """Rebuild ``ctx.tools`` after enable/disable MCP (same user turn).
 
-    Drops tools prefixed with any known MCP server name (catalog + ever-connected),
-    then appends the current ``mcp_client.all_tools()`` snapshot.
+    Drops tools prefixed with any known MCP server name (catalog + ever-connected)
+    and progressive MCP meta-tools, then appends the current ``mcp_client.all_tools()``
+    snapshot plus resource/prompt meta-tools when any server is connected.
 
     Mutates ``ctx.tools`` in place (frozen dataclass allows mutating the list) so
     callers that hold the same ``TurnContext`` — including the realtime gateway —
@@ -141,9 +226,13 @@ def refresh_tools_after_mcp_change(
     kept = [
         t
         for t in ctx.tools
-        if not any(t.name.startswith(f"{prefix}__") for prefix in prefixes)
+        if t.name not in MCP_PROGRESSIVE_META_TOOLS
+        and not any(t.name.startswith(f"{prefix}__") for prefix in prefixes)
     ]
-    ctx.tools[:] = kept + list(mcp_client.all_tools())
+    rebuilt = kept + list(mcp_client.all_tools())
+    if _any_mcp_connected(mcp_client):
+        rebuilt.extend(_mcp_progressive_meta_tool_defs())
+    ctx.tools[:] = rebuilt
     return ctx
 
 
@@ -264,22 +353,6 @@ def _core_tool_defs(
         },
         "required": [],
     }
-    mcp_add_schema: dict[str, object] = {
-        "type": "object",
-        "properties": {
-            "name": {"type": "string"},
-            "server_name": {"type": "string"},
-            "command": {"type": "string"},
-            "args": {"type": "array", "items": {"type": "string"}},
-            "env": {"type": "object"},
-        },
-        "required": [],
-    }
-    mcp_rm_schema: dict[str, object] = {
-        "type": "object",
-        "properties": {"name": {"type": "string"}, "server_name": {"type": "string"}},
-        "required": [],
-    }
     enable_mcp_schema: dict[str, object] = {
         "type": "object",
         "properties": {
@@ -287,80 +360,18 @@ def _core_tool_defs(
                 "type": "string",
                 "description": "Server name from mcp.json (e.g. browser).",
             },
-            "server_name": {"type": "string"},
-            "server": {"type": "string"},
         },
-        "required": [],
+        "required": ["name"],
     }
     disable_mcp_schema: dict[str, object] = {
         "type": "object",
         "properties": {
-            "name": {"type": "string"},
-            "server_name": {"type": "string"},
-            "server": {"type": "string"},
-        },
-        "required": [],
-    }
-    mcp_server_filter_schema: dict[str, object] = {
-        "type": "object",
-        "properties": {
-            "server": {
+            "name": {
                 "type": "string",
-                "description": "Optional MCP server name. Omit to query all connected servers.",
-            },
-            "name": {"type": "string"},
-            "server_name": {"type": "string"},
-        },
-        "required": [],
-    }
-    read_mcp_resource_schema: dict[str, object] = {
-        "type": "object",
-        "properties": {
-            "server": {
-                "type": "string",
-                "description": "MCP server name exactly as returned by list_mcp_resources.",
-            },
-            "uri": {
-                "type": "string",
-                "description": "Resource URI from list_mcp_resources (not necessarily a file URL).",
-            },
-            "name": {"type": "string"},
-            "server_name": {"type": "string"},
-        },
-        "required": ["uri"],
-    }
-    get_mcp_prompt_schema: dict[str, object] = {
-        "type": "object",
-        "properties": {
-            "server": {
-                "type": "string",
-                "description": "MCP server name exactly as returned by list_mcp_prompts.",
-            },
-            "prompt": {
-                "type": "string",
-                "description": "Prompt name from list_mcp_prompts.",
-            },
-            "name": {"type": "string", "description": "Alias for prompt."},
-            "server_name": {"type": "string"},
-            "arguments": {
-                "type": "object",
-                "description": "Optional string arguments for the prompt template.",
-                "additionalProperties": {"type": "string"},
+                "description": "Connected MCP server name to disconnect.",
             },
         },
-        "required": [],
-    }
-    mcp_status_schema: dict[str, object] = {
-        "type": "object",
-        "properties": {
-            "server": {
-                "type": "string",
-                "description": "Optional server name; omit to list all tracked servers.",
-            },
-            "name": {"type": "string"},
-            "server_name": {"type": "string"},
-        },
-        "required": [],
+        "required": ["name"],
     }
     list_skills_schema: dict[str, object] = {"type": "object", "properties": {}}
     task_props: dict[str, object] = {
@@ -459,8 +470,9 @@ def _core_tool_defs(
             ToolDef(
                 "enable_mcp",
                 "Connect a configured MCP server by name from mcp.json (e.g. browser). "
-                "Prefer this over add_mcp_server for known servers. New tools appear on "
-                "the next model step this turn.",
+                "On success returns connection status and discovered tools; on failure "
+                "returns the error (no separate status check needed). New server tools "
+                "and MCP resource/prompt tools appear on the next model step this turn.",
                 enable_mcp_schema,
             ),
             ToolDef(
@@ -468,56 +480,6 @@ def _core_tool_defs(
                 "Disconnect a connected MCP server by name and drop its tools from the "
                 "next model step this turn.",
                 disable_mcp_schema,
-            ),
-            ToolDef(
-                "add_mcp_server",
-                "Connect an ad-hoc MCP stdio server by name/command; tools appear as "
-                "name__tool on the next model step this turn. Prefer enable_mcp for "
-                "servers already listed in mcp.json.",
-                mcp_add_schema,
-            ),
-            ToolDef(
-                "remove_mcp_server",
-                "Disconnect an MCP server by name and drop its tools (next model step).",
-                mcp_rm_schema,
-            ),
-            ToolDef(
-                "mcp_status",
-                "Show MCP server lifecycle status (catalogued / connected / failed / "
-                "needs_auth / disabled). Optional server name filters to one entry.",
-                mcp_status_schema,
-                parallel_safe=True,
-            ),
-            ToolDef(
-                "list_mcp_resources",
-                "List MCP resources from connected servers. Optional server filter. "
-                "Connect with enable_mcp first when the server is only catalogued.",
-                mcp_server_filter_schema,
-                parallel_safe=True,
-            ),
-            ToolDef(
-                "list_mcp_resource_templates",
-                "List MCP resource URI templates from connected servers. Optional server filter.",
-                mcp_server_filter_schema,
-                parallel_safe=True,
-            ),
-            ToolDef(
-                "read_mcp_resource",
-                "Read one MCP resource by server name and URI from list_mcp_resources.",
-                read_mcp_resource_schema,
-                parallel_safe=True,
-            ),
-            ToolDef(
-                "list_mcp_prompts",
-                "List MCP prompt templates from connected servers. Optional server filter.",
-                mcp_server_filter_schema,
-                parallel_safe=True,
-            ),
-            ToolDef(
-                "get_mcp_prompt",
-                "Fetch a named MCP prompt template (optional string arguments) from a connected server.",
-                get_mcp_prompt_schema,
-                parallel_safe=True,
             ),
             ToolDef(
                 "start_loop",
@@ -737,6 +699,8 @@ async def build_context(
         tools.append(render_image_tool_def())
         tools.append(read_attachment_tool_def())
     tools.extend(mcp_client.all_tools())
+    if _any_mcp_connected(mcp_client):
+        tools.extend(_mcp_progressive_meta_tool_defs())
     for ct in extra_tools or []:
         tools.append(ct.tool_def)
     catalog_names = tuple(mcp_client.catalog_names())

@@ -9,7 +9,7 @@ Use the **browser** MCP tools (`browser__*` in the active tool list) for any web
 
 ## Before any browser tool
 
-If `browser__*` tools are not in the active tool list yet, call **`enable_mcp("browser")` first**. That connects the configured server from `mcp.json` and advertises browser tools on the next model step (same user turn). Do not invent `uv`/`command` args via `add_mcp_server` for this server.
+If `browser__*` tools are not in the active tool list yet, call **`enable_mcp("browser")` first**. That connects the configured server from `mcp.json` and advertises browser tools on the next model step (same user turn).
 
 ## Default: indexed DOM (prefer this)
 

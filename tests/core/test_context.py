@@ -10,6 +10,7 @@ from monkeybot.core.context import (
     _parse_skill_description,
     build_context,
     refresh_memory_index,
+    refresh_tools_after_mcp_change,
 )
 from monkeybot.core.llm.provider import Done, TextDelta, UsageEvent
 from monkeybot.core.memory.subsystem import MemorySubsystem
@@ -75,11 +76,14 @@ class FakeMCPClient:
         return []
 
     def known_server_names(self) -> list[str]:
-        return []
+        names: set[str] = set()
+        for tool in self._tools:
+            if "__" in tool.name:
+                names.add(tool.name.split("__", 1)[0])
+        return sorted(names)
 
     def is_connected(self, name: str) -> bool:
-        del name
-        return False
+        return name in self.known_server_names()
 
     def split_prefixed_tool(self, prefixed_name: str) -> tuple[str, str] | None:
         del prefixed_name
@@ -94,10 +98,6 @@ class FakeMCPClient:
         return []
 
     async def list_resources(self, server_name: str | None = None):
-        del server_name
-        return []
-
-    async def list_resource_templates(self, server_name: str | None = None):
         del server_name
         return []
 
@@ -249,11 +249,7 @@ async def test_build_context_merges_core_and_mcp_tools(tmp_path: Path) -> None:
         "task",
         "enable_mcp",
         "disable_mcp",
-        "add_mcp_server",
-        "remove_mcp_server",
-        "mcp_status",
         "list_mcp_resources",
-        "list_mcp_resource_templates",
         "read_mcp_resource",
         "list_mcp_prompts",
         "get_mcp_prompt",
@@ -268,9 +264,106 @@ async def test_build_context_merges_core_and_mcp_tools(tmp_path: Path) -> None:
     assert core_names.issubset(set(names))
     assert "db__query" in names
     assert "wiki__search" in names
+    assert "list_mcp_resources" in names
+    assert "read_mcp_resource" in names
+    assert "list_mcp_prompts" in names
+    assert "get_mcp_prompt" in names
     assert len(ctx.tools) == len(core_names) + 2
     for t in ctx.tools:
         assert t.description.strip()
+
+
+@pytest.mark.asyncio
+async def test_build_context_omits_progressive_mcp_meta_without_connected_mcp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ATTACHMENTS_ENABLED", "true")
+    agent_path = tmp_path / "AGENT.md"
+    agent_path.write_text("You are a helpful assistant.\n", encoding="utf-8")
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    (mem / "INDEX.md").write_text("- alpha\n", encoding="utf-8")
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ctx = await build_context(
+        "thread-1",
+        "req-1",
+        agent_md_path=agent_path,
+        memory=_memory_subsystem(mem),
+        skills_path=skills,
+        mcp_client=FakeMCPClient([]),
+    )
+    names = {t.name for t in ctx.tools}
+    assert "list_mcp_resources" not in names
+    assert "read_mcp_resource" not in names
+    assert "list_mcp_prompts" not in names
+    assert "get_mcp_prompt" not in names
+    assert "enable_mcp" in names
+
+
+def test_refresh_tools_after_mcp_change_adds_and_drops_progressive_meta_tools() -> None:
+    class _ToggleMCP(FakeMCPClient):
+        def __init__(self) -> None:
+            super().__init__([])
+            self._connected: dict[str, list[ToolDef]] = {}
+
+        def known_server_names(self) -> list[str]:
+            return ["browser"]
+
+        def is_connected(self, name: str) -> bool:
+            return name in self._connected
+
+        def all_tools(self) -> list[ToolDef]:
+            out: list[ToolDef] = []
+            for tools in self._connected.values():
+                out.extend(tools)
+            return out
+
+        def connect_browser(self) -> None:
+            self._connected["browser"] = [ToolDef("browser__goto", "Go", {})]
+
+        def disconnect_browser(self) -> None:
+            self._connected.pop("browser", None)
+
+    from monkeybot.core.context import TurnContext
+
+    mcp = _ToggleMCP()
+    ctx = TurnContext(
+        thread_id="t",
+        request_id="r",
+        agent_md="# Agent",
+        memory_index=[],
+        skills=[],
+        tools=[
+            ToolDef("enable_mcp", "Enable", {}),
+            ToolDef("read_file", "Read", {}),
+        ],
+        user_id=None,
+        parent_run_id=None,
+        model="gemini-2.5-flash",
+    )
+
+    mcp.connect_browser()
+    refresh_tools_after_mcp_change(ctx, mcp)
+    names = [t.name for t in ctx.tools]
+    assert "browser__goto" in names
+    assert "list_mcp_resources" in names
+    assert "read_mcp_resource" in names
+    assert "list_mcp_prompts" in names
+    assert "get_mcp_prompt" in names
+    assert names.count("list_mcp_resources") == 1
+    assert names.count("list_mcp_prompts") == 1
+
+    mcp.disconnect_browser()
+    refresh_tools_after_mcp_change(ctx, mcp)
+    names = [t.name for t in ctx.tools]
+    assert "browser__goto" not in names
+    assert "list_mcp_resources" not in names
+    assert "read_mcp_resource" not in names
+    assert "list_mcp_prompts" not in names
+    assert "get_mcp_prompt" not in names
+    assert "enable_mcp" in names
+    assert "read_file" in names
 
 
 @pytest.mark.asyncio

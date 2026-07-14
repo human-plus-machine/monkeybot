@@ -79,12 +79,6 @@ class MCPClientPort(Protocol):
         """List MCP resources from connected servers."""
         ...
 
-    async def list_resource_templates(
-        self, server_name: str | None = None
-    ) -> list[dict[str, Any]]:
-        """List MCP resource templates from connected servers."""
-        ...
-
     async def read_resource(self, server_name: str, uri: str) -> dict[str, Any]:
         """Read one MCP resource by server name and URI."""
         ...
