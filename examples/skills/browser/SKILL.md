@@ -37,7 +37,7 @@ If `browser_get_elements` returns an error, retry once (or with `viewport_only: 
 - `screenshots_dir` — always `./browser/Screenshots`
 - `viewport` — width/height for coordinate clicks
 
-On vision models, after a fallback screenshot call **`render_image`** with the returned `path`, then `browser_click(x, y)`. Do not screenshot after every ordinary click when indexed tools work.
+On vision models, after a fallback screenshot call **`load_file`** with the returned `path`, then `browser_click(x, y)`. Do not screenshot after every ordinary click when indexed tools work.
 
 Text-only models should never rely on screenshots for page understanding — use `browser_get_elements` or `browser_js(...)`.
 
@@ -46,7 +46,7 @@ Text-only models should never rely on screenshots for page understanding — use
 - First navigation: `browser_goto(url)` — response includes matching playbook filenames when present.
 - After navigation: `browser_wait_for` or `browser_wait_idle` as needed.
 - Clicking / typing (default): `browser_get_elements` → `browser_click_by_index` / `browser_input_by_index` / `browser_select_by_index` → `browser_get_elements` again if the page changed.
-- Clicking (fallback only): `browser_screenshot` → `render_image(path)` → `browser_click(x, y)`.
+- Clicking (fallback only): `browser_screenshot` → `load_file(path)` → `browser_click(x, y)`.
 - Ad hoc DOM extraction: `browser_js(expression)` when you need custom page text or attributes.
 - Login walls: stop and ask the user. Use SSO only when Chrome is already signed in; still stop for passwords, MFA, or consent.
 

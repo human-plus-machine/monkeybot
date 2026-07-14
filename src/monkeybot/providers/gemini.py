@@ -339,12 +339,17 @@ def _tool_defs_to_declarations(tools: Sequence[ToolDef]) -> list[Any]:
 
     out: list[Any] = []
     for t in tools:
-        schema = dict(t.input_schema) if t.input_schema else {"type": "object"}
+        model_schema = t.to_model_schema()
+        params = (
+            dict(model_schema["input_schema"])
+            if model_schema["input_schema"]
+            else {"type": "object"}
+        )
         out.append(
             types.FunctionDeclaration(
-                name=t.name,
-                description=t.description or "",
-                parameters_json_schema=schema,
+                name=model_schema["name"],
+                description=model_schema["description"] or "",
+                parameters_json_schema=params,
             )
         )
     return out

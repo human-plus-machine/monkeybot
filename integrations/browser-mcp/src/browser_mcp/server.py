@@ -140,7 +140,7 @@ def browser_screenshot(full: bool = False, max_dim: int | None = 1800) -> str:
     apps, heavy shadow-DOM UIs, drag-and-drop, or visually confirming rendering/layout.
 
     Returns JSON with a workspace-relative path under ``./browser/Screenshots/`` (for
-    ``render_image`` on vision models) plus page metadata — not inline image bytes.
+    ``load_file`` on vision models) plus page metadata — not inline image bytes.
     """
     helpers, _ = _browser_harness()
     abs_path, rel_path = screenshots.allocate_screenshot_path()
@@ -155,7 +155,7 @@ def browser_screenshot(full: bool = False, max_dim: int | None = 1800) -> str:
             "title": info.get("title"),
             "viewport": {"w": info.get("w"), "h": info.get("h")},
             "note": (
-                "Screenshot saved under the agent workspace. Vision models: call render_image "
+                "Screenshot saved under the agent workspace. Vision models: call load_file "
                 "with path. Text-only models: use browser_get_elements instead of this tool. "
                 "Coordinate clicks use viewport metadata from this capture."
             ),

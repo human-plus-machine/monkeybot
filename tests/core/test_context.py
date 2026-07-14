@@ -258,8 +258,7 @@ async def test_build_context_merges_core_and_mcp_tools(tmp_path: Path) -> None:
         "pause_loop",
         "resume_loop",
         "stop_loop",
-        "render_image",
-        "read_attachment",
+        "load_file",
     }
     assert core_names.issubset(set(names))
     assert "db__query" in names
@@ -388,8 +387,7 @@ async def test_build_context_omits_attachment_tools_when_disabled(
     )
 
     names = {t.name for t in ctx.tools}
-    assert "render_image" not in names
-    assert "read_attachment" not in names
+    assert "load_file" not in names
 
 
 @pytest.mark.asyncio
