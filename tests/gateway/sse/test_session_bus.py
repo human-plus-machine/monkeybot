@@ -104,6 +104,45 @@ def test_registry_remove_evicts_curation_cache_entry() -> None:
 
 
 @pytest.mark.asyncio
+async def test_registry_remove_cleans_spill_files(tmp_path: Path) -> None:
+    """Session end removes parent and subagent spill dirs under the session namespace."""
+    spill = tmp_path / ".monkeybot" / "spill" / "s-spill"
+    spill.mkdir(parents=True)
+    (spill / "call.txt").write_text("payload", encoding="utf-8")
+    sub_spill = tmp_path / ".monkeybot" / "spill" / "subagent:s-spill:abc123"
+    sub_spill.mkdir(parents=True)
+    (sub_spill / "tool.txt").write_text("sub", encoding="utf-8")
+    other = tmp_path / ".monkeybot" / "spill" / "other-session"
+    other.mkdir(parents=True)
+    (other / "keep.txt").write_text("keep", encoding="utf-8")
+    other_sub = tmp_path / ".monkeybot" / "spill" / "subagent:other-session:xyz"
+    other_sub.mkdir(parents=True)
+    (other_sub / "keep.txt").write_text("keep", encoding="utf-8")
+
+    reg = SessionRegistry(workspace_root=tmp_path)
+    reg.create("s-spill", agent_md=None, created_at_ms=0)
+    assert (await reg.remove_async("s-spill")).deleted is True
+
+    assert not spill.exists()
+    assert not sub_spill.exists()
+    assert (other / "keep.txt").read_text(encoding="utf-8") == "keep"
+    assert (other_sub / "keep.txt").read_text(encoding="utf-8") == "keep"
+
+
+@pytest.mark.asyncio
+async def test_registry_sync_remove_defers_spill_cleanup(tmp_path: Path) -> None:
+    """Sync remove detaches immediately; spill cleanup runs only on remove_async."""
+    spill = tmp_path / ".monkeybot" / "spill" / "s-sync"
+    spill.mkdir(parents=True)
+    (spill / "call.txt").write_text("payload", encoding="utf-8")
+
+    reg = SessionRegistry(workspace_root=tmp_path)
+    reg.create("s-sync", agent_md=None, created_at_ms=0)
+    assert reg.remove("s-sync").deleted is True
+    assert spill.exists()
+
+
+@pytest.mark.asyncio
 async def test_registry_remove_cancels_pending_responses() -> None:
     reg = SessionRegistry()
     bus = reg.create("s1", agent_md=None, created_at_ms=0)

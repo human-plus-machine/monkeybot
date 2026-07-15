@@ -225,8 +225,9 @@ async def _await_user_response(
 class SessionRegistry:
     """Process-local registry of SessionBus instances."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, workspace_root: Path | None = None) -> None:
         self._sessions: dict[str, SessionBus] = {}  # ponytail: in-process registry, use Redis pub/sub for multi-instance deployments
+        self._workspace_root = workspace_root
 
     def get(self, session_id: str) -> SessionBus | None:
         """Return the bus for id or None."""
@@ -254,8 +255,16 @@ class SessionRegistry:
         self._sessions[session_id] = bus
         return bus
 
+    def _workspace_for_spill(self) -> Path:
+        """Workspace root for spill cleanup: injected path or ``paths.workspace_root`` from yaml."""
+        if self._workspace_root is not None:
+            return Path(self._workspace_root).resolve()
+        from monkeybot.core.workspace_layout import resolve_agent_workspace_root
+
+        return resolve_agent_workspace_root()
+
     def _detach(self, session_id: str) -> SessionBus | None:
-        """Pop a session and clear in-process auxiliaries; does not analyze transcripts."""
+        """Pop a session and clear in-process auxiliaries; does not analyze transcripts or spill."""
         bus = self._sessions.pop(session_id, None)
         if bus is None:
             return None
@@ -267,6 +276,19 @@ class SessionRegistry:
 
         evict_curation_cache(session_id)
         return bus
+
+    async def _cleanup_spill(self, session_id: str) -> None:
+        """Best-effort concurrent removal of session + subagent spill dirs."""
+        from monkeybot.core.tools.spill_inventory import cleanup_session_spill_files
+
+        try:
+            await cleanup_session_spill_files(self._workspace_for_spill(), session_id)
+        except Exception:
+            logger.warning(
+                "spill cleanup failed %s",
+                kv(session_id=session_id),
+                exc_info=True,
+            )
 
     @staticmethod
     def _report_dir_for_path(path: Path) -> str | None:
@@ -290,8 +312,8 @@ class SessionRegistry:
         (see ``memory_prompt._curation_cache``) so both structures share the
         same lifecycle instead of growing unbounded for the life of the process.
 
-        Does not run transcript analysis — use :meth:`remove_async` for that
-        (DELETE /sessions and gateway shutdown).
+        Does not run transcript analysis or spill cleanup — use
+        :meth:`remove_async` for that (DELETE /sessions and gateway shutdown).
         """
         bus = self._detach(session_id)
         if bus is None:
@@ -299,10 +321,11 @@ class SessionRegistry:
         return RemoveResult(deleted=True)
 
     async def remove_async(self, session_id: str) -> RemoveResult:
-        """Detach session, quiesce any in-flight turn, then analyze its transcript."""
+        """Detach session, clean spill files, quiesce the turn, then analyze transcript."""
         bus = self._detach(session_id)
         if bus is None:
             return RemoveResult(deleted=False)
+        await self._cleanup_spill(session_id)
         await bus.quiesce_active_turn()
         writer = bus.transcript_writer
         if writer is None:
@@ -313,9 +336,9 @@ class SessionRegistry:
     async def remove_all_async(self) -> None:
         """Best-effort analyze + remove every remaining session (gateway shutdown).
 
-        Detaches are synchronous and instantaneous; the transcript analysis for
-        each session runs concurrently via ``asyncio.gather`` so shutdown time
-        doesn't scale linearly with the number of open sessions.
+        Session removals (including spill cleanup and transcript analysis) run
+        concurrently via ``asyncio.gather`` so shutdown time doesn't scale
+        linearly with the number of open sessions.
         """
         results = await asyncio.gather(
             *(self.remove_async(sid) for sid in list(self._sessions)),

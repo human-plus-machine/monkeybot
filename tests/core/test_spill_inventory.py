@@ -1,28 +1,41 @@
-"""Spill inventory note helpers."""
+"""Tests for session-scoped spill cleanup."""
 
 from __future__ import annotations
 
-from monkeybot.core.runtime.context_budget import diff_inventory_lines
-from monkeybot.core.tools.spill_inventory import spill_inventory_note
+from pathlib import Path
+
+import pytest
+
+from monkeybot.core.tools.spill_inventory import (
+    cleanup_session_spill_files,
+    session_spill_dirs,
+)
 
 
-def test_diff_inventory_lists_changed_paths() -> None:
-    diff = "\n".join(
-        [
-            "diff --git a/src/foo.py b/src/foo.py",
-            "+++ b/src/foo.py",
-            "diff --git a/src/bar.py b/src/bar.py",
-            "+++ b/src/bar.py",
-        ]
-    )
-    paths = diff_inventory_lines(diff)
-    assert paths == ["src/foo.py", "src/bar.py"]
+def test_session_spill_dirs_includes_parent_and_subagent(tmp_path: Path) -> None:
+    root = tmp_path / ".monkeybot" / "spill"
+    (root / "sess-1").mkdir(parents=True)
+    (root / "subagent:sess-1:aaa").mkdir(parents=True)
+    (root / "subagent:sess-1:bbb").mkdir(parents=True)
+    (root / "sess-2").mkdir(parents=True)
+    (root / "subagent:sess-2:ccc").mkdir(parents=True)
+
+    dirs = session_spill_dirs(tmp_path, "sess-1")
+    names = {p.name for p in dirs}
+    assert names == {"sess-1", "subagent:sess-1:aaa", "subagent:sess-1:bbb"}
 
 
-def test_spill_inventory_note_includes_counts_and_paths() -> None:
-    diff = "diff --git a/a.py b/a.py\n+line\n"
-    note = spill_inventory_note(diff, ".monkeybot/spill/t/call.txt")
-    assert "total chars" in note
-    assert "total lines" in note
-    assert "Changed files (1): a.py" in note
-    assert ".monkeybot/spill/t/call.txt" in note
+@pytest.mark.asyncio
+async def test_cleanup_session_spill_files_concurrent(tmp_path: Path) -> None:
+    root = tmp_path / ".monkeybot" / "spill"
+    for name in ("s1", "subagent:s1:one", "subagent:s1:two", "other"):
+        d = root / name
+        d.mkdir(parents=True)
+        (d / "x.txt").write_text("data", encoding="utf-8")
+
+    await cleanup_session_spill_files(tmp_path, "s1")
+
+    assert not (root / "s1").exists()
+    assert not (root / "subagent:s1:one").exists()
+    assert not (root / "subagent:s1:two").exists()
+    assert (root / "other" / "x.txt").read_text(encoding="utf-8") == "data"

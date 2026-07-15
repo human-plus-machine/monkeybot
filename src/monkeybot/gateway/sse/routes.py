@@ -436,7 +436,7 @@ def _workspace_api_enabled() -> bool:
 
 
 def _api_workspace_root() -> Path:
-    """Workspace root for listing/reads; aligned with :func:`resolve_agent_workspace_root`."""
+    """Workspace root for listing/reads from ``paths.workspace_root`` in monkeybot.yaml."""
     return resolve_agent_workspace_root()
 
 
@@ -480,7 +480,7 @@ def create_app(
 
     For tests, pass FakeLoopPort / custom UsagePort. Story 8 wires the real loop.
     """
-    reg = registry or SessionRegistry()
+    reg = registry or SessionRegistry(workspace_root=resolve_agent_workspace_root())
     loop = loop_port or _default_loop_port(reg)
     usage = usage_port or _StaticUsagePort()
 

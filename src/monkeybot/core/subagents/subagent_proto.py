@@ -132,6 +132,7 @@ class SubagentEnvelope:
     traceparent: str | None = None
     agent_md: str | None = None
     subagent_type: str | None = None
+    parent_session_id: str | None = None
 
     def to_json(self) -> str:
         """Serialize to a compact JSON object for stdin (UTF-8)."""
@@ -148,6 +149,8 @@ class SubagentEnvelope:
             payload["agent_md"] = self.agent_md
         if self.subagent_type is not None:
             payload["subagent_type"] = self.subagent_type
+        if self.parent_session_id is not None:
+            payload["parent_session_id"] = self.parent_session_id
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
     @classmethod
@@ -169,6 +172,7 @@ class SubagentEnvelope:
             traceparent=_opt_traceparent(decoded),
             agent_md=_opt_str_field(decoded, "agent_md"),
             subagent_type=_opt_str_field(decoded, "subagent_type"),
+            parent_session_id=_opt_str_field(decoded, "parent_session_id"),
         )
 
 

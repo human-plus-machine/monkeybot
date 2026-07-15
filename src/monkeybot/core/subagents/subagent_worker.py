@@ -306,7 +306,10 @@ async def _async_main() -> None:
             inspectors.append(perm_insp)
 
         provider = _resolve_provider()
-        thread_id = f"subagent:{envelope.parent_run_id}:{uuid.uuid4().hex[:10]}"
+        # Namespace spill dirs under the parent chat session so session-end
+        # cleanup can remove ``.monkeybot/spill/subagent:{session_id}:*``.
+        spill_session = envelope.parent_session_id or envelope.parent_run_id
+        thread_id = f"subagent:{spill_session}:{uuid.uuid4().hex[:10]}"
         request_id = f"sub-{uuid.uuid4().hex[:12]}"
 
         cap_raw = os.environ.get("MODEL_CONTEXT_WINDOW", "200000").strip()

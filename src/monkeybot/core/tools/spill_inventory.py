@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import shutil
+from pathlib import Path
+
 from monkeybot.core.runtime.context_budget import diff_inventory_lines
 
+logger = logging.getLogger(__name__)
+
 _INVENTORY_PREFIX = "[Spill inventory —"
+_SPILL_DIR_REL = Path(".monkeybot") / "spill"
 
 
 def spill_inventory_note(text: str, rel_spill_path: str) -> str:
@@ -23,6 +31,49 @@ def spill_inventory_note(text: str, rel_spill_path: str) -> str:
         f"Full output at: {rel_spill_path} — use read_file with offset/limit to page through it.]"
     )
     return "\n".join(parts)
+
+
+def spill_root(workspace_root: Path) -> Path:
+    """Return ``.monkeybot/spill`` under ``workspace_root``."""
+    return Path(workspace_root).resolve() / _SPILL_DIR_REL
+
+
+def session_spill_dirs(workspace_root: Path, session_id: str) -> list[Path]:
+    """Spill directories owned by a chat session (parent + nested subagent threads).
+
+    Parent turns write ``.monkeybot/spill/{session_id}/``. Subagent workers write
+    ``.monkeybot/spill/subagent:{session_id}:{suffix}/`` so session-end cleanup
+    can remove both with one namespace.
+    """
+    root = spill_root(workspace_root)
+    dirs: list[Path] = [root / session_id]
+    if root.is_dir():
+        dirs.extend(sorted(root.glob(f"subagent:{session_id}:*")))
+    return dirs
+
+
+def _rmtree_spill(path: Path) -> None:
+    """Remove a spill directory; log and re-raise on failure so callers can observe it."""
+    if not path.exists():
+        return
+    try:
+        shutil.rmtree(path)
+    except OSError:
+        logger.warning("failed to remove spill directory path=%s", path, exc_info=True)
+        raise
+
+
+async def cleanup_session_spill_files(workspace_root: Path, session_id: str) -> None:
+    """Remove session and subagent spill dirs concurrently (off the event loop).
+
+    Spills must survive across user turns within a session so the model can
+    ``read_file`` inventory pointers on later turns. Call this on session end
+    (gateway DELETE / process teardown), not at turn start.
+    """
+    targets = [p for p in session_spill_dirs(workspace_root, session_id) if p.exists()]
+    if not targets:
+        return
+    await asyncio.gather(*(asyncio.to_thread(_rmtree_spill, p) for p in targets))
 
 
 def spill_min_chars_from_env() -> int:
