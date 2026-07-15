@@ -12,6 +12,7 @@ import pytest
 from monkeybot.core.context.epoch import SYSTEM_CONTEXT_UPDATE_HEADING
 from monkeybot.core.llm.provider import Message, UsageEvent
 from monkeybot.core.prompts.prompt import (
+    CURRENT_DATE_HEADING,
     CURRENT_REQUEST_HEADING,
     MEMORY_INDEX_HEADING,
     MEMORY_NUDGE_HEADING,
@@ -124,6 +125,7 @@ def test_volatile_markers_match_heading_constants() -> None:
     cache-block split.
     """
     assert set(_VOLATILE_SYSTEM_MARKERS) == {
+        CURRENT_DATE_HEADING,
         MEMORY_INDEX_HEADING,
         MEMORY_NUDGE_HEADING,
         SKILLS_HEADING,

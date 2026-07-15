@@ -1,10 +1,10 @@
 """Context Epoch — stable baseline + mid-conversation volatile updates.
 
 An epoch is the span during which one rendered system-prompt baseline remains the
-immutable provider-cache prefix. Volatile sources (memory, skills, current-request)
-may change within an epoch and produce chronological system-context updates without
-rewriting the baseline. Compaction (or an incompatible stable-source change) starts
-a new epoch.
+immutable provider-cache prefix. Volatile sources (current date, memory, skills,
+current-request) may change within an epoch and produce chronological system-context
+updates without rewriting the baseline. Compaction (or an incompatible stable-source
+change) starts a new epoch.
 """
 
 from __future__ import annotations
@@ -56,8 +56,8 @@ class _EpochState:
     volatile_fingerprint: str
     """Per-source fingerprints as of the last admitted volatile render (for
 
-    diagnosing which specific source changed on the next reconcile — memory,
-    skills, current-request — rather than reporting the opaque catch-all
+    diagnosing which specific source changed on the next reconcile — current date,
+    memory, skills, current-request — rather than reporting the opaque catch-all
     ``"volatile"``.
     """
     volatile_part_fingerprints: dict[str, str] = field(default_factory=dict)
@@ -90,8 +90,8 @@ class ContextEpochTracker:
     ) -> EpochAdmit:
         """Admit current stable/volatile renders at a provider-turn boundary.
 
-        ``volatile_part_fingerprints`` (e.g. ``{"memory": ..., "skills": ...,
-        "current_request": ...}``) is optional; when supplied it makes
+        ``volatile_part_fingerprints`` (e.g. ``{"current_date": ..., "memory": ...,
+        "skills": ..., "current_request": ...}``) is optional; when supplied it makes
         ``EpochAdmit.changed_sources`` name the specific volatile source(s) that
         changed instead of the catch-all ``"volatile"``.
         """
@@ -216,11 +216,12 @@ def _format_system_context_update(volatile_text: str) -> str:
     if not body.strip():
         return (
             f"{heading}"
-            "Volatile context sections (memory, skills, current request) were cleared."
+            "Volatile context sections (current date, memory, skills, current request) "
+            "were cleared."
         )
     return (
         f"{heading}"
-        "The following replaces prior mid-epoch memory, skills, and current-request "
-        "sections for this conversation.\n\n"
+        "The following replaces prior mid-epoch current-date, memory, skills, and "
+        "current-request sections for this conversation.\n\n"
         f"{body}"
     )

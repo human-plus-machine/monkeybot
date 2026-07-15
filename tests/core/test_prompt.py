@@ -1,5 +1,7 @@
 """Tests for :mod:`monkeybot.core.prompts.prompt`."""
 
+from datetime import date
+
 import pytest
 
 from monkeybot.core.attachments.catalog import AttachmentRecord
@@ -62,6 +64,7 @@ def test_compose_no_chat_skips_current_request() -> None:
     assert "You are TestBot." in out
     assert "## Current request" not in out
     assert "monkeybot harness" in out
+    assert f"## Current date\n{date.today().isoformat()}" in out
 
 
 def test_compose_last_message_user_skips_duplicate_task() -> None:
@@ -69,6 +72,27 @@ def test_compose_last_message_user_skips_duplicate_task() -> None:
     msgs = [Message(role="user", content=[Text(text="Hello")])]
     out = compose_system_prompt(ctx, chat_messages=msgs)
     assert "## Current request" not in out
+
+
+def test_compose_current_date_is_volatile_yyyy_mm_dd() -> None:
+    from monkeybot.core.prompts.prompt import (
+        compose_stable_baseline,
+        compose_volatile_tail,
+        compose_volatile_tail_parts,
+    )
+
+    ctx = _minimal_ctx()
+    today = date.today().isoformat()
+    stable = compose_stable_baseline(ctx)
+    volatile = compose_volatile_tail(ctx)
+    parts = compose_volatile_tail_parts(ctx)
+
+    assert "## Current date" not in stable
+    assert parts["current_date"] == f"\n\n## Current date\n{today}"
+    assert volatile.startswith(parts["current_date"])
+    split_stable, split_volatile = split_system_prompt_for_cache(f"{stable}{volatile}")
+    assert "## Current date" not in split_stable
+    assert split_volatile.startswith(f"\n\n## Current date\n{today}")
 
 
 def test_compose_stable_and_volatile_split() -> None:
@@ -85,8 +109,10 @@ def test_compose_stable_and_volatile_split() -> None:
     volatile = compose_volatile_tail(ctx)
     assert "You are TestBot." in stable
     assert "monkeybot harness" in stable
+    assert "\n\n## Current date\n" not in stable
     assert "\n\n## Memory index\n" not in stable
     assert "\n\n## Skills\n" not in stable
+    assert f"\n\n## Current date\n{date.today().isoformat()}" in volatile
     assert "- fact-a" in volatile
     assert "\n\n## Skills\n- s1" in volatile
     assert compose_system_prompt(ctx) == f"{stable}{volatile}"
@@ -287,12 +313,14 @@ def test_harness_precedes_volatile_sections() -> None:
     out = compose_system_prompt(ctx, chat_messages=msgs)
     stable, volatile = split_system_prompt_for_cache(out)
     assert "monkeybot harness" in stable
+    assert "## Current date" not in stable
     assert "## Memory index" not in stable
     assert "## Current request" not in stable
+    date_idx = volatile.index("## Current date")
     mem_idx = volatile.index("## Memory index")
     skills_idx = volatile.index("## Skills")
     current_idx = volatile.index("## Current request")
-    assert mem_idx < skills_idx < current_idx
+    assert date_idx < mem_idx < skills_idx < current_idx
 
 
 @pytest.mark.parametrize("include_task", [True, False])

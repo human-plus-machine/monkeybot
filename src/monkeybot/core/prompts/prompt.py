@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import date
 
 from monkeybot.core.attachments.catalog import AttachmentRecord
 from monkeybot.core.context import TurnContext
@@ -23,6 +24,7 @@ _MAX_CURRENT_REQUEST_CHARS = 8000
 # boundary in a flattened prompt string (e.g. Anthropic cache-block splitting
 # in ``providers._utils.split_system_prompt_for_cache``) import these instead
 # of re-declaring the literal strings and risking drift.
+CURRENT_DATE_HEADING = "\n\n## Current date\n"
 MEMORY_INDEX_HEADING = "\n\n## Memory index\n"
 MEMORY_NUDGE_HEADING = "\n\n## Memory\n"
 SKILLS_HEADING = "\n\n## Skills\n"
@@ -102,6 +104,15 @@ def _session_attachments_block(catalog: Sequence[AttachmentRecord] | None) -> st
     return "\n\n## Session attachments\n" + "\n".join(lines)
 
 
+def _current_date_block() -> str:
+    """Host-local calendar date as machine-stable ``YYYY-MM-DD`` (volatile).
+
+    Lives in the volatile tail so a day rollover does not bust the stable
+    cache prefix; within a calendar day the fingerprint is stable.
+    """
+    return f"{CURRENT_DATE_HEADING}{date.today().isoformat()}"
+
+
 def _memory_block(
     ctx: TurnContext,
     memory_selection: MemoryPromptSelection | None,
@@ -164,11 +175,12 @@ def compose_volatile_tail(
     chat_messages: Sequence[Message] | None = None,
     memory_selection: MemoryPromptSelection | None = None,
 ) -> str:
-    """Volatile tail: memory index + skills + current-request anchor."""
-    mem_block = _memory_block(ctx, memory_selection)
-    skills_section = _skills_section(ctx)
-    task = _current_request_block(chat_messages)
-    return f"{mem_block}{skills_section}{task}"
+    """Volatile tail: current date + memory index + skills + current-request anchor."""
+    return "".join(
+        compose_volatile_tail_parts(
+            ctx, chat_messages=chat_messages, memory_selection=memory_selection
+        ).values()
+    )
 
 
 def compose_volatile_tail_parts(
@@ -180,10 +192,11 @@ def compose_volatile_tail_parts(
     """Same sections as :func:`compose_volatile_tail`, individually named.
 
     Lets callers (e.g. ``ContextEpochTracker``) attribute a mid-epoch volatile
-    change to the specific source that moved — memory, skills, or the
-    current-request anchor — instead of a catch-all "volatile" label.
+    change to the specific source that moved — current date, memory, skills, or
+    the current-request anchor — instead of a catch-all "volatile" label.
     """
     return {
+        "current_date": _current_date_block(),
         "memory": _memory_block(ctx, memory_selection),
         "skills": _skills_section(ctx),
         "current_request": _current_request_block(chat_messages),
@@ -200,9 +213,9 @@ def compose_system_prompt(
     """Build the system string: AGENT.md, harness, attachments, then volatile tail.
 
     ``ctx.agent_md`` is the operator-authored base prompt (typically from AGENT.md).
-    Stable sections (harness, attachments) precede volatile curation (memory, skills,
-    current-request anchor) so implicit and explicit prompt caching can hit a contiguous
-    prefix across turns.
+    Stable sections (harness, attachments) precede volatile curation (current date,
+    memory, skills, current-request anchor) so implicit and explicit prompt caching
+    can hit a contiguous prefix across turns.
 
     When ``memory_selection`` is set, its lines (and optional search nudge) are used
     instead of the full ``ctx.memory_index``. Skill names are always taken from
