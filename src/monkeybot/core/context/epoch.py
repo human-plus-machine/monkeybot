@@ -87,6 +87,7 @@ class ContextEpochTracker:
         stable_fingerprint: str,
         volatile_fingerprint: str,
         volatile_part_fingerprints: Mapping[str, str] | None = None,
+        volatile_content_text: str | None = None,
     ) -> EpochAdmit:
         """Admit current stable/volatile renders at a provider-turn boundary.
 
@@ -94,6 +95,12 @@ class ContextEpochTracker:
         "skills": ..., "current_request": ...}``) is optional; when supplied it makes
         ``EpochAdmit.changed_sources`` name the specific volatile source(s) that
         changed instead of the catch-all ``"volatile"``.
+
+        ``volatile_content_text`` is optional and should exclude always-present,
+        content-free sources (e.g. the "current date" heading, which is never empty)
+        so :func:`_format_system_context_update` can still say sections "were
+        cleared" when memory/skills/current-request are genuinely all empty. Defaults
+        to ``volatile_text`` when omitted.
         """
         admit, next_state, force_new = self._compute(
             stable_baseline=stable_baseline,
@@ -101,6 +108,7 @@ class ContextEpochTracker:
             stable_fingerprint=stable_fingerprint,
             volatile_fingerprint=volatile_fingerprint,
             volatile_part_fingerprints=volatile_part_fingerprints,
+            volatile_content_text=volatile_content_text,
         )
         self._state = next_state
         self._force_new = force_new
@@ -114,6 +122,7 @@ class ContextEpochTracker:
         stable_fingerprint: str,
         volatile_fingerprint: str,
         volatile_part_fingerprints: Mapping[str, str] | None = None,
+        volatile_content_text: str | None = None,
     ) -> EpochAdmit:
         """Compute the :class:`EpochAdmit` for the given renders without mutating state.
 
@@ -127,6 +136,7 @@ class ContextEpochTracker:
             stable_fingerprint=stable_fingerprint,
             volatile_fingerprint=volatile_fingerprint,
             volatile_part_fingerprints=volatile_part_fingerprints,
+            volatile_content_text=volatile_content_text,
         )
         return admit
 
@@ -138,6 +148,7 @@ class ContextEpochTracker:
         stable_fingerprint: str,
         volatile_fingerprint: str,
         volatile_part_fingerprints: Mapping[str, str] | None,
+        volatile_content_text: str | None = None,
     ) -> tuple[EpochAdmit, _EpochState | None, bool]:
         parts = dict(volatile_part_fingerprints) if volatile_part_fingerprints else {}
         if (
@@ -185,7 +196,10 @@ class ContextEpochTracker:
             kind="volatile_updated",
             epoch_id=next_state.epoch_id,
             leading_system_text=self._leading(next_state),
-            mid_conversation_update=_format_system_context_update(volatile_text),
+            mid_conversation_update=_format_system_context_update(
+                volatile_text,
+                content_text=volatile_content_text,
+            ),
             changed_sources=changed,
         )
         return admit, next_state, self._force_new
@@ -210,15 +224,20 @@ def _diff_source_names(
     return changed or ("volatile",)
 
 
-def _format_system_context_update(volatile_text: str) -> str:
+def _format_system_context_update(volatile_text: str, *, content_text: str | None = None) -> str:
+    """Chronological mid-epoch update text for the volatile tail.
+
+    ``content_text``, when given, is checked for emptiness instead of
+    ``volatile_text`` itself: it should exclude always-present, content-free
+    sources (e.g. "current date", which is never empty) so the "were cleared"
+    message only fires when memory/skills/current-request are genuinely all
+    empty, even though the date heading is still present in ``volatile_text``.
+    """
     heading = SYSTEM_CONTEXT_UPDATE_HEADING.lstrip("\n")
     body = volatile_text.lstrip("\n")
-    if not body.strip():
-        return (
-            f"{heading}"
-            "Volatile context sections (current date, memory, skills, current request) "
-            "were cleared."
-        )
+    check_text = content_text if content_text is not None else body
+    if not check_text.strip():
+        return f"{heading}Volatile context sections (memory, skills, current request) were cleared."
     return (
         f"{heading}"
         "The following replaces prior mid-epoch current-date, memory, skills, and "
