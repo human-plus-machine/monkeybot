@@ -216,7 +216,7 @@ async def _await_user_response(
     Raises:
         asyncio.CancelledError: When the backing Future was cancelled (Stop button path).
     """
-    from monkeybot.core.runtime.loop import _await_user_response_any
+    from monkeybot.core.runtime.tool_batch import _await_user_response_any
 
     fut = bus.pending_responses[pending_key]
     return await _await_user_response_any(bus, fut, pending_key, timeout_sec=timeout_sec)

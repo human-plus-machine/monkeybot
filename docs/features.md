@@ -26,7 +26,7 @@ Client (CLI / chat UI / serverless handler)
 | Layer | Location | Owns |
 |-------|----------|------|
 | **Gateway** | `src/monkeybot/gateway/sse/` | HTTP/SSE transport, session bus, CORS, pending UI responses |
-| **Harness loop** | `src/monkeybot/core/runtime/loop.py` | Turn semantics, streaming, tool batching, hooks, summarization |
+| **Harness loop** | `src/monkeybot/core/runtime/` (`loop.py` facade; `turn_loop.py`, `tool_dispatch.py`, helpers) | Turn semantics, streaming, tool batching, hooks, summarization |
 | **Context** | `src/monkeybot/core/context/` | Per-turn `TurnContext`, tool defs, curation, output budgeting |
 | **Prompts** | `src/monkeybot/core/prompts/` | System prompt composition (operator + harness + volatile tail) |
 | **Providers** | `src/monkeybot/providers/` | Vendor LLM adapters (Gemini, OpenAI, Claude, Bedrock, …) |
@@ -63,7 +63,7 @@ Use this table before adding features so PRs do not thicken the wrong layer: say
 | HTTP/SSE, session bus, CORS, pending UI responses | **Not in core — gateway** | Transport only; call ports into the harness |
 | Chat UI, CLI chrome, deploy manifests, billing | **Not in core — product / OS** | Consume events and APIs; do not fork loop semantics |
 | Operator persona, domain procedures, skill playbooks | **Not in core — `AGENT.md` / skills** | Content the harness injects; not harness code |
-| Domain / third-party tools | **Extension — `CustomTool` / MCP / hooks** | Prefer these over editing `loop.py` or core tool tables |
+| Domain / third-party tools | **Extension — `CustomTool` / MCP / hooks** | Prefer these over editing `turn_loop.py` / `tool_dispatch.py` or core tool tables |
 | Strong isolation for untrusted or unattended work | **OS / container / VM** | Optional OpenSandbox + allowlists are defense-in-depth, not a full trust boundary; real isolation is external |
 
 **PR smell checks:** new HTTP concerns in `core/` → wrong layer; new turn semantics only in the gateway → wrong layer; security that assumes “sandbox = safe” without an OS boundary → document the gap instead of implying a stronger guarantee.
@@ -106,18 +106,18 @@ Do **not** conflate with HITL `ToolConfirmationRequest`. Cancel clears pending s
 
 | Phase | When | Key files |
 |-------|------|-----------|
-| Steer drain | Start of each inner turn | `core/runtime/input_admission.py`, `loop.py` |
-| Hook settlement | Before provider call / `TurnComplete` | `core/hooks/`, `loop.py` |
+| Steer drain | Start of each inner turn | `core/runtime/input_admission.py`, `turn_loop.py` |
+| Hook settlement | Before provider call / `TurnComplete` | `core/hooks/`, `loop_hooks.py` |
 | Hooks (`PRE_TURN`) | Turn 1 of user message | `core/hooks/` |
 | Context curation | Turn 1, if enabled + thresholds met | `core/context/curator.py` |
-| System prompt build | Every inner turn | `core/prompts/prompt.py` |
+| System prompt build | Every inner turn | `core/prompts/prompt.py`, `loop_messages.py` |
 | Attachment resolve | Before provider call | `core/attachments/resolve.py` |
-| Preflight tokens | Before provider call | `core/runtime/context_budget.py` |
-| History summarization | When tokens exceed trigger ratio | `loop.py` |
+| Preflight tokens | Before provider call | `core/runtime/context_budget.py`, `loop_usage.py` |
+| History summarization | When tokens exceed trigger ratio | `history_compaction.py`, `turn_loop.py` |
 | Tool result shaping | Under context pressure tiers | `core/context/tool_shapers.py` |
-| Provider stream | Every inner turn | `providers/*.py` |
-| Tool execution | When model emits tool calls | `core/tools/core_tool_executor.py` |
-| History append | After tool batch | `core/persistence/history.py` |
+| Provider stream | Every inner turn | `providers/*.py`, `turn_loop.py` |
+| Tool execution | When model emits tool calls | `tool_dispatch.py`, `core/tools/core_tool_executor.py` |
+| History append | After tool batch | `core/persistence/history.py`, `tool_dispatch.py` |
 
 ### Gateway SSE flow
 
@@ -140,7 +140,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Purpose:** Single source of truth for harness turn semantics.
 
-**Key files:** `core/runtime/loop.py`, `core/runtime/events.py`
+**Key files:** `core/runtime/loop.py` (facade `run`), `turn_loop.py` (orchestration), `tool_dispatch.py` (tool batches), `doom_loop.py`, `tool_batch.py`, `history_compaction.py`, `events.py`
 
 **How it works:**
 - `run()` is an async generator yielding `AgentEvent` until `TurnComplete`.
@@ -584,7 +584,7 @@ its `.env` before YAML values fill still-unset environment variables.
 - `POST_TOOL` / `POST_TURN` / `AFTER_PROVIDER_RESPONSE` are fire-and-forget at fire time, but `HookManager.drain_settlement()` waits for them (bounded) before the next provider call and before `TurnComplete` (`run()` finally).
 - Settlement never waits on SSE subscribers — only in-process hook tasks.
 - `Message` is frozen: rewrite by replacing list entries, not mutating message fields.
-- Prefer these hooks over editing `loop.py` for product concerns (drive-mode tool filtering, redaction, metering).
+- Prefer these hooks over editing `turn_loop.py` / `tool_dispatch.py` for product concerns (drive-mode tool filtering, redaction, metering).
 
 ---
 
@@ -779,10 +779,11 @@ two runs with `python -m evals.diff`).
 
 | Concern | Start here |
 |---------|------------|
-| Loop / turn semantics | `src/monkeybot/core/runtime/loop.py` |
+| Loop / turn semantics | `src/monkeybot/core/runtime/loop.py` (`run` facade), `turn_loop.py`, `tool_dispatch.py` |
 | System prompt | `src/monkeybot/core/prompts/prompt.py`, `harness_prompt.py` |
 | Gateway wiring | `src/monkeybot/gateway/sse/app.py` |
-| Tool dispatch | `src/monkeybot/core/tools/core_tool_executor.py` |
+| Tool dispatch (executor) | `src/monkeybot/core/tools/core_tool_executor.py` |
+| Tool batch (loop) | `src/monkeybot/core/runtime/tool_dispatch.py`, `tool_batch.py` |
 | Config | `core/config/runtime_env.py`, `cli/src/monkeybot_cli/scaffold_defaults/monkeybot.example.yaml` |
 | MCP | `core/mcp/mcp_client.py`, `docs/mcp.md` |
 | Memory | `core/memory/subsystem.py`, `core/memory/hook.py` |

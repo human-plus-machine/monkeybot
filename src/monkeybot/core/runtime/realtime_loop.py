@@ -56,8 +56,8 @@ from monkeybot.core.types.content_blocks import (
     ToolResponse,
 )
 
-from .loop import (
-    ToolExecutorPort,
+from .loop_ports import ToolExecutorPort
+from .tool_batch import (
     _await_user_response_any,
     _note_registry_mutation,
     _rejected_tool_batch_error,

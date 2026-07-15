@@ -6,10 +6,10 @@ import pytest
 
 from monkeybot.core.llm.provider import Done, TextDelta, ThinkingDelta
 from monkeybot.core.runtime.events import Error, TurnComplete
-from monkeybot.core.runtime.loop import (
+from monkeybot.core.runtime.loop import run
+from monkeybot.core.runtime.turn_loop import (
     _EMPTY_COMPLETION_EXHAUSTED_ERROR,
     _EMPTY_COMPLETION_RECOVERY_NOTE,
-    run,
 )
 from monkeybot.core.tools.types import ToolExecutionResult
 from tests.core.test_loop import AllowInspector, FakeHistory, FakeProvider, RecordingExecutor, _ctx
