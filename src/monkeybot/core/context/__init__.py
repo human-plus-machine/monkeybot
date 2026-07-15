@@ -109,6 +109,8 @@ class TurnContext:
     """Named subagent types (name, description) advertised to the parent in the harness."""
     catalog_mcp_servers: tuple[str, ...] = ()
     """Configured MCP server names available via ``enable_mcp`` (not connected until activated)."""
+    scheduled_loops_available: bool = False
+    """True when durable loop storage is wired (DB_URL); advertise ``enable_loops`` catalog hint."""
 
 
 _log = logging.getLogger(__name__)
@@ -120,6 +122,30 @@ MCP_REGISTRY_MUTATING_TOOLS = frozenset(
         "disable_mcp",
     }
 )
+
+# Built-in tools that mutate scheduled-loop tool advertisement; loop refreshes ctx.tools.
+LOOPS_REGISTRY_MUTATING_TOOLS = frozenset(
+    {
+        "enable_loops",
+        "disable_loops",
+    }
+)
+
+
+@dataclass
+class LoopsToolRegistry:
+    """Process-local progressive-loop advertisement (mirrors MCP client connection state).
+
+    Gateway deps hold one instance for the process lifetime so ``enable_loops`` sticks
+    across user turns until ``disable_loops`` (or process restart).
+
+    Not shared across gateway replicas: multi-instance deploys need a single replica
+    or sticky routing so enable/disable stays consistent for a session (same tradeoff
+    as in-process MCP connections).
+    """
+
+    advertised: bool = False
+
 
 # Resource/prompt meta-tools — advertised only after an MCP server is connected.
 _MCP_SERVER_FILTER_SCHEMA: dict[str, object] = {
@@ -191,6 +217,95 @@ MCP_PROGRESSIVE_META_TOOL_DEFS: tuple[ToolDef, ...] = (
 )
 MCP_PROGRESSIVE_META_TOOLS = frozenset(t.name for t in MCP_PROGRESSIVE_META_TOOL_DEFS)
 
+# Lifecycle tools — advertised only after ``enable_loops`` (or auto-advertise).
+SCHEDULED_LOOP_TOOL_DEFS: tuple[ToolDef, ...] = (
+    ToolDef(
+        "start_loop",
+        "Start a prompt-first scheduled loop after the user confirms. Pass the agreed "
+        "plan in prompt (BUSINESS/RULES). The scheduler fires that prompt on each tick. "
+        "Requires durable storage (DB_URL). Call ``enable_loops`` first when these tools "
+        "are not yet in the active tool list.",
+        {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "Agreed loop plan / tick instructions.",
+                },
+                "interval": {
+                    "type": "string",
+                    "description": "Tick interval, e.g. 20s, 5m, 1h.",
+                },
+                "loop_id": {"type": "string"},
+                "session_id": {
+                    "type": "string",
+                    "description": "Conversation thread for ticks (default loop-main).",
+                },
+                "max_ticks": {"type": "integer"},
+                "max_runtime": {
+                    "type": "string",
+                    "description": "Hard wall-clock limit, e.g. 1h.",
+                },
+                "unbounded": {
+                    "type": "boolean",
+                    "description": (
+                        "Opt out of max_ticks/max_runtime guards. "
+                        "Requires explicit user confirmation."
+                    ),
+                },
+                "skip_if_busy": {"type": "boolean"},
+            },
+            "required": ["prompt", "interval"],
+        },
+    ),
+    ToolDef(
+        "loop_status",
+        "Get status of one scheduled loop or list all loops.",
+        {
+            "type": "object",
+            "properties": {"loop_id": {"type": "string"}},
+            "required": [],
+        },
+        parallel_safe=True,
+        doom_loop_exempt=True,
+    ),
+    ToolDef(
+        "pause_loop",
+        "Pause a scheduled loop.",
+        {
+            "type": "object",
+            "properties": {"loop_id": {"type": "string"}},
+            "required": ["loop_id"],
+        },
+    ),
+    ToolDef(
+        "resume_loop",
+        "Resume a paused scheduled loop.",
+        {
+            "type": "object",
+            "properties": {"loop_id": {"type": "string"}},
+            "required": ["loop_id"],
+        },
+    ),
+    ToolDef(
+        "stop_loop",
+        "Stop a scheduled loop permanently.",
+        {
+            "type": "object",
+            "properties": {"loop_id": {"type": "string"}},
+            "required": ["loop_id"],
+        },
+    ),
+    ToolDef(
+        "disable_loops",
+        "Drop scheduled-loop tools from the next model step this turn. "
+        "Running loops keep their scheduler state; call `stop_loop` first to "
+        "end them.",
+        {"type": "object", "properties": {}, "required": []},
+    ),
+)
+SCHEDULED_LOOP_TOOL_NAMES = frozenset(t.name for t in SCHEDULED_LOOP_TOOL_DEFS)
+
 
 def _any_mcp_connected(mcp_client: Any) -> bool:
     """True when any known MCP server has an active session."""
@@ -222,6 +337,24 @@ def refresh_tools_after_mcp_change(
     if _any_mcp_connected(mcp_client):
         rebuilt.extend(MCP_PROGRESSIVE_META_TOOL_DEFS)
     ctx.tools[:] = rebuilt
+    return ctx
+
+
+def refresh_tools_after_loops_change(
+    ctx: TurnContext,
+    *,
+    loops_advertised: bool,
+) -> TurnContext:
+    """Rebuild ``ctx.tools`` after enable/disable loops (same user turn).
+
+    Drops scheduled-loop progressive tools (lifecycle + ``disable_loops``), then
+    re-appends them when advertised. ``enable_loops`` stays in the core set.
+    Mutates ``ctx.tools`` in place.
+    """
+    kept = [t for t in ctx.tools if t.name not in SCHEDULED_LOOP_TOOL_NAMES]
+    if loops_advertised:
+        kept.extend(SCHEDULED_LOOP_TOOL_DEFS)
+    ctx.tools[:] = kept
     return ctx
 
 
@@ -471,80 +604,12 @@ def _core_tool_defs(
                 disable_mcp_schema,
             ),
             ToolDef(
-                "start_loop",
-                "Start a prompt-first scheduled loop after the user confirms. Pass the agreed "
-                "plan in prompt (BUSINESS/RULES). The scheduler fires that prompt on each tick. "
-                "Requires durable storage (DB_URL).",
-                {
-                    "type": "object",
-                    "properties": {
-                        "prompt": {
-                            "type": "string",
-                            "description": "Agreed loop plan / tick instructions.",
-                        },
-                        "interval": {
-                            "type": "string",
-                            "description": "Tick interval, e.g. 20s, 5m, 1h.",
-                        },
-                        "loop_id": {"type": "string"},
-                        "session_id": {
-                            "type": "string",
-                            "description": "Conversation thread for ticks (default loop-main).",
-                        },
-                        "max_ticks": {"type": "integer"},
-                        "max_runtime": {
-                            "type": "string",
-                            "description": "Hard wall-clock limit, e.g. 1h.",
-                        },
-                        "unbounded": {
-                            "type": "boolean",
-                            "description": (
-                                "Opt out of max_ticks/max_runtime guards. "
-                                "Requires explicit user confirmation."
-                            ),
-                        },
-                        "skip_if_busy": {"type": "boolean"},
-                    },
-                    "required": ["prompt", "interval"],
-                },
-            ),
-            ToolDef(
-                "loop_status",
-                "Get status of one scheduled loop or list all loops.",
-                {
-                    "type": "object",
-                    "properties": {"loop_id": {"type": "string"}},
-                    "required": [],
-                },
-                parallel_safe=True,
-                doom_loop_exempt=True,
-            ),
-            ToolDef(
-                "pause_loop",
-                "Pause a scheduled loop.",
-                {
-                    "type": "object",
-                    "properties": {"loop_id": {"type": "string"}},
-                    "required": ["loop_id"],
-                },
-            ),
-            ToolDef(
-                "resume_loop",
-                "Resume a paused scheduled loop.",
-                {
-                    "type": "object",
-                    "properties": {"loop_id": {"type": "string"}},
-                    "required": ["loop_id"],
-                },
-            ),
-            ToolDef(
-                "stop_loop",
-                "Stop a scheduled loop permanently.",
-                {
-                    "type": "object",
-                    "properties": {"loop_id": {"type": "string"}},
-                    "required": ["loop_id"],
-                },
+                "enable_loops",
+                "Advertise scheduled-loop tools (`start_loop`, `loop_status`, "
+                "`pause_loop`, `resume_loop`, `stop_loop`, `disable_loops`) on the "
+                "next model step this turn. Requires durable storage (DB_URL). "
+                "Prefer the loop skill for procedure before starting a loop.",
+                {"type": "object", "properties": {}, "required": []},
             ),
         ]
     )
@@ -641,6 +706,8 @@ async def build_context(
     sse_bus: PendingResponseBusPort | None = None,
     extra_tools: Sequence[CustomTool] | None = None,
     subagent_registry: dict[str, SubagentConfig] | None = None,
+    scheduled_loops_available: bool = False,
+    loops_advertised: bool = False,
 ) -> TurnContext:
     """Assemble a TurnContext from filesystem paths and the MCP client snapshot.
 
@@ -665,6 +732,9 @@ async def build_context(
             Their ``tool_def`` is appended to the tool list advertised to the model and
             their ``execute`` method is dispatched by :class:`CoreToolExecutor`.
         subagent_registry: Optional map of named subagent personas from monkeybot.yaml.
+        scheduled_loops_available: True when durable loop storage is wired (shows harness hint).
+        loops_advertised: True when the caller's ``LoopsToolRegistry`` has ``enable_loops``
+            active; includes scheduled-loop lifecycle tools immediately for this turn.
 
     Returns:
         Frozen :class:`TurnContext`.
@@ -689,6 +759,8 @@ async def build_context(
     tools.extend(mcp_client.all_tools())
     if _any_mcp_connected(mcp_client):
         tools.extend(MCP_PROGRESSIVE_META_TOOL_DEFS)
+    if loops_advertised and scheduled_loops_available:
+        tools.extend(SCHEDULED_LOOP_TOOL_DEFS)
     for ct in extra_tools or []:
         tools.append(ct.tool_def)
     catalog_names = tuple(mcp_client.catalog_names())
@@ -711,6 +783,7 @@ async def build_context(
         sse_bus=sse_bus,
         subagent_personas=personas,
         catalog_mcp_servers=catalog_names,
+        scheduled_loops_available=scheduled_loops_available,
     )
 
 

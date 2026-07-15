@@ -55,6 +55,7 @@ async def _combined_lifespan(app: FastAPI) -> AsyncIterator[None]:
     deps.run_command_allowed_path_prefixes = sse_deps.run_command_allowed_path_prefixes
     deps.subagent_registry = sse_deps.subagent_registry
     deps.attachment_store = getattr(app.state, "attachment_store", None)
+    deps.loops_registry = sse_deps.loops_registry
 
     realtime_provider = normalize_model_provider(
         config.model.provider or os.environ.get("MODEL_PROVIDER", "google_vertexai")

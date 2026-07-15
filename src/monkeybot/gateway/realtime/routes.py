@@ -116,6 +116,8 @@ async def _build_realtime_context(
     workspace_root, skills_path = _resolved_workspace_paths()
     agent_path = AgentLayout.from_environment().agent_md_path
     model = os.environ.get("MODEL_NAME", "gemini-2.5-flash")
+    loops_available = deps.storage is not None
+    loops_advertised = loops_available and deps.loops_registry.advertised
     return await build_context(
         thread_id=session_id,
         request_id=request_id,
@@ -129,6 +131,8 @@ async def _build_realtime_context(
         enable_context_curation=True,
         extra_tools=[deps.web_search_tool] if deps.web_search_tool is not None else [],
         subagent_registry=deps.subagent_registry,
+        scheduled_loops_available=loops_available,
+        loops_advertised=loops_advertised,
     )
 
 
@@ -152,6 +156,7 @@ def _create_tool_executor(
         run_store=storage.runs() if storage is not None else None,
         scheduled_loop_store=storage.scheduled_loops() if storage is not None else None,
         subagent_registry=deps.subagent_registry,
+        loops_registry=deps.loops_registry,
     )
 
 

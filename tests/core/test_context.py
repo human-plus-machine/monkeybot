@@ -6,10 +6,12 @@ from pathlib import Path
 import pytest
 
 from monkeybot.core.context import (
+    SCHEDULED_LOOP_TOOL_NAMES,
     _discover_skills,
     _parse_skill_description,
     build_context,
     refresh_memory_index,
+    refresh_tools_after_loops_change,
     refresh_tools_after_mcp_change,
 )
 from monkeybot.core.llm.provider import Done, TextDelta, UsageEvent
@@ -249,18 +251,20 @@ async def test_build_context_merges_core_and_mcp_tools(tmp_path: Path) -> None:
         "task",
         "enable_mcp",
         "disable_mcp",
+        "enable_loops",
         "list_mcp_resources",
         "read_mcp_resource",
         "list_mcp_prompts",
         "get_mcp_prompt",
-        "start_loop",
-        "loop_status",
-        "pause_loop",
-        "resume_loop",
-        "stop_loop",
         "load_file",
     }
     assert core_names.issubset(set(names))
+    assert "start_loop" not in names
+    assert "loop_status" not in names
+    assert "pause_loop" not in names
+    assert "resume_loop" not in names
+    assert "stop_loop" not in names
+    assert "disable_loops" not in names
     assert "db__query" in names
     assert "wiki__search" in names
     assert "list_mcp_resources" in names
@@ -298,6 +302,9 @@ async def test_build_context_omits_progressive_mcp_meta_without_connected_mcp(
     assert "list_mcp_prompts" not in names
     assert "get_mcp_prompt" not in names
     assert "enable_mcp" in names
+    assert "enable_loops" in names
+    assert "disable_loops" not in names
+    assert "start_loop" not in names
 
 
 def test_refresh_tools_after_mcp_change_adds_and_drops_progressive_meta_tools() -> None:
@@ -363,6 +370,66 @@ def test_refresh_tools_after_mcp_change_adds_and_drops_progressive_meta_tools() 
     assert "get_mcp_prompt" not in names
     assert "enable_mcp" in names
     assert "read_file" in names
+
+
+def test_refresh_tools_after_loops_change_adds_and_drops_lifecycle_tools() -> None:
+    from monkeybot.core.context import TurnContext
+
+    ctx = TurnContext(
+        thread_id="t",
+        request_id="r",
+        agent_md="# Agent",
+        memory_index=[],
+        skills=[],
+        tools=[
+            ToolDef("enable_loops", "Enable", {}),
+            ToolDef("read_file", "Read", {}),
+        ],
+        user_id=None,
+        parent_run_id=None,
+        model="gemini-2.5-flash",
+    )
+
+    refresh_tools_after_loops_change(ctx, loops_advertised=True)
+    names = {t.name for t in ctx.tools}
+    assert SCHEDULED_LOOP_TOOL_NAMES.issubset(names)
+    assert "disable_loops" in names
+    assert "enable_loops" in names
+    assert "read_file" in names
+
+    refresh_tools_after_loops_change(ctx, loops_advertised=False)
+    names = {t.name for t in ctx.tools}
+    assert names.isdisjoint(SCHEDULED_LOOP_TOOL_NAMES)
+    assert "disable_loops" not in names
+    assert "enable_loops" in names
+    assert "read_file" in names
+
+
+@pytest.mark.asyncio
+async def test_build_context_advertises_loop_tools_when_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ATTACHMENTS_ENABLED", "false")
+    agent_path = tmp_path / "AGENT.md"
+    agent_path.write_text("You are a helpful assistant.\n", encoding="utf-8")
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    (mem / "INDEX.md").write_text("- alpha\n", encoding="utf-8")
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ctx = await build_context(
+        "thread-1",
+        "req-1",
+        agent_md_path=agent_path,
+        memory=_memory_subsystem(mem),
+        skills_path=skills,
+        mcp_client=FakeMCPClient([]),
+        scheduled_loops_available=True,
+        loops_advertised=True,
+    )
+    names = {t.name for t in ctx.tools}
+    assert SCHEDULED_LOOP_TOOL_NAMES.issubset(names)
+    assert ctx.scheduled_loops_available is True
 
 
 @pytest.mark.asyncio

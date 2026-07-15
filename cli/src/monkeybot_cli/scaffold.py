@@ -136,6 +136,13 @@ def install_browser_skill(dest: Path, *, force: bool) -> str:
     return _install_file(target, resources.files(_DEFAULTS_PKG) / "browser" / "SKILL.md", force=force)
 
 
+def install_loop_skill(dest: Path, *, force: bool) -> str:
+    """Install the bundled, trusted scheduled-loop procedure into ``skills/loop``."""
+    target = dest / "skills" / "loop" / "SKILL.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return _install_file(target, resources.files(_DEFAULTS_PKG) / "loop" / "SKILL.md", force=force)
+
+
 def install_env_example(dest: Path, *, force: bool) -> str:
     env_example = dest / ".env.example"
     if env_example.exists() and not force:
@@ -254,6 +261,7 @@ def run_new(
     report.extend(ensure_memory(dest, force=force))
     report.extend(ensure_workspace(dest, force=force))
     report.append(f"  skills/browser/SKILL.md: {install_browser_skill(dest, force=force)}")
+    report.append(f"  skills/loop/SKILL.md: {install_loop_skill(dest, force=force)}")
     report.append(f"  .env.example: {install_env_example(dest, force=force)}")
     report.extend(install_container_files(dest, force=force))
     report.append(

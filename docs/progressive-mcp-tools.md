@@ -1,7 +1,7 @@
 # Progressive MCP tool disclosure
 
 **Status:** implemented  
-**Related:** [MCP](mcp.md) · [Features — MCP](features.md) · [Browser MCP](browser-mcp.md)
+**Related:** [MCP](mcp.md) · [Features — MCP](features.md) · [Browser MCP](browser-mcp.md) · [Progressive loop tools](progressive-loop-tools.md)
 
 ## Behavior
 

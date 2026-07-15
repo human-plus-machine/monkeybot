@@ -33,7 +33,7 @@ from monkeybot.core.config.settings import (
     normalize_model_provider,
     vertex_google_search_enabled_from_config,
 )
-from monkeybot.core.context import build_context
+from monkeybot.core.context import LoopsToolRegistry, build_context
 from monkeybot.core.hooks import HookManager
 from monkeybot.core.llm.provider import (
     Done,
@@ -87,6 +87,7 @@ class _GatewayDeps:
     run_command_allowed_commands: list[str] | None = None
     run_command_allowed_path_prefixes: list[str] | None = None
     subagent_registry: dict[str, SubagentConfig] = field(default_factory=dict)
+    loops_registry: LoopsToolRegistry = field(default_factory=LoopsToolRegistry)
 
 
 _deps = _GatewayDeps()
@@ -360,6 +361,10 @@ class GatewayLoopPort:
 
             extra_tools = [_deps.web_search_tool] if _deps.web_search_tool is not None else []
 
+            storage_backend = getattr(serving.state, "storage", None)
+            loops_available = storage_backend is not None
+            loops_advertised = loops_available and _deps.loops_registry.advertised
+
             try:
                 ctx = await build_context(
                     session_id,
@@ -375,6 +380,8 @@ class GatewayLoopPort:
                     sse_bus=bus,
                     extra_tools=extra_tools,
                     subagent_registry=_deps.subagent_registry,
+                    scheduled_loops_available=loops_available,
+                    loops_advertised=loops_advertised,
                 )
             except Exception as exc:
                 logger.exception("build_context failed")
@@ -386,7 +393,6 @@ class GatewayLoopPort:
                 )
                 return
 
-            storage_backend = getattr(serving.state, "storage", None)
             executor = CoreToolExecutor(
                 workspace_root=workspace_root,
                 memory=getattr(serving.state, "memory", None),
@@ -401,6 +407,7 @@ class GatewayLoopPort:
                     storage_backend.scheduled_loops() if storage_backend is not None else None
                 ),
                 subagent_registry=_deps.subagent_registry,
+                loops_registry=_deps.loops_registry,
             )
             if transcript_writer is not None:
                 await transcript_writer.write_user_message(

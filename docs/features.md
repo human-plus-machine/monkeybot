@@ -270,6 +270,8 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 | `run_command` | Allowlisted shell (host or OpenSandbox) |
 | `task` | Subagent subprocess (parent only) |
 | `enable_mcp` / `disable_mcp` | Catalog connect / disconnect (success includes status) |
+| `enable_loops` | Progressive advertise scheduled-loop tools |
+| `start_loop` / `loop_status` / `pause_loop` / `resume_loop` / `stop_loop` / `disable_loops` | Scheduled loops (progressive — appear only after `enable_loops`) |
 | `list_mcp_resources` / `read_mcp_resource` | MCP resources (progressive — only while an MCP server is connected) |
 | `list_mcp_prompts` / `get_mcp_prompt` | MCP prompt templates (progressive — only while an MCP server is connected) |
 | `load_file` | When attachments enabled (images/PDF into model context) |

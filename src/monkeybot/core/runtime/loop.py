@@ -18,9 +18,11 @@ from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.attachments.freeze import freeze_attachments_in_history
 from monkeybot.core.attachments.store import AttachmentStore
 from monkeybot.core.context import (
+    LOOPS_REGISTRY_MUTATING_TOOLS,
     MCP_REGISTRY_MUTATING_TOOLS,
     TurnContext,
     refresh_memory_index,
+    refresh_tools_after_loops_change,
     refresh_tools_after_mcp_change,
 )
 from monkeybot.core.context.epoch import ContextEpochTracker, EpochAdmit, fingerprint_text
@@ -199,6 +201,23 @@ def _rejected_tool_batch_error(
 def _doom_loop_exempt_names(tools: Sequence[ToolDef]) -> frozenset[str]:
     """Tool names marked ``doom_loop_exempt`` (identical-args polling is expected)."""
     return frozenset(t.name for t in tools if t.doom_loop_exempt)
+
+
+def _note_registry_mutation(
+    call: ToolCall,
+    tool_result: ToolExecutionResult,
+    *,
+    mcp_mutated: bool,
+    loops_mutated: bool,
+) -> tuple[bool, bool]:
+    """Accumulate MCP / loops registry mutation flags after a successful tool call."""
+    if tool_result.error is not None:
+        return mcp_mutated, loops_mutated
+    if call.name in MCP_REGISTRY_MUTATING_TOOLS:
+        mcp_mutated = True
+    if call.name in LOOPS_REGISTRY_MUTATING_TOOLS:
+        loops_mutated = True
+    return mcp_mutated, loops_mutated
 
 
 @dataclasses.dataclass
@@ -1883,6 +1902,7 @@ async def _run_inner_core(
             # must still share a single user row.
             all_tool_responses: list[ContentBlock] = []
             mcp_registry_mutated = False
+            loops_registry_mutated = False
             # Computed once per batch and reused for both chunking and dispatch
             # so the two stay consistent even if ctx.tools were ever mutated
             # mid-batch (e.g. by an MCP registry reload).
@@ -2188,11 +2208,12 @@ async def _run_inner_core(
                     for img_evt in _image_events(ctx.request_id, call.call_id, tool_result):
                         yield img_evt
                     chunk_responses.append(response)
-                    if (
-                        tool_result.error is None
-                        and call.name in MCP_REGISTRY_MUTATING_TOOLS
-                    ):
-                        mcp_registry_mutated = True
+                    mcp_registry_mutated, loops_registry_mutated = _note_registry_mutation(
+                        call,
+                        tool_result,
+                        mcp_mutated=mcp_registry_mutated,
+                        loops_mutated=loops_registry_mutated,
+                    )
                 else:
                     if cancelled is not None and cancelled.is_set():
                         yield Error(request_id=ctx.request_id, error="Request cancelled")
@@ -2251,11 +2272,12 @@ async def _run_inner_core(
                         for img_evt in _image_events(ctx.request_id, call.call_id, tool_result):
                             yield img_evt
                         chunk_responses.append(response)
-                        if (
-                            tool_result.error is None
-                            and call.name in MCP_REGISTRY_MUTATING_TOOLS
-                        ):
-                            mcp_registry_mutated = True
+                        mcp_registry_mutated, loops_registry_mutated = _note_registry_mutation(
+                            call,
+                            tool_result,
+                            mcp_mutated=mcp_registry_mutated,
+                            loops_mutated=loops_registry_mutated,
+                        )
 
                 all_tool_responses.extend(chunk_responses)
             doom_msg = doom_tracker.take_error()
@@ -2329,6 +2351,21 @@ async def _run_inner_core(
                     kv(
                         request_id=ctx.request_id,
                         thread_id=ctx.thread_id,
+                        tool_count=len(ctx.tools),
+                    ),
+                )
+
+            if loops_registry_mutated:
+                advertised = bool(getattr(tool_executor, "loops_advertised", False))
+                ctx = refresh_tools_after_loops_change(ctx, loops_advertised=advertised)
+                tools_dirty = True
+                doom_tracker.exempt_names = _doom_loop_exempt_names(ctx.tools)
+                logger.info(
+                    "refreshed ctx.tools after loops registry change %s",
+                    kv(
+                        request_id=ctx.request_id,
+                        thread_id=ctx.thread_id,
+                        loops_advertised=advertised,
                         tool_count=len(ctx.tools),
                     ),
                 )
