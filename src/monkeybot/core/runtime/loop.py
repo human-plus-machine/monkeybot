@@ -68,7 +68,6 @@ __all__ = [
     "_EMPTY_COMPLETION_EXHAUSTED_ERROR",
     "_EMPTY_COMPLETION_RECOVERY_NOTE",
     "_await_user_response_any",
-    "_chunk_tool_calls",
     "_compact_history_if_needed",
     "_doom_loop_exempt_names",
     "_doom_loop_texts",
