@@ -258,6 +258,7 @@ def test_analyze_records_timeline_perf_and_smells() -> None:
 
     kinds = {f.kind for f in analysis.findings}
     assert "empty_post_tool_reply" in kinds
+    assert "empty_completion" not in kinds
     assert "tool_loop_thrash" in kinds
     assert "policy_vs_execution" in kinds
     assert "error_clustering" in kinds
@@ -312,3 +313,59 @@ def test_analyze_transcript_missing_or_empty(tmp_path: Path) -> None:
     empty.parent.mkdir(parents=True)
     empty.write_text("", encoding="utf-8")
     assert analyze_transcript(empty) is None
+
+
+def test_analyze_flags_thinking_only_empty_completion() -> None:
+    records = [
+        {
+            "type": "SessionManifest",
+            "session_id": "sess-empty",
+            "started_at": "2026-07-15T17:12:36.000Z",
+            "model": "tiny",
+            "provider": "ollama",
+        },
+        {
+            "seq": 1,
+            "ts": "2026-07-15T17:12:36.100Z",
+            "type": "UserMessage",
+            "request_id": "r1",
+            "content": "can you open example.com",
+        },
+        {
+            "seq": 2,
+            "ts": "2026-07-15T17:12:36.200Z",
+            "type": "ProviderRequest",
+            "request_id": "r1",
+            "inner_turn": 1,
+            "model": "tiny",
+        },
+        {
+            "seq": 3,
+            "ts": "2026-07-15T17:13:20.000Z",
+            "type": "ProviderResponse",
+            "request_id": "r1",
+            "inner_turn": 1,
+            "model": "tiny",
+            "text": "",
+            "thinking": "I should enable browser MCP then navigate...",
+            "tool_requests": [],
+            "usage": {"input_tokens": 100, "output_tokens": 200, "cached_tokens": 0},
+        },
+        {
+            "seq": 4,
+            "ts": "2026-07-15T17:13:20.100Z",
+            "type": "TurnComplete",
+            "request_id": "r1",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 200,
+                "cached_tokens": 0,
+                "duration_ms": 50000,
+            },
+        },
+    ]
+    analysis = analyze_records(records)
+    empty = [f for f in analysis.findings if f.kind == "empty_completion"]
+    assert len(empty) == 1
+    assert empty[0].severity == "error"
+    assert "thinking-only" in empty[0].summary

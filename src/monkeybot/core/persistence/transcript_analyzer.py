@@ -389,6 +389,50 @@ def _smell_empty_post_tool(provider_resps: list[dict[str, Any]]) -> list[Finding
     return findings
 
 
+def _smell_empty_completion(provider_resps: list[dict[str, Any]]) -> list[Finding]:
+    """Flag empty first turns (no text, no tools) that post-tool smell misses.
+
+    Skips responses already covered by :func:`_smell_empty_post_tool` (inner>1 or
+    prior tool-bearing response in the same request).
+    """
+    findings: list[Finding] = []
+    for i, resp in enumerate(provider_resps):
+        text = (resp.get("text") or "").strip() if isinstance(resp.get("text"), str) else ""
+        tool_reqs = resp.get("tool_requests") or []
+        if text or tool_reqs:
+            continue
+        inner = int(resp.get("inner_turn") or 0)
+        prior_had_tools = False
+        if i > 0:
+            prev = provider_resps[i - 1]
+            if str(prev.get("request_id")) == str(resp.get("request_id")) and (
+                prev.get("tool_requests") or []
+            ):
+                prior_had_tools = True
+        if inner > 1 or prior_had_tools:
+            continue
+        thinking = resp.get("thinking")
+        had_thinking = isinstance(thinking, str) and bool(thinking.strip())
+        findings.append(
+            Finding(
+                kind="empty_completion",
+                severity="error" if had_thinking else "warn",
+                summary=(
+                    f"Empty ProviderResponse (no text, no tools"
+                    f"{', thinking-only' if had_thinking else ''}) "
+                    f"(request {resp.get('request_id')}, inner {inner})"
+                ),
+                evidence=[
+                    _evidence(
+                        resp,
+                        "(thinking-only)" if had_thinking else "(empty text)",
+                    )
+                ],
+            )
+        )
+    return findings
+
+
 def _smell_orphan_tools(
     provider_resps: list[dict[str, Any]],
     tool_starts: list[dict[str, Any]],
@@ -550,6 +594,7 @@ def _detect_smells(
     findings = (
         _smell_tool_thrash(tool_starts)
         + _smell_empty_post_tool(provider_resps)
+        + _smell_empty_completion(provider_resps)
         + _smell_orphan_tools(provider_resps, tool_starts, results_by_call)
         + _smell_policy(tool_results)
         + _smell_context_churn(provider_reqs, context_summarized)

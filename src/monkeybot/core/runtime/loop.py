@@ -144,6 +144,19 @@ def _effective_doom_loop_threshold() -> int:
         return 3
 
 
+# Provider re-calls after a no-text / no-tools completion (thinking-only
+# included) before ending the user message with an exhausted Error.
+_EMPTY_COMPLETION_RETRIES = 2
+_EMPTY_COMPLETION_RECOVERY_NOTE = (
+    "[Harness] Empty completion: you produced no assistant text and no tool "
+    "calls. Either invoke a tool through the native function-call channel, or "
+    "give the user a short natural-language answer. Do not stay silent."
+)
+_EMPTY_COMPLETION_EXHAUSTED_ERROR = (
+    "Empty model completion after recovery: ending turn with no reply"
+)
+
+
 def _tool_call_fingerprint(name: str, args: dict[str, Any]) -> str:
     return f"{name}:{json.dumps(args, sort_keys=True, default=str)}"
 
@@ -1346,6 +1359,7 @@ async def _run_inner_core(
     memory_selection_fingerprint: str | None = None
     pre_turn_extra: str | None = None
     pre_tool_extra_next: str | None = None
+    empty_completion_retries_left = _EMPTY_COMPLETION_RETRIES
     doom_tracker = _DoomLoopTracker(
         threshold=_effective_doom_loop_threshold(),
         exempt_names=_doom_loop_exempt_names(ctx.tools),
@@ -1858,16 +1872,48 @@ async def _run_inner_core(
                     turn_output_text = cleaned_text
                     needs_followup_after_tools = False
                     break
-                # Model returned no text after tool results (or only whitespace). Without another
-                # provider round the user sees tools then silence — retry until turn budget.
+                # Model returned no text (or only whitespace) and no tool calls.
+                # Post-tool silence: keep retrying until the turn budget so the
+                # user never sees tools then nothing — logged each time so
+                # scorecards / transcripts surface the stall, but not yielded
+                # as an Error since the harness is actively recovering and the
+                # user hasn't seen a failure yet. First-turn / thinking-only
+                # silence: bounded recovery (same non-fatal logging), then an
+                # exhausted Error once retries run out and the turn ends.
                 rows = await _load_agent_chat_history(history, ctx.thread_id)
                 owes_tool_followup = needs_followup_after_tools or (
                     bool(rows)
                     and rows[-1].role == "user"
                     and any(isinstance(b, ToolResponse) for b in rows[-1].content)
                 )
+                retry_empty = False
+                log_msg = "empty model completion; retrying %s"
+                log_fields: dict[str, Any] = {
+                    "request_id": ctx.request_id,
+                    "thread_id": ctx.thread_id,
+                    "turn": turn_index,
+                    "had_thinking": bool((thinking_text or "").strip()),
+                }
                 if owes_tool_followup and turn_index < effective_max:
+                    retry_empty = True
+                    log_msg = "empty model completion after tools; retrying %s"
+                elif empty_completion_retries_left > 0 and turn_index < effective_max:
+                    empty_completion_retries_left -= 1
+                    retry_empty = True
+                    needs_followup_after_tools = False
+                    log_fields["retries_left"] = empty_completion_retries_left
+                if retry_empty:
+                    pre_tool_extra_next = _combine_extras(
+                        pre_tool_extra_next,
+                        _EMPTY_COMPLETION_RECOVERY_NOTE,
+                    )
+                    logger.warning(log_msg, kv(**log_fields))
                     continue
+                logger.warning("empty model completion; ending turn %s", kv(**log_fields))
+                yield Error(
+                    request_id=ctx.request_id,
+                    error=_EMPTY_COMPLETION_EXHAUSTED_ERROR,
+                )
                 needs_followup_after_tools = False
                 break
 
