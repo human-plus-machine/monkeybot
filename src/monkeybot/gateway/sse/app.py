@@ -711,7 +711,7 @@ async def _gateway_lifespan(fastapi_app: FastAPI) -> AsyncIterator[None]:
         await _shutdown(fastapi_app)
 
 
-_registry = SessionRegistry()
+_registry = SessionRegistry(workspace_root=_resolved_workspace_paths()[0])
 app = build_sse_app(
     registry=_registry,
     loop_port=GatewayLoopPort(_registry),

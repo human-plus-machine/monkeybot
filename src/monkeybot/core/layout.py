@@ -67,6 +67,25 @@ def resolve_agent_path(raw: str | Path, agent_root: Path) -> Path:
     return path.resolve() if path.is_absolute() else (agent_root / path).resolve()
 
 
+def resolve_workspace_root(*, agent_root: Path, config_path: Path | None = None) -> Path:
+    """Resolve workspace root from ``paths.workspace_root`` in monkeybot.yaml.
+
+    Yaml is the source of truth (not env overrides). When the key is absent,
+    falls back to ``<agent_root>/workspace``.
+    """
+    workspace_raw = "workspace"
+    if config_path is not None:
+        from monkeybot.core.config.yaml_loader import load_monkeybot_yaml_dict
+
+        _, doc = load_monkeybot_yaml_dict(config_path)
+        paths = doc.get("paths") if isinstance(doc, dict) else None
+        if isinstance(paths, dict):
+            wr = paths.get("workspace_root")
+            if isinstance(wr, str) and wr.strip():
+                workspace_raw = wr.strip()
+    return resolve_agent_path(workspace_raw, agent_root)
+
+
 def resolve_sqlite_url(raw: str, agent_root: Path) -> str:
     """Anchor a relative ``sqlite:///`` URL at the agent root."""
     prefix = "sqlite:///"
@@ -117,18 +136,7 @@ class AgentLayout:
         def path_env(name: str, default: str) -> Path:
             return resolve_agent_path(os.environ.get(name, default), root)
 
-        # paths.workspace_root in monkeybot.yaml is the source of truth (not env overrides).
-        workspace_raw = "workspace"
-        if cfg is not None:
-            from monkeybot.core.config.yaml_loader import load_monkeybot_yaml_dict
-
-            _, doc = load_monkeybot_yaml_dict(cfg)
-            paths = doc.get("paths") if isinstance(doc, dict) else None
-            if isinstance(paths, dict):
-                wr = paths.get("workspace_root")
-                if isinstance(wr, str) and wr.strip():
-                    workspace_raw = wr.strip()
-        workspace = resolve_agent_path(workspace_raw, root)
+        workspace = resolve_workspace_root(agent_root=root, config_path=cfg)
         data = root / "data"
         return cls(
             agent_root=root,
@@ -201,4 +209,5 @@ __all__ = [
     "resolve_config_path",
     "resolve_memory_storage_uri",
     "resolve_sqlite_url",
+    "resolve_workspace_root",
 ]

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import shutil
 from pathlib import Path
 
 from monkeybot.core.runtime.context_budget import diff_inventory_lines
+
+logger = logging.getLogger(__name__)
 
 _INVENTORY_PREFIX = "[Spill inventory —"
 _SPILL_DIR_REL = Path(".monkeybot") / "spill"
@@ -49,9 +52,15 @@ def session_spill_dirs(workspace_root: Path, session_id: str) -> list[Path]:
     return dirs
 
 
-def _rmtree_quiet(path: Path) -> None:
-    if path.exists():
-        shutil.rmtree(path, ignore_errors=True)
+def _rmtree_spill(path: Path) -> None:
+    """Remove a spill directory; log and re-raise on failure so callers can observe it."""
+    if not path.exists():
+        return
+    try:
+        shutil.rmtree(path)
+    except OSError:
+        logger.warning("failed to remove spill directory path=%s", path, exc_info=True)
+        raise
 
 
 async def cleanup_session_spill_files(workspace_root: Path, session_id: str) -> None:
@@ -64,7 +73,7 @@ async def cleanup_session_spill_files(workspace_root: Path, session_id: str) -> 
     targets = [p for p in session_spill_dirs(workspace_root, session_id) if p.exists()]
     if not targets:
         return
-    await asyncio.gather(*(asyncio.to_thread(_rmtree_quiet, p) for p in targets))
+    await asyncio.gather(*(asyncio.to_thread(_rmtree_spill, p) for p in targets))
 
 
 def spill_min_chars_from_env() -> int:

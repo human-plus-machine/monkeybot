@@ -480,7 +480,7 @@ def create_app(
 
     For tests, pass FakeLoopPort / custom UsagePort. Story 8 wires the real loop.
     """
-    reg = registry or SessionRegistry()
+    reg = registry or SessionRegistry(workspace_root=resolve_agent_workspace_root())
     loop = loop_port or _default_loop_port(reg)
     usage = usage_port or _StaticUsagePort()
 
