@@ -98,7 +98,7 @@ class TurnContext:
     context_window_tokens: int = 200_000
     """Max input context for pre-flight checks; summarization triggers near this cap."""
     workspace_root: Path | None = None
-    """Workspace root for tools / spill paths; optional for tests / minimal harness."""
+    """Workspace root for tools and spill file paths (from ``paths.workspace_root``); optional for tests."""
     memory: MemorySubsystem | None = None
     """Memory subsystem for index refresh and search; optional when memory is disabled."""
     context_curation_enabled: bool = True
@@ -726,7 +726,7 @@ async def build_context(
         include_task_tool: When False, omit the ``task`` tool (used by the subagent worker).
         cancelled: Optional cooperative-cancel handle for the parent turn (gateway / CLI).
         context_window_tokens: Model context budget for pre-flight and summarization triggers.
-        workspace_root: Optional workspace root for tools and spill file paths.
+        workspace_root: Optional workspace root for tools/spill paths (``paths.workspace_root``).
         enable_context_curation: When False (e.g. subagent), skip LLM context curation for prompts.
         extra_tools: Optional list of in-process :class:`CustomTool` implementations.
             Their ``tool_def`` is appended to the tool list advertised to the model and

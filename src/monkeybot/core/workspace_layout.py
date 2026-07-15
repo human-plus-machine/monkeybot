@@ -4,23 +4,23 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from monkeybot.core.layout import resolve_agent_path, resolve_agent_root
+from monkeybot.core.layout import resolve_agent_path, resolve_agent_root, resolve_config_path
 
 
 def resolve_agent_workspace_root() -> Path:
     """Directory the agent should treat as its writable workspace.
 
-    Resolution order:
-
-    1. ``MONKEYBOT_WORKSPACE_ROOT`` — absolute path, or relative to agent root.
-    2. ``WORKSPACE_ROOT`` — same semantics (legacy serverless alias).
-    3. ``<agent-root>/workspace``.
+    ``monkeybot.yaml`` ``paths.workspace_root`` is the source of truth. When that
+    key is absent, falls back to ``<agent-root>/workspace``.
     """
-    import os
+    from monkeybot.core.config.yaml_loader import load_monkeybot_yaml_dict
 
     root = resolve_agent_root()
-    for env_name in ("MONKEYBOT_WORKSPACE_ROOT", "WORKSPACE_ROOT"):
-        raw = os.environ.get(env_name, "").strip()
-        if raw:
-            return resolve_agent_path(raw, root)
+    cfg = resolve_config_path(agent_root=root)
+    _, doc = load_monkeybot_yaml_dict(cfg)
+    paths = doc.get("paths") if isinstance(doc, dict) else None
+    if isinstance(paths, dict):
+        raw = paths.get("workspace_root")
+        if isinstance(raw, str) and raw.strip():
+            return resolve_agent_path(raw.strip(), root)
     return (root / "workspace").resolve()

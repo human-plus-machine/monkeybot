@@ -436,7 +436,7 @@ def _workspace_api_enabled() -> bool:
 
 
 def _api_workspace_root() -> Path:
-    """Workspace root for listing/reads; aligned with :func:`resolve_agent_workspace_root`."""
+    """Workspace root for listing/reads from ``paths.workspace_root`` in monkeybot.yaml."""
     return resolve_agent_workspace_root()
 
 

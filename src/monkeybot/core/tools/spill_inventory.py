@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 from pathlib import Path
 
@@ -29,16 +30,41 @@ def spill_inventory_note(text: str, rel_spill_path: str) -> str:
     return "\n".join(parts)
 
 
-def cleanup_spill_files(workspace_root: Path, thread_id: str) -> None:
-    """Remove ``.monkeybot/spill/{thread_id}/`` for a finished session.
+def spill_root(workspace_root: Path) -> Path:
+    """Return ``.monkeybot/spill`` under ``workspace_root``."""
+    return Path(workspace_root).resolve() / _SPILL_DIR_REL
+
+
+def session_spill_dirs(workspace_root: Path, session_id: str) -> list[Path]:
+    """Spill directories owned by a chat session (parent + nested subagent threads).
+
+    Parent turns write ``.monkeybot/spill/{session_id}/``. Subagent workers write
+    ``.monkeybot/spill/subagent:{session_id}:{suffix}/`` so session-end cleanup
+    can remove both with one namespace.
+    """
+    root = spill_root(workspace_root)
+    dirs: list[Path] = [root / session_id]
+    if root.is_dir():
+        dirs.extend(sorted(root.glob(f"subagent:{session_id}:*")))
+    return dirs
+
+
+def _rmtree_quiet(path: Path) -> None:
+    if path.exists():
+        shutil.rmtree(path, ignore_errors=True)
+
+
+async def cleanup_session_spill_files(workspace_root: Path, session_id: str) -> None:
+    """Remove session and subagent spill dirs concurrently (off the event loop).
 
     Spills must survive across user turns within a session so the model can
     ``read_file`` inventory pointers on later turns. Call this on session end
     (gateway DELETE / process teardown), not at turn start.
     """
-    spill_path = Path(workspace_root).resolve() / _SPILL_DIR_REL / thread_id
-    if spill_path.exists():
-        shutil.rmtree(spill_path, ignore_errors=True)
+    targets = [p for p in session_spill_dirs(workspace_root, session_id) if p.exists()]
+    if not targets:
+        return
+    await asyncio.gather(*(asyncio.to_thread(_rmtree_quiet, p) for p in targets))
 
 
 def spill_min_chars_from_env() -> int:

@@ -97,10 +97,14 @@ def test_bootstrap_layout_is_identical_from_every_launch_cwd(
         runtime_env.reset_runtime_env_state_for_tests()
 
 
-def test_process_env_path_override_remains_authoritative(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_yaml_workspace_root_wins_over_process_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``paths.workspace_root`` in monkeybot.yaml beats MONKEYBOT_WORKSPACE_ROOT."""
     agent = tmp_path / "agent"
     _write_agent(agent)
     custom = tmp_path / "mounted-workspace"
+    custom.mkdir()
     before = dict(os.environ)
     try:
         runtime_env.reset_runtime_env_state_for_tests()
@@ -108,17 +112,21 @@ def test_process_env_path_override_remains_authoritative(tmp_path: Path, monkeyp
         monkeypatch.chdir(agent)
         monkeypatch.setenv("MONKEYBOT_WORKSPACE_ROOT", str(custom))
         layout = bootstrap_agent_layout()
-        assert layout.workspace_root == custom.resolve()
+        assert layout.workspace_root == (agent / "workspace").resolve()
     finally:
         os.environ.clear()
         os.environ.update(before)
         runtime_env.reset_runtime_env_state_for_tests()
 
 
-def test_legacy_workspace_root_override_is_preserved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_yaml_workspace_root_wins_over_legacy_workspace_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``paths.workspace_root`` in monkeybot.yaml beats legacy WORKSPACE_ROOT."""
     agent = tmp_path / "agent"
     _write_agent(agent)
     custom = tmp_path / "legacy-mounted-workspace"
+    custom.mkdir()
     before = dict(os.environ)
     try:
         runtime_env.reset_runtime_env_state_for_tests()
@@ -128,8 +136,8 @@ def test_legacy_workspace_root_override_is_preserved(tmp_path: Path, monkeypatch
 
         layout = bootstrap_agent_layout()
 
-        assert layout.workspace_root == custom.resolve()
-        assert os.environ["MONKEYBOT_WORKSPACE_ROOT"] == str(custom.resolve())
+        assert layout.workspace_root == (agent / "workspace").resolve()
+        assert os.environ["MONKEYBOT_WORKSPACE_ROOT"] == str((agent / "workspace").resolve())
     finally:
         os.environ.clear()
         os.environ.update(before)

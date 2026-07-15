@@ -286,7 +286,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - `skills/...` paths resolve only below the read-only skills root; all other relative paths resolve only below `workspace_root`.
 - Writes, edits, and patches reject `skills/...`; real-path checks reject symlink escapes from either root.
 - `apply_patch` validates all hunks before writing; a mid-apply failure rolls back completed ops in reverse order.
-- Large tool results may spill to `.monkeybot/spill/{thread_id}/` for the session lifetime (cleaned on session end).
+- Large tool results may spill to `.monkeybot/spill/{session_id}/` (and `.monkeybot/spill/subagent:{session_id}:*/` for task subagents) for the session lifetime; cleaned concurrently on session end.
 - `task` omitted in subagent workers (`include_task_tool=False`).
 - Nested `task` disabled inside subagents.
 - Custom tools must not collide with core or MCP names.

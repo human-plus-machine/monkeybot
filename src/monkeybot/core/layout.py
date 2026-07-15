@@ -117,11 +117,17 @@ class AgentLayout:
         def path_env(name: str, default: str) -> Path:
             return resolve_agent_path(os.environ.get(name, default), root)
 
-        workspace_raw = (
-            os.environ.get("MONKEYBOT_WORKSPACE_ROOT")
-            or os.environ.get("WORKSPACE_ROOT")
-            or "workspace"
-        )
+        # paths.workspace_root in monkeybot.yaml is the source of truth (not env overrides).
+        workspace_raw = "workspace"
+        if cfg is not None:
+            from monkeybot.core.config.yaml_loader import load_monkeybot_yaml_dict
+
+            _, doc = load_monkeybot_yaml_dict(cfg)
+            paths = doc.get("paths") if isinstance(doc, dict) else None
+            if isinstance(paths, dict):
+                wr = paths.get("workspace_root")
+                if isinstance(wr, str) and wr.strip():
+                    workspace_raw = wr.strip()
         workspace = resolve_agent_path(workspace_raw, root)
         data = root / "data"
         return cls(

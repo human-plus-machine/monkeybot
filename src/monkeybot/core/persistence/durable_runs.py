@@ -56,6 +56,7 @@ class SubagentEnvelope:
     traceparent: str | None = None
     agent_md: str | None = None
     subagent_type: str | None = None
+    parent_session_id: str | None = None
 
     def to_json(self) -> str:
         """Serialize envelope to JSON text."""
@@ -66,6 +67,8 @@ class SubagentEnvelope:
             data.pop("agent_md", None)
         if data.get("subagent_type") is None:
             data.pop("subagent_type", None)
+        if data.get("parent_session_id") is None:
+            data.pop("parent_session_id", None)
         return json.dumps(data, sort_keys=True)
 
     @classmethod
@@ -99,6 +102,9 @@ class SubagentEnvelope:
         subagent_type = data.get("subagent_type")
         if subagent_type is not None and not isinstance(subagent_type, str):
             raise ValueError("subagent_type must be a string when present")
+        parent_session_id = data.get("parent_session_id")
+        if parent_session_id is not None and not isinstance(parent_session_id, str):
+            raise ValueError("parent_session_id must be a string when present")
         return cls(
             task=data["task"],
             context=data["context"],
@@ -110,6 +116,11 @@ class SubagentEnvelope:
             subagent_type=(
                 subagent_type.strip()
                 if isinstance(subagent_type, str) and subagent_type.strip()
+                else None
+            ),
+            parent_session_id=(
+                parent_session_id.strip()
+                if isinstance(parent_session_id, str) and parent_session_id.strip()
                 else None
             ),
         )

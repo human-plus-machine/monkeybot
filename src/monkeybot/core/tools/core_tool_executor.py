@@ -998,6 +998,7 @@ class CoreToolExecutor(ToolExecutorPort):
             traceparent=traceparent,
             agent_md=str(agent_md_path),
             subagent_type=subagent_type,
+            parent_session_id=ctx.thread_id,
         )
 
         scratch = (self._workspace.repo_root / ".monkeybot" / "subagent-runs" / uuid.uuid4().hex)
@@ -1013,6 +1014,7 @@ class CoreToolExecutor(ToolExecutorPort):
             traceparent=envelope.traceparent,
             agent_md=envelope.agent_md,
             subagent_type=envelope.subagent_type,
+            parent_session_id=envelope.parent_session_id,
         )
         queue_mode = os.environ.get("MONKEYBOT_TASK_QUEUE", "").strip().lower() in (
             "1",

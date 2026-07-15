@@ -129,6 +129,31 @@ def test_subagent_envelope_roundtrip_with_persona_fields() -> None:
     assert restored == env
 
 
+def test_subagent_envelope_roundtrip_parent_session_id() -> None:
+    env = SubagentEnvelope(
+        task="t",
+        context="c",
+        memory_storage_uri="local://m",
+        parent_run_id="p1",
+        parent_session_id="session-abc",
+    )
+    restored = SubagentEnvelope.from_json(env.to_json())
+    assert restored.parent_session_id == "session-abc"
+    assert restored == env
+
+
+def test_subagent_envelope_omits_null_parent_session_id() -> None:
+    env = SubagentEnvelope(
+        task="t",
+        context="c",
+        memory_storage_uri="local://m",
+        parent_run_id="p1",
+    )
+    payload = json.loads(env.to_json())
+    assert "parent_session_id" not in payload
+    assert SubagentEnvelope.from_json(env.to_json()).parent_session_id is None
+
+
 def test_resolve_task_agent_md_path_uses_registry(tmp_path: Path) -> None:
     impl = tmp_path / "agents" / "researcher.md"
     impl.parent.mkdir(parents=True)
