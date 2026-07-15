@@ -31,7 +31,7 @@ from monkeybot.core.types.content_blocks import (
 
 from .events import AgentEvent, ContextEpochStarted, SystemContextUpdated
 
-logger = logging.getLogger("monkeybot.core.runtime.loop_messages")
+logger = logging.getLogger("monkeybot.core.runtime.loop.loop_messages")
 
 
 def _normalize_user_content(user_content: str | list[ContentBlock]) -> list[ContentBlock]:

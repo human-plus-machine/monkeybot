@@ -7,14 +7,14 @@ from collections.abc import AsyncIterator, Sequence
 import pytest
 
 from monkeybot.core.llm.provider import Done, Message, ProviderEvent, TextDelta, ToolCall
-from monkeybot.core.runtime.events import Error, TurnComplete
-from monkeybot.core.runtime.loop import (
-    _DoomLoopTracker,
+from monkeybot.core.runtime.doom_loop import (
     _doom_loop_texts,
+    _DoomLoopTracker,
     _effective_doom_loop_threshold,
     _tool_call_fingerprint,
-    run,
 )
+from monkeybot.core.runtime.events import Error, TurnComplete
+from monkeybot.core.runtime.loop import run
 from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.types.types_tools import ToolDef
 from tests.core.test_loop import AllowInspector, FakeHistory, FakeProvider, RecordingExecutor, _ctx
@@ -87,7 +87,7 @@ def test_doom_loop_tracker_exempts_polling_tools() -> None:
 
 
 def test_doom_loop_exempt_names_from_tool_defs() -> None:
-    from monkeybot.core.runtime.loop import _doom_loop_exempt_names
+    from monkeybot.core.runtime.doom_loop import _doom_loop_exempt_names
 
     tools = [
         ToolDef("read_file", "r", {"type": "object"}, parallel_safe=True),
@@ -265,7 +265,7 @@ def test_effective_doom_loop_threshold_env(
     monkeypatch.setenv("DOOM_LOOP_THRESHOLD", "0")
     assert _effective_doom_loop_threshold() == 0
     monkeypatch.setenv("DOOM_LOOP_THRESHOLD", "nope")
-    with caplog.at_level("WARNING", logger="monkeybot.core.runtime.doom_loop"):
+    with caplog.at_level("WARNING", logger="monkeybot.core.runtime.loop.doom_loop"):
         assert _effective_doom_loop_threshold() == 3
     assert "invalid DOOM_LOOP_THRESHOLD" in caplog.text
 

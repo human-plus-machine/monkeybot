@@ -25,7 +25,7 @@ from .events import AgentEvent, ContextSummarized, ContextSummarizing
 from .loop_messages import _load_agent_chat_history, _summary_line_for_message
 from .loop_usage import _prompt_input_tokens_for_history
 
-logger = logging.getLogger("monkeybot.core.runtime.history_compaction")
+logger = logging.getLogger("monkeybot.core.runtime.loop.history_compaction")
 
 SUMMARY_TRIGGER_RATIO = summarization_trigger_ratio_from_env()
 """Same ratio as pre-stream summarization check (``preflight_prompt_tokens >= cap``)."""

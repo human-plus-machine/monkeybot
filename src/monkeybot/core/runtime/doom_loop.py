@@ -12,7 +12,7 @@ from typing import Any
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.types.types_tools import ToolDef
 
-logger = logging.getLogger("monkeybot.core.runtime.doom_loop")
+logger = logging.getLogger("monkeybot.core.runtime.loop.doom_loop")
 
 
 def _effective_doom_loop_threshold() -> int:

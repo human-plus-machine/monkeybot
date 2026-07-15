@@ -103,7 +103,7 @@ from .loop_usage import (
 )
 from .tool_dispatch import ToolBatchState, dispatch_tool_batch
 
-logger = logging.getLogger("monkeybot.core.runtime.turn_loop")
+logger = logging.getLogger("monkeybot.core.runtime.loop.turn_loop")
 
 TurnAction = Literal["continue", "break", "return"]
 

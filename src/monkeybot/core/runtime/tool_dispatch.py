@@ -63,7 +63,7 @@ from .tool_batch import (
     _should_reject_tool_batch,
 )
 
-logger = logging.getLogger("monkeybot.core.runtime.tool_dispatch")
+logger = logging.getLogger("monkeybot.core.runtime.loop.tool_dispatch")
 
 _FinishTool = Callable[
     [ToolCall, ToolExecutionResult],

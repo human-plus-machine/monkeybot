@@ -41,15 +41,12 @@ from monkeybot.core.runtime.events import (
     ToolCallStarted,
     TurnComplete,
 )
-from monkeybot.core.runtime.loop import (
-    _compact_history_if_needed,
-    _image_events,
-    _merge_usage_event,
-    _messages_for_provider,
-    _usage_to_totals,
-    run,
-)
+from monkeybot.core.runtime.history_compaction import _compact_history_if_needed
+from monkeybot.core.runtime.loop import run
+from monkeybot.core.runtime.loop_messages import _messages_for_provider
+from monkeybot.core.runtime.loop_usage import _merge_usage_event, _usage_to_totals
 from monkeybot.core.runtime.tool_batch import _chunk_tool_calls
+from monkeybot.core.runtime.tool_dispatch import _image_events
 from monkeybot.core.testing.mocks_provider import fake_provider_prompt_tokens
 from monkeybot.core.tools.inspector import Decision
 from monkeybot.core.tools.types import ToolExecutionResult
@@ -796,7 +793,7 @@ async def test_run_generator_closes_without_pending_tasks() -> None:
 async def test_run_empty_model_after_tools_retries_then_succeeds() -> None:
     """Regression: do not end the run after tools when the model streams no text (only Done)."""
     from monkeybot.core.runtime.events import Error
-    from monkeybot.core.runtime.loop import _EMPTY_COMPLETION_RECOVERY_NOTE
+    from monkeybot.core.runtime.turn_loop import _EMPTY_COMPLETION_RECOVERY_NOTE
 
     prov = FakeProvider(
         [

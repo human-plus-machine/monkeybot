@@ -18,8 +18,9 @@ Implementation lives under ``core/runtime/``:
 - ``loop_usage`` — usage accounting + provider prompt-token helpers
 - ``loop_ports`` — fakeable tool-execution boundary (``ToolExecutorPort``)
 
-Prefer importing private helpers from their owning modules in new code; a small set
-is re-exported here for existing tests and gateway call sites.
+Only ``run``, ``ToolExecutorPort``, and ``SUMMARY_TRIGGER_RATIO`` are public here.
+Import private helpers directly from their owning module (e.g.
+``from .turn_loop import _EMPTY_COMPLETION_RECOVERY_NOTE``), not through this facade.
 """
 
 from __future__ import annotations
@@ -41,55 +42,18 @@ from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.tools.inspector import ToolInspector
 from monkeybot.core.types.content_blocks import ContentBlock
 
-from .doom_loop import (
-    _doom_loop_exempt_names,
-    _doom_loop_texts,
-    _DoomLoopTracker,
-    _effective_doom_loop_threshold,
-    _tool_call_fingerprint,
-)
 from .events import AgentEvent, Error, TurnComplete
-from .history_compaction import SUMMARY_TRIGGER_RATIO, _compact_history_if_needed
+from .history_compaction import SUMMARY_TRIGGER_RATIO
 from .input_admission import InputAdmission
 from .loop_hooks import _drain_hook_settlement
-from .loop_messages import (
-    _messages_for_provider,
-    _normalize_user_content,
-    _provider_messages_prompt_summary,
-)
+from .loop_messages import _normalize_user_content
 from .loop_ports import ToolExecutorPort
-from .loop_usage import _effective_max_turns, _merge_usage_event, _usage_to_totals
-from .tool_batch import (
-    _await_user_response_any,
-    _rejected_tool_batch_error,
-    _should_reject_tool_batch,
-)
-from .tool_dispatch import _image_events
-from .turn_loop import (
-    _EMPTY_COMPLETION_EXHAUSTED_ERROR,
-    _EMPTY_COMPLETION_RECOVERY_NOTE,
-    _run_inner,
-)
+from .loop_usage import _effective_max_turns, _usage_to_totals
+from .turn_loop import _run_inner
 
 __all__ = [
     "SUMMARY_TRIGGER_RATIO",
     "ToolExecutorPort",
-    "_DoomLoopTracker",
-    "_EMPTY_COMPLETION_EXHAUSTED_ERROR",
-    "_EMPTY_COMPLETION_RECOVERY_NOTE",
-    "_await_user_response_any",
-    "_compact_history_if_needed",
-    "_doom_loop_exempt_names",
-    "_doom_loop_texts",
-    "_effective_doom_loop_threshold",
-    "_image_events",
-    "_merge_usage_event",
-    "_messages_for_provider",
-    "_provider_messages_prompt_summary",
-    "_rejected_tool_batch_error",
-    "_should_reject_tool_batch",
-    "_tool_call_fingerprint",
-    "_usage_to_totals",
     "run",
 ]
 
