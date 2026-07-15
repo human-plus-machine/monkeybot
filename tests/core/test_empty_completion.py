@@ -7,7 +7,6 @@ import pytest
 from monkeybot.core.llm.provider import Done, TextDelta, ThinkingDelta
 from monkeybot.core.runtime.events import Error, TurnComplete
 from monkeybot.core.runtime.loop import (
-    _EMPTY_COMPLETION_ERROR,
     _EMPTY_COMPLETION_EXHAUSTED_ERROR,
     _EMPTY_COMPLETION_RECOVERY_NOTE,
     run,
@@ -43,9 +42,10 @@ async def test_run_retries_thinking_only_empty_completion() -> None:
 
     assert prov.stream_calls == 2
     assert isinstance(events[-1], TurnComplete)
+    # A successful recovery must not surface an Error: the user never sees a
+    # failure for a retry the harness resolved on its own.
     errors = [e for e in events if isinstance(e, Error)]
-    assert len(errors) == 1
-    assert errors[0].error == _EMPTY_COMPLETION_ERROR
+    assert len(errors) == 0
 
     # Recovery note injected into the second provider call's system message.
     second_msgs = prov.stream_messages[1]
@@ -85,14 +85,15 @@ async def test_run_empty_completion_exhausted_emits_error() -> None:
 
     assert prov.stream_calls == 3
     assert isinstance(events[-1], TurnComplete)
+    # Only the final, truly-exhausted attempt surfaces an Error; the two
+    # recovery retries in between are silent (logged, not user-facing).
     error_texts = [e.error for e in events if isinstance(e, Error)]
-    assert error_texts.count(_EMPTY_COMPLETION_ERROR) == 2
-    assert _EMPTY_COMPLETION_EXHAUSTED_ERROR in error_texts
+    assert error_texts == [_EMPTY_COMPLETION_EXHAUSTED_ERROR]
 
 
 @pytest.mark.asyncio
-async def test_run_empty_after_tools_emits_error_and_recovers() -> None:
-    """Post-tool empty turns must surface Error (not silent continue) then recover."""
+async def test_run_empty_after_tools_recovers_without_error() -> None:
+    """Post-tool empty turns retry with a recovery note but stay silent (no Error) once recovered."""
     from monkeybot.core.llm.provider import ToolCall
 
     prov = FakeProvider(
@@ -119,10 +120,7 @@ async def test_run_empty_after_tools_emits_error_and_recovers() -> None:
 
     assert prov.stream_calls == 3
     assert isinstance(events[-1], TurnComplete)
-    empty_errors = [
-        e for e in events if isinstance(e, Error) and e.error == _EMPTY_COMPLETION_ERROR
-    ]
-    assert len(empty_errors) == 1
+    assert not any(isinstance(e, Error) for e in events)
     followup_system = "".join(
         b.text
         for m in prov.stream_messages[2]

@@ -148,7 +148,6 @@ def _effective_doom_loop_threshold() -> int:
 # Provider re-calls after a no-text / no-tools completion (thinking-only
 # included) before ending the user message with an exhausted Error.
 _EMPTY_COMPLETION_RETRIES = 2
-_EMPTY_COMPLETION_ERROR = "Empty model completion: no text and no tool calls"
 _EMPTY_COMPLETION_RECOVERY_NOTE = (
     "[Harness] Empty completion: you produced no assistant text and no tool "
     "calls. Either invoke a tool through the native function-call channel, or "
@@ -1864,10 +1863,12 @@ async def _run_inner_core(
                     break
                 # Model returned no text (or only whitespace) and no tool calls.
                 # Post-tool silence: keep retrying until the turn budget so the
-                # user never sees tools then nothing — but emit Error + recovery
-                # note each time so scorecards / transcripts surface the stall.
-                # First-turn / thinking-only silence: bounded recovery, then
-                # exhausted Error and end.
+                # user never sees tools then nothing — logged each time so
+                # scorecards / transcripts surface the stall, but not yielded
+                # as an Error since the harness is actively recovering and the
+                # user hasn't seen a failure yet. First-turn / thinking-only
+                # silence: bounded recovery (same non-fatal logging), then an
+                # exhausted Error once retries run out and the turn ends.
                 rows = await _load_agent_chat_history(history, ctx.thread_id)
                 owes_tool_followup = needs_followup_after_tools or (
                     bool(rows)
@@ -1896,20 +1897,8 @@ async def _run_inner_core(
                         _EMPTY_COMPLETION_RECOVERY_NOTE,
                     )
                     logger.warning(log_msg, kv(**log_fields))
-                    yield Error(
-                        request_id=ctx.request_id,
-                        error=_EMPTY_COMPLETION_ERROR,
-                    )
                     continue
-                logger.warning(
-                    "empty model completion; ending turn %s",
-                    kv(
-                        request_id=ctx.request_id,
-                        thread_id=ctx.thread_id,
-                        turn=turn_index,
-                        had_thinking=bool((thinking_text or "").strip()),
-                    ),
-                )
+                logger.warning("empty model completion; ending turn %s", kv(**log_fields))
                 yield Error(
                     request_id=ctx.request_id,
                     error=_EMPTY_COMPLETION_EXHAUSTED_ERROR,
