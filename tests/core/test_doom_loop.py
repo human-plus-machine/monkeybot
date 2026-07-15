@@ -265,7 +265,7 @@ def test_effective_doom_loop_threshold_env(
     monkeypatch.setenv("DOOM_LOOP_THRESHOLD", "0")
     assert _effective_doom_loop_threshold() == 0
     monkeypatch.setenv("DOOM_LOOP_THRESHOLD", "nope")
-    with caplog.at_level("WARNING", logger="monkeybot.core.runtime.loop"):
+    with caplog.at_level("WARNING", logger="monkeybot.core.runtime.doom_loop"):
         assert _effective_doom_loop_threshold() == 3
     assert "invalid DOOM_LOOP_THRESHOLD" in caplog.text
 
