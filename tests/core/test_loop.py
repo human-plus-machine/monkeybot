@@ -795,6 +795,12 @@ async def test_run_generator_closes_without_pending_tasks() -> None:
 @pytest.mark.asyncio
 async def test_run_empty_model_after_tools_retries_then_succeeds() -> None:
     """Regression: do not end the run after tools when the model streams no text (only Done)."""
+    from monkeybot.core.runtime.events import Error
+    from monkeybot.core.runtime.loop import (
+        _EMPTY_COMPLETION_ERROR,
+        _EMPTY_COMPLETION_RECOVERY_NOTE,
+    )
+
     prov = FakeProvider(
         [
             [ToolCall(call_id="c1", name="run_command", args={"command": "x"}), Done()],
@@ -820,6 +826,16 @@ async def test_run_empty_model_after_tools_retries_then_succeeds() -> None:
     deltas = [e.delta for e in events if isinstance(e, AssistantDelta)]
     assert deltas == ["summary"]
     assert isinstance(events[-1], TurnComplete)
+    empty_errors = [
+        e for e in events if isinstance(e, Error) and e.error == _EMPTY_COMPLETION_ERROR
+    ]
+    assert len(empty_errors) == 1
+    # Recovery note injected on the provider call after the empty post-tool turn.
+    followup_msgs = prov.stream_messages[2]
+    system_text = "".join(
+        b.text for m in followup_msgs if m.role == "system" for b in m.content if hasattr(b, "text")
+    )
+    assert _EMPTY_COMPLETION_RECOVERY_NOTE in system_text
 
 
 @pytest.mark.asyncio

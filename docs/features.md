@@ -155,7 +155,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 **Invariants:**
 - `run()` **never raises** to callers; errors become `Error` events; `TurnComplete` always emitted.
 - Cooperative cancellation via `asyncio.Event`, checked at loop boundaries.
-- Silent-model guard: whitespace-only assistant after tools → loop continues until budget.
+- Silent-model guard: whitespace-only / empty assistant after tools → emit `Error` + recovery note and keep retrying until turn budget. Empty completion with no prior tools (including thinking-only first turns) → up to 2 recovery re-calls with the same note + `Error`; if still empty, emit an exhausted `Error` and end the turn.
 - **Doom-loop guard:** `DOOM_LOOP_THRESHOLD` consecutive identical tool calls (same name + args) within a user message — whether they succeed or fail — emit an `Error`, inject a harness system note, and force the next provider call with an empty tool list (`toolChoice`-none equivalent) so the model must reply in text. Default threshold `3`; set `0` to disable. Applies to the text agent loop only (not realtime); after each recovery turn the guard re-arms for later streaks in the same message. This catches both repeated failures and successful no-progress loops (e.g. the same screenshot call over and over). Tools marked `ToolDef.doom_loop_exempt=True` (currently `loop_status`) are skipped so identical-args polling does not force a recovery turn.
 - **Truncated tool batch:** When `Done.truncated` is true (provider length/max-tokens stop) **or** every tool call in the batch has `parse_error`, the harness fails the whole batch with tool error results and does **not** execute any call — even if some args parsed as JSON (they may still be silently incomplete). Realtime has no vendor length-limit signal today (Gemini Live), so it only applies the all-`parse_error` reject path.
 - **History summarization:** When preflight tokens exceed the trigger ratio and history is long enough, the middle of the transcript is compressed via a dedicated summarizer call into one assistant row prefixed `[Context Summary]:`. The summarizer is instructed to emit a fixed Markdown template (Objective, Important Details, Work State with Completed/Active/Blocked, Next Move, Relevant Files) — not freeform prose. Head/tail messages are kept; the summary replaces the middle.
@@ -685,6 +685,7 @@ Use this when reviewing PRs or designing new features.
 |------|------|
 | **Loop** | Never raise from `run()`; always emit `TurnComplete` |
 | **Doom loop** | Text loop: identical name+args streak ≥ `DOOM_LOOP_THRESHOLD` (ok or error) → Error + no-tools recovery; re-arms after each recovery; `ToolDef.doom_loop_exempt` skips (e.g. `loop_status`) |
+| **Empty completion** | No text + no tools: after tools → Error + note and retry until turn budget; otherwise up to 2 recovery re-calls then exhausted Error and end |
 | **Truncated tools** | Text loop: `Done.truncated` or all-`parse_error` → fail all; realtime: all-`parse_error` only (no Live length-limit signal) |
 | **Compaction summary** | Middle-history summary uses fixed Markdown template (Objective / Details / Work State / Next Move / Files); stored as `[Context Summary]:` |
 | **Tools** | Native function-call channel only; no JSON-in-prose tool calls |
