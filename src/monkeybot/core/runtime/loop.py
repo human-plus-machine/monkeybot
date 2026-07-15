@@ -7,7 +7,6 @@ import dataclasses
 import json
 import logging
 import os
-import shutil
 import time
 from collections.abc import AsyncIterator, Sequence
 from contextlib import aclosing
@@ -612,7 +611,6 @@ def _parallel_safe_names(tools: Sequence[ToolDef]) -> frozenset[str]:
     """Names marked ``parallel_safe`` (read-only / concurrent-safe tools)."""
     return frozenset(t.name for t in tools if t.parallel_safe)
 
-_SPILL_REL = Path(".monkeybot") / "spill"
 SUMMARY_TRIGGER_RATIO = summarization_trigger_ratio_from_env()
 """Same ratio as pre-stream summarization check (``preflight_prompt_tokens >= cap``)."""
 _SUMMARY_TRIGGER_RATIO = SUMMARY_TRIGGER_RATIO
@@ -839,12 +837,6 @@ async def _prompt_input_tokens_for_history(
         vertex_google_search=vertex_google_search,
         hints=_provider_call_hints(ctx),
     )
-
-
-def _cleanup_spill_files(workspace_root: Path, thread_id: str) -> None:
-    spill_path = Path(workspace_root).resolve() / _SPILL_REL / thread_id
-    if spill_path.exists():
-        shutil.rmtree(spill_path, ignore_errors=True)
 
 
 def _summarization_viable(messages: Sequence[Message]) -> bool:
@@ -1322,8 +1314,6 @@ async def _run_inner_core(
     effective_max = _effective_max_turns(max_turns)
     user_text = _user_text_from_content(user_content)
     _ = await history.load(ctx.thread_id)
-    if ctx.workspace_root is not None:
-        _cleanup_spill_files(ctx.workspace_root, ctx.thread_id)
     await history.append(ctx.thread_id, Message(role="user", content=list(user_content)))
 
     await _fire_hook(

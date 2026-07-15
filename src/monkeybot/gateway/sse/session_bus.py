@@ -264,8 +264,18 @@ class SessionRegistry:
         bus.admission.clear_all()
 
         from monkeybot.core.context.memory_prompt import evict_curation_cache
+        from monkeybot.core.tools.spill_inventory import cleanup_spill_files
+        from monkeybot.core.workspace_layout import resolve_agent_workspace_root
 
         evict_curation_cache(session_id)
+        try:
+            cleanup_spill_files(resolve_agent_workspace_root(), session_id)
+        except Exception:
+            logger.warning(
+                "spill cleanup failed %s",
+                kv(session_id=session_id),
+                exc_info=True,
+            )
         return bus
 
     @staticmethod

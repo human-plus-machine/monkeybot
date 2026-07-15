@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import shutil
+from pathlib import Path
+
 from monkeybot.core.runtime.context_budget import diff_inventory_lines
 
 _INVENTORY_PREFIX = "[Spill inventory —"
+_SPILL_DIR_REL = Path(".monkeybot") / "spill"
 
 
 def spill_inventory_note(text: str, rel_spill_path: str) -> str:
@@ -23,6 +27,18 @@ def spill_inventory_note(text: str, rel_spill_path: str) -> str:
         f"Full output at: {rel_spill_path} — use read_file with offset/limit to page through it.]"
     )
     return "\n".join(parts)
+
+
+def cleanup_spill_files(workspace_root: Path, thread_id: str) -> None:
+    """Remove ``.monkeybot/spill/{thread_id}/`` for a finished session.
+
+    Spills must survive across user turns within a session so the model can
+    ``read_file`` inventory pointers on later turns. Call this on session end
+    (gateway DELETE / process teardown), not at turn start.
+    """
+    spill_path = Path(workspace_root).resolve() / _SPILL_DIR_REL / thread_id
+    if spill_path.exists():
+        shutil.rmtree(spill_path, ignore_errors=True)
 
 
 def spill_min_chars_from_env() -> int:

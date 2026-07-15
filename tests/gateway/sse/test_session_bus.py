@@ -103,6 +103,26 @@ def test_registry_remove_evicts_curation_cache_entry() -> None:
     assert "s1" not in _curation_cache
 
 
+def test_registry_remove_cleans_spill_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Session end removes ``.monkeybot/spill/{session_id}/`` so spills last the session."""
+    monkeypatch.setenv("MONKEYBOT_WORKSPACE_ROOT", str(tmp_path))
+    spill = tmp_path / ".monkeybot" / "spill" / "s-spill"
+    spill.mkdir(parents=True)
+    (spill / "call.txt").write_text("payload", encoding="utf-8")
+    other = tmp_path / ".monkeybot" / "spill" / "other-session"
+    other.mkdir(parents=True)
+    (other / "keep.txt").write_text("keep", encoding="utf-8")
+
+    reg = SessionRegistry()
+    reg.create("s-spill", agent_md=None, created_at_ms=0)
+    assert reg.remove("s-spill").deleted is True
+
+    assert not spill.exists()
+    assert (other / "keep.txt").read_text(encoding="utf-8") == "keep"
+
+
 @pytest.mark.asyncio
 async def test_registry_remove_cancels_pending_responses() -> None:
     reg = SessionRegistry()

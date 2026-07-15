@@ -1130,10 +1130,11 @@ async def test_run_provider_raises_logs_exception(caplog: pytest.LogCaptureFixtu
 
 
 @pytest.mark.asyncio
-async def test_run_cleanup_spill_at_start(tmp_path: Path) -> None:
+async def test_run_preserves_spill_across_turns(tmp_path: Path) -> None:
+    """Spill files must survive turn starts so later turns can read inventory pointers."""
     spill = tmp_path / ".monkeybot" / "spill" / "t1"
     spill.mkdir(parents=True)
-    (spill / "prev.txt").write_text("stale", encoding="utf-8")
+    (spill / "prev.txt").write_text("keep", encoding="utf-8")
     prov = FakeProvider([[TextDelta(text="ok"), Done()]])
     hist = FakeHistory()
     ctx = _ctx(workspace_root=tmp_path)
@@ -1147,7 +1148,7 @@ async def test_run_cleanup_spill_at_start(tmp_path: Path) -> None:
         max_turns=3,
     ):
         pass
-    assert not spill.exists()
+    assert (spill / "prev.txt").read_text(encoding="utf-8") == "keep"
 
 
 @pytest.mark.asyncio
