@@ -6,7 +6,18 @@ Callers should import from this module:
 - ``ToolExecutorPort`` — fakeable tool execution boundary
 - ``SUMMARY_TRIGGER_RATIO`` — history-compaction trigger ratio
 
-Implementation lives under ``core/runtime/`` (``turn_loop``, ``tool_dispatch``, helpers).
+Implementation lives under ``core/runtime/``:
+
+- ``turn_loop`` — per-turn orchestration (prepare, compact, stream, dispatch)
+- ``tool_dispatch`` — tool-batch execution (inspectors, serial/parallel exec)
+- ``tool_batch`` — batch-level helpers (rejection, chunking, registry notes)
+- ``history_compaction`` — history summarization + budgeted tool-response append
+- ``doom_loop`` — consecutive-identical-tool-call detection
+- ``loop_hooks`` — hook firing/settlement helpers
+- ``loop_messages`` — message / system-prompt shaping helpers
+- ``loop_usage`` — usage accounting + provider prompt-token helpers
+- ``loop_ports`` — fakeable tool-execution boundary (``ToolExecutorPort``)
+
 Prefer importing private helpers from their owning modules in new code; a small set
 is re-exported here for existing tests and gateway call sites.
 """
@@ -50,7 +61,6 @@ from .loop_ports import ToolExecutorPort
 from .loop_usage import _effective_max_turns, _merge_usage_event, _usage_to_totals
 from .tool_batch import (
     _await_user_response_any,
-    _chunk_tool_calls,
     _rejected_tool_batch_error,
     _should_reject_tool_batch,
 )

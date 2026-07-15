@@ -42,7 +42,6 @@ from monkeybot.core.runtime.events import (
     TurnComplete,
 )
 from monkeybot.core.runtime.loop import (
-    _chunk_tool_calls,
     _compact_history_if_needed,
     _image_events,
     _merge_usage_event,
@@ -50,6 +49,7 @@ from monkeybot.core.runtime.loop import (
     _usage_to_totals,
     run,
 )
+from monkeybot.core.runtime.tool_batch import _chunk_tool_calls
 from monkeybot.core.testing.mocks_provider import fake_provider_prompt_tokens
 from monkeybot.core.tools.inspector import Decision
 from monkeybot.core.tools.types import ToolExecutionResult
