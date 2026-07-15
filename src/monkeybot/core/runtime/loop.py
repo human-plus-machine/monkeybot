@@ -57,7 +57,6 @@ from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.prompts.prompt import (
     RUNTIME_NOTES_HEADING,
     compose_stable_baseline,
-    compose_volatile_tail,
     compose_volatile_tail_parts,
     latest_user_message_text,
 )
@@ -352,6 +351,12 @@ def _admit_system_context(
         ctx, chat_messages=chat_messages, memory_selection=memory_selection
     )
     volatile = "".join(volatile_parts.values())
+    # Excludes "current_date": it is never empty (always today's date), so it
+    # must not count as "content" when deciding whether volatile sections were
+    # cleared for the "## System context update" mid-epoch message.
+    volatile_content = "".join(
+        text for name, text in volatile_parts.items() if name != "current_date"
+    )
     return epoch.reconcile(
         stable_baseline=stable,
         volatile_text=volatile,
@@ -360,6 +365,7 @@ def _admit_system_context(
         volatile_part_fingerprints={
             name: fingerprint_text(text) for name, text in volatile_parts.items()
         },
+        volatile_content_text=volatile_content,
     )
 
 
@@ -808,16 +814,21 @@ async def _prompt_input_tokens_for_history(
         attachment_catalog.list_records() if attachment_catalog is not None else None
     )
     stable = compose_stable_baseline(ctx, attachment_catalog=catalog)
-    volatile = compose_volatile_tail(
+    volatile_parts = compose_volatile_tail_parts(
         ctx, chat_messages=chat_messages, memory_selection=memory_selection
     )
+    volatile = "".join(volatile_parts.values())
     mid_conversation_update = ""
     if epoch is not None:
+        volatile_content = "".join(
+            text for name, text in volatile_parts.items() if name != "current_date"
+        )
         admit = epoch.peek(
             stable_baseline=stable,
             volatile_text=volatile,
             stable_fingerprint=fingerprint_text(stable),
             volatile_fingerprint=fingerprint_text(volatile),
+            volatile_content_text=volatile_content,
         )
         body = admit.leading_system_text
         mid_conversation_update = admit.mid_conversation_update

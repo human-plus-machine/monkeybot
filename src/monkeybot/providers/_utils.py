@@ -310,6 +310,7 @@ def _anthropic_assistant_block(block: ContentBlock) -> dict[str, Any]:
 # (``tests/providers/test_anthropic_cache.py::test_volatile_markers_match_heading_constants``)
 # asserts these literals stay byte-identical to the owning constants.
 _VOLATILE_SYSTEM_MARKERS = (
+    "\n\n## Current date\n",
     "\n\n## Memory index\n",
     "\n\n## Memory\n",
     "\n\n## Skills\n",
@@ -338,7 +339,7 @@ def build_cached_system_blocks(
 ) -> list[dict[str, Any]]:
     """Return Anthropic system blocks with cache_control only on the stable prefix.
 
-    Volatile tail sections (memory, skills, current request) are sent in a second
+    Volatile tail sections (current date, memory, skills, current request) are sent in a second
     uncached block so explicit caching hits across curation turns.
 
     When ``cache_retention`` is ``none``, no ``cache_control`` markers are applied.

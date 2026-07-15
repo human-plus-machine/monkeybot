@@ -177,7 +177,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 **Section order (cache-friendly):**
 
 1. **Stable prefix (epoch baseline):** `AGENT.md` + harness + session attachments
-2. **Volatile tail:** memory index + skills + "Current request" anchor
+2. **Volatile tail:** current date (`YYYY-MM-DD`) + memory index + skills + "Current request" anchor
 3. **Mid-conversation updates (within epoch):** chronological user message with `## System context update` when volatile sources change; leading baseline stays byte-identical for prompt cache
 
 **How it works:**
@@ -186,6 +186,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - Harness lines for `task`, `web_search`, subagent personas, and `run_command` execution mode are conditional on active tool list.
 - Emission-style block (Levers 1–2: minimum code, terse prose) is injected into the stable prefix when `MONKEYBOT_EMISSION_STYLE=terse`; its dense agent-to-agent sub-block (Lever 3) is additionally gated on the `task` tool being active. Default off. See [§21](#21-emission-style-terse-output-guidance).
 - `HARNESS_TOOL_CALL_PROTOCOL` enforces native tool-call channel, evidence rule, no-repeat rule.
+- "Current date" injects the host-local calendar day as machine-stable `YYYY-MM-DD` in the volatile tail (not the stable cache prefix), so a midnight rollover mid-session emits a mid-conversation update without busting prompt cache.
 - "Current request" block restates last user text when transcript continued with assistant/tool messages (skipped when user row is already last).
 - Memory selection (`MemoryPromptSelection`) replaces full `ctx.memory_index` when truncated; skill names always come from `ctx.skills` (use `list_skills`/`read_file` for the skills root path and full `SKILL.md` procedure).
 
