@@ -47,6 +47,37 @@ def test_post_hitl_failure_emits_hitl_failed() -> None:
     assert "Tool confirmation failed" in events[-1].payload["message"]
 
 
+def test_context_usage_event_emits_usage_updated() -> None:
+    from monkeybot.core.runtime.events import ContextUsage
+    from monkeybot_cli.chat_session import _TurnState
+
+    events: list[ChatUiEvent] = []
+
+    async def _run() -> None:
+        controller = ChatSessionController(
+            base="http://localhost:8080",
+            emit=events.append,
+        )
+        state = _TurnState()
+        await controller._dispatch_turn_event(
+            ContextUsage(
+                request_id="rid-1",
+                estimated_tokens=12_500,
+                context_window_tokens=200_000,
+            ),
+            "rid-1",
+            state,
+        )
+
+    asyncio.run(_run())
+    updated = [e for e in events if e.kind == "usage_updated"]
+    assert len(updated) == 1
+    usage = updated[0].payload["usage"]
+    assert usage is not None
+    assert usage.estimated_prompt_tokens == 12_500
+    assert usage.context_window_tokens == 200_000
+
+
 def test_hitl_reader_confirm_yes() -> None:
     events: list[ChatUiEvent] = []
 

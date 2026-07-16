@@ -101,6 +101,17 @@ class ContextSummarized:
 
 
 @dataclass(frozen=True)
+class ContextUsage:
+    """Live preflight / post-tool prompt size for context meters (not a summarization signal)."""
+
+    kind: Literal["ContextUsage"] = "ContextUsage"
+    request_id: str = ""
+    estimated_tokens: int = 0
+    """Same basis as ``estimated_prompt_tokens`` on usage / ``ContextSummarizing``."""
+    context_window_tokens: int = 0
+
+
+@dataclass(frozen=True)
 class SystemPromptSnapshot:
     """Full system message text sent to the provider on this inner-loop iteration (playground / debug)."""
 
@@ -300,6 +311,7 @@ AgentEvent: TypeAlias = (
     | Error
     | ContextSummarizing
     | ContextSummarized
+    | ContextUsage
     | SystemPromptSnapshot
     | ImageBlock
     | ThinkingBlockDelta
@@ -377,6 +389,15 @@ def _usage_from_obj(raw: object | None) -> UsageTotals:
         duration_ms=dur,
         estimated_prompt_tokens=ept,
     )
+
+
+def _context_token_fields(payload: dict[str, Any]) -> tuple[int, int]:
+    """Parse ``estimated_tokens`` / ``context_window_tokens`` from a wire payload."""
+    et_raw = payload.get("estimated_tokens", 0)
+    cwt_raw = payload.get("context_window_tokens", 0)
+    et = int(et_raw) if isinstance(et_raw, (int, float)) else 0
+    cwt = int(cwt_raw) if isinstance(cwt_raw, (int, float)) else 0
+    return et, cwt
 
 
 def _args_from_obj(raw: object | None) -> dict[str, object]:
@@ -513,7 +534,7 @@ def event_to_json(event: AgentEvent) -> str:
             payload["trace_id"] = event.trace_id
     elif isinstance(event, Error):
         payload = {**base, "error": event.error}
-    elif isinstance(event, ContextSummarizing):
+    elif isinstance(event, (ContextSummarizing, ContextUsage)):
         payload = {
             **base,
             "estimated_tokens": event.estimated_tokens,
@@ -630,10 +651,7 @@ def event_from_json(raw: str) -> AgentEvent:
         err = err_raw if isinstance(err_raw, str) else ""
         return Error(request_id=rid, error=err)
     if t == "ContextSummarizing":
-        et_raw = payload.get("estimated_tokens", 0)
-        cwt_raw = payload.get("context_window_tokens", 0)
-        et = int(et_raw) if isinstance(et_raw, (int, float)) else 0
-        cwt = int(cwt_raw) if isinstance(cwt_raw, (int, float)) else 0
+        et, cwt = _context_token_fields(payload)
         return ContextSummarizing(
             request_id=rid, estimated_tokens=et, context_window_tokens=cwt
         )
@@ -641,6 +659,11 @@ def event_from_json(raw: str) -> AgentEvent:
         ts_raw = payload.get("turns_summarized", 0)
         ts = int(ts_raw) if isinstance(ts_raw, (int, float)) else 0
         return ContextSummarized(request_id=rid, turns_summarized=ts)
+    if t == "ContextUsage":
+        et, cwt = _context_token_fields(payload)
+        return ContextUsage(
+            request_id=rid, estimated_tokens=et, context_window_tokens=cwt
+        )
     if t == "SystemPromptSnapshot":
         it_raw = payload.get("inner_turn", 0)
         inner_turn = int(it_raw) if isinstance(it_raw, (int, float)) else 0

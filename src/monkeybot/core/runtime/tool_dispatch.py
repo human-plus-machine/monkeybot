@@ -37,6 +37,7 @@ from monkeybot.core.types.content_blocks import ContentBlock, Image, Text, ToolR
 from .doom_loop import _doom_loop_exempt_names, _DoomLoopTracker
 from .events import (
     AgentEvent,
+    ContextUsage,
     Error,
     ImageBlock,
     ToolCallResult,
@@ -775,6 +776,11 @@ async def _post_batch_budget_and_registry(
             epoch=epoch_tracker,
         ):
             yield budget_evt
+        yield ContextUsage(
+            request_id=ctx.request_id,
+            estimated_tokens=usage.estimated_prompt_tokens,
+            context_window_tokens=ctx.context_window_tokens,
+        )
 
     if mcp_registry_mutated:
         mcp_client = getattr(tool_executor, "mcp", None)

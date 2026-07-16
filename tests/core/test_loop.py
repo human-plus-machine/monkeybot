@@ -30,6 +30,7 @@ from monkeybot.core.llm.usage import Usage
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.runtime.events import (
     AssistantDelta,
+    ContextUsage,
     Error,
     GroundingEvent,
     ImageBlock,
@@ -335,6 +336,10 @@ async def test_run_no_tools_yields_assistant_then_turn_complete() -> None:
     assert any(isinstance(e, Thinking) for e in events)
     deltas = [e for e in events if isinstance(e, AssistantDelta)]
     assert [e.delta for e in deltas] == ["hi"]
+    usage_events = [e for e in events if isinstance(e, ContextUsage)]
+    assert len(usage_events) == 1
+    assert usage_events[0].estimated_tokens > 0
+    assert usage_events[0].context_window_tokens == 200_000
     assert isinstance(events[-1], TurnComplete)
     assert events[-1].usage.input_tokens == 1
     assert events[-1].usage.output_tokens == 2
@@ -1914,6 +1919,9 @@ async def test_loop_follow_up_after_tool_uses_tool_response_detection() -> None:
     assert prov.stream_calls == 3
     deltas = [e.delta for e in events if isinstance(e, AssistantDelta)]
     assert deltas == ["summary"]
+    usage_events = [e for e in events if isinstance(e, ContextUsage)]
+    # Preflight per inner turn (3) + post-tool after the tool batch (1).
+    assert len(usage_events) >= 4
     assert any(
         m.role == "user" and any(isinstance(b, ToolResponse) for b in m.content)
         for m in hist.rows
