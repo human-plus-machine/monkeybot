@@ -173,9 +173,9 @@ def _ctx(skills: list[SkillRef] | None = None) -> TurnContext:
 def _stub_agent_md_for_tasks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     agent = tmp_path / "AGENT.md"
     agent.write_text("# test agent\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("MONKEYBOT_AGENT_ROOT", str(tmp_path))
     monkeypatch.setenv("AGENT_MD", str(agent))
-    monkeypatch.setenv("MONKEYBOT_SUBAGENT_AGENT_MD", str(agent))
 
 
 @pytest.mark.asyncio

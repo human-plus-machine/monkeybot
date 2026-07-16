@@ -77,6 +77,18 @@ class SubagentConfig:
 
 
 @dataclass(frozen=True)
+class SubagentSettings:
+    """Global defaults for ``task`` subagent runs from ``subagents:`` in monkeybot.yaml."""
+
+    timeout_sec: float = 600.0
+    max_turns: int = 25
+    vertex_google_search: bool = False
+
+
+_DEFAULT_SUBAGENT_SETTINGS = SubagentSettings()
+
+
+@dataclass(frozen=True)
 class ProviderConfig:
     """Native streaming Provider plus model id."""
 
@@ -255,10 +267,76 @@ def _parse_subagent_entries(raw_entries: Any) -> list[SubagentConfig]:
     return configs
 
 
-def get_subagent_configs(config_path: str | None = None) -> list[SubagentConfig]:
-    """Return subagent configurations from ``subagents:`` in monkeybot.yaml."""
+def _subagents_section(doc: dict[str, Any]) -> dict[str, Any]:
+    """Return the ``subagents:`` mapping, or empty dict when absent."""
+    section = doc.get("subagents")
+    if section is None:
+        return {}
+    if isinstance(section, list):
+        raise ConfigError(
+            "subagents must be a mapping with optional defaults and a 'personas' list; "
+            "a bare list is no longer supported"
+        )
+    if not isinstance(section, dict):
+        raise ConfigError(
+            f"subagents must be a mapping, got {type(section).__name__}"
+        )
+    return section
+
+
+def get_subagent_settings(config_path: str | None = None) -> SubagentSettings:
+    """Global ``task`` defaults from ``subagents:`` in monkeybot.yaml (config-file only)."""
     _, doc = load_monkeybot_yaml_dict(config_path)
-    return _parse_subagent_entries(doc.get("subagents"))
+    section = _subagents_section(doc)
+    if not section:
+        return _DEFAULT_SUBAGENT_SETTINGS
+
+    timeout = _DEFAULT_SUBAGENT_SETTINGS.timeout_sec
+    raw_timeout = section.get("timeout_sec")
+    if raw_timeout is not None:
+        if isinstance(raw_timeout, bool) or not isinstance(raw_timeout, (int, float)):
+            raise ConfigError(
+                f"subagents.timeout_sec must be a number, got {raw_timeout!r}"
+            )
+        timeout = max(1.0, float(raw_timeout))
+
+    max_turns = _DEFAULT_SUBAGENT_SETTINGS.max_turns
+    raw_turns = section.get("max_turns")
+    if raw_turns is not None:
+        if isinstance(raw_turns, bool) or not isinstance(raw_turns, int):
+            raise ConfigError(
+                f"subagents.max_turns must be an integer, got {raw_turns!r}"
+            )
+        max_turns = max(1, raw_turns)
+
+    vertex_raw = section.get("vertex_google_search")
+    if vertex_raw is None:
+        vertex = False
+    elif isinstance(vertex_raw, bool):
+        vertex = vertex_raw
+    else:
+        raise ConfigError(
+            f"subagents.vertex_google_search must be true or false, got {vertex_raw!r}"
+        )
+
+    if "agent_md" in section:
+        raise ConfigError(
+            "subagents.agent_md was removed; set agent_md on each entry in "
+            "subagents.personas, or omit subagent_type to inherit paths.agent_md"
+        )
+
+    return SubagentSettings(
+        timeout_sec=timeout,
+        max_turns=max_turns,
+        vertex_google_search=vertex,
+    )
+
+
+def get_subagent_configs(config_path: str | None = None) -> list[SubagentConfig]:
+    """Return named personas from ``subagents.personas`` in monkeybot.yaml."""
+    _, doc = load_monkeybot_yaml_dict(config_path)
+    section = _subagents_section(doc)
+    return _parse_subagent_entries(section.get("personas"))
 
 
 def get_subagent_registry(config_path: str | None = None) -> dict[str, SubagentConfig]:
@@ -328,14 +406,8 @@ def vertex_google_search_enabled_from_config(config_path: str | None = None) -> 
 def subagent_vertex_google_search_from_config(config_path: str | None = None) -> bool:
     """Whether subagent runs enable Gemini's native ``google_search`` grounding tool.
 
-    Read from ``subagent.vertex_google_search`` in monkeybot.yaml. Defaults to ``False``
+    Read from ``subagents.vertex_google_search`` in monkeybot.yaml. Defaults to ``False``
     when absent. Config-file only — not exposed via environment variables.
     """
-    _, doc = load_monkeybot_yaml_dict(config_path)
-    return _bool_config_flag(
-        doc,
-        "subagent",
-        "vertex_google_search",
-        default=False,
-        label="subagent.vertex_google_search",
-    )
+    return get_subagent_settings(config_path).vertex_google_search
+

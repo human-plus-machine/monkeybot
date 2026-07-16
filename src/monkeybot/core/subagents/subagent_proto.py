@@ -13,7 +13,12 @@ from pathlib import Path
 from typing import Any
 
 from monkeybot.core.config.settings import SubagentConfig
-from monkeybot.core.layout import resolve_agent_path, resolve_agent_root, resolve_sqlite_url
+from monkeybot.core.layout import (
+    resolve_agent_path,
+    resolve_agent_root,
+    resolve_config_path,
+    resolve_sqlite_url,
+)
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.runtime.events import (
     AgentEvent,
@@ -68,15 +73,30 @@ def resolve_project_path(raw: str, agent_root: Path | None = None) -> Path:
     return resolve_agent_path(raw, root)
 
 
-def resolve_subagent_agent_md_path(agent_root: Path | None = None) -> Path | None:
-    """Effective subagent AGENT.md path; ``MONKEYBOT_SUBAGENT_AGENT_MD`` wins over ``AGENT_MD``."""
+def config_path_for_agent_root(agent_root: Path | None = None) -> str | None:
+    """Resolve ``monkeybot.yaml`` for ``agent_root`` without consulting cwd."""
     root = agent_root if agent_root is not None else resolve_agent_project_root()
-    raw = os.environ.get("MONKEYBOT_SUBAGENT_AGENT_MD", "").strip()
-    if not raw:
-        raw = os.environ.get("AGENT_MD", "").strip()
-    if not raw:
-        return None
-    return resolve_project_path(raw, root)
+    cfg = resolve_config_path(agent_root=root)
+    return str(cfg) if cfg is not None else None
+
+
+def resolve_default_agent_md_path(agent_root: Path | None = None) -> Path:
+    """Resolve default AGENT.md for a task with no persona: env ``AGENT_MD`` → ``AGENT.md``.
+
+    Returns the first existing file. Raises if none of the candidates exist.
+    """
+    root = agent_root if agent_root is not None else resolve_agent_project_root()
+    raw = os.environ.get("AGENT_MD", "").strip()
+    if raw:
+        path = resolve_project_path(raw, root)
+        if path.is_file():
+            return path
+    default = resolve_project_path("AGENT.md", root)
+    if default.is_file():
+        return default
+    raise ValueError(
+        "No AGENT.md found for subagent (set paths.agent_md or a persona agent_md)"
+    )
 
 
 def resolve_task_agent_md_path(
@@ -85,7 +105,7 @@ def resolve_task_agent_md_path(
     registry: dict[str, SubagentConfig],
     agent_root: Path | None = None,
 ) -> Path:
-    """Resolve AGENT.md for a ``task`` spawn: registry type, then global subagent/parent defaults."""
+    """Resolve AGENT.md for a ``task`` spawn: registry persona, else parent defaults."""
     root = agent_root if agent_root is not None else resolve_agent_project_root()
     key = (subagent_type or "").strip()
     if key:
@@ -100,18 +120,7 @@ def resolve_task_agent_md_path(
             raise ValueError(f"agent_md for subagent_type {key!r} not found: {path}")
         return path
 
-    fallback = resolve_subagent_agent_md_path(root)
-    if fallback is not None and fallback.is_file():
-        return fallback
-    raw = os.environ.get("AGENT_MD", "").strip()
-    if raw:
-        path = resolve_project_path(raw, root)
-        if path.is_file():
-            return path
-    default = (root / "AGENT.md").resolve()
-    if default.is_file():
-        return default
-    raise ValueError("No AGENT.md found for subagent (set subagent.agent_md or paths.agent_md)")
+    return resolve_default_agent_md_path(root)
 
 
 def normalize_sqlite_db_url(db_url: str, agent_root: Path | None = None) -> str:

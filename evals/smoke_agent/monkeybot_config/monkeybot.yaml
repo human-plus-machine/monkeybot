@@ -39,10 +39,9 @@ context_curation:
 memory_hook:
   enabled: true
 
-subagent:
+subagents:
   timeout_sec: 600
   max_turns: 25
-  agent_md: ./monkeybot_config/AGENT.md
 
 web_search:
   backend: duckduckgo

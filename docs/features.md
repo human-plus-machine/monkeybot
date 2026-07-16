@@ -468,7 +468,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Purpose:** Delegate work to isolated subprocess with same workspace/memory/MCP.
 
-**Key files:** `core/subagents/subagent_proto.py`, `subagent_worker.py`, `monkeybot.yaml` `subagents:`
+**Key files:** `core/subagents/subagent_proto.py`, `subagent_worker.py`, `monkeybot.yaml` `subagents.personas`
 
 **How it works:**
 - Parent passes `subagent_type` to select a named persona from `monkeybot.yaml`.
@@ -478,7 +478,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 **Invariants:**
 - No nested `task` inside subagents.
 - Max 10 parallel `task` calls per batch.
-- `SUBAGENT_MAX_TURNS` / `SUBAGENT_TIMEOUT_SEC` env limits apply.
+- `subagents.max_turns` / `subagents.timeout_sec` YAML limits apply.
 
 ---
 
@@ -524,7 +524,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 directory that contains `monkeybot_config/`. The discovered agent root loads
 its `.env` before YAML values fill still-unset environment variables.
 
-**Major sections:** `runtime`, `paths`, `model`, `gateway`, `context_curation`, `memory_hook`, `subagent`, `subagents`, `tools`, `compression`, `web_search`, `sandbox`, `emission`, `fake_provider`, `includes`.
+**Major sections:** `runtime`, `paths`, `model`, `gateway`, `context_curation`, `memory_hook`, `subagents`, `tools`, `compression`, `web_search`, `sandbox`, `emission`, `fake_provider`, `includes`.
 
 **Invariants:**
 - Secrets never belong in yaml.
@@ -725,8 +725,8 @@ Use this when reviewing PRs or designing new features.
 | Current request cap | 8000 chars | code constant |
 | Emission style | off | `MONKEYBOT_EMISSION_STYLE` / `emission.style` |
 | Pending response timeout | 300s | `gateway.pending_response_timeout_sec` |
-| Subagent timeout | 600s | `subagent.timeout_sec` |
-| Subagent max turns | 25 | `subagent.max_turns` |
+| Subagent timeout | 600s | `subagents.timeout_sec` |
+| Subagent max turns | 25 | `subagents.max_turns` |
 | Steer queue depth | 8 | `MONKEYBOT_STEER_QUEUE_MAX` |
 | Follow-up queue depth | 16 | `MONKEYBOT_FOLLOW_UP_QUEUE_MAX` |
 | Follow-up lock retry interval | 1s | `MONKEYBOT_FOLLOW_UP_LOCK_RETRY_S` |

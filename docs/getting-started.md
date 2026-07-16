@@ -66,7 +66,7 @@ Important knobs (see **`monkeybot_config/monkeybot.example.yaml`** for all secti
 | `paths.skills_path` | Read-only trusted skill bundle root (default `./skills`). |
 | `paths.db_url` | SQLite URL for conversation + usage. |
 | `paths.mcp_config` / `paths.command_allowlist_config` | MCP map and run_command allowlist policy path. |
-| `subagent.agent_md` | Subagent prompt file (defaults to same as `paths.agent_md`). |
+| `subagents.personas[].agent_md` | Optional persona prompt for `task(subagent_type=...)`; without a type, inherits `paths.agent_md`. |
 | `model.provider` / `model.name` | Provider and model id (`gemini`, `openai`, `anthropic`, …). |
 | `runtime.port` | Gateway listen port. |
 

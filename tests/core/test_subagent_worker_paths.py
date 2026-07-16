@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 from pathlib import Path
 from typing import cast
@@ -105,10 +106,13 @@ async def test_worker_resolves_relative_agent_md_from_project_root(
     monkeypatch.setattr(subagent_worker, "init_observability", lambda: False)
     monkeypatch.setattr(subagent_worker, "shutdown_observability", lambda: None)
 
-    await subagent_worker._async_main()
-
-    assert captured == [agent_md.resolve()]
-    assert Path.cwd().resolve() == ws.resolve()
+    original_cwd = Path.cwd()
+    try:
+        await subagent_worker._async_main()
+        assert captured == [agent_md.resolve()]
+        assert Path.cwd().resolve() == ws.resolve()
+    finally:
+        os.chdir(original_cwd)
 
 
 async def _run_worker_capturing_vertex_google_search(
@@ -188,12 +192,14 @@ async def _run_worker_capturing_vertex_google_search(
     monkeypatch.setattr(subagent_worker, "build_context", _fake_build_context)
 
     monkeypatch.setattr(
-        subagent_worker, "subagent_vertex_google_search_from_config", lambda: subagent_flag
+        subagent_worker,
+        "subagent_vertex_google_search_from_config",
+        lambda *_a, **_k: subagent_flag,
     )
 
     def _boom(*_a: object, **_k: object) -> bool:
         raise AssertionError(
-            "subagent_worker must read only its own subagent.vertex_google_search "
+            "subagent_worker must read only its own subagents.vertex_google_search "
             "config, never the main agent's web_search.vertex_google_search"
         )
 
@@ -223,8 +229,12 @@ async def _run_worker_capturing_vertex_google_search(
     monkeypatch.setattr(subagent_worker, "init_observability", lambda: False)
     monkeypatch.setattr(subagent_worker, "shutdown_observability", lambda: None)
 
-    await subagent_worker._async_main()
-    return cast(bool, captured_kwargs["vertex_google_search"])
+    original_cwd = Path.cwd()
+    try:
+        await subagent_worker._async_main()
+        return cast(bool, captured_kwargs["vertex_google_search"])
+    finally:
+        os.chdir(original_cwd)
 
 
 @pytest.mark.asyncio
@@ -234,7 +244,7 @@ async def test_subagent_vertex_google_search_scoped_to_own_config(
     monkeypatch: pytest.MonkeyPatch,
     subagent_flag: bool,
 ) -> None:
-    """subagent_worker.py must pass its own ``subagent.vertex_google_search`` config
+    """subagent_worker.py must pass its own ``subagents.vertex_google_search`` config
 
     into the run loop, and must never consult the main agent's
     ``web_search.vertex_google_search`` config function while doing so.

@@ -18,8 +18,8 @@ from monkeybot.core.subagents.subagent_proto import (
     default_subagent_script,
     normalize_sqlite_db_url,
     resolve_agent_project_root,
+    resolve_default_agent_md_path,
     resolve_project_path,
-    resolve_subagent_agent_md_path,
     resolve_subagent_script,
     resolve_task_agent_md_path,
     spawn_subagent,
@@ -93,17 +93,21 @@ def test_resolve_project_path_relative(tmp_path: Path) -> None:
     assert got == agent.resolve()
 
 
-def test_resolve_subagent_agent_md_prefers_override(
+def test_resolve_default_agent_md_path_uses_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    parent = tmp_path / "monkeybot_config" / "AGENT.md"
-    parent.parent.mkdir(parents=True)
+    cfg = tmp_path / "monkeybot_config"
+    cfg.mkdir()
+    parent = cfg / "AGENT.md"
     parent.write_text("# parent\n", encoding="utf-8")
-    override = tmp_path / "custom.md"
-    override.write_text("# custom\n", encoding="utf-8")
+    (cfg / "monkeybot.yaml").write_text("model:\n  provider: gemini\n", encoding="utf-8")
+    monkeypatch.delenv("MONKEYBOT_AGENT_ROOT", raising=False)
+    monkeypatch.delenv("MONKEYBOT_CONFIG", raising=False)
     monkeypatch.setenv("AGENT_MD", "./monkeybot_config/AGENT.md")
-    monkeypatch.setenv("MONKEYBOT_SUBAGENT_AGENT_MD", str(override))
-    assert resolve_subagent_agent_md_path(tmp_path) == override.resolve()
+    elsewhere = tmp_path / "scratch"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    assert resolve_default_agent_md_path(tmp_path) == parent.resolve()
 
 
 def test_normalize_sqlite_db_url_relative(tmp_path: Path) -> None:

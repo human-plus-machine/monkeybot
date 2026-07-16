@@ -21,7 +21,7 @@ from monkeybot.core.attachments.config import (
     max_pdf_bytes,
 )
 from monkeybot.core.attachments.store import AttachmentStore, sniff_mime
-from monkeybot.core.config.settings import SubagentConfig
+from monkeybot.core.config.settings import SubagentConfig, get_subagent_settings
 from monkeybot.core.context import (
     SCHEDULED_LOOP_TOOL_DEFS,
     CustomTool,
@@ -1058,7 +1058,6 @@ class CoreToolExecutor(ToolExecutorPort):
             "MEMORY_STORAGE_URI": memory_uri,
             "MONKEYBOT_SUBAGENT_SKILLS_PATH": str(self._skills_path),
             "OTEL_SERVICE_NAME": _SUBAGENT_OTEL_SERVICE_NAME,
-            "MONKEYBOT_SUBAGENT_AGENT_MD": str(agent_md_path),
         }
 
         for env_key, raw_val in (
@@ -1072,11 +1071,7 @@ class CoreToolExecutor(ToolExecutorPort):
         if db_raw:
             child_env["DB_URL"] = normalize_sqlite_db_url(db_raw, agent_root)
 
-        timeout_raw = os.environ.get("SUBAGENT_TIMEOUT_SEC", "600").strip()
-        try:
-            timeout = max(1.0, float(timeout_raw))
-        except ValueError:
-            timeout = 600.0
+        timeout = get_subagent_settings().timeout_sec
 
         deltas: list[str] = []
         errors: list[str] = []
