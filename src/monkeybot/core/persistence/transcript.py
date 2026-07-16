@@ -54,10 +54,6 @@ def now_iso() -> str:
     )
 
 
-# Internal alias kept for call sites within this module.
-_now_iso = now_iso
-
-
 def _utc_compact_from_iso(started_at: str) -> str:
     """Derive ``YYYYMMDDTHHMMSSZ`` from an ISO-ish UTC timestamp."""
     # "2026-07-14T15:42:01.123Z" -> "20260714T154201Z"
@@ -97,7 +93,7 @@ def resolve_session_artifact_dir(
     existing = _find_existing_session_dir(transcripts_root, safe_id)
     if existing is not None:
         return existing
-    folder = f"{_utc_compact_from_iso(started_at or _now_iso())}_{safe_id}"
+    folder = f"{_utc_compact_from_iso(started_at or now_iso())}_{safe_id}"
     return transcripts_root / folder
 
 
@@ -140,7 +136,7 @@ class TranscriptWriter:
         include_live: bool | None = None,
     ) -> None:
         self._session_id = session_id
-        self._started_at = _now_iso()
+        self._started_at = now_iso()
         self._session_dir = resolve_session_artifact_dir(
             workspace_root, session_id, started_at=self._started_at
         )
@@ -221,7 +217,7 @@ class TranscriptWriter:
     async def write_user_message(self, *, request_id: str, content: str) -> None:
         """Append the incoming user turn (not an ``AgentEvent``; harness-internal)."""
         await self._append_line(
-            {"ts": _now_iso(), "type": "UserMessage", "request_id": request_id, "content": content}
+            {"ts": now_iso(), "type": "UserMessage", "request_id": request_id, "content": content}
         )
 
     async def write_event(self, event: AgentEvent) -> None:
@@ -229,7 +225,7 @@ class TranscriptWriter:
         if not self._include_live and not is_durable_event(event):
             return
         payload = json.loads(event_to_json(event))
-        await self._append_line({"ts": _now_iso(), **payload})
+        await self._append_line({"ts": now_iso(), **payload})
 
     async def write_provider_request(
         self,
@@ -244,7 +240,7 @@ class TranscriptWriter:
         thinking_budget: int | None,
     ) -> None:
         record: dict[str, Any] = {
-            "ts": _now_iso(),
+            "ts": now_iso(),
             "type": "ProviderRequest",
             "request_id": request_id,
             "inner_turn": inner_turn,
@@ -272,7 +268,7 @@ class TranscriptWriter:
     ) -> None:
         await self._append_line(
             {
-                "ts": _now_iso(),
+                "ts": now_iso(),
                 "type": "ProviderResponse",
                 "request_id": request_id,
                 "inner_turn": inner_turn,

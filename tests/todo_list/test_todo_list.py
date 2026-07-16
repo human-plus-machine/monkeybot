@@ -16,7 +16,12 @@ from monkeybot.core.prompts.prompt import (
 )
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.types.types_tools import ToolDef
-from monkeybot.todo_list import TodoListStore, TodoListTool, todo_list_enabled_from_env
+from monkeybot.todo_list import (
+    TodoListStore,
+    TodoListTool,
+    todo_list_enabled_from_env,
+    todo_list_mirror_to_disk_from_env,
+)
 
 
 class _FakeMCP:
@@ -65,6 +70,17 @@ def test_todo_list_enabled_opt_out(monkeypatch: pytest.MonkeyPatch, value: str) 
     assert todo_list_enabled_from_env() is False
 
 
+def test_todo_list_mirror_to_disk_defaults_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MONKEYBOT_TODO_LIST_MIRROR_TO_DISK", raising=False)
+    assert todo_list_mirror_to_disk_from_env() is True
+
+
+@pytest.mark.parametrize("value", ["0", "false", "no", "off", "FALSE"])
+def test_todo_list_mirror_to_disk_opt_out(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("MONKEYBOT_TODO_LIST_MIRROR_TO_DISK", value)
+    assert todo_list_mirror_to_disk_from_env() is False
+
+
 @pytest.mark.asyncio
 async def test_todo_list_tool_add_complete_remove_and_disk_mirror(tmp_path: Path) -> None:
     store = TodoListStore("sess-1", workspace_root=tmp_path)
@@ -95,16 +111,30 @@ async def test_todo_list_tool_add_complete_remove_and_disk_mirror(tmp_path: Path
     assert disk_after["items"] == []
 
 
-def test_todo_list_store_records_mirror_error_on_disk_failure(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_todo_list_mirror_to_disk_false_skips_write(tmp_path: Path) -> None:
+    store = TodoListStore("sess-no-mirror", workspace_root=tmp_path, mirror_to_disk=False)
+    tool = TodoListTool(store)
+
+    added = json.loads(await tool.execute({"action": "add", "text": "Keep in memory"}))
+    assert added["ok"] is True
+    assert added["item"]["text"] == "Keep in memory"
+    assert "mirror_warning" not in added
+    mirrors = list((tmp_path / ".monkeybot" / "transcripts").rglob("todos.json"))
+    assert mirrors == []
+
+
+@pytest.mark.asyncio
+async def test_todo_list_store_records_mirror_error_on_disk_failure(tmp_path: Path) -> None:
     """Memory stays authoritative when the debug mirror write fails; the failure
     is recorded on ``mirror_error`` instead of raising or being fully silent."""
-    store = TodoListStore("sess-mirror-fail", workspace_root=tmp_path)
+    store = TodoListStore("sess-mirror-fail", workspace_root=tmp_path, load_existing=False)
     # Point the mirror at a path that cannot be created (parent is a file, not a dir).
     blocker = tmp_path / "blocked"
     blocker.write_text("not a directory", encoding="utf-8")
     store._session_dir = blocker / "session"
 
-    item = store.add("Ship it")
+    item = await store.add("Ship it")
     assert not isinstance(item, str)
     assert store.mirror_error is not None
     # In-memory state is unaffected by the mirror failure.
@@ -113,7 +143,7 @@ def test_todo_list_store_records_mirror_error_on_disk_failure(tmp_path: Path) ->
 
 @pytest.mark.asyncio
 async def test_todo_list_tool_surfaces_mirror_warning_on_disk_failure(tmp_path: Path) -> None:
-    store = TodoListStore("sess-mirror-fail-2", workspace_root=tmp_path)
+    store = TodoListStore("sess-mirror-fail-2", workspace_root=tmp_path, load_existing=False)
     blocker = tmp_path / "blocked2"
     blocker.write_text("not a directory", encoding="utf-8")
     store._session_dir = blocker / "session"
@@ -127,7 +157,7 @@ async def test_todo_list_tool_surfaces_mirror_warning_on_disk_failure(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_todo_list_tool_validation_errors(tmp_path: Path) -> None:
-    tool = TodoListTool(TodoListStore("s", workspace_root=tmp_path))
+    tool = TodoListTool(TodoListStore("s", workspace_root=tmp_path, mirror_to_disk=False))
     empty = json.loads(await tool.execute({"action": "add", "text": "  "}))
     assert empty["ok"] is False
     missing = json.loads(await tool.execute({"action": "complete", "id": "nope"}))
@@ -148,11 +178,12 @@ def test_harness_omits_todo_list_when_disabled() -> None:
     assert "`todo_list`" not in out
 
 
-def test_volatile_tail_includes_todo_list_when_non_empty(tmp_path: Path) -> None:
-    store = TodoListStore("s", workspace_root=tmp_path)
-    store.add("First")
-    store.add("Second")
-    store.complete("t1")
+@pytest.mark.asyncio
+async def test_volatile_tail_includes_todo_list_when_non_empty(tmp_path: Path) -> None:
+    store = TodoListStore("s", workspace_root=tmp_path, mirror_to_disk=False)
+    await store.add("First")
+    await store.add("Second")
+    await store.complete("t1")
     ctx = TurnContext(
         thread_id="t",
         request_id="r",
@@ -175,7 +206,7 @@ def test_volatile_tail_includes_todo_list_when_non_empty(tmp_path: Path) -> None
 
 
 def test_volatile_tail_omits_todo_list_when_empty(tmp_path: Path) -> None:
-    store = TodoListStore("s", workspace_root=tmp_path)
+    store = TodoListStore("s", workspace_root=tmp_path, mirror_to_disk=False)
     ctx = TurnContext(
         thread_id="t",
         request_id="r",
@@ -197,7 +228,7 @@ async def test_build_context_and_executor_dispatch_todo_list(tmp_path: Path) -> 
     agent.write_text("# Agent\n", encoding="utf-8")
     skills = tmp_path / "skills"
     skills.mkdir()
-    store = TodoListStore("thread-1", workspace_root=tmp_path)
+    store = TodoListStore("thread-1", workspace_root=tmp_path, mirror_to_disk=False)
     tool = TodoListTool(store)
     ctx = await build_context(
         "thread-1",

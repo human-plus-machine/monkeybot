@@ -176,9 +176,11 @@ web_search:
 
 # Session-scoped todo_list tool (parent agent only). Always on unless opted out.
 # Live list is injected under ## Todo list in the volatile prompt; todos.json is
-# mirrored under .monkeybot/transcripts/{session}/ for debugging.
+# mirrored under .monkeybot/transcripts/{session}/ for debugging unless
+# mirror_to_disk is false (env: MONKEYBOT_TODO_LIST_MIRROR_TO_DISK).
 todo_list:
   enabled: true
+  mirror_to_disk: true
 
 sandbox:
   enabled: false

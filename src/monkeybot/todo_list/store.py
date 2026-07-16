@@ -4,12 +4,17 @@ Memory is the agent-facing source of truth. After each successful mutation the
 store snapshots to ``todos.json`` under the session artifact directory
 (``.monkeybot/transcripts/{UTC}_{session_id}/``) for live debugging — same folder
 layout as transcripts, written without requiring transcripts to be enabled.
+
+Disk I/O runs in ``asyncio.to_thread`` so mutations never block the gateway
+event loop. Opt out of mirroring with ``todo_list.mirror_to_disk: false``.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
@@ -24,6 +29,7 @@ TodoStatus = Literal["pending", "done"]
 _MAX_ITEMS = 50
 _MAX_TEXT_CHARS = 500
 _TODOS_FILENAME = "todos.json"
+_ITEM_ID_RE = re.compile(r"^t(\d+)$")
 
 
 @dataclass(frozen=True)
@@ -41,13 +47,27 @@ class TodoListStore:
     Process-local only — not shared across gateway replicas.
     """
 
-    def __init__(self, session_id: str, *, workspace_root: Path) -> None:
+    def __init__(
+        self,
+        session_id: str,
+        *,
+        workspace_root: Path,
+        mirror_to_disk: bool | None = None,
+        load_existing: bool = True,
+    ) -> None:
+        from monkeybot.todo_list import todo_list_mirror_to_disk_from_env
+
         self.session_id = session_id
         self._workspace_root = workspace_root.resolve()
+        self._mirror_to_disk_enabled = (
+            todo_list_mirror_to_disk_from_env() if mirror_to_disk is None else mirror_to_disk
+        )
         self._items: list[TodoItem] = []
         self._next_n = 1
         self._session_dir: Path | None = None
         self._mirror_error: str | None = None
+        if self._mirror_to_disk_enabled and load_existing:
+            self._load_from_disk_sync()
 
     @property
     def items(self) -> tuple[TodoItem, ...]:
@@ -74,7 +94,7 @@ class TodoListStore:
             f"{i}. [{item.status}] {item.text}" for i, item in enumerate(self._items, start=1)
         )
 
-    def add(self, text: str) -> TodoItem | str:
+    async def add(self, text: str) -> TodoItem | str:
         """Append a pending item. Returns the item or an error message string."""
         cleaned = text.strip()
         if not cleaned:
@@ -87,10 +107,10 @@ class TodoListStore:
         self._next_n += 1
         self._items.append(item)
         self._log_mutate("add", item.id)
-        self._mirror_to_disk()
+        await self._mirror_to_disk()
         return item
 
-    def complete(self, item_id: str) -> TodoItem | str:
+    async def complete(self, item_id: str) -> TodoItem | str:
         """Mark an item done. Returns the item or an error message string."""
         idx = self._index_of(item_id)
         if idx is None:
@@ -101,17 +121,17 @@ class TodoListStore:
         updated = TodoItem(id=current.id, text=current.text, status="done")
         self._items[idx] = updated
         self._log_mutate("complete", updated.id)
-        self._mirror_to_disk()
+        await self._mirror_to_disk()
         return updated
 
-    def remove(self, item_id: str) -> TodoItem | str:
+    async def remove(self, item_id: str) -> TodoItem | str:
         """Remove an item. Returns the removed item or an error message string."""
         idx = self._index_of(item_id)
         if idx is None:
             return f"todo_list item id not found: {item_id!r}."
         removed = self._items.pop(idx)
         self._log_mutate("remove", removed.id)
-        self._mirror_to_disk()
+        await self._mirror_to_disk()
         return removed
 
     def _log_mutate(self, action: str, item_id: str) -> None:
@@ -134,29 +154,70 @@ class TodoListStore:
                 return i
         return None
 
-    def _mirror_to_disk(self) -> None:
+    def _load_from_disk_sync(self) -> None:
+        """Best-effort restore from an existing ``todos.json`` (e.g. after reconnect)."""
+        try:
+            session_dir = resolve_session_artifact_dir(self._workspace_root, self.session_id)
+            path = session_dir / _TODOS_FILENAME
+            if not path.is_file():
+                return
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            items_raw = raw.get("items") if isinstance(raw, dict) else None
+            if not isinstance(items_raw, list):
+                return
+            restored: list[TodoItem] = []
+            max_n = 0
+            for entry in items_raw:
+                if not isinstance(entry, dict):
+                    continue
+                item_id = str(entry.get("id") or "").strip()
+                text = str(entry.get("text") or "")
+                status = entry.get("status")
+                if not item_id or status not in ("pending", "done"):
+                    continue
+                restored.append(TodoItem(id=item_id, text=text, status=status))
+                match = _ITEM_ID_RE.match(item_id)
+                if match:
+                    max_n = max(max_n, int(match.group(1)))
+            self._items = restored
+            self._next_n = max_n + 1
+            self._session_dir = session_dir
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            logger.warning(
+                "todo_list disk restore failed %s",
+                kv(session_id=self.session_id),
+                exc_info=True,
+            )
+
+    def _write_mirror_sync(self) -> None:
+        """Synchronous mirror write — always run via ``asyncio.to_thread``."""
+        if self._session_dir is None:
+            self._session_dir = resolve_session_artifact_dir(
+                self._workspace_root, self.session_id
+            )
+        path = self._session_dir / _TODOS_FILENAME
+        payload = {
+            "session_id": self.session_id,
+            "updated_at": now_iso(),
+            "items": self.snapshot(),
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+    async def _mirror_to_disk(self) -> None:
         """Best-effort live snapshot for debugging; never raises to callers.
 
         Memory (``self._items``) stays authoritative regardless of outcome; a
         failure here only means the ``todos.json`` debug mirror is stale, which
         is recorded on ``self._mirror_error`` for callers to surface.
         """
+        if not self._mirror_to_disk_enabled:
+            return
         try:
-            if self._session_dir is None:
-                self._session_dir = resolve_session_artifact_dir(
-                    self._workspace_root, self.session_id
-                )
-            path = self._session_dir / _TODOS_FILENAME
-            payload = {
-                "session_id": self.session_id,
-                "updated_at": now_iso(),
-                "items": self.snapshot(),
-            }
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
-                json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
-                encoding="utf-8",
-            )
+            await asyncio.to_thread(self._write_mirror_sync)
             self._mirror_error = None
         except OSError as exc:
             self._mirror_error = str(exc)

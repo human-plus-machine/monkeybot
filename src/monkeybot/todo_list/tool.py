@@ -47,17 +47,17 @@ class TodoListTool:
     async def execute(self, args: dict[str, object]) -> str:
         action = str(args.get("action") or "").strip().lower()
         if action == "add":
-            result = self._store.add(str(args.get("text") or ""))
+            result = await self._store.add(str(args.get("text") or ""))
             if isinstance(result, str):
                 return self._err(result)
             return self._ok(action=action, item=asdict(result))
         if action == "complete":
-            result = self._store.complete(str(args.get("id") or ""))
+            result = await self._store.complete(str(args.get("id") or ""))
             if isinstance(result, str):
                 return self._err(result)
             return self._ok(action=action, item=asdict(result))
         if action == "remove":
-            result = self._store.remove(str(args.get("id") or ""))
+            result = await self._store.remove(str(args.get("id") or ""))
             if isinstance(result, str):
                 return self._err(result)
             return self._ok(action=action, item=asdict(result))

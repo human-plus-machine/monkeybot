@@ -72,6 +72,10 @@ class RealtimeSessionManager:
         if state is not None and current is not state:
             return
         self._sessions.pop(session_id, None)
+        # Drop the cached todo store so long-running gateways don't retain an
+        # entry for every session_id ever seen. A reconnect on the same id
+        # rehydrates from todos.json when disk mirroring is enabled.
+        self._todo_stores.pop(session_id, None)
 
     def snapshot_metrics(self) -> dict[str, Any]:
         return {
@@ -82,11 +86,10 @@ class RealtimeSessionManager:
     def get_or_create_todo_store(self, session_id: str, *, workspace_root: Path) -> TodoListStore:
         """Return the process-cached todo list for ``session_id``, creating it if absent.
 
-        Cached on the manager (not per-connection) so reconnects on the same
-        ``session_id`` see the same list instead of silently resetting it.
-        Realtime has no ``/new`` (session restart is unsupported per
-        ``session_controller.restart_session``), so no eviction path is needed here —
-        a fresh ``session_id`` always gets a fresh store.
+        Cached on the manager (not per-connection) while the session is live so
+        mid-session lookups reuse the same store. ``remove()`` evicts the entry;
+        a later reconnect constructs a new store that reloads from ``todos.json``
+        when ``todo_list.mirror_to_disk`` is enabled.
         """
         store = self._todo_stores.get(session_id)
         if store is None:

@@ -92,15 +92,36 @@ async def test_concurrent_acquire_respects_limit() -> None:
     assert second is False
 
 
-def test_get_or_create_todo_store_reuses_across_reconnects(tmp_path: Path) -> None:
-    """A reconnect on the same session id must see the same store, not a fresh
-    (empty) one — otherwise the todo list silently resets on WS reconnect."""
+@pytest.mark.asyncio
+async def test_get_or_create_todo_store_reuses_while_session_live(tmp_path: Path) -> None:
+    """While a session is cached, repeated lookups must return the same store."""
     manager = RealtimeSessionManager(_make_config(5))
     store1 = manager.get_or_create_todo_store("s1", workspace_root=tmp_path)
-    store1.add("First task")
+    await store1.add("First task")
 
     store2 = manager.get_or_create_todo_store("s1", workspace_root=tmp_path)
     assert store2 is store1
+    assert [item.text for item in store2.items] == ["First task"]
+
+
+@pytest.mark.asyncio
+async def test_remove_evicts_todo_store_and_reconnect_rehydrates(tmp_path: Path) -> None:
+    """remove() must drop the cached store (no unbounded growth). A reconnect on
+    the same session id reloads from todos.json when disk mirroring is on."""
+    manager = RealtimeSessionManager(_make_config(5))
+    await manager.acquire_slot("s1")
+    state = object()
+    manager.register("s1", state)  # type: ignore[arg-type]
+
+    store1 = manager.get_or_create_todo_store("s1", workspace_root=tmp_path)
+    await store1.add("First task")
+    assert list((tmp_path / ".monkeybot" / "transcripts").rglob("todos.json"))
+
+    manager.remove("s1", state)  # type: ignore[arg-type]
+    assert "s1" not in manager._todo_stores
+
+    store2 = manager.get_or_create_todo_store("s1", workspace_root=tmp_path)
+    assert store2 is not store1
     assert [item.text for item in store2.items] == ["First task"]
 
 

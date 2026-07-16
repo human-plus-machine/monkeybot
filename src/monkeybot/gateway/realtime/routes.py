@@ -125,7 +125,7 @@ def _parent_extra_tools(
 def _maybe_todo_store(
     manager: RealtimeSessionManager, session_id: str, workspace_root: Path
 ) -> TodoListStore | None:
-    """Reuse the manager-cached store so reconnects on the same session don't lose it."""
+    """Reuse the manager-cached store while the session is live; reconnect rehydrates from disk."""
     if not todo_list_enabled_from_env():
         return None
     return manager.get_or_create_todo_store(session_id, workspace_root=workspace_root)
