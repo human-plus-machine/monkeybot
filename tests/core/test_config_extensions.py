@@ -196,7 +196,6 @@ class TestSubagentSettings:
         assert settings.timeout_sec == 600.0
         assert settings.max_turns == 25
         assert settings.vertex_google_search is False
-        assert settings.agent_md is None
 
     def test_reads_defaults_and_personas(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -207,7 +206,6 @@ class TestSubagentSettings:
             "subagents:\n"
             "  timeout_sec: 120\n"
             "  max_turns: 10\n"
-            "  agent_md: ./monkeybot_config/agents/default.md\n"
             "  personas:\n"
             "    - name: researcher\n"
             "      description: Research.\n"
@@ -216,11 +214,23 @@ class TestSubagentSettings:
         settings = get_subagent_settings()
         assert settings.timeout_sec == 120.0
         assert settings.max_turns == 10
-        assert settings.agent_md == "./monkeybot_config/agents/default.md"
         assert get_subagent_settings().timeout_sec == 120.0
         configs = get_subagent_configs()
         assert len(configs) == 1
         assert configs[0].name == "researcher"
+        assert configs[0].agent_md == "./agents/researcher.md"
+
+    def test_top_level_agent_md_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        self._write_config(
+            tmp_path,
+            "subagents:\n"
+            "  agent_md: ./monkeybot_config/agents/default.md\n",
+        )
+        with pytest.raises(ConfigError, match="subagents.agent_md was removed"):
+            get_subagent_settings()
 
 
 class TestGetSubagentConfigs:

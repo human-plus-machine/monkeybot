@@ -99,22 +99,20 @@ Global defaults for `task` calls, plus optional named personas:
 | `timeout_sec` | `600` | Per-subagent timeout |
 | `max_turns` | `25` | Per-subagent turn cap |
 | `vertex_google_search` | `false` | **Gemini only.** Enables native `google_search` grounding for subagent `task` runs. Config-file only. |
-| `agent_md` | (parent `AGENT.md`) | Default prompt when `task` omits `subagent_type` |
-| `personas` | (none) | Named types selected via `task(subagent_type=...)` |
+| `personas` | (none) | Named types selected via `task(subagent_type=...)`; each persona sets its own `agent_md` |
 
 ```yaml
 subagents:
   timeout_sec: 600
   max_turns: 25
   vertex_google_search: false
-  agent_md: ./monkeybot_config/AGENT.md
   personas:
     - name: researcher
       description: "Deep-dives a topic and returns a structured summary."
       agent_md: ./monkeybot_config/agents/researcher.md
 ```
 
-Relative paths resolve from the bot project root, not `workspace/`. For parallel fan-out, use Postgres (`db_url`).
+Without a `subagent_type`, the task inherits the parent `AGENT.md` (`paths.agent_md`). Relative paths resolve from the bot project root, not `workspace/`. For parallel fan-out, use Postgres (`db_url`).
 
 ## `tools`
 

@@ -192,7 +192,9 @@ async def _run_worker_capturing_vertex_google_search(
     monkeypatch.setattr(subagent_worker, "build_context", _fake_build_context)
 
     monkeypatch.setattr(
-        subagent_worker, "subagent_vertex_google_search_from_config", lambda: subagent_flag
+        subagent_worker,
+        "subagent_vertex_google_search_from_config",
+        lambda *_a, **_k: subagent_flag,
     )
 
     def _boom(*_a: object, **_k: object) -> bool:

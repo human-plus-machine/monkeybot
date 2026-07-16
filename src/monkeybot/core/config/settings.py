@@ -83,7 +83,6 @@ class SubagentSettings:
     timeout_sec: float = 600.0
     max_turns: int = 25
     vertex_google_search: bool = False
-    agent_md: str | None = None
 
 
 _DEFAULT_SUBAGENT_SETTINGS = SubagentSettings()
@@ -320,21 +319,16 @@ def get_subagent_settings(config_path: str | None = None) -> SubagentSettings:
             f"subagents.vertex_google_search must be true or false, got {vertex_raw!r}"
         )
 
-    agent_md: str | None = None
-    raw_agent_md = section.get("agent_md")
-    if raw_agent_md is not None:
-        if not isinstance(raw_agent_md, str):
-            raise ConfigError(
-                f"subagents.agent_md must be a string, got {raw_agent_md!r}"
-            )
-        stripped = raw_agent_md.strip()
-        agent_md = stripped or None
+    if "agent_md" in section:
+        raise ConfigError(
+            "subagents.agent_md was removed; set agent_md on each entry in "
+            "subagents.personas, or omit subagent_type to inherit paths.agent_md"
+        )
 
     return SubagentSettings(
         timeout_sec=timeout,
         max_turns=max_turns,
         vertex_google_search=vertex,
-        agent_md=agent_md,
     )
 
 

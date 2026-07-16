@@ -147,9 +147,8 @@ subagents:
   # Gemini only: enable native google_search grounding for subagent task runs.
   # Config-file only (no env var override). Defaults to false.
   vertex_google_search: false
-  # Default AGENT.md for task calls with no subagent_type (relative to bot project root).
-  agent_md: ./monkeybot_config/AGENT.md
   # Named personas — parent selects via task(subagent_type=...).
+  # Without a subagent_type, the task inherits the parent AGENT.md (paths.agent_md).
   # personas:
   #   - name: researcher
   #     description: "Deep-dives a topic and returns a structured summary."

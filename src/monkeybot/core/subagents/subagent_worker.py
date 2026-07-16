@@ -35,9 +35,10 @@ from monkeybot.core.runtime.events import AgentEvent, Error, event_to_json
 from monkeybot.core.runtime.loop import run as run_loop
 from monkeybot.core.subagents.subagent_proto import (
     SubagentEnvelope,
+    config_path_for_agent_root,
     resolve_agent_project_root,
+    resolve_default_agent_md_path,
     resolve_project_path,
-    resolve_subagent_agent_md_path,
 )
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
@@ -236,6 +237,7 @@ async def _async_main() -> None:
     reset_token: object | None = None
 
     agent_root = resolve_agent_project_root()
+    config_path = config_path_for_agent_root(agent_root)
     ws = Path(os.environ["MONKEYBOT_SUBAGENT_WORKSPACE"]).resolve()
     os.chdir(ws)
 
@@ -248,15 +250,10 @@ async def _async_main() -> None:
         if not agent_md_path.is_file():
             agent_md_path = resolve_project_path(envelope.agent_md, agent_root)
     else:
-        resolved = resolve_subagent_agent_md_path(agent_root)
-        if resolved is not None and resolved.is_file():
-            agent_md_path = resolved
-        else:
-            raw_parent = os.environ.get("AGENT_MD", "").strip()
-            if raw_parent:
-                agent_md_path = resolve_project_path(raw_parent, agent_root)
-            else:
-                agent_md_path = resolve_project_path("AGENT.md", agent_root)
+        try:
+            agent_md_path = resolve_default_agent_md_path(agent_root)
+        except ValueError:
+            agent_md_path = resolve_project_path("AGENT.md", agent_root)
 
     db_url = AgentLayout.from_environment(agent_root=agent_root).db_url
     backend = create_storage_backend(db_url)
@@ -264,7 +261,7 @@ async def _async_main() -> None:
     executor: CoreToolExecutor | None = None
 
     try:
-        await backend.open(run_schema=auto_schema_enabled_from_config())
+        await backend.open(run_schema=auto_schema_enabled_from_config(config_path))
 
         mcp = MCPClient()
         mcp_config = resolve_project_path(
@@ -377,7 +374,7 @@ async def _async_main() -> None:
         if envelope.context.strip():
             body += "\n\n---\nContext from parent agent:\n" + envelope.context.strip()
 
-        max_turns = get_subagent_settings().max_turns
+        max_turns = get_subagent_settings(config_path).max_turns
 
         from monkeybot.observability.spans import span_subagent
 
@@ -404,7 +401,7 @@ async def _async_main() -> None:
                     tool_executor=executor,
                     run_id=request_id,
                     max_turns=max_turns,
-                    vertex_google_search=subagent_vertex_google_search_from_config(),
+                    vertex_google_search=subagent_vertex_google_search_from_config(config_path),
                 ):
                     print(event_to_json(evt), flush=True)
         finally:

@@ -162,7 +162,7 @@ Decision → config map:
 | "Restrict dangerous commands" | `tools.denied_patterns`, `command_allowlist.yaml` |
 | "Multiple environments" | top-level `includes:` fragments |
 
-**Subagents (`task` tool):** share the parent `AGENT.md` (or `subagents.agent_md`). Relative paths resolve from the bot project root, not `workspace/`. Specialize via `task` / `context`, not separate agent type folders. For parallel `task` fan-out, prefer Postgres: add `monkeybot[postgres]` to the **agent** `pyproject.toml` dependencies, run `uv sync`, then set `DB_URL=postgresql://...` in `.env`.
+**Subagents (`task` tool):** without `subagent_type`, share the parent `AGENT.md`. With a persona, use that persona's `agent_md`. Relative paths resolve from the bot project root, not `workspace/`. Specialize via `task` / `context` or named personas. For parallel `task` fan-out, prefer Postgres: add `monkeybot[postgres]` to the **agent** `pyproject.toml` dependencies, run `uv sync`, then set `DB_URL=postgresql://...` in `.env`.
 
 **Observability** is mostly env + add `monkeybot[observability]` to agent deps + `uv sync` + an OTel collector — not `monkeybot.yaml`. See `docs/observability-runbook.md`.
 
