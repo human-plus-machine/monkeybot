@@ -314,6 +314,7 @@ _VOLATILE_SYSTEM_MARKERS = (
     "\n\n## Memory index\n",
     "\n\n## Memory\n",
     "\n\n## Skills\n",
+    "\n\n## Todo list\n",
     "\n\n## Current request\n",
     "\n\n## Runtime notes\n",
     "\n\n## System context update\n",

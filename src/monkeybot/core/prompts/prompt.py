@@ -28,6 +28,7 @@ CURRENT_DATE_HEADING = "\n\n## Current date\n"
 MEMORY_INDEX_HEADING = "\n\n## Memory index\n"
 MEMORY_NUDGE_HEADING = "\n\n## Memory\n"
 SKILLS_HEADING = "\n\n## Skills\n"
+TODO_LIST_HEADING = "\n\n## Todo list\n"
 CURRENT_REQUEST_HEADING = "\n\n## Current request\n"
 # Not composed here, but part of the same volatile-tail-heading vocabulary —
 # defined alongside the others so ``providers._utils`` has one import for all.
@@ -142,12 +143,22 @@ def _skills_section(ctx: TurnContext) -> str:
     return f"{SKILLS_HEADING}{skills_block}" if skills_block else ""
 
 
+def _todo_list_section(ctx: TurnContext) -> str:
+    store = ctx.todo_store
+    if store is None:
+        return ""
+    lines = store.format_lines()
+    return f"{TODO_LIST_HEADING}{lines}" if lines else ""
+
+
 def _harness_text(ctx: TurnContext) -> str:
     include_task = any(t.name == "task" for t in ctx.tools)
     include_web_search = any(t.name == "web_search" for t in ctx.tools)
+    include_todo_list = any(t.name == "todo_list" for t in ctx.tools)
     return harness_fixed_context(
         include_task_tool=include_task,
         include_web_search=include_web_search,
+        include_todo_list=include_todo_list,
         workspace_root=str(ctx.workspace_root) if ctx.workspace_root is not None else "(not set)",
         memory_storage_uri=ctx.memory.uri if ctx.memory is not None else "(not set)",
         run_command_opensandbox=SandboxConfig.from_env().enabled,
@@ -192,13 +203,14 @@ def compose_volatile_tail_parts(
     """Same sections as :func:`compose_volatile_tail`, individually named.
 
     Lets callers (e.g. ``ContextEpochTracker``) attribute a mid-epoch volatile
-    change to the specific source that moved — current date, memory, skills, or
-    the current-request anchor — instead of a catch-all "volatile" label.
+    change to the specific source that moved — current date, memory, skills,
+    todo list, or the current-request anchor — instead of a catch-all "volatile" label.
     """
     return {
         "current_date": _current_date_block(),
         "memory": _memory_block(ctx, memory_selection),
         "skills": _skills_section(ctx),
+        "todos": _todo_list_section(ctx),
         "current_request": _current_request_block(chat_messages),
     }
 
@@ -214,7 +226,7 @@ def compose_system_prompt(
 
     ``ctx.agent_md`` is the operator-authored base prompt (typically from AGENT.md).
     Stable sections (harness, attachments) precede volatile curation (current date,
-    memory, skills, current-request anchor) so implicit and explicit prompt caching
+    memory, skills, todo list, current-request anchor) so implicit and explicit prompt caching
     can hit a contiguous prefix across turns.
 
     When ``memory_selection`` is set, its lines (and optional search nudge) are used

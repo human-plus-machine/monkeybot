@@ -46,8 +46,12 @@ def transcript_include_live_from_env() -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
-def _now_iso() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + f".{int(time.time() * 1000) % 1000:03d}Z"
+def now_iso() -> str:
+    """UTC timestamp with millisecond precision, e.g. ``2026-07-16T20:35:48.123Z``."""
+    return (
+        time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+        + f".{int(time.time() * 1000) % 1000:03d}Z"
+    )
 
 
 def _utc_compact_from_iso(started_at: str) -> str:
@@ -70,6 +74,27 @@ def _find_existing_session_dir(transcripts_root: Path, safe_id: str) -> Path | N
         reverse=True,
     )
     return matches[0] if matches else None
+
+
+def resolve_session_artifact_dir(
+    workspace_root: Path,
+    session_id: str,
+    *,
+    started_at: str | None = None,
+) -> Path:
+    """Return the per-session debug artifact directory under ``.monkeybot/transcripts/``.
+
+    Reuses an existing ``*_{session_id}`` folder when present; otherwise returns a new
+    ``{UTC_compact}_{session_id}`` path. The directory is not created here — callers
+    mkdir on first write (transcript NDJSON, ``todos.json``, etc.).
+    """
+    safe_id = sanitize_path_component(session_id)
+    transcripts_root = workspace_root.resolve() / _TRANSCRIPT_REL_DIR
+    existing = _find_existing_session_dir(transcripts_root, safe_id)
+    if existing is not None:
+        return existing
+    folder = f"{_utc_compact_from_iso(started_at or now_iso())}_{safe_id}"
+    return transcripts_root / folder
 
 
 def _max_seq_in_transcript(path: Path) -> int:
@@ -111,21 +136,16 @@ class TranscriptWriter:
         include_live: bool | None = None,
     ) -> None:
         self._session_id = session_id
-        safe_id = sanitize_path_component(session_id)
-        self._started_at = _now_iso()
-        transcripts_root = workspace_root.resolve() / _TRANSCRIPT_REL_DIR
-        existing = _find_existing_session_dir(transcripts_root, safe_id)
-        if existing is not None:
-            self._session_dir = existing
-        else:
-            folder = f"{_utc_compact_from_iso(self._started_at)}_{safe_id}"
-            self._session_dir = transcripts_root / folder
+        self._started_at = now_iso()
+        self._session_dir = resolve_session_artifact_dir(
+            workspace_root, session_id, started_at=self._started_at
+        )
         self._path = self._session_dir / _TRANSCRIPT_FILENAME
         self._lock = asyncio.Lock()
         self._manifest_written = self._path.is_file()
         # Resume from the highest seq already on disk so reused session dirs
         # never emit duplicate evidence pointers.
-        self._seq = _max_seq_in_transcript(self._path) if existing is not None else 0
+        self._seq = _max_seq_in_transcript(self._path) if self._path.is_file() else 0
         self._include_live = (
             transcript_include_live_from_env() if include_live is None else include_live
         )
@@ -164,7 +184,9 @@ class TranscriptWriter:
             try:
                 await asyncio.to_thread(_write_if_new)
             except OSError:
-                logger.warning("transcript manifest write failed for %s", self._session_id, exc_info=True)
+                logger.warning(
+                    "transcript manifest write failed for %s", self._session_id, exc_info=True
+                )
             self._manifest_written = True
 
     async def drain(self) -> None:
@@ -178,7 +200,9 @@ class TranscriptWriter:
     async def _append_line(self, record: dict[str, Any]) -> None:
         async with self._lock:
             self._seq += 1
-            line = json.dumps({"seq": self._seq, **record}, ensure_ascii=False, separators=(",", ":"))
+            line = json.dumps(
+                {"seq": self._seq, **record}, ensure_ascii=False, separators=(",", ":")
+            )
 
             def _append() -> None:
                 self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -193,7 +217,7 @@ class TranscriptWriter:
     async def write_user_message(self, *, request_id: str, content: str) -> None:
         """Append the incoming user turn (not an ``AgentEvent``; harness-internal)."""
         await self._append_line(
-            {"ts": _now_iso(), "type": "UserMessage", "request_id": request_id, "content": content}
+            {"ts": now_iso(), "type": "UserMessage", "request_id": request_id, "content": content}
         )
 
     async def write_event(self, event: AgentEvent) -> None:
@@ -201,7 +225,7 @@ class TranscriptWriter:
         if not self._include_live and not is_durable_event(event):
             return
         payload = json.loads(event_to_json(event))
-        await self._append_line({"ts": _now_iso(), **payload})
+        await self._append_line({"ts": now_iso(), **payload})
 
     async def write_provider_request(
         self,
@@ -216,7 +240,7 @@ class TranscriptWriter:
         thinking_budget: int | None,
     ) -> None:
         record: dict[str, Any] = {
-            "ts": _now_iso(),
+            "ts": now_iso(),
             "type": "ProviderRequest",
             "request_id": request_id,
             "inner_turn": inner_turn,
@@ -244,7 +268,7 @@ class TranscriptWriter:
     ) -> None:
         await self._append_line(
             {
-                "ts": _now_iso(),
+                "ts": now_iso(),
                 "type": "ProviderResponse",
                 "request_id": request_id,
                 "inner_turn": inner_turn,
@@ -259,6 +283,8 @@ class TranscriptWriter:
 
 __all__ = [
     "TranscriptWriter",
+    "now_iso",
+    "resolve_session_artifact_dir",
     "transcript_enabled_from_env",
     "transcript_include_live_from_env",
 ]

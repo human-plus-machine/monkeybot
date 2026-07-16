@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from monkeybot.core.config.realtime_config import RealtimeConfig
 from monkeybot.core.logging_utils import kv
+from monkeybot.todo_list import TodoListStore
 
 from .session import RealtimeConnectionState
 
@@ -26,6 +28,7 @@ class RealtimeSessionManager:
 
     config: RealtimeConfig
     _sessions: dict[str, RealtimeConnectionState] = field(default_factory=dict)
+    _todo_stores: dict[str, TodoListStore] = field(default_factory=dict)
     _sem: asyncio.Semaphore = field(init=False)
 
     def __post_init__(self) -> None:
@@ -69,9 +72,30 @@ class RealtimeSessionManager:
         if state is not None and current is not state:
             return
         self._sessions.pop(session_id, None)
+        # Drop the cached todo store so long-running gateways don't retain an
+        # entry for every session_id ever seen. A reconnect on the same id
+        # rehydrates from todos.json when disk mirroring is enabled.
+        self._todo_stores.pop(session_id, None)
 
     def snapshot_metrics(self) -> dict[str, Any]:
         return {
             "active_sessions": len(self._sessions),
             "max_concurrent_sessions": self.config.session.max_concurrent_sessions,
         }
+
+    async def get_or_create_todo_store(
+        self, session_id: str, *, workspace_root: Path
+    ) -> TodoListStore:
+        """Return the process-cached todo list for ``session_id``, creating it if absent.
+
+        Cached on the manager (not per-connection) while the session is live so
+        mid-session lookups reuse the same store. ``remove()`` evicts the entry;
+        a later reconnect constructs a new store and rehydrates from ``todos.json``
+        (via ``asyncio.to_thread``) when ``todo_list.mirror_to_disk`` is enabled.
+        """
+        store = self._todo_stores.get(session_id)
+        if store is None:
+            store = TodoListStore(session_id, workspace_root=workspace_root)
+            await store.hydrate_from_disk()
+            self._todo_stores[session_id] = store
+        return store

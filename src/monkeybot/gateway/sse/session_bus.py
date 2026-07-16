@@ -19,6 +19,7 @@ from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.persistence.transcript_analyzer import analyze_transcript
 from monkeybot.core.runtime.input_admission import InputAdmission
 from monkeybot.core.tools.permission import SessionApprovals
+from monkeybot.todo_list.store import TodoListStore
 
 from .sse import format_data_event
 
@@ -77,6 +78,8 @@ class SessionBus:
         self.pending_responses: dict[str, asyncio.Future[Any]] = {}
         self.terminated_pending_keys: deque[str] = deque(maxlen=256)
         self.attachment_catalog: SessionAttachmentCatalog | None = None
+        self.todo_store: TodoListStore | None = None
+        """Process-local session todo list (not shared across gateway replicas)."""
         self.transcript_writer: TranscriptWriter | None = None
         """Lazily-created ``TranscriptWriter`` (internal debugging only); None when disabled."""
         self.admission = InputAdmission()

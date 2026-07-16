@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.config.realtime_config import RealtimeConfig
 from monkeybot.core.context import TurnContext, build_context
+from monkeybot.core.layout import AgentLayout
 from monkeybot.core.llm.realtime_provider import (
     AudioFormat,
     RealtimeAudioDelta,
@@ -31,15 +32,19 @@ from monkeybot.core.llm.realtime_provider import (
 )
 from monkeybot.core.llm.realtime_provider import RealtimeError as ProviderError
 from monkeybot.core.logging_utils import kv
-from monkeybot.core.layout import AgentLayout
 from monkeybot.core.persistence.backends import HistoryStore
-from monkeybot.core.runtime.events import ActionRequiredEvent
+from monkeybot.core.runtime.events import (
+    ActionRequiredEvent,
+    ToolCallResult,
+    ToolConfirmationRequestEvent,
+)
 from monkeybot.core.runtime.events import Error as AgentError
-from monkeybot.core.runtime.events import ToolCallResult, ToolConfirmationRequestEvent
 from monkeybot.core.runtime.realtime_loop import run_realtime_turn
 from monkeybot.core.runtime.utterance_buffer import UtteranceBuffer
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.types.content_blocks import Text
+from monkeybot.todo_list import TodoListStore, TodoListTool, todo_list_enabled_from_env
+
 from .deps import RealtimeDependencies
 from .errors import (
     AudioFormatError,
@@ -106,10 +111,32 @@ def _resolved_workspace_paths() -> tuple[Path, Path]:
     return layout.workspace_root, layout.skills_path
 
 
+def _parent_extra_tools(
+    deps: RealtimeDependencies,
+    todo_store: TodoListStore | None,
+) -> list[Any]:
+    """Web search + optional session todo tool for the parent realtime agent."""
+    tools: list[Any] = [deps.web_search_tool] if deps.web_search_tool is not None else []
+    if todo_store is not None:
+        tools.append(TodoListTool(todo_store))
+    return tools
+
+
+async def _maybe_todo_store(
+    manager: RealtimeSessionManager, session_id: str, workspace_root: Path
+) -> TodoListStore | None:
+    """Reuse the manager-cached store while the session is live; reconnect rehydrates from disk."""
+    if not todo_list_enabled_from_env():
+        return None
+    return await manager.get_or_create_todo_store(session_id, workspace_root=workspace_root)
+
+
 async def _build_realtime_context(
     session_id: str,
     request_id: str,
     deps: RealtimeDependencies,
+    *,
+    todo_store: TodoListStore | None = None,
 ) -> TurnContext:
     if deps.mcp is None:
         raise RuntimeError("MCP client is not initialized")
@@ -129,16 +156,19 @@ async def _build_realtime_context(
         context_window_tokens=_env_context_window_tokens(),
         workspace_root=workspace_root,
         enable_context_curation=True,
-        extra_tools=[deps.web_search_tool] if deps.web_search_tool is not None else [],
+        extra_tools=_parent_extra_tools(deps, todo_store),
         subagent_registry=deps.subagent_registry,
         scheduled_loops_available=loops_available,
         loops_advertised=loops_advertised,
+        todo_store=todo_store,
     )
 
 
 def _create_tool_executor(
     deps: RealtimeDependencies,
     attachment_store: Any | None = None,
+    *,
+    todo_store: TodoListStore | None = None,
 ) -> CoreToolExecutor:
     if deps.mcp is None:
         raise RuntimeError("MCP client is not initialized")
@@ -149,7 +179,7 @@ def _create_tool_executor(
         memory=deps.memory,
         skills_path=skills_path,
         mcp=deps.mcp,
-        extra_tools=[deps.web_search_tool] if deps.web_search_tool is not None else [],
+        extra_tools=_parent_extra_tools(deps, todo_store),
         run_command_allowed_commands=deps.run_command_allowed_commands,
         run_command_allowed_path_prefixes=deps.run_command_allowed_path_prefixes,
         attachment_store=attachment_store,
@@ -165,7 +195,9 @@ def _make_realtime_session_config(
     realtime_config: RealtimeConfig,
 ) -> RealtimeSessionConfig:
     input_fmt_str = os.environ.get("MONKEYBOT_REALTIME_AUDIO_INPUT_FORMAT", "pcm_s16le_24khz_mono")
-    output_fmt_str = os.environ.get("MONKEYBOT_REALTIME_AUDIO_OUTPUT_FORMAT", "pcm_s16le_24khz_mono")
+    output_fmt_str = os.environ.get(
+        "MONKEYBOT_REALTIME_AUDIO_OUTPUT_FORMAT", "pcm_s16le_24khz_mono"
+    )
 
     def _parse(fmt: str) -> AudioFormat:
         parts = fmt.lower().split("_")
@@ -278,7 +310,7 @@ async def _handle_assistant_boundary(
     if turn.is_empty:
         return
 
-    tool_executor = _create_tool_executor(deps, attachment_store)
+    tool_executor = _create_tool_executor(deps, attachment_store, todo_store=state.todo_store)
     tool_results: list[Any] = []
     inject_texts: list[str] = []
     # Consume once per utterance so tool-call then prose boundaries do not
@@ -471,9 +503,7 @@ async def _handle_provider_event(
     elif isinstance(event, RealtimeToolCall):
         await _send_frame(
             ws,
-            ServerToolCallFrame(
-                call_id=event.call_id, name=event.name, args=event.args
-            ),
+            ServerToolCallFrame(call_id=event.call_id, name=event.name, args=event.args),
         )
     elif isinstance(event, RealtimeUsage):
         await _send_frame(
@@ -612,9 +642,7 @@ async def _run_session(
 
     all_tasks = {provider_task, client_task, guardrail_task}
     try:
-        done, pending = await asyncio.wait(
-            all_tasks, return_when=asyncio.FIRST_COMPLETED
-        )
+        done, pending = await asyncio.wait(all_tasks, return_when=asyncio.FIRST_COMPLETED)
         for task in pending:
             task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -736,7 +764,9 @@ def create_realtime_router(
                 raise GatewayInternalError("Storage backend not initialized")
 
             history = storage.history()
-            ctx = await _build_realtime_context(session_id, request_id, deps)
+            workspace_root, _skills_path = _resolved_workspace_paths()
+            todo_store = await _maybe_todo_store(manager, session_id, workspace_root)
+            ctx = await _build_realtime_context(session_id, request_id, deps, todo_store=todo_store)
             session_config = _make_realtime_session_config(ctx, manager.config)
             try:
                 realtime_session = await provider.connect(config=session_config)
@@ -751,6 +781,7 @@ def create_realtime_router(
                 buffer=UtteranceBuffer(),
                 opened_at=time.monotonic(),
                 last_activity_at=time.monotonic(),
+                todo_store=todo_store,
             )
             try:
                 manager.register(session_id, state)
@@ -838,12 +869,8 @@ def create_realtime_router(
                 kv(session_id=session_id, request_id=request_id),
             )
             if ws.client_state.name == "CONNECTED":
-                await _safe_client_notify(
-                    ws, _send_frame(ws, ServerErrorFrame(error=str(exc)))
-                )
-                await _safe_client_notify(
-                    ws, ws.close(code=1011, reason="Internal error")
-                )
+                await _safe_client_notify(ws, _send_frame(ws, ServerErrorFrame(error=str(exc))))
+                await _safe_client_notify(ws, ws.close(code=1011, reason="Internal error"))
         finally:
             if state is not None:
                 await _close_session(state, manager, reason=close_reason)
