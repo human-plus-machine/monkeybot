@@ -1117,7 +1117,16 @@ def create_app(
                 uuid.uuid4().hex,
             )
         backend = _storage_backend(request)
-        await backend.history().reset(session_id.strip(), [])
+        thread_id = session_id.strip()
+        try:
+            await backend.history().reset(thread_id, [])
+        except Exception:
+            logger.exception(
+                "chat history delete failed %s",
+                kv(session_id=thread_id),
+            )
+            raise
+        logger.info("chat history deleted %s", kv(session_id=thread_id))
         return {"deleted": True}
 
     app.include_router(api)

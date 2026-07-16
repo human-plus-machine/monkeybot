@@ -53,6 +53,7 @@ Errors use a common envelope:
 | `GET` | `/api/workspace/file` | Optional file slice read. Query `path` (required), `offset` (1-based line, default 1), `limit` (default 200). Same env gate as tree. |
 | `GET` | `/api/chat-history` | Optional recent-threads listing. Disabled when `MONKEYBOT_CHAT_HISTORY_API` is `0` / `false` / `no` / `off`. |
 | `GET` | `/api/chat-history/{session_id}` | Optional persisted user/assistant text for one thread. Same env gate as the list endpoint. |
+| `DELETE` | `/api/chat-history/{session_id}` | Delete one persisted thread and its summary. Same env gate; uses the configured `DB_URL` backend (SQLite, Postgres, or Firestore). |
 
 ---
 
