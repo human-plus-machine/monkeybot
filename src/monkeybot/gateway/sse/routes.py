@@ -1103,6 +1103,23 @@ def create_app(
             "messages": messages_to_wire(messages),
         }
 
+    @api.delete("/api/chat-history/{session_id}")
+    async def chat_history_delete(
+        session_id: str,
+        request: Request,
+    ) -> dict[str, bool]:
+        """Delete one persisted chat transcript and its thread summary."""
+        if not _chat_history_api_enabled():
+            raise APIError(
+                404,
+                "NOT_FOUND",
+                "Chat history API is disabled",
+                uuid.uuid4().hex,
+            )
+        backend = _storage_backend(request)
+        await backend.history().reset(session_id.strip(), [])
+        return {"deleted": True}
+
     app.include_router(api)
     app.include_router(build_scheduler_router(loop_port=loop, registry=reg))
 
