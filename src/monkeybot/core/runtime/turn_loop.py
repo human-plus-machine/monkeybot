@@ -60,6 +60,7 @@ from .events import (
     AttachmentDescriptorEvent,
     ContextSummarized,
     ContextSummarizing,
+    ContextUsage,
     Error,
     SystemPromptSnapshot,
     Thinking,
@@ -558,6 +559,11 @@ async def _maybe_compact_and_shape(
         hints=_provider_call_hints(state.ctx),
     )
     usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, preflight)
+    yield ContextUsage(
+        request_id=state.ctx.request_id,
+        estimated_tokens=usage.estimated_prompt_tokens,
+        context_window_tokens=state.ctx.context_window_tokens,
+    )
     cap = max(1, int(state.ctx.context_window_tokens * _SUMMARY_TRIGGER_RATIO))
     async for evt in _maybe_summarize_history(
         state,
