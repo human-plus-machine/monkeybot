@@ -122,13 +122,13 @@ def _parent_extra_tools(
     return tools
 
 
-def _maybe_todo_store(
+async def _maybe_todo_store(
     manager: RealtimeSessionManager, session_id: str, workspace_root: Path
 ) -> TodoListStore | None:
     """Reuse the manager-cached store while the session is live; reconnect rehydrates from disk."""
     if not todo_list_enabled_from_env():
         return None
-    return manager.get_or_create_todo_store(session_id, workspace_root=workspace_root)
+    return await manager.get_or_create_todo_store(session_id, workspace_root=workspace_root)
 
 
 async def _build_realtime_context(
@@ -765,7 +765,7 @@ def create_realtime_router(
 
             history = storage.history()
             workspace_root, _skills_path = _resolved_workspace_paths()
-            todo_store = _maybe_todo_store(manager, session_id, workspace_root)
+            todo_store = await _maybe_todo_store(manager, session_id, workspace_root)
             ctx = await _build_realtime_context(session_id, request_id, deps, todo_store=todo_store)
             session_config = _make_realtime_session_config(ctx, manager.config)
             try:

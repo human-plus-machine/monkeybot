@@ -5,8 +5,9 @@ store snapshots to ``todos.json`` under the session artifact directory
 (``.monkeybot/transcripts/{UTC}_{session_id}/``) for live debugging — same folder
 layout as transcripts, written without requiring transcripts to be enabled.
 
-Disk I/O runs in ``asyncio.to_thread`` so mutations never block the gateway
-event loop. Opt out of mirroring with ``todo_list.mirror_to_disk: false``.
+Disk I/O (mutation mirrors and reconnect hydration) runs in
+``asyncio.to_thread`` so neither path blocks the gateway event loop. Opt out of
+mirroring with ``todo_list.mirror_to_disk: false``.
 """
 
 from __future__ import annotations
@@ -53,7 +54,6 @@ class TodoListStore:
         *,
         workspace_root: Path,
         mirror_to_disk: bool | None = None,
-        load_existing: bool = True,
     ) -> None:
         from monkeybot.todo_list import todo_list_mirror_to_disk_from_env
 
@@ -66,8 +66,16 @@ class TodoListStore:
         self._next_n = 1
         self._session_dir: Path | None = None
         self._mirror_error: str | None = None
-        if self._mirror_to_disk_enabled and load_existing:
-            self._load_from_disk_sync()
+
+    async def hydrate_from_disk(self) -> None:
+        """Best-effort restore from ``todos.json`` without blocking the event loop.
+
+        Call once after construction when reconnecting or starting a session that
+        may already have a debug mirror on disk. No-op when mirroring is disabled.
+        """
+        if not self._mirror_to_disk_enabled:
+            return
+        await asyncio.to_thread(self._load_from_disk_sync)
 
     @property
     def items(self) -> tuple[TodoItem, ...]:

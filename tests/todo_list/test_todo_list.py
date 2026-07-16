@@ -128,7 +128,7 @@ async def test_todo_list_mirror_to_disk_false_skips_write(tmp_path: Path) -> Non
 async def test_todo_list_store_records_mirror_error_on_disk_failure(tmp_path: Path) -> None:
     """Memory stays authoritative when the debug mirror write fails; the failure
     is recorded on ``mirror_error`` instead of raising or being fully silent."""
-    store = TodoListStore("sess-mirror-fail", workspace_root=tmp_path, load_existing=False)
+    store = TodoListStore("sess-mirror-fail", workspace_root=tmp_path)
     # Point the mirror at a path that cannot be created (parent is a file, not a dir).
     blocker = tmp_path / "blocked"
     blocker.write_text("not a directory", encoding="utf-8")
@@ -143,7 +143,7 @@ async def test_todo_list_store_records_mirror_error_on_disk_failure(tmp_path: Pa
 
 @pytest.mark.asyncio
 async def test_todo_list_tool_surfaces_mirror_warning_on_disk_failure(tmp_path: Path) -> None:
-    store = TodoListStore("sess-mirror-fail-2", workspace_root=tmp_path, load_existing=False)
+    store = TodoListStore("sess-mirror-fail-2", workspace_root=tmp_path)
     blocker = tmp_path / "blocked2"
     blocker.write_text("not a directory", encoding="utf-8")
     store._session_dir = blocker / "session"

@@ -366,6 +366,7 @@ class GatewayLoopPort:
             if todo_list_enabled_from_env():
                 if bus.todo_store is None:
                     bus.todo_store = TodoListStore(session_id, workspace_root=workspace_root)
+                    await bus.todo_store.hydrate_from_disk()
                 todo_store = bus.todo_store
                 extra_tools.append(TodoListTool(todo_store))
 
