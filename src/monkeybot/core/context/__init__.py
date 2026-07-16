@@ -510,7 +510,7 @@ def _core_tool_defs(
     subagent_type_schema: dict[str, object] = {
         "type": "string",
         "description": (
-            "Named subagent persona from monkeybot.yaml subagents registry. "
+            "Named subagent persona from monkeybot.yaml subagents.personas. "
             "Omit to use the default subagent AGENT.md."
         ),
     }

@@ -90,9 +90,9 @@ When the prompt shows fewer entries than exist, a structural confidence score tr
 
 `enabled: true` — automatic memory capture after turns. Disable to manage memory manually.
 
-## `subagent` and `subagents`
+## `subagents`
 
-`subagent` sets defaults for `task` calls:
+Global defaults for `task` calls, plus optional named personas:
 
 | Field | Default | Notes |
 |---|---|---|
@@ -100,14 +100,18 @@ When the prompt shows fewer entries than exist, a structural confidence score tr
 | `max_turns` | `25` | Per-subagent turn cap |
 | `vertex_google_search` | `false` | **Gemini only.** Enables native `google_search` grounding for subagent `task` runs. Config-file only. |
 | `agent_md` | (parent `AGENT.md`) | Default prompt when `task` omits `subagent_type` |
-
-`subagents[]` defines named personas the parent selects via `task(subagent_type=...)`:
+| `personas` | (none) | Named types selected via `task(subagent_type=...)` |
 
 ```yaml
 subagents:
-  - name: researcher
-    description: "Deep-dives a topic and returns a structured summary."
-    agent_md: ./monkeybot_config/agents/researcher.md
+  timeout_sec: 600
+  max_turns: 25
+  vertex_google_search: false
+  agent_md: ./monkeybot_config/AGENT.md
+  personas:
+    - name: researcher
+      description: "Deep-dives a topic and returns a structured summary."
+      agent_md: ./monkeybot_config/agents/researcher.md
 ```
 
 Relative paths resolve from the bot project root, not `workspace/`. For parallel fan-out, use Postgres (`db_url`).

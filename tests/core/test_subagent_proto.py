@@ -93,7 +93,7 @@ def test_resolve_project_path_relative(tmp_path: Path) -> None:
     assert got == agent.resolve()
 
 
-def test_resolve_subagent_agent_md_prefers_override(
+def test_resolve_subagent_agent_md_from_yaml(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     parent = tmp_path / "monkeybot_config" / "AGENT.md"
@@ -101,8 +101,12 @@ def test_resolve_subagent_agent_md_prefers_override(
     parent.write_text("# parent\n", encoding="utf-8")
     override = tmp_path / "custom.md"
     override.write_text("# custom\n", encoding="utf-8")
+    (tmp_path / "monkeybot_config" / "monkeybot.yaml").write_text(
+        "subagents:\n  agent_md: ./custom.md\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MONKEYBOT_AGENT_ROOT", str(tmp_path))
     monkeypatch.setenv("AGENT_MD", "./monkeybot_config/AGENT.md")
-    monkeypatch.setenv("MONKEYBOT_SUBAGENT_AGENT_MD", str(override))
     assert resolve_subagent_agent_md_path(tmp_path) == override.resolve()
 
 

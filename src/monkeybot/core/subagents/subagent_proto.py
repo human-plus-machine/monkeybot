@@ -69,11 +69,11 @@ def resolve_project_path(raw: str, agent_root: Path | None = None) -> Path:
 
 
 def resolve_subagent_agent_md_path(agent_root: Path | None = None) -> Path | None:
-    """Effective subagent AGENT.md path; ``MONKEYBOT_SUBAGENT_AGENT_MD`` wins over ``AGENT_MD``."""
+    """Effective default subagent AGENT.md from ``subagents.agent_md`` in monkeybot.yaml."""
+    from monkeybot.core.config.settings import get_subagent_settings
+
     root = agent_root if agent_root is not None else resolve_agent_project_root()
-    raw = os.environ.get("MONKEYBOT_SUBAGENT_AGENT_MD", "").strip()
-    if not raw:
-        raw = os.environ.get("AGENT_MD", "").strip()
+    raw = (get_subagent_settings().agent_md or "").strip()
     if not raw:
         return None
     return resolve_project_path(raw, root)
@@ -111,7 +111,9 @@ def resolve_task_agent_md_path(
     default = (root / "AGENT.md").resolve()
     if default.is_file():
         return default
-    raise ValueError("No AGENT.md found for subagent (set subagent.agent_md or paths.agent_md)")
+    raise ValueError(
+        "No AGENT.md found for subagent (set subagents.agent_md or paths.agent_md)"
+    )
 
 
 def normalize_sqlite_db_url(db_url: str, agent_root: Path | None = None) -> str:

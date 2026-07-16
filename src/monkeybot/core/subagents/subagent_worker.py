@@ -14,6 +14,7 @@ from typing import Any, cast
 from monkeybot.core.config.settings import (
     auto_schema_enabled_from_config,
     get_provider_config,
+    get_subagent_settings,
     normalize_model_provider,
     subagent_vertex_google_search_from_config,
 )
@@ -247,9 +248,15 @@ async def _async_main() -> None:
         if not agent_md_path.is_file():
             agent_md_path = resolve_project_path(envelope.agent_md, agent_root)
     else:
-        agent_md_path = resolve_subagent_agent_md_path(agent_root) or resolve_project_path(
-            "AGENT.md", agent_root
-        )
+        resolved = resolve_subagent_agent_md_path(agent_root)
+        if resolved is not None and resolved.is_file():
+            agent_md_path = resolved
+        else:
+            raw_parent = os.environ.get("AGENT_MD", "").strip()
+            if raw_parent:
+                agent_md_path = resolve_project_path(raw_parent, agent_root)
+            else:
+                agent_md_path = resolve_project_path("AGENT.md", agent_root)
 
     db_url = AgentLayout.from_environment(agent_root=agent_root).db_url
     backend = create_storage_backend(db_url)
@@ -370,11 +377,8 @@ async def _async_main() -> None:
         if envelope.context.strip():
             body += "\n\n---\nContext from parent agent:\n" + envelope.context.strip()
 
-        max_turns_raw = os.environ.get("SUBAGENT_MAX_TURNS", "").strip()
-        if max_turns_raw:
-            max_turns = max(1, int(max_turns_raw))
-        else:
-            max_turns = max(1, int(os.environ.get("MAX_TURNS", "25")))
+        max_turns = get_subagent_settings().max_turns
+
 
         from monkeybot.observability.spans import span_subagent
 

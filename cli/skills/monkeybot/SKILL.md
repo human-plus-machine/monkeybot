@@ -156,13 +156,13 @@ Decision → config map:
 | "I have a custom web UI" | `gateway.cors_allow_origins` |
 | "Search the web" | `web_search.backend` + `.env` keys (Tavily/Firecrawl) |
 | "Run untrusted code" | `sandbox.enabled` + `SANDBOX_API_KEY` |
-| "Use specialist agents" | `subagents[]` + `monkeybot_config/agents/*.md` |
+| "Use specialist agents" | `subagents.personas` + `monkeybot_config/agents/*.md` |
 | "Connect external tools" | `mcp.json` (`mcpServers` object), then `validate --check-mcp` |
 | "Control cost / context size" | `model.*`, `context_curation.*` |
 | "Restrict dangerous commands" | `tools.denied_patterns`, `command_allowlist.yaml` |
 | "Multiple environments" | top-level `includes:` fragments |
 
-**Subagents (`task` tool):** share the parent `AGENT.md` (or `subagent.agent_md`). Relative paths resolve from the bot project root, not `workspace/`. Specialize via `task` / `context`, not separate agent type folders. For parallel `task` fan-out, prefer Postgres: add `monkeybot[postgres]` to the **agent** `pyproject.toml` dependencies, run `uv sync`, then set `DB_URL=postgresql://...` in `.env`.
+**Subagents (`task` tool):** share the parent `AGENT.md` (or `subagents.agent_md`). Relative paths resolve from the bot project root, not `workspace/`. Specialize via `task` / `context`, not separate agent type folders. For parallel `task` fan-out, prefer Postgres: add `monkeybot[postgres]` to the **agent** `pyproject.toml` dependencies, run `uv sync`, then set `DB_URL=postgresql://...` in `.env`.
 
 **Observability** is mostly env + add `monkeybot[observability]` to agent deps + `uv sync` + an OTel collector — not `monkeybot.yaml`. See `docs/observability-runbook.md`.
 
