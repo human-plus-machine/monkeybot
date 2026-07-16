@@ -6,6 +6,14 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Subagent defaults and named personas are now configured under a single `subagents:` YAML mapping (`subagents.timeout_sec`, `subagents.max_turns`, `subagents.vertex_google_search`, `subagents.agent_md`, `subagents.personas`), replacing the separate `subagent:` defaults block and bare-list `subagents:` personas.
+
+### Breaking
+
+- `subagents:` as a bare list of personas is no longer supported; wrap personas under `subagents.personas` in `monkeybot.yaml`. `SUBAGENT_TIMEOUT_SEC`, `SUBAGENT_MAX_TURNS`, and `MONKEYBOT_SUBAGENT_AGENT_MD` environment variable overrides are removed — set `subagents.timeout_sec`, `subagents.max_turns`, and `subagents.agent_md` in `monkeybot.yaml` instead.
+
 ## [core v2.2.0] - 2026-07-13
 
 ### Added

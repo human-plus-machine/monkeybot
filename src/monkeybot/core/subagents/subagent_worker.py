@@ -379,7 +379,6 @@ async def _async_main() -> None:
 
         max_turns = get_subagent_settings().max_turns
 
-
         from monkeybot.observability.spans import span_subagent
 
         reset_token = _reset_trace_context_if_unattached(attach_token)
