@@ -116,18 +116,19 @@ def _parent_extra_tools(
     todo_store: TodoListStore | None,
 ) -> list[Any]:
     """Web search + optional session todo tool for the parent realtime agent."""
-    tools: list[Any] = (
-        [deps.web_search_tool] if deps.web_search_tool is not None else []
-    )
+    tools: list[Any] = [deps.web_search_tool] if deps.web_search_tool is not None else []
     if todo_store is not None:
         tools.append(TodoListTool(todo_store))
     return tools
 
 
-def _maybe_todo_store(session_id: str, workspace_root: Path) -> TodoListStore | None:
+def _maybe_todo_store(
+    manager: RealtimeSessionManager, session_id: str, workspace_root: Path
+) -> TodoListStore | None:
+    """Reuse the manager-cached store so reconnects on the same session don't lose it."""
     if not todo_list_enabled_from_env():
         return None
-    return TodoListStore(session_id, workspace_root=workspace_root)
+    return manager.get_or_create_todo_store(session_id, workspace_root=workspace_root)
 
 
 async def _build_realtime_context(
@@ -194,7 +195,9 @@ def _make_realtime_session_config(
     realtime_config: RealtimeConfig,
 ) -> RealtimeSessionConfig:
     input_fmt_str = os.environ.get("MONKEYBOT_REALTIME_AUDIO_INPUT_FORMAT", "pcm_s16le_24khz_mono")
-    output_fmt_str = os.environ.get("MONKEYBOT_REALTIME_AUDIO_OUTPUT_FORMAT", "pcm_s16le_24khz_mono")
+    output_fmt_str = os.environ.get(
+        "MONKEYBOT_REALTIME_AUDIO_OUTPUT_FORMAT", "pcm_s16le_24khz_mono"
+    )
 
     def _parse(fmt: str) -> AudioFormat:
         parts = fmt.lower().split("_")
@@ -307,9 +310,7 @@ async def _handle_assistant_boundary(
     if turn.is_empty:
         return
 
-    tool_executor = _create_tool_executor(
-        deps, attachment_store, todo_store=state.todo_store
-    )
+    tool_executor = _create_tool_executor(deps, attachment_store, todo_store=state.todo_store)
     tool_results: list[Any] = []
     inject_texts: list[str] = []
     # Consume once per utterance so tool-call then prose boundaries do not
@@ -502,9 +503,7 @@ async def _handle_provider_event(
     elif isinstance(event, RealtimeToolCall):
         await _send_frame(
             ws,
-            ServerToolCallFrame(
-                call_id=event.call_id, name=event.name, args=event.args
-            ),
+            ServerToolCallFrame(call_id=event.call_id, name=event.name, args=event.args),
         )
     elif isinstance(event, RealtimeUsage):
         await _send_frame(
@@ -643,9 +642,7 @@ async def _run_session(
 
     all_tasks = {provider_task, client_task, guardrail_task}
     try:
-        done, pending = await asyncio.wait(
-            all_tasks, return_when=asyncio.FIRST_COMPLETED
-        )
+        done, pending = await asyncio.wait(all_tasks, return_when=asyncio.FIRST_COMPLETED)
         for task in pending:
             task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -768,10 +765,8 @@ def create_realtime_router(
 
             history = storage.history()
             workspace_root, _skills_path = _resolved_workspace_paths()
-            todo_store = _maybe_todo_store(session_id, workspace_root)
-            ctx = await _build_realtime_context(
-                session_id, request_id, deps, todo_store=todo_store
-            )
+            todo_store = _maybe_todo_store(manager, session_id, workspace_root)
+            ctx = await _build_realtime_context(session_id, request_id, deps, todo_store=todo_store)
             session_config = _make_realtime_session_config(ctx, manager.config)
             try:
                 realtime_session = await provider.connect(config=session_config)
@@ -874,12 +869,8 @@ def create_realtime_router(
                 kv(session_id=session_id, request_id=request_id),
             )
             if ws.client_state.name == "CONNECTED":
-                await _safe_client_notify(
-                    ws, _send_frame(ws, ServerErrorFrame(error=str(exc)))
-                )
-                await _safe_client_notify(
-                    ws, ws.close(code=1011, reason="Internal error")
-                )
+                await _safe_client_notify(ws, _send_frame(ws, ServerErrorFrame(error=str(exc))))
+                await _safe_client_notify(ws, ws.close(code=1011, reason="Internal error"))
         finally:
             if state is not None:
                 await _close_session(state, manager, reason=close_reason)

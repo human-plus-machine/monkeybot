@@ -10,13 +10,12 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
 
 from monkeybot.core.logging_utils import kv
-from monkeybot.core.persistence.transcript import resolve_session_artifact_dir
+from monkeybot.core.persistence.transcript import now_iso, resolve_session_artifact_dir
 
 logger = logging.getLogger(__name__)
 
@@ -36,10 +35,6 @@ class TodoItem:
     status: TodoStatus
 
 
-def _now_iso() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + f".{int(time.time() * 1000) % 1000:03d}Z"
-
-
 class TodoListStore:
     """Mutable ordered todo list for one gateway session.
 
@@ -52,10 +47,20 @@ class TodoListStore:
         self._items: list[TodoItem] = []
         self._next_n = 1
         self._session_dir: Path | None = None
+        self._mirror_error: str | None = None
 
     @property
     def items(self) -> tuple[TodoItem, ...]:
         return tuple(self._items)
+
+    @property
+    def mirror_error(self) -> str | None:
+        """Message from the most recent failed disk mirror, or None if the last write succeeded.
+
+        Memory remains authoritative on mirror failure; callers can surface this
+        (e.g. in the tool response) so a broken debug mirror isn't purely silent.
+        """
+        return self._mirror_error
 
     def snapshot(self) -> list[dict[str, str]]:
         """JSON-serializable copy of the current list."""
@@ -130,7 +135,12 @@ class TodoListStore:
         return None
 
     def _mirror_to_disk(self) -> None:
-        """Best-effort live snapshot for debugging; never raises to callers."""
+        """Best-effort live snapshot for debugging; never raises to callers.
+
+        Memory (``self._items``) stays authoritative regardless of outcome; a
+        failure here only means the ``todos.json`` debug mirror is stale, which
+        is recorded on ``self._mirror_error`` for callers to surface.
+        """
         try:
             if self._session_dir is None:
                 self._session_dir = resolve_session_artifact_dir(
@@ -139,7 +149,7 @@ class TodoListStore:
             path = self._session_dir / _TODOS_FILENAME
             payload = {
                 "session_id": self.session_id,
-                "updated_at": _now_iso(),
+                "updated_at": now_iso(),
                 "items": self.snapshot(),
             }
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -147,7 +157,9 @@ class TodoListStore:
                 json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
                 encoding="utf-8",
             )
-        except OSError:
+            self._mirror_error = None
+        except OSError as exc:
+            self._mirror_error = str(exc)
             logger.warning(
                 "todo_list disk mirror failed %s",
                 kv(session_id=self.session_id),

@@ -95,6 +95,36 @@ async def test_todo_list_tool_add_complete_remove_and_disk_mirror(tmp_path: Path
     assert disk_after["items"] == []
 
 
+def test_todo_list_store_records_mirror_error_on_disk_failure(tmp_path: Path) -> None:
+    """Memory stays authoritative when the debug mirror write fails; the failure
+    is recorded on ``mirror_error`` instead of raising or being fully silent."""
+    store = TodoListStore("sess-mirror-fail", workspace_root=tmp_path)
+    # Point the mirror at a path that cannot be created (parent is a file, not a dir).
+    blocker = tmp_path / "blocked"
+    blocker.write_text("not a directory", encoding="utf-8")
+    store._session_dir = blocker / "session"
+
+    item = store.add("Ship it")
+    assert not isinstance(item, str)
+    assert store.mirror_error is not None
+    # In-memory state is unaffected by the mirror failure.
+    assert store.items[0].text == "Ship it"
+
+
+@pytest.mark.asyncio
+async def test_todo_list_tool_surfaces_mirror_warning_on_disk_failure(tmp_path: Path) -> None:
+    store = TodoListStore("sess-mirror-fail-2", workspace_root=tmp_path)
+    blocker = tmp_path / "blocked2"
+    blocker.write_text("not a directory", encoding="utf-8")
+    store._session_dir = blocker / "session"
+    tool = TodoListTool(store)
+
+    added = json.loads(await tool.execute({"action": "add", "text": "Ship it"}))
+    assert added["ok"] is True
+    assert added["item"]["text"] == "Ship it"
+    assert "mirror_warning" in added
+
+
 @pytest.mark.asyncio
 async def test_todo_list_tool_validation_errors(tmp_path: Path) -> None:
     tool = TodoListTool(TodoListStore("s", workspace_root=tmp_path))

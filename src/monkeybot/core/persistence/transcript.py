@@ -46,8 +46,16 @@ def transcript_include_live_from_env() -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
-def _now_iso() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + f".{int(time.time() * 1000) % 1000:03d}Z"
+def now_iso() -> str:
+    """UTC timestamp with millisecond precision, e.g. ``2026-07-16T20:35:48.123Z``."""
+    return (
+        time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+        + f".{int(time.time() * 1000) % 1000:03d}Z"
+    )
+
+
+# Internal alias kept for call sites within this module.
+_now_iso = now_iso
 
 
 def _utc_compact_from_iso(started_at: str) -> str:
@@ -180,7 +188,9 @@ class TranscriptWriter:
             try:
                 await asyncio.to_thread(_write_if_new)
             except OSError:
-                logger.warning("transcript manifest write failed for %s", self._session_id, exc_info=True)
+                logger.warning(
+                    "transcript manifest write failed for %s", self._session_id, exc_info=True
+                )
             self._manifest_written = True
 
     async def drain(self) -> None:
@@ -194,7 +204,9 @@ class TranscriptWriter:
     async def _append_line(self, record: dict[str, Any]) -> None:
         async with self._lock:
             self._seq += 1
-            line = json.dumps({"seq": self._seq, **record}, ensure_ascii=False, separators=(",", ":"))
+            line = json.dumps(
+                {"seq": self._seq, **record}, ensure_ascii=False, separators=(",", ":")
+            )
 
             def _append() -> None:
                 self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -275,6 +287,8 @@ class TranscriptWriter:
 
 __all__ = [
     "TranscriptWriter",
+    "now_iso",
+    "resolve_session_artifact_dir",
     "transcript_enabled_from_env",
     "transcript_include_live_from_env",
 ]

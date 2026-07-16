@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from monkeybot.core.config.realtime_config import RealtimeConfig
 from monkeybot.core.logging_utils import kv
+from monkeybot.todo_list import TodoListStore
 
 from .session import RealtimeConnectionState
 
@@ -26,6 +28,7 @@ class RealtimeSessionManager:
 
     config: RealtimeConfig
     _sessions: dict[str, RealtimeConnectionState] = field(default_factory=dict)
+    _todo_stores: dict[str, TodoListStore] = field(default_factory=dict)
     _sem: asyncio.Semaphore = field(init=False)
 
     def __post_init__(self) -> None:
@@ -75,3 +78,18 @@ class RealtimeSessionManager:
             "active_sessions": len(self._sessions),
             "max_concurrent_sessions": self.config.session.max_concurrent_sessions,
         }
+
+    def get_or_create_todo_store(self, session_id: str, *, workspace_root: Path) -> TodoListStore:
+        """Return the process-cached todo list for ``session_id``, creating it if absent.
+
+        Cached on the manager (not per-connection) so reconnects on the same
+        ``session_id`` see the same list instead of silently resetting it.
+        Realtime has no ``/new`` (session restart is unsupported per
+        ``session_controller.restart_session``), so no eviction path is needed here —
+        a fresh ``session_id`` always gets a fresh store.
+        """
+        store = self._todo_stores.get(session_id)
+        if store is None:
+            store = TodoListStore(session_id, workspace_root=workspace_root)
+            self._todo_stores[session_id] = store
+        return store

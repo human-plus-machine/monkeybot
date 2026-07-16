@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from monkeybot.core.config.realtime_config import RealtimeConfig, RealtimeSessionConfig
@@ -88,3 +90,22 @@ async def test_concurrent_acquire_respects_limit() -> None:
     second = await manager.acquire_slot("s2")
     assert first is True
     assert second is False
+
+
+def test_get_or_create_todo_store_reuses_across_reconnects(tmp_path: Path) -> None:
+    """A reconnect on the same session id must see the same store, not a fresh
+    (empty) one — otherwise the todo list silently resets on WS reconnect."""
+    manager = RealtimeSessionManager(_make_config(5))
+    store1 = manager.get_or_create_todo_store("s1", workspace_root=tmp_path)
+    store1.add("First task")
+
+    store2 = manager.get_or_create_todo_store("s1", workspace_root=tmp_path)
+    assert store2 is store1
+    assert [item.text for item in store2.items] == ["First task"]
+
+
+def test_get_or_create_todo_store_is_per_session(tmp_path: Path) -> None:
+    manager = RealtimeSessionManager(_make_config(5))
+    store1 = manager.get_or_create_todo_store("s1", workspace_root=tmp_path)
+    store2 = manager.get_or_create_todo_store("s2", workspace_root=tmp_path)
+    assert store1 is not store2

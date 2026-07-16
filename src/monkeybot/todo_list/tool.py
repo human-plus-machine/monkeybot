@@ -67,10 +67,18 @@ class TodoListTool:
         )
 
     def _ok(self, *, action: str, item: dict[str, str]) -> str:
-        return json.dumps(
-            {"ok": True, "action": action, "item": item, "items": self._store.snapshot()},
-            ensure_ascii=False,
-        )
+        payload: dict[str, object] = {
+            "ok": True,
+            "action": action,
+            "item": item,
+            "items": self._store.snapshot(),
+        }
+        if self._store.mirror_error is not None:
+            # Debug mirror is stale; the in-memory list (returned above) is still authoritative.
+            payload["mirror_warning"] = (
+                "todos.json debug mirror write failed; list state is unaffected."
+            )
+        return json.dumps(payload, ensure_ascii=False)
 
     def _err(self, message: str, *, error_kind: str = "validation") -> str:
         return json.dumps(
