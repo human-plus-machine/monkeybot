@@ -524,6 +524,10 @@ async def test_chat_history_disabled_returns_404(registry: SessionRegistry, monk
     monkeypatch.setenv("MONKEYBOT_CHAT_HISTORY_API", "0")
     app = create_app(loop_port=FakeLoopPort(registry), registry=registry)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        r = await client.get("/api/chat-history")
-        assert r.status_code == 404
-        assert r.json()["error"]["code"] == "NOT_FOUND"
+        for method, path in (
+            (client.get, "/api/chat-history"),
+            (client.delete, "/api/chat-history/session-a"),
+        ):
+            r = await method(path)
+            assert r.status_code == 404
+            assert r.json()["error"]["code"] == "NOT_FOUND"

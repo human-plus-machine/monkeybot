@@ -1108,7 +1108,11 @@ def create_app(
         session_id: str,
         request: Request,
     ) -> dict[str, bool]:
-        """Delete one persisted chat transcript and its thread summary."""
+        """Clear one transcript and any backend-specific thread summary.
+
+        The ``deleted`` response is an idempotent wipe acknowledgment, not an
+        indication that a persisted thread previously existed.
+        """
         if not _chat_history_api_enabled():
             raise APIError(
                 404,
