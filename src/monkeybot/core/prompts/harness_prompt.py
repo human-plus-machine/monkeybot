@@ -39,7 +39,7 @@ When workspace tools (`read_file`, `write_file`, `run_command`, …) appear in t
 - `enable_mcp` / `disable_mcp` — connect or drop a server declared in mcp.json by name (e.g. `browser`). Success returns connection status + tools; failure returns the error (no separate status tool). New tools appear on the **next model step this turn**.
 - `list_mcp_resources` / `read_mcp_resource` / `list_mcp_prompts` / `get_mcp_prompt` — appear only after `enable_mcp` succeeds; browse MCP resources and prompt templates from connected servers.
 - `enable_loops` — advertise scheduled-loop tools (`start_loop`, `loop_status`, `pause_loop`, `resume_loop`, `stop_loop`, `disable_loops`); they appear only after `enable_loops`, on the **next model step this turn**. Requires durable storage (`DB_URL`) and a running scheduler worker. Read the `loop` skill for procedure (guards, confirmation) before calling `start_loop`.
-{catalog_mcp_line}{catalog_loops_line}{web_search_line}{task_line}
+{catalog_mcp_line}{catalog_loops_line}{web_search_line}{todo_list_line}{task_line}
 ### Workspace deliverables
 - **New file or full rewrite** → `write_file`.
 - **Targeted change to an existing file** → `read_file` then `replace_in_file` (unique match; light fuzzy fallbacks; optional `replace_all`).
@@ -81,6 +81,12 @@ _TASK_LINE = (
 _WEB_SEARCH_LINE = (
     "- `web_search` — search the web for current information; "
     "returns titles, URLs, and text snippets.\n"
+)
+
+_TODO_LIST_LINE = (
+    "- `todo_list` — maintain an ordered, session-scoped task list "
+    "(`add` / `complete` / `remove`). The live list appears under `## Todo list` "
+    "when non-empty; keep it updated as you work.\n"
 )
 
 
@@ -150,6 +156,7 @@ def harness_fixed_context(
     *,
     include_task_tool: bool,
     include_web_search: bool = False,
+    include_todo_list: bool = False,
     workspace_root: str = "(not set)",
     memory_storage_uri: str = "(not set)",
     run_command_opensandbox: bool = False,
@@ -163,6 +170,7 @@ def harness_fixed_context(
     ``workspace_root`` and ``memory_storage_uri`` are injected once at
     context-build time so the model always uses correct paths in shell commands.
     ``include_web_search`` should be True when a web search backend is active.
+    ``include_todo_list`` should be True when the session-scoped ``todo_list`` tool is active.
     ``run_command_opensandbox`` should match whether ``run_command`` is routed through
     OpenSandbox (same signal as ``SandboxConfig.from_env().enabled``).
     ``subagent_personas`` lists configured named subagent types for the parent orchestrator.
@@ -193,6 +201,7 @@ def harness_fixed_context(
         catalog_mcp_line=catalog_mcp_line,
         catalog_loops_line=catalog_loops_line,
         web_search_line=_WEB_SEARCH_LINE if include_web_search else "",
+        todo_list_line=_TODO_LIST_LINE if include_todo_list else "",
         task_line=_TASK_LINE if include_task_tool else "",
         workspace_root=workspace_root,
         memory_storage_uri=memory_storage_uri,

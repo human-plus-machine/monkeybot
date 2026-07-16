@@ -72,6 +72,27 @@ def _find_existing_session_dir(transcripts_root: Path, safe_id: str) -> Path | N
     return matches[0] if matches else None
 
 
+def resolve_session_artifact_dir(
+    workspace_root: Path,
+    session_id: str,
+    *,
+    started_at: str | None = None,
+) -> Path:
+    """Return the per-session debug artifact directory under ``.monkeybot/transcripts/``.
+
+    Reuses an existing ``*_{session_id}`` folder when present; otherwise returns a new
+    ``{UTC_compact}_{session_id}`` path. The directory is not created here — callers
+    mkdir on first write (transcript NDJSON, ``todos.json``, etc.).
+    """
+    safe_id = sanitize_path_component(session_id)
+    transcripts_root = workspace_root.resolve() / _TRANSCRIPT_REL_DIR
+    existing = _find_existing_session_dir(transcripts_root, safe_id)
+    if existing is not None:
+        return existing
+    folder = f"{_utc_compact_from_iso(started_at or _now_iso())}_{safe_id}"
+    return transcripts_root / folder
+
+
 def _max_seq_in_transcript(path: Path) -> int:
     """Return the highest ``seq`` already written to an NDJSON transcript, or 0."""
     if not path.is_file():
@@ -111,21 +132,16 @@ class TranscriptWriter:
         include_live: bool | None = None,
     ) -> None:
         self._session_id = session_id
-        safe_id = sanitize_path_component(session_id)
         self._started_at = _now_iso()
-        transcripts_root = workspace_root.resolve() / _TRANSCRIPT_REL_DIR
-        existing = _find_existing_session_dir(transcripts_root, safe_id)
-        if existing is not None:
-            self._session_dir = existing
-        else:
-            folder = f"{_utc_compact_from_iso(self._started_at)}_{safe_id}"
-            self._session_dir = transcripts_root / folder
+        self._session_dir = resolve_session_artifact_dir(
+            workspace_root, session_id, started_at=self._started_at
+        )
         self._path = self._session_dir / _TRANSCRIPT_FILENAME
         self._lock = asyncio.Lock()
         self._manifest_written = self._path.is_file()
         # Resume from the highest seq already on disk so reused session dirs
         # never emit duplicate evidence pointers.
-        self._seq = _max_seq_in_transcript(self._path) if existing is not None else 0
+        self._seq = _max_seq_in_transcript(self._path) if self._path.is_file() else 0
         self._include_live = (
             transcript_include_live_from_env() if include_live is None else include_live
         )

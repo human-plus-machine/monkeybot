@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from monkeybot.core.llm.realtime_provider import (
-    AudioFormat,
     RealtimeAudioDelta,
     RealtimeDone,
     RealtimeEvent,
@@ -23,6 +22,7 @@ from monkeybot.core.llm.realtime_provider import (
 )
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.runtime.utterance_buffer import UtteranceBuffer
+from monkeybot.todo_list.store import TodoListStore
 
 from .metrics import RealtimeMetrics
 from .wire import audio_duration_sec
@@ -57,6 +57,8 @@ class RealtimeConnectionState:
     idle_delivery_queue: asyncio.Queue[Any] = field(default_factory=asyncio.Queue)
     metrics: RealtimeMetrics = field(init=False)
     pending_responses: dict[str, asyncio.Future[Any]] = field(default_factory=dict)
+    todo_store: TodoListStore | None = None
+    """Process-local session todo list (not shared across gateway replicas)."""
     _closed: bool = False
 
     def __post_init__(self) -> None:

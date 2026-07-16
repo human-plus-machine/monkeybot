@@ -18,6 +18,7 @@ from monkeybot.core.prompts.prompt import (
     MEMORY_NUDGE_HEADING,
     RUNTIME_NOTES_HEADING,
     SKILLS_HEADING,
+    TODO_LIST_HEADING,
 )
 from monkeybot.providers._utils import (
     _VOLATILE_SYSTEM_MARKERS,
@@ -129,6 +130,7 @@ def test_volatile_markers_match_heading_constants() -> None:
         MEMORY_INDEX_HEADING,
         MEMORY_NUDGE_HEADING,
         SKILLS_HEADING,
+        TODO_LIST_HEADING,
         CURRENT_REQUEST_HEADING,
         RUNTIME_NOTES_HEADING,
         SYSTEM_CONTEXT_UPDATE_HEADING,

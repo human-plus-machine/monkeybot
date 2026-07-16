@@ -19,11 +19,8 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from monkeybot.gateway.bootstrap import ensure_gateway_runtime_env, log_gateway_startup
-
 from monkeybot.core.attachments.config import attachments_enabled_from_env
 from monkeybot.core.attachments.store import AttachmentStore, FilesystemAttachmentStore
-from monkeybot.core.layout import AgentLayout
 from monkeybot.core.config.settings import (
     ConfigError,
     SubagentConfig,
@@ -35,6 +32,7 @@ from monkeybot.core.config.settings import (
 )
 from monkeybot.core.context import LoopsToolRegistry, build_context
 from monkeybot.core.hooks import HookManager
+from monkeybot.core.layout import AgentLayout
 from monkeybot.core.llm.provider import (
     Done,
     Provider,
@@ -59,14 +57,16 @@ from monkeybot.core.runtime.loop import run as run_loop
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector, ToolInspector
-from monkeybot.core.tools.permission import try_load_permission_inspector
 from monkeybot.core.tools.loop_inspector import LoopStartInspector
+from monkeybot.core.tools.permission import try_load_permission_inspector
 from monkeybot.core.types.content_blocks import ContentBlock, Text
 from monkeybot.core.workspace import create_workspace_storage
+from monkeybot.gateway.bootstrap import ensure_gateway_runtime_env, log_gateway_startup
 from monkeybot.gateway.sse.loop_port import UsagePort
 from monkeybot.gateway.sse.routes import create_app as build_sse_app
 from monkeybot.gateway.sse.session_bus import SessionBus, SessionRegistry
 from monkeybot.providers.gemini import GeminiProvider
+from monkeybot.todo_list import TodoListStore, TodoListTool, todo_list_enabled_from_env
 from monkeybot.web_search import WebSearchTool
 from monkeybot.web_search import build_backend as _build_web_search_backend
 
@@ -359,7 +359,15 @@ class GatewayLoopPort:
                 rows = await history.load(session_id)
                 bus.attachment_catalog.rebuild_from_history(rows)
 
-            extra_tools = [_deps.web_search_tool] if _deps.web_search_tool is not None else []
+            extra_tools: list[Any] = (
+                [_deps.web_search_tool] if _deps.web_search_tool is not None else []
+            )
+            todo_store = None
+            if todo_list_enabled_from_env():
+                if bus.todo_store is None:
+                    bus.todo_store = TodoListStore(session_id, workspace_root=workspace_root)
+                todo_store = bus.todo_store
+                extra_tools.append(TodoListTool(todo_store))
 
             storage_backend = getattr(serving.state, "storage", None)
             loops_available = storage_backend is not None
@@ -382,6 +390,7 @@ class GatewayLoopPort:
                     subagent_registry=_deps.subagent_registry,
                     scheduled_loops_available=loops_available,
                     loops_advertised=loops_advertised,
+                    todo_store=todo_store,
                 )
             except Exception as exc:
                 logger.exception("build_context failed")
@@ -644,12 +653,12 @@ async def _startup(fastapi_app: FastAPI) -> None:
         )
         fastapi_app.state.worker_pool = start_worker_pool_background(backend)
 
-    from monkeybot.scheduler.engine import scheduler_enabled_from_env, start_scheduler_background
     from monkeybot.gateway.sse.scheduler_wiring import (
         GatewaySessionEnsurer,
         GatewayTickInvoker,
         StorageSessionBusyChecker,
     )
+    from monkeybot.scheduler.engine import scheduler_enabled_from_env, start_scheduler_background
 
     if scheduler_enabled_from_env():
         loop_port = GatewayLoopPort(_registry)

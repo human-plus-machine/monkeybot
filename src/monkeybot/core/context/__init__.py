@@ -19,6 +19,7 @@ from monkeybot.core.mcp.ports_mcp import MCPClientPort
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.types.types_tools import ToolDef
+from monkeybot.todo_list.store import TodoListStore
 
 
 @runtime_checkable
@@ -111,6 +112,8 @@ class TurnContext:
     """Configured MCP server names available via ``enable_mcp`` (not connected until activated)."""
     scheduled_loops_available: bool = False
     """True when durable loop storage is wired (DB_URL); advertise ``enable_loops`` catalog hint."""
+    todo_store: TodoListStore | None = None
+    """Session-scoped todo list (parent agent only); mutable store held by frozen context."""
 
 
 _log = logging.getLogger(__name__)
@@ -708,6 +711,7 @@ async def build_context(
     subagent_registry: dict[str, SubagentConfig] | None = None,
     scheduled_loops_available: bool = False,
     loops_advertised: bool = False,
+    todo_store: TodoListStore | None = None,
 ) -> TurnContext:
     """Assemble a TurnContext from filesystem paths and the MCP client snapshot.
 
@@ -735,6 +739,8 @@ async def build_context(
         scheduled_loops_available: True when durable loop storage is wired (shows harness hint).
         loops_advertised: True when the caller's ``LoopsToolRegistry`` has ``enable_loops``
             active; includes scheduled-loop lifecycle tools immediately for this turn.
+        todo_store: Optional session-scoped todo list store (parent agent); enables volatile
+            ``## Todo list`` injection. Pass the same store to ``TodoListTool`` via ``extra_tools``.
 
     Returns:
         Frozen :class:`TurnContext`.
@@ -784,6 +790,7 @@ async def build_context(
         subagent_personas=personas,
         catalog_mcp_servers=catalog_names,
         scheduled_loops_available=scheduled_loops_available,
+        todo_store=todo_store,
     )
 
 

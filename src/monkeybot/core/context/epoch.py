@@ -2,7 +2,7 @@
 
 An epoch is the span during which one rendered system-prompt baseline remains the
 immutable provider-cache prefix. Volatile sources (current date, memory, skills,
-current-request) may change within an epoch and produce chronological system-context
+todo list, current-request) may change within an epoch and produce chronological system-context
 updates without rewriting the baseline. Compaction (or an incompatible stable-source
 change) starts a new epoch.
 """
