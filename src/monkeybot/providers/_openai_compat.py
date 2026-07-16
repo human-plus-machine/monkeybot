@@ -242,7 +242,9 @@ def _rate_limit_retry_delay(attempt: int) -> float:
 # requests (parallel tool calls, subagents) can self-inflict a rate limit. Cap
 # in-flight requests for providers with a known low tier; others are unbounded.
 _LOW_THROUGHPUT_PROVIDER_CONCURRENCY: dict[str, int] = {"nvidia": 4}
-_provider_semaphores: dict[str, asyncio.Semaphore] = {}
+# Keyed by (provider, event loop): a Semaphore is bound to the loop it waits on,
+# so reusing one across loops (repeated asyncio.run, per-test event loops) raises.
+_provider_semaphores: dict[tuple[str, asyncio.AbstractEventLoop], asyncio.Semaphore] = {}
 
 
 class ProviderRateLimitError(Exception):
@@ -282,22 +284,28 @@ def is_rate_limit_error(exc: BaseException) -> bool:
     return any(
         phrase in msg
         for phrase in (
+            # NVIDIA's build.nvidia.com worker/quota text, e.g. "ResourceExhausted:
+            # Worker local total request limit reached (N/M)". Deliberately specific
+            # (not a bare "rate limit" substring) to avoid misclassifying unrelated
+            # errors that happen to mention rate limits in passing.
             "resourceexhausted",
-            "resource exhausted",
-            "rate limit",
-            "rate-limit",
+            "worker local total request limit",
             "too many requests",
         )
     )
 
 
 def _provider_semaphore(provider: str) -> asyncio.Semaphore | None:
+    # ponytail: entries never evicted when a loop closes (fine for a gateway
+    # process, which has one loop for its lifetime); add eviction if a caller
+    # starts creating many short-lived loops in one process.
     limit = _LOW_THROUGHPUT_PROVIDER_CONCURRENCY.get(provider)
     if limit is None:
         return None
-    if provider not in _provider_semaphores:
-        _provider_semaphores[provider] = asyncio.Semaphore(limit)
-    return _provider_semaphores[provider]
+    key = (provider, asyncio.get_running_loop())
+    if key not in _provider_semaphores:
+        _provider_semaphores[key] = asyncio.Semaphore(limit)
+    return _provider_semaphores[key]
 
 
 async def iter_openai_compat_stream(
@@ -461,10 +469,12 @@ async def stream_chat_completions_with_tool_fallback(
 
     n_tools = len(tools)
     sem = _provider_semaphore(provider)
-    attempt = 0
+    # Counts rate-limit failures only, independent of tool-unsupported hops
+    # (switching to a tools-less request shouldn't burn a rate-limit retry).
+    rate_limit_attempts = 0
     while True:
-        attempt += 1
         yielded_any = False
+        retry_delay: float | None = None
         async with sem if sem is not None else contextlib.nullcontext():
             try:
                 async for event in iter_openai_compat_stream(
@@ -491,21 +501,26 @@ async def stream_chat_completions_with_tool_fallback(
                     continue
                 if not is_rate_limit_error(exc):
                     raise
-                if yielded_any or attempt >= _RATE_LIMIT_MAX_ATTEMPTS:
+                if yielded_any or rate_limit_attempts >= _RATE_LIMIT_MAX_ATTEMPTS - 1:
                     # Already streamed partial output this attempt, or retries
                     # exhausted: can't safely retry, but still hide the raw
                     # upstream text (e.g. NVIDIA's internal worker/quota string).
                     raise ProviderRateLimitError(provider, model, exc) from exc
-                delay = _rate_limit_retry_delay(attempt)
+                rate_limit_attempts += 1
+                retry_delay = _rate_limit_retry_delay(rate_limit_attempts)
                 _log.warning(
                     "%s rate-limited (attempt %d/%d); retrying in %.1fs: %s",
                     provider,
-                    attempt,
+                    rate_limit_attempts,
                     _RATE_LIMIT_MAX_ATTEMPTS,
-                    delay,
+                    retry_delay,
                     exc,
                 )
-                await asyncio.sleep(delay)
+        # Sleep outside the concurrency gate: a backing-off request must not
+        # hold an in-flight slot idle, or a burst of rate-limited callers can
+        # fill every slot with sleepers and starve everyone else.
+        if retry_delay is not None:
+            await asyncio.sleep(retry_delay)
 
 
 def is_tool_unsupported_error(exc: BaseException) -> bool:

@@ -11,6 +11,7 @@ import pytest
 from monkeybot.core.llm.provider import ThinkingDelta, UsageEvent
 from monkeybot.providers._openai_compat import (
     ProviderRateLimitError,
+    is_rate_limit_error,
     iter_openai_compat_stream,
     stream_chat_completions_with_tool_fallback,
 )
@@ -398,3 +399,116 @@ async def test_rate_limit_exhausted_raises_friendly_error_not_raw_text(
     assert "nvidia" in surfaced.lower()
     # Raw upstream text is preserved for logs, just not surfaced to the user.
     assert "Worker local total request limit" in str(exc_info.value.original)
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_backoff_sleeps_after_releasing_semaphore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The concurrency slot must be released before backing off, not held idle."""
+    client = _flaky_client(
+        _NVIDIA_RESOURCE_EXHAUSTED, fail_times=1, chunks=[_text_chunk("hi")]
+    )
+    _install_fake_openai(monkeypatch, client)
+
+    events: list[str] = []
+
+    class _SpySemaphore:
+        async def __aenter__(self) -> None:
+            events.append("acquire")
+
+        async def __aexit__(self, *_exc: object) -> None:
+            events.append("release")
+
+    monkeypatch.setattr(
+        "monkeybot.providers._openai_compat._provider_semaphore",
+        lambda _provider: _SpySemaphore(),
+    )
+
+    async def _fake_sleep(_delay: float) -> None:
+        events.append("sleep")
+
+    monkeypatch.setattr(
+        "monkeybot.providers._openai_compat.asyncio.sleep", _fake_sleep
+    )
+
+    _ = [
+        ev
+        async for ev in stream_chat_completions_with_tool_fallback(
+            base_url="https://integrate.api.nvidia.com/v1",
+            api_key="nvapi-test",
+            provider="nvidia",
+            messages=[],
+            tools=[],
+            model="meta/llama-3.3-70b-instruct",
+            temperature=0.7,
+            max_tokens=100,
+        )
+    ]
+
+    # release must precede sleep — a backing-off request cannot hold the slot idle.
+    assert events == ["acquire", "release", "sleep", "acquire", "release"]
+
+
+@pytest.mark.asyncio
+async def test_mid_stream_rate_limit_does_not_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Once partial output has streamed, retrying would duplicate it — must not retry."""
+
+    async def _create(**_kwargs: Any) -> Any:
+        async def _stream() -> Any:
+            yield _text_chunk("partial")
+            raise _NVIDIA_RESOURCE_EXHAUSTED
+
+        return _stream()
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=_create)))
+    _install_fake_openai(monkeypatch, client)
+
+    sleeps: list[float] = []
+
+    async def _fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(
+        "monkeybot.providers._openai_compat.asyncio.sleep", _fake_sleep
+    )
+
+    with pytest.raises(ProviderRateLimitError):
+        [
+            ev
+            async for ev in stream_chat_completions_with_tool_fallback(
+                base_url="https://integrate.api.nvidia.com/v1",
+                api_key="nvapi-test",
+                provider="nvidia",
+                messages=[],
+                tools=[],
+                model="meta/llama-3.3-70b-instruct",
+                temperature=0.7,
+                max_tokens=100,
+            )
+        ]
+
+    assert sleeps == []  # no retry attempted once output had already streamed
+
+
+def test_is_rate_limit_error_classifies_real_openai_types(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RateLimitError and a 429 APIStatusError are recognized, a 500 is not."""
+
+    class FakeRateLimitError(Exception):
+        pass
+
+    class FakeAPIStatusError(Exception):
+        def __init__(self, status_code: int) -> None:
+            super().__init__(f"status {status_code}")
+            self.status_code = status_code
+
+    fake_openai = ModuleType("openai")
+    fake_openai.RateLimitError = FakeRateLimitError
+    fake_openai.APIStatusError = FakeAPIStatusError
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+
+    assert is_rate_limit_error(FakeRateLimitError("too many requests"))
+    assert is_rate_limit_error(FakeAPIStatusError(429))
+    assert not is_rate_limit_error(FakeAPIStatusError(500))
