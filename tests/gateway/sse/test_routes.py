@@ -473,8 +473,15 @@ async def test_chat_history_list_and_detail(registry: SessionRegistry) -> None:
     await backend.open()
     try:
         hist = backend.history()
-        await hist.append("sess-a", Message(role="user", content=[Text(text="hello history")]))
-        await hist.append("sess-a", Message(role="assistant", content=[Text(text="hi there")]))
+        for session_id in ("main-agent-session", "project-agent-session"):
+            await hist.append(
+                session_id,
+                Message(role="user", content=[Text(text=f"hello {session_id}")]),
+            )
+            await hist.append(
+                session_id,
+                Message(role="assistant", content=[Text(text="hi there")]),
+            )
 
         app = create_app(loop_port=FakeLoopPort(registry), registry=registry)
         app.state.storage = backend
@@ -482,15 +489,32 @@ async def test_chat_history_list_and_detail(registry: SessionRegistry) -> None:
             r = await client.get("/api/chat-history")
             assert r.status_code == 200
             threads = r.json()["threads"]
-            assert any(t["session_id"] == "sess-a" for t in threads)
+            assert {t["session_id"] for t in threads} == {
+                "main-agent-session",
+                "project-agent-session",
+            }
 
-            rd = await client.get("/api/chat-history/sess-a")
+            rd = await client.get("/api/chat-history/main-agent-session")
             assert rd.status_code == 200
             body = rd.json()
-            assert body["session_id"] == "sess-a"
+            assert body["session_id"] == "main-agent-session"
             assert body["messages"][0]["role"] == "user"
-            assert "hello history" in body["messages"][0]["text"]
+            assert "hello main-agent-session" in body["messages"][0]["text"]
             assert body["messages"][1]["role"] == "assistant"
+
+            deleted = await client.delete("/api/chat-history/main-agent-session")
+            assert deleted.status_code == 200
+            assert deleted.json() == {"deleted": True}
+            assert await hist.load("main-agent-session") == []
+            assert len(await hist.load("project-agent-session")) == 2
+
+            deleted = await client.delete("/api/chat-history/project-agent-session")
+            assert deleted.status_code == 200
+            assert deleted.json() == {"deleted": True}
+            assert await hist.load("project-agent-session") == []
+
+            remaining = await client.get("/api/chat-history")
+            assert remaining.json()["threads"] == []
     finally:
         await backend.close()
 
@@ -500,6 +524,10 @@ async def test_chat_history_disabled_returns_404(registry: SessionRegistry, monk
     monkeypatch.setenv("MONKEYBOT_CHAT_HISTORY_API", "0")
     app = create_app(loop_port=FakeLoopPort(registry), registry=registry)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        r = await client.get("/api/chat-history")
-        assert r.status_code == 404
-        assert r.json()["error"]["code"] == "NOT_FOUND"
+        for method, path in (
+            (client.get, "/api/chat-history"),
+            (client.delete, "/api/chat-history/session-a"),
+        ):
+            r = await method(path)
+            assert r.status_code == 404
+            assert r.json()["error"]["code"] == "NOT_FOUND"
