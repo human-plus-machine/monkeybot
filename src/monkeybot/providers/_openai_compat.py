@@ -9,8 +9,11 @@ API key, and provider name (HuggingFace, Ollama).
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import logging
+import random
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
@@ -224,6 +227,78 @@ def count_openai_compat_input_tokens(
 
 _STREAM_USAGE_OPTIONS: dict[str, bool] = {"include_usage": True}
 
+_RATE_LIMIT_MAX_ATTEMPTS = 3
+_RATE_LIMIT_BASE_DELAY_S = 1.0
+
+
+def _rate_limit_retry_delay(attempt: int) -> float:
+    """Exponential backoff with jitter: ~1s, ~2s, ~4s, … for attempts 1, 2, 3."""
+    base: float = _RATE_LIMIT_BASE_DELAY_S * (2 ** (attempt - 1))
+    jitter: float = random.uniform(0, 0.5)
+    return base + jitter
+
+# NVIDIA's free build.nvidia.com tier is low-throughput and returns its own
+# worker/quota text instead of a clean 429, so callers that fan out concurrent
+# requests (parallel tool calls, subagents) can self-inflict a rate limit. Cap
+# in-flight requests for providers with a known low tier; others are unbounded.
+_LOW_THROUGHPUT_PROVIDER_CONCURRENCY: dict[str, int] = {"nvidia": 4}
+_provider_semaphores: dict[str, asyncio.Semaphore] = {}
+
+
+class ProviderRateLimitError(Exception):
+    """Raised when an upstream provider's own rate limit is hit and retries are exhausted.
+
+    ``str(self)`` is a user-facing message; the raw upstream error is chained via
+    ``__cause__`` (see ``raise ... from exc``) for logs, not shown to the user.
+    """
+
+    def __init__(self, provider: str, model: str, original: BaseException) -> None:
+        super().__init__(
+            f"{provider} is temporarily rate-limiting requests for model {model!r}. "
+            "Please wait a moment and try again."
+        )
+        self.provider = provider
+        self.model = model
+        self.original = original
+
+
+def is_rate_limit_error(exc: BaseException) -> bool:
+    """Return True when *exc* looks like an upstream rate-limit / capacity error.
+
+    Covers standard OpenAI-SDK 429s (``RateLimitError``) plus backends like NVIDIA
+    that return their own quota text (e.g. "ResourceExhausted: Worker local total
+    request limit reached (N/M)") without a clean 429 status.
+    """
+    try:
+        from openai import APIStatusError, RateLimitError  # noqa: PLC0415
+
+        if isinstance(exc, RateLimitError):
+            return True
+        if isinstance(exc, APIStatusError) and exc.status_code == 429:
+            return True
+    except ImportError:
+        pass
+    msg = str(exc).lower()
+    return any(
+        phrase in msg
+        for phrase in (
+            "resourceexhausted",
+            "resource exhausted",
+            "rate limit",
+            "rate-limit",
+            "too many requests",
+        )
+    )
+
+
+def _provider_semaphore(provider: str) -> asyncio.Semaphore | None:
+    limit = _LOW_THROUGHPUT_PROVIDER_CONCURRENCY.get(provider)
+    if limit is None:
+        return None
+    if provider not in _provider_semaphores:
+        _provider_semaphores[provider] = asyncio.Semaphore(limit)
+    return _provider_semaphores[provider]
+
 
 async def iter_openai_compat_stream(
     client: Any,
@@ -356,9 +431,13 @@ async def stream_chat_completions_with_tool_fallback(
     max_tokens: int,
     reasoning_effort: str | None = None,
 ) -> AsyncIterator[ProviderEvent]:
-    """Shared ``stream`` body for OpenAI-compat providers that retry without
-    tools when the upstream server rejects function calling (HuggingFace,
-    Ollama, …).
+    """Shared ``stream`` body for OpenAI-compat providers.
+
+    Retries without tools when the upstream server rejects function calling
+    (HuggingFace, Ollama, …). Also retries with backoff on rate-limit/capacity
+    errors (raw upstream body may not be a clean 429, e.g. NVIDIA's own
+    "ResourceExhausted" text) and caps in-flight concurrency per provider; see
+    ``is_rate_limit_error`` / ``_provider_semaphore``.
     """
     from openai import AsyncOpenAI  # noqa: PLC0415
 
@@ -380,34 +459,53 @@ async def stream_chat_completions_with_tool_fallback(
     if reasoning_effort is not None:
         kwargs["reasoning_effort"] = reasoning_effort
 
-    try:
-        async for event in iter_openai_compat_stream(
-            client,
-            kwargs,
-            provider=provider,
-            n_messages=len(messages),
-            n_tools=len(tools),
-        ):
-            yield event
-    except Exception as exc:
-        if tools and is_tool_unsupported_error(exc):
-            _log.warning(
-                "%s model %r does not support tool calling; retrying without tools. Error: %s",
-                provider,
-                model,
-                exc,
-            )
-            kwargs.pop("tools", None)
-            async for event in iter_openai_compat_stream(
-                client,
-                kwargs,
-                provider=provider,
-                n_messages=len(messages),
-                n_tools=0,
-            ):
-                yield event
-        else:
-            raise
+    n_tools = len(tools)
+    sem = _provider_semaphore(provider)
+    attempt = 0
+    while True:
+        attempt += 1
+        yielded_any = False
+        async with sem if sem is not None else contextlib.nullcontext():
+            try:
+                async for event in iter_openai_compat_stream(
+                    client,
+                    kwargs,
+                    provider=provider,
+                    n_messages=len(messages),
+                    n_tools=n_tools,
+                ):
+                    yielded_any = True
+                    yield event
+                return
+            except Exception as exc:
+                if n_tools and is_tool_unsupported_error(exc):
+                    _log.warning(
+                        "%s model %r does not support tool calling; "
+                        "retrying without tools. Error: %s",
+                        provider,
+                        model,
+                        exc,
+                    )
+                    kwargs.pop("tools", None)
+                    n_tools = 0
+                    continue
+                if not is_rate_limit_error(exc):
+                    raise
+                if yielded_any or attempt >= _RATE_LIMIT_MAX_ATTEMPTS:
+                    # Already streamed partial output this attempt, or retries
+                    # exhausted: can't safely retry, but still hide the raw
+                    # upstream text (e.g. NVIDIA's internal worker/quota string).
+                    raise ProviderRateLimitError(provider, model, exc) from exc
+                delay = _rate_limit_retry_delay(attempt)
+                _log.warning(
+                    "%s rate-limited (attempt %d/%d); retrying in %.1fs: %s",
+                    provider,
+                    attempt,
+                    _RATE_LIMIT_MAX_ATTEMPTS,
+                    delay,
+                    exc,
+                )
+                await asyncio.sleep(delay)
 
 
 def is_tool_unsupported_error(exc: BaseException) -> bool:
@@ -441,8 +539,10 @@ def is_tool_unsupported_error(exc: BaseException) -> bool:
 
 
 __all__ = [
+    "ProviderRateLimitError",
     "count_input_tokens_tiktoken",
     "count_openai_compat_input_tokens",
+    "is_rate_limit_error",
     "is_tool_unsupported_error",
     "iter_openai_compat_stream",
     "messages_to_openai",
