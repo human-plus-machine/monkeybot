@@ -970,7 +970,7 @@ def test_no_animations_immediate_flush_and_static_tool(tmp_path: Path) -> None:
             await pilot.pause()
             shell.mark_finished(result="ok")
             await pilot.pause()
-            assert "*.ts" in str(shell.title) or "grep" in str(shell.title)
+            assert "*.ts" in str(shell.title) and "grep" in str(shell.title)
 
     asyncio.run(_run())
 

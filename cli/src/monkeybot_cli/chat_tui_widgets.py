@@ -240,7 +240,7 @@ class EarlierTurns(Collapsible):
         self._body = Static("", classes="earlier-body")
         super().__init__(
             self._body,
-            title="  0 earlier turns",
+            title=_plain_title("  0 earlier turns"),  # type: ignore[arg-type]
             collapsed=True,
             collapsed_symbol="▶",
             expanded_symbol="▼",
@@ -253,7 +253,7 @@ class EarlierTurns(Collapsible):
         if len(self.digest_lines) > 40:
             self.digest_lines = self.digest_lines[-40:]
         noun = "turn" if self.omitted == 1 else "turns"
-        self.title = f"  {self.omitted} earlier {noun}"
+        self.title = _plain_title(f"  {self.omitted} earlier {noun}")  # type: ignore[assignment]
         preview = "\n".join(self.digest_lines[-20:])
         self._body.update(Text(preview, style="dim"))
 
