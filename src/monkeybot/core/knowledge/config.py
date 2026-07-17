@@ -100,6 +100,9 @@ def resolve_knowledge_settings(
     )
 
 
+_SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
+
+
 def _maybe_migrate_legacy_index(*, agent_root: Path, index_path: Path) -> None:
     """Move agent-root index into the workspace path when the latter is missing."""
     legacy = (agent_root / ".monkeybot" / "knowledge" / "index.sqlite").resolve()
@@ -110,6 +113,13 @@ def _maybe_migrate_legacy_index(*, agent_root: Path, index_path: Path) -> None:
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(legacy), str(dest))
+            # Move WAL/SHM/journal sidecars too — leaving them behind would
+            # drop any uncommitted frames from an unclean prior shutdown and
+            # silently reopen the migrated DB missing recent writes.
+            for suffix in _SQLITE_SIDECAR_SUFFIXES:
+                side = legacy.with_name(legacy.name + suffix)
+                if side.is_file():
+                    shutil.move(str(side), str(dest.with_name(dest.name + suffix)))
             logger.info("Migrated knowledge index from %s to %s", legacy, dest)
         except OSError as exc:
             logger.warning(

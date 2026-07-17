@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import os
 from pathlib import Path
 
 import pytest
@@ -9,7 +11,7 @@ import pytest
 from monkeybot.core.knowledge.chunking import chunk_text
 from monkeybot.core.knowledge.extractors import content_hash
 from monkeybot.core.knowledge.links import parse_wiki_links
-from monkeybot.core.knowledge.sqlite_index import KnowledgeIndex, _to_fts_query
+from monkeybot.core.knowledge.sqlite_index import KnowledgeIndex, _pid_alive, _to_fts_query
 
 
 def test_to_fts_query_uses_or_and_drops_stopwords() -> None:
@@ -21,6 +23,61 @@ def test_to_fts_query_uses_or_and_drops_stopwords() -> None:
     assert " AND " not in q
     assert "getIdToken" in q
     assert '"How"' not in q and '"does"' not in q
+
+
+def test_to_fts_query_strips_embedded_quotes_defensively() -> None:
+    """M1: even if a quote character reaches a token, the MATCH expr stays well-formed."""
+    q = _to_fts_query('foo"bar baz"qux')
+    assert q.count('"') % 2 == 0
+    for part in q.split(" OR "):
+        assert part.startswith('"') and part.endswith('"*')
+        inner = part[1:-2]
+        assert '"' not in inner
+
+
+@pytest.mark.asyncio
+async def test_open_warns_on_second_live_writer(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """M3: opening the same index from a second live PID logs an advisory warning."""
+    db = tmp_path / "index.sqlite"
+    sentinel = db.with_suffix(db.suffix + ".writer-pid")
+    other_pid = os.getpid() + 1
+    # Best-effort: pick a PID that is very unlikely to collide with a real
+    # process but treat as "alive" via a monkeypatch-free direct write.
+    sentinel.parent.mkdir(parents=True, exist_ok=True)
+    sentinel.write_text(str(other_pid), encoding="utf-8")
+
+    index = KnowledgeIndex(db)
+    with caplog.at_level(logging.WARNING, logger="monkeybot.core.knowledge.sqlite_index"):
+        # Force the alive check to say "yes" regardless of real PID state,
+        # since we cannot reliably fabricate a live foreign process in CI.
+        import monkeybot.core.knowledge.sqlite_index as sqlite_index_mod
+
+        original = sqlite_index_mod._pid_alive
+        sqlite_index_mod._pid_alive = lambda _pid: True
+        try:
+            await index.open()
+        finally:
+            sqlite_index_mod._pid_alive = original
+    try:
+        assert any("already has an active writer" in r.message for r in caplog.records)
+    finally:
+        await index.close()
+
+
+def test_pid_alive_false_for_nonexistent_pid() -> None:
+    # A very large PID is virtually guaranteed not to exist.
+    assert _pid_alive("999999999") is False
+
+
+def test_pid_alive_true_for_current_process() -> None:
+    assert _pid_alive(str(os.getpid())) is True
+
+
+def test_pid_alive_false_for_garbage_input() -> None:
+    assert _pid_alive("not-a-pid") is False
+    assert _pid_alive("-1") is False
 
 
 @pytest.mark.asyncio

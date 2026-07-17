@@ -37,16 +37,27 @@ _NUDGE_TEXT = (
 
 
 def format_index_announcement(
-    files: int, chunks: int, *, embeddings: bool
+    files: int,
+    chunks: int,
+    *,
+    embeddings: bool,
+    embeddings_degraded_reason: str | None = None,
 ) -> str:
     layers = "FTS + link graph + embeddings" if embeddings else "FTS + link graph"
-    return (
+    text = (
         "## Workspace knowledge index\n"
         f"A local `search` index over this workspace is ready: {files} files / "
         f"{chunks} chunks ({layers}). Use `search` first for questions about "
         "this codebase; use `grep` for exact identifiers and `glob` to locate "
         "files by name."
     )
+    if embeddings_degraded_reason:
+        text += (
+            "\n\nNote: `knowledge.embeddings.enabled` is set but the semantic "
+            f"(ANN) layer is off — {embeddings_degraded_reason}. Search is still "
+            "running keyword FTS + link graph only."
+        )
+    return text
 
 
 def _append_injection(payload: HookPayload, text: str) -> None:
@@ -64,10 +75,12 @@ class IndexAnnouncer:
         index: KnowledgeIndex,
         *,
         embeddings_enabled: bool,
+        embeddings_degraded_reason: str | None = None,
         announced_cap: int = _ANNOUNCED_CAP,
     ) -> None:
         self._index = index
         self._embeddings = embeddings_enabled
+        self._embeddings_degraded_reason = embeddings_degraded_reason
         self._announced_cap = max(1, announced_cap)
         self._announced: OrderedDict[str, None] = OrderedDict()
 
@@ -95,7 +108,12 @@ class IndexAnnouncer:
             return
         _append_injection(
             payload,
-            format_index_announcement(files, chunks, embeddings=self._embeddings),
+            format_index_announcement(
+                files,
+                chunks,
+                embeddings=self._embeddings,
+                embeddings_degraded_reason=self._embeddings_degraded_reason,
+            ),
         )
         logger.info(
             "index announcer: announced %d files / %d chunks thread=%s",

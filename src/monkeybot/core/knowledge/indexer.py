@@ -162,6 +162,12 @@ class KnowledgeIndexer:
                     logger.warning("knowledge notes rescan failed: %r", exc)
 
     async def _full_scan(self) -> None:
+        """Full workspace + notes/memory rescan.
+
+        Invariant: callers must already hold ``self._lock`` (``ensure_ready``
+        and ``flush``'s ``do_workspace`` branch both do). ``asyncio.Lock`` is
+        not reentrant, so this method itself must never acquire ``self._lock``.
+        """
         alive: set[str] = set()
         max_bytes = self._settings.max_file_bytes
         self._pending_embed = []
@@ -231,10 +237,12 @@ class KnowledgeIndexer:
                     )
                     alive.add(index_path)
             elif self._memory_storage is not None:
+                list_failed = False
                 try:
                     names = await self._memory_storage.list_files()
                 except Exception as exc:
                     logger.warning("knowledge memory list_files failed: %r", exc)
+                    list_failed = True
                     names = []
                 for name in names:
                     rel = name.lstrip("/")
@@ -243,10 +251,17 @@ class KnowledgeIndexer:
                     index_path = f"memory/{rel}"
                     try:
                         text = await self._memory_storage.read_text(rel)
+                    except FileNotFoundError:
+                        continue
                     except Exception as exc:
+                        # Transient read error — treat as still-alive so the
+                        # prune step below does not drop a valid note.
                         logger.warning(
-                            "knowledge memory read_text failed for %s: %r", rel, exc
+                            "knowledge memory read_text failed for %s; keeping stale row: %r",
+                            rel,
+                            exc,
                         )
+                        alive.add(index_path)
                         continue
                     await self._index_text(
                         text,
@@ -255,6 +270,11 @@ class KnowledgeIndexer:
                         mtime=None,
                     )
                     alive.add(index_path)
+                if list_failed:
+                    # Cannot enumerate the backend right now — do not let an
+                    # empty listing look like "all memory notes were deleted".
+                    existing_memory = await self._index.list_paths(source_type="note")
+                    alive |= {p for p in existing_memory if p.startswith("memory/")}
 
             if owns_batch:
                 await self._flush_pending_embeds()
@@ -308,14 +328,19 @@ class KnowledgeIndexer:
             if self._memory_storage is not None:
                 try:
                     text = await self._memory_storage.read_text(rel)
+                except FileNotFoundError:
+                    await self._index.delete_path(path)
+                    await self._delete_vectors(path)
+                    return
                 except Exception as exc:
+                    # Transient backend errors (timeout, rate limit, …) should not
+                    # drop a previously-indexed note; leave the stale row for the
+                    # next debounced write or full rescan to retry.
                     logger.warning(
-                        "knowledge memory read failed for %s; deleting index row: %r",
+                        "knowledge memory read failed for %s; leaving index row stale: %r",
                         path,
                         exc,
                     )
-                    await self._index.delete_path(path)
-                    await self._delete_vectors(path)
                     return
                 await self._index_text(
                     text, index_path=path, source_type="note", mtime=None

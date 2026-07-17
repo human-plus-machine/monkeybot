@@ -40,16 +40,20 @@ class KnowledgeSubsystem:
         settings: KnowledgeSettings,
         embedding_provider: NvidiaEmbeddingProvider | None = None,
         vector_store: SQLiteVectorStore | None = None,
+        embeddings_degraded_reason: str | None = None,
     ) -> None:
         self._index = index
         self._indexer = indexer
         self._settings = settings
         self._embedder = embedding_provider
         self._vectors = vector_store
+        self._embeddings_degraded_reason = embeddings_degraded_reason
         self._hook = KnowledgeHook(indexer)
         self._evidence_guard = EvidencePathGuard()
         self._announcer = IndexAnnouncer(
-            index, embeddings_enabled=self.embeddings_enabled
+            index,
+            embeddings_enabled=self.embeddings_enabled,
+            embeddings_degraded_reason=embeddings_degraded_reason,
         )
         self._usage_nudge = SearchUsageNudge()
 
@@ -74,10 +78,15 @@ class KnowledgeSubsystem:
 
         embedder = embedding_provider
         vectors = vector_store
+        # User-facing reason surfaced via IndexAnnouncer when embeddings were
+        # requested (knowledge.embeddings.enabled: true) but ended up off —
+        # otherwise this is only visible in server logs (see PR #123 review).
+        degraded_reason: str | None = None
         if settings.embeddings.enabled:
             if embedder is None:
                 provider = (settings.embeddings.provider or "nvidia").strip().lower()
                 if provider != "nvidia":
+                    degraded_reason = f"provider {provider!r} is not implemented"
                     logger.warning(
                         "knowledge embeddings provider %r not implemented; semantic stage off",
                         provider,
@@ -91,6 +100,7 @@ class KnowledgeSubsystem:
                             batch_size=settings.embeddings.batch_size,
                         )
                     except Exception as exc:
+                        degraded_reason = f"provider setup failed ({exc})"
                         logger.warning(
                             "knowledge embedding provider setup failed; semantic stage off: %r",
                             exc,
@@ -99,6 +109,7 @@ class KnowledgeSubsystem:
             if vectors is None and embedder is not None:
                 store_type = (settings.store.type or "sqlite").strip().lower()
                 if store_type != "sqlite":
+                    degraded_reason = f"store.type {store_type!r} is not supported"
                     logger.warning(
                         "knowledge store.type %r unsupported; semantic stage off",
                         store_type,
@@ -108,6 +119,7 @@ class KnowledgeSubsystem:
                         vectors = SQLiteVectorStore(settings.store.path)
                         await vectors.open()
                     except Exception as exc:
+                        degraded_reason = f"vector store setup failed ({exc})"
                         logger.warning(
                             "knowledge vector store setup failed; semantic stage off: %r",
                             exc,
@@ -120,6 +132,8 @@ class KnowledgeSubsystem:
                 if vectors is not None:
                     await vectors.close()
                 vectors = None
+                if degraded_reason is None:
+                    degraded_reason = "embedding/vector-store setup did not complete"
             else:
                 logger.info(
                     "knowledge embeddings on (provider=%s model=%s store=%s)",
@@ -144,6 +158,7 @@ class KnowledgeSubsystem:
             settings=settings,
             embedding_provider=embedder,
             vector_store=vectors,
+            embeddings_degraded_reason=degraded_reason,
         )
 
     @property

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from monkeybot.core.knowledge.indexer import KnowledgeIndexer
 from monkeybot.core.knowledge.sqlite_index import KnowledgeIndex
 from monkeybot.core.knowledge.types import KnowledgeSettings
+from monkeybot.core.workspace.protocol import WorkspaceStorage
 
 
 @pytest.mark.asyncio
@@ -503,6 +505,181 @@ async def test_flush_continues_after_wave_failure(tmp_path: Path) -> None:
     finally:
         await index.close()
         await vectors.close()
+
+
+class _FlakyStorage:
+    """FakeWorkspaceStorage wrapper that raises transient errors on demand."""
+
+    def __init__(self, inner: WorkspaceStorage) -> None:
+        self._inner = inner
+        self.list_files_fail = False
+        self.read_text_fail_paths: set[str] = set()
+
+    async def read_text(self, path: str) -> str:
+        if path in self.read_text_fail_paths:
+            raise TimeoutError(f"simulated transient read failure for {path}")
+        return cast(str, await self._inner.read_text(path))
+
+    async def list_files(self, prefix: str = "") -> list[str]:
+        if self.list_files_fail:
+            raise TimeoutError("simulated transient list_files failure")
+        return cast("list[str]", await self._inner.list_files(prefix))
+
+    async def write_text(self, path: str, content: str) -> None:
+        await self._inner.write_text(path, content)
+
+    async def append_text(self, path: str, content: str) -> None:
+        await self._inner.append_text(path, content)
+
+    async def exists(self, path: str) -> bool:
+        return cast(bool, await self._inner.exists(path))
+
+    async def delete(self, path: str) -> None:
+        await self._inner.delete(path)
+
+    async def move(self, src: str, dest: str) -> None:
+        await self._inner.move(src, dest)
+
+    async def gc_prefix(self, prefix: str, max_age_sec: float) -> dict[str, int]:
+        return cast("dict[str, int]", await self._inner.gc_prefix(prefix, max_age_sec))
+
+
+@pytest.mark.asyncio
+async def test_reindex_one_keeps_stale_row_on_transient_memory_read_error(
+    tmp_path: Path,
+) -> None:
+    """A transient read_text failure must not delete a previously-indexed note (H1)."""
+    from tests.core.memory.fake_workspace_storage import FakeWorkspaceStorage
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    knowledge = tmp_path / ".monkeybot" / "knowledge"
+    knowledge.mkdir(parents=True)
+
+    storage = FakeWorkspaceStorage()
+    await storage.write_text("note.md", "hello world")
+    flaky = _FlakyStorage(storage)
+
+    settings = KnowledgeSettings(
+        enabled=True,
+        knowledge_root=str(knowledge),
+        index_path=str(knowledge / "index.sqlite"),
+        debounce_ms=0,
+        startup_scan=False,
+        chunk_tokens=200,
+    )
+    index = KnowledgeIndex(Path(settings.index_path))
+    await index.open()
+    try:
+        indexer = KnowledgeIndexer(
+            index,
+            workspace_root=ws,
+            knowledge_root=knowledge,
+            settings=settings,
+            memory_storage=flaky,
+        )
+        # First reindex succeeds and populates the row.
+        await indexer._reindex_one("memory/note.md", "note")  # noqa: SLF001
+        assert "memory/note.md" in await index.list_paths()
+
+        # Now simulate a transient backend failure on the next reindex.
+        flaky.read_text_fail_paths.add("note.md")
+        await indexer._reindex_one("memory/note.md", "note")  # noqa: SLF001
+
+        # The row must still be present (not deleted) despite the read failure.
+        assert "memory/note.md" in await index.list_paths()
+    finally:
+        await index.close()
+
+
+@pytest.mark.asyncio
+async def test_reindex_one_deletes_on_confirmed_missing_memory_note(
+    tmp_path: Path,
+) -> None:
+    """A genuine FileNotFoundError (not a transient error) should still delete."""
+    from tests.core.memory.fake_workspace_storage import FakeWorkspaceStorage
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    knowledge = tmp_path / ".monkeybot" / "knowledge"
+    knowledge.mkdir(parents=True)
+
+    storage = FakeWorkspaceStorage()
+    await storage.write_text("note.md", "hello world")
+
+    settings = KnowledgeSettings(
+        enabled=True,
+        knowledge_root=str(knowledge),
+        index_path=str(knowledge / "index.sqlite"),
+        debounce_ms=0,
+        startup_scan=False,
+        chunk_tokens=200,
+    )
+    index = KnowledgeIndex(Path(settings.index_path))
+    await index.open()
+    try:
+        indexer = KnowledgeIndexer(
+            index,
+            workspace_root=ws,
+            knowledge_root=knowledge,
+            settings=settings,
+            memory_storage=storage,
+        )
+        await indexer._reindex_one("memory/note.md", "note")  # noqa: SLF001
+        assert "memory/note.md" in await index.list_paths()
+
+        await storage.delete("note.md")
+        await indexer._reindex_one("memory/note.md", "note")  # noqa: SLF001
+        assert "memory/note.md" not in await index.list_paths()
+    finally:
+        await index.close()
+
+
+@pytest.mark.asyncio
+async def test_full_scan_keeps_memory_notes_alive_on_list_files_failure(
+    tmp_path: Path,
+) -> None:
+    """A transient list_files failure during a full scan must not prune all memory notes (H1)."""
+    from tests.core.memory.fake_workspace_storage import FakeWorkspaceStorage
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    knowledge = tmp_path / ".monkeybot" / "knowledge"
+    knowledge.mkdir(parents=True)
+
+    storage = FakeWorkspaceStorage()
+    await storage.write_text("note.md", "hello world")
+    flaky = _FlakyStorage(storage)
+
+    settings = KnowledgeSettings(
+        enabled=True,
+        knowledge_root=str(knowledge),
+        index_path=str(knowledge / "index.sqlite"),
+        debounce_ms=0,
+        startup_scan=True,
+        chunk_tokens=200,
+    )
+    index = KnowledgeIndex(Path(settings.index_path))
+    await index.open()
+    try:
+        indexer = KnowledgeIndexer(
+            index,
+            workspace_root=ws,
+            knowledge_root=knowledge,
+            settings=settings,
+            memory_storage=flaky,
+        )
+        await indexer.ensure_ready()
+        assert "memory/note.md" in await index.list_paths()
+
+        # Simulate the backend going unreachable for a subsequent full rescan.
+        flaky.list_files_fail = True
+        await indexer._full_scan()  # noqa: SLF001
+
+        # The note must survive the prune step despite the failed listing.
+        assert "memory/note.md" in await index.list_paths()
+    finally:
+        await index.close()
 
 
 def test_command_implies_fs_mutation_heuristics() -> None:

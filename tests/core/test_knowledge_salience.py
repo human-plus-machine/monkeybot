@@ -50,6 +50,22 @@ def test_format_index_announcement_mentions_search() -> None:
     assert "embeddings" not in format_index_announcement(1, 1, embeddings=False)
 
 
+def test_format_index_announcement_surfaces_degraded_reason() -> None:
+    """H2: embeddings requested-but-disabled must be visible, not just server logs."""
+    text = format_index_announcement(
+        5,
+        10,
+        embeddings=False,
+        embeddings_degraded_reason="NVIDIA_API_KEY is not set",
+    )
+    assert "embeddings.enabled" in text
+    assert "NVIDIA_API_KEY is not set" in text
+
+    # No degradation note when embeddings were never requested.
+    clean = format_index_announcement(5, 10, embeddings=False)
+    assert "embeddings.enabled" not in clean
+
+
 @pytest.mark.asyncio
 async def test_announcer_injects_once_per_thread(tmp_path: Path) -> None:
     index = KnowledgeIndex(tmp_path / "index.sqlite")
@@ -72,6 +88,33 @@ async def test_announcer_injects_once_per_thread(tmp_path: Path) -> None:
         pre2 = _payload(HookEvent.PRE_TURN)
         await announcer.on_pre_turn(pre2)
         assert pre2.inject_text is None
+    finally:
+        await index.close()
+
+
+@pytest.mark.asyncio
+async def test_announcer_includes_degraded_reason(tmp_path: Path) -> None:
+    """H2: IndexAnnouncer must forward the degraded reason into the injected notice."""
+    index = KnowledgeIndex(tmp_path / "index.sqlite")
+    await index.open()
+    try:
+        await index.upsert_file(
+            path="a.md",
+            source_type="workspace_file",
+            content_hash="h",
+            mtime=1.0,
+            chunks=[],
+            links=[],
+        )
+        announcer = IndexAnnouncer(
+            index,
+            embeddings_enabled=False,
+            embeddings_degraded_reason="provider setup failed (boom)",
+        )
+        pre = _payload(HookEvent.PRE_TURN)
+        await announcer.on_pre_turn(pre)
+        assert pre.inject_text is not None
+        assert "provider setup failed (boom)" in pre.inject_text
     finally:
         await index.close()
 

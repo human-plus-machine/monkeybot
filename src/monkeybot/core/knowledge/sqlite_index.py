@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any, cast
@@ -77,7 +78,36 @@ class KnowledgeIndex:
         await self._conn.execute("PRAGMA foreign_keys = ON")
         await self._conn.executescript(_SCHEMA)
         await self._conn.commit()
+        self._warn_if_other_writer_active()
         logger.info("knowledge index open path=%s", self._db_path)
+
+    def _warn_if_other_writer_active(self) -> None:
+        """Best-effort, non-blocking check for a second live writer PID.
+
+        The indexer's dirty queues are process-local (see KnowledgeIndexer /
+        KnowledgeSubsystem docstrings); two writer processes on the same index
+        would silently double-index and race on chunk upserts. This is
+        advisory only — WAL + busy_timeout still make individual writes safe,
+        it just cannot detect a fully vanished process (best-effort by design).
+        """
+        sentinel = self._db_path.with_suffix(self._db_path.suffix + ".writer-pid")
+        pid = os.getpid()
+        try:
+            if sentinel.is_file():
+                prev = sentinel.read_text(encoding="utf-8").strip()
+                if prev and prev != str(pid) and _pid_alive(prev):
+                    logger.warning(
+                        "knowledge index at %s already has an active writer "
+                        "(pid=%s); this process (pid=%s) may double-index or "
+                        "race on writes — the knowledge layer assumes a single "
+                        "gateway writer per workspace.",
+                        self._db_path,
+                        prev,
+                        pid,
+                    )
+            sentinel.write_text(str(pid), encoding="utf-8")
+        except OSError as exc:
+            logger.debug("knowledge index writer-pid check skipped: %r", exc)
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -372,6 +402,24 @@ class KnowledgeIndex:
         }
 
 
+def _pid_alive(pid_str: str) -> bool:
+    try:
+        pid = int(pid_str)
+    except ValueError:
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, owned by another user
+    except OSError:
+        return False
+    return True
+
+
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_./-]+")
 
 # Dropped from MATCH so natural-language questions don't AND into zero hits.
@@ -534,7 +582,11 @@ def _to_fts_query(query: str) -> str:
         tokens = [t.replace('"', "") for t in _split_tokens(query)[:_MAX_FTS_TOKENS] if t]
     if not tokens:
         return ""
-    parts = [f'"{tok}"*' for tok in tokens if tok]
+    # Defensive strip: tokens are already quote-free via _TOKEN_RE, but this
+    # keeps the FTS5 MATCH expression well-formed even if that regex is ever
+    # loosened (e.g. to allow unicode identifiers).
+    safe_tokens = [tok.replace('"', "") for tok in tokens if tok]
+    parts = [f'"{tok}"*' for tok in safe_tokens if tok]
     return " OR ".join(parts)
 
 

@@ -125,3 +125,36 @@ def test_migrates_legacy_agent_root_index(tmp_path: Path) -> None:
     assert dest.is_file()
     assert dest.read_bytes() == b"sqlite-bytes"
     assert not legacy_index.is_file()
+
+
+def test_migrates_legacy_index_wal_and_shm_sidecars(tmp_path: Path) -> None:
+    """M4: an unclean-shutdown WAL/SHM sidecar must migrate with the main DB file."""
+    agent = tmp_path / "agent"
+    workspace = agent / "workspace"
+    workspace.mkdir(parents=True)
+    legacy_dir = agent / ".monkeybot" / "knowledge"
+    legacy_dir.mkdir(parents=True)
+    legacy_index = legacy_dir / "index.sqlite"
+    legacy_index.write_bytes(b"sqlite-bytes")
+    legacy_wal = legacy_dir / "index.sqlite-wal"
+    legacy_wal.write_bytes(b"wal-frames")
+    legacy_shm = legacy_dir / "index.sqlite-shm"
+    legacy_shm.write_bytes(b"shm-bytes")
+    cfg = agent / "monkeybot_config"
+    cfg.mkdir()
+    (cfg / "monkeybot.yaml").write_text("knowledge:\n  enabled: true\n", encoding="utf-8")
+
+    settings = resolve_knowledge_settings(
+        agent_root=agent,
+        config_path=cfg / "monkeybot.yaml",
+        workspace_root=workspace,
+    )
+    dest = Path(settings.index_path)
+    dest_wal = dest.with_name(dest.name + "-wal")
+    dest_shm = dest.with_name(dest.name + "-shm")
+
+    assert dest.is_file()
+    assert dest_wal.is_file() and dest_wal.read_bytes() == b"wal-frames"
+    assert dest_shm.is_file() and dest_shm.read_bytes() == b"shm-bytes"
+    assert not legacy_wal.exists()
+    assert not legacy_shm.exists()
