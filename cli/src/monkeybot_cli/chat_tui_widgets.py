@@ -12,6 +12,7 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
+from textual.content import Content
 from textual.css.query import NoMatches
 from textual.events import Key, Paste
 from textual.message import Message
@@ -26,6 +27,11 @@ from monkeybot_cli.chat_tool_display import format_tool_expand_body
 _SPIN = "⠋⠙⠹⠸⠴⠦⠧⠇⠏"
 _HISTORY_LIMIT = 500
 _COMPOSER_PLACEHOLDER = "Message the agent — / for commands"
+
+
+def _plain_title(text: str) -> Content:
+    """Collapsible titles parse Textual markup; tool argv often contains ``[`` / ``*``."""
+    return Content.from_text(text, markup=False)
 
 
 def write_osc52_clipboard(app: App[object], text: str) -> bool:
@@ -234,7 +240,7 @@ class EarlierTurns(Collapsible):
         self._body = Static("", classes="earlier-body")
         super().__init__(
             self._body,
-            title="  0 earlier turns",
+            title=_plain_title("  0 earlier turns"),  # type: ignore[arg-type]
             collapsed=True,
             collapsed_symbol="▶",
             expanded_symbol="▼",
@@ -247,7 +253,7 @@ class EarlierTurns(Collapsible):
         if len(self.digest_lines) > 40:
             self.digest_lines = self.digest_lines[-40:]
         noun = "turn" if self.omitted == 1 else "turns"
-        self.title = f"  {self.omitted} earlier {noun}"
+        self.title = _plain_title(f"  {self.omitted} earlier {noun}")  # type: ignore[assignment]
         preview = "\n".join(self.digest_lines[-20:])
         self._body.update(Text(preview, style="dim"))
 
@@ -441,7 +447,7 @@ class ToolCallBlock(Collapsible):
         )
         super().__init__(
             self._detail,
-            title=f"  {title}",
+            title=_plain_title(f"  {title}"),  # type: ignore[arg-type]
             collapsed=True,
             collapsed_symbol="▶",
             expanded_symbol="▼",
@@ -455,14 +461,14 @@ class ToolCallBlock(Collapsible):
             self._spin_timer = self.set_interval(0.08, self._tick_spinner)
             self._tick_spinner()
         else:
-            self.title = f"  {self.display_label}"
+            self.title = _plain_title(f"  {self.display_label}")  # type: ignore[assignment]
 
     def _tick_spinner(self) -> None:
         if self.status != "running":
             return
         glyph = _SPIN[self._spin_i % len(_SPIN)]
         self._spin_i += 1
-        self.title = f"  {glyph} {self.display_label}"
+        self.title = _plain_title(f"  {glyph} {self.display_label}")  # type: ignore[assignment]
 
     def mark_finished(self, *, error: object = None, result: str = "") -> None:
         self.status = "error" if error else "ok"
@@ -472,7 +478,7 @@ class ToolCallBlock(Collapsible):
             self._spin_timer.stop()
             self._spin_timer = None
         mark = "✗" if error else "✓"
-        self.title = f"  {mark} {self.display_label}"
+        self.title = _plain_title(f"  {mark} {self.display_label}")  # type: ignore[assignment]
         self._detail.update(
             format_tool_expand_body(
                 self.tool_name,
