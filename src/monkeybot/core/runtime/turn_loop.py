@@ -779,6 +779,17 @@ async def _consume_provider_stream_body(
         return
 
 
+def _thinking_block(state: _TurnState) -> ContentBlock | None:
+    """Wrap the turn's accumulated thinking text, if any, for persistence."""
+    thinking_text = (state.thinking_text or "").strip()
+    if not thinking_text:
+        return None
+    return ThinkingBlock(
+        thinking=thinking_text,
+        signature=state.thinking_signature or "",
+    )
+
+
 async def _stream_provider_turn(
     state: _TurnState,
     *,
@@ -817,13 +828,9 @@ async def _handle_empty_or_final_text(
         # off the await path means the Firestore write does not delay
         # TurnComplete / the user-visible reply. Awaited at the tail.
         assist_blocks: list[ContentBlock] = []
-        if (state.thinking_text or "").strip():
-            assist_blocks.append(
-                ThinkingBlock(
-                    thinking=state.thinking_text,
-                    signature=state.thinking_signature or "",
-                )
-            )
+        thinking = _thinking_block(state)
+        if thinking is not None:
+            assist_blocks.append(thinking)
         assist_blocks.append(Text(text=cleaned_text))
         state.assistant_write_task = asyncio.create_task(
             history.append(
@@ -904,13 +911,9 @@ async def _append_tool_requests_and_dispatch(
     """
     ordered = sorted(state.pending.values(), key=lambda c: c.call_id)
     assist_blocks: list[ContentBlock] = []
-    if state.thinking_text.strip():
-        assist_blocks.append(
-            ThinkingBlock(
-                thinking=state.thinking_text,
-                signature=state.thinking_signature or "",
-            )
-        )
+    thinking = _thinking_block(state)
+    if thinking is not None:
+        assist_blocks.append(thinking)
     prose = (state.assistant_text or "").strip()
     if prose:
         assist_blocks.append(Text(text=prose))

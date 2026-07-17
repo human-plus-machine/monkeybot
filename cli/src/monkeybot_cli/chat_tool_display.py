@@ -4,31 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from monkeybot.core.tools.tool_kind import tool_kind_label
+
 _SUBAGENT_HINT_MAX = 60
 _TITLE_HINT_MAX = 72
 _DETAIL_MAX = 8000
 _SHELL_TAIL_LINES = 40
-
-_TOOL_KIND: dict[str, str] = {
-    "run_command": "Shell",
-    "execute": "Shell",
-    "shell": "Shell",
-    "bash": "Shell",
-    "read_file": "Read",
-    "read": "Read",
-    "write_file": "Write",
-    "write": "Write",
-    "edit_file": "Edit",
-    "apply_patch": "Edit",
-    "str_replace": "Edit",
-    "grep": "Search",
-    "search": "Search",
-    "web_search": "Search",
-    "glob": "Glob",
-    "list_dir": "List",
-    "list_directory": "List",
-    "task": "Task",
-}
 
 _SHELL_TOOLS = frozenset({"run_command", "execute", "shell", "bash"})
 _READ_TOOLS = frozenset({"read_file", "read"})
@@ -135,14 +116,6 @@ def task_hint(args: dict[str, object]) -> str:
         if isinstance(val, str) and val.strip():
             return truncate_subagent_hint(val.strip())
     return ""
-
-
-def tool_kind_label(tool: str) -> str:
-    key = tool.strip().lower().replace("-", "_")
-    if key in _TOOL_KIND:
-        return _TOOL_KIND[key]
-    cleaned = tool.strip().replace("_", " ").replace("-", " ")
-    return cleaned.title() if cleaned else "Tool"
 
 
 def resolve_tool_hint(tool: str, label: str, args: dict[str, object]) -> str:

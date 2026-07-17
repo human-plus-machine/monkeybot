@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 from monkeybot.core.llm.provider import Message
+from monkeybot.core.logging_utils import kv
+from monkeybot.core.tools.tool_kind import tool_kind_label
 from monkeybot.core.types.content_blocks import (
     ContentBlock,
     RedactedThinking,
@@ -15,6 +18,8 @@ from monkeybot.core.types.content_blocks import (
     ToolRequest,
     ToolResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -56,41 +61,32 @@ def text_from_message(message: Message) -> str:
     return "\n".join(parts).strip()
 
 
-def _text_from_blocks(blocks: list[ContentBlock]) -> str:
+def _text_from_blocks(blocks: list[ContentBlock], *, call_id: str) -> str:
+    """Concatenate Text blocks; log and drop any non-Text result blocks.
+
+    Tool results can carry Image/File blocks that have no wire text
+    representation yet; surfacing them silently as an empty row would hide
+    the gap from anyone debugging a missing result in the chat-history API.
+    """
     parts: list[str] = []
+    dropped = 0
     for block in blocks:
-        if isinstance(block, Text) and block.text.strip():
-            parts.append(block.text.strip())
+        if isinstance(block, Text):
+            if block.text.strip():
+                parts.append(block.text.strip())
+        else:
+            dropped += 1
+    if dropped:
+        logger.warning(
+            "tool result has non-text blocks dropped from chat-history wire %s",
+            kv(call_id=call_id, dropped_blocks=dropped),
+        )
     return "\n".join(parts).strip()
 
 
 def _tool_wire_title(name: str, args: dict[str, object]) -> str:
-    """Short UI title; mirrors CLI ``tool_collapsed_title`` without importing CLI."""
-    kind_map = {
-        "run_command": "Shell",
-        "execute": "Shell",
-        "shell": "Shell",
-        "bash": "Shell",
-        "read_file": "Read",
-        "read": "Read",
-        "write_file": "Write",
-        "write": "Write",
-        "edit_file": "Edit",
-        "apply_patch": "Edit",
-        "str_replace": "Edit",
-        "grep": "Search",
-        "search": "Search",
-        "web_search": "Search",
-        "glob": "Glob",
-        "list_dir": "List",
-        "list_directory": "List",
-        "task": "Task",
-    }
-    key = name.strip().lower().replace("-", "_")
-    kind = kind_map.get(key)
-    if kind is None:
-        cleaned = name.strip().replace("_", " ").replace("-", " ")
-        kind = cleaned.title() if cleaned else "Tool"
+    """Short UI title, e.g. ``Shell  ls``; kind mapping shared with the CLI."""
+    kind = tool_kind_label(name)
 
     hint = ""
     argv = args.get("argv")
@@ -162,7 +158,9 @@ def messages_to_wire(messages: list[Message]) -> list[dict[str, Any]]:
 
         for req in tool_requests:
             resp = responses.get(req.id)
-            result_text = _text_from_blocks(resp.result) if resp is not None else ""
+            result_text = (
+                _text_from_blocks(resp.result, call_id=req.id) if resp is not None else ""
+            )
             error: str | None = None
             if resp is not None and resp.is_error:
                 error = result_text or "tool error"
