@@ -81,12 +81,15 @@ contract stated by the user.
 
 # Appended to every compacted summary so search-first / format rules survive
 # even when middle-history exemplars are dropped (post-summarization epoch).
-_POST_COMPACTION_STANDING = """\
-## Standing instructions (still in effect after compaction)
-- Prefer `search` before broad `glob` / wandering `read_file` for codebase Q&A; use `glob` for locate-a-file / asset questions.
-- Preserve any answer-format contract from the user (e.g. `Qxx:` / `Evidence:` lines) exactly.
-- For long multi-item tasks, keep incremental answers in a workspace file and update it as you go — do not rely on chat memory alone.
-- Answer only after reading: `search` snippets are not evidence — `read_file` the file you cite before answering (`glob` existence suffices for binary assets). If unknown, say unknown.\
+# Keep this a short pointer — full rules live in the harness (avoid drift /
+# duplicated "Standing instructions" blocks accumulating across compactions epochs).
+_POST_COMPACTION_STANDING_HEADING = "## Standing instructions (still in effect after compaction)"
+_POST_COMPACTION_STANDING = f"""\
+{_POST_COMPACTION_STANDING_HEADING}
+Harness rules still apply: prefer `search` before broad exploration for codebase Q&A; \
+`read_file` (or `glob` for binary assets) before `Evidence:` citations; keep incremental \
+answers in a workspace file for long multi-item tasks; preserve any user answer-format \
+contract verbatim.\
 """
 
 
@@ -239,7 +242,10 @@ async def _summarize_history(
             elif isinstance(ev, Done):
                 break
     summary_text = summary_text.strip() or "(empty summary)"
-    summary_body = f"[Context Summary]:\n{summary_text}\n\n{_POST_COMPACTION_STANDING}"
+    if _POST_COMPACTION_STANDING_HEADING in summary_text:
+        summary_body = f"[Context Summary]:\n{summary_text}"
+    else:
+        summary_body = f"[Context Summary]:\n{summary_text}\n\n{_POST_COMPACTION_STANDING}"
     merged = [
         *head,
         Message(

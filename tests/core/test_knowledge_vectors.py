@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from monkeybot.core.persistence.sqlite_vector import SQLiteVectorStore
 from monkeybot.core.persistence.sqlite_vector import SQLiteVectorStore, VectorChunkRecord
 
 

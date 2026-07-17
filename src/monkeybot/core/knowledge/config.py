@@ -48,6 +48,9 @@ def resolve_knowledge_settings(
 
     Index path is always ``{knowledge_root}/index.sqlite``. Debounce, startup
     scan, and max file bytes are fixed defaults (not configurable).
+
+    Side effect: may move a legacy agent-root index (and WAL/SHM sidecars) into
+    the workspace knowledge root via ``_maybe_migrate_legacy_index``.
     """
     root = (agent_root or resolve_agent_root(config_path=config_path)).resolve()
     cfg = config_path or resolve_config_path(agent_root=root)

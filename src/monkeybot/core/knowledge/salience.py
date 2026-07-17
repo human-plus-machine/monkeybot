@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 from collections import OrderedDict
+from dataclasses import dataclass
 
 from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
 from monkeybot.core.knowledge.sqlite_index import KnowledgeIndex
@@ -26,6 +27,15 @@ _SEARCH_TOOLS = frozenset({"search", "recall"})
 # Exploration calls without `search` in one turn before the backstop fires.
 _NUDGE_THRESHOLD = 3
 _ANNOUNCED_CAP = 256
+_NUDGE_THREAD_CAP = 256
+
+
+@dataclass
+class _NudgeState:
+    request_id: str | None = None
+    exploration_calls: int = 0
+    searched: bool = False
+    nudged: bool = False
 
 _NUDGE_TEXT = (
     "## Workspace index reminder\n"
@@ -124,48 +134,69 @@ class IndexAnnouncer:
 
 
 class SearchUsageNudge:
-    """One-shot per-turn reminder when exploration drifts past `search`."""
+    """One-shot per-turn reminder when exploration drifts past `search`.
 
-    def __init__(self, *, threshold: int = _NUDGE_THRESHOLD) -> None:
+    Counters are scoped per ``thread_id`` so concurrent SSE sessions sharing one
+    gateway process cannot reset or inject each other's nudge state.
+    """
+
+    def __init__(
+        self,
+        *,
+        threshold: int = _NUDGE_THRESHOLD,
+        thread_cap: int = _NUDGE_THREAD_CAP,
+    ) -> None:
         self._threshold = threshold
-        self._request_id: str | None = None
-        self._exploration_calls = 0
-        self._searched = False
-        self._nudged = False
+        self._thread_cap = max(1, thread_cap)
+        self._by_thread: OrderedDict[str, _NudgeState] = OrderedDict()
 
     def register(self, manager: HookManager) -> None:
         manager.register(HookEvent.POST_TOOL, self.on_post_tool)
         manager.register(HookEvent.PRE_TOOL, self.on_pre_tool)
 
-    def _reset_for(self, request_id: str) -> None:
-        self._request_id = request_id
-        self._exploration_calls = 0
-        self._searched = False
-        self._nudged = False
+    def _state(self, thread_id: str) -> _NudgeState:
+        existing = self._by_thread.get(thread_id)
+        if existing is not None:
+            self._by_thread.move_to_end(thread_id)
+            return existing
+        state = _NudgeState()
+        self._by_thread[thread_id] = state
+        while len(self._by_thread) > self._thread_cap:
+            self._by_thread.popitem(last=False)
+        return state
+
+    def _reset_for(self, state: _NudgeState, request_id: str) -> None:
+        state.request_id = request_id
+        state.exploration_calls = 0
+        state.searched = False
+        state.nudged = False
 
     async def on_post_tool(self, payload: HookPayload) -> None:
-        if payload.request_id != self._request_id:
-            self._reset_for(payload.request_id)
+        state = self._state(payload.thread_id)
+        if payload.request_id != state.request_id:
+            self._reset_for(state, payload.request_id)
         name = payload.tool_name or ""
         if name in _SEARCH_TOOLS:
-            self._searched = True
+            state.searched = True
         elif name in _EXPLORATION_TOOLS:
-            self._exploration_calls += 1
+            state.exploration_calls += 1
 
     async def on_pre_tool(self, payload: HookPayload) -> None:
-        if payload.request_id != self._request_id:
-            self._reset_for(payload.request_id)
+        state = self._state(payload.thread_id)
+        if payload.request_id != state.request_id:
+            self._reset_for(state, payload.request_id)
             return
-        if self._nudged or self._searched:
+        if state.nudged or state.searched:
             return
-        if self._exploration_calls < self._threshold:
+        if state.exploration_calls < self._threshold:
             return
-        self._nudged = True
+        state.nudged = True
         _append_injection(payload, _NUDGE_TEXT)
         logger.info(
-            "search usage nudge: injected after %d exploration calls request=%s",
-            self._exploration_calls,
+            "search usage nudge: injected after %d exploration calls request=%s thread=%s",
+            state.exploration_calls,
             payload.request_id,
+            payload.thread_id,
         )
 
 

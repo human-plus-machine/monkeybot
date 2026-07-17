@@ -30,6 +30,8 @@ _DEFAULT_DIM = 1024  # query/index default (Matryoshka prefix)
 _DEFAULT_BATCH = 32
 # Match chat provider free-tier throughput discipline.
 _CONCURRENCY = 4
+_RATE_LIMIT_MAX_ATTEMPTS = 3
+_RATE_LIMIT_BASE_DELAY_S = 1.0
 
 _QUERY_PREFIX = "query: "
 _PASSAGE_PREFIX = "passage: "
@@ -157,12 +159,34 @@ class NvidiaEmbeddingProvider:
             "input": texts,
         }
 
+        from monkeybot.providers._openai_compat import is_rate_limit_error
+
+        last_exc: BaseException | None = None
         async with self._sem:
-            try:
-                resp = await client.embeddings.create(**kwargs)
-            except Exception as exc:
-                logger.warning("nvidia embed failed (model=%s): %r", self._model, exc)
-                raise
+            for attempt in range(1, _RATE_LIMIT_MAX_ATTEMPTS + 1):
+                try:
+                    resp = await client.embeddings.create(**kwargs)
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt < _RATE_LIMIT_MAX_ATTEMPTS and is_rate_limit_error(exc):
+                        delay = _RATE_LIMIT_BASE_DELAY_S * (2 ** (attempt - 1))
+                        logger.warning(
+                            "nvidia embed rate-limited (model=%s attempt=%d/%d); "
+                            "retrying in %.1fs: %r",
+                            self._model,
+                            attempt,
+                            _RATE_LIMIT_MAX_ATTEMPTS,
+                            delay,
+                            exc,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    logger.warning("nvidia embed failed (model=%s): %r", self._model, exc)
+                    raise
+            else:
+                assert last_exc is not None
+                raise last_exc
 
         # API may return out of order; sort by index when present.
         data = sorted(resp.data, key=lambda d: getattr(d, "index", 0))

@@ -33,11 +33,18 @@ def _ctx(workspace_root: Path | None) -> TurnContext:
     )
 
 
-def _payload(event: HookEvent, workspace_root: Path | None, **kw) -> HookPayload:
+def _payload(
+    event: HookEvent,
+    workspace_root: Path | None,
+    *,
+    thread_id: str = "t1",
+    request_id: str = "r1",
+    **kw,
+) -> HookPayload:
     return HookPayload(
         event=event,
-        thread_id="t1",
-        request_id="r1",
+        thread_id=thread_id,
+        request_id=request_id,
         ctx=_ctx(workspace_root),
         **kw,
     )
@@ -61,6 +68,13 @@ Evidence: unknown
     assert "public/og-image.png" in paths
     assert "missing/nope.ts" in paths
     assert "unknown" not in paths
+
+
+def test_extract_evidence_paths_strips_trailing_punctuation() -> None:
+    """Sentence-ending period must not become part of the path (false missing)."""
+    assert extract_evidence_paths("Evidence: src/auth.ts.\n") == ["src/auth.ts"]
+    assert extract_evidence_paths("Evidence: `src/auth.ts`.\n") == ["src/auth.ts"]
+    assert extract_evidence_paths("Evidence: src/auth.ts,\n") == ["src/auth.ts"]
 
 
 def test_missing_evidence_paths_filters_existing(tmp_path: Path) -> None:
@@ -207,6 +221,79 @@ async def test_guard_read_confirmation_tolerates_prefix(tmp_path: Path) -> None:
     pre = _payload(HookEvent.PRE_TURN, tmp_path)
     await guard.on_pre_turn(pre)
     assert pre.inject_text is None
+
+
+@pytest.mark.asyncio
+async def test_guard_rejects_common_filename_suffix_collision(tmp_path: Path) -> None:
+    """Reading packages/api/src/index.ts must not confirm a bare src/index.ts cite."""
+    deep = tmp_path / "packages" / "api" / "src"
+    deep.mkdir(parents=True)
+    (deep / "index.ts").write_text("deep", encoding="utf-8")
+    shallow = tmp_path / "src"
+    shallow.mkdir()
+    (shallow / "index.ts").write_text("shallow", encoding="utf-8")
+    guard = EvidencePathGuard()
+    await _record_read(guard, tmp_path, "packages/api/src/index.ts")
+    await guard.on_after_provider(
+        _payload(
+            HookEvent.AFTER_PROVIDER_RESPONSE,
+            tmp_path,
+            assistant_text="Evidence: src/index.ts\n",
+        )
+    )
+    pre = _payload(HookEvent.PRE_TURN, tmp_path)
+    await guard.on_pre_turn(pre)
+    assert pre.inject_text is not None
+    assert "Evidence verification required" in pre.inject_text
+    assert "`src/index.ts`" in pre.inject_text
+
+
+@pytest.mark.asyncio
+async def test_guard_isolates_state_across_threads(tmp_path: Path) -> None:
+    """Concurrent SSE sessions share one guard; confirmations must not leak."""
+    (tmp_path / "a.ts").write_text("1", encoding="utf-8")
+    (tmp_path / "b.ts").write_text("2", encoding="utf-8")
+    guard = EvidencePathGuard()
+    await guard.on_post_tool(
+        _payload(
+            HookEvent.POST_TOOL,
+            tmp_path,
+            thread_id="session-a",
+            tool_name="read_file",
+            tool_args={"path": "a.ts"},
+        )
+    )
+    # Session B cites a.ts without reading it — must still get verification.
+    await guard.on_after_provider(
+        _payload(
+            HookEvent.AFTER_PROVIDER_RESPONSE,
+            tmp_path,
+            thread_id="session-b",
+            assistant_text="Evidence: a.ts\n",
+        )
+    )
+    pre_b = _payload(HookEvent.PRE_TURN, tmp_path, thread_id="session-b")
+    await guard.on_pre_turn(pre_b)
+    assert pre_b.inject_text is not None
+    assert "Evidence verification required" in pre_b.inject_text
+
+    # Session A's pending must not be drained by session B's inject.
+    await guard.on_after_provider(
+        _payload(
+            HookEvent.AFTER_PROVIDER_RESPONSE,
+            tmp_path,
+            thread_id="session-a",
+            assistant_text="Evidence: missing-a.ts\n",
+        )
+    )
+    pre_b2 = _payload(HookEvent.PRE_TURN, tmp_path, thread_id="session-b")
+    await guard.on_pre_turn(pre_b2)
+    assert pre_b2.inject_text is None
+
+    pre_a = _payload(HookEvent.PRE_TURN, tmp_path, thread_id="session-a")
+    await guard.on_pre_turn(pre_a)
+    assert pre_a.inject_text is not None
+    assert "`missing-a.ts`" in pre_a.inject_text
 
 
 @pytest.mark.asyncio

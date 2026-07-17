@@ -133,6 +133,33 @@ class KnowledgeIndex:
             return None
         return float(row["mtime"])
 
+    async def list_chunks_for_path(self, path: str) -> list[TextChunk]:
+        """Return persisted chunks for ``path`` (embedding backfill must reuse these)."""
+        conn = self._require()
+        cur = await conn.execute(
+            """
+            SELECT path, source_type, start_line, end_line, text
+            FROM chunks WHERE path = ? ORDER BY start_line, id
+            """,
+            (path,),
+        )
+        rows = await cur.fetchall()
+        out: list[TextChunk] = []
+        for row in rows:
+            source_type = str(row["source_type"])
+            if source_type not in ("note", "workspace_file"):
+                continue
+            out.append(
+                TextChunk(
+                    path=str(row["path"]),
+                    source_type=source_type,  # type: ignore[arg-type]
+                    start_line=int(row["start_line"]),
+                    end_line=int(row["end_line"]),
+                    text=str(row["text"]),
+                )
+            )
+        return out
+
     async def counts(self) -> tuple[int, int]:
         """Return ``(indexed_files, indexed_chunks)`` for salience reporting."""
         conn = self._require()

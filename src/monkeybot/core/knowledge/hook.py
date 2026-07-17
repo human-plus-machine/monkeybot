@@ -37,17 +37,14 @@ _READ_ONLY_CMDS = frozenset(
         "egrep",
         "fgrep",
         "rg",
-        "find",
         "fd",
         "pwd",
         "echo",
         "printf",
         "which",
         "type",
-        "command",
         "whoami",
         "id",
-        "env",
         "printenv",
         "wc",
         "stat",
@@ -107,6 +104,20 @@ _MUTATING_CMDS = frozenset(
     }
 )
 
+# Wrappers peeled so the real command is classified.
+_SHELL_WRAPPERS = frozenset(
+    {
+        "sudo",
+        "env",
+        "nice",
+        "nohup",
+        "time",
+        "command",
+        "xargs",
+        "stdbuf",
+    }
+)
+
 _GIT_READONLY_SUBS = frozenset(
     {
         "status",
@@ -122,9 +133,10 @@ _GIT_READONLY_SUBS = frozenset(
         "cat-file",
         "blame",
         "shortlog",
-        "stash",  # list is read; push/pop mutate — fail-safe below for stash args
     }
 )
+
+_GIT_STASH_READONLY_SUBS = frozenset({"list", "show"})
 
 _PKG_MUTATING_SUBS = frozenset(
     {
@@ -143,7 +155,14 @@ _PKG_MUTATING_SUBS = frozenset(
     }
 )
 
-_REDIRECT_RE = re.compile(r"(^|[^\d])>{1,2}|<<|\|\s*tee\b")
+_FIND_MUTATING_FLAGS = frozenset(
+    {"-delete", "-exec", "-execdir", "-ok", "-okdir"}
+)
+
+# Include fd redirects (``2>/tmp/out``); require a command-boundary so bare
+# comparison operators inside ``[[ … ]]`` are less likely to false-positive.
+_REDIRECT_RE = re.compile(r"(?:^|[\s;|&])\d*>{1,2}|<<|\|\s*tee\b")
+_COMPOUND_SPLIT_RE = re.compile(r"&&|\|\||;")
 
 
 class KnowledgeHook:
@@ -203,44 +222,40 @@ def _looks_like_note_path(rel: str) -> bool:
 def command_implies_fs_mutation(argv: list[str] | None) -> bool:
     """Return True when argv may change workspace files.
 
-    Unknown commands default to no-rescan (read-only assumption) to avoid
-    full-workspace rescans on every unfamiliar CLI.
+    Unknown commands default to rescan (fail-safe) so wrappers like
+    ``python3 -c`` / ``node -e`` cannot silently leave the index stale.
     """
     if not argv:
         return False
     joined = " ".join(argv)
     if _REDIRECT_RE.search(joined):
         return True
+    return _argv_implies_mutation(list(argv))
+
+
+def _argv_implies_mutation(argv: list[str]) -> bool:
+    argv = _peel_wrappers(argv)
+    if not argv:
+        return False
 
     cmd = argv[0].rsplit("/", 1)[-1].lower()
 
-    # bash -c / sh -c — inspect script body
+    # bash -c / sh -c — inspect every compound segment of the script body
     if cmd in {"bash", "sh", "zsh", "fish"} and len(argv) >= 3 and argv[1] in {
         "-c",
         "-lc",
         "-ic",
     }:
-        script = argv[2]
-        if _REDIRECT_RE.search(script):
-            return True
-        first = script.strip().split(None, 1)[0] if script.strip() else ""
-        first = first.rsplit("/", 1)[-1].lower()
-        if first in _READ_ONLY_CMDS:
-            return False
-        if first in _MUTATING_CMDS:
-            return True
-        return False
+        return _script_implies_mutation(argv[2])
+
+    if cmd == "find":
+        return _find_implies_mutation(argv[1:])
 
     if cmd in _READ_ONLY_CMDS:
         return False
 
     if cmd == "git":
-        if len(argv) < 2:
-            return False
-        sub = argv[1].lstrip("-")
-        if sub in _GIT_READONLY_SUBS:
-            return False
-        return True
+        return _git_implies_mutation(argv)
 
     if cmd in _MUTATING_CMDS:
         if cmd in {"npm", "pnpm", "yarn", "bun", "pip", "pip3", "uv"} and len(argv) >= 2:
@@ -260,7 +275,62 @@ def command_implies_fs_mutation(argv: list[str] | None) -> bool:
             return sub in _PKG_MUTATING_SUBS
         return True
 
+    # Unknown binary — assume it may mutate (safe default for index freshness).
+    return True
+
+
+def _peel_wrappers(argv: list[str]) -> list[str]:
+    out = list(argv)
+    while out:
+        head = out[0].rsplit("/", 1)[-1].lower()
+        if head not in _SHELL_WRAPPERS:
+            break
+        out = out[1:]
+        if head == "env":
+            while out and "=" in out[0] and not out[0].startswith("-"):
+                out = out[1:]
+        elif head == "sudo":
+            while out and out[0].startswith("-") and out[0] not in {"-", "--"}:
+                # sudo -u user / sudo -E … — drop flags; keep operand.
+                if out[0] in {"-u", "-g", "-h", "-p", "-r", "-t", "-C"} and len(out) >= 2:
+                    out = out[2:]
+                else:
+                    out = out[1:]
+    return out
+
+
+def _script_implies_mutation(script: str) -> bool:
+    if _REDIRECT_RE.search(script):
+        return True
+    # Split on pipes after compound ops so ``a | b`` still classifies both sides.
+    for compound in _COMPOUND_SPLIT_RE.split(script):
+        for segment in compound.split("|"):
+            tokens = segment.strip().split()
+            if not tokens:
+                continue
+            if _argv_implies_mutation(tokens):
+                return True
     return False
+
+
+def _find_implies_mutation(args: list[str]) -> bool:
+    for arg in args:
+        if arg in _FIND_MUTATING_FLAGS or arg.startswith("-exec"):
+            return True
+    return False
+
+
+def _git_implies_mutation(argv: list[str]) -> bool:
+    if len(argv) < 2:
+        return False
+    sub = argv[1].lstrip("-")
+    if sub == "stash":
+        if len(argv) >= 3 and argv[2].lstrip("-") in _GIT_STASH_READONLY_SUBS:
+            return False
+        return True
+    if sub in _GIT_READONLY_SUBS:
+        return False
+    return True
 
 
 def _argv_from_args(args: dict[str, Any] | None) -> list[str] | None:

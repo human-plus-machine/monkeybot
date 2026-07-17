@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections import OrderedDict
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
@@ -30,9 +32,12 @@ _PATH_TOKEN_RE = re.compile(r"`([^`]+)`|([^\s;`,]+)")
 _LINE_SUFFIX_RE = re.compile(r":(?:L?\d+(?:\s*[-–—]\s*L?\d+)?|lines)\s*$", re.IGNORECASE)
 # Bare tokens that are line refs, not paths (e.g. `L12–14` after a backticked path).
 _LINE_ONLY_RE = re.compile(r"^L?\d+(?:\s*[-–—]\s*L?\d+)?$", re.IGNORECASE)
+# Trailing sentence punctuation that is not part of a path.
+_TRAILING_PUNCT_RE = re.compile(r"[.,;:!?)\]}\"']+$")
 
 _CORRECTION_HEADING = "## Evidence path correction"
 _VERIFICATION_HEADING = "## Evidence verification required"
+_THREAD_STATE_CAP = 256
 
 
 def extract_evidence_paths(text: str) -> list[str]:
@@ -48,6 +53,7 @@ def extract_evidence_paths(text: str) -> list[str]:
             if not token:
                 continue
             path = _LINE_SUFFIX_RE.sub("", token).strip().strip("`\"'")
+            path = _TRAILING_PUNCT_RE.sub("", path).strip()
             if not path or path.lower() in {"unknown", "or", "and", "similar"}:
                 continue
             # Skip prose fragments / line-only refs that are not path-like
@@ -112,17 +118,26 @@ def _norm_path(path: str) -> str:
     return p.rstrip("/")
 
 
+@dataclass
+class _ThreadEvidenceState:
+    pending: str | None = None
+    confirmed_paths: set[str] = field(default_factory=set)
+    verify_notified: set[str] = field(default_factory=set)
+
+
 class EvidencePathGuard:
     """Scan assistant Evidence citations; inject corrections on the next step.
 
     Tracks ``read_file`` / ``glob`` confirmations so citations sourced only
     from ``search`` snippets trigger a one-shot read-and-verify notice (F22).
+
+    State is scoped per ``thread_id`` because one gateway process shares a
+    single guard instance across concurrent SSE sessions.
     """
 
-    def __init__(self) -> None:
-        self._pending: str | None = None
-        self._confirmed_paths: set[str] = set()
-        self._verify_notified: set[str] = set()
+    def __init__(self, *, thread_cap: int = _THREAD_STATE_CAP) -> None:
+        self._thread_cap = max(1, thread_cap)
+        self._by_thread: OrderedDict[str, _ThreadEvidenceState] = OrderedDict()
 
     def register(self, manager: HookManager) -> None:
         manager.register(HookEvent.AFTER_PROVIDER_RESPONSE, self.on_after_provider)
@@ -130,40 +145,54 @@ class EvidencePathGuard:
         manager.register(HookEvent.PRE_TURN, self.on_pre_turn)
         manager.register(HookEvent.PRE_TOOL, self.on_pre_tool)
 
+    def _state(self, thread_id: str) -> _ThreadEvidenceState:
+        existing = self._by_thread.get(thread_id)
+        if existing is not None:
+            self._by_thread.move_to_end(thread_id)
+            return existing
+        state = _ThreadEvidenceState()
+        self._by_thread[thread_id] = state
+        while len(self._by_thread) > self._thread_cap:
+            self._by_thread.popitem(last=False)
+        return state
+
     async def on_post_tool(self, payload: HookPayload) -> None:
         if payload.tool_error:
             return
+        state = self._state(payload.thread_id)
         args = payload.tool_args or {}
         if payload.tool_name == "read_file":
             path = args.get("path")
             if isinstance(path, str) and path.strip():
-                self._confirmed_paths.add(_norm_path(path))
+                state.confirmed_paths.add(_norm_path(path))
         elif payload.tool_name == "glob":
             # glob proves existence — the right verification for binary assets
             # (images / PDFs) that read_file cannot open.
             for path in _paths_from_glob_result(payload.tool_result):
-                self._confirmed_paths.add(_norm_path(path))
+                state.confirmed_paths.add(_norm_path(path))
         elif payload.tool_name in ("write_file", "replace_in_file"):
             # Writing a file confirms its own existence/content …
             path = args.get("path")
             if isinstance(path, str) and path.strip():
-                self._confirmed_paths.add(_norm_path(path))
+                state.confirmed_paths.add(_norm_path(path))
             # … but Evidence citations *inside* the written content (e.g. an
             # answers.md deliverable) need the same scan as chat text —
             # otherwise externalized answers bypass the guard entirely.
             content = args.get("content") or args.get("new_string")
             root = payload.ctx.workspace_root
             if isinstance(content, str) and content.strip() and root is not None:
-                self._scan_citations(content, Path(root))
+                self._scan_citations(state, content, Path(root))
 
     async def on_after_provider(self, payload: HookPayload) -> None:
         text = (payload.assistant_text or "").strip()
         root = payload.ctx.workspace_root
         if not text or root is None:
             return
-        self._scan_citations(text, Path(root))
+        self._scan_citations(self._state(payload.thread_id), text, Path(root))
 
-    def _scan_citations(self, text: str, root: Path) -> None:
+    def _scan_citations(
+        self, state: _ThreadEvidenceState, text: str, root: Path
+    ) -> None:
         """Queue missing / unread notices for ``Evidence:`` citations in ``text``."""
         cited = extract_evidence_paths(text)
         if not cited:
@@ -174,35 +203,34 @@ class EvidencePathGuard:
             p
             for p in cited
             if p not in missing_set
-            and not self._is_confirmed(p)
-            and p not in self._verify_notified
+            and not self._is_confirmed(state, p)
+            and p not in state.verify_notified
         ]
         notices: list[str] = []
         if missing:
             notices.append(format_evidence_correction(missing))
         if unread:
-            self._verify_notified.update(unread)
+            state.verify_notified.update(unread)
             notices.append(format_verification_notice(unread))
         if not notices:
             return
         combined = "\n\n".join(notices)
-        self._pending = f"{self._pending}\n\n{combined}" if self._pending else combined
+        state.pending = f"{state.pending}\n\n{combined}" if state.pending else combined
         logger.info(
             "evidence_guard: queued correction (missing=%d unread=%d)",
             len(missing),
             len(unread),
         )
 
-    def _is_confirmed(self, cited: str) -> bool:
+    def _is_confirmed(self, state: _ThreadEvidenceState, cited: str) -> bool:
         c = _norm_path(cited)
-        if c in self._confirmed_paths:
+        if c in state.confirmed_paths:
             return True
-        # Tolerate prefix differences (e.g. cited `auriga-web/src/x.ts`,
-        # read as `src/x.ts` — or vice versa).
-        return any(
-            r.endswith("/" + c) or c.endswith("/" + r)
-            for r in self._confirmed_paths
-        )
+        # Tolerate an extra leading directory on the citation (e.g. monorepo
+        # root: cited ``auriga-web/src/x.ts`` after reading ``src/x.ts``).
+        # Only allow citation-longer matches so a read of
+        # ``packages/api/src/index.ts`` cannot confirm a bare ``src/index.ts``.
+        return any("/" in r and c.endswith("/" + r) for r in state.confirmed_paths)
 
     async def on_pre_turn(self, payload: HookPayload) -> None:
         self._inject(payload)
@@ -211,10 +239,11 @@ class EvidencePathGuard:
         self._inject(payload)
 
     def _inject(self, payload: HookPayload) -> None:
-        if not self._pending:
+        state = self._state(payload.thread_id)
+        if not state.pending:
             return
-        notice = self._pending
-        self._pending = None
+        notice = state.pending
+        state.pending = None
         if payload.inject_text:
             payload.inject_text = f"{payload.inject_text.rstrip()}\n\n{notice}"
         else:

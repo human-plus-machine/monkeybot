@@ -443,13 +443,17 @@ class KnowledgeIndexer:
         except Exception as exc:
             logger.warning("knowledge vector has_path failed for %s: %r", index_path, exc)
             return
-        chunks = chunk_text(
-            text,
-            path=index_path,
-            source_type=source_type,
-            chunk_tokens=self._settings.chunk_tokens,
-            overlap_ratio=self._settings.chunk_overlap_ratio,
-        )
+        # Reuse persisted FTS chunk boundaries so vector IDs/spans stay aligned
+        # even if chunk_tokens / overlap_ratio changed since the last index.
+        chunks = await self._index.list_chunks_for_path(index_path)
+        if not chunks:
+            chunks = chunk_text(
+                text,
+                path=index_path,
+                source_type=source_type,
+                chunk_tokens=self._settings.chunk_tokens,
+                overlap_ratio=self._settings.chunk_overlap_ratio,
+            )
         await self._embed_chunks(chunks)
 
     async def _embed_chunks(self, chunks: list[TextChunk]) -> None:

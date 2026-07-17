@@ -1,6 +1,6 @@
-# Unified Knowledge Layer — Design Proposal
+# Unified Knowledge Layer — Design
 
-**Status:** Proposal (pre-implementation)  
+**Status:** Implemented (shipped in the knowledge-layer PR; see also [knowledge-layer-fixes.md](knowledge-layer-fixes.md))  
 **Audience:** MonkeyBot harness + agent authors  
 **Related:** [Features & Design Reference](features.md) · memory subsystem · workspace tools (`grep` / `glob` / `read_file`)  
 **Supersedes:** earlier framing of a standalone `workspace_search` product disconnected from memory
@@ -475,6 +475,8 @@ knowledge:
   caption: off                  # off | llm  (validate policy in experiment)
   # caption_model: …
 ```
+
+**Accepted risk:** FTS (`index.sqlite`) and ANN (`vectors.sqlite`) are separate SQLite files committed independently — a crash between the two can leave vectors pointing at stale FTS chunk IDs. The next content-hash scan self-heals by re-embedding / deleting orphan vectors; there is no cross-DB transaction.
 
 Env overrides (suggested): `KNOWLEDGE_ENABLED`, `KNOWLEDGE_EMBEDDINGS_ENABLED`, plus existing provider key envs. Env wins over YAML per harness norms.
 

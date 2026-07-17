@@ -502,7 +502,7 @@ class CoreToolExecutor(ToolExecutorPort):
             elif name == "search_memory":
                 result_text, err_text = await self._tool_search_memory(args)
             elif name in ("search", "recall"):
-                result_text, err_text = await self._tool_recall(args)
+                result_text, err_text = await self._tool_search(args)
             elif name == "list_skills":
                 result_text, err_text = self._tool_list_skills(ctx)
             elif name == "task":
@@ -931,7 +931,7 @@ class CoreToolExecutor(ToolExecutorPort):
         payload = await self._memory.search_files(query, max_hits=max_hits, skip_raw=False)
         return (_j(payload), None)
 
-    async def _tool_recall(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+    async def _tool_search(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
         query = _str_arg(args, "query", "q")
         if not query:
             return (

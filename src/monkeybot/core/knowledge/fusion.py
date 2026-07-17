@@ -32,7 +32,9 @@ _NOISE_NOTE_PREFIXES = (
 _TEST_PATH_RE = re.compile(
     r"(^|/)(__tests?__/|tests?/)|"
     r"\.(test|spec)\.[^.]+$|"
-    r"/(test|tests|spec|specs)/",
+    r"/(test|tests|spec|specs)/|"
+    r"(^|/)test_[^/]+\.py$|"
+    r"(^|/)[^/]+_test\.py$",
     re.IGNORECASE,
 )
 
@@ -235,7 +237,8 @@ async def _expand_graph(
         c["path"] for c in candidates.values() if c["source_type"] == "note"
     }
     graph_rank = 0
-    for note_path in note_paths:
+    # Sorted for stable graph_rank / RRF across process hash seeds.
+    for note_path in sorted(note_paths):
         edges = await index.links_from(note_path)
         link_refs = [e["ref"] for e in edges]
         for cand in candidates.values():

@@ -31,10 +31,16 @@ def _ctx() -> TurnContext:
     )
 
 
-def _payload(event: HookEvent, *, request_id: str = "r1", **kw) -> HookPayload:
+def _payload(
+    event: HookEvent,
+    *,
+    request_id: str = "r1",
+    thread_id: str = "t1",
+    **kw,
+) -> HookPayload:
     return HookPayload(
         event=event,
-        thread_id="t1",
+        thread_id=thread_id,
         request_id=request_id,
         ctx=_ctx(),
         **kw,
@@ -170,3 +176,36 @@ async def test_nudge_resets_on_new_request() -> None:
     pre = _payload(HookEvent.PRE_TOOL, request_id="r2", tool_name="grep")
     await nudge.on_pre_tool(pre)
     assert pre.inject_text is None
+
+
+@pytest.mark.asyncio
+async def test_nudge_isolates_state_across_threads() -> None:
+    nudge = SearchUsageNudge(threshold=2)
+    for tool in ("grep", "glob"):
+        await nudge.on_post_tool(
+            _payload(
+                HookEvent.POST_TOOL,
+                thread_id="session-a",
+                request_id="ra",
+                tool_name=tool,
+            )
+        )
+    # Session B must not inherit session A's exploration counter.
+    pre_b = _payload(
+        HookEvent.PRE_TOOL,
+        thread_id="session-b",
+        request_id="rb",
+        tool_name="grep",
+    )
+    await nudge.on_pre_tool(pre_b)
+    assert pre_b.inject_text is None
+
+    pre_a = _payload(
+        HookEvent.PRE_TOOL,
+        thread_id="session-a",
+        request_id="ra",
+        tool_name="grep",
+    )
+    await nudge.on_pre_tool(pre_a)
+    assert pre_a.inject_text is not None
+    assert "`search`" in pre_a.inject_text

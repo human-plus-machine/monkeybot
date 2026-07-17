@@ -8,6 +8,7 @@ from datetime import date
 from monkeybot.core.attachments.catalog import AttachmentRecord
 from monkeybot.core.context import TurnContext
 from monkeybot.core.context.memory_prompt import MemoryPromptSelection
+from monkeybot.core.knowledge.config import knowledge_enabled_from_config
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.prompts.harness_prompt import (
     emission_style_terse_from_env,
@@ -159,6 +160,7 @@ def _harness_text(ctx: TurnContext) -> str:
         include_task_tool=include_task,
         include_web_search=include_web_search,
         include_todo_list=include_todo_list,
+        include_knowledge_search=knowledge_enabled_from_config(),
         workspace_root=str(ctx.workspace_root) if ctx.workspace_root is not None else "(not set)",
         memory_storage_uri=ctx.memory.uri if ctx.memory is not None else "(not set)",
         run_command_opensandbox=SandboxConfig.from_env().enabled,

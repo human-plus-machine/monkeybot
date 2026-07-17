@@ -64,7 +64,10 @@ def _parse_one(raw: str, *, source_path: str | None = None) -> ParsedLink | None
 
     # Bare note names → notes/{name}.md (vault convention)
     if "/" not in path and not path.endswith(_NOTE_SUFFIXES):
-        path = f"notes/{path}.md"
+        normalized = _normalize_note_path(f"notes/{path}.md")
+        if normalized is None:
+            return None
+        path = normalized
     elif path.startswith(_KNOWN_NOTE_ROOTS):
         normalized = _normalize_note_path(path)
         if normalized is None:
@@ -78,7 +81,10 @@ def _parse_one(raw: str, *, source_path: str | None = None) -> ParsedLink | None
             return None
         path = normalized
     elif path.endswith(_NOTE_SUFFIXES) and "/" not in path:
-        path = f"notes/{path}"
+        normalized = _normalize_note_path(f"notes/{path}")
+        if normalized is None:
+            return None
+        path = normalized
     else:
         # No source context and not under a known root — reject rather than
         # emit an unresolvable index path (the pre-F2 episodic/x.md bug).
