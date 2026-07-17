@@ -411,3 +411,10 @@ def subagent_vertex_google_search_from_config(config_path: str | None = None) ->
     """
     return get_subagent_settings(config_path).vertex_google_search
 
+
+def knowledge_enabled_from_config(config_path: str | None = None) -> bool:
+    """Whether the unified knowledge layer is enabled (``knowledge.enabled``, default true)."""
+    from monkeybot.core.knowledge.config import knowledge_enabled_from_config as _fn
+
+    return _fn(config_path)
+

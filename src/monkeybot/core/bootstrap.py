@@ -16,6 +16,8 @@ from pathlib import Path
 from monkeybot.core.config.settings import auto_schema_enabled_from_config, get_provider_config
 from monkeybot.core.context import build_context
 from monkeybot.core.hooks import HookManager
+from monkeybot.core.knowledge import KnowledgeSubsystem, resolve_knowledge_settings
+from monkeybot.core.knowledge.config import knowledge_enabled_from_env
 from monkeybot.core.llm.provider import Provider
 from monkeybot.core.llm.usage import usage_from_totals
 from monkeybot.core.mcp.mcp_client import MCPClient
@@ -47,6 +49,7 @@ class HarnessDeps:
     mcp: MCPClient
     provider: Provider
     model: str
+    knowledge: KnowledgeSubsystem | None = None
 
     async def close(self) -> None:
         """Close persisted storage and tear down MCP sessions.
@@ -55,8 +58,17 @@ class HarnessDeps:
         does not define ``aclose``/``close`` today; cloud SDK clients are process-scoped.
         Call explicit workspace teardown here if the protocol gains lifecycle hooks.
         """
+        if self.knowledge is not None:
+            await self.knowledge.close()
         await self.storage.close()
         await self.mcp.disconnect_all()
+
+
+def _local_fs_path_from_storage_uri(uri: str) -> Path | None:
+    u = (uri or "").strip()
+    if not u or u.startswith(("gcs://", "s3://")):
+        return None
+    return Path(u.removeprefix("local://").strip()).expanduser().resolve()
 
 
 def _resolve_run_command_allowlists() -> tuple[list[str] | None, list[str] | None]:
@@ -94,6 +106,7 @@ async def create_harness_deps(
     open_mcp: bool = True,
     provider_override: Provider | None = None,
     _provider_override: Provider | None = None,
+    workspace_root: Path | None = None,
 ) -> HarnessDeps:
     """Open storage, optional memory, MCP, and resolve the LLM provider.
 
@@ -108,6 +121,7 @@ async def create_harness_deps(
         open_mcp: When False, MCP is not loaded from disk (typical for Lambda).
         provider_override: Inject a custom :class:`~monkeybot.core.llm.provider.Provider` (skips config lookup).
         _provider_override: Deprecated alias for ``provider_override`` (tests).
+        workspace_root: When set with knowledge enabled, constructs :class:`KnowledgeSubsystem`.
     """
     override = provider_override if provider_override is not None else _provider_override
     backend = create_storage_backend(db_url)
@@ -132,6 +146,23 @@ async def create_harness_deps(
                 memory_uri=uri,
             )
 
+        knowledge: KnowledgeSubsystem | None = None
+        if knowledge_enabled_from_env() and workspace_root is not None:
+            try:
+                settings = resolve_knowledge_settings(workspace_root=workspace_root)
+                knowledge = await KnowledgeSubsystem.create(
+                    workspace_root=workspace_root,
+                    settings=settings,
+                    knowledge_root=Path(settings.knowledge_root),
+                    memory_storage=memory.storage if memory is not None else None,
+                    memory_root=_local_fs_path_from_storage_uri(uri) if uri else None,
+                    index_path=Path(settings.index_path),
+                )
+                await knowledge.ensure_ready()
+            except Exception as exc:
+                logger.warning("knowledge layer setup failed; continuing without: %r", exc)
+                knowledge = None
+
         mcp = MCPClient()
         if open_mcp and mcp_config_path is not None:
             strict = os.environ.get("MCP_STRICT_LOAD", "").strip().lower() in ("1", "true", "yes")
@@ -140,6 +171,7 @@ async def create_harness_deps(
         return HarnessDeps(
             storage=backend,
             memory=memory,
+            knowledge=knowledge,
             mcp=mcp,
             provider=prov,
             model=model_str,
@@ -193,6 +225,7 @@ async def run_pattern_bc_turn(
     executor = CoreToolExecutor(
         workspace_root=workspace_root,
         memory=deps.memory,
+        knowledge=deps.knowledge,
         skills_path=skills_path,
         mcp=deps.mcp,
         run_command_allowed_commands=run_cmds,

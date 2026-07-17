@@ -32,6 +32,8 @@ from monkeybot.core.config.settings import (
 )
 from monkeybot.core.context import LoopsToolRegistry, build_context
 from monkeybot.core.hooks import HookManager
+from monkeybot.core.knowledge import KnowledgeSubsystem, resolve_knowledge_settings
+from monkeybot.core.knowledge.config import knowledge_enabled_from_env
 from monkeybot.core.layout import AgentLayout
 from monkeybot.core.llm.provider import (
     Done,
@@ -83,6 +85,7 @@ class _GatewayDeps:
     curator_provider: Provider | None = None
     hook_manager: HookManager | None = None
     memory: MemorySubsystem | None = None
+    knowledge: KnowledgeSubsystem | None = None
     web_search_tool: WebSearchTool | None = None
     run_command_allowed_commands: list[str] | None = None
     run_command_allowed_path_prefixes: list[str] | None = None
@@ -116,6 +119,14 @@ def _resolved_workspace_paths() -> tuple[Path, Path]:
 def _memory_storage_uri() -> str:
     """Effective memory storage URI (``MEMORY_STORAGE_URI`` or legacy ``MEMORY_PATH``)."""
     return AgentLayout.from_environment().memory_storage_uri
+
+
+def _local_fs_path_from_storage_uri(uri: str) -> Path | None:
+    """Return a filesystem path for ``local://`` / bare paths; None for cloud URIs."""
+    u = (uri or "").strip()
+    if not u or u.startswith(("gcs://", "s3://")):
+        return None
+    return Path(u.removeprefix("local://").strip()).expanduser().resolve()
 
 
 class _UsageStoreAdapter(UsagePort):
@@ -406,6 +417,7 @@ class GatewayLoopPort:
             executor = CoreToolExecutor(
                 workspace_root=workspace_root,
                 memory=getattr(serving.state, "memory", None),
+                knowledge=getattr(serving.state, "knowledge", None),
                 skills_path=skills_resolved,
                 mcp=mcp,
                 extra_tools=extra_tools,
@@ -609,6 +621,49 @@ async def _startup(fastapi_app: FastAPI) -> None:
         logger.info("memory hook disabled via MONKEYBOT_MEMORY_HOOK_ENABLED")
         fastapi_app.state.memory = None
 
+    # Unified knowledge layer — FTS + ANN + links + search
+    if knowledge_enabled_from_env():
+        try:
+            layout = AgentLayout.from_environment()
+            settings = resolve_knowledge_settings(workspace_root=layout.workspace_root)
+            mem = _deps.memory
+            mem_uri = mem.uri if mem is not None else ""
+            memory_root = _local_fs_path_from_storage_uri(mem_uri) if mem_uri else None
+            knowledge = await KnowledgeSubsystem.create(
+                workspace_root=layout.workspace_root,
+                settings=settings,
+                knowledge_root=Path(settings.knowledge_root),
+                memory_storage=mem.storage if mem is not None else None,
+                memory_root=memory_root,
+                index_path=Path(settings.index_path),
+            )
+            hook_mgr = _deps.hook_manager
+            if hook_mgr is None:
+                hook_mgr = HookManager()
+                _deps.hook_manager = hook_mgr
+            knowledge.register_hooks(hook_mgr)
+            _deps.knowledge = knowledge
+            fastapi_app.state.knowledge = knowledge
+
+            async def _knowledge_startup_scan() -> None:
+                try:
+                    await knowledge.ensure_ready()
+                    logger.info(
+                        "knowledge index ready (path=%s)", settings.index_path
+                    )
+                except Exception as scan_exc:
+                    logger.warning("knowledge startup scan failed: %r", scan_exc)
+
+            asyncio.create_task(_knowledge_startup_scan())
+            logger.info("knowledge layer enabled (index=%s)", settings.index_path)
+        except Exception as exc:
+            logger.warning("knowledge layer setup failed; continuing without: %r", exc)
+            _deps.knowledge = None
+            fastapi_app.state.knowledge = None
+    else:
+        logger.info("knowledge layer disabled via KNOWLEDGE_ENABLED")
+        fastapi_app.state.knowledge = None
+
     if attachments_enabled_from_env():
         try:
             fastapi_app.state.attachment_store = FilesystemAttachmentStore(
@@ -692,6 +747,16 @@ async def _shutdown(fastapi_app: FastAPI) -> None:
     if mcp is not None:
         for name in list(getattr(mcp, "_servers", {}).keys()):
             await mcp.disconnect(name)
+
+    knowledge = _deps.knowledge or getattr(fastapi_app.state, "knowledge", None)
+    if knowledge is not None:
+        try:
+            await knowledge.close()
+        except Exception as exc:
+            logger.warning("knowledge close failed: %s", exc)
+        _deps.knowledge = None
+        with contextlib.suppress(Exception):
+            fastapi_app.state.knowledge = None
 
     worker_pool_handle = getattr(fastapi_app.state, "worker_pool", None)
     if worker_pool_handle is not None:

@@ -132,7 +132,7 @@ def _memory_block(
             f"{MEMORY_NUDGE_HEADING}"
             f"Showing {shown} of {total} index entries "
             f"(coverage {memory_selection.coverage:.0%}, confidence {memory_selection.confidence:.0%}). "
-            "Use `search_memory` with keywords when the task may depend on older or unstated context."
+            "Use `search` (or `search_memory`) with keywords when the task may depend on older or unstated context."
         )
     return mem_block
 

@@ -63,6 +63,13 @@ ENV_MAP: dict[tuple[str, str], str] = {
     ("context_curation", "curator_model"): "CONTEXT_CURATOR_MODEL",
     ("context_curation", "timeout_sec"): "CONTEXT_CURATION_TIMEOUT_SEC",
     ("memory_hook", "enabled"): "MONKEYBOT_MEMORY_HOOK_ENABLED",
+    ("knowledge", "enabled"): "KNOWLEDGE_ENABLED",
+    ("knowledge", "local_index.path"): "KNOWLEDGE_LOCAL_INDEX_PATH",
+    ("knowledge", "recall.default_limit"): "KNOWLEDGE_RECALL_DEFAULT_LIMIT",
+    ("knowledge", "recall.rrf_k"): "KNOWLEDGE_RRF_K",
+    ("knowledge", "indexer.debounce_ms"): "KNOWLEDGE_INDEXER_DEBOUNCE_MS",
+    ("knowledge", "indexer.max_file_bytes"): "KNOWLEDGE_MAX_FILE_BYTES",
+    ("knowledge", "embeddings.enabled"): "KNOWLEDGE_EMBEDDINGS_ENABLED",
     ("tools", "denied_patterns"): "MONKEYBOT_TOOL_DENIED_PATTERNS",
     ("tools", "read_max_lines"): "MONKEYBOT_READ_MAX_LINES",
     ("tools", "read_default_lines"): "MONKEYBOT_READ_DEFAULT_LINES",
@@ -289,6 +296,8 @@ def apply_monkeybot_runtime_env(
             env_val = resolve_sqlite_url(env_val, anchor)
         elif env_key == "MEMORY_STORAGE_URI":
             env_val = resolve_memory_storage_uri(env_val, anchor)
+        # KNOWLEDGE_LOCAL_INDEX_PATH stays relative; resolve_knowledge_settings
+        # anchors it against the workspace (not agent root) in one place.
         os.environ[env_key] = env_val
         logger.debug("Set from monkeybot.yaml: %s=%s", env_key, env_val)
 

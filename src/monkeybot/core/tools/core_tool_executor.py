@@ -41,6 +41,8 @@ from monkeybot.core.mcp.mcp_client import (
     MCPServerNotConnectedError,
 )
 from monkeybot.core.mcp.ports_mcp import MCPClientPort
+from monkeybot.core.knowledge.subsystem import KnowledgeSubsystem
+from monkeybot.core.knowledge.tool import legacy_search_memory_shape
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.persistence.backends import RunStore, ScheduledLoopStore
 from monkeybot.core.persistence.durable_runs import SubagentEnvelope as PersistedSubagentEnvelope
@@ -98,6 +100,8 @@ _CORE_TOOL_NAMES = frozenset(
         "grep",
         "apply_patch",
         "search_memory",
+        "search",
+        "recall",  # legacy alias for `search`
         "list_skills",
         "task",
         "run_command",
@@ -371,6 +375,7 @@ class CoreToolExecutor(ToolExecutorPort):
         scheduled_loop_store: ScheduledLoopStore | None = None,
         subagent_registry: dict[str, SubagentConfig] | None = None,
         loops_registry: LoopsToolRegistry | None = None,
+        knowledge: KnowledgeSubsystem | None = None,
     ) -> None:
         ws_settings = workspace_settings_from_env()
         self._skills_path = Path(skills_path).resolve()
@@ -380,6 +385,7 @@ class CoreToolExecutor(ToolExecutorPort):
         self._spill_read_max_lines = ws_settings.WORKSPACE_SPILL_READ_MAX_LINES
         self._spill_min_chars = spill_min_chars_from_env()
         self._memory = memory
+        self._knowledge = knowledge
         self._mcp = mcp
         self._attachment_store = attachment_store
         self._run_store = run_store
@@ -496,6 +502,8 @@ class CoreToolExecutor(ToolExecutorPort):
                 result_text, err_text = self._tool_apply_patch(args)
             elif name == "search_memory":
                 result_text, err_text = await self._tool_search_memory(args)
+            elif name in ("search", "recall"):
+                result_text, err_text = await self._tool_recall(args)
             elif name == "list_skills":
                 result_text, err_text = self._tool_list_skills(ctx)
             elif name == "task":
@@ -907,6 +915,10 @@ class CoreToolExecutor(ToolExecutorPort):
                 ),
             )
         max_hits = _coerce_int(args.get("max_hits"), 40) or 40
+        # Prefer unified recall when the knowledge layer is enabled
+        if self._knowledge is not None:
+            payload = await self._knowledge.recall(query, limit=max_hits)
+            return (_j(legacy_search_memory_shape(payload)), None)
         if self._memory is None:
             return (
                 None,
@@ -918,6 +930,55 @@ class CoreToolExecutor(ToolExecutorPort):
                 ),
             )
         payload = await self._memory.search_files(query, max_hits=max_hits, skip_raw=False)
+        return (_j(payload), None)
+
+    async def _tool_recall(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+        query = _str_arg(args, "query", "q")
+        if not query:
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "search requires a non-empty query.",
+                    'Use query, e.g. {"query": "refund policy"}.',
+                    {"field": "query", "example": {"query": "refund policy"}},
+                ),
+            )
+        if self._knowledge is None:
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "search requires the knowledge layer to be configured.",
+                    "Set knowledge.enabled: true in monkeybot.yaml (Config B).",
+                    {"field": "knowledge"},
+                ),
+            )
+        limit = _coerce_int(args.get("limit"), None)
+        if limit is None:
+            limit = _coerce_int(args.get("max_hits"), self._knowledge.settings.default_limit) or (
+                self._knowledge.settings.default_limit
+            )
+        path_prefix = args.get("path_prefix")
+        if not isinstance(path_prefix, str) or not path_prefix.strip():
+            path_prefix = None
+        else:
+            path_prefix = path_prefix.strip()
+        source_raw = args.get("source")
+        source = "any"
+        if isinstance(source_raw, str) and source_raw.strip() in {
+            "any",
+            "note",
+            "workspace_file",
+        }:
+            source = source_raw.strip()
+        # modality accepted but ignored in Phase 1
+        payload = await self._knowledge.recall(
+            query,
+            limit=limit,
+            path_prefix=path_prefix,
+            source=source,  # type: ignore[arg-type]
+        )
         return (_j(payload), None)
 
     def _tool_list_skills(self, ctx: TurnContext) -> tuple[str | None, str | None]:

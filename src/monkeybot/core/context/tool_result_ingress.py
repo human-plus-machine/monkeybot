@@ -49,6 +49,8 @@ SANITIZE_SKIP_TOOL_NAMES = frozenset(
         "replace_in_file",
         "glob",
         "search_memory",
+        "search",
+        "recall",  # legacy alias for `search`
         "list_skills",
     }
 )
