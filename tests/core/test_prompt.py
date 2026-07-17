@@ -186,8 +186,9 @@ def test_task_truncation() -> None:
     ]
     out = compose_system_prompt(ctx, chat_messages=msgs)
     assert "…(truncated)" in out
-    # Current-request body is capped at 8k; fixed harness + agent overhead stays bounded.
-    assert len(out) < len(long_user) + 7000
+    # Current-request body is capped at 8k; fixed harness + agent overhead stays bounded
+    # (budget includes the knowledge-retrieval / `search` guidance block).
+    assert len(out) < len(long_user) + 11_000
 
 
 def test_compose_harness_reflects_sandbox_env(monkeypatch: pytest.MonkeyPatch) -> None:

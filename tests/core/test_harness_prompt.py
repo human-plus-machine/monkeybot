@@ -51,6 +51,24 @@ def test_harness_includes_core_tools_and_protocol() -> None:
     assert "native function-call channel" in out
     assert "Fulfillment rule" in out
     assert '{"tool_calls":' not in out
+    assert "### Knowledge retrieval (`search`)" in out
+    assert "one short, focused query per concept" in out
+    assert "near-duplicate parallel" in out
+    assert "not notes-only" in out or "*not* notes-only" in out
+    assert "call `search` before" in out
+    assert "`recall` is a legacy alias" in out
+    assert "rank-1" in out
+    assert "Long multi-item tasks" in out
+    assert "answers.md" in out or "workspace file" in out
+    assert "Evidence: unknown" in out
+    assert "Path rule" in out
+
+
+def test_harness_omits_search_guidance_when_knowledge_disabled() -> None:
+    out = harness_fixed_context(include_task_tool=False, include_knowledge_search=False)
+    assert "### Knowledge retrieval (`search`)" not in out
+    assert "- `search` — **local search index" not in out
+    assert "Path rule" in out  # always-on protocol keeps evidence path rules
 
 
 def test_harness_includes_runtime_error_and_no_repeat_guidance() -> None:

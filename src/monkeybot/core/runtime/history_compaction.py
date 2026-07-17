@@ -44,10 +44,14 @@ section order unchanged. Do not include the <template> tags in your response.
 ## Important Details
 - [constraints/preferences, decisions and why, important facts/assumptions, \
 exact context needed to continue, or "(none)"]
+- [answer-format / output contract from the user, verbatim when present \
+(e.g. `Qxx:` / `Evidence:` lines); otherwise omit this bullet]
 
 ## Work State
 ### Completed
 - [finished work, verified facts, or changes made; otherwise "(none)"]
+- [explicit task-progress ranges when present, verbatim \
+(e.g. "Q01–Q22 answered with evidence; Q23–Q48 remaining")]
 
 ### Active
 - [current work, partial changes, or investigation state; otherwise "(none)"]
@@ -68,7 +72,24 @@ Rules:
 - Use terse bullets, not prose paragraphs.
 - Preserve exact file paths, symbols, commands, error strings, URLs, and \
 identifiers when known.
+- Preserve, verbatim, any explicit task-progress state and any answer-format \
+contract stated by the user.
+- Preserve tool-strategy commitments under Important Details or Work State \
+(e.g. search-first for codebase Q&A; glob for locate-a-file / assets).
 - Do not mention the summary process or that context was compacted.\
+"""
+
+# Appended to every compacted summary so search-first / format rules survive
+# even when middle-history exemplars are dropped (post-summarization epoch).
+# Keep this a short pointer — full rules live in the harness (avoid drift /
+# duplicated "Standing instructions" blocks accumulating across compactions epochs).
+_POST_COMPACTION_STANDING_HEADING = "## Standing instructions (still in effect after compaction)"
+_POST_COMPACTION_STANDING = f"""\
+{_POST_COMPACTION_STANDING_HEADING}
+Harness rules still apply: prefer `search` before broad exploration for codebase Q&A; \
+`read_file` (or `glob` for binary assets) before `Evidence:` citations; keep incremental \
+answers in a workspace file for long multi-item tasks; preserve any user answer-format \
+contract verbatim.\
 """
 
 
@@ -221,11 +242,15 @@ async def _summarize_history(
             elif isinstance(ev, Done):
                 break
     summary_text = summary_text.strip() or "(empty summary)"
+    if _POST_COMPACTION_STANDING_HEADING in summary_text:
+        summary_body = f"[Context Summary]:\n{summary_text}"
+    else:
+        summary_body = f"[Context Summary]:\n{summary_text}\n\n{_POST_COMPACTION_STANDING}"
     merged = [
         *head,
         Message(
             role="assistant",
-            content=[Text(text=f"[Context Summary]:\n{summary_text}")],
+            content=[Text(text=summary_body)],
         ),
         *tail,
     ]

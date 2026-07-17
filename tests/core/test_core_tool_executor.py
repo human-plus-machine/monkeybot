@@ -435,6 +435,119 @@ async def test_search_memory(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_recall_and_search_memory_delegate(tmp_path: Path) -> None:
+    from monkeybot.core.knowledge import KnowledgeSubsystem
+    from monkeybot.core.knowledge.types import KnowledgeSettings
+
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "policy.md").write_text(
+        "Refund policy for annual plans requires approval.\n", encoding="utf-8"
+    )
+    knowledge_root = tmp_path / ".monkeybot" / "knowledge"
+    notes = knowledge_root / "notes"
+    notes.mkdir(parents=True)
+    (notes / "refund.md").write_text(
+        "Annual refunds.\n\n[[workspace:policy.md#L1-1]]\n",
+        encoding="utf-8",
+    )
+    settings = KnowledgeSettings(
+        enabled=True,
+        knowledge_root=str(knowledge_root),
+        index_path=str(knowledge_root / "index.sqlite"),
+        debounce_ms=0,
+        startup_scan=True,
+        default_limit=8,
+    )
+    knowledge = await KnowledgeSubsystem.create(
+        workspace_root=root,
+        settings=settings,
+        knowledge_root=knowledge_root,
+        index_path=Path(settings.index_path),
+    )
+    await knowledge.ensure_ready()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    try:
+        ex = CoreToolExecutor(
+            workspace_root=root,
+            memory=None,
+            knowledge=knowledge,
+            skills_path=skills,
+            mcp=_NoMCP(),
+        )
+        ctx = _ctx()
+        out, err = unwrap_tool_execution_result(
+            await ex.execute(
+                call=ToolCall(
+                    call_id="1",
+                    name="search",
+                    args={"query": "annual refund approval"},
+                ),
+                ctx=ctx,
+            )
+        )
+        assert err is None and out is not None
+        payload = json.loads(out)
+        assert payload["ok"] is True
+        assert payload["hits"]
+
+        # `recall` still works as a legacy alias for `search`
+        out_alias, err_alias = unwrap_tool_execution_result(
+            await ex.execute(
+                call=ToolCall(
+                    call_id="1b",
+                    name="recall",
+                    args={"query": "annual refund approval"},
+                ),
+                ctx=ctx,
+            )
+        )
+        assert err_alias is None and out_alias is not None
+        assert json.loads(out_alias)["hits"]
+
+        # search_memory delegates to search when knowledge is present
+        out2, err2 = unwrap_tool_execution_result(
+            await ex.execute(
+                call=ToolCall(
+                    call_id="2",
+                    name="search_memory",
+                    args={"query": "annual refund"},
+                ),
+                ctx=ctx,
+            )
+        )
+        assert err2 is None and out2 is not None
+        legacy = json.loads(out2)
+        assert legacy["ok"] is True
+        assert legacy["hits"]
+        assert "snippet" in legacy["hits"][0]
+    finally:
+        await knowledge.close()
+
+
+@pytest.mark.asyncio
+async def test_recall_without_knowledge_returns_validation_error(tmp_path: Path) -> None:
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=None,
+        knowledge=None,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="1", name="recall", args={"query": "x"}),
+            ctx=_ctx(),
+        )
+    )
+    assert out is None and err is not None
+    assert "knowledge" in err.lower() or "recall" in err.lower()
+
+
+@pytest.mark.asyncio
 async def test_list_skills_echoes_context_skill_refs(tmp_path: Path) -> None:
     """``list_skills`` returns whatever is already on ``TurnContext.skills`` (no disk read)."""
     root = tmp_path

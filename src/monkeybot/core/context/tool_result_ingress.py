@@ -42,6 +42,10 @@ _REDACT_JSON_KEYS = frozenset(
 )
 
 # Workspace tools return faithful text/JSON; skip ingress JSON field redaction (see CoreToolExecutor).
+# `search`/`recall` snippets are plain text pulled from indexed workspace/note
+# files (never raw binary/base64 blobs — see extractors.is_probably_text),
+# and evidence_guard.py matches cited Evidence paths against exact source
+# text, so these must round-trip byte-for-byte like read_file/glob.
 SANITIZE_SKIP_TOOL_NAMES = frozenset(
     {
         "read_file",
@@ -49,6 +53,8 @@ SANITIZE_SKIP_TOOL_NAMES = frozenset(
         "replace_in_file",
         "glob",
         "search_memory",
+        "search",
+        "recall",  # legacy alias for `search`
         "list_skills",
     }
 )

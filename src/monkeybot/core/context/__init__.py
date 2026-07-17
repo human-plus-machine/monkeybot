@@ -456,11 +456,36 @@ def _core_tool_defs(
         },
         "required": ["patch_text"],
     }
-    search_schema: dict[str, object] = {
+    search_memory_schema: dict[str, object] = {
         "type": "object",
         "properties": {
             "query": {"type": "string"},
             "q": {"type": "string"},
+            "max_hits": {"type": "integer"},
+        },
+        "required": [],
+    }
+    search_schema: dict[str, object] = {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": (
+                    "One focused conceptual query (distinctive nouns). "
+                    "Avoid dumping many near-duplicate questions in parallel."
+                ),
+            },
+            "q": {"type": "string"},
+            "path_prefix": {
+                "type": "string",
+                "description": "Optional path filter (workspace-relative or notes/ / memory/).",
+            },
+            "source": {
+                "type": "string",
+                "enum": ["any", "note", "workspace_file"],
+                "description": "Filter by provenance. Default any.",
+            },
+            "limit": {"type": "integer", "description": "Max hits (default ~10)."},
             "max_hits": {"type": "integer"},
         },
         "required": [],
@@ -550,13 +575,15 @@ def _core_tool_defs(
         ),
         ToolDef(
             "glob",
-            "List workspace file paths matching a glob pattern. Prefer over run_command+ls for discovery.",
+            "List workspace file paths matching a glob pattern. Prefer over run_command+ls for "
+            "discovery. For content questions ('how does X work?'), use `search` first.",
             glob_schema,
             parallel_safe=True,
         ),
         ToolDef(
             "grep",
-            "Search workspace file contents with a Python regex. Prefer over run_command+grep.",
+            "Search workspace file contents with a Python regex. Prefer over run_command+grep. "
+            "Best for exact identifiers; for conceptual / paraphrased questions, use `search` first.",
             grep_schema,
             parallel_safe=True,
         ),
@@ -568,7 +595,21 @@ def _core_tool_defs(
         ),
         ToolDef(
             "search_memory",
-            "Search markdown/text under the memory directory for a keyword or phrase.",
+            "Search markdown/text under the memory directory for a keyword or phrase. "
+            "Prefer `search` for conceptual / cross-file knowledge when available.",
+            search_memory_schema,
+            parallel_safe=True,
+        ),
+        ToolDef(
+            "search",
+            "Search the local workspace index (source files + optional notes) via "
+            "keyword FTS, link graph, and optional embeddings — not notes-only. "
+            "Default first step for unfamiliar code / conceptual / paraphrased / "
+            "cross-file questions. Hits return normalized score (top≈1.0), optional "
+            "cosine/bm25/signals; read until the score drops sharply (top 3–5). "
+            "For locate-a-file/asset questions prefer `glob`. Prefer `grep` for exact "
+            "identifiers. Do not skip because answers 'are in source' — this finds them. "
+            "(`recall` is accepted as a legacy alias.)",
             search_schema,
             parallel_safe=True,
         ),

@@ -1206,8 +1206,12 @@ async def test_run_emits_context_summarize_events_when_over_cap(
     assert isinstance(summarizer_msgs[0].content[0], Text)
     assert "## Objective" in summarizer_msgs[0].content[0].text
     assert "## Relevant Files" in summarizer_msgs[0].content[0].text
+    assert "task-progress" in summarizer_msgs[0].content[0].text
+    assert "answer-format" in summarizer_msgs[0].content[0].text
     assert any(
-        isinstance(x, Text) and x.text.startswith("[Context Summary]:\n")
+        isinstance(x, Text)
+        and x.text.startswith("[Context Summary]:\n")
+        and "Standing instructions (still in effect after compaction)" in x.text
         for m in hist.rows
         for x in m.content
     )

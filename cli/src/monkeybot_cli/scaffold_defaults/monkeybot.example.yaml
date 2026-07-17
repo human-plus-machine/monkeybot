@@ -141,6 +141,27 @@ emission:
 memory_hook:
   enabled: true
 
+# Unified knowledge layer: local FTS + ANN embeddings + note↔workspace links + search.
+# Embeddings stay off by default until configured.
+# Index path is always {root}/index.sqlite (not configurable).
+knowledge:
+  enabled: true
+  search:
+    default_limit: 10
+  indexer:
+    chunk_tokens: 700
+    chunk_overlap_ratio: 0.12
+  embeddings:
+    enabled: false
+    provider: nvidia
+    model: nvidia/nemotron-3-embed-1b
+    dimensions: 1024
+    base_url: https://integrate.api.nvidia.com/v1
+    batch_size: 32
+  store:
+    type: sqlite
+    path: .monkeybot/knowledge/vectors.sqlite
+
 subagents:
   timeout_sec: 600
   max_turns: 25

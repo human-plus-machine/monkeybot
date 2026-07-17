@@ -51,7 +51,7 @@ _DEDUP_TTL_SEC = 300.0
 """5-minute window over which identical (tool, args) calls are deduped."""
 
 _POST_TOOL_SKIP_ON_SUCCESS = frozenset(
-    {"read_file", "search_memory", "list_skills"}
+    {"read_file", "search_memory", "search", "recall", "list_skills"}
 )
 """Read-only tools whose successful calls are not captured (errors still are)."""
 
@@ -145,7 +145,7 @@ _STOPWORDS = frozenset(
 
 
 _PRE_TOOL_TOOLS = frozenset(
-    {"read_file", "write_file", "search_memory", "run_command"}
+    {"read_file", "write_file", "search_memory", "search", "recall", "run_command"}
 )
 
 
