@@ -479,6 +479,8 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - No nested `task` inside subagents.
 - Max 10 parallel `task` calls per batch.
 - `subagents.max_turns` / `subagents.timeout_sec` YAML limits apply.
+- Parent reads child NDJSON with a raised StreamReader limit (`SUBAGENT_STDOUT_LINE_LIMIT`, 16 MiB) — not asyncio’s default 64 KiB — so large `SystemPromptSnapshot` lines do not fail with `Separator is not found, and chunk exceed the limit`.
+- Subagent workers redact `SystemPromptSnapshot.text` on the NDJSON pipe (parent drain ignores it; full index would otherwise inflate every inner-turn line).
 
 ---
 

@@ -253,3 +253,17 @@ async def test_subagent_vertex_google_search_scoped_to_own_config(
         tmp_path, monkeypatch, subagent_flag=subagent_flag
     )
     assert received is subagent_flag
+
+
+def test_event_for_ndjson_pipe_redacts_system_prompt_snapshot() -> None:
+    from monkeybot.core.runtime.events import AssistantDelta, SystemPromptSnapshot
+    from monkeybot.core.subagents.subagent_worker import _event_for_ndjson_pipe
+
+    snap = SystemPromptSnapshot(request_id="r", inner_turn=2, text="x" * 80_000)
+    out = _event_for_ndjson_pipe(snap)
+    assert isinstance(out, SystemPromptSnapshot)
+    assert out.text == "[omitted 80000 chars]"
+    assert out.inner_turn == 2
+
+    delta = AssistantDelta(request_id="r", delta="hi")
+    assert _event_for_ndjson_pipe(delta) is delta

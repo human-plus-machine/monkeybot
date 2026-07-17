@@ -30,6 +30,13 @@ from monkeybot.core.runtime.events import (
 
 logger = logging.getLogger(__name__)
 
+# asyncio StreamReader defaults to 64 KiB per line. Subagents emit full
+# SystemPromptSnapshot NDJSON (AGENT.md + harness + memory INDEX.md) which
+# routinely exceeds that and used to fail with:
+#   "Separator is not found, and chunk exceed the limit"
+# Keep headroom for large tool results / snapshots on the parent←child pipe.
+SUBAGENT_STDOUT_LINE_LIMIT = 16 * 1024 * 1024  # 16 MiB
+
 
 def _memory_storage_uri_from_dict(decoded: dict[str, Any]) -> str:
     """Resolve memory URI from envelope fields; empty string means no memory."""
@@ -235,6 +242,10 @@ async def spawn_subagent(
     Stdout lines are UTF-8 NDJSON. Each line is appended to ``progress.jsonl`` under
     ``scratch_dir``. Parse failures yield :class:`Error` and continue.
 
+    The stdout ``StreamReader`` uses :data:`SUBAGENT_STDOUT_LINE_LIMIT` (not asyncio's
+    default 64 KiB) so large NDJSON events (e.g. ``SystemPromptSnapshot``) do not fail
+    with ``Separator is not found, and chunk exceed the limit``.
+
     After the process exits with code 0, writes ``output.json`` with
     ``event_to_json`` of the last successfully parsed event.
     """
@@ -269,7 +280,31 @@ async def spawn_subagent(
     last_evt: AgentEvent | None = None
 
     while True:
-        line_b = await stdout.readline()
+        try:
+            line_b = await stdout.readline()
+        except ValueError as exc:
+            # LimitOverrunError is surfaced as ValueError with this message when a
+            # single NDJSON line has no newline within the StreamReader limit.
+            msg = str(exc)
+            logger.warning(
+                "subagent NDJSON line exceeded pipe limit %s",
+                kv(
+                    script=script,
+                    parent_run_id=envelope.parent_run_id,
+                    limit=SUBAGENT_STDOUT_LINE_LIMIT,
+                    error=msg,
+                ),
+            )
+            yield Error(
+                request_id="",
+                error=(
+                    f"subagent NDJSON line exceeded StreamReader limit "
+                    f"({SUBAGENT_STDOUT_LINE_LIMIT} bytes): {msg}"
+                ),
+            )
+            if proc.returncode is None:
+                proc.kill()
+            break
         if not line_b:
             break
         raw_line = line_b.decode("utf-8").rstrip("\r\n")
@@ -319,6 +354,7 @@ async def _default_subprocess_exec(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
         env=env,
+        limit=SUBAGENT_STDOUT_LINE_LIMIT,
     )
 
 
