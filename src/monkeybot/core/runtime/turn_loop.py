@@ -816,10 +816,19 @@ async def _handle_empty_or_final_text(
         # right after), so nothing reads it again in-loop. Keeping it
         # off the await path means the Firestore write does not delay
         # TurnComplete / the user-visible reply. Awaited at the tail.
+        assist_blocks: list[ContentBlock] = []
+        if (state.thinking_text or "").strip():
+            assist_blocks.append(
+                ThinkingBlock(
+                    thinking=state.thinking_text,
+                    signature=state.thinking_signature or "",
+                )
+            )
+        assist_blocks.append(Text(text=cleaned_text))
         state.assistant_write_task = asyncio.create_task(
             history.append(
                 state.ctx.thread_id,
-                Message(role="assistant", content=[Text(text=cleaned_text)]),
+                Message(role="assistant", content=assist_blocks),
             )
         )
         last_assistant[0] = cleaned_text
