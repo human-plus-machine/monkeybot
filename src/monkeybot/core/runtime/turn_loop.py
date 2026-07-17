@@ -779,6 +779,22 @@ async def _consume_provider_stream_body(
         return
 
 
+def _thinking_block(state: _TurnState) -> ContentBlock | None:
+    """Wrap the turn's accumulated thinking text, if any, for persistence.
+
+    Emptiness uses ``.strip()``, but the persisted text stays unmodified so
+    Anthropic/Gemini signature replay after tool use still matches the
+    exact content the provider signed.
+    """
+    raw = state.thinking_text or ""
+    if not raw.strip():
+        return None
+    return ThinkingBlock(
+        thinking=raw,
+        signature=state.thinking_signature or "",
+    )
+
+
 async def _stream_provider_turn(
     state: _TurnState,
     *,
@@ -816,10 +832,15 @@ async def _handle_empty_or_final_text(
         # right after), so nothing reads it again in-loop. Keeping it
         # off the await path means the Firestore write does not delay
         # TurnComplete / the user-visible reply. Awaited at the tail.
+        assist_blocks: list[ContentBlock] = []
+        thinking = _thinking_block(state)
+        if thinking is not None:
+            assist_blocks.append(thinking)
+        assist_blocks.append(Text(text=cleaned_text))
         state.assistant_write_task = asyncio.create_task(
             history.append(
                 state.ctx.thread_id,
-                Message(role="assistant", content=[Text(text=cleaned_text)]),
+                Message(role="assistant", content=assist_blocks),
             )
         )
         last_assistant[0] = cleaned_text
@@ -895,13 +916,9 @@ async def _append_tool_requests_and_dispatch(
     """
     ordered = sorted(state.pending.values(), key=lambda c: c.call_id)
     assist_blocks: list[ContentBlock] = []
-    if state.thinking_text.strip():
-        assist_blocks.append(
-            ThinkingBlock(
-                thinking=state.thinking_text,
-                signature=state.thinking_signature or "",
-            )
-        )
+    thinking = _thinking_block(state)
+    if thinking is not None:
+        assist_blocks.append(thinking)
     prose = (state.assistant_text or "").strip()
     if prose:
         assist_blocks.append(Text(text=prose))

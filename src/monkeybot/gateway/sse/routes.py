@@ -1085,7 +1085,7 @@ def create_app(
         request: Request,
         limit: int = 200,
     ) -> dict[str, Any]:
-        """Return persisted user/assistant text for one chat thread."""
+        """Return persisted chat turns for one thread (user/assistant/thinking/tool)."""
         if not _chat_history_api_enabled():
             raise APIError(
                 404,

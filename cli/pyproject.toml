@@ -10,7 +10,7 @@ requires-python = ">=3.11"
 dependencies = [
     # `cli` pulls realtime + typer so `monkeybot talk` works out of the box (text mode).
     # Audio mic/PTT needs the agent (or this env) to also install monkeybot[cli-realtime].
-    "monkeybot[cli]>=2.2.0,<3",
+    "monkeybot[cli]>=2.2.1,<3",
     "monkeybot-browser-mcp>=0.2.0,<1",
     "httpx>=0.27.0",
     "pyyaml>=6.0.2",

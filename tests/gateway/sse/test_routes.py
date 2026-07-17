@@ -520,6 +520,45 @@ async def test_chat_history_list_and_detail(registry: SessionRegistry) -> None:
 
 
 @pytest.mark.asyncio
+async def test_chat_history_detail_includes_thinking(registry: SessionRegistry) -> None:
+    from monkeybot.core.llm.provider import Message
+    from monkeybot.core.persistence.sqlite_backend import SQLiteStorageBackend
+    from monkeybot.core.types.content_blocks import Text, Thinking
+
+    backend = SQLiteStorageBackend("sqlite:///:memory:")
+    await backend.open()
+    try:
+        hist = backend.history()
+        await hist.append(
+            "think-session",
+            Message(role="user", content=[Text(text="why?")]),
+        )
+        await hist.append(
+            "think-session",
+            Message(
+                role="assistant",
+                content=[
+                    Thinking(thinking="weigh options", signature="sig"),
+                    Text(text="because"),
+                ],
+            ),
+        )
+
+        app = create_app(loop_port=FakeLoopPort(registry), registry=registry)
+        app.state.storage = backend
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            rd = await client.get("/api/chat-history/think-session")
+            assert rd.status_code == 200
+            assert rd.json()["messages"] == [
+                {"role": "user", "text": "why?"},
+                {"role": "thinking", "text": "weigh options"},
+                {"role": "assistant", "text": "because"},
+            ]
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
 async def test_chat_history_disabled_returns_404(registry: SessionRegistry, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MONKEYBOT_CHAT_HISTORY_API", "0")
     app = create_app(loop_port=FakeLoopPort(registry), registry=registry)

@@ -3,10 +3,27 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
+from typing import Any
 
 from monkeybot.core.llm.provider import Message
-from monkeybot.core.types.content_blocks import Text
+from monkeybot.core.logging_utils import kv
+from monkeybot.core.tools.tool_hint import (
+    tool_collapsed_title,
+    truncate_detail,
+    truncate_wire_args,
+)
+from monkeybot.core.types.content_blocks import (
+    ContentBlock,
+    RedactedThinking,
+    Text,
+    Thinking,
+    ToolRequest,
+    ToolResponse,
+)
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -48,14 +65,103 @@ def text_from_message(message: Message) -> str:
     return "\n".join(parts).strip()
 
 
-def messages_to_wire(messages: list[Message]) -> list[dict[str, str]]:
-    """Serialize user/assistant turns for the chat-history API."""
-    out: list[dict[str, str]] = []
+def _text_from_blocks(blocks: list[ContentBlock], *, call_id: str) -> str:
+    """Concatenate Text blocks; log and drop any non-Text result blocks.
+
+    Tool results can carry Image/File blocks that have no wire text
+    representation yet; surfacing them silently as an empty row would hide
+    the gap from anyone debugging a missing result in the chat-history API.
+    """
+    parts: list[str] = []
+    dropped = 0
+    for block in blocks:
+        if isinstance(block, Text):
+            if block.text.strip():
+                parts.append(block.text.strip())
+        else:
+            dropped += 1
+    if dropped:
+        logger.warning(
+            "tool result has non-text blocks dropped from chat-history wire %s",
+            kv(call_id=call_id, dropped_blocks=dropped),
+        )
+    return "\n".join(parts).strip()
+
+
+def _tool_responses_by_id(messages: list[Message]) -> dict[str, ToolResponse]:
+    out: dict[str, ToolResponse] = {}
     for msg in messages:
-        if msg.role not in ("user", "assistant"):
+        for block in msg.content:
+            if isinstance(block, ToolResponse) and block.id:
+                out[block.id] = block
+    return out
+
+
+def messages_to_wire(messages: list[Message]) -> list[dict[str, Any]]:
+    """Serialize turns for the chat-history API.
+
+    Assistant messages expand into multiple wire rows when they contain
+    thinking / tool-request blocks so UIs can restore the same traces that
+    were streamed live over SSE:
+
+    - ``role=thinking`` before assistant text
+    - ``role=tool`` for each ``ToolRequest`` (with matching ``ToolResponse``)
+    - ``role=assistant`` for Text
+    - ``role=user`` for user Text (tool-result-only user rows are omitted)
+
+    Tool ``args`` / ``result`` / ``error`` strings are capped so a detail
+    response cannot grow without bound (same limit as CLI expand bodies).
+    """
+    responses = _tool_responses_by_id(messages)
+    out: list[dict[str, Any]] = []
+    for msg in messages:
+        if msg.role == "user":
+            text = text_from_message(msg)
+            if text:
+                out.append({"role": "user", "text": text})
             continue
-        text = text_from_message(msg)
-        if not text:
+        if msg.role != "assistant":
             continue
-        out.append({"role": msg.role, "text": text})
+
+        thinking_parts: list[str] = []
+        text_parts: list[str] = []
+        tool_requests: list[ToolRequest] = []
+        for block in msg.content:
+            if isinstance(block, Thinking) and block.thinking.strip():
+                thinking_parts.append(block.thinking.strip())
+            elif isinstance(block, RedactedThinking):
+                thinking_parts.append("(redacted thinking)")
+            elif isinstance(block, Text) and block.text.strip():
+                text_parts.append(block.text.strip())
+            elif isinstance(block, ToolRequest):
+                tool_requests.append(block)
+
+        for thinking in thinking_parts:
+            out.append({"role": "thinking", "text": thinking})
+
+        text = "\n".join(text_parts).strip()
+        if text:
+            out.append({"role": "assistant", "text": text})
+
+        for req in tool_requests:
+            resp = responses.get(req.id)
+            result_text = (
+                _text_from_blocks(resp.result, call_id=req.id) if resp is not None else ""
+            )
+            error: str | None = None
+            if resp is not None and resp.is_error:
+                error = result_text or "tool error"
+                result_text = ""
+            row: dict[str, Any] = {
+                "role": "tool",
+                "text": tool_collapsed_title(req.name, req.name, dict(req.args)),
+                "tool": req.name,
+                "call_id": req.id,
+                "args": truncate_wire_args(dict(req.args)),
+            }
+            if result_text:
+                row["result"] = truncate_detail(result_text)
+            if error:
+                row["error"] = truncate_detail(error)
+            out.append(row)
     return out
