@@ -9,7 +9,11 @@ from typing import Any
 
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.logging_utils import kv
-from monkeybot.core.tools.tool_kind import tool_kind_label
+from monkeybot.core.tools.tool_hint import (
+    tool_collapsed_title,
+    truncate_detail,
+    truncate_wire_args,
+)
 from monkeybot.core.types.content_blocks import (
     ContentBlock,
     RedactedThinking,
@@ -84,26 +88,6 @@ def _text_from_blocks(blocks: list[ContentBlock], *, call_id: str) -> str:
     return "\n".join(parts).strip()
 
 
-def _tool_wire_title(name: str, args: dict[str, object]) -> str:
-    """Short UI title, e.g. ``Shell  ls``; kind mapping shared with the CLI."""
-    kind = tool_kind_label(name)
-
-    hint = ""
-    argv = args.get("argv")
-    if isinstance(argv, list) and argv:
-        hint = " ".join(str(x) for x in argv)
-    else:
-        for field in ("command", "shell", "script", "path", "query", "url", "task"):
-            val = args.get(field)
-            if isinstance(val, str) and val.strip():
-                hint = val.strip()
-                break
-    hint = " ".join(hint.split())
-    if len(hint) > 72:
-        hint = hint[:72] + "…"
-    return f"{kind}  {hint}" if hint else kind
-
-
 def _tool_responses_by_id(messages: list[Message]) -> dict[str, ToolResponse]:
     out: dict[str, ToolResponse] = {}
     for msg in messages:
@@ -124,6 +108,9 @@ def messages_to_wire(messages: list[Message]) -> list[dict[str, Any]]:
     - ``role=tool`` for each ``ToolRequest`` (with matching ``ToolResponse``)
     - ``role=assistant`` for Text
     - ``role=user`` for user Text (tool-result-only user rows are omitted)
+
+    Tool ``args`` / ``result`` / ``error`` strings are capped so a detail
+    response cannot grow without bound (same limit as CLI expand bodies).
     """
     responses = _tool_responses_by_id(messages)
     out: list[dict[str, Any]] = []
@@ -167,14 +154,14 @@ def messages_to_wire(messages: list[Message]) -> list[dict[str, Any]]:
                 result_text = ""
             row: dict[str, Any] = {
                 "role": "tool",
-                "text": _tool_wire_title(req.name, dict(req.args)),
+                "text": tool_collapsed_title(req.name, req.name, dict(req.args)),
                 "tool": req.name,
                 "call_id": req.id,
-                "args": dict(req.args),
+                "args": truncate_wire_args(dict(req.args)),
             }
             if result_text:
-                row["result"] = result_text
+                row["result"] = truncate_detail(result_text)
             if error:
-                row["error"] = error
+                row["error"] = truncate_detail(error)
             out.append(row)
     return out

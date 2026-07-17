@@ -112,3 +112,38 @@ def test_messages_to_wire_tool_error() -> None:
     assert wire[0]["role"] == "tool"
     assert wire[0]["error"] == "not found"
     assert "result" not in wire[0]
+
+
+def test_messages_to_wire_truncates_large_tool_payloads() -> None:
+    huge = "x" * 10_000
+    wire = messages_to_wire(
+        [
+            Message(
+                role="assistant",
+                content=[
+                    ToolRequest(
+                        id="c3",
+                        name="write_file",
+                        args={"path": "big.txt", "content": huge},
+                    ),
+                ],
+            ),
+            Message(
+                role="user",
+                content=[
+                    ToolResponse(
+                        id="c3",
+                        tool_name="write_file",
+                        result=[Text(text=huge)],
+                    )
+                ],
+            ),
+        ]
+    )
+    row = wire[0]
+    assert row["role"] == "tool"
+    assert len(row["args"]["content"]) == 8001  # 8000 + ellipsis
+    assert row["args"]["content"].endswith("…")
+    assert len(row["result"]) == 8001
+    assert row["result"].endswith("…")
+    assert row["args"]["path"] == "big.txt"

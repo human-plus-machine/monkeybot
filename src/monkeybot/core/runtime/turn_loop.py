@@ -780,12 +780,17 @@ async def _consume_provider_stream_body(
 
 
 def _thinking_block(state: _TurnState) -> ContentBlock | None:
-    """Wrap the turn's accumulated thinking text, if any, for persistence."""
-    thinking_text = (state.thinking_text or "").strip()
-    if not thinking_text:
+    """Wrap the turn's accumulated thinking text, if any, for persistence.
+
+    Emptiness uses ``.strip()``, but the persisted text stays unmodified so
+    Anthropic/Gemini signature replay after tool use still matches the
+    exact content the provider signed.
+    """
+    raw = state.thinking_text or ""
+    if not raw.strip():
         return None
     return ThinkingBlock(
-        thinking=thinking_text,
+        thinking=raw,
         signature=state.thinking_signature or "",
     )
 
