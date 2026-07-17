@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from monkeybot.core.persistence.sqlite_vector import SQLiteVectorStore
-from monkeybot.core.persistence.vector_backends import VectorChunkRecord, create_vector_store
+from monkeybot.core.persistence.sqlite_vector import SQLiteVectorStore, VectorChunkRecord
 
 
 @pytest.mark.asyncio
@@ -130,6 +130,6 @@ async def test_sqlite_vector_path_collapse_and_matryoshka(tmp_path: Path) -> Non
         await store.close()
 
 
-def test_create_vector_store_sqlite(tmp_path: Path) -> None:
-    store = create_vector_store({"type": "sqlite", "path": str(tmp_path / "x.sqlite")})
+def test_sqlite_vector_store_construct(tmp_path: Path) -> None:
+    store = SQLiteVectorStore(tmp_path / "x.sqlite")
     assert store is not None

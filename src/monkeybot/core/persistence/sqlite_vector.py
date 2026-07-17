@@ -1,6 +1,7 @@
 """Local SQLite vector store for knowledge ANN (brute-force cosine).
 
-Fine for experiment scale (~thousands of chunks). Vectors stored as float32 BLOB.
+Single-writer assumption: one gateway process owns the DB. Fine for experiment
+scale (~thousands of chunks); loads all vectors into memory per query.
 """
 
 from __future__ import annotations
@@ -9,11 +10,12 @@ import asyncio
 import logging
 import math
 import struct
+from dataclasses import dataclass
 from pathlib import Path
 
 import aiosqlite
 
-from monkeybot.core.persistence.vector_backends import VectorChunkRecord, VectorHit
+from monkeybot.core.lockfile_names import LOCKFILE_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -31,21 +33,34 @@ CREATE TABLE IF NOT EXISTS vectors (
 CREATE INDEX IF NOT EXISTS idx_vectors_path ON vectors(path);
 """
 
-_LOCKFILE_NAMES = frozenset(
-    {
-        "pnpm-lock.yaml",
-        "package-lock.json",
-        "yarn.lock",
-        "bun.lock",
-        "bun.lockb",
-        "cargo.lock",
-        "poetry.lock",
-        "uv.lock",
-        "composer.lock",
-        "gemfile.lock",
-        "go.sum",
-    }
-)
+_BUSY_TIMEOUT_MS = 5000
+_BRUTE_FORCE_WARN_ROWS = 5000
+
+
+@dataclass(frozen=True)
+class VectorHit:
+    """One ANN similarity hit (chunk-keyed)."""
+
+    chunk_id: str
+    path: str
+    score: float
+    start_line: int | None = None
+    end_line: int | None = None
+
+
+@dataclass(frozen=True)
+class VectorChunkRecord:
+    """One chunk vector to upsert."""
+
+    chunk_id: str
+    path: str
+    vector: list[float]
+    model_id: str
+    dim: int
+    start_line: int | None = None
+    end_line: int | None = None
+    source_type: str = "workspace_file"
+    text: str | None = None
 
 
 class SQLiteVectorStore:
@@ -61,13 +76,17 @@ class SQLiteVectorStore:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = await aiosqlite.connect(self._path)
         self._conn.row_factory = aiosqlite.Row
+        await self._conn.execute("PRAGMA journal_mode=WAL")
+        await self._conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
         await self._conn.executescript(_SCHEMA)
         await self._conn.commit()
+        logger.info("knowledge vector store open path=%s", self._path)
 
     async def close(self) -> None:
         if self._conn is not None:
             await self._conn.close()
             self._conn = None
+            logger.info("knowledge vector store closed path=%s", self._path)
 
     def _require(self) -> aiosqlite.Connection:
         if self._conn is None:
@@ -76,6 +95,17 @@ class SQLiteVectorStore:
 
     async def upsert(self, chunks: list[VectorChunkRecord]) -> None:
         if not chunks:
+            return
+        # Never persist zero / empty vectors (poison ANN scores).
+        valid = [c for c in chunks if c.vector and any(abs(x) > 0.0 for x in c.vector)]
+        skipped = len(chunks) - len(valid)
+        if skipped:
+            logger.warning(
+                "knowledge vector upsert skipped %d empty/zero vectors path_sample=%s",
+                skipped,
+                chunks[0].path if chunks else "",
+            )
+        if not valid:
             return
         conn = self._require()
         rows = [
@@ -89,7 +119,7 @@ class SQLiteVectorStore:
                 c.dim,
                 _pack_f32(c.vector),
             )
-            for c in chunks
+            for c in valid
         ]
         await conn.executemany(
             """
@@ -109,6 +139,7 @@ class SQLiteVectorStore:
             rows,
         )
         await conn.commit()
+        logger.debug("knowledge vector upsert n=%d", len(valid))
 
     async def delete_by_path(self, path: str) -> None:
         conn = self._require()
@@ -143,10 +174,8 @@ class SQLiteVectorStore:
         *,
         limit: int = 20,
         path_prefix: str | None = None,
-        modality: str | None = None,
         dimensions: int | None = None,
     ) -> list[VectorHit]:
-        del modality  # reserved for caption/media phase
         conn = self._require()
         if path_prefix:
             cur = await conn.execute(
@@ -159,10 +188,16 @@ class SQLiteVectorStore:
                 "SELECT chunk_id, path, start_line, end_line, dim, vector FROM vectors"
             )
         rows = await cur.fetchall()
-        if not rows:
+        row_list = list(rows)
+        if not row_list:
+            logger.debug("knowledge vector query empty table")
             return []
+        if len(row_list) >= _BRUTE_FORCE_WARN_ROWS:
+            logger.warning(
+                "knowledge vector brute-force scan rows=%d (consider a real ANN index)",
+                len(row_list),
+            )
 
-        # Unpack row fields on the event loop (cheap), score off-loop (F12).
         packed: list[tuple[str, str, int | None, int | None, int, bytes]] = [
             (
                 str(row["chunk_id"]),
@@ -172,16 +207,23 @@ class SQLiteVectorStore:
                 int(row["dim"]),
                 bytes(row["vector"]),
             )
-            for row in rows
+            for row in row_list
         ]
         use_dim = dimensions if dimensions and dimensions > 0 else None
-        return await asyncio.to_thread(
+        hits = await asyncio.to_thread(
             _score_rows,
             packed,
             list(vector),
             max(1, limit),
             use_dim,
         )
+        logger.debug(
+            "knowledge vector query rows=%d hits=%d limit=%d",
+            len(row_list),
+            len(hits),
+            limit,
+        )
+        return hits
 
 
 def _score_rows(
@@ -198,7 +240,7 @@ def _score_rows(
     best_by_path: dict[str, VectorHit] = {}
     for chunk_id, path, start_line, end_line, dim, blob in rows:
         base = path.rsplit("/", 1)[-1].lower()
-        if base in _LOCKFILE_NAMES or base.endswith(".lock"):
+        if base in LOCKFILE_NAMES or base.endswith(".lock"):
             continue
         stored = _unpack_f32(blob, dim)
         if use_dim is not None:
@@ -247,4 +289,4 @@ def _dot(a: list[float], b: list[float]) -> float:
     return sum(a[i] * b[i] for i in range(n))
 
 
-__all__ = ["SQLiteVectorStore"]
+__all__ = ["SQLiteVectorStore", "VectorChunkRecord", "VectorHit"]

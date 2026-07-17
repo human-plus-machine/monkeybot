@@ -130,18 +130,21 @@ class NvidiaEmbeddingProvider:
         return out
 
     async def _embed_batch_singly(self, texts: list[str]) -> list[list[float]]:
-        """Retry a failed batch one text at a time; skip permanent failures."""
+        """Retry a failed batch one text at a time; re-raise permanent failures.
+
+        Never returns zero vectors — callers would otherwise poison ANN scores.
+        """
         vectors: list[list[float]] = []
         for text in texts:
             try:
                 vectors.extend(await self._embed_one_batch([text]))
             except Exception as exc:
                 logger.warning(
-                    "nvidia embed skipped one input (model=%s): %r",
+                    "nvidia embed failed one input (model=%s): %r",
                     self._model,
                     exc,
                 )
-                vectors.append([0.0] * self._dim)
+                raise
         return vectors
 
     async def _embed_one_batch(self, texts: list[str]) -> list[list[float]]:

@@ -143,17 +143,12 @@ memory_hook:
 
 # Unified knowledge layer: local FTS + ANN embeddings + note↔workspace links + search.
 # Embeddings stay off by default until configured.
+# Index path is always {root}/index.sqlite (not configurable).
 knowledge:
   enabled: true
-  # root: .monkeybot/knowledge
   search:
     default_limit: 10
-  local_index:
-    path: .monkeybot/knowledge/index.sqlite
   indexer:
-    debounce_ms: 300
-    startup_scan: true
-    max_file_bytes: 5000000
     chunk_tokens: 700
     chunk_overlap_ratio: 0.12
   embeddings:
@@ -166,7 +161,6 @@ knowledge:
   store:
     type: sqlite
     path: .monkeybot/knowledge/vectors.sqlite
-  caption: off
 
 subagents:
   timeout_sec: 600

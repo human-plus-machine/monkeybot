@@ -1,24 +1,24 @@
-"""Public KnowledgeSubsystem — indexer + recall for the unified knowledge layer."""
+"""Public KnowledgeSubsystem — indexer + search for the unified knowledge layer."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 from typing import Any, Literal
 
 from monkeybot.core.hooks import HookManager
-from monkeybot.core.knowledge.embeddings import create_embedding_provider
-from monkeybot.core.knowledge.embeddings.base import EmbeddingProvider
-from monkeybot.core.knowledge.fusion import recall as fusion_recall
+from monkeybot.core.knowledge.embeddings.nvidia import NvidiaEmbeddingProvider
 from monkeybot.core.knowledge.evidence_guard import EvidencePathGuard
+from monkeybot.core.knowledge.fusion import search as fusion_search
 from monkeybot.core.knowledge.hook import KnowledgeHook
-from monkeybot.core.knowledge.salience import IndexAnnouncer, SearchUsageNudge
 from monkeybot.core.knowledge.indexer import KnowledgeIndexer
+from monkeybot.core.knowledge.salience import IndexAnnouncer, SearchUsageNudge
 from monkeybot.core.knowledge.sqlite_index import KnowledgeIndex
-from monkeybot.core.knowledge.tool import serialize_recall_result
+from monkeybot.core.knowledge.tool import serialize_search_result
 from monkeybot.core.knowledge.types import KnowledgeSettings, RecallHit
-from monkeybot.core.persistence.vector_backends import VectorStore, create_vector_store
+from monkeybot.core.persistence.sqlite_vector import SQLiteVectorStore
 from monkeybot.core.workspace.protocol import WorkspaceStorage
 
 logger = logging.getLogger(__name__)
@@ -27,7 +27,10 @@ SourceFilter = Literal["any", "note", "workspace_file"]
 
 
 class KnowledgeSubsystem:
-    """Owns the local FTS/links index, indexer, and recall API."""
+    """Owns the local FTS/links index, indexer, and search API.
+
+    Process-local indexer queues assume a single gateway writer per workspace.
+    """
 
     def __init__(
         self,
@@ -35,8 +38,8 @@ class KnowledgeSubsystem:
         index: KnowledgeIndex,
         indexer: KnowledgeIndexer,
         settings: KnowledgeSettings,
-        embedding_provider: EmbeddingProvider | None = None,
-        vector_store: VectorStore | None = None,
+        embedding_provider: NvidiaEmbeddingProvider | None = None,
+        vector_store: SQLiteVectorStore | None = None,
     ) -> None:
         self._index = index
         self._indexer = indexer
@@ -60,8 +63,8 @@ class KnowledgeSubsystem:
         memory_storage: WorkspaceStorage | None = None,
         memory_root: Path | None = None,
         index_path: Path | None = None,
-        embedding_provider: EmbeddingProvider | None = None,
-        vector_store: VectorStore | None = None,
+        embedding_provider: NvidiaEmbeddingProvider | None = None,
+        vector_store: SQLiteVectorStore | None = None,
     ) -> KnowledgeSubsystem:
         """Open the sidecar DB and construct subsystem (does not run startup scan)."""
         root = Path(knowledge_root) if knowledge_root else Path(settings.knowledge_root)
@@ -73,22 +76,46 @@ class KnowledgeSubsystem:
         vectors = vector_store
         if settings.embeddings.enabled:
             if embedder is None:
-                embedder = create_embedding_provider(settings.embeddings)
-            if vectors is None and embedder is not None:
-                try:
-                    vectors = create_vector_store(
-                        {"type": settings.store.type, "path": settings.store.path}
-                    )
-                except Exception as exc:
+                provider = (settings.embeddings.provider or "nvidia").strip().lower()
+                if provider != "nvidia":
                     logger.warning(
-                        "knowledge vector store setup failed; semantic stage off: %r",
-                        exc,
+                        "knowledge embeddings provider %r not implemented; semantic stage off",
+                        provider,
                     )
-                    vectors = None
-            if vectors is not None:
+                else:
+                    try:
+                        embedder = NvidiaEmbeddingProvider(
+                            model=settings.embeddings.model,
+                            dimensions=settings.embeddings.dimensions,
+                            base_url=settings.embeddings.base_url,
+                            batch_size=settings.embeddings.batch_size,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "knowledge embedding provider setup failed; semantic stage off: %r",
+                            exc,
+                        )
+                        embedder = None
+            if vectors is None and embedder is not None:
+                store_type = (settings.store.type or "sqlite").strip().lower()
+                if store_type != "sqlite":
+                    logger.warning(
+                        "knowledge store.type %r unsupported; semantic stage off",
+                        store_type,
+                    )
+                else:
+                    try:
+                        vectors = SQLiteVectorStore(settings.store.path)
+                        await vectors.open()
+                    except Exception as exc:
+                        logger.warning(
+                            "knowledge vector store setup failed; semantic stage off: %r",
+                            exc,
+                        )
+                        vectors = None
+            elif vectors is not None:
                 await vectors.open()
             if embedder is None or vectors is None:
-                # Fail soft — keyword FTS + graph still work without embeddings
                 embedder = None
                 if vectors is not None:
                     await vectors.close()
@@ -151,7 +178,7 @@ class KnowledgeSubsystem:
             except Exception as exc:
                 logger.warning("knowledge vector store close failed: %r", exc)
 
-    async def recall(
+    async def search(
         self,
         query: str,
         *,
@@ -159,15 +186,14 @@ class KnowledgeSubsystem:
         path_prefix: str | None = None,
         source: SourceFilter = "any",
     ) -> dict[str, Any]:
-        """Run fused recall and return a JSON-serializable payload."""
+        """Run fused search and return a JSON-serializable payload."""
         if not self._indexer.ready:
             try:
                 await self._indexer.ensure_ready()
             except Exception as exc:
-                logger.warning("knowledge ensure_ready during recall: %r", exc)
+                logger.warning("knowledge ensure_ready during search: %r", exc)
 
-        # Best-effort flush before query — never block recall on a long rescan (F11).
-        # Shield so the 0.5s timeout cannot cancel an in-progress index/embed flush.
+        # Best-effort flush — never block search on a long rescan (F11).
         stale = False
         try:
             await asyncio.wait_for(
@@ -175,12 +201,16 @@ class KnowledgeSubsystem:
             )
         except TimeoutError:
             stale = True
-            logger.debug("knowledge pre-recall flush timed out; serving possibly stale index")
+            logger.warning(
+                "knowledge pre-search flush timed out; serving possibly stale index"
+            )
         except Exception as exc:
-            logger.debug("knowledge pre-recall flush: %r", exc)
+            stale = True
+            logger.warning("knowledge pre-search flush failed: %r", exc)
 
         lim = limit if limit is not None else self._settings.default_limit
-        hits: list[RecallHit] = await fusion_recall(
+        started = time.perf_counter()
+        hits: list[RecallHit] = await fusion_search(
             self._index,
             query,
             limit=lim,
@@ -193,7 +223,15 @@ class KnowledgeSubsystem:
             else None,
             rrf_k=self._settings.rrf_k,
         )
-        return serialize_recall_result(query, hits, limit=lim, stale=stale)
+        payload = serialize_search_result(query, hits, limit=lim, stale=stale)
+        logger.info(
+            "knowledge search query_len=%d hits=%d stale=%s elapsed_ms=%.1f",
+            len((query or "").strip()),
+            len(hits),
+            stale,
+            (time.perf_counter() - started) * 1000,
+        )
+        return payload
 
 
 __all__ = ["KnowledgeSubsystem"]

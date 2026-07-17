@@ -4,45 +4,30 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import Any, Literal
 
-from monkeybot.core.knowledge.embeddings.base import EmbeddingProvider
+from monkeybot.core.lockfile_names import LOCKFILE_NAMES
+from monkeybot.core.knowledge.embeddings.nvidia import NvidiaEmbeddingProvider
 from monkeybot.core.knowledge.sqlite_index import KnowledgeIndex, _content_tokens
 from monkeybot.core.knowledge.types import RecallHit, SourceType
-from monkeybot.core.persistence.vector_backends import VectorStore
+from monkeybot.core.persistence.sqlite_vector import SQLiteVectorStore
 
 logger = logging.getLogger(__name__)
 
 SourceFilter = Literal["any", "note", "workspace_file"]
+Candidate = dict[str, Any]
 
 _DEFAULT_RRF_K = 20
 _STEM_BOOST = 1.3
 _PATH_SEGMENT_BOOST = 1.15
 _SNIPPET_CHARS = 280
 
-# Noise notes that echo the live chat / auto-capture — keep out of recall.
 _NOISE_NOTE_PATHS = frozenset({"memory/chat_log.md", "memory/INDEX.md"})
 _NOISE_NOTE_PREFIXES = (
     "memory/raw/",
     "memory/episodic/",
     "memory/semantic/",
-)
-
-# Soft-demote ranking traps (lockfiles, tests) without dropping them entirely.
-_LOCKFILE_NAMES = frozenset(
-    {
-        "pnpm-lock.yaml",
-        "package-lock.json",
-        "yarn.lock",
-        "bun.lock",
-        "bun.lockb",
-        "cargo.lock",
-        "poetry.lock",
-        "uv.lock",
-        "composer.lock",
-        "gemfile.lock",
-        "go.sum",
-    }
 )
 _TEST_PATH_RE = re.compile(
     r"(^|/)(__tests?__/|tests?/)|"
@@ -69,9 +54,8 @@ def _file_stem(name: str) -> str:
 
 
 def _score_multiplier(path: str, *, source_type: SourceType) -> float:
-    """Down-rank lockfiles / tests; slight note boost for curated knowledge."""
     name = _basename(path)
-    if name in _LOCKFILE_NAMES or name.endswith(".lock"):
+    if name in LOCKFILE_NAMES or name.endswith(".lock"):
         return 0.12
     if _TEST_PATH_RE.search(path):
         return 0.55
@@ -81,7 +65,6 @@ def _score_multiplier(path: str, *, source_type: SourceType) -> float:
 
 
 def _path_term_boost(path: str, query_tokens: list[str]) -> float:
-    """Multiply existing score when a query token matches the filename/path."""
     if not query_tokens:
         return 1.0
     tokens = {t.lower() for t in query_tokens}
@@ -105,7 +88,6 @@ def _graph_adjacency_bonus(rrf_k: int) -> float:
 
 
 def _collapse_by_path(hits: list[RecallHit]) -> list[RecallHit]:
-    """Keep the best-scoring chunk per path (preserves relative order)."""
     seen: set[str] = set()
     out: list[RecallHit] = []
     for hit in hits:
@@ -117,7 +99,6 @@ def _collapse_by_path(hits: list[RecallHit]) -> list[RecallHit]:
 
 
 def _normalize_scores(hits: list[RecallHit]) -> None:
-    """Per-query normalize so the top fused hit is 1.0."""
     if not hits:
         return
     max_score = max(h.score for h in hits)
@@ -127,42 +108,24 @@ def _normalize_scores(hits: list[RecallHit]) -> None:
         hit.score = hit.score / max_score
 
 
-async def recall(
-    index: KnowledgeIndex,
-    query: str,
-    *,
-    limit: int = 10,
-    path_prefix: str | None = None,
-    source: SourceFilter = "any",
-    embedding_provider: EmbeddingProvider | None = None,
-    vector_store: VectorStore | None = None,
-    ann_dimensions: int | None = None,
-    rrf_k: int | None = None,
-) -> list[RecallHit]:
-    """Run keyword FTS (+ optional ANN) + graph expansion and return fused ranked hits."""
-    q = (query or "").strip()
-    if not q:
-        return []
+def _hit_key(path: str, span: dict[str, int] | None) -> str:
+    if span and "start_line" in span:
+        end = span.get("end_line", span["start_line"])
+        return f"{path}#L{span['start_line']}-{end}"
+    return path
 
-    k = _DEFAULT_RRF_K if rrf_k is None else max(1, int(rrf_k))
-    adjacency_bonus = _graph_adjacency_bonus(k)
-    query_tokens = _content_tokens(q)
 
-    source_type: SourceType | None
-    if source == "any":
-        source_type = None
-    else:
-        source_type = source
-    fts_limit = max(limit * 4, 32)
-    fts_rows = await index.fts_search(
-        q,
-        limit=fts_limit,
-        path_prefix=path_prefix,
-        source=source_type,
-    )
+def _snippet(text: str, limit: int = _SNIPPET_CHARS) -> str:
+    flat = " ".join((text or "").split())
+    if len(flat) <= limit:
+        return flat
+    return flat[: limit - 1] + "…"
 
-    candidates: dict[str, dict[str, Any]] = {}
 
+def _ingest_fts(
+    candidates: dict[str, Candidate],
+    fts_rows: list[dict[str, Any]],
+) -> None:
     for i, row in enumerate(fts_rows):
         path = row["path"]
         if _is_noise_path(path):
@@ -180,92 +143,102 @@ async def recall(
                 "kw_rank": i + 1,
                 "bm25": bm25,
             }
-        else:
-            candidates[key]["kw_rank"] = min(candidates[key].get("kw_rank", 10**9), i + 1)
-            # FTS5 bm25: lower (more negative) is better
-            prev = candidates[key].get("bm25")
-            if prev is None or bm25 < prev:
-                candidates[key]["bm25"] = bm25
+            continue
+        candidates[key]["kw_rank"] = min(candidates[key].get("kw_rank", 10**9), i + 1)
+        prev = candidates[key].get("bm25")
+        if prev is None or bm25 < prev:
+            candidates[key]["bm25"] = bm25
 
-    # Optional semantic ANN stage
-    if embedding_provider is not None and vector_store is not None:
-        try:
-            qvec = await embedding_provider.embed_query(q)
-            # Over-fetch then path-collapse so demoted lockfile chunks don't dominate.
-            ann_hits = await vector_store.query(
-                qvec,
-                limit=max(fts_limit * 2, 64),
-                path_prefix=path_prefix,
-                dimensions=ann_dimensions,
+
+async def _ingest_ann(
+    index: KnowledgeIndex,
+    candidates: dict[str, Candidate],
+    *,
+    query: str,
+    fts_limit: int,
+    path_prefix: str | None,
+    source_type: SourceType | None,
+    embedding_provider: NvidiaEmbeddingProvider,
+    vector_store: SQLiteVectorStore,
+    ann_dimensions: int | None,
+) -> None:
+    qvec = await embedding_provider.embed_query(query)
+    ann_hits = await vector_store.query(
+        qvec,
+        limit=max(fts_limit * 2, 64),
+        path_prefix=path_prefix,
+        dimensions=ann_dimensions,
+    )
+    seen_paths: set[str] = set()
+    ann_rank = 0
+    for hit in ann_hits:
+        if _is_noise_path(hit.path):
+            continue
+        if _basename(hit.path) in LOCKFILE_NAMES:
+            continue
+        if hit.path in seen_paths:
+            continue
+        seen_paths.add(hit.path)
+        ann_rank += 1
+        span = None
+        if hit.start_line is not None:
+            span = {
+                "start_line": int(hit.start_line),
+                "end_line": int(hit.end_line or hit.start_line),
+            }
+        key = hit.chunk_id if hit.chunk_id else _hit_key(hit.path, span)
+        cosine = float(hit.score)
+        if key not in candidates:
+            chunk = await index.get_chunk_snippet(
+                hit.path,
+                start_line=hit.start_line,
+                end_line=hit.end_line,
             )
-            seen_paths: set[str] = set()
-            ann_rank = 0
-            for hit in ann_hits:
-                if _is_noise_path(hit.path):
-                    continue
-                if _basename(hit.path) in _LOCKFILE_NAMES:
-                    continue
-                if hit.path in seen_paths:
-                    continue
-                seen_paths.add(hit.path)
-                ann_rank += 1
-                span = None
-                if hit.start_line is not None:
-                    span = {
-                        "start_line": int(hit.start_line),
-                        "end_line": int(hit.end_line or hit.start_line),
-                    }
-                key = hit.chunk_id if hit.chunk_id else _hit_key(hit.path, span)
-                cosine = float(hit.score)
-                if key not in candidates:
-                    chunk = await index.get_chunk_snippet(
-                        hit.path,
-                        start_line=hit.start_line,
-                        end_line=hit.end_line,
-                    )
-                    if chunk is None:
-                        continue
-                    if source_type is not None and chunk["source_type"] != source_type:
-                        continue
-                    candidates[key] = {
-                        "path": chunk["path"],
-                        "source_type": chunk["source_type"],
-                        "snippet": _snippet(chunk["text"]),
-                        "span": {
-                            "start_line": chunk["start_line"],
-                            "end_line": chunk["end_line"],
-                        },
-                        "links": [],
-                        "via": "ann",
-                        "vec_rank": ann_rank,
-                        "cosine": cosine,
-                    }
-                else:
-                    candidates[key]["vec_rank"] = min(
-                        candidates[key].get("vec_rank", 10**9), ann_rank
-                    )
-                    prev_cos = candidates[key].get("cosine")
-                    if prev_cos is None or cosine > prev_cos:
-                        candidates[key]["cosine"] = cosine
-                    if not candidates[key].get("via"):
-                        candidates[key]["via"] = "ann"
-                if ann_rank >= fts_limit:
-                    break
-        except Exception as exc:
-            logger.warning("knowledge ANN stage failed; continuing keyword+graph: %r", exc)
+            if chunk is None:
+                continue
+            if source_type is not None and chunk["source_type"] != source_type:
+                continue
+            candidates[key] = {
+                "path": chunk["path"],
+                "source_type": chunk["source_type"],
+                "snippet": _snippet(chunk["text"]),
+                "span": {
+                    "start_line": chunk["start_line"],
+                    "end_line": chunk["end_line"],
+                },
+                "links": [],
+                "via": "ann",
+                "vec_rank": ann_rank,
+                "cosine": cosine,
+            }
+        else:
+            candidates[key]["vec_rank"] = min(
+                candidates[key].get("vec_rank", 10**9), ann_rank
+            )
+            prev_cos = candidates[key].get("cosine")
+            if prev_cos is None or cosine > prev_cos:
+                candidates[key]["cosine"] = cosine
+            if not candidates[key].get("via"):
+                candidates[key]["via"] = "ann"
+        if ann_rank >= fts_limit:
+            break
 
-    # Graph expansion: from note hits, pull 1-hop workspace/note links.
-    # Graph targets form a third ranked list fused via RRF (not an absolute score).
+
+async def _expand_graph(
+    index: KnowledgeIndex,
+    candidates: dict[str, Candidate],
+    *,
+    path_prefix: str | None,
+    source: SourceFilter,
+) -> None:
     note_paths = {
-        c["path"]
-        for c in candidates.values()
-        if c["source_type"] == "note"
+        c["path"] for c in candidates.values() if c["source_type"] == "note"
     }
     graph_rank = 0
     for note_path in note_paths:
         edges = await index.links_from(note_path)
         link_refs = [e["ref"] for e in edges]
-        for key, cand in list(candidates.items()):
+        for cand in candidates.values():
             if cand["path"] == note_path:
                 cand["links"] = link_refs
 
@@ -277,6 +250,8 @@ async def recall(
                 continue
             if source == "workspace_file" and edge["link_type"] != "workspace":
                 continue
+            if _is_noise_path(target):
+                continue
 
             span = None
             if edge["start_line"] is not None:
@@ -285,8 +260,6 @@ async def recall(
                     "end_line": int(edge["end_line"] or edge["start_line"]),
                 }
             key = _hit_key(target, span)
-            if _is_noise_path(target):
-                continue
             if key in candidates:
                 if not candidates[key].get("via"):
                     candidates[key]["via"] = f"graph:{note_path}"
@@ -301,7 +274,6 @@ async def recall(
                 end_line=edge["end_line"],
             )
             if chunk is None:
-                # Unresolvable target (missing from index) — don't emit null snippets
                 continue
 
             graph_rank += 1
@@ -320,9 +292,17 @@ async def recall(
                 "graph_rank": graph_rank,
             }
 
-    # Score: RRF across keyword + vector + graph ranks; path-term + demotion multipliers
+
+def _score_candidates(
+    candidates: dict[str, Candidate],
+    *,
+    k: int,
+    adjacency_bonus: float,
+    query_tokens: list[str],
+    limit: int,
+) -> list[RecallHit]:
     scored: list[RecallHit] = []
-    for key, cand in candidates.items():
+    for cand in candidates.values():
         if _is_noise_path(cand["path"]):
             continue
         score = 0.0
@@ -336,7 +316,6 @@ async def recall(
         if "graph_rank" in cand:
             score += 1.0 / (k + int(cand["graph_rank"]))
             signals.append("graph")
-            # Small adjacency bonus only when graph reinforces an organic hit
             if "kw_rank" in cand or "vec_rank" in cand:
                 score += adjacency_bonus
         if score <= 0:
@@ -370,18 +349,72 @@ async def recall(
     return collapsed
 
 
-def _hit_key(path: str, span: dict[str, int] | None) -> str:
-    if span and "start_line" in span:
-        end = span.get("end_line", span["start_line"])
-        return f"{path}#L{span['start_line']}-{end}"
-    return path
+async def search(
+    index: KnowledgeIndex,
+    query: str,
+    *,
+    limit: int = 10,
+    path_prefix: str | None = None,
+    source: SourceFilter = "any",
+    embedding_provider: NvidiaEmbeddingProvider | None = None,
+    vector_store: SQLiteVectorStore | None = None,
+    ann_dimensions: int | None = None,
+    rrf_k: int | None = None,
+) -> list[RecallHit]:
+    """Run keyword FTS (+ optional ANN) + graph expansion; return fused ranked hits."""
+    q = (query or "").strip()
+    if not q:
+        return []
+
+    started = time.perf_counter()
+    k = _DEFAULT_RRF_K if rrf_k is None else max(1, int(rrf_k))
+    adjacency_bonus = _graph_adjacency_bonus(k)
+    query_tokens = _content_tokens(q)
+    source_type: SourceType | None = None if source == "any" else source
+    fts_limit = max(limit * 4, 32)
+
+    fts_rows = await index.fts_search(
+        q,
+        limit=fts_limit,
+        path_prefix=path_prefix,
+        source=source_type,
+    )
+    candidates: dict[str, Candidate] = {}
+    _ingest_fts(candidates, fts_rows)
+
+    if embedding_provider is not None and vector_store is not None:
+        try:
+            await _ingest_ann(
+                index,
+                candidates,
+                query=q,
+                fts_limit=fts_limit,
+                path_prefix=path_prefix,
+                source_type=source_type,
+                embedding_provider=embedding_provider,
+                vector_store=vector_store,
+                ann_dimensions=ann_dimensions,
+            )
+        except Exception as exc:
+            logger.warning("knowledge ANN stage failed; continuing keyword+graph: %r", exc)
+
+    await _expand_graph(
+        index, candidates, path_prefix=path_prefix, source=source
+    )
+    hits = _score_candidates(
+        candidates,
+        k=k,
+        adjacency_bonus=adjacency_bonus,
+        query_tokens=query_tokens,
+        limit=limit,
+    )
+    logger.debug(
+        "knowledge fusion query_len=%d hits=%d elapsed_ms=%.1f",
+        len(q),
+        len(hits),
+        (time.perf_counter() - started) * 1000,
+    )
+    return hits
 
 
-def _snippet(text: str, limit: int = _SNIPPET_CHARS) -> str:
-    flat = " ".join((text or "").split())
-    if len(flat) <= limit:
-        return flat
-    return flat[: limit - 1] + "…"
-
-
-__all__ = ["recall"]
+__all__ = ["search"]

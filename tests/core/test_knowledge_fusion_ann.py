@@ -8,10 +8,10 @@ import pytest
 
 from monkeybot.core.knowledge.chunking import chunk_text
 from monkeybot.core.knowledge.extractors import content_hash
-from monkeybot.core.knowledge.fusion import recall
+from monkeybot.core.knowledge.fusion import search as recall
 from monkeybot.core.knowledge.sqlite_index import KnowledgeIndex
 from monkeybot.core.persistence.sqlite_vector import SQLiteVectorStore
-from monkeybot.core.persistence.vector_backends import VectorChunkRecord
+from monkeybot.core.persistence.sqlite_vector import VectorChunkRecord
 
 
 class _FakeEmbedder:

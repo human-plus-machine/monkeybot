@@ -33,7 +33,7 @@ from monkeybot.core.config.settings import (
 from monkeybot.core.context import LoopsToolRegistry, build_context
 from monkeybot.core.hooks import HookManager
 from monkeybot.core.knowledge import KnowledgeSubsystem, resolve_knowledge_settings
-from monkeybot.core.knowledge.config import knowledge_enabled_from_env
+from monkeybot.core.knowledge.config import knowledge_enabled_from_config
 from monkeybot.core.layout import AgentLayout
 from monkeybot.core.llm.provider import (
     Done,
@@ -622,7 +622,7 @@ async def _startup(fastapi_app: FastAPI) -> None:
         fastapi_app.state.memory = None
 
     # Unified knowledge layer — FTS + ANN + links + search
-    if knowledge_enabled_from_env():
+    if knowledge_enabled_from_config():
         try:
             layout = AgentLayout.from_environment()
             settings = resolve_knowledge_settings(workspace_root=layout.workspace_root)
@@ -661,7 +661,7 @@ async def _startup(fastapi_app: FastAPI) -> None:
             _deps.knowledge = None
             fastapi_app.state.knowledge = None
     else:
-        logger.info("knowledge layer disabled via KNOWLEDGE_ENABLED")
+        logger.info("knowledge layer disabled via knowledge.enabled")
         fastapi_app.state.knowledge = None
 
     if attachments_enabled_from_env():
@@ -755,9 +755,10 @@ async def _shutdown(fastapi_app: FastAPI) -> None:
         except Exception as exc:
             logger.warning("knowledge close failed: %s", exc)
         _deps.knowledge = None
-        with contextlib.suppress(Exception):
+        try:
             fastapi_app.state.knowledge = None
-
+        except Exception as exc:
+            logger.warning("knowledge state clear failed: %s", exc)
     worker_pool_handle = getattr(fastapi_app.state, "worker_pool", None)
     if worker_pool_handle is not None:
         from monkeybot.core.subagents.worker_pool import shutdown_worker_pool

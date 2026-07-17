@@ -516,4 +516,4 @@ def test_command_implies_fs_mutation_heuristics() -> None:
     assert command_implies_fs_mutation(["rm", "-rf", "tmp"])
     assert command_implies_fs_mutation(["pnpm", "install"])
     assert command_implies_fs_mutation(["bash", "-c", "echo hi > out.txt"])
-    assert command_implies_fs_mutation(["mystery-tool"])  # fail-safe
+    assert not command_implies_fs_mutation(["mystery-tool"])  # unknown → no rescan

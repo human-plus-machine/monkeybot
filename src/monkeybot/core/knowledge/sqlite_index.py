@@ -72,9 +72,12 @@ class KnowledgeIndex:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = await aiosqlite.connect(str(self._db_path))
         self._conn.row_factory = aiosqlite.Row
+        await self._conn.execute("PRAGMA journal_mode=WAL")
+        await self._conn.execute("PRAGMA busy_timeout=5000")
         await self._conn.execute("PRAGMA foreign_keys = ON")
         await self._conn.executescript(_SCHEMA)
         await self._conn.commit()
+        logger.info("knowledge index open path=%s", self._db_path)
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -268,7 +271,7 @@ class KnowledgeIndex:
             cur = await conn.execute(sql, params)
             rows = await cur.fetchall()
         except aiosqlite.OperationalError as exc:
-            logger.debug("FTS query failed (%s); query=%r", exc, fts_query)
+            logger.warning("FTS query failed (%s); query=%r", exc, fts_query)
             return []
 
         out: list[dict[str, Any]] = []

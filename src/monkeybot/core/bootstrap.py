@@ -17,7 +17,7 @@ from monkeybot.core.config.settings import auto_schema_enabled_from_config, get_
 from monkeybot.core.context import build_context
 from monkeybot.core.hooks import HookManager
 from monkeybot.core.knowledge import KnowledgeSubsystem, resolve_knowledge_settings
-from monkeybot.core.knowledge.config import knowledge_enabled_from_env
+from monkeybot.core.knowledge.config import knowledge_enabled_from_config
 from monkeybot.core.llm.provider import Provider
 from monkeybot.core.llm.usage import usage_from_totals
 from monkeybot.core.mcp.mcp_client import MCPClient
@@ -147,7 +147,7 @@ async def create_harness_deps(
             )
 
         knowledge: KnowledgeSubsystem | None = None
-        if knowledge_enabled_from_env() and workspace_root is not None:
+        if knowledge_enabled_from_config() and workspace_root is not None:
             try:
                 settings = resolve_knowledge_settings(workspace_root=workspace_root)
                 knowledge = await KnowledgeSubsystem.create(

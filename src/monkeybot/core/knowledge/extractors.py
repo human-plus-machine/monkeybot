@@ -75,24 +75,12 @@ _TEXT_SUFFIXES = frozenset(
     }
 )
 
+from monkeybot.core.lockfile_names import LOCKFILE_NAMES
+
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _NULL_BYTE = b"\x00"
 
-_SKIP_FILE_NAMES = frozenset(
-    {
-        "pnpm-lock.yaml",
-        "package-lock.json",
-        "yarn.lock",
-        "bun.lock",
-        "bun.lockb",
-        "cargo.lock",
-        "poetry.lock",
-        "uv.lock",
-        "composer.lock",
-        "gemfile.lock",
-        "go.sum",
-    }
-)
+_SKIP_FILE_NAMES = LOCKFILE_NAMES
 
 
 def content_hash(data: bytes | str) -> str:

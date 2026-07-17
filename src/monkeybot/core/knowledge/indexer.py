@@ -9,12 +9,12 @@ from collections import defaultdict
 from pathlib import Path
 
 from monkeybot.core.knowledge.chunking import chunk_text
-from monkeybot.core.knowledge.embeddings.base import EmbeddingProvider
+from monkeybot.core.knowledge.embeddings.nvidia import NvidiaEmbeddingProvider
 from monkeybot.core.knowledge.extractors import content_hash, read_text_file, walk_text_files
 from monkeybot.core.knowledge.links import parse_wiki_links
 from monkeybot.core.knowledge.sqlite_index import KnowledgeIndex
 from monkeybot.core.knowledge.types import KnowledgeSettings, SourceType, TextChunk
-from monkeybot.core.persistence.vector_backends import VectorChunkRecord, VectorStore
+from monkeybot.core.persistence.sqlite_vector import SQLiteVectorStore, VectorChunkRecord
 from monkeybot.core.workspace.protocol import WorkspaceStorage
 
 logger = logging.getLogger(__name__)
@@ -26,7 +26,10 @@ _MTIME_EPS = 1e-6
 
 
 class KnowledgeIndexer:
-    """Debounced indexer over workspace files, knowledge notes, and memory vault."""
+    """Debounced indexer over workspace files, knowledge notes, and memory vault.
+
+    Process-local dirty queues assume a single gateway writer per workspace index.
+    """
 
     def __init__(
         self,
@@ -37,8 +40,8 @@ class KnowledgeIndexer:
         settings: KnowledgeSettings,
         memory_storage: WorkspaceStorage | None = None,
         memory_root: Path | None = None,
-        embedding_provider: EmbeddingProvider | None = None,
-        vector_store: VectorStore | None = None,
+        embedding_provider: NvidiaEmbeddingProvider | None = None,
+        vector_store: SQLiteVectorStore | None = None,
     ) -> None:
         self._index = index
         self._workspace_root = Path(workspace_root).resolve()
@@ -74,6 +77,8 @@ class KnowledgeIndexer:
                     await self._full_scan()
                 except Exception as exc:
                     logger.warning("knowledge startup scan failed: %r", exc)
+                    # Do not mark ready — next ensure_ready/search can retry.
+                    return
             self._ready = True
 
     def enqueue(self, path: str, *, source_type: SourceType | None = None) -> None:
@@ -238,7 +243,10 @@ class KnowledgeIndexer:
                     index_path = f"memory/{rel}"
                     try:
                         text = await self._memory_storage.read_text(rel)
-                    except Exception:
+                    except Exception as exc:
+                        logger.warning(
+                            "knowledge memory read_text failed for %s: %r", rel, exc
+                        )
                         continue
                     await self._index_text(
                         text,
@@ -300,7 +308,12 @@ class KnowledgeIndexer:
             if self._memory_storage is not None:
                 try:
                     text = await self._memory_storage.read_text(rel)
-                except Exception:
+                except Exception as exc:
+                    logger.warning(
+                        "knowledge memory read failed for %s; deleting index row: %r",
+                        path,
+                        exc,
+                    )
                     await self._index.delete_path(path)
                     await self._delete_vectors(path)
                     return

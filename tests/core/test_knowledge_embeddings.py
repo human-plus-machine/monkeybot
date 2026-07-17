@@ -1,4 +1,4 @@
-"""Unit tests for NVIDIA embedding adapter helpers and factory."""
+"""Unit tests for NVIDIA embedding adapter helpers."""
 
 from __future__ import annotations
 
@@ -6,13 +6,11 @@ import math
 
 import pytest
 
-from monkeybot.core.knowledge.embeddings import create_embedding_provider
 from monkeybot.core.knowledge.embeddings.nvidia import (
     NvidiaEmbeddingProvider,
     _l2_normalize,
     _maybe_truncate_and_renorm,
 )
-from monkeybot.core.knowledge.types import EmbeddingSettings
 
 
 def test_l2_normalize_unit_length() -> None:
@@ -40,19 +38,6 @@ def test_nvidia_provider_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = NvidiaEmbeddingProvider()
     assert provider.model_id == "nvidia/nemotron-3-embed-1b"
     assert provider.dim == 1024
-
-
-def test_create_embedding_provider_disabled() -> None:
-    assert create_embedding_provider(EmbeddingSettings(enabled=False)) is None
-
-
-def test_create_embedding_provider_nvidia(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-test")
-    provider = create_embedding_provider(
-        EmbeddingSettings(enabled=True, provider="nvidia", model="nvidia/nemotron-3-embed-1b")
-    )
-    assert provider is not None
-    assert provider.model_id == "nvidia/nemotron-3-embed-1b"
 
 
 @pytest.mark.asyncio

@@ -151,6 +151,7 @@ class KnowledgeHook:
 
     def __init__(self, indexer: KnowledgeIndexer) -> None:
         self._indexer = indexer
+        self._notes_dirty = False
 
     def register(self, manager: HookManager) -> None:
         manager.register(HookEvent.POST_TOOL, self.on_post_tool)
@@ -167,6 +168,8 @@ class KnowledgeHook:
                 payload.tool_name, payload.tool_args, payload.tool_result
             ):
                 self._indexer.enqueue_workspace_rel(rel)
+                if _looks_like_note_path(rel):
+                    self._notes_dirty = True
             return
 
         if payload.tool_name in _SHELL_TOOLS and _run_command_succeeded(payload.tool_result):
@@ -181,14 +184,30 @@ class KnowledgeHook:
 
     async def on_post_turn(self, payload: HookPayload) -> None:
         del payload
-        # Notes/memory may have been updated by the organizer this turn
+        if not self._notes_dirty:
+            return
+        self._notes_dirty = False
         self._indexer.request_notes_rescan()
 
 
+def _looks_like_note_path(rel: str) -> bool:
+    norm = rel.replace("\\", "/").lstrip("./")
+    return (
+        norm.startswith("notes/")
+        or norm.startswith("memory/")
+        or "/notes/" in norm
+        or "/memory/" in norm
+    )
+
+
 def command_implies_fs_mutation(argv: list[str] | None) -> bool:
-    """Return True when argv may change workspace files (fail-safe on unknown)."""
+    """Return True when argv may change workspace files.
+
+    Unknown commands default to no-rescan (read-only assumption) to avoid
+    full-workspace rescans on every unfamiliar CLI.
+    """
     if not argv:
-        return True
+        return False
     joined = " ".join(argv)
     if _REDIRECT_RE.search(joined):
         return True
@@ -208,39 +227,40 @@ def command_implies_fs_mutation(argv: list[str] | None) -> bool:
         first = first.rsplit("/", 1)[-1].lower()
         if first in _READ_ONLY_CMDS:
             return False
-        return True
+        if first in _MUTATING_CMDS:
+            return True
+        return False
 
     if cmd in _READ_ONLY_CMDS:
         return False
 
     if cmd == "git":
         if len(argv) < 2:
-            return True
+            return False
         sub = argv[1].lstrip("-")
         if sub in _GIT_READONLY_SUBS:
-            # git stash without list/show is mutating
-            if sub == "stash" and (
-                len(argv) == 2 or argv[2] not in {"list", "show"}
-            ):
-                return True
-            return False
-        return True
-
-    if cmd in {"npm", "pnpm", "yarn", "bun", "pip", "pip3", "uv"}:
-        if len(argv) < 2:
-            return True
-        sub = argv[1].lower()
-        if sub in _PKG_MUTATING_SUBS:
-            return True
-        if sub in {"list", "ls", "outdated", "view", "info", "test", "exec", "why", "tree"}:
             return False
         return True
 
     if cmd in _MUTATING_CMDS:
+        if cmd in {"npm", "pnpm", "yarn", "bun", "pip", "pip3", "uv"} and len(argv) >= 2:
+            sub = argv[1].lstrip("-").lower()
+            if sub in {
+                "list",
+                "ls",
+                "outdated",
+                "view",
+                "info",
+                "test",
+                "exec",
+                "why",
+                "tree",
+            }:
+                return False
+            return sub in _PKG_MUTATING_SUBS
         return True
 
-    # Unknown binary — fail-safe rescan
-    return True
+    return False
 
 
 def _argv_from_args(args: dict[str, Any] | None) -> list[str] | None:

@@ -45,7 +45,6 @@ class RecallHit:
     span: dict[str, int] | None = None
     links: list[str] = field(default_factory=list)
     via: str | None = None
-    modality: str = "text"
     cosine: float | None = None
     bm25: float | None = None
     signals: list[str] = field(default_factory=list)
@@ -55,7 +54,6 @@ class RecallHit:
             "source_type": self.source_type,
             "path": self.path,
             "score": round(self.score, 4),
-            "modality": self.modality,
             "snippet": self.snippet,
         }
         if self.span is not None:

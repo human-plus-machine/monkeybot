@@ -13,6 +13,7 @@ Two hooks (F21):
 from __future__ import annotations
 
 import logging
+from collections import OrderedDict
 
 from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
 from monkeybot.core.knowledge.sqlite_index import KnowledgeIndex
@@ -24,6 +25,7 @@ _SEARCH_TOOLS = frozenset({"search", "recall"})
 
 # Exploration calls without `search` in one turn before the backstop fires.
 _NUDGE_THRESHOLD = 3
+_ANNOUNCED_CAP = 256
 
 _NUDGE_TEXT = (
     "## Workspace index reminder\n"
@@ -57,18 +59,33 @@ def _append_injection(payload: HookPayload, text: str) -> None:
 class IndexAnnouncer:
     """Inject a one-time per-thread notice that the `search` index is ready."""
 
-    def __init__(self, index: KnowledgeIndex, *, embeddings_enabled: bool) -> None:
+    def __init__(
+        self,
+        index: KnowledgeIndex,
+        *,
+        embeddings_enabled: bool,
+        announced_cap: int = _ANNOUNCED_CAP,
+    ) -> None:
         self._index = index
         self._embeddings = embeddings_enabled
-        self._announced: set[str] = set()
+        self._announced_cap = max(1, announced_cap)
+        self._announced: OrderedDict[str, None] = OrderedDict()
 
     def register(self, manager: HookManager) -> None:
         manager.register(HookEvent.PRE_TURN, self.on_pre_turn)
 
+    def _mark_announced(self, thread_id: str) -> None:
+        if thread_id in self._announced:
+            self._announced.move_to_end(thread_id)
+            return
+        self._announced[thread_id] = None
+        while len(self._announced) > self._announced_cap:
+            self._announced.popitem(last=False)
+
     async def on_pre_turn(self, payload: HookPayload) -> None:
         if payload.thread_id in self._announced:
             return
-        self._announced.add(payload.thread_id)
+        self._mark_announced(payload.thread_id)
         try:
             files, chunks = await self._index.counts()
         except Exception as exc:

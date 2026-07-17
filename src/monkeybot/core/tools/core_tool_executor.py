@@ -42,7 +42,6 @@ from monkeybot.core.mcp.mcp_client import (
 )
 from monkeybot.core.mcp.ports_mcp import MCPClientPort
 from monkeybot.core.knowledge.subsystem import KnowledgeSubsystem
-from monkeybot.core.knowledge.tool import legacy_search_memory_shape
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.persistence.backends import RunStore, ScheduledLoopStore
 from monkeybot.core.persistence.durable_runs import SubagentEnvelope as PersistedSubagentEnvelope
@@ -915,10 +914,10 @@ class CoreToolExecutor(ToolExecutorPort):
                 ),
             )
         max_hits = _coerce_int(args.get("max_hits"), 40) or 40
-        # Prefer unified recall when the knowledge layer is enabled
+        # Prefer unified search when the knowledge layer is enabled
         if self._knowledge is not None:
-            payload = await self._knowledge.recall(query, limit=max_hits)
-            return (_j(legacy_search_memory_shape(payload)), None)
+            payload = await self._knowledge.search(query, limit=max_hits)
+            return (_j(payload), None)
         if self._memory is None:
             return (
                 None,
@@ -950,7 +949,7 @@ class CoreToolExecutor(ToolExecutorPort):
                 _built_in_tool_error(
                     "validation",
                     "search requires the knowledge layer to be configured.",
-                    "Set knowledge.enabled: true in monkeybot.yaml (Config B).",
+                    "Set knowledge.enabled: true in monkeybot.yaml.",
                     {"field": "knowledge"},
                 ),
             )
@@ -972,8 +971,7 @@ class CoreToolExecutor(ToolExecutorPort):
             "workspace_file",
         }:
             source = source_raw.strip()
-        # modality accepted but ignored in Phase 1
-        payload = await self._knowledge.recall(
+        payload = await self._knowledge.search(
             query,
             limit=limit,
             path_prefix=path_prefix,

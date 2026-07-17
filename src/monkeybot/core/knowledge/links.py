@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from pathlib import PurePosixPath
 
-from monkeybot.core.knowledge.types import LinkType, ParsedLink
+from monkeybot.core.knowledge.types import ParsedLink
 
 # [[workspace:path/to/file.md#L40-72]] or [[workspace:path]] or [[notes/foo]] / [[foo]]
 _WIKI_LINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
@@ -160,8 +160,4 @@ def format_link_ref(link: ParsedLink) -> str:
     return base
 
 
-def link_type_for(link: ParsedLink) -> LinkType:
-    return link.link_type
-
-
-__all__ = ["ParsedLink", "format_link_ref", "link_type_for", "parse_wiki_links"]
+__all__ = ["ParsedLink", "format_link_ref", "parse_wiki_links"]

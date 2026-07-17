@@ -456,7 +456,7 @@ def _core_tool_defs(
         },
         "required": ["patch_text"],
     }
-    search_schema: dict[str, object] = {
+    search_memory_schema: dict[str, object] = {
         "type": "object",
         "properties": {
             "query": {"type": "string"},
@@ -465,7 +465,7 @@ def _core_tool_defs(
         },
         "required": [],
     }
-    recall_schema: dict[str, object] = {
+    search_schema: dict[str, object] = {
         "type": "object",
         "properties": {
             "query": {
@@ -484,11 +484,6 @@ def _core_tool_defs(
                 "type": "string",
                 "enum": ["any", "note", "workspace_file"],
                 "description": "Filter by provenance. Default any.",
-            },
-            "modality": {
-                "type": "string",
-                "enum": ["any", "text", "image", "pdf", "audio"],
-                "description": "Reserved; ignored in Phase 1 (text-only index).",
             },
             "limit": {"type": "integer", "description": "Max hits (default ~10)."},
             "max_hits": {"type": "integer"},
@@ -602,7 +597,7 @@ def _core_tool_defs(
             "search_memory",
             "Search markdown/text under the memory directory for a keyword or phrase. "
             "Prefer `search` for conceptual / cross-file knowledge when available.",
-            search_schema,
+            search_memory_schema,
             parallel_safe=True,
         ),
         ToolDef(
@@ -615,7 +610,7 @@ def _core_tool_defs(
             "For locate-a-file/asset questions prefer `glob`. Prefer `grep` for exact "
             "identifiers. Do not skip because answers 'are in source' — this finds them. "
             "(`recall` is accepted as a legacy alias.)",
-            recall_schema,
+            search_schema,
             parallel_safe=True,
         ),
         ToolDef(

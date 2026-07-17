@@ -8,7 +8,7 @@ import pytest
 
 from monkeybot.core.knowledge.chunking import chunk_text
 from monkeybot.core.knowledge.extractors import content_hash
-from monkeybot.core.knowledge.fusion import recall
+from monkeybot.core.knowledge.fusion import search as recall
 from monkeybot.core.knowledge.links import parse_wiki_links
 from monkeybot.core.knowledge.sqlite_index import KnowledgeIndex
 
@@ -149,7 +149,7 @@ async def test_graph_only_hits_use_rrf_not_absolute_score(tmp_path: Path) -> Non
     participate in RRF as a third list and stay below dual-signal hits.
     """
     from monkeybot.core.persistence.sqlite_vector import SQLiteVectorStore
-    from monkeybot.core.persistence.vector_backends import VectorChunkRecord
+    from monkeybot.core.persistence.sqlite_vector import VectorChunkRecord
 
     class _FakeEmbedder:
         model_id = "fake"
@@ -257,7 +257,7 @@ async def test_graph_only_hits_use_rrf_not_absolute_score(tmp_path: Path) -> Non
 async def test_score_normalized_and_signals_exposed(tmp_path: Path) -> None:
     """F4: top hit score == 1.0; bm25/cosine/signals populated when available."""
     from monkeybot.core.persistence.sqlite_vector import SQLiteVectorStore
-    from monkeybot.core.persistence.vector_backends import VectorChunkRecord
+    from monkeybot.core.persistence.sqlite_vector import VectorChunkRecord
 
     class _FakeEmbedder:
         model_id = "fake"
