@@ -948,9 +948,41 @@ def test_no_animations_immediate_flush_and_static_tool(tmp_path: Path) -> None:
             app._mount(tool)
             await pilot.pause()
             assert tool._spin_timer is None
-            assert "read" in tool.title or "x" in tool.title
+            title_text = str(tool.title)
+            assert "read" in title_text or "x" in title_text
+
+            # Tool argv JSON / globs must not crash Textual markup parsing in titles.
+            shell = ToolCallBlock(
+                'Shell  argv: ["grep", "-r", "getIdToken", "--include=*.ts"]',
+                tool="run_command",
+                args={
+                    "argv": [
+                        "grep",
+                        "-r",
+                        "getIdToken",
+                        "auriga-web/src",
+                        "--include=*.ts",
+                        "--include=*.tsx",
+                    ]
+                },
+            )
+            app._mount(shell)
+            await pilot.pause()
+            shell.mark_finished(result="ok")
+            await pilot.pause()
+            assert "*.ts" in str(shell.title) or "grep" in str(shell.title)
 
     asyncio.run(_run())
+
+
+def test_tool_call_block_title_survives_markup_chars() -> None:
+    """Regression: argv JSON brackets previously raised MarkupError in Collapsible titles."""
+    title = 'Shell  argv: ["grep", "-r", "x", "--include=*.ts" --include=*.tsx"]'
+    # Crash was on __init__ / Collapsible title parse — constructing is enough.
+    block = ToolCallBlock(title, tool="run_command", args={"argv": '["grep", "--include=*.ts"]'})
+    assert "[" in str(block.title)
+    assert "*.ts" in str(block.title)
+    assert block.display_label == title
 
 
 def test_realtime_barge_in_skips_queue(monkeypatch) -> None:
