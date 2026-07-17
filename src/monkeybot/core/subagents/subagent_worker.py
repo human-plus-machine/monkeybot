@@ -31,7 +31,12 @@ from monkeybot.core.llm.provider import (
 from monkeybot.core.mcp.mcp_client import MCPClient
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.persistence.backends import HistoryStore, create_storage_backend
-from monkeybot.core.runtime.events import AgentEvent, Error, event_to_json
+from monkeybot.core.runtime.events import (
+    AgentEvent,
+    Error,
+    SystemPromptSnapshot,
+    event_to_json,
+)
 from monkeybot.core.runtime.loop import run as run_loop
 from monkeybot.core.subagents.subagent_proto import (
     SubagentEnvelope,
@@ -166,6 +171,22 @@ async def _stream_run_loop_events(
             vertex_google_search=vertex_google_search,
         ):
             yield evt
+
+
+def _event_for_ndjson_pipe(evt: AgentEvent) -> AgentEvent:
+    """Shrink live-only payloads before writing to the parent NDJSON pipe.
+
+    ``SystemPromptSnapshot.text`` includes the full memory INDEX when curation is
+    off for subagents. Emitting that verbatim used to blow asyncio's 64 KiB
+    ``readline`` limit on the parent. Parent drain ignores the snapshot anyway.
+    """
+    if isinstance(evt, SystemPromptSnapshot):
+        return SystemPromptSnapshot(
+            request_id=evt.request_id,
+            inner_turn=evt.inner_turn,
+            text=f"[omitted {len(evt.text)} chars]",
+        )
+    return evt
 
 
 def _resolve_provider() -> Provider:
@@ -403,7 +424,7 @@ async def _async_main() -> None:
                     max_turns=max_turns,
                     vertex_google_search=subagent_vertex_google_search_from_config(config_path),
                 ):
-                    print(event_to_json(evt), flush=True)
+                    print(event_to_json(_event_for_ndjson_pipe(evt)), flush=True)
         finally:
             shutdown_observability()
     finally:

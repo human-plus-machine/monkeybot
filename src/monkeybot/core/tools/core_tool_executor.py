@@ -56,6 +56,7 @@ from monkeybot.core.runtime.events import (
 )
 from monkeybot.core.runtime.loop import ToolExecutorPort
 from monkeybot.core.subagents.subagent_proto import (
+    SUBAGENT_STDOUT_LINE_LIMIT,
     SubagentEnvelope,
     normalize_sqlite_db_url,
     resolve_agent_project_root,
@@ -1090,6 +1091,7 @@ class CoreToolExecutor(ToolExecutorPort):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
                 env=env,
+                limit=SUBAGENT_STDOUT_LINE_LIMIT,
             )
             proc_holder[0] = p
             return p

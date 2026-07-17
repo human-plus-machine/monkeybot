@@ -11,8 +11,15 @@ from unittest.mock import AsyncMock
 import pytest
 
 from monkeybot.core.config.settings import SubagentConfig
-from monkeybot.core.runtime.events import AssistantDelta, Error, Thinking, event_to_json
+from monkeybot.core.runtime.events import (
+    AssistantDelta,
+    Error,
+    SystemPromptSnapshot,
+    Thinking,
+    event_to_json,
+)
 from monkeybot.core.subagents.subagent_proto import (
+    SUBAGENT_STDOUT_LINE_LIMIT,
     SubagentEnvelope,
     _default_subprocess_exec,
     default_subagent_script,
@@ -395,3 +402,62 @@ async def test_default_subprocess_exec_discards_stderr_to_avoid_deadlock(tmp_pat
     assert proc.stdout is not None
     assert (await asyncio.wait_for(proc.stdout.readline(), timeout=2)).strip() == b"ok"
     assert await asyncio.wait_for(proc.wait(), timeout=2) == 0
+
+
+@pytest.mark.asyncio
+async def test_default_subprocess_exec_reads_ndjson_lines_over_64kib(
+    tmp_path: Path,
+) -> None:
+    """Regression: SystemPromptSnapshot NDJSON can exceed asyncio's default 64 KiB limit."""
+    assert SUBAGENT_STDOUT_LINE_LIMIT > 65536
+    big_text = "m" * (70 * 1024)
+    line = event_to_json(
+        SystemPromptSnapshot(request_id="r", inner_turn=1, text=big_text)
+    )
+    assert len(line.encode("utf-8")) > 65536
+
+    script = tmp_path / "child.py"
+    script.write_text(
+        "import sys\n" f"sys.stdout.write({line!r} + '\\n')\n" "sys.stdout.flush()\n",
+        encoding="utf-8",
+    )
+    proc = await _default_subprocess_exec(sys.executable, "-u", str(script))
+    assert proc.stdout is not None
+    raw = await asyncio.wait_for(proc.stdout.readline(), timeout=5)
+    assert len(raw) > 65536
+    assert b'"type":"SystemPromptSnapshot"' in raw
+    assert await asyncio.wait_for(proc.wait(), timeout=2) == 0
+
+
+@pytest.mark.asyncio
+async def test_spawn_subagent_streams_oversized_system_prompt_snapshot(
+    tmp_scratch: Path,
+) -> None:
+    """End-to-end: parent can drain a >64 KiB SystemPromptSnapshot NDJSON line."""
+    big_text = "n" * (70 * 1024)
+    snap = SystemPromptSnapshot(request_id="r", inner_turn=0, text=big_text)
+    lines = [
+        event_to_json(Thinking(request_id="r")),
+        event_to_json(snap),
+        event_to_json(AssistantDelta(request_id="r", delta="done")),
+    ]
+    env = SubagentEnvelope(
+        task="t",
+        context="",
+        memory_storage_uri="local://m",
+        parent_run_id="p",
+    )
+
+    async def subprocess_exec(*_a: object, **_k: object) -> FakeProcess:
+        return FakeProcess(lines, exit_code=0)
+
+    collected = [evt async for evt in spawn_subagent(
+        "s.py",
+        env,
+        scratch_dir=tmp_scratch,
+        subprocess_exec=subprocess_exec,
+    )]
+    assert isinstance(collected[0], Thinking)
+    assert isinstance(collected[1], SystemPromptSnapshot)
+    assert len(collected[1].text) == 70 * 1024
+    assert isinstance(collected[2], AssistantDelta)
