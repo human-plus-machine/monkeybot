@@ -136,6 +136,8 @@ def test_openai_tool_response_image_becomes_text_placeholder() -> None:
     assert "image loaded" in content
     assert "generated-media/images/x.png" in content
     assert "aW1n" not in content
+    assert "do not invent a different subject" in content
+    assert "pixels omitted" in content
 
 
 def test_openai_canonical_four_turn() -> None:

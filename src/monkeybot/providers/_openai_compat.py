@@ -79,7 +79,9 @@ def _media_tool_placeholder(kind: str, block: Image | File) -> str:
     return (
         f"[{kind} loaded: mime={block.mime_type}{label_bit}, "
         f"~{len(block.data or '')} base64 chars — pixels omitted for this provider; "
-        "already shown in the UI]"
+        "already shown in the UI. Describe this media from the user request or "
+        "generation prompt used this turn; do not invent a different subject from "
+        "memory or prior sessions.]"
     )
 
 

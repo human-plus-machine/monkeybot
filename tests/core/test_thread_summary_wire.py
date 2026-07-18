@@ -214,6 +214,7 @@ def test_messages_to_wire_recovers_image_from_freeze_stub_and_path() -> None:
         tool_name="load_file",
         attachment_id="att_abc",
         kind="image",
+        path=path,
     )
     wire = messages_to_wire(
         [

@@ -94,17 +94,26 @@ def _freeze_tool_responses(msg: Message) -> Message:
         ):
             kind = "pdf"
         attachment_id: str | None = None
+        path: str | None = None
         for b in block.result:
-            if isinstance(b, Image):
-                meta = b.metadata or {}
+            if not isinstance(b, (Image, File)):
+                continue
+            meta = b.metadata or {}
+            if attachment_id is None:
                 att_raw = meta.get("attachment_id")
                 if isinstance(att_raw, str) and att_raw.strip():
                     attachment_id = att_raw.strip()
-                    break
+            if path is None:
+                path_raw = meta.get("path")
+                if isinstance(path_raw, str) and path_raw.strip():
+                    path = path_raw.strip()
+            if attachment_id is not None and path is not None:
+                break
         summary = render_tool_media_freeze_text(
             tool_name=block.tool_name,
             attachment_id=attachment_id,
             kind=kind,
+            path=path,
         )
         changed = True
         new_content.append(

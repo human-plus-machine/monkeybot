@@ -207,7 +207,7 @@ def main() -> None:
         _emit(False, error=f"Failed to write {out_path}: {exc}")
 
     rel = f"./generated-media/images/{filename}"
-    _emit(True, path=rel, model=model_id, aspect_ratio=aspect)
+    _emit(True, path=rel, prompt=prompt, model=model_id, aspect_ratio=aspect)
 
 
 if __name__ == "__main__":

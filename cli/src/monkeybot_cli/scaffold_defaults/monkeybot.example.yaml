@@ -28,9 +28,9 @@ runtime:
   # gateway_port: 8080
   # Internal debugging only (not agent-visible): write every AgentEvent and raw
   # provider request/response for each session to
-  # {workspace_root}/.monkeybot/transcripts/{session_id}.ndjson. Opt-in; default off.
+  # {workspace_root}/.monkeybot/transcripts/{UTC}_{session_id}/transcript.ndjson.
   # (env: MONKEYBOT_TRANSCRIPT_ENABLED)
-  transcript_enabled: false
+  transcript_enabled: true
 
 # Required: choose the conversational harness for this deployment.
 #   turn_based  - existing HTTP POST /reply + SSE (default, backwards-compatible)

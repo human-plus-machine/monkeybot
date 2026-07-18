@@ -58,13 +58,20 @@ def render_tool_media_freeze_text(
     tool_name: str,
     attachment_id: str | None,
     kind: str,
+    path: str | None = None,
 ) -> str:
+    path_bit = ""
+    if isinstance(path, str) and path.strip():
+        path_bit = f" path={path.strip()};"
     if attachment_id:
         return (
-            f"[{tool_name} {attachment_id} result: {kind} shown earlier; "
+            f"[{tool_name} {attachment_id} result: {kind} shown earlier;{path_bit} "
             f'call load_file(attachment_id="{attachment_id}") to reload.]'
         )
-    return f"[{tool_name} result: {kind} shown earlier; call tool again to reload.]"
+    return (
+        f"[{tool_name} result: {kind} shown earlier;{path_bit} "
+        "call tool again to reload.]"
+    )
 
 
 def filename_from_metadata(metadata: dict[str, object] | None, *, fallback: str) -> str:
