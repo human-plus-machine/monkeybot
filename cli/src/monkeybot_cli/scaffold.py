@@ -275,7 +275,14 @@ def run_new(
     model: str | None = None,
     extras: list[str] | None = None,
 ) -> list[str]:
-    """Full scaffold: config bundle, trusted skills, writable state, and image files."""
+    """Full scaffold: config bundle, empty skills root, writable state, and image files.
+
+    Capability skills (``browser``, ``image-generator``, ``loop``) are packaged
+    under ``scaffold_defaults`` but not installed into new agents for now —
+    the Mac Main Agent loads them from ``~/.monkeybot/.internal/skills``
+    instead. Re-enable via ``install_*_skill`` when custom agents should get
+    them again.
+    """
     cfg_dir = dest / "monkeybot_config"
     report = install_config_bundle(cfg_dir, force=force)
     report.append(
@@ -284,9 +291,7 @@ def run_new(
     )
     report.extend(ensure_memory(dest, force=force))
     report.extend(ensure_workspace(dest, force=force))
-    report.append(f"  skills/browser/SKILL.md: {install_browser_skill(dest, force=force)}")
-    report.extend(install_image_generator_skill(dest, force=force))
-    report.append(f"  skills/loop/SKILL.md: {install_loop_skill(dest, force=force)}")
+    report.append("  skills/: ensured (empty — capability skills deferred)")
     report.append(f"  .env.example: {install_env_example(dest, force=force)}")
     report.extend(install_container_files(dest, force=force))
     report.append(
