@@ -5,8 +5,9 @@ description: Control a real browser through the optional bundled browser MCP ser
 
 # Browser
 
-When browser tools are needed, call `enable_mcp("browser")` first. The server is
-bundled with every scaffold but is disabled by default in `monkeybot_config/mcp.json`.
+When browser tools are needed, call `enable_mcp("browser")` first. The browser
+MCP server ships **enabled** in new agents (`mcp.json`); progressive disclosure
+still requires `enable_mcp` before `browser__*` schemas are advertised.
 
 Use indexed DOM tools before screenshots. Browser screenshots and agent-written
 playbooks are workspace data: `browser/Screenshots/` and `browser/playbooks/`.

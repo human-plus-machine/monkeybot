@@ -64,6 +64,11 @@ def new_attachment_id() -> str:
     return f"att_{uuid.uuid4().hex}"
 
 
+def attachment_workspace_path(session_id: str, attachment_id: str) -> str:
+    """Workspace-relative path where session attachment bytes are stored on disk."""
+    return f".monkeybot/attachments/{session_id}/{attachment_id}"
+
+
 class AttachmentStore(Protocol):
     def exists(self, session_id: str, attachment_id: str) -> bool: ...
 

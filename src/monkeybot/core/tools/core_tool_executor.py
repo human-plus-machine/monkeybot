@@ -20,7 +20,11 @@ from monkeybot.core.attachments.config import (
     max_image_bytes,
     max_pdf_bytes,
 )
-from monkeybot.core.attachments.store import AttachmentStore, sniff_mime
+from monkeybot.core.attachments.store import (
+    AttachmentStore,
+    attachment_workspace_path,
+    sniff_mime,
+)
 from monkeybot.core.config.settings import SubagentConfig, get_subagent_settings
 from monkeybot.core.context import (
     SCHEDULED_LOOP_TOOL_DEFS,
@@ -408,6 +412,10 @@ class CoreToolExecutor(ToolExecutorPort):
                 if run_command_allowed_path_prefixes is not None
                 else tuple(ALLOWED_PATHS)
             )
+            # Allow absolute argv paths under the resolved skills root (list_skills
+            # returns this path; scripts live outside the workspace cwd).
+            skills = str(self._skills_path)
+            paths = tuple(dict.fromkeys((*paths, skills, f"{skills}/")))
             self._run_cmd_allowed_commands = cmds
             self._run_cmd_allowed_paths = paths
             _scfg = SandboxConfig.from_env()
@@ -664,7 +672,11 @@ class CoreToolExecutor(ToolExecutorPort):
             return ToolExecutionResult.err(
                 f"Attachment {attachment_id} expired or removed; ask user to re-upload"
             )
-        meta: dict[str, object] = {"attachment_id": attachment_id, "filename": filename}
+        meta: dict[str, object] = {
+            "attachment_id": attachment_id,
+            "filename": filename,
+            "path": attachment_workspace_path(ctx.thread_id, attachment_id),
+        }
         return self._media_result(mime, data_b64, meta)
 
     def _load_file_from_path(self, path: str, ctx: TurnContext) -> ToolExecutionResult:

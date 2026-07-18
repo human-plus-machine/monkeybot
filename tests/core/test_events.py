@@ -205,6 +205,23 @@ def test_sse_image_block_roundtrip() -> None:
     assert event_from_json(event_to_json(ev)) == ev
 
 
+def test_sse_image_block_path_omits_data_on_wire() -> None:
+    ev = ImageBlock(
+        request_id="r",
+        image_id="c1:0",
+        mime_type="image/png",
+        path="./generated-media/images/x.png",
+    )
+    raw = event_to_json(ev)
+    assert "data" not in raw or '"data"' not in raw
+    import json
+
+    d = json.loads(raw)
+    assert d["path"] == "./generated-media/images/x.png"
+    assert "data" not in d
+    assert event_from_json(raw).path == "./generated-media/images/x.png"
+
+
 def test_sse_image_block_roundtrip_without_image_id() -> None:
     ev = ImageBlock(request_id="r", mime_type="image/png", data="abc")
     assert event_from_json(event_to_json(ev)) == ev

@@ -83,5 +83,6 @@ def test_new_with_extras_cli(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     text = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
     assert (
-        f'"monkeybot[openai,sandbox,postgres,bedrock]{COMPATIBLE_CORE_RANGE}"' in text
+        f'"monkeybot[openai,sandbox,web-search,postgres,bedrock]{COMPATIBLE_CORE_RANGE}"'
+        in text
     )

@@ -1100,7 +1100,7 @@ def create_app(
         messages = await backend.history().load(session_id.strip(), limit=cap)
         return {
             "session_id": session_id,
-            "messages": messages_to_wire(messages),
+            "messages": messages_to_wire(messages, thread_id=session_id.strip()),
         }
 
     @api.delete("/api/chat-history/{session_id}")

@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.types.content_blocks import Text
 
+from .store import attachment_workspace_path
 from .text import parse_attachment_descriptor_text
 
 
@@ -50,8 +51,8 @@ class SessionAttachmentCatalog:
                 parsed = parse_attachment_descriptor_text(block.text)
                 if parsed is None:
                     continue
-                storage_path = (
-                    f".monkeybot/attachments/{self.session_id}/{parsed.attachment_id}"
+                storage_path = attachment_workspace_path(
+                    self.session_id, parsed.attachment_id
                 )
                 self.records[parsed.attachment_id] = AttachmentRecord(
                     attachment_id=parsed.attachment_id,

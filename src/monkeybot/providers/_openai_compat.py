@@ -29,6 +29,8 @@ from monkeybot.core.llm.provider import (
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.types.content_blocks import (
     ContentBlock,
+    File,
+    Image,
     RedactedThinking,
     Text,
     Thinking,
@@ -65,11 +67,31 @@ def _system_prompt_from_message(message: Message) -> str:
     return "\n\n".join(texts)
 
 
+def _media_tool_placeholder(kind: str, block: Image | File) -> str:
+    """Text stand-in for image/file tool results on text-only OpenAI-compat models.
+
+    Chat Completions tool messages are text-only; pixels are already delivered to
+    the UI via ``ImageBlock`` SSE. Keep a short path/filename hint for the model.
+    """
+    meta = block.metadata or {}
+    label = meta.get("path") or meta.get("filename") or ""
+    label_bit = f", path={label}" if label else ""
+    return (
+        f"[{kind} loaded: mime={block.mime_type}{label_bit}, "
+        f"~{len(block.data or '')} base64 chars — pixels omitted for this provider; "
+        "already shown in the UI]"
+    )
+
+
 def _flatten_tool_response_text(block: ToolResponse) -> str:
     parts: list[str] = []
     for b in block.result:
         if isinstance(b, Text):
             parts.append(b.text)
+        elif isinstance(b, Image):
+            parts.append(_media_tool_placeholder("image", b))
+        elif isinstance(b, File):
+            parts.append(_media_tool_placeholder("file", b))
         else:
             raise ValueError(
                 f"unsupported ToolResponse block for OpenAI-compat: {type(b).__name__}"

@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Any
 
+from monkeybot.core.attachments.store import attachment_workspace_path
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.tools.tool_hint import (
@@ -16,6 +19,7 @@ from monkeybot.core.tools.tool_hint import (
 )
 from monkeybot.core.types.content_blocks import (
     ContentBlock,
+    Image,
     RedactedThinking,
     Text,
     Thinking,
@@ -24,6 +28,20 @@ from monkeybot.core.types.content_blocks import (
 )
 
 logger = logging.getLogger(__name__)
+
+_MIME_BY_SUFFIX = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+# Matches freeze stubs from ``render_tool_media_freeze_text``.
+_FROZEN_TOOL_MEDIA_RE = re.compile(
+    r"^\[(?P<tool>\S+)(?:\s+(?P<attachment_id>att_\S+))?\s+result:\s+"
+    r"(?P<kind>image|pdf|file)\s+shown earlier;",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -66,11 +84,10 @@ def text_from_message(message: Message) -> str:
 
 
 def _text_from_blocks(blocks: list[ContentBlock], *, call_id: str) -> str:
-    """Concatenate Text blocks; log and drop any non-Text result blocks.
+    """Concatenate Text blocks; Image rows are emitted separately on the wire.
 
-    Tool results can carry Image/File blocks that have no wire text
-    representation yet; surfacing them silently as an empty row would hide
-    the gap from anyone debugging a missing result in the chat-history API.
+    Other non-Text result blocks (e.g. File) still have no wire representation
+    and are logged so a missing result is visible when debugging history.
     """
     parts: list[str] = []
     dropped = 0
@@ -78,6 +95,8 @@ def _text_from_blocks(blocks: list[ContentBlock], *, call_id: str) -> str:
         if isinstance(block, Text):
             if block.text.strip():
                 parts.append(block.text.strip())
+        elif isinstance(block, Image):
+            continue
         else:
             dropped += 1
     if dropped:
@@ -86,6 +105,122 @@ def _text_from_blocks(blocks: list[ContentBlock], *, call_id: str) -> str:
             kv(call_id=call_id, dropped_blocks=dropped),
         )
     return "\n".join(parts).strip()
+
+
+def _image_row(
+    *,
+    path: str,
+    mime_type: str,
+    label: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "role": "image",
+        "text": label or path,
+        "mime_type": mime_type,
+        "path": path,
+        "filename": PurePosixPath(path).name,
+    }
+
+
+def _mime_for_path(path: str) -> str:
+    return _MIME_BY_SUFFIX.get(PurePosixPath(path).suffix.lower(), "image/png")
+
+
+def _path_from_tool_args(args: dict[str, Any]) -> str | None:
+    for key in ("path", "file_path", "file"):
+        raw = args.get(key)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    return None
+
+
+def _frozen_image_hint(blocks: list[ContentBlock]) -> tuple[str | None, str | None]:
+    """Return ``(attachment_id, kind)`` from a media freeze stub, if present."""
+    for block in blocks:
+        if not isinstance(block, Text) or not block.text.strip():
+            continue
+        match = _FROZEN_TOOL_MEDIA_RE.match(block.text.strip())
+        if match is None:
+            continue
+        return match.group("attachment_id"), (match.group("kind") or "").lower()
+    return None, None
+
+
+def _resolve_image_path(
+    *,
+    path: object,
+    attachment_id: object,
+    thread_id: str | None,
+) -> str | None:
+    if isinstance(path, str) and path.strip():
+        return path.strip()
+    if (
+        isinstance(attachment_id, str)
+        and attachment_id.strip()
+        and thread_id
+        and thread_id.strip()
+    ):
+        return attachment_workspace_path(thread_id.strip(), attachment_id.strip())
+    return None
+
+
+def _image_rows_for_tool_response(
+    req: ToolRequest,
+    resp: ToolResponse,
+    *,
+    thread_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Emit image wire rows for a tool response, including post-freeze stubs.
+
+    After a turn, ``freeze_attachments_in_history`` replaces Image blocks with a
+    short Text stub. Chat-history resume reconstructs from a durable path only
+    (never inline base64).
+    """
+    rows: list[dict[str, Any]] = []
+    for block in resp.result:
+        if not isinstance(block, Image):
+            continue
+        meta = block.metadata or {}
+        resolved = _resolve_image_path(
+            path=meta.get("path"),
+            attachment_id=meta.get("attachment_id"),
+            thread_id=thread_id,
+        )
+        if not resolved:
+            logger.warning(
+                "skipping image wire row without durable path %s",
+                kv(
+                    has_data=bool(block.data),
+                    filename=meta.get("filename")
+                    if isinstance(meta.get("filename"), str)
+                    else None,
+                ),
+            )
+            continue
+        filename = meta.get("filename")
+        label = (
+            filename.strip()
+            if isinstance(filename, str) and filename.strip()
+            else resolved
+        )
+        rows.append(
+            _image_row(path=resolved, mime_type=block.mime_type, label=label)
+        )
+    if rows:
+        return rows
+
+    # Frozen stub recovery: Image bytes were replaced with Text.
+    path = _path_from_tool_args(dict(req.args or {}))
+    attachment_id, freeze_kind = _frozen_image_hint(resp.result)
+    if path is None and freeze_kind == "image":
+        path = _resolve_image_path(
+            path=None, attachment_id=attachment_id, thread_id=thread_id
+        )
+    if not path:
+        return []
+    if freeze_kind != "image" and PurePosixPath(path).suffix.lower() not in _MIME_BY_SUFFIX:
+        return []
+    return [_image_row(path=path, mime_type=_mime_for_path(path))]
 
 
 def _tool_responses_by_id(messages: list[Message]) -> dict[str, ToolResponse]:
@@ -97,7 +232,11 @@ def _tool_responses_by_id(messages: list[Message]) -> dict[str, ToolResponse]:
     return out
 
 
-def messages_to_wire(messages: list[Message]) -> list[dict[str, Any]]:
+def messages_to_wire(
+    messages: list[Message],
+    *,
+    thread_id: str | None = None,
+) -> list[dict[str, Any]]:
     """Serialize turns for the chat-history API.
 
     Assistant messages expand into multiple wire rows when they contain
@@ -106,11 +245,13 @@ def messages_to_wire(messages: list[Message]) -> list[dict[str, Any]]:
 
     - ``role=thinking`` before assistant text
     - ``role=tool`` for each ``ToolRequest`` (with matching ``ToolResponse``)
+    - ``role=image`` for Image blocks (or freeze stubs + durable paths)
     - ``role=assistant`` for Text
     - ``role=user`` for user Text (tool-result-only user rows are omitted)
 
     Tool ``args`` / ``result`` / ``error`` strings are capped so a detail
     response cannot grow without bound (same limit as CLI expand bodies).
+    Image rows never include inline base64 ``data``.
     """
     responses = _tool_responses_by_id(messages)
     out: list[dict[str, Any]] = []
@@ -164,4 +305,8 @@ def messages_to_wire(messages: list[Message]) -> list[dict[str, Any]]:
             if error:
                 row["error"] = truncate_detail(error)
             out.append(row)
+            if resp is not None and not resp.is_error:
+                out.extend(
+                    _image_rows_for_tool_response(req, resp, thread_id=thread_id)
+                )
     return out

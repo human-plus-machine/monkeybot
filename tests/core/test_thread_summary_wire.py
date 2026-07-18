@@ -114,6 +114,139 @@ def test_messages_to_wire_tool_error() -> None:
     assert "result" not in wire[0]
 
 
+def test_messages_to_wire_includes_image_rows_from_load_file() -> None:
+    from monkeybot.core.types.content_blocks import Image
+
+    wire = messages_to_wire(
+        [
+            Message(role="user", content=[Text(text="make a cat")]),
+            Message(
+                role="assistant",
+                content=[
+                    ToolRequest(
+                        id="c_img",
+                        name="load_file",
+                        args={"path": "./generated-media/images/cat.png"},
+                    ),
+                ],
+            ),
+            Message(
+                role="user",
+                content=[
+                    ToolResponse(
+                        id="c_img",
+                        tool_name="load_file",
+                        result=[
+                            Image(
+                                mime_type="image/png",
+                                data="aW1n",
+                                metadata={
+                                    "path": "./generated-media/images/cat.png",
+                                    "filename": "cat.png",
+                                },
+                            )
+                        ],
+                    )
+                ],
+            ),
+            Message(role="assistant", content=[Text(text="Here is your cat.")]),
+        ]
+    )
+    assert wire[0]["role"] == "user"
+    assert wire[1]["role"] == "tool"
+    assert wire[1]["tool"] == "load_file"
+    assert wire[2] == {
+        "role": "image",
+        "text": "cat.png",
+        "mime_type": "image/png",
+        "path": "./generated-media/images/cat.png",
+        "filename": "cat.png",
+    }
+    assert "data" not in wire[2]
+    assert wire[3] == {"role": "assistant", "text": "Here is your cat."}
+
+
+def test_messages_to_wire_image_without_path_uses_attachment_layout() -> None:
+    from monkeybot.core.types.content_blocks import Image
+
+    wire = messages_to_wire(
+        [
+            Message(
+                role="assistant",
+                content=[ToolRequest(id="c1", name="load_file", args={"attachment_id": "att_1"})],
+            ),
+            Message(
+                role="user",
+                content=[
+                    ToolResponse(
+                        id="c1",
+                        tool_name="load_file",
+                        result=[
+                            Image(
+                                mime_type="image/png",
+                                data="aW1n",
+                                metadata={"filename": "shot.png", "attachment_id": "att_1"},
+                            )
+                        ],
+                    )
+                ],
+            ),
+        ],
+        thread_id="sess-9",
+    )
+    assert wire[1] == {
+        "role": "image",
+        "text": "shot.png",
+        "mime_type": "image/png",
+        "path": ".monkeybot/attachments/sess-9/att_1",
+        "filename": "att_1",
+    }
+    assert "data" not in wire[1]
+    assert "attachment_id" not in wire[1]
+
+
+def test_messages_to_wire_recovers_image_from_freeze_stub_and_path() -> None:
+    """After freeze, Image blocks become text stubs — still emit role=image via path."""
+    from monkeybot.core.attachments.text import render_tool_media_freeze_text
+
+    path = "./generated-media/images/car.png"
+    stub = render_tool_media_freeze_text(
+        tool_name="load_file",
+        attachment_id="att_abc",
+        kind="image",
+    )
+    wire = messages_to_wire(
+        [
+            Message(
+                role="assistant",
+                content=[ToolRequest(id="c_img", name="load_file", args={"path": path})],
+            ),
+            Message(
+                role="user",
+                content=[
+                    ToolResponse(
+                        id="c_img",
+                        tool_name="load_file",
+                        result=[Text(text=stub)],
+                    )
+                ],
+            ),
+            Message(role="assistant", content=[Text(text="Here is your car.")]),
+        ]
+    )
+    assert wire[0]["role"] == "tool"
+    assert wire[1] == {
+        "role": "image",
+        "text": path,
+        "mime_type": "image/png",
+        "path": path,
+        "filename": "car.png",
+    }
+    assert "data" not in wire[1]
+    assert "attachment_id" not in wire[1]
+    assert wire[2] == {"role": "assistant", "text": "Here is your car."}
+
+
 def test_messages_to_wire_truncates_large_tool_payloads() -> None:
     huge = "x" * 10_000
     wire = messages_to_wire(

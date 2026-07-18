@@ -135,7 +135,12 @@ def _image_events(
         return []
     events: list[ImageBlock] = []
     for idx, b in enumerate(result.blocks):
-        if not isinstance(b, Image) or not b.data:
+        if not isinstance(b, Image):
+            continue
+        meta = b.metadata or {}
+        path_raw = meta.get("path")
+        path = path_raw.strip() if isinstance(path_raw, str) else ""
+        if not path and not b.data:
             continue
         image_id = f"{call_id}:{idx}" if call_id else f"{request_id}:{idx}"
         events.append(
@@ -143,7 +148,9 @@ def _image_events(
                 request_id=request_id,
                 image_id=image_id,
                 mime_type=b.mime_type,
-                data=b.data,
+                # Keep pixels only when there is no durable path (SSE omits data if path set).
+                data="" if path else b.data,
+                path=path,
             )
         )
     return events

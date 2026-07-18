@@ -25,6 +25,7 @@ _CONFIG_BUNDLE: Final[tuple[tuple[str, str], ...]] = (
     ("permissions.yaml", "permissions.yaml"),
     ("AGENT.md", "AGENT.md"),
     ("otel-collector.example.yaml", "otel-collector.example.yaml"),
+    ("opensandbox.docker.toml", "opensandbox.docker.toml"),
 )
 
 _MEMORY_INDEX: Final = (
@@ -125,6 +126,15 @@ def ensure_workspace(dest: Path, *, force: bool) -> list[str]:
     else:
         lines.append("  workspace/.gitkeep: skipped")
 
+    for rel in (
+        "browser/playbooks",
+        "browser/Screenshots",
+        "generated-media/images",
+    ):
+        path = workspace / rel
+        path.mkdir(parents=True, exist_ok=True)
+        lines.append(f"  workspace/{rel}/: ensured")
+
     dest.joinpath("skills").mkdir(parents=True, exist_ok=True)
     return lines
 
@@ -134,6 +144,18 @@ def install_browser_skill(dest: Path, *, force: bool) -> str:
     target = dest / "skills" / "browser" / "SKILL.md"
     target.parent.mkdir(parents=True, exist_ok=True)
     return _install_file(target, resources.files(_DEFAULTS_PKG) / "browser" / "SKILL.md", force=force)
+
+
+def install_image_generator_skill(dest: Path, *, force: bool) -> list[str]:
+    """Install the Vertex image-generator skill (SKILL.md + generate_image.py)."""
+    skill_dir = dest / "skills" / "image-generator"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    src = resources.files(_DEFAULTS_PKG) / "image-generator"
+    lines: list[str] = []
+    for name in ("SKILL.md", "generate_image.py"):
+        status = _install_file(skill_dir / name, src / name, force=force)
+        lines.append(f"  skills/image-generator/{name}: {status}")
+    return lines
 
 
 def install_loop_skill(dest: Path, *, force: bool) -> str:
@@ -221,9 +243,11 @@ def write_agent_pyproject(
     if path.exists() and not force:
         return "skipped"
     existed = path.exists()
-    # Sandbox is configured in every generated agent, so install its SDK with
-    # the provider dependencies rather than imposing it on every core install.
-    dep = monkeybot_requirement(provider=provider, extras=["sandbox", *(extras or [])])
+    # Sandbox + web search ship enabled in every generated agent config.
+    dep = monkeybot_requirement(
+        provider=provider,
+        extras=["sandbox", "web-search", *(extras or [])],
+    )
     name = _sanitize_project_name(dest.name)
     path.write_text(
         (
@@ -261,6 +285,7 @@ def run_new(
     report.extend(ensure_memory(dest, force=force))
     report.extend(ensure_workspace(dest, force=force))
     report.append(f"  skills/browser/SKILL.md: {install_browser_skill(dest, force=force)}")
+    report.extend(install_image_generator_skill(dest, force=force))
     report.append(f"  skills/loop/SKILL.md: {install_loop_skill(dest, force=force)}")
     report.append(f"  .env.example: {install_env_example(dest, force=force)}")
     report.extend(install_container_files(dest, force=force))

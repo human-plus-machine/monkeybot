@@ -58,6 +58,8 @@ ALLOWED_PATHS = [
 
 
 _VERTEX_SKILL_ENV_KEYS = (
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
     "VERTEX_AI_PROJECT_ID",
     "GOOGLE_CLOUD_PROJECT",
     "GCP_PROJECT_ID",
@@ -67,11 +69,20 @@ _VERTEX_SKILL_ENV_KEYS = (
 
 
 def build_skill_runtime_env(*, cwd: Path | str) -> dict[str, str]:
-    """Environment for skill scripts (inherits host env + workspace/GCP overrides)."""
+    """Environment for skill scripts (inherits host env + workspace/GCP overrides).
+
+    Prepends the gateway interpreter's ``bin`` directory to ``PATH`` so
+    ``bash -c 'python3 …'`` resolves the same Python that has monkeybot
+    extras (e.g. ``google-genai``), not a bare system ``python3``.
+    """
     exec_cwd = str(Path(cwd).resolve())
     env = os.environ.copy()
     env["MONKEYBOT_WORKSPACE_ROOT"] = exec_cwd
     env["WORKSPACE_ROOT"] = exec_cwd
+    venv_bin = str(Path(sys.executable).resolve().parent)
+    existing_path = env.get("PATH", "")
+    env["PATH"] = f"{venv_bin}{os.pathsep}{existing_path}" if existing_path else venv_bin
+    env.setdefault("MONKEYBOT_PYTHON", sys.executable)
     for key in _VERTEX_SKILL_ENV_KEYS:
         val = os.environ.get(key, "").strip()
         if val:

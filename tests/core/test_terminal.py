@@ -20,6 +20,7 @@ from monkeybot.core.tools.terminal import (
     ExecutionResult,
     SecurityError,
     TerminalExecutor,
+    build_skill_runtime_env,
 )
 
 
@@ -294,7 +295,13 @@ class TestTerminalExecutorExecution:
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
         await executor.execute("echo", ["hi"], cwd=workspace)
-        assert seen_env.get("PATH") == "/custom/bin:/usr/bin"
+        import os
+        import sys
+        from pathlib import Path
+
+        venv_bin = str(Path(sys.executable).resolve().parent)
+        assert seen_env.get("PATH") == f"{venv_bin}{os.pathsep}/custom/bin:/usr/bin"
+        assert seen_env.get("MONKEYBOT_PYTHON") == sys.executable
 
 
 class TestTerminalExecutorTimeout:
@@ -489,3 +496,17 @@ class TestTerminalExecutorConstants:
 
         for cmd in dangerous_commands:
             assert cmd not in ALLOWED_COMMANDS, f"Dangerous command '{cmd}' found in ALLOWED_COMMANDS!"
+
+
+def test_build_skill_runtime_env_prepends_gateway_python_bin(tmp_path, monkeypatch) -> None:
+    """bash -c python3 must see the gateway venv before system python."""
+    import os
+    import sys
+    from pathlib import Path
+
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    env = build_skill_runtime_env(cwd=tmp_path)
+    venv_bin = str(Path(sys.executable).resolve().parent)
+    assert env["PATH"].split(os.pathsep)[0] == venv_bin
+    assert env["MONKEYBOT_PYTHON"] == sys.executable
+    assert env["MONKEYBOT_WORKSPACE_ROOT"] == str(tmp_path.resolve())

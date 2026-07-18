@@ -22,6 +22,7 @@ from .text import (
     render_attachment_descriptor_text,
     render_tool_media_freeze_text,
 )
+from .store import attachment_workspace_path
 
 
 def _freeze_user_row(
@@ -69,7 +70,9 @@ def _freeze_user_row(
                     filename=filename,
                     mime_type=block.mime_type,
                     description=description[:500],
-                    storage_path=f".monkeybot/attachments/{thread_id}/{block.attachment_id}",
+                    storage_path=attachment_workspace_path(
+                        thread_id, block.attachment_id
+                    ),
                 )
             )
     return Message(role=msg.role, content=new_content)
