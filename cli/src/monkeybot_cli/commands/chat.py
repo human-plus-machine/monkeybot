@@ -715,6 +715,7 @@ def run_chat(args: argparse.Namespace) -> int:
             if not ensure_opensandbox_for_agent(
                 agent_root,
                 server_url=server_url_from_config(cfg_doc),
+                docker_wait_secs=2.0,
             ):
                 print(
                     f"{_DIM}Continuing without a healthy OpenSandbox — run_command may fail.{_RESET}",

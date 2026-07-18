@@ -30,18 +30,20 @@ def test_new_scaffolds(tmp_path: Path) -> None:
     assert (tmp_path / "workspace" / ".gitkeep").is_file()
     assert not (tmp_path / "workspace" / "skills").exists()
     assert (tmp_path / "skills" / "browser" / "SKILL.md").is_file()
+    assert (tmp_path / "skills" / "image-generator" / "SKILL.md").is_file()
     assert (tmp_path / "Dockerfile").is_file()
     assert (tmp_path / ".dockerignore").is_file()
     text = (tmp_path / "monkeybot_config" / "monkeybot.yaml").read_text()
     assert "test-model" in text
     assert "workspace_root: ./workspace" in text
+    assert "localhost:18080" in text
     env_text = (tmp_path / ".env.example").read_text()
     assert "MONKEYBOT_WORKSPACE_ROOT" not in env_text
     assert "AGENT_MD" not in env_text
     assert "MONKEYBOT_SUBAGENT_AGENT_MD" not in env_text
     assert "DB_URL" in env_text
     pyproject = (tmp_path / "pyproject.toml").read_text()
-    assert "monkeybot[gemini,sandbox]>=2.2.0,<3" in pyproject
+    assert "monkeybot[gemini,sandbox,web-search]>=2.2.0,<3" in pyproject
     assert "monkeybot-browser-mcp>=0.2.0,<1" in pyproject
     assert "package = false" in pyproject
     assert "[tool.uv.sources]" not in pyproject

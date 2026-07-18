@@ -20,6 +20,10 @@ allowed_path_prefixes:
   - ./test-data/
   - ./code/
   - ./code
+  - ./generated-media/
+  - ./generated-media
+  - ./browser/
+  - ./browser
 
 # Optional: regexes matched against the normalized invocation (deny wins).
 # Omit this key to use built-in DEFAULT_DENY_PATTERNS (install blocking).

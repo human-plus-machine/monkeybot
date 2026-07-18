@@ -108,6 +108,38 @@ def test_openai_skips_thinking_blocks() -> None:
     ]
 
 
+def test_openai_tool_response_image_becomes_text_placeholder() -> None:
+    """NVIDIA/OpenAI-compat tool rows are text-only; Image blocks must not raise."""
+    from monkeybot.core.types.content_blocks import Image
+    from monkeybot.providers._openai_compat import messages_to_openai
+
+    msg = Message(
+        role="user",
+        content=[
+            ToolResponse(
+                id="c1",
+                tool_name="load_file",
+                result=[
+                    Image(
+                        mime_type="image/png",
+                        data="aW1n",
+                        metadata={"path": "./generated-media/images/x.png"},
+                    )
+                ],
+            )
+        ],
+    )
+    _sys, rows = messages_to_openai([msg])
+    assert rows[0]["role"] == "tool"
+    assert rows[0]["tool_call_id"] == "c1"
+    content = rows[0]["content"]
+    assert "image loaded" in content
+    assert "generated-media/images/x.png" in content
+    assert "aW1n" not in content
+    assert "do not invent a different subject" in content
+    assert "pixels omitted" in content
+
+
 def test_openai_canonical_four_turn() -> None:
     msgs = typed_messages_four_turn()
     _sys, rows = _messages_to_openai(msgs)

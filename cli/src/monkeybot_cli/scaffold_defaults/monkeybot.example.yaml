@@ -28,9 +28,9 @@ runtime:
   # gateway_port: 8080
   # Internal debugging only (not agent-visible): write every AgentEvent and raw
   # provider request/response for each session to
-  # {workspace_root}/.monkeybot/transcripts/{session_id}.ndjson. Opt-in; default off.
+  # {workspace_root}/.monkeybot/transcripts/{UTC}_{session_id}/transcript.ndjson.
   # (env: MONKEYBOT_TRANSCRIPT_ENABLED)
-  transcript_enabled: false
+  transcript_enabled: true
 
 # Required: choose the conversational harness for this deployment.
 #   turn_based  - existing HTTP POST /reply + SSE (default, backwards-compatible)
@@ -204,8 +204,12 @@ todo_list:
   mirror_to_disk: true
 
 sandbox:
+  # Opt-in: requires Docker Desktop (OpenSandbox). Leave false for normal Mac
+  # installs so the gateway starts without Docker. When enabled, ``monkeybot run``
+  # / ``chat`` try to start OpenSandbox on ``server_url`` (fail-fast if Docker is down).
   enabled: false
-  server_url: http://localhost:8080
+  # Keep off the gateway port (runtime.port, default 8080). Lifecycle default is 18080.
+  server_url: http://localhost:18080
   image: python:3.12
   ttl_seconds: 1800
   # Set false only for a remote sandbox server with no shared filesystem. It

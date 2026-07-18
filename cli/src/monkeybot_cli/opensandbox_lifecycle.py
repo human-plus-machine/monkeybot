@@ -222,10 +222,15 @@ def ensure_opensandbox_for_agent(
     *,
     server_url: str,
     skip: bool | None = None,
+    docker_wait_secs: float | None = None,
+    health_wait_secs: float | None = None,
 ) -> bool:
     """Ensure OpenSandbox server is reachable; start docker container when needed.
 
     Returns True when health check passes or sandbox is skipped/disabled upstream.
+
+    Pass a small ``docker_wait_secs`` (e.g. 2) from ``monkeybot run`` so missing
+    Docker Desktop cannot block gateway startup for tens of seconds.
     """
     if skip is None:
         skip = os.environ.get("SKIP_OPENSANDBOX", "").strip() == "1"
@@ -236,12 +241,13 @@ def ensure_opensandbox_for_agent(
     if _health_ok(host_port):
         return True
 
-    docker_wait_secs = float(
-        os.environ.get("SANDBOX_DOCKER_WAIT_SECS", str(_DEFAULT_DOCKER_WAIT_SECS))
-    )
+    if docker_wait_secs is None:
+        docker_wait_secs = float(
+            os.environ.get("SANDBOX_DOCKER_WAIT_SECS", str(_DEFAULT_DOCKER_WAIT_SECS))
+        )
     if not _wait_docker_available(timeout_secs=docker_wait_secs):
         print(
-            "monkeybot chat: Docker not available; run_command sandbox will fail "
+            "monkeybot: Docker not available; run_command sandbox will fail "
             "(set sandbox.enabled: false or start Docker).",
             flush=True,
         )
@@ -250,37 +256,41 @@ def ensure_opensandbox_for_agent(
     config_path = resolve_opensandbox_config(agent_root)
     if not config_path.is_file():
         print(
-            f"monkeybot chat: missing {config_path}; cannot start OpenSandbox.",
+            f"monkeybot: missing {config_path}; cannot start OpenSandbox.",
             flush=True,
         )
         return False
 
     container = os.environ.get("SANDBOX_CONTAINER", _DEFAULT_CONTAINER).strip() or _DEFAULT_CONTAINER
     image = _server_image()
-    wait_secs = float(os.environ.get("SANDBOX_HEALTH_WAIT_SECS", str(_DEFAULT_HEALTH_WAIT_SECS)))
+    if health_wait_secs is None:
+        health_wait_secs = float(
+            os.environ.get("SANDBOX_HEALTH_WAIT_SECS", str(_DEFAULT_HEALTH_WAIT_SECS))
+        )
+    wait_secs = health_wait_secs
     want_hash = _config_sha256(config_path)
 
     if _container_exists(container):
         published = _published_port(container)
         port_ok = f":{host_port}" in published
         if not _config_mount_ok(container) or not port_ok:
-            print(f"monkeybot chat: recreating OpenSandbox container {container}", flush=True)
+            print(f"monkeybot: recreating OpenSandbox container {container}", flush=True)
             _remove_container(container)
         elif want_hash and _container_config_label(container) != want_hash:
-            print(f"monkeybot chat: recreating OpenSandbox (config changed)", flush=True)
+            print("monkeybot: recreating OpenSandbox (config changed)", flush=True)
             _remove_container(container)
         elif not _container_running(container):
-            print(f"monkeybot chat: starting OpenSandbox container {container}", flush=True)
+            print(f"monkeybot: starting OpenSandbox container {container}", flush=True)
             _start_existing(container)
 
     if _container_exists(container):
         if _wait_healthy(host_port, timeout_secs=wait_secs, container=container):
             return True
-        print("monkeybot chat: OpenSandbox unhealthy; recreating container", flush=True)
+        print("monkeybot: OpenSandbox unhealthy; recreating container", flush=True)
         _remove_container(container)
 
     print(
-        f"monkeybot chat: starting OpenSandbox ({image}, port {host_port})…",
+        f"monkeybot: starting OpenSandbox ({image}, port {host_port})…",
         flush=True,
     )
     if not _run_container(
@@ -291,24 +301,24 @@ def ensure_opensandbox_for_agent(
         cfg_hash=want_hash,
     ):
         print(
-            f"monkeybot chat: docker run failed (is port {host_port} in use?)",
+            f"monkeybot: docker run failed (is port {host_port} in use?)",
             flush=True,
         )
         return False
 
     if _wait_healthy(host_port, timeout_secs=wait_secs, container=container):
-        print(f"monkeybot chat: OpenSandbox ready (127.0.0.1:{host_port})", flush=True)
+        print(f"monkeybot: OpenSandbox ready (127.0.0.1:{host_port})", flush=True)
         return True
 
     if _container_exists(container) and not _container_running(container):
         print(
-            "monkeybot chat: OpenSandbox container exited before becoming healthy "
+            "monkeybot: OpenSandbox container exited before becoming healthy "
             f"(image={image}).",
             flush=True,
         )
     else:
         print(
-            f"monkeybot chat: OpenSandbox did not become healthy within {wait_secs:.0f}s.",
+            f"monkeybot: OpenSandbox did not become healthy within {wait_secs:.0f}s.",
             flush=True,
         )
     return False
