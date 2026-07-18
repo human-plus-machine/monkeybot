@@ -247,6 +247,67 @@ def test_messages_to_wire_recovers_image_from_freeze_stub_and_path() -> None:
     assert wire[2] == {"role": "assistant", "text": "Here is your car."}
 
 
+def test_messages_to_wire_no_image_row_for_non_image_tool_with_png_path_arg() -> None:
+    """write_file with a .png path arg must not fabricate a role=image row."""
+    wire = messages_to_wire(
+        [
+            Message(
+                role="assistant",
+                content=[
+                    ToolRequest(
+                        id="c1",
+                        name="write_file",
+                        args={"path": "notes/summary.png", "content": "not an image"},
+                    ),
+                ],
+            ),
+            Message(
+                role="user",
+                content=[
+                    ToolResponse(
+                        id="c1",
+                        tool_name="write_file",
+                        result=[Text(text="Wrote 30 bytes to notes/summary.png")],
+                    )
+                ],
+            ),
+        ]
+    )
+    assert not any(row.get("role") == "image" for row in wire)
+
+
+def test_messages_to_wire_no_image_row_for_run_command_with_png_path_arg() -> None:
+    """run_command with a .png path arg must not fabricate a role=image row."""
+    wire = messages_to_wire(
+        [
+            Message(
+                role="assistant",
+                content=[
+                    ToolRequest(
+                        id="c1",
+                        name="run_command",
+                        args={
+                            "path": "./generated-media/images/foo.png",
+                            "command": "ls -la ./generated-media/images/foo.png",
+                        },
+                    ),
+                ],
+            ),
+            Message(
+                role="user",
+                content=[
+                    ToolResponse(
+                        id="c1",
+                        tool_name="run_command",
+                        result=[Text(text="-rw-r--r-- 1 user staff 1234 foo.png")],
+                    )
+                ],
+            ),
+        ]
+    )
+    assert not any(row.get("role") == "image" for row in wire)
+
+
 def test_messages_to_wire_truncates_large_tool_payloads() -> None:
     huge = "x" * 10_000
     wire = messages_to_wire(

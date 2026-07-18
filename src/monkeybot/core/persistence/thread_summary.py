@@ -43,6 +43,12 @@ _FROZEN_TOOL_MEDIA_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Only these tools can return Image blocks (see core_tool_executor._media_result).
+# Scoping the freeze-stub/path-arg recovery below to this set prevents unrelated
+# tools (write_file, run_command, ...) whose args merely *contain* an
+# image-suffixed path from being misrepresented as image rows on the wire.
+_IMAGE_CAPABLE_TOOLS = frozenset({"load_file"})
+
 
 @dataclass(frozen=True)
 class ChatThreadSummary:
@@ -135,7 +141,12 @@ def _path_from_tool_args(args: dict[str, Any]) -> str | None:
 
 
 def _frozen_image_hint(blocks: list[ContentBlock]) -> tuple[str | None, str | None]:
-    """Return ``(attachment_id, kind)`` from a media freeze stub, if present."""
+    """Return ``(attachment_id, kind)`` from a media freeze stub, if present.
+
+    Relies on the invariant in ``_freeze_tool_responses`` (freeze.py): a frozen
+    tool result is always replaced wholesale with a single ``Text`` stub, never
+    mixed with other blocks. If that invariant changes, this must be revisited.
+    """
     for block in blocks:
         if not isinstance(block, Text) or not block.text.strip():
             continue
@@ -208,6 +219,9 @@ def _image_rows_for_tool_response(
         )
     if rows:
         return rows
+
+    if req.name not in _IMAGE_CAPABLE_TOOLS:
+        return []
 
     # Frozen stub recovery: Image bytes were replaced with Text.
     path = _path_from_tool_args(dict(req.args or {}))

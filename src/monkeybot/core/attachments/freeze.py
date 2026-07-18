@@ -17,12 +17,12 @@ from monkeybot.core.types.content_blocks import (
 )
 
 from .catalog import AttachmentRecord, SessionAttachmentCatalog
+from .store import attachment_workspace_path
 from .text import (
     filename_from_metadata,
     render_attachment_descriptor_text,
     render_tool_media_freeze_text,
 )
-from .store import attachment_workspace_path
 
 
 def _freeze_user_row(
