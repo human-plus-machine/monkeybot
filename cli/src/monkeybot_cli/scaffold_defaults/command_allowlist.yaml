@@ -17,6 +17,8 @@ allowed_path_prefixes:
   - ./data/memory
   - ./skills/
   - ./skills
+  - ./global-skills/
+  - ./global-skills
   - ./test-data/
   - ./code/
   - ./code

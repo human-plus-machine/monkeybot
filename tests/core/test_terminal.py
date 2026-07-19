@@ -475,6 +475,8 @@ class TestTerminalExecutorConstants:
             "./data/memory",
             "./skills/",
             "./skills",
+            "./global-skills/",
+            "./global-skills",
             "./test-data/",
             "./code/",
             "./code",
