@@ -51,6 +51,8 @@ ALLOWED_PATHS = [
     "./data/memory",     # Same, when callers omit trailing slash
     "./skills/",         # Skills directory
     "./skills",          # Same, when callers omit trailing slash
+    "./global-skills/",  # Shared library authoring (Main Agent Studio)
+    "./global-skills",   # Same, when callers omit trailing slash
     "./test-data/",      # Test data directory (for tests only)
     "./code/",           # Reference / cloned repos (explicit ./ paths in argv)
     "./code",            # Same, when callers omit trailing slash
