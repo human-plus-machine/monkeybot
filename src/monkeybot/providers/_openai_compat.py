@@ -116,6 +116,17 @@ def messages_to_openai(messages: Sequence[Message]) -> tuple[str | None, list[di
         for item in buf:
             if isinstance(item, Text):
                 content.append({"type": "text", "text": item.text})
+            elif isinstance(item, Image):
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{item.mime_type};base64,{item.data}"},
+                    }
+                )
+            elif isinstance(item, File):
+                # No Chat Completions wire type for documents; keep the model
+                # aware a file was attached instead of erroring the whole turn.
+                content.append({"type": "text", "text": _media_tool_placeholder("file", item)})
             else:
                 raise ValueError(
                     f"unsupported user content block for OpenAI-compat: {type(item).__name__}"
