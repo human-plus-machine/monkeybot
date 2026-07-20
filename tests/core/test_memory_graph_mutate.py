@@ -298,3 +298,68 @@ async def test_graph_opens_with_wal(tmp_path: Path) -> None:
         assert await graph.get_updated_at("semantic/a.md") == 1.0
     finally:
         await graph.close()
+
+
+@pytest.mark.asyncio
+async def test_mutation_and_organizer_share_lock(tmp_path: Path) -> None:
+    """forget mid-turn and organizer INDEX write cannot interleave."""
+    import asyncio
+
+    mem = tmp_path / "memory"
+    (mem / "semantic").mkdir(parents=True)
+    storage = LocalWorkspaceStorage(mem)
+    path = "semantic/shared.md"
+    await storage.write_text(
+        path,
+        format_memory_note(note_type="semantic", status="active", body="shared note"),
+    )
+    await storage.write_text(
+        "INDEX.md",
+        "# Memory Index\n\n- [[semantic/shared.md]] | tags: | summary: shared\n",
+    )
+
+    sub = _subsystem(mem)
+    try:
+        order: list[str] = []
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_organizer() -> None:
+            async with sub.lock:
+                order.append("organizer_enter")
+                started.set()
+                await release.wait()
+                # Simulate INDEX rewrite while holding the shared lock.
+                await storage.write_text(
+                    "INDEX.md",
+                    "# Memory Index\n\n- [[semantic/shared.md]] | tags: | summary: organizer\n",
+                )
+                order.append("organizer_exit")
+
+        async def forget_while_organizer_holds() -> dict[str, Any]:
+            await started.wait()
+            order.append("forget_wait")
+            result = await sub.forget(path)
+            order.append("forget_done")
+            return result
+
+        org_task = asyncio.create_task(slow_organizer())
+        forget_task = asyncio.create_task(forget_while_organizer_holds())
+        await started.wait()
+        await asyncio.sleep(0.05)
+        # forget must still be waiting on the lock
+        assert "forget_done" not in order
+        release.set()
+        forgotten = await forget_task
+        await org_task
+        assert forgotten["ok"] is True
+        assert order == [
+            "organizer_enter",
+            "forget_wait",
+            "organizer_exit",
+            "forget_done",
+        ]
+        index = await storage.read_text("INDEX.md")
+        assert "[[semantic/shared.md]]" not in index
+    finally:
+        await sub.close()

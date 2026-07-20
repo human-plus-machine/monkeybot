@@ -162,3 +162,49 @@ def test_migrate_all_agents_when_flag_set(
     assert (a / "memory" / "INDEX.md").is_file()
     assert (b / "memory" / "INDEX.md").is_file()
     assert (outside / "memory" / "INDEX.md").is_file()
+
+
+def test_migrate_host_memory_volume_moves_when_dest_empty(tmp_path: Path) -> None:
+    from monkeybot.core.memory.migrate_layout import migrate_host_memory_volume
+
+    legacy = tmp_path / "monkeybot-data" / "memory"
+    dest = tmp_path / "monkeybot-memory"
+    legacy.mkdir(parents=True)
+    (legacy / "INDEX.md").write_text("# idx\n", encoding="utf-8")
+    (legacy / "episodic").mkdir()
+    (legacy / "episodic" / "note.md").write_text("hello\n", encoding="utf-8")
+
+    result = migrate_host_memory_volume(legacy, dest)
+
+    assert result["action"] == "moved"
+    assert (dest / "INDEX.md").read_text() == "# idx\n"
+    assert (dest / "episodic" / "note.md").read_text() == "hello\n"
+    assert not legacy.exists()
+
+
+def test_migrate_host_memory_volume_skips_non_empty_dest(tmp_path: Path) -> None:
+    from monkeybot.core.memory.migrate_layout import migrate_host_memory_volume
+
+    legacy = tmp_path / "legacy"
+    dest = tmp_path / "dest"
+    legacy.mkdir()
+    dest.mkdir()
+    (legacy / "old.md").write_text("old\n", encoding="utf-8")
+    (dest / "keep.md").write_text("keep\n", encoding="utf-8")
+
+    result = migrate_host_memory_volume(legacy, dest)
+
+    assert result["action"] == "skipped_dest_not_empty"
+    assert (legacy / "old.md").is_file()
+    assert (dest / "keep.md").read_text() == "keep\n"
+
+
+def test_migrate_host_cli_exit_codes(tmp_path: Path) -> None:
+    from monkeybot.core.memory.migrate_layout import main
+
+    legacy = tmp_path / "legacy"
+    dest = tmp_path / "dest"
+    legacy.mkdir()
+    (legacy / "a.md").write_text("x\n", encoding="utf-8")
+    assert main(["--host-legacy", str(legacy), "--host-dest", str(dest)]) == 0
+    assert (dest / "a.md").is_file()

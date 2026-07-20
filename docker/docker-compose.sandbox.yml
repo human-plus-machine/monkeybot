@@ -48,22 +48,10 @@ services:
       - /tmp/monkeybot-data:/tmp/monkeybot-data
       - /tmp/monkeybot-memory:/tmp/monkeybot-memory
     command: >
-      sh -c 'set -e;
-             LEGACY=/tmp/monkeybot-data/memory;
-             DEST=/tmp/monkeybot-memory;
-             mkdir -p "$$DEST";
-             if [ -d "$$LEGACY" ]; then
-               if [ -z "$$(ls -A "$$DEST" 2>/dev/null)" ]; then
-                 echo "Migrating legacy memory $$LEGACY -> $$DEST";
-                 mv "$$LEGACY"/* "$$DEST"/ 2>/dev/null || true;
-                 mv "$$LEGACY"/.[!.]* "$$DEST"/ 2>/dev/null || true;
-                 rmdir "$$LEGACY" 2>/dev/null || true;
-               else
-                 echo "Keeping $$DEST; legacy $$LEGACY still present (not empty dest)";
-               fi;
-             fi;
-             mkdir -p /tmp/monkeybot-workspace /tmp/monkeybot-skills /tmp/monkeybot-data "$$DEST";
-             cp -rn /app/skills/. /tmp/monkeybot-skills/ 2>/dev/null || true;
-             python -m monkeybot.gateway.main'
+      sh -c "set -e;
+      python -m monkeybot.core.memory.migrate_layout --host-legacy /tmp/monkeybot-data/memory --host-dest /tmp/monkeybot-memory;
+      mkdir -p /tmp/monkeybot-workspace /tmp/monkeybot-skills /tmp/monkeybot-data /tmp/monkeybot-memory;
+      cp -rn /app/skills/. /tmp/monkeybot-skills/ 2>/dev/null || true;
+      python -m monkeybot.gateway.main"
     depends_on:
       - opensandbox-server

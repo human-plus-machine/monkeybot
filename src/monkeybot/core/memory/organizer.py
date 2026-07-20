@@ -257,21 +257,8 @@ class MemoryOrganizer:
         Returns immediately with zeros if ``raw/`` is missing or empty.
         Per-file errors are captured in MemoryOrganizerResult.errors, not propagated.
         """
-        if self._pre_run is not None:
-            try:
-                await self._pre_run()
-            except Exception as exc:
-                logger.warning("memory organizer pre_run failed: %r", exc)
-
-        all_under_raw = await self._storage.list_files("raw/")
-        raw_files = [
-            p
-            for p in all_under_raw
-            if p.startswith("raw/")
-            and p.endswith(".md")
-            and not p.startswith("raw/processed/")
-            and p.count("/") == 1
-        ]
+        await self._run_pre_hook()
+        raw_files = await self._list_raw_files()
         if not raw_files:
             return MemoryOrganizerResult(0, 0, False)
 
@@ -280,42 +267,18 @@ class MemoryOrganizer:
         errors: list[str] = []
 
         for raw_rel in sorted(raw_files):
-            raw_name = Path(raw_rel).name
             try:
-                content = await self._storage.read_text(raw_rel)
-                summary = await self._summarize(content)
-                folder = await self._classify(summary)
-                filename = self._generate_filename(raw_name, folder)
-                dest_path = f"{folder}/{filename}"
-                links = await self._choose_links(
-                    summary=summary, folder=folder, exclude_path=dest_path
-                )
-
-                note_text = format_memory_note(
-                    note_type=folder,
-                    status="active",
-                    body=summary,
-                    supersedes=links.supersedes,
-                    related=list(links.related),
-                )
-                await self._storage.write_text(dest_path, note_text)
-                if self._on_note_written is not None:
-                    await self._on_note_written(dest_path, note_text)
-
-                entries.append(
-                    IndexEntry(folder=folder, filename=filename, tags="", summary=summary)
-                )
-
-                processed_rel = f"raw/processed/{raw_name}"
-                await self._storage.move(raw_rel, processed_rel)
-
-                files_written += 1
-
+                entry = await self._process_raw_file(raw_rel)
             except Exception as e:
+                raw_name = Path(raw_rel).name
                 logger.warning(
                     "Memory organizer failed to process %s: %s", raw_name, str(e)
                 )
                 errors.append(raw_name)
+                continue
+            if entry is not None:
+                entries.append(entry)
+                files_written += 1
 
         if entries:
             await self._update_index(entries)
@@ -326,6 +289,50 @@ class MemoryOrganizer:
             index_updated=bool(entries),
             errors=errors,
         )
+
+    async def _run_pre_hook(self) -> None:
+        if self._pre_run is None:
+            return
+        try:
+            await self._pre_run()
+        except Exception as exc:
+            logger.warning("memory organizer pre_run failed: %r", exc)
+
+    async def _list_raw_files(self) -> list[str]:
+        all_under_raw = await self._storage.list_files("raw/")
+        return [
+            p
+            for p in all_under_raw
+            if p.startswith("raw/")
+            and p.endswith(".md")
+            and not p.startswith("raw/processed/")
+            and p.count("/") == 1
+        ]
+
+    async def _process_raw_file(self, raw_rel: str) -> IndexEntry | None:
+        raw_name = Path(raw_rel).name
+        content = await self._storage.read_text(raw_rel)
+        summary = await self._summarize(content)
+        folder = await self._classify(summary)
+        filename = self._generate_filename(raw_name, folder)
+        dest_path = f"{folder}/{filename}"
+        links = await self._choose_links(
+            summary=summary, folder=folder, exclude_path=dest_path
+        )
+
+        note_text = format_memory_note(
+            note_type=folder,
+            status="active",
+            body=summary,
+            supersedes=links.supersedes,
+            related=list(links.related),
+        )
+        await self._storage.write_text(dest_path, note_text)
+        if self._on_note_written is not None:
+            await self._on_note_written(dest_path, note_text)
+
+        await self._storage.move(raw_rel, f"raw/processed/{raw_name}")
+        return IndexEntry(folder=folder, filename=filename, tags="", summary=summary)
 
     def _generate_filename(self, raw_name: str, folder: str) -> str:
         del folder
@@ -458,6 +465,25 @@ class MemoryOrganizer:
         return parse_link_decision(raw, allowed=allowed)
 
     async def _update_index(self, entries: list[IndexEntry]) -> None:
+        existing_content = await self._read_index_or_default()
+        new_lines = await self._format_index_lines(entries)
+        if not new_lines:
+            return
+
+        merged = append_index_entries(existing_content, new_lines)
+        _header, entry_lines = split_index_document(merged)
+        cap = index_cap_from_env()
+        kept, archived = apply_index_entry_cap(entry_lines, cap)
+        if archived:
+            await self._append_archive(archived)
+
+        final_content = format_index_document(_header, kept)
+        try:
+            await self._storage.write_text(INDEX_FILENAME, final_content)
+        except Exception as e:
+            raise MemoryOrganizerError(f"Failed to write INDEX.md: {e}") from e
+
+    async def _read_index_or_default(self) -> str:
         existing_content = ""
         if await self._storage.exists(INDEX_FILENAME):
             try:
@@ -465,9 +491,11 @@ class MemoryOrganizer:
             except Exception as exc:
                 logger.warning("organizer INDEX.md read failed: %r", exc)
                 existing_content = ""
-
         if not existing_content.strip():
-            existing_content = f"{DEFAULT_INDEX_HEADER}\n"
+            return f"{DEFAULT_INDEX_HEADER}\n"
+        return existing_content
+
+    async def _format_index_lines(self, entries: list[IndexEntry]) -> list[str]:
         new_lines: list[str] = []
         for entry in entries:
             try:
@@ -478,7 +506,6 @@ class MemoryOrganizer:
                         filename=entry.filename, summary=entry.summary
                     ),
                 )
-
                 tags = ""
                 summary_line = entry.summary
                 for line in response.splitlines():
@@ -486,39 +513,24 @@ class MemoryOrganizer:
                         tags = line[5:].strip()
                     elif line.lower().startswith("summary:"):
                         summary_line = line[8:].strip()
-
                 entry.tags = tags
                 entry.summary = summary_line
             except Exception as exc:
                 logger.debug("index entry LLM call failed for %s: %r", entry.filename, exc)
 
-            formatted = (
+            new_lines.append(
                 f"- [[{entry.folder}/{entry.filename}]]"
                 f" | tags: {entry.tags} | {entry.summary}"
             )
-            new_lines.append(formatted)
+        return new_lines
 
-        if not new_lines:
-            return
-
-        merged = append_index_entries(existing_content, new_lines)
-        _header, entry_lines = split_index_document(merged)
-        cap = index_cap_from_env()
-        kept, archived = apply_index_entry_cap(entry_lines, cap)
-        if archived:
-            archive_raw = ""
-            if await self._storage.exists(INDEX_ARCHIVE_FILENAME):
-                try:
-                    archive_raw = await self._storage.read_text(INDEX_ARCHIVE_FILENAME)
-                except Exception as exc:
-                    logger.warning("organizer INDEX.archive.md read failed: %r", exc)
-                    archive_raw = ""
-            archive_out = merge_archive_content(archive_raw, archived)
-            await self._storage.write_text(INDEX_ARCHIVE_FILENAME, archive_out)
-
-        final_content = format_index_document(_header, kept)
-
-        try:
-            await self._storage.write_text(INDEX_FILENAME, final_content)
-        except Exception as e:
-            raise MemoryOrganizerError(f"Failed to write INDEX.md: {e}") from e
+    async def _append_archive(self, archived: list[str]) -> None:
+        archive_raw = ""
+        if await self._storage.exists(INDEX_ARCHIVE_FILENAME):
+            try:
+                archive_raw = await self._storage.read_text(INDEX_ARCHIVE_FILENAME)
+            except Exception as exc:
+                logger.warning("organizer INDEX.archive.md read failed: %r", exc)
+                archive_raw = ""
+        archive_out = merge_archive_content(archive_raw, archived)
+        await self._storage.write_text(INDEX_ARCHIVE_FILENAME, archive_out)

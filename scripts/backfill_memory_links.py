@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""One-time backfill: add Obsidian-style related/supersedes links to existing memory notes.
+"""Optional LLM backfill: infer related/supersedes links for existing memory notes.
+
+Graph population for notes already on disk does **not** require this script —
+gateway startup runs ``MemorySubsystem.rebuild_graph()`` automatically, and the
+Mac Memory graph Reload path does the same when the sidecar is empty.
+
+Use this script only when you want the organizer's LLM linker to add Obsidian
+``related`` / ``supersedes`` links to notes that were filed before linking existed.
 
 Usage:
   cd /path/to/monkeybot

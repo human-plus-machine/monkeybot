@@ -342,8 +342,98 @@ def migrate_all_local_agent_memory_layouts(
     return results
 
 
+def migrate_host_memory_volume(
+    legacy: Path | str, dest: Path | str
+) -> dict[str, Any]:
+    """Migrate an absolute host memory dir (docker-compose upgrade path).
+
+    When ``legacy`` exists and ``dest`` is missing or empty, move legacy contents
+    into ``dest``. Used by the sandbox compose entrypoint so upgrades do not
+    orphan ``/tmp/monkeybot-data/memory``.
+    """
+    legacy_path = Path(legacy).expanduser()
+    dest_path = Path(dest).expanduser()
+    result: dict[str, Any] = {
+        "legacy": str(legacy_path),
+        "dest": str(dest_path),
+        "action": "noop",
+    }
+    if not legacy_path.is_dir():
+        dest_path.mkdir(parents=True, exist_ok=True)
+        return result
+
+    dest_path.mkdir(parents=True, exist_ok=True)
+    try:
+        dest_empty = not any(dest_path.iterdir())
+    except OSError as exc:
+        logger.warning("Cannot list dest memory volume %s: %r", dest_path, exc)
+        result["action"] = "error"
+        result["error"] = repr(exc)
+        return result
+
+    if not dest_empty:
+        result["action"] = "skipped_dest_not_empty"
+        logger.info(
+            "Keeping %s; legacy %s still present (dest not empty)",
+            dest_path,
+            legacy_path,
+        )
+        return result
+
+    try:
+        for item in legacy_path.iterdir():
+            target = dest_path / item.name
+            shutil.move(str(item), str(target))
+        try:
+            legacy_path.rmdir()
+        except OSError:
+            # Non-empty leftovers (e.g. stuck file) — leave for operator.
+            pass
+    except OSError as exc:
+        logger.warning(
+            "Failed host memory migrate %s → %s: %r", legacy_path, dest_path, exc
+        )
+        result["action"] = "move_failed"
+        result["error"] = repr(exc)
+        return result
+
+    result["action"] = "moved"
+    logger.info("Migrated host memory volume %s → %s", legacy_path, dest_path)
+    return result
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI for docker-compose host volume migration."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--host-legacy",
+        type=Path,
+        help="Legacy absolute memory directory (e.g. /tmp/monkeybot-data/memory)",
+    )
+    parser.add_argument(
+        "--host-dest",
+        type=Path,
+        help="Canonical absolute memory directory (e.g. /tmp/monkeybot-memory)",
+    )
+    args = parser.parse_args(argv)
+    if args.host_legacy is None or args.host_dest is None:
+        parser.error("--host-legacy and --host-dest are required")
+    result = migrate_host_memory_volume(args.host_legacy, args.host_dest)
+    action = result.get("action")
+    if action == "error" or action == "move_failed":
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
 __all__ = [
     "discover_local_agent_roots",
     "migrate_agent_memory_layout",
     "migrate_all_local_agent_memory_layouts",
+    "migrate_host_memory_volume",
 ]
