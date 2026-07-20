@@ -34,7 +34,9 @@ directory containing `monkeybot_config/`. It then loads the root `.env`, applies
 YAML values to still-unset environment variables, and constructs the layout.
 
 The portable override contract is `MONKEYBOT_CONFIG`,
-`MONKEYBOT_WORKSPACE_ROOT`, `SKILLS_PATH`, `DB_URL`, `MEMORY_STORAGE_URI`,
+`MONKEYBOT_WORKSPACE_ROOT`, `MONKEYBOT_WORKSPACE_ROOT_OVERRIDE` (absolute path;
+beats yaml `paths.workspace_root` for one process — used by Monkeybot Mac
+workspace sessions), `SKILLS_PATH`, `DB_URL`, `MEMORY_STORAGE_URI`,
 `MCP_CONFIG`, `SANDBOX_ENABLED`, `SANDBOX_SERVER_URL`, `SANDBOX_IMAGE`,
 `SANDBOX_API_KEY` (with `SANDBOX_AUTH_TOKEN` accepted as a compatibility alias),
 `SANDBOX_SHARED_FILESYSTEM`, and `PORT`. Use absolute override values when a
