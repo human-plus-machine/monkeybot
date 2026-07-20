@@ -10,7 +10,9 @@ API key, and provider name (HuggingFace, Ollama).
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
+import functools
 import io
 import json
 import logging
@@ -108,32 +110,40 @@ def _user_file_placeholder(block: File) -> str:
 _MAX_EXTRACTED_PDF_CHARS = 20_000
 
 
+@functools.lru_cache(maxsize=32)
 def _extract_pdf_text_sync(data_b64: str, max_chars: int) -> str | None:
     """Best-effort text layer extraction. Returns None on any failure or no text.
 
     Bytes are an untrusted user upload (may be corrupt, encrypted, or a scanned
     image-only PDF with no text layer) — any of that is a normal "nothing to
     extract" outcome, not a bug, so failures fall back to the caller's placeholder
-    rather than raising.
+    rather than raising. ``lru_cache`` avoids re-parsing the same attachment on
+    every subsequent turn — full history (and every token-count check) re-walks
+    every ``File`` block in the conversation, so without this a PDF gets
+    re-decoded and re-parsed from scratch dozens of times over a long chat.
     """
-    import base64
-
-    from pypdf import PdfReader
+    from pypdf import PdfReader  # noqa: PLC0415
 
     try:
         reader = PdfReader(io.BytesIO(base64.b64decode(data_b64)))
-        parts: list[str] = []
-        total = 0
-        for page in reader.pages:
-            text = (page.extract_text() or "").strip()
-            if text:
-                parts.append(text)
-                total += len(text)
-            if total >= max_chars:
-                break
-        text = "\n\n".join(parts).strip()
     except Exception:
+        _log.warning("PDF extraction failed to open document", exc_info=True)
         return None
+
+    parts: list[str] = []
+    total = 0
+    for page in reader.pages:
+        try:
+            text = (page.extract_text() or "").strip()
+        except Exception:
+            _log.warning("PDF extraction failed on one page, skipping it", exc_info=True)
+            continue
+        if text:
+            parts.append(text)
+            total += len(text)
+        if total >= max_chars:
+            break
+    text = "\n\n".join(parts).strip()
     return text or None
 
 

@@ -2013,7 +2013,6 @@ dependencies = [
     { name = "httpx" },
     { name = "mcp" },
     { name = "pydantic" },
-    { name = "pypdf" },
     { name = "python-dotenv" },
     { name = "python-ulid" },
     { name = "pyyaml" },
@@ -2060,10 +2059,12 @@ gemini = [
 ]
 huggingface = [
     { name = "openai" },
+    { name = "pypdf" },
     { name = "tiktoken" },
 ]
 nvidia = [
     { name = "openai" },
+    { name = "pypdf" },
     { name = "tiktoken" },
 ]
 observability = [
@@ -2074,10 +2075,12 @@ observability = [
 ]
 ollama = [
     { name = "openai" },
+    { name = "pypdf" },
     { name = "tiktoken" },
 ]
 openai = [
     { name = "openai" },
+    { name = "pypdf" },
     { name = "tiktoken" },
 ]
 postgres = [
@@ -2169,7 +2172,10 @@ requires-dist = [
     { name = "pyaudio", marker = "extra == 'cli-realtime'", specifier = ">=0.2.11" },
     { name = "pydantic", specifier = ">=2.10.0" },
     { name = "pynput", marker = "extra == 'cli-realtime'", specifier = ">=1.7.6" },
-    { name = "pypdf", specifier = ">=6.14.2" },
+    { name = "pypdf", marker = "extra == 'huggingface'", specifier = ">=6.14.2" },
+    { name = "pypdf", marker = "extra == 'nvidia'", specifier = ">=6.14.2" },
+    { name = "pypdf", marker = "extra == 'ollama'", specifier = ">=6.14.2" },
+    { name = "pypdf", marker = "extra == 'openai'", specifier = ">=6.14.2" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "python-ulid", specifier = ">=2.0.0" },
     { name = "pyyaml", specifier = ">=6.0.2" },
