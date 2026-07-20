@@ -15,20 +15,18 @@ from monkeybot.core.knowledge.links import parse_wiki_links
 from monkeybot.core.knowledge.sqlite_index import KnowledgeIndex
 from monkeybot.core.knowledge.types import KnowledgeSettings, SourceType, TextChunk
 from monkeybot.core.persistence.sqlite_vector import SQLiteVectorStore, VectorChunkRecord
-from monkeybot.core.workspace.protocol import WorkspaceStorage
 
 logger = logging.getLogger(__name__)
 
-# Memory vault paths we skip (noise / auto-capture / organizer archives).
-# Index only INDEX.md and curated notes under knowledge/notes/.
-_MEMORY_SKIP_PREFIXES = ("raw/", "episodic/", "semantic/")
+# Memory is a separate system — never ingest anything under memory/.
 _MTIME_EPS = 1e-6
 
 
 class KnowledgeIndexer:
-    """Debounced indexer over workspace files, knowledge notes, and memory vault.
+    """Debounced indexer over workspace files and knowledge notes.
 
     Process-local dirty queues assume a single gateway writer per workspace index.
+    Memory vault paths are never indexed (full split from the memory subsystem).
     """
 
     def __init__(
@@ -38,8 +36,6 @@ class KnowledgeIndexer:
         workspace_root: Path,
         knowledge_root: Path,
         settings: KnowledgeSettings,
-        memory_storage: WorkspaceStorage | None = None,
-        memory_root: Path | None = None,
         embedding_provider: NvidiaEmbeddingProvider | None = None,
         vector_store: SQLiteVectorStore | None = None,
     ) -> None:
@@ -48,8 +44,6 @@ class KnowledgeIndexer:
         self._knowledge_root = Path(knowledge_root).resolve()
         self._notes_root = self._knowledge_root / "notes"
         self._settings = settings
-        self._memory_storage = memory_storage
-        self._memory_root = Path(memory_root).resolve() if memory_root else None
         self._embedder = embedding_provider
         self._vectors = vector_store
         self._dirty: set[tuple[str, SourceType | None]] = set()
@@ -162,7 +156,7 @@ class KnowledgeIndexer:
                     logger.warning("knowledge notes rescan failed: %r", exc)
 
     async def _full_scan(self) -> None:
-        """Full workspace + notes/memory rescan.
+        """Full workspace + knowledge-notes rescan.
 
         Invariant: callers must already hold ``self._lock`` (``ensure_ready``
         and ``flush``'s ``do_workspace`` branch both do). ``asyncio.Lock`` is
@@ -189,6 +183,13 @@ class KnowledgeIndexer:
         finally:
             self._pending_embed = None
 
+        # Drop any legacy memory/* rows left from before the full split.
+        existing_notes = await self._index.list_paths(source_type="note")
+        for path in existing_notes:
+            if path.startswith("memory/"):
+                await self._index.delete_path(path)
+                await self._delete_vectors(path)
+
         deleted = await self._index.delete_missing(alive)
         if deleted:
             logger.info("knowledge index removed %d stale paths", deleted)
@@ -201,7 +202,7 @@ class KnowledgeIndexer:
                 logger.warning("knowledge vector prune failed: %r", exc)
 
     async def _scan_notes_and_memory(self, *, prune: bool = True) -> set[str]:
-        """Index knowledge notes + memory vault. Returns alive note paths."""
+        """Index knowledge notes only (memory vault is never ingested)."""
         alive: set[str] = set()
         max_bytes = self._settings.max_file_bytes
         owns_batch = self._pending_embed is None
@@ -223,58 +224,12 @@ class KnowledgeIndexer:
                 )
                 alive.add(index_path)
 
-            if self._memory_root is not None and self._memory_root.is_dir():
-                mem_files = await asyncio.to_thread(
-                    walk_text_files, self._memory_root, max_file_bytes=max_bytes
-                )
-                for file_path in mem_files:
-                    rel = _rel_under(file_path, self._memory_root)
-                    if rel is None or _memory_skipped(rel):
-                        continue
-                    index_path = f"memory/{rel}"
-                    await self._index_disk_file(
-                        file_path, index_path=index_path, source_type="note"
-                    )
-                    alive.add(index_path)
-            elif self._memory_storage is not None:
-                list_failed = False
-                try:
-                    names = await self._memory_storage.list_files()
-                except Exception as exc:
-                    logger.warning("knowledge memory list_files failed: %r", exc)
-                    list_failed = True
-                    names = []
-                for name in names:
-                    rel = name.lstrip("/")
-                    if _memory_skipped(rel) or not _looks_like_text_name(rel):
-                        continue
-                    index_path = f"memory/{rel}"
-                    try:
-                        text = await self._memory_storage.read_text(rel)
-                    except FileNotFoundError:
-                        continue
-                    except Exception as exc:
-                        # Transient read error — treat as still-alive so the
-                        # prune step below does not drop a valid note.
-                        logger.warning(
-                            "knowledge memory read_text failed for %s; keeping stale row: %r",
-                            rel,
-                            exc,
-                        )
-                        alive.add(index_path)
-                        continue
-                    await self._index_text(
-                        text,
-                        index_path=index_path,
-                        source_type="note",
-                        mtime=None,
-                    )
-                    alive.add(index_path)
-                if list_failed:
-                    # Cannot enumerate the backend right now — do not let an
-                    # empty listing look like "all memory notes were deleted".
-                    existing_memory = await self._index.list_paths(source_type="note")
-                    alive |= {p for p in existing_memory if p.startswith("memory/")}
+            # Prune any leftover memory/* note rows on notes rescan.
+            existing_notes = await self._index.list_paths(source_type="note")
+            for path in existing_notes:
+                if path.startswith("memory/"):
+                    await self._index.delete_path(path)
+                    await self._delete_vectors(path)
 
             if owns_batch:
                 await self._flush_pending_embeds()
@@ -285,6 +240,8 @@ class KnowledgeIndexer:
         if prune:
             existing_notes = await self._index.list_paths(source_type="note")
             for path in existing_notes - alive:
+                if path.startswith("memory/"):
+                    continue  # already deleted above
                 await self._index.delete_path(path)
                 await self._delete_vectors(path)
         return alive
@@ -312,42 +269,13 @@ class KnowledgeIndexer:
             return
 
         if path.startswith("memory/"):
-            rel = path[len("memory/") :]
-            if _memory_skipped(rel):
-                await self._index.delete_path(path)
-                await self._delete_vectors(path)
-                return
-            if self._memory_root is not None:
-                disk = self._memory_root / rel
-                if not disk.is_file():
-                    await self._index.delete_path(path)
-                    await self._delete_vectors(path)
-                    return
-                await self._index_disk_file(disk, index_path=path, source_type="note")
-                return
-            if self._memory_storage is not None:
-                try:
-                    text = await self._memory_storage.read_text(rel)
-                except FileNotFoundError:
-                    await self._index.delete_path(path)
-                    await self._delete_vectors(path)
-                    return
-                except Exception as exc:
-                    # Transient backend errors (timeout, rate limit, …) should not
-                    # drop a previously-indexed note; leave the stale row for the
-                    # next debounced write or full rescan to retry.
-                    logger.warning(
-                        "knowledge memory read failed for %s; leaving index row stale: %r",
-                        path,
-                        exc,
-                    )
-                    return
-                await self._index_text(
-                    text, index_path=path, source_type="note", mtime=None
-                )
-                return
+            # Full split: never keep memory paths in the knowledge index.
             await self._index.delete_path(path)
             await self._delete_vectors(path)
+            return
+
+        await self._index.delete_path(path)
+        await self._delete_vectors(path)
 
     async def _index_disk_file(
         self,
@@ -583,10 +511,6 @@ def _rel_under(path: Path, root: Path) -> str | None:
         return path.resolve().relative_to(root.resolve()).as_posix()
     except ValueError:
         return None
-
-
-def _memory_skipped(rel: str) -> bool:
-    return any(rel.startswith(p) for p in _MEMORY_SKIP_PREFIXES)
 
 
 def _looks_like_text_name(name: str) -> bool:

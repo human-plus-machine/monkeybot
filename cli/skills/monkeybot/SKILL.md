@@ -86,7 +86,7 @@ monkeybot new --dest /path/to/bot --provider openai --yes
 ```
 
 Creates `monkeybot_config/`, read-only `skills/`, writable `workspace/`,
-`data/memory/`, `.env.example`, a Dockerfile, and an agent `pyproject.toml`.
+`memory/`, `.env.example`, a Dockerfile, and an agent `pyproject.toml`.
 Use `--force` only when overwriting is explicitly requested.
 
 Then:
@@ -191,7 +191,7 @@ uv tool install --editable .
 
 | Command | Purpose |
 |---------|---------|
-| `new` | Scaffold `monkeybot_config/`, `workspace/`, `data/memory/`, `skills/`, `pyproject.toml`, `.env.example` |
+| `new` | Scaffold `monkeybot_config/`, `workspace/`, `memory/`, `skills/`, `pyproject.toml`, `.env.example` |
 | `validate` | Config + paths + MCP shape (`--check-mcp` for network) |
 | `doctor` | Python, provider extra, credentials, port |
 | `run` | Start SSE gateway subprocess |

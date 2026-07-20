@@ -75,7 +75,10 @@ async def test_promote_writes_semantic_and_unlinks_source(tmp_path: Path) -> Non
     await sub.promote("run1", src)
     assert not src.exists()
     assert "semantic/note.md" in st.files
-    assert st.files["semantic/note.md"] == "body"
+    text = st.files["semantic/note.md"]
+    assert "status: active" in text
+    assert "body" in text
+    assert text.strip().endswith("body")
 
 
 @pytest.mark.asyncio
@@ -84,6 +87,45 @@ async def test_gc_processed_delegates_to_storage_gc_prefix() -> None:
     sub = _fake_subsystem(st)
     await sub.gc_processed(max_age_sec=123.0)
     assert st.gc_calls == [("raw/processed/", 123.0)]
+
+
+@pytest.mark.asyncio
+async def test_rebuild_graph_indexes_legacy_notes_without_frontmatter(
+    tmp_path: Path,
+) -> None:
+    storage = FakeWorkspaceStorage()
+    storage.files["episodic/old.md"] = "Remembered a meeting about cats.\n"
+    storage.files["semantic/prefs.md"] = (
+        "---\ntype: semantic\nstatus: active\n---\n\nPrefers dark mode.\n"
+    )
+    sub = _fake_subsystem(storage, uri=f"local://{tmp_path / 'mem'}")
+    try:
+        stats = await sub.rebuild_graph()
+        assert stats["scanned"] == 2
+        assert stats["upserted"] == 2
+        graph = await sub.export_graph()
+        paths = {n["path"] for n in graph["nodes"]}
+        assert paths == {"episodic/old.md", "semantic/prefs.md"}
+        by_path = {n["path"]: n for n in graph["nodes"]}
+        assert by_path["episodic/old.md"]["type"] == "episodic"
+        assert by_path["episodic/old.md"]["status"] == "active"
+        assert by_path["semantic/prefs.md"]["type"] == "semantic"
+    finally:
+        await sub.close()
+
+
+@pytest.mark.asyncio
+async def test_remote_memory_disables_graph() -> None:
+    st = FakeWorkspaceStorage()
+    sub = _fake_subsystem(st, uri="gcs://bucket/mem")
+    assert await sub.ensure_graph() is None
+    payload = await sub.export_graph()
+    assert payload["nodes"] == []
+    assert payload["edges"] == []
+    assert "local://" in str(payload.get("note") or "")
+    stats = await sub.rebuild_graph()
+    assert stats.get("skipped") == 1
+    await sub.close()
 
 
 @pytest.mark.asyncio

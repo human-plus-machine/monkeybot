@@ -64,13 +64,6 @@ class HarnessDeps:
         await self.mcp.disconnect_all()
 
 
-def _local_fs_path_from_storage_uri(uri: str) -> Path | None:
-    u = (uri or "").strip()
-    if not u or u.startswith(("gcs://", "s3://")):
-        return None
-    return Path(u.removeprefix("local://").strip()).expanduser().resolve()
-
-
 def _resolve_run_command_allowlists() -> tuple[list[str] | None, list[str] | None]:
     """Load allowlists from ``COMMAND_ALLOWLIST_CONFIG`` when present; else executor defaults."""
     path_str = os.environ.get("COMMAND_ALLOWLIST_CONFIG", "").strip()
@@ -154,8 +147,6 @@ async def create_harness_deps(
                     workspace_root=workspace_root,
                     settings=settings,
                     knowledge_root=Path(settings.knowledge_root),
-                    memory_storage=memory.storage if memory is not None else None,
-                    memory_root=_local_fs_path_from_storage_uri(uri) if uri else None,
                     index_path=Path(settings.index_path),
                 )
                 await knowledge.ensure_ready()

@@ -68,7 +68,7 @@ realtime:
 
 paths:
   agent_md: ./monkeybot_config/AGENT.md
-  memory_storage_uri: local://./data/memory
+  memory_storage_uri: local://./memory
   skills_path: ./skills
   db_url: sqlite:///data/monkeybot.db
   # Apply SQLite/Postgres DDL on startup (true | false). Default true. Set false when migrations own the schema.

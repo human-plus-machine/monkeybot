@@ -471,8 +471,8 @@ class TestTerminalExecutorConstants:
         """Test that ALLOWED_PATHS contains expected paths."""
         # Document expected paths
         expected_paths = [
-            "./data/memory/",
-            "./data/memory",
+            "../memory/",
+            "../memory",
             "./skills/",
             "./skills",
             "./global-skills/",

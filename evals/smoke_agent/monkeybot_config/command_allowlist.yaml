@@ -12,8 +12,8 @@ allowed_commands:
   - find
 
 allowed_path_prefixes:
-  - ./data/memory/
-  - ./data/memory
+  - ../memory/
+  - ../memory
   - ./skills/
   - ./skills
   - ./generated-media/

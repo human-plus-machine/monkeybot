@@ -213,9 +213,7 @@ def _looks_like_note_path(rel: str) -> bool:
     norm = rel.replace("\\", "/").lstrip("./")
     return (
         norm.startswith("notes/")
-        or norm.startswith("memory/")
         or "/notes/" in norm
-        or "/memory/" in norm
     )
 
 

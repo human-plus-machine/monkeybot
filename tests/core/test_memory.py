@@ -164,6 +164,93 @@ async def test_search_memory_files_can_skip_raw_tree(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_search_memory_files_returns_full_body_and_links(tmp_path: Path) -> None:
+    from monkeybot.core.memory.note_format import format_memory_note
+
+    memory = tmp_path / "memory"
+    (memory / "episodic").mkdir(parents=True)
+    text = format_memory_note(
+        note_type="episodic",
+        status="active",
+        body="Learned that Gemini image generation needs a Vertex project id.",
+        related=["episodic/neighbor.md"],
+    )
+    (memory / "episodic" / "gemini.md").write_text(text, encoding="utf-8")
+
+    got = await async_search_memory_files(_st(memory), "Gemini image", max_hits=5)
+    assert len(got["hits"]) == 1
+    hit = got["hits"][0]
+    assert hit["path"] == "episodic/gemini.md"
+    assert "Vertex project id" in hit["body"]
+    assert hit["body_truncated"] is False
+    assert {"path": "episodic/neighbor.md", "kind": "related"} in hit["links"]
+    assert "snippet" in hit
+
+
+@pytest.mark.asyncio
+async def test_search_memory_files_scores_long_multi_token_queries(tmp_path: Path) -> None:
+    """Kitchen-sink queries must not require the full string as one substring."""
+    from monkeybot.core.memory.note_format import format_memory_note
+
+    memory = tmp_path / "memory"
+    (memory / "episodic").mkdir(parents=True)
+    (memory / "episodic" / "gemini.md").write_text(
+        format_memory_note(
+            note_type="episodic",
+            status="active",
+            body=(
+                "Gemini image generation worked with Vertex after fixing API keys; "
+                "MCP image-generator was unknown."
+            ),
+        ),
+        encoding="utf-8",
+    )
+    (memory / "episodic" / "unrelated.md").write_text(
+        format_memory_note(
+            note_type="episodic",
+            status="active",
+            body="Discussed citation formatter styles and DOI validation only.",
+        ),
+        encoding="utf-8",
+    )
+
+    got = await async_search_memory_files(
+        _st(memory),
+        "Gemini image generation API keys Vertex MCP command policy cp",
+        max_hits=10,
+    )
+    paths = [h["path"] for h in got["hits"]]
+    assert "episodic/gemini.md" in paths
+    assert "episodic/unrelated.md" not in paths
+    gemini = next(h for h in got["hits"] if h["path"] == "episodic/gemini.md")
+    assert gemini.get("score", 0) >= 3
+    assert "Vertex" in gemini["body"]
+
+
+@pytest.mark.asyncio
+async def test_async_load_memory_hit_by_path(tmp_path: Path) -> None:
+    from monkeybot.core.memory.note_format import format_memory_note
+    from monkeybot.core.memory.storage_ops import async_load_memory_hit
+
+    memory = tmp_path / "memory"
+    (memory / "semantic").mkdir(parents=True)
+    (memory / "semantic" / "prefs.md").write_text(
+        format_memory_note(
+            note_type="semantic",
+            status="active",
+            body="User prefers dark mode.",
+        ),
+        encoding="utf-8",
+    )
+    hit = await async_load_memory_hit(_st(memory), "semantic/prefs.md")
+    assert hit is not None
+    assert hit["body"] == "User prefers dark mode."
+    assert hit["type"] == "semantic"
+    missing = await async_load_memory_hit(_st(memory), "semantic/nope.md")
+    assert missing is None
+
+
+@pytest.mark.asyncio
 async def test_promote_to_memory_moves_into_semantic(tmp_path: Path) -> None:
     run_id = "01TEST"
     runs_root = tmp_path / "runs"
@@ -178,7 +265,7 @@ async def test_promote_to_memory_moves_into_semantic(tmp_path: Path) -> None:
 
     dest = memory / "semantic" / "x.md"
     assert dest.is_file()
-    assert dest.read_text(encoding="utf-8") == "body"
+    assert "body" in dest.read_text(encoding="utf-8")
     assert not src.exists()
 
 

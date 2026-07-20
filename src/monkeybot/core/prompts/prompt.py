@@ -26,7 +26,11 @@ _MAX_CURRENT_REQUEST_CHARS = 8000
 # in ``providers._utils.split_system_prompt_for_cache``) import these instead
 # of re-declaring the literal strings and risking drift.
 CURRENT_DATE_HEADING = "\n\n## Current date\n"
-MEMORY_INDEX_HEADING = "\n\n## Memory index\n"
+MEMORY_INDEX_HEADING = (
+    "\n\n## Memory index\n"
+    "Stored memories from past sessions; entries are titles — "
+    "`search_memory` retrieves the full note.\n"
+)
 MEMORY_NUDGE_HEADING = "\n\n## Memory\n"
 SKILLS_HEADING = "\n\n## Skills\n"
 TODO_LIST_HEADING = "\n\n## Todo list\n"
@@ -133,7 +137,8 @@ def _memory_block(
             f"{MEMORY_NUDGE_HEADING}"
             f"Showing {shown} of {total} index entries "
             f"(coverage {memory_selection.coverage:.0%}, confidence {memory_selection.confidence:.0%}). "
-            "Use `search` (or `search_memory`) with keywords when the task may depend on older or unstated context."
+            "Use `search_memory` with keywords when the task may depend on older "
+            "session context or preferences; use `search` for workspace/code."
         )
     return mem_block
 

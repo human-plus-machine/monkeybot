@@ -121,14 +121,6 @@ def _memory_storage_uri() -> str:
     return AgentLayout.from_environment().memory_storage_uri
 
 
-def _local_fs_path_from_storage_uri(uri: str) -> Path | None:
-    """Return a filesystem path for ``local://`` / bare paths; None for cloud URIs."""
-    u = (uri or "").strip()
-    if not u or u.startswith(("gcs://", "s3://")):
-        return None
-    return Path(u.removeprefix("local://").strip()).expanduser().resolve()
-
-
 class _UsageStoreAdapter(UsagePort):
     """GET /usage backed by the UsageStore returned from the storage backend."""
 
@@ -610,6 +602,22 @@ async def _startup(fastapi_app: FastAPI) -> None:
                         gc_stats["deleted"],
                         gc_stats["errors"],
                     )
+                working_gc = await memory.gc_working()
+                if working_gc["deleted"] or working_gc["errors"]:
+                    logger.info(
+                        "memory working gc: scanned=%d deleted=%d errors=%d",
+                        working_gc["scanned"],
+                        working_gc["deleted"],
+                        working_gc["errors"],
+                    )
+                rebuild = await memory.rebuild_graph()
+                if rebuild["upserted"] or rebuild["errors"]:
+                    logger.info(
+                        "memory graph rebuild: scanned=%d upserted=%d errors=%d",
+                        rebuild["scanned"],
+                        rebuild["upserted"],
+                        rebuild["errors"],
+                    )
             except Exception as gc_exc:
                 logger.warning("memory gc on startup failed: %r", gc_exc)
         except Exception as exc:
@@ -626,15 +634,10 @@ async def _startup(fastapi_app: FastAPI) -> None:
         try:
             layout = AgentLayout.from_environment()
             settings = resolve_knowledge_settings(workspace_root=layout.workspace_root)
-            mem = _deps.memory
-            mem_uri = mem.uri if mem is not None else ""
-            memory_root = _local_fs_path_from_storage_uri(mem_uri) if mem_uri else None
             knowledge = await KnowledgeSubsystem.create(
                 workspace_root=layout.workspace_root,
                 settings=settings,
                 knowledge_root=Path(settings.knowledge_root),
-                memory_storage=mem.storage if mem is not None else None,
-                memory_root=memory_root,
                 index_path=Path(settings.index_path),
             )
             hook_mgr = _deps.hook_manager

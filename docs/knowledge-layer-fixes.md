@@ -33,7 +33,7 @@
 
 ### F3. Exclude auto-memory noise from the index (or stop boosting it) ✅ DONE
 
-- **Problem:** The memory hook writes a note per tool call ("glob returned zero results in 25ms") into `data/memory/episodic/` and `semantic/`. The indexer ingests all of it as `source_type: note` with a 1.12 ranking boost. Noise filters only cover `memory/chat_log.md` and `memory/raw/`.
+- **Problem:** The memory hook writes a note per tool call ("glob returned zero results in 25ms") into `memory/episodic/` and `semantic/`. The indexer ingests all of it as `source_type: note` with a 1.12 ranking boost. Noise filters only cover `memory/chat_log.md` and `memory/raw/`.
 - **Files:** `src/monkeybot/core/knowledge/indexer.py` (`_MEMORY_SKIP_PREFIXES`), `src/monkeybot/core/knowledge/fusion.py` (`_NOISE_NOTE_PREFIXES`, `_score_multiplier`).
 - **Change (pick one, prefer a):**
   - (a) Add `episodic/` and post-tool-generated `semantic/` files to `_MEMORY_SKIP_PREFIXES` so they are never indexed. Index only `INDEX.md` and curated/distilled notes.

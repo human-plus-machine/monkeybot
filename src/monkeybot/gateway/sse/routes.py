@@ -1049,6 +1049,41 @@ def create_app(
             "truncated": result["truncated"],
         }
 
+    @api.get("/api/memory/graph")
+    async def memory_graph(
+        request: Request,
+        refresh: bool = False,
+    ) -> dict[str, Any]:
+        """Export memory-note nodes + wiki/supersedes edges for visualization.
+
+        Pass ``refresh=true`` to rescan note files into the sidecar (used by the
+        Mac app Reload button after organizer/backfill writes new wiki links).
+        """
+        memory = getattr(request.app.state, "memory", None)
+        if memory is None:
+            raise APIError(
+                404,
+                "NOT_FOUND",
+                "Memory layer is disabled",
+                uuid.uuid4().hex,
+            )
+        try:
+            payload = await memory.export_graph(refresh=refresh)
+        except Exception as exc:
+            logger.exception("memory graph export failed refresh=%s: %r", refresh, exc)
+            raise
+        if not isinstance(payload, dict):
+            payload = {"nodes": [], "edges": [], "note": "invalid graph payload"}
+        nodes = payload.get("nodes")
+        edges = payload.get("edges")
+        logger.info(
+            "memory graph export refresh=%s nodes=%s edges=%s",
+            refresh,
+            len(nodes) if isinstance(nodes, list) else 0,
+            len(edges) if isinstance(edges, list) else 0,
+        )
+        return cast(dict[str, Any], payload)
+
     @api.get("/api/chat-history")
     async def chat_history_list(
         request: Request,

@@ -105,7 +105,7 @@ def resolve_memory_storage_uri(raw: str, agent_root: Path) -> str:
     value = raw.strip()
     if value.startswith(("gcs://", "s3://")):
         return value
-    local_path = value.removeprefix("local://") or "data/memory"
+    local_path = value.removeprefix("local://") or "memory"
     return f"local://{resolve_agent_path(local_path, agent_root)}"
 
 
@@ -155,7 +155,7 @@ class AgentLayout:
             ),
             db_url=resolve_sqlite_url(os.environ.get("DB_URL", "sqlite:///data/monkeybot.db"), root),
             memory_storage_uri=resolve_memory_storage_uri(
-                os.environ.get("MEMORY_STORAGE_URI", os.environ.get("MEMORY_PATH", "data/memory")),
+                os.environ.get("MEMORY_STORAGE_URI", os.environ.get("MEMORY_PATH", "memory")),
                 root,
             ),
         )
@@ -188,6 +188,22 @@ def bootstrap_agent_layout(
     to the launcher process directory.
     """
     root = resolve_agent_root(cwd=cwd, config_path=config_path)
+
+    # One-shot: data/memory → memory for every local agent under ~/.monkeybot/agents
+    # (plus this root), before env/URI resolution so MEMORY_STORAGE_URI is correct.
+    try:
+        from monkeybot.core.memory.migrate_layout import (
+            migrate_all_local_agent_memory_layouts,
+        )
+
+        migrate_all_local_agent_memory_layouts(include=root)
+    except Exception as exc:  # noqa: BLE001 — layout must still boot
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "Memory layout migrate skipped: %r", exc
+        )
+
     env_file = root / ".env"
     if env_file.is_file():
         load_dotenv(env_file, override=False)

@@ -319,6 +319,14 @@ class MemoryHook:
             if len(lines) >= self._max_hits:
                 break
         if lines:
+            heading = (
+                "Stored memories from past sessions (snippets — "
+                "`search_memory` retrieves the full note):"
+            )
+            existing = (payload.inject_text or "").rstrip()
+            payload.inject_text = (
+                f"{existing}\n\n{heading}" if existing else heading
+            )
             payload.inject_memory_lines = list(payload.inject_memory_lines) + lines
 
     async def on_pre_tool(self, payload: HookPayload) -> None:
@@ -361,7 +369,7 @@ class MemoryHook:
                 self._storage,
                 query,
                 max_hits=self._max_hits * 2,
-                skip_relative_prefixes=("raw",),
+                skip_relative_prefixes=("raw", "working"),
             )
         except Exception as exc:
             logger.warning("memory search failed for %r: %r", query, exc)

@@ -34,8 +34,8 @@ When workspace tools (`read_file`, `write_file`, `run_command`, …) appear in t
 
 ### Core built-in tools (when present in the active tool list)
 - `read_file` / `write_file` / `replace_in_file` / `glob` / `grep` / `apply_patch` — paths are **workspace-relative** under the workspace root below. **`glob`** lists matching files (prefer over `run_command` + `ls`). **`grep`** searches file contents with a regex (prefer over `run_command` + `grep`). **`apply_patch`** applies a multi-file Codex-style patch (Add / Update / Delete / Move) fail-closed. Do not substitute a code block in chat for a file deliverable.
-- `search_memory` — keyword search under the configured memory directory (delegates to `search` when the knowledge layer is on).
-{search_tool_line}{knowledge_search_block}- `list_skills` — resolves the skills root path for installed skills listed under `## Skills` below; read each skill's `SKILL.md` under that root for procedure.
+- `search_memory` — past events, decisions, user preferences, prior sessions under the memory directory; **not** for code/workspace — use `search`. Never delegates to knowledge search. Hits return the **full note `body`** plus `links`; follow a neighbor with `search_memory(path=…)`. Memory paths are **not** workspace paths — never `read_file` them.
+{search_tool_line}{knowledge_search_block}{memory_teaching_block}- `list_skills` — resolves the skills root path for installed skills listed under `## Skills` below; read each skill's `SKILL.md` under that root for procedure.
 - `run_command` — allowlisted shell with optional `timeout` (seconds). {run_command_exec_note} Shell starts in **workspace root**; use the paths listed under Runtime paths below — do NOT guess directory names. `cd` is a shell builtin and cannot be used as a bare command; use `bash -c "cd <dir> && <cmd>"` instead. Pass **`argv` as a list** with the binary first (e.g. `{{"argv": ["ls", "."]}}`); do not pass `{{"command": "ls -R", "args": []}}` — that treats `ls -R` as the binary name.
 - `enable_mcp` / `disable_mcp` — connect or drop a server declared in mcp.json by name (e.g. `browser`). Success returns connection status + tools; failure returns the error (no separate status tool). New tools appear on the **next model step this turn**.
 - `list_mcp_resources` / `read_mcp_resource` / `list_mcp_prompts` / `get_mcp_prompt` — appear only after `enable_mcp` succeeds; browse MCP resources and prompt templates from connected servers.
@@ -58,8 +58,10 @@ When workspace tools (`read_file`, `write_file`, `run_command`, …) appear in t
 - **No-repeat rule (applies to every tool):** never issue a tool call with the same name and same arguments that already failed this turn. A retry is only allowed after you have changed the command, arguments, or path in response to the error. If you cannot change anything, stop retrying and report the blocker in plain text.
 
 ### Runtime paths
-- workspace root: `{workspace_root}`
-- memory storage: `{memory_storage_uri}` — optional notes live here; `search` indexes **workspace files** plus notes. Prefer `search` / `search_memory` over shelling into this URI; use the URI in `run_command` only for low-level inspection.
+- workspace root (cwd): `{workspace_root}` — `read_file` / `write_file` / `glob` / `run_command` start here.
+- runtime (inside workspace): `.monkeybot/` — spill, knowledge index, transcripts. Not memory.
+- memory storage: `{memory_storage_uri}` — durable session notes (typed folders + INDEX). **Outside** the workspace root (sibling `memory/` of `workspace/`). Use `search_memory` only; hit paths like `episodic/….md` are memory-relative keys for `search_memory(path=…)`, never for `read_file`. Prefer `search_memory` over shelling into this URI; if you must inspect via shell, use `../memory` from cwd (allowlisted)`.
+- workspace `data/` (if present) is ordinary project files — **not** the memory store.
 
 ### MCP tools
 - Names look like `server__tool` (double underscore).
@@ -91,9 +93,9 @@ _TODO_LIST_LINE = (
 )
 
 _SEARCH_TOOL_LINE = (
-    "- `search` — **local search index over the workspace** (and optional notes): "
-    "FTS + link graph + optional embeddings. This is *not* notes-only and *not* a "
-    "substitute for `read_file` — it finds which files to open. Prefer `search` for "
+    "- `search` — **local search index over the workspace** (+ knowledge notes): "
+    "FTS + link graph + optional embeddings. Has **no** record of past conversations — "
+    "use `search_memory` for those. Not a substitute for `read_file`. Prefer `search` for "
     "unfamiliar codebases, conceptual / cross-file / paraphrased questions; prefer "
     "`grep` for exact identifiers, filenames, or stack traces. (`recall` is a legacy "
     "alias.)\n"
@@ -103,6 +105,7 @@ _KNOWLEDGE_SEARCH_BLOCK = """\
 ### Knowledge retrieval (`search`) — how to use it well
 - **Default:** when exploring or answering questions about code you have not already located, **call `search` before** broad `glob` / wandering `read_file`. Do **not** skip it because "the answer is in source" — the index *is* that source.
 - **When:** "where does X live?", "how does Y work?", multi-question repo Q&A, paraphrases without exact symbols, or when you lack a precise path/`grep` needle.
+- **Not for:** past sessions, user preferences, or "what did we decide earlier" — use `search_memory`.
 - **Locate-a-file / asset questions:** for "where is the logo / hero image / font file?" prefer `glob` on the plausible directory (e.g. `**/public/**`, `**/assets/**`) over `search`.
 - **Query shape:** one short, focused query per concept using distinctive nouns (mechanism, module role, behavior) — not the user's full multi-question dump pasted into ten parallel calls.
 - **Batching:** if answering several questions, issue a few high-signal searches (or one then refine), not near-duplicate parallel queries for every line item.
@@ -110,6 +113,16 @@ _KNOWLEDGE_SEARCH_BLOCK = """\
 - **After hits:** `read_file` hits until the normalized score drops sharply (typically the top 3–5), including rank-1 even if the name looks unexpected. Skip only obvious noise (lockfiles). If the top hits all look off-topic, reformulate once; if two reformulations fail, fall back to `grep` / `glob`.
 - **Answer only after reading:** a `search` snippet is never sufficient evidence — snippets truncate and can mislead. Before emitting an answer or `Evidence:` line, `read_file` the file you will cite and confirm the exact source lines (for binary assets like images/PDFs, `glob` existence is enough). Never emit a file path you have not confirmed via `read_file` / `glob` this session; if still unknown, write `Evidence: unknown`.
 - **Long multi-item tasks:** when a task has more than ~10 enumerable items (question lists, checklists), write incremental results to a workspace file early (e.g. `answers.md`) and update it as you go. Do not wait until the end — context may be compacted mid-task.
+"""
+
+_MEMORY_TEACHING_BLOCK = """\
+### Memory retrieval (`search_memory`) — how to use it well
+- **Types:** `episodic` = what happened; `semantic` = durable facts; `procedural` = how-tos; `working` = short-lived scratch (usually not injected).
+- **Routing:** what happened / preferences / prior sessions → `search_memory`; how does code work → `search`; why is it this way → both, **memory first**.
+- **Full notes:** keyword hits include `body` (full note text) and `links` (`related` / `supersedes`). Soft 1-hop neighbors may appear as `via: graph` snippets without a full body.
+- **Traverse:** to open a neighbor, call `search_memory` with `path` set to that memory-relative path (e.g. `episodic/….md`). Do **not** use `read_file` — memory is a separate store from the workspace.
+- **Mutations:** when a stored fact is wrong, use `update_memory` (supersede) or `forget` — do not leave stale notes active.
+- **Index lines** under `## Memory index` are titles only — call `search_memory` for the full note.
 """
 
 
@@ -230,6 +243,7 @@ def harness_fixed_context(
         task_line=_TASK_LINE if include_task_tool else "",
         search_tool_line=_SEARCH_TOOL_LINE if include_knowledge_search else "",
         knowledge_search_block=_KNOWLEDGE_SEARCH_BLOCK if include_knowledge_search else "",
+        memory_teaching_block=_MEMORY_TEACHING_BLOCK,
         workspace_root=workspace_root,
         memory_storage_uri=memory_storage_uri,
     )

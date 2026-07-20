@@ -39,7 +39,7 @@ def _write_agent(root: Path) -> Path:
         "  skills_path: ./skills\n"
         "  agent_md: ./monkeybot_config/AGENT.md\n"
         "  db_url: sqlite:///data/monkeybot.db\n"
-        "  memory_storage_uri: local://./data/memory\n"
+        "  memory_storage_uri: local://./memory\n"
         "  mcp_config: ./monkeybot_config/mcp.json\n"
         "  command_allowlist_config: ./monkeybot_config/command_allowlist.yaml\n"
         "  permission_config: ./monkeybot_config/permissions.yaml\n",
@@ -74,7 +74,7 @@ def test_bootstrap_layout_is_identical_from_every_launch_cwd(
         assert layout.workspace_root == (agent / "workspace").resolve()
         assert layout.skills_path == (agent / "skills").resolve()
         assert layout.db_url == f"sqlite:///{(agent / 'data' / 'monkeybot.db').resolve()}"
-        assert layout.memory_storage_uri == f"local://{(agent / 'data' / 'memory').resolve()}"
+        assert layout.memory_storage_uri == f"local://{(agent / 'memory').resolve()}"
         assert os.environ["MODEL_NAME"] == "from-root-dotenv"
         assert os.environ["MONKEYBOT_WORKSPACE_ROOT"] == str((agent / "workspace").resolve())
 

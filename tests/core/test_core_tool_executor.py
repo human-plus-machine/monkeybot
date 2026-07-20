@@ -435,9 +435,11 @@ async def test_search_memory(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_recall_and_search_memory_delegate(tmp_path: Path) -> None:
+async def test_search_memory_does_not_delegate_to_knowledge(tmp_path: Path) -> None:
     from monkeybot.core.knowledge import KnowledgeSubsystem
     from monkeybot.core.knowledge.types import KnowledgeSettings
+    from monkeybot.core.memory.subsystem import MemorySubsystem
+    from monkeybot.core.workspace.local import LocalWorkspaceStorage
 
     root = tmp_path / "ws"
     root.mkdir()
@@ -466,12 +468,33 @@ async def test_recall_and_search_memory_delegate(tmp_path: Path) -> None:
         index_path=Path(settings.index_path),
     )
     await knowledge.ensure_ready()
+
+    mem_root = tmp_path / "memory"
+    mem_root.mkdir()
+    (mem_root / "semantic").mkdir()
+    (mem_root / "semantic" / "note.md").write_text(
+        "---\ntype: semantic\nstatus: active\n---\n"
+        "User prefers dark mode in the dashboard.\n",
+        encoding="utf-8",
+    )
+    storage = LocalWorkspaceStorage(mem_root)
+
+    class _FakeProvider:
+        async def complete(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            raise AssertionError("should not call provider")
+
+    memory = MemorySubsystem(
+        storage=storage,
+        provider=_FakeProvider(),  # type: ignore[arg-type]
+        model="test",
+        memory_uri=f"local://{mem_root}",
+    )
     skills = tmp_path / "skills"
     skills.mkdir()
     try:
         ex = CoreToolExecutor(
             workspace_root=root,
-            memory=None,
+            memory=memory,
             knowledge=knowledge,
             skills_path=skills,
             mcp=_NoMCP(),
@@ -492,7 +515,6 @@ async def test_recall_and_search_memory_delegate(tmp_path: Path) -> None:
         assert payload["ok"] is True
         assert payload["hits"]
 
-        # `recall` still works as a legacy alias for `search`
         out_alias, err_alias = unwrap_tool_execution_result(
             await ex.execute(
                 call=ToolCall(
@@ -506,24 +528,94 @@ async def test_recall_and_search_memory_delegate(tmp_path: Path) -> None:
         assert err_alias is None and out_alias is not None
         assert json.loads(out_alias)["hits"]
 
-        # search_memory delegates to search when knowledge is present
+        # search_memory must hit memory notes, not knowledge workspace hits
         out2, err2 = unwrap_tool_execution_result(
             await ex.execute(
                 call=ToolCall(
                     call_id="2",
                     name="search_memory",
-                    args={"query": "annual refund"},
+                    args={"query": "dark mode"},
                 ),
                 ctx=ctx,
             )
         )
         assert err2 is None and out2 is not None
-        legacy = json.loads(out2)
-        assert legacy["ok"] is True
-        assert legacy["hits"]
-        assert "snippet" in legacy["hits"][0]
+        mem_payload = json.loads(out2)
+        assert mem_payload["ok"] is True
+        assert mem_payload["hits"]
+        assert any("dark mode" in h.get("snippet", "").lower() for h in mem_payload["hits"])
+        assert any("dark mode" in (h.get("body") or "").lower() for h in mem_payload["hits"])
+        assert all(
+            not str(h.get("path", "")).startswith("notes/")
+            and "policy.md" not in str(h.get("path", ""))
+            for h in mem_payload["hits"]
+        )
     finally:
         await knowledge.close()
+
+
+@pytest.mark.asyncio
+async def test_search_memory_path_lookup(tmp_path: Path) -> None:
+    from monkeybot.core.memory.note_format import format_memory_note
+
+    root = tmp_path
+    mem = tmp_path / "mem"
+    (mem / "episodic").mkdir(parents=True)
+    note = format_memory_note(
+        note_type="episodic",
+        status="active",
+        body="Vertex MCP image path details.",
+        related=["episodic/other.md"],
+    )
+    (mem / "episodic" / "vertex.md").write_text(note, encoding="utf-8")
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    ctx = _ctx()
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="1",
+                name="search_memory",
+                args={"path": "episodic/vertex.md"},
+            ),
+            ctx=ctx,
+        )
+    )
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert payload["ok"] is True
+    assert len(payload["hits"]) == 1
+    hit = payload["hits"][0]
+    assert hit["path"] == "episodic/vertex.md"
+    assert "Vertex MCP" in hit["body"]
+    assert {"path": "episodic/other.md", "kind": "related"} in hit["links"]
+
+    out2, err2 = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="2",
+                name="search_memory",
+                args={"path": "episodic/missing.md"},
+            ),
+            ctx=ctx,
+        )
+    )
+    assert err2 is None and out2 is not None
+    payload2 = json.loads(out2)
+    assert payload2["hits"] == []
+    assert "read_file" in (payload2.get("note") or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_recall_and_search_memory_delegate(tmp_path: Path) -> None:
+    """Legacy name retained; behavior is non-delegation (see above)."""
+    await test_search_memory_does_not_delegate_to_knowledge(tmp_path)
 
 
 @pytest.mark.asyncio
@@ -621,12 +713,13 @@ async def test_list_skills_returns_descriptions_from_discovered_skill_md(tmp_pat
 async def test_run_command_cat_under_memory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     agent_dir = tmp_path / "agent"
     ws = agent_dir / "workspace"
-    (ws / "data" / "memory").mkdir(parents=True)
-    (ws / "data" / "memory" / "f.md").write_text("inside", encoding="utf-8")
-    mem = ws / "data" / "memory"
+    ws.mkdir(parents=True)
+    mem = agent_dir / "memory"
+    mem.mkdir(parents=True)
+    (mem / "f.md").write_text("inside", encoding="utf-8")
     skills = ws / "skills"
     skills.mkdir()
-    monkeypatch.chdir(agent_dir)
+    monkeypatch.chdir(ws)
     ex = CoreToolExecutor(
         workspace_root=ws,
         memory=_mem_sub(mem),
@@ -637,7 +730,7 @@ async def test_run_command_cat_under_memory(tmp_path: Path, monkeypatch: pytest.
         call=ToolCall(
             call_id="1",
             name="run_command",
-            args={"argv": ["cat", "./data/memory/f.md"]},
+            args={"argv": ["cat", "../memory/f.md"]},
         ),
         ctx=_ctx(),
     ))

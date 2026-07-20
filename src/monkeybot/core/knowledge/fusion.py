@@ -25,9 +25,7 @@ _SNIPPET_CHARS = 280
 
 _NOISE_NOTE_PATHS = frozenset({"memory/chat_log.md", "memory/INDEX.md"})
 _NOISE_NOTE_PREFIXES = (
-    "memory/raw/",
-    "memory/episodic/",
-    "memory/semantic/",
+    "memory/",
 )
 _TEST_PATH_RE = re.compile(
     r"(^|/)(__tests?__/|tests?/)|"

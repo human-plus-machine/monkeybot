@@ -102,14 +102,24 @@ def write_active_config(
 
 
 def ensure_memory(dest: Path, *, force: bool) -> list[str]:
-    memory = dest / "data" / "memory"
+    memory = dest / "memory"
     memory.mkdir(parents=True, exist_ok=True)
+    lines: list[str] = []
+    for sub in ("episodic", "semantic", "procedural", "working", "raw"):
+        d = memory / sub
+        d.mkdir(parents=True, exist_ok=True)
+        keep = d / ".gitkeep"
+        if not keep.exists() or force:
+            keep.touch(exist_ok=True)
+            lines.append(f"  memory/{sub}/: ensured")
     idx = memory / "INDEX.md"
     if not idx.exists() or force:
         existed = idx.exists()
         idx.write_text(_MEMORY_INDEX, encoding="utf-8")
-        return [f"  data/memory/INDEX.md: {'overwritten' if existed else 'created'}"]
-    return ["  data/memory/INDEX.md: skipped"]
+        lines.append(f"  memory/INDEX.md: {'overwritten' if existed else 'created'}")
+    else:
+        lines.append("  memory/INDEX.md: skipped")
+    return lines or ["  memory/: ensured"]
 
 
 def ensure_workspace(dest: Path, *, force: bool) -> list[str]:
