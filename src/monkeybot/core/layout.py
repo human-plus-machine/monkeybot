@@ -8,12 +8,15 @@ or an arbitrary service-manager directory.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+_log = logging.getLogger(__name__)
 
 
 def _config_root(path: Path) -> Path:
@@ -67,12 +70,43 @@ def resolve_agent_path(raw: str | Path, agent_root: Path) -> Path:
     return path.resolve() if path.is_absolute() else (agent_root / path).resolve()
 
 
-def resolve_workspace_root(*, agent_root: Path, config_path: Path | None = None) -> Path:
-    """Resolve workspace root from ``paths.workspace_root`` in monkeybot.yaml.
+def resolve_workspace_root_override() -> Path | None:
+    """Absolute host path that remaps the agent workspace for one process.
 
-    Yaml is the source of truth (not env overrides). When the key is absent,
-    falls back to ``<agent_root>/workspace``.
+    Used by Monkeybot Mac workspace sessions so attachments / file tools land
+    under ``~/.monkeybot/workspaces/<id>/memory`` instead of the agent's
+    ``paths.workspace_root``. Relative values are ignored.
     """
+    raw = os.environ.get("MONKEYBOT_WORKSPACE_ROOT_OVERRIDE", "").strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        _log.warning(
+            "Ignoring relative MONKEYBOT_WORKSPACE_ROOT_OVERRIDE=%r (must be absolute)",
+            raw,
+        )
+        return None
+    resolved = path.resolve()
+    _log.info(
+        "Workspace root remapped via MONKEYBOT_WORKSPACE_ROOT_OVERRIDE to %s",
+        resolved,
+    )
+    return resolved
+
+
+def resolve_workspace_root(*, agent_root: Path, config_path: Path | None = None) -> Path:
+    """Resolve workspace root from yaml, with an optional absolute process override.
+
+    ``MONKEYBOT_WORKSPACE_ROOT_OVERRIDE`` (absolute) wins when set — used by the
+    Mac app to remap a gateway onto a workspace shared-memory directory.
+    Otherwise ``paths.workspace_root`` in monkeybot.yaml is the source of truth
+    (plain ``MONKEYBOT_WORKSPACE_ROOT`` / legacy ``WORKSPACE_ROOT`` do not win).
+    When the yaml key is absent, falls back to ``<agent_root>/workspace``.
+    """
+    if override := resolve_workspace_root_override():
+        return override
+
     workspace_raw = "workspace"
     if config_path is not None:
         from monkeybot.core.config.yaml_loader import load_monkeybot_yaml_dict
@@ -198,11 +232,7 @@ def bootstrap_agent_layout(
 
         migrate_all_local_agent_memory_layouts(include=root)
     except Exception as exc:  # noqa: BLE001 — layout must still boot
-        import logging
-
-        logging.getLogger(__name__).warning(
-            "Memory layout migrate skipped: %r", exc
-        )
+        _log.warning("Memory layout migrate skipped: %r", exc)
 
     env_file = root / ".env"
     if env_file.is_file():
@@ -226,4 +256,5 @@ __all__ = [
     "resolve_memory_storage_uri",
     "resolve_sqlite_url",
     "resolve_workspace_root",
+    "resolve_workspace_root_override",
 ]

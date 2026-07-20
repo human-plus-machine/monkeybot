@@ -17,6 +17,7 @@ def _clear_layout_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
         "MONKEYBOT_AGENT_ROOT",
         "MONKEYBOT_CONFIG",
         "MONKEYBOT_WORKSPACE_ROOT",
+        "MONKEYBOT_WORKSPACE_ROOT_OVERRIDE",
         "WORKSPACE_ROOT",
         "SKILLS_PATH",
         "AGENT_MD",
@@ -138,6 +139,53 @@ def test_yaml_workspace_root_wins_over_legacy_workspace_root(
 
         assert layout.workspace_root == (agent / "workspace").resolve()
         assert os.environ["MONKEYBOT_WORKSPACE_ROOT"] == str((agent / "workspace").resolve())
+    finally:
+        os.environ.clear()
+        os.environ.update(before)
+        runtime_env.reset_runtime_env_state_for_tests()
+
+
+def test_workspace_root_override_beats_yaml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Absolute ``MONKEYBOT_WORKSPACE_ROOT_OVERRIDE`` remaps the agent workspace."""
+    agent = tmp_path / "agent"
+    _write_agent(agent)
+    custom = tmp_path / "workspace-memory"
+    custom.mkdir()
+    before = dict(os.environ)
+    try:
+        runtime_env.reset_runtime_env_state_for_tests()
+        _clear_layout_overrides(monkeypatch)
+        monkeypatch.chdir(agent)
+        monkeypatch.setenv("MONKEYBOT_WORKSPACE_ROOT_OVERRIDE", str(custom))
+        monkeypatch.setenv("MONKEYBOT_WORKSPACE_ROOT", str(tmp_path / "ignored"))
+
+        layout = bootstrap_agent_layout()
+
+        assert layout.workspace_root == custom.resolve()
+        assert os.environ["MONKEYBOT_WORKSPACE_ROOT"] == str(custom.resolve())
+    finally:
+        os.environ.clear()
+        os.environ.update(before)
+        runtime_env.reset_runtime_env_state_for_tests()
+
+
+def test_relative_workspace_root_override_is_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent = tmp_path / "agent"
+    _write_agent(agent)
+    before = dict(os.environ)
+    try:
+        runtime_env.reset_runtime_env_state_for_tests()
+        _clear_layout_overrides(monkeypatch)
+        monkeypatch.chdir(agent)
+        monkeypatch.setenv("MONKEYBOT_WORKSPACE_ROOT_OVERRIDE", "relative/path")
+
+        layout = bootstrap_agent_layout()
+
+        assert layout.workspace_root == (agent / "workspace").resolve()
     finally:
         os.environ.clear()
         os.environ.update(before)
