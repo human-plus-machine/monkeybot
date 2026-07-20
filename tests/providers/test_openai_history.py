@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import io
 import json
 
 from monkeybot.core.llm.provider import Message
@@ -16,7 +18,38 @@ from monkeybot.providers.openai import _messages_to_openai
 from tests.providers.conftest import typed_messages_four_turn, typed_messages_turn_2b_tool_only
 
 
-def test_openai_fan_out_writes_two_tool_rows() -> None:
+def _pdf_bytes(text: str | None = "Hello World") -> bytes:
+    """Build a minimal real one-page PDF, with a text layer unless *text* is None."""
+    from pypdf import PdfWriter
+    from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=200, height=200)
+    if text is not None:
+        font = DictionaryObject()
+        font[NameObject("/Type")] = NameObject("/Font")
+        font[NameObject("/Subtype")] = NameObject("/Type1")
+        font[NameObject("/BaseFont")] = NameObject("/Helvetica")
+        resources = DictionaryObject()
+        fonts = DictionaryObject()
+        fonts[NameObject("/F1")] = writer._add_object(font)
+        resources[NameObject("/Font")] = fonts
+        page[NameObject("/Resources")] = resources
+
+        stream = DecodedStreamObject()
+        stream.set_data(f"BT /F1 24 Tf 10 100 Td ({text}) Tj ET".encode())
+        page[NameObject("/Contents")] = writer._add_object(stream)
+
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
+
+def _pdf_b64(text: str | None = "Hello World") -> str:
+    return base64.b64encode(_pdf_bytes(text)).decode()
+
+
+async def test_openai_fan_out_writes_two_tool_rows() -> None:
     msg = Message(
         role="user",
         content=[
@@ -24,7 +57,7 @@ def test_openai_fan_out_writes_two_tool_rows() -> None:
             ToolResponse(id="y", tool_name="echo", result=[Text(text="b")]),
         ],
     )
-    _sys, rows = _messages_to_openai([msg])
+    _sys, rows = await _messages_to_openai([msg])
     assert _sys is None
     assert rows[-2]["role"] == "tool"
     assert rows[-2]["tool_call_id"] == "x"
@@ -32,7 +65,7 @@ def test_openai_fan_out_writes_two_tool_rows() -> None:
     assert rows[-1]["tool_call_id"] == "y"
 
 
-def test_openai_assistant_text_and_toolrequest() -> None:
+async def test_openai_assistant_text_and_toolrequest() -> None:
     m = Message(
         role="assistant",
         content=[
@@ -40,7 +73,7 @@ def test_openai_assistant_text_and_toolrequest() -> None:
             ToolRequest(id="c1", name="echo", args={"x": 1}),
         ],
     )
-    _sys, rows = _messages_to_openai([m])
+    _sys, rows = await _messages_to_openai([m])
     assert rows == [
         {
             "role": "assistant",
@@ -59,12 +92,12 @@ def test_openai_assistant_text_and_toolrequest() -> None:
     ]
 
 
-def test_openai_assistant_toolrequest_only() -> None:
+async def test_openai_assistant_toolrequest_only() -> None:
     m = Message(
         role="assistant",
         content=[ToolRequest(id="c2", name="ls", args={})],
     )
-    _sys, rows = _messages_to_openai([m])
+    _sys, rows = await _messages_to_openai([m])
     assert len(rows) == 1
     row = rows[0]
     assert row["role"] == "assistant"
@@ -78,7 +111,7 @@ def test_openai_assistant_toolrequest_only() -> None:
     ]
 
 
-def test_openai_skips_thinking_blocks() -> None:
+async def test_openai_skips_thinking_blocks() -> None:
     """Ollama/HF must not crash when history contains Thinking from a prior turn."""
     m = Message(
         role="assistant",
@@ -89,7 +122,7 @@ def test_openai_skips_thinking_blocks() -> None:
             ToolRequest(id="c1", name="run_command", args={"argv": ["ls"]}),
         ],
     )
-    _sys, rows = _messages_to_openai([m])
+    _sys, rows = await _messages_to_openai([m])
     assert rows == [
         {
             "role": "assistant",
@@ -108,7 +141,7 @@ def test_openai_skips_thinking_blocks() -> None:
     ]
 
 
-def test_openai_tool_response_image_becomes_text_placeholder() -> None:
+async def test_openai_tool_response_image_becomes_text_placeholder() -> None:
     """NVIDIA/OpenAI-compat tool rows are text-only; Image blocks must not raise."""
     from monkeybot.core.types.content_blocks import Image
     from monkeybot.providers._openai_compat import messages_to_openai
@@ -129,7 +162,7 @@ def test_openai_tool_response_image_becomes_text_placeholder() -> None:
             )
         ],
     )
-    _sys, rows = messages_to_openai([msg])
+    _sys, rows = await messages_to_openai([msg])
     assert rows[0]["role"] == "tool"
     assert rows[0]["tool_call_id"] == "c1"
     content = rows[0]["content"]
@@ -140,7 +173,7 @@ def test_openai_tool_response_image_becomes_text_placeholder() -> None:
     assert "pixels omitted" in content
 
 
-def test_openai_user_image_becomes_image_url() -> None:
+async def test_openai_user_image_becomes_image_url() -> None:
     """User-attached images must convert to a Chat Completions image_url block, not raise."""
     from monkeybot.core.types.content_blocks import Image
     from monkeybot.providers._openai_compat import messages_to_openai
@@ -149,7 +182,7 @@ def test_openai_user_image_becomes_image_url() -> None:
         role="user",
         content=[Text(text="what is this?"), Image(mime_type="image/png", data="aW1n")],
     )
-    _sys, rows = messages_to_openai([msg])
+    _sys, rows = await messages_to_openai([msg])
     assert rows[0]["role"] == "user"
     content = rows[0]["content"]
     assert content[0] == {"type": "text", "text": "what is this?"}
@@ -159,8 +192,8 @@ def test_openai_user_image_becomes_image_url() -> None:
     }
 
 
-def test_openai_user_file_becomes_text_placeholder() -> None:
-    """User-attached files (PDFs) must not raise; Chat Completions has no document type."""
+async def test_openai_user_file_becomes_text_placeholder() -> None:
+    """Unparseable file bytes must not raise; falls back to the can't-read placeholder."""
     from monkeybot.core.types.content_blocks import File
     from monkeybot.providers._openai_compat import messages_to_openai
 
@@ -171,7 +204,7 @@ def test_openai_user_file_becomes_text_placeholder() -> None:
             File(mime_type="application/pdf", data="cGRm", metadata={"filename": "a.pdf"}),
         ],
     )
-    _sys, rows = messages_to_openai([msg])
+    _sys, rows = await messages_to_openai([msg])
     content = rows[0]["content"]
     assert content[0] == {"type": "text", "text": "summarize this"}
     assert content[1]["type"] == "text"
@@ -185,13 +218,93 @@ def test_openai_user_file_becomes_text_placeholder() -> None:
     assert "already shown in the ui" not in content[1]["text"].lower()
 
 
-def test_openai_user_image_only_message() -> None:
+async def test_openai_user_pdf_with_text_layer_sends_extracted_text() -> None:
+    """A real PDF with a text layer must reach the model as actual text, not a placeholder."""
+    from monkeybot.core.types.content_blocks import File
+    from monkeybot.providers._openai_compat import messages_to_openai
+
+    msg = Message(
+        role="user",
+        content=[
+            Text(text="summarize this"),
+            File(
+                mime_type="application/pdf",
+                data=_pdf_b64("Hello World"),
+                metadata={"filename": "a.pdf"},
+            ),
+        ],
+    )
+    _sys, rows = await messages_to_openai([msg])
+    content = rows[0]["content"]
+    assert content[1]["type"] == "text"
+    assert "Hello World" in content[1]["text"]
+    assert "cannot read file contents" not in content[1]["text"]
+
+
+async def test_openai_tool_response_pdf_with_text_layer_sends_extracted_text() -> None:
+    """A model-initiated load_file on a PDF must also get real text, not the media placeholder."""
+    from monkeybot.core.types.content_blocks import File
+    from monkeybot.providers._openai_compat import messages_to_openai
+
+    msg = Message(
+        role="user",
+        content=[
+            ToolResponse(
+                id="c1",
+                tool_name="load_file",
+                result=[
+                    File(
+                        mime_type="application/pdf",
+                        data=_pdf_b64("Hello World"),
+                        metadata={"path": "./workspace/a.pdf"},
+                    )
+                ],
+            )
+        ],
+    )
+    _sys, rows = await messages_to_openai([msg])
+    content = rows[0]["content"]
+    assert "Hello World" in content
+    assert "pixels omitted" not in content
+
+
+async def test_openai_user_pdf_without_text_layer_falls_back_to_placeholder() -> None:
+    """A scanned/image-only PDF (no text layer) must fall back to the can't-read placeholder."""
+    from monkeybot.core.types.content_blocks import File
+    from monkeybot.providers._openai_compat import messages_to_openai
+
+    msg = Message(
+        role="user",
+        content=[
+            Text(text="summarize this"),
+            File(mime_type="application/pdf", data=_pdf_b64(None), metadata={"filename": "a.pdf"}),
+        ],
+    )
+    _sys, rows = await messages_to_openai([msg])
+    content = rows[0]["content"]
+    assert "cannot read file contents" in content[1]["text"]
+
+
+async def test_extract_pdf_text_truncates_long_text() -> None:
+    """Extraction caps output so a huge PDF can't blow the context window."""
+    from monkeybot.core.types.content_blocks import File
+    from monkeybot.providers._openai_compat import _extract_pdf_text
+
+    long_text = "word " * 5000  # well over a small max_chars cap
+    block = File(mime_type="application/pdf", data=_pdf_b64(long_text))
+    result = await _extract_pdf_text(block, max_chars=100)
+    assert result is not None
+    assert len(result) < len(long_text)
+    assert "[... PDF text truncated ...]" in result
+
+
+async def test_openai_user_image_only_message() -> None:
     """Single-block image-only user message (no leading Text) must not collapse to a bare string."""
     from monkeybot.core.types.content_blocks import Image
     from monkeybot.providers._openai_compat import messages_to_openai
 
     msg = Message(role="user", content=[Image(mime_type="image/png", data="aW1n")])
-    _sys, rows = messages_to_openai([msg])
+    _sys, rows = await messages_to_openai([msg])
     assert rows[0] == {
         "role": "user",
         "content": [
@@ -200,7 +313,7 @@ def test_openai_user_image_only_message() -> None:
     }
 
 
-def test_openai_user_file_only_message() -> None:
+async def test_openai_user_file_only_message() -> None:
     """Single-block file-only user message (no leading Text) must not raise."""
     from monkeybot.core.types.content_blocks import File
     from monkeybot.providers._openai_compat import messages_to_openai
@@ -209,16 +322,16 @@ def test_openai_user_file_only_message() -> None:
         role="user",
         content=[File(mime_type="application/pdf", data="cGRm", metadata={"filename": "a.pdf"})],
     )
-    _sys, rows = messages_to_openai([msg])
+    _sys, rows = await messages_to_openai([msg])
     content = rows[0]["content"]
     assert len(content) == 1
     assert content[0]["type"] == "text"
     assert "cannot read file contents" in content[0]["text"]
 
 
-def test_openai_canonical_four_turn() -> None:
+async def test_openai_canonical_four_turn() -> None:
     msgs = typed_messages_four_turn()
-    _sys, rows = _messages_to_openai(msgs)
+    _sys, rows = await _messages_to_openai(msgs)
     assert _sys is None
     assert len(rows) == 4
     assert rows[0] == {"role": "user", "content": "hi"}
@@ -231,9 +344,9 @@ def test_openai_canonical_four_turn() -> None:
     assert rows[3] == {"role": "assistant", "content": "all set"}
 
 
-def test_openai_tool_only_assistant() -> None:
+async def test_openai_tool_only_assistant() -> None:
     msgs = typed_messages_turn_2b_tool_only()
-    _sys, rows = _messages_to_openai(msgs)
+    _sys, rows = await _messages_to_openai(msgs)
     assert _sys is None
     assert len(rows) == 1
     row = rows[0]
