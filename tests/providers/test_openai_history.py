@@ -140,6 +140,82 @@ def test_openai_tool_response_image_becomes_text_placeholder() -> None:
     assert "pixels omitted" in content
 
 
+def test_openai_user_image_becomes_image_url() -> None:
+    """User-attached images must convert to a Chat Completions image_url block, not raise."""
+    from monkeybot.core.types.content_blocks import Image
+    from monkeybot.providers._openai_compat import messages_to_openai
+
+    msg = Message(
+        role="user",
+        content=[Text(text="what is this?"), Image(mime_type="image/png", data="aW1n")],
+    )
+    _sys, rows = messages_to_openai([msg])
+    assert rows[0]["role"] == "user"
+    content = rows[0]["content"]
+    assert content[0] == {"type": "text", "text": "what is this?"}
+    assert content[1] == {
+        "type": "image_url",
+        "image_url": {"url": "data:image/png;base64,aW1n"},
+    }
+
+
+def test_openai_user_file_becomes_text_placeholder() -> None:
+    """User-attached files (PDFs) must not raise; Chat Completions has no document type."""
+    from monkeybot.core.types.content_blocks import File
+    from monkeybot.providers._openai_compat import messages_to_openai
+
+    msg = Message(
+        role="user",
+        content=[
+            Text(text="summarize this"),
+            File(mime_type="application/pdf", data="cGRm", metadata={"filename": "a.pdf"}),
+        ],
+    )
+    _sys, rows = messages_to_openai([msg])
+    content = rows[0]["content"]
+    assert content[0] == {"type": "text", "text": "summarize this"}
+    assert content[1]["type"] == "text"
+    assert "cannot read file contents" in content[1]["text"]
+    assert "isn't supported here instead of guessing" in content[1]["text"]
+    assert "a.pdf" in content[1]["text"]
+    assert "cGRm" not in content[1]["text"]
+    # Must not reuse tool-result media wording, which invites the model to
+    # "describe" content it was never actually given.
+    assert "describe" not in content[1]["text"].lower()
+    assert "already shown in the ui" not in content[1]["text"].lower()
+
+
+def test_openai_user_image_only_message() -> None:
+    """Single-block image-only user message (no leading Text) must not collapse to a bare string."""
+    from monkeybot.core.types.content_blocks import Image
+    from monkeybot.providers._openai_compat import messages_to_openai
+
+    msg = Message(role="user", content=[Image(mime_type="image/png", data="aW1n")])
+    _sys, rows = messages_to_openai([msg])
+    assert rows[0] == {
+        "role": "user",
+        "content": [
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,aW1n"}}
+        ],
+    }
+
+
+def test_openai_user_file_only_message() -> None:
+    """Single-block file-only user message (no leading Text) must not raise."""
+    from monkeybot.core.types.content_blocks import File
+    from monkeybot.providers._openai_compat import messages_to_openai
+
+    msg = Message(
+        role="user",
+        content=[File(mime_type="application/pdf", data="cGRm", metadata={"filename": "a.pdf"})],
+    )
+    _sys, rows = messages_to_openai([msg])
+    content = rows[0]["content"]
+    assert len(content) == 1
+    assert content[0]["type"] == "text"
+    assert "cannot read file contents" in content[0]["text"]
+
+
 def test_openai_canonical_four_turn() -> None:
     msgs = typed_messages_four_turn()
     _sys, rows = _messages_to_openai(msgs)
