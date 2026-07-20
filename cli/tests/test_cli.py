@@ -110,7 +110,7 @@ def test_validate_custom_config_anchors_paths_at_its_parent(tmp_path: Path) -> N
         "  agent_md: AGENT.md\n"
         "  skills_path: skills\n"
         "  db_url: sqlite:///data/monkeybot.db\n"
-        "  memory_storage_uri: local://data/memory\n",
+        "  memory_storage_uri: local://memory\n",
         encoding="utf-8",
     )
     unrelated = tmp_path / "unrelated"

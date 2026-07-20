@@ -19,7 +19,6 @@ from monkeybot.core.knowledge.sqlite_index import KnowledgeIndex
 from monkeybot.core.knowledge.tool import serialize_search_result
 from monkeybot.core.knowledge.types import KnowledgeSettings, RecallHit
 from monkeybot.core.persistence.sqlite_vector import SQLiteVectorStore
-from monkeybot.core.workspace.protocol import WorkspaceStorage
 
 logger = logging.getLogger(__name__)
 
@@ -64,8 +63,6 @@ class KnowledgeSubsystem:
         workspace_root: Path,
         settings: KnowledgeSettings,
         knowledge_root: Path | None = None,
-        memory_storage: WorkspaceStorage | None = None,
-        memory_root: Path | None = None,
         index_path: Path | None = None,
         embedding_provider: NvidiaEmbeddingProvider | None = None,
         vector_store: SQLiteVectorStore | None = None,
@@ -147,8 +144,6 @@ class KnowledgeSubsystem:
             workspace_root=workspace_root,
             knowledge_root=root,
             settings=settings,
-            memory_storage=memory_storage,
-            memory_root=memory_root,
             embedding_provider=embedder,
             vector_store=vectors,
         )
@@ -247,6 +242,5 @@ class KnowledgeSubsystem:
             (time.perf_counter() - started) * 1000,
         )
         return payload
-
 
 __all__ = ["KnowledgeSubsystem"]

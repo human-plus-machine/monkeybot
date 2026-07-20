@@ -54,7 +54,7 @@ def test_harness_includes_core_tools_and_protocol() -> None:
     assert "### Knowledge retrieval (`search`)" in out
     assert "one short, focused query per concept" in out
     assert "near-duplicate parallel" in out
-    assert "not notes-only" in out or "*not* notes-only" in out
+    assert "no record of past conversations" in out or "Has **no** record of past conversations" in out
     assert "call `search` before" in out
     assert "`recall` is a legacy alias" in out
     assert "rank-1" in out
@@ -62,6 +62,7 @@ def test_harness_includes_core_tools_and_protocol() -> None:
     assert "answers.md" in out or "workspace file" in out
     assert "Evidence: unknown" in out
     assert "Path rule" in out
+    assert "### Memory retrieval (`search_memory`)" in out
 
 
 def test_harness_omits_search_guidance_when_knowledge_disabled() -> None:
@@ -105,10 +106,13 @@ def test_harness_injects_runtime_paths() -> None:
     out = harness_fixed_context(
         include_task_tool=False,
         workspace_root="/srv/bot",
-        memory_storage_uri="local:///srv/bot/data/memory",
+        memory_storage_uri="local:///srv/bot/memory",
     )
     assert "`/srv/bot`" in out
-    assert "local:///srv/bot/data/memory" in out
+    assert "local:///srv/bot/memory" in out
+    assert "Outside** the workspace" in out or "Outside the workspace" in out or "**Outside**" in out
+    assert "../memory" in out
+    assert "not** the memory store" in out.lower() or "not the memory store" in out.lower()
 
 
 def test_harness_lists_scheduled_loops_when_available() -> None:

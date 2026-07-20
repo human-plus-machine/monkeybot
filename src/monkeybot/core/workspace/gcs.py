@@ -119,6 +119,20 @@ class GCSWorkspaceStorage:
         except Exception as exc:
             _log.warning("gcs move: delete source failed after copy src=%s dest=%s: %r", sk, dk, exc)
 
+    async def mtime(self, path: str) -> float | None:
+        key = self._key(path)
+
+        def _mtime() -> float | None:
+            blob = self._bucket.get_blob(key)
+            if blob is None or blob.updated is None:
+                return None
+            return float(blob.updated.timestamp())
+
+        try:
+            return await asyncio.to_thread(_mtime)
+        except NotFound:
+            return None
+
     async def gc_prefix(self, prefix: str, max_age_sec: float) -> dict[str, int]:
         del prefix, max_age_sec
         _log.info(

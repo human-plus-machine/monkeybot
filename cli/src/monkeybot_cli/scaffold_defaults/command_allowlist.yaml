@@ -13,8 +13,8 @@ allowed_commands:
 
 # Path prefixes permitted in run_command argv (./ and / arguments).
 allowed_path_prefixes:
-  - ./data/memory/
-  - ./data/memory
+  - ../memory/
+  - ../memory
   - ./skills/
   - ./skills
   - ./global-skills/

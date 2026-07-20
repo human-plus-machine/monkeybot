@@ -14,7 +14,7 @@ Security Model:
 
 Example:
     >>> executor = TerminalExecutor()
-    >>> result = await executor.execute("ls", ["./data/memory/"])
+    >>> result = await executor.execute("ls", ["../memory/"])
     >>> print(result.stdout)
 """
 
@@ -47,8 +47,8 @@ ALLOWED_COMMANDS = [
 # SECURITY: Path allowlist - modify with extreme caution
 # Only add paths that are safe for agent access
 ALLOWED_PATHS = [
-    "./data/memory/",    # Memory storage directory
-    "./data/memory",     # Same, when callers omit trailing slash
+    "../memory/",        # Agent-home memory (cwd is workspace/)
+    "../memory",         # Same, when callers omit trailing slash
     "./skills/",         # Skills directory
     "./skills",          # Same, when callers omit trailing slash
     "./global-skills/",  # Shared library authoring (Main Agent Studio)
@@ -149,7 +149,7 @@ class TerminalExecutor:
         >>> executor = TerminalExecutor()
         >>> 
         >>> # Allowed command + allowed path - succeeds
-        >>> result = await executor.execute("cat", ["./data/memory/file.txt"])
+        >>> result = await executor.execute("cat", ["../memory/file.txt"])
         >>> print(result.stdout)
         >>> 
         >>> # Blocked command - raises SecurityError
@@ -214,7 +214,7 @@ class TerminalExecutor:
         
         Example:
             >>> executor = TerminalExecutor()
-            >>> result = await executor.execute("ls", ["-la", "./data/memory/"])
+            >>> result = await executor.execute("ls", ["-la", "../memory/"])
             >>> if result.exit_code == 0:
             >>>     print(f"Files: {result.stdout}")
         

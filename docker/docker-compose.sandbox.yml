@@ -12,6 +12,11 @@
 #   Using /tmp means the same path is mounted into the container AND accessible
 #   to the host daemon. The default opensandbox config already allows /tmp.
 #
+# Memory path:
+#   Canonical URI is local:///tmp/monkeybot-memory. On startup the entrypoint
+#   migrates a legacy /tmp/monkeybot-data/memory tree into that volume when the
+#   new volume is missing or empty — so compose upgrades do not orphan data.
+#
 # This file overlays only what changes from docker-compose.yml:
 #   - Adds the opensandbox-server sidecar
 #   - Sets workspace to /tmp/monkeybot-workspace (host-accessible path)
@@ -36,14 +41,17 @@ services:
       - MONKEYBOT_WORKSPACE_ROOT=/tmp/monkeybot-workspace
       - SKILLS_PATH=/tmp/monkeybot-skills
       - DB_URL=sqlite:////tmp/monkeybot-data/monkeybot.db
-      - MEMORY_STORAGE_URI=local:///tmp/monkeybot-data/memory
+      - MEMORY_STORAGE_URI=local:///tmp/monkeybot-memory
     volumes:
       - /tmp/monkeybot-workspace:/tmp/monkeybot-workspace
       - /tmp/monkeybot-skills:/tmp/monkeybot-skills
       - /tmp/monkeybot-data:/tmp/monkeybot-data
+      - /tmp/monkeybot-memory:/tmp/monkeybot-memory
     command: >
-      sh -c "mkdir -p /tmp/monkeybot-workspace /tmp/monkeybot-skills /tmp/monkeybot-data/memory &&
-             cp -rn /app/skills/. /tmp/monkeybot-skills/ 2>/dev/null || true &&
-             python -m monkeybot.gateway.main"
+      sh -c "set -e;
+      python -m monkeybot.core.memory.migrate_layout --host-legacy /tmp/monkeybot-data/memory --host-dest /tmp/monkeybot-memory;
+      mkdir -p /tmp/monkeybot-workspace /tmp/monkeybot-skills /tmp/monkeybot-data /tmp/monkeybot-memory;
+      cp -rn /app/skills/. /tmp/monkeybot-skills/ 2>/dev/null || true;
+      python -m monkeybot.gateway.main"
     depends_on:
       - opensandbox-server

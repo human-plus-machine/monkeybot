@@ -170,7 +170,101 @@ class TestMemoryOrganizerCustomFolders:
         assert all(f in organizer._all_folders for f in BUILT_IN_FOLDERS)
 
 
-class TestUpdateIndex:
+class TestMemoryOrganizerLinking:
+    @pytest.mark.asyncio
+    async def test_links_related_from_index_candidates(self, tmp_path):
+        organizer, root = make_organizer(
+            tmp_path,
+            provider=FakeProvider(
+                [
+                    "User prefers dark mode in the editor.",
+                    "semantic",
+                    "related: semantic/theme.md\nsupersedes: none",
+                    "tags: prefs\nsummary: Prefers dark mode",
+                ]
+            ),
+        )
+        (root / "semantic").mkdir(parents=True)
+        (root / "INDEX.md").write_text(
+            "# Memory Index\n\n"
+            "- [[semantic/theme.md]] | tags: ui | Uses light theme today\n"
+            "- [[episodic/other.md]] | tags: noise | Unrelated tool failure\n"
+        )
+        raw = root / "raw"
+        raw.mkdir(parents=True)
+        (raw / "pref.md").write_text("User said they want dark mode.")
+
+        result = await organizer.run()
+        assert result.files_written == 1
+        note = next((root / "semantic").glob("*.md")).read_text()
+        assert "[[semantic/theme.md]]" in note
+        assert note.startswith("---")
+        assert "type: semantic" in note
+
+    @pytest.mark.asyncio
+    async def test_rejects_invented_link_paths(self, tmp_path):
+        organizer, root = make_organizer(
+            tmp_path,
+            provider=FakeProvider(
+                [
+                    "Summary about cats.",
+                    "episodic",
+                    "related: semantic/made-up.md, episodic/real.md\nsupersedes: none",
+                    "tags: cats\nsummary: Cat note",
+                ]
+            ),
+        )
+        (root / "INDEX.md").write_text(
+            "# Memory Index\n\n"
+            "- [[episodic/real.md]] | tags: pets | Prior cat generation\n"
+        )
+        raw = root / "raw"
+        raw.mkdir(parents=True)
+        (raw / "cat.md").write_text("generated a cat image")
+
+        await organizer.run()
+        note = next((root / "episodic").glob("*.md")).read_text()
+        assert "[[episodic/real.md]]" in note
+        assert "made-up" not in note
+
+    @pytest.mark.asyncio
+    async def test_skips_link_llm_when_index_empty(self, tmp_path):
+        # Only three LLM calls: summarize, classify, index entry.
+        organizer, root = make_organizer(
+            tmp_path,
+            provider=FakeProvider(
+                [
+                    "Summary text.",
+                    "episodic",
+                    "tags: event\nsummary: Test event happened",
+                ]
+            ),
+        )
+        raw = root / "raw"
+        raw.mkdir(parents=True)
+        (raw / "2026-03-18-run.md").write_text("Agent did something today.")
+        result = await organizer.run()
+        assert result.files_written == 1
+
+
+def test_parse_link_decision_filters_and_caps():
+    from monkeybot.core.memory.organizer import parse_link_decision
+
+    allowed = {
+        "semantic/a.md",
+        "semantic/b.md",
+        "episodic/c.md",
+        "semantic/d.md",
+    }
+    decision = parse_link_decision(
+        "related: [[semantic/a.md]], semantic/b.md, semantic/nope.md, episodic/c.md, semantic/d.md\n"
+        "supersedes: semantic/a.md\n",
+        allowed=allowed,
+    )
+    assert decision.supersedes == "semantic/a.md"
+    assert "semantic/a.md" not in decision.related
+    assert decision.related == ("semantic/b.md", "episodic/c.md", "semantic/d.md")
+
     @pytest.mark.asyncio
     async def test_creates_index_if_missing(self, tmp_path):
         organizer, root = make_organizer(

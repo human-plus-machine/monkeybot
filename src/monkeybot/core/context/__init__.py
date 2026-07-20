@@ -459,9 +459,33 @@ def _core_tool_defs(
     search_memory_schema: dict[str, object] = {
         "type": "object",
         "properties": {
-            "query": {"type": "string"},
+            "query": {
+                "type": "string",
+                "description": (
+                    "Past events, decisions, preferences, or prior-session facts. "
+                    "Not for code/workspace — use `search`. "
+                    "Hits include full note `body` plus `links` for graph hops."
+                ),
+            },
             "q": {"type": "string"},
+            "path": {
+                "type": "string",
+                "description": (
+                    "Fetch one memory note by path (e.g. episodic/note.md) to follow "
+                    "a Related/supersedes link. Memory-relative — never use read_file."
+                ),
+            },
+            "folder": {
+                "type": "string",
+                "description": (
+                    "Optional type filter: episodic | semantic | procedural | working."
+                ),
+            },
             "max_hits": {"type": "integer"},
+            "include_retired": {
+                "type": "boolean",
+                "description": "Include superseded/forgotten notes (default false).",
+            },
         },
         "required": [],
     }
@@ -472,13 +496,14 @@ def _core_tool_defs(
                 "type": "string",
                 "description": (
                     "One focused conceptual query (distinctive nouns). "
-                    "Avoid dumping many near-duplicate questions in parallel."
+                    "Avoid dumping many near-duplicate questions in parallel. "
+                    "Not for past conversations — use `search_memory`."
                 ),
             },
             "q": {"type": "string"},
             "path_prefix": {
                 "type": "string",
-                "description": "Optional path filter (workspace-relative or notes/ / memory/).",
+                "description": "Optional path filter (workspace-relative or notes/).",
             },
             "source": {
                 "type": "string",
@@ -595,20 +620,58 @@ def _core_tool_defs(
         ),
         ToolDef(
             "search_memory",
-            "Search markdown/text under the memory directory for a keyword or phrase. "
-            "Prefer `search` for conceptual / cross-file knowledge when available.",
+            "Search durable memory notes for past events, decisions, user preferences, "
+            "or prior sessions. Returns full note body + links — do not use read_file on "
+            "memory paths (they are not workspace files). Follow Related links with "
+            "search_memory(path=…). Not for code/workspace content — use `search`. "
+            "Optional folder=episodic|semantic|procedural|working.",
             search_memory_schema,
             parallel_safe=True,
         ),
         ToolDef(
+            "edit_memory",
+            "Rewrite an active memory note in place (path + content). "
+            "Use when correcting wording without creating a superseding note.",
+            {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+                "required": ["path", "content"],
+            },
+        ),
+        ToolDef(
+            "update_memory",
+            "Supersede a stale memory note: marks the old path superseded and writes "
+            "a new active note. Use when a stored fact is wrong after reality changed.",
+            {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+                "required": ["path", "content"],
+            },
+        ),
+        ToolDef(
+            "forget",
+            "Retire a memory note (status=forgotten) and remove it from INDEX.md.",
+            {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+        ),
+        ToolDef(
             "search",
-            "Search the local workspace index (source files + optional notes) via "
-            "keyword FTS, link graph, and optional embeddings — not notes-only. "
-            "Default first step for unfamiliar code / conceptual / paraphrased / "
-            "cross-file questions. Hits return normalized score (top≈1.0), optional "
-            "cosine/bm25/signals; read until the score drops sharply (top 3–5). "
-            "For locate-a-file/asset questions prefer `glob`. Prefer `grep` for exact "
-            "identifiers. Do not skip because answers 'are in source' — this finds them. "
+            "Search the local workspace index (source files + knowledge notes) via "
+            "keyword FTS, link graph, and optional embeddings. Has no record of past "
+            "conversations — use `search_memory` for those. Default first step for "
+            "unfamiliar code / conceptual / paraphrased / cross-file questions. "
+            "Hits return normalized score (top≈1.0), optional cosine/bm25/signals; "
+            "read until the score drops sharply (top 3–5). For locate-a-file/asset "
+            "questions prefer `glob`. Prefer `grep` for exact identifiers. "
             "(`recall` is accepted as a legacy alias.)",
             search_schema,
             parallel_safe=True,
@@ -801,6 +864,13 @@ async def build_context(
             subagent_type_names=type_names,
         )
     )
+    if not include_task_tool:
+        # Subagents may search memory but must not mutate it.
+        tools = [
+            t
+            for t in tools
+            if t.name not in {"edit_memory", "update_memory", "forget"}
+        ]
     if attachments_enabled_from_env():
         tools.append(load_file_tool_def())
     tools.extend(mcp_client.all_tools())

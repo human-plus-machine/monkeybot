@@ -39,7 +39,7 @@ cd my-agent
 ```
 
 This creates an agent-root layout: `monkeybot_config/` and `skills/` are
-committed inputs; `workspace/` is agent-writable; `data/memory/` is local
+committed inputs; `workspace/` is agent-writable; `memory/` is local
 runtime state; and the project includes a `Dockerfile`, `.dockerignore`, and
 non-packaged agent `pyproject.toml`. The browser MCP package and browser skill
 are bundled but disabled by default. See [Agent project layout](agent-layout.md)
