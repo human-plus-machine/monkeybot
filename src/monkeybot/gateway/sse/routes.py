@@ -1084,6 +1084,63 @@ def create_app(
         )
         return cast(dict[str, Any], payload)
 
+    @api.get("/api/memory/note")
+    async def memory_note(
+        request: Request,
+        path: str,
+    ) -> dict[str, Any]:
+        """Fetch one memory note's body for the Mac graph inspector panel."""
+        memory = getattr(request.app.state, "memory", None)
+        if memory is None:
+            raise APIError(
+                404,
+                "NOT_FOUND",
+                "Memory layer is disabled",
+                uuid.uuid4().hex,
+            )
+        path_norm = (path or "").replace("\\", "/").lstrip("./").strip()
+        if not path_norm:
+            raise APIError(
+                400,
+                "BAD_REQUEST",
+                "path is required",
+                uuid.uuid4().hex,
+            )
+        try:
+            payload = await memory.search_files(
+                "",
+                path=path_norm,
+                include_retired=True,
+            )
+        except Exception as exc:
+            logger.exception("memory note fetch failed path=%s: %r", path_norm, exc)
+            raise
+        hits = payload.get("hits") if isinstance(payload, dict) else None
+        if not isinstance(hits, list) or not hits:
+            raise APIError(
+                404,
+                "NOT_FOUND",
+                f"Memory note not found: {path_norm}",
+                uuid.uuid4().hex,
+            )
+        hit = hits[0] if isinstance(hits[0], dict) else {}
+        result = {
+            "path": hit.get("path") or path_norm,
+            "type": hit.get("type") or "semantic",
+            "status": hit.get("status") or "active",
+            "body": hit.get("body") or "",
+            "body_truncated": bool(hit.get("body_truncated")),
+            "links": hit.get("links") or [],
+        }
+        links = result["links"]
+        logger.info(
+            "memory note fetch path=%s type=%s links=%s",
+            result["path"],
+            result["type"],
+            len(links) if isinstance(links, list) else 0,
+        )
+        return result
+
     @api.get("/api/chat-history")
     async def chat_history_list(
         request: Request,
