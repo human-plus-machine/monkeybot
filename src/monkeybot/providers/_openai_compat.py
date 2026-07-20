@@ -70,14 +70,20 @@ def _system_prompt_from_message(message: Message) -> str:
     return "\n\n".join(texts)
 
 
+def _file_label(block: Image | File) -> str:
+    """Shared path/filename lookup for the placeholder/extracted-text builders below."""
+    meta = block.metadata or {}
+    label = meta.get("path") or meta.get("filename")
+    return str(label) if label else ""
+
+
 def _media_tool_placeholder(kind: str, block: Image | File) -> str:
     """Text stand-in for image/file tool results on text-only OpenAI-compat models.
 
     Chat Completions tool messages are text-only; pixels are already delivered to
     the UI via ``ImageBlock`` SSE. Keep a short path/filename hint for the model.
     """
-    meta = block.metadata or {}
-    label = meta.get("path") or meta.get("filename") or ""
+    label = _file_label(block)
     label_bit = f", path={label}" if label else ""
     return (
         f"[{kind} loaded: mime={block.mime_type}{label_bit}, "
@@ -97,8 +103,7 @@ def _user_file_placeholder(block: File) -> str:
     it was never given, which just prompts a hallucinated summary. Used when
     extraction isn't applicable (non-PDF) or found no text (scanned/image-only PDF).
     """
-    meta = block.metadata or {}
-    label = meta.get("path") or meta.get("filename") or ""
+    label = _file_label(block)
     label_bit = f" ({label})" if label else ""
     return (
         f"[File attachment{label_bit}, mime={block.mime_type}: this provider cannot "
@@ -158,8 +163,7 @@ async def _extract_pdf_text(block: File, max_chars: int = _MAX_EXTRACTED_PDF_CHA
 
 
 def _extracted_file_text(block: File, text: str) -> str:
-    meta = block.metadata or {}
-    label = meta.get("path") or meta.get("filename") or ""
+    label = _file_label(block)
     label_bit = f" ({label})" if label else ""
     return f"[File attachment{label_bit}, extracted text follows:]\n{text}"
 
