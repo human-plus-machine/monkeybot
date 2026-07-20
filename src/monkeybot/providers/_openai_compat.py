@@ -85,6 +85,24 @@ def _media_tool_placeholder(kind: str, block: Image | File) -> str:
     )
 
 
+def _user_file_placeholder(block: File) -> str:
+    """Text stand-in for a user-attached file OpenAI-compat can't ingest.
+
+    Chat Completions has no document wire type. Unlike ``_media_tool_placeholder``
+    (tool-result media already streamed to the UI as pixels), the model has never
+    seen these bytes — say so plainly instead of inviting it to "describe" content
+    it was never given, which just prompts a hallucinated summary.
+    """
+    meta = block.metadata or {}
+    label = meta.get("path") or meta.get("filename") or ""
+    label_bit = f" ({label})" if label else ""
+    return (
+        f"[File attachment{label_bit}, mime={block.mime_type}: this provider cannot "
+        "read file contents over the chat API. Tell the user this attachment type "
+        "isn't supported here instead of guessing at its contents.]"
+    )
+
+
 def _flatten_tool_response_text(block: ToolResponse) -> str:
     parts: list[str] = []
     for b in block.result:
@@ -117,6 +135,10 @@ def messages_to_openai(messages: Sequence[Message]) -> tuple[str | None, list[di
             if isinstance(item, Text):
                 content.append({"type": "text", "text": item.text})
             elif isinstance(item, Image):
+                # Text-only OpenAI-compat models/servers may reject image_url
+                # outright; that surfaces as a normal upstream error, not a
+                # crash here. No capability check — model vision support isn't
+                # known ahead of the request.
                 content.append(
                     {
                         "type": "image_url",
@@ -124,9 +146,7 @@ def messages_to_openai(messages: Sequence[Message]) -> tuple[str | None, list[di
                     }
                 )
             elif isinstance(item, File):
-                # No Chat Completions wire type for documents; keep the model
-                # aware a file was attached instead of erroring the whole turn.
-                content.append({"type": "text", "text": _media_tool_placeholder("file", item)})
+                content.append({"type": "text", "text": _user_file_placeholder(item)})
             else:
                 raise ValueError(
                     f"unsupported user content block for OpenAI-compat: {type(item).__name__}"
