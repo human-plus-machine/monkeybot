@@ -167,7 +167,7 @@ def test_repaired_orphan_history_converts_for_anthropic() -> None:
     assert len(converted) == 2
 
 
-def test_repaired_orphan_history_converts_for_openai() -> None:
+async def test_repaired_orphan_history_converts_for_openai() -> None:
     messages = [
         Message(
             role="user",
@@ -177,7 +177,7 @@ def test_repaired_orphan_history_converts_for_openai() -> None:
         ),
     ]
     repaired = repair_tool_turn_integrity(messages)
-    _system, converted = messages_to_openai(repaired)
+    _system, converted = await messages_to_openai(repaired)
     assert len(converted) == 2
 
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 import json
 import logging
 import random
@@ -91,7 +92,8 @@ def _user_file_placeholder(block: File) -> str:
     Chat Completions has no document wire type. Unlike ``_media_tool_placeholder``
     (tool-result media already streamed to the UI as pixels), the model has never
     seen these bytes — say so plainly instead of inviting it to "describe" content
-    it was never given, which just prompts a hallucinated summary.
+    it was never given, which just prompts a hallucinated summary. Used when
+    extraction isn't applicable (non-PDF) or found no text (scanned/image-only PDF).
     """
     meta = block.metadata or {}
     label = meta.get("path") or meta.get("filename") or ""
@@ -103,7 +105,64 @@ def _user_file_placeholder(block: File) -> str:
     )
 
 
-def _flatten_tool_response_text(block: ToolResponse) -> str:
+_MAX_EXTRACTED_PDF_CHARS = 20_000
+
+
+def _extract_pdf_text_sync(data_b64: str, max_chars: int) -> str | None:
+    """Best-effort text layer extraction. Returns None on any failure or no text.
+
+    Bytes are an untrusted user upload (may be corrupt, encrypted, or a scanned
+    image-only PDF with no text layer) — any of that is a normal "nothing to
+    extract" outcome, not a bug, so failures fall back to the caller's placeholder
+    rather than raising.
+    """
+    import base64
+
+    from pypdf import PdfReader
+
+    try:
+        reader = PdfReader(io.BytesIO(base64.b64decode(data_b64)))
+        parts: list[str] = []
+        total = 0
+        for page in reader.pages:
+            text = (page.extract_text() or "").strip()
+            if text:
+                parts.append(text)
+                total += len(text)
+            if total >= max_chars:
+                break
+        text = "\n\n".join(parts).strip()
+    except Exception:
+        return None
+    return text or None
+
+
+async def _extract_pdf_text(block: File, max_chars: int = _MAX_EXTRACTED_PDF_CHARS) -> str | None:
+    """Off-thread PDF text extraction so parsing never blocks the gateway's event loop."""
+    if block.mime_type != "application/pdf":
+        return None
+    text = await asyncio.to_thread(_extract_pdf_text_sync, block.data, max_chars)
+    if text and len(text) > max_chars:
+        text = text[:max_chars].rstrip() + "\n\n[... PDF text truncated ...]"
+    return text
+
+
+def _extracted_file_text(block: File, text: str) -> str:
+    meta = block.metadata or {}
+    label = meta.get("path") or meta.get("filename") or ""
+    label_bit = f" ({label})" if label else ""
+    return f"[File attachment{label_bit}, extracted text follows:]\n{text}"
+
+
+async def _user_file_content(block: File) -> str:
+    """Real extracted text when available, else the existing can't-read placeholder."""
+    extracted = await _extract_pdf_text(block)
+    if extracted:
+        return _extracted_file_text(block, extracted)
+    return _user_file_placeholder(block)
+
+
+async def _flatten_tool_response_text(block: ToolResponse) -> str:
     parts: list[str] = []
     for b in block.result:
         if isinstance(b, Text):
@@ -111,7 +170,8 @@ def _flatten_tool_response_text(block: ToolResponse) -> str:
         elif isinstance(b, Image):
             parts.append(_media_tool_placeholder("image", b))
         elif isinstance(b, File):
-            parts.append(_media_tool_placeholder("file", b))
+            extracted = await _extract_pdf_text(b)
+            parts.append(_extracted_file_text(b, extracted) if extracted else _media_tool_placeholder("file", b))
         else:
             raise ValueError(
                 f"unsupported ToolResponse block for OpenAI-compat: {type(b).__name__}"
@@ -119,12 +179,14 @@ def _flatten_tool_response_text(block: ToolResponse) -> str:
     return "".join(parts)
 
 
-def messages_to_openai(messages: Sequence[Message]) -> tuple[str | None, list[dict[str, Any]]]:
+async def messages_to_openai(
+    messages: Sequence[Message],
+) -> tuple[str | None, list[dict[str, Any]]]:
     """Split system prompt text vs OpenAI Chat messages (block-native)."""
     system_parts: list[str] = []
     out: list[dict[str, Any]] = []
 
-    def flush_user_blocks(buf: list[ContentBlock]) -> None:
+    async def flush_user_blocks(buf: list[ContentBlock]) -> None:
         if not buf:
             return
         if len(buf) == 1 and isinstance(buf[0], Text):
@@ -146,7 +208,7 @@ def messages_to_openai(messages: Sequence[Message]) -> tuple[str | None, list[di
                     }
                 )
             elif isinstance(item, File):
-                content.append({"type": "text", "text": _user_file_placeholder(item)})
+                content.append({"type": "text", "text": await _user_file_content(item)})
             else:
                 raise ValueError(
                     f"unsupported user content block for OpenAI-compat: {type(item).__name__}"
@@ -205,18 +267,18 @@ def messages_to_openai(messages: Sequence[Message]) -> tuple[str | None, list[di
         buf: list[ContentBlock] = []
         for block in m.content:
             if isinstance(block, ToolResponse):
-                flush_user_blocks(buf)
+                await flush_user_blocks(buf)
                 buf.clear()
                 out.append(
                     {
                         "role": "tool",
                         "tool_call_id": block.id,
-                        "content": _flatten_tool_response_text(block),
+                        "content": await _flatten_tool_response_text(block),
                     }
                 )
             else:
                 buf.append(block)
-        flush_user_blocks(buf)
+        await flush_user_blocks(buf)
 
     joined_system = "\n\n".join(system_parts).strip()
     return (joined_system or None, out)
@@ -266,12 +328,12 @@ def openai_tools_token_count(encoding: Any, tools: list[dict[str, Any]]) -> int:
     return len(encoding.encode(json.dumps(tools, ensure_ascii=False, default=str)))
 
 
-def count_openai_compat_input_tokens(
+async def count_openai_compat_input_tokens(
     encoding: Any,
     messages: Sequence[Message],
     tools: Sequence[ToolDef],
 ) -> int:
-    system, oai_messages = messages_to_openai(messages)
+    system, oai_messages = await messages_to_openai(messages)
     if system:
         oai_messages = [{"role": "system", "content": system}, *oai_messages]
     tool_defs = openai_tools(tools) if tools else []
@@ -479,7 +541,7 @@ async def count_input_tokens_tiktoken(
         enc = tiktoken.encoding_for_model(model)
     except KeyError:
         enc = tiktoken.get_encoding("cl100k_base")
-    return count_openai_compat_input_tokens(enc, msgs, tools)
+    return await count_openai_compat_input_tokens(enc, msgs, tools)
 
 
 async def stream_chat_completions_with_tool_fallback(
@@ -505,7 +567,7 @@ async def stream_chat_completions_with_tool_fallback(
     from openai import AsyncOpenAI  # noqa: PLC0415
 
     msgs = list(messages)
-    system, oai_messages = messages_to_openai(msgs)
+    system, oai_messages = await messages_to_openai(msgs)
     if system:
         oai_messages = [{"role": "system", "content": system}, *oai_messages]
 
