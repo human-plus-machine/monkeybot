@@ -189,8 +189,8 @@ def bootstrap_agent_layout(
     """
     root = resolve_agent_root(cwd=cwd, config_path=config_path)
 
-    # One-shot: data/memory → memory for every local agent under ~/.monkeybot/agents
-    # (plus this root), before env/URI resolution so MEMORY_STORAGE_URI is correct.
+    # One-shot: data/memory → memory for this agent root (before env/URI resolution).
+    # Set MONKEYBOT_MIGRATE_ALL_AGENTS=1 to also migrate every agent under ~/.monkeybot/agents/.
     try:
         from monkeybot.core.memory.migrate_layout import (
             migrate_all_local_agent_memory_layouts,

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 import aiosqlite
 
 logger = logging.getLogger(__name__)
+
+_BUSY_TIMEOUT_MS = 5000
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS notes (
@@ -29,6 +31,39 @@ CREATE INDEX IF NOT EXISTS idx_mem_notes_status ON notes(status);
 """
 
 
+@runtime_checkable
+class MemoryGraphStore(Protocol):
+    """Seam for the memory graph (local SQLite today; shared store later)."""
+
+    async def open(self) -> None: ...
+
+    async def close(self) -> None: ...
+
+    async def upsert_note(
+        self,
+        path: str,
+        *,
+        note_type: str,
+        status: str,
+        updated_at: float,
+        links: list[tuple[str, str]] | None = None,
+    ) -> None: ...
+
+    async def set_status(self, path: str, status: str, *, updated_at: float) -> None: ...
+
+    async def delete_note(self, path: str) -> None: ...
+
+    async def get_updated_at(self, path: str) -> float | None: ...
+
+    async def get_status(self, path: str) -> str | None: ...
+
+    async def neighbors(self, path: str) -> list[str]: ...
+
+    async def list_paths(self, *, status: str | None = "active") -> list[str]: ...
+
+    async def export_graph(self) -> dict[str, Any]: ...
+
+
 class MemoryGraph:
     """Process-local graph for durable memory notes (not the knowledge DB)."""
 
@@ -41,6 +76,8 @@ class MemoryGraph:
             return
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = await aiosqlite.connect(self._db_path)
+        await self._conn.execute("PRAGMA journal_mode=WAL")
+        await self._conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
         await self._conn.executescript(_SCHEMA)
         await self._conn.commit()
         logger.info("memory graph open path=%s", self._db_path)
@@ -163,4 +200,4 @@ class MemoryGraph:
         return {"nodes": nodes, "edges": edges}
 
 
-__all__ = ["MemoryGraph"]
+__all__ = ["MemoryGraph", "MemoryGraphStore"]

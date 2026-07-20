@@ -544,6 +544,9 @@ class _FlakyStorage:
     async def move(self, src: str, dest: str) -> None:
         await self._inner.move(src, dest)
 
+    async def mtime(self, path: str) -> float | None:
+        return cast("float | None", await self._inner.mtime(path))
+
     async def gc_prefix(self, prefix: str, max_age_sec: float) -> dict[str, int]:
         return cast("dict[str, int]", await self._inner.gc_prefix(prefix, max_age_sec))
 

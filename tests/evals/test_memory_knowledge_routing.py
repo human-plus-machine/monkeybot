@@ -29,11 +29,28 @@ ROUTING_CASES: list[tuple[str, str]] = [
 
 
 def _expected_surface_from_tool_text(question: str, tool_name: str, description: str) -> bool:
-    """Heuristic: description for the expected tool should claim the question's domain."""
-    del question
+    """Heuristic: question domain cues + tool description must agree on routing."""
+    q = question.lower()
     desc = description.lower()
     if tool_name == "search_memory":
-        memory_signals = (
+        question_signals = (
+            "decide",
+            "decided",
+            "prefer",
+            "preferred",
+            "last week",
+            "prior",
+            "session",
+            "customer said",
+            "remind",
+            "preferences",
+            "happened",
+            "earlier",
+            "why is",
+            "user's",
+            "user stored",
+        )
+        memory_desc = (
             "past",
             "preference",
             "session",
@@ -41,16 +58,32 @@ def _expected_surface_from_tool_text(question: str, tool_name: str, description:
             "not for code",
             "prior",
         )
-        return any(s in desc for s in memory_signals)
+        return any(s in q for s in question_signals) and any(
+            s in desc for s in memory_desc
+        )
     if tool_name == "search":
-        code_signals = (
+        question_signals = (
+            "where is",
+            "how does",
+            "which file",
+            "middleware",
+            "gateway",
+            "embeddings",
+            "indexer",
+            "executor",
+            "defined",
+            "configures",
+            "walk",
+            "dispatch",
+        )
+        code_desc = (
             "workspace",
             "code",
             "no record of past",
             "conversation",
             "cross-file",
         )
-        return any(s in desc for s in code_signals)
+        return any(s in q for s in question_signals) and any(s in desc for s in code_desc)
     return False
 
 

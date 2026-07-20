@@ -11,7 +11,8 @@ from monkeybot.core.knowledge.types import ParsedLink
 _WIKI_LINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 _WORKSPACE_PREFIX = "workspace:"
 _LINE_SPAN_RE = re.compile(r"^(?P<path>.+?)#L(?P<start>\d+)(?:-(?P<end>\d+))?$", re.IGNORECASE)
-_KNOWN_NOTE_ROOTS = ("notes/", "memory/")
+# Knowledge notes only — durable memory lives outside the knowledge index.
+_KNOWN_NOTE_ROOTS = ("notes/",)
 _NOTE_SUFFIXES = (".md", ".txt", ".markdown")
 
 
@@ -23,8 +24,8 @@ def parse_wiki_links(
     """Extract wiki links from ``text``.
 
     Non-``workspace:`` targets resolve relative to ``source_path``'s directory
-    within the index namespace (e.g. ``memory/INDEX.md`` + ``[[episodic/x.md]]``
-    → ``memory/episodic/x.md``). ``workspace:`` targets stay workspace-relative.
+    within the index namespace (e.g. ``notes/INDEX.md`` + ``[[tip.md]]``
+    → ``notes/tip.md``). ``workspace:`` targets stay workspace-relative.
     """
     out: list[ParsedLink] = []
     for match in _WIKI_LINK_RE.finditer(text or ""):
@@ -60,6 +61,11 @@ def _parse_one(raw: str, *, source_path: str | None = None) -> ParsedLink | None
 
     path, start, end = _split_span(target)
     if not path:
+        return None
+
+    # Durable memory is outside the knowledge index — never accept memory/ targets
+    # (including via relative join that would produce notes/memory/...).
+    if path == "memory" or path.startswith("memory/"):
         return None
 
     # Bare note names → notes/{name}.md (vault convention)
@@ -141,7 +147,7 @@ def _normalize_workspace_path(path: str) -> str | None:
 
 
 def _normalize_note_path(path: str) -> str | None:
-    """Normalize and require the result stay under ``notes/`` or ``memory/``."""
+    """Normalize and require the result stay under ``notes/``."""
     parts = _normalize_segments(path)
     if not parts:
         return None
@@ -149,7 +155,7 @@ def _normalize_note_path(path: str) -> str | None:
     if not normalized.startswith(_KNOWN_NOTE_ROOTS):
         return None
     # Directory-only roots are not valid file targets
-    if normalized in ("notes", "memory") or normalized.endswith("/"):
+    if normalized in ("notes",) or normalized.endswith("/"):
         return None
     return normalized
 

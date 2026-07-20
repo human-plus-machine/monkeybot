@@ -23,7 +23,6 @@ _STEM_BOOST = 1.3
 _PATH_SEGMENT_BOOST = 1.15
 _SNIPPET_CHARS = 280
 
-_NOISE_NOTE_PATHS = frozenset({"memory/chat_log.md", "memory/INDEX.md"})
 _NOISE_NOTE_PREFIXES = (
     "memory/",
 )
@@ -38,8 +37,6 @@ _TEST_PATH_RE = re.compile(
 
 
 def _is_noise_path(path: str) -> bool:
-    if path in _NOISE_NOTE_PATHS:
-        return True
     return any(path.startswith(p) for p in _NOISE_NOTE_PREFIXES)
 
 

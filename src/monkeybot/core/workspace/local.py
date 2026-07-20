@@ -127,6 +127,17 @@ class LocalWorkspaceStorage:
 
         await asyncio.to_thread(_mv)
 
+    async def mtime(self, path: str) -> float | None:
+        p = self._abs(path)
+        self._ensure_under_root(p)
+
+        def _mtime() -> float | None:
+            if not p.is_file():
+                return None
+            return float(p.stat().st_mtime)
+
+        return await asyncio.to_thread(_mtime)
+
     async def gc_prefix(self, prefix: str, max_age_sec: float) -> dict[str, int]:
         root = self._root
         pre = prefix.strip().replace("\\", "/")

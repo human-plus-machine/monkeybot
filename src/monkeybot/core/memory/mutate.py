@@ -7,7 +7,7 @@ import time
 import uuid
 from typing import Any
 
-from monkeybot.core.memory.graph import MemoryGraph
+from monkeybot.core.memory.graph import MemoryGraphStore
 from monkeybot.core.memory.index_format import (
     INDEX_FILENAME,
     append_index_entries,
@@ -16,7 +16,6 @@ from monkeybot.core.memory.index_format import (
     split_index_document,
 )
 from monkeybot.core.memory.note_format import (
-    TYPED_FOLDERS,
     extract_memory_wiki_links,
     folder_from_rel_path,
     format_memory_note,
@@ -58,30 +57,34 @@ async def drop_index_paths(storage: WorkspaceStorage, drop: set[str]) -> None:
 
 
 async def _upsert_graph_from_text(
-    graph: MemoryGraph | None,
+    graph: MemoryGraphStore | None,
     path: str,
     text: str,
 ) -> None:
+    """Best-effort graph upsert — never fails the mutation."""
     if graph is None:
         return
-    meta, _body = parse_memory_note(text)
-    if meta is None:
-        return
-    links = [(t, "related") for t in extract_memory_wiki_links(text)]
-    if meta.supersedes:
-        links.append((meta.supersedes, "supersedes"))
-    await graph.upsert_note(
-        path,
-        note_type=meta.type,
-        status=meta.status,
-        updated_at=time.time(),
-        links=links,
-    )
+    try:
+        meta, _body = parse_memory_note(text)
+        if meta is None:
+            return
+        links = [(t, "related") for t in extract_memory_wiki_links(text)]
+        if meta.supersedes:
+            links.append((meta.supersedes, "supersedes"))
+        await graph.upsert_note(
+            path,
+            note_type=meta.type,
+            status=meta.status,
+            updated_at=time.time(),
+            links=links,
+        )
+    except Exception as exc:
+        logger.debug("memory graph upsert skipped path=%s: %r", path, exc)
 
 
 async def edit_memory_note(
     storage: WorkspaceStorage,
-    graph: MemoryGraph | None,
+    graph: MemoryGraphStore | None,
     *,
     path: str,
     content: str,
@@ -104,14 +107,14 @@ async def edit_memory_note(
 
 async def update_memory_note(
     storage: WorkspaceStorage,
-    graph: MemoryGraph | None,
+    graph: MemoryGraphStore | None,
     *,
     path: str,
     content: str,
 ) -> dict[str, Any]:
     path = path.replace("\\", "/").lstrip("./")
-    folder = folder_from_rel_path(path) or "semantic"
-    if folder not in TYPED_FOLDERS:
+    folder = folder_from_rel_path(path)
+    if folder is None:
         return {"ok": False, "error": "path must be under episodic|semantic|procedural|working"}
     if not await storage.exists(path):
         return {"ok": False, "error": f"note not found: {path}"}
@@ -120,14 +123,7 @@ async def update_memory_note(
     old_meta, _ = parse_memory_note(old_text)
     note_type = old_meta.type if old_meta else folder
 
-    superseded = format_memory_note(
-        note_type=note_type,
-        status="superseded",
-        body=parse_memory_note(old_text)[1] if old_meta else old_text,
-    )
-    await storage.write_text(path, superseded)
-    await _upsert_graph_from_text(graph, path, superseded)
-
+    # Write the new note first so a crash/graph failure cannot lose caller content.
     filename = f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}.md"
     new_path = f"{folder}/{filename}"
     new_text = format_memory_note(
@@ -137,7 +133,13 @@ async def update_memory_note(
         supersedes=path,
     )
     await storage.write_text(new_path, new_text)
-    await _upsert_graph_from_text(graph, new_path, new_text)
+
+    superseded = format_memory_note(
+        note_type=note_type,
+        status="superseded",
+        body=parse_memory_note(old_text)[1] if old_meta else old_text,
+    )
+    await storage.write_text(path, superseded)
 
     await drop_index_paths(storage, {path})
     summary = " ".join(content.strip().split())[:160]
@@ -147,6 +149,10 @@ async def update_memory_note(
         existing_idx = "# Memory Index\n"
     merged = append_index_entries(existing_idx, [_index_line(folder, filename, summary)])
     await storage.write_text(INDEX_FILENAME, merged)
+
+    # Graph is best-effort after durable files + INDEX are consistent.
+    await _upsert_graph_from_text(graph, path, superseded)
+    await _upsert_graph_from_text(graph, new_path, new_text)
 
     logger.info("memory update superseded=%s path=%s", path, new_path)
     return {
@@ -159,7 +165,7 @@ async def update_memory_note(
 
 async def forget_memory_note(
     storage: WorkspaceStorage,
-    graph: MemoryGraph | None,
+    graph: MemoryGraphStore | None,
     *,
     path: str,
 ) -> dict[str, Any]:
@@ -173,8 +179,9 @@ async def forget_memory_note(
     note_type = meta.type if meta else (folder_from_rel_path(path) or "episodic")
     forgotten = format_memory_note(note_type=note_type, status="forgotten", body=body)
     await storage.write_text(path, forgotten)
-    await _upsert_graph_from_text(graph, path, forgotten)
+    # INDEX cleanup must not depend on graph write succeeding.
     await drop_index_paths(storage, {path})
+    await _upsert_graph_from_text(graph, path, forgotten)
     logger.info("memory forget path=%s", path)
     return {"ok": True, "path": path, "action": "forget"}
 

@@ -1,8 +1,8 @@
 """One-shot migration: agent ``data/memory`` → ``memory`` (layout rename).
 
-Runs for every local agent under ``~/.monkeybot/agents/`` (plus the current
-agent root) so Mac app / CLI / gateway startups all stay compatible after the
-default path change.
+By default bootstrap migrates only the agent that is starting. Pass
+``migrate_all=True`` (or set ``MONKEYBOT_MIGRATE_ALL_AGENTS=1``) to touch every
+local agent under ``~/.monkeybot/agents/``.
 """
 
 from __future__ import annotations
@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import time
 from pathlib import Path
 from typing import Any
 
@@ -17,10 +18,12 @@ logger = logging.getLogger(__name__)
 
 _LEGACY_REL = Path("data") / "memory"
 _CANONICAL_REL = Path("memory")
+_LOCK_NAME = ".memory-layout-migrate.lock"
 
 _URI_REPLACEMENTS = (
     ("local://./data/memory", "local://./memory"),
     ("local://data/memory", "local://./memory"),
+    ("local:///tmp/monkeybot-data/memory", "local:///tmp/monkeybot-memory"),
 )
 
 _ALLOWLIST_REPLACEMENTS = (
@@ -91,6 +94,87 @@ def _rewrite_text_file(path: Path, replacements: tuple[tuple[str, str], ...]) ->
     return True
 
 
+def _is_scaffold_only(dest: Path) -> bool:
+    """True when ``dest`` only has ensure_memory scaffold (no real notes)."""
+    if not dest.is_dir():
+        return False
+    try:
+        for path in dest.rglob("*"):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(dest).as_posix()
+            if path.name == ".gitkeep":
+                continue
+            if rel == "INDEX.md":
+                continue
+            # Any other file (a real note under typed folders, raw logs, etc.)
+            return False
+        return True
+    except OSError:
+        return False
+
+
+def _merge_legacy_into_dest(legacy: Path, dest: Path) -> None:
+    """Copy missing files from legacy into dest, then remove legacy."""
+    for src in legacy.rglob("*"):
+        if not src.is_file():
+            continue
+        rel = src.relative_to(legacy)
+        target = dest / rel
+        if target.exists():
+            # Prefer legacy note content over empty scaffold INDEX when both exist
+            # only if dest file is a scaffold placeholder INDEX with no entries.
+            if rel.as_posix() == "INDEX.md":
+                try:
+                    dest_text = target.read_text(encoding="utf-8")
+                    src_text = src.read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                if "[[" not in dest_text and "[[" in src_text:
+                    target.write_text(src_text, encoding="utf-8")
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, target)
+    shutil.rmtree(legacy, ignore_errors=True)
+
+
+def _acquire_migrate_lock(agent_root: Path) -> Path | None:
+    """Exclusive lock file; returns lock path or None if another migrator holds it."""
+    lock_path = agent_root / _LOCK_NAME
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        # Stale lock older than 5 minutes → steal; else skip.
+        try:
+            age = time.time() - lock_path.stat().st_mtime
+        except OSError:
+            return None
+        if age < 300:
+            return None
+        try:
+            lock_path.unlink(missing_ok=True)
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except OSError:
+            return None
+    except OSError as exc:
+        logger.warning("Cannot create migrate lock for %s: %r", agent_root, exc)
+        return None
+    try:
+        os.write(fd, f"{os.getpid()}\n".encode())
+    finally:
+        os.close(fd)
+    return lock_path
+
+
+def _release_migrate_lock(lock_path: Path | None) -> None:
+    if lock_path is None:
+        return
+    try:
+        lock_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _move_legacy_memory_dir(agent_root: Path) -> str | None:
     """Move ``data/memory`` → ``memory``. Returns action label or None."""
     legacy = (agent_root / _LEGACY_REL).resolve()
@@ -99,29 +183,69 @@ def _move_legacy_memory_dir(agent_root: Path) -> str | None:
         return None
     if legacy == dest:
         return None
-    if dest.exists():
-        logger.warning(
-            "Skipping memory dir move for %s: both %s and %s exist — "
-            "keeping canonical memory/; remove data/memory manually if unused",
+
+    lock = _acquire_migrate_lock(agent_root)
+    if lock is None:
+        logger.info(
+            "Skipping memory dir move for %s: migrate lock held by another process",
             agent_root.name,
-            legacy,
-            dest,
         )
-        return "skipped_both_exist"
+        return "skipped_locked"
+
     try:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(legacy), str(dest))
-    except OSError as exc:
-        logger.warning(
-            "Failed to move %s → %s for agent %s: %r",
-            legacy,
-            dest,
-            agent_root.name,
-            exc,
-        )
-        return "move_failed"
-    logger.info("Migrated memory layout for %s: %s → %s", agent_root.name, legacy, dest)
-    return "moved"
+        # Re-check under lock (TOCTOU).
+        if not legacy.is_dir():
+            return None
+        if dest.exists():
+            if _is_scaffold_only(dest):
+                logger.info(
+                    "Merging legacy %s into scaffold-only %s for agent %s",
+                    legacy,
+                    dest,
+                    agent_root.name,
+                )
+                try:
+                    _merge_legacy_into_dest(legacy, dest)
+                except OSError as exc:
+                    logger.warning(
+                        "Failed to merge %s → %s for agent %s: %r",
+                        legacy,
+                        dest,
+                        agent_root.name,
+                        exc,
+                    )
+                    return "move_failed"
+                logger.info(
+                    "Migrated memory layout for %s: merged %s → %s",
+                    agent_root.name,
+                    legacy,
+                    dest,
+                )
+                return "moved"
+            logger.warning(
+                "Skipping memory dir move for %s: both %s and %s exist — "
+                "keeping canonical memory/; remove data/memory manually if unused",
+                agent_root.name,
+                legacy,
+                dest,
+            )
+            return "skipped_both_exist"
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(legacy), str(dest))
+        except OSError as exc:
+            logger.warning(
+                "Failed to move %s → %s for agent %s: %r",
+                legacy,
+                dest,
+                agent_root.name,
+                exc,
+            )
+            return "move_failed"
+        logger.info("Migrated memory layout for %s: %s → %s", agent_root.name, legacy, dest)
+        return "moved"
+    finally:
+        _release_migrate_lock(lock)
 
 
 def migrate_agent_memory_layout(agent_root: Path) -> dict[str, Any]:
@@ -165,11 +289,34 @@ def migrate_agent_memory_layout(agent_root: Path) -> dict[str, Any]:
 
 
 def migrate_all_local_agent_memory_layouts(
-    *, include: Path | None = None
+    *, include: Path | None = None, migrate_all: bool | None = None
 ) -> list[dict[str, Any]]:
-    """Migrate every discovered local agent (plus optional ``include`` root)."""
+    """Migrate agents.
+
+    When ``migrate_all`` is false (default unless ``MONKEYBOT_MIGRATE_ALL_AGENTS=1``),
+    only ``include`` is migrated — avoids concurrent Mac/CLI/gateway touching every
+    agent under ``~/.monkeybot/agents/``.
+    """
+    if migrate_all is None:
+        migrate_all = os.environ.get("MONKEYBOT_MIGRATE_ALL_AGENTS", "").strip() in (
+            "1",
+            "true",
+            "yes",
+        )
     results: list[dict[str, Any]] = []
-    for root in discover_local_agent_roots(include=include):
+    roots = (
+        discover_local_agent_roots(include=include)
+        if migrate_all
+        else ([include.expanduser().resolve()] if include is not None else [])
+    )
+    # When migrate_all is false but include lacks monkeybot_config, still try it
+    # if it looks like an agent root (has data/memory or memory).
+    if not migrate_all and include is not None:
+        root = include.expanduser().resolve()
+        if root not in roots:
+            roots = [root]
+
+    for root in roots:
         try:
             results.append(migrate_agent_memory_layout(root))
         except Exception as exc:  # noqa: BLE001 — never block bootstrap

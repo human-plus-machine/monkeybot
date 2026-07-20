@@ -140,6 +140,24 @@ class S3WorkspaceStorage:
 
         await asyncio.to_thread(_copy_delete)
 
+    async def mtime(self, path: str) -> float | None:
+        key = self._key(path)
+
+        def _mtime() -> float | None:
+            try:
+                resp = self._s3.head_object(Bucket=self._bucket, Key=key)
+            except ClientError as exc:
+                code = exc.response.get("Error", {}).get("Code", "")
+                if code in ("404", "NoSuchKey", "NotFound", "404 Not Found"):
+                    return None
+                raise
+            last_mod = resp.get("LastModified")
+            if last_mod is None:
+                return None
+            return float(last_mod.timestamp())
+
+        return await asyncio.to_thread(_mtime)
+
     async def gc_prefix(self, prefix: str, max_age_sec: float) -> dict[str, int]:
         del prefix, max_age_sec
         _log.info(

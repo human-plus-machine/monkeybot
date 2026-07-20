@@ -13,7 +13,7 @@ import asyncio
 
 from monkeybot.core.hooks import HookManager
 from monkeybot.core.llm.provider import Provider
-from monkeybot.core.memory.graph import MemoryGraph
+from monkeybot.core.memory.graph import MemoryGraph, MemoryGraphStore
 from monkeybot.core.memory.hook import MemoryHook
 from monkeybot.core.memory.mutate import (
     drop_index_paths,
@@ -69,7 +69,7 @@ class MemorySubsystem:
         *,
         memory_uri: str,
         max_retrieval_hits: int = 3,
-        graph: MemoryGraph | None = None,
+        graph: MemoryGraphStore | None = None,
     ) -> None:
         self._storage = storage
         self._memory_uri = memory_uri.strip()
@@ -80,7 +80,7 @@ class MemorySubsystem:
         )
         root = _local_memory_root(memory_uri)
         if graph is not None:
-            self._graph: MemoryGraph | None = graph
+            self._graph: MemoryGraphStore | None = graph
         elif root is not None:
             self._graph = MemoryGraph(root / ".graph.sqlite")
         else:
@@ -113,32 +113,40 @@ class MemorySubsystem:
     def register_hooks(self, manager: HookManager) -> None:
         self._hook.register(manager)
 
-    async def ensure_graph(self) -> MemoryGraph | None:
+    async def ensure_graph(self) -> MemoryGraphStore | None:
+        """Open the graph sidecar; return None if unavailable (best-effort)."""
         if self._graph is None:
             return None
         if not self._graph_opened:
-            await self._graph.open()
-            self._graph_opened = True
+            try:
+                await self._graph.open()
+                self._graph_opened = True
+            except Exception as exc:
+                logger.warning("memory graph open failed (continuing without graph): %r", exc)
+                return None
         return self._graph
 
     async def _on_note_written(self, path: str, text: str) -> None:
         graph = await self.ensure_graph()
         if graph is None:
             return
-        meta, _ = parse_memory_note(text)
-        note_type = meta.type if meta is not None else (folder_from_rel_path(path) or "episodic")
-        status = meta.status if meta is not None else "active"
-        supersedes = meta.supersedes if meta is not None else None
-        links = [(t, "related") for t in extract_memory_wiki_links(text)]
-        if supersedes:
-            links.append((supersedes, "supersedes"))
-        await graph.upsert_note(
-            path,
-            note_type=note_type,
-            status=status,
-            updated_at=time.time(),
-            links=links,
-        )
+        try:
+            meta, _ = parse_memory_note(text)
+            note_type = meta.type if meta is not None else (folder_from_rel_path(path) or "episodic")
+            status = meta.status if meta is not None else "active"
+            supersedes = meta.supersedes if meta is not None else None
+            links = [(t, "related") for t in extract_memory_wiki_links(text)]
+            if supersedes:
+                links.append((supersedes, "supersedes"))
+            await graph.upsert_note(
+                path,
+                note_type=note_type,
+                status=status,
+                updated_at=time.time(),
+                links=links,
+            )
+        except Exception as exc:
+            logger.debug("memory graph note upsert skipped path=%s: %r", path, exc)
 
     async def rebuild_graph(self) -> dict[str, int]:
         """Scan typed memory folders and upsert every note into the sidecar graph.
@@ -279,21 +287,21 @@ class MemorySubsystem:
 
     async def edit_memory(self, path: str, content: str) -> dict[str, Any]:
         async with self.lock:
-            graph = await self.ensure_graph()
+            graph = await self.ensure_graph()  # best-effort; mutations work without it
             return await edit_memory_note(
                 self._storage, graph, path=path, content=content
             )
 
     async def update_memory(self, path: str, content: str) -> dict[str, Any]:
         async with self.lock:
-            graph = await self.ensure_graph()
+            graph = await self.ensure_graph()  # best-effort; mutations work without it
             return await update_memory_note(
                 self._storage, graph, path=path, content=content
             )
 
     async def forget(self, path: str) -> dict[str, Any]:
         async with self.lock:
-            graph = await self.ensure_graph()
+            graph = await self.ensure_graph()  # best-effort; mutations work without it
             return await forget_memory_note(self._storage, graph, path=path)
 
     async def promote(self, run_id: str, file: Path) -> None:
@@ -301,6 +309,37 @@ class MemorySubsystem:
 
     async def gc_processed(self, *, max_age_sec: float = 7 * 24 * 60 * 60) -> dict[str, int]:
         return await self._storage.gc_prefix("raw/processed/", max_age_sec)
+
+    async def _note_updated_at(
+        self,
+        path: str,
+        *,
+        graph: MemoryGraphStore | None,
+        text: str,
+    ) -> float | None:
+        """Resolve note age: graph → storage mtime → None."""
+        if graph is not None:
+            try:
+                ts = await graph.get_updated_at(path)
+            except Exception as exc:
+                logger.debug("gc_working graph get_updated_at skipped %s: %r", path, exc)
+                ts = None
+            if ts is not None:
+                return ts
+            meta, _ = parse_memory_note(text)
+            if meta is not None:
+                await self._on_note_written(path, text)
+                try:
+                    ts = await graph.get_updated_at(path)
+                except Exception:
+                    ts = None
+                if ts is not None:
+                    return ts
+        try:
+            return await self._storage.mtime(path)
+        except Exception as exc:
+            logger.debug("gc_working storage mtime failed %s: %r", path, exc)
+            return None
 
     async def gc_working(self, *, ttl_days: float | None = None) -> dict[str, int]:
         """Delete expired working/ notes and drop them from INDEX + graph."""
@@ -311,6 +350,7 @@ class MemorySubsystem:
         scanned = 0
         deleted = 0
         errors = 0
+        skipped_no_age = 0
         drop: set[str] = set()
         try:
             paths = await self._storage.list_files("working/")
@@ -327,22 +367,33 @@ class MemorySubsystem:
             scanned += 1
             try:
                 text = await self._storage.read_text(rel_posix)
-                meta, _ = parse_memory_note(text)
-                updated_at = await graph.get_updated_at(rel_posix) if graph else None
+                updated_at = await self._note_updated_at(
+                    rel_posix, graph=graph, text=text
+                )
                 if updated_at is None:
-                    if meta is not None and graph is not None:
-                        await self._on_note_written(rel_posix, text)
+                    skipped_no_age += 1
                     continue
                 if updated_at >= cutoff:
                     continue
                 await self._storage.delete(rel_posix)
                 if graph is not None:
-                    await graph.delete_note(rel_posix)
+                    try:
+                        await graph.delete_note(rel_posix)
+                    except Exception as exc:
+                        logger.debug(
+                            "gc_working graph delete skipped %s: %r", rel_posix, exc
+                        )
                 drop.add(rel_posix)
                 deleted += 1
             except Exception as exc:
                 logger.warning("gc_working failed for %s: %r", rel_posix, exc)
                 errors += 1
+        if skipped_no_age:
+            logger.warning(
+                "gc_working skipped %d note(s) with no age signal "
+                "(graph + storage mtime unavailable)",
+                skipped_no_age,
+            )
         if drop:
             await drop_index_paths(self._storage, drop)
         return {"scanned": scanned, "deleted": deleted, "errors": errors}

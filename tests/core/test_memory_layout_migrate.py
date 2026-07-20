@@ -31,7 +31,7 @@ def _write_agent(root: Path, *, uri: str = "local://./data/memory") -> None:
     )
     legacy = root / "data" / "memory"
     legacy.mkdir(parents=True)
-    (legacy / "INDEX.md").write_text("# idx\n", encoding="utf-8")
+    (legacy / "INDEX.md").write_text("# idx\n- [[episodic/note.md]] | tags: | summary: hi\n", encoding="utf-8")
     (legacy / "episodic").mkdir()
     (legacy / "episodic" / "note.md").write_text("hello\n", encoding="utf-8")
 
@@ -67,7 +67,7 @@ def test_migrate_is_idempotent(tmp_path: Path) -> None:
     assert (agent / "memory" / "episodic" / "note.md").is_file()
 
 
-def test_migrate_skips_when_both_dirs_exist(tmp_path: Path) -> None:
+def test_migrate_skips_when_both_dirs_exist_with_real_notes(tmp_path: Path) -> None:
     agent = tmp_path / "default"
     _write_agent(agent)
     (agent / "memory").mkdir()
@@ -83,7 +83,35 @@ def test_migrate_skips_when_both_dirs_exist(tmp_path: Path) -> None:
     assert result["yaml_updated"] is True
 
 
-def test_migrate_all_agents_under_home(
+def test_migrate_merges_when_dest_is_scaffold_only(tmp_path: Path) -> None:
+    """Re-running init creates empty memory/; migration should merge legacy notes."""
+    agent = tmp_path / "default"
+    _write_agent(agent)
+    mem = agent / "memory"
+    for sub in ("episodic", "semantic", "procedural", "working", "raw"):
+        d = mem / sub
+        d.mkdir(parents=True)
+        (d / ".gitkeep").touch()
+    (mem / "INDEX.md").write_text("# Memory Index\n", encoding="utf-8")
+
+    result = migrate_agent_memory_layout(agent)
+
+    assert result["moved"] is True
+    assert (agent / "memory" / "episodic" / "note.md").read_text() == "hello\n"
+    assert "[[episodic/note.md]]" in (agent / "memory" / "INDEX.md").read_text()
+    assert not (agent / "data" / "memory").exists()
+
+
+def test_migrate_rewrites_absolute_docker_uri(tmp_path: Path) -> None:
+    agent = tmp_path / "default"
+    _write_agent(agent, uri="local:///tmp/monkeybot-data/memory")
+    result = migrate_agent_memory_layout(agent)
+    assert result["yaml_updated"] is True
+    yaml_text = (agent / "monkeybot_config" / "monkeybot.yaml").read_text()
+    assert "local:///tmp/monkeybot-memory" in yaml_text
+
+
+def test_migrate_all_default_only_include(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     home = tmp_path / "home"
@@ -92,16 +120,41 @@ def test_migrate_all_agents_under_home(
     b = agents / "beta"
     _write_agent(a)
     _write_agent(b)
-    # Outside home — only migrated when include= is passed
+    outside = tmp_path / "outside-agent"
+    _write_agent(outside)
+
+    monkeypatch.setenv("MONKEYBOT_HOME", str(home))
+    monkeypatch.delenv("MONKEYBOT_MIGRATE_ALL_AGENTS", raising=False)
+
+    found = discover_local_agent_roots()
+    assert {p.name for p in found} == {"alpha", "beta"}
+
+    # Default: only the included agent is migrated.
+    results = migrate_all_local_agent_memory_layouts(include=outside)
+    by_name = {Path(r["agent_root"]).name: r for r in results}
+    assert set(by_name) == {"outside-agent"}
+    assert by_name["outside-agent"]["moved"] is True
+    assert not (a / "memory").exists()
+    assert (outside / "memory" / "INDEX.md").is_file()
+
+
+def test_migrate_all_agents_when_flag_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    agents = home / "agents"
+    a = agents / "alpha"
+    b = agents / "beta"
+    _write_agent(a)
+    _write_agent(b)
     outside = tmp_path / "outside-agent"
     _write_agent(outside)
 
     monkeypatch.setenv("MONKEYBOT_HOME", str(home))
 
-    found = discover_local_agent_roots()
-    assert {p.name for p in found} == {"alpha", "beta"}
-
-    results = migrate_all_local_agent_memory_layouts(include=outside)
+    results = migrate_all_local_agent_memory_layouts(
+        include=outside, migrate_all=True
+    )
     by_name = {Path(r["agent_root"]).name: r for r in results}
     assert by_name["alpha"]["moved"] is True
     assert by_name["beta"]["moved"] is True
