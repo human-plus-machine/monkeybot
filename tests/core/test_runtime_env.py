@@ -44,6 +44,42 @@ def test_yaml_applies_when_env_unset(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert os.environ.get("MODEL_NAME") == "test-model-x"
 
 
+def test_scheduler_enabled_yaml_applies_and_enables_scheduler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from monkeybot.scheduler.engine import scheduler_enabled_from_env
+
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    (cfg_dir / "monkeybot.yaml").write_text(
+        "scheduler:\n  enabled: true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("MONKEYBOT_SCHEDULER_ENABLED", raising=False)
+    runtime_env.apply_monkeybot_runtime_env()
+    assert os.environ.get("MONKEYBOT_SCHEDULER_ENABLED") == "true"
+    assert scheduler_enabled_from_env() is True
+
+
+def test_scheduler_enabled_explicit_env_wins_over_yaml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from monkeybot.scheduler.engine import scheduler_enabled_from_env
+
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    (cfg_dir / "monkeybot.yaml").write_text(
+        "scheduler:\n  enabled: true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MONKEYBOT_SCHEDULER_ENABLED", "false")
+    runtime_env.apply_monkeybot_runtime_env()
+    assert os.environ.get("MONKEYBOT_SCHEDULER_ENABLED") == "false"
+    assert scheduler_enabled_from_env() is False
+
+
 def test_google_cloud_project_wins_over_yaml_gcp_project_id(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -38,6 +38,9 @@ class TestEnvMap:
         assert ENV_MAP[("sandbox", "server_url")] == "SANDBOX_SERVER_URL"
         assert ENV_MAP[("sandbox", "image")] == "SANDBOX_IMAGE"
 
+    def test_scheduler_enabled_in_env_map(self) -> None:
+        assert ENV_MAP[("scheduler", "enabled")] == "MONKEYBOT_SCHEDULER_ENABLED"
+
     def test_vertex_google_search_not_in_env_map(self) -> None:
         """Config-file only (like paths.auto_schema) — no env var override."""
         assert ("web_search", "vertex_google_search") not in ENV_MAP
