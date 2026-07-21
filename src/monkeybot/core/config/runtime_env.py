@@ -83,6 +83,7 @@ ENV_MAP: dict[tuple[str, str], str] = {
     ("sandbox", "image"): "SANDBOX_IMAGE",
     ("sandbox", "ttl_seconds"): "SANDBOX_TTL_SECONDS",
     ("sandbox", "shared_filesystem"): "SANDBOX_SHARED_FILESYSTEM",
+    ("scheduler", "enabled"): "MONKEYBOT_SCHEDULER_ENABLED",
     ("fake_provider", "events_json"): "MONKEYBOT_FAKE_PROVIDER_EVENTS",
     ("emission", "style"): "MONKEYBOT_EMISSION_STYLE",
     ("runtime", "transcript_enabled"): "MONKEYBOT_TRANSCRIPT_ENABLED",

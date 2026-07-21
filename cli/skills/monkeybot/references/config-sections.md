@@ -146,6 +146,16 @@ Tavily/Firecrawl need `TAVILY_API_KEY` / `FIRECRAWL_API_KEY` in `.env`. Doctor c
 
 Needs `SANDBOX_API_KEY` in `.env`.
 
+## `scheduler`
+
+Prompt-first scheduled loops (`start_loop`, `/scheduler/loops`). Requires durable storage (`paths.db_url`). Loops are registered at runtime — there is no static `jobs` list in YAML.
+
+| Field | Default | When to change |
+|---|---|---|
+| `enabled` | `false` | `true` runs the tick worker in-process on the gateway (local/dev). Production: leave `false` and run `python -m monkeybot.scheduler` as a separate process |
+
+Env override: `MONKEYBOT_SCHEDULER_ENABLED` (`1` \| `true` \| `yes` \| `on`).
+
 ## `includes`
 
 Top-level list of YAML fragments (paths relative to the config file's directory). Later files deep-merge over earlier ones — useful for per-environment overrides:

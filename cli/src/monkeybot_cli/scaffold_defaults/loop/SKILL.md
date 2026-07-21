@@ -11,8 +11,9 @@ Use this skill when the user wants recurring agent work on an interval
 ## Prerequisites
 
 1. Durable storage must be configured (`paths.db_url` / `DB_URL`).
-2. A scheduler worker must be running (`MONKEYBOT_SCHEDULER_ENABLED=1` or the
-   standalone scheduler process).
+2. A scheduler worker must be running (`scheduler.enabled: true` in
+   `monkeybot.yaml`, `MONKEYBOT_SCHEDULER_ENABLED=1`, or the standalone
+   scheduler process).
 3. Call `enable_loops` first if `start_loop` / `loop_status` / `pause_loop` /
    `resume_loop` / `stop_loop` / `disable_loops` are not yet in the active tool
    list. New tools appear on the **next model step this turn**.

@@ -216,6 +216,14 @@ sandbox:
   # then runs compute-only commands and refuses workspace/skills file access.
   shared_filesystem: true
 
+# Prompt-first scheduled loops (start_loop / /scheduler/loops). Requires paths.db_url.
+# There is no static jobs list — loops are registered at runtime by the agent or API.
+scheduler:
+  # When true, run the tick worker in-process on the gateway (dev-friendly).
+  # Production: leave false and run `python -m monkeybot.scheduler` as a separate process.
+  # Env override: MONKEYBOT_SCHEDULER_ENABLED (1 | true | yes | on).
+  enabled: false
+
 # Optional JSON for MODEL_PROVIDER=fake tests (env: MONKEYBOT_FAKE_PROVIDER_EVENTS)
 # fake_provider:
 #   events_json: '[[]]'
