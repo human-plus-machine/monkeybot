@@ -54,6 +54,13 @@ Source: PR #123 (knowledge layer) review feedback. Embeddings default off; evals
 ### MCP
 - **MCP distro linkage** — confirm scaffolded `monkeybot.yaml` paths (`paths.mcp_config`, `paths.skills_path`) match deployment; smoke-test against real MCP servers beyond the bundled examples.
 
+### Tooling *(intentionally dropped — not completed)*
+
+Product decision to stop tracking these as active backlog items (not claiming they shipped):
+
+- **File-op tool audit** — Keep `write_file`; no plan to replace it with `create_file` + `find_and_replace` only.
+- **Custom subagents** — Named profiles with per-persona skills / MCP selections remain out of scope for now; workers continue to load the global skills path and `MCP_CONFIG`.
+
 ### Future platforms *(not scheduled)*
 
 Moved from README — longer-term / speculative integrations without active implementation:
