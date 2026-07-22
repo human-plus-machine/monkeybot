@@ -753,6 +753,51 @@ async def test_run_cancellation_between_two_tools_second_skipped() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_cancels_mid_provider_text_stream() -> None:
+    """Stop must interrupt token streaming, not wait for the full LLM call."""
+    cancel = asyncio.Event()
+
+    class CancelAfterFirstDelta(FakeProvider):
+        async def stream(
+            self,
+            messages: Sequence[Message],
+            tools: Sequence[ToolDef],
+            *,
+            model: str,
+            thinking_budget: int | None = None,
+            vertex_google_search: bool = False,
+        ) -> AsyncIterator[ProviderEvent]:
+            del messages, tools, model, thinking_budget, vertex_google_search
+            self.stream_calls += 1
+            yield TextDelta(text="Hello ")
+            cancel.set()
+            yield TextDelta(text="world — should not appear")
+            yield Done()
+
+    hist = FakeHistory()
+    events = []
+    async for e in run(
+        "u",
+        _ctx(),
+        provider=CancelAfterFirstDelta([[]]),
+        history=hist,
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        cancelled=cancel,
+        max_turns=2,
+    ):
+        events.append(e)
+
+    deltas = [e.delta for e in events if isinstance(e, AssistantDelta)]
+    assert deltas == ["Hello "]
+    assert any(isinstance(e, Error) and "cancelled" in e.error.lower() for e in events)
+    assert isinstance(events[-1], TurnComplete)
+    # Partial reply must land in history so follow-ups see what the user saw.
+    assert [m.role for m in hist.rows] == ["user", "assistant"]
+    assert _flatten_text_from_message(hist.rows[1]) == "Hello"
+
+
+@pytest.mark.asyncio
 async def test_run_generator_closes_without_pending_tasks() -> None:
     cancel = asyncio.Event()
 
