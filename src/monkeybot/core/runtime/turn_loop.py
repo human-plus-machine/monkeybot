@@ -626,6 +626,7 @@ async def _consume_provider_stream_body(
     transcript_writer: TranscriptWriter | None,
     vertex_google_search: bool,
     stream_mapper: ProviderStreamMapper,
+    cancelled: asyncio.Event | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Consume provider stream, write response transcript, fire after-response hook.
 
@@ -655,6 +656,10 @@ async def _consume_provider_stream_body(
                 )
             ) as stream:
                 async for ev in stream:
+                    # Stop mid-token-stream when POST /cancel sets the event —
+                    # otherwise Stop only takes effect after the full LLM call.
+                    if cancelled is not None and cancelled.is_set():
+                        raise asyncio.CancelledError
                     if isinstance(ev, UsageEvent):
                         _merge_usage_event(usage, ev)
                         usage.cost_usd += estimate_cost(
@@ -803,6 +808,7 @@ async def _stream_provider_turn(
     hook_manager: HookManager | None,
     transcript_writer: TranscriptWriter | None,
     vertex_google_search: bool,
+    cancelled: asyncio.Event | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Stream provider events; fill ``state.pending`` / text fields. May set action=return."""
     await _write_transcript_provider_request(state, transcript_writer=transcript_writer)
@@ -815,6 +821,7 @@ async def _stream_provider_turn(
         transcript_writer=transcript_writer,
         vertex_google_search=vertex_google_search,
         stream_mapper=stream_mapper,
+        cancelled=cancelled,
     ):
         yield evt
 
@@ -1092,6 +1099,7 @@ async def _run_inner_core(
                 hook_manager=hook_manager,
                 transcript_writer=transcript_writer,
                 vertex_google_search=vertex_google_search,
+                cancelled=cancelled,
             ):
                 yield evt
             if state.action == "return":
