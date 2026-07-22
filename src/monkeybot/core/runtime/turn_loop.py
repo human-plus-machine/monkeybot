@@ -751,10 +751,39 @@ async def _consume_provider_stream_body(
     except asyncio.CancelledError:
         for aev in stream_mapper.finish():
             yield aev
+        _sync_stream_mapper_text(state, stream_mapper)
+        logger.info(
+            "provider stream cancelled %s",
+            kv(
+                request_id=state.ctx.request_id,
+                thread_id=state.ctx.thread_id,
+                turn=state.turn_index,
+                partial_chars=len(state.assistant_text or ""),
+                had_thinking=bool((state.thinking_text or "").strip()),
+            ),
+        )
+        if transcript_writer is not None:
+            await transcript_writer.write_provider_response(
+                request_id=state.ctx.request_id,
+                inner_turn=state.turn_index,
+                model=state.ctx.model,
+                text=state.assistant_text,
+                thinking=state.thinking_text,
+                tool_requests=[],
+                usage={
+                    "input_tokens": llm_input,
+                    "output_tokens": llm_output,
+                    "cached_tokens": llm_cached,
+                    "cache_read_tokens": llm_cache_read,
+                    "cache_creation_tokens": llm_cache_creation,
+                },
+            )
         await _fire_after_provider_response(
             hook_manager,
             ctx=state.ctx,
             inner_turn=state.turn_index,
+            assistant_text=state.assistant_text,
+            thinking_text=state.thinking_text,
             provider_error="Request cancelled",
         )
         yield Error(request_id=state.ctx.request_id, error="Request cancelled")
@@ -764,18 +793,22 @@ async def _consume_provider_stream_body(
     except Exception as exc:
         for aev in stream_mapper.finish():
             yield aev
+        _sync_stream_mapper_text(state, stream_mapper)
         logger.exception(
             "provider stream failed %s",
             kv(
                 request_id=state.ctx.request_id,
                 thread_id=state.ctx.thread_id,
                 model=state.ctx.model,
+                partial_chars=len(state.assistant_text or ""),
             ),
         )
         await _fire_after_provider_response(
             hook_manager,
             ctx=state.ctx,
             inner_turn=state.turn_index,
+            assistant_text=state.assistant_text,
+            thinking_text=state.thinking_text,
             provider_error=str(exc),
         )
         yield Error(request_id=state.ctx.request_id, error=str(exc))
@@ -798,6 +831,48 @@ def _thinking_block(state: _TurnState) -> ContentBlock | None:
         thinking=raw,
         signature=state.thinking_signature or "",
     )
+
+
+def _sync_stream_mapper_text(state: _TurnState, stream_mapper: ProviderStreamMapper) -> None:
+    """Copy streamed text/thinking into turn state after an abort mid-stream.
+
+    Does not copy ``pending`` tool calls — incomplete ToolRequests without
+    responses would break history integrity.
+    """
+    state.assistant_text = stream_mapper.assistant_text
+    state.thinking_text = stream_mapper.thinking_text
+    state.thinking_signature = stream_mapper.thinking_signature
+    state.stream_truncated = stream_mapper.stream_truncated
+
+
+async def _persist_partial_assistant_on_abort(
+    state: _TurnState,
+    *,
+    history: HistoryStore,
+    last_assistant: list[str],
+) -> None:
+    """Persist already-streamed assistant text so Stop/errors keep model context.
+
+    Early ``action=\"return\"`` skips ``_handle_empty_or_final_text``, so cancel
+    must write here — otherwise the user sees a partial reply that history
+    never records.
+    """
+    cleaned = (state.assistant_text or "").strip()
+    assist_blocks: list[ContentBlock] = []
+    thinking = _thinking_block(state)
+    if thinking is not None:
+        assist_blocks.append(thinking)
+    if cleaned:
+        assist_blocks.append(Text(text=cleaned))
+    if not assist_blocks:
+        return
+    await history.append(
+        state.ctx.thread_id,
+        Message(role="assistant", content=assist_blocks),
+    )
+    if cleaned:
+        last_assistant[0] = cleaned
+        state.turn_output_text = cleaned
 
 
 async def _stream_provider_turn(
@@ -1103,6 +1178,11 @@ async def _run_inner_core(
             ):
                 yield evt
             if state.action == "return":
+                # Cancel/error mid-stream skips _handle_empty_or_final_text —
+                # persist any text already shown to the user before exiting.
+                await _persist_partial_assistant_on_abort(
+                    state, history=history, last_assistant=last_assistant
+                )
                 return
             state.action = None
 

@@ -774,12 +774,13 @@ async def test_run_cancels_mid_provider_text_stream() -> None:
             yield TextDelta(text="world — should not appear")
             yield Done()
 
+    hist = FakeHistory()
     events = []
     async for e in run(
         "u",
         _ctx(),
         provider=CancelAfterFirstDelta([[]]),
-        history=FakeHistory(),
+        history=hist,
         inspectors=[],
         tool_executor=RecordingExecutor(),
         cancelled=cancel,
@@ -791,6 +792,9 @@ async def test_run_cancels_mid_provider_text_stream() -> None:
     assert deltas == ["Hello "]
     assert any(isinstance(e, Error) and "cancelled" in e.error.lower() for e in events)
     assert isinstance(events[-1], TurnComplete)
+    # Partial reply must land in history so follow-ups see what the user saw.
+    assert [m.role for m in hist.rows] == ["user", "assistant"]
+    assert _flatten_text_from_message(hist.rows[1]) == "Hello"
 
 
 @pytest.mark.asyncio
