@@ -194,11 +194,15 @@ def test_gemini_binary_thought_signature_roundtrip() -> None:
     """Opaque binary signatures must survive normalize → store → Part replay."""
     import base64
 
-    from monkeybot.providers.gemini import _normalize_signature, _signature_wire_bytes
+    from monkeybot.providers.gemini import (
+        _SIGNATURE_B64_PREFIX,
+        _normalize_signature,
+        _signature_wire_bytes,
+    )
 
     raw = bytes([0xFF, 0x01, 0x02, 0xFE, 0xAB, 0xCD, 0x00, 0x7F])
     stored = _normalize_signature(raw)
-    assert stored == base64.b64encode(raw).decode("ascii")
+    assert stored == _SIGNATURE_B64_PREFIX + base64.b64encode(raw).decode("ascii")
     assert _signature_wire_bytes(stored) == raw
 
     rest = [
@@ -220,6 +224,28 @@ def test_gemini_binary_thought_signature_roundtrip() -> None:
     assert fc.function_call is not None
     assert fc.function_call.name == "list_skills"
     assert getattr(fc, "thought_signature", None) == raw
+
+
+def test_gemini_signature_prefix_and_legacy_paths() -> None:
+    """b64: marks new binary storage; unprefixed base64 still replays old opaque sigs."""
+    import base64
+
+    from monkeybot.providers.gemini import (
+        _SIGNATURE_B64_PREFIX,
+        _normalize_signature,
+        _signature_wire_bytes,
+    )
+
+    # Plain legacy/test signatures (not valid std base64) round-trip as UTF-8.
+    assert _signature_wire_bytes("sig-tool") == b"sig-tool"
+
+    raw = bytes([0xFF, 0x00, 0x01, 0xFE])
+    assert _normalize_signature(raw).startswith(_SIGNATURE_B64_PREFIX)
+
+    # Pre-prefix storage: old normalize base64-encoded non-UTF-8 bytes with no prefix.
+    legacy_b64 = base64.b64encode(raw).decode("ascii")
+    assert not legacy_b64.startswith(_SIGNATURE_B64_PREFIX)
+    assert _signature_wire_bytes(legacy_b64) == raw
 
 
 def test_gemini_multistep_synthetic_on_each_model_tool_turn() -> None:

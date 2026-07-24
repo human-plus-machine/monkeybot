@@ -35,6 +35,10 @@ from monkeybot.providers.sampling import resolve_model_sampling
 
 THOUGHT_SIGNATURE_KEY = "thoughtSignature"
 SYNTHETIC_THOUGHT_SIGNATURE = "skip_thought_signature_validator"
+# Prefix marks signatures stored as base64 by :func:`_normalize_signature` so
+# replay can distinguish them from legacy plain UTF-8 strings that happen to
+# be valid base64 alphabet (would otherwise silently mis-decode).
+_SIGNATURE_B64_PREFIX = "b64:"
 
 _log = logging.getLogger(__name__)
 
@@ -239,18 +243,18 @@ def _normalize_signature(value: Any) -> str | None:
     """Coerce SDK ``thought_signature`` (bytes or str) to a JSON-safe string.
 
     The google-genai SDK exposes signatures as ``bytes``. Real Gemini thought
-    signatures are opaque binary, so we always store ``bytes`` as standard
-    base64 (ASCII). Passing a base64 *string* into ``Part(thought_signature=...)``
-    makes the SDK base64-decode it; passing ``bytes`` uses them as-is — so
-    replay must restore the original byte sequence (see
-    :func:`_signature_wire_bytes`).
+    signatures are opaque binary, so we always store ``bytes`` as prefixed
+    standard base64 (``b64:…``). Passing a base64 *string* into
+    ``Part(thought_signature=...)`` makes the SDK base64-decode it; passing
+    ``bytes`` uses them as-is — so replay must restore the original byte
+    sequence (see :func:`_signature_wire_bytes`).
     """
     if value is None:
         return None
     if isinstance(value, bytes):
         if not value:
             return None
-        return base64.b64encode(value).decode("ascii")
+        return _SIGNATURE_B64_PREFIX + base64.b64encode(value).decode("ascii")
     if isinstance(value, str):
         return value or None
     return None
@@ -261,14 +265,31 @@ def _signature_wire_bytes(sig: str) -> bytes:
 
     - Synthetic skip tokens must be sent as literal UTF-8 bytes (the SDK
       base64-decodes *strings*, which would corrupt the sentinel).
-    - Production signatures are base64 from :func:`_normalize_signature`.
-    - Legacy/test values stored as plain UTF-8 text fall back to ``encode``.
+    - Prefixed (``b64:``) values from :func:`_normalize_signature` decode as
+      base64 payload.
+    - Unprefixed values: try strict base64 (pre-prefix storage / older PR
+      builds), else legacy/test plain UTF-8 text.
     """
     if sig == SYNTHETIC_THOUGHT_SIGNATURE:
         return sig.encode("utf-8")
+    if sig.startswith(_SIGNATURE_B64_PREFIX):
+        payload = sig[len(_SIGNATURE_B64_PREFIX) :]
+        try:
+            return base64.b64decode(payload, validate=True)
+        except binascii.Error:
+            _log.debug(
+                "Gemini thought signature has b64: prefix but failed to decode; "
+                "using UTF-8 bytes %s",
+                kv(sig_len=len(sig)),
+            )
+            return sig.encode("utf-8")
     try:
         return base64.b64decode(sig, validate=True)
     except binascii.Error:
+        _log.debug(
+            "Gemini thought signature is not base64; using UTF-8 bytes (legacy/plain) %s",
+            kv(sig_len=len(sig)),
+        )
         return sig.encode("utf-8")
 
 
@@ -303,6 +324,10 @@ def _messages_to_contents(rest: Sequence[Message]) -> list[Any]:
     # No clear user-text boundary (e.g. repaired tool-only history): treat the
     # whole transcript as the active loop so we still attach signatures / synthetic.
     if active_start is None and rest:
+        _log.debug(
+            "Gemini history has no user-loop boundary; treating full history as active loop %s",
+            kv(n_messages=len(rest)),
+        )
         active_start = 0
 
     contents: list[Any] = []
@@ -747,7 +772,9 @@ class GeminiProvider:
         if ev is not None:
             yield ev
 
-        for call_id in sorted(pending_tools.keys()):
-            yield pending_tools[call_id]
+        # Insertion order = provider stream arrival order. Do not sort by
+        # call_id: Gemini thought_signature must stay on the first functionCall.
+        for tool_call in pending_tools.values():
+            yield tool_call
 
         yield Done(truncated=truncated)
