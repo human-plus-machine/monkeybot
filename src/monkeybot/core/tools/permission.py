@@ -61,7 +61,10 @@ class PermissionRuleset:
 def resource_for_call(call: InspectorToolCall) -> str:
     """Normalize a tool call into a single resource string for pattern matching."""
     if call.name == "run_command":
-        line = norm_run_command_line(call.args)
+        try:
+            line = norm_run_command_line(call.args)
+        except ValueError:
+            line = None
         if line:
             return line
     path = call.args.get("path")
