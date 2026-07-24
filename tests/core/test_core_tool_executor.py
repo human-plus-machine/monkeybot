@@ -1209,15 +1209,16 @@ async def test_task_tool_parent_cancel_stops_hanging_subagent(tmp_path: Path, mo
 
 @pytest.mark.asyncio
 async def test_write_spill_with_inventory_writes_full_payload(tmp_path: Path) -> None:
-    from monkeybot.core.tools.core_tool_executor import _write_spill_with_inventory
+    from monkeybot.core.tools.spill_inventory import write_spill_with_inventory
 
     body = "x" * 25_000
-    out = _write_spill_with_inventory(body, tmp_path, "th1", "call-1")
+    out = write_spill_with_inventory(body, tmp_path, "th1", "call-1", tool_name="run_command")
     spill = tmp_path / ".monkeybot" / "spill" / "th1" / "call-1.txt"
     assert spill.read_text(encoding="utf-8") == body
     assert body not in out
     assert "Spill inventory" in out
     assert "25000 total chars" in out
+    assert "Preview:" in out
     assert ".monkeybot/spill/th1/call-1.txt" in out
 
 
@@ -1241,7 +1242,8 @@ async def test_list_skills_spills_large_json(tmp_path: Path) -> None:
     out, err = unwrap_tool_execution_result(await ex.execute(call=ToolCall(call_id="c-spill", name="list_skills", args={}), ctx=ctx))
     assert err is None and out is not None
     assert "Spill inventory" in out
-    assert len(out) < 2000
+    assert "Preview:" in out
+    assert len(out) < 4000
     spill = root / ".monkeybot" / "spill" / "t" / "c-spill.txt"
     assert spill.is_file()
     raw = spill.read_text(encoding="utf-8")
