@@ -160,6 +160,90 @@ def test_gemini_replay_synthetic_signature_when_missing_on_first_active_tool_cal
     assert _has_thought_signature(fc_parts[0]) == SYNTHETIC_THOUGHT_SIGNATURE
 
 
+def test_gemini_tool_result_with_folded_text_does_not_strip_prior_signatures() -> None:
+    """System-context text folded into a tool-result user turn must not reset the loop."""
+    rest = [
+        Message(role="user", content=[Text(text="list skills")]),
+        Message(
+            role="assistant",
+            content=[
+                ToolRequest(
+                    id="c1",
+                    name="list_skills",
+                    args={},
+                    metadata={THOUGHT_SIGNATURE_KEY: "sig-keep"},
+                )
+            ],
+        ),
+        Message(
+            role="user",
+            content=[
+                ToolResponse(id="c1", tool_name="list_skills", result=[Text(text="ok")]),
+                Text(text="## System context update\nnote"),
+            ],
+        ),
+    ]
+    contents = _messages_to_contents(rest)
+    fc = contents[1].parts[0]
+    assert fc.function_call is not None
+    assert fc.function_call.name == "list_skills"
+    assert _has_thought_signature(fc) == "sig-keep"
+
+
+def test_gemini_binary_thought_signature_roundtrip() -> None:
+    """Opaque binary signatures must survive normalize → store → Part replay."""
+    import base64
+
+    from monkeybot.providers.gemini import _normalize_signature, _signature_wire_bytes
+
+    raw = bytes([0xFF, 0x01, 0x02, 0xFE, 0xAB, 0xCD, 0x00, 0x7F])
+    stored = _normalize_signature(raw)
+    assert stored == base64.b64encode(raw).decode("ascii")
+    assert _signature_wire_bytes(stored) == raw
+
+    rest = [
+        Message(role="user", content=[Text(text="hi")]),
+        Message(
+            role="assistant",
+            content=[
+                ToolRequest(
+                    id="c1",
+                    name="list_skills",
+                    args={},
+                    metadata={THOUGHT_SIGNATURE_KEY: stored},
+                )
+            ],
+        ),
+    ]
+    contents = _messages_to_contents(rest)
+    fc = contents[1].parts[0]
+    assert fc.function_call is not None
+    assert fc.function_call.name == "list_skills"
+    assert getattr(fc, "thought_signature", None) == raw
+
+
+def test_gemini_multistep_synthetic_on_each_model_tool_turn() -> None:
+    """Each step's first functionCall needs a signature (Gemini 3 sequential FC)."""
+    rest = [
+        Message(role="user", content=[Text(text="do things")]),
+        Message(
+            role="assistant",
+            content=[ToolRequest(id="c1", name="echo", args={"x": 1})],
+        ),
+        Message(
+            role="user",
+            content=[ToolResponse(id="c1", tool_name="echo", result=[Text(text="ok")])],
+        ),
+        Message(
+            role="assistant",
+            content=[ToolRequest(id="c2", name="list_skills", args={})],
+        ),
+    ]
+    contents = _messages_to_contents(rest)
+    assert _has_thought_signature(contents[1].parts[0]) == SYNTHETIC_THOUGHT_SIGNATURE
+    assert _has_thought_signature(contents[3].parts[0]) == SYNTHETIC_THOUGHT_SIGNATURE
+
+
 def test_gemini_replay_thinking_dropped_outside_active_loop() -> None:
     rest = [
         Message(role="user", content=[Text(text="first")]),

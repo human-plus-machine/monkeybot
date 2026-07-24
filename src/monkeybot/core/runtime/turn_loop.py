@@ -1165,7 +1165,9 @@ async def _append_tool_requests_and_dispatch(
     Yields tool-batch events. On abort sets ``state.action = "return"`` so the
     caller can exit the core loop.
     """
-    ordered = sorted(state.pending.values(), key=lambda c: c.call_id)
+    # Preserve stream insertion order so Gemini thought_signature stays on the
+    # first functionCall part (parallel calls: only the first carries a sig).
+    ordered = list(state.pending.values())
     assist_blocks: list[ContentBlock] = []
     thinking = _thinking_block(state)
     if thinking is not None:
