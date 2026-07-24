@@ -104,19 +104,44 @@ class TodoListStore:
 
     async def add(self, text: str) -> TodoItem | str:
         """Append a pending item. Returns the item or an error message string."""
-        cleaned = text.strip()
-        if not cleaned:
-            return "todo_list add requires non-empty text."
-        if len(cleaned) > _MAX_TEXT_CHARS:
-            return f"todo_list text exceeds {_MAX_TEXT_CHARS} characters."
-        if len(self._items) >= _MAX_ITEMS:
-            return f"todo_list is full (max {_MAX_ITEMS} items); complete or remove some first."
-        item = TodoItem(id=f"t{self._next_n}", text=cleaned, status="pending")
-        self._next_n += 1
-        self._items.append(item)
-        self._log_mutate("add", item.id)
+        result = await self.add_many([text])
+        if isinstance(result, str):
+            return result
+        return result[0]
+
+    async def add_many(self, texts: list[str]) -> list[TodoItem] | str:
+        """Append one or more pending items atomically.
+
+        Validates the full batch before mutating. On success returns the new
+        items (in order); on failure returns an error string and leaves the
+        list unchanged.
+        """
+        if not texts:
+            return "todo_list add requires non-empty text (string or non-empty list)."
+        cleaned_batch: list[str] = []
+        for raw in texts:
+            cleaned = str(raw).strip()
+            if not cleaned:
+                return "todo_list add requires non-empty text."
+            if len(cleaned) > _MAX_TEXT_CHARS:
+                return f"todo_list text exceeds {_MAX_TEXT_CHARS} characters."
+            cleaned_batch.append(cleaned)
+        if len(self._items) + len(cleaned_batch) > _MAX_ITEMS:
+            return (
+                f"todo_list would exceed max {_MAX_ITEMS} items "
+                f"({len(self._items)} existing + {len(cleaned_batch)} new); "
+                "complete or remove some first."
+            )
+        added: list[TodoItem] = []
+        for cleaned in cleaned_batch:
+            item = TodoItem(id=f"t{self._next_n}", text=cleaned, status="pending")
+            self._next_n += 1
+            self._items.append(item)
+            added.append(item)
+        ids = ",".join(item.id for item in added)
+        self._log_mutate("add", ids)
         await self._mirror_to_disk()
-        return item
+        return added
 
     async def complete(self, item_id: str) -> TodoItem | str:
         """Mark an item done. Returns the item or an error message string."""
