@@ -6,7 +6,13 @@ titles like ``Shell  ls`` do not drift between surfaces.
 
 from __future__ import annotations
 
+import logging
+
+from monkeybot.core.logging_utils import kv
+from monkeybot.core.tools.inspector import coerce_run_command_argv
 from monkeybot.core.tools.tool_kind import tool_kind_label
+
+logger = logging.getLogger(__name__)
 
 SUBAGENT_HINT_MAX = 60
 TITLE_HINT_MAX = 72
@@ -26,9 +32,13 @@ def truncate_subagent_hint(text: str) -> str:
 
 def tool_hint(args: dict[str, object]) -> str:
     """Summary of tool args for status lines and wire titles."""
-    argv = args.get("argv")
-    if isinstance(argv, list) and argv:
-        return collapse_hint(" ".join(str(x) for x in argv))
+    try:
+        argv = coerce_run_command_argv(args.get("argv"))
+    except ValueError as e:
+        logger.debug("tool_hint: argv coerce failed %s", kv(error=str(e)))
+        argv = None
+    if argv:
+        return collapse_hint(" ".join(argv))
 
     cmd = args.get("command")
     if isinstance(cmd, str) and cmd.strip():

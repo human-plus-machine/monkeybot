@@ -92,6 +92,32 @@ async def test_inspector_argv_used_for_deny_check(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_inspector_argv_json_string_coerced_for_deny_check(tmp_path: Path) -> None:
+    """Stringified argv (LLM quirk) still reaches deny-pattern checks."""
+    p = _write_policy(tmp_path)
+    inspector = CommandTierInspector(p)
+    call = InspectorToolCall(
+        "1",
+        "run_command",
+        {"argv": '["curl", "http://x"]'},
+    )
+    d = await inspector.check(call, _minimal_ctx())
+    assert d.kind == "deny"
+    assert d.message == "denied by run_command deny_patterns policy"
+
+
+@pytest.mark.asyncio
+async def test_inspector_argv_invalid_string_clear_error(tmp_path: Path) -> None:
+    p = _write_policy(tmp_path)
+    inspector = CommandTierInspector(p)
+    call = InspectorToolCall("1", "run_command", {"argv": "git status"})
+    d = await inspector.check(call, _minimal_ctx())
+    assert d.kind == "deny"
+    assert d.message is not None
+    assert "argv must be an array" in d.message
+
+
+@pytest.mark.asyncio
 async def test_inspector_non_run_command_bypassed(tmp_path: Path) -> None:
     p = _write_policy(tmp_path)
     inspector = CommandTierInspector(p)

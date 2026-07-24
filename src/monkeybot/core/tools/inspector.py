@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import shlex
 from dataclasses import dataclass
@@ -91,12 +92,59 @@ def _optional_nonempty_str_list(path: Path, data: dict[str, Any], key: str) -> l
     return out
 
 
+def coerce_run_command_argv(argv_raw: object) -> list[str] | None:
+    """Normalize ``argv`` to a non-empty ``list[str]``.
+
+    Accepts a real list or a JSON-encoded list string (common LLM tool-arg quirk).
+    Returns ``None`` when ``argv`` is absent or empty.
+    Raises ``ValueError`` when ``argv`` is present but not coercible to a list.
+    """
+    if argv_raw is None:
+        return None
+
+    if isinstance(argv_raw, list):
+        if not argv_raw:
+            return None
+        return [str(x) for x in argv_raw]
+
+    if isinstance(argv_raw, str):
+        stripped = argv_raw.strip()
+        if not stripped:
+            return None
+        if not stripped.startswith("["):
+            raise ValueError(
+                "argv must be an array (or JSON array string), got string"
+            )
+        try:
+            parsed: object = json.loads(stripped)
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                "argv must be an array (or JSON array string), "
+                f"got string that is not valid JSON: {e}"
+            ) from e
+        if isinstance(parsed, list) and parsed:
+            return [str(x) for x in parsed]
+        kind = type(parsed).__name__
+        raise ValueError(
+            "argv must be a non-empty array (or JSON array string), "
+            f"got JSON {kind}"
+        )
+
+    raise ValueError(
+        "argv must be an array (or JSON array string), "
+        f"got {type(argv_raw).__name__}"
+    )
+
+
 def norm_run_command_line(args: dict[str, object]) -> str | None:
-    """Build one line for deny-regex checks (mirrors ``run_command`` argv shapes)."""
-    argv_raw = args.get("argv")
-    if isinstance(argv_raw, list) and argv_raw:
-        parts = [str(x) for x in argv_raw]
-        return shlex.join(parts)
+    """Build one line for deny-regex checks (mirrors ``run_command`` argv shapes).
+
+    Raises ``ValueError`` when ``argv`` is present but not coercible (see
+    ``coerce_run_command_argv``).
+    """
+    argv = coerce_run_command_argv(args.get("argv"))
+    if argv:
+        return shlex.join(argv)
 
     cmd = args.get("command")
     if isinstance(cmd, str) and cmd.strip():
@@ -197,7 +245,10 @@ class CommandTierInspector:
         if call.name != "run_command":
             return Decision(kind="allow")
 
-        cmd_norm = norm_run_command_line(call.args)
+        try:
+            cmd_norm = norm_run_command_line(call.args)
+        except ValueError as e:
+            return Decision(kind="deny", message=str(e))
         if not cmd_norm:
             return Decision(
                 kind="deny",

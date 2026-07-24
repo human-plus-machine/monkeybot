@@ -70,6 +70,7 @@ from monkeybot.core.subagents.subagent_proto import (
     resolve_task_agent_md_path,
     spawn_subagent,
 )
+from monkeybot.core.tools.inspector import coerce_run_command_argv
 from monkeybot.core.tools.sandbox_executor import SandboxConfig, SandboxExecutor
 from monkeybot.core.tools.spill_inventory import spill_inventory_note, spill_min_chars_from_env
 from monkeybot.core.tools.terminal import (
@@ -332,9 +333,8 @@ def _argv_from_command_string(stripped: str) -> tuple[str, list[str]]:
 
 
 def _parse_run_command(args: dict[str, Any]) -> tuple[str, list[str]]:
-    argv_raw = args.get("argv")
-    if isinstance(argv_raw, list) and argv_raw:
-        argv = [str(x) for x in argv_raw]
+    argv = coerce_run_command_argv(args.get("argv"))
+    if argv:
         return argv[0], argv[1:]
 
     cmd = args.get("command")

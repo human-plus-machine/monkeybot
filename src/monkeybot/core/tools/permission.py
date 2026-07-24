@@ -61,7 +61,14 @@ class PermissionRuleset:
 def resource_for_call(call: InspectorToolCall) -> str:
     """Normalize a tool call into a single resource string for pattern matching."""
     if call.name == "run_command":
-        line = norm_run_command_line(call.args)
+        try:
+            line = norm_run_command_line(call.args)
+        except ValueError as e:
+            logger.debug(
+                "permission: argv coerce failed for resource string %s",
+                kv(tool=call.name, call_id=call.call_id, error=str(e)),
+            )
+            line = None
         if line:
             return line
     path = call.args.get("path")
