@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from monkeybot.core.llm.provider import GroundingEvent, UsageEvent
+from monkeybot.core.llm.provider import GroundingEvent, Message, UsageEvent
 from monkeybot.core.types.interfaces import LLMError
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers.gemini import (
@@ -104,13 +104,14 @@ def test_grounding_metadata_to_dict_extracts_sources_and_queries() -> None:
 def _install_fake_google_genai(
     monkeypatch: pytest.MonkeyPatch,
     *,
-    stream_chunks: list[Any] | None,
+    stream_chunks: list[Any] | None = None,
+    count_tokens_error: BaseException | None = None,
 ) -> dict[str, Any]:
-    captured_config: dict[str, Any] = {}
+    captured: dict[str, Any] = {}
 
     class FakeModels:
         async def generate_content_stream(self, **kwargs: Any) -> Any:
-            captured_config["config"] = kwargs["config"]
+            captured["config"] = kwargs["config"]
 
             async def _gen() -> AsyncIterator[Any]:
                 if stream_chunks is None:
@@ -121,8 +122,17 @@ def _install_fake_google_genai(
 
             return _gen()
 
+        async def count_tokens(self, **kwargs: Any) -> Any:
+            if count_tokens_error is not None:
+                raise count_tokens_error
+            captured["model"] = kwargs["model"]
+            captured["contents"] = kwargs["contents"]
+            captured["config"] = kwargs.get("config")
+            return types.SimpleNamespace(total_tokens=42)
+
     class FakeClient:
-        def __init__(self, **_kwargs: Any) -> None:
+        def __init__(self, **client_kwargs: Any) -> None:
+            captured["client_kwargs"] = client_kwargs
             self.aio = types.SimpleNamespace(models=FakeModels())
 
     fake_google = ModuleType("google")
@@ -130,17 +140,21 @@ def _install_fake_google_genai(
     fake_types = ModuleType("google.genai.types")
     fake_genai.Client = FakeClient  # type: ignore[attr-defined]
     fake_types.GenerateContentConfig = lambda **kw: kw  # type: ignore[attr-defined]
+    fake_types.CountTokensConfig = lambda **kw: kw  # type: ignore[attr-defined]
+    fake_types.GenerationConfig = lambda **kw: kw  # type: ignore[attr-defined]
     fake_types.ThinkingConfig = lambda **kw: kw  # type: ignore[attr-defined]
     fake_types.Tool = lambda **kw: kw  # type: ignore[attr-defined]
     fake_types.GoogleSearch = lambda **kw: kw  # type: ignore[attr-defined]
     fake_types.FunctionDeclaration = lambda **kw: kw  # type: ignore[attr-defined]
+    fake_types.Content = lambda **kw: kw  # type: ignore[attr-defined]
+    fake_types.Part = lambda **kw: kw  # type: ignore[attr-defined]
     fake_google.genai = fake_genai  # type: ignore[attr-defined]
     fake_genai.types = fake_types  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "google", fake_google)
     monkeypatch.setitem(sys.modules, "google.genai", fake_genai)
     monkeypatch.setitem(sys.modules, "google.genai.types", fake_types)
     monkeypatch.setenv("VERTEX_AI_PROJECT_ID", "p")
-    return captured_config
+    return captured
 
 
 @pytest.mark.asyncio
@@ -211,6 +225,67 @@ async def test_stream_omits_google_search_tool_when_disabled(monkeypatch: pytest
     [ev async for ev in provider.stream([], [], model="gemini-2.5-flash")]
 
     assert "tools" not in captured_config["config"]
+
+
+@pytest.mark.asyncio
+async def test_count_tokens_developer_api_folds_system_omits_unsupported_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AI Studio (api_key) CountTokensConfig rejects system_instruction/tools/gen_cfg."""
+    captured = _install_fake_google_genai(monkeypatch)
+    provider = GeminiProvider(api_key="test-key")
+    messages = [
+        Message.text("system", "You are helpful."),
+        Message.text("user", "hi"),
+    ]
+    tool = ToolDef("read_file", "Read a file", {"type": "object", "properties": {}})
+
+    n = await provider.count_input_tokens(messages, [tool], model="gemini-2.5-flash")
+
+    assert n == 42
+    assert captured["client_kwargs"].get("api_key") == "test-key"
+    assert captured["config"] is None
+    contents = captured["contents"]
+    assert contents[0]["role"] == "user"
+    assert contents[0]["parts"][0]["text"] == "You are helpful."
+
+
+@pytest.mark.asyncio
+async def test_count_tokens_vertex_keeps_system_instruction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = _install_fake_google_genai(monkeypatch)
+    provider = GeminiProvider()
+    messages = [
+        Message.text("system", "You are helpful."),
+        Message.text("user", "hi"),
+    ]
+
+    n = await provider.count_input_tokens(messages, [], model="gemini-2.5-flash")
+
+    assert n == 42
+    assert captured["client_kwargs"].get("vertexai") is True
+    assert captured["config"]["system_instruction"] == "You are helpful."
+    assert "generation_config" in captured["config"]
+
+
+@pytest.mark.asyncio
+async def test_count_tokens_error_logs_before_wrapping(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _install_fake_google_genai(monkeypatch, count_tokens_error=RuntimeError("boom"))
+
+    provider = GeminiProvider()
+    with (
+        caplog.at_level("WARNING", logger="monkeybot.providers.gemini"),
+        pytest.raises(LLMError, match="boom"),
+    ):
+        await provider.count_input_tokens([], [], model="gemini-2.5-flash")
+
+    assert "Gemini count_tokens error" in caplog.text
+    assert "provider=gemini" in caplog.text
+    assert "model=gemini-2.5-flash" in caplog.text
 
 
 @pytest.mark.asyncio

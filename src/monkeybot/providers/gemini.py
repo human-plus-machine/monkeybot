@@ -484,45 +484,58 @@ class GeminiProvider:
                 "google-genai is required for GeminiProvider. Install with: uv sync (monkeybot dependencies)."
             ) from exc
 
-        temperature = float(self._temperature)
-        max_tokens = int(self._max_tokens)
-        thinking_budget = _resolve_thinking_budget(
-            self._thinking_budget,
-            override=thinking_budget,
-            messages=messages,
-            tools=tools,
-        )
-
         system_instruction, rest = _split_system_and_rest(messages)
         contents = _messages_to_contents(rest)
-        decls = _tool_defs_to_declarations(tools)
-
+        # Developer API CountTokensConfig rejects system_instruction/tools/gen_cfg; fold system into contents.
         count_cfg_kwargs: dict[str, Any] = {}
-        if system_instruction:
-            count_cfg_kwargs["system_instruction"] = system_instruction
-        count_tools: list[Any] = []
-        if decls:
-            count_tools.append(types.Tool(function_declarations=decls))
-        if vertex_google_search:
-            count_tools.append(types.Tool(google_search=types.GoogleSearch()))
-        if count_tools:
-            count_cfg_kwargs["tools"] = count_tools
+        if self._api_key:
+            if system_instruction:
+                contents = [
+                    types.Content(role="user", parts=[types.Part(text=system_instruction)]),
+                    *contents,
+                ]
+        else:
+            if system_instruction:
+                count_cfg_kwargs["system_instruction"] = system_instruction
+            decls = _tool_defs_to_declarations(tools)
+            count_tools: list[Any] = []
+            if decls:
+                count_tools.append(types.Tool(function_declarations=decls))
+            if vertex_google_search:
+                count_tools.append(types.Tool(google_search=types.GoogleSearch()))
+            if count_tools:
+                count_cfg_kwargs["tools"] = count_tools
+            budget = _resolve_thinking_budget(
+                self._thinking_budget,
+                override=thinking_budget,
+                messages=messages,
+                tools=tools,
+            )
+            gen_cfg_kwargs: dict[str, Any] = {
+                "temperature": float(self._temperature),
+                "max_output_tokens": int(self._max_tokens),
+            }
+            if budget != -1:
+                gen_cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=budget)
+            count_cfg_kwargs["generation_config"] = types.GenerationConfig(**gen_cfg_kwargs)
 
-        gen_cfg_kwargs: dict[str, Any] = {
-            "temperature": temperature,
-            "max_output_tokens": max_tokens,
-        }
-        if thinking_budget != -1:
-            gen_cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=thinking_budget)
-        count_cfg_kwargs["generation_config"] = types.GenerationConfig(**gen_cfg_kwargs)
-
-        ct_cfg = types.CountTokensConfig(**count_cfg_kwargs)
+        ct_cfg = types.CountTokensConfig(**count_cfg_kwargs) if count_cfg_kwargs else None
         client = self._client(model_param)
-        resp = await client.aio.models.count_tokens(
-            model=model_param,
-            contents=contents,
-            config=ct_cfg,
-        )
+        try:
+            resp = await client.aio.models.count_tokens(
+                model=model_param,
+                contents=contents,
+                config=ct_cfg,
+            )
+        except LLMError:
+            raise
+        except Exception as exc:
+            _log.warning(
+                "Gemini count_tokens error %s",
+                kv(provider="gemini", model=model, n_messages=len(messages), n_tools=len(tools)),
+                exc_info=True,
+            )
+            raise LLMError(str(exc)) from exc
         return int(resp.total_tokens or 0)
 
     async def stream(
