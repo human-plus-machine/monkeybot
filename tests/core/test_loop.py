@@ -988,8 +988,12 @@ def test_chunk_tool_calls_groups_consecutive_parallel_safe() -> None:
 
 
 @pytest.mark.asyncio
-async def test_parallel_safe_tools_results_in_call_id_order() -> None:
-    """Parallel-safe read tools run concurrently; results persist in call_id order."""
+async def test_parallel_safe_tools_results_in_submission_order() -> None:
+    """Parallel-safe read tools run concurrently; results persist in provider order.
+
+    Order follows the stream (not wall-clock completion or call_id sort) so Gemini
+    thought_signature stays on the first functionCall part.
+    """
     delays = {"c1": 0.04, "a1": 0.01, "b1": 0.02}
     concurrent = {"n": 0, "max": 0}
     lock = asyncio.Lock()
@@ -1042,10 +1046,10 @@ async def test_parallel_safe_tools_results_in_call_id_order() -> None:
         if m.role == "user" and m.content and isinstance(m.content[0], ToolResponse)
     ]
     assert len(tool_resp_messages) == 1
-    assert [b.id for b in tool_resp_messages[0].content] == ["a1", "b1", "c1"]
+    assert [b.id for b in tool_resp_messages[0].content] == ["c1", "a1", "b1"]
 
     result_events = [e for e in events if isinstance(e, ToolCallResult)]
-    assert [e.result for e in result_events] == ["result:a1", "result:b1", "result:c1"]
+    assert [e.result for e in result_events] == ["result:c1", "result:a1", "result:b1"]
 
 
 @pytest.mark.asyncio
@@ -1749,13 +1753,13 @@ async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_parallel_task_results_appended_in_call_id_order() -> None:
-    """Parallel task calls must append to history in call_id order regardless of completion order.
+async def test_parallel_task_results_appended_in_submission_order() -> None:
+    """Parallel task calls append in provider stream order, not completion order.
 
-    The executor finishes b1 first, then a1, then c1 (reverse alphabetical).
-    History and ToolCallResult events must still appear in sorted call_id order: a1, b1, c1.
-    This guards against regressions where appends happen inside the async task (completion order)
-    instead of after asyncio.gather (submission/call_id order).
+    The executor finishes b1 first, then a1, then c1. History and ToolCallResult
+    events must still follow submission order (c1, a1, b1) so Gemini
+    functionResponse parts align with functionCall parts (thought_signature on
+    the first FC).
     """
     # Reverse-alphabetical finish order: b1 (0.01s) → a1 (0.02s) → c1 (0.05s)
     delays = {"c1": 0.05, "a1": 0.02, "b1": 0.01}
@@ -1805,16 +1809,15 @@ async def test_parallel_task_results_appended_in_call_id_order() -> None:
         "parallel task responses must be consolidated into one user Message"
     )
     consolidated = tool_resp_messages[0].content
-    assert [b.id for b in consolidated] == ["a1", "b1", "c1"], (
-        "tool result blocks must be in call_id order within the consolidated message"
+    assert [b.id for b in consolidated] == ["c1", "a1", "b1"], (
+        "tool result blocks must follow provider submission order"
     )
 
     result_events = [e for e in events if isinstance(e, ToolCallResult)]
     assert [e.tool for e in result_events] == ["task", "task", "task"]
-    # Results must contain the correct payloads tied to call_ids
     result_bodies = [e.result for e in result_events]
-    assert result_bodies == ["result:a1", "result:b1", "result:c1"], (
-        "ToolCallResult events must be emitted in call_id order"
+    assert result_bodies == ["result:c1", "result:a1", "result:b1"], (
+        "ToolCallResult events must be emitted in submission order"
     )
 
 
@@ -1860,8 +1863,8 @@ async def test_serial_mixed_tool_results_consolidated_into_one_user_message() ->
     consolidated = tool_resp_messages[0].content
     by_id = {b.id: b.tool_name for b in consolidated}
     assert by_id == {"a": "read_file", "b": "run_command"}
-    assert [b.id for b in consolidated] == sorted(by_id), (
-        "tool result blocks must be in call_id order within the consolidated message"
+    assert [b.id for b in consolidated] == ["b", "a"], (
+        "tool result blocks must follow provider submission order"
     )
 
 
@@ -2247,6 +2250,7 @@ async def test_system_prompt_snapshot_includes_skills_memory_and_attachments() -
 
 @pytest.mark.asyncio
 async def test_inspector_dispatches_per_tool_request_block_order() -> None:
+    """Inspectors see tools in provider stream order (not sorted by call_id)."""
     insp = OrderRecordingInspector()
     prov = FakeProvider(
         [
@@ -2283,7 +2287,7 @@ async def test_inspector_dispatches_per_tool_request_block_order() -> None:
         max_turns=4,
     ):
         pass
-    assert insp.seen_call_ids == ["a1", "m2", "z9"]
+    assert insp.seen_call_ids == ["z9", "a1", "m2"]
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import logging
 import os
@@ -33,6 +35,10 @@ from monkeybot.providers.sampling import resolve_model_sampling
 
 THOUGHT_SIGNATURE_KEY = "thoughtSignature"
 SYNTHETIC_THOUGHT_SIGNATURE = "skip_thought_signature_validator"
+# Prefix marks signatures stored as base64 by :func:`_normalize_signature` so
+# replay can distinguish them from legacy plain UTF-8 strings that happen to
+# be valid base64 alphabet (would otherwise silently mis-decode).
+_SIGNATURE_B64_PREFIX = "b64:"
 
 _log = logging.getLogger(__name__)
 
@@ -199,10 +205,19 @@ def _media_parts_from_blocks(blocks: Sequence[object]) -> list[Any]:
 
 
 def _is_user_loop_boundary(message: Message) -> bool:
-    """A user turn that carries at least one non-ToolResponse block opens an active loop."""
+    """A pure user turn (no tool results) opens an active thought-signature loop.
+
+    Gemini's turn boundary is the most recent user message that is *not* a
+    ``functionResponse`` turn. Mid-conversation system-context updates are often
+    folded into the trailing tool-result user message as extra ``Text`` blocks;
+    those must not reset the loop or we strip ``thoughtSignature`` from earlier
+    ``functionCall`` parts that Gemini still validates → 400 missing signature.
+    """
     if message.role != "user":
         return False
-    return any(not isinstance(b, ToolResponse) for b in message.content)
+    if any(isinstance(b, ToolResponse) for b in message.content):
+        return False
+    return bool(message.content)
 
 
 def _active_loop_start_index(messages: Sequence[Message]) -> int | None:
@@ -225,26 +240,57 @@ def _signature_from_metadata(metadata: dict[str, object] | None) -> str | None:
 
 
 def _normalize_signature(value: Any) -> str | None:
-    """Coerce SDK ``thought_signature`` (bytes or str) to a non-empty Python string.
+    """Coerce SDK ``thought_signature`` (bytes or str) to a JSON-safe string.
 
-    The google-genai pydantic model normalizes wire signatures to ``bytes``
-    using base64 decoding for string inputs. Round-tripping requires preserving
-    the original textual representation; we standardise on base64 strings when
-    we receive bytes that aren't valid UTF-8.
+    The google-genai SDK exposes signatures as ``bytes``. Real Gemini thought
+    signatures are opaque binary, so we always store ``bytes`` as prefixed
+    standard base64 (``b64:…``). Passing a base64 *string* into
+    ``Part(thought_signature=...)`` makes the SDK base64-decode it; passing
+    ``bytes`` uses them as-is — so replay must restore the original byte
+    sequence (see :func:`_signature_wire_bytes`).
     """
     if value is None:
         return None
     if isinstance(value, bytes):
-        try:
-            decoded = value.decode("utf-8")
-        except UnicodeDecodeError:
-            import base64
-
-            decoded = base64.b64encode(value).decode("ascii")
-        return decoded or None
+        if not value:
+            return None
+        return _SIGNATURE_B64_PREFIX + base64.b64encode(value).decode("ascii")
     if isinstance(value, str):
         return value or None
     return None
+
+
+def _signature_wire_bytes(sig: str) -> bytes:
+    """Convert a stored signature string to bytes for ``types.Part``.
+
+    - Synthetic skip tokens must be sent as literal UTF-8 bytes (the SDK
+      base64-decodes *strings*, which would corrupt the sentinel).
+    - Prefixed (``b64:``) values from :func:`_normalize_signature` decode as
+      base64 payload.
+    - Unprefixed values: try strict base64 (pre-prefix storage / older PR
+      builds), else legacy/test plain UTF-8 text.
+    """
+    if sig == SYNTHETIC_THOUGHT_SIGNATURE:
+        return sig.encode("utf-8")
+    if sig.startswith(_SIGNATURE_B64_PREFIX):
+        payload = sig[len(_SIGNATURE_B64_PREFIX) :]
+        try:
+            return base64.b64decode(payload, validate=True)
+        except binascii.Error:
+            _log.debug(
+                "Gemini thought signature has b64: prefix but failed to decode; "
+                "using UTF-8 bytes %s",
+                kv(sig_len=len(sig)),
+            )
+            return sig.encode("utf-8")
+    try:
+        return base64.b64decode(sig, validate=True)
+    except binascii.Error:
+        _log.debug(
+            "Gemini thought signature is not base64; using UTF-8 bytes (legacy/plain) %s",
+            kv(sig_len=len(sig)),
+        )
+        return sig.encode("utf-8")
 
 
 def _messages_to_contents(rest: Sequence[Message]) -> list[Any]:
@@ -275,6 +321,14 @@ def _messages_to_contents(rest: Sequence[Message]) -> list[Any]:
                 )
 
     active_start = _active_loop_start_index(rest)
+    # No clear user-text boundary (e.g. repaired tool-only history): treat the
+    # whole transcript as the active loop so we still attach signatures / synthetic.
+    if active_start is None and rest:
+        _log.debug(
+            "Gemini history has no user-loop boundary; treating full history as active loop %s",
+            kv(n_messages=len(rest)),
+        )
+        active_start = 0
 
     contents: list[Any] = []
     for idx, m in enumerate(rest):
@@ -292,7 +346,7 @@ def _messages_to_contents(rest: Sequence[Message]) -> list[Any]:
                     continue
                 kwargs: dict[str, Any] = {"text": block.thinking, "thought": True}
                 if block.signature:
-                    kwargs["thought_signature"] = block.signature.encode("utf-8")
+                    kwargs["thought_signature"] = _signature_wire_bytes(block.signature)
                 parts.append(types.Part(**kwargs))
             elif isinstance(block, ToolRequest):
                 fc_kwargs: dict[str, Any] = {
@@ -308,9 +362,7 @@ def _messages_to_contents(rest: Sequence[Message]) -> list[Any]:
                     if sig is None and needs_synthetic_for_first_model_tool_call:
                         sig = SYNTHETIC_THOUGHT_SIGNATURE
                     if sig is not None:
-                        # SDK validator base64-decodes string inputs; pass raw bytes
-                        # so the literal signature survives the round-trip.
-                        part_kwargs["thought_signature"] = sig.encode("utf-8")
+                        part_kwargs["thought_signature"] = _signature_wire_bytes(sig)
                 needs_synthetic_for_first_model_tool_call = False
                 parts.append(types.Part(**part_kwargs))
             elif isinstance(block, ToolResponse):
@@ -720,7 +772,9 @@ class GeminiProvider:
         if ev is not None:
             yield ev
 
-        for call_id in sorted(pending_tools.keys()):
-            yield pending_tools[call_id]
+        # Insertion order = provider stream arrival order. Do not sort by
+        # call_id: Gemini thought_signature must stay on the first functionCall.
+        for tool_call in pending_tools.values():
+            yield tool_call
 
         yield Done(truncated=truncated)
