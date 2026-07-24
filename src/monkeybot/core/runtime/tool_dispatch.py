@@ -768,7 +768,7 @@ async def _post_batch_budget_and_registry(
         usage.estimated_prompt_tokens = max(
             usage.estimated_prompt_tokens, budget_used
         )
-        budgeter = ContextBudgeter.from_env(
+        budgeter = ContextBudgeter.for_window(
             window_tokens=ctx.context_window_tokens,
             used_tokens=budget_used,
         )

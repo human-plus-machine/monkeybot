@@ -183,8 +183,7 @@ tools:
   # read_default_lines: 20000
   # spill_read_max_lines: 50000
   # spill_min_chars: 8000
-  # result_budget_fraction: 0.8
-  # result_budget_floor_tokens: 2000
+  # Context pressure / result-budget ratios are fixed in harness code (not configurable).
 
 web_search:
   # duckduckgo | tavily | firecrawl | none  (Tavily/Firecrawl need keys in .env)

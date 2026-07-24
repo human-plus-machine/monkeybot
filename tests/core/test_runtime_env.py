@@ -261,8 +261,35 @@ def test_tools_budget_env_keys(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert os.environ.get("MONKEYBOT_READ_DEFAULT_LINES") == "1500"
     assert os.environ.get("MONKEYBOT_SPILL_READ_MAX_LINES") == "25000"
     assert os.environ.get("MONKEYBOT_SPILL_MIN_CHARS") == "9000"
-    assert os.environ.get("MONKEYBOT_RESULT_BUDGET_FRACTION") == "0.75"
-    assert os.environ.get("MONKEYBOT_RESULT_BUDGET_FLOOR_TOKENS") == "1500"
+    # Result-budget / compression ratios are harness-fixed (not YAML/env knobs).
+    assert os.environ.get("MONKEYBOT_RESULT_BUDGET_FRACTION") is None
+    assert os.environ.get("MONKEYBOT_RESULT_BUDGET_FLOOR_TOKENS") is None
+
+
+def test_compression_ratios_not_mapped_from_yaml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    (cfg_dir / "monkeybot.yaml").write_text(
+        "compression:\n"
+        "  light_ratio: 0.1\n"
+        "  moderate_ratio: 0.2\n"
+        "  aggressive_ratio: 0.3\n",
+        encoding="utf-8",
+    )
+    for key in (
+        "MONKEYBOT_PRESSURE_LIGHT_RATIO",
+        "MONKEYBOT_PRESSURE_MODERATE_RATIO",
+        "MONKEYBOT_PRESSURE_AGGRESSIVE_RATIO",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    runtime_env.reset_runtime_env_state_for_tests()
+    runtime_env.apply_monkeybot_runtime_env()
+    assert os.environ.get("MONKEYBOT_PRESSURE_LIGHT_RATIO") is None
+    assert os.environ.get("MONKEYBOT_PRESSURE_MODERATE_RATIO") is None
+    assert os.environ.get("MONKEYBOT_PRESSURE_AGGRESSIVE_RATIO") is None
 
 
 def test_denied_patterns_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

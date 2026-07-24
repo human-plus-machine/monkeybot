@@ -55,21 +55,39 @@ class SQLiteHistoryStore:
         )
         await self._conn.commit()
 
-    async def load(self, thread_id: str, limit: int = 100) -> list[Message]:
-        """Return up to ``limit`` messages for ``thread_id``, oldest first."""
-        cursor = await self._conn.execute(
-            """
-            SELECT id, role, content, created_at
-            FROM conversation_history
-            WHERE thread_id = ?
-            ORDER BY created_at DESC, id DESC
-            LIMIT ?
-            """,
-            (thread_id, limit),
-        )
-        rows = await cursor.fetchall()
-        await cursor.close()
-        rows_chrono = list(reversed(list(rows)))
+    async def load(self, thread_id: str, limit: int | None = None) -> list[Message]:
+        """Return messages for ``thread_id``, oldest first.
+
+        When ``limit`` is set, returns the newest ``limit`` rows. When ``None``,
+        returns the full thread (compaction owns size — do not silently slide).
+        """
+        if limit is None:
+            cursor = await self._conn.execute(
+                """
+                SELECT id, role, content, created_at
+                FROM conversation_history
+                WHERE thread_id = ?
+                ORDER BY created_at ASC, id ASC
+                """,
+                (thread_id,),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+            rows_chrono = list(rows)
+        else:
+            cursor = await self._conn.execute(
+                """
+                SELECT id, role, content, created_at
+                FROM conversation_history
+                WHERE thread_id = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (thread_id, limit),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+            rows_chrono = list(reversed(list(rows)))
         out: list[Message] = []
         for row in rows_chrono:
             row_id = int(row[0])

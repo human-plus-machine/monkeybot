@@ -43,7 +43,7 @@ from monkeybot.core.tools.inspector import ToolInspector
 from monkeybot.core.types.content_blocks import ContentBlock
 
 from .events import AgentEvent, Error, TurnComplete
-from .history_compaction import SUMMARY_TRIGGER_RATIO
+from .context_budget import SUMMARY_TRIGGER_RATIO
 from .input_admission import InputAdmission
 from .loop_hooks import _drain_hook_settlement
 from .loop_messages import _normalize_user_content

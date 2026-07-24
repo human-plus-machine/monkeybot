@@ -16,8 +16,8 @@ from monkeybot.core.llm.usage import Usage
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.runtime.context_budget import (
+    SUMMARY_TRIGGER_RATIO,
     ContextBudgeter,
-    summarization_trigger_ratio_from_env,
 )
 from monkeybot.core.types.content_blocks import ContentBlock, Text
 
@@ -27,8 +27,12 @@ from .loop_usage import _prompt_input_tokens_for_history
 
 logger = logging.getLogger("monkeybot.core.runtime.loop.history_compaction")
 
-SUMMARY_TRIGGER_RATIO = summarization_trigger_ratio_from_env()
-"""Same ratio as pre-stream summarization check (``preflight_prompt_tokens >= cap``)."""
+# Fixed harness policy — not env/YAML tunable.
+# Soft count trigger: compact before presenting this many chat rows to the model.
+HISTORY_COMPACT_AT = 100
+# Last-resort ceiling only after compact failure (never a silent happy-path slide).
+HISTORY_LOAD_MAX = 500
+
 _SUMMARY_TRIGGER_RATIO = SUMMARY_TRIGGER_RATIO
 _SUMMARY_KEEP_HEAD = 1
 _SUMMARY_KEEP_TAIL = 6
