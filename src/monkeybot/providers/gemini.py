@@ -355,6 +355,30 @@ def _tool_defs_to_declarations(tools: Sequence[ToolDef]) -> list[Any]:
     return out
 
 
+# Matches context_budget / estimate_anthropic_input_tokens (~4 chars per token).
+_CHARS_PER_TOKEN = 4
+
+
+def _estimate_developer_api_tool_tokens(
+    tools: Sequence[ToolDef],
+    *,
+    vertex_google_search: bool = False,
+) -> int:
+    """Local tool-token estimate for AI Studio CountTokensConfig.
+
+    The Developer API rejects ``tools`` on ``CountTokensConfig``, but ``stream``
+    still sends function declarations (and optional ``google_search``). Without a
+    local add-on, prompt estimates undercount and delay context compaction.
+    """
+    payloads: list[dict[str, Any]] = [t.to_model_schema() for t in tools]
+    if vertex_google_search:
+        payloads.append({"google_search": {}})
+    if not payloads:
+        return 0
+    text = json.dumps(payloads, ensure_ascii=False, default=str)
+    return max(1, len(text) // _CHARS_PER_TOKEN)
+
+
 def _grounding_metadata_to_dict(gm: Any) -> dict[str, Any] | None:
     """Flatten Vertex ``GroundingMetadata`` into a small, wire-friendly dict.
 
@@ -536,7 +560,14 @@ class GeminiProvider:
                 exc_info=True,
             )
             raise LLMError(str(exc)) from exc
-        return int(resp.total_tokens or 0)
+        total = int(resp.total_tokens or 0)
+        if self._api_key:
+            # Developer API cannot count tool schemas; add a local estimate so
+            # context-pressure / summarization gates are not systematically low.
+            total += _estimate_developer_api_tool_tokens(
+                tools, vertex_google_search=vertex_google_search
+            )
+        return total
 
     async def stream(
         self,

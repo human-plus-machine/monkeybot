@@ -15,6 +15,7 @@ from monkeybot.core.types.interfaces import LLMError
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers.gemini import (
     GeminiProvider,
+    _estimate_developer_api_tool_tokens,
     _grounding_metadata_to_dict,
     _usage_from_response,
 )
@@ -227,6 +228,15 @@ async def test_stream_omits_google_search_tool_when_disabled(monkeypatch: pytest
     assert "tools" not in captured_config["config"]
 
 
+def test_estimate_developer_api_tool_tokens_includes_schemas() -> None:
+    tool = ToolDef("read_file", "Read a file", {"type": "object", "properties": {"path": {}}})
+    assert _estimate_developer_api_tool_tokens([]) == 0
+    n = _estimate_developer_api_tool_tokens([tool])
+    assert n > 0
+    with_search = _estimate_developer_api_tool_tokens([tool], vertex_google_search=True)
+    assert with_search > n
+
+
 @pytest.mark.asyncio
 async def test_count_tokens_developer_api_folds_system_omits_unsupported_config(
     monkeypatch: pytest.MonkeyPatch,
@@ -242,12 +252,29 @@ async def test_count_tokens_developer_api_folds_system_omits_unsupported_config(
 
     n = await provider.count_input_tokens(messages, [tool], model="gemini-2.5-flash")
 
-    assert n == 42
+    tool_est = _estimate_developer_api_tool_tokens([tool])
+    assert tool_est > 0
+    assert n == 42 + tool_est
     assert captured["client_kwargs"].get("api_key") == "test-key"
     assert captured["config"] is None
     contents = captured["contents"]
     assert contents[0]["role"] == "user"
     assert contents[0]["parts"][0]["text"] == "You are helpful."
+
+
+@pytest.mark.asyncio
+async def test_count_tokens_developer_api_adds_google_search_estimate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even on api_key, stream may send google_search; count should not drop it."""
+    _install_fake_google_genai(monkeypatch)
+    provider = GeminiProvider(api_key="test-key")
+
+    n = await provider.count_input_tokens(
+        [], [], model="gemini-2.5-flash", vertex_google_search=True
+    )
+
+    assert n == 42 + _estimate_developer_api_tool_tokens([], vertex_google_search=True)
 
 
 @pytest.mark.asyncio
