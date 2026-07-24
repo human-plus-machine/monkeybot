@@ -355,6 +355,30 @@ def _tool_defs_to_declarations(tools: Sequence[ToolDef]) -> list[Any]:
     return out
 
 
+# Matches context_budget / estimate_anthropic_input_tokens (~4 chars per token).
+_CHARS_PER_TOKEN = 4
+
+
+def _estimate_developer_api_tool_tokens(
+    tools: Sequence[ToolDef],
+    *,
+    vertex_google_search: bool = False,
+) -> int:
+    """Local tool-token estimate for AI Studio CountTokensConfig.
+
+    The Developer API rejects ``tools`` on ``CountTokensConfig``, but ``stream``
+    still sends function declarations (and optional ``google_search``). Without a
+    local add-on, prompt estimates undercount and delay context compaction.
+    """
+    payloads: list[dict[str, Any]] = [t.to_model_schema() for t in tools]
+    if vertex_google_search:
+        payloads.append({"google_search": {}})
+    if not payloads:
+        return 0
+    text = json.dumps(payloads, ensure_ascii=False, default=str)
+    return max(1, len(text) // _CHARS_PER_TOKEN)
+
+
 def _grounding_metadata_to_dict(gm: Any) -> dict[str, Any] | None:
     """Flatten Vertex ``GroundingMetadata`` into a small, wire-friendly dict.
 
@@ -484,46 +508,66 @@ class GeminiProvider:
                 "google-genai is required for GeminiProvider. Install with: uv sync (monkeybot dependencies)."
             ) from exc
 
-        temperature = float(self._temperature)
-        max_tokens = int(self._max_tokens)
-        thinking_budget = _resolve_thinking_budget(
-            self._thinking_budget,
-            override=thinking_budget,
-            messages=messages,
-            tools=tools,
-        )
-
         system_instruction, rest = _split_system_and_rest(messages)
         contents = _messages_to_contents(rest)
-        decls = _tool_defs_to_declarations(tools)
-
+        # Developer API CountTokensConfig rejects system_instruction/tools/gen_cfg; fold system into contents.
         count_cfg_kwargs: dict[str, Any] = {}
-        if system_instruction:
-            count_cfg_kwargs["system_instruction"] = system_instruction
-        count_tools: list[Any] = []
-        if decls:
-            count_tools.append(types.Tool(function_declarations=decls))
-        if vertex_google_search:
-            count_tools.append(types.Tool(google_search=types.GoogleSearch()))
-        if count_tools:
-            count_cfg_kwargs["tools"] = count_tools
+        if self._api_key:
+            if system_instruction:
+                contents = [
+                    types.Content(role="user", parts=[types.Part(text=system_instruction)]),
+                    *contents,
+                ]
+        else:
+            if system_instruction:
+                count_cfg_kwargs["system_instruction"] = system_instruction
+            decls = _tool_defs_to_declarations(tools)
+            count_tools: list[Any] = []
+            if decls:
+                count_tools.append(types.Tool(function_declarations=decls))
+            if vertex_google_search:
+                count_tools.append(types.Tool(google_search=types.GoogleSearch()))
+            if count_tools:
+                count_cfg_kwargs["tools"] = count_tools
+            budget = _resolve_thinking_budget(
+                self._thinking_budget,
+                override=thinking_budget,
+                messages=messages,
+                tools=tools,
+            )
+            gen_cfg_kwargs: dict[str, Any] = {
+                "temperature": float(self._temperature),
+                "max_output_tokens": int(self._max_tokens),
+            }
+            if budget != -1:
+                gen_cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=budget)
+            count_cfg_kwargs["generation_config"] = types.GenerationConfig(**gen_cfg_kwargs)
 
-        gen_cfg_kwargs: dict[str, Any] = {
-            "temperature": temperature,
-            "max_output_tokens": max_tokens,
-        }
-        if thinking_budget != -1:
-            gen_cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=thinking_budget)
-        count_cfg_kwargs["generation_config"] = types.GenerationConfig(**gen_cfg_kwargs)
-
-        ct_cfg = types.CountTokensConfig(**count_cfg_kwargs)
+        ct_cfg = types.CountTokensConfig(**count_cfg_kwargs) if count_cfg_kwargs else None
         client = self._client(model_param)
-        resp = await client.aio.models.count_tokens(
-            model=model_param,
-            contents=contents,
-            config=ct_cfg,
-        )
-        return int(resp.total_tokens or 0)
+        try:
+            resp = await client.aio.models.count_tokens(
+                model=model_param,
+                contents=contents,
+                config=ct_cfg,
+            )
+        except LLMError:
+            raise
+        except Exception as exc:
+            _log.warning(
+                "Gemini count_tokens error %s",
+                kv(provider="gemini", model=model, n_messages=len(messages), n_tools=len(tools)),
+                exc_info=True,
+            )
+            raise LLMError(str(exc)) from exc
+        total = int(resp.total_tokens or 0)
+        if self._api_key:
+            # Developer API cannot count tool schemas; add a local estimate so
+            # context-pressure / summarization gates are not systematically low.
+            total += _estimate_developer_api_tool_tokens(
+                tools, vertex_google_search=vertex_google_search
+            )
+        return total
 
     async def stream(
         self,
