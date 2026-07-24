@@ -63,7 +63,11 @@ def resource_for_call(call: InspectorToolCall) -> str:
     if call.name == "run_command":
         try:
             line = norm_run_command_line(call.args)
-        except ValueError:
+        except ValueError as e:
+            logger.debug(
+                "permission: argv coerce failed for resource string %s",
+                kv(tool=call.name, call_id=call.call_id, error=str(e)),
+            )
             line = None
         if line:
             return line

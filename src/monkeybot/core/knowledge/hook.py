@@ -9,6 +9,7 @@ from typing import Any
 
 from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
 from monkeybot.core.knowledge.indexer import KnowledgeIndexer
+from monkeybot.core.tools.inspector import coerce_run_command_argv
 
 logger = logging.getLogger(__name__)
 
@@ -334,9 +335,12 @@ def _git_implies_mutation(argv: list[str]) -> bool:
 def _argv_from_args(args: dict[str, Any] | None) -> list[str] | None:
     if not args:
         return None
-    argv = args.get("argv")
-    if isinstance(argv, list) and all(isinstance(x, str) for x in argv):
-        return list(argv)
+    try:
+        argv = coerce_run_command_argv(args.get("argv"))
+    except ValueError:
+        argv = None
+    if argv:
+        return argv
     # Legacy shapes
     cmd = args.get("command")
     extra = args.get("args") or args.get("arguments")
