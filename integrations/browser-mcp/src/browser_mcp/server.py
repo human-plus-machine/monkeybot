@@ -19,6 +19,9 @@ from browser_mcp import dom_indexing, playbooks, screenshots
 logger = logging.getLogger(__name__)
 
 _bh: tuple[Any, Any] | None = None
+# CDP endpoint (BU_CDP_URL/WS or in-app file) the current daemon binding was ensured with.
+# Used instead of browser-harness's nonexistent daemon_browser_kind() to decide when to bounce.
+_bound_cdp: str | None = None
 
 # Written by Monkeyapp when the in-app Electron CDP bridge is live. Prefer this over
 # auto-discovering the user's desktop Chrome (which wins when BU_CDP_URL is empty/stale).
@@ -64,7 +67,14 @@ def _apply_in_app_cdp_url() -> str | None:
         return http
     try:
         raw = _IN_APP_CDP_URL_FILE.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
     except OSError:
+        logger.warning(
+            "browser-mcp: failed reading in-app CDP URL file %s",
+            _IN_APP_CDP_URL_FILE,
+            exc_info=True,
+        )
         return None
     if not raw:
         return None
@@ -81,25 +91,32 @@ def _apply_in_app_cdp_url() -> str | None:
 def _browser_harness() -> tuple[Any, Any]:
     """Lazy import + daemon bootstrap on first browser tool use.
 
-    When an explicit in-app CDP URL is configured, bounce any daemon that attached
-    to local desktop Chrome so tool calls drive the Monkeyapp panel instead.
+    When an explicit CDP URL is configured (env or Monkeyapp runtime file) and the
+    live daemon was bound to a different endpoint (or none — i.e. local Chrome),
+    bounce it so tool calls drive the in-app panel instead.
     """
-    global _bh
+    global _bh, _bound_cdp
+    cdp = _apply_in_app_cdp_url()
+    if _bh is not None and cdp == _bound_cdp:
+        return _bh
+
     from browser_harness import admin, helpers
 
-    cdp = _apply_in_app_cdp_url()
-    if cdp and admin.daemon_alive():
-        kind = admin.daemon_browser_kind()
-        if kind in (None, "local"):
-            logger.info(
-                "browser-mcp: replacing local-Chrome harness daemon with CDP %s",
-                cdp,
-            )
-            admin.restart_daemon()
-            _bh = None
-    if _bh is None:
-        admin.ensure_daemon()
-        _bh = (helpers, admin)
+    # Fresh process: _bound_cdp is None while an external local-Chrome daemon may
+    # still be alive. Restart whenever the desired CDP differs from what we last
+    # ensured (browser-harness 0.1.3 has no daemon_browser_kind() to query).
+    if admin.daemon_alive() and _bound_cdp != cdp:
+        logger.info(
+            "browser-mcp: replacing harness daemon for CDP %s (was %s)",
+            cdp,
+            _bound_cdp,
+        )
+        admin.restart_daemon()
+        _bh = None
+
+    admin.ensure_daemon()
+    _bh = (helpers, admin)
+    _bound_cdp = cdp
     return _bh
 
 
@@ -343,8 +360,9 @@ def browser_stop() -> str:
     from browser_harness import admin
 
     admin.restart_daemon()
-    global _bh
+    global _bh, _bound_cdp
     _bh = None
+    _bound_cdp = None
     return _json_text({"ok": True, "message": "daemon stopped"})
 
 
@@ -358,10 +376,11 @@ def _stop_daemon_for_shutdown() -> None:
     Browser Use Cloud session -- and its billing -- would keep running
     indefinitely. Idempotent: safe to call even if no daemon was ever started.
     """
-    global _bh
+    global _bh, _bound_cdp
     if _bh is None:
         return
     _bh = None
+    _bound_cdp = None
     try:
         from browser_harness import admin
 

@@ -17,9 +17,12 @@ from browser_mcp import dom_indexing, server
 @pytest.fixture(autouse=True)
 def _reset_bh_state():
     original = server._bh
+    original_bound = server._bound_cdp
     server._bh = None
+    server._bound_cdp = None
     yield
     server._bh = original
+    server._bound_cdp = original_bound
 
 
 def _patch_harness(helpers: MagicMock):

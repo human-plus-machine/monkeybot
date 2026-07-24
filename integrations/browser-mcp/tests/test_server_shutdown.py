@@ -18,9 +18,12 @@ from browser_mcp import server
 def _reset_bh_state():
     """Isolate ``server._bh`` module state across tests."""
     original = server._bh
+    original_bound = server._bound_cdp
     server._bh = None
+    server._bound_cdp = None
     yield
     server._bh = original
+    server._bound_cdp = original_bound
 
 
 def test_stop_daemon_for_shutdown_noop_when_daemon_never_started() -> None:

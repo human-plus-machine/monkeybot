@@ -973,13 +973,18 @@ class MCPClient:
         """Connect a server previously registered by :meth:`load_from_config`.
 
         Re-reads ``mcp.json`` so late-bound env (e.g. Monkeyapp ``BU_CDP_URL``) is
-        applied. Already-connected servers are disconnected and reconnected.
+        applied. Already-connected servers reconnect only when their resolved
+        catalog spec changed; otherwise this is a no-op that returns current tools.
         Raises :class:`MCPDiagnosticError` when ``name`` is not in the catalog.
         """
+        previous = dict(self._catalog[name]) if name in self._catalog else None
         if self._config_path is not None:
             # Refresh catalog from disk without dropping other connected servers.
             await self._reload_catalog_entry(name)
         if name in self._servers:
+            current = self._catalog.get(name)
+            if previous is not None and previous == current:
+                return list(self._servers[name].tools)
             await self.disconnect(name)
         spec = self._catalog.get(name)
         if spec is None:

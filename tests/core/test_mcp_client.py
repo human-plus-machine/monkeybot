@@ -878,3 +878,86 @@ async def test_list_and_read_resources() -> None:
     assert got["name"] == "summarize"
     assert got["messages"]
     sess.get_prompt.assert_awaited_once_with("summarize", arguments={"topic": "x"})
+
+
+@pytest.mark.asyncio
+async def test_connect_from_catalog_noop_when_spec_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-enable with identical mcp.json must not tear down the live session."""
+    monkeypatch.setenv("BU_CDP_URL", "http://127.0.0.1:9222")
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "browser": {
+                        "command": "python",
+                        "args": ["x.py"],
+                        "env": {"BU_CDP_URL": "${BU_CDP_URL}"},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    sess = SimpleNamespace()
+    sess.initialize = AsyncMock()
+    sess.list_tools = AsyncMock(
+        return_value=SimpleNamespace(
+            tools=[SimpleNamespace(name="goto", description="Go", inputSchema={})]
+        )
+    )
+    sess.call_tool = AsyncMock()
+
+    client = MCPClient(hooks=_stub_hooks(sess))
+    await client.load_from_config(cfg)
+    first = await client.connect_from_catalog("browser")
+    rec = client._servers["browser"]
+
+    again = await client.connect_from_catalog("browser")
+    assert again == first
+    assert client._servers["browser"] is rec
+    sess.call_tool.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_connect_from_catalog_reconnects_when_env_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Late-bound BU_CDP_URL in mcp.json must force disconnect + reconnect."""
+    monkeypatch.setenv("BU_CDP_URL", "")
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "browser": {
+                        "command": "python",
+                        "args": ["x.py"],
+                        "env": {"BU_CDP_URL": "${BU_CDP_URL}"},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    sess = SimpleNamespace()
+    sess.initialize = AsyncMock()
+    sess.list_tools = AsyncMock(
+        return_value=SimpleNamespace(
+            tools=[SimpleNamespace(name="goto", description="Go", inputSchema={})]
+        )
+    )
+    sess.call_tool = AsyncMock()
+
+    client = MCPClient(hooks=_stub_hooks(sess))
+    await client.load_from_config(cfg)
+    await client.connect_from_catalog("browser")
+    first_rec = client._servers["browser"]
+    assert first_rec.tools  # connected
+
+    monkeypatch.setenv("BU_CDP_URL", "http://127.0.0.1:9333")
+    again = await client.connect_from_catalog("browser")
+    assert any(t.name == "browser__goto" for t in again)
+    assert client._servers["browser"] is not first_rec
