@@ -1481,6 +1481,8 @@ async def test_run_compacts_on_message_count_even_under_token_cap(
     kinds = [type(x).__name__ for x in events]
     assert "ContextSummarizing" in kinds
     assert "ContextSummarized" in kinds
+    summarizing = next(x for x in events if type(x).__name__ == "ContextSummarizing")
+    assert summarizing.estimated_tokens > 0
     assert len(hist.reset_calls) == 1
     assert any(
         isinstance(x, Text) and x.text.startswith("[Context Summary]:")
