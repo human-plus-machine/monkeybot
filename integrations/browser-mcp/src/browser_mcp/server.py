@@ -6,8 +6,10 @@ import atexit
 import contextlib
 import json
 import logging
+import os
 import signal
 import sys
+from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -17,6 +19,11 @@ from browser_mcp import dom_indexing, playbooks, screenshots
 logger = logging.getLogger(__name__)
 
 _bh: tuple[Any, Any] | None = None
+
+# Written by Monkeyapp when the in-app Electron CDP bridge is live. Prefer this over
+# auto-discovering the user's desktop Chrome (which wins when BU_CDP_URL is empty/stale).
+_IN_APP_CDP_URL_FILE = Path.home() / ".monkeybot" / "runtime" / "in-app-cdp-url"
+
 
 mcp = FastMCP(
     "browser",
@@ -44,12 +51,53 @@ mcp = FastMCP(
 )
 
 
-def _browser_harness() -> tuple[Any, Any]:
-    """Lazy import + daemon bootstrap on first browser tool use."""
-    global _bh
-    if _bh is None:
-        from browser_harness import admin, helpers
+def _apply_in_app_cdp_url() -> str | None:
+    """Ensure BU_CDP_URL/WS points at Monkeyapp's bridge when one is published.
 
+    Returns the explicit CDP endpoint in use (env or file), or None.
+    """
+    ws = (os.environ.get("BU_CDP_WS") or "").strip()
+    http = (os.environ.get("BU_CDP_URL") or "").strip()
+    if ws:
+        return ws
+    if http:
+        return http
+    try:
+        raw = _IN_APP_CDP_URL_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    if raw.startswith("ws://") or raw.startswith("wss://"):
+        os.environ["BU_CDP_WS"] = raw
+        os.environ.pop("BU_CDP_URL", None)
+        return raw
+    if raw.startswith("http://") or raw.startswith("https://"):
+        os.environ["BU_CDP_URL"] = raw
+        return raw
+    return None
+
+
+def _browser_harness() -> tuple[Any, Any]:
+    """Lazy import + daemon bootstrap on first browser tool use.
+
+    When an explicit in-app CDP URL is configured, bounce any daemon that attached
+    to local desktop Chrome so tool calls drive the Monkeyapp panel instead.
+    """
+    global _bh
+    from browser_harness import admin, helpers
+
+    cdp = _apply_in_app_cdp_url()
+    if cdp and admin.daemon_alive():
+        kind = admin.daemon_browser_kind()
+        if kind in (None, "local"):
+            logger.info(
+                "browser-mcp: replacing local-Chrome harness daemon with CDP %s",
+                cdp,
+            )
+            admin.restart_daemon()
+            _bh = None
+    if _bh is None:
         admin.ensure_daemon()
         _bh = (helpers, admin)
     return _bh

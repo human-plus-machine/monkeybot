@@ -972,11 +972,15 @@ class MCPClient:
     async def connect_from_catalog(self, name: str) -> list[ToolDef]:
         """Connect a server previously registered by :meth:`load_from_config`.
 
-        Already-connected servers return their current tool list (no-op reconnect).
+        Re-reads ``mcp.json`` so late-bound env (e.g. Monkeyapp ``BU_CDP_URL``) is
+        applied. Already-connected servers are disconnected and reconnected.
         Raises :class:`MCPDiagnosticError` when ``name`` is not in the catalog.
         """
+        if self._config_path is not None:
+            # Refresh catalog from disk without dropping other connected servers.
+            await self._reload_catalog_entry(name)
         if name in self._servers:
-            return list(self._servers[name].tools)
+            await self.disconnect(name)
         spec = self._catalog.get(name)
         if spec is None:
             known = self.catalog_names()
@@ -992,6 +996,31 @@ class MCPClient:
             name, spec, mcp_json_path=self._config_path, raise_on_error=True
         )
         return defs
+
+    async def _reload_catalog_entry(self, name: str) -> None:
+        """Re-parse mcp.json and replace one catalog entry (env interpolation included)."""
+        path = self._config_path
+        if path is None or not path.is_file():
+            return
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            logger.warning("mcp catalog refresh failed reading %s", path, exc_info=True)
+            return
+        if not isinstance(raw, dict):
+            return
+        raw = interpolate_env_vars(raw)
+        servers_any = raw.get("mcpServers")
+        if not isinstance(servers_any, dict):
+            return
+        spec = servers_any.get(name)
+        if not isinstance(spec, dict):
+            self._catalog.pop(name, None)
+            return
+        if spec.get("enabled") is False:
+            self._catalog.pop(name, None)
+            return
+        self._catalog[name] = dict(spec)
 
     def _log_connect_failure(
         self,
