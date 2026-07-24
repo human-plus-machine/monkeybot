@@ -89,7 +89,7 @@ class ContextSummarizing:
     kind: Literal["ContextSummarizing"] = "ContextSummarizing"
     request_id: str = ""
     estimated_tokens: int = 0
-    """Pre-stream input token count that tripped the summarization threshold (same basis as ``estimated_prompt_tokens`` on usage)."""
+    """Prompt-token estimate at summarization start (preflight for token pressure; counted on demand for count pressure)."""
     context_window_tokens: int = 0
 
 

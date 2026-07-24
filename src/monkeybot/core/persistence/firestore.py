@@ -116,15 +116,25 @@ class FirestoreHistoryStore:
         )
         await self._upsert_thread_summary(thread_id, created_at=created_at, content=payload)
 
-    async def load(self, thread_id: str, limit: int = 100) -> list[Message]:
-        query = (
-            self._client.collection(self._collection)
-            .where(filter=FieldFilter("thread_id", "==", thread_id))
-            .order_by("created_at", direction=firestore.Query.DESCENDING)
-            .limit(limit)
-        )
-        rows = [doc async for doc in query.stream()]
-        rows_chrono = list(reversed(rows))
+    async def load(self, thread_id: str, limit: int | None = None) -> list[Message]:
+        if limit is not None:
+            # Newest ``limit`` rows: query descending then reverse to chronological.
+            query = (
+                self._client.collection(self._collection)
+                .where(filter=FieldFilter("thread_id", "==", thread_id))
+                .order_by("created_at", direction=firestore.Query.DESCENDING)
+                .limit(limit)
+            )
+            rows = [doc async for doc in query.stream()]
+            rows_chrono = list(reversed(rows))
+        else:
+            query = (
+                self._client.collection(self._collection)
+                .where(filter=FieldFilter("thread_id", "==", thread_id))
+                .order_by("created_at", direction=firestore.Query.ASCENDING)
+            )
+            rows = [doc async for doc in query.stream()]
+            rows_chrono = list(rows)
         out: list[Message] = []
         for doc in rows_chrono:
             data = doc.to_dict() or {}

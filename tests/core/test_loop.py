@@ -151,9 +151,11 @@ class FakeHistory:
         self.rows: list[Message] = list(preload) if preload is not None else []
         self.reset_calls: list[tuple[str, list[Message]]] = []
 
-    async def load(self, thread_id: str, limit: int = 100) -> list[Message]:
-        del thread_id, limit
-        return list(self.rows)
+    async def load(self, thread_id: str, limit: int | None = None) -> list[Message]:
+        del thread_id
+        if limit is None:
+            return list(self.rows)
+        return list(self.rows[-limit:]) if limit > 0 else []
 
     async def append(self, thread_id: str, message: Message) -> None:
         del thread_id
@@ -1440,6 +1442,133 @@ async def test_run_no_context_summarize_events_when_under_cap(tmp_path: Path) ->
     assert "ContextSummarizing" not in kinds
     assert "ContextSummarized" not in kinds
     assert prov.stream_calls == 1
+    assert hist.reset_calls == []
+
+
+@pytest.mark.asyncio
+async def test_run_compacts_on_message_count_even_under_token_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Count trigger must compact before silent history loss (limit=100 slide)."""
+    monkeypatch.delenv("CONTEXT_SUMMARIZATION_MODEL", raising=False)
+    preload = [
+        Message(
+            role="user" if i % 2 == 0 else "assistant",
+            content=[Text(text=f"msg-{i}")],
+        )
+        for i in range(100)
+    ]
+    hist = FakeHistory(preload)
+    prov = FakeProvider(
+        [
+            [TextDelta(text=" count summary "), Done()],
+            [TextDelta(text="final"), Done()],
+        ]
+    )
+    # Huge window so token path would never fire.
+    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=2_000_000)
+    events = []
+    async for e in run(
+        "continue",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        max_turns=4,
+    ):
+        events.append(e)
+    kinds = [type(x).__name__ for x in events]
+    assert "ContextSummarizing" in kinds
+    assert "ContextSummarized" in kinds
+    summarizing = next(x for x in events if type(x).__name__ == "ContextSummarizing")
+    assert summarizing.estimated_tokens > 0
+    assert len(hist.reset_calls) == 1
+    assert any(
+        isinstance(x, Text) and x.text.startswith("[Context Summary]:")
+        for m in hist.rows
+        for x in m.content
+    )
+    # Compacted history must be far smaller than the pre-compact 100+ rows.
+    assert len(hist.rows) < 20
+
+
+@pytest.mark.asyncio
+async def test_run_persists_load_max_tail_when_compact_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Load-max safety must history.reset the truncated tail, not only trim memory."""
+    import monkeybot.core.runtime.history_compaction as hc
+    import monkeybot.core.runtime.turn_loop as tl
+
+    monkeypatch.setattr(tl, "HISTORY_COMPACT_AT", 10)
+    monkeypatch.setattr(tl, "HISTORY_LOAD_MAX", 12)
+    monkeypatch.setattr(hc, "HISTORY_COMPACT_AT", 10)
+    monkeypatch.setattr(hc, "HISTORY_LOAD_MAX", 12)
+
+    async def boom(*_args: object, **_kwargs: object) -> int:
+        raise RuntimeError("summarizer down")
+
+    monkeypatch.setattr(tl, "_summarize_history", boom)
+
+    preload = [
+        Message(
+            role="user" if i % 2 == 0 else "assistant",
+            content=[Text(text=f"row-{i}")],
+        )
+        for i in range(20)
+    ]
+    hist = FakeHistory(preload)
+    prov = FakeProvider([[TextDelta(text="final"), Done()]])
+    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=2_000_000)
+    async for _ in run(
+        "continue",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        max_turns=4,
+    ):
+        pass
+
+    assert hist.reset_calls, "expected durable truncate via history.reset"
+    _thread, persisted = hist.reset_calls[-1]
+    assert len(persisted) == 12
+    flat_persisted = [b.text for m in persisted for b in m.content if isinstance(b, Text)]
+    assert "row-0" not in flat_persisted
+    assert "row-19" in flat_persisted
+    # Final assistant reply may append after the safety reset.
+    assert len(hist.rows) >= 12
+    assert len(hist.rows) <= 13
+
+
+@pytest.mark.asyncio
+async def test_run_loads_full_history_not_silent_100_slide(tmp_path: Path) -> None:
+    """Agent load must not drop oldest rows when under compact threshold."""
+    preload = [
+        Message(
+            role="user" if i % 2 == 0 else "assistant",
+            content=[Text(text=f"keep-{i}")],
+        )
+        for i in range(40)
+    ]
+    hist = FakeHistory(preload)
+    prov = FakeProvider([[TextDelta(text="final"), Done()]])
+    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=2_000_000)
+    async for _ in run(
+        "hello",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        max_turns=4,
+    ):
+        pass
+    # Original early content still present (plus new user/assistant rows).
+    flat = [b.text for m in hist.rows for b in m.content if isinstance(b, Text)]
+    assert "keep-0" in flat
     assert hist.reset_calls == []
 
 

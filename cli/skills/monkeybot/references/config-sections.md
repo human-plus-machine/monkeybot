@@ -121,7 +121,8 @@ Without a `subagent_type`, the task inherits the parent `AGENT.md` (`paths.agent
 | `denied_patterns` | (none) | Block substrings in tool args, e.g. `"rm -rf"` (also env `MONKEYBOT_TOOL_DENIED_PATTERNS`) |
 | `read_max_lines` / `read_default_lines` | (code defaults) | Tune file-read limits |
 | `spill_read_max_lines` / `spill_min_chars` | (code defaults) | Tune large-result spill behavior |
-| `result_budget_fraction` / `result_budget_floor_tokens` | (code defaults) | Advanced result-budgeting; rarely needed |
+
+Context pressure ratios and tool-result budget fractions are fixed in harness code (not YAML/env).
 
 For shell-command safety, pair `denied_patterns` with `monkeybot_config/command_allowlist.yaml`.
 

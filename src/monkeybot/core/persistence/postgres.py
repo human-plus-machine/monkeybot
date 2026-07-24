@@ -147,20 +147,32 @@ class PostgresHistoryStore:
         async with self._pool.acquire() as conn:
             await self._insert_message(conn, thread_id, message)
 
-    async def load(self, thread_id: str, limit: int = 100) -> list[Message]:
+    async def load(self, thread_id: str, limit: int | None = None) -> list[Message]:
         async with self._pool.acquire() as conn:
-            rows = await conn.fetch(
-                """
-                SELECT id, role, content
-                FROM conversation_history
-                WHERE thread_id = $1
-                ORDER BY created_at DESC, id DESC
-                LIMIT $2
-                """,
-                thread_id,
-                limit,
-            )
-        rows_chrono = list(reversed(rows))
+            if limit is None:
+                rows = await conn.fetch(
+                    """
+                    SELECT id, role, content
+                    FROM conversation_history
+                    WHERE thread_id = $1
+                    ORDER BY created_at ASC, id ASC
+                    """,
+                    thread_id,
+                )
+                rows_chrono = list(rows)
+            else:
+                rows = await conn.fetch(
+                    """
+                    SELECT id, role, content
+                    FROM conversation_history
+                    WHERE thread_id = $1
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT $2
+                    """,
+                    thread_id,
+                    limit,
+                )
+                rows_chrono = list(reversed(rows))
         out: list[Message] = []
         for row in rows_chrono:
             row_id = int(row["id"])

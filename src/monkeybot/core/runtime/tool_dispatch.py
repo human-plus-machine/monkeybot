@@ -44,7 +44,7 @@ from .events import (
     ToolCallStarted,
     ToolConfirmationRequestEvent,
 )
-from .history_compaction import _append_budgeted_tool_responses
+from .history_compaction import HISTORY_LOAD_MAX, _append_budgeted_tool_responses
 from .loop_hooks import (
     _HOOK_PRE_TOOL_TIMEOUT_S,
     _fire_hook,
@@ -745,7 +745,22 @@ async def _post_batch_budget_and_registry(
         yield Error(request_id=ctx.request_id, error=doom_msg)
 
     if all_tool_responses:
+        # Compaction + load-max run before every provider call, so steady-state
+        # history is ≤ HISTORY_LOAD_MAX. Clamp the recount input defensively for
+        # any pre-compact / failed-compact window so we never tokenize an
+        # unbounded migrating thread on every tool batch.
         chat_for_budget = await _load_agent_chat_history(history, ctx.thread_id)
+        if len(chat_for_budget) > HISTORY_LOAD_MAX:
+            logger.warning(
+                "post-batch budget history exceeds load max; recounting tail only %s",
+                kv(
+                    request_id=ctx.request_id,
+                    thread_id=ctx.thread_id,
+                    message_count=len(chat_for_budget),
+                    load_max=HISTORY_LOAD_MAX,
+                ),
+            )
+            chat_for_budget = chat_for_budget[-HISTORY_LOAD_MAX:]
         budget_used = usage.estimated_prompt_tokens
         try:
             budget_used = await _prompt_input_tokens_for_history(
@@ -768,7 +783,7 @@ async def _post_batch_budget_and_registry(
         usage.estimated_prompt_tokens = max(
             usage.estimated_prompt_tokens, budget_used
         )
-        budgeter = ContextBudgeter.from_env(
+        budgeter = ContextBudgeter.for_window(
             window_tokens=ctx.context_window_tokens,
             used_tokens=budget_used,
         )

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import re
 from dataclasses import dataclass
 
@@ -14,7 +13,6 @@ from monkeybot.core.context.tool_result_ingress import (
     skip_tool_result_sanitize,
 )
 from monkeybot.core.context.tool_shapers import shape_tool_text
-from monkeybot.core.logging_utils import kv
 from monkeybot.core.types.content_blocks import ContentBlock, Text, ToolResponse
 
 logger = logging.getLogger(__name__)
@@ -24,65 +22,32 @@ _CHARS_PER_TOKEN = 4
 
 _DIFF_GIT_RE = re.compile(r"^diff --git a/.+ b/(.+)$", re.MULTILINE)
 
-_DEFAULT_LIGHT_RATIO = 0.50
-_DEFAULT_MODERATE_RATIO = 0.70
-_DEFAULT_AGGRESSIVE_RATIO = 0.85
-
-
-def _ratio_from_env(name: str, default: float) -> float:
-    raw = os.environ.get(name, "").strip()
-    if not raw:
-        return default
-    try:
-        val = float(raw)
-    except ValueError:
-        logger.warning(
-            "invalid env var value %s",
-            kv(name=name, value=raw, default=default),
-        )
-        return default
-    return min(0.99, max(0.05, val))
-
-
-def pressure_light_ratio_from_env() -> float:
-    return _ratio_from_env("MONKEYBOT_PRESSURE_LIGHT_RATIO", _DEFAULT_LIGHT_RATIO)
-
-
-def pressure_moderate_ratio_from_env() -> float:
-    return _ratio_from_env("MONKEYBOT_PRESSURE_MODERATE_RATIO", _DEFAULT_MODERATE_RATIO)
-
-
-def pressure_aggressive_ratio_from_env() -> float:
-    return _ratio_from_env("MONKEYBOT_PRESSURE_AGGRESSIVE_RATIO", _DEFAULT_AGGRESSIVE_RATIO)
-
-
-def summarization_trigger_ratio_from_env() -> float:
-    """Ratio of context window that triggers full LLM summarization."""
-    return pressure_aggressive_ratio_from_env()
+# Fixed harness policy — not env/YAML tunable.
+PRESSURE_LIGHT_RATIO = 0.50
+PRESSURE_MODERATE_RATIO = 0.70
+PRESSURE_AGGRESSIVE_RATIO = 0.85
+SUMMARY_TRIGGER_RATIO = PRESSURE_AGGRESSIVE_RATIO
+RESULT_BUDGET_FRACTION = 0.8
+RESULT_BUDGET_FLOOR_TOKENS = 2000
 
 
 def compute_context_pressure_tier(
     used_tokens: int,
     window_tokens: int,
     *,
-    light_ratio: float | None = None,
-    moderate_ratio: float | None = None,
-    aggressive_ratio: float | None = None,
+    light_ratio: float = PRESSURE_LIGHT_RATIO,
+    moderate_ratio: float = PRESSURE_MODERATE_RATIO,
+    aggressive_ratio: float = PRESSURE_AGGRESSIVE_RATIO,
 ) -> ContextPressureTier | None:
     """Return pressure tier from ``used_tokens / window_tokens``, or None when low."""
     if window_tokens <= 0:
         return None
     ratio = used_tokens / window_tokens
-    light = light_ratio if light_ratio is not None else pressure_light_ratio_from_env()
-    moderate = moderate_ratio if moderate_ratio is not None else pressure_moderate_ratio_from_env()
-    aggressive = (
-        aggressive_ratio if aggressive_ratio is not None else pressure_aggressive_ratio_from_env()
-    )
-    if ratio >= aggressive:
+    if ratio >= aggressive_ratio:
         return "aggressive"
-    if ratio >= moderate:
+    if ratio >= moderate_ratio:
         return "moderate"
-    if ratio >= light:
+    if ratio >= light_ratio:
         return "light"
     return None
 
@@ -149,42 +114,24 @@ def _trim_text_to_token_budget(text: str, token_budget: int) -> str:
     return trimmed
 
 
-def budget_fraction_from_env() -> float:
-    raw = os.environ.get("MONKEYBOT_RESULT_BUDGET_FRACTION", "0.8").strip()
-    try:
-        val = float(raw)
-    except ValueError:
-        return 0.8
-    return min(1.0, max(0.05, val))
-
-
-def budget_floor_tokens_from_env() -> int:
-    raw = os.environ.get("MONKEYBOT_RESULT_BUDGET_FLOOR_TOKENS", "2000").strip()
-    try:
-        return max(1, int(raw))
-    except ValueError:
-        return 2000
-
-
 @dataclass
 class ContextBudgeter:
     """Allocate remaining context headroom across a batch of tool results."""
 
     window_tokens: int
     used_tokens: int
-    safety_fraction: float = 0.8
-    floor_tokens: int = 2000
+    safety_fraction: float = RESULT_BUDGET_FRACTION
+    floor_tokens: int = RESULT_BUDGET_FLOOR_TOKENS
     pressure_tier: ContextPressureTier | None = None
 
     @classmethod
-    def from_env(cls, *, window_tokens: int, used_tokens: int) -> ContextBudgeter:
+    def for_window(cls, *, window_tokens: int, used_tokens: int) -> ContextBudgeter:
         tier = compute_context_pressure_tier(used_tokens, window_tokens)
-        base_fraction = budget_fraction_from_env()
         return cls(
             window_tokens=window_tokens,
             used_tokens=used_tokens,
-            safety_fraction=_safety_fraction_for_tier(base_fraction, tier),
-            floor_tokens=budget_floor_tokens_from_env(),
+            safety_fraction=_safety_fraction_for_tier(RESULT_BUDGET_FRACTION, tier),
+            floor_tokens=RESULT_BUDGET_FLOOR_TOKENS,
             pressure_tier=tier,
         )
 
