@@ -1,14 +1,17 @@
-"""Tests for session-scoped spill cleanup."""
+"""Tests for session-scoped spill cleanup and inventory previews."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 from monkeybot.core.tools.spill_inventory import (
+    _build_spill_preview,
     cleanup_session_spill_files,
     session_spill_dirs,
+    spill_inventory_note,
 )
 
 
@@ -39,3 +42,40 @@ async def test_cleanup_session_spill_files_concurrent(tmp_path: Path) -> None:
     assert not (root / "subagent:s1:one").exists()
     assert not (root / "subagent:s1:two").exists()
     assert (root / "other" / "x.txt").read_text(encoding="utf-8") == "data"
+
+
+def test_spill_preview_unwraps_run_command_json_stdout() -> None:
+    rows = [{"id": i, "title": f"pr-{i}", "state": "OPEN"} for i in range(40)]
+    payload = json.dumps({"ok": True, "stdout": json.dumps(rows)})
+    kind, preview, unwrapped, _body_lines = _build_spill_preview(
+        payload, tool_name="run_command"
+    )
+    assert kind == "json"
+    assert unwrapped is True
+    assert "pr-0" in preview
+    assert len(preview) < len(payload)
+    assert preview.count('"id"') <= 20
+
+
+def test_spill_inventory_note_includes_preview_not_full_body() -> None:
+    body = ("line-%s\n" % ("x" * 200)) * 80
+    note = spill_inventory_note(body, ".monkeybot/spill/t/c.txt", tool_name="grep")
+    assert "Spill inventory" in note
+    assert "Preview:" in note
+    assert "kind=" in note
+    assert "tool=grep" in note
+    assert ".monkeybot/spill/t/c.txt" in note
+    assert body not in note
+    assert len(note) < 3500
+
+
+def test_spill_preview_code_uses_head_tail() -> None:
+    lines = [f"def f{i}():\n    return {i}" for i in range(100)]
+    text = "\n".join(lines)
+    kind, preview, _unwrapped, _body_lines = _build_spill_preview(
+        text, tool_name="read_file"
+    )
+    assert kind == "code"
+    assert "def f0():" in preview
+    assert "omitted from spill preview" in preview
+    assert len(preview) < len(text)
