@@ -88,8 +88,9 @@ _WEB_SEARCH_LINE = (
 
 _TODO_LIST_LINE = (
     "- `todo_list` — maintain an ordered, session-scoped task list "
-    "(`add` / `complete` / `remove`). The live list appears under `## Todo list` "
-    "when non-empty; keep it updated as you work.\n"
+    "(`add` / `complete` / `remove`). For `add`, pass `text` as a string or a "
+    "list of strings to append many items in one call. The live list appears "
+    "under `## Todo list` when non-empty; keep it updated as you work.\n"
 )
 
 _SEARCH_TOOL_LINE = (

@@ -160,16 +160,71 @@ async def test_todo_list_tool_validation_errors(tmp_path: Path) -> None:
     tool = TodoListTool(TodoListStore("s", workspace_root=tmp_path, mirror_to_disk=False))
     empty = json.loads(await tool.execute({"action": "add", "text": "  "}))
     assert empty["ok"] is False
+    empty_list = json.loads(await tool.execute({"action": "add", "text": []}))
+    assert empty_list["ok"] is False
     missing = json.loads(await tool.execute({"action": "complete", "id": "nope"}))
     assert missing["ok"] is False
     bad = json.loads(await tool.execute({"action": "list"}))
     assert bad["ok"] is False
 
 
+@pytest.mark.asyncio
+async def test_todo_list_tool_add_many_atomic(tmp_path: Path) -> None:
+    store = TodoListStore("sess-many", workspace_root=tmp_path, mirror_to_disk=False)
+    tool = TodoListTool(store)
+
+    added = json.loads(
+        await tool.execute(
+            {
+                "action": "add",
+                "text": [
+                    "Review PR 473",
+                    "Review PR 554",
+                    "Review PR 591",
+                ],
+            }
+        )
+    )
+    assert added["ok"] is True
+    assert "item" not in added  # bulk: use added + items, not a misleading first item
+    assert [item["text"] for item in added["added"]] == [
+        "Review PR 473",
+        "Review PR 554",
+        "Review PR 591",
+    ]
+    assert [item["id"] for item in added["items"]] == ["t1", "t2", "t3"]
+    assert len(store.items) == 3
+
+    # Capacity checked against the whole batch before any mutation.
+    store_full = TodoListStore("sess-cap", workspace_root=tmp_path, mirror_to_disk=False)
+    for i in range(49):
+        item = await store_full.add(f"keep-{i}")
+        assert not isinstance(item, str)
+    tool_full = TodoListTool(store_full)
+    over = json.loads(
+        await tool_full.execute({"action": "add", "text": ["one-more", "two-more"]})
+    )
+    assert over["ok"] is False
+    assert "would exceed max" in over["message"]
+    assert len(store_full.items) == 49
+
+
+@pytest.mark.asyncio
+async def test_todo_list_add_many_rejects_blank_without_partial_write(tmp_path: Path) -> None:
+    store = TodoListStore("sess-blank", workspace_root=tmp_path, mirror_to_disk=False)
+    await store.add("already there")
+    tool = TodoListTool(store)
+
+    bad = json.loads(await tool.execute({"action": "add", "text": ["ok", "  ", "also"]}))
+    assert bad["ok"] is False
+    assert [item.text for item in store.items] == ["already there"]
+
+
 def test_harness_includes_todo_list_when_enabled() -> None:
     out = harness_fixed_context(include_task_tool=False, include_todo_list=True)
     assert "`todo_list`" in out
     assert "`add` / `complete` / `remove`" in out
+    assert "list of strings" in out
     assert "## Todo list" in out
 
 
