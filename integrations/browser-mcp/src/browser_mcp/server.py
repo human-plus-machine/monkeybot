@@ -22,6 +22,10 @@ _bh: tuple[Any, Any] | None = None
 # CDP endpoint (BU_CDP_URL/WS or in-app file) the current daemon binding was ensured with.
 # Used instead of browser-harness's nonexistent daemon_browser_kind() to decide when to bounce.
 _bound_cdp: str | None = None
+# True when the last _apply_in_app_cdp_url() call set BU_CDP_URL/WS from the in-app file
+# (as opposed to an operator-supplied env var). Lets us clear that self-set value when the
+# file goes away, instead of falling back to a port we wrote from a now-stale file read.
+_env_set_from_in_app_file = False
 
 # Written by Monkeyapp when the in-app Electron CDP bridge is live. Prefer this over
 # auto-discovering the user's desktop Chrome (which wins when BU_CDP_URL is empty/stale).
@@ -54,17 +58,7 @@ mcp = FastMCP(
 )
 
 
-def _apply_in_app_cdp_url() -> str | None:
-    """Ensure BU_CDP_URL/WS points at Monkeyapp's bridge when one is published.
-
-    Returns the explicit CDP endpoint in use (env or file), or None.
-    """
-    ws = (os.environ.get("BU_CDP_WS") or "").strip()
-    http = (os.environ.get("BU_CDP_URL") or "").strip()
-    if ws:
-        return ws
-    if http:
-        return http
+def _read_in_app_cdp_file() -> str | None:
     try:
         raw = _IN_APP_CDP_URL_FILE.read_text(encoding="utf-8").strip()
     except FileNotFoundError:
@@ -76,15 +70,52 @@ def _apply_in_app_cdp_url() -> str | None:
             exc_info=True,
         )
         return None
-    if not raw:
-        return None
-    if raw.startswith("ws://") or raw.startswith("wss://"):
-        os.environ["BU_CDP_WS"] = raw
+    return raw or None
+
+
+def _apply_in_app_cdp_url() -> str | None:
+    """Ensure BU_CDP_URL/WS points at Monkeyapp's bridge when one is published.
+
+    Prefers the in-app runtime file over process env: mcp.json often bakes a
+    concrete ``http://127.0.0.1:PORT`` from a previous launch, and that port is
+    dead after restart (WinError 10061 / connection refused). The file is
+    rewritten every time Electron's CDP bridge comes up.
+
+    When the file disappears (Monkeyapp closed) after having supplied the
+    active endpoint, the env var we set from it is cleared rather than left in
+    place -- otherwise the next call would fall back to that same self-set,
+    now-dead port, reintroducing the stale-endpoint bug this function exists
+    to avoid. Operator-supplied env vars (self-hosted headless Chrome, Browser
+    Use Cloud -- see docs/browser-mcp.md) are never touched by this path.
+
+    Returns the explicit CDP endpoint in use (file or env), or None.
+    """
+    global _env_set_from_in_app_file
+
+    file_url = _read_in_app_cdp_file()
+    if file_url:
+        if file_url.startswith("ws://") or file_url.startswith("wss://"):
+            os.environ["BU_CDP_WS"] = file_url
+            os.environ.pop("BU_CDP_URL", None)
+            _env_set_from_in_app_file = True
+            return file_url
+        if file_url.startswith("http://") or file_url.startswith("https://"):
+            os.environ["BU_CDP_URL"] = file_url
+            os.environ.pop("BU_CDP_WS", None)
+            _env_set_from_in_app_file = True
+            return file_url
+
+    if _env_set_from_in_app_file:
+        os.environ.pop("BU_CDP_WS", None)
         os.environ.pop("BU_CDP_URL", None)
-        return raw
-    if raw.startswith("http://") or raw.startswith("https://"):
-        os.environ["BU_CDP_URL"] = raw
-        return raw
+        _env_set_from_in_app_file = False
+
+    ws = (os.environ.get("BU_CDP_WS") or "").strip()
+    http = (os.environ.get("BU_CDP_URL") or "").strip()
+    if ws:
+        return ws
+    if http:
+        return http
     return None
 
 
