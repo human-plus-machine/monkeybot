@@ -36,15 +36,17 @@ def _install_fake_harness(monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, M
     return admin, helpers
 
 
-def test_apply_in_app_cdp_url_prefers_env_over_file(
+def test_apply_in_app_cdp_url_prefers_file_over_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Stale mcp.json-baked ports must not win over Monkeyapp's live bridge file."""
     cdp_file = tmp_path / "in-app-cdp-url"
     cdp_file.write_text("http://127.0.0.1:9333", encoding="utf-8")
     monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", cdp_file)
     monkeypatch.setenv("BU_CDP_URL", "http://127.0.0.1:9222")
 
-    assert server._apply_in_app_cdp_url() == "http://127.0.0.1:9222"
+    assert server._apply_in_app_cdp_url() == "http://127.0.0.1:9333"
+    assert server.os.environ.get("BU_CDP_URL") == "http://127.0.0.1:9333"
 
 
 def test_apply_in_app_cdp_url_reads_http_file(
