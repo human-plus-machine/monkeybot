@@ -96,6 +96,22 @@ async def count_anthropic_input_tokens(
     return int(resp.input_tokens)
 
 
+# Sampling/thinking kwargs a request may carry that a not-yet-catalogued model
+# can reject with HTTP 400. Model-specific cases are gated ahead of time via
+# ``model_capabilities.supports_param``; this is the fallback for a model that
+# table doesn't know about yet (e.g. released after this code was written).
+_STRIPPABLE_PARAMS = ("temperature", "top_p", "top_k", "thinking")
+
+
+def _strip_rejected_params(kwargs: dict[str, Any], exc: Exception) -> list[str]:
+    """Drop any of ``_STRIPPABLE_PARAMS`` named in ``exc``'s message; return what was dropped."""
+    msg = str(exc).lower()
+    dropped = [p for p in _STRIPPABLE_PARAMS if p in kwargs and p in msg]
+    for p in dropped:
+        del kwargs[p]
+    return dropped
+
+
 async def iter_anthropic_sdk_stream(
     client: Any,
     stream_kwargs: dict[str, Any],
@@ -104,6 +120,51 @@ async def iter_anthropic_sdk_stream(
     error_message: str,
     n_messages: int | None = None,
     n_tools: int | None = None,
+) -> AsyncIterator[ProviderEvent]:
+    """Stream an Anthropic ``messages.stream`` call, yielding provider events.
+
+    If the request 400s before any content was streamed and the error names a
+    sampling/thinking param present in ``stream_kwargs``, retries once with
+    that param dropped — a safety net for models not yet in
+    ``model_capabilities`` (see that module's docstring). No retry once
+    content has started: dropping a param mid-stream would risk duplicated
+    output for a caller that already received deltas.
+    """
+    kwargs = stream_kwargs
+    for attempt in range(2):
+        started = False
+        try:
+            async for event in _stream_anthropic_once(client, kwargs, provider=provider):
+                started = True
+                yield event
+            return
+        except Exception as exc:
+            if attempt == 0 and not started:
+                dropped = _strip_rejected_params(kwargs, exc)
+                if dropped:
+                    _log.warning(
+                        "anthropic stream rejected params, retrying without them %s",
+                        kv(provider=provider, model=kwargs.get("model"), dropped=dropped),
+                    )
+                    continue
+            _log.warning(
+                error_message,
+                kv(
+                    provider=provider,
+                    model=kwargs.get("model"),
+                    n_messages=n_messages,
+                    n_tools=n_tools,
+                ),
+                exc_info=True,
+            )
+            raise
+
+
+async def _stream_anthropic_once(
+    client: Any,
+    stream_kwargs: dict[str, Any],
+    *,
+    provider: str,
 ) -> AsyncIterator[ProviderEvent]:
     tool_input_buf = ""
     tool_id = ""
@@ -114,89 +175,68 @@ async def iter_anthropic_sdk_stream(
     cache_creation = 0
     stop_reason: str | None = None
 
-    try:
-        async with client.messages.stream(**stream_kwargs) as stream:
-            async for event in stream:
-                match event.type:
-                    case "content_block_start":
-                        if event.content_block.type == "tool_use":
-                            tool_id = event.content_block.id
-                            tool_name = event.content_block.name
-                            tool_input_buf = ""
-                    case "content_block_delta":
-                        if event.delta.type == "text_delta":
-                            yield TextDelta(text=event.delta.text)
-                        elif event.delta.type == "thinking_delta":
-                            thought = getattr(event.delta, "thinking", None) or ""
-                            if thought:
-                                yield ThinkingDelta(text=thought)
-                        elif event.delta.type == "signature_delta":
-                            sig = getattr(event.delta, "signature", None) or ""
-                            if sig:
-                                yield ThinkingDelta(text="", signature=sig)
-                        elif event.delta.type == "input_json_delta":
-                            partial = event.delta.partial_json
-                            tool_input_buf += partial
-                            if tool_id and partial:
-                                yield ToolInputDelta(
-                                    call_id=tool_id,
-                                    name=tool_name,
-                                    delta=partial,
-                                )
-                    case "content_block_stop":
-                        if tool_id:
-                            args, parse_error = safe_parse_tool_args(
-                                tool_input_buf,
-                                call_id=tool_id,
-                                tool_name=tool_name,
-                                provider=provider,
-                            )
-                            yield ToolCall(
+    async with client.messages.stream(**stream_kwargs) as stream:
+        async for event in stream:
+            match event.type:
+                case "content_block_start":
+                    if event.content_block.type == "tool_use":
+                        tool_id = event.content_block.id
+                        tool_name = event.content_block.name
+                        tool_input_buf = ""
+                case "content_block_delta":
+                    if event.delta.type == "text_delta":
+                        yield TextDelta(text=event.delta.text)
+                    elif event.delta.type == "thinking_delta":
+                        thought = getattr(event.delta, "thinking", None) or ""
+                        if thought:
+                            yield ThinkingDelta(text=thought)
+                    elif event.delta.type == "signature_delta":
+                        sig = getattr(event.delta, "signature", None) or ""
+                        if sig:
+                            yield ThinkingDelta(text="", signature=sig)
+                    elif event.delta.type == "input_json_delta":
+                        partial = event.delta.partial_json
+                        tool_input_buf += partial
+                        if tool_id and partial:
+                            yield ToolInputDelta(
                                 call_id=tool_id,
                                 name=tool_name,
-                                args=args,
-                                parse_error=parse_error,
+                                delta=partial,
                             )
-                            tool_id = tool_name = tool_input_buf = ""
-                    case "message_delta":
-                        delta = getattr(event, "delta", None)
-                        sr = getattr(delta, "stop_reason", None) if delta is not None else None
-                        if sr:
-                            stop_reason = str(sr)
-                        if hasattr(event, "usage"):
-                            output_tokens = int(getattr(event.usage, "output_tokens", 0) or 0)
-                            read = int(
-                                getattr(event.usage, "cache_read_input_tokens", 0) or 0
-                            )
-                            created = int(
-                                getattr(event.usage, "cache_creation_input_tokens", 0) or 0
-                            )
-                            if read:
-                                cache_read = read
-                            if created:
-                                cache_creation = created
-                    case "message_start":
-                        if hasattr(event, "message") and event.message.usage:
-                            usage = event.message.usage
-                            input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
-                            cache_read = int(
-                                getattr(usage, "cache_read_input_tokens", 0) or 0
-                            )
-                            cache_creation = int(
-                                getattr(usage, "cache_creation_input_tokens", 0) or 0
-                            )
-    except Exception:
-        _log.warning(
-            error_message,
-            kv(
-                provider=provider,
-                model=stream_kwargs.get("model"),
-                n_messages=n_messages,
-                n_tools=n_tools,
-            ),
-            exc_info=True,
-        )
-        raise
+                case "content_block_stop":
+                    if tool_id:
+                        args, parse_error = safe_parse_tool_args(
+                            tool_input_buf,
+                            call_id=tool_id,
+                            tool_name=tool_name,
+                            provider=provider,
+                        )
+                        yield ToolCall(
+                            call_id=tool_id,
+                            name=tool_name,
+                            args=args,
+                            parse_error=parse_error,
+                        )
+                        tool_id = tool_name = tool_input_buf = ""
+                case "message_delta":
+                    delta = getattr(event, "delta", None)
+                    sr = getattr(delta, "stop_reason", None) if delta is not None else None
+                    if sr:
+                        stop_reason = str(sr)
+                    if hasattr(event, "usage"):
+                        output_tokens = int(getattr(event.usage, "output_tokens", 0) or 0)
+                        read = int(getattr(event.usage, "cache_read_input_tokens", 0) or 0)
+                        created = int(getattr(event.usage, "cache_creation_input_tokens", 0) or 0)
+                        if read:
+                            cache_read = read
+                        if created:
+                            cache_creation = created
+                case "message_start":
+                    if hasattr(event, "message") and event.message.usage:
+                        usage = event.message.usage
+                        input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+                        cache_read = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
+                        cache_creation = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
 
     yield UsageEvent(
         input_tokens=input_tokens,
@@ -291,9 +331,7 @@ def _anthropic_assistant_block(block: ContentBlock) -> dict[str, Any]:
         }
     if isinstance(block, RedactedThinking):
         return {"type": "redacted_thinking", "data": block.data}
-    raise ValueError(
-        f"unsupported assistant content block for Anthropic: {type(block).__name__}"
-    )
+    raise ValueError(f"unsupported assistant content block for Anthropic: {type(block).__name__}")
 
 
 # Must match volatile section headers emitted by ``compose_system_prompt``

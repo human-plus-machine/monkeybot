@@ -20,6 +20,7 @@ from monkeybot.providers._utils import (
     mark_last_tool_cached,
     split_leading_system,
 )
+from monkeybot.providers.model_capabilities import supports_param
 from monkeybot.providers.sampling import resolve_model_sampling
 
 _log = logging.getLogger(__name__)
@@ -44,10 +45,9 @@ class VertexClaudeProvider:
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> None:
-        self._project_id = (
-            (project_id or "").strip()
-            or os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID", "").strip()
-        )
+        self._project_id = (project_id or "").strip() or os.environ.get(
+            "ANTHROPIC_VERTEX_PROJECT_ID", ""
+        ).strip()
         self._region = (
             (region or "").strip()
             or os.environ.get("ANTHROPIC_VERTEX_REGION", "").strip()
@@ -135,8 +135,9 @@ class VertexClaudeProvider:
             "messages": cast(Any, converted_messages),
             "tools": tools_param,
             "max_tokens": self._max_tokens,
-            "temperature": self._temperature,
         }
+        if supports_param(model, "temperature"):
+            stream_kwargs["temperature"] = self._temperature
         async for event in iter_anthropic_sdk_stream(
             client,
             stream_kwargs,

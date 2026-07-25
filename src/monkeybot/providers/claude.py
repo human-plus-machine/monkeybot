@@ -17,6 +17,7 @@ from monkeybot.providers._utils import (
     mark_last_tool_cached,
     split_leading_system,
 )
+from monkeybot.providers.model_capabilities import supports_param
 from monkeybot.providers.sampling import resolve_model_sampling
 
 
@@ -100,15 +101,22 @@ class ClaudeProvider:
             "messages": cast(Any, converted_messages),
             "tools": tools_param,
             "max_tokens": self._max_tokens,
-            "temperature": self._temperature,
         }
-        if thinking_budget is not None and thinking_budget > 0:
+        if supports_param(model, "temperature"):
+            stream_kwargs["temperature"] = self._temperature
+        if (
+            thinking_budget is not None
+            and thinking_budget > 0
+            and supports_param(model, "thinking_budget_tokens")
+        ):
             stream_kwargs["thinking"] = {
                 "type": "enabled",
                 "budget_tokens": thinking_budget,
             }
             # Anthropic requires temperature=1 when extended thinking is enabled.
             stream_kwargs["temperature"] = 1
+        # else if thinking_budget was requested but rejected: model runs adaptive
+        # thinking by default; manual budget_tokens would 400, so it's dropped.
 
         client_kwargs: dict[str, Any] = {}
         if session_id and retention != "none":
