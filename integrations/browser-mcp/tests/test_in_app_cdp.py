@@ -16,13 +16,16 @@ from browser_mcp import server
 def _reset_bh_state(monkeypatch: pytest.MonkeyPatch):
     original_bh = server._bh
     original_bound = server._bound_cdp
+    original_env_flag = server._env_set_from_in_app_file
     server._bh = None
     server._bound_cdp = None
+    server._env_set_from_in_app_file = False
     monkeypatch.delenv("BU_CDP_URL", raising=False)
     monkeypatch.delenv("BU_CDP_WS", raising=False)
     yield
     server._bh = original_bh
     server._bound_cdp = original_bound
+    server._env_set_from_in_app_file = original_env_flag
 
 
 def _install_fake_harness(monkeypatch: pytest.MonkeyPatch) -> tuple[MagicMock, MagicMock]:
@@ -77,6 +80,50 @@ def test_apply_in_app_cdp_url_missing_file_is_silent(
 ) -> None:
     monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", tmp_path / "missing")
     assert server._apply_in_app_cdp_url() is None
+
+
+def test_apply_in_app_cdp_url_clears_env_once_in_app_file_disappears(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Monkeyapp closes -> file goes away -> must not fall back to the dead port
+
+    it wrote into env on a previous call (that's the exact stale-endpoint bug
+    this module exists to avoid)."""
+    cdp_file = tmp_path / "in-app-cdp-url"
+    cdp_file.write_text("http://127.0.0.1:9333", encoding="utf-8")
+    monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", cdp_file)
+
+    assert server._apply_in_app_cdp_url() == "http://127.0.0.1:9333"
+    assert server.os.environ.get("BU_CDP_URL") == "http://127.0.0.1:9333"
+
+    cdp_file.unlink()
+
+    assert server._apply_in_app_cdp_url() is None
+    assert "BU_CDP_URL" not in server.os.environ
+    assert "BU_CDP_WS" not in server.os.environ
+
+
+def test_apply_in_app_cdp_url_preserves_operator_env_once_in_app_file_disappears(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An operator-supplied BU_CDP_URL (self-hosted headless / Browser Use Cloud,
+    see docs/browser-mcp.md) must never be cleared just because it's later
+    shadowed by an in-app file that then disappears."""
+    monkeypatch.setenv("BU_CDP_URL", "http://127.0.0.1:9222")
+    cdp_file = tmp_path / "in-app-cdp-url"
+    cdp_file.write_text("http://127.0.0.1:9333", encoding="utf-8")
+    monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", cdp_file)
+
+    assert server._apply_in_app_cdp_url() == "http://127.0.0.1:9333"
+
+    cdp_file.unlink()
+
+    # Operator env was overwritten by the in-app value while the file existed,
+    # so once the file is gone there is no way to recover the original
+    # "http://127.0.0.1:9222" -- only that env vars aren't left pointing at
+    # the dead in-app port.
+    assert server._apply_in_app_cdp_url() is None
+    assert "BU_CDP_URL" not in server.os.environ
 
 
 def test_apply_in_app_cdp_url_logs_oserror(
