@@ -54,17 +54,7 @@ mcp = FastMCP(
 )
 
 
-def _apply_in_app_cdp_url() -> str | None:
-    """Ensure BU_CDP_URL/WS points at Monkeyapp's bridge when one is published.
-
-    Returns the explicit CDP endpoint in use (env or file), or None.
-    """
-    ws = (os.environ.get("BU_CDP_WS") or "").strip()
-    http = (os.environ.get("BU_CDP_URL") or "").strip()
-    if ws:
-        return ws
-    if http:
-        return http
+def _read_in_app_cdp_file() -> str | None:
     try:
         raw = _IN_APP_CDP_URL_FILE.read_text(encoding="utf-8").strip()
     except FileNotFoundError:
@@ -76,15 +66,36 @@ def _apply_in_app_cdp_url() -> str | None:
             exc_info=True,
         )
         return None
-    if not raw:
-        return None
-    if raw.startswith("ws://") or raw.startswith("wss://"):
-        os.environ["BU_CDP_WS"] = raw
-        os.environ.pop("BU_CDP_URL", None)
-        return raw
-    if raw.startswith("http://") or raw.startswith("https://"):
-        os.environ["BU_CDP_URL"] = raw
-        return raw
+    return raw or None
+
+
+def _apply_in_app_cdp_url() -> str | None:
+    """Ensure BU_CDP_URL/WS points at Monkeyapp's bridge when one is published.
+
+    Prefers the in-app runtime file over process env: mcp.json often bakes a
+    concrete ``http://127.0.0.1:PORT`` from a previous launch, and that port is
+    dead after restart (WinError 10061 / connection refused). The file is
+    rewritten every time Electron's CDP bridge comes up.
+
+    Returns the explicit CDP endpoint in use (file or env), or None.
+    """
+    file_url = _read_in_app_cdp_file()
+    if file_url:
+        if file_url.startswith("ws://") or file_url.startswith("wss://"):
+            os.environ["BU_CDP_WS"] = file_url
+            os.environ.pop("BU_CDP_URL", None)
+            return file_url
+        if file_url.startswith("http://") or file_url.startswith("https://"):
+            os.environ["BU_CDP_URL"] = file_url
+            os.environ.pop("BU_CDP_WS", None)
+            return file_url
+
+    ws = (os.environ.get("BU_CDP_WS") or "").strip()
+    http = (os.environ.get("BU_CDP_URL") or "").strip()
+    if ws:
+        return ws
+    if http:
+        return http
     return None
 
 
