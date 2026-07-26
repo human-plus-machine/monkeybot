@@ -40,6 +40,7 @@
 
 ### Infra
 - **Postgres as production default** — backend exists; gateway still defaults to SQLite; decide when/if this becomes the default.
+- **Firestore usage aggregation doesn't scale** — `FirestoreUsageStore.summary()`/`breakdown()` (agent-wide, no `thread_id`) stream the entire `turn_usage` collection into memory and aggregate in Python. Fine at small scale; revisit with a Firestore aggregation query or a scheduled rollup doc if `/usage` traffic or data volume grows.
 - **Knowledge ANN index (sqlite-vec)** — deliberately deferred. The numpy matrix cache in `sqlite_vector.py` holds through ~50–100k chunks and query cost is embed-API bound, not local ANN. Revisit only if measured ANN p95 exceeds ~20–50 ms or the resident matrix causes RAM pressure; the true scale escape hatch is `store.type: pgvector`, not `sqlite-vec` packaging.
 
 ### MCP

@@ -39,6 +39,7 @@ from .loop_port import LoopPort, UsagePort
 from .models import (
     APIError,
     AdmissionAcceptedResponse,
+    AgentUsageResponse,
     AttachmentUploadResponse,
     CancelRequest,
     CreateSessionRequest,
@@ -406,6 +407,22 @@ class _StaticUsagePort:
             "context_window_tokens": cw,
         }
 
+    async def agent_usage(self, *, since: str | None) -> dict[str, Any]:
+        _ = since
+        return {
+            "turns": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cached_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_creation_tokens": 0,
+            "cost_usd": 0.0,
+            "period_start": 0,
+            "period_end": 0,
+            "by_model": [],
+            "by_day": [],
+        }
+
 
 async def _ping_loop(bus: SessionBus) -> None:
     """Emit `: ping N` heartbeats every 0.5s until cancelled."""
@@ -417,6 +434,23 @@ async def _ping_loop(bus: SessionBus) -> None:
             await bus.publish_comment(format_ping(n))
     except asyncio.CancelledError:
         raise
+
+
+def _validate_since(since: str | None, request_id: str) -> None:
+    """Reject a malformed ``since`` query param instead of silently ignoring it.
+
+    ``since`` is expected to be a unix-ms timestamp; anything else (e.g. a
+    negative number, empty string, or non-numeric text) would otherwise be
+    swallowed by the downstream ``str.isdigit()`` check and cause the filter
+    to be silently dropped rather than surfacing the caller's mistake.
+    """
+    if since is not None and not since.isdigit():
+        raise APIError(
+            400,
+            "BAD_REQUEST",
+            "`since` must be a non-negative integer (unix ms)",
+            request_id,
+        )
 
 
 def _parse_last_event_id(request: Request) -> int | None:
@@ -982,6 +1016,7 @@ def create_app(
         reg_dep: SessionRegistry = Depends(get_registry),
     ) -> SessionUsageResponse:
         """Return token/cost aggregates for the session (UsagePort backend)."""
+        _validate_since(since, uuid.uuid4().hex)
         if reg_dep.get(session_id) is None:
             raise APIError(
                 404,
@@ -992,6 +1027,17 @@ def create_app(
         usage_ref: UsagePort = request.app.state.usage
         raw = await usage_ref.session_usage(session_id, since=since)
         return SessionUsageResponse.model_validate(raw)
+
+    @api.get("/usage", response_model=AgentUsageResponse)
+    async def get_agent_usage(
+        request: Request,
+        since: str | None = None,
+    ) -> AgentUsageResponse:
+        """Return agent-wide totals and spend split by model / UTC day."""
+        _validate_since(since, uuid.uuid4().hex)
+        usage_ref: UsagePort = request.app.state.usage
+        raw = await usage_ref.agent_usage(since=since)
+        return AgentUsageResponse.model_validate(raw)
 
     @api.get("/api/workspace/tree")
     async def workspace_tree(

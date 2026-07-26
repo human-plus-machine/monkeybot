@@ -20,7 +20,7 @@ class LoopPort(Protocol):
 
 
 class UsagePort(Protocol):
-    """Returns usage aggregates for GET /sessions/{id}/usage."""
+    """Returns usage aggregates for session and agent-wide usage endpoints."""
 
     async def session_usage(
         self,
@@ -28,4 +28,7 @@ class UsagePort(Protocol):
         *,
         since: str | None,
     ) -> dict[str, Any]:
-        """Return JSON-serializable dict matching GET /usage body."""
+        """Return JSON-serializable dict matching GET /sessions/{id}/usage body."""
+
+    async def agent_usage(self, *, since: str | None) -> dict[str, Any]:
+        """Return JSON-serializable dict matching GET /usage body (totals + breakdown)."""

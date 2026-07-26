@@ -124,6 +124,9 @@ async def test_usage_record_stores_estimated_prompt_tokens(usage_conn) -> None:
     await cur.close()
     assert row is not None
     assert int(row[0]) == 4242
+
+
+@pytest.mark.asyncio
 async def test_usage_summary_last_estimated_prompt_tokens_most_recent(usage_conn) -> None:
     store = SQLiteUsageStore(usage_conn)
     for created_at, inp, est in [(1000, 50, 500), (2000, 120, 1200), (3000, 99, 999)]:
@@ -221,3 +224,46 @@ def test_usage_summary_defaults_cache_fields_zero() -> None:
     )
     assert s.cache_read_tokens == 0
     assert s.cache_creation_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_usage_breakdown_by_model_and_day(usage_conn) -> None:
+    from datetime import datetime, timezone
+
+    store = SQLiteUsageStore(usage_conn)
+    day1 = int(datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc).timestamp() * 1000)
+    day2 = int(datetime(2026, 7, 26, 12, 0, tzinfo=timezone.utc).timestamp() * 1000)
+    rows = [
+        ("a", "gemini-2.5-flash", 10, 5, 0.02, day1),
+        ("b", "gemini-2.5-flash", 20, 5, 0.03, day1),
+        ("c", "claude-sonnet-4", 100, 50, 0.10, day2),
+    ]
+    for tid, model, inp, out, cost, created in rows:
+        await usage_conn.execute(
+            """
+            INSERT INTO turn_usage(
+                thread_id, run_id, model,
+                input_tokens, output_tokens, cached_tokens,
+                cost_usd, duration_ms, created_at, context_json
+            )
+            VALUES (?, NULL, ?, ?, ?, 0, ?, 1, ?, NULL)
+            """,
+            (tid, model, inp, out, cost, created),
+        )
+    await usage_conn.commit()
+
+    breakdown = await store.breakdown()
+    assert [b.key for b in breakdown.by_model] == ["claude-sonnet-4", "gemini-2.5-flash"]
+    flash = breakdown.by_model[1]
+    assert flash.turns == 2
+    assert flash.input_tokens == 30
+    assert flash.cost_usd == pytest.approx(0.05)
+    assert [b.key for b in breakdown.by_day] == ["2026-07-25", "2026-07-26"]
+    assert breakdown.by_day[0].turns == 2
+    assert breakdown.by_day[1].cost_usd == pytest.approx(0.10)
+
+    filtered = await store.breakdown(since_ms=day2)
+    assert len(filtered.by_model) == 1
+    assert filtered.by_model[0].key == "claude-sonnet-4"
+    assert len(filtered.by_day) == 1
+    assert filtered.by_day[0].key == "2026-07-26"

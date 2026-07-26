@@ -13,7 +13,7 @@ from google.cloud.firestore import AsyncClient
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from monkeybot.core.llm.provider import Message, Role
-from monkeybot.core.llm.usage import Usage, UsageSummary
+from monkeybot.core.llm.usage import Usage, UsageBreakdown, UsageBucket, UsageSummary
 from monkeybot.core.persistence.backends import FirestoreConfig
 from monkeybot.core.persistence.firestore_scheduled_loops import FirestoreScheduledLoopStore
 from monkeybot.core.persistence.durable_runs import (
@@ -318,6 +318,38 @@ class FirestoreUsageStore:
             cache_read_tokens=cache_read_tokens,
             cache_creation_tokens=cache_creation_tokens,
         )
+
+    async def breakdown(self, since_ms: int | None = None) -> UsageBreakdown:
+        """Aggregate usage by model and by UTC calendar day (in-process).
+
+        When filtering with no thread, streams the entire ``turn_usage`` collection
+        (small-scale only; not suitable for large production datasets).
+        """
+        rows = await self._fetch_usage_rows(None, since_ms)
+        if not rows:
+            return UsageBreakdown(by_model=[], by_day=[])
+
+        by_model_map: dict[str, list[dict[str, object]]] = {}
+        by_day_map: dict[str, list[dict[str, object]]] = {}
+        for row in rows:
+            model = str(row.get("model") or "unknown")
+            by_model_map.setdefault(model, []).append(row)
+            day = time.strftime("%Y-%m-%d", time.gmtime(_field_int(row, "created_at") / 1000.0))
+            by_day_map.setdefault(day, []).append(row)
+
+        def _bucket(key: str, group: list[dict[str, object]]) -> UsageBucket:
+            return UsageBucket(
+                key=key,
+                turns=len(group),
+                input_tokens=sum(_field_int(r, "input_tokens") for r in group),
+                output_tokens=sum(_field_int(r, "output_tokens") for r in group),
+                cost_usd=sum(_field_float(r, "cost_usd") for r in group),
+            )
+
+        by_model = [_bucket(k, g) for k, g in by_model_map.items()]
+        by_model.sort(key=lambda b: (-b.cost_usd, b.key))
+        by_day = [_bucket(k, g) for k, g in sorted(by_day_map.items())]
+        return UsageBreakdown(by_model=by_model, by_day=by_day)
 
 
 def _doc_to_run_row(doc_id: str, data: dict[str, object]) -> SubagentRunRow:

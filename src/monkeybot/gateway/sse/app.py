@@ -12,7 +12,7 @@ import json
 import logging
 import os
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +65,7 @@ from monkeybot.core.types.content_blocks import ContentBlock, Text
 from monkeybot.core.workspace import create_workspace_storage
 from monkeybot.gateway.bootstrap import ensure_gateway_runtime_env, log_gateway_startup
 from monkeybot.gateway.sse.loop_port import UsagePort
+from monkeybot.gateway.sse.models import AgentUsageResponse, SessionUsageResponse
 from monkeybot.gateway.sse.routes import create_app as build_sse_app
 from monkeybot.gateway.sse.session_bus import SessionBus, SessionRegistry
 from monkeybot.providers.gemini import GeminiProvider
@@ -122,10 +123,16 @@ def _memory_storage_uri() -> str:
 
 
 class _UsageStoreAdapter(UsagePort):
-    """GET /usage backed by the UsageStore returned from the storage backend."""
+    """Usage endpoints backed by the UsageStore from the storage backend."""
 
     def __init__(self, store: UsageStore) -> None:
         self._store = store
+
+    @staticmethod
+    def _parse_since(since: str | None) -> int | None:
+        if since is not None and since.isdigit():
+            return int(since)
+        return None
 
     async def session_usage(
         self,
@@ -133,9 +140,7 @@ class _UsageStoreAdapter(UsagePort):
         *,
         since: str | None,
     ) -> dict[str, Any]:
-        since_ms: int | None = None
-        if since is not None and since.isdigit():
-            since_ms = int(since)
+        since_ms = self._parse_since(since)
         s = await self._store.summary(thread_id=session_id, since_ms=since_ms)
         context_window_tokens = _env_context_window_tokens()
         summarization_threshold_tokens = max(1, int(context_window_tokens * SUMMARY_TRIGGER_RATIO))
@@ -156,6 +161,28 @@ class _UsageStoreAdapter(UsagePort):
             "context_window_tokens": context_window_tokens,
         }
 
+    async def agent_usage(self, *, since: str | None) -> dict[str, Any]:
+        since_ms = self._parse_since(since)
+        s = await self._store.summary(thread_id=None, since_ms=since_ms)
+        b = await self._store.breakdown(since_ms=since_ms)
+        return {
+            "turns": s.turns,
+            "input_tokens": s.input_tokens,
+            "output_tokens": s.output_tokens,
+            "cached_tokens": s.cached_tokens,
+            "cache_read_tokens": s.cache_read_tokens,
+            "cache_creation_tokens": s.cache_creation_tokens,
+            "cost_usd": s.cost_usd,
+            "period_start": s.period_start_ms if s.period_start_ms is not None else 0,
+            "period_end": s.period_end_ms if s.period_end_ms is not None else 0,
+            "by_model": [asdict(row) for row in b.by_model],
+            "by_day": [asdict(row) for row in b.by_day],
+        }
+
+
+def _zero_agent_usage() -> dict[str, Any]:
+    return AgentUsageResponse().model_dump()
+
 
 class _StaticUsagePortZeros(UsagePort):
     """Pre-startup placeholder so route wiring can construct the FastAPI app."""
@@ -168,22 +195,17 @@ class _StaticUsagePortZeros(UsagePort):
     ) -> dict[str, Any]:
         del since
         cw = _env_context_window_tokens()
-        return {
-            "session_id": session_id,
-            "turns": 0,
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "cached_tokens": 0,
-            "cache_read_tokens": 0,
-            "cache_creation_tokens": 0,
-            "cost_usd": 0.0,
-            "period_start": 0,
-            "period_end": 0,
-            "last_prompt_tokens": 0,
-            "estimated_prompt_tokens": 0,
-            "summarization_threshold_tokens": max(1, int(cw * SUMMARY_TRIGGER_RATIO)),
-            "context_window_tokens": cw,
-        }
+        return SessionUsageResponse(
+            session_id=session_id,
+            last_prompt_tokens=0,
+            estimated_prompt_tokens=0,
+            summarization_threshold_tokens=max(1, int(cw * SUMMARY_TRIGGER_RATIO)),
+            context_window_tokens=cw,
+        ).model_dump()
+
+    async def agent_usage(self, *, since: str | None) -> dict[str, Any]:
+        del since
+        return _zero_agent_usage()
 
 
 def _content_blocks_to_text(blocks: list[ContentBlock]) -> str:

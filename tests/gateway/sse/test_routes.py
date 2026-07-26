@@ -308,6 +308,38 @@ class _PopulatedUsagePort:
             "context_window_tokens": 200_000,
         }
 
+    async def agent_usage(self, *, since: str | None) -> dict[str, object]:
+        _ = since
+        return {
+            "turns": 2,
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "cached_tokens": 28,
+            "cache_read_tokens": 20,
+            "cache_creation_tokens": 8,
+            "cost_usd": 0.05,
+            "period_start": 1000,
+            "period_end": 2000,
+            "by_model": [
+                {
+                    "key": "gemini-2.5-flash",
+                    "turns": 2,
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "cost_usd": 0.05,
+                }
+            ],
+            "by_day": [
+                {
+                    "key": "2026-07-26",
+                    "turns": 2,
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "cost_usd": 0.05,
+                }
+            ],
+        }
+
 
 @pytest.mark.asyncio
 async def test_get_usage_zero_payload_has_cache_keys(
@@ -368,6 +400,55 @@ async def test_get_usage_404_for_unknown_session(client: AsyncClient) -> None:
     r = await client.get("/sessions/missing-session/usage")
     assert r.status_code == 404
     assert r.json()["error"]["code"] == "SESSION_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_get_usage_rejects_malformed_since(client: AsyncClient) -> None:
+    cr = await client.post("/sessions", json={})
+    sid = cr.json()["session_id"]
+    r = await client.get(f"/sessions/{sid}/usage", params={"since": "not-a-number"})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "BAD_REQUEST"
+
+
+@pytest.mark.asyncio
+async def test_get_agent_usage_returns_totals(client: AsyncClient) -> None:
+    r = await client.get("/usage")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["turns"] == 0
+    assert body["cost_usd"] == 0.0
+    assert body["by_model"] == []
+    assert body["by_day"] == []
+    assert "input_tokens" in body
+    assert "cache_read_tokens" in body
+
+
+@pytest.mark.asyncio
+async def test_get_agent_usage_populated(
+    registry: SessionRegistry,
+) -> None:
+    usage_port: UsagePort = _PopulatedUsagePort()
+    app = create_app(
+        loop_port=FakeLoopPort(registry),
+        usage_port=usage_port,
+        registry=registry,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        r = await client.get("/usage")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["cost_usd"] == 0.05
+    assert body["by_model"][0]["key"] == "gemini-2.5-flash"
+    assert body["by_day"][0]["key"] == "2026-07-26"
+    assert "cached_tokens" not in body["by_model"][0]
+
+
+@pytest.mark.asyncio
+async def test_get_agent_usage_rejects_malformed_since(client: AsyncClient) -> None:
+    r = await client.get("/usage", params={"since": "-1"})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "BAD_REQUEST"
 
 
 @pytest.mark.asyncio
