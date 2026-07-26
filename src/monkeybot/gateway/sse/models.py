@@ -182,6 +182,32 @@ class SessionUsageResponse(BaseModel):
     )
 
 
+class UsageBucketResponse(BaseModel):
+    """One model or day bucket in GET /usage."""
+
+    key: str
+    turns: int
+    input_tokens: int
+    output_tokens: int
+    cost_usd: float
+
+
+class AgentUsageResponse(BaseModel):
+    """GET /usage — agent-wide totals plus spend split by model and UTC day."""
+
+    turns: int
+    input_tokens: int
+    output_tokens: int
+    cached_tokens: int
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+    cost_usd: float
+    period_start: int
+    period_end: int
+    by_model: list[UsageBucketResponse] = Field(default_factory=list)
+    by_day: list[UsageBucketResponse] = Field(default_factory=list)
+
+
 def error_payload_dict(code: str, message: str, request_id: str) -> dict[str, Any]:
     """Build a JSON-serializable error body for JSONResponse."""
     return {"error": {"code": code, "message": message, "request_id": request_id}}

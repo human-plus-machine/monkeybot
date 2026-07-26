@@ -39,6 +39,7 @@ from .loop_port import LoopPort, UsagePort
 from .models import (
     APIError,
     AdmissionAcceptedResponse,
+    AgentUsageResponse,
     AttachmentUploadResponse,
     CancelRequest,
     CreateSessionRequest,
@@ -404,6 +405,22 @@ class _StaticUsagePort:
             "estimated_prompt_tokens": 0,
             "summarization_threshold_tokens": st,
             "context_window_tokens": cw,
+        }
+
+    async def agent_usage(self, *, since: str | None) -> dict[str, Any]:
+        _ = since
+        return {
+            "turns": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cached_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_creation_tokens": 0,
+            "cost_usd": 0.0,
+            "period_start": 0,
+            "period_end": 0,
+            "by_model": [],
+            "by_day": [],
         }
 
 
@@ -992,6 +1009,16 @@ def create_app(
         usage_ref: UsagePort = request.app.state.usage
         raw = await usage_ref.session_usage(session_id, since=since)
         return SessionUsageResponse.model_validate(raw)
+
+    @api.get("/usage", response_model=AgentUsageResponse)
+    async def get_agent_usage(
+        request: Request,
+        since: str | None = None,
+    ) -> AgentUsageResponse:
+        """Return agent-wide totals and spend split by model / UTC day."""
+        usage_ref: UsagePort = request.app.state.usage
+        raw = await usage_ref.agent_usage(since=since)
+        return AgentUsageResponse.model_validate(raw)
 
     @api.get("/api/workspace/tree")
     async def workspace_tree(

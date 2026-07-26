@@ -11,7 +11,7 @@ from typing import cast
 import asyncpg
 
 from monkeybot.core.llm.provider import Message, Role
-from monkeybot.core.llm.usage import Usage, UsageSummary
+from monkeybot.core.llm.usage import Usage, UsageBreakdown, UsageBucket, UsageSummary
 from monkeybot.core.persistence.durable_runs import (
     _SUBAGENT_COLUMNS,
     SubagentEnvelope,
@@ -381,6 +381,66 @@ class PostgresUsageStore:
             cache_read_tokens=int(row["cache_read_tokens"]),
             cache_creation_tokens=int(row["cache_creation_tokens"]),
         )
+
+    async def breakdown(self, since_ms: int | None = None) -> UsageBreakdown:
+        """Aggregate usage by model and by UTC calendar day."""
+        clauses: list[str] = []
+        params: list[object] = []
+        if since_ms is not None:
+            clauses.append("created_at >= $1")
+            params.append(since_ms)
+        where_sql = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        agg = """
+                COUNT(*) AS turns,
+                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(cost_usd), 0.0) AS cost_usd
+        """
+        model_sql = f"""
+            SELECT model, {agg}
+            FROM turn_usage
+            {where_sql}
+            GROUP BY model
+            ORDER BY cost_usd DESC, model ASC
+        """
+        day_sql = f"""
+            SELECT
+                to_char(
+                    to_timestamp(created_at / 1000.0) AT TIME ZONE 'UTC',
+                    'YYYY-MM-DD'
+                ) AS day,
+                {agg}
+            FROM turn_usage
+            {where_sql}
+            GROUP BY day
+            ORDER BY day ASC
+        """
+
+        async with self._pool.acquire() as conn:
+            model_rows = await conn.fetch(model_sql, *params)
+            day_rows = await conn.fetch(day_sql, *params)
+
+        by_model = [
+            UsageBucket(
+                key=str(row["model"]),
+                turns=int(row["turns"]),
+                input_tokens=int(row["input_tokens"]),
+                output_tokens=int(row["output_tokens"]),
+                cost_usd=float(row["cost_usd"]),
+            )
+            for row in model_rows
+        ]
+        by_day = [
+            UsageBucket(
+                key=str(row["day"]),
+                turns=int(row["turns"]),
+                input_tokens=int(row["input_tokens"]),
+                output_tokens=int(row["output_tokens"]),
+                cost_usd=float(row["cost_usd"]),
+            )
+            for row in day_rows
+        ]
+        return UsageBreakdown(by_model=by_model, by_day=by_day)
 
 
 class PostgresRunStore:
