@@ -130,6 +130,17 @@ class _FailThenSucceedStream:
         return _CM()
 
 
+def _cm_raising(exc: Exception) -> Any:
+    class _CM:
+        async def __aenter__(self) -> object:
+            raise exc
+
+        async def __aexit__(self, *_exc: object) -> bool:
+            return False
+
+    return _CM()
+
+
 @pytest.mark.asyncio
 async def test_retries_without_rejected_param_on_unlisted_model() -> None:
     stream_fn = _FailThenSucceedStream(_minimal_events())
@@ -177,3 +188,149 @@ async def test_does_not_retry_when_error_names_no_known_param() -> None:
             pass
 
     assert len(stream_fn.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_does_not_strip_thinking_on_message_shaping_400() -> None:
+    """A 400 that merely mentions thinking must not silently disable thinking."""
+
+    calls: list[dict[str, Any]] = []
+
+    def stream_fn(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return _cm_raising(
+            RuntimeError(
+                "Error code: 400 - messages.1.content.0.type: Expected 'thinking' or "
+                "'redacted_thinking', but found 'text'. When 'thinking' is enabled, a "
+                "final 'assistant' message must start with a thinking block."
+            )
+        )
+
+    client = MagicMock()
+    client.messages.stream = stream_fn
+
+    with pytest.raises(RuntimeError):
+        async for _ in iter_anthropic_sdk_stream(
+            client,
+            {
+                "model": "claude-sonnet-6-hypothetical",
+                "thinking": {"type": "enabled", "budget_tokens": 4000},
+                "temperature": 1,
+                "max_tokens": 100,
+            },
+            provider="claude",
+            error_message="Claude stream error: %s",
+        ):
+            pass
+
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_strips_multiple_rejected_params_across_retries() -> None:
+    """The API blames one field at a time; keep dropping until the request is accepted."""
+
+    calls: list[dict[str, Any]] = []
+
+    def stream_fn(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        if "thinking" in kwargs:
+            return _cm_raising(
+                RuntimeError("Error code: 400 - thinking.budget_tokens: unsupported")
+            )
+        if "temperature" in kwargs:
+            return _cm_raising(
+                RuntimeError("Error code: 400 - temperature: Extra inputs are not permitted")
+            )
+
+        class _CM:
+            async def __aenter__(self) -> object:
+                async def _gen() -> object:
+                    for event in _minimal_events():
+                        yield event
+
+                return _gen()
+
+            async def __aexit__(self, *_exc: object) -> bool:
+                return False
+
+        return _CM()
+
+    client = MagicMock()
+    client.messages.stream = stream_fn
+
+    events: list[object] = []
+    async for event in iter_anthropic_sdk_stream(
+        client,
+        {
+            "model": "claude-sonnet-6-hypothetical",
+            "thinking": {"type": "enabled", "budget_tokens": 4000},
+            "temperature": 1,
+            "max_tokens": 100,
+        },
+        provider="claude",
+        error_message="Claude stream error: %s",
+    ):
+        events.append(event)
+
+    assert len(calls) == 3
+    assert "thinking" not in calls[2]
+    assert "temperature" not in calls[2]
+    assert any(isinstance(e, UsageEvent) for e in events)
+
+
+@pytest.mark.asyncio
+async def test_does_not_retry_after_content_started() -> None:
+    """Once deltas have been yielded, a failure must propagate — no duplicated output."""
+
+    calls: list[dict[str, Any]] = []
+
+    def stream_fn(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+
+        class _CM:
+            async def __aenter__(self) -> object:
+                async def _gen() -> object:
+                    yield SimpleNamespace(
+                        type="content_block_delta",
+                        delta=SimpleNamespace(type="text_delta", text="partial"),
+                    )
+                    raise RuntimeError(
+                        "Error code: 400 - temperature: Extra inputs are not permitted"
+                    )
+
+                return _gen()
+
+            async def __aexit__(self, *_exc: object) -> bool:
+                return False
+
+        return _CM()
+
+    client = MagicMock()
+    client.messages.stream = stream_fn
+
+    with pytest.raises(RuntimeError):
+        async for _ in iter_anthropic_sdk_stream(
+            client,
+            {"model": "claude-sonnet-6-hypothetical", "temperature": 0.7, "max_tokens": 100},
+            provider="claude",
+            error_message="Claude stream error: %s",
+        ):
+            pass
+
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_does_not_mutate_caller_kwargs() -> None:
+    stream_fn = _FailThenSucceedStream(_minimal_events())
+    client = MagicMock()
+    client.messages.stream = stream_fn
+
+    kwargs = {"model": "claude-sonnet-6-hypothetical", "temperature": 0.7, "max_tokens": 100}
+    async for _ in iter_anthropic_sdk_stream(
+        client, kwargs, provider="claude", error_message="Claude stream error: %s"
+    ):
+        pass
+
+    assert kwargs["temperature"] == 0.7

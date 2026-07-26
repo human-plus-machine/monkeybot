@@ -107,7 +107,7 @@ class ClaudeProvider:
         if (
             thinking_budget is not None
             and thinking_budget > 0
-            and supports_param(model, "thinking_budget_tokens")
+            and supports_param(model, "thinking")
         ):
             stream_kwargs["thinking"] = {
                 "type": "enabled",
@@ -115,8 +115,6 @@ class ClaudeProvider:
             }
             # Anthropic requires temperature=1 when extended thinking is enabled.
             stream_kwargs["temperature"] = 1
-        # else if thinking_budget was requested but rejected: model runs adaptive
-        # thinking by default; manual budget_tokens would 400, so it's dropped.
 
         client_kwargs: dict[str, Any] = {}
         if session_id and retention != "none":

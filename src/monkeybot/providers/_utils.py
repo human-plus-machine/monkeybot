@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import AsyncIterator, Sequence
 from typing import Any, Literal
 
@@ -103,10 +104,25 @@ async def count_anthropic_input_tokens(
 _STRIPPABLE_PARAMS = ("temperature", "top_p", "top_k", "thinking")
 
 
+def _rejects_param(msg: str, param: str) -> bool:
+    """True if ``msg`` blames ``param`` as a request field, not just mentions the word.
+
+    Anthropic reports a rejected param as a field path — ``temperature: Extra
+    inputs are not permitted``, ``thinking.budget_tokens: ...``. A bare
+    substring test would also match unrelated 400s that merely name the
+    concept, e.g. the message-shaping error "When 'thinking' is enabled, a
+    final 'assistant' message must start with a thinking block" — stripping
+    there would silently disable extended thinking and hide a real bug.
+    """
+    return re.search(rf"(?:^|[^a-z0-9_.]){re.escape(param)}(?:\.[a-z0-9_.]+)?:", msg) is not None
+
+
 def _strip_rejected_params(kwargs: dict[str, Any], exc: Exception) -> list[str]:
-    """Drop any of ``_STRIPPABLE_PARAMS`` named in ``exc``'s message; return what was dropped."""
+    """Drop any of ``_STRIPPABLE_PARAMS`` blamed by ``exc``; return what was dropped."""
     msg = str(exc).lower()
-    dropped = [p for p in _STRIPPABLE_PARAMS if p in kwargs and p in msg]
+    if "400" not in msg:
+        return []
+    dropped = [p for p in _STRIPPABLE_PARAMS if p in kwargs and _rejects_param(msg, p)]
     for p in dropped:
         del kwargs[p]
     return dropped
@@ -123,15 +139,17 @@ async def iter_anthropic_sdk_stream(
 ) -> AsyncIterator[ProviderEvent]:
     """Stream an Anthropic ``messages.stream`` call, yielding provider events.
 
-    If the request 400s before any content was streamed and the error names a
-    sampling/thinking param present in ``stream_kwargs``, retries once with
-    that param dropped — a safety net for models not yet in
-    ``model_capabilities`` (see that module's docstring). No retry once
-    content has started: dropping a param mid-stream would risk duplicated
-    output for a caller that already received deltas.
+    If the request 400s before any content was streamed and the error blames a
+    sampling/thinking param present in ``stream_kwargs``, retries with that
+    param dropped — a safety net for models not yet in ``model_capabilities``
+    (see that module's docstring). Retries until no further param can be
+    dropped, since the API blames one field at a time and a request can carry
+    several rejected params at once. No retry once content has started:
+    dropping a param mid-stream would risk duplicated output for a caller that
+    already received deltas.
     """
-    kwargs = stream_kwargs
-    for attempt in range(2):
+    kwargs = dict(stream_kwargs)  # never mutate the caller's dict
+    for _attempt in range(len(_STRIPPABLE_PARAMS) + 1):
         started = False
         try:
             async for event in _stream_anthropic_once(client, kwargs, provider=provider):
@@ -139,7 +157,7 @@ async def iter_anthropic_sdk_stream(
                 yield event
             return
         except Exception as exc:
-            if attempt == 0 and not started:
+            if not started:
                 dropped = _strip_rejected_params(kwargs, exc)
                 if dropped:
                     _log.warning(
