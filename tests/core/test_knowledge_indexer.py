@@ -400,6 +400,138 @@ async def test_mtime_fast_path_skips_reread(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_chunker_version_bump_forces_rechunk(tmp_path: Path) -> None:
+    """A CHUNKER_VERSION bump must re-chunk files whose mtime never changed."""
+    from monkeybot.core.knowledge.chunking import CHUNKER_VERSION
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    target = ws / "hello.py"
+    target.write_text("def hello():\n    return 1\n", encoding="utf-8")
+    knowledge = tmp_path / ".monkeybot" / "knowledge"
+    knowledge.mkdir(parents=True)
+    settings = KnowledgeSettings(
+        enabled=True,
+        knowledge_root=str(knowledge),
+        index_path=str(knowledge / "index.sqlite"),
+        debounce_ms=0,
+        startup_scan=True,
+        chunk_tokens=200,
+    )
+    index = KnowledgeIndex(Path(settings.index_path))
+    await index.open()
+    try:
+        indexer = KnowledgeIndexer(
+            index,
+            workspace_root=ws,
+            knowledge_root=knowledge,
+            settings=settings,
+        )
+        await indexer.ensure_ready()
+        state = await index.get_file_state("hello.py")
+        assert state is not None
+        assert state.chunker_version == CHUNKER_VERSION
+
+        # Simulate rows written by an older chunker (mtime untouched).
+        conn = index._require()  # noqa: SLF001
+        await conn.execute(
+            "UPDATE files SET content_hash = 'stale', chunker_version = ? "
+            "WHERE path = 'hello.py'",
+            (CHUNKER_VERSION - 1,),
+        )
+        await conn.commit()
+
+        await indexer._full_scan()  # noqa: SLF001
+
+        healed = await index.get_file_state("hello.py")
+        assert healed is not None
+        assert healed.chunker_version == CHUNKER_VERSION
+        assert await index.get_file_hash("hello.py") != "stale"
+        assert healed.mtime == state.mtime
+    finally:
+        await index.close()
+
+
+@pytest.mark.asyncio
+async def test_startup_purges_vectors_from_a_previous_model(tmp_path: Path) -> None:
+    """Switching embedding model must evict incomparable vectors, then re-embed."""
+    from monkeybot.core.persistence.sqlite_vector import (
+        SQLiteVectorStore,
+        VectorChunkRecord,
+    )
+
+    class _Embedder:
+        model_id = "model-new"
+        dim = 2
+
+        async def embed_documents(self, texts: list[str]) -> list[list[float]]:
+            return [[1.0, 0.0] for _ in texts]
+
+        async def embed_query(self, text: str) -> list[float]:
+            del text
+            return [1.0, 0.0]
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    (ws / "hello.py").write_text("def hello():\n    return 1\n", encoding="utf-8")
+    knowledge = tmp_path / ".monkeybot" / "knowledge"
+    knowledge.mkdir(parents=True)
+    settings = KnowledgeSettings(
+        enabled=True,
+        knowledge_root=str(knowledge),
+        index_path=str(knowledge / "index.sqlite"),
+        debounce_ms=0,
+        startup_scan=True,
+        chunk_tokens=200,
+    )
+    index = KnowledgeIndex(Path(settings.index_path))
+    await index.open()
+    vectors = SQLiteVectorStore(knowledge / "vectors.sqlite")
+    await vectors.open()
+    try:
+        await vectors.upsert(
+            [
+                VectorChunkRecord(
+                    chunk_id="hello.py#L1-2",
+                    path="hello.py",
+                    vector=[0.0, 1.0],
+                    model_id="model-old",
+                    dim=2,
+                    start_line=1,
+                    end_line=2,
+                ),
+                VectorChunkRecord(
+                    chunk_id="ghost.py#L1-1",
+                    path="ghost.py",
+                    vector=[0.0, 1.0],
+                    model_id="model-old",
+                    dim=2,
+                    start_line=1,
+                    end_line=1,
+                ),
+            ]
+        )
+        indexer = KnowledgeIndexer(
+            index,
+            workspace_root=ws,
+            knowledge_root=knowledge,
+            settings=settings,
+            embedding_provider=cast("object", _Embedder()),  # type: ignore[arg-type]
+            vector_store=vectors,
+        )
+        await indexer.ensure_ready()
+
+        # Old-model rows are gone; the live path is re-embedded under the new model.
+        assert not await vectors.has_path("ghost.py")
+        hits = await vectors.query([1.0, 0.0], limit=5, model_id="model-new")
+        assert [h.path for h in hits] == ["hello.py"]
+        assert not await vectors.query([0.0, 1.0], limit=5, model_id="model-old")
+    finally:
+        await index.close()
+        await vectors.close()
+
+
+@pytest.mark.asyncio
 async def test_readonly_run_command_does_not_rescan(tmp_path: Path) -> None:
     """F11: ls/cat-style commands must not trigger a full workspace rescan."""
     from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
@@ -658,6 +790,143 @@ async def test_full_scan_keeps_memory_notes_alive_on_list_files_failure(
 ) -> None:
     """Legacy name: full scan now prunes memory notes (full split)."""
     await test_full_scan_prunes_legacy_memory_notes(tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_full_scan_deletes_orphan_vectors(tmp_path: Path) -> None:
+    """Full scan delete_missing drops vector rows for paths gone from disk."""
+    from monkeybot.core.persistence.sqlite_vector import SQLiteVectorStore
+    from monkeybot.core.persistence.sqlite_vector import VectorChunkRecord
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    (ws / "keep.py").write_text("def keep():\n    return 1\n", encoding="utf-8")
+    knowledge = tmp_path / ".monkeybot" / "knowledge"
+    knowledge.mkdir(parents=True)
+
+    settings = KnowledgeSettings(
+        enabled=True,
+        knowledge_root=str(knowledge),
+        index_path=str(knowledge / "index.sqlite"),
+        debounce_ms=0,
+        startup_scan=True,
+        chunk_tokens=200,
+    )
+    index = KnowledgeIndex(Path(settings.index_path))
+    await index.open()
+    vectors = SQLiteVectorStore(knowledge / "vectors.sqlite")
+    await vectors.open()
+    try:
+        await vectors.upsert(
+            [
+                VectorChunkRecord(
+                    chunk_id="gone.py#L1-1",
+                    path="gone.py",
+                    vector=[0.0, 1.0],
+                    model_id="fake",
+                    dim=2,
+                    start_line=1,
+                    end_line=1,
+                ),
+            ]
+        )
+        assert await vectors.has_path("gone.py")
+
+        indexer = KnowledgeIndexer(
+            index,
+            workspace_root=ws,
+            knowledge_root=knowledge,
+            settings=settings,
+            embedding_provider=_FakeEmbedder(),
+            vector_store=vectors,
+        )
+        await indexer.ensure_ready()
+        assert await vectors.has_path("keep.py")
+        assert not await vectors.has_path("gone.py")
+    finally:
+        await index.close()
+        await vectors.close()
+
+
+@pytest.mark.asyncio
+async def test_ensure_ready_prunes_orphan_vectors_without_startup_scan(
+    tmp_path: Path,
+) -> None:
+    """Even with startup_scan=false, vector orphans vs FTS are pruned."""
+    from monkeybot.core.persistence.sqlite_vector import SQLiteVectorStore
+    from monkeybot.core.persistence.sqlite_vector import VectorChunkRecord
+
+    from monkeybot.core.knowledge.chunking import chunk_text
+    from monkeybot.core.knowledge.extractors import content_hash
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    # Disk has a new file that should NOT be indexed (no startup scan)
+    (ws / "new_on_disk.py").write_text("x = 1\n", encoding="utf-8")
+    knowledge = tmp_path / ".monkeybot" / "knowledge"
+    knowledge.mkdir(parents=True)
+
+    settings = KnowledgeSettings(
+        enabled=True,
+        knowledge_root=str(knowledge),
+        index_path=str(knowledge / "index.sqlite"),
+        debounce_ms=0,
+        startup_scan=False,
+        chunk_tokens=200,
+    )
+    index = KnowledgeIndex(Path(settings.index_path))
+    await index.open()
+    vectors = SQLiteVectorStore(knowledge / "vectors.sqlite")
+    await vectors.open()
+    try:
+        keep = "def keep():\n    return 1\n"
+        await index.upsert_file(
+            path="keep.py",
+            source_type="workspace_file",
+            content_hash=content_hash(keep),
+            mtime=1.0,
+            chunks=chunk_text(keep, path="keep.py", source_type="workspace_file"),
+        )
+        await vectors.upsert(
+            [
+                VectorChunkRecord(
+                    chunk_id="keep.py#L1-2",
+                    path="keep.py",
+                    vector=[1.0, 0.0],
+                    model_id="fake",
+                    dim=2,
+                    start_line=1,
+                    end_line=2,
+                ),
+                VectorChunkRecord(
+                    chunk_id="gone.py#L1-1",
+                    path="gone.py",
+                    vector=[0.0, 1.0],
+                    model_id="fake",
+                    dim=2,
+                    start_line=1,
+                    end_line=1,
+                ),
+            ]
+        )
+
+        indexer = KnowledgeIndexer(
+            index,
+            workspace_root=ws,
+            knowledge_root=knowledge,
+            settings=settings,
+            embedding_provider=_FakeEmbedder(),
+            vector_store=vectors,
+        )
+        await indexer.ensure_ready()
+
+        # Orphan pruned; FTS-alive path kept; disk-only file not scanned in
+        assert await vectors.has_path("keep.py")
+        assert not await vectors.has_path("gone.py")
+        assert "new_on_disk.py" not in await index.list_paths()
+    finally:
+        await index.close()
+        await vectors.close()
 
 
 def test_command_implies_fs_mutation_heuristics() -> None:

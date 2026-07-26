@@ -30,6 +30,10 @@ build/
 
 # Data (SQLite DB + memory files — never commit)
 data/
+.monkeybot/
+workspace/.monkeybot/
+*.sqlite
+*.sqlite.writer-pid
 
 # Testing & coverage
 .pytest_cache/

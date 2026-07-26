@@ -158,3 +158,28 @@ def test_migrates_legacy_index_wal_and_shm_sidecars(tmp_path: Path) -> None:
     assert dest_shm.is_file() and dest_shm.read_bytes() == b"shm-bytes"
     assert not legacy_wal.exists()
     assert not legacy_shm.exists()
+
+
+def test_embeddings_provider_defaults_from_yaml(tmp_path: Path) -> None:
+    agent = tmp_path / "agent"
+    workspace = agent / "workspace"
+    workspace.mkdir(parents=True)
+    cfg = agent / "monkeybot_config"
+    cfg.mkdir()
+    (cfg / "monkeybot.yaml").write_text(
+        "knowledge:\n"
+        "  enabled: true\n"
+        "  embeddings:\n"
+        "    enabled: true\n"
+        "    provider: openai\n",
+        encoding="utf-8",
+    )
+    settings = resolve_knowledge_settings(
+        agent_root=agent,
+        config_path=cfg / "monkeybot.yaml",
+        workspace_root=workspace,
+    )
+    assert settings.embeddings.provider == "openai"
+    assert settings.embeddings.model == "text-embedding-3-small"
+    assert settings.embeddings.dimensions == 1536
+    assert settings.embeddings.base_url == "https://api.openai.com/v1"

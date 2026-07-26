@@ -91,6 +91,9 @@ class VectorStoreSettings:
     path: str = ".monkeybot/knowledge/vectors.sqlite"
 
 
+CaptionMode = Literal["off", "path", "llm"]
+
+
 @dataclass(frozen=True)
 class KnowledgeSettings:
     """Resolved knowledge-layer settings for one agent process."""
@@ -105,11 +108,14 @@ class KnowledgeSettings:
     chunk_tokens: int = 700
     chunk_overlap_ratio: float = 0.12
     rrf_k: int = 20
+    captions: CaptionMode = "path"
+    caption_model: str | None = None
     embeddings: EmbeddingSettings = field(default_factory=EmbeddingSettings)
     store: VectorStoreSettings = field(default_factory=VectorStoreSettings)
 
 
 __all__ = [
+    "CaptionMode",
     "EmbeddingSettings",
     "KnowledgeSettings",
     "LinkType",

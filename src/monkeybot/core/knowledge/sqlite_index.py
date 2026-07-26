@@ -5,15 +5,34 @@ from __future__ import annotations
 import logging
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
 import aiosqlite
 
+from monkeybot.core.knowledge.chunking import CHUNKER_VERSION
 from monkeybot.core.knowledge.links import ParsedLink, format_link_ref
 from monkeybot.core.knowledge.types import LinkType, SourceType, TextChunk
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class FileIndexState:
+    """Stored indexing state for one file (mtime fast-path inputs)."""
+
+    mtime: float | None
+    chunker_version: int
+
+
+class KnowledgeWriterConflictError(RuntimeError):
+    """Raised when a second process tries to open the index as a writer."""
+
+
+# One extra pass after clearing a stale sentinel; more means a live contender.
+_WRITER_CLAIM_ATTEMPTS = 2
+
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS files (
@@ -21,7 +40,8 @@ CREATE TABLE IF NOT EXISTS files (
     source_type TEXT NOT NULL,
     mtime REAL,
     content_hash TEXT NOT NULL,
-    modality TEXT NOT NULL DEFAULT 'text'
+    modality TEXT NOT NULL DEFAULT 'text',
+    chunker_version INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS chunks (
@@ -59,65 +79,141 @@ CREATE INDEX IF NOT EXISTS idx_links_target ON links(target_path);
 
 
 class KnowledgeIndex:
-    """Async SQLite FTS + links store for the knowledge layer."""
+    """Async SQLite FTS + links store for the knowledge layer.
+
+    One gateway process may open the index as a writer. Additional processes
+    must use ``read_only=True`` (subagents) or fail with
+    :class:`KnowledgeWriterConflictError`.
+    """
 
     def __init__(self, db_path: Path) -> None:
         self._db_path = Path(db_path)
         self._conn: aiosqlite.Connection | None = None
+        self._read_only = False
 
     @property
     def path(self) -> Path:
         return self._db_path
 
-    async def open(self) -> None:
+    @property
+    def read_only(self) -> bool:
+        return self._read_only
+
+    async def open(self, *, read_only: bool = False) -> None:
+        """Open the DB. Writer claims the single-writer sentinel; readers use ``mode=ro``."""
+        self._read_only = read_only
+        if read_only:
+            if not self._db_path.is_file():
+                raise FileNotFoundError(
+                    f"knowledge index not found for read-only open: {self._db_path} "
+                    "(start the gateway writer first so the index exists)"
+                )
+            uri = _sqlite_uri(self._db_path, read_only=True)
+            self._conn = await aiosqlite.connect(uri, uri=True)
+            self._conn.row_factory = aiosqlite.Row
+            await self._conn.execute("PRAGMA busy_timeout=5000")
+            logger.info("knowledge index open (read-only) path=%s", self._db_path)
+            return
+
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._claim_writer_or_raise()
         self._conn = await aiosqlite.connect(str(self._db_path))
         self._conn.row_factory = aiosqlite.Row
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.execute("PRAGMA busy_timeout=5000")
         await self._conn.execute("PRAGMA foreign_keys = ON")
         await self._conn.executescript(_SCHEMA)
+        await self._migrate()
         await self._conn.commit()
-        self._warn_if_other_writer_active()
         logger.info("knowledge index open path=%s", self._db_path)
 
-    def _warn_if_other_writer_active(self) -> None:
-        """Best-effort, non-blocking check for a second live writer PID.
+    async def _migrate(self) -> None:
+        """Add columns introduced after a DB was first created."""
+        conn = self._require()
+        cur = await conn.execute("PRAGMA table_info(files)")
+        columns = {str(row["name"]) for row in await cur.fetchall()}
+        if "chunker_version" not in columns:
+            # Legacy rows report version 0 so the next scan re-chunks them.
+            await conn.execute(
+                "ALTER TABLE files ADD COLUMN chunker_version INTEGER NOT NULL DEFAULT 0"
+            )
+            logger.info("knowledge index migrated: files.chunker_version added")
 
-        The indexer's dirty queues are process-local (see KnowledgeIndexer /
-        KnowledgeSubsystem docstrings); two writer processes on the same index
-        would silently double-index and race on chunk upserts. This is
-        advisory only — WAL + busy_timeout still make individual writes safe,
-        it just cannot detect a fully vanished process (best-effort by design).
+    def _claim_writer_or_raise(self) -> None:
+        """Hard single-writer lock via ``*.writer-pid`` sentinel.
+
+        The sentinel is created with ``O_CREAT | O_EXCL`` so two processes
+        racing to open the same index (e.g. a gateway restart overlapping the
+        old process) cannot both believe they won: exactly one create succeeds
+        and the loser reads the winner's pid. Stale sentinels (dead PID, or our
+        own from a previous open) are cleared and the exclusive create retried.
         """
         sentinel = self._db_path.with_suffix(self._db_path.suffix + ".writer-pid")
         pid = os.getpid()
-        try:
-            if sentinel.is_file():
-                prev = sentinel.read_text(encoding="utf-8").strip()
+        for _ in range(_WRITER_CLAIM_ATTEMPTS):
+            try:
+                fd = os.open(sentinel, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            except FileExistsError:
+                prev = _read_sentinel_pid(sentinel)
                 if prev and prev != str(pid) and _pid_alive(prev):
-                    logger.warning(
-                        "knowledge index at %s already has an active writer "
-                        "(pid=%s); this process (pid=%s) may double-index or "
-                        "race on writes — the knowledge layer assumes a single "
-                        "gateway writer per workspace.",
-                        self._db_path,
-                        prev,
-                        pid,
-                    )
-            sentinel.write_text(str(pid), encoding="utf-8")
+                    raise KnowledgeWriterConflictError(
+                        f"knowledge index at {self._db_path} already has an active "
+                        f"writer (pid={prev}); this process (pid={pid}) cannot open "
+                        "as a second writer — use read_only=True for search-only "
+                        "clients (e.g. subagents), or stop the other gateway."
+                    ) from None
+                try:
+                    sentinel.unlink(missing_ok=True)
+                except OSError as exc:
+                    raise RuntimeError(
+                        f"knowledge index writer-pid claim failed at {sentinel}: {exc}"
+                    ) from exc
+                continue
+            except OSError as exc:
+                raise RuntimeError(
+                    f"knowledge index writer-pid claim failed at {sentinel}: {exc}"
+                ) from exc
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write(str(pid))
+            except OSError as exc:
+                raise RuntimeError(
+                    f"knowledge index writer-pid claim failed at {sentinel}: {exc}"
+                ) from exc
+            return
+        raise KnowledgeWriterConflictError(
+            f"knowledge index at {self._db_path} lost the writer-pid race "
+            f"(pid={pid}); another process is claiming it concurrently."
+        )
+
+    def _release_writer_claim(self) -> None:
+        if self._read_only:
+            return
+        sentinel = self._db_path.with_suffix(self._db_path.suffix + ".writer-pid")
+        try:
+            if _read_sentinel_pid(sentinel) == str(os.getpid()):
+                sentinel.unlink(missing_ok=True)
         except OSError as exc:
-            logger.debug("knowledge index writer-pid check skipped: %r", exc)
+            logger.debug("knowledge index writer-pid release skipped: %r", exc)
 
     async def close(self) -> None:
         if self._conn is not None:
             await self._conn.close()
             self._conn = None
+            self._release_writer_claim()
+            logger.info("knowledge index closed path=%s", self._db_path)
 
     def _require(self) -> aiosqlite.Connection:
         if self._conn is None:
             raise RuntimeError("KnowledgeIndex.open() has not been called")
         return self._conn
+
+    def _require_writable(self) -> aiosqlite.Connection:
+        if self._read_only:
+            raise RuntimeError(
+                "KnowledgeIndex is open read-only; writes require the gateway writer"
+            )
+        return self._require()
 
     async def get_file_hash(self, path: str) -> str | None:
         conn = self._require()
@@ -125,13 +221,23 @@ class KnowledgeIndex:
         row = await cur.fetchone()
         return str(row["content_hash"]) if row else None
 
-    async def get_file_mtime(self, path: str) -> float | None:
+    async def get_file_state(self, path: str) -> FileIndexState | None:
+        """Return the stored mtime + chunker version for ``path`` (None if absent)."""
         conn = self._require()
-        cur = await conn.execute("SELECT mtime FROM files WHERE path = ?", (path,))
+        cur = await conn.execute(
+            "SELECT mtime, chunker_version FROM files WHERE path = ?", (path,)
+        )
         row = await cur.fetchone()
-        if row is None or row["mtime"] is None:
+        if row is None:
             return None
-        return float(row["mtime"])
+        return FileIndexState(
+            mtime=float(row["mtime"]) if row["mtime"] is not None else None,
+            chunker_version=int(row["chunker_version"]),
+        )
+
+    async def get_file_mtime(self, path: str) -> float | None:
+        state = await self.get_file_state(path)
+        return state.mtime if state else None
 
     async def list_chunks_for_path(self, path: str) -> list[TextChunk]:
         """Return persisted chunks for ``path`` (embedding backfill must reuse these)."""
@@ -191,20 +297,24 @@ class KnowledgeIndex:
         mtime: float | None,
         chunks: list[TextChunk],
         links: list[ParsedLink] | None = None,
+        chunker_version: int = CHUNKER_VERSION,
     ) -> None:
-        conn = self._require()
+        conn = self._require_writable()
         await conn.execute("BEGIN")
         try:
             await conn.execute(
                 """
-                INSERT INTO files (path, source_type, mtime, content_hash, modality)
-                VALUES (?, ?, ?, ?, 'text')
+                INSERT INTO files (
+                    path, source_type, mtime, content_hash, modality, chunker_version
+                )
+                VALUES (?, ?, ?, ?, 'text', ?)
                 ON CONFLICT(path) DO UPDATE SET
                     source_type = excluded.source_type,
                     mtime = excluded.mtime,
-                    content_hash = excluded.content_hash
+                    content_hash = excluded.content_hash,
+                    chunker_version = excluded.chunker_version
                 """,
-                (path, source_type, mtime, content_hash),
+                (path, source_type, mtime, content_hash, chunker_version),
             )
             await self._delete_chunks_for_path(path)
             await conn.execute("DELETE FROM links WHERE source_path = ?", (path,))
@@ -265,7 +375,7 @@ class KnowledgeIndex:
             raise
 
     async def delete_path(self, path: str) -> None:
-        conn = self._require()
+        conn = self._require_writable()
         await conn.execute("BEGIN")
         try:
             await self._delete_chunks_for_path(path)
@@ -427,6 +537,24 @@ class KnowledgeIndex:
             "end_line": int(row["end_line"]),
             "text": str(row["text"]),
         }
+
+
+def _sqlite_uri(path: Path, *, read_only: bool) -> str:
+    """Build a ``file:`` URI suitable for ``aiosqlite.connect(..., uri=True)``."""
+    resolved = path.resolve().as_posix()
+    # Absolute paths need an extra slash after file: on POSIX.
+    if not resolved.startswith("/"):
+        resolved = "/" + resolved
+    mode = "ro" if read_only else "rwc"
+    return f"file:{resolved}?mode={mode}"
+
+
+def _read_sentinel_pid(sentinel: Path) -> str:
+    """Read the pid from a writer sentinel, or ``""`` when unreadable/absent."""
+    try:
+        return sentinel.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return ""
 
 
 def _pid_alive(pid_str: str) -> bool:
@@ -631,4 +759,9 @@ def _span_from_chunk_id(chunk_id: str) -> dict[str, int] | None:
         return None
 
 
-__all__ = ["KnowledgeIndex", "_to_fts_query"]
+__all__ = [
+    "FileIndexState",
+    "KnowledgeIndex",
+    "KnowledgeWriterConflictError",
+    "_to_fts_query",
+]

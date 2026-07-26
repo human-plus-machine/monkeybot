@@ -17,16 +17,6 @@
 - Decide and implement: should the CLI (`doctor`, `run`, `chat`) detect these from config and actually start/stop the containers, or just validate/warn with remediation hints while the user manages Docker manually?
 - Open sub-questions if going the "CLI starts services" route: where do per-project Docker assets live (`opensandbox.docker.toml`, OTel collector yaml, compose files) — agent-project-owned files referenced from `monkeybot.yaml`, or CLI-shipped generic templates; and is the sandbox worker image (project-specific extra deps) something the CLI should build, or stay manual/documented.
 
-### 4. Knowledge Layer — PR #123 review follow-ups
-Source: PR #123 (knowledge layer) review feedback. Embeddings default off; evals gate everything. None blocked merge.
-
-- **Content-aware chunking** *(top priority)* — replace the line-aligned ~700-token char window with per-suffix strategies: symbol-aware boundaries for code (tree-sitter or indent/brace heuristic; don't split inside top-level defs), heading-section boundaries for markdown/docs, top-level key groups for JSON/YAML/TOML, keep current window as prose fallback. Eval-gated; measure whether rank-4 misses move with heading-boundary chunking on markdown alone. Pull forward from F18 / Phase 2.5.
-- **Vector search perf (still SQLite)** — short-term: normalize at write time, pre-slice Matryoshka dims at write (store/scan 1024 not 2048), cache unpacked matrix in memory (invalidate on upsert) + numpy matmul. Real fix: spike `sqlite-vec` (`vec0` KNN) behind existing `store.type`. Decide chunk-count ceiling (monorepo 50k+?) to choose which path is enough.
-- **Embedding provider adapters** — config lists `openai | voyage | gemini | openai_compatible` but only NVIDIA is implemented; other values warn and degrade to keyword+graph. Thin `EmbeddingProvider` protocol with per-provider defaults (model, dim, prefix convention); OpenAI / `openai_compatible` nearly free given the existing OpenAI-SDK + custom base URL adapter.
-- **Document-type extraction plan** — indexer is text-suffix only; PDFs, DOCX, images skipped. Design doc lists per-page PDF text + caption-then-embed for images. Make explicit: PDF-at-minimum as committed fast-follow vs someday; note "text files only in v1" in the design doc indexing section if deferred.
-- **Orphan-vector self-heal** — confirm startup always runs vector reconciliation (`delete_missing` / re-embed on hash mismatch), including whether heal is gated on `startup_scan`. Add a regression test that `_ingest_ann` drops hits whose chunk snippet can't be resolved (stale orphan between crash and heal).
-- **Single-writer invariant** — document prominently that one gateway process owns the knowledge DBs (currently only in docstrings), or accelerate pgvector if multi-replica / shared-storage cloud deploy is real. Confirm subagent read-only search is enforced, not just convention.
-
 ---
 
 ## Bugs
@@ -50,6 +40,7 @@ Source: PR #123 (knowledge layer) review feedback. Embeddings default off; evals
 
 ### Infra
 - **Postgres as production default** — backend exists; gateway still defaults to SQLite; decide when/if this becomes the default.
+- **Knowledge ANN index (sqlite-vec)** — deliberately deferred. The numpy matrix cache in `sqlite_vector.py` holds through ~50–100k chunks and query cost is embed-API bound, not local ANN. Revisit only if measured ANN p95 exceeds ~20–50 ms or the resident matrix causes RAM pressure; the true scale escape hatch is `store.type: pgvector`, not `sqlite-vec` packaging.
 
 ### MCP
 - **MCP distro linkage** — confirm scaffolded `monkeybot.yaml` paths (`paths.mcp_config`, `paths.skills_path`) match deployment; smoke-test against real MCP servers beyond the bundled examples.
