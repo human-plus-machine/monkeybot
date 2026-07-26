@@ -677,6 +677,10 @@ requires-dist = [
     { name = "pyaudio", marker = "extra == 'cli-realtime'", specifier = ">=0.2.11" },
     { name = "pydantic", specifier = ">=2.10.0" },
     { name = "pynput", marker = "extra == 'cli-realtime'", specifier = ">=1.7.6" },
+    { name = "pypdf", marker = "extra == 'huggingface'", specifier = ">=6.14.2" },
+    { name = "pypdf", marker = "extra == 'nvidia'", specifier = ">=6.14.2" },
+    { name = "pypdf", marker = "extra == 'ollama'", specifier = ">=6.14.2" },
+    { name = "pypdf", marker = "extra == 'openai'", specifier = ">=6.14.2" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "python-ulid", specifier = ">=2.0.0" },
     { name = "pyyaml", specifier = ">=6.0.2" },
@@ -684,16 +688,18 @@ requires-dist = [
     { name = "tiktoken", marker = "extra == 'nvidia'", specifier = ">=0.7.0" },
     { name = "tiktoken", marker = "extra == 'ollama'", specifier = ">=0.7.0" },
     { name = "tiktoken", marker = "extra == 'openai'", specifier = ">=0.7.0" },
+    { name = "tree-sitter-language-pack", marker = "extra == 'knowledge-ast'", specifier = ">=1.6" },
     { name = "typer", marker = "extra == 'cli'", specifier = ">=0.12.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32.0" },
     { name = "websockets", marker = "extra == 'realtime'", specifier = ">=14.0" },
 ]
-provides-extras = ["gemini", "vertex", "claude", "vertex-claude", "bedrock", "openai", "huggingface", "ollama", "nvidia", "sandbox", "scheduler", "postgres", "firestore", "gcs", "aws", "council", "web-search", "evals", "realtime", "realtime-gemini", "cli", "cli-realtime", "observability"]
+provides-extras = ["gemini", "vertex", "claude", "vertex-claude", "bedrock", "openai", "huggingface", "ollama", "nvidia", "sandbox", "scheduler", "postgres", "firestore", "gcs", "aws", "council", "web-search", "evals", "realtime", "realtime-gemini", "cli", "cli-realtime", "observability", "knowledge-ast"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "anthropic", extras = ["vertex", "bedrock"], specifier = ">=0.40.0" },
     { name = "asgi-lifespan", specifier = ">=2.1.0" },
+    { name = "monkeybot", extras = ["knowledge-ast"] },
     { name = "monkeybot-cli", editable = "." },
     { name = "mypy", specifier = ">=1.13.0" },
     { name = "opentelemetry-api", specifier = ">=1.28" },

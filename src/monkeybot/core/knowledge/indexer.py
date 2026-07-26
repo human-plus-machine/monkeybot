@@ -8,9 +8,19 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
-from monkeybot.core.knowledge.chunking import chunk_text
-from monkeybot.core.knowledge.embeddings.nvidia import NvidiaEmbeddingProvider
-from monkeybot.core.knowledge.extractors import content_hash, read_text_file, walk_text_files
+from monkeybot.core.knowledge.captions import resolve_image_caption
+from monkeybot.core.knowledge.chunking import CHUNKER_VERSION, chunk_text, index_content_digest
+from monkeybot.core.knowledge.embeddings.base import EmbeddingProvider
+from monkeybot.core.knowledge.extractors import (
+    DOCX_SUFFIXES,
+    IMAGE_SUFFIXES,
+    PDF_SUFFIXES,
+    extract_docx_text,
+    extract_pdf_pages,
+    media_content_digest,
+    read_text_file,
+    walk_indexable_files,
+)
 from monkeybot.core.knowledge.links import parse_wiki_links
 from monkeybot.core.knowledge.sqlite_index import KnowledgeIndex
 from monkeybot.core.knowledge.types import KnowledgeSettings, SourceType, TextChunk
@@ -36,7 +46,7 @@ class KnowledgeIndexer:
         workspace_root: Path,
         knowledge_root: Path,
         settings: KnowledgeSettings,
-        embedding_provider: NvidiaEmbeddingProvider | None = None,
+        embedding_provider: EmbeddingProvider | None = None,
         vector_store: SQLiteVectorStore | None = None,
     ) -> None:
         self._index = index
@@ -60,7 +70,16 @@ class KnowledgeIndexer:
         return self._ready
 
     async def ensure_ready(self) -> None:
-        """Startup full scan (when configured). Idempotent."""
+        """Startup reconciliation. Idempotent.
+
+        When ``startup_scan`` is true, runs a full disk walk (hash skip /
+        re-embed on mismatch + ``delete_missing`` for FTS and vectors).
+
+        When ``startup_scan`` is false, the disk walk is skipped — but if a
+        vector store is attached, orphan vector rows whose paths are no longer
+        in the FTS index are still pruned. Re-embed on content-hash mismatch
+        remains gated on a full scan (startup or workspace rescan).
+        """
         if self._ready:
             return
         async with self._lock:
@@ -73,6 +92,11 @@ class KnowledgeIndexer:
                     logger.warning("knowledge startup scan failed: %r", exc)
                     # Do not mark ready — next ensure_ready/search can retry.
                     return
+            elif self._vectors is not None:
+                try:
+                    await self._prune_orphan_vectors()
+                except Exception as exc:
+                    logger.warning("knowledge vector orphan prune failed: %r", exc)
             self._ready = True
 
     def enqueue(self, path: str, *, source_type: SourceType | None = None) -> None:
@@ -167,15 +191,13 @@ class KnowledgeIndexer:
         self._pending_embed = []
         try:
             file_paths = await asyncio.to_thread(
-                walk_text_files, self._workspace_root, max_file_bytes=max_bytes
+                walk_indexable_files, self._workspace_root, max_file_bytes=max_bytes
             )
             for file_path in file_paths:
                 rel = _rel_under(file_path, self._workspace_root)
                 if rel is None:
                     continue
-                await self._index_disk_file(
-                    file_path, index_path=rel, source_type="workspace_file"
-                )
+                await self._index_disk_file(file_path, index_path=rel, source_type="workspace_file")
                 alive.add(rel)
 
             alive |= await self._scan_notes_and_memory(prune=False)
@@ -193,13 +215,10 @@ class KnowledgeIndexer:
         deleted = await self._index.delete_missing(alive)
         if deleted:
             logger.info("knowledge index removed %d stale paths", deleted)
-        if self._vectors is not None:
-            try:
-                v_deleted = await self._vectors.delete_missing(alive)
-                if v_deleted:
-                    logger.info("knowledge vectors removed %d stale paths", v_deleted)
-            except Exception as exc:
-                logger.warning("knowledge vector prune failed: %r", exc)
+        try:
+            await self._prune_orphan_vectors(alive)
+        except Exception as exc:
+            logger.warning("knowledge vector prune failed: %r", exc)
 
     async def _scan_notes_and_memory(self, *, prune: bool = True) -> set[str]:
         """Index knowledge notes only (memory vault is never ingested)."""
@@ -212,16 +231,14 @@ class KnowledgeIndexer:
         try:
             self._notes_root.mkdir(parents=True, exist_ok=True)
             note_files = await asyncio.to_thread(
-                walk_text_files, self._notes_root, max_file_bytes=max_bytes
+                walk_indexable_files, self._notes_root, max_file_bytes=max_bytes
             )
             for file_path in note_files:
                 rel = _rel_under(file_path, self._notes_root)
                 if rel is None:
                     continue
                 index_path = f"notes/{rel}"
-                await self._index_disk_file(
-                    file_path, index_path=index_path, source_type="note"
-                )
+                await self._index_disk_file(file_path, index_path=index_path, source_type="note")
                 alive.add(index_path)
 
             # Prune any leftover memory/* note rows on notes rescan.
@@ -291,30 +308,134 @@ class KnowledgeIndexer:
 
         # F11: mtime fast path — skip read+hash when unchanged.
         stored_mtime = await self._index.get_file_mtime(index_path)
-        if (
-            stored_mtime is not None
-            and abs(float(stored_mtime) - float(mtime)) < _MTIME_EPS
-        ):
+        if stored_mtime is not None and abs(float(stored_mtime) - float(mtime)) < _MTIME_EPS:
             if self._embedder is None or self._vectors is None:
                 return
             try:
                 if await self._vectors.has_path(index_path):
                     return
             except Exception as exc:
-                logger.warning(
-                    "knowledge vector has_path failed for %s: %r", index_path, exc
-                )
+                logger.warning("knowledge vector has_path failed for %s: %r", index_path, exc)
             # Need embed backfill — fall through to read.
 
-        text = await asyncio.to_thread(
-            read_text_file, file_path, max_file_bytes=self._settings.max_file_bytes
-        )
+        suffix = file_path.suffix.lower()
+        max_bytes = self._settings.max_file_bytes
+
+        if suffix in PDF_SUFFIXES:
+            await self._index_pdf(
+                file_path, index_path=index_path, source_type=source_type, mtime=mtime
+            )
+            return
+        if suffix in DOCX_SUFFIXES:
+            text = await asyncio.to_thread(extract_docx_text, file_path, max_file_bytes=max_bytes)
+            if text is None:
+                await self._index.delete_path(index_path)
+                await self._delete_vectors(index_path)
+                return
+            digest = await asyncio.to_thread(_media_digest_from_path, file_path)
+            await self._index_text(
+                text,
+                index_path=index_path,
+                source_type=source_type,
+                mtime=mtime,
+                content_digest=digest,
+            )
+            return
+        if suffix in IMAGE_SUFFIXES:
+            await self._index_image(
+                file_path, index_path=index_path, source_type=source_type, mtime=mtime
+            )
+            return
+
+        text = await asyncio.to_thread(read_text_file, file_path, max_file_bytes=max_bytes)
         if text is None:
             await self._index.delete_path(index_path)
             await self._delete_vectors(index_path)
             return
+        await self._index_text(text, index_path=index_path, source_type=source_type, mtime=mtime)
+
+    async def _index_pdf(
+        self,
+        file_path: Path,
+        *,
+        index_path: str,
+        source_type: SourceType,
+        mtime: float | None,
+    ) -> None:
+        pages = await asyncio.to_thread(
+            extract_pdf_pages,
+            file_path,
+            max_file_bytes=self._settings.max_file_bytes,
+        )
+        if not pages:
+            await self._index.delete_path(index_path)
+            await self._delete_vectors(index_path)
+            return
+        digest = await asyncio.to_thread(_media_digest_from_path, file_path)
+        existing = await self._index.get_file_hash(index_path)
+        if existing == digest:
+            joined = "\n\n".join(f"[PDF page {p.page}]\n{p.text}" for p in pages)
+            await self._maybe_backfill_embeddings(
+                joined, index_path=index_path, source_type=source_type
+            )
+            return
+        chunks = [
+            TextChunk(
+                path=index_path,
+                source_type=source_type,
+                start_line=page.page,
+                end_line=page.page,
+                text=f"[PDF page {page.page}]\n{page.text}",
+            )
+            for page in pages
+        ]
+        await self._index.upsert_file(
+            path=index_path,
+            source_type=source_type,
+            content_hash=digest,
+            mtime=mtime,
+            chunks=chunks,
+            links=[],
+        )
+        await self._embed_chunks(chunks)
+
+    async def _index_image(
+        self,
+        file_path: Path,
+        *,
+        index_path: str,
+        source_type: SourceType,
+        mtime: float | None,
+    ) -> None:
+        mode = self._settings.captions
+        if mode == "off":
+            await self._index.delete_path(index_path)
+            await self._delete_vectors(index_path)
+            return
+        cache_dir = self._knowledge_root / "captions"
+        caption = await resolve_image_caption(
+            rel_path=index_path,
+            file_path=file_path,
+            mode=mode,
+            cache_dir=cache_dir,
+            caption_model=self._settings.caption_model,
+        )
+        if caption is None:
+            await self._index.delete_path(index_path)
+            await self._delete_vectors(index_path)
+            return
+        digest = await asyncio.to_thread(_media_digest_from_path, file_path)
+        # Mix caption into digest so caption-mode changes force re-index.
+        caption_digest = media_content_digest(
+            f"{digest}\n{mode}\n{caption}".encode(),
+            chunker_version=CHUNKER_VERSION,
+        )
         await self._index_text(
-            text, index_path=index_path, source_type=source_type, mtime=mtime
+            caption,
+            index_path=index_path,
+            source_type=source_type,
+            mtime=mtime,
+            content_digest=caption_digest,
         )
 
     async def _index_text(
@@ -324,8 +445,12 @@ class KnowledgeIndexer:
         index_path: str,
         source_type: SourceType,
         mtime: float | None,
+        content_digest: str | None = None,
     ) -> None:
-        digest = await asyncio.to_thread(content_hash, text)
+        if content_digest is not None:
+            digest = content_digest
+        else:
+            digest = await asyncio.to_thread(index_content_digest, text)
         existing = await self._index.get_file_hash(index_path)
         if existing == digest:
             # FTS is current, but embeddings may still be missing (ANN just enabled).
@@ -341,11 +466,7 @@ class KnowledgeIndexer:
             chunk_tokens=self._settings.chunk_tokens,
             overlap_ratio=self._settings.chunk_overlap_ratio,
         )
-        links = (
-            parse_wiki_links(text, source_path=index_path)
-            if source_type == "note"
-            else []
-        )
+        links = parse_wiki_links(text, source_path=index_path) if source_type == "note" else []
         await self._index.upsert_file(
             path=index_path,
             source_type=source_type,
@@ -444,8 +565,7 @@ class KnowledgeIndexer:
                 ok += len(wave)
             except Exception as exc:
                 logger.warning(
-                    "knowledge embed wave failed (%d chunks at offset %d): %r; "
-                    "retrying per path",
+                    "knowledge embed wave failed (%d chunks at offset %d): %r; retrying per path",
                     len(wave),
                     start,
                     exc,
@@ -497,6 +617,16 @@ class KnowledgeIndexer:
             await self._vectors.delete_by_path(path)
             await self._vectors.upsert(records)
 
+    async def _prune_orphan_vectors(self, alive: set[str] | None = None) -> None:
+        """Drop vector rows for paths absent from the FTS index (or ``alive``)."""
+        if self._vectors is None:
+            return
+        if alive is None:
+            alive = await self._index.list_paths()
+        deleted = await self._vectors.delete_missing(alive)
+        if deleted:
+            logger.info("knowledge vectors removed %d stale paths", deleted)
+
     async def _delete_vectors(self, path: str) -> None:
         if self._vectors is None:
             return
@@ -513,11 +643,14 @@ def _rel_under(path: Path, root: Path) -> str | None:
         return None
 
 
+def _media_digest_from_path(file_path: Path) -> str:
+    raw = file_path.read_bytes()
+    return media_content_digest(raw, chunker_version=CHUNKER_VERSION)
+
+
 def _looks_like_text_name(name: str) -> bool:
     lower = name.lower()
-    return lower.endswith(
-        (".md", ".txt", ".markdown", ".rst", ".json", ".yaml", ".yml")
-    )
+    return lower.endswith((".md", ".txt", ".markdown", ".rst", ".json", ".yaml", ".yml"))
 
 
 __all__ = ["KnowledgeIndexer"]

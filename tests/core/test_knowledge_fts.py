@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import os
 from pathlib import Path
 
@@ -36,34 +35,74 @@ def test_to_fts_query_strips_embedded_quotes_defensively() -> None:
 
 
 @pytest.mark.asyncio
-async def test_open_warns_on_second_live_writer(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """M3: opening the same index from a second live PID logs an advisory warning."""
+async def test_open_raises_on_second_live_writer(tmp_path: Path) -> None:
+    """Second writer open raises when another live PID owns the sentinel."""
+    from monkeybot.core.knowledge.sqlite_index import KnowledgeWriterConflictError
+
     db = tmp_path / "index.sqlite"
     sentinel = db.with_suffix(db.suffix + ".writer-pid")
     other_pid = os.getpid() + 1
-    # Best-effort: pick a PID that is very unlikely to collide with a real
-    # process but treat as "alive" via a monkeypatch-free direct write.
     sentinel.parent.mkdir(parents=True, exist_ok=True)
     sentinel.write_text(str(other_pid), encoding="utf-8")
 
     index = KnowledgeIndex(db)
-    with caplog.at_level(logging.WARNING, logger="monkeybot.core.knowledge.sqlite_index"):
-        # Force the alive check to say "yes" regardless of real PID state,
-        # since we cannot reliably fabricate a live foreign process in CI.
-        import monkeybot.core.knowledge.sqlite_index as sqlite_index_mod
+    import monkeybot.core.knowledge.sqlite_index as sqlite_index_mod
 
-        original = sqlite_index_mod._pid_alive
-        sqlite_index_mod._pid_alive = lambda _pid: True
-        try:
-            await index.open()
-        finally:
-            sqlite_index_mod._pid_alive = original
+    original = sqlite_index_mod._pid_alive
+    sqlite_index_mod._pid_alive = lambda _pid: True
     try:
-        assert any("already has an active writer" in r.message for r in caplog.records)
+        with pytest.raises(KnowledgeWriterConflictError, match="already has an active writer"):
+            await index.open()
     finally:
-        await index.close()
+        sqlite_index_mod._pid_alive = original
+        if index._conn is not None:  # noqa: SLF001
+            await index.close()
+
+
+@pytest.mark.asyncio
+async def test_read_only_open_ok_while_writer_claimed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Read-only clients can open while a writer sentinel is held."""
+    db = tmp_path / "index.sqlite"
+    writer = KnowledgeIndex(db)
+    await writer.open()
+    try:
+        # Seed a row so RO FTS works.
+        from monkeybot.core.knowledge.types import TextChunk
+
+        await writer.upsert_file(
+            path="a.py",
+            source_type="workspace_file",
+            content_hash="abc",
+            mtime=1.0,
+            chunks=[
+                TextChunk(
+                    path="a.py",
+                    source_type="workspace_file",
+                    start_line=1,
+                    end_line=1,
+                    text="hello refund policy",
+                )
+            ],
+        )
+        reader = KnowledgeIndex(db)
+        await reader.open(read_only=True)
+        try:
+            hits = await reader.fts_search("refund", limit=5)
+            assert any(h["path"] == "a.py" for h in hits)
+            with pytest.raises(RuntimeError, match="read-only"):
+                await reader.upsert_file(
+                    path="b.py",
+                    source_type="workspace_file",
+                    content_hash="x",
+                    mtime=1.0,
+                    chunks=[],
+                )
+        finally:
+            await reader.close()
+    finally:
+        await writer.close()
 
 
 def test_pid_alive_false_for_nonexistent_pid() -> None:

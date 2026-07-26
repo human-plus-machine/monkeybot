@@ -19,6 +19,8 @@ from monkeybot.core.config.settings import (
     subagent_vertex_google_search_from_config,
 )
 from monkeybot.core.context import TurnContext, build_context
+from monkeybot.core.knowledge import KnowledgeSubsystem, resolve_knowledge_settings
+from monkeybot.core.knowledge.config import knowledge_enabled_from_config
 from monkeybot.core.layout import AgentLayout, bootstrap_agent_layout
 from monkeybot.core.llm.provider import (
     Done,
@@ -280,6 +282,7 @@ async def _async_main() -> None:
     backend = create_storage_backend(db_url)
     mcp: MCPClient | None = None
     executor: CoreToolExecutor | None = None
+    knowledge: KnowledgeSubsystem | None = None
 
     try:
         await backend.open(run_schema=auto_schema_enabled_from_config(config_path))
@@ -364,6 +367,31 @@ async def _async_main() -> None:
                 memory_uri=mem_uri,
             )
 
+        # Read-only knowledge search against the parent gateway's index.
+        # Subagents must not claim the writer lock or run indexing/hooks.
+        if knowledge_enabled_from_config(config_path):
+            try:
+                settings = resolve_knowledge_settings(
+                    agent_root=agent_root,
+                    config_path=Path(config_path) if config_path else None,
+                    workspace_root=ws,
+                )
+                knowledge = await KnowledgeSubsystem.create(
+                    workspace_root=ws,
+                    settings=settings,
+                    knowledge_root=Path(settings.knowledge_root),
+                    index_path=Path(settings.index_path),
+                    read_only=True,
+                )
+            except FileNotFoundError as exc:
+                logger.info(
+                    "knowledge read-only open skipped (index not ready yet): %s", exc
+                )
+                knowledge = None
+            except Exception as exc:
+                logger.warning("knowledge read-only setup failed for subagent: %r", exc)
+                knowledge = None
+
         ctx = await build_context(
             thread_id,
             request_id,
@@ -388,6 +416,7 @@ async def _async_main() -> None:
             extra_tools=extra_tools,
             run_command_allowed_commands=run_allow_cmds,
             run_command_allowed_path_prefixes=run_allow_paths,
+            knowledge=knowledge,
         )
         history = backend.history()
 
@@ -406,6 +435,7 @@ async def _async_main() -> None:
             # Subagents read memory (index, search_memory) via MemorySubsystem but do not
             # register memory hooks — chat_log / raw / organizer writes stay on the parent
             # gateway to avoid duplicate or conflicting durable memory updates.
+            # Knowledge search is read-only against the parent index (no indexer/hooks).
             async with span_subagent(
                 thread_id=thread_id,
                 request_id=request_id,
@@ -432,6 +462,11 @@ async def _async_main() -> None:
         _detach_trace(attach_token)
         if executor is not None:
             await executor.aclose()
+        if knowledge is not None:
+            try:
+                await knowledge.close()
+            except Exception as exc:
+                logger.warning("knowledge close failed in subagent: %r", exc)
         if mcp is not None:
             for name in list(getattr(mcp, "_servers", {}).keys()):
                 await mcp.disconnect(name)

@@ -202,11 +202,12 @@
 - **File:** `docs/workspace-index-design.md`
 - **Change:** Add a "What counts as a note" section: curated = organizer-distilled or human/agent-authored files under `knowledge/notes/` and memory `INDEX.md` + `semantic/` distillations that pass a curation flag; raw capture (episodic tool echoes, chat logs, spill) is **never** `source_type: note`. Boost applies only to curated.
 
-### F18. Note code-aware chunking as a known limitation / Phase 2.5 item
+### F18. Note code-aware chunking as a known limitation / Phase 2.5 item ✅ DONE
 
 - **Problem:** Line/char-window chunking with heading prefixes is a prose strategy; the dominant corpus is code. Function-splitting boundaries degrade snippets and embeddings and plausibly contribute to rank-4 misses.
 - **File:** `docs/workspace-index-design.md` (+ future `chunking.py` work)
 - **Change:** Document the limitation now; plan symbol-aware chunking (tree-sitter, or a cheap indent/brace heuristic that avoids splitting inside a top-level definition) as Phase 2.5. Not blocking.
+- **Done:** Content-aware chunking shipped in `core/knowledge/chunking.py` — per-suffix strategies (markdown headings, tree-sitter / brace heuristic for code, JSON/YAML/TOML top-level keys, prose window fallback). Optional extra `knowledge-ast` (`tree-sitter-language-pack`). `CHUNKER_VERSION` forces re-index on upgrade. Offline markdown rank≤4 gate in `tests/core/test_knowledge_chunking_rank.py`.
 
 ### F19. Fix design-doc examples and freshness claims
 

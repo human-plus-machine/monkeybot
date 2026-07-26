@@ -8,7 +8,7 @@ import time
 from typing import Any, Literal
 
 from monkeybot.core.lockfile_names import LOCKFILE_NAMES
-from monkeybot.core.knowledge.embeddings.nvidia import NvidiaEmbeddingProvider
+from monkeybot.core.knowledge.embeddings.base import EmbeddingProvider
 from monkeybot.core.knowledge.sqlite_index import KnowledgeIndex, _content_tokens
 from monkeybot.core.knowledge.types import RecallHit, SourceType
 from monkeybot.core.persistence.sqlite_vector import SQLiteVectorStore
@@ -155,7 +155,7 @@ async def _ingest_ann(
     fts_limit: int,
     path_prefix: str | None,
     source_type: SourceType | None,
-    embedding_provider: NvidiaEmbeddingProvider,
+    embedding_provider: EmbeddingProvider,
     vector_store: SQLiteVectorStore,
     ann_dimensions: int | None,
 ) -> None:
@@ -354,7 +354,7 @@ async def search(
     limit: int = 10,
     path_prefix: str | None = None,
     source: SourceFilter = "any",
-    embedding_provider: NvidiaEmbeddingProvider | None = None,
+    embedding_provider: EmbeddingProvider | None = None,
     vector_store: SQLiteVectorStore | None = None,
     ann_dimensions: int | None = None,
     rrf_k: int | None = None,

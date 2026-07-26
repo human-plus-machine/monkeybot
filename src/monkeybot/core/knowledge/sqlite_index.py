@@ -15,6 +15,11 @@ from monkeybot.core.knowledge.types import LinkType, SourceType, TextChunk
 
 logger = logging.getLogger(__name__)
 
+
+class KnowledgeWriterConflictError(RuntimeError):
+    """Raised when a second process tries to open the index as a writer."""
+
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS files (
     path TEXT PRIMARY KEY,
@@ -59,18 +64,44 @@ CREATE INDEX IF NOT EXISTS idx_links_target ON links(target_path);
 
 
 class KnowledgeIndex:
-    """Async SQLite FTS + links store for the knowledge layer."""
+    """Async SQLite FTS + links store for the knowledge layer.
+
+    One gateway process may open the index as a writer. Additional processes
+    must use ``read_only=True`` (subagents) or fail with
+    :class:`KnowledgeWriterConflictError`.
+    """
 
     def __init__(self, db_path: Path) -> None:
         self._db_path = Path(db_path)
         self._conn: aiosqlite.Connection | None = None
+        self._read_only = False
 
     @property
     def path(self) -> Path:
         return self._db_path
 
-    async def open(self) -> None:
+    @property
+    def read_only(self) -> bool:
+        return self._read_only
+
+    async def open(self, *, read_only: bool = False) -> None:
+        """Open the DB. Writer claims the single-writer sentinel; readers use ``mode=ro``."""
+        self._read_only = read_only
+        if read_only:
+            if not self._db_path.is_file():
+                raise FileNotFoundError(
+                    f"knowledge index not found for read-only open: {self._db_path} "
+                    "(start the gateway writer first so the index exists)"
+                )
+            uri = _sqlite_uri(self._db_path, read_only=True)
+            self._conn = await aiosqlite.connect(uri, uri=True)
+            self._conn.row_factory = aiosqlite.Row
+            await self._conn.execute("PRAGMA busy_timeout=5000")
+            logger.info("knowledge index open (read-only) path=%s", self._db_path)
+            return
+
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._claim_writer_or_raise()
         self._conn = await aiosqlite.connect(str(self._db_path))
         self._conn.row_factory = aiosqlite.Row
         await self._conn.execute("PRAGMA journal_mode=WAL")
@@ -78,17 +109,13 @@ class KnowledgeIndex:
         await self._conn.execute("PRAGMA foreign_keys = ON")
         await self._conn.executescript(_SCHEMA)
         await self._conn.commit()
-        self._warn_if_other_writer_active()
         logger.info("knowledge index open path=%s", self._db_path)
 
-    def _warn_if_other_writer_active(self) -> None:
-        """Best-effort, non-blocking check for a second live writer PID.
+    def _claim_writer_or_raise(self) -> None:
+        """Hard single-writer lock via ``*.writer-pid`` sentinel.
 
-        The indexer's dirty queues are process-local (see KnowledgeIndexer /
-        KnowledgeSubsystem docstrings); two writer processes on the same index
-        would silently double-index and race on chunk upserts. This is
-        advisory only — WAL + busy_timeout still make individual writes safe,
-        it just cannot detect a fully vanished process (best-effort by design).
+        If another live PID already owns the sentinel, refuse to open as a
+        writer. Stale sentinels (dead PID) are overwritten.
         """
         sentinel = self._db_path.with_suffix(self._db_path.suffix + ".writer-pid")
         pid = os.getpid()
@@ -96,28 +123,50 @@ class KnowledgeIndex:
             if sentinel.is_file():
                 prev = sentinel.read_text(encoding="utf-8").strip()
                 if prev and prev != str(pid) and _pid_alive(prev):
-                    logger.warning(
-                        "knowledge index at %s already has an active writer "
-                        "(pid=%s); this process (pid=%s) may double-index or "
-                        "race on writes — the knowledge layer assumes a single "
-                        "gateway writer per workspace.",
-                        self._db_path,
-                        prev,
-                        pid,
+                    raise KnowledgeWriterConflictError(
+                        f"knowledge index at {self._db_path} already has an active "
+                        f"writer (pid={prev}); this process (pid={pid}) cannot open "
+                        "as a second writer — use read_only=True for search-only "
+                        "clients (e.g. subagents), or stop the other gateway."
                     )
             sentinel.write_text(str(pid), encoding="utf-8")
+        except KnowledgeWriterConflictError:
+            raise
         except OSError as exc:
-            logger.debug("knowledge index writer-pid check skipped: %r", exc)
+            raise RuntimeError(
+                f"knowledge index writer-pid claim failed at {sentinel}: {exc}"
+            ) from exc
+
+    def _release_writer_claim(self) -> None:
+        if self._read_only:
+            return
+        sentinel = self._db_path.with_suffix(self._db_path.suffix + ".writer-pid")
+        try:
+            if sentinel.is_file():
+                prev = sentinel.read_text(encoding="utf-8").strip()
+                if prev == str(os.getpid()):
+                    sentinel.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.debug("knowledge index writer-pid release skipped: %r", exc)
 
     async def close(self) -> None:
         if self._conn is not None:
             await self._conn.close()
             self._conn = None
+            self._release_writer_claim()
+            logger.info("knowledge index closed path=%s", self._db_path)
 
     def _require(self) -> aiosqlite.Connection:
         if self._conn is None:
             raise RuntimeError("KnowledgeIndex.open() has not been called")
         return self._conn
+
+    def _require_writable(self) -> aiosqlite.Connection:
+        if self._read_only:
+            raise RuntimeError(
+                "KnowledgeIndex is open read-only; writes require the gateway writer"
+            )
+        return self._require()
 
     async def get_file_hash(self, path: str) -> str | None:
         conn = self._require()
@@ -192,7 +241,7 @@ class KnowledgeIndex:
         chunks: list[TextChunk],
         links: list[ParsedLink] | None = None,
     ) -> None:
-        conn = self._require()
+        conn = self._require_writable()
         await conn.execute("BEGIN")
         try:
             await conn.execute(
@@ -265,7 +314,7 @@ class KnowledgeIndex:
             raise
 
     async def delete_path(self, path: str) -> None:
-        conn = self._require()
+        conn = self._require_writable()
         await conn.execute("BEGIN")
         try:
             await self._delete_chunks_for_path(path)
@@ -427,6 +476,16 @@ class KnowledgeIndex:
             "end_line": int(row["end_line"]),
             "text": str(row["text"]),
         }
+
+
+def _sqlite_uri(path: Path, *, read_only: bool) -> str:
+    """Build a ``file:`` URI suitable for ``aiosqlite.connect(..., uri=True)``."""
+    resolved = path.resolve().as_posix()
+    # Absolute paths need an extra slash after file: on POSIX.
+    if not resolved.startswith("/"):
+        resolved = "/" + resolved
+    mode = "ro" if read_only else "rwc"
+    return f"file:{resolved}?mode={mode}"
 
 
 def _pid_alive(pid_str: str) -> bool:
@@ -631,4 +690,4 @@ def _span_from_chunk_id(chunk_id: str) -> dict[str, int] | None:
         return None
 
 
-__all__ = ["KnowledgeIndex", "_to_fts_query"]
+__all__ = ["KnowledgeIndex", "KnowledgeWriterConflictError", "_to_fts_query"]

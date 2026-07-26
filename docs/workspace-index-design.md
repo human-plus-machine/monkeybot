@@ -304,6 +304,18 @@ Semantic ANN alone is not hybrid search. Every `recall` fuses up to three signal
 - `links` + FTS + file/chunk sync metadata → **always local SQLite** (beside the pluggable vector store).
 - `VectorStore` → **similarity only** (sqlite / pgvector / Pinecone / Qdrant / …). Remote stores are not asked to implement graph joins.
 
+### Single-writer invariant
+
+**One gateway process owns writes** to `.monkeybot/knowledge/index.sqlite` (and `vectors.sqlite` when embeddings are on) per workspace.
+
+| Role | Access |
+|------|--------|
+| Gateway | Writer — indexes on startup / hooks, claims `*.writer-pid` sentinel |
+| Subagent workers | **Read-only** — `KnowledgeSubsystem.create(..., read_only=True)` opens SQLite `mode=ro`, runs `search` only (no indexer, no knowledge hooks) |
+| Second gateway on the same workspace | **Refused** — `KnowledgeWriterConflictError` if another live PID holds the sentinel |
+
+Indexer dirty queues are process-local; two writers would double-index and race. Multi-replica / shared-storage cloud deploys need a shared store (**pgvector**, Phase 3) — not a second SQLite writer.
+
 See [System overview](#system-overview) for the end-to-end and recall diagrams.
 ---
 
@@ -311,23 +323,26 @@ See [System overview](#system-overview) for the end-to-end and recall diagrams.
 
 ### What gets indexed (workspace side)
 
-| Source | Extraction | Indexed text |
-|--------|------------|--------------|
-| Text / code / markdown / HTML (stripped) | Chunk ~500–800 tokens, ~10–15% overlap; path + heading prefix | Chunk text → FTS; embed when semantic on |
-| PDF | Per-page text (or ranges) | Page text; empty pages may caption if policy allows |
-| Images | Caption (semantic/caption policy) | Caption string |
-| Notes | Full note + parsed `[[links]]` | Note text → FTS; edges → `links` table |
+| Source | Extraction | Indexed text | Status |
+|--------|------------|--------------|--------|
+| Text / code / markdown / HTML (stripped) | **Content-aware chunking** (~500–800 tokens, ~10–15% overlap): heading sections for markdown/rst; tree-sitter top-level defs for code when `knowledge-ast` extra is installed (indent/brace heuristic fallback otherwise); top-level key/table groups for JSON/YAML/TOML; line-aligned window for prose. Path + section/symbol prefix on each chunk. `CHUNKER_VERSION` is mixed into the content digest so algorithm bumps force re-index. | Chunk text → FTS; embed when semantic on | **Shipped** |
+| PDF | Per-page text via `pypdf` (`knowledge-media` extra); empty pages skipped (no OCR) | One FTS chunk per page (`start_line`/`end_line` = page number); soft-fail if extra missing | **Shipped** |
+| DOCX | Paragraph text via `python-docx` (`knowledge-media` extra) | Body text → same chunker as prose; soft-fail if extra missing | **Shipped** |
+| Images (png/jpeg/gif/webp) | Caption per `knowledge.captions` policy | Caption string → FTS; embed when semantic on | **Shipped** |
+| Notes | Full note + parsed `[[links]]` | Note text → FTS; edges → `links` table | **Shipped** |
 
-Ignore the same noise dirs as workspace `grep` (`.git`, `node_modules`, `.venv`, `__pycache__`, …). Skip binaries over `max_file_bytes`.
+Ignore the same noise dirs as workspace `grep` (`.git`, `node_modules`, `.venv`, `__pycache__`, …). Skip binaries over `max_file_bytes`. Install media extractors with `uv sync --extra knowledge-media`.
 
 **Config B still needs an indexer** — FTS over workspace chunks is not “free memory tweaks.” The same extract/chunk/hash pipeline runs; only cloud embed + remote vector upsert are skipped when embeddings are off.
 
 ### Captions (media) — semantic kit
 
-- `caption: off` — skip non-text (default until experiment says otherwise).
-- `caption: llm` — one-shot via vision-capable model (or `caption_model` override); cache by **content hash**.
+- `captions: off` — skip image files (PDF/DOCX still index when the media extra is installed).
+- `captions: path` — **default**; deterministic caption from relative path + stem (e.g. `Image: public/images/auth-hero.png (auth-hero)`). Enables FTS/basename recall without an LLM.
+- `captions: llm` — one-shot via OpenAI-compatible vision (`caption_model`, default `gpt-4o-mini` when unset); cache by **content hash** under `.monkeybot/knowledge/captions/`. On failure or missing `OPENAI_API_KEY`, falls back to path caption. Path tokens are retained so basename search still works.
 - Prefer validating **caption-on-first-miss** vs background sweep in the mixed-media experiment (see below).
-- Caption cache under `.monkeybot/knowledge/captions/` (or `.monkeybot/index/captions/`) even when vectors are remote.
+- Caption cache under `.monkeybot/knowledge/captions/` even when vectors are remote.
+- Legacy YAML key `caption` (singular) is accepted as an alias for `captions`.
 
 ### Incremental updates (hooks)
 
@@ -366,13 +381,13 @@ EmbeddingProvider
 
 | `embeddings.provider` | Notes |
 |-----------------------|--------|
-| `nvidia` | **Phase 2 default** — see [Pinned model](#pinned-model-nemotron-3-embed-1b) |
-| `openai` | e.g. `text-embedding-3-small` |
-| `voyage` | Voyage AI |
-| `gemini` / `google` | Gemini embedding API |
-| `openai_compatible` | Custom base URL + model |
+| `nvidia` | **Default** — Nemotron-3-Embed-1B; `query:` / `passage:` prefixes; client-side Matryoshka (`NVIDIA_API_KEY`) |
+| `openai` | `text-embedding-3-small` @ 1536; API `dimensions` (`OPENAI_API_KEY`) |
+| `voyage` | `voyage-3-lite` @ 512; OpenAI-compat + `input_type` query/document (`VOYAGE_API_KEY`) |
+| `gemini` / `google` | `text-embedding-004` @ 768 via `google-genai` (`GEMINI_API_KEY`) |
+| `openai_compatible` | Custom `base_url` + `model` required; same OpenAI SDK path (`OPENAI_API_KEY`) |
 
-Keys via env / `.env` only. Persist `model_id` + `dim` with every vector for safe re-embed on model change.
+All providers implement `EmbeddingProvider` (`model_id`, `dim`, `embed_documents`, `embed_query`). Factory: `core/knowledge/embeddings/factory.py`. Unknown / misconfigured providers soft-degrade to keyword+graph.
 
 #### Pinned model: Nemotron-3-Embed-1B
 
@@ -457,11 +472,16 @@ knowledge:
   embeddings:
     enabled: false              # no cloud embed calls until explicitly on
     provider: nvidia            # nvidia | openai | voyage | gemini | openai_compatible
-    model: nvidia/nemotron-3-embed-1b
-    dimensions: 1024            # Matryoshka prefix (native 2048); faster ANN, re-embed optional
-    base_url: https://integrate.api.nvidia.com/v1
-    batch_size: 32              # keep modest on free-tier NVIDIA throughput
-    # auth: NVIDIA_API_KEY
+    # model / dimensions / base_url optional — per-provider defaults apply when omitted:
+    #   nvidia  → nvidia/nemotron-3-embed-1b @ 1024  (NVIDIA_API_KEY; client Matryoshka)
+    #   openai  → text-embedding-3-small @ 1536       (OPENAI_API_KEY)
+    #   voyage  → voyage-3-lite @ 512                 (VOYAGE_API_KEY)
+    #   gemini  → text-embedding-004 @ 768            (GEMINI_API_KEY)
+    #   openai_compatible → model + base_url required (OPENAI_API_KEY)
+    # model: nvidia/nemotron-3-embed-1b
+    # dimensions: 1024
+    # base_url: https://integrate.api.nvidia.com/v1
+    batch_size: 32
 
   store:
     type: sqlite                # experiment default; Phase 3 first BYO: pgvector
@@ -472,11 +492,14 @@ knowledge:
     # table: knowledge_chunks
     # pinecone / qdrant / chroma / http fields as needed…
 
-  caption: off                  # off | llm  (validate policy in experiment)
-  # caption_model: …
+  captions: path                # off | path | llm  (path = FTS by filename; llm = vision + cache)
+  # caption_model: gpt-4o-mini  # used when captions: llm
 ```
 
-**Accepted risk:** FTS (`index.sqlite`) and ANN (`vectors.sqlite`) are separate SQLite files committed independently — a crash between the two can leave vectors pointing at stale FTS chunk IDs. The next content-hash scan self-heals by re-embedding / deleting orphan vectors; there is no cross-DB transaction.
+**Accepted risk:** FTS (`index.sqlite`) and ANN (`vectors.sqlite`) are separate SQLite files committed independently — a crash between the two can leave vectors pointing at stale FTS chunk IDs. There is no cross-DB transaction. Self-heal layers:
+
+1. **Startup / rescan** — `startup_scan: true` (default) runs a full content-hash walk: re-embed on hash mismatch and `delete_missing` for both FTS and vectors. When `startup_scan: false`, the disk walk is skipped, but if embeddings are on the indexer still prunes vector rows whose paths are absent from FTS (`delete_missing` against the current index). Re-embed on hash mismatch stays gated on a full scan (startup or workspace rescan).
+2. **Query soft-drop** — `_ingest_ann` skips ANN hits whose chunk snippet cannot be resolved in FTS (stale orphan between crash and heal), so recall never surfaces dangling vector IDs.
 
 Env overrides (suggested): `KNOWLEDGE_ENABLED`, `KNOWLEDGE_EMBEDDINGS_ENABLED`, plus existing provider key envs. Env wins over YAML per harness norms.
 
@@ -921,9 +944,9 @@ Resolved:
 | 2 | Knowledge root | **`.monkeybot/knowledge/`** |
 | 3 | First embedding provider (Phase 2) | **NVIDIA** |
 | 4 | First BYO store after sqlite (Phase 3) | **pgvector** |
-| 5 | Caption model | **Reuse `model.name`** when vision-capable |
+| 5 | Caption model | **`captions: path` default**; `llm` uses `caption_model` or `gpt-4o-mini` via OpenAI-compat vision |
 | 6 | Protocol placement | **`vector_backends.py`** (keep session-store protocols separate) |
-| 7 | Subagents | **Read-only `recall` against parent index** |
+| 7 | Subagents | **Read-only `search` against parent index** (`read_only=True`; no indexer/hooks) |
 | 8 | Eval dataset | Seed from **auriga-web**; labeled Q&A in a markdown file; agent clones repo, answers all questions; score by parsing the transcript |
 | 9 | Phase 2 embed model | **`nvidia/nemotron-3-embed-1b`** (Nemotron-3-Embed-1B, dim **2048**, query/passage prefixes) |
 
@@ -966,3 +989,6 @@ Still open / follow-ups: confirm hosted NIM short-name if build.nvidia.com diffe
 | 2026-07-17 | **F22 — Evidence must be read, not snippet-derived:** `EvidencePathGuard` tracks `read_file`/`glob` confirmations and injects a one-shot "Evidence verification required" notice for cited-but-unread paths; harness path rule downgraded `search` hits to leads ("answer only after reading"); same rule in post-compaction standing instructions |
 | 2026-07-17 | **Post-F22 unprompted full-48 run: score 43/48** (best yet; prompted baseline 39, pre-F22 unprompted 37); `search`×31 unprompted, 24 files read, **0× ContextSummarized**; model self-externalized to `answers.md` + `todo_list`; all seven F22-target snippet misses converted; residual misses = right-file-not-opened (Q12 globals.css, Q13 button.tsx, Q15 thread/index.tsx, Q44 tests/, Q45 src/content); transcript `20260717T162603Z_2f553ae9-f600-4f41-93d5-39c152e72b58` |
 | 2026-07-17 | **F22 guard extended to written deliverables:** `Evidence:` citations inside `write_file` content / `replace_in_file` new_string are scanned with the same missing/unread checks (answers.md bypassed the chat-text-only guard); model-written paths count as confirmed |
+| 2026-07-25 | **F18 / content-aware chunking:** per-suffix strategies in `chunking.py` (markdown headings, tree-sitter top-level defs via optional `knowledge-ast` extra with indent/brace fallback, JSON/YAML/TOML top-level keys, prose window). `CHUNKER_VERSION` mixed into indexer digest forces one-time re-scan on upgrade (or wipe `.monkeybot/knowledge/*.sqlite`). Offline markdown rank≤4 gate: `tests/core/test_knowledge_chunking_rank.py` |
+| 2026-07-25 | **Media extraction shipped:** PDF per-page (`pypdf`), DOCX paragraphs (`python-docx`) via optional `knowledge-media` extra; images indexed with `knowledge.captions` (`off` / `path` default / `llm` + hash cache). Not “text files only in v1.” OCR / native multimodal embeddings still deferred. |
+| 2026-07-26 | **Single-writer enforced:** second live gateway writer raises `KnowledgeWriterConflictError`; subagents use `read_only=True` search against parent index (no indexer/hooks). pgvector still Phase 3 for multi-replica. |
