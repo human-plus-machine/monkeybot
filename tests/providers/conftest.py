@@ -62,7 +62,8 @@ def make_anthropic_stream_mock(events: list[object]) -> MagicMock:
             return False
 
     client = MagicMock()
-    client.messages.stream = MagicMock(return_value=_AsyncStreamCM())
+    # New CM per call so a retried request re-reads the events, not an exhausted generator.
+    client.messages.stream = MagicMock(side_effect=lambda **_kw: _AsyncStreamCM())
     return client
 
 

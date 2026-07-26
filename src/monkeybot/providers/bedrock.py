@@ -20,6 +20,7 @@ from monkeybot.providers._utils import (
     mark_last_tool_cached,
     split_leading_system,
 )
+from monkeybot.providers.model_capabilities import supports_param
 from monkeybot.providers.sampling import resolve_model_sampling
 
 _log = logging.getLogger(__name__)
@@ -132,8 +133,9 @@ class BedrockClaudeProvider:
             "messages": converted_messages,
             "tools": tools_param,
             "max_tokens": self._max_tokens,
-            "temperature": self._temperature,
         }
+        if supports_param(model, "temperature"):
+            stream_kwargs["temperature"] = self._temperature
         async for event in iter_anthropic_sdk_stream(
             client,
             stream_kwargs,
