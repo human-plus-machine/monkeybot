@@ -101,7 +101,7 @@ async def count_anthropic_input_tokens(
 # can reject with HTTP 400. Model-specific cases are gated ahead of time via
 # ``model_capabilities.supports_param``; this is the fallback for a model that
 # table doesn't know about yet (e.g. released after this code was written).
-_STRIPPABLE_PARAMS = ("temperature", "top_p", "top_k", "thinking")
+_STRIPPABLE_PARAMS = ("temperature", "thinking")
 
 
 def _rejects_param(msg: str, param: str) -> bool:

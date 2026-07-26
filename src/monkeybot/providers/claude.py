@@ -113,8 +113,10 @@ class ClaudeProvider:
                 "type": "enabled",
                 "budget_tokens": thinking_budget,
             }
-            # Anthropic requires temperature=1 when extended thinking is enabled.
-            stream_kwargs["temperature"] = 1
+            # Anthropic requires temperature=1 when extended thinking is enabled —
+            # but only send it to models that accept a temperature at all.
+            if supports_param(model, "temperature"):
+                stream_kwargs["temperature"] = 1
 
         client_kwargs: dict[str, Any] = {}
         if session_id and retention != "none":

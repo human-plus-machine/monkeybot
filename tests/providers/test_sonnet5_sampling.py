@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from monkeybot.core.llm.provider import Message, UsageEvent
+from monkeybot.providers import model_capabilities
 from monkeybot.providers._utils import iter_anthropic_sdk_stream
 from monkeybot.providers.claude import ClaudeProvider
 from tests.providers.conftest import CANONICAL_TOOL_DEFS, make_anthropic_stream_mock
@@ -91,6 +92,26 @@ async def test_older_model_manual_thinking_forces_temperature_1(
     kwargs = client.messages.stream.call_args.kwargs
     assert kwargs["thinking"] == {"type": "enabled", "budget_tokens": 4000}
     assert kwargs["temperature"] == 1
+
+
+@pytest.mark.asyncio
+async def test_thinking_does_not_force_temperature_on_a_temp_only_blocked_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model that rejects temperature but allows thinking must not get temperature=1."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    monkeypatch.setitem(
+        model_capabilities.UNSUPPORTED_SAMPLING_PARAMS,
+        "claude-temponly-1",
+        frozenset({"temperature"}),
+    )
+    client = make_anthropic_stream_mock(_minimal_events())
+    provider = ClaudeProvider(temperature=0.9)
+    with patch("anthropic.AsyncAnthropic", return_value=client):
+        await _drain(provider, model="claude-temponly-1-20260101", thinking_budget=4000)
+    kwargs = client.messages.stream.call_args.kwargs
+    assert kwargs["thinking"] == {"type": "enabled", "budget_tokens": 4000}
+    assert "temperature" not in kwargs
 
 
 # --- retry-and-strip fallback for a model not yet in the static table ---
