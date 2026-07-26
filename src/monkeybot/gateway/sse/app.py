@@ -65,6 +65,7 @@ from monkeybot.core.types.content_blocks import ContentBlock, Text
 from monkeybot.core.workspace import create_workspace_storage
 from monkeybot.gateway.bootstrap import ensure_gateway_runtime_env, log_gateway_startup
 from monkeybot.gateway.sse.loop_port import UsagePort
+from monkeybot.gateway.sse.models import AgentUsageResponse, SessionUsageResponse
 from monkeybot.gateway.sse.routes import create_app as build_sse_app
 from monkeybot.gateway.sse.session_bus import SessionBus, SessionRegistry
 from monkeybot.providers.gemini import GeminiProvider
@@ -180,19 +181,7 @@ class _UsageStoreAdapter(UsagePort):
 
 
 def _zero_agent_usage() -> dict[str, Any]:
-    return {
-        "turns": 0,
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "cached_tokens": 0,
-        "cache_read_tokens": 0,
-        "cache_creation_tokens": 0,
-        "cost_usd": 0.0,
-        "period_start": 0,
-        "period_end": 0,
-        "by_model": [],
-        "by_day": [],
-    }
+    return AgentUsageResponse().model_dump()
 
 
 class _StaticUsagePortZeros(UsagePort):
@@ -206,22 +195,13 @@ class _StaticUsagePortZeros(UsagePort):
     ) -> dict[str, Any]:
         del since
         cw = _env_context_window_tokens()
-        return {
-            "session_id": session_id,
-            "turns": 0,
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "cached_tokens": 0,
-            "cache_read_tokens": 0,
-            "cache_creation_tokens": 0,
-            "cost_usd": 0.0,
-            "period_start": 0,
-            "period_end": 0,
-            "last_prompt_tokens": 0,
-            "estimated_prompt_tokens": 0,
-            "summarization_threshold_tokens": max(1, int(cw * SUMMARY_TRIGGER_RATIO)),
-            "context_window_tokens": cw,
-        }
+        return SessionUsageResponse(
+            session_id=session_id,
+            last_prompt_tokens=0,
+            estimated_prompt_tokens=0,
+            summarization_threshold_tokens=max(1, int(cw * SUMMARY_TRIGGER_RATIO)),
+            context_window_tokens=cw,
+        ).model_dump()
 
     async def agent_usage(self, *, since: str | None) -> dict[str, Any]:
         del since

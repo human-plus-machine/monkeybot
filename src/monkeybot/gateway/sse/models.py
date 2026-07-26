@@ -155,15 +155,15 @@ class SessionUsageResponse(BaseModel):
     """GET /sessions/{id}/usage response."""
 
     session_id: str
-    turns: int
-    input_tokens: int
-    output_tokens: int
-    cached_tokens: int
+    turns: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_tokens: int = 0
     cache_read_tokens: int = 0
     cache_creation_tokens: int = 0
-    cost_usd: float
-    period_start: int
-    period_end: int
+    cost_usd: float = 0.0
+    period_start: int = 0
+    period_end: int = 0
     last_prompt_tokens: int = Field(
         0,
         description="Input (prompt) tokens reported for the most recent completed turn in this session.",
@@ -195,15 +195,15 @@ class UsageBucketResponse(BaseModel):
 class AgentUsageResponse(BaseModel):
     """GET /usage — agent-wide totals plus spend split by model and UTC day."""
 
-    turns: int
-    input_tokens: int
-    output_tokens: int
-    cached_tokens: int
+    turns: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_tokens: int = 0
     cache_read_tokens: int = 0
     cache_creation_tokens: int = 0
-    cost_usd: float
-    period_start: int
-    period_end: int
+    cost_usd: float = 0.0
+    period_start: int = 0
+    period_end: int = 0
     by_model: list[UsageBucketResponse] = Field(default_factory=list)
     by_day: list[UsageBucketResponse] = Field(default_factory=list)
 
