@@ -41,7 +41,7 @@ Validate check ids: `paths.agent_md.exists`, `paths.skills_path.exists`, `paths.
 | `max_tokens` | `60000` | Cap per-response length |
 | `thinking_budget` | `-1` | Gemini: `-1` model default, `0` off, `N` token budget. Ollama reasoning models: `-1` server default, `0` off (`reasoning_effort: none`) |
 | `context_window` | `1000000` | Summarization trigger threshold (tokens) |
-| `max_turns` | `50` | Hard cap on turns per run |
+| `max_turns` | `1000` | Hard cap on turns per run |
 | `summarization_model` | (main model) | Cheaper model for history summarization (env `CONTEXT_SUMMARIZATION_MODEL`) |
 
 Validate check ids: `model.provider.supported`, `model.name.present`. Supported YAML providers: `gemini`/`vertex`, `openai`, `anthropic`, `vertex-claude`, `huggingface`, `ollama`, `aws_bedrock`, `fake`.
@@ -97,14 +97,14 @@ Global defaults for `task` calls, plus optional named personas:
 | Field | Default | Notes |
 |---|---|---|
 | `timeout_sec` | `600` | Per-subagent timeout |
-| `max_turns` | `25` | Per-subagent turn cap |
+| `max_turns` | `1000` | Per-subagent turn cap |
 | `vertex_google_search` | `false` | **Gemini only.** Enables native `google_search` grounding for subagent `task` runs. Config-file only. |
 | `personas` | (none) | Named types selected via `task(subagent_type=...)`; each persona sets its own `agent_md` |
 
 ```yaml
 subagents:
   timeout_sec: 600
-  max_turns: 25
+  max_turns: 1000
   vertex_google_search: false
   personas:
     - name: researcher

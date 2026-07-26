@@ -81,7 +81,7 @@ class SubagentSettings:
     """Global defaults for ``task`` subagent runs from ``subagents:`` in monkeybot.yaml."""
 
     timeout_sec: float = 600.0
-    max_turns: int = 25
+    max_turns: int = 1000
     vertex_google_search: bool = False
 
 

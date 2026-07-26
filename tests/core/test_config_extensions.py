@@ -197,7 +197,7 @@ class TestSubagentSettings:
         self._write_config(tmp_path, "model:\n  provider: gemini\n  name: test\n")
         settings = get_subagent_settings()
         assert settings.timeout_sec == 600.0
-        assert settings.max_turns == 25
+        assert settings.max_turns == 1000
         assert settings.vertex_google_search is False
 
     def test_reads_defaults_and_personas(
