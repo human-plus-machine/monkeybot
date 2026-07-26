@@ -77,7 +77,7 @@ One **user message** may span multiple **inner turns** (model → tools → mode
 ### Sequence (one user message)
 
 1. Append user message to history; fire `USER_MESSAGE` hook.
-2. **Inner turn loop** (up to `MAX_TURNS`, default 50):
+2. **Inner turn loop** (up to `MAX_TURNS`, default 1000):
    - Drain **steer** queue (mid-turn user injections) into history; emit `UserSteered`.
    - Await hook **settlement** (fire-and-forget `POST_TOOL` / prior write-side hooks) with bounded timeout.
    - Refresh memory index; optional context curation (turn 1 only).

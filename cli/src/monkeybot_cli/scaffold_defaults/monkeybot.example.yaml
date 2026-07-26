@@ -90,7 +90,7 @@ model:
   thinking_budget: -1
   # Summarisation trigger (tokens)
   context_window: 1000000
-  max_turns: 50
+  max_turns: 1000
   # Prompt-cache session hints: none | short | long (env: MODEL_CACHE_RETENTION)
   # cache_retention: short
   # Optional cheaper model for sync history summarization (env: CONTEXT_SUMMARIZATION_MODEL); omit = main model
@@ -164,7 +164,7 @@ knowledge:
 
 subagents:
   timeout_sec: 600
-  max_turns: 25
+  max_turns: 1000
   # Gemini only: enable native google_search grounding for subagent task runs.
   # Config-file only (no env var override). Defaults to false.
   vertex_google_search: false

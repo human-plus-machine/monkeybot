@@ -38,7 +38,7 @@ from .loop_messages import (
 def _effective_max_turns(max_turns: int | None) -> int:
     if max_turns is not None:
         return max_turns
-    return int(os.getenv("MAX_TURNS", "50"))
+    return int(os.getenv("MAX_TURNS", "1000"))
 
 
 def _usage_to_totals(u: Usage) -> UsageTotals:
