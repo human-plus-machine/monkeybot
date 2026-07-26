@@ -47,12 +47,19 @@ def _pdf_bytes(text: str | None = "Hello World") -> bytes:
     return buf.getvalue()
 
 
-def _docx_bytes(paragraphs: list[str]) -> bytes:
+def _docx_bytes(
+    paragraphs: list[str], tables: list[list[list[str]]] | None = None
+) -> bytes:
     from docx import Document
 
     doc = Document()
     for p in paragraphs:
         doc.add_paragraph(p)
+    for rows in tables or []:
+        table = doc.add_table(rows=len(rows), cols=len(rows[0]))
+        for r, row in enumerate(rows):
+            for c, cell in enumerate(row):
+                table.cell(r, c).text = cell
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
@@ -112,6 +119,46 @@ def test_extract_docx_text(tmp_path: Path) -> None:
     assert text is not None
     assert "First paragraph" in text
     assert "Second paragraph" in text
+
+
+def test_extract_docx_includes_table_cells(tmp_path: Path) -> None:
+    """Table-heavy DOCX files must not index as near-empty (tables were dropped)."""
+    path = tmp_path / "matrix.docx"
+    path.write_bytes(
+        _docx_bytes(
+            ["Pricing overview"],
+            tables=[[["Plan", "Price"], ["Annual", "USD 4200"]]],
+        )
+    )
+    text = extract_docx_text(path, max_file_bytes=5_000_000)
+    assert text is not None
+    assert "Pricing overview" in text
+    for cell in ("Plan", "Price", "Annual", "USD 4200"):
+        assert cell in text
+    # Rows render as pipe-separated cells, in document order after the paragraph.
+    assert text.index("Pricing overview") < text.index("Annual")
+    assert "Plan | Price" in text
+
+
+def test_extract_pdf_closes_file_handle(tmp_path: Path) -> None:
+    """The reader must not keep the PDF open (FD leak over a large scan)."""
+    path = tmp_path / "doc.pdf"
+    path.write_bytes(_pdf_bytes("Closed Handle"))
+    opened: list[io.BufferedReader] = []
+    real_open = Path.open
+
+    def _tracking_open(self: Path, *args: object, **kwargs: object) -> object:
+        handle = real_open(self, *args, **kwargs)  # type: ignore[arg-type]
+        if self == path:
+            opened.append(handle)  # type: ignore[arg-type]
+        return handle
+
+    with patch.object(Path, "open", _tracking_open):
+        pages = extract_pdf_pages(path, max_file_bytes=5_000_000)
+
+    assert pages
+    assert opened, "expected the extractor to own the file handle"
+    assert all(handle.closed for handle in opened)
 
 
 def test_path_caption() -> None:

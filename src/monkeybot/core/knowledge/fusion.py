@@ -165,6 +165,7 @@ async def _ingest_ann(
         limit=max(fts_limit * 2, 64),
         path_prefix=path_prefix,
         dimensions=ann_dimensions,
+        model_id=embedding_provider.model_id,
     )
     seen_paths: set[str] = set()
     ann_rank = 0

@@ -6,9 +6,21 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Knowledge indexing follows document structure instead of fixed line windows: markdown headings, code definitions (tree-sitter via the optional `knowledge-ast` extra, brace/indent heuristic otherwise), and JSON/YAML/TOML top-level keys become chunk boundaries.
+- Embeddings run on NVIDIA, OpenAI, any OpenAI-compatible endpoint, Voyage, or Gemini via `knowledge.embeddings.provider`. Misconfigured or unavailable providers degrade to keyword + graph search rather than failing the turn.
+- PDF, DOCX, and image files are indexed with the `knowledge-media` extra. Images use `knowledge.captions` (`off` / `path` / `llm`); DOCX indexing covers tables as well as paragraphs.
+- Subagents search the parent workspace index read-only, and a second gateway attempting to write the same index is refused.
+
 ### Fixed
 
 - Stop mid-reply now cancels the in-flight provider token stream (instead of waiting for the full LLM call) and persists any already-streamed assistant text to history so follow-up turns keep matching what the user saw.
+- Chunking improvements now reach existing workspaces: a chunker version bump re-chunks indexed files even when their modification time never changed, so upgrades no longer require deleting `.monkeybot/knowledge/`.
+- Vector search scores only vectors from the active embedding model. Switching provider or `dimensions` purges the incomparable rows at startup and re-embeds them, instead of blending two models into one similarity ranking.
+- The knowledge index writer lock is claimed atomically, so two gateways starting at the same moment can no longer both believe they own the index.
+- Embedding requests carry a per-request timeout, so one slow endpoint cannot stall an indexing pass; cached vector matrices are bounded by a memory budget with least-recently-used eviction.
+- PDF extraction closes its file handle (previously leaked a descriptor per file on large scans), the code chunker no longer splits mid-function when a docstring contains an unbalanced brace, and `knowledge.chunk_overlap_ratio` is honored for markdown, code, and structured files.
 
 ### Changed
 

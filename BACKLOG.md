@@ -17,17 +17,6 @@
 - Decide and implement: should the CLI (`doctor`, `run`, `chat`) detect these from config and actually start/stop the containers, or just validate/warn with remediation hints while the user manages Docker manually?
 - Open sub-questions if going the "CLI starts services" route: where do per-project Docker assets live (`opensandbox.docker.toml`, OTel collector yaml, compose files) — agent-project-owned files referenced from `monkeybot.yaml`, or CLI-shipped generic templates; and is the sandbox worker image (project-specific extra deps) something the CLI should build, or stay manual/documented.
 
-### 4. Knowledge Layer — PR #123 review follow-ups
-Source: PR #123 (knowledge layer) review feedback. Embeddings default off; evals gate everything. None blocked merge.
-
-- ~~**Content-aware chunking** *(top priority)*~~ ✅ — per-suffix strategies in `chunking.py` (markdown headings, tree-sitter / brace heuristic for code, JSON/YAML/TOML top-level keys, prose fallback). Optional `knowledge-ast` extra. Offline markdown rank≤4 gate in `test_knowledge_chunking_rank.py`.
-- ~~**Vector search perf — short-term (still SQLite)**~~ ✅ — normalize at write time (`upsert` L2-normalizes once; query no longer re-normalizes stored rows), Matryoshka dims already sliced client-side at write in `embeddings/nvidia.py` (store/scan 1024, not 2048), and an in-memory numpy matrix cache in `sqlite_vector.py` (`_MatrixCache`, invalidated on `upsert`/`delete_by_path`/`delete_missing`, rebuilt lazily on next `query`) replaces per-query struct-unpack + pure-Python dot products with a single `matrix @ query` numpy matmul. `numpy` added as a core dep (`<2.5` pin — newer stub files break `mypy` under this project's `python_version = 3.11` target).
-- ~~**Vector search perf — real fix (sqlite-vec)**~~ ⏸ deferred — numpy matrix cache is enough through ~50–100k chunks; query cost is embed-API bound, not local ANN. Revisit only if measured ANN p95 > ~20–50 ms or RAM pressure from the full matrix. True scale escape hatch remains `store.type: pgvector`, not `sqlite-vec` packaging.
-- ~~**Embedding provider adapters**~~ ✅ — `EmbeddingProvider` protocol + factory with per-provider defaults (model/dim/base_url/prefix/`input_type`). Implementations: NVIDIA (unchanged Matryoshka), OpenAI, `openai_compatible`, Voyage (OpenAI-compat + `input_type`), Gemini/`google` (`google-genai`). Unknown/misconfigured providers still soft-degrade to keyword+graph.
-- ~~**Document-type extraction**~~ ✅ — PDF (per-page `pypdf`), DOCX (`python-docx`), and images (path caption default; optional LLM vision + hash cache). Optional `knowledge-media` extra; `knowledge.captions: off|path|llm` (default `path`). Design doc indexing section updated.
-- ~~**Orphan-vector self-heal**~~ ✅ — heal confirmed: full content-hash scan (`delete_missing` + re-embed on hash mismatch) runs when `startup_scan: true` (default) or on workspace rescan; with `startup_scan: false` and embeddings on, startup still prunes vector rows absent from FTS. Query soft-drop: `_ingest_ann` skips hits whose chunk snippet can't be resolved. Regression tests in `test_knowledge_fusion_ann.py` / `test_knowledge_indexer.py`; design doc accepted-risk updated.
-- ~~**Single-writer invariant**~~ ✅ — one gateway writer per workspace knowledge DB (`KnowledgeWriterConflictError` on a second live writer). Subagents open `KnowledgeSubsystem.create(..., read_only=True)` and get working `search` without indexer/hooks. Documented in design doc + features. pgvector remains Phase 3 for multi-replica.
-
 ---
 
 ## Bugs
@@ -51,6 +40,7 @@ Source: PR #123 (knowledge layer) review feedback. Embeddings default off; evals
 
 ### Infra
 - **Postgres as production default** — backend exists; gateway still defaults to SQLite; decide when/if this becomes the default.
+- **Knowledge ANN index (sqlite-vec)** — deliberately deferred. The numpy matrix cache in `sqlite_vector.py` holds through ~50–100k chunks and query cost is embed-API bound, not local ANN. Revisit only if measured ANN p95 exceeds ~20–50 ms or the resident matrix causes RAM pressure; the true scale escape hatch is `store.type: pgvector`, not `sqlite-vec` packaging.
 
 ### MCP
 - **MCP distro linkage** — confirm scaffolded `monkeybot.yaml` paths (`paths.mcp_config`, `paths.skills_path`) match deployment; smoke-test against real MCP servers beyond the bundled examples.

@@ -179,6 +179,82 @@ async def test_sqlite_vector_write_normalizes_and_cache_invalidates(tmp_path: Pa
         await store.close()
 
 
+def _record(chunk_id: str, path: str, vector: list[float], model: str) -> VectorChunkRecord:
+    return VectorChunkRecord(
+        chunk_id=chunk_id,
+        path=path,
+        vector=vector,
+        model_id=model,
+        dim=len(vector),
+        start_line=1,
+        end_line=1,
+    )
+
+
+@pytest.mark.asyncio
+async def test_query_scores_only_the_active_model(tmp_path: Path) -> None:
+    """Vectors from another embedding model must not be pooled into scoring."""
+    store = SQLiteVectorStore(tmp_path / "v.sqlite")
+    await store.open()
+    try:
+        await store.upsert(
+            [
+                _record("old.py#L1-1", "old.py", [1.0, 0.0], "model-old"),
+                _record("new.py#L1-1", "new.py", [0.0, 1.0], "model-new"),
+            ]
+        )
+        # Without the model filter the old-model row wins on this query vector.
+        unfiltered = await store.query([1.0, 0.0], limit=5)
+        assert unfiltered[0].path == "old.py"
+
+        scoped = await store.query([1.0, 0.0], limit=5, model_id="model-new")
+        assert [h.path for h in scoped] == ["new.py"]
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_delete_stale_models_purges_other_models_and_dims(tmp_path: Path) -> None:
+    store = SQLiteVectorStore(tmp_path / "v.sqlite")
+    await store.open()
+    try:
+        await store.upsert(
+            [
+                _record("a.py#L1-1", "a.py", [1.0, 0.0], "keep"),
+                _record("b.py#L1-1", "b.py", [0.0, 1.0], "drop"),
+                # Same model, different configured width → also incomparable.
+                _record("c.py#L1-1", "c.py", [1.0, 0.0, 0.0], "keep"),
+            ]
+        )
+        assert await store.delete_stale_models("keep", 2) == 2
+        assert await store.has_path("a.py")
+        assert not await store.has_path("b.py")
+        assert not await store.has_path("c.py")
+        # Idempotent on a clean store.
+        assert await store.delete_stale_models("keep", 2) == 0
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_matrix_cache_respects_byte_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An oversized matrix is rebuilt per query instead of pinned in memory."""
+    import monkeybot.core.persistence.sqlite_vector as mod
+
+    monkeypatch.setattr(mod, "_MAX_CACHE_BYTES", 1)
+    store = SQLiteVectorStore(tmp_path / "v.sqlite")
+    await store.open()
+    try:
+        await store.upsert([_record("a.py#L1-1", "a.py", [1.0, 0.0], "m")])
+        hits = await store.query([1.0, 0.0], limit=5, model_id="m")
+        assert hits[0].path == "a.py"
+        assert not store._caches  # noqa: SLF001 — nothing cached over budget
+    finally:
+        await store.close()
+
+
 @pytest.mark.asyncio
 async def test_sqlite_vector_query_reuses_cache_across_calls(tmp_path: Path) -> None:
     """Two queries against unchanged data must return identical results."""

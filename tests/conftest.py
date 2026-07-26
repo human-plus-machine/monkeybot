@@ -1,6 +1,11 @@
 """Shared pytest configuration for the monkeybot test suite."""
 
+from __future__ import annotations
+
+import gc
 import os
+import threading
+from typing import Any
 
 import pytest
 
@@ -41,3 +46,46 @@ def _isolate_exported_layout_environment() -> None:
     from monkeybot.core.config.runtime_env import reset_runtime_env_state_for_tests
 
     reset_runtime_env_state_for_tests()
+
+
+def _stop_leaked_aiosqlite_connections(*, timeout: float = 0.5) -> int:
+    """Force-stop aiosqlite worker threads left open by tests.
+
+    aiosqlite ``Connection`` workers are non-daemon threads blocked on
+    ``SimpleQueue.get()``. An unclosed connection makes ``Py_FinalizeEx``
+    hang forever after the suite finishes, which looks like a frozen run.
+    """
+    try:
+        import aiosqlite
+    except ImportError:
+        return 0
+
+    stopped = 0
+    for obj in gc.get_objects():
+        if not isinstance(obj, aiosqlite.Connection):
+            continue
+        thread: threading.Thread | None = getattr(obj, "_thread", None)
+        if thread is None or not thread.is_alive():
+            continue
+        try:
+            # Prefer the library's own stop path (queues _STOP_RUNNING_SENTINEL).
+            stop = getattr(obj, "stop", None)
+            if callable(stop):
+                stop()
+            else:
+                continue
+        except Exception:
+            continue
+        thread.join(timeout=timeout)
+        stopped += 1
+    return stopped
+
+
+@pytest.fixture(autouse=True)
+def _reap_leaked_aiosqlite_after_test() -> Any:
+    yield
+    _stop_leaked_aiosqlite_connections()
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    _stop_leaked_aiosqlite_connections()

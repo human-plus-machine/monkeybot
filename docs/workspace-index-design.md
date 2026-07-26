@@ -310,7 +310,7 @@ Semantic ANN alone is not hybrid search. Every `recall` fuses up to three signal
 
 | Role | Access |
 |------|--------|
-| Gateway | Writer — indexes on startup / hooks, claims `*.writer-pid` sentinel |
+| Gateway | Writer — indexes on startup / hooks, claims `*.writer-pid` sentinel via an atomic `O_CREAT`/`O_EXCL` create, so two racing gateways cannot both win |
 | Subagent workers | **Read-only** — `KnowledgeSubsystem.create(..., read_only=True)` opens SQLite `mode=ro`, runs `search` only (no indexer, no knowledge hooks) |
 | Second gateway on the same workspace | **Refused** — `KnowledgeWriterConflictError` if another live PID holds the sentinel |
 
@@ -325,9 +325,9 @@ See [System overview](#system-overview) for the end-to-end and recall diagrams.
 
 | Source | Extraction | Indexed text | Status |
 |--------|------------|--------------|--------|
-| Text / code / markdown / HTML (stripped) | **Content-aware chunking** (~500–800 tokens, ~10–15% overlap): heading sections for markdown/rst; tree-sitter top-level defs for code when `knowledge-ast` extra is installed (indent/brace heuristic fallback otherwise); top-level key/table groups for JSON/YAML/TOML; line-aligned window for prose. Path + section/symbol prefix on each chunk. `CHUNKER_VERSION` is mixed into the content digest so algorithm bumps force re-index. | Chunk text → FTS; embed when semantic on | **Shipped** |
+| Text / code / markdown / HTML (stripped) | **Content-aware chunking** (~500–800 tokens, ~10–15% overlap): heading sections for markdown/rst; tree-sitter top-level defs for code when `knowledge-ast` extra is installed (indent/brace heuristic fallback otherwise); top-level key/table groups for JSON/YAML/TOML; line-aligned window for prose. Path + section/symbol prefix on each chunk. `CHUNKER_VERSION` is mixed into the content digest **and stored per file** (`files.chunker_version`) so a version bump re-chunks existing workspaces even when mtimes never change. | Chunk text → FTS; embed when semantic on | **Shipped** |
 | PDF | Per-page text via `pypdf` (`knowledge-media` extra); empty pages skipped (no OCR) | One FTS chunk per page (`start_line`/`end_line` = page number); soft-fail if extra missing | **Shipped** |
-| DOCX | Paragraph text via `python-docx` (`knowledge-media` extra) | Body text → same chunker as prose; soft-fail if extra missing | **Shipped** |
+| DOCX | Paragraphs **and tables** via `python-docx` (`knowledge-media` extra), walked in document order; table rows render as pipe-separated cells | Body text → same chunker as prose; soft-fail if extra missing | **Shipped** |
 | Images (png/jpeg/gif/webp) | Caption per `knowledge.captions` policy | Caption string → FTS; embed when semantic on | **Shipped** |
 | Notes | Full note + parsed `[[links]]` | Note text → FTS; edges → `links` table | **Shipped** |
 
@@ -407,7 +407,7 @@ All providers implement `EmbeddingProvider` (`model_id`, `dim`, `embed_documents
 
 - Reuse `openai` SDK against NVIDIA base URL (same pattern as `providers/nvidia.py`).
 - Batch with `embeddings.batch_size` (default 32–64); backoff on 429 / throughput errors (NVIDIA free tier is low-throughput — share the concurrency discipline from `_openai_compat`).
-- On model or `dimensions` change: wipe/rebuild vector store (or version namespace by `model_id`+`dim`); FTS/links sidecar stays.
+- On model or `dimensions` change: **automatic** — rows are namespaced by `model_id`+`dim`. Queries only score rows written by the active model, and startup (`KnowledgeIndexer.ensure_ready`) calls `delete_stale_models` to drop the rest; the following scan re-embeds those paths. FTS/links sidecar stays. With `startup_scan: false` the purge still runs, but re-embedding waits for the next scan or file change.
 - Fail soft: embed errors log + skip ANN for that turn / dirty path; keyword+graph still run.
 
 ### Pluggable `VectorStore` in `core/persistence/`
@@ -500,6 +500,7 @@ knowledge:
 
 1. **Startup / rescan** — `startup_scan: true` (default) runs a full content-hash walk: re-embed on hash mismatch and `delete_missing` for both FTS and vectors. When `startup_scan: false`, the disk walk is skipped, but if embeddings are on the indexer still prunes vector rows whose paths are absent from FTS (`delete_missing` against the current index). Re-embed on hash mismatch stays gated on a full scan (startup or workspace rescan).
 2. **Query soft-drop** — `_ingest_ann` skips ANN hits whose chunk snippet cannot be resolved in FTS (stale orphan between crash and heal), so recall never surfaces dangling vector IDs.
+3. **Model scoping** — every vector row records `model_id`+`dim`; queries filter on the active model and startup purges the rest, so a provider or `dimensions` switch cannot mix incomparable vectors into one cosine ranking.
 
 Env overrides (suggested): `KNOWLEDGE_ENABLED`, `KNOWLEDGE_EMBEDDINGS_ENABLED`, plus existing provider key envs. Env wins over YAML per harness norms.
 
@@ -989,6 +990,7 @@ Still open / follow-ups: confirm hosted NIM short-name if build.nvidia.com diffe
 | 2026-07-17 | **F22 — Evidence must be read, not snippet-derived:** `EvidencePathGuard` tracks `read_file`/`glob` confirmations and injects a one-shot "Evidence verification required" notice for cited-but-unread paths; harness path rule downgraded `search` hits to leads ("answer only after reading"); same rule in post-compaction standing instructions |
 | 2026-07-17 | **Post-F22 unprompted full-48 run: score 43/48** (best yet; prompted baseline 39, pre-F22 unprompted 37); `search`×31 unprompted, 24 files read, **0× ContextSummarized**; model self-externalized to `answers.md` + `todo_list`; all seven F22-target snippet misses converted; residual misses = right-file-not-opened (Q12 globals.css, Q13 button.tsx, Q15 thread/index.tsx, Q44 tests/, Q45 src/content); transcript `20260717T162603Z_2f553ae9-f600-4f41-93d5-39c152e72b58` |
 | 2026-07-17 | **F22 guard extended to written deliverables:** `Evidence:` citations inside `write_file` content / `replace_in_file` new_string are scanned with the same missing/unread checks (answers.md bypassed the chat-text-only guard); model-written paths count as confirmed |
-| 2026-07-25 | **F18 / content-aware chunking:** per-suffix strategies in `chunking.py` (markdown headings, tree-sitter top-level defs via optional `knowledge-ast` extra with indent/brace fallback, JSON/YAML/TOML top-level keys, prose window). `CHUNKER_VERSION` mixed into indexer digest forces one-time re-scan on upgrade (or wipe `.monkeybot/knowledge/*.sqlite`). Offline markdown rank≤4 gate: `tests/core/test_knowledge_chunking_rank.py` |
+| 2026-07-25 | **F18 / content-aware chunking:** per-suffix strategies in `chunking.py` (markdown headings, tree-sitter top-level defs via optional `knowledge-ast` extra with indent/brace fallback, JSON/YAML/TOML top-level keys, prose window). `CHUNKER_VERSION` is mixed into the indexer digest **and** persisted per file, so a version bump forces a one-time re-chunk on upgrade. Offline markdown rank≤4 gate: `tests/core/test_knowledge_chunking_rank.py` |
 | 2026-07-25 | **Media extraction shipped:** PDF per-page (`pypdf`), DOCX paragraphs (`python-docx`) via optional `knowledge-media` extra; images indexed with `knowledge.captions` (`off` / `path` default / `llm` + hash cache). Not “text files only in v1.” OCR / native multimodal embeddings still deferred. |
 | 2026-07-26 | **Single-writer enforced:** second live gateway writer raises `KnowledgeWriterConflictError`; subagents use `read_only=True` search against parent index (no indexer/hooks). pgvector still Phase 3 for multi-replica. |
+| 2026-07-26 | **PR #148 review fixes:** `files.chunker_version` makes a `CHUNKER_VERSION` bump actually re-chunk (the mtime fast path used to skip it, so content-aware chunking never reached existing workspaces); vector rows are scoped by `model_id` at query time with a startup `delete_stale_models` purge (mixed-provider vectors were being cosine-scored together); writer sentinel claimed with `O_EXCL`; chunker tracks triple-quoted strings; DOCX tables indexed; per-request embed timeout + LRU byte cap on the matrix cache. |

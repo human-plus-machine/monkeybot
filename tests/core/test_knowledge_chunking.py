@@ -6,6 +6,7 @@ import pytest
 
 from monkeybot.core.knowledge.chunking import (
     CHUNKER_VERSION,
+    _indent_brace_units,
     chunk_text,
     estimate_tokens,
     index_content_digest,
@@ -155,6 +156,71 @@ def test_code_ast_path_when_available() -> None:
     for c in chunks:
         first_body = c.text.split("\n", 1)[1].lstrip("\n").split("\n", 1)[0]
         assert not first_body.startswith("    x =")
+
+
+def test_code_heuristic_survives_braces_in_docstrings() -> None:
+    """A stray brace/quote in a triple-quoted string must not desync depth."""
+    text = (
+        'def alpha():\n'
+        '    """Doc with an unbalanced { brace and an apostrophe: don\'t.\n'
+        '\n'
+        '    Still the same docstring: } and "quotes" inside.\n'
+        '    """\n'
+        "    return 1\n"
+        "\n"
+        "def beta():\n"
+        '    """Another doc with { only."""\n'
+        "    return 2\n"
+        "\n"
+        "def gamma():\n"
+        "    return 3\n"
+    )
+    # Depth must return to 0 after each docstring, so every def opens a unit.
+    lines = text.splitlines(keepends=True)
+    units = _indent_brace_units(lines)
+    assert [u.label for u in units] == ["alpha", "beta", "gamma"]
+    assert [u.start_line for u in units] == [1, 8, 12]
+
+    chunks = chunk_text(
+        text,
+        path="src/mod.py",
+        source_type="workspace_file",
+        chunk_tokens=20,
+        overlap_ratio=0.0,
+        use_ast=False,
+    )
+    starts = [c.text.split("\n", 1)[1].lstrip("\n").split("\n", 1)[0] for c in chunks]
+    assert all(s.startswith("def ") for s in starts), starts
+
+
+def test_unit_overlap_respects_overlap_ratio() -> None:
+    """Packing must walk back by overlap_chars, not re-emit a whole large unit."""
+    section = "## S{i}\n\n" + "body text for the section. " * 12 + "\n\n"
+    text = "".join(section.format(i=i) for i in range(12))
+    target_tokens = 200  # ~800 target chars; each section ~330 chars
+
+    chunks = chunk_text(
+        text,
+        path="docs/x.md",
+        source_type="workspace_file",
+        chunk_tokens=target_tokens,
+        overlap_ratio=0.02,  # ~16 chars — smaller than any single section
+    )
+    assert len(chunks) >= 2
+    # No section is large enough to fit the overlap budget, so nothing repeats.
+    bodies = [c.text.split("\n", 1)[1] for c in chunks]
+    total = sum(len(b) for b in bodies)
+    assert total <= len(text) * 1.05, "overlap_ratio ignored; whole units duplicated"
+
+    generous = chunk_text(
+        text,
+        path="docs/x.md",
+        source_type="workspace_file",
+        chunk_tokens=target_tokens,
+        overlap_ratio=0.5,  # budget now exceeds a section → overlap appears
+    )
+    generous_total = sum(len(c.text.split("\n", 1)[1]) for c in generous)
+    assert generous_total > total
 
 
 def test_json_top_level_keys_grouped() -> None:

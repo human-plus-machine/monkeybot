@@ -14,7 +14,11 @@ from monkeybot.core.knowledge.types import EmbeddingSettings
 
 @dataclass(frozen=True)
 class ProviderDefaults:
-    """Default model / dim / endpoint / auth for one ``embeddings.provider``."""
+    """Default model / dim / endpoint / auth for one ``embeddings.provider``.
+
+    Every field is forwarded to the adapter by :func:`create_embedding_provider`
+    — adapters declare their own fallbacks only for direct construction.
+    """
 
     model: str
     dimensions: int
@@ -22,6 +26,8 @@ class ProviderDefaults:
     api_key_env: str
     query_prefix: str = ""
     passage_prefix: str = ""
+    # False when the API ignores a `dimensions` request and we must Matryoshka
+    # slice client-side (NVIDIA integrate returns native width only).
     pass_dimensions: bool = True
     input_type_mode: str = "none"
     install_hint: str = "Install with: uv sync --extra openai"
@@ -125,6 +131,9 @@ def create_embedding_provider(
             base_url=base_url or defaults.base_url,
             batch_size=settings.batch_size,
             api_key=api_key,
+            query_prefix=defaults.query_prefix,
+            passage_prefix=defaults.passage_prefix,
+            pass_dimensions=defaults.pass_dimensions,
         )
 
     if name == "gemini":
@@ -133,6 +142,9 @@ def create_embedding_provider(
             dimensions=dimensions or defaults.dimensions,
             batch_size=settings.batch_size,
             api_key=api_key,
+            query_prefix=defaults.query_prefix,
+            passage_prefix=defaults.passage_prefix,
+            pass_dimensions=defaults.pass_dimensions,
         )
 
     # openai | openai_compatible | voyage — shared OpenAI-compat client

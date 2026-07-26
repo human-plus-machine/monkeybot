@@ -85,6 +85,7 @@ class KnowledgeIndexer:
         async with self._lock:
             if self._ready:
                 return
+            await self._purge_stale_model_vectors()
             if self._settings.startup_scan:
                 try:
                     await self._full_scan()
@@ -306,9 +307,16 @@ class KnowledgeIndexer:
         except OSError:
             mtime = time.time()
 
-        # F11: mtime fast path — skip read+hash when unchanged.
-        stored_mtime = await self._index.get_file_mtime(index_path)
-        if stored_mtime is not None and abs(float(stored_mtime) - float(mtime)) < _MTIME_EPS:
+        # F11: mtime fast path — skip read+hash when unchanged. Files chunked by
+        # an older CHUNKER_VERSION never take it, so a version bump re-chunks
+        # existing workspaces instead of waiting for each file to be touched.
+        state = await self._index.get_file_state(index_path)
+        if (
+            state is not None
+            and state.chunker_version == CHUNKER_VERSION
+            and state.mtime is not None
+            and abs(state.mtime - float(mtime)) < _MTIME_EPS
+        ):
             if self._embedder is None or self._vectors is None:
                 return
             try:
@@ -616,6 +624,22 @@ class KnowledgeIndexer:
         for path, records in records_by_path.items():
             await self._vectors.delete_by_path(path)
             await self._vectors.upsert(records)
+
+    async def _purge_stale_model_vectors(self) -> None:
+        """Drop vectors from a previous embedding model / dimension config.
+
+        Vectors are only comparable within one model+width, so a provider or
+        ``dimensions`` change must evict the old rows; the scan that follows
+        re-embeds those paths with the active model.
+        """
+        if self._embedder is None or self._vectors is None:
+            return
+        try:
+            await self._vectors.delete_stale_models(
+                self._embedder.model_id, self._embedder.dim
+            )
+        except Exception as exc:
+            logger.warning("knowledge stale-model vector purge failed: %r", exc)
 
     async def _prune_orphan_vectors(self, alive: set[str] | None = None) -> None:
         """Drop vector rows for paths absent from the FTS index (or ``alive``)."""

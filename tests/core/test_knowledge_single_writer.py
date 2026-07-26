@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -102,6 +103,56 @@ async def test_writer_releases_sentinel_on_close(tmp_path: Path) -> None:
         assert sentinel.is_file()
     finally:
         await second.close()
+
+
+@pytest.mark.asyncio
+async def test_writer_claim_is_exclusive_create(tmp_path: Path) -> None:
+    """The sentinel is claimed with O_EXCL so a racing writer cannot also win."""
+    import os
+
+    import monkeybot.core.knowledge.sqlite_index as sqlite_index_mod
+
+    db = tmp_path / "index.sqlite"
+    sentinel = db.with_suffix(db.suffix + ".writer-pid")
+    real_open = os.open
+    calls: list[int] = []
+
+    def _racing_open(path: object, flags: int, *args: object) -> int:
+        # A competitor claims the sentinel between our check and our create.
+        if path == sentinel and flags & os.O_EXCL and not calls:
+            calls.append(flags)
+            sentinel.write_text(str(os.getpid() + 1), encoding="utf-8")
+        return real_open(path, flags, *args)  # type: ignore[arg-type]
+
+    original_alive = sqlite_index_mod._pid_alive
+    sqlite_index_mod._pid_alive = lambda _pid: True
+    try:
+        with patch("os.open", _racing_open):
+            index = KnowledgeIndex(db)
+            with pytest.raises(
+                KnowledgeWriterConflictError, match="already has an active writer"
+            ):
+                await index.open()
+    finally:
+        sqlite_index_mod._pid_alive = original_alive
+    assert calls, "expected an O_EXCL create attempt"
+
+
+@pytest.mark.asyncio
+async def test_stale_sentinel_from_dead_pid_is_reclaimed(tmp_path: Path) -> None:
+    db = tmp_path / "index.sqlite"
+    sentinel = db.with_suffix(db.suffix + ".writer-pid")
+    sentinel.parent.mkdir(parents=True, exist_ok=True)
+    sentinel.write_text("999999999", encoding="utf-8")  # not a live pid
+
+    index = KnowledgeIndex(db)
+    await index.open()
+    try:
+        import os
+
+        assert sentinel.read_text(encoding="utf-8").strip() == str(os.getpid())
+    finally:
+        await index.close()
 
 
 @pytest.mark.asyncio

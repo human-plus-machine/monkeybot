@@ -2,10 +2,14 @@
 
 Single-writer assumption: one gateway process owns the DB. Vectors are
 L2-normalized once at write time (``upsert``); an in-memory numpy matrix of
-all rows is cached and reused across queries, invalidated on any write
-(``upsert`` / ``delete_by_path`` / ``delete_missing``). This keeps repeat
-queries to a single ``matrix @ query`` instead of re-unpacking and
+rows is cached per embedding model and reused across queries, invalidated on
+any write (``upsert`` / ``delete_by_path`` / ``delete_missing``). This keeps
+repeat queries to a single ``matrix @ query`` instead of re-unpacking and
 re-normalizing every row from SQLite each time.
+
+Rows are scoped by ``model_id``: vectors from different embedding models are
+not comparable, so queries only score rows written by the active model, and
+``delete_stale_models`` prunes rows left behind by a provider/dimension switch.
 """
 
 from __future__ import annotations
@@ -14,6 +18,7 @@ import asyncio
 import logging
 import math
 import struct
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,10 +41,15 @@ CREATE TABLE IF NOT EXISTS vectors (
     vector BLOB NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_vectors_path ON vectors(path);
+CREATE INDEX IF NOT EXISTS idx_vectors_model ON vectors(model_id);
 """
 
 _BUSY_TIMEOUT_MS = 5000
 _BRUTE_FORCE_WARN_ROWS = 20_000
+# Resident budget for cached row matrices across all models. A single model
+# whose matrix exceeds this is scored straight from SQLite each query rather
+# than pinning hundreds of MB; smaller models are evicted least-recently-used.
+_MAX_CACHE_BYTES = 256 * 1024 * 1024
 
 
 def _sqlite_uri(path: Path, *, read_only: bool) -> str:
@@ -97,7 +107,8 @@ class SQLiteVectorStore:
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path)
         self._conn: aiosqlite.Connection | None = None
-        self._cache: _MatrixCache | None = None
+        # Keyed by model_id ("" = unfiltered), least-recently-used first.
+        self._caches: OrderedDict[str, _MatrixCache] = OrderedDict()
         self._cache_lock = asyncio.Lock()
         self._read_only = False
         # Bumped on every write; lets a concurrent cache rebuild detect that
@@ -150,8 +161,29 @@ class SQLiteVectorStore:
         return self._require()
 
     def _invalidate_cache(self) -> None:
-        self._cache = None
+        self._caches.clear()
         self._write_version += 1
+
+    def _install_cache(self, key: str, cache: _MatrixCache) -> None:
+        """Cache ``cache`` under ``key``, honoring the resident byte budget."""
+        size = int(cache.matrix.nbytes)
+        if size > _MAX_CACHE_BYTES:
+            logger.warning(
+                "knowledge vector matrix for model=%r is %.0f MiB (> %.0f MiB budget); "
+                "rebuilding per query instead of caching",
+                key,
+                size / (1024 * 1024),
+                _MAX_CACHE_BYTES / (1024 * 1024),
+            )
+            return
+        self._caches[key] = cache
+        self._caches.move_to_end(key)
+        while len(self._caches) > 1 and self._cached_bytes() > _MAX_CACHE_BYTES:
+            evicted, _ = self._caches.popitem(last=False)
+            logger.info("knowledge vector cache evicted model=%r", evicted)
+
+    def _cached_bytes(self) -> int:
+        return sum(int(c.matrix.nbytes) for c in self._caches.values())
 
     async def upsert(self, chunks: list[VectorChunkRecord]) -> None:
         if not chunks:
@@ -231,20 +263,55 @@ class SQLiteVectorStore:
         row = await cur.fetchone()
         return row is not None
 
-    async def _get_cache(self) -> _MatrixCache:
-        """Return the cached row matrix, rebuilding it if invalidated.
+    async def delete_stale_models(self, model_id: str, dim: int) -> int:
+        """Drop rows not written by ``(model_id, dim)``. Returns deleted count.
+
+        Called on startup so switching embedding provider or dimensions purges
+        incomparable vectors (which the next scan re-embeds) instead of leaving
+        them to be scored against the new model's queries.
+        """
+        conn = self._require_writable()
+        cur = await conn.execute(
+            "SELECT COUNT(*) AS n FROM vectors WHERE model_id != ? OR dim != ?",
+            (model_id, int(dim)),
+        )
+        row = await cur.fetchone()
+        stale = int(row["n"]) if row else 0
+        if not stale:
+            return 0
+        await conn.execute(
+            "DELETE FROM vectors WHERE model_id != ? OR dim != ?", (model_id, int(dim))
+        )
+        await conn.commit()
+        self._invalidate_cache()
+        logger.info(
+            "knowledge vectors removed %d rows from other models (active=%s dim=%d)",
+            stale,
+            model_id,
+            dim,
+        )
+        return stale
+
+    async def _get_cache(self, model_id: str | None) -> _MatrixCache:
+        """Return the cached row matrix for ``model_id``, rebuilding if invalidated.
 
         Rebuild cost (unpack + normalize every row) is paid once per write
         burst rather than once per query.
         """
+        key = model_id or ""
         async with self._cache_lock:
-            if self._cache is not None:
-                return self._cache
+            cached = self._caches.get(key)
+            if cached is not None:
+                self._caches.move_to_end(key)
+                return cached
             version = self._write_version
             conn = self._require()
-            cur = await conn.execute(
-                "SELECT chunk_id, path, start_line, end_line, dim, vector FROM vectors"
-            )
+            sql = "SELECT chunk_id, path, start_line, end_line, dim, vector FROM vectors"
+            params: tuple[str, ...] = ()
+            if model_id:
+                sql += " WHERE model_id = ?"
+                params = (model_id,)
+            cur = await conn.execute(sql, params)
             rows = await cur.fetchall()
             row_list = list(rows)
             if len(row_list) >= _BRUTE_FORCE_WARN_ROWS:
@@ -258,7 +325,7 @@ class SQLiteVectorStore:
             # install the cache if no write raced us, otherwise leave it
             # unset so the next query rebuilds from fresh rows.
             if self._write_version == version:
-                self._cache = cache
+                self._install_cache(key, cache)
             return cache
 
     async def query(
@@ -268,8 +335,10 @@ class SQLiteVectorStore:
         limit: int = 20,
         path_prefix: str | None = None,
         dimensions: int | None = None,
+        model_id: str | None = None,
     ) -> list[VectorHit]:
-        cache = await self._get_cache()
+        """Score rows written by ``model_id`` (all rows when it is None)."""
+        cache = await self._get_cache(model_id)
         n = len(cache.chunk_ids)
         if n == 0:
             logger.debug("knowledge vector query empty table")

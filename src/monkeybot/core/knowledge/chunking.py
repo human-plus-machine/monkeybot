@@ -23,10 +23,19 @@ from monkeybot.core.knowledge.types import SourceType, TextChunk
 logger = logging.getLogger(__name__)
 
 # Bump when chunk boundaries change so content-hash skips re-index.
-CHUNKER_VERSION = 3
+CHUNKER_VERSION = 4
 
 # Rough heuristic: ~4 characters per token for mixed code/prose.
 _CHARS_PER_TOKEN = 4
+
+# How far past ``target_chars`` a unit may grow before it is window-split.
+# Atomic units (code defs, structured keys) are worth keeping whole well past
+# the target: a function or config block cut mid-body retrieves badly, and the
+# embedding APIs accept inputs far larger than our default 700-token target.
+# Prose sections have no such structure to preserve, so they get only enough
+# slack to avoid splitting off a tiny trailing chunk.
+_ATOMIC_OVERSIZE_FACTOR = 8.0
+_PROSE_OVERSIZE_FACTOR = 1.25
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$")
 _SETEXT_RE = re.compile(r"^(=+|-+)\s*$")
 _YAML_TOP_KEY_RE = re.compile(r"^([^\s#-][^:#]*?)\s*:")
@@ -238,7 +247,9 @@ def _pack_units(
 
         # Oversized non-atomic unit → sub-split with window inside it.
         # Atomic units (code defs / structured keys) stay whole unless huge.
-        oversize_limit = target_chars * (8.0 if unit.atomic else 1.25)
+        oversize_limit = target_chars * (
+            _ATOMIC_OVERSIZE_FACTOR if unit.atomic else _PROSE_OVERSIZE_FACTOR
+        )
         if char_count > oversize_limit and unit.body.strip():
             unit_lines = unit.body.splitlines(keepends=True)
             if not unit_lines:
@@ -275,7 +286,18 @@ def _pack_units(
         if j >= len(units):
             break
 
-        i = j - 1 if overlap_chars > 0 and j - i > 1 else j
+        # Walk back by ``overlap_chars`` worth of trailing units (mirrors
+        # _window_chunk_lines). A unit that alone exceeds the overlap budget is
+        # not re-included, so overlap_ratio bounds the duplication.
+        next_i = j
+        back_chars = 0
+        while (
+            next_i > i + 1
+            and back_chars + len(units[next_i - 1].body) <= overlap_chars
+        ):
+            next_i -= 1
+            back_chars += len(units[next_i].body)
+        i = max(i + 1, next_i)
 
     return chunks if chunks else _window_chunk_lines(
         lines,
@@ -752,14 +774,15 @@ def _node_label(node: object, text: str) -> str | None:
 def _indent_brace_units(lines: list[str]) -> list[_Unit]:
     """Split at indent-0 / brace-depth-0 statement starts; never mid-block."""
     depth = 0
+    # Open string delimiter (1 or 3 chars) when inside a multi-line string.
     in_string: str | None = None
-    escape = False
     unit_starts = [0]
 
     for i, line in enumerate(lines):
         stripped = line.strip()
         if (
-            i > 0
+            in_string is None
+            and i > 0
             and depth == 0
             and stripped
             and len(line) - len(line.lstrip(" \t")) == 0
@@ -770,21 +793,7 @@ def _indent_brace_units(lines: list[str]) -> list[_Unit]:
         ):
             unit_starts.append(i)
 
-        for ch in line:
-            if in_string:
-                if escape:
-                    escape = False
-                elif ch == "\\":
-                    escape = True
-                elif ch == in_string:
-                    in_string = None
-                continue
-            if ch in {'"', "'", "`"}:
-                in_string = ch
-            elif ch in "{[(":
-                depth += 1
-            elif ch in "}])":
-                depth = max(0, depth - 1)
+        depth, in_string = _scan_line(line, depth=depth, in_string=in_string)
 
     units: list[_Unit] = []
     for idx, start in enumerate(unit_starts):
@@ -796,6 +805,56 @@ def _indent_brace_units(lines: list[str]) -> list[_Unit]:
         units.append(_Unit(start + 1, end, label, body, atomic=True))
 
     return units or [_Unit(1, len(lines), None, "".join(lines))]
+
+
+_QUOTE_CHARS = ("'", '"', "`")
+
+
+def _scan_line(
+    line: str, *, depth: int, in_string: str | None
+) -> tuple[int, str | None]:
+    """Update brace depth and open-string state after consuming ``line``.
+
+    Tracks triple-quoted strings (``\"\"\"`` / ``'''``) so a brace or apostrophe
+    inside a docstring cannot desync ``depth`` and split a function mid-body.
+    Single-char string state is dropped at end of line (unless the line ends in
+    a backslash continuation), which bounds the damage from apostrophes in
+    prose, Rust lifetimes, and other one-line quote lookalikes.
+    """
+    i = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        if in_string is not None:
+            if ch == "\\":
+                i += 2
+                continue
+            if line.startswith(in_string, i):
+                i += len(in_string)
+                in_string = None
+                continue
+            i += 1
+            continue
+        if ch in _QUOTE_CHARS:
+            triple = ch * 3
+            if line.startswith(triple, i):
+                in_string = triple
+                i += 3
+            else:
+                in_string = ch
+                i += 1
+            continue
+        if ch in "{[(":
+            depth += 1
+        elif ch in "}])":
+            depth = max(0, depth - 1)
+        i += 1
+
+    if in_string is not None and len(in_string) == 1:
+        # A single-quoted string never spans lines without a continuation.
+        if not line.rstrip("\n").endswith("\\"):
+            in_string = None
+    return depth, in_string
 
 
 def _heuristic_label(first_line: str) -> str | None:

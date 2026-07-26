@@ -8,6 +8,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from monkeybot.core.lockfile_names import LOCKFILE_NAMES
 
@@ -201,26 +202,33 @@ def extract_pdf_pages(path: Path, *, max_file_bytes: int) -> list[PdfPage] | Non
             path,
         )
         return None
+    pages: list[PdfPage] = []
     try:
-        reader = PdfReader(str(path))
+        # Own the handle so it is always closed — pypdf keeps the stream open
+        # for lazy page access, which leaks descriptors over a large scan.
+        with path.open("rb") as stream:
+            reader = PdfReader(stream)
+            for i, page in enumerate(reader.pages, start=1):
+                try:
+                    text = (page.extract_text() or "").strip()
+                except Exception as exc:
+                    logger.warning(
+                        "knowledge PDF page %d extract failed for %s: %r", i, path, exc
+                    )
+                    continue
+                if text:
+                    pages.append(PdfPage(page=i, text=text))
     except Exception as exc:
         logger.warning("knowledge PDF open failed for %s: %r", path, exc)
         return None
-
-    pages: list[PdfPage] = []
-    for i, page in enumerate(reader.pages, start=1):
-        try:
-            text = (page.extract_text() or "").strip()
-        except Exception as exc:
-            logger.warning("knowledge PDF page %d extract failed for %s: %r", i, path, exc)
-            continue
-        if text:
-            pages.append(PdfPage(page=i, text=text))
     return pages
 
 
 def extract_docx_text(path: Path, *, max_file_bytes: int) -> str | None:
-    """Extract paragraph text from a DOCX. Soft-fails when python-docx is missing."""
+    """Extract paragraph *and* table text from a DOCX, in document order.
+
+    Soft-fails when python-docx is missing.
+    """
     if not _file_size_ok(path, max_file_bytes=max_file_bytes):
         return None
     if path.suffix.lower() not in DOCX_SUFFIXES:
@@ -238,9 +246,55 @@ def extract_docx_text(path: Path, *, max_file_bytes: int) -> str | None:
     except Exception as exc:
         logger.warning("knowledge DOCX open failed for %s: %r", path, exc)
         return None
-    parts = [p.text.strip() for p in doc.paragraphs if p.text and p.text.strip()]
+    try:
+        parts = _docx_body_texts(doc)
+    except Exception as exc:
+        logger.warning(
+            "knowledge DOCX body walk failed for %s: %r; falling back to paragraphs",
+            path,
+            exc,
+        )
+        parts = [p.text.strip() for p in doc.paragraphs if p.text and p.text.strip()]
     text = "\n\n".join(parts).strip()
     return text or None
+
+
+def _docx_body_texts(doc: Any) -> list[str]:
+    """Body paragraphs and tables in document order."""
+    from docx.oxml.ns import qn
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    out: list[str] = []
+    for child in doc.element.body.iterchildren():
+        if child.tag == qn("w:p"):
+            text = Paragraph(child, doc).text.strip()
+            if text:
+                out.append(text)
+        elif child.tag == qn("w:tbl"):
+            rendered = _docx_table_text(Table(child, doc))
+            if rendered:
+                out.append(rendered)
+    return out
+
+
+def _docx_table_text(table: Any) -> str:
+    """Render a table as newline-separated ``cell | cell`` rows."""
+    rows: list[str] = []
+    for row in table.rows:
+        cells = [_docx_cell_text(cell) for cell in row.cells]
+        if any(cells):
+            rows.append(" | ".join(cells))
+    return "\n".join(rows)
+
+
+def _docx_cell_text(cell: Any) -> str:
+    parts = [p.text.strip() for p in cell.paragraphs if p.text and p.text.strip()]
+    for nested in cell.tables:
+        rendered = _docx_table_text(nested)
+        if rendered:
+            parts.append(rendered)
+    return " ".join(parts).strip()
 
 
 def extract_file(path: Path, *, max_file_bytes: int) -> ExtractedDocument | None:

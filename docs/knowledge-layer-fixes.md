@@ -150,7 +150,7 @@
   3. In `subsystem.recall()`, replace the unbounded `await flush()` with `asyncio.wait_for(flush(), timeout=~0.5s)`; on timeout, run the query anyway and set `"stale": true` in the payload (the design doc already promises this).
   4. Move file read + hash into `asyncio.to_thread` so scans don't block the event loop.
 - **Accept:** `recall` p95 latency < 150ms with a dirty queue present; `ls`-type commands trigger no rescan.
-- **Done:** `command_implies_fs_mutation`; mtime fast path + `get_file_mtime`; 0.5s flush timeout with `stale: true`; disk I/O via `to_thread`. Coverage: readonly/`ls` rescan skip, mtime path, mutation heuristics.
+- **Done:** `command_implies_fs_mutation`; mtime fast path via `get_file_state` (mtime **and** stored `chunker_version` must match, so a chunker upgrade still re-chunks untouched files); 0.5s flush timeout with `stale: true`; disk I/O via `to_thread`. Coverage: readonly/`ls` rescan skip, mtime path, chunker-version bump re-chunk, mutation heuristics.
 
 ### F12. SQLite write batching + vector query off the event loop ✅ DONE
 
@@ -207,7 +207,7 @@
 - **Problem:** Line/char-window chunking with heading prefixes is a prose strategy; the dominant corpus is code. Function-splitting boundaries degrade snippets and embeddings and plausibly contribute to rank-4 misses.
 - **File:** `docs/workspace-index-design.md` (+ future `chunking.py` work)
 - **Change:** Document the limitation now; plan symbol-aware chunking (tree-sitter, or a cheap indent/brace heuristic that avoids splitting inside a top-level definition) as Phase 2.5. Not blocking.
-- **Done:** Content-aware chunking shipped in `core/knowledge/chunking.py` — per-suffix strategies (markdown headings, tree-sitter / brace heuristic for code, JSON/YAML/TOML top-level keys, prose window fallback). Optional extra `knowledge-ast` (`tree-sitter-language-pack`). `CHUNKER_VERSION` forces re-index on upgrade. Offline markdown rank≤4 gate in `tests/core/test_knowledge_chunking_rank.py`.
+- **Done:** Content-aware chunking shipped in `core/knowledge/chunking.py` — per-suffix strategies (markdown headings, tree-sitter / brace heuristic for code, JSON/YAML/TOML top-level keys, prose window fallback). Optional extra `knowledge-ast` (`tree-sitter-language-pack`). `CHUNKER_VERSION` is stored per file (`files.chunker_version`) and forces a re-chunk on upgrade regardless of mtime. Offline markdown rank≤4 gate in `tests/core/test_knowledge_chunking_rank.py`.
 
 ### F19. Fix design-doc examples and freshness claims
 
