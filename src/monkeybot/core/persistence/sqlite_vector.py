@@ -100,6 +100,10 @@ class SQLiteVectorStore:
         self._cache: _MatrixCache | None = None
         self._cache_lock = asyncio.Lock()
         self._read_only = False
+        # Bumped on every write; lets a concurrent cache rebuild detect that
+        # the rows it read are already stale and must not be cached (avoids
+        # losing an invalidation to an in-flight build — see _get_cache).
+        self._write_version = 0
 
     async def open(self, *, read_only: bool = False) -> None:
         if self._conn is not None:
@@ -147,6 +151,7 @@ class SQLiteVectorStore:
 
     def _invalidate_cache(self) -> None:
         self._cache = None
+        self._write_version += 1
 
     async def upsert(self, chunks: list[VectorChunkRecord]) -> None:
         if not chunks:
@@ -235,6 +240,7 @@ class SQLiteVectorStore:
         async with self._cache_lock:
             if self._cache is not None:
                 return self._cache
+            version = self._write_version
             conn = self._require()
             cur = await conn.execute(
                 "SELECT chunk_id, path, start_line, end_line, dim, vector FROM vectors"
@@ -247,7 +253,12 @@ class SQLiteVectorStore:
                     len(row_list),
                 )
             cache = await asyncio.to_thread(_build_cache, row_list)
-            self._cache = cache
+            # A write may have committed while we were reading/building above;
+            # its invalidation already fired before we re-check, so only
+            # install the cache if no write raced us, otherwise leave it
+            # unset so the next query rebuilds from fresh rows.
+            if self._write_version == version:
+                self._cache = cache
             return cache
 
     async def query(

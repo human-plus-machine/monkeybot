@@ -96,10 +96,10 @@ async def default_vision_caption(
         logger.warning("knowledge llm caption read failed %s: %r", file_path, exc)
         return None
     data_url = f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
-    client_kwargs: dict[str, str] = {"api_key": key}
-    if base_url:
-        client_kwargs["base_url"] = base_url.rstrip("/")
-    client = AsyncOpenAI(**client_kwargs)
+    client = AsyncOpenAI(
+        api_key=key,
+        base_url=base_url.rstrip("/") if base_url else None,
+    )
     try:
         resp = await client.chat.completions.create(
             model=model,
@@ -159,7 +159,10 @@ async def resolve_image_caption(
     except OSError as exc:
         logger.warning("knowledge image read failed %s: %r", file_path, exc)
         return stub
-    digest = content_hash(raw)
+    model = (caption_model or "").strip() or "gpt-4o-mini"
+    # Mix the model into the cache key so switching caption_model invalidates
+    # previously cached captions instead of silently reusing stale ones.
+    digest = content_hash(f"{model}\n".encode() + raw)
     cached = read_cached_caption(cache_dir, digest)
     if cached:
         return cached
@@ -172,7 +175,6 @@ async def resolve_image_caption(
             logger.warning("knowledge vision_fn failed for %s: %r", file_path, exc)
             caption = None
     else:
-        model = (caption_model or "").strip() or "gpt-4o-mini"
         caption = await default_vision_caption(file_path, model=model)
 
     if caption and caption.strip():
