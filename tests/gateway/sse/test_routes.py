@@ -403,6 +403,15 @@ async def test_get_usage_404_for_unknown_session(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_usage_rejects_malformed_since(client: AsyncClient) -> None:
+    cr = await client.post("/sessions", json={})
+    sid = cr.json()["session_id"]
+    r = await client.get(f"/sessions/{sid}/usage", params={"since": "not-a-number"})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "BAD_REQUEST"
+
+
+@pytest.mark.asyncio
 async def test_get_agent_usage_returns_totals(client: AsyncClient) -> None:
     r = await client.get("/usage")
     assert r.status_code == 200
@@ -433,6 +442,13 @@ async def test_get_agent_usage_populated(
     assert body["by_model"][0]["key"] == "gemini-2.5-flash"
     assert body["by_day"][0]["key"] == "2026-07-26"
     assert "cached_tokens" not in body["by_model"][0]
+
+
+@pytest.mark.asyncio
+async def test_get_agent_usage_rejects_malformed_since(client: AsyncClient) -> None:
+    r = await client.get("/usage", params={"since": "-1"})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "BAD_REQUEST"
 
 
 @pytest.mark.asyncio

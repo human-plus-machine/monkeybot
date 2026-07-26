@@ -436,6 +436,23 @@ async def _ping_loop(bus: SessionBus) -> None:
         raise
 
 
+def _validate_since(since: str | None, request_id: str) -> None:
+    """Reject a malformed ``since`` query param instead of silently ignoring it.
+
+    ``since`` is expected to be a unix-ms timestamp; anything else (e.g. a
+    negative number, empty string, or non-numeric text) would otherwise be
+    swallowed by the downstream ``str.isdigit()`` check and cause the filter
+    to be silently dropped rather than surfacing the caller's mistake.
+    """
+    if since is not None and not since.isdigit():
+        raise APIError(
+            400,
+            "BAD_REQUEST",
+            "`since` must be a non-negative integer (unix ms)",
+            request_id,
+        )
+
+
 def _parse_last_event_id(request: Request) -> int | None:
     raw = request.headers.get("last-event-id")
     if raw is None or raw == "":
@@ -999,6 +1016,7 @@ def create_app(
         reg_dep: SessionRegistry = Depends(get_registry),
     ) -> SessionUsageResponse:
         """Return token/cost aggregates for the session (UsagePort backend)."""
+        _validate_since(since, uuid.uuid4().hex)
         if reg_dep.get(session_id) is None:
             raise APIError(
                 404,
@@ -1016,6 +1034,7 @@ def create_app(
         since: str | None = None,
     ) -> AgentUsageResponse:
         """Return agent-wide totals and spend split by model / UTC day."""
+        _validate_since(since, uuid.uuid4().hex)
         usage_ref: UsagePort = request.app.state.usage
         raw = await usage_ref.agent_usage(since=since)
         return AgentUsageResponse.model_validate(raw)
