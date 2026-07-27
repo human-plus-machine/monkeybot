@@ -671,8 +671,7 @@ def _core_tool_defs(
             "unfamiliar code / conceptual / paraphrased / cross-file questions. "
             "Hits return normalized score (top≈1.0), optional cosine/bm25/signals; "
             "read until the score drops sharply (top 3–5). For locate-a-file/asset "
-            "questions prefer `glob`. Prefer `grep` for exact identifiers. "
-            "(`recall` is accepted as a legacy alias.)",
+            "questions prefer `glob`. Prefer `grep` for exact identifiers.",
             search_schema,
             parallel_safe=True,
         ),

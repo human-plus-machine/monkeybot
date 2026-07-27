@@ -515,19 +515,6 @@ async def test_search_memory_does_not_delegate_to_knowledge(tmp_path: Path) -> N
         assert payload["ok"] is True
         assert payload["hits"]
 
-        out_alias, err_alias = unwrap_tool_execution_result(
-            await ex.execute(
-                call=ToolCall(
-                    call_id="1b",
-                    name="recall",
-                    args={"query": "annual refund approval"},
-                ),
-                ctx=ctx,
-            )
-        )
-        assert err_alias is None and out_alias is not None
-        assert json.loads(out_alias)["hits"]
-
         # search_memory must hit memory notes, not knowledge workspace hits
         out2, err2 = unwrap_tool_execution_result(
             await ex.execute(
@@ -613,13 +600,7 @@ async def test_search_memory_path_lookup(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_recall_and_search_memory_delegate(tmp_path: Path) -> None:
-    """Legacy name retained; behavior is non-delegation (see above)."""
-    await test_search_memory_does_not_delegate_to_knowledge(tmp_path)
-
-
-@pytest.mark.asyncio
-async def test_recall_without_knowledge_returns_validation_error(tmp_path: Path) -> None:
+async def test_search_without_knowledge_returns_validation_error(tmp_path: Path) -> None:
     skills = tmp_path / "skills"
     skills.mkdir()
     ex = CoreToolExecutor(
@@ -631,12 +612,12 @@ async def test_recall_without_knowledge_returns_validation_error(tmp_path: Path)
     )
     out, err = unwrap_tool_execution_result(
         await ex.execute(
-            call=ToolCall(call_id="1", name="recall", args={"query": "x"}),
+            call=ToolCall(call_id="1", name="search", args={"query": "x"}),
             ctx=_ctx(),
         )
     )
     assert out is None and err is not None
-    assert "knowledge" in err.lower() or "recall" in err.lower()
+    assert "knowledge" in err.lower() or "search" in err.lower()
 
 
 @pytest.mark.asyncio

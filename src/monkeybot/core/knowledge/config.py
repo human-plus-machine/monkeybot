@@ -74,8 +74,6 @@ def resolve_knowledge_settings(
     _maybe_migrate_legacy_index(agent_root=root, index_path=index_path)
 
     search_raw = section.get("search")
-    if not isinstance(search_raw, dict):
-        search_raw = section.get("recall")  # legacy key
     search: dict[str, Any] = search_raw if isinstance(search_raw, dict) else {}
     default_limit = _int(search.get("default_limit"), 10)
     rrf_k = _int(search.get("rrf_k"), 20)

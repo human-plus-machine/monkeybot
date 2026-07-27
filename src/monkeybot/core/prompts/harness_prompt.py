@@ -98,8 +98,7 @@ _SEARCH_TOOL_LINE = (
     "FTS + link graph + optional embeddings. Has **no** record of past conversations — "
     "use `search_memory` for those. Not a substitute for `read_file`. Prefer `search` for "
     "unfamiliar codebases, conceptual / cross-file / paraphrased questions; prefer "
-    "`grep` for exact identifiers, filenames, or stack traces. (`recall` is a legacy "
-    "alias.)\n"
+    "`grep` for exact identifiers, filenames, or stack traces.\n"
 )
 
 _KNOWLEDGE_SEARCH_BLOCK = """\
