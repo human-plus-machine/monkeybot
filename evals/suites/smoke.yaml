@@ -3,6 +3,8 @@
 id: smoke
 scenarios:
   - tools/core_read
+  - tools/core_write
+  - tools/core_run_command
   - skills/skill_invocation
   - subagents/dispatch_complete
   - memory/recall_single_session

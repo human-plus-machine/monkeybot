@@ -13,6 +13,8 @@ SCENARIO_DIR = Path(__file__).parent / "scenarios"
 SCENARIO_FILES = [
     "turn_completion.yaml",
     "tool_read.yaml",
+    "tool_write.yaml",
+    "tool_run_command.yaml",
     "tool_search_memory.yaml",
     "memory_write_inject.yaml",
     "subagent_roundtrip.yaml",

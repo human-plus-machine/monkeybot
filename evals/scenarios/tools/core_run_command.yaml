@@ -1,0 +1,11 @@
+# `echo` is in both ALLOWED_COMMANDS (terminal.py) and the smoke agent's
+# command_allowlist.yaml, and takes no path-looking argument, so this works
+# with SANDBOX_ENABLED=false (plain TerminalExecutor, no Docker needed).
+description: "Agent runs a trivial shell command via the run_command core tool"
+tags: [tools, core]
+messages:
+  - "Use the shell/run_command tool to run `echo monkeybot-shell-check` and tell me exactly what it printed."
+assertions:
+  metrics: [response_relevancy, faithfulness]
+  required_tools: [run_command]
+  max_tool_errors: 0

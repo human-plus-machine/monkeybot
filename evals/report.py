@@ -111,10 +111,16 @@ async def _run_scenario(scenario: Scenario, agent_url: str) -> ScenarioAggregate
     )
 
 
-async def run_suite(suite_id: str, scenario_ids: list[str], agent_url: str) -> RunRecord:
+async def run_suite(
+    suite_id: str, scenario_ids: list[str], agent_url: str, scenario_delay_sec: float = 0
+) -> RunRecord:
     scenarios = load_scenarios_by_id(scenario_ids)
     started_at = utc_now_iso()
-    aggregates = [await _run_scenario(s, agent_url) for s in scenarios]
+    aggregates = []
+    for i, s in enumerate(scenarios):
+        if i > 0 and scenario_delay_sec > 0:
+            await asyncio.sleep(scenario_delay_sec)
+        aggregates.append(await _run_scenario(s, agent_url))
     finished_at = utc_now_iso()
 
     model_provider, model_name, judge_provider, judge_model = _model_metadata()
@@ -317,6 +323,15 @@ def main(argv: list[str] | None = None) -> int:
         "baseline presence).",
     )
     parser.add_argument("--update-baseline", action="store_true", help="Write this run as the new baseline")
+    parser.add_argument(
+        "--scenario-delay-sec",
+        type=float,
+        default=float(os.environ.get("EVAL_SCENARIO_DELAY_SEC", "0")),
+        help="Sleep this many seconds between scenarios (default: EVAL_SCENARIO_DELAY_SEC env "
+        "var, or 0). Use to stay under a provider's requests-per-minute limit on slow/low-rpm "
+        "models — each scenario itself makes several requests in quick succession, so spacing "
+        "is applied between scenarios rather than within one.",
+    )
     args = parser.parse_args(argv)
 
     agent_url = args.agent_url or os.environ.get("AGENT_URL", "http://127.0.0.1:8080")
@@ -327,7 +342,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         suite_path = SUITES_DIR / f"{args.suite}.yaml"
         suite_id, scenario_ids = load_suite(suite_path)
-        record = asyncio.run(run_suite(suite_id, scenario_ids, agent_url))
+        record = asyncio.run(run_suite(suite_id, scenario_ids, agent_url, args.scenario_delay_sec))
         save_run(record)
 
     if args.update_baseline:
