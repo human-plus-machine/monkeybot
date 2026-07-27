@@ -227,3 +227,29 @@ async def test_aclose_flushes_remainder() -> None:
     assert isinstance(wrapped, SubagentEvent)
     assert isinstance(wrapped.inner, AssistantDelta)
     assert wrapped.inner.delta == "left over"
+
+
+@pytest.mark.asyncio
+async def test_coalesce_flushes_on_request_id_change() -> None:
+    """Deltas from a new child request_id must not merge into the prior buffer."""
+    pub = FakePublisher()
+    flag = [0]
+    coalescer = AssistantDeltaCoalescer(
+        publisher=pub,
+        correlation=_CORRELATION,
+        fail_count=flag,
+        coalesce_ms=60_000,
+        coalesce_chars=512,
+    )
+    await coalescer.handle(AssistantDelta(request_id="req-a", delta="first"))
+    await coalescer.handle(AssistantDelta(request_id="req-b", delta="second"))
+    await coalescer.aclose()
+    assert len(pub.events) == 2
+    assert isinstance(pub.events[0], SubagentEvent)
+    assert isinstance(pub.events[0].inner, AssistantDelta)
+    assert pub.events[0].inner.request_id == "req-a"
+    assert pub.events[0].inner.delta == "first"
+    assert isinstance(pub.events[1], SubagentEvent)
+    assert isinstance(pub.events[1].inner, AssistantDelta)
+    assert pub.events[1].inner.request_id == "req-b"
+    assert pub.events[1].inner.delta == "second"

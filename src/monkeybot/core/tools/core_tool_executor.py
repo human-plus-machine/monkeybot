@@ -11,6 +11,7 @@ import os
 import shlex
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -48,7 +49,6 @@ from monkeybot.core.mcp.mcp_client import (
 from monkeybot.core.mcp.ports_mcp import MCPClientPort
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.persistence.backends import RunStore, ScheduledLoopStore
-from monkeybot.core.persistence.durable_runs import SubagentEnvelope as PersistedSubagentEnvelope
 from monkeybot.core.persistence.runs import make_run_id
 from monkeybot.core.persistence.scheduled_loops import ScheduledLoopCreate
 from monkeybot.core.runtime.events import (
@@ -256,6 +256,48 @@ def _record_subagent_drain_event(
     return 0, None
 
 
+@dataclass
+class _SubagentDrainAccum:
+    """Mutable drain state for an inline ``task`` subprocess (no nonlocal soup)."""
+
+    deltas: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    tool_call_count: int = 0
+    tool_results: list[dict[str, str]] = field(default_factory=list)
+    turn_complete: TurnComplete | None = None
+
+    def record(self, evt: AgentEvent) -> None:
+        tool_delta, maybe_complete = _record_subagent_drain_event(
+            evt,
+            deltas=self.deltas,
+            errors=self.errors,
+            tool_results=self.tool_results,
+        )
+        self.tool_call_count += tool_delta
+        if maybe_complete is not None:
+            self.turn_complete = maybe_complete
+
+    def to_payload(
+        self,
+        *,
+        scratch: Path,
+        run_id: str,
+        child_thread_id: str,
+        subagent_type: str | None,
+    ) -> dict[str, Any]:
+        return _task_result_payload(
+            errors=self.errors,
+            deltas=self.deltas,
+            tool_call_count=self.tool_call_count,
+            tool_results=self.tool_results,
+            turn_complete=self.turn_complete,
+            scratch=scratch,
+            run_id=run_id,
+            child_thread_id=child_thread_id,
+            subagent_type=subagent_type,
+        )
+
+
 async def _await_subagent_drain(
     *,
     drain_task: asyncio.Task[None],
@@ -362,6 +404,167 @@ def _task_result_payload(
         "child_thread_id": child_thread_id,
         "subagent_type": subagent_type,
     }
+
+
+async def _run_inline_subagent_with_progress(
+    *,
+    script: Path,
+    envelope: SubagentEnvelope,
+    scratch: Path,
+    child_env: dict[str, str],
+    timeout: float,
+    ctx: TurnContext,
+    call: ToolCall,
+    run_id: str,
+    child_thread_id: str,
+    subagent_type: str | None,
+    task: str,
+) -> dict[str, Any]:
+    """Spawn an inline subagent, forward nested SSE, always emit SubagentCompleted."""
+    accum = _SubagentDrainAccum()
+    proc_holder: list[asyncio.subprocess.Process | None] = [None]
+    fail_count: list[int] = [0]
+    label = subagent_type or "subagent"
+
+    async def _subprocess_exec(*cmd: str | bytes) -> asyncio.subprocess.Process:
+        env = dict(os.environ)
+        env.update(child_env)
+        env["PYTHONUNBUFFERED"] = "1"
+        p = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            env=env,
+            limit=SUBAGENT_STDOUT_LINE_LIMIT,
+        )
+        proc_holder[0] = p
+        return p
+
+    logger.info(
+        "subagent spawn %s",
+        kv(
+            run_id=run_id,
+            child_thread_id=child_thread_id,
+            subagent_type=subagent_type or "",
+            parent_call_id=call.call_id,
+        ),
+    )
+    await safe_publish(
+        ctx.event_publisher,
+        SubagentStarted(
+            request_id=ctx.request_id,
+            parent_call_id=call.call_id,
+            run_id=run_id,
+            child_thread_id=child_thread_id,
+            subagent_type=subagent_type,
+            task=task,
+            label=label,
+        ),
+        fail_count=fail_count,
+        run_id=run_id,
+    )
+    coalescer = AssistantDeltaCoalescer(
+        publisher=ctx.event_publisher,
+        correlation={
+            "request_id": ctx.request_id,
+            "parent_call_id": call.call_id,
+            "run_id": run_id,
+            "child_thread_id": child_thread_id,
+            "subagent_type": subagent_type,
+        },
+        fail_count=fail_count,
+    )
+
+    async def _on_event(evt: AgentEvent) -> None:
+        await coalescer.handle(evt)
+
+    async def _drain() -> None:
+        async for evt in spawn_subagent(
+            str(script),
+            envelope,
+            scratch_dir=scratch,
+            subprocess_exec=_subprocess_exec,
+            on_event=_on_event,
+        ):
+            accum.record(evt)
+
+    drain_task = asyncio.create_task(_drain())
+    payload: dict[str, Any] | None = None
+    try:
+        try:
+            await _await_subagent_drain(
+                drain_task=drain_task,
+                cancelled=ctx.cancelled,
+                timeout=timeout,
+                proc_holder=proc_holder,
+                errors=accum.errors,
+                run_id=run_id,
+            )
+        finally:
+            await coalescer.aclose()
+        payload = accum.to_payload(
+            scratch=scratch,
+            run_id=run_id,
+            child_thread_id=child_thread_id,
+            subagent_type=subagent_type,
+        )
+    except Exception as exc:
+        logger.warning(
+            "subagent finalize failed %s",
+            kv(run_id=run_id, error=str(exc)),
+            exc_info=True,
+        )
+        if str(exc) not in accum.errors:
+            accum.errors.append(str(exc))
+        try:
+            payload = accum.to_payload(
+                scratch=scratch,
+                run_id=run_id,
+                child_thread_id=child_thread_id,
+                subagent_type=subagent_type,
+            )
+        except Exception:
+            payload = {
+                "ok": False,
+                "final_message": "",
+                "assistant_text": "",
+                "tool_call_count": accum.tool_call_count,
+                "tool_results": accum.tool_results[-10:],
+                "errors": list(accum.errors),
+                "usage": None,
+                "scratch_dir": str(scratch),
+                "run_id": run_id,
+                "child_thread_id": child_thread_id,
+                "subagent_type": subagent_type,
+            }
+    finally:
+        # Always emit a terminal event so the parent SSE UI cannot stick on "running".
+        done = payload or {
+            "ok": False,
+            "final_message": "",
+            "errors": list(accum.errors) or ["task: subagent finalize failed"],
+            "tool_call_count": accum.tool_call_count,
+        }
+        await safe_publish(
+            ctx.event_publisher,
+            SubagentCompleted(
+                request_id=ctx.request_id,
+                parent_call_id=call.call_id,
+                run_id=run_id,
+                child_thread_id=child_thread_id,
+                subagent_type=subagent_type,
+                ok=bool(done["ok"]),
+                final_message=str(done.get("final_message") or ""),
+                errors=list(done.get("errors") or accum.errors),
+                tool_call_count=int(done.get("tool_call_count") or accum.tool_call_count),
+            ),
+            fail_count=fail_count,
+            run_id=run_id,
+        )
+
+    assert payload is not None
+    return payload
 
 
 def _j(data: object) -> str:
@@ -1333,18 +1536,9 @@ class CoreToolExecutor(ToolExecutorPort):
         scratch = self._workspace.repo_root / ".monkeybot" / "subagent-runs" / uuid.uuid4().hex
         scratch.mkdir(parents=True, exist_ok=True)
 
-        persisted = PersistedSubagentEnvelope(
-            task=envelope.task,
-            context=envelope.context,
-            memory_storage_uri=envelope.memory_storage_uri,
-            parent_run_id=envelope.parent_run_id,
-            model=envelope.model,
-            traceparent=envelope.traceparent,
-            agent_md=envelope.agent_md,
-            subagent_type=envelope.subagent_type,
-            parent_session_id=envelope.parent_session_id,
-            child_thread_id=child_thread_id,
-        )
+        # Queue mode: worker pool has no parent SessionBus/EventPublisherPort, so nested
+        # SubagentStarted/Event/Completed SSE is intentionally not emitted here. Clients
+        # should treat ``queued: true`` as async and reopen via ``child_thread_id`` later.
         queue_mode = os.environ.get("MONKEYBOT_TASK_QUEUE", "").strip().lower() in (
             "1",
             "true",
@@ -1358,7 +1552,7 @@ class CoreToolExecutor(ToolExecutorPort):
                     run_id=run_id,
                     parent_run_id=parent_label,
                     script=str(script),
-                    envelope=persisted,
+                    envelope=envelope,
                     scratch_dir=scratch,
                 )
                 return (
@@ -1370,7 +1564,11 @@ class CoreToolExecutor(ToolExecutorPort):
                             "child_thread_id": child_thread_id,
                             "subagent_type": subagent_type,
                             "scratch_dir": str(scratch),
-                            "message": "Subagent run queued for worker pool.",
+                            "message": (
+                                "Subagent run queued for worker pool. "
+                                "Nested SSE progress is not streamed in queue mode; "
+                                "use child_thread_id to reopen the nested transcript."
+                            ),
                         }
                     ),
                     None,
@@ -1379,7 +1577,7 @@ class CoreToolExecutor(ToolExecutorPort):
                 run_id=run_id,
                 parent_run_id=parent_label,
                 script=str(script),
-                envelope=persisted,
+                envelope=envelope,
                 scratch_dir=scratch,
             )
 
@@ -1389,137 +1587,27 @@ class CoreToolExecutor(ToolExecutorPort):
             memory_uri=memory_uri,
             skills_path=self._skills_path,
         )
-        timeout = get_subagent_settings().timeout_sec
-
-        deltas: list[str] = []
-        errors: list[str] = []
-        tool_call_count = 0
-        tool_results: list[dict[str, str]] = []
-        turn_complete: TurnComplete | None = None
-        proc_holder: list[asyncio.subprocess.Process | None] = [None]
-
-        async def _subprocess_exec(*cmd: str | bytes) -> asyncio.subprocess.Process:
-            env = dict(os.environ)
-            env.update(child_env)
-            env["PYTHONUNBUFFERED"] = "1"
-            p = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-                env=env,
-                limit=SUBAGENT_STDOUT_LINE_LIMIT,
-            )
-            proc_holder[0] = p
-            return p
-
-        fail_count: list[int] = [0]
-        label = subagent_type or "subagent"
-        logger.info(
-            "subagent spawn %s",
-            kv(
-                run_id=run_id,
-                child_thread_id=child_thread_id,
-                subagent_type=subagent_type or "",
-                parent_call_id=call.call_id,
-            ),
-        )
-        await safe_publish(
-            ctx.event_publisher,
-            SubagentStarted(
-                request_id=ctx.request_id,
-                parent_call_id=call.call_id,
-                run_id=run_id,
-                child_thread_id=child_thread_id,
-                subagent_type=subagent_type,
-                task=task,
-                label=label,
-            ),
-            fail_count=fail_count,
-            run_id=run_id,
-        )
-        coalescer = AssistantDeltaCoalescer(
-            publisher=ctx.event_publisher,
-            correlation={
-                "request_id": ctx.request_id,
-                "parent_call_id": call.call_id,
-                "run_id": run_id,
-                "child_thread_id": child_thread_id,
-                "subagent_type": subagent_type,
-            },
-            fail_count=fail_count,
-        )
-
-        async def _on_event(evt: AgentEvent) -> None:
-            await coalescer.handle(evt)
-
-        async def _drain() -> None:
-            nonlocal turn_complete, tool_call_count
-            async for evt in spawn_subagent(
-                str(script),
-                envelope,
-                scratch_dir=scratch,
-                subprocess_exec=_subprocess_exec,
-                on_event=_on_event,
-            ):
-                tool_delta, maybe_complete = _record_subagent_drain_event(
-                    evt,
-                    deltas=deltas,
-                    errors=errors,
-                    tool_results=tool_results,
-                )
-                tool_call_count += tool_delta
-                if maybe_complete is not None:
-                    turn_complete = maybe_complete
-
-        drain_task = asyncio.create_task(_drain())
-        try:
-            await _await_subagent_drain(
-                drain_task=drain_task,
-                cancelled=ctx.cancelled,
-                timeout=timeout,
-                proc_holder=proc_holder,
-                errors=errors,
-                run_id=run_id,
-            )
-        finally:
-            await coalescer.aclose()
-
-        payload = _task_result_payload(
-            errors=errors,
-            deltas=deltas,
-            tool_call_count=tool_call_count,
-            tool_results=tool_results,
-            turn_complete=turn_complete,
+        payload = await _run_inline_subagent_with_progress(
+            script=script,
+            envelope=envelope,
             scratch=scratch,
+            child_env=child_env,
+            timeout=get_subagent_settings().timeout_sec,
+            ctx=ctx,
+            call=call,
             run_id=run_id,
             child_thread_id=child_thread_id,
             subagent_type=subagent_type,
-        )
-
-        await safe_publish(
-            ctx.event_publisher,
-            SubagentCompleted(
-                request_id=ctx.request_id,
-                parent_call_id=call.call_id,
-                run_id=run_id,
-                child_thread_id=child_thread_id,
-                subagent_type=subagent_type,
-                ok=bool(payload["ok"]),
-                final_message=str(payload["final_message"]),
-                errors=list(errors),
-                tool_call_count=tool_call_count,
-            ),
-            fail_count=fail_count,
-            run_id=run_id,
+            task=task,
         )
 
         if self._run_store is not None and not queue_mode:
             result_json = _j(payload)
+            errors = list(payload.get("errors") or [])
             if len(errors) == 0:
                 await self._run_store.record_completed(run_id, result_json)
             else:
-                await self._run_store.record_failed(run_id, "; ".join(errors))
+                await self._run_store.record_failed(run_id, "; ".join(str(e) for e in errors))
         return (_j(payload), None)
 
     async def _tool_run_command(self, args: dict[str, Any]) -> tuple[str | None, str | None]:

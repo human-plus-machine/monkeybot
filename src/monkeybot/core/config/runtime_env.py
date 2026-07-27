@@ -54,6 +54,7 @@ ENV_MAP: dict[tuple[str, str], str] = {
     ("anthropic_vertex", "region"): "ANTHROPIC_VERTEX_REGION",
     ("gateway", "pending_response_timeout_sec"): "PENDING_RESPONSE_TIMEOUT_SEC",
     ("gateway", "sse_replay_max"): "SSE_REPLAY_MAX",
+    ("gateway", "sse_nested_replay_max"): "SSE_NESTED_REPLAY_MAX",
     ("gateway", "graceful_shutdown_timeout_sec"): "GRACEFUL_SHUTDOWN_TIMEOUT_SEC",
     ("gateway", "cors_allow_origins"): "MONKEYBOT_CORS_ALLOW_ORIGINS",
     ("context_curation", "enabled"): "CONTEXT_CURATION_ENABLED",

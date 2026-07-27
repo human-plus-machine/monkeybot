@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import deque
+
 import pytest
 
 from monkeybot.core.runtime.events import SubagentStarted, event_from_json
@@ -23,11 +25,13 @@ async def test_session_bus_event_publisher_forwards_subagent_started() -> None:
         label="researcher",
     )
     await publisher.publish_event(evt)
-    assert len(bus._replay) >= 1
-    _seq, frame = bus._replay[-1]
+    assert len(bus._replay_nested) >= 1
+    _seq, frame = bus._replay_nested[-1]
     assert "SubagentStarted" in frame
     assert "call-1" in frame
     assert "subagent:sess-integration:abc" in frame
+    # Nested events must not land in the primary replay lane.
+    assert bus._replay_primary == deque()
     for line in frame.splitlines():
         if line.startswith("data:"):
             payload = line[len("data:") :].strip()

@@ -83,7 +83,8 @@ class _SessionBusEventPublisher:
     bus: SessionBus
 
     async def publish_event(self, event: AgentEvent) -> None:
-        await self.bus.publish_data(event_to_json(event))
+        # Nested lane keeps chatty Subagent* traffic from evicting primary-turn replay.
+        await self.bus.publish_data(event_to_json(event), lane="nested")
 
 
 @dataclass

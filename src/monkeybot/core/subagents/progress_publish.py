@@ -1,7 +1,8 @@
 """Nested subagent progress publishing helpers (Story 2).
 
 Safe publish isolates parent SSE failures from the ``task`` tool. AssistantDelta
-coalescing bounds parent-bus traffic (≤66ms or ≤512 chars, flush on boundaries).
+coalescing bounds parent-bus traffic (≤66ms or ≤512 chars, flush on boundaries
+and on child ``request_id`` changes).
 """
 
 from __future__ import annotations
@@ -91,6 +92,9 @@ class AssistantDeltaCoalescer:
         if not is_subagent_forwardable(inner):
             return
         if isinstance(inner, AssistantDelta):
+            # Flush before mixing deltas from a new child request/turn into the buffer.
+            if self._buffer and inner.request_id != self._delta_request_id:
+                await self.flush()
             if not self._buffer:
                 self._delta_request_id = inner.request_id
             self._buffer.append(inner.delta)
