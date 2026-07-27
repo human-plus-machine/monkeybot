@@ -26,9 +26,9 @@ _DIFF_GIT_RE = re.compile(r"^diff --git a/.+ b/(.+)$", re.MULTILINE)
 PRESSURE_LIGHT_RATIO = 0.50
 PRESSURE_MODERATE_RATIO = 0.70
 PRESSURE_AGGRESSIVE_RATIO = 0.85
-# Sync history summarization fires later than aggressive shaping so tool-result
-# shaping can reclaim headroom before a full middle-history compact.
-SUMMARY_TRIGGER_RATIO = 0.95
+# Sync history summarization fires at the same bar as aggressive tool-result
+# shaping — row count is otherwise unbounded until this token bar is hit.
+SUMMARY_TRIGGER_RATIO = PRESSURE_AGGRESSIVE_RATIO
 RESULT_BUDGET_FRACTION = 0.8
 RESULT_BUDGET_FLOOR_TOKENS = 2000
 
@@ -67,11 +67,16 @@ def _safety_fraction_for_tier(
     return base_fraction
 
 
+def estimate_tokens_from_char_count(char_count: int) -> int:
+    """Cheap local token estimate from a raw character count (no network)."""
+    if char_count <= 0:
+        return 0
+    return max(1, char_count // _CHARS_PER_TOKEN)
+
+
 def estimate_tokens(text: str) -> int:
     """Cheap local token estimate (no network)."""
-    if not text:
-        return 0
-    return max(1, len(text) // _CHARS_PER_TOKEN)
+    return estimate_tokens_from_char_count(len(text))
 
 
 def _tool_response_with_text(block: ToolResponse, text: str) -> ToolResponse:

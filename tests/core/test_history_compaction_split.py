@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from monkeybot.core.context.tool_result_ingress import (
+    summary_tool_result_max_chars_from_env,
+)
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.runtime.history_compaction import (
     SUMMARY_KEEP_HEAD_COUNT,
@@ -11,7 +14,7 @@ from monkeybot.core.runtime.history_compaction import (
     protect_recent_count,
     split_messages_for_compaction,
 )
-from monkeybot.core.types.content_blocks import Text
+from monkeybot.core.types.content_blocks import Text, ToolResponse
 
 
 def _msgs(n: int, *, chars: int = 40) -> list[Message]:
@@ -68,3 +71,29 @@ def test_protect_recent_count_tracks_tail() -> None:
     messages = _msgs(25, chars=80)
     _, _, tail = split_messages_for_compaction(messages, window_tokens=50_000)
     assert protect_recent_count(messages, window_tokens=50_000) == len(tail)
+
+
+def test_estimate_ignores_summary_truncation_cap_for_large_tool_results() -> None:
+    """Tail sizing must reflect the real payload, not the LLM-summary text cap.
+
+    ``_summary_line_for_message`` truncates tool-result text to a fixed char
+    limit for building the summarization prompt. Keep-budget sizing must not
+    inherit that cap, or large tool outputs in the tail would be undercounted
+    against ``SUMMARY_KEEP_TAIL_RATIO``.
+    """
+    cap = summary_tool_result_max_chars_from_env()
+    huge_result_chars = cap * 5
+    message = Message(
+        role="assistant",
+        content=[
+            ToolResponse(
+                id="call-1",
+                tool_name="read_file",
+                result=[Text(text="y" * huge_result_chars)],
+            )
+        ],
+    )
+    tokens = _estimate_message_tokens(message)
+    # A truncation-capped estimate would plateau near cap // 4 tokens; the
+    # real estimate must scale with the untruncated payload well beyond that.
+    assert tokens > (cap // 4) * 2

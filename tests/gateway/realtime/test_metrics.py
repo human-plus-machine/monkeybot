@@ -73,7 +73,7 @@ def test_to_usage_payload_uses_last_prompt_not_cumulative(metrics: RealtimeMetri
     assert payload["last_prompt_tokens"] == 2_500
     assert payload["estimated_prompt_tokens"] == 2_500
     assert payload["context_window_tokens"] == 200_000
-    assert payload["summarization_threshold_tokens"] == 190_000
+    assert payload["summarization_threshold_tokens"] == 170_000
 
 
 def test_to_usage_payload_default_context_window(metrics: RealtimeMetrics) -> None:

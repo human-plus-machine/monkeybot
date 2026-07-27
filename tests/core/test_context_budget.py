@@ -115,8 +115,8 @@ def test_compute_context_pressure_tier_thresholds() -> None:
     assert compute_context_pressure_tier(55_000, 100_000) == "light"
     assert compute_context_pressure_tier(75_000, 100_000) == "moderate"
     assert compute_context_pressure_tier(90_000, 100_000) == "aggressive"
-    # Summarization fires after aggressive shaping.
-    assert SUMMARY_TRIGGER_RATIO == 0.95
+    # Summarization fires at the same bar as aggressive shaping.
+    assert SUMMARY_TRIGGER_RATIO == 0.85
 
 
 def test_for_window_tightens_safety_fraction_under_pressure() -> None:

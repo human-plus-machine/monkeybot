@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from collections.abc import AsyncIterator, Sequence
@@ -10,6 +11,7 @@ from contextlib import aclosing
 from typing import Any, cast
 
 from monkeybot.core.context import TurnContext
+from monkeybot.core.context.common import text_from_blocks
 from monkeybot.core.context.epoch import ContextEpochTracker
 from monkeybot.core.llm.provider import Done, Message, Provider, TextDelta
 from monkeybot.core.llm.usage import Usage
@@ -17,9 +19,9 @@ from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.runtime.context_budget import (
     ContextBudgeter,
-    estimate_tokens,
+    estimate_tokens_from_char_count,
 )
-from monkeybot.core.types.content_blocks import ContentBlock, Text
+from monkeybot.core.types.content_blocks import ContentBlock, Text, ToolRequest, ToolResponse
 
 from .events import AgentEvent, ContextSummarized, ContextSummarizing
 from .loop_messages import _load_agent_chat_history, _summary_line_for_message
@@ -28,8 +30,12 @@ from .loop_usage import _prompt_input_tokens_for_history
 logger = logging.getLogger("monkeybot.core.runtime.loop.history_compaction")
 
 # Fixed harness policy — not env/YAML tunable.
-# Last-resort ceiling only after compact failure (never a silent happy-path slide).
-HISTORY_LOAD_MAX = 500
+# Pure bug guard, not a normal-flow limit: row count is otherwise unbounded and
+# only the token-pressure trigger (SUMMARY_TRIGGER_RATIO) should ever compact
+# history. This only fires if token-based summarization is somehow never
+# reached (e.g. a stuck estimate) so it never presents an unbounded row count
+# to the provider or persistence layer.
+HISTORY_LOAD_MAX = 5000
 
 # Always keep the oldest row (usually the original user goal).
 SUMMARY_KEEP_HEAD_COUNT = 1
@@ -113,9 +119,31 @@ async def _await_history_write(task: asyncio.Task[None] | None) -> None:
         logger.exception("background assistant history write failed")
 
 
+def _raw_message_char_count(message: Message) -> int:
+    """Untruncated content length of ``message`` for sizing, not display.
+
+    Deliberately does not go through ``_summary_line_for_message`` /
+    ``summarize_tool_result_text``: those cap tool-result text (for the LLM
+    summarization prompt) at a fixed char limit, which would make keep-budget
+    decisions blind to large tool outputs — the exact payloads a
+    token-budgeted tail exists to protect against.
+    """
+    total = 0
+    for block in message.content:
+        if isinstance(block, Text):
+            total += len(block.text)
+        elif isinstance(block, ToolRequest):
+            total += len(json.dumps(block.args, sort_keys=True))
+        elif isinstance(block, ToolResponse):
+            total += len(text_from_blocks(list(block.result)))
+        else:
+            total += len(type(block).__name__)
+    return total
+
+
 def _estimate_message_tokens(message: Message) -> int:
     """Cheap local estimate for keep-budget decisions (no provider round-trip)."""
-    return estimate_tokens(_summary_line_for_message(message))
+    return estimate_tokens_from_char_count(_raw_message_char_count(message))
 
 
 def split_messages_for_compaction(

@@ -253,7 +253,7 @@ def test_session_usage_response_defaults_cache_fields() -> None:
         "period_end": 0,
         "last_prompt_tokens": 0,
         "estimated_prompt_tokens": 0,
-        "summarization_threshold_tokens": 190_000,
+        "summarization_threshold_tokens": 170_000,
         "context_window_tokens": 200_000,
     }
     resp = SessionUsageResponse.model_validate(raw)
@@ -275,7 +275,7 @@ def test_session_usage_response_includes_cache_fields() -> None:
         "period_end": 2,
         "last_prompt_tokens": 3,
         "estimated_prompt_tokens": 4,
-        "summarization_threshold_tokens": 190_000,
+        "summarization_threshold_tokens": 170_000,
         "context_window_tokens": 200_000,
     }
     resp = SessionUsageResponse.model_validate(raw)
@@ -304,7 +304,7 @@ class _PopulatedUsagePort:
             "period_end": 2000,
             "last_prompt_tokens": 3,
             "estimated_prompt_tokens": 4,
-            "summarization_threshold_tokens": 190_000,
+            "summarization_threshold_tokens": 170_000,
             "context_window_tokens": 200_000,
         }
 
