@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from collections.abc import AsyncIterator, Sequence
@@ -16,10 +17,20 @@ from monkeybot.core.llm.usage import Usage
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.runtime.context_budget import (
-    SUMMARY_TRIGGER_RATIO,
     ContextBudgeter,
+    estimate_tokens_from_char_count,
 )
-from monkeybot.core.types.content_blocks import ContentBlock, Text
+from monkeybot.core.types.content_blocks import (
+    AttachmentRef,
+    ContentBlock,
+    File,
+    Image,
+    RedactedThinking,
+    Text,
+    Thinking,
+    ToolRequest,
+    ToolResponse,
+)
 
 from .events import AgentEvent, ContextSummarized, ContextSummarizing
 from .loop_messages import _load_agent_chat_history, _summary_line_for_message
@@ -28,14 +39,19 @@ from .loop_usage import _prompt_input_tokens_for_history
 logger = logging.getLogger("monkeybot.core.runtime.loop.history_compaction")
 
 # Fixed harness policy — not env/YAML tunable.
-# Soft count trigger: compact before presenting this many chat rows to the model.
-HISTORY_COMPACT_AT = 100
-# Last-resort ceiling only after compact failure (never a silent happy-path slide).
-HISTORY_LOAD_MAX = 500
+# Pure bug guard, not a normal-flow limit: row count is otherwise unbounded and
+# only the token-pressure trigger (SUMMARY_TRIGGER_RATIO) should ever compact
+# history. This only fires if token-based summarization is somehow never
+# reached (e.g. a stuck estimate) so it never presents an unbounded row count
+# to the provider or persistence layer.
+HISTORY_LOAD_MAX = 5000
 
-_SUMMARY_TRIGGER_RATIO = SUMMARY_TRIGGER_RATIO
-_SUMMARY_KEEP_HEAD = 1
-_SUMMARY_KEEP_TAIL = 6
+# Always keep the oldest row (usually the original user goal).
+SUMMARY_KEEP_HEAD_COUNT = 1
+# Keep newest rows until they consume this fraction of the model context window.
+SUMMARY_KEEP_TAIL_RATIO = 0.20
+# Floor so a user/assistant (or tool) pair survives even on tiny windows.
+SUMMARY_KEEP_TAIL_MIN = 2
 
 # Fixed Markdown template for middle-history compression.
 _COMPACTION_SUMMARY_SYSTEM = """\
@@ -112,8 +128,103 @@ async def _await_history_write(task: asyncio.Task[None] | None) -> None:
         logger.exception("background assistant history write failed")
 
 
-def _summarization_viable(messages: Sequence[Message]) -> bool:
-    return len(messages) > _SUMMARY_KEEP_HEAD + _SUMMARY_KEEP_TAIL
+def _raw_block_char_count(block: ContentBlock) -> int:
+    """Untruncated content length of a single block for keep-budget sizing."""
+    if isinstance(block, Text):
+        return len(block.text)
+    if isinstance(block, ToolRequest):
+        return len(json.dumps(block.args, sort_keys=True))
+    if isinstance(block, ToolResponse):
+        return sum(_raw_block_char_count(b) for b in block.result)
+    if isinstance(block, Image | File):
+        return len(block.data) + len(block.mime_type)
+    if isinstance(block, Thinking):
+        return len(block.thinking) + len(block.signature)
+    if isinstance(block, RedactedThinking):
+        return len(block.data)
+    if isinstance(block, AttachmentRef):
+        return len(block.attachment_id) + len(block.mime_type)
+    return len(type(block).__name__)
+
+
+def _raw_message_char_count(message: Message) -> int:
+    """Untruncated content length of ``message`` for sizing, not display.
+
+    Deliberately does not go through ``_summary_line_for_message`` /
+    ``summarize_tool_result_text``: those cap tool-result text (for the LLM
+    summarization prompt) at a fixed char limit, which would make keep-budget
+    decisions blind to large tool outputs — the exact payloads a
+    token-budgeted tail exists to protect against.
+
+    Also counts ``Image`` / ``File`` base64 payloads and ``Thinking`` traces at
+    full length: falling back to ``type(block).__name__`` would report ~5–8
+    chars for multi-kilobyte multimodal / reasoning blocks and blow past
+    ``SUMMARY_KEEP_TAIL_RATIO``.
+    """
+    return sum(_raw_block_char_count(block) for block in message.content)
+
+
+def _estimate_message_tokens(message: Message) -> int:
+    """Cheap local estimate for keep-budget decisions (no provider round-trip)."""
+    return estimate_tokens_from_char_count(_raw_message_char_count(message))
+
+
+def split_messages_for_compaction(
+    messages: Sequence[Message],
+    *,
+    window_tokens: int,
+) -> tuple[list[Message], list[Message], list[Message]]:
+    """Split history into (head, middle, tail) with a token-budgeted recent tail.
+
+    Tail grows from the newest message until it reaches
+    ``window_tokens * SUMMARY_KEEP_TAIL_RATIO`` (at least ``SUMMARY_KEEP_TAIL_MIN``
+    rows), leaving ≥1 middle row whenever the transcript is long enough to compact.
+    """
+    n = len(messages)
+    min_for_middle = SUMMARY_KEEP_HEAD_COUNT + SUMMARY_KEEP_TAIL_MIN + 1
+    if n < min_for_middle:
+        return list(messages), [], []
+
+    head = list(messages[:SUMMARY_KEEP_HEAD_COUNT])
+    tail_budget = max(1, int(max(1, window_tokens) * SUMMARY_KEEP_TAIL_RATIO))
+    max_tail = n - SUMMARY_KEEP_HEAD_COUNT - 1  # leave ≥1 middle
+
+    tail_rev: list[Message] = []
+    used = 0
+    for i in range(n - 1, SUMMARY_KEEP_HEAD_COUNT - 1, -1):
+        if len(tail_rev) >= max_tail:
+            break
+        msg = messages[i]
+        tok = _estimate_message_tokens(msg)
+        if len(tail_rev) >= SUMMARY_KEEP_TAIL_MIN and used + tok > tail_budget:
+            break
+        tail_rev.append(msg)
+        used += tok
+
+    tail = list(reversed(tail_rev))
+    middle = list(messages[SUMMARY_KEEP_HEAD_COUNT : n - len(tail)])
+    return head, middle, tail
+
+
+def protect_recent_count(
+    messages: Sequence[Message],
+    *,
+    window_tokens: int,
+) -> int:
+    """How many newest rows pressure-shaping should leave verbatim."""
+    _, _, tail = split_messages_for_compaction(messages, window_tokens=window_tokens)
+    if tail:
+        return len(tail)
+    return min(len(messages), SUMMARY_KEEP_TAIL_MIN)
+
+
+def _summarization_viable(
+    messages: Sequence[Message],
+    *,
+    window_tokens: int,
+) -> bool:
+    _, middle, _ = split_messages_for_compaction(messages, window_tokens=window_tokens)
+    return bool(middle)
 
 
 def _summarization_model_id(ctx: TurnContext) -> str:
@@ -133,14 +244,22 @@ async def _compact_history_if_needed(
     history: HistoryStore,
     provider: Provider,
     model: str,
+    window_tokens: int,
 ) -> int:
     """Summarize middle history when tool results exhausted headroom."""
     # Compaction persists via history.reset; use unrepaired rows so synthetic
     # in-memory repairs are never written to the store.
     chat_messages = await history.load(thread_id)
-    if not _summarization_viable(chat_messages):
+    if not _summarization_viable(chat_messages, window_tokens=window_tokens):
         return 0
-    return await _summarize_history(thread_id, chat_messages, history, provider, model)
+    return await _summarize_history(
+        thread_id,
+        chat_messages,
+        history,
+        provider,
+        model,
+        window_tokens=window_tokens,
+    )
 
 
 async def _append_budgeted_tool_responses(
@@ -174,6 +293,7 @@ async def _append_budgeted_tool_responses(
             history=history,
             provider=provider,
             model=_summarization_model_id(ctx),
+            window_tokens=ctx.context_window_tokens,
         )
     except Exception:
         logger.warning(
@@ -208,15 +328,26 @@ async def _summarize_history(
     history: HistoryStore,
     provider: Provider,
     model: str,
+    *,
+    window_tokens: int,
 ) -> int:
     """Compress middle history into one assistant summary row. Returns middle row count."""
-    if not _summarization_viable(messages):
-        return 0
-    head = messages[:_SUMMARY_KEEP_HEAD]
-    tail = messages[-_SUMMARY_KEEP_TAIL :]
-    middle = messages[_SUMMARY_KEEP_HEAD : -_SUMMARY_KEEP_TAIL]
+    head, middle, tail = split_messages_for_compaction(
+        messages, window_tokens=window_tokens
+    )
     if not middle:
         return 0
+    logger.debug(
+        "history compaction split %s",
+        kv(
+            thread_id=thread_id,
+            window_tokens=window_tokens,
+            head=len(head),
+            middle=len(middle),
+            tail=len(tail),
+            tail_budget=max(1, int(max(1, window_tokens) * SUMMARY_KEEP_TAIL_RATIO)),
+        ),
+    )
     lines = [_summary_line_for_message(m) for m in middle]
     blob = "\n\n---\n\n".join(lines)
     summarize_messages = [
@@ -259,4 +390,12 @@ async def _summarize_history(
         *tail,
     ]
     await history.reset(thread_id, merged)
+    logger.debug(
+        "history compaction reset %s",
+        kv(
+            thread_id=thread_id,
+            turns_summarized=len(middle),
+            kept_rows=len(merged),
+        ),
+    )
     return len(middle)

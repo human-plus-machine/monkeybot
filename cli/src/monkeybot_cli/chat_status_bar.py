@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from monkeybot.core.runtime.context_budget import SUMMARY_TRIGGER_RATIO
+
 _DIM = "\x1b[2m"
 _GREEN = "\x1b[32m"
 _YELLOW = "\x1b[33m"
@@ -37,7 +39,7 @@ def parse_usage_response(data: dict[str, object]) -> SessionUsageView:
     cap = _int("context_window_tokens", DEFAULT_CONTEXT_WINDOW)
     thresh = _int("summarization_threshold_tokens", 0)
     if thresh <= 0:
-        thresh = max(1, int(cap * 0.85))
+        thresh = max(1, int(cap * SUMMARY_TRIGGER_RATIO))
     return SessionUsageView(
         input_tokens=_int("input_tokens"),
         output_tokens=_int("output_tokens"),
@@ -85,7 +87,7 @@ def _ring_parts(
         1,
         summarization_threshold_tokens
         if summarization_threshold_tokens > 0
-        else int(cap * 0.85),
+        else int(cap * SUMMARY_TRIGGER_RATIO),
     )
     pct_used = min(100, max(0, round((ring_numerator / cap) * 100)))
     return _ring_glyph(pct_used), pct_used, ring_numerator, thresh

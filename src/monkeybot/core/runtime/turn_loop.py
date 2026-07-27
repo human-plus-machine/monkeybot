@@ -37,7 +37,10 @@ from monkeybot.core.messages import convert_to_provider
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.prompts.prompt import latest_user_message_text
-from monkeybot.core.runtime.context_budget import compute_context_pressure_tier
+from monkeybot.core.runtime.context_budget import (
+    SUMMARY_TRIGGER_RATIO,
+    compute_context_pressure_tier,
+)
 from monkeybot.core.runtime.provider_stream_mapper import ProviderStreamMapper
 from monkeybot.core.tools.inspector import ToolInspector
 from monkeybot.core.types.content_blocks import (
@@ -67,14 +70,12 @@ from .events import (
     UserSteered,
 )
 from .history_compaction import (
-    HISTORY_COMPACT_AT,
     HISTORY_LOAD_MAX,
-    _SUMMARY_KEEP_TAIL,
-    _SUMMARY_TRIGGER_RATIO,
     _await_history_write,
     _summarization_model_id,
     _summarization_viable,
     _summarize_history,
+    protect_recent_count,
 )
 from .input_admission import InputAdmission, preview_text
 from .loop_hooks import (
@@ -406,17 +407,16 @@ async def _refresh_prompt_after_history_change(
     )
 
 
-def _count_pressure_should_summarize(chat_messages: list[Message]) -> bool:
-    return (
-        len(chat_messages) >= HISTORY_COMPACT_AT
-        and _summarization_viable(chat_messages)
-    )
-
-
 def _token_pressure_should_summarize(
-    chat_messages: list[Message], *, preflight: int, cap: int
+    chat_messages: list[Message],
+    *,
+    preflight: int,
+    cap: int,
+    window_tokens: int,
 ) -> bool:
-    return preflight >= cap and _summarization_viable(chat_messages)
+    return preflight >= cap and _summarization_viable(
+        chat_messages, window_tokens=window_tokens
+    )
 
 
 async def _preflight_prompt_tokens(
@@ -446,7 +446,6 @@ async def _run_history_summarization(
     attachment_store: AttachmentStore | None,
     attachment_catalog: SessionAttachmentCatalog | None,
     vertex_google_search: bool,
-    reason: Literal["token", "count"],
     estimated_tokens: int,
     recount_after: bool,
 ) -> AsyncIterator[AgentEvent]:
@@ -459,7 +458,6 @@ async def _run_history_summarization(
             request_id=state.ctx.request_id,
             thread_id=state.ctx.thread_id,
             turn=state.turn_index,
-            reason=reason,
             estimated_tokens=estimated_tokens,
             message_count=len(state.chat_messages),
         ),
@@ -480,6 +478,7 @@ async def _run_history_summarization(
                 history,
                 provider,
                 _summarization_model_id(state.ctx),
+                window_tokens=state.ctx.context_window_tokens,
             )
         except Exception:
             logger.warning(
@@ -487,7 +486,6 @@ async def _run_history_summarization(
                 kv(
                     request_id=state.ctx.request_id,
                     thread_id=state.ctx.thread_id,
-                    reason=reason,
                 ),
                 exc_info=True,
             )
@@ -503,7 +501,6 @@ async def _run_history_summarization(
             request_id=state.ctx.request_id,
             thread_id=state.ctx.thread_id,
             turn=state.turn_index,
-            reason=reason,
             turns_summarized=turns_summarized,
         ),
     )
@@ -524,42 +521,6 @@ async def _run_history_summarization(
         usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, post)
 
 
-async def _maybe_summarize_on_count_pressure(
-    state: _TurnState,
-    *,
-    history: HistoryStore,
-    provider: Provider,
-    usage: Usage,
-    attachment_store: AttachmentStore | None,
-    attachment_catalog: SessionAttachmentCatalog | None,
-    vertex_google_search: bool,
-) -> AsyncIterator[AgentEvent]:
-    """Compact when chat row count hits HISTORY_COMPACT_AT (before full preflight)."""
-    if not _count_pressure_should_summarize(state.chat_messages):
-        return
-    # Only pay for token counting when the count trigger already fired — keeps the
-    # under-threshold path cheap while still giving ContextSummarizing a real estimate.
-    estimated = await _preflight_prompt_tokens(
-        state,
-        provider=provider,
-        vertex_google_search=vertex_google_search,
-    )
-    usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, estimated)
-    async for evt in _run_history_summarization(
-        state,
-        history=history,
-        provider=provider,
-        usage=usage,
-        attachment_store=attachment_store,
-        attachment_catalog=attachment_catalog,
-        vertex_google_search=vertex_google_search,
-        reason="count",
-        estimated_tokens=estimated,
-        recount_after=False,
-    ):
-        yield evt
-
-
 async def _maybe_summarize_on_token_pressure(
     state: _TurnState,
     *,
@@ -574,7 +535,10 @@ async def _maybe_summarize_on_token_pressure(
 ) -> AsyncIterator[AgentEvent]:
     """Compact when prompt tokens hit the context-window ratio threshold."""
     if not _token_pressure_should_summarize(
-        state.chat_messages, preflight=preflight, cap=cap
+        state.chat_messages,
+        preflight=preflight,
+        cap=cap,
+        window_tokens=state.ctx.context_window_tokens,
     ):
         return
     async for evt in _run_history_summarization(
@@ -585,7 +549,6 @@ async def _maybe_summarize_on_token_pressure(
         attachment_store=attachment_store,
         attachment_catalog=attachment_catalog,
         vertex_google_search=vertex_google_search,
-        reason="token",
         estimated_tokens=preflight,
         recount_after=True,
     ):
@@ -644,7 +607,10 @@ async def _apply_pressure_and_before_provider(
             attachment_store=attachment_store,
             session_id=state.ctx.thread_id,
             pressure_tier=pressure_tier,
-            protect_recent=_SUMMARY_KEEP_TAIL,
+            protect_recent=protect_recent_count(
+                state.chat_messages,
+                window_tokens=state.ctx.context_window_tokens,
+            ),
         )
         state.provider_messages = _messages_for_provider(
             system_msg,
@@ -700,27 +666,8 @@ async def _maybe_compact_and_shape(
     attachment_catalog: SessionAttachmentCatalog | None,
     vertex_google_search: bool,
 ) -> AsyncIterator[AgentEvent]:
-    """Count/token compaction, pressure shaping, before-provider hook."""
+    """Token compaction, pressure shaping, before-provider hook."""
     _require_prompt(state)
-
-    # 1) Compact on message-count pressure before the always-on preflight.
-    async for evt in _maybe_summarize_on_count_pressure(
-        state,
-        history=history,
-        provider=provider,
-        usage=usage,
-        attachment_store=attachment_store,
-        attachment_catalog=attachment_catalog,
-        vertex_google_search=vertex_google_search,
-    ):
-        yield evt
-    async for evt in _apply_history_load_max_safety(
-        state,
-        history=history,
-        attachment_store=attachment_store,
-        attachment_catalog=attachment_catalog,
-    ):
-        yield evt
 
     preflight = await _preflight_prompt_tokens(
         state,
@@ -733,7 +680,7 @@ async def _maybe_compact_and_shape(
         estimated_tokens=usage.estimated_prompt_tokens,
         context_window_tokens=state.ctx.context_window_tokens,
     )
-    cap = max(1, int(state.ctx.context_window_tokens * _SUMMARY_TRIGGER_RATIO))
+    cap = max(1, int(state.ctx.context_window_tokens * SUMMARY_TRIGGER_RATIO))
     async for evt in _maybe_summarize_on_token_pressure(
         state,
         history=history,
@@ -744,6 +691,13 @@ async def _maybe_compact_and_shape(
         vertex_google_search=vertex_google_search,
         preflight=preflight,
         cap=cap,
+    ):
+        yield evt
+    async for evt in _apply_history_load_max_safety(
+        state,
+        history=history,
+        attachment_store=attachment_store,
+        attachment_catalog=attachment_catalog,
     ):
         yield evt
     async for evt in _apply_pressure_and_before_provider(

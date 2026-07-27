@@ -64,3 +64,6 @@ code/
 
 # Local venv for evals dependency experiments
 .evals-venv/
+
+# monkeythink
+.monkeythink/
