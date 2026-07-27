@@ -117,9 +117,10 @@ jobs:
           # AGENT_URL below expect 8787, so pin PORT explicitly (env beats yaml).
           PORT: "8787"
           SANDBOX_ENABLED: "false" # no Docker socket in this runner
-          # Small context window so context/summarization_trigger.yaml actually crosses the
-          # real summarization threshold; the other smoke scenarios are short enough to fit.
-          MODEL_CONTEXT_WINDOW: "8000"
+          # No MODEL_CONTEXT_WINDOW override: that was only needed for
+          # context/summarization_trigger.yaml (see evals/suites/smoke.yaml), which is
+          # currently excluded from smoke pending a retune against thinkingmachines/inkling.
+          # Re-add MODEL_CONTEXT_WINDOW: "8000" here alongside it if it comes back.
         run: |
           uv run -m monkeybot.gateway.main > /tmp/gateway.log 2>&1 &
           echo $! > /tmp/gateway.pid
