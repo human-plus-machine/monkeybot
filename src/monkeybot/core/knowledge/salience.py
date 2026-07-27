@@ -7,7 +7,7 @@ Two hooks (F21):
   index exists before it starts exploring.
 * :class:`SearchUsageNudge` — drift backstop: if a turn accumulates several
   ``grep`` / ``glob`` / ``read_file`` calls without a single ``search``
-  (or ``recall``) call, inject a one-time reminder on the next tool step.
+  call, inject a one-time reminder on the next tool step.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from monkeybot.core.knowledge.sqlite_index import KnowledgeIndex
 logger = logging.getLogger(__name__)
 
 _EXPLORATION_TOOLS = frozenset({"grep", "glob", "read_file"})
-_SEARCH_TOOLS = frozenset({"search", "recall"})
+_SEARCH_TOOLS = frozenset({"search"})
 
 # Exploration calls without `search` in one turn before the backstop fires.
 _NUDGE_THRESHOLD = 3

@@ -56,7 +56,6 @@ def test_harness_includes_core_tools_and_protocol() -> None:
     assert "near-duplicate parallel" in out
     assert "no record of past conversations" in out or "Has **no** record of past conversations" in out
     assert "call `search` before" in out
-    assert "`recall` is a legacy alias" in out
     assert "rank-1" in out
     assert "Long multi-item tasks" in out
     assert "answers.md" in out or "workspace file" in out

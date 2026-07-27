@@ -116,7 +116,6 @@ _CORE_TOOL_NAMES = frozenset(
         "update_memory",
         "forget",
         "search",
-        "recall",  # legacy alias for `search`
         "list_skills",
         "task",
         "run_command",
@@ -872,7 +871,7 @@ class CoreToolExecutor(ToolExecutorPort):
                 result_text, err_text = await self._tool_memory_mutate(args, action="update")
             elif name == "forget":
                 result_text, err_text = await self._tool_memory_mutate(args, action="forget")
-            elif name in ("search", "recall"):
+            elif name == "search":
                 result_text, err_text = await self._tool_search(args)
             elif name == "list_skills":
                 result_text, err_text = self._tool_list_skills(ctx)
