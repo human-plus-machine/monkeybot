@@ -26,7 +26,9 @@ _DIFF_GIT_RE = re.compile(r"^diff --git a/.+ b/(.+)$", re.MULTILINE)
 PRESSURE_LIGHT_RATIO = 0.50
 PRESSURE_MODERATE_RATIO = 0.70
 PRESSURE_AGGRESSIVE_RATIO = 0.85
-SUMMARY_TRIGGER_RATIO = PRESSURE_AGGRESSIVE_RATIO
+# Sync history summarization fires later than aggressive shaping so tool-result
+# shaping can reclaim headroom before a full middle-history compact.
+SUMMARY_TRIGGER_RATIO = 0.95
 RESULT_BUDGET_FRACTION = 0.8
 RESULT_BUDGET_FLOOR_TOKENS = 2000
 

@@ -174,7 +174,7 @@ class SessionUsageResponse(BaseModel):
     )
     summarization_threshold_tokens: int = Field(
         0,
-        description="``floor(MODEL_CONTEXT_WINDOW * 0.85)`` — same bar as sync summarization in the agent loop.",
+        description="``floor(MODEL_CONTEXT_WINDOW * 0.95)`` — same bar as sync summarization in the agent loop.",
     )
     context_window_tokens: int = Field(
         1_000_000,

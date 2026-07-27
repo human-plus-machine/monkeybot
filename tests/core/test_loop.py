@@ -1450,10 +1450,10 @@ async def test_run_no_context_summarize_events_when_under_cap(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_run_compacts_on_message_count_even_under_token_cap(
+async def test_run_does_not_compact_on_message_count_under_token_cap(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Count trigger must compact before silent history loss (limit=100 slide)."""
+    """Long chatty threads under the token bar must not compact on row count alone."""
     monkeypatch.delenv("CONTEXT_SUMMARIZATION_MODEL", raising=False)
     preload = [
         Message(
@@ -1463,13 +1463,8 @@ async def test_run_compacts_on_message_count_even_under_token_cap(
         for i in range(100)
     ]
     hist = FakeHistory(preload)
-    prov = FakeProvider(
-        [
-            [TextDelta(text=" count summary "), Done()],
-            [TextDelta(text="final"), Done()],
-        ]
-    )
-    # Huge window so token path would never fire.
+    prov = FakeProvider([[TextDelta(text="final"), Done()]])
+    # Huge window so token path never fires.
     ctx = _ctx(workspace_root=tmp_path, context_window_tokens=2_000_000)
     events = []
     async for e in run(
@@ -1483,18 +1478,10 @@ async def test_run_compacts_on_message_count_even_under_token_cap(
     ):
         events.append(e)
     kinds = [type(x).__name__ for x in events]
-    assert "ContextSummarizing" in kinds
-    assert "ContextSummarized" in kinds
-    summarizing = next(x for x in events if type(x).__name__ == "ContextSummarizing")
-    assert summarizing.estimated_tokens > 0
-    assert len(hist.reset_calls) == 1
-    assert any(
-        isinstance(x, Text) and x.text.startswith("[Context Summary]:")
-        for m in hist.rows
-        for x in m.content
-    )
-    # Compacted history must be far smaller than the pre-compact 100+ rows.
-    assert len(hist.rows) < 20
+    assert "ContextSummarizing" not in kinds
+    assert "ContextSummarized" not in kinds
+    assert hist.reset_calls == []
+    assert prov.stream_calls == 1
 
 
 @pytest.mark.asyncio
@@ -1505,15 +1492,8 @@ async def test_run_persists_load_max_tail_when_compact_fails(
     import monkeybot.core.runtime.history_compaction as hc
     import monkeybot.core.runtime.turn_loop as tl
 
-    monkeypatch.setattr(tl, "HISTORY_COMPACT_AT", 10)
     monkeypatch.setattr(tl, "HISTORY_LOAD_MAX", 12)
-    monkeypatch.setattr(hc, "HISTORY_COMPACT_AT", 10)
     monkeypatch.setattr(hc, "HISTORY_LOAD_MAX", 12)
-
-    async def boom(*_args: object, **_kwargs: object) -> int:
-        raise RuntimeError("summarizer down")
-
-    monkeypatch.setattr(tl, "_summarize_history", boom)
 
     preload = [
         Message(
@@ -1524,6 +1504,7 @@ async def test_run_persists_load_max_tail_when_compact_fails(
     ]
     hist = FakeHistory(preload)
     prov = FakeProvider([[TextDelta(text="final"), Done()]])
+    # Huge window: token compact won't fire; load-max still truncates oversize history.
     ctx = _ctx(workspace_root=tmp_path, context_window_tokens=2_000_000)
     async for _ in run(
         "continue",
@@ -2494,6 +2475,7 @@ async def test_compact_history_does_not_persist_synthetic_tool_repairs() -> None
         history=hist,
         provider=prov,
         model="gemini-2.5-flash",
+        window_tokens=100_000,
     )
     assert turns == 1
     assert len(hist.reset_calls) == 1

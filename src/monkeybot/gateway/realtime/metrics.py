@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.runtime.context_budget import SUMMARY_TRIGGER_RATIO
 
 logger = logging.getLogger("monkeybot.gateway.realtime.metrics")
 
@@ -68,7 +69,9 @@ class RealtimeMetrics:
             "last_prompt_tokens": self.last_prompt_tokens,
             "estimated_prompt_tokens": self.last_prompt_tokens,
             "context_window_tokens": context_window_tokens,
-            "summarization_threshold_tokens": max(1, int(context_window_tokens * 0.85)),
+            "summarization_threshold_tokens": max(
+                1, int(context_window_tokens * SUMMARY_TRIGGER_RATIO)
+            ),
         }
 
     def start_turn(self, now: float | None = None) -> None:

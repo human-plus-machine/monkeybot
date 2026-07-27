@@ -246,7 +246,7 @@ Files are stored under `{workspace}/.monkeybot/attachments/{session_id}/{attachm
 | `period_start` / `period_end` | Min/max `created_at` (ms) in scope (`0` when empty). |
 | `last_prompt_tokens` | **Provider** `input_tokens` for the **most recent** completed turn (post-call usage on that request). |
 | `estimated_prompt_tokens` | Peak **pre-stream** prompt input tokens for the latest turn: `Provider.count_input_tokens(messages, tools, model=…)` (Vertex **countTokens**, Anthropic **count_tokens**, OpenAI **tiktoken** on the Chat Completions-shaped payload). Updated whenever the loop builds the outbound bundle—including after an in-turn summarization rebuild. Same check as `ContextSummarizing` / `ContextSummarized`. |
-| `summarization_threshold_tokens` | `floor(context_window_tokens × 0.85)` — same ratio as `SUMMARY_TRIGGER_RATIO` in `src/monkeybot/core/runtime/loop.py`. When `estimated_prompt_tokens` approaches or exceeds this, the user turn is near the **sync summarization** threshold (subject to history length and viability rules in the loop). |
+| `summarization_threshold_tokens` | `floor(context_window_tokens × 0.95)` — same ratio as `SUMMARY_TRIGGER_RATIO` in `src/monkeybot/core/runtime/loop.py`. When `estimated_prompt_tokens` approaches or exceeds this, the user turn is near the **sync summarization** threshold (subject to history length and viability rules in the loop). |
 | `context_window_tokens` | From gateway env `MODEL_CONTEXT_WINDOW` (YAML → runtime env). Denominator for “% of window” style UIs. |
 
 **Notes**

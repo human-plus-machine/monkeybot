@@ -33,7 +33,7 @@ def test_parse_usage_response_fills_threshold_default() -> None:
     assert usage.output_tokens == 340
     assert usage.cost_usd == 0.0123
     assert usage.estimated_prompt_tokens == 1100
-    assert usage.summarization_threshold_tokens == 850
+    assert usage.summarization_threshold_tokens == 950
 
 
 def test_format_context_ring_uses_estimate_over_last_prompt() -> None:
@@ -41,7 +41,7 @@ def test_format_context_ring_uses_estimate_over_last_prompt() -> None:
         estimated_prompt_tokens=500,
         last_prompt_tokens=900,
         context_window_tokens=1000,
-        summarization_threshold_tokens=850,
+        summarization_threshold_tokens=950,
     )
     assert "50%" in ring
     assert "◕" in ring or "◑" in ring
@@ -52,7 +52,7 @@ def test_format_context_ring_falls_back_to_last_prompt() -> None:
         estimated_prompt_tokens=0,
         last_prompt_tokens=250,
         context_window_tokens=1000,
-        summarization_threshold_tokens=850,
+        summarization_threshold_tokens=950,
     )
     assert "25%" in ring
 
@@ -64,7 +64,7 @@ def test_format_status_line_shows_context_ring_only() -> None:
         cost_usd=0.0456,
         estimated_prompt_tokens=400,
         context_window_tokens=1000,
-        summarization_threshold_tokens=850,
+        summarization_threshold_tokens=950,
     )
     line = format_status_line(usage, width=120)
     assert "40%" in line
@@ -90,28 +90,28 @@ def test_format_context_ring_markup_colors() -> None:
         SessionUsageView(
             estimated_prompt_tokens=100,
             context_window_tokens=1000,
-            summarization_threshold_tokens=850,
+            summarization_threshold_tokens=950,
         )
     )
     assert "[green]" in green and "10%" in green
 
     yellow = format_context_ring_markup(
         SessionUsageView(
-            estimated_prompt_tokens=700,
+            estimated_prompt_tokens=800,
             context_window_tokens=1000,
-            summarization_threshold_tokens=850,
+            summarization_threshold_tokens=950,
         )
     )
-    assert "[yellow]" in yellow and "70%" in yellow
+    assert "[yellow]" in yellow and "80%" in yellow
 
     red = format_context_ring_markup(
         SessionUsageView(
-            estimated_prompt_tokens=900,
+            estimated_prompt_tokens=960,
             context_window_tokens=1000,
-            summarization_threshold_tokens=850,
+            summarization_threshold_tokens=950,
         )
     )
-    assert "[red]" in red and "90%" in red
+    assert "[red]" in red and "96%" in red
 
 
 def test_usage_store_update() -> None:
@@ -132,7 +132,7 @@ def test_plain_renderer_prints_context_ring(capsys) -> None:
     usage = SessionUsageView(
         estimated_prompt_tokens=250,
         context_window_tokens=1000,
-        summarization_threshold_tokens=850,
+        summarization_threshold_tokens=950,
     )
     controller = ChatSessionController(base="http://127.0.0.1:9", emit=lambda _e: None)
     renderer._on_usage_updated({"usage": usage}, controller)
