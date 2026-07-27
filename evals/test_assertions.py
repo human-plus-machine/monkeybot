@@ -57,6 +57,52 @@ def test_max_tool_errors() -> None:
     assert len(bad) == 1
 
 
+def test_tool_errors_count_self_corrected_same_tool_not_counted() -> None:
+    run = _run([
+        ToolCallRecord(tool="read_file", args_summary="bad/path.md", error="not found"),
+        ToolCallRecord(tool="read_file", args_summary="good/path.md"),
+    ])
+    assert run.tool_errors_count() == 0
+    ok = evaluate_assertions(_scenario({"max_tool_errors": 0}), run)
+    assert ok == []
+
+
+def test_tool_errors_count_unresolved_error_is_counted() -> None:
+    run = _run([ToolCallRecord(tool="read_file", args_summary="bad/path.md", error="not found")])
+    assert run.tool_errors_count() == 1
+    bad = evaluate_assertions(_scenario({"max_tool_errors": 0}), run)
+    assert len(bad) == 1
+
+
+def test_tool_errors_count_ignores_success_on_a_different_tool() -> None:
+    run = _run([
+        ToolCallRecord(tool="read_file", args_summary="bad/path.md", error="not found"),
+        ToolCallRecord(tool="glob", args_summary="**/*.md"),
+    ])
+    assert run.tool_errors_count() == 1
+
+
+def test_tool_errors_count_multi_error_mixed_resolution() -> None:
+    # First read_file error is resolved by the later successful read_file call; the
+    # write_file error has no later successful write_file call, so it stays unresolved.
+    run = _run([
+        ToolCallRecord(tool="read_file", args_summary="bad/path.md", error="not found"),
+        ToolCallRecord(tool="write_file", args_summary="out.txt", error="permission denied"),
+        ToolCallRecord(tool="read_file", args_summary="good/path.md"),
+    ])
+    assert run.tool_errors_count() == 1
+
+
+def test_tool_errors_count_forgives_by_tool_name_not_args() -> None:
+    # Documents the coarse matching semantics: a later success on the same tool
+    # forgives a prior error even against different args (different file paths).
+    run = _run([
+        ToolCallRecord(tool="write_file", args_summary="a.txt", error="disk full"),
+        ToolCallRecord(tool="write_file", args_summary="b.txt"),
+    ])
+    assert run.tool_errors_count() == 0
+
+
 def test_max_latency_ms() -> None:
     run = _run(duration_ms=5000)
     ok = evaluate_assertions(_scenario({"max_latency_ms": 10000}), run)

@@ -75,7 +75,25 @@ class EvalRun(BaseModel):
         return counts
 
     def tool_errors_count(self) -> int:
-        return sum(1 for t in self.turns for c in t.tool_calls if c.error)
+        """Count tool errors the agent never recovered from.
+
+        An error is "self-corrected" (not counted) if a later call to the same tool
+        in this run succeeded — e.g. a bad-path read_file followed by a good one.
+        Matching is by tool name only, not args: any later success on the same tool
+        forgives *all* prior errors on it, even against different paths/args (e.g. a
+        failed write_file("a") then a successful write_file("b") counts as resolved).
+        Fine for the current scenarios' single-error cases; tighten to per-args
+        matching if a scenario ever needs to tell those apart.
+        """
+        calls = [c for t in self.turns for c in t.tool_calls]
+        unresolved = 0
+        for i, c in enumerate(calls):
+            if not c.error:
+                continue
+            if any(not later.error for later in calls[i + 1 :] if later.tool == c.tool):
+                continue
+            unresolved += 1
+        return unresolved
 
     def subagent_calls_count(self) -> int:
         return self.tool_calls_by_name().get("task", 0)

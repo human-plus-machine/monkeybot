@@ -2542,6 +2542,56 @@ async def test_compact_history_does_not_persist_synthetic_tool_repairs() -> None
 
 
 @pytest.mark.asyncio
+async def test_run_replays_repaired_history_to_provider() -> None:
+    """A corrupted stored turn (orphaned tool request, no result) must be repaired
+    in-memory before the *next* real turn hits the provider — this is the actual
+    wiring path (`turn_loop` -> `_load_agent_chat_history` -> `transform_context` ->
+    `repair_tool_turn_integrity`), not just the pure-function unit tests."""
+    broken_tail = Message(
+        role="assistant",
+        content=[ToolRequest(id="orphan-1", name="echo", args={})],
+    )
+    hist = FakeHistory([Message(role="user", content=[Text(text="earlier")]), broken_tail])
+    prov = FakeProvider([[TextDelta(text="ok"), Done()]])
+    ctx = _ctx()
+    async for _ in run(
+        "follow up",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        max_turns=4,
+    ):
+        pass
+
+    assert prov.stream_calls >= 1
+    sent = prov.stream_messages[0]
+    synthetic = [
+        b
+        for m in sent
+        if m.role == "user"
+        for b in m.content
+        if isinstance(b, ToolResponse) and b.id == "orphan-1"
+    ]
+    assert len(synthetic) == 1
+    assert synthetic[0].is_error is True
+    assert isinstance(synthetic[0].result[0], Text)
+    assert synthetic[0].result[0].text == "Tool call interrupted or result missing"
+
+    # The repair is in-memory only: the stored/persisted history must remain
+    # unrepaired (still just the orphaned request, no synthesized result).
+    stored_tool_requests = [
+        b for m in hist.rows for b in m.content if isinstance(b, ToolRequest) and b.id == "orphan-1"
+    ]
+    stored_tool_responses = [
+        b for m in hist.rows for b in m.content if isinstance(b, ToolResponse) and b.id == "orphan-1"
+    ]
+    assert len(stored_tool_requests) == 1
+    assert stored_tool_responses == []
+
+
+@pytest.mark.asyncio
 async def test_run_refreshes_tools_after_enable_mcp_same_turn() -> None:
     """After enable_mcp, the next provider_stream sees newly connected MCP tools."""
 
