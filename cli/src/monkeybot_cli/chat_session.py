@@ -632,8 +632,8 @@ class ChatSessionController:
             )
             return
         if isinstance(evt, ContextSummarized):
+            # Mid-turn /usage is stale; post-compaction ContextUsage updates the ring.
             self._emit("summarized", turns=evt.turns_summarized)
-            await self._fetch_usage()
             return
         if isinstance(evt, AssistantDelta):
             self._on_assistant_delta(evt, state)

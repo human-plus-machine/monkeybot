@@ -78,6 +78,31 @@ def test_context_usage_event_emits_usage_updated() -> None:
     assert usage.context_window_tokens == 200_000
 
 
+def test_context_summarized_does_not_fetch_usage() -> None:
+    """Persisted /usage mid-turn would clobber the live post-compaction ring."""
+    from monkeybot.core.runtime.events import ContextSummarized
+    from monkeybot_cli.chat_session import _TurnState
+
+    events: list[ChatUiEvent] = []
+
+    async def _run() -> None:
+        controller = ChatSessionController(
+            base="http://localhost:8080",
+            emit=events.append,
+        )
+        controller._fetch_usage = AsyncMock()  # type: ignore[method-assign]
+        state = _TurnState()
+        await controller._dispatch_turn_event(
+            ContextSummarized(request_id="rid-1", turns_summarized=4),
+            "rid-1",
+            state,
+        )
+        controller._fetch_usage.assert_not_awaited()
+
+    asyncio.run(_run())
+    assert any(e.kind == "summarized" and e.payload.get("turns") == 4 for e in events)
+
+
 def test_hitl_reader_confirm_yes() -> None:
     events: list[ChatUiEvent] = []
 

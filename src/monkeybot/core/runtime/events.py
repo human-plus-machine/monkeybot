@@ -102,12 +102,12 @@ class ContextSummarized:
 
 @dataclass(frozen=True)
 class ContextUsage:
-    """Live preflight / post-tool prompt size for context meters (not a summarization signal)."""
+    """Live current prompt size for context meters (not peak, not a summarization signal)."""
 
     kind: Literal["ContextUsage"] = "ContextUsage"
     request_id: str = ""
     estimated_tokens: int = 0
-    """Same basis as ``estimated_prompt_tokens`` on usage / ``ContextSummarizing``."""
+    """Current preflight / post-tool / post-compaction prompt size for UI meters."""
     context_window_tokens: int = 0
 
 
