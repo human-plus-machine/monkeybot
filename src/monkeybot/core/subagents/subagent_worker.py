@@ -334,10 +334,14 @@ async def _async_main() -> None:
             inspectors.append(perm_insp)
 
         provider = _resolve_provider()
-        # Namespace spill dirs under the parent chat session so session-end
+        # Prefer parent-allocated id so SSE progress and the child transcript share one key.
+        # Otherwise namespace spill dirs under the parent chat session so session-end
         # cleanup can remove ``.monkeybot/spill/subagent:{session_id}:*``.
-        spill_session = envelope.parent_session_id or envelope.parent_run_id
-        thread_id = f"subagent:{spill_session}:{uuid.uuid4().hex[:10]}"
+        if envelope.child_thread_id:
+            thread_id = envelope.child_thread_id
+        else:
+            spill_session = envelope.parent_session_id or envelope.parent_run_id
+            thread_id = f"subagent:{spill_session}:{uuid.uuid4().hex[:10]}"
         request_id = f"sub-{uuid.uuid4().hex[:12]}"
 
         cap_raw = os.environ.get("MODEL_CONTEXT_WINDOW", "200000").strip()
@@ -384,9 +388,7 @@ async def _async_main() -> None:
                     read_only=True,
                 )
             except FileNotFoundError as exc:
-                logger.info(
-                    "knowledge read-only open skipped (index not ready yet): %s", exc
-                )
+                logger.info("knowledge read-only open skipped (index not ready yet): %s", exc)
                 knowledge = None
             except Exception as exc:
                 logger.warning("knowledge read-only setup failed for subagent: %r", exc)

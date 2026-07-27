@@ -57,18 +57,11 @@ class SubagentEnvelope:
     agent_md: str | None = None
     subagent_type: str | None = None
     parent_session_id: str | None = None
+    child_thread_id: str | None = None
 
     def to_json(self) -> str:
-        """Serialize envelope to JSON text."""
-        data = asdict(self)
-        if data.get("traceparent") is None:
-            data.pop("traceparent", None)
-        if data.get("agent_md") is None:
-            data.pop("agent_md", None)
-        if data.get("subagent_type") is None:
-            data.pop("subagent_type", None)
-        if data.get("parent_session_id") is None:
-            data.pop("parent_session_id", None)
+        """Serialize envelope to JSON text; omit optional fields that are None."""
+        data = {k: v for k, v in asdict(self).items() if v is not None}
         return json.dumps(data, sort_keys=True)
 
     @classmethod
@@ -93,37 +86,31 @@ class SubagentEnvelope:
         for key in ("task", "context", "parent_run_id"):
             if not isinstance(data[key], str):
                 raise ValueError(f"{key} must be a string")
-        traceparent = data.get("traceparent")
-        if traceparent is not None and not isinstance(traceparent, str):
-            raise ValueError("traceparent must be a string when present")
-        agent_md = data.get("agent_md")
-        if agent_md is not None and not isinstance(agent_md, str):
-            raise ValueError("agent_md must be a string when present")
-        subagent_type = data.get("subagent_type")
-        if subagent_type is not None and not isinstance(subagent_type, str):
-            raise ValueError("subagent_type must be a string when present")
-        parent_session_id = data.get("parent_session_id")
-        if parent_session_id is not None and not isinstance(parent_session_id, str):
-            raise ValueError("parent_session_id must be a string when present")
         return cls(
             task=data["task"],
             context=data["context"],
             memory_storage_uri=uri.strip(),
             parent_run_id=data["parent_run_id"],
             model=model,
-            traceparent=traceparent.strip() if isinstance(traceparent, str) and traceparent.strip() else None,
-            agent_md=agent_md.strip() if isinstance(agent_md, str) and agent_md.strip() else None,
-            subagent_type=(
-                subagent_type.strip()
-                if isinstance(subagent_type, str) and subagent_type.strip()
-                else None
-            ),
-            parent_session_id=(
-                parent_session_id.strip()
-                if isinstance(parent_session_id, str) and parent_session_id.strip()
-                else None
-            ),
+            traceparent=_opt_envelope_str(data, "traceparent"),
+            agent_md=_opt_envelope_str(data, "agent_md"),
+            subagent_type=_opt_envelope_str(data, "subagent_type"),
+            parent_session_id=_opt_envelope_str(data, "parent_session_id"),
+            child_thread_id=_opt_envelope_str(data, "child_thread_id"),
         )
+
+
+def _opt_envelope_str(data: dict[str, object], key: str) -> str | None:
+    """Optional string field: missing/blank → None; wrong type → ValueError."""
+    if key not in data:
+        return None
+    val = data[key]
+    if val is None:
+        return None
+    if not isinstance(val, str):
+        raise ValueError(f"{key} must be a string when present")
+    stripped = val.strip()
+    return stripped or None
 
 
 def _tuple_to_run_row(row: tuple[object, ...]) -> SubagentRunRow:

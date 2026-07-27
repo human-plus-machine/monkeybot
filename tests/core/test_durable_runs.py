@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import subprocess
@@ -93,6 +94,32 @@ def test_durable_subagent_envelope_persona_roundtrip() -> None:
     restored = SubagentEnvelope.from_json(env.to_json())
     assert restored.agent_md == "/tmp/agents/analyst.md"
     assert restored.subagent_type == "analyst"
+
+
+def test_durable_envelope_roundtrip_child_thread_id() -> None:
+    env = SubagentEnvelope(
+        task="t",
+        context="",
+        memory_storage_uri="local:///mem",
+        parent_run_id="p1",
+        child_thread_id="subagent:sess:abc1234567",
+    )
+    payload = env.to_json()
+    assert "child_thread_id" in payload
+    restored = SubagentEnvelope.from_json(payload)
+    assert restored.child_thread_id == "subagent:sess:abc1234567"
+
+
+def test_durable_envelope_omits_null_child_thread_id() -> None:
+    env = SubagentEnvelope(
+        task="t",
+        context="",
+        memory_storage_uri="local:///mem",
+        parent_run_id="p1",
+    )
+    data = json.loads(env.to_json())
+    assert "child_thread_id" not in data
+    assert SubagentEnvelope.from_json(env.to_json()).child_thread_id is None
 
 
 @pytest.mark.asyncio

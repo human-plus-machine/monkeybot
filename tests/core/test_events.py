@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import json
-from typing import Literal, cast
+from typing import Literal, cast, get_args
 
 import pytest
 
 from monkeybot.core.runtime.events import (
     ActionRequiredEvent,
+    AgentEvent,
     AssistantDelta,
+    AssistantTextEnded,
+    AssistantTextStarted,
+    ContextUsage,
     Error,
     EventDecodeError,
     FrontendToolRequestEvent,
@@ -18,12 +22,15 @@ from monkeybot.core.runtime.events import (
     QueuedInputAccepted,
     RedactedThinkingBlock,
     SystemNotificationEvent,
+    SystemPromptSnapshot,
     Thinking,
     ThinkingBlockComplete,
     ThinkingBlockDelta,
+    ThinkingBlockStarted,
     ToolCallResult,
     ToolCallStarted,
     ToolConfirmationRequestEvent,
+    ToolInputDeltaEvent,
     TurnComplete,
     UsageTotals,
     UserSteered,
@@ -338,3 +345,278 @@ def test_agent_event_roundtrip_tool_input_delta() -> None:
 
     ev = ToolInputDeltaEvent(request_id="r1", call_id="c1", tool="read_file", delta='{"p')
     assert event_from_json(event_to_json(ev)) == ev
+
+
+def test_subagent_started_is_agent_event() -> None:
+    from monkeybot.core.runtime.events import SubagentStarted
+
+    ev: AgentEvent = SubagentStarted(
+        request_id="parent-req",
+        parent_call_id="task-call-1",
+        run_id="run-uuid",
+        child_thread_id="subagent:sess:abc123def0",
+        subagent_type="researcher",
+        task="Investigate foo",
+        label="Research",
+    )
+    assert ev.kind == "SubagentStarted"
+    assert isinstance(ev, SubagentStarted)
+    assert SubagentStarted in get_args(AgentEvent)
+
+
+def test_subagent_event_is_agent_event() -> None:
+    from monkeybot.core.runtime.events import SubagentEvent
+
+    ev: AgentEvent = SubagentEvent(
+        request_id="parent-req",
+        parent_call_id="task-call-1",
+        run_id="run-uuid",
+        child_thread_id="subagent:sess:abc123def0",
+        subagent_type="researcher",
+        inner=AssistantDelta(request_id="child-req", delta="hi"),
+    )
+    assert ev.kind == "SubagentEvent"
+    assert isinstance(ev, SubagentEvent)
+    assert SubagentEvent in get_args(AgentEvent)
+
+
+def test_subagent_completed_is_agent_event() -> None:
+    from monkeybot.core.runtime.events import SubagentCompleted
+
+    ev: AgentEvent = SubagentCompleted(
+        request_id="parent-req",
+        parent_call_id="task-call-1",
+        run_id="run-uuid",
+        child_thread_id="subagent:sess:abc123def0",
+        subagent_type="researcher",
+        ok=True,
+        final_message="done",
+        errors=[],
+        tool_call_count=0,
+    )
+    assert ev.kind == "SubagentCompleted"
+    assert isinstance(ev, SubagentCompleted)
+    assert SubagentCompleted in get_args(AgentEvent)
+
+
+def test_subagent_started_roundtrip() -> None:
+    from monkeybot.core.runtime.events import SubagentStarted
+
+    ev = SubagentStarted(
+        request_id="parent-req",
+        parent_call_id="task-call-1",
+        run_id="run-uuid",
+        child_thread_id="subagent:sess:abc123def0",
+        subagent_type="researcher",
+        task="Investigate foo",
+        label="Research",
+    )
+    assert event_from_json(event_to_json(ev)) == ev
+
+
+def test_subagent_started_roundtrip_null_subagent_type() -> None:
+    from monkeybot.core.runtime.events import SubagentStarted
+
+    ev = SubagentStarted(
+        request_id="parent-req",
+        parent_call_id="task-call-1",
+        run_id="run-uuid",
+        child_thread_id="subagent:sess:abc123def0",
+        subagent_type=None,
+        task="Investigate foo",
+        label="Research",
+    )
+    out = event_from_json(event_to_json(ev))
+    assert out == ev
+    payload = json.loads(event_to_json(ev))
+    assert payload["subagent_type"] is None
+
+
+def test_subagent_event_roundtrip_preserves_inner() -> None:
+    from monkeybot.core.runtime.events import SubagentEvent
+
+    inner = ToolCallStarted(
+        request_id="child-r",
+        tool="read_file",
+        label="Read",
+        args={"path": "a.py"},
+        call_id="c-child",
+    )
+    ev = SubagentEvent(
+        request_id="parent-req",
+        parent_call_id="task-call-1",
+        run_id="run-uuid",
+        child_thread_id="subagent:sess:abc123def0",
+        subagent_type="researcher",
+        inner=inner,
+    )
+    out = event_from_json(event_to_json(ev))
+    assert out == ev
+    assert isinstance(out, SubagentEvent)
+    assert out.inner.request_id == "child-r"
+    assert out.request_id == "parent-req"
+
+
+def test_subagent_event_roundtrip_assistant_delta_inner() -> None:
+    from monkeybot.core.runtime.events import SubagentEvent
+
+    ev = SubagentEvent(
+        request_id="parent-req",
+        parent_call_id="task-call-1",
+        run_id="run-uuid",
+        child_thread_id="subagent:sess:abc123def0",
+        subagent_type="researcher",
+        inner=AssistantDelta(request_id="c", delta="café"),
+    )
+    assert event_from_json(event_to_json(ev)) == ev
+
+
+def test_subagent_event_wire_uses_type_and_nested_inner() -> None:
+    from monkeybot.core.runtime.events import SubagentEvent
+
+    ev = SubagentEvent(
+        request_id="parent-req",
+        parent_call_id="task-call-1",
+        run_id="run-uuid",
+        child_thread_id="subagent:sess:abc123def0",
+        subagent_type="researcher",
+        inner=AssistantDelta(request_id="child-req", delta="hi"),
+    )
+    payload = json.loads(event_to_json(ev))
+    assert payload["type"] == "SubagentEvent"
+    assert isinstance(payload["inner"], dict)
+    assert payload["inner"]["type"] == "AssistantDelta"
+
+
+def test_subagent_completed_roundtrip() -> None:
+    from monkeybot.core.runtime.events import SubagentCompleted
+
+    ev = SubagentCompleted(
+        request_id="parent-req",
+        parent_call_id="task-call-1",
+        run_id="run-uuid",
+        child_thread_id="subagent:sess:abc123def0",
+        subagent_type="researcher",
+        ok=False,
+        final_message="done",
+        errors=["boom"],
+        tool_call_count=2,
+    )
+    assert event_from_json(event_to_json(ev)) == ev
+
+
+def test_subagent_event_decode_rejects_missing_inner() -> None:
+    raw = json.dumps(
+        {
+            "type": "SubagentEvent",
+            "request_id": "parent-req",
+            "parent_call_id": "task-call-1",
+            "run_id": "run-uuid",
+            "child_thread_id": "subagent:sess:abc123def0",
+            "subagent_type": "researcher",
+        }
+    )
+    with pytest.raises(EventDecodeError, match="SubagentEvent inner must be an object"):
+        event_from_json(raw)
+
+
+def test_subagent_event_decode_rejects_non_object_inner() -> None:
+    raw = json.dumps(
+        {
+            "type": "SubagentEvent",
+            "request_id": "parent-req",
+            "parent_call_id": "task-call-1",
+            "run_id": "run-uuid",
+            "child_thread_id": "subagent:sess:abc123def0",
+            "subagent_type": "researcher",
+            "inner": "nope",
+        }
+    )
+    with pytest.raises(EventDecodeError, match="SubagentEvent inner must be an object"):
+        event_from_json(raw)
+
+
+def test_is_subagent_forwardable_allowlist() -> None:
+    from monkeybot.core.runtime.events import is_subagent_forwardable
+
+    allowlisted: list[AgentEvent] = [
+        AssistantDelta(request_id="r", delta="x"),
+        AssistantTextStarted(request_id="r"),
+        AssistantTextEnded(request_id="r", text="done"),
+        ThinkingBlockStarted(request_id="r"),
+        ThinkingBlockDelta(request_id="r", text="t"),
+        ThinkingBlockComplete(request_id="r", signature="sig"),
+        RedactedThinkingBlock(request_id="r", data="opaque"),
+        ToolCallStarted(request_id="r", tool="read_file", label="Read", call_id="c1"),
+        ToolCallResult(request_id="r", tool="read_file", result="ok", call_id="c1"),
+        ToolInputDeltaEvent(request_id="r", call_id="c1", tool="read_file", delta='{"p'),
+        Error(request_id="r", error="boom"),
+        TurnComplete(request_id="r"),
+    ]
+    assert all(is_subagent_forwardable(ev) for ev in allowlisted)
+
+
+def test_is_subagent_forwardable_denylist() -> None:
+    from monkeybot.core.runtime.events import SubagentStarted, is_subagent_forwardable
+
+    denylisted: list[AgentEvent] = [
+        SystemPromptSnapshot(request_id="r", inner_turn=1, text="## Agent"),
+        ContextUsage(request_id="r", estimated_tokens=1, context_window_tokens=2),
+        ToolConfirmationRequestEvent(
+            request_id="r",
+            tool_call_id="tc",
+            tool_name="run_command",
+            arguments={"x": 1},
+        ),
+        Thinking(request_id="r"),
+        ImageBlock(request_id="r", mime_type="image/png", data="abc"),
+        SubagentStarted(
+            request_id="p",
+            parent_call_id="c",
+            run_id="r",
+            child_thread_id="t",
+        ),
+    ]
+    assert all(not is_subagent_forwardable(ev) for ev in denylisted)
+
+
+def test_wrap_subagent_event_returns_wrapper() -> None:
+    from monkeybot.core.runtime.events import SubagentEvent, wrap_subagent_event
+
+    inner = ToolCallResult(
+        request_id="child-req",
+        tool="read_file",
+        result="ok",
+        call_id="c-child",
+    )
+    wrapped = wrap_subagent_event(
+        request_id="parent-req",
+        parent_call_id="task-call-1",
+        run_id="run-uuid",
+        child_thread_id="subagent:sess:abc123def0",
+        subagent_type="researcher",
+        inner=inner,
+    )
+    assert wrapped is not None
+    assert isinstance(wrapped, SubagentEvent)
+    assert wrapped.inner == inner
+    assert wrapped.request_id == "parent-req"
+    assert wrapped.parent_call_id == "task-call-1"
+    assert wrapped.run_id == "run-uuid"
+    assert wrapped.child_thread_id == "subagent:sess:abc123def0"
+    assert wrapped.subagent_type == "researcher"
+
+
+def test_wrap_subagent_event_returns_none_for_denylisted() -> None:
+    from monkeybot.core.runtime.events import wrap_subagent_event
+
+    inner = SystemPromptSnapshot(request_id="r", inner_turn=1, text="## Agent")
+    wrapped = wrap_subagent_event(
+        request_id="parent-req",
+        parent_call_id="task-call-1",
+        run_id="run-uuid",
+        child_thread_id="subagent:sess:abc123def0",
+        subagent_type="researcher",
+        inner=inner,
+    )
+    assert wrapped is None

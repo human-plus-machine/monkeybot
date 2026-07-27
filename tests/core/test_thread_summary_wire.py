@@ -1,5 +1,8 @@
+import json
+
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.persistence.thread_summary import messages_to_wire
+from monkeybot.core.tools.tool_hint import DETAIL_MAX
 from monkeybot.core.types.content_blocks import (
     RedactedThinking,
     Text,
@@ -342,3 +345,235 @@ def test_messages_to_wire_truncates_large_tool_payloads() -> None:
     assert len(row["result"]) == 8001
     assert row["result"].endswith("…")
     assert row["args"]["path"] == "big.txt"
+
+
+def test_messages_to_wire_task_elevates_linkage_fields() -> None:
+    result = json.dumps(
+        {
+            "ok": True,
+            "final_message": "done",
+            "run_id": "run-1",
+            "child_thread_id": "subagent:s:abc1234567",
+            "subagent_type": "researcher",
+        }
+    )
+    wire = messages_to_wire(
+        [
+            Message(
+                role="assistant",
+                content=[
+                    ToolRequest(
+                        id="t1",
+                        name="task",
+                        args={"task": "research X", "subagent_type": "researcher"},
+                    )
+                ],
+            ),
+            Message(
+                role="user",
+                content=[
+                    ToolResponse(
+                        id="t1",
+                        tool_name="task",
+                        result=[Text(text=result)],
+                    )
+                ],
+            ),
+        ]
+    )
+    row = wire[0]
+    assert row["tool"] == "task"
+    assert row["run_id"] == "run-1"
+    assert row["child_thread_id"] == "subagent:s:abc1234567"
+    assert row["subagent_type"] == "researcher"
+    assert row["result"] == result
+
+
+def test_messages_to_wire_task_omits_linkage_on_bad_json() -> None:
+    result = "not-json{{"
+    wire = messages_to_wire(
+        [
+            Message(
+                role="assistant",
+                content=[
+                    ToolRequest(
+                        id="t1",
+                        name="task",
+                        args={"task": "research X"},
+                    )
+                ],
+            ),
+            Message(
+                role="user",
+                content=[
+                    ToolResponse(
+                        id="t1",
+                        tool_name="task",
+                        result=[Text(text=result)],
+                    )
+                ],
+            ),
+        ]
+    )
+    row = wire[0]
+    assert row["tool"] == "task"
+    assert row["result"] == result
+    assert "run_id" not in row
+    assert "child_thread_id" not in row
+    assert "subagent_type" not in row
+
+
+def test_messages_to_wire_task_omits_missing_linkage_keys() -> None:
+    result = json.dumps({"ok": True, "final_message": "hi"})
+    wire = messages_to_wire(
+        [
+            Message(
+                role="assistant",
+                content=[
+                    ToolRequest(
+                        id="t1",
+                        name="task",
+                        args={"task": "research X"},
+                    )
+                ],
+            ),
+            Message(
+                role="user",
+                content=[
+                    ToolResponse(
+                        id="t1",
+                        tool_name="task",
+                        result=[Text(text=result)],
+                    )
+                ],
+            ),
+        ]
+    )
+    row = wire[0]
+    assert row["tool"] == "task"
+    assert row["result"] == result
+    assert "run_id" not in row
+    assert "child_thread_id" not in row
+    assert "subagent_type" not in row
+
+
+def test_messages_to_wire_task_partial_linkage_only_present_keys() -> None:
+    result = json.dumps({"ok": True, "run_id": "run-only", "final_message": "hi"})
+    wire = messages_to_wire(
+        [
+            Message(
+                role="assistant",
+                content=[
+                    ToolRequest(
+                        id="t1",
+                        name="task",
+                        args={"task": "research X"},
+                    )
+                ],
+            ),
+            Message(
+                role="user",
+                content=[
+                    ToolResponse(
+                        id="t1",
+                        tool_name="task",
+                        result=[Text(text=result)],
+                    )
+                ],
+            ),
+        ]
+    )
+    row = wire[0]
+    assert row["tool"] == "task"
+    assert row["run_id"] == "run-only"
+    assert "child_thread_id" not in row
+    assert "subagent_type" not in row
+
+
+def test_messages_to_wire_non_task_tool_unchanged_with_linkage_shaped_json() -> None:
+    result = json.dumps(
+        {
+            "ok": True,
+            "run_id": "run-should-not-elevate",
+            "child_thread_id": "subagent:s:shouldnot",
+            "subagent_type": "researcher",
+            "final_message": "done",
+        }
+    )
+    wire = messages_to_wire(
+        [
+            Message(
+                role="assistant",
+                content=[
+                    ToolRequest(
+                        id="c1",
+                        name="run_command",
+                        args={"command": "ls"},
+                    )
+                ],
+            ),
+            Message(
+                role="user",
+                content=[
+                    ToolResponse(
+                        id="c1",
+                        tool_name="run_command",
+                        result=[Text(text=result)],
+                    )
+                ],
+            ),
+        ]
+    )
+    row = wire[0]
+    assert row["tool"] == "run_command"
+    assert row["role"] == "tool"
+    assert row["call_id"] == "c1"
+    assert "args" in row
+    assert row["result"] == result
+    assert "run_id" not in row
+    assert "child_thread_id" not in row
+    assert "subagent_type" not in row
+
+
+def test_messages_to_wire_task_elevates_from_pre_truncation_parse() -> None:
+    payload = {
+        "ok": True,
+        "run_id": "run-abc",
+        "child_thread_id": "subagent:sess:deadbeef01",
+        "subagent_type": "researcher",
+        "final_message": "x" * (DETAIL_MAX + 500),
+    }
+    result_text = json.dumps(payload)
+    assert len(result_text) > DETAIL_MAX
+
+    wire = messages_to_wire(
+        [
+            Message(
+                role="assistant",
+                content=[
+                    ToolRequest(
+                        id="t1",
+                        name="task",
+                        args={"task": "research X", "subagent_type": "researcher"},
+                    )
+                ],
+            ),
+            Message(
+                role="user",
+                content=[
+                    ToolResponse(
+                        id="t1",
+                        tool_name="task",
+                        result=[Text(text=result_text)],
+                    )
+                ],
+            ),
+        ]
+    )
+    row = wire[0]
+    assert row["tool"] == "task"
+    assert len(row["result"]) == DETAIL_MAX + 1
+    assert row["result"].endswith("…")
+    assert row["run_id"] == "run-abc"
+    assert row["child_thread_id"] == "subagent:sess:deadbeef01"
+    assert row["subagent_type"] == "researcher"

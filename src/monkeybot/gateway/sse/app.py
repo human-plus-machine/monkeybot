@@ -52,8 +52,8 @@ from monkeybot.core.persistence.backends import (
     create_storage_backend,
 )
 from monkeybot.core.persistence.transcript import TranscriptWriter, transcript_enabled_from_env
+from monkeybot.core.runtime.events import AgentEvent, TurnComplete, UsageTotals, event_to_json
 from monkeybot.core.runtime.events import Error as AgentError
-from monkeybot.core.runtime.events import TurnComplete, UsageTotals, event_to_json
 from monkeybot.core.runtime.loop import SUMMARY_TRIGGER_RATIO
 from monkeybot.core.runtime.loop import run as run_loop
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
@@ -74,6 +74,16 @@ from monkeybot.web_search import WebSearchTool
 from monkeybot.web_search import build_backend as _build_web_search_backend
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _SessionBusEventPublisher:
+    """Adapt :class:`SessionBus` to :class:`EventPublisherPort` for nested subagent SSE."""
+
+    bus: SessionBus
+
+    async def publish_event(self, event: AgentEvent) -> None:
+        await self.bus.publish_data(event_to_json(event))
 
 
 @dataclass
@@ -412,6 +422,7 @@ class GatewayLoopPort:
                     context_window_tokens=_env_context_window_tokens(),
                     workspace_root=workspace_root,
                     sse_bus=bus,
+                    event_publisher=_SessionBusEventPublisher(bus),
                     extra_tools=extra_tools,
                     subagent_registry=_deps.subagent_registry,
                     scheduled_loops_available=loops_available,

@@ -29,6 +29,40 @@ def test_is_durable_event_classifies_settlement() -> None:
     assert "AssistantDelta" not in DURABLE_EVENT_KINDS
 
 
+def test_subagent_lifecycle_durable_classification() -> None:
+    from monkeybot.core.runtime.events import (
+        SubagentCompleted,
+        SubagentEvent,
+        SubagentStarted,
+    )
+
+    started = SubagentStarted(
+        request_id="p",
+        parent_call_id="c",
+        run_id="r",
+        child_thread_id="t",
+    )
+    completed = SubagentCompleted(
+        request_id="p",
+        parent_call_id="c",
+        run_id="r",
+        child_thread_id="t",
+    )
+    live = SubagentEvent(
+        request_id="p",
+        parent_call_id="c",
+        run_id="r",
+        child_thread_id="t",
+        inner=AssistantDelta(request_id="child", delta="x"),
+    )
+    assert is_durable_event(started)
+    assert is_durable_event(completed)
+    assert not is_durable_event(live)
+    assert "SubagentStarted" in DURABLE_EVENT_KINDS
+    assert "SubagentCompleted" in DURABLE_EVENT_KINDS
+    assert "SubagentEvent" not in DURABLE_EVENT_KINDS
+
+
 def test_assistant_text_ended_roundtrip_with_text() -> None:
     ev = AssistantTextEnded(request_id="r1", text="hello world")
     assert is_durable_event(ev)
