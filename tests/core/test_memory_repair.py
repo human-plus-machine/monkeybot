@@ -206,10 +206,11 @@ async def test_refresh_memory_index_repairs_corrupt_utf8(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_refresh_memory_index_empty_on_os_error(
+async def test_refresh_memory_index_preserves_stale_on_os_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Transient load failures must propagate so refresh keeps the stale index."""
     agent_path = tmp_path / "AGENT.md"
     agent_path.write_text("ok\n", encoding="utf-8")
     mem = tmp_path / "memory"
@@ -234,5 +235,5 @@ async def test_refresh_memory_index_empty_on_os_error(
 
     out = await refresh_memory_index(ctx)
 
-    assert out is not ctx
-    assert out.memory_index == []
+    assert out is ctx
+    assert ctx.memory_index == ["stable"]

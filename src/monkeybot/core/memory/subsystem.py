@@ -189,25 +189,20 @@ class MemorySubsystem:
             return await self._organizer.run()
 
     async def load_index(self) -> list[str]:
-        try:
-            report = await repair_memory_tree(self._storage)
-            if report.quarantined or report.index_rebuilt or report.index_pruned:
-                logger.warning(
-                    "memory repair applied uri=%s quarantined=%s rebuilt=%s pruned=%s entries=%s",
-                    self._memory_uri,
-                    report.quarantined,
-                    report.index_rebuilt,
-                    report.index_pruned,
-                    report.entries_written,
-                )
-            lines = await async_load_index(self._storage)
-        except Exception as exc:
+        # Repair corruption first, then load. Do not swallow load failures here —
+        # refresh_memory_index relies on exceptions to keep a stale index on
+        # transient storage errors (OSError, etc.).
+        report = await repair_memory_tree(self._storage)
+        if report.quarantined or report.index_rebuilt or report.index_pruned:
             logger.warning(
-                "memory load_index failed after repair (serving empty index) uri=%s: %r",
+                "memory repair applied uri=%s quarantined=%s rebuilt=%s pruned=%s entries=%s",
                 self._memory_uri,
-                exc,
+                report.quarantined,
+                report.index_rebuilt,
+                report.index_pruned,
+                report.entries_written,
             )
-            return []
+        lines = await async_load_index(self._storage)
         # Drop working/ entries from the prompt window (demotion).
         filtered: list[str] = []
         for line in lines:
