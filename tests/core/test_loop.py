@@ -1282,6 +1282,46 @@ async def test_run_emits_context_summarize_events_when_over_cap(
 
 
 @pytest.mark.asyncio
+async def test_run_emits_context_usage_after_tools_without_compaction() -> None:
+    """Tool dispatch still yields ContextUsage when needs_compaction is False."""
+    prov = FakeProvider(
+        [
+            [
+                ToolCall(call_id="c1", name="run_command", args={"command": "echo hi"}),
+                Done(),
+            ],
+            [TextDelta(text="done"), Done()],
+        ]
+    )
+    hist = FakeHistory()
+    events = []
+    async for e in run(
+        "u",
+        _ctx(context_window_tokens=200_000),
+        provider=prov,
+        history=hist,
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(("short result", None)),
+        max_turns=4,
+    ):
+        events.append(e)
+
+    assert not any(isinstance(e, ContextSummarizing) for e in events)
+    assert not any(isinstance(e, ContextSummarized) for e in events)
+
+    tool_result_idx = next(
+        i for i, e in enumerate(events) if isinstance(e, ToolCallResult)
+    )
+    post_tool_usage = next(
+        (e for e in events[tool_result_idx + 1 :] if isinstance(e, ContextUsage)),
+        None,
+    )
+    assert post_tool_usage is not None
+    assert post_tool_usage.estimated_tokens > 0
+    assert post_tool_usage.context_window_tokens == 200_000
+
+
+@pytest.mark.asyncio
 async def test_summarization_call_never_receives_vertex_google_search(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
