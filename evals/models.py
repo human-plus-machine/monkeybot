@@ -79,6 +79,11 @@ class EvalRun(BaseModel):
 
         An error is "self-corrected" (not counted) if a later call to the same tool
         in this run succeeded — e.g. a bad-path read_file followed by a good one.
+        Matching is by tool name only, not args: any later success on the same tool
+        forgives *all* prior errors on it, even against different paths/args (e.g. a
+        failed write_file("a") then a successful write_file("b") counts as resolved).
+        Fine for the current scenarios' single-error cases; tighten to per-args
+        matching if a scenario ever needs to tell those apart.
         """
         calls = [c for t in self.turns for c in t.tool_calls]
         unresolved = 0
