@@ -19,12 +19,6 @@
 
 ---
 
-## Bugs
-
-- **Corrupted memory recovery** — investigate how memory can end up corrupted (e.g. bad `INDEX.md` / episodic notes / encoding failures) and add a repair path: detect corruption, recover or quarantine bad files, and restore a usable memory index without manual surgery. (Image generation use case)
-
----
-
 ## Do Later
 
 ### Connectors

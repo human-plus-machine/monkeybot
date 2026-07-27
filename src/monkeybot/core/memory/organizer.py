@@ -29,6 +29,7 @@ from monkeybot.core.memory.index_format import (
     split_index_document,
 )
 from monkeybot.core.memory.note_format import format_memory_note
+from monkeybot.core.memory.repair import repair_memory_tree
 from monkeybot.core.memory.storage_ops import MEMORY_SEARCH_STOPWORDS, async_load_index
 from monkeybot.core.types.content_blocks import Text
 from monkeybot.core.types.interfaces import MonkeybotError
@@ -490,7 +491,20 @@ class MemoryOrganizer:
                 existing_content = await self._storage.read_text(INDEX_FILENAME)
             except Exception as exc:
                 logger.warning("organizer INDEX.md read failed: %r", exc)
-                existing_content = ""
+                try:
+                    report = await repair_memory_tree(self._storage, full_scan=True)
+                    if report.quarantined or report.index_rebuilt or report.index_pruned:
+                        logger.warning(
+                            "organizer memory repair quarantined=%s rebuilt=%s pruned=%s",
+                            report.quarantined,
+                            report.index_rebuilt,
+                            report.index_pruned,
+                        )
+                    if await self._storage.exists(INDEX_FILENAME):
+                        existing_content = await self._storage.read_text(INDEX_FILENAME)
+                except Exception as repair_exc:
+                    logger.warning("organizer memory repair failed: %r", repair_exc)
+                    existing_content = ""
         if not existing_content.strip():
             return f"{DEFAULT_INDEX_HEADER}\n"
         return existing_content

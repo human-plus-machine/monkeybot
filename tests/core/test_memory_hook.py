@@ -108,9 +108,9 @@ async def test_post_tool_without_tool_name_writes_nothing(tmp_path: Path) -> Non
 
 @pytest.mark.asyncio
 async def test_post_tool_skips_read_only_tools_on_success(tmp_path: Path) -> None:
-    """read_file / search_memory / list_skills successes are not captured."""
+    """read_file / load_file / search_memory / list_skills successes are not captured."""
     hook = MemoryHook(storage=_local_st(tmp_path / "memory"))
-    for name in ("read_file", "search_memory", "list_skills"):
+    for name in ("read_file", "load_file", "search_memory", "list_skills"):
         await hook.on_post_tool(
             _payload(
                 HookEvent.POST_TOOL,
@@ -121,6 +121,27 @@ async def test_post_tool_skips_read_only_tools_on_success(tmp_path: Path) -> Non
             )
         )
     assert not (tmp_path / "memory" / "raw").exists()
+
+
+@pytest.mark.asyncio
+async def test_post_tool_sanitizes_data_uri_before_raw_write(tmp_path: Path) -> None:
+    hook = MemoryHook(storage=_local_st(tmp_path / "memory"))
+    # sanitize_tool_result_text only strips data-URIs with >=200 base64 chars.
+    b64 = ("A" * 200) + "=="
+    await hook.on_post_tool(
+        _payload(
+            HookEvent.POST_TOOL,
+            tool_name="custom_tool",
+            tool_args={},
+            tool_result=f"preview data:image/png;base64,{b64} done",
+            tool_error=None,
+        )
+    )
+    raw_files = list((tmp_path / "memory" / "raw").glob("*.md"))
+    assert len(raw_files) == 1
+    body = raw_files[0].read_text(encoding="utf-8")
+    assert f"data:image/png;base64,{b64}" not in body
+    assert "omitted" in body.lower()
 
 
 @pytest.mark.asyncio
