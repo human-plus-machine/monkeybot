@@ -12,6 +12,7 @@ from monkeybot.core.memory.index_format import (
     INDEX_FILENAME,
     append_index_entries,
     format_index_document,
+    format_index_entry_line,
     is_index_entry_line,
     split_index_document,
 )
@@ -24,13 +25,6 @@ from monkeybot.core.memory.note_format import (
 from monkeybot.core.workspace.protocol import WorkspaceStorage
 
 logger = logging.getLogger(__name__)
-
-
-def _index_line(folder: str, filename: str, summary: str) -> str:
-    one = " ".join(summary.strip().split())
-    if len(one) > 160:
-        one = one[:157] + "..."
-    return f"- [[{folder}/{filename}]] | tags: | summary: {one}"
 
 
 async def drop_index_paths(storage: WorkspaceStorage, drop: set[str]) -> None:
@@ -147,7 +141,7 @@ async def update_memory_note(
         existing_idx = await storage.read_text(INDEX_FILENAME)
     else:
         existing_idx = "# Memory Index\n"
-    merged = append_index_entries(existing_idx, [_index_line(folder, filename, summary)])
+    merged = append_index_entries(existing_idx, [format_index_entry_line(folder, filename, summary)])
     await storage.write_text(INDEX_FILENAME, merged)
 
     # Graph is best-effort after durable files + INDEX are consistent.

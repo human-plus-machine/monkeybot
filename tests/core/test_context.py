@@ -248,6 +248,9 @@ async def test_build_context_merges_core_and_mcp_tools(tmp_path: Path) -> None:
         "apply_patch",
         "search_memory",
         "search",
+        "edit_memory",
+        "update_memory",
+        "forget",
         "list_skills",
         "task",
         "enable_mcp",
@@ -634,14 +637,17 @@ async def test_refresh_memory_index_picks_up_new_entries(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_refresh_memory_index_silent_fail_on_unicode_error(
-    tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
+async def test_refresh_memory_index_repairs_corrupt_utf8(tmp_path: Path) -> None:
+    """Corrupt INDEX.md is quarantined/rebuilt; refresh returns the recovered index."""
     agent_path = tmp_path / "AGENT.md"
     agent_path.write_text("ok\n", encoding="utf-8")
     mem = tmp_path / "memory"
     mem.mkdir()
+    (mem / "episodic").mkdir()
+    (mem / "episodic" / "n.md").write_text(
+        "---\ntype: episodic\nstatus: active\n---\n\nRecovered after corrupt INDEX.\n",
+        encoding="utf-8",
+    )
     (mem / "INDEX.md").write_text("valid line\n", encoding="utf-8")
     skills = tmp_path / "skills"
     skills.mkdir()
@@ -656,12 +662,10 @@ async def test_refresh_memory_index_silent_fail_on_unicode_error(
     )
     (mem / "INDEX.md").write_bytes(b"\xff\xfe")
 
-    with caplog.at_level(logging.WARNING, logger="monkeybot.core.context"):
-        out = await refresh_memory_index(ctx)
+    out = await refresh_memory_index(ctx)
 
-    assert out is ctx
-    assert ctx.memory_index == ["valid line"]
-    assert any("[MEMORY]" in r.message for r in caplog.records)
+    assert out is not ctx
+    assert any("episodic/n.md" in line for line in out.memory_index)
 
 
 @pytest.mark.asyncio

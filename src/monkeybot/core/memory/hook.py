@@ -38,6 +38,7 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import Any
 
+from monkeybot.core.context.tool_result_ingress import sanitize_tool_result_text
 from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
 from monkeybot.core.memory.storage_ops import async_search_memory_files
 from monkeybot.core.workspace.protocol import WorkspaceStorage
@@ -51,7 +52,7 @@ _DEDUP_TTL_SEC = 300.0
 """5-minute window over which identical (tool, args) calls are deduped."""
 
 _POST_TOOL_SKIP_ON_SUCCESS = frozenset(
-    {"read_file", "search_memory", "search", "recall", "list_skills"}
+    {"read_file", "load_file", "search_memory", "search", "recall", "list_skills"}
 )
 """Read-only tools whose successful calls are not captured (errors still are)."""
 
@@ -266,8 +267,14 @@ class MemoryHook:
                 "memory: dedup skip for %s (key=%s...)", payload.tool_name, dedup_key[:8]
             )
             return
-        result_preview = _truncate(payload.tool_result, _RESULT_PREVIEW_CHARS)
-        error_preview = _truncate(payload.tool_error, _RESULT_PREVIEW_CHARS)
+        result_preview = _truncate(
+            sanitize_tool_result_text(payload.tool_result or "") or None,
+            _RESULT_PREVIEW_CHARS,
+        )
+        error_preview = _truncate(
+            sanitize_tool_result_text(payload.tool_error or "") or None,
+            _RESULT_PREVIEW_CHARS,
+        )
         args_str = _format_dict(payload.tool_args or {})
         body = (
             f"# post_tool\n\n"

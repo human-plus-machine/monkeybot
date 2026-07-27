@@ -53,6 +53,7 @@ async def test_load_index_returns_empty_when_index_missing(tmp_path: Path) -> No
 
 @pytest.mark.asyncio
 async def test_load_index_unicode_strict_raises_on_invalid_utf8(tmp_path: Path) -> None:
+    """Low-level ``async_load_index`` stays strict; repair lives on MemorySubsystem."""
     memory = tmp_path / "memory"
     memory.mkdir()
     (memory / INDEX_FILENAME).write_bytes(b"\xff\xfe")

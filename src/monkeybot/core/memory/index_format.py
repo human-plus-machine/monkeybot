@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import os
+import re
 
 INDEX_FILENAME = "INDEX.md"
 INDEX_ARCHIVE_FILENAME = "INDEX.archive.md"
 DEFAULT_INDEX_HEADER = "# Memory Index"
+
+_INDEX_LINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 
 
 def index_cap_from_env() -> int:
@@ -16,6 +19,22 @@ def index_cap_from_env() -> int:
         return max(1, int(raw))
     except ValueError:
         return 200
+
+
+def wiki_target_from_line(line: str) -> str | None:
+    """Return the first ``[[target]]`` path in *line*, normalized, or ``None``."""
+    match = _INDEX_LINK_RE.search(line or "")
+    if not match:
+        return None
+    return match.group(1).strip().replace("\\", "/").lstrip("./")
+
+
+def format_index_entry_line(folder: str, filename: str, summary: str) -> str:
+    """Canonical INDEX row: ``- [[folder/file.md]] | tags: | summary: …``."""
+    one = " ".join(summary.strip().split())
+    if len(one) > 160:
+        one = one[:157] + "..."
+    return f"- [[{folder}/{filename}]] | tags: | summary: {one}"
 
 
 def is_index_entry_line(line: str) -> bool:

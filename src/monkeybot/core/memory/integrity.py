@@ -5,11 +5,11 @@ Used by ``scripts/verify_memory.py``, pytest evals (T1), and future tooling.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
-_INDEX_LINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
+from monkeybot.core.memory.index_format import wiki_target_from_line
+
 _TYPED_FOLDERS = frozenset({"episodic", "semantic", "procedural", "working"})
 DEFAULT_MIN_SUMMARY_CHARS = 20
 
@@ -21,9 +21,9 @@ def _load_index_entries(memory_root: Path) -> list[tuple[str, str]]:
         return []
     entries: list[tuple[str, str]] = []
     for line in index.read_text(encoding="utf-8").splitlines():
-        m = _INDEX_LINK_RE.search(line)
-        if m:
-            entries.append((m.group(1), line.strip()))
+        target = wiki_target_from_line(line)
+        if target:
+            entries.append((target, line.strip()))
     return entries
 
 

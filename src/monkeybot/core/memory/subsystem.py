@@ -28,6 +28,7 @@ from monkeybot.core.memory.note_format import (
     parse_memory_note,
 )
 from monkeybot.core.memory.organizer import MemoryOrganizer
+from monkeybot.core.memory.repair import repair_memory_tree
 from monkeybot.core.memory.storage_ops import (
     async_load_index,
     async_load_memory_hit,
@@ -188,6 +189,19 @@ class MemorySubsystem:
             return await self._organizer.run()
 
     async def load_index(self) -> list[str]:
+        # Repair corruption first, then load. Do not swallow load failures here —
+        # refresh_memory_index relies on exceptions to keep a stale index on
+        # transient storage errors (OSError, etc.).
+        report = await repair_memory_tree(self._storage)
+        if report.quarantined or report.index_rebuilt or report.index_pruned:
+            logger.warning(
+                "memory repair applied uri=%s quarantined=%s rebuilt=%s pruned=%s entries=%s",
+                self._memory_uri,
+                report.quarantined,
+                report.index_rebuilt,
+                report.index_pruned,
+                report.entries_written,
+            )
         lines = await async_load_index(self._storage)
         # Drop working/ entries from the prompt window (demotion).
         filtered: list[str] = []
