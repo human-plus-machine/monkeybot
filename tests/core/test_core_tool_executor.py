@@ -156,18 +156,25 @@ class _MCPWithBlob:
         del path, raise_on_error
 
 
-def _ctx(skills: list[SkillRef] | None = None) -> TurnContext:
-    return TurnContext(
-        thread_id="t",
-        request_id="r",
-        agent_md="# Agent",
-        memory_index=[],
-        skills=skills or [],
-        tools=[],
-        user_id=None,
-        parent_run_id=None,
-        model="gemini-2.5-flash",
-    )
+def _ctx(
+    skills: list[SkillRef] | None = None,
+    *,
+    event_publisher: object | None = None,
+) -> TurnContext:
+    kwargs: dict[str, object] = {
+        "thread_id": "t",
+        "request_id": "r",
+        "agent_md": "# Agent",
+        "memory_index": [],
+        "skills": skills or [],
+        "tools": [],
+        "user_id": None,
+        "parent_run_id": None,
+        "model": "gemini-2.5-flash",
+    }
+    if event_publisher is not None:
+        kwargs["event_publisher"] = event_publisher
+    return TurnContext(**kwargs)  # type: ignore[arg-type]
 
 
 def _stub_agent_md_for_tasks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2245,3 +2252,643 @@ async def test_mcp_resource_and_prompt_tools(tmp_path: Path) -> None:
     )
     assert got.error is None
     assert json.loads(got.blocks[0].text)["name"] == "summarize"  # type: ignore[index]
+
+
+# --- Story 2: subagent progress publishing ---------------------------------
+
+
+class _FakeEventPublisher:
+    """Captures publish_event calls for task-tool SSE tests."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.events: list[object] = []
+        self.fail = fail
+
+    async def publish_event(self, event: object) -> None:
+        if self.fail:
+            raise RuntimeError("publish boom")
+        self.events.append(event)
+
+
+def test_turn_context_event_publisher_defaults_none() -> None:
+    ctx = TurnContext(
+        thread_id="t",
+        request_id="r",
+        agent_md="# Agent",
+        memory_index=[],
+        skills=[],
+        tools=[],
+        user_id=None,
+        parent_run_id=None,
+        model="gemini-2.5-flash",
+    )
+    assert ctx.event_publisher is None
+
+
+@pytest.mark.asyncio
+async def test_build_context_accepts_event_publisher(tmp_path: Path) -> None:
+    from monkeybot.core.context import build_context
+
+    agent_path = tmp_path / "AGENT.md"
+    agent_path.write_text("You are helpful.\n", encoding="utf-8")
+    mem = tmp_path / "memory"
+    mem.mkdir()
+    (mem / "INDEX.md").write_text("", encoding="utf-8")
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    pub = _FakeEventPublisher()
+    ctx = await build_context(
+        "thread-1",
+        "req-1",
+        agent_md_path=agent_path,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp_client=_NoMCP(),
+        event_publisher=pub,
+    )
+    assert ctx.event_publisher is pub
+
+
+@pytest.mark.asyncio
+async def test_task_tool_result_includes_child_thread_id_and_subagent_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.runtime.events import TurnComplete, UsageTotals
+
+    agents = tmp_path / "monkeybot_config" / "agents"
+    agents.mkdir(parents=True)
+    (agents / "researcher.md").write_text("# researcher\n", encoding="utf-8")
+    (tmp_path / "monkeybot_config" / "AGENT.md").write_text("# parent\n", encoding="utf-8")
+
+    async def fake_spawn(
+        script: str,
+        envelope: object,
+        *,
+        scratch_dir: object,
+        subprocess_exec: object | None = None,
+        on_event: object | None = None,
+        extra_env: dict[str, str] | None = None,
+    ):
+        del script, scratch_dir, subprocess_exec, on_event, extra_env, envelope
+        yield TurnComplete(
+            request_id="r",
+            usage=UsageTotals(
+                input_tokens=1,
+                output_tokens=1,
+                cached_tokens=0,
+                cost_usd=0.0,
+                duration_ms=1,
+                estimated_prompt_tokens=0,
+            ),
+        )
+
+    monkeypatch.setattr("monkeybot.core.tools.core_tool_executor.spawn_subagent", fake_spawn)
+
+    root = tmp_path
+    _stub_agent_md_for_tasks(root, monkeypatch)
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    worker = root / "subagent_worker.py"
+    worker.write_text("# placeholder\n", encoding="utf-8")
+    monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
+    monkeypatch.setenv("MONKEYBOT_AGENT_ROOT", str(tmp_path))
+
+    registry = {
+        "researcher": SubagentConfig(
+            name="researcher",
+            description="research",
+            skills=[],
+            agent_md="./monkeybot_config/agents/researcher.md",
+        )
+    }
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+        subagent_registry=registry,
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="c-link",
+                name="task",
+                args={"task": "research topic", "subagent_type": "researcher"},
+            ),
+            ctx=_ctx(),
+        )
+    )
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert isinstance(payload["run_id"], str) and payload["run_id"]
+    assert isinstance(payload["child_thread_id"], str)
+    assert payload["child_thread_id"].startswith("subagent:t:")
+    assert payload["subagent_type"] == "researcher"
+
+
+@pytest.mark.asyncio
+async def test_task_tool_publishes_started_events_completed_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.runtime.events import (
+        AssistantDelta,
+        SubagentCompleted,
+        SubagentEvent,
+        SubagentStarted,
+        ToolCallStarted,
+        TurnComplete,
+        UsageTotals,
+    )
+
+    async def fake_spawn(
+        script: str,
+        envelope: object,
+        *,
+        scratch_dir: object,
+        subprocess_exec: object | None = None,
+        on_event: object | None = None,
+        extra_env: dict[str, str] | None = None,
+    ):
+        del script, scratch_dir, subprocess_exec, extra_env, envelope
+        events = [
+            AssistantDelta(request_id="r", delta="hi"),
+            ToolCallStarted(
+                request_id="r", tool="search", label="search", args={}, call_id="c1"
+            ),
+            TurnComplete(
+                request_id="r",
+                usage=UsageTotals(
+                    input_tokens=1,
+                    output_tokens=1,
+                    cached_tokens=0,
+                    cost_usd=0.0,
+                    duration_ms=1,
+                    estimated_prompt_tokens=0,
+                ),
+            ),
+        ]
+        for evt in events:
+            if on_event is not None:
+                await on_event(evt)  # type: ignore[misc]
+            yield evt
+
+    monkeypatch.setattr("monkeybot.core.tools.core_tool_executor.spawn_subagent", fake_spawn)
+
+    root = tmp_path
+    _stub_agent_md_for_tasks(root, monkeypatch)
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    worker = root / "subagent_worker.py"
+    worker.write_text("# placeholder\n", encoding="utf-8")
+    monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
+
+    pub = _FakeEventPublisher()
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="c-pub",
+                name="task",
+                args={"task": "do the thing", "context": "ctx"},
+            ),
+            ctx=_ctx(event_publisher=pub),
+        )
+    )
+    assert err is None and out is not None
+    kinds = [getattr(e, "kind", None) for e in pub.events]
+    assert kinds[0] == "SubagentStarted"
+    assert isinstance(pub.events[0], SubagentStarted)
+    assert "SubagentEvent" in kinds
+    assert any(isinstance(e, SubagentEvent) for e in pub.events)
+    assert kinds[-1] == "SubagentCompleted"
+    assert isinstance(pub.events[-1], SubagentCompleted)
+
+
+@pytest.mark.asyncio
+async def test_task_tool_noop_publish_when_publisher_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.runtime.events import AssistantDelta, TurnComplete, UsageTotals
+
+    async def fake_spawn(
+        script: str,
+        envelope: object,
+        *,
+        scratch_dir: object,
+        subprocess_exec: object | None = None,
+        on_event: object | None = None,
+        extra_env: dict[str, str] | None = None,
+    ):
+        del script, scratch_dir, subprocess_exec, extra_env, envelope
+        events = [
+            AssistantDelta(request_id="r", delta="ok"),
+            TurnComplete(
+                request_id="r",
+                usage=UsageTotals(
+                    input_tokens=1,
+                    output_tokens=1,
+                    cached_tokens=0,
+                    cost_usd=0.0,
+                    duration_ms=1,
+                    estimated_prompt_tokens=0,
+                ),
+            ),
+        ]
+        for evt in events:
+            if on_event is not None:
+                await on_event(evt)  # type: ignore[misc]
+            yield evt
+
+    monkeypatch.setattr("monkeybot.core.tools.core_tool_executor.spawn_subagent", fake_spawn)
+
+    root = tmp_path
+    _stub_agent_md_for_tasks(root, monkeypatch)
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    worker = root / "subagent_worker.py"
+    worker.write_text("# placeholder\n", encoding="utf-8")
+    monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
+
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="c-noop",
+                name="task",
+                args={"task": "do the thing"},
+            ),
+            ctx=_ctx(),
+        )
+    )
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert payload["ok"] is True
+    assert payload["assistant_text"] == "ok"
+    assert isinstance(payload.get("child_thread_id"), str)
+    assert payload["child_thread_id"].startswith("subagent:t:")
+    assert "run_id" in payload
+
+
+@pytest.mark.asyncio
+async def test_task_tool_publish_error_does_not_fail_tool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.runtime.events import AssistantDelta, TurnComplete, UsageTotals
+
+    async def fake_spawn(
+        script: str,
+        envelope: object,
+        *,
+        scratch_dir: object,
+        subprocess_exec: object | None = None,
+        on_event: object | None = None,
+        extra_env: dict[str, str] | None = None,
+    ):
+        del script, scratch_dir, subprocess_exec, extra_env, envelope
+        events = [
+            AssistantDelta(request_id="r", delta="hi"),
+            TurnComplete(
+                request_id="r",
+                usage=UsageTotals(
+                    input_tokens=1,
+                    output_tokens=1,
+                    cached_tokens=0,
+                    cost_usd=0.0,
+                    duration_ms=1,
+                    estimated_prompt_tokens=0,
+                ),
+            ),
+        ]
+        for evt in events:
+            if on_event is not None:
+                await on_event(evt)  # type: ignore[misc]
+            yield evt
+
+    monkeypatch.setattr("monkeybot.core.tools.core_tool_executor.spawn_subagent", fake_spawn)
+
+    root = tmp_path
+    _stub_agent_md_for_tasks(root, monkeypatch)
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    worker = root / "subagent_worker.py"
+    worker.write_text("# placeholder\n", encoding="utf-8")
+    monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
+
+    pub = _FakeEventPublisher(fail=True)
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="c-fail-pub",
+                name="task",
+                args={"task": "do the thing"},
+            ),
+            ctx=_ctx(event_publisher=pub),
+        )
+    )
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert payload["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_task_tool_sets_child_thread_id_on_envelope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.runtime.events import TurnComplete, UsageTotals
+
+    seen: list[object] = []
+
+    async def fake_spawn(
+        script: str,
+        envelope: object,
+        *,
+        scratch_dir: object,
+        subprocess_exec: object | None = None,
+        on_event: object | None = None,
+        extra_env: dict[str, str] | None = None,
+    ):
+        del script, scratch_dir, subprocess_exec, on_event, extra_env
+        seen.append(envelope)
+        yield TurnComplete(
+            request_id="r",
+            usage=UsageTotals(
+                input_tokens=1,
+                output_tokens=1,
+                cached_tokens=0,
+                cost_usd=0.0,
+                duration_ms=1,
+                estimated_prompt_tokens=0,
+            ),
+        )
+
+    monkeypatch.setattr("monkeybot.core.tools.core_tool_executor.spawn_subagent", fake_spawn)
+
+    root = tmp_path
+    _stub_agent_md_for_tasks(root, monkeypatch)
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    worker = root / "subagent_worker.py"
+    worker.write_text("# placeholder\n", encoding="utf-8")
+    monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
+
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="c-env",
+                name="task",
+                args={"task": "do the thing"},
+            ),
+            ctx=_ctx(),
+        )
+    )
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert len(seen) == 1
+    env = seen[0]
+    assert getattr(env, "child_thread_id", None) == payload["child_thread_id"]
+    assert isinstance(payload["child_thread_id"], str)
+    assert payload["child_thread_id"].startswith("subagent:t:")
+
+
+@pytest.mark.asyncio
+async def test_task_tool_queue_mode_includes_linkage_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.persistence.durable_runs import SubagentEnvelope as StoredEnvelope
+    from monkeybot.core.persistence.sqlite_backend import SQLiteStorageBackend
+
+    monkeypatch.setenv("MONKEYBOT_TASK_QUEUE", "1")
+    root = tmp_path
+    _stub_agent_md_for_tasks(root, monkeypatch)
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    worker = root / "subagent_worker.py"
+    worker.write_text("# placeholder\n", encoding="utf-8")
+    monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
+    monkeypatch.setenv("MONKEYBOT_AGENT_ROOT", str(tmp_path))
+
+    agents = tmp_path / "monkeybot_config" / "agents"
+    agents.mkdir(parents=True)
+    (agents / "researcher.md").write_text("# researcher\n", encoding="utf-8")
+    (tmp_path / "monkeybot_config" / "AGENT.md").write_text("# parent\n", encoding="utf-8")
+
+    registry = {
+        "researcher": SubagentConfig(
+            name="researcher",
+            description="research",
+            skills=[],
+            agent_md="./monkeybot_config/agents/researcher.md",
+        )
+    }
+
+    backend = SQLiteStorageBackend("sqlite:///:memory:")
+    await backend.open()
+    try:
+        ex = CoreToolExecutor(
+            workspace_root=root,
+            memory=_mem_sub(mem),
+            skills_path=skills,
+            mcp=_NoMCP(),
+            run_store=backend.runs(),
+            subagent_registry=registry,
+        )
+        out, err = unwrap_tool_execution_result(
+            await ex.execute(
+                call=ToolCall(
+                    call_id="c-q-link",
+                    name="task",
+                    args={
+                        "task": "queued task",
+                        "context": "ctx",
+                        "subagent_type": "researcher",
+                    },
+                ),
+                ctx=_ctx(),
+            )
+        )
+        assert err is None and out is not None
+        payload = json.loads(out)
+        assert payload["ok"] is True
+        assert payload["queued"] is True
+        assert isinstance(payload["child_thread_id"], str)
+        assert payload["child_thread_id"].startswith("subagent:t:")
+        assert payload["subagent_type"] == "researcher"
+        assert "Nested SSE progress is not streamed in queue mode" in payload["message"]
+        row = await backend.runs().get_run(payload["run_id"])
+        assert row is not None
+        stored = StoredEnvelope.from_json(row.envelope_json)
+        assert stored.child_thread_id == payload["child_thread_id"]
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_task_tool_queue_mode_skips_nested_sse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Queue mode returns before SubagentStarted/Completed (no parent publisher reachability)."""
+    from monkeybot.core.persistence.sqlite_backend import SQLiteStorageBackend
+
+    monkeypatch.setenv("MONKEYBOT_TASK_QUEUE", "1")
+    root = tmp_path
+    _stub_agent_md_for_tasks(root, monkeypatch)
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    worker = root / "subagent_worker.py"
+    worker.write_text("# placeholder\n", encoding="utf-8")
+    monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
+
+    backend = SQLiteStorageBackend("sqlite:///:memory:")
+    await backend.open()
+    try:
+        pub = _FakeEventPublisher()
+        ex = CoreToolExecutor(
+            workspace_root=root,
+            memory=_mem_sub(mem),
+            skills_path=skills,
+            mcp=_NoMCP(),
+            run_store=backend.runs(),
+        )
+        out, err = unwrap_tool_execution_result(
+            await ex.execute(
+                call=ToolCall(
+                    call_id="c-q-sse",
+                    name="task",
+                    args={"task": "queued task", "context": "ctx"},
+                ),
+                ctx=_ctx(event_publisher=pub),
+            )
+        )
+        assert err is None and out is not None
+        assert pub.events == []
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_task_tool_publishes_completed_when_payload_build_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SubagentCompleted must still fire if finalize/payload assembly raises."""
+    from monkeybot.core.runtime.events import (
+        AssistantDelta,
+        SubagentCompleted,
+        SubagentStarted,
+        TurnComplete,
+        UsageTotals,
+    )
+
+    async def fake_spawn(
+        script: str,
+        envelope: object,
+        *,
+        scratch_dir: object,
+        subprocess_exec: object | None = None,
+        on_event: object | None = None,
+        extra_env: dict[str, str] | None = None,
+    ):
+        del script, scratch_dir, subprocess_exec, extra_env, envelope
+        events = [
+            AssistantDelta(request_id="r", delta="hi"),
+            TurnComplete(
+                request_id="r",
+                usage=UsageTotals(
+                    input_tokens=1,
+                    output_tokens=1,
+                    cached_tokens=0,
+                    cost_usd=0.0,
+                    duration_ms=1,
+                    estimated_prompt_tokens=0,
+                ),
+            ),
+        ]
+        for evt in events:
+            if on_event is not None:
+                await on_event(evt)  # type: ignore[misc]
+            yield evt
+
+    monkeypatch.setattr("monkeybot.core.tools.core_tool_executor.spawn_subagent", fake_spawn)
+
+    def boom(**_kwargs: object) -> dict[str, object]:
+        raise RuntimeError("payload boom")
+
+    monkeypatch.setattr(
+        "monkeybot.core.tools.core_tool_executor._task_result_payload",
+        boom,
+    )
+
+    root = tmp_path
+    _stub_agent_md_for_tasks(root, monkeypatch)
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    worker = root / "subagent_worker.py"
+    worker.write_text("# placeholder\n", encoding="utf-8")
+    monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
+
+    pub = _FakeEventPublisher()
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="c-finalize",
+                name="task",
+                args={"task": "do the thing"},
+            ),
+            ctx=_ctx(event_publisher=pub),
+        )
+    )
+    assert err is None and out is not None
+    kinds = [getattr(e, "kind", None) for e in pub.events]
+    assert kinds[0] == "SubagentStarted"
+    assert isinstance(pub.events[0], SubagentStarted)
+    assert kinds[-1] == "SubagentCompleted"
+    completed = pub.events[-1]
+    assert isinstance(completed, SubagentCompleted)
+    assert completed.ok is False
+    assert any("payload boom" in e for e in completed.errors)
+    payload = json.loads(out)
+    assert payload["ok"] is False
+    assert any("payload boom" in e for e in payload["errors"])

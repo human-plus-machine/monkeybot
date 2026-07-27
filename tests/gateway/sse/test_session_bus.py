@@ -38,6 +38,35 @@ async def test_replay_buffer_caps_at_maxlen() -> None:
 
 
 @pytest.mark.asyncio
+async def test_nested_replay_lane_does_not_evict_primary() -> None:
+    bus = SessionBus(
+        created_at_ms=0,
+        agent_md=None,
+        replay_maxlen=2,
+        nested_replay_maxlen=2,
+    )
+    await bus.publish_data('{"lane":"primary","i":1}', lane="primary")
+    await bus.publish_data('{"lane":"primary","i":2}', lane="primary")
+    for i in range(5):
+        await bus.publish_data(f'{{"lane":"nested","i":{i}}}', lane="nested")
+    replay, _q = await bus.subscribe(0)
+    # Both primary frames survive despite nested overflow.
+    assert any('"lane":"primary","i":1' in frame for frame in replay)
+    assert any('"lane":"primary","i":2' in frame for frame in replay)
+    # Nested lane keeps only its last two.
+    nested_frames = [f for f in replay if '"lane":"nested"' in f]
+    assert len(nested_frames) == 2
+    assert '"i":3' in nested_frames[0]
+    assert '"i":4' in nested_frames[1]
+    seqs = []
+    for frame in replay:
+        for line in frame.splitlines():
+            if line.startswith("id:"):
+                seqs.append(int(line[len("id:") :].strip()))
+    assert seqs == sorted(seqs)
+
+
+@pytest.mark.asyncio
 async def test_ping_frames_not_added_to_replay() -> None:
     bus = SessionBus(created_at_ms=0, agent_md=None)
     await bus.publish_data('{"one":true}')

@@ -30,6 +30,8 @@ PENDING_RESPONSE_TIMEOUT_SEC: float = float(os.environ.get("PENDING_RESPONSE_TIM
 _QUIESCE_TURN_TIMEOUT_SEC: float = float(os.environ.get("MONKEYBOT_QUIESCE_TURN_TIMEOUT_SEC", "30"))
 _QUIESCE_HARD_CANCEL_TIMEOUT_SEC: float = 5.0
 
+ReplayLane = Literal["primary", "nested"]
+
 
 @dataclass(frozen=True)
 class RemoveResult:
@@ -48,12 +50,28 @@ def _replay_maxlen_from_env() -> int:
         return 256
 
 
+def _nested_replay_maxlen_from_env() -> int:
+    """Nested subagent traffic uses a separate replay lane (SSE_NESTED_REPLAY_MAX)."""
+    raw = os.environ.get("SSE_NESTED_REPLAY_MAX", "").strip()
+    if not raw:
+        return _replay_maxlen_from_env()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return _replay_maxlen_from_env()
+
+
 class SessionAlreadyExistsError(Exception):
     """Raised when POST /sessions repeats an existing client-supplied id."""
 
 
 class SessionBus:
-    """Broadcasts framed SSE events; buffers numbered data events for replay."""
+    """Broadcasts framed SSE events; buffers numbered data events for replay.
+
+    Primary-turn and nested-subagent events share one monotonic ``_seq`` (for
+    Last-Event-ID ordering) but use **partitioned** replay deques so a chatty
+    subagent cannot evict parent-turn frames from the primary lane.
+    """
 
     def __init__(
         self,
@@ -61,6 +79,7 @@ class SessionBus:
         created_at_ms: int,
         agent_md: str | None,
         replay_maxlen: int | None = None,
+        nested_replay_maxlen: int | None = None,
         provider: Any | None = None,
         model_name: str | None = None,
     ) -> None:
@@ -71,8 +90,16 @@ class SessionBus:
         self.current_request_id: str | None = None
         self.cancel_requested_for: str | None = None
         self._seq = 0
-        maxlen = replay_maxlen if replay_maxlen is not None else _replay_maxlen_from_env()
-        self._replay: deque[tuple[int, str]] = deque(maxlen=maxlen)
+        primary_maxlen = (
+            replay_maxlen if replay_maxlen is not None else _replay_maxlen_from_env()
+        )
+        nested_maxlen = (
+            nested_replay_maxlen
+            if nested_replay_maxlen is not None
+            else _nested_replay_maxlen_from_env()
+        )
+        self._replay_primary: deque[tuple[int, str]] = deque(maxlen=primary_maxlen)
+        self._replay_nested: deque[tuple[int, str]] = deque(maxlen=nested_maxlen)
         self._subscribers: set[asyncio.Queue[str]] = set()
         self._lock = asyncio.Lock()
         self.pending_responses: dict[str, asyncio.Future[Any]] = {}
@@ -134,13 +161,28 @@ class SessionBus:
             return "terminated"
         return "unknown"
 
-    async def publish_data(self, data_json: str) -> int:
-        """Buffer and broadcast one JSON data event; returns monotonic sequence id."""
+    def _replay_lane(self, lane: ReplayLane) -> deque[tuple[int, str]]:
+        return self._replay_nested if lane == "nested" else self._replay_primary
+
+    def _merged_replay(self) -> list[tuple[int, str]]:
+        """Primary + nested frames sorted by shared sequence id."""
+        return sorted(
+            (*self._replay_primary, *self._replay_nested),
+            key=lambda item: item[0],
+        )
+
+    async def publish_data(self, data_json: str, *, lane: ReplayLane = "primary") -> int:
+        """Buffer and broadcast one JSON data event; returns monotonic sequence id.
+
+        ``lane`` selects which partitioned replay deque stores the frame. Nested
+        subagent progress should use ``lane="nested"`` so it cannot evict
+        primary-turn events.
+        """
         async with self._lock:
             self._seq += 1
             seq = self._seq
             frame = format_data_event(seq, data_json)
-            self._replay.append((seq, frame))
+            self._replay_lane(lane).append((seq, frame))
             subscribers = list(self._subscribers)
         for q in subscribers:
             await q.put(frame)
@@ -160,12 +202,15 @@ class SessionBus:
         Register a subscriber and return buffered frames after last_event_id.
 
         If last_event_id is None, replay all buffered frames (seq > 0).
+        Merges primary and nested lanes in sequence order.
         """
         async with self._lock:
             q: asyncio.Queue[str] = asyncio.Queue()
             self._subscribers.add(q)
             cutoff = last_event_id if last_event_id is not None else 0
-            replay_frames = [frame for seq, frame in self._replay if seq > cutoff]
+            replay_frames = [
+                frame for seq, frame in self._merged_replay() if seq > cutoff
+            ]
         return replay_frames, q
 
     async def unsubscribe(self, queue: asyncio.Queue[str]) -> None:

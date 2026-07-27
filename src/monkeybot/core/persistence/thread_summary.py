@@ -49,6 +49,9 @@ _FROZEN_TOOL_MEDIA_RE = re.compile(
 # image-suffixed path from being misrepresented as image rows on the wire.
 _IMAGE_CAPABLE_TOOLS = frozenset({"load_file"})
 
+# Optional top-level fields elevated from task tool result JSON onto wire rows.
+_TASK_LINKAGE_KEYS: tuple[str, ...] = ("run_id", "child_thread_id", "subagent_type")
+
 
 @dataclass(frozen=True)
 class ChatThreadSummary:
@@ -165,12 +168,7 @@ def _resolve_image_path(
 ) -> str | None:
     if isinstance(path, str) and path.strip():
         return path.strip()
-    if (
-        isinstance(attachment_id, str)
-        and attachment_id.strip()
-        and thread_id
-        and thread_id.strip()
-    ):
+    if isinstance(attachment_id, str) and attachment_id.strip() and thread_id and thread_id.strip():
         return attachment_workspace_path(thread_id.strip(), attachment_id.strip())
     return None
 
@@ -209,14 +207,8 @@ def _image_rows_for_tool_response(
             )
             continue
         filename = meta.get("filename")
-        label = (
-            filename.strip()
-            if isinstance(filename, str) and filename.strip()
-            else resolved
-        )
-        rows.append(
-            _image_row(path=resolved, mime_type=block.mime_type, label=label)
-        )
+        label = filename.strip() if isinstance(filename, str) and filename.strip() else resolved
+        rows.append(_image_row(path=resolved, mime_type=block.mime_type, label=label))
     if rows:
         return rows
 
@@ -227,9 +219,7 @@ def _image_rows_for_tool_response(
     path = _path_from_tool_args(dict(req.args or {}))
     attachment_id, freeze_kind = _frozen_image_hint(resp.result)
     if path is None and freeze_kind == "image":
-        path = _resolve_image_path(
-            path=None, attachment_id=attachment_id, thread_id=thread_id
-        )
+        path = _resolve_image_path(path=None, attachment_id=attachment_id, thread_id=thread_id)
     if not path:
         return []
     if freeze_kind != "image" and PurePosixPath(path).suffix.lower() not in _MIME_BY_SUFFIX:
@@ -243,6 +233,27 @@ def _tool_responses_by_id(messages: list[Message]) -> dict[str, ToolResponse]:
         for block in msg.content:
             if isinstance(block, ToolResponse) and block.id:
                 out[block.id] = block
+    return out
+
+
+def _task_linkage_from_result(result_text: str) -> dict[str, str]:
+    """Parse task tool result JSON and return elevated linkage fields.
+
+    Returns only keys among run_id / child_thread_id / subagent_type whose
+    values are non-empty strings. Returns {} on non-JSON, non-object, or
+    missing/invalid fields. Never raises.
+    """
+    try:
+        raw = json.loads(result_text)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key in _TASK_LINKAGE_KEYS:
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            out[key] = value.strip()
     return out
 
 
@@ -300,9 +311,7 @@ def messages_to_wire(
 
         for req in tool_requests:
             resp = responses.get(req.id)
-            result_text = (
-                _text_from_blocks(resp.result, call_id=req.id) if resp is not None else ""
-            )
+            result_text = _text_from_blocks(resp.result, call_id=req.id) if resp is not None else ""
             error: str | None = None
             if resp is not None and resp.is_error:
                 error = result_text or "tool error"
@@ -314,13 +323,14 @@ def messages_to_wire(
                 "call_id": req.id,
                 "args": truncate_wire_args(dict(req.args)),
             }
+            # Elevate linkage from full result before truncating the stored string.
+            if req.name == "task" and result_text:
+                row.update(_task_linkage_from_result(result_text))
             if result_text:
                 row["result"] = truncate_detail(result_text)
             if error:
                 row["error"] = truncate_detail(error)
             out.append(row)
             if resp is not None and not resp.is_error:
-                out.extend(
-                    _image_rows_for_tool_response(req, resp, thread_id=thread_id)
-                )
+                out.extend(_image_rows_for_tool_response(req, resp, thread_id=thread_id))
     return out

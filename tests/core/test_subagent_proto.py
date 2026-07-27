@@ -165,6 +165,33 @@ def test_subagent_envelope_omits_null_parent_session_id() -> None:
     assert SubagentEnvelope.from_json(env.to_json()).parent_session_id is None
 
 
+def test_proto_envelope_roundtrip_child_thread_id() -> None:
+    env = SubagentEnvelope(
+        task="t",
+        context="c",
+        memory_storage_uri="local://m",
+        parent_run_id="p1",
+        child_thread_id="subagent:sess:abc1234567",
+    )
+    payload = json.loads(env.to_json())
+    assert payload["child_thread_id"] == "subagent:sess:abc1234567"
+    restored = SubagentEnvelope.from_json(env.to_json())
+    assert restored == env
+    assert restored.child_thread_id == "subagent:sess:abc1234567"
+
+
+def test_proto_envelope_omits_null_child_thread_id() -> None:
+    env = SubagentEnvelope(
+        task="t",
+        context="c",
+        memory_storage_uri="local://m",
+        parent_run_id="p1",
+    )
+    payload = json.loads(env.to_json())
+    assert "child_thread_id" not in payload
+    assert SubagentEnvelope.from_json(env.to_json()).child_thread_id is None
+
+
 def test_resolve_task_agent_md_path_uses_registry(tmp_path: Path) -> None:
     impl = tmp_path / "agents" / "researcher.md"
     impl.parent.mkdir(parents=True)

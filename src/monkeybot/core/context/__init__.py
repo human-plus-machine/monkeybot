@@ -17,6 +17,7 @@ from monkeybot.core.attachments.tools import load_file_tool_def
 from monkeybot.core.config.settings import SubagentConfig
 from monkeybot.core.mcp.ports_mcp import MCPClientPort
 from monkeybot.core.memory.subsystem import MemorySubsystem
+from monkeybot.core.runtime.events import AgentEvent
 from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.todo_list.store import TodoListStore
@@ -59,11 +60,22 @@ class PendingResponseBusPort(Protocol):
 
     def resolve_pending(self, pending_key: str, payload: Any) -> bool: ...
 
-    def is_pending_or_terminal(self, pending_key: str) -> Literal["pending", "terminated", "unknown"]: ...
+    def is_pending_or_terminal(
+        self, pending_key: str
+    ) -> Literal["pending", "terminated", "unknown"]: ...
 
     def abandon_pending_timeout(self, pending_key: str) -> None: ...
 
     def abandon_pending_cancel_all(self) -> None: ...
+
+
+@runtime_checkable
+class EventPublisherPort(Protocol):
+    """Minimal sink for parent-session AgentEvents (keeps core free of gateway imports)."""
+
+    async def publish_event(self, event: AgentEvent) -> None:
+        """Serialize and publish onto the parent session SSE bus."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -106,6 +118,8 @@ class TurnContext:
     """When True (parent agent), optional LLM curation may narrow memory in the system prompt."""
     sse_bus: PendingResponseBusPort | None = None
     """Gateway session bus for Story 5 pending UI responses; None for CLI / harness."""
+    event_publisher: EventPublisherPort | None = None
+    """Optional parent SSE publisher for nested subagent progress; None for CLI / tests."""
     subagent_personas: tuple[tuple[str, str], ...] = ()
     """Named subagent types (name, description) advertised to the parent in the harness."""
     catalog_mcp_servers: tuple[str, ...] = ()
@@ -370,7 +384,10 @@ def _core_tool_defs(
     read_schema: dict[str, object] = {
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "Repo-relative path under the workspace root."},
+            "path": {
+                "type": "string",
+                "description": "Repo-relative path under the workspace root.",
+            },
             "offset": {"type": "integer", "description": "1-based start line (optional)."},
             "limit": {"type": "integer", "description": "Max lines to return (optional)."},
         },
@@ -387,7 +404,10 @@ def _core_tool_defs(
     replace_schema: dict[str, object] = {
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "Repo-relative path under the workspace root."},
+            "path": {
+                "type": "string",
+                "description": "Repo-relative path under the workspace root.",
+            },
             "old_string": {
                 "type": "string",
                 "description": (
@@ -811,6 +831,7 @@ async def build_context(
     workspace_root: Path | None = None,
     enable_context_curation: bool = True,
     sse_bus: PendingResponseBusPort | None = None,
+    event_publisher: EventPublisherPort | None = None,
     extra_tools: Sequence[CustomTool] | None = None,
     subagent_registry: dict[str, SubagentConfig] | None = None,
     scheduled_loops_available: bool = False,
@@ -836,6 +857,8 @@ async def build_context(
         context_window_tokens: Model context budget for pre-flight and summarization triggers.
         workspace_root: Optional workspace root for tools/spill paths (``paths.workspace_root``).
         enable_context_curation: When False (e.g. subagent), skip LLM context curation for prompts.
+        sse_bus: Optional gateway bus for pending UI responses.
+        event_publisher: Optional parent SSE publisher for nested subagent progress.
         extra_tools: Optional list of in-process :class:`CustomTool` implementations.
             Their ``tool_def`` is appended to the tool list advertised to the model and
             their ``execute`` method is dispatched by :class:`CoreToolExecutor`.
@@ -866,11 +889,7 @@ async def build_context(
     )
     if not include_task_tool:
         # Subagents may search memory but must not mutate it.
-        tools = [
-            t
-            for t in tools
-            if t.name not in {"edit_memory", "update_memory", "forget"}
-        ]
+        tools = [t for t in tools if t.name not in {"edit_memory", "update_memory", "forget"}]
     if attachments_enabled_from_env():
         tools.append(load_file_tool_def())
     tools.extend(mcp_client.all_tools())
@@ -898,6 +917,7 @@ async def build_context(
         memory=memory,
         context_curation_enabled=enable_context_curation,
         sse_bus=sse_bus,
+        event_publisher=event_publisher,
         subagent_personas=personas,
         catalog_mcp_servers=catalog_names,
         scheduled_loops_available=scheduled_loops_available,

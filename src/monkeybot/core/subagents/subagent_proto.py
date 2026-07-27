@@ -101,9 +101,7 @@ def resolve_default_agent_md_path(agent_root: Path | None = None) -> Path:
     default = resolve_project_path("AGENT.md", root)
     if default.is_file():
         return default
-    raise ValueError(
-        "No AGENT.md found for subagent (set paths.agent_md or a persona agent_md)"
-    )
+    raise ValueError("No AGENT.md found for subagent (set paths.agent_md or a persona agent_md)")
 
 
 def resolve_task_agent_md_path(
@@ -149,6 +147,7 @@ class SubagentEnvelope:
     agent_md: str | None = None
     subagent_type: str | None = None
     parent_session_id: str | None = None
+    child_thread_id: str | None = None
 
     def to_json(self) -> str:
         """Serialize to a compact JSON object for stdin (UTF-8)."""
@@ -167,6 +166,8 @@ class SubagentEnvelope:
             payload["subagent_type"] = self.subagent_type
         if self.parent_session_id is not None:
             payload["parent_session_id"] = self.parent_session_id
+        if self.child_thread_id is not None:
+            payload["child_thread_id"] = self.child_thread_id
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
     @classmethod
@@ -189,6 +190,7 @@ class SubagentEnvelope:
             agent_md=_opt_str_field(decoded, "agent_md"),
             subagent_type=_opt_str_field(decoded, "subagent_type"),
             parent_session_id=_opt_str_field(decoded, "parent_session_id"),
+            child_thread_id=_opt_str_field(decoded, "child_thread_id"),
         )
 
 
