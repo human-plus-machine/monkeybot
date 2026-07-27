@@ -519,6 +519,11 @@ async def _run_history_summarization(
             vertex_google_search=vertex_google_search,
         )
         usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, post)
+        yield ContextUsage(
+            request_id=state.ctx.request_id,
+            estimated_tokens=post,
+            context_window_tokens=state.ctx.context_window_tokens,
+        )
 
 
 async def _maybe_summarize_on_token_pressure(
@@ -677,7 +682,7 @@ async def _maybe_compact_and_shape(
     usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, preflight)
     yield ContextUsage(
         request_id=state.ctx.request_id,
-        estimated_tokens=usage.estimated_prompt_tokens,
+        estimated_tokens=preflight,
         context_window_tokens=state.ctx.context_window_tokens,
     )
     cap = max(1, int(state.ctx.context_window_tokens * SUMMARY_TRIGGER_RATIO))

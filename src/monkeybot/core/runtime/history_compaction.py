@@ -32,7 +32,7 @@ from monkeybot.core.types.content_blocks import (
     ToolResponse,
 )
 
-from .events import AgentEvent, ContextSummarized, ContextSummarizing
+from .events import AgentEvent, ContextSummarized, ContextSummarizing, ContextUsage
 from .loop_messages import _load_agent_chat_history, _summary_line_for_message
 from .loop_usage import _prompt_input_tokens_for_history
 
@@ -280,46 +280,52 @@ async def _append_budgeted_tool_responses(
         Message(role="user", content=trimmed),
     )
     usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, budgeter.used_tokens)
-    if not needs_compaction:
-        return
-    yield ContextSummarizing(
+    current = budgeter.used_tokens
+    if needs_compaction:
+        yield ContextSummarizing(
+            request_id=ctx.request_id,
+            estimated_tokens=current,
+            context_window_tokens=ctx.context_window_tokens,
+        )
+        try:
+            turns_summarized = await _compact_history_if_needed(
+                thread_id=ctx.thread_id,
+                history=history,
+                provider=provider,
+                model=_summarization_model_id(ctx),
+                window_tokens=ctx.context_window_tokens,
+            )
+        except Exception:
+            logger.warning(
+                "post-tool summarization failed %s; continuing",
+                kv(request_id=ctx.request_id, thread_id=ctx.thread_id),
+                exc_info=True,
+            )
+            turns_summarized = 0
+        yield ContextSummarized(
+            request_id=ctx.request_id,
+            turns_summarized=turns_summarized,
+        )
+        if turns_summarized > 0:
+            if epoch is not None:
+                epoch.begin_new_epoch()
+            chat_messages = await _load_agent_chat_history(history, ctx.thread_id)
+            post = await _prompt_input_tokens_for_history(
+                ctx=ctx,
+                chat_messages=chat_messages,
+                provider=provider,
+                attachment_store=None,
+                attachment_catalog=None,
+                vertex_google_search=vertex_google_search,
+                epoch=epoch,
+            )
+            usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, post)
+            current = post
+    yield ContextUsage(
         request_id=ctx.request_id,
-        estimated_tokens=usage.estimated_prompt_tokens,
+        estimated_tokens=current,
         context_window_tokens=ctx.context_window_tokens,
     )
-    try:
-        turns_summarized = await _compact_history_if_needed(
-            thread_id=ctx.thread_id,
-            history=history,
-            provider=provider,
-            model=_summarization_model_id(ctx),
-            window_tokens=ctx.context_window_tokens,
-        )
-    except Exception:
-        logger.warning(
-            "post-tool summarization failed %s; continuing",
-            kv(request_id=ctx.request_id, thread_id=ctx.thread_id),
-            exc_info=True,
-        )
-        turns_summarized = 0
-    yield ContextSummarized(
-        request_id=ctx.request_id,
-        turns_summarized=turns_summarized,
-    )
-    if turns_summarized > 0:
-        if epoch is not None:
-            epoch.begin_new_epoch()
-        chat_messages = await _load_agent_chat_history(history, ctx.thread_id)
-        post = await _prompt_input_tokens_for_history(
-            ctx=ctx,
-            chat_messages=chat_messages,
-            provider=provider,
-            attachment_store=None,
-            attachment_catalog=None,
-            vertex_google_search=vertex_google_search,
-            epoch=epoch,
-        )
-        usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, post)
 
 
 async def _summarize_history(

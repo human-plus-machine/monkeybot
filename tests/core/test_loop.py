@@ -30,6 +30,8 @@ from monkeybot.core.llm.usage import Usage
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.runtime.events import (
     AssistantDelta,
+    ContextSummarized,
+    ContextSummarizing,
     ContextUsage,
     Error,
     GroundingEvent,
@@ -1266,6 +1268,17 @@ async def test_run_emits_context_summarize_events_when_over_cap(
         for m in hist.rows
         for x in m.content
     )
+    summarizing = next(e for e in events if isinstance(e, ContextSummarizing))
+    summarized_idx = next(
+        i for i, e in enumerate(events) if isinstance(e, ContextSummarized)
+    )
+    post_usage = next(
+        (e for e in events[summarized_idx + 1 :] if isinstance(e, ContextUsage)),
+        None,
+    )
+    assert post_usage is not None
+    assert post_usage.estimated_tokens < summarizing.estimated_tokens
+    assert post_usage.estimated_tokens > 0
 
 
 @pytest.mark.asyncio
