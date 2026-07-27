@@ -11,7 +11,6 @@ from contextlib import aclosing
 from typing import Any, cast
 
 from monkeybot.core.context import TurnContext
-from monkeybot.core.context.common import text_from_blocks
 from monkeybot.core.context.epoch import ContextEpochTracker
 from monkeybot.core.llm.provider import Done, Message, Provider, TextDelta
 from monkeybot.core.llm.usage import Usage
@@ -21,7 +20,17 @@ from monkeybot.core.runtime.context_budget import (
     ContextBudgeter,
     estimate_tokens_from_char_count,
 )
-from monkeybot.core.types.content_blocks import ContentBlock, Text, ToolRequest, ToolResponse
+from monkeybot.core.types.content_blocks import (
+    AttachmentRef,
+    ContentBlock,
+    File,
+    Image,
+    RedactedThinking,
+    Text,
+    Thinking,
+    ToolRequest,
+    ToolResponse,
+)
 
 from .events import AgentEvent, ContextSummarized, ContextSummarizing
 from .loop_messages import _load_agent_chat_history, _summary_line_for_message
@@ -119,6 +128,25 @@ async def _await_history_write(task: asyncio.Task[None] | None) -> None:
         logger.exception("background assistant history write failed")
 
 
+def _raw_block_char_count(block: ContentBlock) -> int:
+    """Untruncated content length of a single block for keep-budget sizing."""
+    if isinstance(block, Text):
+        return len(block.text)
+    if isinstance(block, ToolRequest):
+        return len(json.dumps(block.args, sort_keys=True))
+    if isinstance(block, ToolResponse):
+        return sum(_raw_block_char_count(b) for b in block.result)
+    if isinstance(block, Image | File):
+        return len(block.data) + len(block.mime_type)
+    if isinstance(block, Thinking):
+        return len(block.thinking) + len(block.signature)
+    if isinstance(block, RedactedThinking):
+        return len(block.data)
+    if isinstance(block, AttachmentRef):
+        return len(block.attachment_id) + len(block.mime_type)
+    return len(type(block).__name__)
+
+
 def _raw_message_char_count(message: Message) -> int:
     """Untruncated content length of ``message`` for sizing, not display.
 
@@ -127,18 +155,13 @@ def _raw_message_char_count(message: Message) -> int:
     summarization prompt) at a fixed char limit, which would make keep-budget
     decisions blind to large tool outputs — the exact payloads a
     token-budgeted tail exists to protect against.
+
+    Also counts ``Image`` / ``File`` base64 payloads and ``Thinking`` traces at
+    full length: falling back to ``type(block).__name__`` would report ~5–8
+    chars for multi-kilobyte multimodal / reasoning blocks and blow past
+    ``SUMMARY_KEEP_TAIL_RATIO``.
     """
-    total = 0
-    for block in message.content:
-        if isinstance(block, Text):
-            total += len(block.text)
-        elif isinstance(block, ToolRequest):
-            total += len(json.dumps(block.args, sort_keys=True))
-        elif isinstance(block, ToolResponse):
-            total += len(text_from_blocks(list(block.result)))
-        else:
-            total += len(type(block).__name__)
-    return total
+    return sum(_raw_block_char_count(block) for block in message.content)
 
 
 def _estimate_message_tokens(message: Message) -> int:

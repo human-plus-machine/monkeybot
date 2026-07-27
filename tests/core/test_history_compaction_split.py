@@ -14,7 +14,7 @@ from monkeybot.core.runtime.history_compaction import (
     protect_recent_count,
     split_messages_for_compaction,
 )
-from monkeybot.core.types.content_blocks import Text, ToolResponse
+from monkeybot.core.types.content_blocks import File, Image, Text, Thinking, ToolResponse
 
 
 def _msgs(n: int, *, chars: int = 40) -> list[Message]:
@@ -97,3 +97,26 @@ def test_estimate_ignores_summary_truncation_cap_for_large_tool_results() -> Non
     # A truncation-capped estimate would plateau near cap // 4 tokens; the
     # real estimate must scale with the untruncated payload well beyond that.
     assert tokens > (cap // 4) * 2
+
+
+def test_estimate_counts_image_thinking_and_file_payloads() -> None:
+    """Multimodal / reasoning blocks must not collapse to type-name char counts.
+
+    A type-name fallback (~5–8 chars) would undercount base64 images, long
+    thinking traces, and file payloads against ``SUMMARY_KEEP_TAIL_RATIO``.
+    """
+    image_data = "A" * 40_000
+    thinking_text = "r" * 20_000
+    file_data = "B" * 30_000
+    message = Message(
+        role="assistant",
+        content=[
+            Image(mime_type="image/png", data=image_data),
+            Thinking(thinking=thinking_text, signature="sig"),
+            File(mime_type="application/pdf", data=file_data),
+        ],
+    )
+    tokens = _estimate_message_tokens(message)
+    # Type-name fallback would be ~5–8 tokens total; real payload is >> that.
+    min_chars = len(image_data) + len(thinking_text) + len(file_data)
+    assert tokens >= min_chars // 4
