@@ -365,8 +365,9 @@ async def test_env_vars_do_not_change_sizing(
 
 
 @pytest.mark.asyncio
-async def test_yaml_read_defaults_still_apply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_yaml_read_max_still_applies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from monkeybot.core.tools.core_tool_executor import workspace_settings_from_config
+    from monkeybot.core.tools.workspace_service import AGENT_READ_DEFAULT_LINES
 
     cfg_dir = tmp_path / "monkeybot_config"
     cfg_dir.mkdir()
@@ -379,8 +380,8 @@ async def test_yaml_read_defaults_still_apply(tmp_path: Path, monkeypatch: pytes
     monkeypatch.setenv("MONKEYBOT_READ_DEFAULT_LINES", "1")
     workspace_settings_from_config.cache_clear()
     settings = workspace_settings_from_config()
-    assert settings.WORKSPACE_READ_DEFAULT_LINES == 7
+    # read_default_lines is retired — harness default wins over YAML and env.
+    assert settings.WORKSPACE_READ_DEFAULT_LINES == AGENT_READ_DEFAULT_LINES
     assert settings.WORKSPACE_READ_MAX_LINES == 50
-    # Absurd env must not override YAML.
     assert settings.WORKSPACE_READ_DEFAULT_LINES != 1
     workspace_settings_from_config.cache_clear()

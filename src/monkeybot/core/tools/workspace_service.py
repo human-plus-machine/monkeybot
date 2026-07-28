@@ -117,6 +117,11 @@ class WorkspaceSettings:
     WORKSPACE_WRITE_SCOPE_REL: str | None = None
 
 
+# Agent ``read_file`` default when ``limit`` is omitted (harness-fixed; not YAML/env).
+# Gateway file-viewer keeps the generous ``WorkspaceSettings`` default above.
+AGENT_READ_DEFAULT_LINES = 2000
+
+
 class WorkspaceError(Exception):
     """Logical error for workspace operations (maps to HTTP 400)."""
 

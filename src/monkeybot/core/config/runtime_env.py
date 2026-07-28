@@ -103,8 +103,24 @@ RETIRED_TOOLS_KEYS: frozenset[str] = frozenset(
     {
         "spill_min_chars",
         "spill_read_max_lines",
+        "read_default_lines",
     }
 )
+
+_RETIRED_TOOLS_WARNINGS: dict[str, str] = {
+    "spill_min_chars": (
+        "tools.spill_min_chars is retired and ignored — spill/read sizing is derived from "
+        "model.context_window (see docs/spill-dynamic-design.md)"
+    ),
+    "spill_read_max_lines": (
+        "tools.spill_read_max_lines is retired and ignored — spill/read sizing is derived from "
+        "model.context_window (see docs/spill-dynamic-design.md)"
+    ),
+    "read_default_lines": (
+        "tools.read_default_lines is retired and ignored — read_file defaults to 2000 lines; "
+        "pass limit to request more"
+    ),
+}
 
 
 def warn_retired_tools_keys(doc: Mapping[str, Any]) -> list[str]:
@@ -116,11 +132,7 @@ def warn_retired_tools_keys(doc: Mapping[str, Any]) -> list[str]:
     for key in sorted(RETIRED_TOOLS_KEYS):
         if key in tools:
             found.append(key)
-            logger.warning(
-                "tools.%s is retired and ignored — spill/read sizing is derived from "
-                "model.context_window (see docs/spill-dynamic-design.md)",
-                key,
-            )
+            logger.warning(_RETIRED_TOOLS_WARNINGS[key])
     return found
 
 

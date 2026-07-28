@@ -257,7 +257,7 @@ def test_tools_budget_env_keys(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
         monkeypatch.delenv(key, raising=False)
     runtime_env.reset_runtime_env_state_for_tests()
     runtime_env.apply_monkeybot_runtime_env()
-    # read_* / spill_* are no longer env-mapped (YAML-only or retired).
+    # read_* / spill_* are no longer env-mapped (YAML-only max lines, or retired).
     assert os.environ.get("MONKEYBOT_READ_MAX_LINES") is None
     assert os.environ.get("MONKEYBOT_READ_DEFAULT_LINES") is None
     assert os.environ.get("MONKEYBOT_SPILL_READ_MAX_LINES") is None
@@ -265,16 +265,17 @@ def test_tools_budget_env_keys(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     # Result-budget / compression ratios are harness-fixed (not YAML/env knobs).
     assert os.environ.get("MONKEYBOT_RESULT_BUDGET_FRACTION") is None
     assert os.environ.get("MONKEYBOT_RESULT_BUDGET_FLOOR_TOKENS") is None
-    # Retired spill keys warn but do not reject.
+    # Retired tools keys warn but do not reject.
     found = runtime_env.warn_retired_tools_keys(
         {
             "tools": {
                 "spill_min_chars": 9000,
                 "spill_read_max_lines": 25000,
+                "read_default_lines": 1500,
             }
         }
     )
-    assert found == ["spill_min_chars", "spill_read_max_lines"]
+    assert found == ["read_default_lines", "spill_min_chars", "spill_read_max_lines"]
 
 
 def test_compression_ratios_not_mapped_from_yaml(

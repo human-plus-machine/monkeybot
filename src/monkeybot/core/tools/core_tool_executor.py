@@ -27,11 +27,7 @@ from monkeybot.core.attachments.store import (
     attachment_workspace_path,
     sniff_mime,
 )
-from monkeybot.core.config.settings import (
-    SubagentConfig,
-    get_subagent_settings,
-    read_default_lines_from_config,
-)
+from monkeybot.core.config.settings import SubagentConfig, get_subagent_settings
 from monkeybot.core.context import (
     SCHEDULED_LOOP_TOOL_DEFS,
     CustomTool,
@@ -92,6 +88,7 @@ from monkeybot.core.tools.terminal import (
 )
 from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.tools.workspace_service import (
+    AGENT_READ_DEFAULT_LINES,
     WorkspaceError,
     WorkspaceFileService,
     WorkspaceSettings,
@@ -165,7 +162,7 @@ def _int_config(raw: object, default: int) -> int:
 
 @lru_cache(maxsize=4)
 def workspace_settings_from_config() -> WorkspaceSettings:
-    """Build workspace read limits from monkeybot.yaml (not environment variables)."""
+    """Build agent workspace read limits (``read_max_lines`` from YAML; default lines fixed)."""
     from monkeybot.core.config.yaml_loader import load_monkeybot_yaml_dict
 
     _path, doc = load_monkeybot_yaml_dict()
@@ -175,7 +172,7 @@ def workspace_settings_from_config() -> WorkspaceSettings:
             tools.get("read_max_lines") if isinstance(tools, dict) else None,
             5000,
         ),
-        WORKSPACE_READ_DEFAULT_LINES=read_default_lines_from_config(),
+        WORKSPACE_READ_DEFAULT_LINES=AGENT_READ_DEFAULT_LINES,
     )
 
 

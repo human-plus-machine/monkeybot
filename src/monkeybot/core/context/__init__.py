@@ -14,11 +14,12 @@ import yaml
 
 from monkeybot.core.attachments.config import attachments_enabled_from_env
 from monkeybot.core.attachments.tools import load_file_tool_def
-from monkeybot.core.config.settings import SubagentConfig, read_default_lines_from_config
+from monkeybot.core.config.settings import SubagentConfig
 from monkeybot.core.mcp.ports_mcp import MCPClientPort
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.runtime.events import AgentEvent
 from monkeybot.core.tools.types import ToolExecutionResult
+from monkeybot.core.tools.workspace_service import AGENT_READ_DEFAULT_LINES
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.todo_list.store import TodoListStore
 
@@ -381,7 +382,7 @@ def _core_tool_defs(
     subagent_type_names: Sequence[str] | None = None,
 ) -> list[ToolDef]:
     """Static core tools always available before MCP extensions."""
-    default_lines = read_default_lines_from_config()
+    default_lines = AGENT_READ_DEFAULT_LINES
     read_schema: dict[str, object] = {
         "type": "object",
         "properties": {

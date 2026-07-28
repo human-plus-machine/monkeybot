@@ -119,9 +119,9 @@ Without a `subagent_type`, the task inherits the parent `AGENT.md` (`paths.agent
 | Field | Default | When to change |
 |---|---|---|
 | `denied_patterns` | (none) | Block substrings in tool args, e.g. `"rm -rf"` (also env `MONKEYBOT_TOOL_DENIED_PATTERNS`) |
-| `read_max_lines` / `read_default_lines` | `5000` / `2000` | Tune ordinary `read_file` line governors (**YAML only** — no env override) |
+| `read_max_lines` | `5000` | Cap on `read_file` `limit` (**YAML only** — no env override). Default when `limit` is omitted is harness-fixed at **2000** (pass `limit` to request more). |
 
-Spill and `read_file` char budgets are derived from `model.context_window` (retired keys `spill_min_chars` / `spill_read_max_lines` warn and are ignored). Context pressure ratios and tool-result budget fractions are fixed in harness code (not YAML/env).
+Spill and `read_file` char budgets are derived from `model.context_window` (retired keys `spill_min_chars` / `spill_read_max_lines` / `read_default_lines` warn and are ignored). Context pressure ratios and tool-result budget fractions are fixed in harness code (not YAML/env).
 
 For shell-command safety, pair `denied_patterns` with `monkeybot_config/command_allowlist.yaml`.
 

@@ -28,7 +28,6 @@ from monkeybot.core.config.settings import (
     get_subagent_registry,
     get_subagent_settings,
     normalize_model_provider,
-    read_default_lines_from_config,
     subagent_vertex_google_search_from_config,
     vertex_google_search_enabled_from_config,
 )
@@ -60,7 +59,6 @@ __all__ = [
     "get_subagent_settings",
     "load_monkeybot_yaml_dict",
     "normalize_model_provider",
-    "read_default_lines_from_config",
     "reset_runtime_env_state_for_tests",
     "RealtimeAudioConfig",
     "RealtimeConfig",

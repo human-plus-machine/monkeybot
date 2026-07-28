@@ -386,29 +386,6 @@ def auto_schema_enabled_from_config(config_path: str | None = None) -> bool:
     raise ConfigError(f"paths.auto_schema must be true or false, got {raw!r}")
 
 
-_DEFAULT_READ_DEFAULT_LINES = 2000
-
-
-def read_default_lines_from_config(config_path: str | None = None) -> int:
-    """Default line count for ``read_file`` when the caller omits ``limit``.
-
-    Read from ``tools.read_default_lines`` in monkeybot.yaml. Defaults to
-    ``2000`` when absent. Config-file only — not exposed via environment variables.
-    """
-    _, doc = load_monkeybot_yaml_dict(config_path)
-    tools = doc.get("tools")
-    if not isinstance(tools, dict):
-        return _DEFAULT_READ_DEFAULT_LINES
-    raw = tools.get("read_default_lines")
-    if raw is None:
-        return _DEFAULT_READ_DEFAULT_LINES
-    if isinstance(raw, bool) or not isinstance(raw, int):
-        raise ConfigError(
-            f"tools.read_default_lines must be an integer, got {raw!r}"
-        )
-    return max(1, raw)
-
-
 def vertex_google_search_enabled_from_config(config_path: str | None = None) -> bool:
     """Whether the main agent enables Gemini's native ``google_search`` grounding tool.
 
