@@ -27,7 +27,11 @@ from monkeybot.core.attachments.store import (
     attachment_workspace_path,
     sniff_mime,
 )
-from monkeybot.core.config.settings import SubagentConfig, get_subagent_settings
+from monkeybot.core.config.settings import (
+    SubagentConfig,
+    get_subagent_settings,
+    read_default_lines_from_config,
+)
 from monkeybot.core.context import (
     SCHEDULED_LOOP_TOOL_DEFS,
     CustomTool,
@@ -171,10 +175,7 @@ def workspace_settings_from_config() -> WorkspaceSettings:
             tools.get("read_max_lines") if isinstance(tools, dict) else None,
             5000,
         ),
-        WORKSPACE_READ_DEFAULT_LINES=_int_config(
-            tools.get("read_default_lines") if isinstance(tools, dict) else None,
-            2000,
-        ),
+        WORKSPACE_READ_DEFAULT_LINES=read_default_lines_from_config(),
     )
 
 

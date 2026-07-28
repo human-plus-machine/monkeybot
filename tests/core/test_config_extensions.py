@@ -20,6 +20,7 @@ from monkeybot.core.config import (
     get_subagent_registry,
     get_subagent_settings,
     normalize_model_provider,
+    read_default_lines_from_config,
     reset_runtime_env_state_for_tests,
     subagent_vertex_google_search_from_config,
     validate_monkeybot_yaml_doc,
@@ -396,6 +397,48 @@ class TestAutoSchemaConfig:
 
     def test_not_mapped_to_env(self) -> None:
         assert ("paths", "auto_schema") not in ENV_MAP
+
+
+class TestReadDefaultLinesFromConfig:
+    def test_default_when_missing(self) -> None:
+        assert read_default_lines_from_config("/nonexistent/monkeybot.yaml") == 2000
+
+    def test_reads_from_yaml(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text("tools:\n  read_default_lines: 1500\n", encoding="utf-8")
+        assert read_default_lines_from_config(str(config_path)) == 1500
+
+    def test_rejects_non_integer(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text("tools:\n  read_default_lines: true\n", encoding="utf-8")
+        with pytest.raises(ConfigError, match="must be an integer"):
+            read_default_lines_from_config(str(config_path))
+
+    def test_ignores_env_override(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text("tools:\n  read_default_lines: 1500\n", encoding="utf-8")
+        monkeypatch.setenv("MONKEYBOT_READ_DEFAULT_LINES", "9999")
+        assert read_default_lines_from_config(str(config_path)) == 1500
+
+    def test_not_mapped_to_env(self) -> None:
+        assert ("tools", "read_default_lines") not in ENV_MAP
+
+    def test_read_file_tool_advertises_default(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from monkeybot.core.context import _core_tool_defs
+
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text("tools:\n  read_default_lines: 3500\n", encoding="utf-8")
+        monkeypatch.setenv("MONKEYBOT_CONFIG", str(config_path))
+        tools = {t.name: t for t in _core_tool_defs()}
+        read = tools["read_file"]
+        assert "3500" in read.description
+        limit_desc = read.input_schema["properties"]["limit"]["description"]
+        assert "3500" in limit_desc
+        assert "small" in limit_desc.lower() or "repeated" in limit_desc.lower()
+        offset_desc = read.input_schema["properties"]["offset"]["description"]
+        assert "tiny" in offset_desc.lower() or "next_offset" in offset_desc.lower()
 
 
 class TestRealtimeConfig:
