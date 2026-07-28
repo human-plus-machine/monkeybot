@@ -9,3 +9,4 @@ assertions:
   metrics: [response_relevancy]
   required_tools: [list_mcp_resources, read_mcp_resource]
   min_tool_calls: 2
+  max_tool_errors: 0

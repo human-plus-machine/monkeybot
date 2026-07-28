@@ -5,7 +5,9 @@
 # no Docker socket wired up for this yet, so this scenario is local-only.
 # Not in evals/suites/smoke.yaml;
 # run it by adding "tools/core_run_command_sandbox" to a suite yaml's scenarios list and
-# booting the smoke_agent gateway with SANDBOX_ENABLED=true (see docs/live-evals.md).
+# booting the smoke_agent gateway with SANDBOX_ENABLED=true plus a reachable OpenSandbox
+# server — docs/live-evals.md only documents the default SANDBOX_ENABLED=false path, so
+# use the opensandbox.docker.toml scaffold referenced above for the backend setup.
 # `echo` succeeding here proves the sandbox actually created a container and
 # executed a real command inside it, not just that config parsing works.
 description: "Agent runs a trivial shell command via run_command with SANDBOX_ENABLED=true (real OpenSandbox/Docker backend)"

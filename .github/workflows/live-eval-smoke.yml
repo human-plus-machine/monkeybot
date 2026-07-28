@@ -91,7 +91,8 @@ jobs:
     needs: [gate, secrets]
     if: needs.gate.outputs.run == 'true' && needs.secrets.outputs.available == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 50 # 11 scenarios x ~150s inter-scenario delay (see EVAL_SCENARIO_DELAY_SEC) + run time
+    timeout-minutes: 60 # 11 scenarios x ~150s inter-scenario delay (see EVAL_SCENARIO_DELAY_SEC) + run time,
+    # plus headroom for checkout/uv sync/gateway boot and slow judge or subagent turns
     steps:
       - uses: actions/checkout@v4
 
