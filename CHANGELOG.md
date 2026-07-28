@@ -36,6 +36,12 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 - `subagents:` as a bare list of personas is no longer supported; wrap personas under `subagents.personas` in `monkeybot.yaml`. `SUBAGENT_TIMEOUT_SEC`, `SUBAGENT_MAX_TURNS`, and `MONKEYBOT_SUBAGENT_AGENT_MD` environment variable overrides are removed — set `subagents.timeout_sec`, `subagents.max_turns`, and per-persona `agent_md` in `monkeybot.yaml` instead. Top-level `subagents.agent_md` is also removed.
 
+## [cli v0.3.1] - 2026-07-28
+
+### Changed
+
+- Scaffold `monkeybot.example.yaml` documents harness-fixed `read_file` default (2000 lines), YAML-only `tools.read_max_lines`, and retired `read_default_lines` / spill knobs. `model.context_window` notes that it also drives soft-spill / read char budgets.
+
 ## [core v2.2.0] - 2026-07-13
 
 ### Added
