@@ -160,11 +160,11 @@ def _int_config(raw: object, default: int) -> int:
 
 
 @lru_cache(maxsize=4)
-def workspace_settings_from_config(config_path: str | None = None) -> WorkspaceSettings:
+def workspace_settings_from_config() -> WorkspaceSettings:
     """Build workspace read limits from monkeybot.yaml (not environment variables)."""
     from monkeybot.core.config.yaml_loader import load_monkeybot_yaml_dict
 
-    _path, doc = load_monkeybot_yaml_dict(config_path)
+    _path, doc = load_monkeybot_yaml_dict()
     tools = doc.get("tools") if isinstance(doc.get("tools"), dict) else {}
     return WorkspaceSettings(
         WORKSPACE_READ_MAX_LINES=_int_config(

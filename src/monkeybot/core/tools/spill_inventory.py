@@ -64,6 +64,10 @@ def spill_budgets_from_window(window_tokens: int) -> SpillBudgets:
     spill_threshold = _clamp(base, min(8_000, window_chars * 0.05), 64_000)
     inline_budget = _clamp(base * INLINE_MULTIPLIER, min(16_000, window_chars * 0.15), 128_000)
     spill_read_budget = _clamp(base * READ_MULTIPLIER, min(32_000, window_chars * 0.25), 256_000)
+    # Tiny / misconfigured windows can clamp threshold and inline to the same
+    # int (often 0). Enforce strict ordering so callers never hit AssertionError.
+    inline_budget = max(inline_budget, spill_threshold + 1)
+    spill_read_budget = max(spill_read_budget, inline_budget + 1)
     inline_hard_cap = max(_DEFAULT_INLINE_HARD_FLOOR, spill_threshold)
     summary_max_chars = _clamp(base, min(4_096, window_chars * 0.025), 16_384)
 

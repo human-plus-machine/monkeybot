@@ -95,10 +95,13 @@ def _ctx(*, context_window_tokens: int = 200_000, skills: list[SkillRef] | None 
     )
 
 
-@pytest.mark.parametrize("window", [8_000, 128_000, 200_000, 1_000_000])
+@pytest.mark.parametrize("window", [1, 2, 3, 8_000, 128_000, 200_000, 1_000_000])
 def test_spill_budgets_scale_and_order(window: int) -> None:
     b = spill_budgets_from_window(window)
     assert b.spill_threshold < b.inline_budget < b.spill_read_budget
+    if window < 8_000:
+        # Tiny / misconfigured windows must still return ordered budgets.
+        return
     window_chars = window * 4
     assert b.inline_budget <= max(16_000, int(window_chars * 0.15) + 1)
     if window == 8_000:
