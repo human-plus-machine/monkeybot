@@ -1,0 +1,11 @@
+# Uses the in-process fixture MCP server wired up in
+# evals/smoke_agent/monkeybot_config/mcp.json (server "fixture", see
+# evals/smoke_agent/fixture_mcp_server.py). No network calls, CI-reachable.
+description: "Agent lists and fetches an MCP prompt from the fixture server"
+tags: [mcp]
+messages:
+  - "The MCP server 'fixture' exposes a prompt template. List its prompts, then fetch the 'greet' prompt with name='World' and tell me what the resulting prompt text is."
+assertions:
+  metrics: [response_relevancy]
+  required_tools: [list_mcp_prompts, get_mcp_prompt]
+  min_tool_calls: 2

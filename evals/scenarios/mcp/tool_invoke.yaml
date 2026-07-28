@@ -1,12 +1,10 @@
-# Requires an MCP server configured on the agent under test (e.g. scaffolded
-# monkeybot_config/mcp.json from monkeybot_cli.scaffold_defaults)
-# with browser-mcp wired up) and MODEL_PROVIDER pointed at a real model that can pick an MCP tool.
-# Not part of the CI smoke suite yet — no in-process MCP fixture exists in the workflow (see
-# docs/live-evals.md). Run locally with `tags: [local-only]` scenarios included.
-description: "Agent invokes an MCP-provided tool (e.g. browser MCP) when asked to use it"
-tags: [mcp, local-only]
+# Uses the in-process fixture MCP server wired up in
+# evals/smoke_agent/monkeybot_config/mcp.json (server "fixture", see
+# evals/smoke_agent/fixture_mcp_server.py). No network calls, CI-reachable.
+description: "Agent invokes an MCP-provided tool (fixture server's echo tool) when asked to use it"
+tags: [mcp]
 messages:
-  - "You have an MCP browser tool available. Use it to check what tools you currently have connected, and list their names."
+  - "You have an MCP server called 'fixture' connected, with an 'echo' tool that echoes back text. Use it to echo the text 'ping'."
 assertions:
   metrics: [response_relevancy]
   min_tool_calls: 1

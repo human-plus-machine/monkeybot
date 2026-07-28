@@ -1,0 +1,17 @@
+description: "Current-events question triggers web_search tool"
+user_message: "What's the latest news on the Rust 1.80 release?"
+scripted_turns:
+  - - type: tool_call
+      call_id: c1
+      name: web_search
+      args:
+        query: "Rust 1.80 release notes"
+    - type: done
+  - - type: text_delta
+      text: "Rust 1.80 was released with several new stabilized APIs."
+    - type: done
+assertions:
+  tool_categories_used:
+    - web_search
+  turn_completed: true
+  max_turns: 3

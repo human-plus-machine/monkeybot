@@ -721,6 +721,29 @@ class TestSandboxExecutorWorkspaceMount:
         assert cc_kwargs.get("use_server_proxy") is True
 
     @pytest.mark.asyncio
+    async def test_cwd_forwarded_as_working_directory_in_shared_filesystem_mode(
+        self, tmp_path
+    ):
+        # Only the remote compute-only branch (working_directory == "/tmp") was
+        # covered before; the default shared-filesystem branch that forwards a
+        # resolved cwd straight through to RunCommandOpts had zero coverage.
+        subdir = tmp_path / "subdir"
+        subdir.mkdir()
+        cfg = SandboxConfig(
+            enabled=True, server_url="http://localhost:8080",
+            api_key=None, image="python:3.12", ttl_seconds=1800,
+        )
+        executor = SandboxExecutor(cfg, tmp_path)
+        mock_cls, sandbox = _make_create_mock()
+        osb, patches = self._patch_modules(mock_cls)
+
+        with patch.dict(sys.modules, patches):
+            await executor.execute("echo", ["hi"], cwd=subdir)
+
+        opts = sandbox.commands.run.call_args.kwargs["opts"]
+        assert opts.working_directory == str(subdir.resolve())
+
+    @pytest.mark.asyncio
     async def test_api_key_none_when_not_set(self, tmp_path):
         cfg = SandboxConfig(
             enabled=True, server_url="http://localhost:8080",

@@ -1,0 +1,24 @@
+description: "Code discovery request triggers glob then grep tools"
+user_message: "Find all Python files that reference `run_scenario` in this repo."
+scripted_turns:
+  - - type: tool_call
+      call_id: c1
+      name: glob
+      args:
+        pattern: "**/*.py"
+    - type: done
+  - - type: tool_call
+      call_id: c2
+      name: grep
+      args:
+        pattern: "run_scenario"
+        file_glob: "*.py"
+    - type: done
+  - - type: text_delta
+      text: "Found matches in tests/evals/scenario_runner.py and test_agent_behavior.py."
+    - type: done
+assertions:
+  tool_categories_used:
+    - code_search
+  turn_completed: true
+  max_turns: 4

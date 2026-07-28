@@ -10,8 +10,10 @@ scenarios:
   - memory/recall_single_session
   - memory/recall_cross_session
   - multi_turn/task_tracking
+  - mcp/tool_invoke
+  - mcp/list_resources
+  - mcp/get_prompt
   # - context/summarization_trigger   # excluded: known-failing on thinkingmachines/inkling
   #   (min_summarizations: 0 < 1) — inkling's terser replies likely never push the estimated
   #   prompt past the trigger cap in this scenario's turn count. See evals/TEST_COVERAGE.md's
   #   open question. Re-add once retuned (more turns / smaller window) or root-caused.
-  # - mcp/tool_invoke   # add once a CI MCP fixture exists (see mcp/tool_invoke.yaml)

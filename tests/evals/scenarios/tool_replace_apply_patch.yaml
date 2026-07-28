@@ -1,0 +1,32 @@
+description: "Edit request triggers replace_in_file, follow-up multi-file edit triggers apply_patch"
+user_message: "Fix the typo in notes.txt: change 'helo' to 'hello', then also add a new line to config.txt."
+scripted_turns:
+  - - type: tool_call
+      call_id: c1
+      name: replace_in_file
+      args:
+        path: "notes.txt"
+        old_string: "helo"
+        new_string: "hello"
+    - type: done
+  - - type: tool_call
+      call_id: c2
+      name: apply_patch
+      args:
+        patch_text: |
+          *** Begin Patch
+          *** Update File: config.txt
+          @@
+          -old line
+          +old line
+          +new line
+          *** End Patch
+    - type: done
+  - - type: text_delta
+      text: "Fixed the typo and updated config.txt."
+    - type: done
+assertions:
+  tool_categories_used:
+    - write
+  turn_completed: true
+  max_turns: 4
