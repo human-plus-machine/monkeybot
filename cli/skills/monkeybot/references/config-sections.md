@@ -40,7 +40,7 @@ Validate check ids: `paths.agent_md.exists`, `paths.skills_path.exists`, `paths.
 | `temperature` | `0.7` | Lower for deterministic output, higher for creative |
 | `max_tokens` | `60000` | Cap per-response length |
 | `thinking_budget` | `-1` | Gemini: `-1` model default, `0` off, `N` token budget. Ollama reasoning models: `-1` server default, `0` off (`reasoning_effort: none`) |
-| `context_window` | `1000000` | Summarization trigger threshold (tokens) |
+| `context_window` | `1000000` | Summarization trigger (tokens); also drives soft-spill / `read_file` char budgets |
 | `max_turns` | `1000` | Hard cap on turns per run |
 | `summarization_model` | (main model) | Cheaper model for history summarization (env `CONTEXT_SUMMARIZATION_MODEL`) |
 
@@ -119,9 +119,9 @@ Without a `subagent_type`, the task inherits the parent `AGENT.md` (`paths.agent
 | Field | Default | When to change |
 |---|---|---|
 | `denied_patterns` | (none) | Block substrings in tool args, e.g. `"rm -rf"` (also env `MONKEYBOT_TOOL_DENIED_PATTERNS`) |
-| `read_max_lines` / `read_default_lines` | `5000` / `2000` | Tune ordinary `read_file` line governors (**YAML only** — no env override) |
+| `read_max_lines` | `5000` | Cap on `read_file` `limit` (**YAML only** — no env override). Default when `limit` is omitted is harness-fixed at **2000** (pass `limit` to request more). |
 
-Spill and `read_file` char budgets are derived from `model.context_window` (retired keys `spill_min_chars` / `spill_read_max_lines` warn and are ignored). Context pressure ratios and tool-result budget fractions are fixed in harness code (not YAML/env).
+Spill and `read_file` char budgets are derived from `model.context_window` (retired keys `spill_min_chars` / `spill_read_max_lines` / `read_default_lines` warn and are ignored). Context pressure ratios and tool-result budget fractions are fixed in harness code (not YAML/env).
 
 For shell-command safety, pair `denied_patterns` with `monkeybot_config/command_allowlist.yaml`.
 

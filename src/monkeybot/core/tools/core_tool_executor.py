@@ -88,6 +88,7 @@ from monkeybot.core.tools.terminal import (
 )
 from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.tools.workspace_service import (
+    AGENT_READ_DEFAULT_LINES,
     WorkspaceError,
     WorkspaceFileService,
     WorkspaceSettings,
@@ -161,7 +162,7 @@ def _int_config(raw: object, default: int) -> int:
 
 @lru_cache(maxsize=4)
 def workspace_settings_from_config() -> WorkspaceSettings:
-    """Build workspace read limits from monkeybot.yaml (not environment variables)."""
+    """Build agent workspace read limits (``read_max_lines`` from YAML; default lines fixed)."""
     from monkeybot.core.config.yaml_loader import load_monkeybot_yaml_dict
 
     _path, doc = load_monkeybot_yaml_dict()
@@ -171,10 +172,7 @@ def workspace_settings_from_config() -> WorkspaceSettings:
             tools.get("read_max_lines") if isinstance(tools, dict) else None,
             5000,
         ),
-        WORKSPACE_READ_DEFAULT_LINES=_int_config(
-            tools.get("read_default_lines") if isinstance(tools, dict) else None,
-            2000,
-        ),
+        WORKSPACE_READ_DEFAULT_LINES=AGENT_READ_DEFAULT_LINES,
     )
 
 

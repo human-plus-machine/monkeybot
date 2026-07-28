@@ -117,6 +117,11 @@ class WorkspaceSettings:
     WORKSPACE_WRITE_SCOPE_REL: str | None = None
 
 
+# Agent ``read_file`` default when ``limit`` is omitted (harness-fixed; not YAML/env).
+# Gateway file-viewer keeps the generous ``WorkspaceSettings`` default above.
+AGENT_READ_DEFAULT_LINES = 2000
+
+
 class WorkspaceError(Exception):
     """Logical error for workspace operations (maps to HTTP 400)."""
 
@@ -483,7 +488,8 @@ class WorkspaceFileService:
         max_lines = self._settings.WORKSPACE_READ_MAX_LINES
         if limit is None:
             if apply_default_limit:
-                limit = self._settings.WORKSPACE_READ_DEFAULT_LINES
+                # Default must respect the configured cap (same as an explicit limit).
+                limit = min(self._settings.WORKSPACE_READ_DEFAULT_LINES, max_lines)
         elif limit < 1:
             raise WorkspaceError(
                 f"limit must be between 1 and {max_lines}",

@@ -30,11 +30,17 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - Subagent defaults and named personas are now configured under a single `subagents:` YAML mapping (`subagents.timeout_sec`, `subagents.max_turns`, `subagents.vertex_google_search`, `subagents.personas`), replacing the separate `subagent:` defaults block and bare-list `subagents:` personas. Persona prompts live only on `subagents.personas[].agent_md`; tasks without a `subagent_type` inherit the parent `paths.agent_md`.
-- Spill sizing is window-derived (soft spill). `tools.spill_min_chars` / `tools.spill_read_max_lines` are retired (warned, ignored). `tools.read_max_lines` / `read_default_lines` are YAML-only (env overrides removed). Large ordinary reads can return more content than the old flat 32k cap.
+- Spill sizing is window-derived (soft spill). `tools.spill_min_chars` / `tools.spill_read_max_lines` / `tools.read_default_lines` are retired (warned, ignored). `tools.read_max_lines` is YAML-only (env overrides removed). `read_file` defaults to 2000 lines when `limit` is omitted; pass `limit` to request more. Large ordinary reads can return more content than the old flat 32k cap.
 
 ### Breaking
 
 - `subagents:` as a bare list of personas is no longer supported; wrap personas under `subagents.personas` in `monkeybot.yaml`. `SUBAGENT_TIMEOUT_SEC`, `SUBAGENT_MAX_TURNS`, and `MONKEYBOT_SUBAGENT_AGENT_MD` environment variable overrides are removed — set `subagents.timeout_sec`, `subagents.max_turns`, and per-persona `agent_md` in `monkeybot.yaml` instead. Top-level `subagents.agent_md` is also removed.
+
+## [cli v0.3.1] - 2026-07-28
+
+### Changed
+
+- Scaffold `monkeybot.example.yaml` documents harness-fixed `read_file` default (2000 lines), YAML-only `tools.read_max_lines`, and retired `read_default_lines` / spill knobs. `model.context_window` notes that it also drives soft-spill / read char budgets.
 
 ## [core v2.2.0] - 2026-07-13
 

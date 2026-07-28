@@ -723,7 +723,7 @@ Use this when reviewing PRs or designing new features.
 | Context window | 200000 (example yaml: 1M) | `MODEL_CONTEXT_WINDOW` |
 | Summarization trigger | ratio from compression config | `SUMMARY_TRIGGER_RATIO` |
 | Read max lines | 5000 | `tools.read_max_lines` (YAML only — no env override) |
-| Default read lines | 2000 | `tools.read_default_lines` (YAML only — no env override) |
+| Default read lines | 2000 | Harness-fixed (`AGENT_READ_DEFAULT_LINES`); pass `limit` to request more |
 | Spill threshold / inline / read char budgets | derived from `model.context_window` | not configurable (no YAML, no env) |
 | Context curation timeout | 10s | `context_curation.timeout_sec` |
 | Current request cap | 8000 chars | code constant |

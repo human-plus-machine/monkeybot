@@ -26,7 +26,8 @@ from monkeybot.core.config import (
     validate_provider_env,
     vertex_google_search_enabled_from_config,
 )
-from monkeybot.core.config.runtime_env import ENV_MAP
+from monkeybot.core.config.runtime_env import ENV_MAP, RETIRED_TOOLS_KEYS, warn_retired_tools_keys
+from monkeybot.core.tools.workspace_service import AGENT_READ_DEFAULT_LINES
 
 
 class TestEnvMap:
@@ -396,6 +397,45 @@ class TestAutoSchemaConfig:
 
     def test_not_mapped_to_env(self) -> None:
         assert ("paths", "auto_schema") not in ENV_MAP
+
+
+class TestReadDefaultLinesFixed:
+    def test_agent_default_is_2000(self) -> None:
+        assert AGENT_READ_DEFAULT_LINES == 2000
+
+    def test_retired_from_yaml(self) -> None:
+        assert "read_default_lines" in RETIRED_TOOLS_KEYS
+        assert ("tools", "read_default_lines") not in ENV_MAP
+
+    def test_yaml_key_warns_and_is_ignored(self) -> None:
+        found = warn_retired_tools_keys({"tools": {"read_default_lines": 20000}})
+        assert found == ["read_default_lines"]
+
+    def test_read_file_tool_advertises_fixed_default(self) -> None:
+        from monkeybot.core.context import _core_tool_defs
+
+        tools = {t.name: t for t in _core_tool_defs()}
+        read = tools["read_file"]
+        assert str(AGENT_READ_DEFAULT_LINES) in read.description
+        limit_desc = read.input_schema["properties"]["limit"]["description"]
+        assert str(AGENT_READ_DEFAULT_LINES) in limit_desc
+        assert "small" in limit_desc.lower() or "repeated" in limit_desc.lower()
+
+    def test_default_limit_clamped_to_read_max(self, tmp_path: Path) -> None:
+        from monkeybot.core.tools.workspace_service import WorkspaceFileService, WorkspaceSettings
+
+        (tmp_path / "wide.txt").write_text(
+            "\n".join(f"L{i}" for i in range(100)), encoding="utf-8"
+        )
+        svc = WorkspaceFileService(
+            tmp_path,
+            WorkspaceSettings(
+                WORKSPACE_READ_MAX_LINES=40,
+                WORKSPACE_READ_DEFAULT_LINES=AGENT_READ_DEFAULT_LINES,
+            ),
+        )
+        result = svc.read_file("wide.txt")
+        assert result["end_line"] - result["start_line"] + 1 == 40
 
 
 class TestRealtimeConfig:

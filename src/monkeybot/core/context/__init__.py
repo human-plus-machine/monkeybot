@@ -19,6 +19,7 @@ from monkeybot.core.mcp.ports_mcp import MCPClientPort
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.runtime.events import AgentEvent
 from monkeybot.core.tools.types import ToolExecutionResult
+from monkeybot.core.tools.workspace_service import AGENT_READ_DEFAULT_LINES
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.todo_list.store import TodoListStore
 
@@ -381,6 +382,7 @@ def _core_tool_defs(
     subagent_type_names: Sequence[str] | None = None,
 ) -> list[ToolDef]:
     """Static core tools always available before MCP extensions."""
+    default_lines = AGENT_READ_DEFAULT_LINES
     read_schema: dict[str, object] = {
         "type": "object",
         "properties": {
@@ -392,14 +394,18 @@ def _core_tool_defs(
                 "type": "integer",
                 "description": (
                     "1-based start line (optional). Continue a truncated read from "
-                    "the payload's next_offset."
+                    "the payload's next_offset — do not page the file in tiny chunks."
                 ),
             },
             "limit": {
                 "type": "integer",
                 "description": (
-                    "Max lines to return (optional). Large reads are additionally "
-                    "bounded by a context-derived char budget; check truncated / next_offset."
+                    f"Max lines to return. Defaults to {default_lines} when omitted; "
+                    f"prefer omitting limit (or >= {default_lines}) over many small reads. "
+                    f"Pass a larger value when you need more of the file. Large reads are "
+                    f"additionally bounded by a context-derived char budget; check "
+                    f"truncated / next_offset. Avoid small limits (e.g. 40) with repeated "
+                    f"read_file calls — one larger read is cheaper."
                 ),
             },
         },
@@ -615,7 +621,12 @@ def _core_tool_defs(
         ),
         ToolDef(
             "read_file",
-            "Read a UTF-8 text file from the workspace with path validation.",
+            (
+                f"Read a UTF-8 text file from the workspace with path validation. "
+                f"Without limit, returns up to {default_lines} lines from offset. "
+                f"Prefer that default (or a larger limit) over many small reads; "
+                f"use offset+limit only to continue from next_offset when truncated."
+            ),
             read_schema,
             parallel_safe=True,
         ),

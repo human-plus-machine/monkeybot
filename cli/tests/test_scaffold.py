@@ -21,7 +21,7 @@ def test_run_new_creates_bundle(tmp_path: Path) -> None:
     assert (cfg / "otel-collector.example.yaml").is_file()
     assert not (cfg / "env.example").exists()
     assert (tmp_path / ".env.example").is_file()
-    assert (tmp_path / "data" / "memory" / "INDEX.md").is_file()
+    assert (tmp_path / "memory" / "INDEX.md").is_file()
     assert (tmp_path / "skills").is_dir()
     assert not (tmp_path / "skills" / "browser").exists()
     assert not (tmp_path / "skills" / "image-generator").exists()
@@ -37,6 +37,10 @@ def test_run_new_creates_bundle(tmp_path: Path) -> None:
     assert "localhost:18080" in yaml_text
     assert "Opt-in: requires Docker Desktop" in yaml_text
     assert "  enabled: false\n  # Keep off the gateway port" in yaml_text
+    assert "read_max_lines: 5000" in yaml_text
+    assert "2000 lines" in yaml_text
+    assert "read_default_lines, spill_min_chars, spill_read_max_lines" in yaml_text
+    assert "drives soft-spill / read_file char budgets" in yaml_text
     mcp = (cfg / "mcp.json").read_text(encoding="utf-8")
     assert '"browser"' in mcp and '"enabled": true' in mcp
     pyproject = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
