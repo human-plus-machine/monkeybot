@@ -421,6 +421,22 @@ class TestReadDefaultLinesFixed:
         assert str(AGENT_READ_DEFAULT_LINES) in limit_desc
         assert "small" in limit_desc.lower() or "repeated" in limit_desc.lower()
 
+    def test_default_limit_clamped_to_read_max(self, tmp_path: Path) -> None:
+        from monkeybot.core.tools.workspace_service import WorkspaceFileService, WorkspaceSettings
+
+        (tmp_path / "wide.txt").write_text(
+            "\n".join(f"L{i}" for i in range(100)), encoding="utf-8"
+        )
+        svc = WorkspaceFileService(
+            tmp_path,
+            WorkspaceSettings(
+                WORKSPACE_READ_MAX_LINES=40,
+                WORKSPACE_READ_DEFAULT_LINES=AGENT_READ_DEFAULT_LINES,
+            ),
+        )
+        result = svc.read_file("wide.txt")
+        assert result["end_line"] - result["start_line"] + 1 == 40
+
 
 class TestRealtimeConfig:
     def _write_config(self, tmp_path: Path, yaml_text: str) -> Path:
