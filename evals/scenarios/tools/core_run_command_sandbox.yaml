@@ -2,8 +2,8 @@
 # code path instead of TerminalExecutor. Requires SANDBOX_ENABLED=true and a
 # running OpenSandbox server backed by a live Docker daemon (see
 # cli/src/monkeybot_cli/scaffold_defaults/opensandbox.docker.toml) — CI has
-# no Docker socket wired up for this yet, so this scenario is local-only
-# (same pattern as evals/scenarios/mcp/tool_invoke.yaml). Not in evals/suites/smoke.yaml;
+# no Docker socket wired up for this yet, so this scenario is local-only.
+# Not in evals/suites/smoke.yaml;
 # run it by adding "tools/core_run_command_sandbox" to a suite yaml's scenarios list and
 # booting the smoke_agent gateway with SANDBOX_ENABLED=true (see docs/live-evals.md).
 # `echo` succeeding here proves the sandbox actually created a container and

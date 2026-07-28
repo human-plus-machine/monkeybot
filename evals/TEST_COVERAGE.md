@@ -47,9 +47,11 @@ Tool/component list pulled from `src/monkeybot/core/tools/core_tool_executor.py`
    already comprehensive. Added the one real missing unit test plus a `local-only` live scenario
    for when a Docker/OpenSandbox backend is available in CI (not yet).
 6. ~~Loops/scheduler, web_search, todo_list, attachments, knowledge `search`, `glob`/`grep`,
-   `replace_in_file`/`apply_patch`~~ — closed at the deterministic level (all 7, routing-only —
-   these are lower-traffic surfaces where a live/rate-limited slot isn't warranted, and each
-   already has direct subsystem-level unit coverage elsewhere).
+   `replace_in_file`/`apply_patch`~~ — routing coverage added at the deterministic level (all 7).
+   These are FakeProvider-scripted scenarios that assert `tool_categories_used`, i.e. they prove
+   the harness wires the right tool category to the right prompt, not live tool behavior against
+   a real model — live is still deferred for these lower-traffic surfaces, and each already has
+   direct subsystem-level unit coverage elsewhere.
 
 No further gaps identified in this pass — remaining known issue is `context/summarization_trigger`'s
 live failure against `inkling` (see open questions below), which predates this round of work.

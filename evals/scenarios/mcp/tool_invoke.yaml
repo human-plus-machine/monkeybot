@@ -4,7 +4,9 @@
 description: "Agent invokes an MCP-provided tool (fixture server's echo tool) when asked to use it"
 tags: [mcp]
 messages:
-  - "You have an MCP server called 'fixture' connected, with an 'echo' tool that echoes back text. Use it to echo the text 'ping'."
+  - "You have an MCP server called 'fixture' connected, with a 'fixture__echo' tool that echoes back text. Use it to echo the text 'ping'."
 assertions:
   metrics: [response_relevancy]
+  required_tools: [fixture__echo]
   min_tool_calls: 1
+  max_tool_errors: 0
