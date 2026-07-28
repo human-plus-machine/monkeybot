@@ -15,8 +15,8 @@ from monkeybot.core.llm.provider import Message
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.messages import transform_context
 from monkeybot.core.persistence.backends import HistoryStore
+from monkeybot.core.prompts.headings import RUNTIME_NOTES_HEADING
 from monkeybot.core.prompts.prompt import (
-    RUNTIME_NOTES_HEADING,
     compose_stable_baseline,
     compose_volatile_tail_parts,
 )
@@ -206,17 +206,17 @@ def _combine_extras(*parts: str | None) -> str | None:
     return "\n\n".join(kept)
 
 
-def _flatten_tool_result_for_summary(resp: ToolResponse) -> str:
+def _flatten_tool_result_for_summary(
+    resp: ToolResponse, *, window_tokens: int | None = None
+) -> str:
     parts: list[str] = []
     for b in resp.result:
-        if isinstance(b, Text):
-            parts.append(summarize_tool_result_text(b.text))
-        else:
-            parts.append(summarize_tool_result_text(json.dumps(b.to_dict(), sort_keys=True)))
+        raw = b.text if isinstance(b, Text) else json.dumps(b.to_dict(), sort_keys=True)
+        parts.append(summarize_tool_result_text(raw, window_tokens=window_tokens))
     return "".join(parts) or "(empty)"
 
 
-def _summary_line_for_message(m: Message) -> str:
+def _summary_line_for_message(m: Message, *, window_tokens: int | None = None) -> str:
     pieces: list[str] = []
     for b in m.content:
         if isinstance(b, Text):
@@ -224,7 +224,7 @@ def _summary_line_for_message(m: Message) -> str:
         elif isinstance(b, ToolRequest):
             pieces.append(f"[tool_call: {b.name}({json.dumps(b.args, sort_keys=True)})]")
         elif isinstance(b, ToolResponse):
-            body = _flatten_tool_result_for_summary(b)
+            body = _flatten_tool_result_for_summary(b, window_tokens=window_tokens)
             tag = "tool_error" if b.is_error else "tool_result"
             pieces.append(f"[{tag} {b.tool_name}: {body}]")
         else:

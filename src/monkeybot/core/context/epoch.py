@@ -15,13 +15,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Literal
 
-
 # Heading for the chronological mid-epoch update text (see
-# ``_format_system_context_update``). Exported so callers that need to locate
-# the stable/volatile boundary in a flattened prompt string (e.g. Anthropic
-# cache-block splitting in ``providers._utils.split_system_prompt_for_cache``)
-# import this instead of re-declaring the literal and risking drift.
-SYSTEM_CONTEXT_UPDATE_HEADING = "\n\n## System context update\n"
+# ``_format_system_context_update``), defined in the import-free headings leaf
+# and re-exported here, where callers have always found it.
+from monkeybot.core.prompts.headings import SYSTEM_CONTEXT_UPDATE_HEADING
 
 
 def fingerprint_text(*parts: str) -> str:

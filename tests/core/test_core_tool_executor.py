@@ -97,7 +97,9 @@ class _MCPWithBlob:
 
     def __init__(self, *, blob_len: int = 1200) -> None:
         alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-        self._payload = json.dumps({"data": (alphabet * 20)[:blob_len]})
+        blob = (alphabet * ((blob_len // len(alphabet)) + 1))[:blob_len]
+        self._payload = json.dumps({"data": blob})
+        self._blob_len = blob_len
 
     async def connect(
         self,
@@ -1230,12 +1232,13 @@ async def test_list_skills_spills_large_json(tmp_path: Path) -> None:
     out, err = unwrap_tool_execution_result(await ex.execute(call=ToolCall(call_id="c-spill", name="list_skills", args={}), ctx=ctx))
     assert err is None and out is not None
     assert "Spill inventory" in out
-    assert "Preview:" in out
-    assert len(out) < 4000
+    # Soft spill inlines a body prefix; preview is omitted when body is present.
+    assert "Preview:" not in out
     spill = root / ".monkeybot" / "spill" / "t" / "c-spill.txt"
     assert spill.is_file()
     raw = spill.read_text(encoding="utf-8")
     assert len(raw) > 20_000
+    assert raw[:200] in out
 
 
 @pytest.mark.asyncio
@@ -1330,13 +1333,14 @@ async def test_read_file_preserves_embedded_base64_blob(tmp_path: Path) -> None:
 async def test_spill_writes_raw_payload_before_sanitize(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    del monkeypatch  # env sizing knobs are retired; threshold is window-derived
     root = tmp_path
     mem = tmp_path / "mem"
     mem.mkdir()
     skills = tmp_path / "skills"
     skills.mkdir()
-    monkeypatch.setenv("MONKEYBOT_SPILL_MIN_CHARS", "500")
-    mcp = _MCPWithBlob()
+    # Payload must exceed window-derived spill_threshold (~16k at 200k window).
+    mcp = _MCPWithBlob(blob_len=20_000)
     ex = CoreToolExecutor(workspace_root=root, memory=_mem_sub(mem), skills_path=skills, mcp=mcp)
     out, err = unwrap_tool_execution_result(
         await ex.execute(
@@ -1350,9 +1354,11 @@ async def test_spill_writes_raw_payload_before_sanitize(
     assert spill.is_file()
     raw = spill.read_text(encoding="utf-8")
     parsed = json.loads(raw)
-    assert len(parsed["data"]) == 1200
+    assert len(parsed["data"]) == 20_000
     assert "omitted" not in parsed["data"]
-    assert mcp._payload[:80] not in out
+    # History is sanitized; raw base64 must not survive in the inline body.
+    assert "omitted" in out
+    assert parsed["data"][:80] not in out
 
 
 @pytest.mark.asyncio

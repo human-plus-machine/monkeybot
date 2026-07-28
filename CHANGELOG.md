@@ -12,6 +12,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 - Embeddings run on NVIDIA, OpenAI, any OpenAI-compatible endpoint, Voyage, or Gemini via `knowledge.embeddings.provider`. Misconfigured or unavailable providers degrade to keyword + graph search rather than failing the turn.
 - PDF, DOCX, and image files are indexed with the `knowledge-media` extra. Images use `knowledge.captions` (`off` / `path` / `llm`); DOCX indexing covers tables as well as paragraphs.
 - Subagents search the parent workspace index read-only, and a second gateway attempting to write the same index is refused.
+- Soft spill and unified `read_file` char budgets derive from `model.context_window`: large tool results always land on disk with a large inline body when headroom allows; `read_file` returns `next_offset` and never lies about `end_line`.
 
 ### Fixed
 
@@ -21,10 +22,15 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 - The knowledge index writer lock is claimed atomically, so two gateways starting at the same moment can no longer both believe they own the index.
 - Embedding requests carry a per-request timeout, so one slow endpoint cannot stall an indexing pass; cached vector matrices are bounded by a memory budget with least-recently-used eviction.
 - PDF extraction closes its file handle (previously leaked a descriptor per file on large scans), the code chunker no longer splits mid-function when a docstring contains an unbalanced brace, and `knowledge.chunk_overlap_ratio` is honored for markdown, code, and structured files.
+- `read_file` no longer applies a post-hoc 32k char chop after line selection (which made `end_line` lie and caused the model to skip unread lines when paging).
+- `read_file` reports `truncated: false` and omits `next_offset` when a read reaches the end of the file, instead of marking every complete read truncated and pointing past EOF. A line too long for the whole char budget is now marked inline where it was cut.
+- Tool results too large to inline as-is are shaped into still-valid JSON (with `… (+N more items)` markers) rather than inlined as a raw, unparseable JSON prefix.
+- Context summarization sizes its per-result cap from the active model's context window rather than a hardcoded 200k window.
 
 ### Changed
 
 - Subagent defaults and named personas are now configured under a single `subagents:` YAML mapping (`subagents.timeout_sec`, `subagents.max_turns`, `subagents.vertex_google_search`, `subagents.personas`), replacing the separate `subagent:` defaults block and bare-list `subagents:` personas. Persona prompts live only on `subagents.personas[].agent_md`; tasks without a `subagent_type` inherit the parent `paths.agent_md`.
+- Spill sizing is window-derived (soft spill). `tools.spill_min_chars` / `tools.spill_read_max_lines` are retired (warned, ignored). `tools.read_max_lines` / `read_default_lines` are YAML-only (env overrides removed). Large ordinary reads can return more content than the old flat 32k cap.
 
 ### Breaking
 

@@ -12,6 +12,7 @@ import shlex
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -76,7 +77,7 @@ from monkeybot.core.subagents.subagent_proto import (
 from monkeybot.core.tools.inspector import coerce_run_command_argv
 from monkeybot.core.tools.sandbox_executor import SandboxConfig, SandboxExecutor
 from monkeybot.core.tools.spill_inventory import (
-    spill_min_chars_from_env,
+    spill_budgets_from_window,
     write_spill_with_inventory,
 )
 from monkeybot.core.tools.terminal import (
@@ -148,22 +149,32 @@ def _tool_handler_kind(name: str, *, mcp: MCPClientPort, extra_tools: dict[str, 
     return "unknown"
 
 
-def _int_env(name: str, default: int) -> int:
-    raw = os.environ.get(name, "").strip()
-    if not raw:
+def _int_config(raw: object, default: int) -> int:
+    """Coerce a YAML scalar to int, falling back to the code default."""
+    if not isinstance(raw, int | float | str) or isinstance(raw, bool):
         return default
     try:
         return int(raw)
-    except ValueError:
+    except (TypeError, ValueError):
         return default
 
 
-def workspace_settings_from_env() -> WorkspaceSettings:
-    """Build workspace read limits from harness env (yaml-backed via runtime_env)."""
+@lru_cache(maxsize=4)
+def workspace_settings_from_config() -> WorkspaceSettings:
+    """Build workspace read limits from monkeybot.yaml (not environment variables)."""
+    from monkeybot.core.config.yaml_loader import load_monkeybot_yaml_dict
+
+    _path, doc = load_monkeybot_yaml_dict()
+    tools = doc.get("tools") if isinstance(doc.get("tools"), dict) else {}
     return WorkspaceSettings(
-        WORKSPACE_READ_MAX_LINES=_int_env("MONKEYBOT_READ_MAX_LINES", 5000),
-        WORKSPACE_READ_DEFAULT_LINES=_int_env("MONKEYBOT_READ_DEFAULT_LINES", 2000),
-        WORKSPACE_SPILL_READ_MAX_LINES=_int_env("MONKEYBOT_SPILL_READ_MAX_LINES", 50_000),
+        WORKSPACE_READ_MAX_LINES=_int_config(
+            tools.get("read_max_lines") if isinstance(tools, dict) else None,
+            5000,
+        ),
+        WORKSPACE_READ_DEFAULT_LINES=_int_config(
+            tools.get("read_default_lines") if isinstance(tools, dict) else None,
+            2000,
+        ),
     )
 
 
@@ -736,13 +747,11 @@ class CoreToolExecutor(ToolExecutorPort):
         loops_registry: LoopsToolRegistry | None = None,
         knowledge: KnowledgeSubsystem | None = None,
     ) -> None:
-        ws_settings = workspace_settings_from_env()
+        ws_settings = workspace_settings_from_config()
         self._skills_path = Path(skills_path).resolve()
         self._workspace = WorkspaceFileService(
             Path(workspace_root).resolve(), settings=ws_settings, skills_root=self._skills_path
         )
-        self._spill_read_max_lines = ws_settings.WORKSPACE_SPILL_READ_MAX_LINES
-        self._spill_min_chars = spill_min_chars_from_env()
         self._memory = memory
         self._knowledge = knowledge
         self._mcp = mcp
@@ -852,7 +861,7 @@ class CoreToolExecutor(ToolExecutorPort):
             if name == "load_file":
                 return self._tool_load_file(args, ctx)
             if name == "read_file":
-                result_text, err_text = self._tool_read_file(args)
+                result_text, err_text = self._tool_read_file(args, ctx)
             elif name == "write_file":
                 result_text, err_text = self._tool_write_file(args)
             elif name == "replace_in_file":
@@ -984,10 +993,10 @@ class CoreToolExecutor(ToolExecutorPort):
 
         if err_text is None and result_text is not None:
             skip_sanitize = skip_tool_result_sanitize(name)
+            budgets = spill_budgets_from_window(ctx.context_window_tokens)
             should_spill = (
                 name not in _SPILL_SKIP_TOOLS
-                and self._spill_min_chars > 0
-                and len(result_text) >= self._spill_min_chars
+                and len(result_text) >= budgets.spill_threshold
             )
             if should_spill:
                 result_text = write_spill_with_inventory(
@@ -996,13 +1005,19 @@ class CoreToolExecutor(ToolExecutorPort):
                     ctx.thread_id,
                     call.call_id,
                     tool_name=name,
+                    inline_budget=budgets.inline_budget,
                 )
                 if not skip_sanitize:
                     result_text = sanitize_tool_result_text(result_text)
             else:
                 if not skip_sanitize:
                     result_text = sanitize_tool_result_text(result_text)
-                result_text = cap_tool_result_text(result_text)
+                # Floor at spill_threshold so sub-threshold results are never
+                # truncated without a spill file; read_file floors at read budget.
+                hard_cap = budgets.inline_hard_cap
+                if name == "read_file":
+                    hard_cap = max(hard_cap, budgets.spill_read_budget)
+                result_text = cap_tool_result_text(result_text, max_chars=hard_cap)
         if err_text is not None:
             return ToolExecutionResult.err(err_text)
         return ToolExecutionResult.ok_text(result_text or "")
@@ -1110,7 +1125,7 @@ class CoreToolExecutor(ToolExecutorPort):
 
         return self._media_result(mime, data_b64, meta)
 
-    def _tool_read_file(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+    def _tool_read_file(self, args: dict[str, Any], ctx: TurnContext) -> tuple[str | None, str | None]:
         path = _str_arg(args, "path", "file_path", "file")
         if not path:
             return (
@@ -1124,15 +1139,17 @@ class CoreToolExecutor(ToolExecutorPort):
             )
         offset = _coerce_int(args.get("offset"), 1) or 1
         limit = _coerce_int(args.get("limit"), None)
-        max_lines_cap = None
-        if _is_under_spill_path(self._workspace.repo_root, path):
-            max_lines_cap = self._spill_read_max_lines
+        budgets = spill_budgets_from_window(ctx.context_window_tokens)
+        # Budget content before JSON encoding (~10% headroom for escaping/envelope).
+        max_chars = max(1, int(budgets.spill_read_budget * 0.9))
+        spill_path = _is_under_spill_path(self._workspace.repo_root, path)
         try:
             payload = self._workspace.read_file(
                 path,
                 offset=offset,
                 limit=limit,
-                max_lines_cap=max_lines_cap,
+                max_chars=max_chars,
+                apply_default_limit=not spill_path,
             )
             return (_j(payload), None)
         except WorkspaceError as exc:

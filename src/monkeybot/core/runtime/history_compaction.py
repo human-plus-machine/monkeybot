@@ -354,7 +354,7 @@ async def _summarize_history(
             tail_budget=max(1, int(max(1, window_tokens) * SUMMARY_KEEP_TAIL_RATIO)),
         ),
     )
-    lines = [_summary_line_for_message(m) for m in middle]
+    lines = [_summary_line_for_message(m, window_tokens=window_tokens) for m in middle]
     blob = "\n\n---\n\n".join(lines)
     summarize_messages = [
         Message(

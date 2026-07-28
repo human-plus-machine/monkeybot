@@ -189,6 +189,22 @@ class ContextBudgeter:
         text = text_from_blocks(list(block.result))
         if not skip_tool_result_sanitize(block.tool_name):
             text = sanitize_tool_result_text(text)
+        body, note = _split_inventory_note(text)
+        if note is not None:
+            # Soft-spilled results were sized at ingress; only reshape under pressure
+            # and never drop the inventory pointer.
+            if self.pressure_tier in ("moderate", "aggressive"):
+                budget = resolve_tool_budget(block.tool_name)
+                shaped_body = shape_tool_text(
+                    body,
+                    tool_name=block.tool_name,
+                    budget=budget,
+                    pressure_tier=self.pressure_tier,
+                )
+                text = f"{shaped_body}\n{note}" if shaped_body else note
+            else:
+                text = f"{body}\n{note}" if body else note
+            return block, text
         budget = resolve_tool_budget(block.tool_name)
         if budget is not None or self.pressure_tier in ("moderate", "aggressive"):
             text = shape_tool_text(

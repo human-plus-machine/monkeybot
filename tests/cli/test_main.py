@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+from monkeybot_cli.realtime import talk_ui
 from typer.testing import CliRunner
 
 from monkeybot.cli.main import app, run_talk_session
@@ -32,7 +36,18 @@ def test_talk_text_generates_session_id() -> None:
     assert result.exit_code == 1
 
 
-def test_talk_auto_start_gateway_fails_without_workspace() -> None:
+def test_talk_auto_start_gateway_fails_without_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Auto-start outside a workspace must say so, not fall through to a connect error.
+
+    Kept hermetic on purpose: this used to read ambient state, so any gateway
+    answering on the default port (or a config found by walking up from the repo)
+    skipped the branch under test and failed the assertion for unrelated reasons.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("MONKEYBOT_CONFIG", raising=False)
+    monkeypatch.setattr(talk_ui, "health_ok", lambda base: False)
     result = runner.invoke(app, ["talk", "--text", "--gateway-url", "ws://localhost:0"])
     assert result.exit_code == 1
     assert "Could not find monkeybot_config/monkeybot.yaml" in result.output

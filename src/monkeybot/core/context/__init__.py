@@ -388,8 +388,20 @@ def _core_tool_defs(
                 "type": "string",
                 "description": "Repo-relative path under the workspace root.",
             },
-            "offset": {"type": "integer", "description": "1-based start line (optional)."},
-            "limit": {"type": "integer", "description": "Max lines to return (optional)."},
+            "offset": {
+                "type": "integer",
+                "description": (
+                    "1-based start line (optional). Continue a truncated read from "
+                    "the payload's next_offset."
+                ),
+            },
+            "limit": {
+                "type": "integer",
+                "description": (
+                    "Max lines to return (optional). Large reads are additionally "
+                    "bounded by a context-derived char budget; check truncated / next_offset."
+                ),
+            },
         },
         "required": ["path"],
     }

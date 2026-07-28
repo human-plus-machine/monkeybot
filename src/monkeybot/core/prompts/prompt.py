@@ -14,30 +14,19 @@ from monkeybot.core.prompts.harness_prompt import (
     emission_style_terse_from_env,
     harness_fixed_context,
 )
+from monkeybot.core.prompts.headings import (
+    CURRENT_DATE_HEADING,
+    CURRENT_REQUEST_HEADING,
+    MEMORY_INDEX_HEADING,
+    MEMORY_NUDGE_HEADING,
+    SKILLS_HEADING,
+    TODO_LIST_HEADING,
+)
 from monkeybot.core.tools.sandbox_executor import SandboxConfig
 from monkeybot.core.types.content_blocks import Text
 
 # Cap injected user text so long pastes do not dominate the context window.
 _MAX_CURRENT_REQUEST_CHARS = 8000
-
-# Volatile-tail section headings, defined once here (where the sections are
-# actually composed) so callers that need to locate the stable/volatile
-# boundary in a flattened prompt string (e.g. Anthropic cache-block splitting
-# in ``providers._utils.split_system_prompt_for_cache``) import these instead
-# of re-declaring the literal strings and risking drift.
-CURRENT_DATE_HEADING = "\n\n## Current date\n"
-MEMORY_INDEX_HEADING = (
-    "\n\n## Memory index\n"
-    "Stored memories from past sessions; entries are titles — "
-    "`search_memory` retrieves the full note.\n"
-)
-MEMORY_NUDGE_HEADING = "\n\n## Memory\n"
-SKILLS_HEADING = "\n\n## Skills\n"
-TODO_LIST_HEADING = "\n\n## Todo list\n"
-CURRENT_REQUEST_HEADING = "\n\n## Current request\n"
-# Not composed here, but part of the same volatile-tail-heading vocabulary —
-# defined alongside the others so ``providers._utils`` has one import for all.
-RUNTIME_NOTES_HEADING = "\n\n## Runtime notes\n"
 
 
 def _user_text_flat(m: Message) -> str:
