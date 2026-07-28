@@ -19,6 +19,13 @@ SCENARIO_FILES = [
     "memory_write_inject.yaml",
     "subagent_roundtrip.yaml",
     "context_curation.yaml",
+    "tool_loops.yaml",
+    "tool_glob_grep.yaml",
+    "tool_replace_apply_patch.yaml",
+    "tool_search_knowledge.yaml",
+    "tool_load_file.yaml",
+    "tool_web_search.yaml",
+    "tool_todo_list.yaml",
 ]
 
 

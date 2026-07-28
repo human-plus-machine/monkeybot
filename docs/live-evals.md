@@ -44,7 +44,7 @@ Runs land under `evals/runs/` (gitignored). Diff two artifacts with `uv run pyth
 
 ## What the smoke suite covers
 
-Scenarios under `evals/scenarios/` assert both judge metrics and harness telemetry (e.g. `required_tools`). Current smoke membership is the explicit list in `evals/suites/smoke.yaml` (tools, skills, subagents, memory, context, multi-turn). MCP live scenarios are local-only until a CI MCP fixture exists — see `evals/scenarios/mcp/tool_invoke.yaml`.
+Scenarios under `evals/scenarios/` assert both judge metrics and harness telemetry (e.g. `required_tools`). Current smoke membership is the explicit list in `evals/suites/smoke.yaml` (tools, skills, subagents, memory, multi-turn, mcp — `context/summarization_trigger` is currently commented out, see `evals/TEST_COVERAGE.md`). MCP scenarios run against an in-process fixture MCP server (`evals/smoke_agent/fixture_mcp_server.py`, no network calls) wired up in `evals/smoke_agent/monkeybot_config/mcp.json` — see `evals/scenarios/mcp/`.
 
 ## CI
 

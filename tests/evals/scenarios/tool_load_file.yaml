@@ -1,0 +1,17 @@
+description: "Attachment reference triggers load_file tool"
+user_message: "Take a look at the screenshot I attached and describe what's in it."
+scripted_turns:
+  - - type: tool_call
+      call_id: c1
+      name: load_file
+      args:
+        attachment_id: "att-123"
+    - type: done
+  - - type: text_delta
+      text: "The screenshot shows a login form."
+    - type: done
+assertions:
+  tool_categories_used:
+    - attachment
+  turn_completed: true
+  max_turns: 3

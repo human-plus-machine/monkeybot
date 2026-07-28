@@ -14,6 +14,7 @@ from monkeybot.core.context import LoopsToolRegistry, SkillRef, TurnContext, _di
 from monkeybot.core.llm.provider import Done, TextDelta, ToolCall, UsageEvent
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
+from monkeybot.core.mcp.mcp_client import MCPDiagnosticError, MCPServerNotConnectedError
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.tools.types import unwrap_tool_execution_result
 from monkeybot.core.workspace import create_workspace_storage
@@ -2239,6 +2240,136 @@ async def test_mcp_resource_and_prompt_tools(tmp_path: Path) -> None:
     )
     assert got.error is None
     assert json.loads(got.blocks[0].text)["name"] == "summarize"  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_read_mcp_resource_requires_server_and_uri(tmp_path: Path) -> None:
+    (tmp_path / "mem").mkdir(exist_ok=True)
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_ResourcesMCP(),
+    )
+    ctx = _ctx()
+
+    missing_server = await ex.execute(
+        call=ToolCall(name="read_mcp_resource", args={"uri": "docs://readme"}, call_id="r1"),
+        ctx=ctx,
+    )
+    assert missing_server.error == "read_mcp_resource requires server"
+
+    missing_uri = await ex.execute(
+        call=ToolCall(name="read_mcp_resource", args={"server": "docs"}, call_id="r2"),
+        ctx=ctx,
+    )
+    assert missing_uri.error == "read_mcp_resource requires uri"
+
+
+@pytest.mark.asyncio
+async def test_get_mcp_prompt_requires_server_and_prompt(tmp_path: Path) -> None:
+    (tmp_path / "mem").mkdir(exist_ok=True)
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_ResourcesMCP(),
+    )
+    ctx = _ctx()
+
+    missing_server = await ex.execute(
+        call=ToolCall(name="get_mcp_prompt", args={"prompt": "summarize"}, call_id="p1"),
+        ctx=ctx,
+    )
+    assert missing_server.error == "get_mcp_prompt requires server"
+
+    missing_prompt = await ex.execute(
+        call=ToolCall(name="get_mcp_prompt", args={"server": "docs"}, call_id="p2"),
+        ctx=ctx,
+    )
+    assert missing_prompt.error == "get_mcp_prompt requires prompt"
+
+
+class _ResourcesMCPNotConnected(_NoMCP):
+    """MCP stub whose resource/prompt calls fail: server unknown or missing capability."""
+
+    async def list_resources(self, server_name: str | None = None):
+        raise MCPServerNotConnectedError(server_name or "docs")
+
+    async def read_resource(self, server_name: str, uri: str):
+        del uri
+        raise MCPServerNotConnectedError(server_name)
+
+    async def list_prompts(self, server_name: str | None = None):
+        raise MCPDiagnosticError(
+            server_name or "docs",
+            f"MCP server {server_name!r} does not advertise prompts capability",
+            remedy="Use a server that supports prompts, or call enable_mcp first.",
+        )
+
+    async def get_prompt(
+        self,
+        server_name: str,
+        prompt_name: str,
+        arguments: dict[str, str] | None = None,
+    ):
+        del prompt_name, arguments
+        raise MCPDiagnosticError(
+            server_name,
+            f"MCP server {server_name!r} does not advertise prompts capability",
+            remedy="Use a server that supports prompts, or call enable_mcp first.",
+        )
+
+
+@pytest.mark.asyncio
+async def test_mcp_resource_and_prompt_tools_not_found_paths(tmp_path: Path) -> None:
+    (tmp_path / "mem").mkdir(exist_ok=True)
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_ResourcesMCPNotConnected(),
+    )
+    ctx = _ctx()
+
+    listed = await ex.execute(
+        call=ToolCall(name="list_mcp_resources", args={"server": "missing"}, call_id="r1"),
+        ctx=ctx,
+    )
+    assert listed.error is not None
+    assert "not connected" in listed.error
+
+    read = await ex.execute(
+        call=ToolCall(
+            name="read_mcp_resource",
+            args={"server": "missing", "uri": "docs://readme"},
+            call_id="r2",
+        ),
+        ctx=ctx,
+    )
+    assert read.error is not None
+    assert "not connected" in read.error
+
+    prompts = await ex.execute(
+        call=ToolCall(name="list_mcp_prompts", args={"server": "docs"}, call_id="p1"),
+        ctx=ctx,
+    )
+    assert prompts.error is not None
+    assert "does not advertise prompts capability" in prompts.error
+
+    got = await ex.execute(
+        call=ToolCall(
+            name="get_mcp_prompt",
+            args={"server": "docs", "prompt": "summarize"},
+            call_id="p2",
+        ),
+        ctx=ctx,
+    )
+    assert got.error is not None
+    assert "does not advertise prompts capability" in got.error
 
 
 # --- Story 2: subagent progress publishing ---------------------------------

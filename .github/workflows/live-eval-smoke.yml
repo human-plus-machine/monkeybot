@@ -12,10 +12,10 @@ name: Live eval smoke
 # as a PR comment. The run JSON is uploaded as an artifact — download two of them and
 # compare with `uv run python -m evals.diff <old.json> <new.json>`.
 #
-# Cost/time budget: smoke suite is ~8 scenarios x 2-5 turns x (agent call + judge call),
+# Cost/time budget: smoke suite is ~11 scenarios x 2-5 turns x (agent call + judge call),
 # paced by EVAL_SCENARIO_DELAY_SEC=150 between scenarios to stay under the current
-# model's provider rate limit. Expect roughly $0.50-2.00 and ~20-35 minutes per run
-# (7 delays x 150s = ~17.5 min of pacing alone, plus actual call time) — this is not
+# model's provider rate limit. Expect roughly $0.75-3.00 and ~30-45 minutes per run
+# (10 delays x 150s = 25 min of pacing alone, plus actual call time) — this is not
 # stuck if it runs long; see timeout-minutes below.
 #
 # Secrets required: NVIDIA_API_KEY only (https://build.nvidia.com — free tier). The agent
@@ -91,7 +91,8 @@ jobs:
     needs: [gate, secrets]
     if: needs.gate.outputs.run == 'true' && needs.secrets.outputs.available == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 40 # 8 scenarios x ~150s inter-scenario delay (see EVAL_SCENARIO_DELAY_SEC) + run time
+    timeout-minutes: 60 # 11 scenarios x ~150s inter-scenario delay (see EVAL_SCENARIO_DELAY_SEC) + run time,
+    # plus headroom for checkout/uv sync/gateway boot and slow judge or subagent turns
     steps:
       - uses: actions/checkout@v4
 

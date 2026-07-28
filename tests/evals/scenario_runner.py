@@ -20,7 +20,11 @@ from tests.evals.eval_hook import EvalHook, EvalRecord
 def tool_category(tool_name: str) -> str:
     """Map core tool names to coarse categories (single place to update on renames)."""
     read_tools = frozenset({"read_file", "list_files", "find_files"})
-    write_tools = frozenset({"write_file", "create_file"})
+    write_tools = frozenset({"write_file", "create_file", "replace_in_file", "apply_patch"})
+    loop_tools = frozenset(
+        {"start_loop", "loop_status", "pause_loop", "resume_loop", "stop_loop"}
+    )
+    code_search_tools = frozenset({"glob", "grep"})
     if tool_name in read_tools:
         return "read"
     if tool_name in write_tools:
@@ -31,6 +35,18 @@ def tool_category(tool_name: str) -> str:
         return "shell"
     if tool_name == "task":
         return "subagent"
+    if tool_name in loop_tools:
+        return "loop"
+    if tool_name == "web_search":
+        return "web_search"
+    if tool_name == "todo_list":
+        return "todo"
+    if tool_name == "load_file":
+        return "attachment"
+    if tool_name == "search":
+        return "knowledge_search"
+    if tool_name in code_search_tools:
+        return "code_search"
     return "other"
 
 

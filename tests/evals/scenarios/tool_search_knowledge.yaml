@@ -1,0 +1,17 @@
+description: "Conceptual code question triggers the knowledge `search` tool (not search_memory)"
+user_message: "How does the context curation logic work in this codebase?"
+scripted_turns:
+  - - type: tool_call
+      call_id: c1
+      name: search
+      args:
+        query: "context curation"
+    - type: done
+  - - type: text_delta
+      text: "Context curation trims the prompt before it hits the model."
+    - type: done
+assertions:
+  tool_categories_used:
+    - knowledge_search
+  turn_completed: true
+  max_turns: 3

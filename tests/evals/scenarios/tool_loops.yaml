@@ -1,0 +1,24 @@
+description: "Recurring-task request triggers loop lifecycle tools (start_loop, loop_status)"
+user_message: "Start a loop that checks the deploy status every 5 minutes, then tell me its status."
+scripted_turns:
+  - - type: tool_call
+      call_id: c1
+      name: start_loop
+      args:
+        prompt: "Check deploy status"
+        interval: "5m"
+    - type: done
+  - - type: tool_call
+      call_id: c2
+      name: loop_status
+      args:
+        loop_id: "loop-1"
+    - type: done
+  - - type: text_delta
+      text: "Loop started and is running."
+    - type: done
+assertions:
+  tool_categories_used:
+    - loop
+  turn_completed: true
+  max_turns: 4
