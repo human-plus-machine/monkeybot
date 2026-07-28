@@ -8,10 +8,17 @@ from monkeybot.core.attachments.catalog import AttachmentRecord
 from monkeybot.core.context import SkillRef, TurnContext
 from monkeybot.core.context.memory_prompt import MemoryPromptSelection
 from monkeybot.core.llm.provider import Message
-from monkeybot.core.prompts.prompt import compose_system_prompt
-from monkeybot.providers._utils import split_system_prompt_for_cache
+from monkeybot.core.prompts.headings import (
+    CURRENT_DATE_HEADING,
+    CURRENT_REQUEST_HEADING,
+    MEMORY_INDEX_HEADING,
+    SKILLS_HEADING,
+    heading_marker,
+)
+from monkeybot.core.prompts.prompt import _MAX_CURRENT_REQUEST_CHARS, compose_system_prompt
 from monkeybot.core.types.content_blocks import Text, ToolRequest, ToolResponse
 from monkeybot.core.types.types_tools import ToolDef
+from monkeybot.providers._utils import split_system_prompt_for_cache
 
 
 def _minimal_ctx(
@@ -186,9 +193,12 @@ def test_task_truncation() -> None:
     ]
     out = compose_system_prompt(ctx, chat_messages=msgs)
     assert "…(truncated)" in out
-    # Current-request body is capped at 8k; fixed harness + agent overhead stays bounded
-    # (budget includes the knowledge-retrieval / `search` guidance block).
-    assert len(out) < len(long_user) + 11_000
+    # What matters is that the injected request body is capped, so measure only
+    # what the paste added rather than the whole prompt — otherwise ordinary
+    # harness growth fails this test for the wrong reason (it did).
+    added = len(out) - len(compose_system_prompt(ctx, chat_messages=[]))
+    assert added < len(long_user)
+    assert added <= _MAX_CURRENT_REQUEST_CHARS + len(CURRENT_REQUEST_HEADING) + 200
 
 
 def test_compose_harness_reflects_sandbox_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -314,13 +324,15 @@ def test_harness_precedes_volatile_sections() -> None:
     out = compose_system_prompt(ctx, chat_messages=msgs)
     stable, volatile = split_system_prompt_for_cache(out)
     assert "monkeybot harness" in stable
-    assert "## Current date" not in stable
-    assert "## Memory index" not in stable
-    assert "## Current request" not in stable
-    date_idx = volatile.index("## Current date")
-    mem_idx = volatile.index("## Memory index")
-    skills_idx = volatile.index("## Skills")
-    current_idx = volatile.index("## Current request")
+    # Match heading markers, not bare titles: the harness prose cross-references
+    # sections by name (e.g. "entries under `## Memory index` are titles only"),
+    # so a substring check would flag those references as a split failure.
+    for heading in (CURRENT_DATE_HEADING, MEMORY_INDEX_HEADING, CURRENT_REQUEST_HEADING):
+        assert heading_marker(heading) not in stable
+    date_idx = volatile.index(heading_marker(CURRENT_DATE_HEADING))
+    mem_idx = volatile.index(heading_marker(MEMORY_INDEX_HEADING))
+    skills_idx = volatile.index(heading_marker(SKILLS_HEADING))
+    current_idx = volatile.index(heading_marker(CURRENT_REQUEST_HEADING))
     assert date_idx < mem_idx < skills_idx < current_idx
 
 

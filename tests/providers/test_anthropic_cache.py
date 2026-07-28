@@ -11,7 +11,7 @@ import pytest
 
 from monkeybot.core.context.epoch import SYSTEM_CONTEXT_UPDATE_HEADING
 from monkeybot.core.llm.provider import Message, UsageEvent
-from monkeybot.core.prompts.prompt import (
+from monkeybot.core.prompts.headings import (
     CURRENT_DATE_HEADING,
     CURRENT_REQUEST_HEADING,
     MEMORY_INDEX_HEADING,
@@ -19,12 +19,14 @@ from monkeybot.core.prompts.prompt import (
     RUNTIME_NOTES_HEADING,
     SKILLS_HEADING,
     TODO_LIST_HEADING,
+    VOLATILE_SECTION_HEADINGS,
+    VOLATILE_SECTION_MARKERS,
+    heading_marker,
 )
 from monkeybot.providers._utils import (
-    _VOLATILE_SYSTEM_MARKERS,
-    build_anthropic_messages,
     build_cached_system_blocks,
     mark_last_tool_cached,
+    split_system_prompt_for_cache,
 )
 from monkeybot.providers.bedrock import BedrockClaudeProvider
 from monkeybot.providers.claude import ClaudeProvider
@@ -32,7 +34,6 @@ from monkeybot.providers.vertex_claude import VertexClaudeProvider
 from tests.providers.conftest import (
     CANONICAL_TOOL_DEFS,
     make_anthropic_stream_mock,
-    typed_messages_four_turn,
 )
 
 SYSTEM_TEXT = "SYS_PROMPT"
@@ -116,16 +117,17 @@ def test_build_cached_system_blocks_shape() -> None:
     ]
 
 
-def test_volatile_markers_match_heading_constants() -> None:
-    """_VOLATILE_SYSTEM_MARKERS cannot import the owning modules directly (circular
+def test_volatile_markers_cover_every_heading_constant() -> None:
+    """Every volatile heading must be detectable by the cache splitter.
 
-    import via core.context -> core.config.settings -> providers.claude), so the
-    literals are duplicated by hand. This test is the enforcement mechanism: any
-    heading rename/addition in the owning module must be mirrored here or this
-    test fails, catching drift that would otherwise silently break the Anthropic
-    cache-block split.
+    The markers used to be literals duplicated by hand in ``providers._utils``
+    (the owning modules cannot be imported there: ``core.context`` ->
+    ``core.config.settings`` -> ``providers.claude`` cycles). They drifted the
+    first time a heading gained a prose body, silently pushing volatile text
+    into the cached prefix. Both sides now share ``core.prompts.headings``; this
+    test keeps a heading from being added there without joining the marker set.
     """
-    assert set(_VOLATILE_SYSTEM_MARKERS) == {
+    for heading in (
         CURRENT_DATE_HEADING,
         MEMORY_INDEX_HEADING,
         MEMORY_NUDGE_HEADING,
@@ -134,7 +136,19 @@ def test_volatile_markers_match_heading_constants() -> None:
         CURRENT_REQUEST_HEADING,
         RUNTIME_NOTES_HEADING,
         SYSTEM_CONTEXT_UPDATE_HEADING,
-    }
+    ):
+        assert heading in VOLATILE_SECTION_HEADINGS
+        stable, volatile = split_system_prompt_for_cache(f"STABLE{heading}body")
+        assert stable == "STABLE"
+        assert volatile.startswith(heading)
+
+
+def test_volatile_markers_ignore_prose_under_the_heading() -> None:
+    """A marker is the title line only, so heading prose can be reworded freely."""
+    for marker in VOLATILE_SECTION_MARKERS:
+        assert marker.startswith("\n\n## ")
+        assert marker.count("\n") == 3, marker  # two leading, one closing the title
+    assert heading_marker("\n\n## Memory index\nprose here\n") == "\n\n## Memory index\n"
 
 
 def test_build_cached_system_blocks_splits_volatile_tail() -> None:

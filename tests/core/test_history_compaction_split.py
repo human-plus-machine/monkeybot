@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-from monkeybot.core.context.tool_result_ingress import (
-    summary_tool_result_max_chars_from_env,
-)
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.runtime.history_compaction import (
     SUMMARY_KEEP_HEAD_COUNT,
@@ -15,6 +12,7 @@ from monkeybot.core.runtime.history_compaction import (
     split_messages_for_compaction,
 )
 from monkeybot.core.types.content_blocks import File, Image, Text, Thinking, ToolResponse
+from monkeybot.core.tools.spill_inventory import spill_budgets_from_window
 
 
 def _msgs(n: int, *, chars: int = 40) -> list[Message]:
@@ -81,7 +79,7 @@ def test_estimate_ignores_summary_truncation_cap_for_large_tool_results() -> Non
     inherit that cap, or large tool outputs in the tail would be undercounted
     against ``SUMMARY_KEEP_TAIL_RATIO``.
     """
-    cap = summary_tool_result_max_chars_from_env()
+    cap = spill_budgets_from_window(200_000).summary_max_chars
     huge_result_chars = cap * 5
     message = Message(
         role="assistant",

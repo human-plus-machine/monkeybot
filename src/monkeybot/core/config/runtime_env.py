@@ -65,10 +65,6 @@ ENV_MAP: dict[tuple[str, str], str] = {
     ("context_curation", "timeout_sec"): "CONTEXT_CURATION_TIMEOUT_SEC",
     ("memory_hook", "enabled"): "MONKEYBOT_MEMORY_HOOK_ENABLED",
     ("tools", "denied_patterns"): "MONKEYBOT_TOOL_DENIED_PATTERNS",
-    ("tools", "read_max_lines"): "MONKEYBOT_READ_MAX_LINES",
-    ("tools", "read_default_lines"): "MONKEYBOT_READ_DEFAULT_LINES",
-    ("tools", "spill_read_max_lines"): "MONKEYBOT_SPILL_READ_MAX_LINES",
-    ("tools", "spill_min_chars"): "MONKEYBOT_SPILL_MIN_CHARS",
     ("compression", "resume_thinking_budget"): "MONKEYBOT_RESUME_THINKING_BUDGET",
     ("web_search", "backend"): "WEB_SEARCH_BACKEND",
     ("web_search", "max_results"): "WEB_SEARCH_MAX_RESULTS",
@@ -100,6 +96,32 @@ ENV_MAP: dict[tuple[str, str], str] = {
 
 # Backward-compatible alias for internal/tests.
 _ENV_MAP = ENV_MAP
+
+# YAML keys that used to map to env but are retired. Still accepted in the file
+# (no unknown-key rejection), but warn so configs are not silently ignored.
+RETIRED_TOOLS_KEYS: frozenset[str] = frozenset(
+    {
+        "spill_min_chars",
+        "spill_read_max_lines",
+    }
+)
+
+
+def warn_retired_tools_keys(doc: Mapping[str, Any]) -> list[str]:
+    """Log one warning per retired ``tools.*`` key; return the keys found."""
+    tools = doc.get("tools")
+    if not isinstance(tools, dict):
+        return []
+    found: list[str] = []
+    for key in sorted(RETIRED_TOOLS_KEYS):
+        if key in tools:
+            found.append(key)
+            logger.warning(
+                "tools.%s is retired and ignored — spill/read sizing is derived from "
+                "model.context_window (see docs/spill-dynamic-design.md)",
+                key,
+            )
+    return found
 
 
 def reset_runtime_env_state_for_tests() -> None:
@@ -248,6 +270,8 @@ def apply_monkeybot_runtime_env(
     except Exception as exc:
         logger.error("Failed to load %s: %s", path, exc)
         raise
+
+    warn_retired_tools_keys(merged)
 
     _RUNTIME_ENV_APPLIED = True
     google_cloud_project = (os.environ.get("GOOGLE_CLOUD_PROJECT") or "").strip()

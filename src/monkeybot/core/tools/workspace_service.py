@@ -8,7 +8,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 from monkeybot.core.tools.text_normalize import normalize_unicode_punctuation
 
@@ -33,6 +33,11 @@ _GREP_IGNORE_DIRS = frozenset(
 )
 
 
+# Appended when a single line exceeds the whole char budget and had to be cut
+# mid-line; the remainder is not reachable via ``offset``.
+_LINE_SLICED_MARKER = " …[line cut at char budget]"
+
+
 class ReadFileResult(TypedDict):
     ok: bool
     path: str
@@ -41,6 +46,7 @@ class ReadFileResult(TypedDict):
     end_line: int
     total_lines: int
     truncated: bool
+    next_offset: NotRequired[int]
 
 
 class WriteFileResult(TypedDict):
@@ -91,11 +97,15 @@ class GrepResult(TypedDict):
 
 @dataclass
 class WorkspaceSettings:
-    """Defaults for workspace file limits (override via env in callers or pass explicit settings)."""
+    """Defaults for workspace file limits (YAML via callers, or pass explicit settings).
 
-    WORKSPACE_READ_MAX_LINES: int = 50000
-    WORKSPACE_READ_DEFAULT_LINES: int = 20000
-    WORKSPACE_SPILL_READ_MAX_LINES: int = 50_000
+    The agent path always supplies YAML-derived settings, so these defaults only
+    serve non-agent callers such as the gateway file-viewer endpoints, which are
+    not bound by any model context window and keep the historic generous limits.
+    """
+
+    WORKSPACE_READ_MAX_LINES: int = 50_000
+    WORKSPACE_READ_DEFAULT_LINES: int = 20_000
     WORKSPACE_WRITE_MAX_BYTES: int = 8_000_000
     WORKSPACE_GLOB_MAX_PATHS: int = 2000
     WORKSPACE_GLOB_TIMEOUT_SEC: float = 20.0
@@ -125,7 +135,6 @@ def _coerce_workspace_settings(settings: object | None) -> WorkspaceSettings:
     for field in (
         "WORKSPACE_READ_MAX_LINES",
         "WORKSPACE_READ_DEFAULT_LINES",
-        "WORKSPACE_SPILL_READ_MAX_LINES",
         "WORKSPACE_WRITE_MAX_BYTES",
         "WORKSPACE_GLOB_MAX_PATHS",
         "WORKSPACE_GLOB_TIMEOUT_SEC",
@@ -466,22 +475,23 @@ class WorkspaceFileService:
         *,
         offset: int = 1,
         limit: int | None = None,
-        max_lines_cap: int | None = None,
+        max_chars: int | None = None,
+        apply_default_limit: bool = True,
     ) -> ReadFileResult:
         if offset < 1:
             raise WorkspaceError("offset must be >= 1", code="invalid_offset")
-        max_lines = (
-            max_lines_cap
-            if max_lines_cap is not None
-            else self._settings.WORKSPACE_READ_MAX_LINES
-        )
+        max_lines = self._settings.WORKSPACE_READ_MAX_LINES
         if limit is None:
-            limit = self._settings.WORKSPACE_READ_DEFAULT_LINES
-        if limit < 1 or limit > max_lines:
+            if apply_default_limit:
+                limit = self._settings.WORKSPACE_READ_DEFAULT_LINES
+        elif limit < 1:
             raise WorkspaceError(
                 f"limit must be between 1 and {max_lines}",
                 code="invalid_limit",
             )
+        elif limit > max_lines:
+            # Char budget is the authority when present; otherwise clamp.
+            limit = max_lines
         fp = self._resolve_under_root(path)
         if not fp.is_file():
             raise WorkspaceError(f"Not a file: {path}", code="not_found")
@@ -499,19 +509,65 @@ class WorkspaceFileService:
                 "total_lines": total,
                 "truncated": False,
             }
-        end_idx = min(start_idx + limit, total)
-        chunk = lines[start_idx:end_idx]
-        width = max(6, len(str(end_idx)))
-        numbered = "\n".join(f"{start_idx + 1 + i:{width}d}|{chunk[i]}" for i in range(len(chunk)))
-        return {
+        end_cap = total if limit is None else min(start_idx + limit, total)
+
+        width = max(6, len(str(max(total, 1))))
+        if max_chars is None:
+            end_idx = end_cap
+            chunk = lines[start_idx:end_idx]
+            numbered = "\n".join(
+                f"{start_idx + 1 + i:{width}d}|{chunk[i]}" for i in range(len(chunk))
+            )
+            truncated = end_idx < total
+            result: ReadFileResult = {
+                "ok": True,
+                "path": self._as_repo_rel(fp),
+                "content": numbered,
+                "start_line": start_idx + 1,
+                "end_line": end_idx,
+                "total_lines": total,
+                "truncated": truncated,
+            }
+            if truncated:
+                result["next_offset"] = end_idx + 1
+            return result
+
+        # Char-bounded selection: accumulate numbered line length; never chop mid-slice.
+        selected: list[str] = []
+        used = 0
+        end_idx = start_idx
+        sliced = False
+        for i in range(start_idx, end_cap):
+            line = lines[i]
+            numbered_line = f"{i + 1:{width}d}|{line}"
+            add = len(numbered_line) + (1 if selected else 0)
+            if selected and used + add > max_chars:
+                break
+            if not selected and add > max_chars:
+                # Always advance at least one line so paging cannot deadlock. The
+                # remainder of this line is unreachable by offset, so say so.
+                kept = numbered_line[: max(1, max_chars)]
+                selected.append(f"{kept}{_LINE_SLICED_MARKER}")
+                end_idx = i + 1
+                sliced = True
+                break
+            selected.append(numbered_line)
+            used += add
+            end_idx = i + 1
+
+        more_lines = end_idx < total
+        out: ReadFileResult = {
             "ok": True,
             "path": self._as_repo_rel(fp),
-            "content": numbered,
+            "content": "\n".join(selected),
             "start_line": start_idx + 1,
             "end_line": end_idx,
             "total_lines": total,
-            "truncated": end_idx < total,
+            "truncated": more_lines or sliced,
         }
+        if more_lines:
+            out["next_offset"] = end_idx + 1
+        return out
 
     def write_file(self, path: str, content: str) -> WriteFileResult:
         if content is None:

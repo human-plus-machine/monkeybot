@@ -288,7 +288,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - `skills/...` paths resolve only below the read-only skills root; all other relative paths resolve only below `workspace_root`.
 - Writes, edits, and patches reject `skills/...`; real-path checks reject symlink escapes from either root.
 - `apply_patch` validates all hunks before writing; a mid-apply failure rolls back completed ops in reverse order.
-- Large tool results may spill to `.monkeybot/spill/{session_id}/` (and `.monkeybot/spill/subagent:{session_id}:*/` for task subagents) for the session lifetime; cleaned concurrently on session end.
+- Soft spill: large tool results always write the full payload to `.monkeybot/spill/{session_id}/` (and `.monkeybot/spill/subagent:{session_id}:*/` for task subagents) and keep a window-derived inline body in history when headroom allows; cleaned concurrently on session end. Budgets derive from `model.context_window` (no spill YAML/env knobs). Reported `read_file` line metadata is always truthful (`next_offset` when truncated).
 - `task` omitted in subagent workers (`include_task_tool=False`).
 - Nested `task` disabled inside subagents.
 - Custom tools must not collide with core or MCP names.
@@ -722,8 +722,9 @@ Use this when reviewing PRs or designing new features.
 | Doom-loop threshold | 3 (0 = off) | `DOOM_LOOP_THRESHOLD` |
 | Context window | 200000 (example yaml: 1M) | `MODEL_CONTEXT_WINDOW` |
 | Summarization trigger | ratio from compression config | `SUMMARY_TRIGGER_RATIO` |
-| Read max lines | 5000 | `MONKEYBOT_READ_MAX_LINES` |
-| Default read lines | 2000 | built-in |
+| Read max lines | 5000 | `tools.read_max_lines` (YAML only — no env override) |
+| Default read lines | 2000 | `tools.read_default_lines` (YAML only — no env override) |
+| Spill threshold / inline / read char budgets | derived from `model.context_window` | not configurable (no YAML, no env) |
 | Context curation timeout | 10s | `context_curation.timeout_sec` |
 | Current request cap | 8000 chars | code constant |
 | Emission style | off | `MONKEYBOT_EMISSION_STYLE` / `emission.style` |

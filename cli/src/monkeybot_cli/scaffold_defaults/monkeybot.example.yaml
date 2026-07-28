@@ -185,10 +185,10 @@ tools:
   # List of substrings blocked in tool args (also env MONKEYBOT_TOOL_DENIED_PATTERNS as comma-separated)
   # denied_patterns:
   #   - "rm -rf"
-  # read_max_lines: 50000
-  # read_default_lines: 20000
-  # spill_read_max_lines: 50000
-  # spill_min_chars: 8000
+  # YAML-only (no env override): ordinary read_file line governors.
+  # read_max_lines: 5000
+  # read_default_lines: 2000
+  # Spill / read char budgets are derived from model.context_window (not configurable).
   # Context pressure / result-budget ratios are fixed in harness code (not configurable).
 
 web_search:

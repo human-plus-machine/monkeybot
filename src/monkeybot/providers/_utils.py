@@ -19,6 +19,7 @@ from monkeybot.core.llm.provider import (
     UsageEvent,
 )
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.prompts.headings import VOLATILE_SECTION_MARKERS
 from monkeybot.core.types.content_blocks import (
     ContentBlock,
     File,
@@ -352,29 +353,15 @@ def _anthropic_assistant_block(block: ContentBlock) -> dict[str, Any]:
     raise ValueError(f"unsupported assistant content block for Anthropic: {type(block).__name__}")
 
 
-# Must match volatile section headers emitted by ``compose_system_prompt``
+# Volatile section headings emitted by ``compose_system_prompt``
 # (``core.prompts.prompt``), ``_append_extra_system_text`` (``core.runtime.loop``),
-# and ``_format_system_context_update`` (``core.context.epoch``).
-#
-# These modules cannot be imported here directly: ``core.context`` transitively
-# imports ``core.config.settings``, which imports concrete provider classes
-# from this package, creating a circular import. Each owning module exposes
-# its heading as a module-level ``*_HEADING`` constant (not just an inline
-# literal) specifically so this list — and any other out-of-package consumer —
-# can be kept in sync by grepping for ``_HEADING = "\n\n## `` rather than by
-# re-deriving the split point from prose. A dedicated regression test
-# (``tests/providers/test_anthropic_cache.py::test_volatile_markers_match_heading_constants``)
-# asserts these literals stay byte-identical to the owning constants.
-_VOLATILE_SYSTEM_MARKERS = (
-    "\n\n## Current date\n",
-    "\n\n## Memory index\n",
-    "\n\n## Memory\n",
-    "\n\n## Skills\n",
-    "\n\n## Todo list\n",
-    "\n\n## Current request\n",
-    "\n\n## Runtime notes\n",
-    "\n\n## System context update\n",
-)
+# and ``_format_system_context_update`` (``core.context.epoch``). Shared from the
+# import-free ``core.prompts.headings`` leaf: importing the composing modules
+# here would cycle (``core.context`` -> ``core.config.settings`` -> provider
+# classes in this package), which is why these literals were once duplicated by
+# hand — and drifted. Markers are title-line only, so editing the prose under a
+# heading cannot move the split point.
+_VOLATILE_SYSTEM_MARKERS = VOLATILE_SECTION_MARKERS
 
 
 def split_system_prompt_for_cache(system: str) -> tuple[str, str]:
