@@ -106,7 +106,7 @@ Common types you will handle in a chat UI:
 | `Error` | Recoverable stream error string in `error`. |
 | `ImageBlock` | Inline image (`mime_type`, base64 `data`). |
 | `ThinkingBlockDelta` / `ThinkingBlockComplete` / `RedactedThinkingBlock` | Extended thinking blocks where the model exposes them. |
-| `ToolConfirmationRequest` | User must approve/deny; POST to `tool-confirmations` with `tool_call_id`. |
+| `ToolConfirmationRequest` | User must approve/deny; POST to `tool-confirmations` with `tool_call_id`. The reference Textual client can auto-answer these client-side in `auto-approve`/`deny-confirms` mode (`Shift+Tab` in `monkeybot chat`) — this is purely a UI convenience, no gateway change; `ActionRequiredEvent` elicitations are never auto-answered. |
 | `ActionRequiredEvent` | e.g. `action_type: "elicitation"` with `id` and `payload`; POST to `elicitations/{id}`. |
 | `FrontendToolRequest` | UI-executed tool; POST result to `frontend-tool-results/{tool_call_id}`. |
 | `SystemNotificationEvent` | Toasts / inline system messages (`notification_type`, `msg`). |

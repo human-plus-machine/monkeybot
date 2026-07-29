@@ -20,6 +20,7 @@ from monkeybot_cli.chat_tui import (
     ToolCallBlock,
     UserTurn,
     _COMPOSER_PLACEHOLDER,
+    cycle_approval_mode,
     filter_slash_commands,
     format_topbar,
     gateway_host_label,
@@ -676,7 +677,7 @@ def test_composer_busy_spinner_tracks_turn(tmp_path: Path) -> None:
             app._handle_event(ChatUiEvent("turn_started", {}))
             await pilot.pause()
             assert spinner.busy is True
-            assert "working · Ctrl-C interrupt" in app._status_line()
+            assert "working · Esc interrupt" in app._status_line()
 
             app._handle_event(ChatUiEvent("turn_complete", {}))
             await pilot.pause()
@@ -1271,5 +1272,651 @@ def test_follow_scroll_does_not_yank_after_scroll_up(tmp_path: Path) -> None:
             await pilot.pause()
             assert app._auto_scroll is False
             assert float(transcript.scroll_y) <= y_after_user + 0.5
+
+    asyncio.run(_run())
+
+
+def test_esc_interrupts_active_turn(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        app._controller.abort_turn = AsyncMock()  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            app._handle_event(ChatUiEvent("turn_started", {}))
+            await pilot.pause()
+            assert app._turn_active is True
+
+            await pilot.press("escape")
+            await pilot.pause()
+            app._controller.abort_turn.assert_called_once()
+
+    asyncio.run(_run())
+
+
+def test_esc_cancels_search_not_turn(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        app._controller.abort_turn = AsyncMock()  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            app._handle_event(ChatUiEvent("turn_started", {}))
+            await pilot.pause()
+            composer = app.query_one("#prompt", Composer)
+            composer.push_history("earlier message")
+            composer.action_history_search()
+            assert composer.in_search is True
+
+            await pilot.press("escape")
+            await pilot.pause()
+            assert composer.in_search is False
+            app._controller.abort_turn.assert_not_called()
+
+    asyncio.run(_run())
+
+
+def test_esc_dismisses_open_slash_palette(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            composer = app.query_one("#prompt", Composer)
+            composer.load_text("/he")
+            app._update_slash_palette("/he")
+            await pilot.pause()
+            assert app._palette().display is True
+
+            await pilot.press("escape")
+            await pilot.pause()
+            assert app._palette().display is False
+
+    asyncio.run(_run())
+
+
+def test_double_esc_recalls_last_message(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            composer = app.query_one("#prompt", Composer)
+            composer.push_history("hello there")
+
+            await pilot.press("escape")
+            await pilot.pause()
+            assert composer.text == ""
+            assert app._hitl_status_flash == "Esc again to edit previous message"
+
+            await pilot.press("escape")
+            await pilot.pause()
+            assert composer.text == "hello there"
+
+    asyncio.run(_run())
+
+
+def test_cycle_approval_mode_round_trip() -> None:
+    assert cycle_approval_mode("normal") == "auto-approve"
+    assert cycle_approval_mode("auto-approve") == "deny-confirms"
+    assert cycle_approval_mode("deny-confirms") == "normal"
+    assert cycle_approval_mode("bogus") == "auto-approve"
+
+
+def test_shift_tab_cycles_mode_and_status_line(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            assert app.approval_mode == "normal"
+
+            await pilot.press("shift+tab")
+            await pilot.pause()
+            assert app.approval_mode == "auto-approve"
+            assert "auto-approve" in app._status_line()
+
+            await pilot.press("shift+tab")
+            await pilot.pause()
+            assert app.approval_mode == "deny-confirms"
+            assert "deny-confirms" in app._status_line()
+
+            await pilot.press("shift+tab")
+            await pilot.pause()
+            assert app.approval_mode == "normal"
+            assert "auto-approve" not in app._status_line()
+            assert "deny-confirms" not in app._status_line()
+
+    asyncio.run(_run())
+
+
+def test_auto_approve_mode_answers_confirm_without_card(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        answers: list = []
+        app._controller.provide_hitl_answer = answers.append  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            app.approval_mode = "auto-approve"
+            app._handle_event(
+                ChatUiEvent(
+                    "hitl_required",
+                    {
+                        "prompt": "Approve?",
+                        "hitl_kind": "confirm",
+                        "tool_name": "shell",
+                        "arguments": {"command": "ls"},
+                    },
+                )
+            )
+            await pilot.pause()
+
+            assert app._hitl_active is False
+            assert app._hitl_card is None
+            assert len(answers) == 1
+            assert answers[0].approved is True
+
+    asyncio.run(_run())
+
+
+def test_deny_confirms_mode_answers_confirm_with_denial(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        answers: list = []
+        app._controller.provide_hitl_answer = answers.append  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            app.approval_mode = "deny-confirms"
+            app._handle_event(
+                ChatUiEvent(
+                    "hitl_required",
+                    {"prompt": "Approve?", "hitl_kind": "confirm", "tool_name": "shell"},
+                )
+            )
+            await pilot.pause()
+
+            assert app._hitl_active is False
+            assert len(answers) == 1
+            assert answers[0].approved is False
+
+    asyncio.run(_run())
+
+
+def test_auto_approve_mode_still_shows_elicit_card(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        answers: list = []
+        app._controller.provide_hitl_answer = answers.append  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            app.approval_mode = "auto-approve"
+            app._handle_event(
+                ChatUiEvent(
+                    "hitl_required",
+                    {"prompt": "What's your name?", "hitl_kind": "elicit"},
+                )
+            )
+            await pilot.pause()
+
+            assert app._hitl_active is True
+            assert app._hitl_card is not None
+            assert answers == []
+
+    asyncio.run(_run())
+
+
+def test_slash_clear_behaves_like_new(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        app._controller.restart_session = AsyncMock()  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            app.query_one("#prompt", Composer).post_message(Composer.Submitted("/clear"))
+            await pilot.pause()
+            app._controller.restart_session.assert_awaited_once()
+            systems = [w.body for w in app.query(SystemLine)]
+            assert any("New session" in body for body in systems)
+
+    asyncio.run(_run())
+
+
+def test_slash_model_no_arg_shows_current(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            app.query_one("#prompt", Composer).post_message(Composer.Submitted("/model"))
+            await pilot.pause()
+            systems = [w.body for w in app.query(SystemLine)]
+            assert any("model: fake/m" in body for body in systems)
+
+    asyncio.run(_run())
+
+
+def test_slash_model_switch_updates_topbar(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        app._controller.restart_session = AsyncMock()  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            app.query_one("#prompt", Composer).post_message(
+                Composer.Submitted("/model anthropic/claude-x")
+            )
+            await pilot.pause()
+            app._controller.restart_session.assert_awaited_once()
+            assert app.provider == "anthropic"
+            assert app.model == "claude-x"
+            assert app._controller.model_provider == "anthropic"
+            assert app._controller.model_name == "claude-x"
+            systems = [w.body for w in app.query(SystemLine)]
+            assert any("Model set to anthropic/claude-x" in body for body in systems)
+
+    asyncio.run(_run())
+
+
+def test_slash_model_switch_failure_restores_previous(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        app._controller.model_provider = "fake"
+        app._controller.model_name = "m"
+        calls = {"n": 0}
+
+        async def flaky_restart() -> None:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("MODEL_UNAVAILABLE")
+
+        app._controller.restart_session = flaky_restart  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            app.query_one("#prompt", Composer).post_message(
+                Composer.Submitted("/model bogus/nope")
+            )
+            await pilot.pause()
+            assert app.provider == "fake"
+            assert app.model == "m"
+            assert app._controller.model_provider == "fake"
+            assert app._controller.model_name == "m"
+            assert calls["n"] == 2
+            systems = [w.body for w in app.query(SystemLine)]
+            assert any("Model switch failed" in body for body in systems)
+
+    asyncio.run(_run())
+
+
+def test_slash_status_mounts_summary(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            app.query_one("#prompt", Composer).post_message(Composer.Submitted("/status"))
+            await pilot.pause()
+            systems = [w.body for w in app.query(SystemLine)]
+            assert any("session" in body and "model" in body and "fake/m" in body for body in systems)
+
+    asyncio.run(_run())
+
+
+def test_slash_config_reads_yaml(tmp_path: Path) -> None:
+    async def _run() -> None:
+        config_dir = tmp_path / "monkeybot_config"
+        config_dir.mkdir()
+        (config_dir / "monkeybot.yaml").write_text(
+            "model:\n  provider: nvidia\n  name: meta/llama\nruntime:\n  port: 8080\n"
+            "sandbox:\n  enabled: false\n",
+            encoding="utf-8",
+        )
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            app.query_one("#prompt", Composer).post_message(Composer.Submitted("/config"))
+            await pilot.pause()
+            systems = [w.body for w in app.query(SystemLine)]
+            assert any("nvidia" in body and "meta/llama" in body for body in systems)
+
+    asyncio.run(_run())
+
+
+def test_filter_slash_commands_includes_new_commands() -> None:
+    matches = dict(filter_slash_commands("/c"))
+    assert "/clear" in matches
+    assert "/config" in matches
+    assert "/copy" in matches
+
+
+def test_question_mark_on_empty_composer_shows_shortcuts(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            await pilot.press("question_mark")
+            await pilot.pause()
+            assert len(app.screen_stack) == 2
+
+            await pilot.press("escape")
+            await pilot.pause()
+            assert len(app.screen_stack) == 1
+
+    asyncio.run(_run())
+
+
+def test_question_mark_with_text_types_normally(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            composer = app.query_one("#prompt", Composer)
+            composer.load_text("is this real")
+            composer.move_cursor(composer.document.end)
+            await pilot.press("question_mark")
+            await pilot.pause()
+            assert len(app.screen_stack) == 1
+            assert composer.text == "is this real?"
+
+    asyncio.run(_run())
+
+
+def test_at_mention_shows_file_options_and_tab_inserts_without_submit(tmp_path: Path) -> None:
+    async def _run() -> None:
+        (tmp_path / "readme.md").write_text("x")
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        app._load_file_index = lambda: None  # type: ignore[method-assign]
+        submitted: list[str] = []
+        app._controller.submit = AsyncMock(  # type: ignore[method-assign]
+            side_effect=lambda m: submitted.append(m)
+        )
+        async with app.run_test() as pilot:
+            app._file_index = ["readme.md", "src/main.py"]
+            composer = app.query_one("#prompt", Composer)
+            composer.load_text("@rea")
+            composer.move_cursor(composer.document.end)
+            app._update_palette(composer)
+            await pilot.pause()
+            assert app.palette_mode == "file"
+            assert app._palette().option_count >= 1
+
+            await pilot.press("tab")
+            await pilot.pause()
+            assert composer.text == "readme.md "
+            assert not submitted
+            assert not list(app.query(UserTurn))
+
+    asyncio.run(_run())
+
+
+def test_at_mention_enter_inserts_path_not_submit(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        app._load_file_index = lambda: None  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            app._file_index = ["readme.md"]
+            composer = app.query_one("#prompt", Composer)
+            composer.load_text("look at @rea")
+            composer.move_cursor(composer.document.end)
+            app._update_palette(composer)
+            await pilot.pause()
+            assert app.palette_mode == "file"
+
+            await pilot.press("enter")
+            await pilot.pause()
+            assert composer.text == "look at readme.md "
+            assert not list(app.query(UserTurn))
+
+    asyncio.run(_run())
+
+
+def test_email_like_text_does_not_open_file_palette(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        app._load_file_index = lambda: None  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            app._file_index = ["readme.md"]
+            composer = app.query_one("#prompt", Composer)
+            composer.load_text("contact a@b.com")
+            composer.move_cursor(composer.document.end)
+            app._update_palette(composer)
+            await pilot.pause()
+            assert app.palette_mode is None
+            assert app._palette().display is False
+
+    asyncio.run(_run())
+
+
+def test_at_palette_never_opens_during_hitl(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        app._load_file_index = lambda: None  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            app._file_index = ["readme.md"]
+            app._handle_event(
+                ChatUiEvent("hitl_required", {"prompt": "Approve?", "hitl_kind": "confirm"})
+            )
+            await pilot.pause()
+            composer = app.query_one("#prompt", Composer)
+            composer.load_text("@rea")
+            composer.move_cursor(composer.document.end)
+            app._update_palette(composer)
+            await pilot.pause()
+            assert app.palette_mode is None
+            assert app._palette().display is False
+
+    asyncio.run(_run())
+
+
+def test_bang_command_mounts_tool_block_and_never_submits(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        app._controller.submit = AsyncMock()  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            app.query_one("#prompt", Composer).post_message(Composer.Submitted("!echo hi"))
+            await pilot.pause()
+            blocks = list(app.query(ToolCallBlock))
+            assert len(blocks) == 1
+            assert blocks[0].tool_name == "local_shell"
+            assert "echo hi" in blocks[0].display_label
+
+            for _ in range(20):
+                await pilot.pause()
+                if blocks[0].status != "running":
+                    break
+            assert blocks[0].status == "ok"
+            app._controller.submit.assert_not_called()
+            assert not list(app.query(UserTurn))
+
+    asyncio.run(_run())
+
+
+def test_bang_command_during_hitl_still_resolves_hitl(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        answers: list = []
+        app._controller.provide_hitl_answer = answers.append  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            app._handle_event(
+                ChatUiEvent(
+                    "hitl_required",
+                    {"prompt": "What's your name?", "hitl_kind": "elicit"},
+                )
+            )
+            await pilot.pause()
+            app.query_one("#prompt", Composer).post_message(Composer.Submitted("!echo hi"))
+            await pilot.pause()
+            assert len(answers) == 1
+            assert answers[0].text == "!echo hi"
+            assert not list(app.query(ToolCallBlock))
+
+    asyncio.run(_run())
+
+
+def test_bang_empty_shows_usage_hint(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            app.query_one("#prompt", Composer).post_message(Composer.Submitted("!"))
+            await pilot.pause()
+            systems = [w.body for w in app.query(SystemLine)]
+            assert any("Usage: !<command>" in body for body in systems)
+
+    asyncio.run(_run())
+
+
+def test_single_esc_idle_does_not_clear_draft(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            composer = app.query_one("#prompt", Composer)
+            composer.push_history("previous message")
+            composer.load_text("draft in progress")
+
+            await pilot.press("escape")
+            await pilot.pause()
+            assert composer.text == "draft in progress"
 
     asyncio.run(_run())
