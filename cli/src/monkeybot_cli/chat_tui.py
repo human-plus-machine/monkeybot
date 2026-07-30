@@ -6,6 +6,7 @@ import contextlib
 import logging
 import os
 import re
+import shlex
 import subprocess
 import time
 from datetime import datetime
@@ -62,6 +63,7 @@ _PENDING_LIMIT = 5
 _MAX_MOUNTED_TURNS = 200
 _SLASH_PREFIX_RE = re.compile(r"^/\S*$")
 _ESC_RECALL_WINDOW = 1.5
+_FILE_INDEX_TTL_SEC = 30.0
 
 _APPROVAL_MODES: tuple[str, ...] = ("normal", "auto-approve", "deny-confirms")
 
@@ -365,7 +367,7 @@ class ChatApp(App[int]):
         self._last_esc: float | None = None
         self._palette_mode: str | None = None
         self._file_index: list[str] | None = None
-        self._pending_composer_cursor: tuple[int, int] | None = None
+        self._file_index_loaded_at: float | None = None
         self.title = "monkeybot chat"
 
     def compose(self) -> ComposeResult:
@@ -793,6 +795,11 @@ class ChatApp(App[int]):
             self._hide_slash_palette()
             return
         _start, query = token
+        if (
+            self._file_index_loaded_at is None
+            or time.monotonic() - self._file_index_loaded_at > _FILE_INDEX_TTL_SEC
+        ):
+            self._load_file_index()
         matches = fuzzy_filter_files(self._file_index or [], query)
         palette = self._palette()
         if not matches:
@@ -805,8 +812,12 @@ class ChatApp(App[int]):
         palette.display = True
         self._palette_mode = "file"
 
-    def complete_at_from_palette(self) -> str | None:
-        """If the @ file palette is open, splice the selected path over the token."""
+    def complete_at_from_palette(self) -> tuple[str, tuple[int, int]] | None:
+        """If the @ file palette is open, splice the selected path over the token.
+
+        Returns ``(new_text, cursor_location)`` so the caller never needs to reach
+        into app-private state to know where the cursor should land.
+        """
         if self._palette_mode != "file":
             return None
         with contextlib.suppress(NoMatches):
@@ -828,14 +839,14 @@ class ChatApp(App[int]):
             new_line = line[:start] + inserted + line[col:]
             lines = composer.text.split("\n")
             lines[row] = new_line
-            self._pending_composer_cursor = (row, start + len(inserted))
-            return "\n".join(lines)
+            return "\n".join(lines), (row, start + len(inserted))
         return None
 
     @work(thread=True, exclusive=True, group="file-index")
     def _load_file_index(self) -> None:
         files = list_workspace_files(self.agent_root)
         self._file_index = files
+        self._file_index_loaded_at = time.monotonic()
 
     def slash_palette_move(self, delta: int) -> bool:
         with contextlib.suppress(NoMatches):
@@ -1241,6 +1252,12 @@ class ChatApp(App[int]):
         if not command:
             self._mount_system("Usage: !<command> — runs locally, not sent to the agent")
             return
+        if self.approval_mode == "deny-confirms":
+            self._mount_system(
+                "! shell is disabled in deny-confirms mode — Shift+Tab to switch mode",
+                error=True,
+            )
+            return
         append_history(self.agent_root, raw)
         composer = self.query_one("#prompt", Composer)
         composer.push_history(raw)
@@ -1480,7 +1497,7 @@ class ChatApp(App[int]):
                 self._mount_system("Set $EDITOR to use /config edit", error=True)
                 return
             with self.suspend():
-                subprocess.call([editor, str(path)])
+                subprocess.call([*shlex.split(editor), str(path)])
             self._mount_system(
                 "Config edited — restart the gateway (a fresh `monkeybot chat`) to apply changes"
             )

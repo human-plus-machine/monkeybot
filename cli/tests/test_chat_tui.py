@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -1652,6 +1654,120 @@ def test_slash_config_reads_yaml(tmp_path: Path) -> None:
             await pilot.pause()
             systems = [w.body for w in app.query(SystemLine)]
             assert any("nvidia" in body and "meta/llama" in body for body in systems)
+
+    asyncio.run(_run())
+
+
+def test_slash_config_edit_splits_editor_with_args(tmp_path: Path, monkeypatch) -> None:
+    async def _run() -> None:
+        config_dir = tmp_path / "monkeybot_config"
+        config_dir.mkdir()
+        config_path = config_dir / "monkeybot.yaml"
+        config_path.write_text("model:\n  provider: nvidia\n", encoding="utf-8")
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        app.suspend = contextlib.nullcontext  # type: ignore[method-assign]
+        monkeypatch.setenv("EDITOR", "code --wait")
+        calls: list[list[str]] = []
+        monkeypatch.setattr(
+            "monkeybot_cli.chat_tui.subprocess.call",
+            lambda argv: calls.append(list(argv)),
+        )
+        async with app.run_test() as pilot:
+            app.query_one("#prompt", Composer).post_message(Composer.Submitted("/config edit"))
+            await pilot.pause()
+            assert calls == [["code", "--wait", str(config_path)]]
+
+    asyncio.run(_run())
+
+
+def test_bang_disabled_in_deny_confirms_mode(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            app.approval_mode = "deny-confirms"
+            app.query_one("#prompt", Composer).post_message(Composer.Submitted("!echo hi"))
+            await pilot.pause()
+            assert not list(app.query(ToolCallBlock))
+            systems = [w.body for w in app.query(SystemLine)]
+            assert any("deny-confirms mode" in body for body in systems)
+
+    asyncio.run(_run())
+
+
+def test_at_completion_returns_text_and_cursor_tuple(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        app._load_file_index = lambda: None  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            app._file_index = ["readme.md"]
+            app._file_index_loaded_at = time.monotonic()
+            composer = app.query_one("#prompt", Composer)
+            composer.load_text("@rea")
+            composer.move_cursor(composer.document.end)
+            app._update_palette(composer)
+            await pilot.pause()
+
+            result = app.complete_at_from_palette()
+            assert result == ("readme.md ", (0, len("readme.md ")))
+
+    asyncio.run(_run())
+
+
+def test_at_mention_reloads_stale_file_index(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        reload_calls = {"n": 0}
+
+        def fake_reload() -> None:
+            reload_calls["n"] += 1
+            app._file_index = ["fresh.md"]
+            app._file_index_loaded_at = time.monotonic()
+
+        app._load_file_index = fake_reload  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            # Never loaded (loaded_at is None) -> triggers a reload.
+            composer = app.query_one("#prompt", Composer)
+            composer.load_text("@fre")
+            composer.move_cursor(composer.document.end)
+            app._update_palette(composer)
+            await pilot.pause()
+            assert reload_calls["n"] == 1
+            assert app._file_index == ["fresh.md"]
+
+            # Fresh index -> no reload on the next keystroke.
+            composer.load_text("@fres")
+            composer.move_cursor(composer.document.end)
+            app._update_palette(composer)
+            await pilot.pause()
+            assert reload_calls["n"] == 1
 
     asyncio.run(_run())
 

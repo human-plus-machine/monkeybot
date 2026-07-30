@@ -987,13 +987,12 @@ class Composer(TextArea):
             complete = getattr(app, "complete_at_from_palette", None)
             if not callable(complete):
                 return False
-            filled = complete()
-            if filled is None:
+            result = complete()
+            if result is None:
                 return False
+            filled, cursor = result
             self.load_text(filled)
-            cursor = getattr(app, "_pending_composer_cursor", None)
-            if cursor is not None:
-                self.move_cursor(cursor)
+            self.move_cursor(cursor)
             self._sync_height()
             return True
         return False
