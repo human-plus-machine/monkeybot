@@ -1025,9 +1025,9 @@ async def test_task_tool_unknown_subagent_type_returns_validation_error(
 ) -> None:
     root = tmp_path
     mem = tmp_path / "mem"
-    mem.mkdir()
+    mem.mkdir(exist_ok=True)
     skills = tmp_path / "skills"
-    skills.mkdir()
+    skills.mkdir(exist_ok=True)
     worker = root / "subagent_worker.py"
     worker.write_text("# placeholder\n", encoding="utf-8")
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
@@ -1157,9 +1157,9 @@ async def test_task_tool_parent_cancel_stops_hanging_subagent(tmp_path: Path, mo
     root = tmp_path
     _stub_agent_md_for_tasks(root, monkeypatch)
     mem = tmp_path / "mem"
-    mem.mkdir()
+    mem.mkdir(exist_ok=True)
     skills = tmp_path / "skills"
-    skills.mkdir()
+    skills.mkdir(exist_ok=True)
     worker = root / "subagent_worker.py"
     worker.write_text("# placeholder\n", encoding="utf-8")
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
@@ -2631,9 +2631,9 @@ async def test_task_tool_noop_publish_when_publisher_none(
     root = tmp_path
     _stub_agent_md_for_tasks(root, monkeypatch)
     mem = tmp_path / "mem"
-    mem.mkdir()
+    mem.mkdir(exist_ok=True)
     skills = tmp_path / "skills"
-    skills.mkdir()
+    skills.mkdir(exist_ok=True)
     worker = root / "subagent_worker.py"
     worker.write_text("# placeholder\n", encoding="utf-8")
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
@@ -2768,9 +2768,9 @@ async def test_task_tool_sets_child_thread_id_on_envelope(
     root = tmp_path
     _stub_agent_md_for_tasks(root, monkeypatch)
     mem = tmp_path / "mem"
-    mem.mkdir()
+    mem.mkdir(exist_ok=True)
     skills = tmp_path / "skills"
-    skills.mkdir()
+    skills.mkdir(exist_ok=True)
     worker = root / "subagent_worker.py"
     worker.write_text("# placeholder\n", encoding="utf-8")
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
@@ -3010,3 +3010,172 @@ async def test_task_tool_publishes_completed_when_payload_build_fails(
     payload = json.loads(out)
     assert payload["ok"] is False
     assert any("payload boom" in e for e in payload["errors"])
+
+
+def _fake_spawn_emitting(events: list[object]):
+    """Build a ``spawn_subagent`` stand-in that replays ``events`` from a child."""
+
+    async def fake_spawn(
+        script: str,
+        envelope: object,
+        *,
+        scratch_dir: object,
+        subprocess_exec: object | None = None,
+        on_event: object | None = None,
+        extra_env: dict[str, str] | None = None,
+    ):
+        del script, scratch_dir, subprocess_exec, extra_env, envelope
+        for evt in events:
+            if on_event is not None:
+                await on_event(evt)  # type: ignore[misc]
+            yield evt
+
+    return fake_spawn
+
+
+def _clean_child_events() -> list[object]:
+    from monkeybot.core.runtime.events import AssistantDelta, TurnComplete, UsageTotals
+
+    return [
+        AssistantDelta(request_id="r", delta="done"),
+        TurnComplete(
+            request_id="r",
+            usage=UsageTotals(
+                input_tokens=1,
+                output_tokens=1,
+                cached_tokens=0,
+                cost_usd=0.0,
+                duration_ms=1,
+                estimated_prompt_tokens=0,
+            ),
+        ),
+    ]
+
+
+async def _run_task_tool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    child_events: list[object],
+    args: dict[str, object],
+) -> dict[str, object]:
+    monkeypatch.setattr(
+        "monkeybot.core.tools.core_tool_executor.spawn_subagent",
+        _fake_spawn_emitting(child_events),
+    )
+    root = tmp_path
+    _stub_agent_md_for_tasks(root, monkeypatch)
+    mem = tmp_path / "mem"
+    mem.mkdir(exist_ok=True)
+    skills = tmp_path / "skills"
+    skills.mkdir(exist_ok=True)
+    worker = root / "subagent_worker.py"
+    worker.write_text("# placeholder\n", encoding="utf-8")
+    monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
+
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="c-exit", name="task", args=dict(args)),
+            ctx=_ctx(event_publisher=_FakeEventPublisher()),
+        )
+    )
+    # Rejected input comes back on the error channel; the caller asserts on it.
+    body = out if out is not None else err
+    assert body is not None
+    return json.loads(body)
+
+
+@pytest.mark.asyncio
+async def test_task_exit_reason_is_completed_on_a_clean_child_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = await _run_task_tool(
+        tmp_path,
+        monkeypatch,
+        child_events=_clean_child_events(),
+        args={"task": "do the thing"},
+    )
+    assert payload["ok"] is True
+    assert payload["exit_reason"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_task_exit_reason_distinguishes_max_turns_from_a_generic_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.runtime.events import Error
+    from monkeybot.core.runtime.turn_loop import MAX_TURNS_ERROR
+
+    max_turns = await _run_task_tool(
+        tmp_path,
+        monkeypatch,
+        child_events=[Error(request_id="r", error=MAX_TURNS_ERROR)],
+        args={"task": "do the thing"},
+    )
+    assert max_turns["ok"] is False
+    assert max_turns["exit_reason"] == "max_turns"
+
+    other = await _run_task_tool(
+        tmp_path,
+        monkeypatch,
+        child_events=[Error(request_id="r", error="provider blew up")],
+        args={"task": "do the thing"},
+    )
+    assert other["exit_reason"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_task_reports_artifact_existence_only_when_the_caller_names_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "landed.md").write_text("hi\n", encoding="utf-8")
+
+    unasked = await _run_task_tool(
+        tmp_path,
+        monkeypatch,
+        child_events=_clean_child_events(),
+        args={"task": "write the doc"},
+    )
+    # No expectation declared -> the harness must not claim to know.
+    assert unasked["artifact_exists"] is None
+    assert unasked["artifacts"] == []
+
+    checked = await _run_task_tool(
+        tmp_path,
+        monkeypatch,
+        child_events=_clean_child_events(),
+        args={"task": "write the doc", "expect_files": ["landed.md", "missing.md"]},
+    )
+    assert checked["artifact_exists"] is False
+    assert checked["artifacts"] == [
+        {"path": "landed.md", "exists": True},
+        {"path": "missing.md", "exists": False},
+    ]
+
+    all_there = await _run_task_tool(
+        tmp_path,
+        monkeypatch,
+        child_events=_clean_child_events(),
+        args={"task": "write the doc", "expect_files": ["landed.md"]},
+    )
+    assert all_there["artifact_exists"] is True
+
+
+@pytest.mark.asyncio
+async def test_task_rejects_expect_files_that_escape_the_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = await _run_task_tool(
+        tmp_path,
+        monkeypatch,
+        child_events=_clean_child_events(),
+        args={"task": "x", "expect_files": ["../outside.md"]},
+    )
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "validation"

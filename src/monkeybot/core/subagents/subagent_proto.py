@@ -37,6 +37,11 @@ logger = logging.getLogger(__name__)
 # Keep headroom for large tool results / snapshots on the parent←child pipe.
 SUBAGENT_STDOUT_LINE_LIMIT = 16 * 1024 * 1024  # 16 MiB
 
+# Prefix of the ``Error`` emitted when the child process itself dies. The parent
+# task tool matches on it to report ``exit_reason="crashed"`` — a contract, not
+# a log line.
+SUBAGENT_EXIT_ERROR_PREFIX = "subagent process exited with code"
+
 
 def _memory_storage_uri_from_dict(decoded: dict[str, Any]) -> str:
     """Resolve memory URI from envelope fields; empty string means no memory."""
@@ -334,7 +339,7 @@ async def spawn_subagent(
             "subagent process exited nonzero %s",
             kv(script=script, parent_run_id=envelope.parent_run_id, exit_code=code),
         )
-        yield Error(request_id="", error=f"subagent process exited with code {code}")
+        yield Error(request_id="", error=f"{SUBAGENT_EXIT_ERROR_PREFIX} {code}")
 
     if code == 0 and last_evt is not None:
         out_path = scratch_dir / "output.json"

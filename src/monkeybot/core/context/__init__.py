@@ -596,6 +596,15 @@ def _core_tool_defs(
             "type": "string",
             "description": "Optional background the parent already gathered (constraints, paths, prior tool output).",
         },
+        "expect_files": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Workspace-relative files the subagent is expected to create or update. "
+                "The result reports artifact_exists plus a per-path artifacts list, so you "
+                "do not need to check with a follow-up read_file or glob."
+            ),
+        },
     }
     type_names = sorted({n.strip() for n in (subagent_type_names or []) if n and str(n).strip()})
     subagent_type_schema: dict[str, object] = {

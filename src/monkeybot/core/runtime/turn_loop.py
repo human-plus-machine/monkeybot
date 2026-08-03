@@ -109,6 +109,11 @@ from .tool_dispatch import ToolBatchState, dispatch_tool_batch
 
 logger = logging.getLogger("monkeybot.core.runtime.loop.turn_loop")
 
+# Emitted as an ``Error`` event when a run hits its turn budget. The parent task
+# tool matches on this exact value to report ``exit_reason="max_turns"``, so it is
+# a contract between the loop and the subagent completion payload, not a message.
+MAX_TURNS_ERROR = "Max turns exceeded"
+
 TurnAction = Literal["continue", "break", "return"]
 
 _EMPTY_COMPLETION_RETRIES = 2
@@ -1363,7 +1368,7 @@ async def _run_inner_core(
                 max_turns=state.effective_max,
             ),
         )
-        yield Error(request_id=state.ctx.request_id, error="Max turns exceeded")
+        yield Error(request_id=state.ctx.request_id, error=MAX_TURNS_ERROR)
 
     # Ensure the backgrounded assistant write has landed before any load/reset
     # below (freeze) so the assistant row is durable and not overwritten.
