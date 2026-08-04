@@ -80,7 +80,11 @@ class SubagentConfig:
 class SubagentSettings:
     """Global defaults for ``task`` subagent runs from ``subagents:`` in monkeybot.yaml."""
 
-    timeout_sec: float = 600.0
+    # ponytail: 600s killed real implementer/story-writer children mid-work (PRT-5022).
+    # A flat hour is the lazy ceiling: parent cancel still stops a runaway sooner, and
+    # max_turns bounds the pathological case. Narrow it per-spawn only if an hour of a
+    # wedged child actually costs something.
+    timeout_sec: float = 3600.0
     max_turns: int = 1000
     vertex_google_search: bool = False
 
