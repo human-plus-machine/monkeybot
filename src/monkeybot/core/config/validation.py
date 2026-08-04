@@ -18,6 +18,7 @@ SUPPORTED_MODEL_PROVIDERS = frozenset(
         "huggingface",
         "ollama",
         "nvidia",
+        "openrouter",
         "fake",
         "aws_bedrock",
     }
@@ -37,6 +38,7 @@ SUPPORTED_YAML_MODEL_PROVIDERS = frozenset(
         "huggingface",
         "ollama",
         "nvidia",
+        "openrouter",
         "fake",
         "aws_bedrock",
     }

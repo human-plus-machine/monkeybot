@@ -80,7 +80,7 @@ paths:
   workspace_root: ./workspace
 
 model:
-  # gemini | openai | anthropic | vertex-claude | huggingface | ollama | nvidia | aws_bedrock | fake
+  # gemini | openai | anthropic | vertex-claude | huggingface | ollama | nvidia | openrouter | aws_bedrock | fake
   provider: gemini
   name: gemini-3.1-flash-live-preview
   temperature: 0.7

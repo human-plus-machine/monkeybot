@@ -11,6 +11,7 @@ from monkeybot.gateway.sse import app as gateway_app
 from monkeybot.providers.gemini import GeminiProvider
 from monkeybot.providers.huggingface import HuggingFaceProvider
 from monkeybot.providers.ollama import OllamaProvider
+from monkeybot.providers.openrouter import OpenRouterProvider
 
 
 def test_normalize_model_provider_aliases() -> None:
@@ -67,3 +68,17 @@ def test_resolve_curator_reuses_main_for_vertex_anthropic(
     main = ScriptedFakeProvider([TextDelta(text="x"), Done()])
     curator = gateway_app._resolve_curator_provider(main)
     assert curator is main
+
+
+def test_resolve_provider_openrouter(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MODEL_PROVIDER", "openrouter")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    provider = gateway_app._resolve_provider()
+    assert isinstance(provider, OpenRouterProvider)
+    assert provider._base_url == "https://openrouter.ai/api/v1"
+
+
+def test_openrouter_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    with pytest.raises(ValueError, match="OPENROUTER_API_KEY"):
+        OpenRouterProvider()
