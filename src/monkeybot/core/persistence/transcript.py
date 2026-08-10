@@ -11,8 +11,7 @@ skipped by default so the transcript is a replay-grade durable log. Set
 ``MONKEYBOT_TRANSCRIPT_INCLUDE_LIVE=1`` to capture every SSE event.
 
 Not surfaced to the agent or any tool; gated by ``MONKEYBOT_TRANSCRIPT_ENABLED``
-(default off) and wired only from the gateway loop (``GatewayLoopPort.start_turn``
-and the provider call site in ``core/runtime/loop.py``).
+(default off) and wired from the SSE gateway loop and realtime WebSocket route.
 """
 
 from __future__ import annotations
