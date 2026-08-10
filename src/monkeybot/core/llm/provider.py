@@ -116,6 +116,12 @@ class ProviderCallHints:
 
     Content strategy (stable/volatile split + epoch) lives in prompts; these
     hints are provider-specific request options layered on top.
+
+    ``cache_retention``:
+    - Anthropic-family: ``short`` = 5m ephemeral, ``long`` = 1h ``ttl``,
+      ``none`` = no ``cache_control`` markers.
+    - OpenAI: ``long`` sets ``prompt_cache_retention=24h``; ``short``/``none``
+      leave the API default.
     """
 
     session_id: str | None = None
