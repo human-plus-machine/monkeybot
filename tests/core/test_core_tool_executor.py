@@ -511,6 +511,29 @@ async def test_grep_incomplete_scan_errors(tmp_path: Path, monkeypatch: pytest.M
 
 
 @pytest.mark.asyncio
+async def test_grep_incomplete_scan_errors_with_rg(tmp_path: Path) -> None:
+    """rg path must honor WORKSPACE_GREP_MAX_FILES (not only the Python walker)."""
+    import shutil
+
+    from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService, WorkspaceSettings
+
+    if shutil.which("rg") is None:
+        pytest.skip("rg not on PATH")
+
+    root = tmp_path
+    for i in range(5):
+        (root / f"f{i}.py").write_text(f"MARKER_{i}\n", encoding="utf-8")
+    (root / "hit.py").write_text("KNOWN_MATCH_TOKEN\n", encoding="utf-8")
+    svc = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILES=2, WORKSPACE_GREP_MAX_MATCHES=50),
+    )
+    with pytest.raises(WorkspaceError) as ei:
+        svc.grep("KNOWN_MATCH_TOKEN")
+    assert ei.value.code == "incomplete_scan"
+
+
+@pytest.mark.asyncio
 async def test_grep_capped_complete_scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from monkeybot.core.tools.workspace_service import WorkspaceFileService, WorkspaceSettings
 

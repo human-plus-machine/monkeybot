@@ -868,6 +868,7 @@ class WorkspaceFileService:
                     globs=globs,
                     max_matches=max_m,
                     offset=off,
+                    max_files=max_files,
                     max_file_bytes=max_file_bytes,
                     t0=t0,
                 )
@@ -1011,6 +1012,7 @@ class WorkspaceFileService:
         globs: list[str] | None,
         max_matches: int,
         offset: int,
+        max_files: int,
         max_file_bytes: int,
         t0: float,
     ) -> GrepResult:
@@ -1050,6 +1052,7 @@ class WorkspaceFileService:
 
         matches: list[GrepMatch] = []
         total_match_count = 0
+        files_begun = 0
         files_scanned = 0
         for line in proc.stdout.splitlines():
             if not line.strip():
@@ -1057,7 +1060,10 @@ class WorkspaceFileService:
             event = json.loads(line)
             etype = event.get("type")
             data = event.get("data") or {}
-            if etype == "match":
+            if etype == "begin":
+                # One begin event per searched file — use for the file-cap check.
+                files_begun += 1
+            elif etype == "match":
                 total_match_count += 1
                 if total_match_count <= offset or len(matches) >= max_matches:
                     continue
@@ -1089,6 +1095,18 @@ class WorkspaceFileService:
                 matched_lines = stats.get("matched_lines")
                 if isinstance(matched_lines, int):
                     total_match_count = matched_lines
+
+        # Prefer the higher of begin-events vs summary.searches so a missing or
+        # under-counted summary cannot hide an over-cap scan.
+        if files_begun > files_scanned:
+            files_scanned = files_begun
+
+        if files_scanned > max_files:
+            raise WorkspaceError(
+                f"grep scanned {files_scanned} files (limit {max_files}) and stopped early; "
+                "results are incomplete and cannot be used to conclude absence",
+                code="incomplete_scan",
+            )
 
         return self._grep_result(
             pattern=pattern,
