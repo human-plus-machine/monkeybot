@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -14,7 +16,7 @@ from monkeybot.core.llm.realtime_provider import (
     RealtimeToolCall,
     RealtimeTurnBoundary,
 )
-from monkeybot.core.runtime.events import TurnComplete
+from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.runtime.utterance_buffer import UtteranceBuffer
 from monkeybot.gateway.realtime.routes import (
     _handle_assistant_boundary,
@@ -205,7 +207,8 @@ async def test_typed_text_tool_then_prose_commits_user_once(
 
 
 @pytest.mark.asyncio
-async def test_assistant_boundary_passes_transcript_writer(
+async def test_assistant_boundary_writes_talk_transcript(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = _state()
@@ -213,24 +216,33 @@ async def test_assistant_boundary_passes_transcript_writer(
     state.buffer.mark_user_turn_boundary()
     state.buffer.add_assistant_text("hi")
     state.buffer.mark_assistant_turn_boundary()
-    writer = MagicMock()
-    writer.write_event = AsyncMock()
+    writer = TranscriptWriter("s1", workspace_root=tmp_path)
+    await writer.ensure_manifest()
     state.transcript_writer = writer
-    seen: dict[str, Any] = {}
 
-    async def _fake_run(*_args: Any, **kwargs: Any) -> Any:
-        seen["writer"] = kwargs["transcript_writer"]
-        yield TurnComplete(request_id="r1")
+    history = MagicMock()
+    history.append = AsyncMock()
+    history.load = AsyncMock(return_value=[])
+    ctx = MagicMock()
+    ctx.memory = None
+    ctx.thread_id = "s1"
+    ctx.request_id = "r1"
+    ctx.model = "fake"
+    deps = MagicMock()
+    deps.inspectors = []
+    deps.hook_manager = None
 
     monkeypatch.setattr(
         "monkeybot.gateway.realtime.routes._create_tool_executor",
         lambda *_args, **_kwargs: MagicMock(),
     )
-    monkeypatch.setattr("monkeybot.gateway.realtime.routes.run_realtime_turn", _fake_run)
 
     await _handle_assistant_boundary(
-        MagicMock(), state, MagicMock(), MagicMock(), MagicMock(), None, None
+        MagicMock(), state, ctx, history, deps, None, None
     )
 
-    assert seen["writer"] is writer
-    writer.write_event.assert_awaited_once()
+    lines = [json.loads(line) for line in writer.path.read_text(encoding="utf-8").splitlines()]
+    types = [line["type"] for line in lines]
+    assert types[0] == "SessionManifest"
+    assert "UserMessage" in types
+    assert "TurnComplete" in types

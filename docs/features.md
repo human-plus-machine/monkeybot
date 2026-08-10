@@ -405,7 +405,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
   - Durable boundaries: `ToolCallStarted`, `ToolCallResult`, `TurnComplete`, `Error`, `ContextSummarized`, `AssistantTextEnded` (with `text`), `ThinkingBlockComplete`, epoch/steer admissions, etc.
   - Live-only: streaming deltas (`AssistantDelta`, `ToolInputDelta`, `ThinkingBlockDelta`, …), progress heartbeats, playground snapshots.
 - **Tool settlement:** live `ToolCallResult` mirrors durable `ToolResponse` blocks appended after the tool batch (one user row per model tool-call turn, call-order preserved). Crash between assistant `ToolRequest` append and batched responses is repaired in-memory on load (`tool_integrity`).
-- **Optional NDJSON transcript** (`MONKEYBOT_TRANSCRIPT_ENABLED`): writes durable events by default; set `MONKEYBOT_TRANSCRIPT_INCLUDE_LIVE=1` for full SSE fidelity.
+- **Optional NDJSON transcript** (`MONKEYBOT_TRANSCRIPT_ENABLED`): writes durable events by default; set `MONKEYBOT_TRANSCRIPT_INCLUDE_LIVE=1` for full SSE fidelity. CLI-spawned `chat` and `talk` gateways enable it by default for `/export-trace`; an explicit `MONKEYBOT_TRANSCRIPT_ENABLED=0` still disables capture.
 
 **Invariants:**
 - Lazy backend imports.

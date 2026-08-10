@@ -105,7 +105,6 @@ async def start_gateway_if_needed(
 
     env = {**os.environ, "PORT": str(port)}
     env.setdefault("LOG_LEVEL", "error")
-    env.setdefault("MONKEYBOT_TRANSCRIPT_ENABLED", "1")
     runtime = resolve_runtime_python(workspace)
     cmd = gateway_argv(runtime, module=COMBINED_GATEWAY_MODULE)
 
