@@ -245,4 +245,5 @@ async def test_assistant_boundary_writes_talk_transcript(
     types = [line["type"] for line in lines]
     assert types[0] == "SessionManifest"
     assert "UserMessage" in types
+    assert "AssistantTextEnded" in types
     assert "TurnComplete" in types

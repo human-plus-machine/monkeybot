@@ -1341,8 +1341,8 @@ class ChatApp(App[int]):
         src = session_dir / "transcript.ndjson"
         if not src.is_file():
             self._mount_system(
-                "No trace file found — transcript capture may be disabled "
-                "(set MONKEYBOT_TRANSCRIPT_ENABLED=1 and restart)",
+                "No trace file found — enable transcript capture on the gateway and restart "
+                "(external gateways need MONKEYBOT_TRANSCRIPT_ENABLED=1)",
                 error=True,
             )
             return

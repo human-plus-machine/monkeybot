@@ -779,6 +779,7 @@ def create_realtime_router(
             except Exception as exc:
                 raise ProviderConnectionError(str(exc)) from exc
 
+            transcript_enabled = transcript_enabled_from_env()
             state = RealtimeConnectionState(
                 session_id=session_id,
                 request_id=request_id,
@@ -787,20 +788,8 @@ def create_realtime_router(
                 buffer=UtteranceBuffer(),
                 opened_at=time.monotonic(),
                 last_activity_at=time.monotonic(),
-                transcript_writer=(
-                    TranscriptWriter(session_id, workspace_root=workspace_root)
-                    if transcript_enabled_from_env()
-                    else None
-                ),
                 todo_store=todo_store,
             )
-            if state.transcript_writer is not None:
-                await state.transcript_writer.ensure_manifest(
-                    agent_md=str(AgentLayout.from_environment().agent_md_path),
-                    model=ctx.model,
-                    provider=provider.name,
-                    workspace_root=str(workspace_root),
-                )
             try:
                 manager.register(session_id, state)
             except ValueError as exc:
@@ -808,6 +797,17 @@ def create_realtime_router(
                     str(exc),
                     details="session_already_active",
                 ) from exc
+
+            if transcript_enabled:
+                state.transcript_writer = TranscriptWriter(
+                    session_id, workspace_root=workspace_root
+                )
+                await state.transcript_writer.ensure_manifest(
+                    agent_md=str(AgentLayout.from_environment().agent_md_path),
+                    model=ctx.model,
+                    provider=provider.name,
+                    workspace_root=str(workspace_root),
+                )
 
             await _send_frame(
                 ws,
