@@ -8,6 +8,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `monkeybot chat` TUI gained Claude-Code-style interaction: `Esc` interrupts the active turn (double-tap while idle recalls your last message for editing), `Shift+Tab` cycles a client-side approval mode (`normal` / `auto-approve` / `deny-confirms` — auto-answers tool confirmation prompts only, elicitations still ask), `@` fuzzy-inserts a workspace file path, `!<command>` runs a local shell command shown in the transcript but never sent to the agent, and `?` opens a keyboard-shortcut overlay. New slash commands: `/clear` (alias of `/new`), `/model` (switches model by starting a fresh session), `/status`, `/config`.
 - Knowledge indexing follows document structure instead of fixed line windows: markdown headings, code definitions (tree-sitter via the optional `knowledge-ast` extra, brace/indent heuristic otherwise), and JSON/YAML/TOML top-level keys become chunk boundaries.
 - Embeddings run on NVIDIA, OpenAI, any OpenAI-compatible endpoint, Voyage, or Gemini via `knowledge.embeddings.provider`. Misconfigured or unavailable providers degrade to keyword + graph search rather than failing the turn.
 - PDF, DOCX, and image files are indexed with the `knowledge-media` extra. Images use `knowledge.captions` (`off` / `path` / `llm`); DOCX indexing covers tables as well as paragraphs.

@@ -553,6 +553,15 @@ its `.env` before YAML values fill still-unset environment variables.
 | `monkeybot chat` | Spawn SSE gateway + REPL |
 | `monkeybot talk` | Realtime WebSocket client (audio/text) |
 
+**Chat TUI (Textual):** Claude-Code-style interaction on top of the slash palette and history
+search — `Esc` interrupts the active turn (double-tap while idle to recall your last message),
+`Shift+Tab` cycles an approval mode (`normal` / `auto-approve` / `deny-confirms`, client-side only —
+it auto-answers tool *confirmation* prompts, elicitations still ask), `@` fuzzy-inserts a workspace
+file path, `!<command>` runs a local shell command shown in the transcript but never sent to the
+agent, and `?` opens a shortcuts overlay. Slash commands added: `/clear`, `/model` (starts a new
+session — no mid-session model swap exists), `/status`, `/config`. See
+[getting-started.md](getting-started.md#chat-tui-shortcuts) for the full key table.
+
 **Agent-first dependencies:** The CLI is thin — provider/storage extras (`bedrock`, `postgres`, …) are declared on the **agent** `pyproject.toml`, not the global CLI. `monkeybot run` / `chat` / `talk` / `doctor` resolve the interpreter as:
 
 1. `<agent>/.venv/bin/python` when a project venv exists

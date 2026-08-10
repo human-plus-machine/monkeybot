@@ -100,6 +100,23 @@ monkeybot run             # terminal 1
 monkeybot chat --attach   # terminal 2
 ```
 
+### Chat TUI shortcuts
+
+| Key | Action |
+| --- | --- |
+| `Esc` | Interrupt the running turn; press again within ~1.5s while idle to recall your last message for editing |
+| `Shift+Tab` | Cycle approval mode: `normal` → `auto-approve` (auto-answers tool confirmation prompts) → `deny-confirms` → back to `normal` |
+| `@` | Fuzzy-pick a workspace file (honors `.gitignore`) and insert its path |
+| `!<command>` | Run a local shell command — output shows in the transcript but is **never** sent to the agent |
+| `?` | Show the full keyboard-shortcut overlay (when the composer is empty) |
+| `Ctrl+R` | Reverse history search |
+| `Ctrl+C` | Cancel the current turn, clear the composer, or exit |
+
+New slash commands: `/clear` (alias of `/new`), `/model [<provider>/]<name>` (switches model by
+starting a fresh session — context is cleared), `/status` (session, model, connection, usage),
+`/config [edit]` (show or open `monkeybot.yaml`; changes need a gateway restart to take effect).
+Run `/help` in chat for the full list.
+
 ---
 
 ## 5. Call the HTTP API (optional)
