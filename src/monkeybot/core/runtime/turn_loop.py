@@ -775,6 +775,7 @@ async def _consume_provider_stream_body(
     llm_cached = 0
     llm_cache_read = 0
     llm_cache_creation = 0
+    hints = _provider_call_hints(state.ctx)
     try:
         async with span_llm(ctx=state.ctx, vertex_google_search=vertex_google_search):
             async with aclosing(
@@ -787,7 +788,7 @@ async def _consume_provider_stream_body(
                         model=state.ctx.model,
                         thinking_budget=state.stream_thinking,
                         vertex_google_search=vertex_google_search,
-                        hints=_provider_call_hints(state.ctx),
+                        hints=hints,
                     ),
                 )
             ) as stream:
@@ -804,6 +805,7 @@ async def _consume_provider_stream_body(
                             ev.output_tokens,
                             cache_read_tokens=ev.cache_read_tokens,
                             cache_creation_tokens=ev.cache_creation_tokens,
+                            cache_retention=hints.cache_retention,
                         )
                         llm_input += ev.input_tokens
                         llm_output += ev.output_tokens

@@ -37,7 +37,48 @@ def test_estimate_cost_with_cache_tokens() -> None:
         cache_read_tokens=1_000_000,
         cache_creation_tokens=1_000_000,
     )
+    # short (default): 3.75 write + 0.30 read
     assert cost == pytest.approx(4.05)
+
+
+def test_estimate_cost_long_retention_uses_2x_anthropic_write() -> None:
+    short = estimate_cost(
+        "claude-sonnet-4",
+        0,
+        0,
+        cache_creation_tokens=1_000_000,
+        cache_retention="short",
+    )
+    long = estimate_cost(
+        "claude-sonnet-4",
+        0,
+        0,
+        cache_creation_tokens=1_000_000,
+        cache_retention="long",
+    )
+    assert short == pytest.approx(3.75)
+    assert long == pytest.approx(6.00)
+    # Under-report if long were priced as short: (2-1.25)/2 = 37.5%
+    assert (long - short) / long == pytest.approx(0.375)
+
+
+def test_estimate_cost_long_retention_noop_when_no_write_rate() -> None:
+    # OpenAI has cache_write=0; retention must not invent an Anthropic premium.
+    short = estimate_cost(
+        "gpt-5",
+        0,
+        0,
+        cache_read_tokens=1_000_000,
+        cache_retention="short",
+    )
+    long = estimate_cost(
+        "gpt-5",
+        0,
+        0,
+        cache_read_tokens=1_000_000,
+        cache_retention="long",
+    )
+    assert short == long == pytest.approx(0.125)
 
 
 def test_estimate_cost_unknown_model_zero() -> None:

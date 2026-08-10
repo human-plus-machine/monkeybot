@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import logging
+from typing import Literal
 
 _log = logging.getLogger(__name__)
 
 # USD per 1M tokens: (input, output, cache_write, cache_read)
 # Bedrock/Vertex ids are normalized onto these bare keys (see _normalize).
 # Gemini-on-Vertex uses the same gemini-* keys when the model id matches.
+# Anthropic cache_write is the 5-minute (1.25× input) rate; estimate_cost
+# upgrades writes to 2× input when cache_retention is ``long`` (1h TTL).
 MODEL_PRICING: dict[str, tuple[float, float, float, float]] = {
     "claude-sonnet-4": (3.00, 15.00, 3.75, 0.30),
     "claude-opus-4": (15.00, 75.00, 18.75, 1.50),
@@ -17,6 +20,9 @@ MODEL_PRICING: dict[str, tuple[float, float, float, float]] = {
     "gemini-2.5-flash": (0.30, 2.50, 0.00, 0.075),
     "gemini-3-flash-preview": (0.30, 2.50, 0.00, 0.075),
 }
+
+# Anthropic 1-hour ephemeral cache writes are 2× base input (docs: prompt caching).
+_ANTHROPIC_LONG_CACHE_WRITE_MULTIPLIER = 2.0
 
 __all__ = ["MODEL_PRICING", "estimate_cost", "normalize_model_id", "pricing_for"]
 
@@ -74,9 +80,18 @@ def estimate_cost(
     *,
     cache_read_tokens: int = 0,
     cache_creation_tokens: int = 0,
+    cache_retention: Literal["none", "short", "long"] = "short",
 ) -> float:
-    """Return estimated USD cost using :func:`pricing_for`. Unknown model → 0.0."""
+    """Return estimated USD cost using :func:`pricing_for`. Unknown model → 0.0.
+
+    ``cache_retention`` selects the Anthropic cache-write tier when the model
+    has a non-zero write rate (Claude family): ``short``/``none`` use the table's
+    5-minute 1.25× rate; ``long`` uses 2× input for 1-hour TTL writes. OpenAI /
+    Gemini keep ``cache_write=0`` so retention is a no-op for them.
+    """
     rin, rout, rcw, rcr = pricing_for(model)
+    if cache_retention == "long" and rin > 0 and rcw > 0:
+        rcw = rin * _ANTHROPIC_LONG_CACHE_WRITE_MULTIPLIER
     return (
         input_tokens * rin
         + output_tokens * rout
