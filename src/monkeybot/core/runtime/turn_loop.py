@@ -52,6 +52,7 @@ from monkeybot.core.types.content_blocks import (
 from monkeybot.core.types.content_blocks import Thinking as ThinkingBlock
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers.pricing import estimate_cost
+from monkeybot.providers._utils import note_anthropic_token_estimate_observation
 
 from .doom_loop import (
     _doom_loop_exempt_names,
@@ -256,6 +257,7 @@ class _TurnState:
     thinking_text: str = ""
     thinking_signature: str | None = None
     stream_truncated: bool = False
+    last_preflight_tokens: int = 0
 
 
 async def _prepare_turn_context(
@@ -684,6 +686,7 @@ async def _maybe_compact_and_shape(
         provider=provider,
         vertex_google_search=vertex_google_search,
     )
+    state.last_preflight_tokens = preflight
     usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, preflight)
     yield ContextUsage(
         request_id=state.ctx.request_id,
@@ -832,6 +835,35 @@ async def _consume_provider_stream_body(
                 prompt=_provider_messages_prompt_summary(state.provider_messages),
                 completion=state.assistant_text or "",
             )
+            actual_prompt = llm_input + llm_cache_read + llm_cache_creation
+            if state.last_preflight_tokens > 0 and actual_prompt > 0:
+                if provider.name in ("bedrock", "claude", "vertex-claude"):
+                    note_anthropic_token_estimate_observation(
+                        estimated=state.last_preflight_tokens,
+                        actual=actual_prompt,
+                    )
+                logger.debug(
+                    "prompt token preflight vs actual %s",
+                    kv(
+                        request_id=state.ctx.request_id,
+                        thread_id=state.ctx.thread_id,
+                        turn=state.turn_index,
+                        preflight=state.last_preflight_tokens,
+                        actual_prompt=actual_prompt,
+                        context_window=state.ctx.context_window_tokens,
+                        provider=provider.name,
+                    ),
+                )
+                if actual_prompt > state.ctx.context_window_tokens:
+                    logger.warning(
+                        "provider-reported prompt exceeds configured context_window %s",
+                        kv(
+                            request_id=state.ctx.request_id,
+                            actual_prompt=actual_prompt,
+                            context_window=state.ctx.context_window_tokens,
+                            model=state.ctx.model,
+                        ),
+                    )
         if transcript_writer is not None:
             await transcript_writer.write_provider_response(
                 request_id=state.ctx.request_id,

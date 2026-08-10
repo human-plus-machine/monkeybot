@@ -376,6 +376,21 @@ def split_system_prompt_for_cache(system: str) -> tuple[str, str]:
     return system[:split_at], system[split_at:]
 
 
+def anthropic_cache_control(
+    cache_retention: Literal["none", "short", "long"],
+) -> dict[str, Any] | None:
+    """Build an Anthropic ``cache_control`` object, or ``None`` when caching is disabled.
+
+    ``short`` uses the default 5-minute ephemeral TTL. ``long`` sets ``ttl: "1h"``
+    (extended cache; no beta header required on current Anthropic APIs).
+    """
+    if cache_retention == "none":
+        return None
+    if cache_retention == "long":
+        return {"type": "ephemeral", "ttl": "1h"}
+    return {"type": "ephemeral"}
+
+
 def build_cached_system_blocks(
     system: str,
     *,
@@ -391,16 +406,16 @@ def build_cached_system_blocks(
     Args:
         system: Non-empty system prompt text. Callers MUST guard empty strings
             and pass anthropic.NOT_GIVEN instead (see provider stream methods).
-        cache_retention: ``none`` disables markers; ``short``/``long`` enable
-            ephemeral ``cache_control`` (Anthropic does not distinguish short/long
-            on the block itself; session affinity is a separate hint).
+        cache_retention: ``none`` disables markers; ``short`` is 5-minute ephemeral;
+            ``long`` is 1-hour ephemeral (``ttl: "1h"``).
 
     Returns:
-        One or two text blocks; the stable prefix carries ``cache_control: ephemeral``
-        unless retention is ``none``.
+        One or two text blocks; the stable prefix carries ``cache_control`` unless
+        retention is ``none``.
     """
     stable, volatile = split_system_prompt_for_cache(system)
-    if cache_retention == "none":
+    control = anthropic_cache_control(cache_retention)
+    if control is None:
         if not volatile.strip():
             return [{"type": "text", "text": system}]
         blocks: list[dict[str, Any]] = [{"type": "text", "text": stable}]
@@ -408,9 +423,9 @@ def build_cached_system_blocks(
             blocks.append({"type": "text", "text": volatile})
         return blocks
     if not volatile.strip():
-        return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+        return [{"type": "text", "text": system, "cache_control": control}]
     blocks = [
-        {"type": "text", "text": stable, "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": stable, "cache_control": control},
     ]
     if volatile:
         blocks.append({"type": "text", "text": volatile})
@@ -422,10 +437,10 @@ def mark_last_tool_cached(
     *,
     cache_retention: Literal["none", "short", "long"] = "short",
 ) -> list[dict[str, Any]]:
-    """Return a copy of ``tools`` with ``cache_control: ephemeral`` on the LAST tool.
+    """Return a copy of ``tools`` with ``cache_control`` on the LAST tool.
 
-    Marks the final tool dict so Anthropic caches the entire tools-array prefix.
-    No-ops when ``tools`` is empty or ``cache_retention`` is ``none``.
+    Needed when system is empty (no system breakpoint). No-ops when ``tools`` is
+    empty or ``cache_retention`` is ``none``.
 
     Args:
         tools: Anthropic tool dicts (output of a provider ``_convert_tools``).
@@ -435,10 +450,95 @@ def mark_last_tool_cached(
         A new list; only the last element gains a ``cache_control`` key. Input
         list and its dicts are not mutated (shallow-copy the last dict).
     """
-    if not tools or cache_retention == "none":
+    control = anthropic_cache_control(cache_retention)
+    if not tools or control is None:
         return tools
-    marked_last = {**tools[-1], "cache_control": {"type": "ephemeral"}}
+    marked_last = {**tools[-1], "cache_control": control}
     return [*tools[:-1], marked_last]
+
+
+def _mark_message_last_block_cached(
+    message: dict[str, Any],
+    *,
+    control: dict[str, Any],
+) -> dict[str, Any]:
+    """Return a shallow-copied message with ``cache_control`` on its last content block."""
+    content = message.get("content")
+    if isinstance(content, str):
+        return {
+            **message,
+            "content": [{"type": "text", "text": content, "cache_control": control}],
+        }
+    if not isinstance(content, list) or not content:
+        return dict(message)
+    blocks = [dict(b) if isinstance(b, dict) else b for b in content]
+    last = blocks[-1]
+    if isinstance(last, dict):
+        blocks[-1] = {**last, "cache_control": control}
+    return {**message, "content": blocks}
+
+
+def mark_conversation_cache_breakpoints(
+    messages: list[dict[str, Any]],
+    *,
+    cache_retention: Literal["none", "short", "long"] = "short",
+    max_breakpoints: int = 2,
+) -> list[dict[str, Any]]:
+    """Return messages with rolling ``cache_control`` breakpoints on the conversation prefix.
+
+    Marks the last content block of the most recent message and retains a breakpoint
+    on the previous message (when present) so the turn that *writes* a new cache
+    entry can still *read* the prior prefix. Anthropic allows at most 4 breakpoints
+    per request; callers should budget system/tools markers accordingly.
+
+    Does not mutate caller-owned dicts. When ``cache_retention`` is ``none`` or
+    ``max_breakpoints`` < 1, returns a shallow copy of ``messages`` unchanged.
+    """
+    if not messages or cache_retention == "none" or max_breakpoints < 1:
+        return list(messages)
+    control = anthropic_cache_control(cache_retention)
+    if control is None:
+        return list(messages)
+
+    out = [dict(m) for m in messages]
+    # Mark from the end: newest first, then previous turn's end.
+    n = min(max_breakpoints, len(out))
+    for idx in range(len(out) - n, len(out)):
+        out[idx] = _mark_message_last_block_cached(out[idx], control=control)
+    return out
+
+
+def prepare_anthropic_cached_payload(
+    *,
+    system: str,
+    messages: Sequence[Message],
+    tools: Sequence[Any],
+    cache_retention: Literal["none", "short", "long"],
+    not_given: Any,
+    conversation_breakpoints: int = 2,
+) -> tuple[Any, list[dict[str, Any]], Any]:
+    """Build ``(system_param, messages, tools_param)`` for Anthropic ``messages.stream``.
+
+    Shared by Claude / Bedrock / Vertex Claude so marker placement stays identical.
+    Budget: 1 system + 1 tools + ``conversation_breakpoints`` (default 2) ≤ 4.
+    """
+    converted_messages = mark_conversation_cache_breakpoints(
+        build_anthropic_messages(messages),
+        cache_retention=cache_retention,
+        max_breakpoints=conversation_breakpoints,
+    )
+    converted_tools = anthropic_tool_defs(tools) if tools else None
+    system_param: Any = (
+        build_cached_system_blocks(system, cache_retention=cache_retention)
+        if system
+        else not_given
+    )
+    tools_param: Any = (
+        mark_last_tool_cached(converted_tools, cache_retention=cache_retention)
+        if converted_tools
+        else not_given
+    )
+    return system_param, converted_messages, tools_param
 
 
 def build_anthropic_messages(messages: Sequence[Message]) -> list[dict[str, Any]]:
@@ -478,6 +578,35 @@ def build_anthropic_messages(messages: Sequence[Message]) -> list[dict[str, Any]
     return out
 
 
+# Default chars/token for Bedrock/Vertex estimate fallback. ``// 4`` under-counted
+# JSON-heavy tool payloads enough that compaction fired ~60 turns late in a
+# measured 164-turn Bedrock session; 3 is a conservative baseline before feedback.
+_ESTIMATE_CHARS_PER_TOKEN = 3.0
+# Multiplier learned from preflight estimate vs provider-reported prompt size.
+_estimate_correction: float = 1.0
+
+
+def note_anthropic_token_estimate_observation(*, estimated: int, actual: int) -> None:
+    """Feed back last-turn estimate vs actual so future estimates track real size.
+
+    ``actual`` should be total prompt tokens (uncached input + cache read + cache
+    creation). Uses a light EMA so a single outlier cannot swing the scale.
+    """
+    global _estimate_correction
+    if estimated < 1 or actual < 1:
+        return
+    ratio = actual / estimated
+    # Clamp so a broken count cannot zero or explode the scale.
+    ratio = max(0.5, min(ratio, 4.0))
+    _estimate_correction = (0.7 * _estimate_correction) + (0.3 * ratio)
+
+
+def reset_anthropic_token_estimate_correction() -> None:
+    """Test helper: restore the estimate correction factor to 1.0."""
+    global _estimate_correction
+    _estimate_correction = 1.0
+
+
 def estimate_anthropic_input_tokens(
     *,
     system: str,
@@ -497,10 +626,12 @@ def estimate_anthropic_input_tokens(
     if tools:
         parts.append(json.dumps(list(tools), ensure_ascii=False))
     char_count = sum(len(p) for p in parts)
-    return max(1, char_count // 4)
+    base = max(1, int(char_count / _ESTIMATE_CHARS_PER_TOKEN))
+    return max(1, int(base * _estimate_correction))
 
 
 __all__ = [
+    "anthropic_cache_control",
     "anthropic_tool_defs",
     "build_anthropic_messages",
     "build_cached_system_blocks",
@@ -508,7 +639,11 @@ __all__ = [
     "estimate_anthropic_input_tokens",
     "estimate_cost",
     "iter_anthropic_sdk_stream",
+    "mark_conversation_cache_breakpoints",
     "mark_last_tool_cached",
+    "note_anthropic_token_estimate_observation",
+    "prepare_anthropic_cached_payload",
+    "reset_anthropic_token_estimate_correction",
     "safe_parse_tool_args",
     "split_leading_system",
     "split_system_prompt_for_cache",
