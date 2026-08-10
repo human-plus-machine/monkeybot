@@ -1130,6 +1130,121 @@ async def test_run_command_malformed_args_returns_validation_envelope(
 
 
 @pytest.mark.asyncio
+async def test_run_command_timeout_hint_rejects_timeout_bump_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Timeout guidance must not push 'raise timeout and retry the same argv'."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from monkeybot.core.tools.terminal import CommandTimeoutError
+
+    monkeypatch.chdir(tmp_path)
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    terminal = MagicMock()
+    terminal.allowed_commands = ("python3",)
+    terminal.allowed_path_prefixes = ("./",)
+    terminal.execute = AsyncMock(
+        side_effect=CommandTimeoutError(
+            "Command exceeded 300s timeout",
+            timeout=300,
+            stdout="creating database test_epsilon_test\n",
+            stderr="still migrating…\n",
+        )
+    )
+    terminal.aclose = AsyncMock()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+        terminal=terminal,
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="1",
+                name="run_command",
+                args={"argv": ["python3", "-m", "pytest"], "timeout": 300},
+            ),
+            ctx=_ctx(),
+        )
+    )
+    assert out is None and err is not None
+    payload = json.loads(err)
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "runtime"
+    assert "300s" in payload["message"]
+    hint = payload["hint"].lower()
+    assert "partial state" in hint or "left partial" in hint
+    assert "not a valid recovery" in hint
+    assert "larger timeout" in hint
+    assert "increase" not in hint
+    assert "read_file" in hint
+    details = payload["details"]
+    assert "example" not in details
+    assert "avoid" not in details
+    assert "prefer" not in details
+    spill_rel = details["partial_output_path"]
+    assert spill_rel.endswith("-timeout.txt")
+    assert details["stdout_chars"] > 0
+    assert details["stderr_chars"] > 0
+    assert "test_epsilon_test" in details["partial_output_tail"]
+    # Full streams live on disk — not dumped as the error body.
+    spill_body = (tmp_path / spill_rel).read_text(encoding="utf-8")
+    assert "test_epsilon_test" in spill_body
+    assert "still migrating" in spill_body
+    assert spill_rel in payload["hint"]
+
+
+@pytest.mark.asyncio
+async def test_run_command_timeout_spills_partial_output_from_real_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end: killed process output is spilled; envelope points at the path."""
+    monkeypatch.chdir(tmp_path)
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="to1",
+                name="run_command",
+                args={
+                    "argv": [
+                        "python3",
+                        "-c",
+                        "import sys, time; print('before-hang', flush=True); time.sleep(60)",
+                    ],
+                    "timeout": 1,
+                },
+            ),
+            ctx=_ctx(),
+        )
+    )
+    assert out is None and err is not None
+    payload = json.loads(err)
+    assert payload["error_kind"] == "runtime"
+    spill_rel = payload["details"]["partial_output_path"]
+    spill_text = (tmp_path / spill_rel).read_text(encoding="utf-8")
+    assert "before-hang" in spill_text
+    assert "before-hang" in payload["details"].get("partial_output_tail", "")
+    # Envelope itself stays small — no multi-MB dump of streams at top level.
+    assert "before-hang" not in payload["message"]
+    assert len(json.dumps(payload)) < 8_000
+
+
+@pytest.mark.asyncio
 async def test_unknown_tool(tmp_path: Path) -> None:
     ex = CoreToolExecutor(
         workspace_root=tmp_path,

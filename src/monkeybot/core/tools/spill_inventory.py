@@ -421,6 +421,60 @@ def write_spill_with_inventory(
     return history
 
 
+_TIMEOUT_PARTIAL_TAIL_CHARS = 1500
+
+
+def partial_output_tail(stdout: str, stderr: str, *, max_chars: int = _TIMEOUT_PARTIAL_TAIL_CHARS) -> str:
+    """Return a short tail suitable for inlining in a timeout error envelope."""
+    parts: list[str] = []
+    if stdout:
+        parts.append(f"--- stdout ---\n{stdout}")
+    if stderr:
+        parts.append(f"--- stderr ---\n{stderr}")
+    if not parts:
+        return ""
+    combined = "\n\n".join(parts)
+    if len(combined) <= max_chars:
+        return combined
+    omitted = len(combined) - max_chars
+    return f"…(+{omitted} chars omitted)\n{combined[-max_chars:]}"
+
+
+def write_run_command_timeout_spill(
+    *,
+    workspace_root: Path,
+    thread_id: str,
+    call_id: str,
+    stdout: str,
+    stderr: str,
+) -> str:
+    """Persist drained run_command streams after timeout; return workspace-relative path."""
+    body = "\n".join(
+        [
+            "=== run_command partial output (process killed on timeout) ===",
+            "",
+            "--- stdout ---",
+            stdout if stdout else "(empty)",
+            "",
+            "--- stderr ---",
+            stderr if stderr else "(empty)",
+            "",
+        ]
+    )
+    rel = (
+        f"{_SPILL_DIR_REL.as_posix()}/{thread_id}/"
+        f"{_safe_spill_filename(f'{call_id}-timeout')}.txt"
+    )
+    out_path = (Path(workspace_root) / rel).resolve()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(body, encoding="utf-8")
+    logger.debug(
+        "run_command timeout spill %s",
+        kv(path=rel, stdout_chars=len(stdout), stderr_chars=len(stderr)),
+    )
+    return rel
+
+
 def spill_root(workspace_root: Path) -> Path:
     """Return ``.monkeybot/spill`` under ``workspace_root``."""
     return Path(workspace_root).resolve() / _SPILL_DIR_REL

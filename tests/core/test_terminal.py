@@ -12,6 +12,8 @@ Terminal Executor, including:
 Security tests are marked with SECURITY comment for easy identification.
 """
 
+import asyncio
+
 import pytest
 
 from monkeybot.core.tools.terminal import (
@@ -260,12 +262,18 @@ class TestTerminalExecutorExecution:
 
         seen_env: dict[str, str] = {}
 
-        async def fake_exec(*cmd, stdout=None, stderr=None, cwd=None, env=None):
+        async def fake_exec(*cmd, stdout=None, stderr=None, cwd=None, env=None, **kwargs):
+            del kwargs
             nonlocal seen_env
             seen_env = dict(env or {})
             proc = MagicMock()
-            proc.communicate = AsyncMock(return_value=(b"ok", b""))
+            proc.pid = 12345
             proc.returncode = 0
+            proc.stdout = MagicMock()
+            proc.stderr = MagicMock()
+            proc.stdout.read = AsyncMock(return_value=b"")
+            proc.stderr.read = AsyncMock(return_value=b"")
+            proc.wait = AsyncMock(return_value=0)
             return proc
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
@@ -285,12 +293,18 @@ class TestTerminalExecutorExecution:
 
         seen_env: dict[str, str] = {}
 
-        async def fake_exec(*cmd, stdout=None, stderr=None, cwd=None, env=None):
+        async def fake_exec(*cmd, stdout=None, stderr=None, cwd=None, env=None, **kwargs):
+            del kwargs
             nonlocal seen_env
             seen_env = dict(env or {})
             proc = MagicMock()
-            proc.communicate = AsyncMock(return_value=(b"ok", b""))
+            proc.pid = 12345
             proc.returncode = 0
+            proc.stdout = MagicMock()
+            proc.stderr = MagicMock()
+            proc.stdout.read = AsyncMock(return_value=b"")
+            proc.stderr.read = AsyncMock(return_value=b"")
+            proc.wait = AsyncMock(return_value=0)
             return proc
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
@@ -314,7 +328,9 @@ class TestTerminalExecutorTimeout:
     @pytest.mark.asyncio
     async def test_timeout_kills_process(self, executor):
         """Test that timeout kills long-running process."""
-        with pytest.raises(TimeoutError) as exc_info:
+        from monkeybot.core.tools.terminal import CommandTimeoutError
+
+        with pytest.raises(CommandTimeoutError) as exc_info:
             await executor.execute(
                 "python3",
                 ["-c", "import time; time.sleep(60)"],
@@ -322,6 +338,49 @@ class TestTerminalExecutorTimeout:
             )
 
         assert "timeout" in str(exc_info.value).lower()
+        assert exc_info.value.timeout == 1
+
+    @pytest.mark.asyncio
+    async def test_timeout_preserves_partial_stdout(self, executor):
+        """Drained stdout/stderr from before kill are attached to the error."""
+        from monkeybot.core.tools.terminal import CommandTimeoutError
+
+        with pytest.raises(CommandTimeoutError) as exc_info:
+            await executor.execute(
+                "python3",
+                [
+                    "-c",
+                    "import sys, time; print('partial-out', flush=True); "
+                    "print('partial-err', file=sys.stderr, flush=True); time.sleep(60)",
+                ],
+                timeout=1,
+            )
+
+        assert "partial-out" in exc_info.value.stdout
+        assert "partial-err" in exc_info.value.stderr
+
+    @pytest.mark.asyncio
+    async def test_execute_does_not_hang_when_grandchild_holds_pipe(self, executor):
+        """Child can exit while a descendant keeps stdout open; drain must still finish."""
+        # Parent prints and exits; forked child keeps the PIPE open for 60s.
+        # Unbounded stdout.read() would hang until the child exits.
+        result = await asyncio.wait_for(
+            executor.execute(
+                "python3",
+                [
+                    "-c",
+                    "import os, sys, time\n"
+                    "if os.fork() == 0:\n"
+                    "    time.sleep(60)\n"
+                    "    os._exit(0)\n"
+                    "print('done', flush=True)\n",
+                ],
+                timeout=5,
+            ),
+            timeout=8,
+        )
+        assert result.exit_code == 0
+        assert "done" in result.stdout
 
     @pytest.mark.asyncio
     async def test_fast_command_does_not_timeout(self, executor):
