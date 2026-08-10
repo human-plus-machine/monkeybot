@@ -25,6 +25,8 @@ from textual.reactive import reactive
 from textual.widgets import Button, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
+from monkeybot_cli.chat_file_index import detect_at_token, fuzzy_filter_files, list_workspace_files
+from monkeybot_cli.chat_local_shell import run_local_shell, truncate_output
 from monkeybot_cli.chat_renderer import SessionController
 from monkeybot_cli.chat_session import (
     ChatSessionController,
@@ -32,8 +34,6 @@ from monkeybot_cli.chat_session import (
     HitlAnswer,
     format_args_preview,
 )
-from monkeybot_cli.chat_file_index import detect_at_token, fuzzy_filter_files, list_workspace_files
-from monkeybot_cli.chat_local_shell import run_local_shell, truncate_output
 from monkeybot_cli.chat_status_bar import (
     SessionUsageView,
     format_context_ring_markup,
