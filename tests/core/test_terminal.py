@@ -462,7 +462,7 @@ class TestTerminalExecutorConstants:
     def test_allowed_commands_list(self):
         """Test that ALLOWED_COMMANDS contains expected commands."""
         # Document expected commands
-        expected_commands = ["cat", "ls", "grep", "echo", "python", "python3", "uv", "git", "gh", "bash"]
+        expected_commands = ["cat", "ls", "grep", "rg", "echo", "python", "python3", "uv", "git", "gh", "bash"]
 
         for cmd in expected_commands:
             assert cmd in ALLOWED_COMMANDS, f"Expected command '{cmd}' not in ALLOWED_COMMANDS"

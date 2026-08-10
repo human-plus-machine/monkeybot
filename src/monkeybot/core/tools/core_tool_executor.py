@@ -683,6 +683,11 @@ def _workspace_error_envelope(exc: WorkspaceError) -> str:
         hint = "Widen old_string until unique, or set replace_all=true."
     elif code == "invalid_offset":
         hint = 'Use "offset" as a positive integer (1 = first line).'
+    elif code == "invalid_file_glob":
+        hint = (
+            'Pass a valid filename glob such as "*.py" or "*.{ts,tsx}", '
+            "or a list of globs; fix unbalanced braces."
+        )
     elif code in ("write_failed", "glob_failed", "delete_failed"):
         hint = "Check disk permissions and path; retry after fixing the underlying issue."
     else:
@@ -1315,8 +1320,20 @@ class CoreToolExecutor(ToolExecutorPort):
         ignore_case = args.get("ignore_case", False)
         if not isinstance(ignore_case, bool):
             ignore_case = str(ignore_case).strip().lower() in ("1", "true", "yes", "on")
-        file_glob = _str_arg(args, "file_glob", "include", "glob")
+        file_glob_raw = args.get("file_glob")
+        if file_glob_raw is None:
+            file_glob_raw = args.get("include")
+        if file_glob_raw is None:
+            file_glob_raw = args.get("glob")
+        file_glob: str | list[str] | None
+        if isinstance(file_glob_raw, list):
+            file_glob = [str(x) for x in file_glob_raw]
+        elif isinstance(file_glob_raw, str) and file_glob_raw.strip():
+            file_glob = file_glob_raw.strip()
+        else:
+            file_glob = None
         max_matches = _coerce_int(args.get("max_matches"), None)
+        offset = _coerce_int(args.get("offset"), None)
         try:
             payload = self._workspace.grep(
                 pattern,
@@ -1324,9 +1341,29 @@ class CoreToolExecutor(ToolExecutorPort):
                 ignore_case=ignore_case,
                 file_glob=file_glob,
                 max_matches=max_matches,
+                offset=offset,
             )
             return (_j(payload), None)
         except WorkspaceError as exc:
+            if getattr(exc, "code", None) == "incomplete_scan":
+                return (
+                    None,
+                    _built_in_tool_error(
+                        "incomplete_scan",
+                        str(exc),
+                        "This result cannot be used to conclude absence. Narrow `root` or "
+                        'pass a `file_glob` (e.g. "*.py") so every candidate file can be '
+                        "scanned, then retry.",
+                        {
+                            "code": "incomplete_scan",
+                            "valid_options": [
+                                "narrow root to a subdirectory",
+                                'pass file_glob such as "*.py" or "*.{ts,tsx}"',
+                                "page matches with offset after a complete narrower scan",
+                            ],
+                        },
+                    ),
+                )
             return (None, _workspace_error_envelope(exc))
 
     def _tool_apply_patch(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
