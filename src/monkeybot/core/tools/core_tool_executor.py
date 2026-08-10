@@ -79,12 +79,15 @@ from monkeybot.core.subagents.subagent_proto import (
 from monkeybot.core.tools.inspector import coerce_run_command_argv
 from monkeybot.core.tools.sandbox_executor import SandboxConfig, SandboxExecutor
 from monkeybot.core.tools.spill_inventory import (
+    partial_output_tail,
     spill_budgets_from_window,
+    write_run_command_timeout_spill,
     write_spill_with_inventory,
 )
 from monkeybot.core.tools.terminal import (
     ALLOWED_COMMANDS,
     ALLOWED_PATHS,
+    CommandTimeoutError,
     SecurityError,
     TerminalExecutor,
 )
@@ -954,7 +957,7 @@ class CoreToolExecutor(ToolExecutorPort):
             elif name == "task":
                 result_text, err_text = await self._tool_task(call, ctx)
             elif name == "run_command":
-                result_text, err_text = await self._tool_run_command(args)
+                result_text, err_text = await self._tool_run_command(args, call=call, ctx=ctx)
             elif name == "enable_mcp":
                 result_text, err_text = await self._tool_enable_mcp(args)
             elif name == "disable_mcp":
@@ -1745,7 +1748,13 @@ class CoreToolExecutor(ToolExecutorPort):
                 await self._run_store.record_failed(run_id, "; ".join(str(e) for e in errors))
         return (_j(payload), None)
 
-    async def _tool_run_command(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+    async def _tool_run_command(
+        self,
+        args: dict[str, Any],
+        *,
+        call: ToolCall,
+        ctx: TurnContext,
+    ) -> tuple[str | None, str | None]:
         try:
             cmd, argv = _parse_run_command(args)
         except ValueError as exc:
@@ -1760,14 +1769,35 @@ class CoreToolExecutor(ToolExecutorPort):
             )
         except SecurityError as exc:
             return None, self._run_command_security_envelope(exc)
-        except TimeoutError as exc:
+        except CommandTimeoutError as exc:
+            spill_path = write_run_command_timeout_spill(
+                workspace_root=self._workspace.repo_root,
+                thread_id=ctx.thread_id,
+                call_id=call.call_id,
+                stdout=exc.stdout,
+                stderr=exc.stderr,
+            )
+            details: dict[str, Any] = {
+                "partial_output_path": spill_path,
+                "stdout_chars": len(exc.stdout),
+                "stderr_chars": len(exc.stderr),
+            }
+            tail = partial_output_tail(exc.stdout, exc.stderr)
+            if tail:
+                details["partial_output_tail"] = tail
             return (
                 None,
                 _built_in_tool_error(
                     "runtime",
                     str(exc),
-                    "Increase run_command timeout (seconds) or use a shorter command, then retry once.",
-                    {"example": {"argv": ["git", "--version"], "timeout": 120}},
+                    "The process was killed mid-execution and may have left partial state "
+                    "(half-created databases, lock files, partial writes, dirty caches) that "
+                    "will affect subsequent runs. Do not re-run the same argv with a larger "
+                    "timeout — that is not a valid recovery. Diagnose instead: read_file "
+                    f"{spill_path} for what the process emitted before kill, narrow the "
+                    "command scope, or find and fix why it is slow, cleaning up any leftover "
+                    "state before retrying with a changed argv.",
+                    details,
                 ),
             )
         return (

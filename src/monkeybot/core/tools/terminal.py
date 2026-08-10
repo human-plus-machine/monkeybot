@@ -19,8 +19,10 @@ Example:
 """
 
 import asyncio
+import contextlib
 import logging
 import os
+import signal
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -28,6 +30,10 @@ from pathlib import Path
 from typing import List
 
 logger = logging.getLogger(__name__)
+
+# After the child exits or is killed, wait at most this long for stdout/stderr EOF.
+# Descendants that keep pipes open must not block execute() forever.
+_STREAM_DRAIN_TIMEOUT_SEC = 2.0
 
 # SECURITY: Command allowlist - modify with extreme caution
 # Only add commands that are essential and have been security reviewed
@@ -131,6 +137,112 @@ class SecurityError(Exception):
     pass
 
 
+class CommandTimeoutError(TimeoutError):
+    """Raised when a command exceeds its timeout; carries drained partial streams.
+
+    ``stdout`` / ``stderr`` are whatever was emitted before the process was
+    killed (may be empty). Callers should spill these rather than dumping them
+    into the model context.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        timeout: int,
+        stdout: str = "",
+        stderr: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.timeout = timeout
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+async def _pump_stream(stream: asyncio.StreamReader, chunks: list[bytes]) -> None:
+    """Append stream chunks until EOF; safe to cancel (keeps chunks already read)."""
+    while True:
+        data = await stream.read(65536)
+        if not data:
+            return
+        chunks.append(data)
+
+
+async def _drain_pumps(
+    *tasks: asyncio.Task[None],
+    timeout: float = _STREAM_DRAIN_TIMEOUT_SEC,
+) -> bool:
+    """Wait for stream pumps to finish; cancel stragglers after ``timeout``.
+
+    Returns True when every pump finished cleanly (EOF), False if any were cancelled.
+    """
+    if not tasks:
+        return True
+    _done, pending = await asyncio.wait(set(tasks), timeout=timeout)
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+        logger.warning(
+            "stream drain timed out; cancelled %d reader(s)",
+            len(pending),
+            extra={"component": "terminal_executor", "pending_readers": len(pending)},
+        )
+        return False
+    return True
+
+
+async def _wait_for_exit(process: asyncio.subprocess.Process, timeout: float) -> bool:
+    """Wait until the direct child exits.
+
+    Returns True if still running after ``timeout``.
+
+    Polls ``returncode`` instead of awaiting ``process.wait()`` alone: when a
+    descendant keeps stdout/stderr open, asyncio can set ``returncode`` while
+    ``wait()`` never completes.
+    """
+    if process.returncode is not None:
+        return False
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    wait_task = asyncio.create_task(process.wait())
+    try:
+        while process.returncode is None:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return True
+            await asyncio.wait({wait_task}, timeout=min(remaining, 0.1))
+            if wait_task.done() and process.returncode is None:
+                # wait() finished exceptionally; surface it
+                await wait_task
+        return False
+    finally:
+        if not wait_task.done():
+            wait_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await wait_task
+
+
+def _kill_process_group(
+    pgid: int | None,
+    process: asyncio.subprocess.Process,
+) -> None:
+    """SIGKILL ``pgid`` when known so pipe-holding descendants die too.
+
+    ``pgid`` must be captured before the direct child is reaped — after
+    ``wait()`` the PID may be gone and ``getpgid`` will fail.
+    """
+    if pgid is not None:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+            return
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    if process.returncode is None:
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+
+
 class TerminalExecutor:
     """
     Secure terminal command executor with allowlist-based security.
@@ -211,7 +323,8 @@ class TerminalExecutor:
         
         Raises:
             SecurityError: If command or path violates security policy
-            TimeoutError: If command exceeds timeout duration
+            CommandTimeoutError: If command exceeds timeout duration (includes
+                drained partial stdout/stderr)
         
         Example:
             >>> executor = TerminalExecutor()
@@ -249,49 +362,80 @@ class TerminalExecutor:
 
         executable = sys.executable if command in ("python3", "python") else command
 
+        # Concurrent stream pumps avoid PIPE-buffer deadlock while we wait on
+        # the process, and preserve partial output when we kill on timeout.
+        # start_new_session=True makes the child a process-group leader so we
+        # can kill descendants that would otherwise keep capture pipes open.
+        process = await asyncio.create_subprocess_exec(
+            executable,
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=exec_cwd,
+            env=env,
+            start_new_session=True,
+        )
+        assert process.stdout is not None and process.stderr is not None
         try:
-            # Create subprocess with captured output
-            process = await asyncio.create_subprocess_exec(
-                executable,
-                *args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=exec_cwd,
-                env=env,
-            )
-            
-            # Wait for completion with timeout
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=timeout
-            )
-            
-            # Truncate large outputs to prevent memory exhaustion
-            stdout = self._truncate_output(stdout, "stdout")
-            stderr = self._truncate_output(stderr, "stderr")
-            
-            return ExecutionResult(
-                stdout=stdout.decode("utf-8", errors="replace"),
-                stderr=stderr.decode("utf-8", errors="replace"),
-                exit_code=process.returncode or 0
-            )
-        
-        except asyncio.TimeoutError:
-            # CRITICAL: Kill process on timeout to prevent zombie processes
-            if process.returncode is None:
-                process.kill()
-                await process.wait()
-            
-            error_msg = f"Command exceeded {timeout}s timeout"
+            pgid: int | None = os.getpgid(process.pid) if process.pid is not None else None
+        except ProcessLookupError:
+            pgid = process.pid
+        stdout_chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
+        stdout_task = asyncio.create_task(_pump_stream(process.stdout, stdout_chunks))
+        stderr_task = asyncio.create_task(_pump_stream(process.stderr, stderr_chunks))
+        timed_out = False
+        if await _wait_for_exit(process, timeout):
+            timed_out = True
+            _kill_process_group(pgid, process)
+            # Reap the direct child if it is still listed; ignore if already gone.
+            with contextlib.suppress(ProcessLookupError):
+                await _wait_for_exit(process, _STREAM_DRAIN_TIMEOUT_SEC)
+
+        drained_clean = await _drain_pumps(stdout_task, stderr_task)
+        if not drained_clean:
+            # Orphans may still hold the capture pipes open after the child exits.
+            _kill_process_group(pgid, process)
+
+        stdout_raw = self._truncate_output(b"".join(stdout_chunks), "stdout")
+        stderr_raw = self._truncate_output(b"".join(stderr_chunks), "stderr")
+        stdout = stdout_raw.decode("utf-8", errors="replace")
+        stderr = stderr_raw.decode("utf-8", errors="replace")
+
+        if timed_out or not drained_clean:
+            if timed_out:
+                error_msg = f"Command exceeded {timeout}s timeout"
+            else:
+                # Direct child exited, but we had to kill pipe-holding descendants.
+                # Do not report success — unfinished work was forcibly terminated.
+                error_msg = (
+                    "Command exited but capture streams did not close "
+                    "(a descendant was still writing); unfinished work was killed"
+                )
             logger.error(
                 error_msg,
                 extra={
                     "component": "terminal_executor",
                     "command": command,
-                    "timeout": timeout
-                }
+                    "timeout": timeout,
+                    "timed_out": timed_out,
+                    "drained_clean": drained_clean,
+                    "stdout_chars": len(stdout),
+                    "stderr_chars": len(stderr),
+                },
             )
-            raise TimeoutError(error_msg)
+            raise CommandTimeoutError(
+                error_msg,
+                timeout=timeout,
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+        return ExecutionResult(
+            stdout=stdout,
+            stderr=stderr,
+            exit_code=process.returncode or 0,
+        )
     
     def _validate_command(self, command: str) -> None:
         """
