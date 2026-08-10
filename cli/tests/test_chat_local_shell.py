@@ -7,6 +7,7 @@ import sys
 import time
 from pathlib import Path
 
+import monkeybot_cli.chat_local_shell as chat_local_shell
 from monkeybot_cli.chat_local_shell import run_local_shell, truncate_output
 
 
@@ -74,6 +75,42 @@ def test_run_local_shell_timeout_kills_grandchildren(tmp_path: Path) -> None:
             break
         time.sleep(0.05)
     assert not alive, "grandchild process outlived the timed-out shell"
+
+
+def test_popen_kwargs_use_process_group_on_posix(monkeypatch) -> None:
+    monkeypatch.setattr(chat_local_shell, "_IS_WINDOWS", False)
+    assert chat_local_shell._popen_kwargs_for_platform() == {"start_new_session": True}
+
+
+def test_popen_kwargs_use_new_process_group_on_windows(monkeypatch) -> None:
+    monkeypatch.setattr(chat_local_shell, "_IS_WINDOWS", True)
+    kwargs = chat_local_shell._popen_kwargs_for_platform()
+    assert set(kwargs) == {"creationflags"}
+
+
+def test_kill_process_tree_uses_killpg_on_posix(monkeypatch) -> None:
+    monkeypatch.setattr(chat_local_shell, "_IS_WINDOWS", False)
+    calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(chat_local_shell.os, "killpg", lambda pid, sig: calls.append((pid, sig)))
+    chat_local_shell._kill_process_tree(4321)
+    assert calls == [(4321, chat_local_shell.signal.SIGKILL)]
+
+
+def test_kill_process_tree_uses_taskkill_on_windows(monkeypatch) -> None:
+    """Regression test for the AttributeError os.killpg raised on Windows.
+
+    os.killpg doesn't exist on Windows, so the POSIX-only kill path would
+    crash a timed-out `!` command instead of finishing the tool block there.
+    """
+    monkeypatch.setattr(chat_local_shell, "_IS_WINDOWS", True)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        chat_local_shell.subprocess,
+        "run",
+        lambda argv, **kwargs: calls.append(list(argv)),
+    )
+    chat_local_shell._kill_process_tree(4321)
+    assert calls == [["taskkill", "/F", "/T", "/PID", "4321"]]
 
 
 def test_truncate_output_lines() -> None:
