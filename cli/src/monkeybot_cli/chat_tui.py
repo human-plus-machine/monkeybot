@@ -5,10 +5,13 @@ from __future__ import annotations
 import contextlib
 import logging
 import re
+import shutil
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
+from monkeybot.core.layout import resolve_workspace_root
+from monkeybot.core.persistence.transcript import resolve_session_artifact_dir
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -18,16 +21,21 @@ from textual.reactive import reactive
 from textual.widgets import Button, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
+from monkeybot_cli.chat_renderer import SessionController
 from monkeybot_cli.chat_session import (
     ChatSessionController,
     ChatUiEvent,
     HitlAnswer,
 )
-from monkeybot_cli.chat_status_bar import SessionUsageView, format_context_ring_markup, format_voice_status
+from monkeybot_cli.chat_status_bar import (
+    SessionUsageView,
+    format_context_ring_markup,
+    format_voice_status,
+)
 from monkeybot_cli.chat_theme import MONKEYBOT_DARK, MONKEYBOT_LIGHT, resolve_theme_name
 from monkeybot_cli.chat_tool_display import tool_collapsed_title
-
 from monkeybot_cli.chat_tui_widgets import (
+    _COMPOSER_PLACEHOLDER,
     AssistantTurn,
     Composer,
     ComposerBusySpinner,
@@ -41,11 +49,10 @@ from monkeybot_cli.chat_tui_widgets import (
     ToolCallBlock,
     TranscriptPane,
     UserTurn,
-    _COMPOSER_PLACEHOLDER,
     write_osc52_clipboard,
 )
+from monkeybot_cli.config_resolve import resolve_config
 from monkeybot_cli.exit_commands import is_exit_command
-from monkeybot_cli.chat_renderer import SessionController
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +69,7 @@ _SLASH_SPECS: tuple[tuple[str, str], ...] = (
     ("/timestamps", "Toggle turn timestamps"),
     ("/copy", "Copy last assistant reply"),
     ("/export", "Export transcript to a markdown file"),
+    ("/export-trace", "Export full debug trace (ndjson) for evals"),
     ("/bye", "Exit chat"),
 )
 
@@ -1178,6 +1186,9 @@ class ChatApp(App[int]):
         if name == "export":
             self._cmd_export()
             return
+        if name == "export-trace":
+            self._cmd_export_trace()
+            return
         self._mount_system("Unknown command — try /help", error=True)
 
     def _cmd_help(self) -> None:
@@ -1319,6 +1330,31 @@ class ChatApp(App[int]):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
         return path
+
+    def _cmd_export_trace(self) -> None:
+        if not self._session_id:
+            self._mount_system("No active session to export a trace for", error=True)
+            return
+        config_path = resolve_config(None, cwd=self.agent_root)
+        workspace_root = resolve_workspace_root(agent_root=self.agent_root, config_path=config_path)
+        session_dir = resolve_session_artifact_dir(workspace_root, self._session_id)
+        src = session_dir / "transcript.ndjson"
+        if not src.is_file():
+            self._mount_system(
+                "No trace file found — transcript capture may be disabled "
+                "(set MONKEYBOT_TRANSCRIPT_ENABLED=1 and restart)",
+                error=True,
+            )
+            return
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        dest = self.agent_root / "data" / f"trace_export_{ts}.ndjson"
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dest)
+        except OSError as exc:
+            self._mount_system(f"Trace export failed: {exc}", error=True)
+            return
+        self._mount_system(f"Exported trace to {dest}")
 
     def _finish_hitl_answer(self, answer: HitlAnswer) -> None:
         self._clear_hitl_ui()
