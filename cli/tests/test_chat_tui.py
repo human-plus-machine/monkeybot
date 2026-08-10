@@ -624,6 +624,52 @@ def test_slash_export(tmp_path: Path) -> None:
     asyncio.run(_run())
 
 
+def test_slash_export_trace_no_session(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            app.query_one("#prompt", Composer).post_message(Composer.Submitted("/export-trace"))
+            await pilot.pause()
+            assert not list((tmp_path / "data").glob("trace_export_*.ndjson"))
+
+    asyncio.run(_run())
+
+
+def test_slash_export_trace_copies_ndjson(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            app._session_id = "sess-123"
+            session_dir = (
+                tmp_path / "workspace" / ".monkeybot" / "transcripts" / "20260101T000000Z_sess-123"
+            )
+            session_dir.mkdir(parents=True)
+            (session_dir / "transcript.ndjson").write_text(
+                '{"seq":1,"type":"SessionManifest"}\n', encoding="utf-8"
+            )
+            app.query_one("#prompt", Composer).post_message(Composer.Submitted("/export-trace"))
+            await pilot.pause()
+            exports = list((tmp_path / "data").glob("trace_export_*.ndjson"))
+            assert len(exports) == 1
+            assert exports[0].read_text(encoding="utf-8") == '{"seq":1,"type":"SessionManifest"}\n'
+
+    asyncio.run(_run())
+
+
 def test_queue_while_busy(tmp_path: Path) -> None:
     async def _run() -> None:
         app = ChatApp(

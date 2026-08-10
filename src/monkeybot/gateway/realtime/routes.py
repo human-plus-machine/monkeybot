@@ -33,6 +33,7 @@ from monkeybot.core.llm.realtime_provider import (
 from monkeybot.core.llm.realtime_provider import RealtimeError as ProviderError
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.backends import HistoryStore
+from monkeybot.core.persistence.transcript import TranscriptWriter, transcript_enabled_from_env
 from monkeybot.core.runtime.events import (
     ActionRequiredEvent,
     ToolCallResult,
@@ -332,7 +333,10 @@ async def _handle_assistant_boundary(
             tool_results_out=tool_results,
             inject_texts_out=inject_texts,
             pending_bus=state,
+            transcript_writer=state.transcript_writer,
         ):
+            if state.transcript_writer is not None:
+                await state.transcript_writer.write_event(event)
             if isinstance(event, AgentError):
                 turn_error = event.error
             elif isinstance(event, ToolCallResult):
@@ -680,6 +684,8 @@ async def _close_session(
         )
     state.metrics.close(reason=reason)
     state.metrics.emit_summary()
+    if state.transcript_writer is not None:
+        await state.transcript_writer.drain()
     manager.release_slot(state.session_id)
     manager.remove(state.session_id, state)
 
@@ -773,6 +779,7 @@ def create_realtime_router(
             except Exception as exc:
                 raise ProviderConnectionError(str(exc)) from exc
 
+            transcript_enabled = transcript_enabled_from_env()
             state = RealtimeConnectionState(
                 session_id=session_id,
                 request_id=request_id,
@@ -790,6 +797,17 @@ def create_realtime_router(
                     str(exc),
                     details="session_already_active",
                 ) from exc
+
+            if transcript_enabled:
+                state.transcript_writer = TranscriptWriter(
+                    session_id, workspace_root=workspace_root
+                )
+                await state.transcript_writer.ensure_manifest(
+                    agent_md=str(AgentLayout.from_environment().agent_md_path),
+                    model=ctx.model,
+                    provider=provider.name,
+                    workspace_root=str(workspace_root),
+                )
 
             await _send_frame(
                 ws,

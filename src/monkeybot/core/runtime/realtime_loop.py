@@ -35,6 +35,7 @@ from monkeybot.core.runtime.events import (
     ActionRequiredEvent,
     AgentEvent,
     AssistantDelta,
+    AssistantTextEnded,
     AttachmentDescriptorEvent,
     Error,
     Thinking,
@@ -371,6 +372,7 @@ async def run_realtime_turn(
         if assistant_text.strip():
             assistant_blocks.append(Text(text=assistant_text.strip()))
             yield AssistantDelta(request_id=ctx.request_id, delta=assistant_text.strip())
+            yield AssistantTextEnded(request_id=ctx.request_id, text=assistant_text.strip())
 
         tool_results: list[ContentBlock] = []
         for rtc in assistant_tool_calls:
