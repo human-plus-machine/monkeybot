@@ -21,6 +21,7 @@ from monkeybot.core.llm.realtime_provider import (
     RealtimeUsage,
 )
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.runtime.utterance_buffer import UtteranceBuffer
 from monkeybot.todo_list.store import TodoListStore
 
@@ -57,6 +58,7 @@ class RealtimeConnectionState:
     idle_delivery_queue: asyncio.Queue[Any] = field(default_factory=asyncio.Queue)
     metrics: RealtimeMetrics = field(init=False)
     pending_responses: dict[str, asyncio.Future[Any]] = field(default_factory=dict)
+    transcript_writer: TranscriptWriter | None = None
     todo_store: TodoListStore | None = None
     """Process-local session todo list (not shared across gateway replicas)."""
     _closed: bool = False

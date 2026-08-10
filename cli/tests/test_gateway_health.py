@@ -6,7 +6,11 @@ import argparse
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from monkeybot_cli.commands.chat import _SpawnedGateway, run_chat
+from monkeybot_cli.commands.chat import (
+    _spawn_gateway,
+    _SpawnedGateway,
+    run_chat,
+)
 from monkeybot_cli.gateway_health import occupied_gateway_message, wait_for_health
 
 
@@ -41,6 +45,25 @@ def test_wait_for_health_rejects_dead_child_after_stale_200() -> None:
 
     with patch("monkeybot_cli.gateway_health.httpx.get", return_value=_Resp()):
         assert wait_for_health("http://127.0.0.1:18080", proc, timeout_s=1.0) is False
+
+
+def test_spawn_gateway_enables_transcript_capture(tmp_path: Path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_popen(*args: object, **kwargs: object) -> object:
+        captured["env"] = kwargs["env"]
+        return object()
+
+    monkeypatch.delenv("MONKEYBOT_TRANSCRIPT_ENABLED", raising=False)
+    monkeypatch.setattr("monkeybot_cli.commands.chat.subprocess.Popen", fake_popen)
+    spawned = _spawn_gateway(None, tmp_path, 8123)
+    try:
+        env = captured["env"]
+        assert isinstance(env, dict)
+        assert env["MONKEYBOT_TRANSCRIPT_ENABLED"] == "1"
+    finally:
+        spawned.log_file.close()
+        spawned.log_path.unlink()
 
 
 def test_run_chat_refuses_occupied_port(tmp_path: Path, capsys) -> None:

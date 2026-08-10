@@ -321,7 +321,9 @@ async def test_grep(tmp_path: Path) -> None:
     assert err is None and out is not None
     payload = json.loads(out)
     assert payload["ok"] is True
+    assert payload["scan_complete"] is True
     assert payload["match_count"] >= 1
+    assert payload["total_match_count"] >= payload["match_count"]
     assert any(m["path"] == "a.py" for m in payload["matches"])
 
 
@@ -333,7 +335,7 @@ async def test_grep_skips_noise_directories(tmp_path: Path) -> None:
     skills = tmp_path / "skills"
     skills.mkdir()
     (root / "a.py").write_text("def foo():\n    pass\n", encoding="utf-8")
-    for noisy_dir in ("node_modules", ".git", "__pycache__", ".venv"):
+    for noisy_dir in ("node_modules", ".git", "__pycache__", ".venv", ".monkeybot"):
         d = root / noisy_dir
         d.mkdir()
         (d / "junk.py").write_text("def foo():\n    pass\n", encoding="utf-8")
@@ -359,6 +361,285 @@ async def test_grep_skips_noise_directories(tmp_path: Path) -> None:
     assert payload["ok"] is True
     matched_paths = {m["path"] for m in payload["matches"]}
     assert matched_paths == {"a.py"}
+
+
+@pytest.mark.asyncio
+async def test_grep_root_file(tmp_path: Path) -> None:
+    root = tmp_path
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    (root / "only.py").write_text("unique_marker_xyz\n", encoding="utf-8")
+    (root / "other.py").write_text("unique_marker_xyz\n", encoding="utf-8")
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    ctx = _ctx()
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="1",
+                name="grep",
+                args={"pattern": "unique_marker_xyz", "root": "only.py"},
+            ),
+            ctx=ctx,
+        )
+    )
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert payload["ok"] is True
+    assert payload["scan_complete"] is True
+    assert payload["match_count"] == 1
+    assert payload["matches"][0]["path"] == "only.py"
+
+
+@pytest.mark.asyncio
+async def test_grep_brace_glob(tmp_path: Path) -> None:
+    root = tmp_path
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    (root / "a.py").write_text("BRACE_HIT\n", encoding="utf-8")
+    (root / "b.md").write_text("BRACE_HIT\n", encoding="utf-8")
+    (root / "c.txt").write_text("BRACE_HIT\n", encoding="utf-8")
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    ctx = _ctx()
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="1",
+                name="grep",
+                args={"pattern": "BRACE_HIT", "file_glob": "*.{py,md}"},
+            ),
+            ctx=ctx,
+        )
+    )
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert payload["ok"] is True
+    paths = {m["path"] for m in payload["matches"]}
+    assert paths == {"a.py", "b.md"}
+
+
+@pytest.mark.asyncio
+async def test_grep_unparseable_glob(tmp_path: Path) -> None:
+    root = tmp_path
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    (root / "a.py").write_text("x\n", encoding="utf-8")
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    ctx = _ctx()
+    _out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="1",
+                name="grep",
+                args={"pattern": "x", "file_glob": "*.{py"},
+            ),
+            ctx=ctx,
+        )
+    )
+    assert err is not None
+    payload = json.loads(err)
+    assert payload["ok"] is False
+    assert payload["details"]["code"] == "invalid_file_glob"
+
+
+@pytest.mark.asyncio
+async def test_grep_incomplete_scan_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService, WorkspaceSettings
+
+    monkeypatch.setattr("monkeybot.core.tools.workspace_service.shutil.which", lambda _name: None)
+    root = tmp_path
+    for i in range(5):
+        (root / f"f{i}.py").write_text(f"MARKER_{i}\n", encoding="utf-8")
+    (root / "hit.py").write_text("KNOWN_MATCH_TOKEN\n", encoding="utf-8")
+    svc = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILES=2, WORKSPACE_GREP_MAX_MATCHES=50),
+    )
+    with pytest.raises(WorkspaceError) as ei:
+        svc.grep("KNOWN_MATCH_TOKEN")
+    assert ei.value.code == "incomplete_scan"
+
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    ex._workspace = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILES=2, WORKSPACE_GREP_MAX_MATCHES=50),
+    )
+    ctx = _ctx()
+    _out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="1",
+                name="grep",
+                args={"pattern": "KNOWN_MATCH_TOKEN"},
+            ),
+            ctx=ctx,
+        )
+    )
+    assert err is not None
+    payload = json.loads(err)
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "incomplete_scan"
+
+
+@pytest.mark.asyncio
+async def test_grep_incomplete_scan_errors_with_rg(tmp_path: Path) -> None:
+    """rg path must honor WORKSPACE_GREP_MAX_FILES (not only the Python walker)."""
+    import shutil
+
+    from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService, WorkspaceSettings
+
+    if shutil.which("rg") is None:
+        pytest.skip("rg not on PATH")
+
+    root = tmp_path
+    for i in range(5):
+        (root / f"f{i}.py").write_text(f"MARKER_{i}\n", encoding="utf-8")
+    (root / "hit.py").write_text("KNOWN_MATCH_TOKEN\n", encoding="utf-8")
+    svc = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILES=2, WORKSPACE_GREP_MAX_MATCHES=50),
+    )
+    with pytest.raises(WorkspaceError) as ei:
+        svc.grep("KNOWN_MATCH_TOKEN")
+    assert ei.value.code == "incomplete_scan"
+
+
+@pytest.mark.asyncio
+async def test_grep_capped_complete_scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from monkeybot.core.tools.workspace_service import WorkspaceFileService, WorkspaceSettings
+
+    monkeypatch.setattr("monkeybot.core.tools.workspace_service.shutil.which", lambda _name: None)
+    root = tmp_path
+    (root / "a.py").write_text("HIT\nHIT\nHIT\n", encoding="utf-8")
+    svc = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_MATCHES=2, WORKSPACE_GREP_MAX_FILES=100),
+    )
+    page1 = svc.grep("HIT", max_matches=2, offset=0)
+    assert page1["ok"] is True
+    assert page1["scan_complete"] is True
+    assert page1["match_count"] == 2
+    assert page1["total_match_count"] == 3
+    assert page1.get("next_offset") == 2
+    page2 = svc.grep("HIT", max_matches=2, offset=page1["next_offset"])
+    assert page2["match_count"] == 1
+    assert page2["total_match_count"] == 3
+    assert "next_offset" not in page2
+
+
+@pytest.mark.asyncio
+async def test_grep_rg_and_python_parity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import shutil
+
+    from monkeybot.core.tools.workspace_service import WorkspaceFileService, WorkspaceSettings
+
+    root = tmp_path
+    (root / "a.py").write_text("parity_token_alpha\n", encoding="utf-8")
+    (root / "b.md").write_text("parity_token_alpha\n", encoding="utf-8")
+    (root / "c.txt").write_text("other\n", encoding="utf-8")
+    mb = root / ".monkeybot"
+    mb.mkdir()
+    (mb / "noise.py").write_text("parity_token_alpha\n", encoding="utf-8")
+    settings = WorkspaceSettings(WORKSPACE_GREP_MAX_MATCHES=50, WORKSPACE_GREP_MAX_FILES=100)
+    svc = WorkspaceFileService(root, settings=settings)
+
+    if shutil.which("rg") is None:
+        pytest.skip("rg not on PATH")
+
+    with_rg = svc.grep("parity_token_alpha", file_glob="*.{py,md}")
+    monkeypatch.setattr("monkeybot.core.tools.workspace_service.shutil.which", lambda _name: None)
+    without_rg = svc.grep("parity_token_alpha", file_glob="*.{py,md}")
+
+    assert with_rg["ok"] is True and without_rg["ok"] is True
+    assert with_rg.keys() == without_rg.keys()
+    assert {m["path"] for m in with_rg["matches"]} == {m["path"] for m in without_rg["matches"]}
+    assert with_rg["total_match_count"] == without_rg["total_match_count"]
+    assert with_rg["match_count"] == without_rg["match_count"]
+    assert with_rg["scan_complete"] is True and without_rg["scan_complete"] is True
+    assert all(not m["path"].startswith(".monkeybot") for m in with_rg["matches"])
+
+
+async def test_grep_path_glob_parity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Path-style file_glob must match the same files with and without rg."""
+    import shutil
+
+    from monkeybot.core.tools.workspace_service import WorkspaceFileService, WorkspaceSettings
+
+    root = tmp_path
+    (root / "src").mkdir()
+    (root / "src" / "nested").mkdir()
+    (root / "src" / "nested" / "deep.py").write_text("PATH_GLOB_HIT\n", encoding="utf-8")
+    (root / "src" / "top.py").write_text("PATH_GLOB_HIT\n", encoding="utf-8")
+    (root / "other").mkdir()
+    (root / "other" / "side.py").write_text("PATH_GLOB_HIT\n", encoding="utf-8")
+    (root / "other" / "test_x.py").write_text("PATH_GLOB_HIT\n", encoding="utf-8")
+    svc = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_MATCHES=50, WORKSPACE_GREP_MAX_FILES=100),
+    )
+    rg_bin = shutil.which("rg")
+
+    def _paths(result: dict) -> set[str]:
+        return {m["path"] for m in result["matches"]}
+
+    # Python-only: path globs and basename globs.
+    monkeypatch.setattr("monkeybot.core.tools.workspace_service.shutil.which", lambda _name: None)
+    assert _paths(svc.grep("PATH_GLOB_HIT", file_glob="src/**/*.py")) == {
+        "src/nested/deep.py",
+        "src/top.py",
+    }
+    assert _paths(svc.grep("PATH_GLOB_HIT", file_glob="src/*.py")) == {"src/top.py"}
+    assert _paths(svc.grep("PATH_GLOB_HIT", file_glob="test_*.py")) == {"other/test_x.py"}
+
+    if rg_bin is None:
+        pytest.skip("rg not on PATH")
+
+    monkeypatch.undo()
+    with_rg = svc.grep("PATH_GLOB_HIT", file_glob="src/**/*.py")
+    monkeypatch.setattr("monkeybot.core.tools.workspace_service.shutil.which", lambda _name: None)
+    without_rg = svc.grep("PATH_GLOB_HIT", file_glob="src/**/*.py")
+    assert _paths(with_rg) == _paths(without_rg) == {"src/nested/deep.py", "src/top.py"}
+
+    monkeypatch.undo()
+    with_rg = svc.grep("PATH_GLOB_HIT", file_glob="src/*.py")
+    monkeypatch.setattr("monkeybot.core.tools.workspace_service.shutil.which", lambda _name: None)
+    without_rg = svc.grep("PATH_GLOB_HIT", file_glob="src/*.py")
+    assert _paths(with_rg) == _paths(without_rg) == {"src/top.py"}
+
+    monkeypatch.undo()
+    with_rg = svc.grep("PATH_GLOB_HIT", file_glob="test_*.py")
+    monkeypatch.setattr("monkeybot.core.tools.workspace_service.shutil.which", lambda _name: None)
+    without_rg = svc.grep("PATH_GLOB_HIT", file_glob="test_*.py")
+    assert _paths(with_rg) == _paths(without_rg) == {"other/test_x.py"}
 
 
 @pytest.mark.asyncio
@@ -1025,9 +1306,9 @@ async def test_task_tool_unknown_subagent_type_returns_validation_error(
 ) -> None:
     root = tmp_path
     mem = tmp_path / "mem"
-    mem.mkdir()
+    mem.mkdir(exist_ok=True)
     skills = tmp_path / "skills"
-    skills.mkdir()
+    skills.mkdir(exist_ok=True)
     worker = root / "subagent_worker.py"
     worker.write_text("# placeholder\n", encoding="utf-8")
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
@@ -1157,9 +1438,9 @@ async def test_task_tool_parent_cancel_stops_hanging_subagent(tmp_path: Path, mo
     root = tmp_path
     _stub_agent_md_for_tasks(root, monkeypatch)
     mem = tmp_path / "mem"
-    mem.mkdir()
+    mem.mkdir(exist_ok=True)
     skills = tmp_path / "skills"
-    skills.mkdir()
+    skills.mkdir(exist_ok=True)
     worker = root / "subagent_worker.py"
     worker.write_text("# placeholder\n", encoding="utf-8")
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
@@ -2631,9 +2912,9 @@ async def test_task_tool_noop_publish_when_publisher_none(
     root = tmp_path
     _stub_agent_md_for_tasks(root, monkeypatch)
     mem = tmp_path / "mem"
-    mem.mkdir()
+    mem.mkdir(exist_ok=True)
     skills = tmp_path / "skills"
-    skills.mkdir()
+    skills.mkdir(exist_ok=True)
     worker = root / "subagent_worker.py"
     worker.write_text("# placeholder\n", encoding="utf-8")
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
@@ -2768,9 +3049,9 @@ async def test_task_tool_sets_child_thread_id_on_envelope(
     root = tmp_path
     _stub_agent_md_for_tasks(root, monkeypatch)
     mem = tmp_path / "mem"
-    mem.mkdir()
+    mem.mkdir(exist_ok=True)
     skills = tmp_path / "skills"
-    skills.mkdir()
+    skills.mkdir(exist_ok=True)
     worker = root / "subagent_worker.py"
     worker.write_text("# placeholder\n", encoding="utf-8")
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
@@ -3010,3 +3291,172 @@ async def test_task_tool_publishes_completed_when_payload_build_fails(
     payload = json.loads(out)
     assert payload["ok"] is False
     assert any("payload boom" in e for e in payload["errors"])
+
+
+def _fake_spawn_emitting(events: list[object]):
+    """Build a ``spawn_subagent`` stand-in that replays ``events`` from a child."""
+
+    async def fake_spawn(
+        script: str,
+        envelope: object,
+        *,
+        scratch_dir: object,
+        subprocess_exec: object | None = None,
+        on_event: object | None = None,
+        extra_env: dict[str, str] | None = None,
+    ):
+        del script, scratch_dir, subprocess_exec, extra_env, envelope
+        for evt in events:
+            if on_event is not None:
+                await on_event(evt)  # type: ignore[misc]
+            yield evt
+
+    return fake_spawn
+
+
+def _clean_child_events() -> list[object]:
+    from monkeybot.core.runtime.events import AssistantDelta, TurnComplete, UsageTotals
+
+    return [
+        AssistantDelta(request_id="r", delta="done"),
+        TurnComplete(
+            request_id="r",
+            usage=UsageTotals(
+                input_tokens=1,
+                output_tokens=1,
+                cached_tokens=0,
+                cost_usd=0.0,
+                duration_ms=1,
+                estimated_prompt_tokens=0,
+            ),
+        ),
+    ]
+
+
+async def _run_task_tool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    child_events: list[object],
+    args: dict[str, object],
+) -> dict[str, object]:
+    monkeypatch.setattr(
+        "monkeybot.core.tools.core_tool_executor.spawn_subagent",
+        _fake_spawn_emitting(child_events),
+    )
+    root = tmp_path
+    _stub_agent_md_for_tasks(root, monkeypatch)
+    mem = tmp_path / "mem"
+    mem.mkdir(exist_ok=True)
+    skills = tmp_path / "skills"
+    skills.mkdir(exist_ok=True)
+    worker = root / "subagent_worker.py"
+    worker.write_text("# placeholder\n", encoding="utf-8")
+    monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
+
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="c-exit", name="task", args=dict(args)),
+            ctx=_ctx(event_publisher=_FakeEventPublisher()),
+        )
+    )
+    # Rejected input comes back on the error channel; the caller asserts on it.
+    body = out if out is not None else err
+    assert body is not None
+    return json.loads(body)
+
+
+@pytest.mark.asyncio
+async def test_task_exit_reason_is_completed_on_a_clean_child_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = await _run_task_tool(
+        tmp_path,
+        monkeypatch,
+        child_events=_clean_child_events(),
+        args={"task": "do the thing"},
+    )
+    assert payload["ok"] is True
+    assert payload["exit_reason"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_task_exit_reason_distinguishes_max_turns_from_a_generic_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.runtime.events import Error
+    from monkeybot.core.runtime.turn_loop import MAX_TURNS_ERROR
+
+    max_turns = await _run_task_tool(
+        tmp_path,
+        monkeypatch,
+        child_events=[Error(request_id="r", error=MAX_TURNS_ERROR)],
+        args={"task": "do the thing"},
+    )
+    assert max_turns["ok"] is False
+    assert max_turns["exit_reason"] == "max_turns"
+
+    other = await _run_task_tool(
+        tmp_path,
+        monkeypatch,
+        child_events=[Error(request_id="r", error="provider blew up")],
+        args={"task": "do the thing"},
+    )
+    assert other["exit_reason"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_task_reports_artifact_existence_only_when_the_caller_names_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "landed.md").write_text("hi\n", encoding="utf-8")
+
+    unasked = await _run_task_tool(
+        tmp_path,
+        monkeypatch,
+        child_events=_clean_child_events(),
+        args={"task": "write the doc"},
+    )
+    # No expectation declared -> the harness must not claim to know.
+    assert unasked["artifact_exists"] is None
+    assert unasked["artifacts"] == []
+
+    checked = await _run_task_tool(
+        tmp_path,
+        monkeypatch,
+        child_events=_clean_child_events(),
+        args={"task": "write the doc", "expect_files": ["landed.md", "missing.md"]},
+    )
+    assert checked["artifact_exists"] is False
+    assert checked["artifacts"] == [
+        {"path": "landed.md", "exists": True},
+        {"path": "missing.md", "exists": False},
+    ]
+
+    all_there = await _run_task_tool(
+        tmp_path,
+        monkeypatch,
+        child_events=_clean_child_events(),
+        args={"task": "write the doc", "expect_files": ["landed.md"]},
+    )
+    assert all_there["artifact_exists"] is True
+
+
+@pytest.mark.asyncio
+async def test_task_rejects_expect_files_that_escape_the_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = await _run_task_tool(
+        tmp_path,
+        monkeypatch,
+        child_events=_clean_child_events(),
+        args={"task": "x", "expect_files": ["../outside.md"]},
+    )
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "validation"

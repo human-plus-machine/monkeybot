@@ -49,6 +49,7 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
         ("huggingface",), "huggingface", ("HF_TOKEN", "HUGGINGFACE_API_KEY")
     ),
     "nvidia": ProviderSpec(("nvidia",), "nvidia", ("NVIDIA_API_KEY",)),
+    "openrouter": ProviderSpec(("openrouter",), "openrouter", ("OPENROUTER_API_KEY",)),
     "ollama": ProviderSpec(
         # credential_env_vars is empty: credentials_optional=True short-circuits
         # credentials_present() before these are ever read, and OLLAMA_BASE_URL
@@ -83,6 +84,7 @@ def extra_module(extra: str) -> str:
         "huggingface": "openai",
         "ollama": "openai",
         "nvidia": "openai",
+        "openrouter": "openai",
     }
     return mapping.get(extra, extra)
 

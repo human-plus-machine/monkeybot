@@ -63,8 +63,10 @@ from monkeybot.core.runtime.events import (
     TurnComplete,
 )
 from monkeybot.core.runtime.loop import ToolExecutorPort
+from monkeybot.core.runtime.turn_loop import MAX_TURNS_ERROR
 from monkeybot.core.subagents.progress_publish import AssistantDeltaCoalescer, safe_publish
 from monkeybot.core.subagents.subagent_proto import (
+    SUBAGENT_EXIT_ERROR_PREFIX,
     SUBAGENT_STDOUT_LINE_LIMIT,
     SubagentEnvelope,
     normalize_sqlite_db_url,
@@ -237,6 +239,36 @@ def _task_child_env(
     return child_env
 
 
+def _parse_expect_files(args: dict[str, Any]) -> list[str]:
+    """Validate the optional ``expect_files`` list. Raises ValueError with a reason."""
+    raw = args.get("expect_files")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError("expect_files must be a list of workspace-relative paths.")
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("expect_files entries must be non-empty strings.")
+        out.append(item.strip())
+    return out
+
+
+def _check_expected_artifacts(
+    workspace: WorkspaceFileService,
+    expect_files: list[str],
+) -> tuple[bool | None, list[dict[str, Any]]]:
+    """Return (all_present, per-path results). ``(None, [])`` when nothing was asked."""
+    if not expect_files:
+        return None, []
+    results: list[dict[str, Any]] = []
+    for rel in expect_files:
+        # Paths were validated at the trust boundary; re-resolve to follow any
+        # workspace root change during the run rather than caching a stale Path.
+        results.append({"path": rel, "exists": workspace.resolve_workspace_path(rel).is_file()})
+    return all(bool(r["exists"]) for r in results), results
+
+
 def _record_subagent_drain_event(
     evt: AgentEvent,
     *,
@@ -273,6 +305,17 @@ class _SubagentDrainAccum:
     tool_call_count: int = 0
     tool_results: list[dict[str, str]] = field(default_factory=list)
     turn_complete: TurnComplete | None = None
+    exit_reason: str | None = None
+
+    def note_exit_reason(self, reason: str, *, force: bool = False) -> None:
+        """Record why the run ended. First writer wins unless ``force``.
+
+        The parent detects ``timeout``/``cancelled`` and forces them, because those
+        kill the child and would otherwise be masked by the ``crashed`` its death
+        reports moments later.
+        """
+        if force or self.exit_reason is None:
+            self.exit_reason = reason
 
     def record(self, evt: AgentEvent) -> None:
         tool_delta, maybe_complete = _record_subagent_drain_event(
@@ -284,6 +327,11 @@ class _SubagentDrainAccum:
         self.tool_call_count += tool_delta
         if maybe_complete is not None:
             self.turn_complete = maybe_complete
+        if isinstance(evt, Error):
+            if evt.error == MAX_TURNS_ERROR:
+                self.note_exit_reason("max_turns")
+            elif evt.error.startswith(SUBAGENT_EXIT_ERROR_PREFIX):
+                self.note_exit_reason("crashed")
 
     def to_payload(
         self,
@@ -299,6 +347,7 @@ class _SubagentDrainAccum:
             tool_call_count=self.tool_call_count,
             tool_results=self.tool_results,
             turn_complete=self.turn_complete,
+            exit_reason=self.exit_reason,
             scratch=scratch,
             run_id=run_id,
             child_thread_id=child_thread_id,
@@ -312,10 +361,11 @@ async def _await_subagent_drain(
     cancelled: asyncio.Event | None,
     timeout: float,
     proc_holder: list[asyncio.subprocess.Process | None],
-    errors: list[str],
+    accum: _SubagentDrainAccum,
     run_id: str,
 ) -> None:
-    """Wait for drain with parent cancel + timeout; append errors in place."""
+    """Wait for drain with parent cancel + timeout; record errors/exit_reason in place."""
+    errors = accum.errors
     cancel_wait = asyncio.create_task(cancelled.wait()) if cancelled is not None else None
     try:
         if cancel_wait is None:
@@ -323,6 +373,7 @@ async def _await_subagent_drain(
                 await asyncio.wait_for(drain_task, timeout=timeout)
             except TimeoutError:
                 errors.append(f"task: subagent exceeded {timeout:g}s timeout")
+                accum.note_exit_reason("timeout", force=True)
                 await _stop_subagent_process(proc_holder[0])
                 if not drain_task.done():
                     drain_task.cancel()
@@ -337,6 +388,7 @@ async def _await_subagent_drain(
         )
         if not done:
             errors.append(f"task: subagent exceeded {timeout:g}s timeout")
+            accum.note_exit_reason("timeout", force=True)
             await _stop_subagent_process(proc_holder[0])
             cancel_wait.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -363,6 +415,7 @@ async def _await_subagent_drain(
                 errors.append(str(exc))
         else:
             errors.append(_PARENT_CANCEL_TASK_ERR)
+            accum.note_exit_reason("cancelled", force=True)
             await _stop_subagent_process(proc_holder[0])
             if not drain_task.done():
                 drain_task.cancel()
@@ -382,6 +435,7 @@ def _task_result_payload(
     tool_call_count: int,
     tool_results: list[dict[str, str]],
     turn_complete: TurnComplete | None,
+    exit_reason: str | None = None,
     scratch: Path,
     run_id: str,
     child_thread_id: str,
@@ -399,14 +453,20 @@ def _task_result_payload(
             "duration_ms": u.duration_ms,
         }
     full_text = "".join(deltas).strip()
+    ok = len(errors) == 0
     return {
-        "ok": len(errors) == 0,
+        "ok": ok,
+        "exit_reason": exit_reason or ("completed" if ok else "error"),
         "final_message": full_text,
         "assistant_text": full_text,
         "tool_call_count": tool_call_count,
         "tool_results": tool_results[-10:],
         "errors": errors,
         "usage": usage_payload,
+        # Overwritten by _tool_task when the caller declared expect_files. None means
+        # "not asked" — never claim knowledge of artifacts nobody named.
+        "artifact_exists": None,
+        "artifacts": [],
         "scratch_dir": str(scratch),
         "run_id": run_id,
         "child_thread_id": child_thread_id,
@@ -506,7 +566,7 @@ async def _run_inline_subagent_with_progress(
                 cancelled=ctx.cancelled,
                 timeout=timeout,
                 proc_holder=proc_holder,
-                errors=accum.errors,
+                accum=accum,
                 run_id=run_id,
             )
         finally:
@@ -535,8 +595,11 @@ async def _run_inline_subagent_with_progress(
         except Exception:
             payload = {
                 "ok": False,
+                "exit_reason": accum.exit_reason or "error",
                 "final_message": "",
                 "assistant_text": "",
+                "artifact_exists": None,
+                "artifacts": [],
                 "tool_call_count": accum.tool_call_count,
                 "tool_results": accum.tool_results[-10:],
                 "errors": list(accum.errors),
@@ -550,6 +613,7 @@ async def _run_inline_subagent_with_progress(
         # Always emit a terminal event so the parent SSE UI cannot stick on "running".
         done = payload or {
             "ok": False,
+            "exit_reason": accum.exit_reason or "error",
             "final_message": "",
             "errors": list(accum.errors) or ["task: subagent finalize failed"],
             "tool_call_count": accum.tool_call_count,
@@ -619,6 +683,11 @@ def _workspace_error_envelope(exc: WorkspaceError) -> str:
         hint = "Widen old_string until unique, or set replace_all=true."
     elif code == "invalid_offset":
         hint = 'Use "offset" as a positive integer (1 = first line).'
+    elif code == "invalid_file_glob":
+        hint = (
+            'Pass a valid filename glob such as "*.py" or "*.{ts,tsx}", '
+            "or a list of globs; fix unbalanced braces."
+        )
     elif code in ("write_failed", "glob_failed", "delete_failed"):
         hint = "Check disk permissions and path; retry after fixing the underlying issue."
     else:
@@ -1251,8 +1320,20 @@ class CoreToolExecutor(ToolExecutorPort):
         ignore_case = args.get("ignore_case", False)
         if not isinstance(ignore_case, bool):
             ignore_case = str(ignore_case).strip().lower() in ("1", "true", "yes", "on")
-        file_glob = _str_arg(args, "file_glob", "include", "glob")
+        file_glob_raw = args.get("file_glob")
+        if file_glob_raw is None:
+            file_glob_raw = args.get("include")
+        if file_glob_raw is None:
+            file_glob_raw = args.get("glob")
+        file_glob: str | list[str] | None
+        if isinstance(file_glob_raw, list):
+            file_glob = [str(x) for x in file_glob_raw]
+        elif isinstance(file_glob_raw, str) and file_glob_raw.strip():
+            file_glob = file_glob_raw.strip()
+        else:
+            file_glob = None
         max_matches = _coerce_int(args.get("max_matches"), None)
+        offset = _coerce_int(args.get("offset"), None)
         try:
             payload = self._workspace.grep(
                 pattern,
@@ -1260,9 +1341,29 @@ class CoreToolExecutor(ToolExecutorPort):
                 ignore_case=ignore_case,
                 file_glob=file_glob,
                 max_matches=max_matches,
+                offset=offset,
             )
             return (_j(payload), None)
         except WorkspaceError as exc:
+            if getattr(exc, "code", None) == "incomplete_scan":
+                return (
+                    None,
+                    _built_in_tool_error(
+                        "incomplete_scan",
+                        str(exc),
+                        "This result cannot be used to conclude absence. Narrow `root` or "
+                        'pass a `file_glob` (e.g. "*.py") so every candidate file can be '
+                        "scanned, then retry.",
+                        {
+                            "code": "incomplete_scan",
+                            "valid_options": [
+                                "narrow root to a subdirectory",
+                                'pass file_glob such as "*.py" or "*.{ts,tsx}"',
+                                "page matches with offset after a complete narrower scan",
+                            ],
+                        },
+                    ),
+                )
             return (None, _workspace_error_envelope(exc))
 
     def _tool_apply_patch(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -1498,6 +1599,22 @@ class CoreToolExecutor(ToolExecutorPort):
             context_val = str(context_val)
 
         subagent_type = _str_arg(args, "subagent_type", "type", "persona")
+
+        try:
+            expect_files = _parse_expect_files(args)
+            for rel in expect_files:
+                self._workspace.resolve_workspace_path(rel, label="expect_files")
+        except (ValueError, WorkspaceError) as exc:
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    str(exc),
+                    "Pass expect_files as workspace-relative paths the subagent should create.",
+                    {"field": "expect_files", "expect_files": args.get("expect_files")},
+                ),
+            )
+
         agent_root = resolve_agent_project_root()
         try:
             agent_md_path = resolve_task_agent_md_path(
@@ -1614,6 +1731,10 @@ class CoreToolExecutor(ToolExecutorPort):
             subagent_type=subagent_type,
             task=task,
         )
+
+        artifact_exists, artifacts = _check_expected_artifacts(self._workspace, expect_files)
+        payload["artifact_exists"] = artifact_exists
+        payload["artifacts"] = artifacts
 
         if self._run_store is not None and not queue_mode:
             result_json = _j(payload)

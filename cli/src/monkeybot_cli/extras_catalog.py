@@ -26,6 +26,7 @@ PROVIDER_CHOICES: tuple[ExtraChoice, ...] = (
     ExtraChoice("huggingface", "Hugging Face"),
     ExtraChoice("ollama", "Ollama (local)"),
     ExtraChoice("nvidia", "NVIDIA NIM"),
+    ExtraChoice("openrouter", "OpenRouter"),
 )
 
 # Non-provider agent features (root ``[project.optional-dependencies]`` names).

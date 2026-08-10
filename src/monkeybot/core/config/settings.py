@@ -15,6 +15,7 @@ from monkeybot.providers.huggingface import HuggingFaceProvider
 from monkeybot.providers.nvidia import NvidiaProvider
 from monkeybot.providers.ollama import OllamaProvider
 from monkeybot.providers.openai import OpenAIProvider
+from monkeybot.providers.openrouter import OpenRouterProvider
 from monkeybot.providers.sampling import resolve_model_sampling
 from monkeybot.providers.vertex_claude import VertexClaudeProvider
 
@@ -80,7 +81,11 @@ class SubagentConfig:
 class SubagentSettings:
     """Global defaults for ``task`` subagent runs from ``subagents:`` in monkeybot.yaml."""
 
-    timeout_sec: float = 600.0
+    # ponytail: 600s killed real implementer/story-writer children mid-work (PRT-5022).
+    # A flat hour is the lazy ceiling: parent cancel still stops a runaway sooner, and
+    # max_turns bounds the pathological case. Narrow it per-spawn only if an hour of a
+    # wedged child actually costs something.
+    timeout_sec: float = 3600.0
     max_turns: int = 1000
     vertex_google_search: bool = False
 
@@ -215,6 +220,14 @@ def get_provider_config(
             ),
             resolved_model,
         )
+    if provider_key == "openrouter":
+        return ProviderConfig(
+            OpenRouterProvider(
+                temperature=sampling.temperature,
+                max_tokens=sampling.max_tokens,
+            ),
+            resolved_model,
+        )
     if provider_key == "aws_bedrock":
         from monkeybot.providers.bedrock import BedrockClaudeProvider  # noqa: PLC0415
 
@@ -230,7 +243,7 @@ def get_provider_config(
     raise ValueError(
         f"Unsupported model provider: {provider_key}. "
         "Supported providers: google_vertexai, openai, anthropic, vertex_anthropic, "
-        "huggingface, ollama, nvidia, aws_bedrock"
+        "huggingface, ollama, nvidia, openrouter, aws_bedrock"
     )
 
 

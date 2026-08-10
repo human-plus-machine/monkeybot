@@ -7,6 +7,7 @@ from monkeybot.core.llm.provider import Message, ToolCall
 from monkeybot.core.llm.realtime_provider import RealtimeToolCall
 from monkeybot.core.runtime.events import (
     AssistantDelta,
+    AssistantTextEnded,
     Thinking,
     ToolCallResult,
     ToolCallStarted,
@@ -81,6 +82,7 @@ class TestRunRealtimeTurn:
         assert any(isinstance(e, Thinking) for e in events)
         assert events
         assert any(isinstance(e, AssistantDelta) for e in events)
+        assert AssistantTextEnded(request_id="r1", text="hi there") in events
         assert any(isinstance(e, TurnComplete) for e in events)
         assert len(history.rows) == 2
         assert history.rows[0].role == "user"

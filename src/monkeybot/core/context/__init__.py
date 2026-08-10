@@ -460,23 +460,47 @@ def _core_tool_defs(
         "properties": {
             "pattern": {
                 "type": "string",
-                "description": "Python regex to search for in file contents.",
+                "description": (
+                    "Python regex to search for in file contents. Prefer simple patterns: "
+                    "ripgrep may accelerate the search when available, but constructs that "
+                    "need Python re (lookaround, backreferences) always use the Python engine."
+                ),
             },
             "root": {
                 "type": "string",
-                "description": "Optional repo-relative directory to search under (default workspace root).",
+                "description": (
+                    "Optional repo-relative directory or file to search under "
+                    "(default workspace root). A file path searches just that file."
+                ),
             },
             "ignore_case": {
                 "type": "boolean",
                 "description": "Case-insensitive search (default false).",
             },
             "file_glob": {
-                "type": "string",
-                "description": 'Optional filename filter (e.g. "*.py", "*.{ts,tsx}").',
+                "description": (
+                    'Optional filename filter: a string (e.g. "*.py", "*.{ts,tsx}") or a list '
+                    "of globs. Brace expansion is supported. An unparseable glob is an error "
+                    "(never a silent empty match)."
+                ),
+                "oneOf": [
+                    {"type": "string"},
+                    {"type": "array", "items": {"type": "string"}},
+                ],
             },
             "max_matches": {
                 "type": "integer",
-                "description": "Cap on returned matches (default server limit).",
+                "description": (
+                    "Cap on returned matches in this page (default server limit). "
+                    "Does not stop the scan; check total_match_count and next_offset."
+                ),
+            },
+            "offset": {
+                "type": "integer",
+                "description": (
+                    "Skip this many matches before collecting the returned page "
+                    "(default 0). Continue from a prior response's next_offset."
+                ),
             },
         },
         "required": ["pattern"],
@@ -596,6 +620,15 @@ def _core_tool_defs(
             "type": "string",
             "description": "Optional background the parent already gathered (constraints, paths, prior tool output).",
         },
+        "expect_files": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Workspace-relative files the subagent is expected to create or update. "
+                "The result reports artifact_exists plus a per-path artifacts list, so you "
+                "do not need to check with a follow-up read_file or glob."
+            ),
+        },
     }
     type_names = sorted({n.strip() for n in (subagent_type_names or []) if n and str(n).strip()})
     subagent_type_schema: dict[str, object] = {
@@ -651,7 +684,10 @@ def _core_tool_defs(
         ToolDef(
             "grep",
             "Search workspace file contents with a Python regex. Prefer over run_command+grep. "
-            "Best for exact identifiers; for conceptual / paraphrased questions, use `search` first.",
+            "Best for exact identifiers; for conceptual / paraphrased questions, use `search` first. "
+            "An empty match list is evidence of absence only when the payload has "
+            "scan_complete=true (incomplete scans return ok:false / incomplete_scan — narrow "
+            "root or pass file_glob). Capped pages still report total_match_count and next_offset.",
             grep_schema,
             parallel_safe=True,
         ),

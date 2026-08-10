@@ -52,6 +52,7 @@ from monkeybot.core.types.content_blocks import (
 from monkeybot.core.types.content_blocks import Thinking as ThinkingBlock
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers.pricing import estimate_cost
+from monkeybot.providers._utils import note_anthropic_token_estimate_observation
 
 from .doom_loop import (
     _doom_loop_exempt_names,
@@ -108,6 +109,11 @@ from .loop_usage import (
 from .tool_dispatch import ToolBatchState, dispatch_tool_batch
 
 logger = logging.getLogger("monkeybot.core.runtime.loop.turn_loop")
+
+# Emitted as an ``Error`` event when a run hits its turn budget. The parent task
+# tool matches on this exact value to report ``exit_reason="max_turns"``, so it is
+# a contract between the loop and the subagent completion payload, not a message.
+MAX_TURNS_ERROR = "Max turns exceeded"
 
 TurnAction = Literal["continue", "break", "return"]
 
@@ -251,6 +257,7 @@ class _TurnState:
     thinking_text: str = ""
     thinking_signature: str | None = None
     stream_truncated: bool = False
+    last_preflight_tokens: int = 0
 
 
 async def _prepare_turn_context(
@@ -679,6 +686,7 @@ async def _maybe_compact_and_shape(
         provider=provider,
         vertex_google_search=vertex_google_search,
     )
+    state.last_preflight_tokens = preflight
     usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, preflight)
     yield ContextUsage(
         request_id=state.ctx.request_id,
@@ -767,6 +775,7 @@ async def _consume_provider_stream_body(
     llm_cached = 0
     llm_cache_read = 0
     llm_cache_creation = 0
+    hints = _provider_call_hints(state.ctx)
     try:
         async with span_llm(ctx=state.ctx, vertex_google_search=vertex_google_search):
             async with aclosing(
@@ -779,7 +788,7 @@ async def _consume_provider_stream_body(
                         model=state.ctx.model,
                         thinking_budget=state.stream_thinking,
                         vertex_google_search=vertex_google_search,
-                        hints=_provider_call_hints(state.ctx),
+                        hints=hints,
                     ),
                 )
             ) as stream:
@@ -796,6 +805,7 @@ async def _consume_provider_stream_body(
                             ev.output_tokens,
                             cache_read_tokens=ev.cache_read_tokens,
                             cache_creation_tokens=ev.cache_creation_tokens,
+                            cache_retention=hints.cache_retention,
                         )
                         llm_input += ev.input_tokens
                         llm_output += ev.output_tokens
@@ -827,6 +837,35 @@ async def _consume_provider_stream_body(
                 prompt=_provider_messages_prompt_summary(state.provider_messages),
                 completion=state.assistant_text or "",
             )
+            actual_prompt = llm_input + llm_cache_read + llm_cache_creation
+            if state.last_preflight_tokens > 0 and actual_prompt > 0:
+                if provider.name in ("bedrock", "claude", "vertex-claude"):
+                    note_anthropic_token_estimate_observation(
+                        estimated=state.last_preflight_tokens,
+                        actual=actual_prompt,
+                    )
+                logger.debug(
+                    "prompt token preflight vs actual %s",
+                    kv(
+                        request_id=state.ctx.request_id,
+                        thread_id=state.ctx.thread_id,
+                        turn=state.turn_index,
+                        preflight=state.last_preflight_tokens,
+                        actual_prompt=actual_prompt,
+                        context_window=state.ctx.context_window_tokens,
+                        provider=provider.name,
+                    ),
+                )
+                if actual_prompt > state.ctx.context_window_tokens:
+                    logger.warning(
+                        "provider-reported prompt exceeds configured context_window %s",
+                        kv(
+                            request_id=state.ctx.request_id,
+                            actual_prompt=actual_prompt,
+                            context_window=state.ctx.context_window_tokens,
+                            model=state.ctx.model,
+                        ),
+                    )
         if transcript_writer is not None:
             await transcript_writer.write_provider_response(
                 request_id=state.ctx.request_id,
@@ -1363,7 +1402,7 @@ async def _run_inner_core(
                 max_turns=state.effective_max,
             ),
         )
-        yield Error(request_id=state.ctx.request_id, error="Max turns exceeded")
+        yield Error(request_id=state.ctx.request_id, error=MAX_TURNS_ERROR)
 
     # Ensure the backgrounded assistant write has landed before any load/reset
     # below (freeze) so the assistant row is durable and not overwritten.

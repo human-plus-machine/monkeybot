@@ -35,6 +35,7 @@ ALLOWED_COMMANDS = [
     "cat",      # Read file contents
     "ls",       # List directory contents
     "grep",     # Search file contents (line-oriented)
+    "rg",       # ripgrep — fast content search (prefer builtin grep tool when available)
     "echo",     # Print text (used in tests and debugging)
     "python",   # Execute Python scripts (skills)
     "python3",  # Execute Python scripts (skills)
