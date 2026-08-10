@@ -402,14 +402,24 @@ class TerminalExecutor:
         stdout = stdout_raw.decode("utf-8", errors="replace")
         stderr = stderr_raw.decode("utf-8", errors="replace")
 
-        if timed_out:
-            error_msg = f"Command exceeded {timeout}s timeout"
+        if timed_out or not drained_clean:
+            if timed_out:
+                error_msg = f"Command exceeded {timeout}s timeout"
+            else:
+                # Direct child exited, but we had to kill pipe-holding descendants.
+                # Do not report success — unfinished work was forcibly terminated.
+                error_msg = (
+                    "Command exited but capture streams did not close "
+                    "(a descendant was still writing); unfinished work was killed"
+                )
             logger.error(
                 error_msg,
                 extra={
                     "component": "terminal_executor",
                     "command": command,
                     "timeout": timeout,
+                    "timed_out": timed_out,
+                    "drained_clean": drained_clean,
                     "stdout_chars": len(stdout),
                     "stderr_chars": len(stderr),
                 },

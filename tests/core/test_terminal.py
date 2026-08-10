@@ -361,26 +361,31 @@ class TestTerminalExecutorTimeout:
 
     @pytest.mark.asyncio
     async def test_execute_does_not_hang_when_grandchild_holds_pipe(self, executor):
-        """Child can exit while a descendant keeps stdout open; drain must still finish."""
+        """Child exit with a pipe-holding descendant must error, not report success."""
+        from monkeybot.core.tools.terminal import CommandTimeoutError
+
         # Parent prints and exits; forked child keeps the PIPE open for 60s.
         # Unbounded stdout.read() would hang until the child exits.
-        result = await asyncio.wait_for(
-            executor.execute(
-                "python3",
-                [
-                    "-c",
-                    "import os, sys, time\n"
-                    "if os.fork() == 0:\n"
-                    "    time.sleep(60)\n"
-                    "    os._exit(0)\n"
-                    "print('done', flush=True)\n",
-                ],
-                timeout=5,
-            ),
-            timeout=8,
-        )
-        assert result.exit_code == 0
-        assert "done" in result.stdout
+        with pytest.raises(CommandTimeoutError) as exc_info:
+            await asyncio.wait_for(
+                executor.execute(
+                    "python3",
+                    [
+                        "-c",
+                        "import os, sys, time\n"
+                        "if os.fork() == 0:\n"
+                        "    time.sleep(60)\n"
+                        "    os._exit(0)\n"
+                        "print('done', flush=True)\n",
+                    ],
+                    timeout=5,
+                ),
+                timeout=8,
+            )
+        assert "descendant" in str(exc_info.value).lower() or "streams did not close" in str(
+            exc_info.value
+        ).lower()
+        assert "done" in exc_info.value.stdout
 
     @pytest.mark.asyncio
     async def test_fast_command_does_not_timeout(self, executor):
