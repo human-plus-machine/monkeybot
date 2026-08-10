@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import time
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -1772,6 +1773,68 @@ def test_at_mention_reloads_stale_file_index(tmp_path: Path) -> None:
     asyncio.run(_run())
 
 
+def test_config_edit_reports_editor_launch_failure(tmp_path: Path, monkeypatch) -> None:
+    async def _run() -> None:
+        config_dir = tmp_path / "monkeybot_config"
+        config_dir.mkdir()
+        (config_dir / "monkeybot.yaml").write_text("model:\n  provider: nvidia\n", encoding="utf-8")
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        app.suspend = contextlib.nullcontext  # type: ignore[method-assign]
+        monkeypatch.setenv("EDITOR", "does-not-exist-anywhere")
+
+        def _raise(argv: list[str]) -> None:
+            raise FileNotFoundError(argv[0])
+
+        monkeypatch.setattr("monkeybot_cli.chat_tui.subprocess.call", _raise)
+        async with app.run_test() as pilot:
+            app.query_one("#prompt", Composer).post_message(Composer.Submitted("/config edit"))
+            await pilot.pause()
+            systems = [w.body for w in app.query(SystemLine)]
+            assert any("Could not launch $EDITOR" in body for body in systems)
+
+    asyncio.run(_run())
+
+
+def test_file_palette_refreshes_when_async_index_load_completes(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        app._load_file_index = lambda: None  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            composer = app.query_one("#prompt", Composer)
+            # Index isn't loaded yet, so with no matches to show the palette
+            # hides itself even though the cursor is still on an @ token.
+            composer.load_text("@rea")
+            composer.move_cursor(composer.document.end)
+            app._update_palette(composer)
+            await pilot.pause()
+            assert app._palette_mode is None
+
+            # Simulate the background worker finishing after the keystroke.
+            app._file_index = ["readme.md"]
+            app._file_index_loaded_at = time.monotonic()
+            app._refresh_file_palette()
+            await pilot.pause()
+            assert app._palette_mode == "file"
+            palette = app._palette()
+            assert palette.option_count == 1
+
+    asyncio.run(_run())
+
+
 def test_filter_slash_commands_includes_new_commands() -> None:
     matches = dict(filter_slash_commands("/c"))
     assert "/clear" in matches
@@ -1854,6 +1917,44 @@ def test_at_mention_shows_file_options_and_tab_inserts_without_submit(tmp_path: 
             assert composer.text == "readme.md "
             assert not submitted
             assert not list(app.query(UserTurn))
+
+    asyncio.run(_run())
+
+
+def test_at_completion_failure_is_logged_not_swallowed_silently(
+    tmp_path: Path, caplog
+) -> None:
+    async def _run() -> None:
+        (tmp_path / "readme.md").write_text("x")
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        app._load_file_index = lambda: None  # type: ignore[method-assign]
+        app.complete_at_from_palette = lambda: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            RuntimeError("boom")
+        )
+        async with app.run_test() as pilot:
+            app._file_index = ["readme.md"]
+            composer = app.query_one("#prompt", Composer)
+            composer.load_text("@rea")
+            composer.move_cursor(composer.document.end)
+            app._update_palette(composer)
+            await pilot.pause()
+            assert app.palette_mode == "file"
+
+            with caplog.at_level(logging.ERROR, logger="monkeybot_cli.chat_tui_widgets"):
+                result = composer._apply_at_completion()
+
+            # Fails closed (no crash, no silent no-op) with a diagnostic logged,
+            # instead of the broad `suppress(Exception)` that hid this before.
+            assert result is False
+            assert composer.text == "@rea"
+            assert any("@ file completion failed" in rec.message for rec in caplog.records)
 
     asyncio.run(_run())
 

@@ -847,6 +847,23 @@ class ChatApp(App[int]):
         files = list_workspace_files(self.agent_root)
         self._file_index = files
         self._file_index_loaded_at = time.monotonic()
+        self.call_from_thread(self._refresh_file_palette)
+
+    def _refresh_file_palette(self) -> None:
+        """Re-run palette matching once a background file-index load completes.
+
+        Without this, typing ``@`` while the index is still loading leaves the
+        picker empty (no matches yet, so the palette hides itself) until the
+        user makes another edit. This re-checks the cursor position directly
+        rather than trusting ``_palette_mode``, since a still-loading index
+        means the palette was never shown as "file" mode in the first place.
+        """
+        with contextlib.suppress(NoMatches):
+            composer = self.query_one("#prompt", Composer)
+            row, col = composer.cursor_location
+            line = composer.document.get_line(row)
+            if detect_at_token(line, col) is not None:
+                self._update_palette(composer)
 
     def slash_palette_move(self, delta: int) -> bool:
         with contextlib.suppress(NoMatches):
@@ -1496,8 +1513,12 @@ class ChatApp(App[int]):
             if not editor:
                 self._mount_system("Set $EDITOR to use /config edit", error=True)
                 return
-            with self.suspend():
-                subprocess.call([*shlex.split(editor), str(path)])
+            try:
+                with self.suspend():
+                    subprocess.call([*shlex.split(editor), str(path)])
+            except (OSError, ValueError) as exc:
+                self._mount_system(f"Could not launch $EDITOR ({editor}): {exc}", error=True)
+                return
             self._mount_system(
                 "Config edited — restart the gateway (a fresh `monkeybot chat`) to apply changes"
             )

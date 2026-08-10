@@ -982,20 +982,22 @@ class Composer(TextArea):
 
     def _apply_at_completion(self) -> bool:
         """If the @ file palette is open, splice the picked path in and return True."""
-        with contextlib.suppress(Exception):
-            app = self.app
-            complete = getattr(app, "complete_at_from_palette", None)
-            if not callable(complete):
-                return False
+        app = self.app
+        complete = getattr(app, "complete_at_from_palette", None)
+        if not callable(complete):
+            return False
+        try:
             result = complete()
-            if result is None:
-                return False
-            filled, cursor = result
-            self.load_text(filled)
-            self.move_cursor(cursor)
-            self._sync_height()
-            return True
-        return False
+        except Exception:
+            logger.exception("@ file completion failed")
+            return False
+        if result is None:
+            return False
+        filled, cursor = result
+        self.load_text(filled)
+        self.move_cursor(cursor)
+        self._sync_height()
+        return True
 
     def _on_key(self, event: Key) -> None:
         if self._search_mode:
