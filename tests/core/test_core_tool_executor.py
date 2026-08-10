@@ -588,6 +588,60 @@ async def test_grep_rg_and_python_parity(tmp_path: Path, monkeypatch: pytest.Mon
     assert all(not m["path"].startswith(".monkeybot") for m in with_rg["matches"])
 
 
+async def test_grep_path_glob_parity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Path-style file_glob must match the same files with and without rg."""
+    import shutil
+
+    from monkeybot.core.tools.workspace_service import WorkspaceFileService, WorkspaceSettings
+
+    root = tmp_path
+    (root / "src").mkdir()
+    (root / "src" / "nested").mkdir()
+    (root / "src" / "nested" / "deep.py").write_text("PATH_GLOB_HIT\n", encoding="utf-8")
+    (root / "src" / "top.py").write_text("PATH_GLOB_HIT\n", encoding="utf-8")
+    (root / "other").mkdir()
+    (root / "other" / "side.py").write_text("PATH_GLOB_HIT\n", encoding="utf-8")
+    (root / "other" / "test_x.py").write_text("PATH_GLOB_HIT\n", encoding="utf-8")
+    svc = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_MATCHES=50, WORKSPACE_GREP_MAX_FILES=100),
+    )
+    rg_bin = shutil.which("rg")
+
+    def _paths(result: dict) -> set[str]:
+        return {m["path"] for m in result["matches"]}
+
+    # Python-only: path globs and basename globs.
+    monkeypatch.setattr("monkeybot.core.tools.workspace_service.shutil.which", lambda _name: None)
+    assert _paths(svc.grep("PATH_GLOB_HIT", file_glob="src/**/*.py")) == {
+        "src/nested/deep.py",
+        "src/top.py",
+    }
+    assert _paths(svc.grep("PATH_GLOB_HIT", file_glob="src/*.py")) == {"src/top.py"}
+    assert _paths(svc.grep("PATH_GLOB_HIT", file_glob="test_*.py")) == {"other/test_x.py"}
+
+    if rg_bin is None:
+        pytest.skip("rg not on PATH")
+
+    monkeypatch.undo()
+    with_rg = svc.grep("PATH_GLOB_HIT", file_glob="src/**/*.py")
+    monkeypatch.setattr("monkeybot.core.tools.workspace_service.shutil.which", lambda _name: None)
+    without_rg = svc.grep("PATH_GLOB_HIT", file_glob="src/**/*.py")
+    assert _paths(with_rg) == _paths(without_rg) == {"src/nested/deep.py", "src/top.py"}
+
+    monkeypatch.undo()
+    with_rg = svc.grep("PATH_GLOB_HIT", file_glob="src/*.py")
+    monkeypatch.setattr("monkeybot.core.tools.workspace_service.shutil.which", lambda _name: None)
+    without_rg = svc.grep("PATH_GLOB_HIT", file_glob="src/*.py")
+    assert _paths(with_rg) == _paths(without_rg) == {"src/top.py"}
+
+    monkeypatch.undo()
+    with_rg = svc.grep("PATH_GLOB_HIT", file_glob="test_*.py")
+    monkeypatch.setattr("monkeybot.core.tools.workspace_service.shutil.which", lambda _name: None)
+    without_rg = svc.grep("PATH_GLOB_HIT", file_glob="test_*.py")
+    assert _paths(with_rg) == _paths(without_rg) == {"other/test_x.py"}
+
+
 @pytest.mark.asyncio
 async def test_apply_patch_tool(tmp_path: Path) -> None:
     root = tmp_path

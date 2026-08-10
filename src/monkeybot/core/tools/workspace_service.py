@@ -246,10 +246,49 @@ def _normalize_file_globs(file_glob: str | list[str] | None) -> list[str] | None
     return out
 
 
-def _name_matches_globs(name: str, globs: list[str] | None) -> bool:
+def _compile_path_glob(pattern: str) -> re.Pattern[str]:
+    """Compile a path glob where ``*``/``?`` do not cross ``/`` and ``**`` does."""
+    parts: list[str] = []
+    i = 0
+    n = len(pattern)
+    while i < n:
+        if pattern.startswith("**/", i):
+            parts.append("(?:.*/)?")
+            i += 3
+        elif pattern.startswith("**", i):
+            parts.append(".*")
+            i += 2
+        elif pattern[i] == "*":
+            parts.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            parts.append("[^/]")
+            i += 1
+        else:
+            parts.append(re.escape(pattern[i]))
+            i += 1
+    return re.compile(f"^{''.join(parts)}$")
+
+
+def _path_matches_globs(rel_path: str, globs: list[str] | None) -> bool:
+    """Match ``file_glob`` with ripgrep/gitignore-like rules.
+
+    Patterns without ``/`` match the basename in any directory (so ``*.py`` and
+    ``test_*.py`` work under nested folders). Patterns that contain ``/`` match
+    the workspace-relative path, with ``**`` spanning directories.
+    """
     if globs is None:
         return True
-    return any(fnmatch.fnmatch(name, g) for g in globs)
+    path = rel_path.replace("\\", "/").removeprefix("./")
+    name = path.rsplit("/", 1)[-1]
+    for raw in globs:
+        g = raw.replace("\\", "/").removeprefix("./")
+        if "/" not in g.rstrip("/"):
+            if fnmatch.fnmatch(name, g):
+                return True
+        elif _compile_path_glob(g).fullmatch(path) is not None:
+            return True
+    return False
 
 
 def _regex_needs_python_engine(pattern: str) -> bool:
@@ -950,7 +989,7 @@ class WorkspaceFileService:
                     rel = self._as_repo_rel(fp)
                 except WorkspaceError:
                     continue
-                if not _name_matches_globs(fp.name, globs):
+                if not _path_matches_globs(rel, globs):
                     continue
                 try:
                     st = fp.stat()
@@ -1038,13 +1077,22 @@ class WorkspaceFileService:
         if globs:
             for g in globs:
                 cmd.extend(["--glob", g])
-        cmd.extend(["--", pattern, str(base.resolve())])
+        # Search from the workspace root as cwd so path-style --glob patterns
+        # (e.g. src/**/*.py) match the same relative paths as the Python walker.
+        search_root = self._root.resolve()
+        search_path = base.resolve()
+        try:
+            rg_target = search_path.relative_to(search_root).as_posix() or "."
+        except ValueError:
+            rg_target = str(search_path)
+        cmd.extend(["--", pattern, rg_target])
         proc = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             timeout=120,
             check=False,
+            cwd=str(search_root),
         )
         # 0 = matches, 1 = no matches; anything else is a hard failure → caller falls back.
         if proc.returncode not in (0, 1):
