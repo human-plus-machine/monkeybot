@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 import fnmatch
+import json
+import logging
 import os
 import re
+import shutil
+import subprocess
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NotRequired, TypedDict
 
+from monkeybot.core.logging_utils import kv
 from monkeybot.core.tools.text_normalize import normalize_unicode_punctuation
+
+logger = logging.getLogger(__name__)
 
 # Directories skipped when walking for grep: noisy, large, or not source content.
 _GREP_IGNORE_DIRS = frozenset(
@@ -29,7 +37,18 @@ _GREP_IGNORE_DIRS = frozenset(
         "dist",
         "build",
         ".next",
+        ".monkeybot",
+        ".terraform",
+        "target",
+        "vendor",
     }
+)
+
+# One-level or nested ``{a,b}`` groups in filename globs (fnmatch has no brace expansion).
+_BRACE_GLOB_RE = re.compile(r"\{([^{}]+)\}")
+# Python ``re`` features that the Rust regex crate (ripgrep) does not support.
+_RG_UNSUPPORTED_RE = re.compile(
+    r"\(\?[=!<]|\\[1-9]|\(\?P=|\\g<"
 )
 
 
@@ -90,9 +109,11 @@ class GrepResult(TypedDict):
     pattern: str
     matches: list[GrepMatch]
     match_count: int
+    total_match_count: int
     files_scanned: int
-    truncated: bool
+    scan_complete: bool
     duration_ms: int
+    next_offset: NotRequired[int]
 
 
 @dataclass
@@ -152,6 +173,88 @@ def _coerce_workspace_settings(settings: object | None) -> WorkspaceSettings:
         if val is not None:
             setattr(out, field, val)
     return out
+
+
+def _expand_file_glob(pattern: str) -> list[str]:
+    """Expand ``{a,b}`` groups in a filename glob into concrete fnmatch patterns.
+
+    Raises :class:`WorkspaceError` on unbalanced braces or empty alternatives so
+    callers never silently match zero files from a malformed glob.
+    """
+    if pattern.count("{") != pattern.count("}"):
+        raise WorkspaceError(
+            f"Unbalanced braces in file_glob: {pattern!r}",
+            code="invalid_file_glob",
+        )
+    if "{" not in pattern:
+        if "}" in pattern:
+            raise WorkspaceError(
+                f"Unbalanced braces in file_glob: {pattern!r}",
+                code="invalid_file_glob",
+            )
+        return [pattern]
+    m = _BRACE_GLOB_RE.search(pattern)
+    if m is None:
+        raise WorkspaceError(
+            f"Unparseable file_glob: {pattern!r}",
+            code="invalid_file_glob",
+        )
+    inner = m.group(1)
+    alternatives = inner.split(",")
+    if not alternatives or any(not alt.strip() for alt in alternatives):
+        raise WorkspaceError(
+            f"Empty alternative in file_glob braces: {pattern!r}",
+            code="invalid_file_glob",
+        )
+    prefix = pattern[: m.start()]
+    suffix = pattern[m.end() :]
+    expanded: list[str] = []
+    for alt in alternatives:
+        expanded.extend(_expand_file_glob(f"{prefix}{alt}{suffix}"))
+    return expanded
+
+
+def _normalize_file_globs(file_glob: str | list[str] | None) -> list[str] | None:
+    """Normalize ``file_glob`` to a list of fnmatch patterns, or ``None`` for no filter."""
+    if file_glob is None:
+        return None
+    if isinstance(file_glob, str):
+        raw_items: list[str] = [file_glob]
+    elif isinstance(file_glob, list):
+        raw_items = [str(x) for x in file_glob]
+    else:
+        raise WorkspaceError(
+            "file_glob must be a string or list of strings",
+            code="invalid_file_glob",
+        )
+    if not raw_items:
+        raise WorkspaceError("file_glob must not be empty", code="invalid_file_glob")
+    out: list[str] = []
+    for item in raw_items:
+        s = item.strip()
+        if not s:
+            raise WorkspaceError(
+                "file_glob entries must be non-empty strings",
+                code="invalid_file_glob",
+            )
+        out.extend(_expand_file_glob(s))
+    if not out:
+        raise WorkspaceError(
+            f"file_glob matched no patterns: {file_glob!r}",
+            code="invalid_file_glob",
+        )
+    return out
+
+
+def _name_matches_globs(name: str, globs: list[str] | None) -> bool:
+    if globs is None:
+        return True
+    return any(fnmatch.fnmatch(name, g) for g in globs)
+
+
+def _regex_needs_python_engine(pattern: str) -> bool:
+    """True when ``pattern`` uses Python ``re`` features unsupported by ripgrep."""
+    return _RG_UNSUPPORTED_RE.search(pattern) is not None
 
 
 def _is_disproportionate_match(search: str, old_string: str) -> bool:
@@ -731,39 +834,122 @@ class WorkspaceFileService:
         *,
         root: str | None = None,
         ignore_case: bool = False,
-        file_glob: str | None = None,
+        file_glob: str | list[str] | None = None,
         max_matches: int | None = None,
+        offset: int | None = None,
     ) -> GrepResult:
         if not pattern or not str(pattern).strip():
             raise WorkspaceError("pattern is required", code="missing_pattern")
+        pat = pattern.strip()
         flags = re.IGNORECASE if ignore_case else 0
         try:
-            regex = re.compile(pattern.strip(), flags)
+            regex = re.compile(pat, flags)
         except re.error as e:
             raise WorkspaceError(f"Invalid regex: {e}", code="invalid_regex") from e
+        globs = _normalize_file_globs(file_glob)
         base = self._resolve_root_dir(root)
         max_m = max_matches if max_matches is not None else self._settings.WORKSPACE_GREP_MAX_MATCHES
+        if max_m < 1:
+            raise WorkspaceError("max_matches must be >= 1", code="invalid_max_matches")
+        off = 0 if offset is None else int(offset)
+        if off < 0:
+            raise WorkspaceError("offset must be >= 0", code="invalid_offset")
         max_files = self._settings.WORKSPACE_GREP_MAX_FILES
         max_file_bytes = self._settings.WORKSPACE_GREP_MAX_FILE_BYTES
+        t0 = time.monotonic()
+
+        use_rg = shutil.which("rg") is not None and not _regex_needs_python_engine(pat)
+        if use_rg:
+            try:
+                return self._grep_with_rg(
+                    pat,
+                    base=base,
+                    ignore_case=ignore_case,
+                    globs=globs,
+                    max_matches=max_m,
+                    offset=off,
+                    max_file_bytes=max_file_bytes,
+                    t0=t0,
+                )
+            except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+                # Fall back to the pure-Python walker; do not change match semantics
+                # by failing closed when an optional accelerator is broken.
+                logger.warning("grep rg fallback %s", kv(error=str(exc)))
+
+        return self._grep_python(
+            regex,
+            pat,
+            base=base,
+            globs=globs,
+            max_matches=max_m,
+            offset=off,
+            max_files=max_files,
+            max_file_bytes=max_file_bytes,
+            t0=t0,
+        )
+
+    def _grep_result(
+        self,
+        *,
+        pattern: str,
+        base: Path,
+        matches: list[GrepMatch],
+        total_match_count: int,
+        files_scanned: int,
+        offset: int,
+        t0: float,
+    ) -> GrepResult:
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        payload: GrepResult = {
+            "ok": True,
+            "root": self._as_repo_rel(base) if base != self._root else ".",
+            "pattern": pattern,
+            "matches": matches,
+            "match_count": len(matches),
+            "total_match_count": total_match_count,
+            "files_scanned": files_scanned,
+            "scan_complete": True,
+            "duration_ms": duration_ms,
+        }
+        next_offset = offset + len(matches)
+        if next_offset < total_match_count:
+            payload["next_offset"] = next_offset
+        return payload
+
+    def _grep_python(
+        self,
+        regex: re.Pattern[str],
+        pattern: str,
+        *,
+        base: Path,
+        globs: list[str] | None,
+        max_matches: int,
+        offset: int,
+        max_files: int,
+        max_file_bytes: int,
+        t0: float,
+    ) -> GrepResult:
         matches: list[GrepMatch] = []
         files_scanned = 0
-        truncated = False
-        t0 = time.monotonic()
-        for dirpath, dirnames, filenames in os.walk(base):
-            dirnames[:] = sorted(d for d in dirnames if d not in _GREP_IGNORE_DIRS)
+        total_match_count = 0
+        candidates_remaining = False
+        # os.walk on a file yields nothing — scan that single file instead.
+        walk_iter: Iterator[tuple[str, list[str], list[str]]]
+        if base.is_file():
+            walk_iter = iter([(str(base.parent), [], [base.name])])
+        else:
+            walk_iter = os.walk(base)
+
+        for dirpath, dirnames, filenames in walk_iter:
+            if not base.is_file():
+                dirnames[:] = sorted(d for d in dirnames if d not in _GREP_IGNORE_DIRS)
             for name in sorted(filenames):
-                if len(matches) >= max_m:
-                    truncated = True
-                    break
-                if files_scanned >= max_files:
-                    truncated = True
-                    break
                 fp = Path(dirpath) / name
                 try:
                     rel = self._as_repo_rel(fp)
                 except WorkspaceError:
                     continue
-                if file_glob and not fnmatch.fnmatch(fp.name, file_glob):
+                if not _name_matches_globs(fp.name, globs):
                     continue
                 try:
                     st = fp.stat()
@@ -771,6 +957,9 @@ class WorkspaceFileService:
                     continue
                 if st.st_size > max_file_bytes:
                     continue
+                if files_scanned >= max_files:
+                    candidates_remaining = True
+                    break
                 files_scanned += 1
                 try:
                     data = fp.read_bytes()
@@ -780,10 +969,12 @@ class WorkspaceFileService:
                     continue
                 text = data.decode("utf-8", errors="replace")
                 for line_no, line in enumerate(text.splitlines(), start=1):
-                    if len(matches) >= max_m:
-                        truncated = True
-                        break
-                    if regex.search(line):
+                    if not regex.search(line):
+                        continue
+                    total_match_count += 1
+                    if total_match_count <= offset:
+                        continue
+                    if len(matches) < max_matches:
                         matches.append(
                             {
                                 "path": rel,
@@ -791,21 +982,123 @@ class WorkspaceFileService:
                                 "text": line[:2000],
                             }
                         )
-                if truncated:
-                    break
-            if truncated:
+            if candidates_remaining:
                 break
-        duration_ms = int((time.monotonic() - t0) * 1000)
-        return {
-            "ok": True,
-            "root": self._as_repo_rel(base) if base != self._root else ".",
-            "pattern": pattern.strip(),
-            "matches": matches,
-            "match_count": len(matches),
-            "files_scanned": files_scanned,
-            "truncated": truncated,
-            "duration_ms": duration_ms,
-        }
+
+        if candidates_remaining:
+            raise WorkspaceError(
+                f"grep scanned {files_scanned} files (limit {max_files}) and stopped early; "
+                "results are incomplete and cannot be used to conclude absence",
+                code="incomplete_scan",
+            )
+
+        return self._grep_result(
+            pattern=pattern,
+            base=base,
+            matches=matches,
+            total_match_count=total_match_count,
+            files_scanned=files_scanned,
+            offset=offset,
+            t0=t0,
+        )
+
+    def _grep_with_rg(
+        self,
+        pattern: str,
+        *,
+        base: Path,
+        ignore_case: bool,
+        globs: list[str] | None,
+        max_matches: int,
+        offset: int,
+        max_file_bytes: int,
+        t0: float,
+    ) -> GrepResult:
+        rg_bin = shutil.which("rg")
+        if not rg_bin:
+            raise OSError("rg not found")
+        cmd: list[str] = [
+            rg_bin,
+            "--json",
+            "--no-config",
+            "--hidden",
+            "--no-ignore",
+            "--max-filesize",
+            str(max_file_bytes),
+        ]
+        if ignore_case:
+            cmd.append("-i")
+        for ignore_dir in sorted(_GREP_IGNORE_DIRS):
+            # ``--no-ignore`` disables gitignore; these globs still apply. Prefer
+            # directory-name forms so nested paths like ``pkg/node_modules`` are skipped.
+            cmd.extend(["--glob", f"!{ignore_dir}"])
+            cmd.extend(["--glob", f"!**/{ignore_dir}/**"])
+        if globs:
+            for g in globs:
+                cmd.extend(["--glob", g])
+        cmd.extend(["--", pattern, str(base.resolve())])
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        # 0 = matches, 1 = no matches; anything else is a hard failure → caller falls back.
+        if proc.returncode not in (0, 1):
+            raise OSError(proc.stderr.strip() or f"rg exited {proc.returncode}")
+
+        matches: list[GrepMatch] = []
+        total_match_count = 0
+        files_scanned = 0
+        for line in proc.stdout.splitlines():
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            etype = event.get("type")
+            data = event.get("data") or {}
+            if etype == "match":
+                total_match_count += 1
+                if total_match_count <= offset or len(matches) >= max_matches:
+                    continue
+                path_info = data.get("path") or {}
+                path_text = path_info.get("text") if isinstance(path_info, dict) else None
+                if not isinstance(path_text, str):
+                    continue
+                fp = Path(path_text)
+                if not fp.is_absolute():
+                    fp = self._root / fp
+                try:
+                    rel = self._as_repo_rel(fp.resolve())
+                except WorkspaceError:
+                    continue
+                lines_info = data.get("lines") or {}
+                text = lines_info.get("text") if isinstance(lines_info, dict) else ""
+                if not isinstance(text, str):
+                    text = ""
+                text = text.rstrip("\n\r")[:2000]
+                line_no = data.get("line_number")
+                if not isinstance(line_no, int):
+                    line_no = 0
+                matches.append({"path": rel, "line": line_no, "text": text})
+            elif etype == "summary":
+                stats = data.get("stats") or {}
+                searches = stats.get("searches")
+                if isinstance(searches, int):
+                    files_scanned = searches
+                matched_lines = stats.get("matched_lines")
+                if isinstance(matched_lines, int):
+                    total_match_count = matched_lines
+
+        return self._grep_result(
+            pattern=pattern,
+            base=base,
+            matches=matches,
+            total_match_count=total_match_count,
+            files_scanned=files_scanned,
+            offset=offset,
+            t0=t0,
+        )
 
     def _as_repo_rel(self, p: Path) -> str:
         if self._skills_root is not None:

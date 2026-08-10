@@ -3,6 +3,7 @@ allowed_commands:
   - cat
   - ls
   - grep
+  - rg
   - echo
   - python
   - python3
