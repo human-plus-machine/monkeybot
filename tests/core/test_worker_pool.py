@@ -305,8 +305,8 @@ async def test_queue_mode_enqueue_then_worker_executes_e2e(
             ctx=_ctx(),
         )
     )
-    assert err is None and out is not None
-    run_id = json.loads(out)["run_id"]
+    assert err is not None and out is None
+    run_id = json.loads(err)["details"]["run_id"]
 
     execution_count = 0
 

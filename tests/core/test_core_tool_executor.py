@@ -2318,11 +2318,12 @@ async def test_task_tool_queue_mode_enqueues_pending_run(
                 ctx=_ctx(),
             )
         )
-        assert err is None and out is not None
-        payload = json.loads(out)
-        assert payload["ok"] is True
-        assert payload["queued"] is True
-        row = await backend.runs().get_run(payload["run_id"])
+        assert err is not None and out is None
+        payload = json.loads(err)
+        assert payload["ok"] is False
+        assert payload["error_kind"] == "pending"
+        assert payload["details"]["queued"] is True
+        row = await backend.runs().get_run(payload["details"]["run_id"])
         assert row is not None
         assert row.status == "pending"
         stored = StoredEnvelope.from_json(row.envelope_json)
@@ -3458,18 +3459,20 @@ async def test_task_tool_queue_mode_includes_linkage_fields(
                 ctx=_ctx(),
             )
         )
-        assert err is None and out is not None
-        payload = json.loads(out)
-        assert payload["ok"] is True
-        assert payload["queued"] is True
-        assert isinstance(payload["child_thread_id"], str)
-        assert payload["child_thread_id"].startswith("subagent:t:")
-        assert payload["subagent_type"] == "researcher"
-        assert "Nested SSE progress is not streamed in queue mode" in payload["message"]
-        row = await backend.runs().get_run(payload["run_id"])
+        assert err is not None and out is None
+        payload = json.loads(err)
+        assert payload["ok"] is False
+        assert payload["error_kind"] == "pending"
+        details = payload["details"]
+        assert details["queued"] is True
+        assert isinstance(details["child_thread_id"], str)
+        assert details["child_thread_id"].startswith("subagent:t:")
+        assert details["subagent_type"] == "researcher"
+        assert "Do not treat this as task completion" in payload["hint"]
+        row = await backend.runs().get_run(details["run_id"])
         assert row is not None
         stored = StoredEnvelope.from_json(row.envelope_json)
-        assert stored.child_thread_id == payload["child_thread_id"]
+        assert stored.child_thread_id == details["child_thread_id"]
     finally:
         await backend.close()
 
@@ -3513,7 +3516,8 @@ async def test_task_tool_queue_mode_skips_nested_sse(
                 ctx=_ctx(event_publisher=pub),
             )
         )
-        assert err is None and out is not None
+        assert err is not None and out is None
+        assert json.loads(err)["error_kind"] == "pending"
         assert pub.events == []
     finally:
         await backend.close()

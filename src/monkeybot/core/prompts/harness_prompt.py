@@ -78,7 +78,9 @@ When workspace tools (`read_file`, `write_file`, `run_command`, …) appear in t
 _TASK_LINE = (
     "- `task` — subprocess subagent with the same workspace, memory, and MCP configuration; "
     "pass `subagent_type` to select a named persona (see Subagent personas below). "
-    "Returns JSON (summary, errors, usage, `exit_reason`). When you expect the subagent to "
+    "Returns JSON (summary, errors, usage, `exit_reason`). When queue mode returns "
+    "`ok:false` / `error_kind:pending` / `queued:true`, the child has **not** finished — "
+    "do not treat that as completion. When you expect the subagent to "
     "produce files, list them in `expect_files` and read `artifact_exists` from the result "
     "instead of checking with a follow-up read_file or glob. "
     "Nested `task` is disabled inside a subagent.\n"

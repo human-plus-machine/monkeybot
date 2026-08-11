@@ -1697,8 +1697,8 @@ class CoreToolExecutor(ToolExecutorPort):
         scratch.mkdir(parents=True, exist_ok=True)
 
         # Queue mode: worker pool has no parent SessionBus/EventPublisherPort, so nested
-        # SubagentStarted/Event/Completed SSE is intentionally not emitted here. Clients
-        # should treat ``queued: true`` as async and reopen via ``child_thread_id`` later.
+        # SubagentStarted/Event/Completed SSE is intentionally not emitted here. Return
+        # ok:false / pending so ``ok`` never means terminal success while work is queued.
         queue_mode = os.environ.get("MONKEYBOT_TASK_QUEUE", "").strip().lower() in (
             "1",
             "true",
@@ -1716,22 +1716,21 @@ class CoreToolExecutor(ToolExecutorPort):
                     scratch_dir=scratch,
                 )
                 return (
-                    _j(
+                    None,
+                    _built_in_tool_error(
+                        "pending",
+                        "Subagent run queued for worker pool; work has not finished yet.",
+                        "Do not treat this as task completion. Wait for a terminal "
+                        "exit_reason (or reopen via child_thread_id) before reporting "
+                        "done or skipping follow-up work.",
                         {
-                            "ok": True,
                             "queued": True,
                             "run_id": run_id,
                             "child_thread_id": child_thread_id,
                             "subagent_type": subagent_type,
                             "scratch_dir": str(scratch),
-                            "message": (
-                                "Subagent run queued for worker pool. "
-                                "Nested SSE progress is not streamed in queue mode; "
-                                "use child_thread_id to reopen the nested transcript."
-                            ),
-                        }
+                        },
                     ),
-                    None,
                 )
             await self._run_store.record_started(
                 run_id=run_id,
