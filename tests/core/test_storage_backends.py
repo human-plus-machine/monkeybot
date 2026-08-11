@@ -605,12 +605,39 @@ async def test_run_reset_stale_claims(sqlite_backend: SQLiteStorageBackend) -> N
     )
     assert await store.claim("run-stale-1", "worker-stale") is True
     await asyncio.sleep(0.02)
+    stale = await store.list_stale_claims(stale_after_ms=10)
+    assert len(stale) == 1
+    assert stale[0].run_id == "run-stale-1"
     reset = await store.reset_stale_claims(stale_after_ms=10)
     assert reset == 1
     row = await store.get_run("run-stale-1")
     assert row is not None
     assert row.status == "pending"
     assert row.worker_id is None
+
+
+@pytest.mark.asyncio
+async def test_run_renew_claim_extends_lease(sqlite_backend: SQLiteStorageBackend) -> None:
+    import asyncio
+
+    store = sqlite_backend.runs()
+    env = _make_envelope(parent_run_id="renew-parent")
+    await store.record_pending(
+        run_id="run-renew-1",
+        parent_run_id=None,
+        script="subagents/x.py",
+        envelope=env,
+        scratch_dir=Path("/tmp/run-renew-1"),
+    )
+    assert await store.claim("run-renew-1", "worker-renew") is True
+    before = await store.get_run("run-renew-1")
+    assert before is not None and before.claimed_at is not None
+    await asyncio.sleep(0.02)
+    assert await store.renew_claim("run-renew-1", "worker-renew") is True
+    after = await store.get_run("run-renew-1")
+    assert after is not None and after.claimed_at is not None
+    assert after.claimed_at >= before.claimed_at
+    assert await store.list_stale_claims(stale_after_ms=10) == []
 
 
 def test_factory_raises_runtime_error_for_firestore_without_client(

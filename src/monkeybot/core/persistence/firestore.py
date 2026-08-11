@@ -462,6 +462,45 @@ class FirestoreRunStore:
         )
         return bool(await claim_txn(transaction, doc_ref))
 
+    async def renew_claim(self, run_id: str, worker_id: str) -> bool:
+        now_ms = int(time.time() * 1000)
+        doc_ref = self._doc(run_id)
+        transaction = self._client.transaction()
+
+        async def _renew_body(
+            txn: firestore.AsyncTransaction,
+            ref: firestore.AsyncDocumentReference,
+        ) -> bool:
+            snap = await ref.get(transaction=txn)
+            if not snap.exists:
+                return False
+            data = snap.to_dict() or {}
+            if data.get("status") != "running" or data.get("worker_id") != worker_id:
+                return False
+            txn.update(ref, {"claimed_at": now_ms})
+            return True
+
+        renew_txn = cast(
+            Callable[[firestore.AsyncTransaction, firestore.AsyncDocumentReference], Awaitable[bool]],
+            firestore.async_transactional(_renew_body),
+        )
+        return bool(await renew_txn(transaction, doc_ref))
+
+    async def list_stale_claims(self, stale_after_ms: int) -> list[SubagentRunRow]:
+        cutoff = int(time.time() * 1000) - stale_after_ms
+        query = (
+            self._client.collection(self._collection)
+            .where(filter=FieldFilter("status", "==", "running"))
+            .where(filter=FieldFilter("claimed_at", "<", cutoff))
+        )
+        out: list[SubagentRunRow] = []
+        async for doc in query.stream():
+            data = doc.to_dict() or {}
+            if data.get("claimed_at") is None:
+                continue
+            out.append(_doc_to_run_row(doc.id, data))
+        return out
+
     async def reset_stale_claims(self, stale_after_ms: int) -> int:
         cutoff = int(time.time() * 1000) - stale_after_ms
         query = (

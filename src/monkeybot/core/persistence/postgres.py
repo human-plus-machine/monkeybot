@@ -516,6 +516,41 @@ class PostgresRunStore:
             )
         return row is not None
 
+    async def renew_claim(self, run_id: str, worker_id: str) -> bool:
+        now_ms = int(time.time() * 1000)
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE subagent_runs
+                SET claimed_at = $1
+                WHERE run_id = $2
+                  AND status = 'running'
+                  AND worker_id = $3
+                """,
+                now_ms,
+                run_id,
+                worker_id,
+            )
+        try:
+            return int(result.split()[-1]) == 1
+        except (ValueError, IndexError):
+            return False
+
+    async def list_stale_claims(self, stale_after_ms: int) -> list[SubagentRunRow]:
+        cutoff = int(time.time() * 1000) - stale_after_ms
+        columns = ", ".join(_SUBAGENT_COLUMNS)
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT {columns} FROM subagent_runs
+                WHERE status = 'running'
+                  AND claimed_at IS NOT NULL
+                  AND claimed_at < $1
+                """,
+                cutoff,
+            )
+        return [_tuple_to_run_row(tuple(r)) for r in rows]
+
     async def reset_stale_claims(self, stale_after_ms: int) -> int:
         cutoff = int(time.time() * 1000) - stale_after_ms
         async with self._pool.acquire() as conn:

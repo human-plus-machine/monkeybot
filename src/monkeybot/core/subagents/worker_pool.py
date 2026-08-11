@@ -26,7 +26,6 @@ from monkeybot.core.subagents.subagent_proto import (
 logger = logging.getLogger(__name__)
 
 _SHUTDOWN_FAILURE_MESSAGE = "subagent run cancelled during worker shutdown"
-_STALE_CLAIM_WARN_FRACTION = 0.8
 
 
 async def _stop_subagent_process(proc: asyncio.subprocess.Process | None) -> None:
@@ -103,15 +102,34 @@ async def _still_owns_run(
     run_store: RunStore,
     run_id: str,
     worker_id: str,
-    *,
-    claimed_at: int | None = None,
 ) -> bool:
     row = await run_store.get_run(run_id)
-    if row is None or row.status != "running" or row.worker_id != worker_id:
-        return False
-    if claimed_at is not None and row.claimed_at != claimed_at:
-        return False
-    return True
+    return bool(row is not None and row.status == "running" and row.worker_id == worker_id)
+
+
+def _write_subagent_pid(scratch: Path, pid: int) -> None:
+    try:
+        (scratch / "subagent.pid").write_text(str(pid), encoding="utf-8")
+    except OSError:
+        logger.warning("failed to write subagent.pid under %s", scratch)
+
+
+def _kill_scratch_subagent(scratch: Path) -> None:
+    """Best-effort kill of a reclaimed run's child process (from scratch/subagent.pid)."""
+    pid_path = scratch / "subagent.pid"
+    try:
+        raw = pid_path.read_text(encoding="utf-8").strip()
+        pid = int(raw)
+    except (OSError, ValueError):
+        return
+    if pid <= 0:
+        return
+    try:
+        os.kill(pid, 9)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        logger.warning("permission denied killing reclaimed subagent pid=%s", pid)
 
 
 async def _fail_in_flight_runs(
@@ -131,24 +149,23 @@ async def _fail_in_flight_runs(
             run_ids.discard(run_id)
 
 
-async def _stale_claim_watchdog(
+async def _claim_heartbeat(
+    run_store: RunStore,
     run_id: str,
-    claimed_at: int,
+    worker_id: str,
     stale_claim_ms: int,
 ) -> None:
-    """Warn once when a run approaches the stale-claim reclaim window."""
-    warn_after_ms = int(stale_claim_ms * _STALE_CLAIM_WARN_FRACTION)
-    deadline_s = max(0.0, (claimed_at + warn_after_ms - int(time.time() * 1000)) / 1000.0)
-    if deadline_s > 0:
-        await asyncio.sleep(deadline_s)
-    logger.warning(
-        "subagent run_id=%s has been running for >=%.0f%% of MONKEYBOT_WORKER_STALE_CLAIM_MS "
-        "(%d ms); if execution exceeds the full window another worker may reclaim and "
-        "re-execute the run",
-        run_id,
-        _STALE_CLAIM_WARN_FRACTION * 100,
-        stale_claim_ms,
-    )
+    """Renew claimed_at while the run executes so live workers are not reclaimed."""
+    interval_s = max(1.0, (stale_claim_ms / 1000.0) / 4.0)
+    while True:
+        await asyncio.sleep(interval_s)
+        ok = await run_store.renew_claim(run_id, worker_id)
+        if not ok:
+            logger.warning(
+                "claim heartbeat lost %s",
+                kv(run_id=run_id, worker_id=worker_id),
+            )
+            return
 
 
 async def execute_claimed_run(
@@ -169,25 +186,15 @@ async def execute_claimed_run(
     scratch = Path(row.scratch_dir)
     errors: list[str] = []
     last_event_json: str | None = None
-    claimed_at = row.claimed_at
-    if claimed_at is None:
-        fresh = await run_store.get_run(row.run_id)
-        if fresh is not None:
-            claimed_at = fresh.claimed_at
-    watchdog: asyncio.Task[None] | None = None
-    if claimed_at is not None and stale_claim_ms > 0:
-        watchdog = asyncio.create_task(
-            _stale_claim_watchdog(row.run_id, claimed_at, stale_claim_ms),
-            name=f"monkeybot-stale-watchdog-{row.run_id}",
+    heartbeat: asyncio.Task[None] | None = None
+    if stale_claim_ms > 0:
+        heartbeat = asyncio.create_task(
+            _claim_heartbeat(run_store, row.run_id, worker_id, stale_claim_ms),
+            name=f"monkeybot-claim-heartbeat-{row.run_id}",
         )
 
     async def _record_failed_if_owner(message: str) -> bool:
-        if not await _still_owns_run(
-            run_store,
-            row.run_id,
-            worker_id,
-            claimed_at=claimed_at,
-        ):
+        if not await _still_owns_run(run_store, row.run_id, worker_id):
             logger.warning(
                 "skipping failed outcome for run_id=%s worker_id=%s: claim lost",
                 row.run_id,
@@ -198,12 +205,7 @@ async def execute_claimed_run(
         return True
 
     async def _record_completed_if_owner(result_json: str) -> bool:
-        if not await _still_owns_run(
-            run_store,
-            row.run_id,
-            worker_id,
-            claimed_at=claimed_at,
-        ):
+        if not await _still_owns_run(run_store, row.run_id, worker_id):
             logger.warning(
                 "skipping completed outcome for run_id=%s worker_id=%s: claim lost",
                 row.run_id,
@@ -228,6 +230,8 @@ async def execute_claimed_run(
             limit=SUBAGENT_STDOUT_LINE_LIMIT,
         )
         proc_holder[0] = proc
+        if proc.pid is not None:
+            _write_subagent_pid(scratch, proc.pid)
         return proc
 
     async def _consume() -> None:
@@ -280,10 +284,10 @@ async def execute_claimed_run(
                 with contextlib.suppress(asyncio.CancelledError):
                     await consume_task
     finally:
-        if watchdog is not None:
-            watchdog.cancel()
+        if heartbeat is not None:
+            heartbeat.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await watchdog
+                await heartbeat
 
     if errors:
         logger.debug(
@@ -359,6 +363,17 @@ async def run_worker_loop(
     try:
         while True:
             try:
+                stale_rows = await run_store.list_stale_claims(stale_claim_ms)
+                for stale in stale_rows:
+                    _kill_scratch_subagent(Path(stale.scratch_dir))
+                    logger.warning(
+                        "reclaiming stale subagent claim %s",
+                        kv(
+                            run_id=stale.run_id,
+                            worker_id=stale.worker_id or "",
+                            exit_reason="reclaimed",
+                        ),
+                    )
                 reset_count = await run_store.reset_stale_claims(stale_claim_ms)
                 if reset_count:
                     logger.info(
@@ -404,8 +419,8 @@ def start_worker_pool_background(
     active_runs: set[str] = set()
     logger.info(
         "starting subagent worker pool worker_id=%s script=%s concurrency=%d "
-        "stale_claim_ms=%d (MONKEYBOT_WORKER_STALE_CLAIM_MS; runs without heartbeat "
-        "may be reclaimed and re-executed after this window)",
+        "stale_claim_ms=%d (MONKEYBOT_WORKER_STALE_CLAIM_MS; live runs heartbeat the "
+        "claim lease; stale runs are killed via scratch/subagent.pid then requeued)",
         wid,
         resolved_script,
         settings.concurrency,

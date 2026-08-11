@@ -38,6 +38,21 @@ def _make_envelope(parent_run_id: str = "parent-1", *, task: str = "do work") ->
 
 
 @pytest.mark.asyncio
+async def test_kill_scratch_subagent_reads_pid_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    (scratch / "subagent.pid").write_text("424242\n", encoding="utf-8")
+    kills: list[tuple[int, int]] = []
+
+    def _fake_kill(pid: int, sig: int) -> None:
+        kills.append((pid, sig))
+
+    monkeypatch.setattr(worker_pool.os, "kill", _fake_kill)
+    worker_pool._kill_scratch_subagent(scratch)
+    assert kills == [(424242, 9)]
+
+
+@pytest.mark.asyncio
 async def test_worker_pool_executes_claimed_run_once(
     sqlite_backend: SQLiteStorageBackend,
     tmp_path: Path,

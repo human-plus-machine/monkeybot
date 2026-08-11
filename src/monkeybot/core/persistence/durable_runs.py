@@ -146,6 +146,38 @@ class SQLiteRunStore:
         await self._conn.commit()
         return int(cursor.rowcount) == 1
 
+    async def renew_claim(self, run_id: str, worker_id: str) -> bool:
+        """Extend the running claim lease for a worker still executing the run."""
+        now_ms = int(time.time() * 1000)
+        cursor = await self._conn.execute(
+            """
+            UPDATE subagent_runs
+            SET claimed_at = ?
+            WHERE run_id = ?
+              AND status = 'running'
+              AND worker_id = ?
+            """,
+            (now_ms, run_id, worker_id),
+        )
+        await self._conn.commit()
+        return int(cursor.rowcount) == 1
+
+    async def list_stale_claims(self, stale_after_ms: int) -> list[SubagentRunRow]:
+        """Return ``running`` rows whose claim lease is older than ``stale_after_ms``."""
+        cutoff = int(time.time() * 1000) - stale_after_ms
+        columns = ", ".join(_SUBAGENT_COLUMNS)
+        cursor = await self._conn.execute(
+            f"""
+            SELECT {columns} FROM subagent_runs
+            WHERE status = 'running'
+              AND claimed_at IS NOT NULL
+              AND claimed_at < ?
+            """,
+            (cutoff,),
+        )
+        rows = await cursor.fetchall()
+        return [_tuple_to_run_row(tuple(r)) for r in rows]
+
     async def reset_stale_claims(self, stale_after_ms: int) -> int:
         """Reset ``running`` rows with stale ``claimed_at`` back to ``pending``."""
         cutoff = int(time.time() * 1000) - stale_after_ms
