@@ -1440,13 +1440,30 @@ class CoreToolExecutor(ToolExecutorPort):
             payload = plan_and_apply_patch(self._workspace, hunks)
             return (_j(payload), None)
         except PatchError as exc:
+            code = getattr(exc, "code", "patch_error")
+            details: dict[str, Any] = {"code": code}
+            extra = getattr(exc, "details", None)
+            if isinstance(extra, dict):
+                details.update(extra)
+            if code == "rollback_failed":
+                return (
+                    None,
+                    _built_in_tool_error(
+                        "runtime",
+                        str(exc),
+                        "Workspace may be partially modified. Re-read every dirty path "
+                        "in details before any retry; do not re-apply the same patch_text.",
+                        details,
+                    ),
+                )
             return (
                 None,
                 _built_in_tool_error(
                     "validation",
                     str(exc),
-                    "Fix the patch (markers, paths, or hunk context) and retry once.",
-                    {"code": getattr(exc, "code", "patch_error")},
+                    "Fix the patch (markers, paths, or hunk context). Re-read target "
+                    "files before retrying; do not retry identical patch_text.",
+                    details,
                 ),
             )
         except WorkspaceError as exc:

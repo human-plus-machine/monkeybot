@@ -226,3 +226,48 @@ def test_mid_apply_rollback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     assert not (tmp_path / "new.txt").exists()
     assert (tmp_path / "old.txt").read_text(encoding="utf-8") == "old\n"
     assert (tmp_path / "keep.txt").read_text(encoding="utf-8") == "keep\n"
+
+
+def test_rollback_failed_lists_dirty_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = WorkspaceFileService(tmp_path)
+    (tmp_path / "old.txt").write_text("old\n", encoding="utf-8")
+
+    planned_ok = parse_patch(
+        """*** Begin Patch
+*** Add File: new.txt
++hello
+*** Update File: old.txt
+@@
+-old
++new
+*** End Patch
+"""
+    )
+    real_write = ws.write_file
+    write_calls = {"n": 0}
+
+    def flaky_write(path: str, content: str):
+        write_calls["n"] += 1
+        if write_calls["n"] == 2:
+            raise WorkspaceError("disk full", code="write_failed")
+        return real_write(path, content)
+
+    real_delete = ws.delete_file
+
+    def flaky_delete(path: str):
+        if path == "new.txt":
+            raise WorkspaceError("delete blocked", code="write_failed")
+        return real_delete(path)
+
+    monkeypatch.setattr(ws, "write_file", flaky_write)
+    monkeypatch.setattr(ws, "delete_file", flaky_delete)
+    with pytest.raises(PatchError) as ei:
+        plan_and_apply_patch(ws, planned_ok)
+    err = ei.value
+    assert err.code == "rollback_failed"
+    assert err.details["dirty_paths"] == ["new.txt"]
+    assert err.details["applied_paths"] == ["new.txt"]
+    assert (tmp_path / "new.txt").exists()
+    assert (tmp_path / "old.txt").read_text(encoding="utf-8") == "old\n"

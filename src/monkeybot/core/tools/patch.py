@@ -39,9 +39,16 @@ END_MARKER = "*** End Patch"
 class PatchError(Exception):
     """Patch parse or apply validation failure (fail-closed; no disk writes yet)."""
 
-    def __init__(self, message: str, code: str = "patch_error") -> None:
+    def __init__(
+        self,
+        message: str,
+        code: str = "patch_error",
+        *,
+        details: dict[str, object] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.details: dict[str, object] = details or {}
 
 
 @dataclass(frozen=True)
@@ -375,8 +382,23 @@ def _plan_ops(workspace: WorkspaceFileService, hunks: list[Hunk]) -> list[_Plann
     return planned
 
 
-def _rollback_ops(workspace: WorkspaceFileService, done: list[_PlannedOp]) -> None:
-    """Best-effort undo of successfully applied ops (reverse order)."""
+def _op_paths(op: _PlannedOp) -> list[str]:
+    paths = [op.path]
+    if op.move_path is not None:
+        paths.append(op.move_path)
+    return paths
+
+
+def _rollback_ops(
+    workspace: WorkspaceFileService, done: list[_PlannedOp]
+) -> tuple[list[str], list[str]]:
+    """Best-effort undo of successfully applied ops (reverse order).
+
+    Returns ``(reverted_paths, dirty_paths)``. Dirty means rollback failed for
+    that op — the workspace may still reflect the partial apply.
+    """
+    reverted: list[str] = []
+    dirty: list[str] = []
     for op in reversed(done):
         try:
             if op.action == "add":
@@ -385,24 +407,41 @@ def _rollback_ops(workspace: WorkspaceFileService, done: list[_PlannedOp]) -> No
                 if op.old_content is not None:
                     workspace.write_file(op.path, op.old_content)
             elif op.action == "move":
+                move_dirty: list[str] = []
                 if op.move_path is not None:
                     try:
                         workspace.delete_file(op.move_path)
-                    except WorkspaceError as exc:
-                        logger.warning(
-                            "apply_patch rollback: could not remove move dest %s",
-                            kv(path=op.move_path, error=str(exc)),
+                    except WorkspaceError:
+                        logger.exception(
+                            "apply_patch rollback failed %s",
+                            kv(action=op.action, path=op.path, move_path=op.move_path),
                         )
+                        move_dirty.append(op.move_path)
                 if op.old_content is not None:
-                    workspace.write_file(op.path, op.old_content)
+                    try:
+                        workspace.write_file(op.path, op.old_content)
+                    except WorkspaceError:
+                        logger.exception(
+                            "apply_patch rollback failed %s",
+                            kv(action=op.action, path=op.path, move_path=op.move_path),
+                        )
+                        move_dirty.append(op.path)
+                if move_dirty:
+                    dirty.extend(move_dirty)
+                else:
+                    reverted.extend(_op_paths(op))
+                continue
             elif op.action == "delete":
                 if op.old_content is not None:
                     workspace.write_file(op.path, op.old_content)
+            reverted.extend(_op_paths(op))
         except WorkspaceError:
             logger.exception(
                 "apply_patch rollback failed %s",
                 kv(action=op.action, path=op.path, move_path=op.move_path),
             )
+            dirty.extend(_op_paths(op))
+    return reverted, dirty
 
 
 def _apply_ops(
@@ -438,7 +477,22 @@ def _apply_ops(
                 files.append({"path": op.path, "action": "delete"})
             done.append(op)
     except (WorkspaceError, PatchError) as exc:
-        _rollback_ops(workspace, done)
+        applied_paths = [p for op in done for p in _op_paths(op)]
+        reverted, dirty = _rollback_ops(workspace, done)
+        if dirty:
+            raise PatchError(
+                f"Patch apply failed ({exc}); rollback incomplete. "
+                f"Applied: {applied_paths or 'none'}. "
+                f"Reverted: {reverted or 'none'}. "
+                f"Still dirty: {dirty}. Re-read dirty paths before any retry.",
+                code="rollback_failed",
+                details={
+                    "applied_paths": applied_paths,
+                    "reverted_paths": reverted,
+                    "dirty_paths": dirty,
+                    "apply_error": str(exc),
+                },
+            ) from exc
         if isinstance(exc, PatchError):
             raise
         raise PatchError(str(exc), code=getattr(exc, "code", "write_failed")) from exc
