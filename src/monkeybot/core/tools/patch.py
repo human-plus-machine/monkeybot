@@ -331,13 +331,29 @@ def _plan_ops(workspace: WorkspaceFileService, hunks: list[Hunk]) -> list[_Plann
         raise PatchError("patch rejected: empty patch (no hunks)", code="empty_patch")
 
     planned: list[_PlannedOp] = []
+    # Destinations claimed by earlier add/move ops in this patch.
+    reserved_dests: set[str] = set()
+    # Paths removed by earlier delete/move ops (may be re-added later).
+    removed_paths: set[str] = set()
+
+    def _require_absent_dest(path: str, *, action: str) -> None:
+        fp = workspace.require_writable_path(path)
+        exists_on_disk = fp.exists() and path not in removed_paths
+        if exists_on_disk or path in reserved_dests:
+            raise PatchError(
+                f"apply_patch verification failed: cannot {action} over existing path: {path}",
+                code="already_exists",
+            )
+
     for hunk in hunks:
         if isinstance(hunk, AddHunk):
-            workspace.require_writable_path(hunk.path)
+            _require_absent_dest(hunk.path, action="add")
             content = hunk.contents
             if content and not content.endswith("\n"):
                 content = content + "\n"
             planned.append(_PlannedOp(action="add", path=hunk.path, content=content))
+            reserved_dests.add(hunk.path)
+            removed_paths.discard(hunk.path)
         elif isinstance(hunk, DeleteHunk):
             fp = workspace.require_writable_path(hunk.path)
             if not fp.is_file():
@@ -349,6 +365,8 @@ def _plan_ops(workspace: WorkspaceFileService, hunks: list[Hunk]) -> list[_Plann
             planned.append(
                 _PlannedOp(action="delete", path=hunk.path, old_content=old)
             )
+            removed_paths.add(hunk.path)
+            reserved_dests.discard(hunk.path)
         else:
             fp = workspace.require_writable_path(hunk.path)
             if not fp.is_file():
@@ -357,7 +375,7 @@ def _plan_ops(workspace: WorkspaceFileService, hunks: list[Hunk]) -> list[_Plann
                     code="not_found",
                 )
             if hunk.move_path:
-                workspace.require_writable_path(hunk.move_path)
+                _require_absent_dest(hunk.move_path, action="move")
             old = fp.read_text(encoding="utf-8", errors="replace")
             new_content = derive_new_contents(hunk.path, hunk.chunks, old)
             if hunk.move_path:
@@ -370,6 +388,10 @@ def _plan_ops(workspace: WorkspaceFileService, hunks: list[Hunk]) -> list[_Plann
                         old_content=old,
                     )
                 )
+                reserved_dests.add(hunk.move_path)
+                removed_paths.add(hunk.path)
+                reserved_dests.discard(hunk.path)
+                removed_paths.discard(hunk.move_path)
             else:
                 planned.append(
                     _PlannedOp(
@@ -408,9 +430,11 @@ def _rollback_ops(
                     workspace.write_file(op.path, op.old_content)
             elif op.action == "move":
                 move_dirty: list[str] = []
+                move_reverted: list[str] = []
                 if op.move_path is not None:
                     try:
                         workspace.delete_file(op.move_path)
+                        move_reverted.append(op.move_path)
                     except WorkspaceError:
                         logger.exception(
                             "apply_patch rollback failed %s",
@@ -420,16 +444,15 @@ def _rollback_ops(
                 if op.old_content is not None:
                     try:
                         workspace.write_file(op.path, op.old_content)
+                        move_reverted.append(op.path)
                     except WorkspaceError:
                         logger.exception(
                             "apply_patch rollback failed %s",
                             kv(action=op.action, path=op.path, move_path=op.move_path),
                         )
                         move_dirty.append(op.path)
-                if move_dirty:
-                    dirty.extend(move_dirty)
-                else:
-                    reverted.extend(_op_paths(op))
+                dirty.extend(move_dirty)
+                reverted.extend(move_reverted)
                 continue
             elif op.action == "delete":
                 if op.old_content is not None:

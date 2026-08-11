@@ -501,6 +501,44 @@ class FirestoreRunStore:
             out.append(_doc_to_run_row(doc.id, data))
         return out
 
+    async def reset_stale_claim(
+        self,
+        run_id: str,
+        stale_after_ms: int,
+        *,
+        worker_id: str | None = None,
+    ) -> bool:
+        cutoff = int(time.time() * 1000) - stale_after_ms
+        doc_ref = self._doc(run_id)
+        transaction = self._client.transaction()
+
+        async def _reset_body(
+            txn: firestore.AsyncTransaction,
+            ref: firestore.AsyncDocumentReference,
+        ) -> bool:
+            snap = await ref.get(transaction=txn)
+            if not snap.exists:
+                return False
+            data = snap.to_dict() or {}
+            if data.get("status") != "running":
+                return False
+            claimed_at = data.get("claimed_at")
+            if claimed_at is None or int(claimed_at) >= cutoff:
+                return False
+            if worker_id is not None and data.get("worker_id") != worker_id:
+                return False
+            txn.update(
+                ref,
+                {"status": "pending", "worker_id": None, "claimed_at": None},
+            )
+            return True
+
+        reset_txn = cast(
+            Callable[[firestore.AsyncTransaction, firestore.AsyncDocumentReference], Awaitable[bool]],
+            firestore.async_transactional(_reset_body),
+        )
+        return bool(await reset_txn(transaction, doc_ref))
+
     async def reset_stale_claims(self, stale_after_ms: int) -> int:
         cutoff = int(time.time() * 1000) - stale_after_ms
         query = (
@@ -529,27 +567,85 @@ class FirestoreRunStore:
             await batch.commit()
         return reset
 
-    async def record_completed(self, run_id: str, result_json: str) -> None:
+    async def record_completed(
+        self,
+        run_id: str,
+        result_json: str,
+        *,
+        worker_id: str | None = None,
+    ) -> bool:
         now_ms = int(time.time() * 1000)
-        await self._doc(run_id).update(
-            {
-                "status": "completed",
-                "result_json": result_json,
-                "finished_at": now_ms,
-                "error_json": None,
-            }
-        )
+        fields = {
+            "status": "completed",
+            "result_json": result_json,
+            "finished_at": now_ms,
+            "error_json": None,
+        }
+        if worker_id is None:
+            await self._doc(run_id).update(fields)
+            return True
 
-    async def record_failed(self, run_id: str, error: str) -> None:
+        doc_ref = self._doc(run_id)
+        transaction = self._client.transaction()
+
+        async def _complete_body(
+            txn: firestore.AsyncTransaction,
+            ref: firestore.AsyncDocumentReference,
+        ) -> bool:
+            snap = await ref.get(transaction=txn)
+            if not snap.exists:
+                return False
+            data = snap.to_dict() or {}
+            if data.get("status") != "running" or data.get("worker_id") != worker_id:
+                return False
+            txn.update(ref, fields)
+            return True
+
+        complete_txn = cast(
+            Callable[[firestore.AsyncTransaction, firestore.AsyncDocumentReference], Awaitable[bool]],
+            firestore.async_transactional(_complete_body),
+        )
+        return bool(await complete_txn(transaction, doc_ref))
+
+    async def record_failed(
+        self,
+        run_id: str,
+        error: str,
+        *,
+        worker_id: str | None = None,
+    ) -> bool:
         now_ms = int(time.time() * 1000)
         err_payload = json.dumps({"message": error})
-        await self._doc(run_id).update(
-            {
-                "status": "failed",
-                "error_json": err_payload,
-                "finished_at": now_ms,
-            }
+        fields = {
+            "status": "failed",
+            "error_json": err_payload,
+            "finished_at": now_ms,
+        }
+        if worker_id is None:
+            await self._doc(run_id).update(fields)
+            return True
+
+        doc_ref = self._doc(run_id)
+        transaction = self._client.transaction()
+
+        async def _fail_body(
+            txn: firestore.AsyncTransaction,
+            ref: firestore.AsyncDocumentReference,
+        ) -> bool:
+            snap = await ref.get(transaction=txn)
+            if not snap.exists:
+                return False
+            data = snap.to_dict() or {}
+            if data.get("status") != "running" or data.get("worker_id") != worker_id:
+                return False
+            txn.update(ref, fields)
+            return True
+
+        fail_txn = cast(
+            Callable[[firestore.AsyncTransaction, firestore.AsyncDocumentReference], Awaitable[bool]],
+            firestore.async_transactional(_fail_body),
         )
+        return bool(await fail_txn(transaction, doc_ref))
 
     async def pending_runs(self) -> list[SubagentRunRow]:
         rows: list[SubagentRunRow] = []

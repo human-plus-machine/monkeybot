@@ -768,6 +768,7 @@ def run_chat(args: argparse.Namespace) -> int:
                 resume_session_id=getattr(args, "session", None),
                 animations_enabled=animations_enabled,
                 theme_choice=theme_choice,
+                config_path=config_path,
             )
         return asyncio.run(_plain_chat_session(args, base, spawned_gateway=not attach))
     except KeyboardInterrupt:

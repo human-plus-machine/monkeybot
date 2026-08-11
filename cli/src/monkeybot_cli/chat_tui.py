@@ -319,6 +319,7 @@ class ChatApp(App[int]):
         animations_enabled: bool = True,
         theme_choice: str = "auto",
         controller: SessionController | None = None,
+        config_path: Path | None = None,
     ) -> None:
         super().__init__()
         self.register_theme(MONKEYBOT_DARK)
@@ -326,6 +327,11 @@ class ChatApp(App[int]):
         self.theme = resolve_theme_name(theme_choice)
         self.base = base
         self.agent_root = agent_root
+        self.config_path = (
+            config_path.expanduser().resolve()
+            if config_path is not None
+            else None
+        )
         self.provider = provider
         self.model = model
         self.spawned_gateway = spawned_gateway
@@ -1291,7 +1297,12 @@ class ChatApp(App[int]):
     @work(thread=True, group="local-shell")
     def _exec_local_shell(self, block: ToolCallBlock, command: str) -> None:
         output, code = run_local_shell(command, self.agent_root)
-        error: str | None = f"exit {code}" if code not in (0, None) else None
+        if code is None:
+            error: str | None = "timed out"
+        elif code != 0:
+            error = f"exit {code}"
+        else:
+            error = None
         result = truncate_output(output)
         self.call_from_thread(block.mark_finished, error=error, result=result)
 
@@ -1516,8 +1527,13 @@ class ChatApp(App[int]):
             )
         self._mount_system("\n".join(lines))
 
+    def _resolved_config_path(self) -> Path:
+        if self.config_path is not None:
+            return self.config_path
+        return self.agent_root / "monkeybot_config" / "monkeybot.yaml"
+
     def _cmd_config(self, arg: str) -> None:
-        path = self.agent_root / "monkeybot_config" / "monkeybot.yaml"
+        path = self._resolved_config_path()
         if arg.strip().lower() == "edit":
             editor = os.environ.get("EDITOR")
             if not editor:
@@ -1646,7 +1662,7 @@ class ChatApp(App[int]):
         if not self._session_id:
             self._mount_system("No active session to export a trace for", error=True)
             return
-        config_path = resolve_config(None, cwd=self.agent_root)
+        config_path = self.config_path or resolve_config(None, cwd=self.agent_root)
         workspace_root = resolve_workspace_root(agent_root=self.agent_root, config_path=config_path)
         session_dir = resolve_session_artifact_dir(workspace_root, self._session_id)
         src = session_dir / "transcript.ndjson"
@@ -1860,6 +1876,7 @@ def run_chat_tui(
     animations_enabled: bool = True,
     theme_choice: str = "auto",
     controller: SessionController | None = None,
+    config_path: Path | None = None,
 ) -> int:
     app = ChatApp(
         base=base,
@@ -1876,6 +1893,7 @@ def run_chat_tui(
         animations_enabled=animations_enabled,
         theme_choice=theme_choice,
         controller=controller,
+        config_path=config_path,
     )
     result = app.run()
     return int(result) if isinstance(result, int) else 0

@@ -271,3 +271,113 @@ def test_rollback_failed_lists_dirty_paths(
     assert err.details["applied_paths"] == ["new.txt"]
     assert (tmp_path / "new.txt").exists()
     assert (tmp_path / "old.txt").read_text(encoding="utf-8") == "old\n"
+
+
+def test_add_rejects_existing_destination(tmp_path: Path) -> None:
+    ws = WorkspaceFileService(tmp_path)
+    (tmp_path / "dest.txt").write_text("IMPORTANT\n", encoding="utf-8")
+    with pytest.raises(PatchError) as ei:
+        plan_and_apply_patch(
+            ws,
+            parse_patch(
+                """*** Begin Patch
+*** Add File: dest.txt
++new
+*** End Patch
+"""
+            ),
+        )
+    assert ei.value.code == "already_exists"
+    assert (tmp_path / "dest.txt").read_text(encoding="utf-8") == "IMPORTANT\n"
+
+
+def test_move_rejects_existing_destination(tmp_path: Path) -> None:
+    ws = WorkspaceFileService(tmp_path)
+    (tmp_path / "src.txt").write_text("from\n", encoding="utf-8")
+    (tmp_path / "dest.txt").write_text("IMPORTANT\n", encoding="utf-8")
+    with pytest.raises(PatchError) as ei:
+        plan_and_apply_patch(
+            ws,
+            parse_patch(
+                """*** Begin Patch
+*** Update File: src.txt
+*** Move to: dest.txt
+@@
+-from
++moved
+*** End Patch
+"""
+            ),
+        )
+    assert ei.value.code == "already_exists"
+    assert (tmp_path / "src.txt").read_text(encoding="utf-8") == "from\n"
+    assert (tmp_path / "dest.txt").read_text(encoding="utf-8") == "IMPORTANT\n"
+
+
+def test_add_after_delete_same_path_allowed(tmp_path: Path) -> None:
+    ws = WorkspaceFileService(tmp_path)
+    (tmp_path / "swap.txt").write_text("old\n", encoding="utf-8")
+    result = plan_and_apply_patch(
+        ws,
+        parse_patch(
+            """*** Begin Patch
+*** Delete File: swap.txt
+*** Add File: swap.txt
++new
+*** End Patch
+"""
+        ),
+    )
+    assert result["ok"] is True
+    assert (tmp_path / "swap.txt").read_text(encoding="utf-8") == "new\n"
+
+
+def test_move_rollback_lists_successful_half(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When only one half of a move rollback fails, report the other as reverted."""
+    ws = WorkspaceFileService(tmp_path)
+    (tmp_path / "src.txt").write_text("from\n", encoding="utf-8")
+
+    hunks = parse_patch(
+        """*** Begin Patch
+*** Update File: src.txt
+*** Move to: dest.txt
+@@
+-from
++moved
+*** End Patch
+"""
+    )
+    real_write = ws.write_file
+    write_calls = {"n": 0}
+
+    def flaky_write(path: str, content: str):
+        write_calls["n"] += 1
+        # First write is the move destination during apply; second is source restore.
+        if path == "src.txt" and write_calls["n"] >= 2:
+            raise WorkspaceError("restore blocked", code="write_failed")
+        return real_write(path, content)
+
+    monkeypatch.setattr(ws, "write_file", flaky_write)
+
+    # Force a mid-apply failure after the move dest write by failing delete of src.
+    real_delete = ws.delete_file
+
+    def flaky_delete(path: str):
+        if path == "src.txt":
+            raise WorkspaceError("delete blocked", code="write_failed")
+        return real_delete(path)
+
+    monkeypatch.setattr(ws, "delete_file", flaky_delete)
+
+    with pytest.raises(PatchError) as ei:
+        plan_and_apply_patch(ws, hunks)
+    err = ei.value
+    assert err.code == "rollback_failed"
+    # Dest delete succeeded during rollback; source restore failed.
+    assert err.details["reverted_paths"] == ["dest.txt"]
+    assert err.details["dirty_paths"] == ["src.txt"]
+    assert not (tmp_path / "dest.txt").exists()
+    # Source was never deleted (apply failed on delete), and restore rewrite also failed.
+    assert (tmp_path / "src.txt").read_text(encoding="utf-8") == "from\n"

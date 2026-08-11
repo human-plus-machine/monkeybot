@@ -223,6 +223,20 @@ async def _wait_for_exit(process: asyncio.subprocess.Process, timeout: float) ->
                 await wait_task
 
 
+_SUPPORTS_PROCESS_GROUPS = sys.platform != "win32"
+
+
+def _process_group_id(pid: int | None) -> int | None:
+    if pid is None or not _SUPPORTS_PROCESS_GROUPS:
+        return None
+    try:
+        return os.getpgid(pid)
+    except ProcessLookupError:
+        return pid
+    except OSError:
+        return None
+
+
 def _kill_process_group(
     pgid: int | None,
     process: asyncio.subprocess.Process,
@@ -232,7 +246,7 @@ def _kill_process_group(
     ``pgid`` must be captured before the direct child is reaped — after
     ``wait()`` the PID may be gone and ``getpgid`` will fail.
     """
-    if pgid is not None:
+    if pgid is not None and _SUPPORTS_PROCESS_GROUPS:
         try:
             os.killpg(pgid, signal.SIGKILL)
             return
@@ -364,8 +378,8 @@ class TerminalExecutor:
 
         # Concurrent stream pumps avoid PIPE-buffer deadlock while we wait on
         # the process, and preserve partial output when we kill on timeout.
-        # start_new_session=True makes the child a process-group leader so we
-        # can kill descendants that would otherwise keep capture pipes open.
+        # On Unix, start_new_session=True makes the child a process-group leader
+        # so we can kill descendants that would otherwise keep capture pipes open.
         process = await asyncio.create_subprocess_exec(
             executable,
             *args,
@@ -373,13 +387,10 @@ class TerminalExecutor:
             stderr=asyncio.subprocess.PIPE,
             cwd=exec_cwd,
             env=env,
-            start_new_session=True,
+            start_new_session=_SUPPORTS_PROCESS_GROUPS,
         )
         assert process.stdout is not None and process.stderr is not None
-        try:
-            pgid: int | None = os.getpgid(process.pid) if process.pid is not None else None
-        except ProcessLookupError:
-            pgid = process.pid
+        pgid = _process_group_id(process.pid)
         stdout_chunks: list[bytes] = []
         stderr_chunks: list[bytes] = []
         stdout_task = asyncio.create_task(_pump_stream(process.stdout, stdout_chunks))

@@ -656,9 +656,20 @@ class WorkspaceFileService:
         rel = self._settings.WORKSPACE_WRITE_SCOPE_REL
         if rel is None:
             return None
-        s = str(rel).strip().replace("\\", "/").lstrip("/")
-        if not s or ".." in s:
-            return None
+        raw = str(rel).strip().replace("\\", "/")
+        s = raw.lstrip("/")
+        if (
+            not s
+            or ".." in s
+            or raw.startswith("~")
+            or raw.startswith("/")
+        ):
+            # Fail closed: a configured-but-invalid scope must not disable enforcement.
+            raise WorkspaceError(
+                f"Invalid WORKSPACE_WRITE_SCOPE_REL: {rel!r} "
+                "(must be a non-empty repo-relative path without '..')",
+                code="invalid_write_scope",
+            )
         return (self._root / s).resolve()
 
     def _require_under_write_scope(self, fp: Path) -> None:

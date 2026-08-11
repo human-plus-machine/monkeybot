@@ -1705,6 +1705,76 @@ def test_slash_config_reads_yaml(tmp_path: Path) -> None:
     asyncio.run(_run())
 
 
+def test_slash_config_uses_explicit_config_path(tmp_path: Path) -> None:
+    async def _run() -> None:
+        default_dir = tmp_path / "monkeybot_config"
+        default_dir.mkdir()
+        (default_dir / "monkeybot.yaml").write_text(
+            "model:\n  provider: default\n  name: wrong\n",
+            encoding="utf-8",
+        )
+        custom = tmp_path / "custom.yaml"
+        custom.write_text(
+            "model:\n  provider: custom-provider\n  name: custom-model\n"
+            "runtime:\n  port: 9090\n"
+            "sandbox:\n  enabled: false\n",
+            encoding="utf-8",
+        )
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+            config_path=custom,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            app.query_one("#prompt", Composer).post_message(Composer.Submitted("/config"))
+            await pilot.pause()
+            systems = [w.body for w in app.query(SystemLine)]
+            assert any(
+                str(custom.resolve()) in body
+                and "custom-provider" in body
+                and "custom-model" in body
+                for body in systems
+            )
+            assert not any("default" in body and "wrong" in body for body in systems)
+
+    asyncio.run(_run())
+
+
+def test_slash_config_edit_uses_explicit_config_path(
+    tmp_path: Path, monkeypatch
+) -> None:
+    async def _run() -> None:
+        custom = tmp_path / "elsewhere" / "monkeybot.yaml"
+        custom.parent.mkdir()
+        custom.write_text("model:\n  provider: nvidia\n", encoding="utf-8")
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+            config_path=custom,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        app.suspend = contextlib.nullcontext  # type: ignore[method-assign]
+        monkeypatch.setenv("EDITOR", "code --wait")
+        calls: list[list[str]] = []
+        monkeypatch.setattr(
+            "monkeybot_cli.chat_tui.subprocess.call",
+            lambda argv: calls.append(list(argv)),
+        )
+        async with app.run_test() as pilot:
+            app.query_one("#prompt", Composer).post_message(Composer.Submitted("/config edit"))
+            await pilot.pause()
+            assert calls == [["code", "--wait", str(custom.resolve())]]
+
+    asyncio.run(_run())
+
+
 def test_slash_config_edit_splits_editor_with_args(tmp_path: Path, monkeypatch) -> None:
     async def _run() -> None:
         config_dir = tmp_path / "monkeybot_config"
@@ -2111,6 +2181,35 @@ def test_bang_command_mounts_tool_block_and_never_submits(tmp_path: Path) -> Non
             assert blocks[0].status == "ok"
             app._controller.submit.assert_not_called()
             assert not list(app.query(UserTurn))
+
+    asyncio.run(_run())
+
+
+def test_bang_command_timeout_marks_error(tmp_path: Path, monkeypatch) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        monkeypatch.setattr(
+            "monkeybot_cli.chat_tui.run_local_shell",
+            lambda command, cwd, **kwargs: ("(timed out after 120s)", None),
+        )
+        async with app.run_test() as pilot:
+            app.query_one("#prompt", Composer).post_message(Composer.Submitted("!sleep 999"))
+            await pilot.pause()
+            blocks = list(app.query(ToolCallBlock))
+            assert len(blocks) == 1
+            for _ in range(20):
+                await pilot.pause()
+                if blocks[0].status != "running":
+                    break
+            assert blocks[0].status == "error"
+            assert "timed out" in str(blocks[0]._detail._markdown or blocks[0].title)
 
     asyncio.run(_run())
 

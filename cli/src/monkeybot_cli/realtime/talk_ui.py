@@ -215,6 +215,7 @@ def run_talk_ui_session(
                 spawned_gateway=spawned is not None,
                 verbose=verbose,
                 controller=controller,
+                config_path=config_path,
             )
         return asyncio.run(
             _plain_talk_session(controller=controller, spawned_gateway=spawned is not None)

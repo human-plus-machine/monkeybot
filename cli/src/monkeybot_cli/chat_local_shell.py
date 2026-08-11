@@ -61,6 +61,7 @@ def run_local_shell(command: str, cwd: Path, *, timeout: float = 120.0) -> tuple
     except subprocess.TimeoutExpired:
         _kill_process_tree(proc.pid)
         output, _ = proc.communicate()
+        # ``None`` means timed out (distinct from a real exit status).
         return output + f"\n(timed out after {timeout:.0f}s)", None
     return output, proc.returncode
 

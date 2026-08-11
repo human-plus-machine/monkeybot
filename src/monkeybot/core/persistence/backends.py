@@ -90,11 +90,31 @@ class RunStore(Protocol):
 
     async def list_stale_claims(self, stale_after_ms: int) -> list[SubagentRunRow]: ...
 
+    async def reset_stale_claim(
+        self,
+        run_id: str,
+        stale_after_ms: int,
+        *,
+        worker_id: str | None = None,
+    ) -> bool: ...
+
     async def reset_stale_claims(self, stale_after_ms: int) -> int: ...
 
-    async def record_completed(self, run_id: str, result_json: str) -> None: ...
+    async def record_completed(
+        self,
+        run_id: str,
+        result_json: str,
+        *,
+        worker_id: str | None = None,
+    ) -> bool: ...
 
-    async def record_failed(self, run_id: str, error: str) -> None: ...
+    async def record_failed(
+        self,
+        run_id: str,
+        error: str,
+        *,
+        worker_id: str | None = None,
+    ) -> bool: ...
 
     async def pending_runs(self) -> list[SubagentRunRow]: ...
 
