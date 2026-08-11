@@ -118,10 +118,16 @@ MAX_TURNS_ERROR = "Max turns exceeded"
 TurnAction = Literal["continue", "break", "return"]
 
 _EMPTY_COMPLETION_RETRIES = 2
+_POST_TOOL_EMPTY_RETRIES = 1
 _EMPTY_COMPLETION_RECOVERY_NOTE = (
     "[Harness] Empty completion: you produced no assistant text and no tool "
     "calls. Either invoke a tool through the native function-call channel, or "
     "give the user a short natural-language answer. Do not stay silent."
+)
+_POST_TOOL_EMPTY_COMPLETION_NOTE = (
+    "[Harness] Post-tool empty completion: tool results are already in history. "
+    "Answer from those results now. Do not re-run tools unless a concrete gap "
+    "remains, and do not stay silent."
 )
 _EMPTY_COMPLETION_EXHAUSTED_ERROR = (
     "Empty model completion after recovery: ending turn with no reply"
@@ -242,6 +248,7 @@ class _TurnState:
     pre_turn_extra: str | None = None
     pre_tool_extra_next: str | None = None
     empty_completion_retries_left: int = _EMPTY_COMPLETION_RETRIES
+    post_tool_empty_retries_left: int = _POST_TOOL_EMPTY_RETRIES
     turn_input_text: str = ""
     turn_output_text: str = ""
     chat_messages: list[Message] = dataclasses.field(default_factory=list)
@@ -1112,6 +1119,7 @@ async def _handle_empty_or_final_text(
         and any(isinstance(b, ToolResponse) for b in rows[-1].content)
     )
     retry_empty = False
+    recovery_note = _EMPTY_COMPLETION_RECOVERY_NOTE
     log_msg = "empty model completion; retrying %s"
     log_fields: dict[str, Any] = {
         "request_id": state.ctx.request_id,
@@ -1120,8 +1128,12 @@ async def _handle_empty_or_final_text(
         "had_thinking": bool((state.thinking_text or "").strip()),
     }
     if owes_tool_followup and state.turn_index < state.effective_max:
-        retry_empty = True
-        log_msg = "empty model completion after tools; retrying %s"
+        if state.post_tool_empty_retries_left > 0:
+            state.post_tool_empty_retries_left -= 1
+            retry_empty = True
+            recovery_note = _POST_TOOL_EMPTY_COMPLETION_NOTE
+            log_msg = "empty model completion after tools; retrying %s"
+            log_fields["post_tool_retries_left"] = state.post_tool_empty_retries_left
     elif state.empty_completion_retries_left > 0 and state.turn_index < state.effective_max:
         state.empty_completion_retries_left -= 1
         retry_empty = True
@@ -1130,7 +1142,7 @@ async def _handle_empty_or_final_text(
     if retry_empty:
         state.pre_tool_extra_next = _combine_extras(
             state.pre_tool_extra_next,
-            _EMPTY_COMPLETION_RECOVERY_NOTE,
+            recovery_note,
         )
         logger.warning(log_msg, kv(**log_fields))
         state.action = "continue"

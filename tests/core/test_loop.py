@@ -901,12 +901,15 @@ async def test_run_empty_model_after_tools_retries_then_succeeds() -> None:
     assert isinstance(events[-1], TurnComplete)
     # A successful post-tool recovery must not surface an Error.
     assert not any(isinstance(e, Error) for e in events)
-    # Recovery note injected on the provider call after the empty post-tool turn.
+    # Post-tool empty uses a distinct note (answer from results; don't burn tools).
+    from monkeybot.core.runtime.turn_loop import _POST_TOOL_EMPTY_COMPLETION_NOTE
+
     followup_msgs = prov.stream_messages[2]
     system_text = "".join(
         b.text for m in followup_msgs if m.role == "system" for b in m.content if hasattr(b, "text")
     )
-    assert _EMPTY_COMPLETION_RECOVERY_NOTE in system_text
+    assert _POST_TOOL_EMPTY_COMPLETION_NOTE in system_text
+    assert _EMPTY_COMPLETION_RECOVERY_NOTE not in system_text
 
 
 @pytest.mark.asyncio
