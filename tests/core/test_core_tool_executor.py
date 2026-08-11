@@ -2534,6 +2534,35 @@ async def test_custom_tool_tool_execution_result_passthrough(tmp_path: Path) -> 
     assert any(isinstance(b, Image) for b in result.blocks)
 
 
+@pytest.mark.asyncio
+async def test_extra_tool_runtime_error_forbids_identical_retry(tmp_path: Path) -> None:
+    from monkeybot.core.types.types_tools import ToolDef
+
+    class _BoomTool:
+        tool_def = ToolDef("boom", "raises", {"type": "object", "properties": {}})
+
+        async def execute(self, args: dict[str, object]) -> str:
+            del args
+            raise RuntimeError("boom")
+
+    (tmp_path / "mem").mkdir(exist_ok=True)
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_NoMCP(),
+        extra_tools=[_BoomTool()],
+    )
+    _out, err = unwrap_tool_execution_result(
+        await ex.execute(call=ToolCall(call_id="1", name="boom", args={}), ctx=_ctx())
+    )
+    assert err is not None
+    payload = json.loads(err)
+    assert payload["ok"] is False
+    assert "Do not retry identical arguments" in payload["hint"]
+    assert "if appropriate" not in payload["hint"]
+
 
 class _CatalogMCP(_NoMCP):
     def __init__(self) -> None:

@@ -664,6 +664,18 @@ def _built_in_tool_error(
     return _j(payload)
 
 
+_RUNTIME_NO_IDENTICAL_RETRY_HINT = (
+    "Do not retry identical arguments. Fix the underlying cause if you can act on it; "
+    "otherwise stop and report the blocker. If a spill or partial_output_path is present, "
+    "read_file that path before changing approach."
+)
+_TIMEOUT_NO_IDENTICAL_RETRY_HINT = (
+    "Do not retry identical arguments and do not bump timeouts. "
+    "If a spill or partial_output_path is present, read_file that path first; "
+    "otherwise narrow scope or diagnose from the error."
+)
+
+
 def _incomplete_scan_envelope(
     exc: WorkspaceError,
     hint: str,
@@ -1023,7 +1035,7 @@ class CoreToolExecutor(ToolExecutorPort):
                         _built_in_tool_error(
                             "runtime",
                             str(exc),
-                            "Fix the underlying issue described in message, then retry once if appropriate.",
+                            _RUNTIME_NO_IDENTICAL_RETRY_HINT,
                             {"tool": name},
                         ),
                     )
@@ -1054,13 +1066,23 @@ class CoreToolExecutor(ToolExecutorPort):
             result_text, err_text = None, str(exc)
         except SecurityError as exc:
             result_text, err_text = None, self._run_command_security_envelope(exc)
-        except (TimeoutError, ValueError, TypeError, OSError) as exc:
+        except TimeoutError as exc:
             result_text, err_text = (
                 None,
                 _built_in_tool_error(
                     "runtime",
                     str(exc),
-                    "Fix the underlying issue described in message, then retry once if appropriate.",
+                    _TIMEOUT_NO_IDENTICAL_RETRY_HINT,
+                    {"tool": name},
+                ),
+            )
+        except (ValueError, TypeError, OSError) as exc:
+            result_text, err_text = (
+                None,
+                _built_in_tool_error(
+                    "runtime",
+                    str(exc),
+                    _RUNTIME_NO_IDENTICAL_RETRY_HINT,
                     {"tool": name},
                 ),
             )
