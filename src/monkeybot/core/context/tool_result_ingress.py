@@ -74,6 +74,12 @@ def blob_json_field_max_chars() -> int:
     return _BLOB_JSON_FIELD_MAX_CHARS
 
 
+def _has_nontrivial_b64_markers(sample: str) -> bool:
+    """True when ``+/`` density looks like base64, not a lone slash or plus."""
+    plus_slash = sum(1 for ch in sample if ch in "+/")
+    return plus_slash >= 3 or (plus_slash / max(1, len(sample)) >= 0.02)
+
+
 def _looks_like_base64(value: str) -> bool:
     """Return True when *value* is likely base64, including short JSON field payloads."""
     if not value:
@@ -91,23 +97,47 @@ def _looks_like_base64(value: str) -> bool:
     sample = stripped[:512]
     if len(set(sample.strip("="))) <= 2:
         return False
-    if stripped.rstrip().endswith("=") or any(ch in "+/" for ch in sample):
+    if stripped.rstrip().endswith("="):
+        return True
+    if _has_nontrivial_b64_markers(sample):
         return True
     return len(set(sample)) >= 6
 
 
 def _is_plausible_base64_run(text: str) -> bool:
+    """True for long runs that look like real base64 (not diffs / prose)."""
     if len(text) < _MIN_BASE64_RUN:
         return False
     sample = text[:4096]
     if len(set(sample.strip("="))) <= 2:
         return False
-    if any(ch in "+/" for ch in sample):
-        return True
+    allowed = sum(1 for ch in sample if ch.isalnum() or ch in "+/=\n\r")
+    if allowed / max(1, len(sample)) < 0.98:
+        return False
+    if len(set(sample)) < 8:
+        return False
     if sample.rstrip().endswith("="):
         return True
-    allowed = sum(1 for ch in sample if ch.isalnum() or ch in "+/=\n\r")
-    return allowed / max(1, len(sample)) >= 0.98 and len(set(sample)) >= 8
+    # Require padding or non-trivial ``+/`` density — not a single slash or plus.
+    return _has_nontrivial_b64_markers(sample)
+
+
+def _is_compact_non_text_blob(value: str) -> bool:
+    """Dense payloads without whitespace/punctuation — omit these by size.
+
+    Readable text (unified diffs, logs, JSON) has whitespace or punctuation
+    outside the base64 alphabet; those must survive sanitize so soft spill can
+    handle size. Compact ``"x" * N`` / binary-looking runs still redact.
+    """
+    sample = value[:4096]
+    if not sample:
+        return False
+    if any(ch.isspace() for ch in sample):
+        return False
+    for ch in sample:
+        if not (ch.isalnum() or ch in "+/="):
+            return False
+    return True
 
 
 def _replace_long_b64(match: re.Match[str]) -> str:
@@ -118,12 +148,18 @@ def _replace_long_b64(match: re.Match[str]) -> str:
 
 
 def _should_redact_blob_field(key: str, value: str, *, max_field: int) -> bool:
-    """True only for denylisted blob keys that look like binary/base64 or are oversized."""
+    """True for denylisted keys that look like binary/base64 or compact blobs.
+
+    Oversized plain text under denylisted keys (e.g. MCP ``data`` holding a
+    unified diff) is left intact — whole-result size is handled by soft spill.
+    """
     if key.lower() not in _REDACT_JSON_KEYS:
         return False
     if _looks_like_base64(value):
         return True
-    return max_field > 0 and len(value) > max_field
+    if max_field > 0 and len(value) > max_field:
+        return _is_compact_non_text_blob(value)
+    return False
 
 
 def _redact_json_value(key: str, value: Any, *, max_field: int) -> Any:

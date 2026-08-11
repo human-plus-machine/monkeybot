@@ -386,6 +386,90 @@ def _tally_grep_skip(kind: str, tallies: dict[str, int]) -> bool:
     return True
 
 
+def _clip_grep_match_line(
+    line: str,
+    match_start: int | None,
+    match_end: int | None = None,
+    *,
+    max_chars: int = 2000,
+) -> str:
+    """Clip a long grep hit so the match remains visible in the preview.
+
+    Short lines are returned unchanged. When ``match_start`` is missing, falls
+    back to a prefix clip (historical behavior). Otherwise centers a window on
+    ``[match_start, match_end)``, keeping the full match when it fits, and marks
+    truncation with leading/trailing ``…`` while staying within ``max_chars``.
+    """
+    if max_chars <= 0:
+        return ""
+    if len(line) <= max_chars:
+        return line
+    if match_start is None:
+        return line[:max_chars]
+
+    start = max(0, min(match_start, len(line)))
+    end = start if match_end is None else max(start, min(match_end, len(line)))
+    ellipsis = "…"
+    match_len = end - start
+
+    def _assemble(win_start: int, win_end: int) -> str:
+        parts: list[str] = []
+        if win_start > 0:
+            parts.append(ellipsis)
+        parts.append(line[win_start:win_end])
+        if win_end < len(line):
+            parts.append(ellipsis)
+        return "".join(parts)
+
+    # Match longer than the budget: keep as much of the match as possible.
+    if match_len >= max_chars:
+        need_lead = start > 0
+        budget = max_chars - (1 if need_lead else 0)
+        chunk_end = start + budget
+        need_trail = chunk_end < len(line)
+        if need_trail:
+            budget = max_chars - (1 if need_lead else 0) - 1
+            chunk_end = start + max(0, budget)
+        return _assemble(start, chunk_end)
+
+    # Match fits: center context around it, refining ellipsis costs.
+    need_lead = start > 0
+    need_trail = end < len(line)
+    win_start = start
+    win_end = end
+    for _ in range(3):
+        content_budget = max_chars - (1 if need_lead else 0) - (1 if need_trail else 0)
+        if content_budget < match_len:
+            content_budget = match_len
+        extra = content_budget - match_len
+        before = extra // 2
+        after = extra - before
+        win_start = start - before
+        win_end = end + after
+        if win_start < 0:
+            win_end = min(len(line), win_end - win_start)
+            win_start = 0
+        if win_end > len(line):
+            win_start = max(0, win_start - (win_end - len(line)))
+            win_end = len(line)
+        if win_start > start:
+            win_start = start
+        if win_end < end:
+            win_end = min(len(line), end)
+            if win_end - win_start > content_budget:
+                win_end = win_start + content_budget
+        new_need_lead = win_start > 0
+        new_need_trail = win_end < len(line)
+        if new_need_lead == need_lead and new_need_trail == need_trail:
+            break
+        need_lead, need_trail = new_need_lead, new_need_trail
+
+    result = _assemble(win_start, win_end)
+    if len(result) > max_chars:
+        return result[:max_chars]
+    return result
+
+
 def _regex_needs_python_engine(pattern: str) -> bool:
     """True when ``pattern`` uses Python ``re`` features unsupported by ripgrep."""
     return _RG_UNSUPPORTED_RE.search(pattern) is not None
@@ -949,7 +1033,10 @@ class WorkspaceFileService:
                 if time.monotonic() > deadline:
                     stop_reason = "timeout"
                     break
-                if not p.is_file():
+                if not (p.is_file() or p.is_dir()):
+                    continue
+                # ``Path.glob`` can yield the search root for patterns like ``.`` / ``*``.
+                if p.resolve() == base.resolve():
                     continue
                 try:
                     self._as_repo_rel(p)
@@ -1137,14 +1224,19 @@ class WorkspaceFileService:
             files_scanned += 1
             text = data.decode("utf-8", errors="replace")
             for line_no, line in enumerate(text.splitlines(), start=1):
-                if not regex.search(line):
+                m = regex.search(line)
+                if m is None:
                     continue
                 total_match_count += 1
                 if total_match_count <= offset:
                     continue
                 if len(matches) < max_matches:
                     matches.append(
-                        {"path": rel, "line": line_no, "text": line[:2000]}
+                        {
+                            "path": rel,
+                            "line": line_no,
+                            "text": _clip_grep_match_line(line, m.start(), m.end()),
+                        }
                     )
 
         if candidates_remaining:
@@ -1281,7 +1373,20 @@ class WorkspaceFileService:
                 text = lines_info.get("text") if isinstance(lines_info, dict) else ""
                 if not isinstance(text, str):
                     text = ""
-                text = text.rstrip("\n\r")[:2000]
+                text = text.rstrip("\n\r")
+                match_start: int | None = None
+                match_end: int | None = None
+                submatches = data.get("submatches")
+                if isinstance(submatches, list) and submatches:
+                    first = submatches[0]
+                    if isinstance(first, dict):
+                        raw_start = first.get("start")
+                        raw_end = first.get("end")
+                        if isinstance(raw_start, int):
+                            match_start = raw_start
+                        if isinstance(raw_end, int):
+                            match_end = raw_end
+                text = _clip_grep_match_line(text, match_start, match_end)
                 line_no = data.get("line_number")
                 if not isinstance(line_no, int):
                     line_no = 0

@@ -51,6 +51,30 @@ def test_sanitize_keeps_short_plain_text_in_json_data_field() -> None:
     assert parsed["data"] == "not base64 text"
 
 
+def test_sanitize_keeps_unified_diff_in_json_data_field() -> None:
+    """Bitbucket DC MCP returns diffs in ``data``; size must not omit plain text."""
+    diff = (
+        "diff --git a/src/foo.py b/src/foo.py\n"
+        "--- a/src/foo.py\n"
+        "+++ b/src/foo.py\n"
+        "@@ -1,5 +1,8 @@\n"
+        " def greet(name):\n"
+        "-    return f'hi {name}'\n"
+        "+    # chore/dead-code cleanup\n"
+        "+    return f'hello {name}'\n"
+        "+\n"
+        "+def unused():\n"
+        "+    pass\n"
+    )
+    # Stretch past the blob-field size threshold while staying text-like.
+    while len(diff) < 800:
+        diff += "+    # more context line with /path/and+++markers\n"
+    assert len(diff) > 512
+    payload = {"success": True, "data": diff}
+    raw = json.dumps(payload)
+    assert sanitize_tool_result_text(raw) == raw
+
+
 def test_sanitize_keeps_long_non_blob_text_fields() -> None:
     """browser_get_elements ``tree`` must survive sanitize; spill/cap handle size."""
     tree = "\n".join(f"[{i}]<button>Item {i}</button>" for i in range(200))
