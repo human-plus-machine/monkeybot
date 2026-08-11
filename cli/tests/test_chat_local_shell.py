@@ -35,6 +35,18 @@ def test_run_local_shell_timeout(tmp_path: Path) -> None:
     assert "timed out" in out
 
 
+def test_run_local_shell_caps_unbounded_output(tmp_path: Path) -> None:
+    script = tmp_path / "flood.py"
+    script.write_text(
+        "import sys\nwhile True:\n    sys.stdout.write('y' * 4096)\n    sys.stdout.flush()\n",
+        encoding="utf-8",
+    )
+    out, code = run_local_shell(f"{sys.executable} {script}", tmp_path, timeout=5.0)
+    assert code is not None
+    assert len(out) <= chat_local_shell._MAX_CAPTURE_CHARS + 80
+    assert "output capped" in out
+
+
 def test_run_local_shell_timeout_kills_grandchildren(tmp_path: Path) -> None:
     """A timed-out command must not leave children it spawned still running.
 

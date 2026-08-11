@@ -28,6 +28,8 @@ from monkeybot.core.tools.text_normalize import normalize_unicode_punctuation
 from monkeybot.core.tools.workspace_service import WorkspaceError
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from monkeybot.core.tools.workspace_service import WorkspaceFileService
 
 logger = logging.getLogger(__name__)
@@ -331,31 +333,36 @@ def _plan_ops(workspace: WorkspaceFileService, hunks: list[Hunk]) -> list[_Plann
         raise PatchError("patch rejected: empty patch (no hunks)", code="empty_patch")
 
     planned: list[_PlannedOp] = []
-    # Destinations claimed by earlier add/move ops in this patch.
+    # Destinations claimed by earlier add/move ops in this patch (canonical repo-rel).
     reserved_dests: set[str] = set()
     # Paths removed by earlier delete/move ops (may be re-added later).
     removed_paths: set[str] = set()
 
-    def _require_absent_dest(path: str, *, action: str) -> None:
+    def _canon(path: str) -> tuple[str, Path]:
         fp = workspace.require_writable_path(path)
-        exists_on_disk = fp.exists() and path not in removed_paths
-        if exists_on_disk or path in reserved_dests:
+        return workspace._as_repo_rel(fp), fp
+
+    def _require_absent_dest(path: str, *, action: str) -> str:
+        canon, fp = _canon(path)
+        exists_on_disk = fp.exists() and canon not in removed_paths
+        if exists_on_disk or canon in reserved_dests:
             raise PatchError(
                 f"apply_patch verification failed: cannot {action} over existing path: {path}",
                 code="already_exists",
             )
+        return canon
 
     for hunk in hunks:
         if isinstance(hunk, AddHunk):
-            _require_absent_dest(hunk.path, action="add")
+            canon = _require_absent_dest(hunk.path, action="add")
             content = hunk.contents
             if content and not content.endswith("\n"):
                 content = content + "\n"
             planned.append(_PlannedOp(action="add", path=hunk.path, content=content))
-            reserved_dests.add(hunk.path)
-            removed_paths.discard(hunk.path)
+            reserved_dests.add(canon)
+            removed_paths.discard(canon)
         elif isinstance(hunk, DeleteHunk):
-            fp = workspace.require_writable_path(hunk.path)
+            canon, fp = _canon(hunk.path)
             if not fp.is_file():
                 raise PatchError(
                     f"apply_patch verification failed: Failed to read file to delete: {hunk.path}",
@@ -365,17 +372,19 @@ def _plan_ops(workspace: WorkspaceFileService, hunks: list[Hunk]) -> list[_Plann
             planned.append(
                 _PlannedOp(action="delete", path=hunk.path, old_content=old)
             )
-            removed_paths.add(hunk.path)
-            reserved_dests.discard(hunk.path)
+            removed_paths.add(canon)
+            reserved_dests.discard(canon)
         else:
-            fp = workspace.require_writable_path(hunk.path)
+            canon_src, fp = _canon(hunk.path)
             if not fp.is_file():
                 raise PatchError(
                     f"apply_patch verification failed: Failed to read file to update: {hunk.path}",
                     code="not_found",
                 )
             if hunk.move_path:
-                _require_absent_dest(hunk.move_path, action="move")
+                canon_dest = _require_absent_dest(hunk.move_path, action="move")
+            else:
+                canon_dest = None
             old = fp.read_text(encoding="utf-8", errors="replace")
             new_content = derive_new_contents(hunk.path, hunk.chunks, old)
             if hunk.move_path:
@@ -388,10 +397,11 @@ def _plan_ops(workspace: WorkspaceFileService, hunks: list[Hunk]) -> list[_Plann
                         old_content=old,
                     )
                 )
-                reserved_dests.add(hunk.move_path)
-                removed_paths.add(hunk.path)
-                reserved_dests.discard(hunk.path)
-                removed_paths.discard(hunk.move_path)
+                assert canon_dest is not None
+                reserved_dests.add(canon_dest)
+                removed_paths.add(canon_src)
+                reserved_dests.discard(canon_src)
+                removed_paths.discard(canon_dest)
             else:
                 planned.append(
                     _PlannedOp(

@@ -356,6 +356,7 @@ class ChatApp(App[int]):
         self._hitl_active = False
         self._hitl_kind: str | None = None
         self._turn_active = False
+        self._submit_in_flight = False
         self._open_tools: dict[str, ToolCallBlock] = {}
         self._anon_tools: list[ToolCallBlock] = []
         self._exit_code = 0
@@ -1406,8 +1407,16 @@ class ChatApp(App[int]):
         lines.append("Type @ to fuzzy-pick a file, or !<command> to run a local shell command.")
         self._mount_system("\n".join(lines))
 
+    def _session_mutating_blocked(self) -> bool:
+        """True while a turn is active or a reply submission is still in flight.
+
+        ``_turn_active`` is only set after the reply POST succeeds, so slash
+        commands that tear down the session must also gate on in-flight submit.
+        """
+        return self._turn_active or self._submit_in_flight
+
     def _cmd_new(self) -> None:
-        if self._turn_active:
+        if self._session_mutating_blocked():
             self._mount_system("Wait for the current turn to finish before /new")
             return
         self._pending.clear()
@@ -1418,7 +1427,7 @@ class ChatApp(App[int]):
         if not sid:
             self._mount_system("Usage: /resume <session_id>", error=True)
             return
-        if self._turn_active:
+        if self._session_mutating_blocked():
             self._mount_system("Wait for the current turn to finish before /resume")
             return
         self._pending.clear()
@@ -1457,7 +1466,7 @@ class ChatApp(App[int]):
                 "(context is cleared)"
             )
             return
-        if self._turn_active:
+        if self._session_mutating_blocked():
             self._mount_system("Wait for the current turn to finish before /model")
             return
         if "/" in spec:
@@ -1719,10 +1728,14 @@ class ChatApp(App[int]):
 
     @work(exclusive=True, group="submit")
     async def _submit_message(self, message: str) -> None:
-        await self._controller.submit(message)
-        if not self._controller.stream_alive:
-            self._exit_code = 1
-            self.exit(self._exit_code)
+        self._submit_in_flight = True
+        try:
+            await self._controller.submit(message)
+            if not self._controller.stream_alive:
+                self._exit_code = 1
+                self.exit(self._exit_code)
+        finally:
+            self._submit_in_flight = False
 
     def action_show_shortcuts(self) -> None:
         self.push_screen(ShortcutsScreen())

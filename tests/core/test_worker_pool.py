@@ -130,6 +130,60 @@ async def test_write_subagent_pid_records_identity(
 
 
 @pytest.mark.asyncio
+async def test_kill_scratch_subagent_kills_when_leader_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    (scratch / "subagent.pid").write_text(
+        "424242\nps:original-start\n", encoding="utf-8"
+    )
+    killpgs: list[tuple[int, int]] = []
+
+    monkeypatch.setattr(worker_pool, "_SUPPORTS_PROCESS_GROUPS", True)
+    monkeypatch.setattr(worker_pool, "_process_identity", lambda pid: None)
+    monkeypatch.setattr(
+        worker_pool.os,
+        "killpg",
+        lambda pgid, sig: killpgs.append((pgid, sig)),
+    )
+    worker_pool._kill_scratch_subagent(scratch)
+    assert killpgs == [(424242, 9)]
+
+
+@pytest.mark.asyncio
+async def test_stop_subagent_process_kills_group_after_leader_exits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signals: list[tuple[str, int, int]] = []
+
+    class _FakeProc:
+        pid = 111
+        returncode = 0  # leader already exited
+
+        def terminate(self) -> None:
+            raise AssertionError("should use killpg")
+
+        def kill(self) -> None:
+            signals.append(("kill", self.pid, 9))
+
+        async def wait(self) -> int:
+            return 0
+
+    def _fake_killpg(pgid: int, sig: int) -> None:
+        signals.append(("killpg", pgid, int(sig)))
+
+    monkeypatch.setattr(worker_pool, "_SUPPORTS_PROCESS_GROUPS", True)
+    monkeypatch.setattr(worker_pool.os, "killpg", _fake_killpg)
+    monkeypatch.setattr(worker_pool.asyncio, "sleep", AsyncMock())
+
+    proc = _FakeProc()
+    await worker_pool._stop_subagent_process(proc, pgid=111)  # type: ignore[arg-type]
+    assert ("killpg", 111, int(worker_pool.signal.SIGTERM)) in signals
+    assert ("killpg", 111, int(worker_pool.signal.SIGKILL)) in signals
+
+
+@pytest.mark.asyncio
 async def test_stop_subagent_process_kills_process_group(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -165,6 +219,22 @@ async def test_stop_subagent_process_kills_process_group(
     await worker_pool._stop_subagent_process(proc, pgid=111)  # type: ignore[arg-type]
     assert ("killpg", 111, int(worker_pool.signal.SIGTERM)) in signals
     assert ("killpg", 111, int(worker_pool.signal.SIGKILL)) in signals
+
+
+@pytest.mark.asyncio
+async def test_claim_heartbeat_swallows_renew_errors(
+    sqlite_backend: SQLiteStorageBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = sqlite_backend.runs()
+
+    async def boom(*_a, **_k):
+        raise RuntimeError("db down")
+
+    store.renew_claim = boom  # type: ignore[method-assign]
+    monkeypatch.setattr(worker_pool.asyncio, "sleep", AsyncMock())
+    # Should return, not raise.
+    await worker_pool._claim_heartbeat(store, "run-x", "worker-a", stale_claim_ms=40)
 
 
 @pytest.mark.asyncio

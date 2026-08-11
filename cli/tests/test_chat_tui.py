@@ -1578,6 +1578,29 @@ def test_slash_clear_behaves_like_new(tmp_path: Path) -> None:
     asyncio.run(_run())
 
 
+def test_slash_new_blocked_while_submit_in_flight(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        app._controller.restart_session = AsyncMock()  # type: ignore[method-assign]
+        app._turn_active = False
+        app._submit_in_flight = True
+        async with app.run_test() as pilot:
+            app.query_one("#prompt", Composer).post_message(Composer.Submitted("/new"))
+            await pilot.pause()
+            app._controller.restart_session.assert_not_awaited()
+            systems = [w.body for w in app.query(SystemLine)]
+            assert any("Wait for the current turn" in body for body in systems)
+
+    asyncio.run(_run())
+
+
 def test_slash_model_no_arg_shows_current(tmp_path: Path) -> None:
     async def _run() -> None:
         app = ChatApp(

@@ -291,6 +291,26 @@ def test_add_rejects_existing_destination(tmp_path: Path) -> None:
     assert (tmp_path / "dest.txt").read_text(encoding="utf-8") == "IMPORTANT\n"
 
 
+def test_add_rejects_equivalent_destination_paths(tmp_path: Path) -> None:
+    ws = WorkspaceFileService(tmp_path)
+    (tmp_path / "subdir").mkdir()
+    with pytest.raises(PatchError) as ei:
+        plan_and_apply_patch(
+            ws,
+            parse_patch(
+                """*** Begin Patch
+*** Add File: subdir/../dest.txt
++first
+*** Add File: dest.txt
++second
+*** End Patch
+"""
+            ),
+        )
+    assert ei.value.code == "already_exists"
+    assert not (tmp_path / "dest.txt").exists()
+
+
 def test_move_rejects_existing_destination(tmp_path: Path) -> None:
     ws = WorkspaceFileService(tmp_path)
     (tmp_path / "src.txt").write_text("from\n", encoding="utf-8")

@@ -43,15 +43,19 @@ def _process_group_id(pid: int | None) -> int | None:
         return None
 
 
-def _kill_process_group(pgid: int | None, proc: asyncio.subprocess.Process) -> None:
-    """SIGKILL the process group when known so descendants die with the child."""
+def _kill_process_group(pgid: int | None, proc: asyncio.subprocess.Process | None = None) -> None:
+    """SIGKILL ``pgid`` when known so descendants die with the child.
+
+    Prefer the process group even when the direct child has already exited —
+    orphans can keep mutating the workspace or holding pipes open.
+    """
     if pgid is not None and _SUPPORTS_PROCESS_GROUPS:
         try:
             os.killpg(pgid, signal.SIGKILL)
             return
         except (ProcessLookupError, PermissionError, OSError):
             pass
-    if proc.returncode is None:
+    if proc is not None and proc.returncode is None:
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
 
@@ -61,20 +65,31 @@ async def _stop_subagent_process(
     *,
     pgid: int | None = None,
 ) -> None:
-    """SIGTERM then reap; SIGKILL the process group if still alive after a short wait."""
-    if proc is None or proc.returncode is not None:
+    """SIGTERM/SIGKILL the process group (or direct child) on timeout/cancel.
+
+    Do not skip cleanup just because the direct child already exited — the
+    group may still have descendants.
+    """
+    if proc is None and pgid is None:
         return
     try:
         if pgid is not None and _SUPPORTS_PROCESS_GROUPS:
             os.killpg(pgid, signal.SIGTERM)
-        else:
+        elif proc is not None and proc.returncode is None:
             proc.terminate()
     except (ProcessLookupError, PermissionError, OSError):
-        return
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=8.0)
-    except TimeoutError:
-        _kill_process_group(pgid, proc)
+        pass
+    if proc is not None and proc.returncode is None:
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=8.0)
+            return
+        except TimeoutError:
+            pass
+    else:
+        # Leader already gone; give group members a moment after SIGTERM.
+        await asyncio.sleep(0.05)
+    _kill_process_group(pgid, proc)
+    if proc is not None and proc.returncode is None:
         with contextlib.suppress(ProcessLookupError):
             await proc.wait()
 
@@ -239,9 +254,7 @@ def _kill_scratch_subagent(scratch: Path) -> None:
         return
     pid, expected_identity = recorded
     current = _process_identity(pid)
-    if current is None:
-        return
-    if current != expected_identity:
+    if current is not None and current != expected_identity:
         logger.warning(
             "skipping reclaim kill for pid=%s under %s: identity mismatch "
             "(possible PID reuse)",
@@ -249,7 +262,7 @@ def _kill_scratch_subagent(scratch: Path) -> None:
             scratch,
         )
         return
-    # With start_new_session the recorded PID is the process-group leader.
+    # Leader may already be gone; killpg still reaches orphaned group members.
     if _SUPPORTS_PROCESS_GROUPS:
         try:
             os.killpg(pid, signal.SIGKILL)
@@ -274,7 +287,14 @@ async def _claim_heartbeat(
     interval_s = max(1.0, (stale_claim_ms / 1000.0) / 4.0)
     while True:
         await asyncio.sleep(interval_s)
-        ok = await run_store.renew_claim(run_id, worker_id)
+        try:
+            ok = await run_store.renew_claim(run_id, worker_id)
+        except Exception:
+            logger.exception(
+                "claim heartbeat failed %s",
+                kv(run_id=run_id, worker_id=worker_id),
+            )
+            return
         if not ok:
             logger.warning(
                 "claim heartbeat lost %s",
@@ -406,7 +426,8 @@ async def execute_claimed_run(
     finally:
         if heartbeat is not None:
             heartbeat.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            # renew_claim failures must not escape and skip outcome recording.
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await heartbeat
 
     if errors:
