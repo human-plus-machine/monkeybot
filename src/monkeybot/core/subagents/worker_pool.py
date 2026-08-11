@@ -11,12 +11,13 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from monkeybot.core.config.settings import auto_schema_enabled_from_config
+from monkeybot.core.config.settings import auto_schema_enabled_from_config, get_subagent_settings
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.backends import RunStore, StorageBackend, create_storage_backend
 from monkeybot.core.persistence.durable_runs import SubagentRunRow
 from monkeybot.core.runtime.events import Error, TurnComplete, event_to_json
 from monkeybot.core.subagents.subagent_proto import (
+    SUBAGENT_STDOUT_LINE_LIMIT,
     SubagentEnvelope,
     resolve_subagent_script,
     spawn_subagent,
@@ -26,6 +27,23 @@ logger = logging.getLogger(__name__)
 
 _SHUTDOWN_FAILURE_MESSAGE = "subagent run cancelled during worker shutdown"
 _STALE_CLAIM_WARN_FRACTION = 0.8
+
+
+async def _stop_subagent_process(proc: asyncio.subprocess.Process | None) -> None:
+    """SIGTERM then reap; SIGKILL if still alive after a short wait."""
+    if proc is None or proc.returncode is not None:
+        return
+    try:
+        proc.terminate()
+    except ProcessLookupError:
+        return
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=8.0)
+    except TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        with contextlib.suppress(ProcessLookupError):
+            await proc.wait()
 
 
 def _env_float(name: str, default: float) -> float:
@@ -140,6 +158,7 @@ async def execute_claimed_run(
     script: Path,
     worker_id: str,
     stale_claim_ms: int = 600_000,
+    timeout_sec: float | None = None,
 ) -> None:
     """Run one claimed subagent row to completion and persist the outcome."""
     envelope = SubagentEnvelope.from_json(row.envelope_json)
@@ -194,22 +213,72 @@ async def execute_claimed_run(
         await run_store.record_completed(row.run_id, result_json)
         return True
 
-    try:
+    budget = get_subagent_settings().timeout_sec if timeout_sec is None else float(timeout_sec)
+    proc_holder: list[asyncio.subprocess.Process | None] = [None]
+
+    async def _subprocess_exec(*cmd: str | bytes) -> asyncio.subprocess.Process:
+        env = dict(os.environ)
+        env["PYTHONUNBUFFERED"] = "1"
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            env=env,
+            limit=SUBAGENT_STDOUT_LINE_LIMIT,
+        )
+        proc_holder[0] = proc
+        return proc
+
+    async def _consume() -> None:
+        nonlocal last_event_json
         async for evt in spawn_subagent(
             str(script),
             envelope,
             scratch_dir=scratch,
+            subprocess_exec=_subprocess_exec,
         ):
             if isinstance(evt, Error):
                 errors.append(evt.error)
             elif isinstance(evt, TurnComplete):
                 last_event_json = event_to_json(evt)
-    except asyncio.CancelledError:
-        await _record_failed_if_owner(_SHUTDOWN_FAILURE_MESSAGE)
-        raise
-    except Exception as exc:
-        logger.exception("worker failed executing run_id=%s", row.run_id)
-        errors.append(str(exc))
+
+    consume_task = asyncio.create_task(_consume())
+    try:
+        try:
+            await asyncio.wait_for(consume_task, timeout=budget)
+        except TimeoutError:
+            progress = scratch / "progress.jsonl"
+            msg = (
+                f"exit_reason=timeout: subagent exceeded {budget:g}s; "
+                f"inspect {progress}"
+            )
+            logger.warning(
+                "worker subagent timeout %s",
+                kv(run_id=row.run_id, timeout_sec=budget, progress=str(progress)),
+            )
+            errors.append(msg)
+            await _stop_subagent_process(proc_holder[0])
+            if not consume_task.done():
+                consume_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await consume_task
+        except asyncio.CancelledError:
+            await _stop_subagent_process(proc_holder[0])
+            if not consume_task.done():
+                consume_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await consume_task
+            await _record_failed_if_owner(_SHUTDOWN_FAILURE_MESSAGE)
+            raise
+        except Exception as exc:
+            logger.exception("worker failed executing run_id=%s", row.run_id)
+            errors.append(str(exc))
+            await _stop_subagent_process(proc_holder[0])
+            if not consume_task.done():
+                consume_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await consume_task
     finally:
         if watchdog is not None:
             watchdog.cancel()

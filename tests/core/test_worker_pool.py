@@ -86,6 +86,56 @@ async def test_worker_pool_executes_claimed_run_once(
 
 
 @pytest.mark.asyncio
+async def test_execute_claimed_run_times_out_and_records_failure(
+    sqlite_backend: SQLiteStorageBackend,
+    tmp_path: Path,
+) -> None:
+    store = sqlite_backend.runs()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    env = _make_envelope()
+    await store.record_pending(
+        run_id="worker-run-timeout",
+        parent_run_id="parent",
+        script="subagents/x.py",
+        envelope=env,
+        scratch_dir=scratch,
+    )
+    assert await store.claim("worker-run-timeout", "worker-a") is True
+
+    async def _hanging_spawn(
+        script: str,
+        envelope,
+        *,
+        scratch_dir: Path,
+        subprocess_exec=None,
+        on_event=None,
+        extra_env=None,
+    ):
+        del script, envelope, scratch_dir, subprocess_exec, on_event, extra_env
+        await asyncio.sleep(3600)
+        yield TurnComplete(request_id="req-never", usage=UsageTotals())
+
+    with patch.object(worker_pool, "spawn_subagent", side_effect=_hanging_spawn):
+        row = await store.get_run("worker-run-timeout")
+        assert row is not None
+        await worker_pool.execute_claimed_run(
+            store,
+            row,
+            script=tmp_path / "worker.py",
+            worker_id="worker-a",
+            timeout_sec=0.05,
+        )
+
+    row = await store.get_run("worker-run-timeout")
+    assert row is not None
+    assert row.status == "failed"
+    assert row.error_json is not None
+    assert "exit_reason=timeout" in row.error_json
+    assert "progress.jsonl" in row.error_json
+
+
+@pytest.mark.asyncio
 async def test_worker_loop_claims_and_executes_pending_run(
     sqlite_backend: SQLiteStorageBackend,
     tmp_path: Path,
