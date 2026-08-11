@@ -584,6 +584,98 @@ async def test_grep_incomplete_scan_errors_with_rg(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_grep_skipped_oversized_is_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService, WorkspaceSettings
+
+    monkeypatch.setattr("monkeybot.core.tools.workspace_service.shutil.which", lambda _name: None)
+    root = tmp_path
+    (root / "small.py").write_text("nope\n", encoding="utf-8")
+    (root / "big.py").write_bytes(b"SECRET_TOKEN\n" + b"x" * 200)
+    svc = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILE_BYTES=50, WORKSPACE_GREP_MAX_FILES=100),
+    )
+    with pytest.raises(WorkspaceError) as ei:
+        svc.grep("SECRET_TOKEN")
+    assert ei.value.code == "incomplete_scan"
+    assert ei.value.details is not None
+    assert ei.value.details["files_skipped_oversized"] == 1
+    assert ei.value.details["stop_reason"] == "skipped_files"
+
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    ex._workspace = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILE_BYTES=50, WORKSPACE_GREP_MAX_FILES=100),
+    )
+    _out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="1", name="grep", args={"pattern": "SECRET_TOKEN"}),
+            ctx=_ctx(),
+        )
+    )
+    assert err is not None
+    payload = json.loads(err)
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "incomplete_scan"
+    assert payload["details"]["files_skipped_oversized"] == 1
+
+
+@pytest.mark.asyncio
+async def test_grep_skipped_binary_is_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService, WorkspaceSettings
+
+    monkeypatch.setattr("monkeybot.core.tools.workspace_service.shutil.which", lambda _name: None)
+    root = tmp_path
+    (root / "a.py").write_text("hello\n", encoding="utf-8")
+    (root / "blob.bin").write_bytes(b"abc\x00defSECRET")
+    svc = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILES=100),
+    )
+    with pytest.raises(WorkspaceError) as ei:
+        svc.grep("SECRET")
+    assert ei.value.code == "incomplete_scan"
+    assert ei.value.details is not None
+    assert ei.value.details["files_skipped_binary"] == 1
+
+
+@pytest.mark.asyncio
+async def test_grep_skipped_oversized_incomplete_with_rg(tmp_path: Path) -> None:
+    import shutil
+
+    from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService, WorkspaceSettings
+
+    if shutil.which("rg") is None:
+        pytest.skip("rg not on PATH")
+
+    root = tmp_path
+    (root / "small.py").write_text("nope\n", encoding="utf-8")
+    (root / "big.py").write_bytes(b"SECRET_TOKEN\n" + b"x" * 200)
+    svc = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILE_BYTES=50, WORKSPACE_GREP_MAX_FILES=100),
+    )
+    with pytest.raises(WorkspaceError) as ei:
+        svc.grep("SECRET_TOKEN")
+    assert ei.value.code == "incomplete_scan"
+    assert ei.value.details is not None
+    assert ei.value.details["files_skipped_oversized"] == 1
+
+
+@pytest.mark.asyncio
 async def test_grep_capped_complete_scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from monkeybot.core.tools.workspace_service import WorkspaceFileService, WorkspaceSettings
 

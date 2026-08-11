@@ -296,6 +296,91 @@ def _path_matches_globs(rel_path: str, globs: list[str] | None) -> bool:
     return False
 
 
+def _raise_if_grep_files_skipped(
+    *,
+    oversized: int,
+    binary: int,
+    unreadable: int,
+    files_scanned: int,
+    max_file_bytes: int,
+    partial_matches: list[GrepMatch] | None = None,
+) -> None:
+    """Fail closed when candidates were skipped — empty hits must not imply absence."""
+    total = oversized + binary + unreadable
+    if total == 0:
+        return
+    parts: list[str] = []
+    if oversized:
+        parts.append(f"{oversized} oversized (>{max_file_bytes} bytes)")
+    if binary:
+        parts.append(f"{binary} binary")
+    if unreadable:
+        parts.append(f"{unreadable} unreadable")
+    details: dict[str, object] = {
+        "stop_reason": "skipped_files",
+        "files_scanned": files_scanned,
+        "files_skipped_oversized": oversized,
+        "files_skipped_binary": binary,
+        "files_skipped_unreadable": unreadable,
+    }
+    if partial_matches:
+        cap = min(50, len(partial_matches))
+        details["partial_matches"] = partial_matches[:cap]
+        details["partial_matches_omitted"] = len(partial_matches) - cap
+    raise WorkspaceError(
+        f"grep skipped {total} candidate file(s) ({', '.join(parts)}); "
+        "results are incomplete and cannot be used to conclude absence",
+        code="incomplete_scan",
+        details=details,
+    )
+
+
+def _raise_grep_max_files(
+    files_scanned: int,
+    max_files: int,
+    extra_details: dict[str, object] | None = None,
+) -> None:
+    details: dict[str, object] = {
+        "stop_reason": "max_files",
+        "files_scanned": files_scanned,
+    }
+    if extra_details:
+        details.update(extra_details)
+    raise WorkspaceError(
+        f"grep scanned {files_scanned} files (limit {max_files}) and stopped early; "
+        "results are incomplete and cannot be used to conclude absence",
+        code="incomplete_scan",
+        details=details,
+    )
+
+
+def _grep_classify(
+    fp: Path, max_file_bytes: int
+) -> tuple[str, bytes | None]:
+    """Classify a candidate as ``ok`` / ``oversized`` / ``binary`` / ``unreadable``."""
+    try:
+        st = fp.stat()
+    except OSError:
+        return "unreadable", None
+    if st.st_size > max_file_bytes:
+        return "oversized", None
+    try:
+        data = fp.read_bytes()
+    except OSError:
+        return "unreadable", None
+    if b"\x00" in data[:8192]:
+        return "binary", None
+    return "ok", data
+
+
+def _tally_grep_skip(kind: str, tallies: dict[str, int]) -> bool:
+    """Bump skip tallies for a non-ok classify result. Returns True when skipped."""
+    if kind == "ok":
+        return False
+    tallies[kind] = tallies.get(kind, 0) + 1
+    return True
+
+
 def _regex_needs_python_engine(pattern: str) -> bool:
     """True when ``pattern`` uses Python ``re`` features unsupported by ripgrep."""
     return _RG_UNSUPPORTED_RE.search(pattern) is not None
@@ -982,6 +1067,30 @@ class WorkspaceFileService:
             payload["next_offset"] = next_offset
         return payload
 
+    def _iter_grep_candidates(
+        self,
+        base: Path,
+        globs: list[str] | None,
+    ) -> Iterator[tuple[Path, str]]:
+        """Yield ``(path, repo-relative)`` for grep candidates under ``base``."""
+        walk_iter: Iterator[tuple[str, list[str], list[str]]]
+        if base.is_file():
+            walk_iter = iter([(str(base.parent), [], [base.name])])
+        else:
+            walk_iter = os.walk(base)
+        for dirpath, dirnames, filenames in walk_iter:
+            if not base.is_file():
+                dirnames[:] = sorted(d for d in dirnames if d not in _GREP_IGNORE_DIRS)
+            for name in sorted(filenames):
+                fp = Path(dirpath) / name
+                try:
+                    rel = self._as_repo_rel(fp)
+                except WorkspaceError:
+                    continue
+                if not _path_matches_globs(rel, globs):
+                    continue
+                yield fp, rel
+
     def _grep_python(
         self,
         regex: re.Pattern[str],
@@ -999,64 +1108,48 @@ class WorkspaceFileService:
         files_scanned = 0
         total_match_count = 0
         candidates_remaining = False
-        # os.walk on a file yields nothing — scan that single file instead.
-        walk_iter: Iterator[tuple[str, list[str], list[str]]]
-        if base.is_file():
-            walk_iter = iter([(str(base.parent), [], [base.name])])
-        else:
-            walk_iter = os.walk(base)
+        tallies = {"oversized": 0, "binary": 0, "unreadable": 0}
 
-        for dirpath, dirnames, filenames in walk_iter:
-            if not base.is_file():
-                dirnames[:] = sorted(d for d in dirnames if d not in _GREP_IGNORE_DIRS)
-            for name in sorted(filenames):
-                fp = Path(dirpath) / name
-                try:
-                    rel = self._as_repo_rel(fp)
-                except WorkspaceError:
-                    continue
-                if not _path_matches_globs(rel, globs):
-                    continue
-                try:
-                    st = fp.stat()
-                except OSError:
-                    continue
-                if st.st_size > max_file_bytes:
-                    continue
-                if files_scanned >= max_files:
-                    candidates_remaining = True
-                    break
-                files_scanned += 1
-                try:
-                    data = fp.read_bytes()
-                except OSError:
-                    continue
-                if b"\x00" in data[:8192]:
-                    continue
-                text = data.decode("utf-8", errors="replace")
-                for line_no, line in enumerate(text.splitlines(), start=1):
-                    if not regex.search(line):
-                        continue
-                    total_match_count += 1
-                    if total_match_count <= offset:
-                        continue
-                    if len(matches) < max_matches:
-                        matches.append(
-                            {
-                                "path": rel,
-                                "line": line_no,
-                                "text": line[:2000],
-                            }
-                        )
-            if candidates_remaining:
+        for fp, rel in self._iter_grep_candidates(base, globs):
+            kind, data = _grep_classify(fp, max_file_bytes)
+            if _tally_grep_skip(kind, tallies):
+                continue
+            if files_scanned >= max_files:
+                candidates_remaining = True
                 break
+            assert data is not None
+            files_scanned += 1
+            text = data.decode("utf-8", errors="replace")
+            for line_no, line in enumerate(text.splitlines(), start=1):
+                if not regex.search(line):
+                    continue
+                total_match_count += 1
+                if total_match_count <= offset:
+                    continue
+                if len(matches) < max_matches:
+                    matches.append(
+                        {"path": rel, "line": line_no, "text": line[:2000]}
+                    )
 
         if candidates_remaining:
-            raise WorkspaceError(
-                f"grep scanned {files_scanned} files (limit {max_files}) and stopped early; "
-                "results are incomplete and cannot be used to conclude absence",
-                code="incomplete_scan",
+            _raise_grep_max_files(
+                files_scanned,
+                max_files,
+                {
+                    "files_skipped_oversized": tallies["oversized"],
+                    "files_skipped_binary": tallies["binary"],
+                    "files_skipped_unreadable": tallies["unreadable"],
+                },
             )
+
+        _raise_if_grep_files_skipped(
+            oversized=tallies["oversized"],
+            binary=tallies["binary"],
+            unreadable=tallies["unreadable"],
+            files_scanned=files_scanned,
+            max_file_bytes=max_file_bytes,
+            partial_matches=matches or None,
+        )
 
         return self._grep_result(
             pattern=pattern,
@@ -1176,11 +1269,20 @@ class WorkspaceFileService:
             files_scanned = files_begun
 
         if files_scanned > max_files:
-            raise WorkspaceError(
-                f"grep scanned {files_scanned} files (limit {max_files}) and stopped early; "
-                "results are incomplete and cannot be used to conclude absence",
-                code="incomplete_scan",
-            )
+            _raise_grep_max_files(files_scanned, max_files)
+
+        tallies = {"oversized": 0, "binary": 0, "unreadable": 0}
+        for fp, _rel in self._iter_grep_candidates(base, globs):
+            kind, _data = _grep_classify(fp, max_file_bytes)
+            _tally_grep_skip(kind, tallies)
+        _raise_if_grep_files_skipped(
+            oversized=tallies["oversized"],
+            binary=tallies["binary"],
+            unreadable=tallies["unreadable"],
+            files_scanned=files_scanned,
+            max_file_bytes=max_file_bytes,
+            partial_matches=matches or None,
+        )
 
         return self._grep_result(
             pattern=pattern,
