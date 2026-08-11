@@ -105,7 +105,11 @@ def _looks_like_base64(value: str) -> bool:
 
 
 def _is_plausible_base64_run(text: str) -> bool:
-    """True for long runs that look like real base64 (not diffs / prose)."""
+    """True for long runs that look like real base64 (not diffs / prose).
+
+    After the alphabet-ratio gate, unpadded alphanumeric-only base64 is still
+    accepted — padding / ``+/`` markers are sufficient but not required.
+    """
     if len(text) < _MIN_BASE64_RUN:
         return False
     sample = text[:4096]
@@ -114,12 +118,7 @@ def _is_plausible_base64_run(text: str) -> bool:
     allowed = sum(1 for ch in sample if ch.isalnum() or ch in "+/=\n\r")
     if allowed / max(1, len(sample)) < 0.98:
         return False
-    if len(set(sample)) < 8:
-        return False
-    if sample.rstrip().endswith("="):
-        return True
-    # Require padding or non-trivial ``+/`` density — not a single slash or plus.
-    return _has_nontrivial_b64_markers(sample)
+    return len(set(sample)) >= 8
 
 
 def _is_compact_non_text_blob(value: str) -> bool:

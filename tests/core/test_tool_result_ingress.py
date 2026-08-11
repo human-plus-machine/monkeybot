@@ -108,6 +108,15 @@ def test_sanitize_redacts_long_bare_base64_run() -> None:
     assert "base64 run" in out
 
 
+def test_sanitize_redacts_long_alphanumeric_base64_run() -> None:
+    """Unpadded alphanumeric-only base64 must still redact (no +/ or = required)."""
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    blob = (alphabet * 20)[:1200]
+    out = sanitize_tool_result_text(blob)
+    assert blob not in out
+    assert "base64 run" in out
+
+
 def test_sanitize_keeps_repeated_plain_text() -> None:
     text = "x" * 40_000
     assert sanitize_tool_result_text(text) == text

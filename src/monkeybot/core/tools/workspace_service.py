@@ -386,6 +386,35 @@ def _tally_grep_skip(kind: str, tallies: dict[str, int]) -> bool:
     return True
 
 
+def _utf8_byte_offsets_to_char_offsets(
+    text: str,
+    byte_start: int,
+    byte_end: int | None = None,
+) -> tuple[int, int | None]:
+    """Map ripgrep UTF-8 byte offsets into Unicode character indices for *text*."""
+    encoded = text.encode("utf-8")
+
+    def _clamp_boundary(pos: int) -> int:
+        pos = max(0, min(pos, len(encoded)))
+        # Exclusive end at ``len(encoded)`` is already a valid boundary.
+        if pos >= len(encoded):
+            return len(encoded)
+        # Step back if *pos* lands mid multi-byte sequence.
+        while pos > 0 and (encoded[pos] & 0xC0) == 0x80:
+            pos -= 1
+        return pos
+
+    start = _clamp_boundary(byte_start)
+    char_start = len(encoded[:start].decode("utf-8"))
+    if byte_end is None:
+        return char_start, None
+    end = _clamp_boundary(max(byte_start, byte_end))
+    if end < start:
+        end = start
+    char_end = len(encoded[:end].decode("utf-8"))
+    return char_start, char_end
+
+
 def _clip_grep_match_line(
     line: str,
     match_start: int | None,
@@ -1383,9 +1412,11 @@ class WorkspaceFileService:
                         raw_start = first.get("start")
                         raw_end = first.get("end")
                         if isinstance(raw_start, int):
-                            match_start = raw_start
-                        if isinstance(raw_end, int):
-                            match_end = raw_end
+                            # rg submatches are UTF-8 byte offsets into the line.
+                            end_arg = raw_end if isinstance(raw_end, int) else None
+                            match_start, match_end = _utf8_byte_offsets_to_char_offsets(
+                                text, raw_start, end_arg
+                            )
                 text = _clip_grep_match_line(text, match_start, match_end)
                 line_no = data.get("line_number")
                 if not isinstance(line_no, int):
