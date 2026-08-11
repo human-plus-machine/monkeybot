@@ -133,10 +133,7 @@ def _is_compact_non_text_blob(value: str) -> bool:
         return False
     if any(ch.isspace() for ch in sample):
         return False
-    for ch in sample:
-        if not (ch.isalnum() or ch in "+/="):
-            return False
-    return True
+    return all(ch.isalnum() or ch in "+/=" for ch in sample)
 
 
 def _replace_long_b64(match: re.Match[str]) -> str:
