@@ -99,7 +99,6 @@ class GlobResult(TypedDict):
     pattern: str
     paths: list[str]
     count: int
-    truncated: bool
     duration_ms: int
 
 
@@ -146,9 +145,15 @@ AGENT_READ_DEFAULT_LINES = 2000
 class WorkspaceError(Exception):
     """Logical error for workspace operations (maps to HTTP 400)."""
 
-    def __init__(self, message: str, code: str = "workspace_error") -> None:
+    def __init__(
+        self,
+        message: str,
+        code: str = "workspace_error",
+        details: dict[str, object] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.details = details
 
 
 def _coerce_workspace_settings(settings: object | None) -> WorkspaceSettings:
@@ -836,12 +841,12 @@ class WorkspaceFileService:
         deadline = time.monotonic() + self._settings.WORKSPACE_GLOB_TIMEOUT_SEC
         max_paths = self._settings.WORKSPACE_GLOB_MAX_PATHS
         paths: list[str] = []
-        truncated = False
+        stop_reason: str | None = None
         t0 = time.monotonic()
         try:
             for p in base.glob(effective_pattern):
                 if time.monotonic() > deadline:
-                    truncated = True
+                    stop_reason = "timeout"
                     break
                 if not p.is_file():
                     continue
@@ -851,19 +856,40 @@ class WorkspaceFileService:
                     continue
                 paths.append(self._as_repo_rel(p))
                 if len(paths) >= max_paths:
-                    truncated = True
+                    stop_reason = "max_paths"
                     break
         except OSError as e:
             raise WorkspaceError(f"Glob failed: {e}", code="glob_failed") from e
         paths.sort()
         duration_ms = int((time.monotonic() - t0) * 1000)
+        if stop_reason is not None:
+            reason = (
+                f"timeout after {self._settings.WORKSPACE_GLOB_TIMEOUT_SEC}s"
+                if stop_reason == "timeout"
+                else f"path cap {max_paths}"
+            )
+            # Cap mid-flight evidence so the error envelope stays model-sized.
+            partial_cap = min(100, len(paths))
+            raise WorkspaceError(
+                f"glob found {len(paths)} paths then stopped early ({reason}); "
+                "results are incomplete and cannot be used to conclude absence",
+                code="incomplete_scan",
+                details={
+                    "stop_reason": stop_reason,
+                    "count": len(paths),
+                    "partial_paths": paths[:partial_cap],
+                    "partial_paths_omitted": len(paths) - partial_cap,
+                    "root": self._as_repo_rel(base) if base != self._root else ".",
+                    "pattern": pattern,
+                    "duration_ms": duration_ms,
+                },
+            )
         return {
             "ok": True,
             "root": self._as_repo_rel(base) if base != self._root else ".",
             "pattern": pattern,
             "paths": paths,
             "count": len(paths),
-            "truncated": truncated,
             "duration_ms": duration_ms,
         }
 

@@ -677,7 +677,9 @@ def _core_tool_defs(
         ToolDef(
             "glob",
             "List workspace file paths matching a glob pattern. Prefer over run_command+ls for "
-            "discovery. For content questions ('how does X work?'), use `search` first.",
+            "discovery. For content questions ('how does X work?'), use `search` first. "
+            "A path list is evidence of absence only when the call succeeds with ok:true "
+            "(incomplete scans return ok:false / incomplete_scan — narrow root or pattern).",
             glob_schema,
             parallel_safe=True,
         ),

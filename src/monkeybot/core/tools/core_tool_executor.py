@@ -664,6 +664,21 @@ def _built_in_tool_error(
     return _j(payload)
 
 
+def _incomplete_scan_envelope(
+    exc: WorkspaceError,
+    hint: str,
+    valid_options: list[str],
+) -> str:
+    """Shared ok:false envelope when glob/grep cannot support absence conclusions."""
+    details: dict[str, Any] = {}
+    extra = getattr(exc, "details", None)
+    if isinstance(extra, dict):
+        details.update(extra)
+    details["code"] = "incomplete_scan"
+    details["valid_options"] = valid_options
+    return _built_in_tool_error("incomplete_scan", str(exc), hint, details)
+
+
 def _workspace_error_envelope(exc: WorkspaceError) -> str:
     code = getattr(exc, "code", "workspace_error")
     msg = str(exc)
@@ -1305,6 +1320,21 @@ class CoreToolExecutor(ToolExecutorPort):
             payload = self._workspace.glob_paths(pattern, root=root)
             return (_j(payload), None)
         except WorkspaceError as exc:
+            if getattr(exc, "code", None) == "incomplete_scan":
+                return (
+                    None,
+                    _incomplete_scan_envelope(
+                        exc,
+                        "This result cannot be used to conclude absence. Narrow `root` or "
+                        "tighten `pattern`, then retry. Partial paths (if any) are in "
+                        "details.partial_paths — inspect those before re-issuing.",
+                        [
+                            "narrow root to a subdirectory",
+                            "use a tighter pattern (e.g. src/**/*.py instead of **/*)",
+                            "search for a specific filename instead of listing everything",
+                        ],
+                    ),
+                )
             return (None, _workspace_error_envelope(exc))
 
     def _tool_grep(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -1351,20 +1381,16 @@ class CoreToolExecutor(ToolExecutorPort):
             if getattr(exc, "code", None) == "incomplete_scan":
                 return (
                     None,
-                    _built_in_tool_error(
-                        "incomplete_scan",
-                        str(exc),
+                    _incomplete_scan_envelope(
+                        exc,
                         "This result cannot be used to conclude absence. Narrow `root` or "
                         'pass a `file_glob` (e.g. "*.py") so every candidate file can be '
                         "scanned, then retry.",
-                        {
-                            "code": "incomplete_scan",
-                            "valid_options": [
-                                "narrow root to a subdirectory",
-                                'pass file_glob such as "*.py" or "*.{ts,tsx}"',
-                                "page matches with offset after a complete narrower scan",
-                            ],
-                        },
+                        [
+                            "narrow root to a subdirectory",
+                            'pass file_glob such as "*.py" or "*.{ts,tsx}"',
+                            "page matches with offset after a complete narrower scan",
+                        ],
                     ),
                 )
             return (None, _workspace_error_envelope(exc))

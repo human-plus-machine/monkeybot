@@ -293,6 +293,56 @@ async def test_glob(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_glob_incomplete_scan_errors(tmp_path: Path) -> None:
+    from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService, WorkspaceSettings
+
+    root = tmp_path
+    for i in range(5):
+        (root / f"f{i}.txt").write_text(f"x{i}\n", encoding="utf-8")
+    svc = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GLOB_MAX_PATHS=2),
+    )
+    with pytest.raises(WorkspaceError) as ei:
+        svc.glob_paths("*.txt")
+    assert ei.value.code == "incomplete_scan"
+    assert isinstance(ei.value.details, dict)
+    assert ei.value.details["stop_reason"] == "max_paths"
+    assert ei.value.details["count"] == 2
+    assert len(ei.value.details["partial_paths"]) == 2
+
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    ex._workspace = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GLOB_MAX_PATHS=2),
+    )
+    ctx = _ctx()
+    _out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="1", name="glob", args={"pattern": "*.txt"}),
+            ctx=ctx,
+        )
+    )
+    assert err is not None
+    payload = json.loads(err)
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "incomplete_scan"
+    assert "cannot be used to conclude absence" in payload["message"]
+    assert "Narrow `root`" in payload["hint"]
+    assert payload["details"]["count"] == 2
+    assert len(payload["details"]["partial_paths"]) == 2
+
+
+@pytest.mark.asyncio
 async def test_grep(tmp_path: Path) -> None:
     root = tmp_path
     mem = tmp_path / "mem"
