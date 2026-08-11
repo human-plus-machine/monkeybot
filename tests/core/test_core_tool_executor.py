@@ -676,6 +676,68 @@ async def test_grep_skipped_oversized_incomplete_with_rg(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_grep_rg_timeout_is_incomplete_no_python_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """rg TimeoutExpired must not fall through to unbounded Python walk."""
+    import shutil
+    import subprocess
+
+    from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService
+
+    if shutil.which("rg") is None:
+        pytest.skip("rg not on PATH")
+
+    root = tmp_path
+    (root / "a.py").write_text("needle\n", encoding="utf-8")
+    python_calls = {"n": 0}
+    real_grep_python = WorkspaceFileService._grep_python
+
+    def _track_python(self, *args, **kwargs):  # noqa: ANN001
+        python_calls["n"] += 1
+        return real_grep_python(self, *args, **kwargs)
+
+    def _timeout_run(*_a, **_kw):  # noqa: ANN001
+        raise subprocess.TimeoutExpired(cmd=["rg"], timeout=120)
+
+    monkeypatch.setattr(WorkspaceFileService, "_grep_python", _track_python)
+    monkeypatch.setattr(
+        "monkeybot.core.tools.workspace_service.subprocess.run",
+        _timeout_run,
+    )
+    svc = WorkspaceFileService(root)
+    with pytest.raises(WorkspaceError) as ei:
+        svc.grep("needle")
+    assert ei.value.code == "incomplete_scan"
+    assert ei.value.details is not None
+    assert ei.value.details["stop_reason"] == "rg_timed_out"
+    assert python_calls["n"] == 0
+
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    ex._workspace = WorkspaceFileService(root)
+    _out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="1", name="grep", args={"pattern": "needle"}),
+            ctx=_ctx(),
+        )
+    )
+    assert err is not None
+    payload = json.loads(err)
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "incomplete_scan"
+    assert payload["details"]["stop_reason"] == "rg_timed_out"
+
+
+@pytest.mark.asyncio
 async def test_grep_capped_complete_scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from monkeybot.core.tools.workspace_service import WorkspaceFileService, WorkspaceSettings
 

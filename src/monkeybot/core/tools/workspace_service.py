@@ -44,6 +44,11 @@ _GREP_IGNORE_DIRS = frozenset(
     }
 )
 
+# Wall-clock budget for the optional ripgrep accelerator. On expiry we fail closed
+# (incomplete_scan) instead of falling back to an unbounded Python walk.
+_RG_TIMEOUT_SEC = 120
+
+
 # One-level or nested ``{a,b}`` groups in filename globs (fnmatch has no brace expansion).
 _BRACE_GLOB_RE = re.compile(r"\{([^{}]+)\}")
 # Python ``re`` features that the Rust regex crate (ripgrep) does not support.
@@ -1205,14 +1210,30 @@ class WorkspaceFileService:
         except ValueError:
             rg_target = str(search_path)
         cmd.extend(["--", pattern, rg_target])
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
-            cwd=str(search_root),
-        )
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=_RG_TIMEOUT_SEC,
+                check=False,
+                cwd=str(search_root),
+            )
+        except subprocess.TimeoutExpired as exc:
+            # Do not fall back to unbounded Python walk after already spending the budget.
+            logger.warning(
+                "grep rg timed out %s",
+                kv(timeout_sec=_RG_TIMEOUT_SEC, pattern=pattern),
+            )
+            raise WorkspaceError(
+                f"grep rg timed out after {_RG_TIMEOUT_SEC}s; results are incomplete and "
+                "cannot be used to conclude absence",
+                code="incomplete_scan",
+                details={
+                    "stop_reason": "rg_timed_out",
+                    "timeout_sec": _RG_TIMEOUT_SEC,
+                },
+            ) from exc
         # 0 = matches, 1 = no matches; anything else is a hard failure → caller falls back.
         if proc.returncode not in (0, 1):
             raise OSError(proc.stderr.strip() or f"rg exited {proc.returncode}")
