@@ -44,6 +44,11 @@ _GREP_IGNORE_DIRS = frozenset(
     }
 )
 
+# Wall-clock budget for the optional ripgrep accelerator. On expiry we fail closed
+# (incomplete_scan) instead of falling back to an unbounded Python walk.
+_RG_TIMEOUT_SEC = 120
+
+
 # One-level or nested ``{a,b}`` groups in filename globs (fnmatch has no brace expansion).
 _BRACE_GLOB_RE = re.compile(r"\{([^{}]+)\}")
 # Python ``re`` features that the Rust regex crate (ripgrep) does not support.
@@ -99,7 +104,6 @@ class GlobResult(TypedDict):
     pattern: str
     paths: list[str]
     count: int
-    truncated: bool
     duration_ms: int
 
 
@@ -146,9 +150,15 @@ AGENT_READ_DEFAULT_LINES = 2000
 class WorkspaceError(Exception):
     """Logical error for workspace operations (maps to HTTP 400)."""
 
-    def __init__(self, message: str, code: str = "workspace_error") -> None:
+    def __init__(
+        self,
+        message: str,
+        code: str = "workspace_error",
+        details: dict[str, object] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.details = details
 
 
 def _coerce_workspace_settings(settings: object | None) -> WorkspaceSettings:
@@ -289,6 +299,91 @@ def _path_matches_globs(rel_path: str, globs: list[str] | None) -> bool:
         elif _compile_path_glob(g).fullmatch(path) is not None:
             return True
     return False
+
+
+def _raise_if_grep_files_skipped(
+    *,
+    oversized: int,
+    binary: int,
+    unreadable: int,
+    files_scanned: int,
+    max_file_bytes: int,
+    partial_matches: list[GrepMatch] | None = None,
+) -> None:
+    """Fail closed when candidates were skipped — empty hits must not imply absence."""
+    total = oversized + binary + unreadable
+    if total == 0:
+        return
+    parts: list[str] = []
+    if oversized:
+        parts.append(f"{oversized} oversized (>{max_file_bytes} bytes)")
+    if binary:
+        parts.append(f"{binary} binary")
+    if unreadable:
+        parts.append(f"{unreadable} unreadable")
+    details: dict[str, object] = {
+        "stop_reason": "skipped_files",
+        "files_scanned": files_scanned,
+        "files_skipped_oversized": oversized,
+        "files_skipped_binary": binary,
+        "files_skipped_unreadable": unreadable,
+    }
+    if partial_matches:
+        cap = min(50, len(partial_matches))
+        details["partial_matches"] = partial_matches[:cap]
+        details["partial_matches_omitted"] = len(partial_matches) - cap
+    raise WorkspaceError(
+        f"grep skipped {total} candidate file(s) ({', '.join(parts)}); "
+        "results are incomplete and cannot be used to conclude absence",
+        code="incomplete_scan",
+        details=details,
+    )
+
+
+def _raise_grep_max_files(
+    files_scanned: int,
+    max_files: int,
+    extra_details: dict[str, object] | None = None,
+) -> None:
+    details: dict[str, object] = {
+        "stop_reason": "max_files",
+        "files_scanned": files_scanned,
+    }
+    if extra_details:
+        details.update(extra_details)
+    raise WorkspaceError(
+        f"grep scanned {files_scanned} files (limit {max_files}) and stopped early; "
+        "results are incomplete and cannot be used to conclude absence",
+        code="incomplete_scan",
+        details=details,
+    )
+
+
+def _grep_classify(
+    fp: Path, max_file_bytes: int
+) -> tuple[str, bytes | None]:
+    """Classify a candidate as ``ok`` / ``oversized`` / ``binary`` / ``unreadable``."""
+    try:
+        st = fp.stat()
+    except OSError:
+        return "unreadable", None
+    if st.st_size > max_file_bytes:
+        return "oversized", None
+    try:
+        data = fp.read_bytes()
+    except OSError:
+        return "unreadable", None
+    if b"\x00" in data[:8192]:
+        return "binary", None
+    return "ok", data
+
+
+def _tally_grep_skip(kind: str, tallies: dict[str, int]) -> bool:
+    """Bump skip tallies for a non-ok classify result. Returns True when skipped."""
+    if kind == "ok":
+        return False
+    tallies[kind] = tallies.get(kind, 0) + 1
+    return True
 
 
 def _regex_needs_python_engine(pattern: str) -> bool:
@@ -561,9 +656,20 @@ class WorkspaceFileService:
         rel = self._settings.WORKSPACE_WRITE_SCOPE_REL
         if rel is None:
             return None
-        s = str(rel).strip().replace("\\", "/").lstrip("/")
-        if not s or ".." in s:
-            return None
+        raw = str(rel).strip().replace("\\", "/")
+        s = raw.lstrip("/")
+        if (
+            not s
+            or ".." in s
+            or raw.startswith("~")
+            or raw.startswith("/")
+        ):
+            # Fail closed: a configured-but-invalid scope must not disable enforcement.
+            raise WorkspaceError(
+                f"Invalid WORKSPACE_WRITE_SCOPE_REL: {rel!r} "
+                "(must be a non-empty repo-relative path without '..')",
+                code="invalid_write_scope",
+            )
         return (self._root / s).resolve()
 
     def _require_under_write_scope(self, fp: Path) -> None:
@@ -836,12 +942,12 @@ class WorkspaceFileService:
         deadline = time.monotonic() + self._settings.WORKSPACE_GLOB_TIMEOUT_SEC
         max_paths = self._settings.WORKSPACE_GLOB_MAX_PATHS
         paths: list[str] = []
-        truncated = False
+        stop_reason: str | None = None
         t0 = time.monotonic()
         try:
             for p in base.glob(effective_pattern):
                 if time.monotonic() > deadline:
-                    truncated = True
+                    stop_reason = "timeout"
                     break
                 if not p.is_file():
                     continue
@@ -851,19 +957,40 @@ class WorkspaceFileService:
                     continue
                 paths.append(self._as_repo_rel(p))
                 if len(paths) >= max_paths:
-                    truncated = True
+                    stop_reason = "max_paths"
                     break
         except OSError as e:
             raise WorkspaceError(f"Glob failed: {e}", code="glob_failed") from e
         paths.sort()
         duration_ms = int((time.monotonic() - t0) * 1000)
+        if stop_reason is not None:
+            reason = (
+                f"timeout after {self._settings.WORKSPACE_GLOB_TIMEOUT_SEC}s"
+                if stop_reason == "timeout"
+                else f"path cap {max_paths}"
+            )
+            # Cap mid-flight evidence so the error envelope stays model-sized.
+            partial_cap = min(100, len(paths))
+            raise WorkspaceError(
+                f"glob found {len(paths)} paths then stopped early ({reason}); "
+                "results are incomplete and cannot be used to conclude absence",
+                code="incomplete_scan",
+                details={
+                    "stop_reason": stop_reason,
+                    "count": len(paths),
+                    "partial_paths": paths[:partial_cap],
+                    "partial_paths_omitted": len(paths) - partial_cap,
+                    "root": self._as_repo_rel(base) if base != self._root else ".",
+                    "pattern": pattern,
+                    "duration_ms": duration_ms,
+                },
+            )
         return {
             "ok": True,
             "root": self._as_repo_rel(base) if base != self._root else ".",
             "pattern": pattern,
             "paths": paths,
             "count": len(paths),
-            "truncated": truncated,
             "duration_ms": duration_ms,
         }
 
@@ -956,6 +1083,30 @@ class WorkspaceFileService:
             payload["next_offset"] = next_offset
         return payload
 
+    def _iter_grep_candidates(
+        self,
+        base: Path,
+        globs: list[str] | None,
+    ) -> Iterator[tuple[Path, str]]:
+        """Yield ``(path, repo-relative)`` for grep candidates under ``base``."""
+        walk_iter: Iterator[tuple[str, list[str], list[str]]]
+        if base.is_file():
+            walk_iter = iter([(str(base.parent), [], [base.name])])
+        else:
+            walk_iter = os.walk(base)
+        for dirpath, dirnames, filenames in walk_iter:
+            if not base.is_file():
+                dirnames[:] = sorted(d for d in dirnames if d not in _GREP_IGNORE_DIRS)
+            for name in sorted(filenames):
+                fp = Path(dirpath) / name
+                try:
+                    rel = self._as_repo_rel(fp)
+                except WorkspaceError:
+                    continue
+                if not _path_matches_globs(rel, globs):
+                    continue
+                yield fp, rel
+
     def _grep_python(
         self,
         regex: re.Pattern[str],
@@ -973,64 +1124,48 @@ class WorkspaceFileService:
         files_scanned = 0
         total_match_count = 0
         candidates_remaining = False
-        # os.walk on a file yields nothing — scan that single file instead.
-        walk_iter: Iterator[tuple[str, list[str], list[str]]]
-        if base.is_file():
-            walk_iter = iter([(str(base.parent), [], [base.name])])
-        else:
-            walk_iter = os.walk(base)
+        tallies = {"oversized": 0, "binary": 0, "unreadable": 0}
 
-        for dirpath, dirnames, filenames in walk_iter:
-            if not base.is_file():
-                dirnames[:] = sorted(d for d in dirnames if d not in _GREP_IGNORE_DIRS)
-            for name in sorted(filenames):
-                fp = Path(dirpath) / name
-                try:
-                    rel = self._as_repo_rel(fp)
-                except WorkspaceError:
-                    continue
-                if not _path_matches_globs(rel, globs):
-                    continue
-                try:
-                    st = fp.stat()
-                except OSError:
-                    continue
-                if st.st_size > max_file_bytes:
-                    continue
-                if files_scanned >= max_files:
-                    candidates_remaining = True
-                    break
-                files_scanned += 1
-                try:
-                    data = fp.read_bytes()
-                except OSError:
-                    continue
-                if b"\x00" in data[:8192]:
-                    continue
-                text = data.decode("utf-8", errors="replace")
-                for line_no, line in enumerate(text.splitlines(), start=1):
-                    if not regex.search(line):
-                        continue
-                    total_match_count += 1
-                    if total_match_count <= offset:
-                        continue
-                    if len(matches) < max_matches:
-                        matches.append(
-                            {
-                                "path": rel,
-                                "line": line_no,
-                                "text": line[:2000],
-                            }
-                        )
-            if candidates_remaining:
+        for fp, rel in self._iter_grep_candidates(base, globs):
+            kind, data = _grep_classify(fp, max_file_bytes)
+            if _tally_grep_skip(kind, tallies):
+                continue
+            if files_scanned >= max_files:
+                candidates_remaining = True
                 break
+            assert data is not None
+            files_scanned += 1
+            text = data.decode("utf-8", errors="replace")
+            for line_no, line in enumerate(text.splitlines(), start=1):
+                if not regex.search(line):
+                    continue
+                total_match_count += 1
+                if total_match_count <= offset:
+                    continue
+                if len(matches) < max_matches:
+                    matches.append(
+                        {"path": rel, "line": line_no, "text": line[:2000]}
+                    )
 
         if candidates_remaining:
-            raise WorkspaceError(
-                f"grep scanned {files_scanned} files (limit {max_files}) and stopped early; "
-                "results are incomplete and cannot be used to conclude absence",
-                code="incomplete_scan",
+            _raise_grep_max_files(
+                files_scanned,
+                max_files,
+                {
+                    "files_skipped_oversized": tallies["oversized"],
+                    "files_skipped_binary": tallies["binary"],
+                    "files_skipped_unreadable": tallies["unreadable"],
+                },
             )
+
+        _raise_if_grep_files_skipped(
+            oversized=tallies["oversized"],
+            binary=tallies["binary"],
+            unreadable=tallies["unreadable"],
+            files_scanned=files_scanned,
+            max_file_bytes=max_file_bytes,
+            partial_matches=matches or None,
+        )
 
         return self._grep_result(
             pattern=pattern,
@@ -1086,14 +1221,30 @@ class WorkspaceFileService:
         except ValueError:
             rg_target = str(search_path)
         cmd.extend(["--", pattern, rg_target])
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
-            cwd=str(search_root),
-        )
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=_RG_TIMEOUT_SEC,
+                check=False,
+                cwd=str(search_root),
+            )
+        except subprocess.TimeoutExpired as exc:
+            # Do not fall back to unbounded Python walk after already spending the budget.
+            logger.warning(
+                "grep rg timed out %s",
+                kv(timeout_sec=_RG_TIMEOUT_SEC, pattern=pattern),
+            )
+            raise WorkspaceError(
+                f"grep rg timed out after {_RG_TIMEOUT_SEC}s; results are incomplete and "
+                "cannot be used to conclude absence",
+                code="incomplete_scan",
+                details={
+                    "stop_reason": "rg_timed_out",
+                    "timeout_sec": _RG_TIMEOUT_SEC,
+                },
+            ) from exc
         # 0 = matches, 1 = no matches; anything else is a hard failure → caller falls back.
         if proc.returncode not in (0, 1):
             raise OSError(proc.stderr.strip() or f"rg exited {proc.returncode}")
@@ -1150,11 +1301,20 @@ class WorkspaceFileService:
             files_scanned = files_begun
 
         if files_scanned > max_files:
-            raise WorkspaceError(
-                f"grep scanned {files_scanned} files (limit {max_files}) and stopped early; "
-                "results are incomplete and cannot be used to conclude absence",
-                code="incomplete_scan",
-            )
+            _raise_grep_max_files(files_scanned, max_files)
+
+        tallies = {"oversized": 0, "binary": 0, "unreadable": 0}
+        for fp, _rel in self._iter_grep_candidates(base, globs):
+            kind, _data = _grep_classify(fp, max_file_bytes)
+            _tally_grep_skip(kind, tallies)
+        _raise_if_grep_files_skipped(
+            oversized=tallies["oversized"],
+            binary=tallies["binary"],
+            unreadable=tallies["unreadable"],
+            files_scanned=files_scanned,
+            max_file_bytes=max_file_bytes,
+            partial_matches=matches or None,
+        )
 
         return self._grep_result(
             pattern=pattern,

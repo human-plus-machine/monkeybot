@@ -77,6 +77,9 @@ def test_harness_includes_runtime_error_and_no_repeat_guidance() -> None:
     assert "No-repeat rule" in out
     assert "same name and same arguments that already failed" in out
     assert "ok: false" in out
+    assert "Spill / partial artifacts" in out
+    assert "partial_output_path" in out
+    assert "read_file that path" in out or "`read_file` that path" in out
 
 
 def test_harness_adds_task_line_when_enabled() -> None:

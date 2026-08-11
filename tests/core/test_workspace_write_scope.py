@@ -95,3 +95,20 @@ def test_no_scope_allows_anywhere_under_repo() -> None:
         svc = WorkspaceFileService(root, settings=WorkspaceSettings())
         out = svc.write_file("anywhere/a.txt", "x")
         assert out["ok"] is True
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["..\\", "../", "foo/../bar", "..\\evil", "a\\..\\b", "", "   ", "/abs"],
+)
+def test_invalid_write_scope_fails_closed(bad: str) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "other").mkdir()
+        svc = WorkspaceFileService(
+            root,
+            settings=WorkspaceSettings(WORKSPACE_WRITE_SCOPE_REL=bad),
+        )
+        with pytest.raises(WorkspaceError) as exc:
+            svc.write_file("other/x.txt", "nope")
+        assert exc.value.code == "invalid_write_scope"

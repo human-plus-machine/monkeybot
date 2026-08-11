@@ -10,6 +10,7 @@ from monkeybot.core.runtime.loop import run
 from monkeybot.core.runtime.turn_loop import (
     _EMPTY_COMPLETION_EXHAUSTED_ERROR,
     _EMPTY_COMPLETION_RECOVERY_NOTE,
+    _POST_TOOL_EMPTY_COMPLETION_NOTE,
 )
 from monkeybot.core.tools.types import ToolExecutionResult
 from tests.core.test_loop import AllowInspector, FakeHistory, FakeProvider, RecordingExecutor, _ctx
@@ -128,4 +129,40 @@ async def test_run_empty_after_tools_recovers_without_error() -> None:
         for b in m.content
         if hasattr(b, "text")
     )
-    assert _EMPTY_COMPLETION_RECOVERY_NOTE in followup_system
+    assert _POST_TOOL_EMPTY_COMPLETION_NOTE in followup_system
+    assert _EMPTY_COMPLETION_RECOVERY_NOTE not in followup_system
+
+
+@pytest.mark.asyncio
+async def test_run_empty_after_tools_exhausts_capped_retries() -> None:
+    """Post-tool empty retries once, then Error — not the full turn budget."""
+    from monkeybot.core.llm.provider import ToolCall
+
+    prov = FakeProvider(
+        [
+            [
+                ToolCall(call_id="c1", name="run_command", args={"command": "echo hi"}),
+                Done(),
+            ],
+            [Done()],
+            [Done()],
+            [Done()],
+        ]
+    )
+    events = []
+    async for e in run(
+        "do it",
+        _ctx(),
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(ToolExecutionResult.ok_text("ok")),
+        max_turns=6,
+    ):
+        events.append(e)
+
+    # tool turn + 1 post-tool empty retry + exhausted empty = 3 streams
+    assert prov.stream_calls == 3
+    assert isinstance(events[-1], TurnComplete)
+    error_texts = [e.error for e in events if isinstance(e, Error)]
+    assert error_texts == [_EMPTY_COMPLETION_EXHAUSTED_ERROR]

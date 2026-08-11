@@ -146,6 +146,83 @@ class SQLiteRunStore:
         await self._conn.commit()
         return int(cursor.rowcount) == 1
 
+    async def renew_claim(self, run_id: str, worker_id: str) -> bool:
+        """Extend the running claim lease for a worker still executing the run."""
+        now_ms = int(time.time() * 1000)
+        cursor = await self._conn.execute(
+            """
+            UPDATE subagent_runs
+            SET claimed_at = ?
+            WHERE run_id = ?
+              AND status = 'running'
+              AND worker_id = ?
+            """,
+            (now_ms, run_id, worker_id),
+        )
+        await self._conn.commit()
+        return int(cursor.rowcount) == 1
+
+    async def list_stale_claims(self, stale_after_ms: int) -> list[SubagentRunRow]:
+        """Return ``running`` rows whose claim lease is older than ``stale_after_ms``."""
+        cutoff = int(time.time() * 1000) - stale_after_ms
+        columns = ", ".join(_SUBAGENT_COLUMNS)
+        cursor = await self._conn.execute(
+            f"""
+            SELECT {columns} FROM subagent_runs
+            WHERE status = 'running'
+              AND claimed_at IS NOT NULL
+              AND claimed_at < ?
+            """,
+            (cutoff,),
+        )
+        rows = await cursor.fetchall()
+        return [_tuple_to_run_row(tuple(r)) for r in rows]
+
+    async def reset_stale_claim(
+        self,
+        run_id: str,
+        stale_after_ms: int,
+        *,
+        worker_id: str | None = None,
+    ) -> bool:
+        """Atomically reset one stale ``running`` claim back to ``pending``.
+
+        Returns True only when this caller won the reset. Used before reclaim
+        kill so a renewed heartbeat cannot be killed while the claim stays live.
+        """
+        cutoff = int(time.time() * 1000) - stale_after_ms
+        if worker_id is None:
+            cursor = await self._conn.execute(
+                """
+                UPDATE subagent_runs
+                SET status = 'pending',
+                    worker_id = NULL,
+                    claimed_at = NULL
+                WHERE run_id = ?
+                  AND status = 'running'
+                  AND claimed_at IS NOT NULL
+                  AND claimed_at < ?
+                """,
+                (run_id, cutoff),
+            )
+        else:
+            cursor = await self._conn.execute(
+                """
+                UPDATE subagent_runs
+                SET status = 'pending',
+                    worker_id = NULL,
+                    claimed_at = NULL
+                WHERE run_id = ?
+                  AND status = 'running'
+                  AND worker_id = ?
+                  AND claimed_at IS NOT NULL
+                  AND claimed_at < ?
+                """,
+                (run_id, worker_id, cutoff),
+            )
+        await self._conn.commit()
+        return int(cursor.rowcount) == 1
+
     async def reset_stale_claims(self, stale_after_ms: int) -> int:
         """Reset ``running`` rows with stale ``claimed_at`` back to ``pending``."""
         cutoff = int(time.time() * 1000) - stale_after_ms
@@ -164,37 +241,88 @@ class SQLiteRunStore:
         await self._conn.commit()
         return int(cursor.rowcount)
 
-    async def record_completed(self, run_id: str, result_json: str) -> None:
-        """Mark run completed with payload."""
-        now_ms = int(time.time() * 1000)
-        await self._conn.execute(
-            """
-            UPDATE subagent_runs
-            SET status = 'completed',
-                result_json = ?,
-                finished_at = ?,
-                error_json = NULL
-            WHERE run_id = ?
-            """,
-            (result_json, now_ms, run_id),
-        )
-        await self._conn.commit()
+    async def record_completed(
+        self,
+        run_id: str,
+        result_json: str,
+        *,
+        worker_id: str | None = None,
+    ) -> bool:
+        """Mark run completed with payload.
 
-    async def record_failed(self, run_id: str, error: str) -> None:
-        """Mark run failed with JSON ``{\"message\": ...}`` error."""
+        When ``worker_id`` is set, only succeeds if that worker still owns a
+        ``running`` claim (atomic; avoids TOCTOU overwrite after reclaim).
+        """
+        now_ms = int(time.time() * 1000)
+        if worker_id is None:
+            cursor = await self._conn.execute(
+                """
+                UPDATE subagent_runs
+                SET status = 'completed',
+                    result_json = ?,
+                    finished_at = ?,
+                    error_json = NULL
+                WHERE run_id = ?
+                """,
+                (result_json, now_ms, run_id),
+            )
+        else:
+            cursor = await self._conn.execute(
+                """
+                UPDATE subagent_runs
+                SET status = 'completed',
+                    result_json = ?,
+                    finished_at = ?,
+                    error_json = NULL
+                WHERE run_id = ?
+                  AND status = 'running'
+                  AND worker_id = ?
+                """,
+                (result_json, now_ms, run_id, worker_id),
+            )
+        await self._conn.commit()
+        return int(cursor.rowcount) == 1
+
+    async def record_failed(
+        self,
+        run_id: str,
+        error: str,
+        *,
+        worker_id: str | None = None,
+    ) -> bool:
+        """Mark run failed with JSON ``{\"message\": ...}`` error.
+
+        When ``worker_id`` is set, only succeeds if that worker still owns a
+        ``running`` claim (atomic; avoids TOCTOU overwrite after reclaim).
+        """
         now_ms = int(time.time() * 1000)
         err_payload = json.dumps({"message": error})
-        await self._conn.execute(
-            """
-            UPDATE subagent_runs
-            SET status = 'failed',
-                error_json = ?,
-                finished_at = ?
-            WHERE run_id = ?
-            """,
-            (err_payload, now_ms, run_id),
-        )
+        if worker_id is None:
+            cursor = await self._conn.execute(
+                """
+                UPDATE subagent_runs
+                SET status = 'failed',
+                    error_json = ?,
+                    finished_at = ?
+                WHERE run_id = ?
+                """,
+                (err_payload, now_ms, run_id),
+            )
+        else:
+            cursor = await self._conn.execute(
+                """
+                UPDATE subagent_runs
+                SET status = 'failed',
+                    error_json = ?,
+                    finished_at = ?
+                WHERE run_id = ?
+                  AND status = 'running'
+                  AND worker_id = ?
+                """,
+                (err_payload, now_ms, run_id, worker_id),
+            )
         await self._conn.commit()
+        return int(cursor.rowcount) == 1
 
     async def pending_runs(self) -> list[SubagentRunRow]:
         """Return ``pending`` runs oldest-first (worker pool claim candidates)."""

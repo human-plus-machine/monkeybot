@@ -30,6 +30,9 @@ def test_repair_synthesizes_missing_tool_result() -> None:
     assert len(responses) == 1
     assert responses[0].id == "c1"
     assert responses[0].is_error is True
+    assert isinstance(responses[0].result[0], Text)
+    assert 'Tool "echo" was interrupted or its result is missing' in responses[0].result[0].text
+    assert "do not assume the tool never ran" in responses[0].result[0].text
 
 
 def test_repair_skips_synthetic_assistant_for_unresolvable_orphan() -> None:

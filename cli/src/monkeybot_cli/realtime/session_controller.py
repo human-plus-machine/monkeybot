@@ -452,7 +452,7 @@ class RealtimeSessionController:
         self._spawn_background(_send(), name="rt-hitl")
 
     async def restart_session(self) -> None:
-        self._emit("error", message="Session restart is not supported in realtime mode")
+        raise RuntimeError("Session restart is not supported in realtime mode")
 
     async def resume_session(self, session_id: str) -> None:
         await self.close()

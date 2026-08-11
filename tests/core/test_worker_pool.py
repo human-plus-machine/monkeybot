@@ -38,6 +38,206 @@ def _make_envelope(parent_run_id: str = "parent-1", *, task: str = "do work") ->
 
 
 @pytest.mark.asyncio
+async def test_kill_scratch_subagent_reads_pid_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    (scratch / "subagent.pid").write_text("424242\nps:Wed Aug 11 12:00:00 2026\n", encoding="utf-8")
+    kills: list[tuple[int, int]] = []
+    killpgs: list[tuple[int, int]] = []
+
+    def _fake_kill(pid: int, sig: int) -> None:
+        kills.append((pid, sig))
+
+    def _fake_killpg(pgid: int, sig: int) -> None:
+        killpgs.append((pgid, sig))
+
+    monkeypatch.setattr(worker_pool, "_SUPPORTS_PROCESS_GROUPS", True)
+    monkeypatch.setattr(
+        worker_pool,
+        "_process_identity",
+        lambda pid: "ps:Wed Aug 11 12:00:00 2026" if pid == 424242 else None,
+    )
+    monkeypatch.setattr(worker_pool.os, "kill", _fake_kill)
+    monkeypatch.setattr(worker_pool.os, "killpg", _fake_killpg)
+    worker_pool._kill_scratch_subagent(scratch)
+    assert killpgs == [(424242, 9)]
+    assert kills == []
+
+
+@pytest.mark.asyncio
+async def test_kill_scratch_subagent_skips_pid_reuse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    (scratch / "subagent.pid").write_text(
+        "424242\nps:original-start\n", encoding="utf-8"
+    )
+    killpgs: list[tuple[int, int]] = []
+
+    monkeypatch.setattr(worker_pool, "_SUPPORTS_PROCESS_GROUPS", True)
+    monkeypatch.setattr(
+        worker_pool,
+        "_process_identity",
+        lambda pid: "ps:reused-start" if pid == 424242 else None,
+    )
+    monkeypatch.setattr(
+        worker_pool.os,
+        "killpg",
+        lambda pgid, sig: killpgs.append((pgid, sig)),
+    )
+    worker_pool._kill_scratch_subagent(scratch)
+    assert killpgs == []
+
+
+@pytest.mark.asyncio
+async def test_kill_scratch_subagent_skips_legacy_pid_only_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    (scratch / "subagent.pid").write_text("424242\n", encoding="utf-8")
+    killpgs: list[tuple[int, int]] = []
+
+    monkeypatch.setattr(worker_pool, "_SUPPORTS_PROCESS_GROUPS", True)
+    monkeypatch.setattr(
+        worker_pool,
+        "_process_identity",
+        lambda pid: "ps:anything",
+    )
+    monkeypatch.setattr(
+        worker_pool.os,
+        "killpg",
+        lambda pgid, sig: killpgs.append((pgid, sig)),
+    )
+    worker_pool._kill_scratch_subagent(scratch)
+    assert killpgs == []
+
+
+@pytest.mark.asyncio
+async def test_write_subagent_pid_records_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(
+        worker_pool,
+        "_process_identity",
+        lambda pid: f"ps:token-{pid}",
+    )
+    worker_pool._write_subagent_pid(scratch, 99)
+    assert (scratch / "subagent.pid").read_text(encoding="utf-8") == "99\nps:token-99\n"
+
+
+@pytest.mark.asyncio
+async def test_kill_scratch_subagent_kills_when_leader_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    (scratch / "subagent.pid").write_text(
+        "424242\nps:original-start\n", encoding="utf-8"
+    )
+    killpgs: list[tuple[int, int]] = []
+
+    monkeypatch.setattr(worker_pool, "_SUPPORTS_PROCESS_GROUPS", True)
+    monkeypatch.setattr(worker_pool, "_process_identity", lambda pid: None)
+    monkeypatch.setattr(
+        worker_pool.os,
+        "killpg",
+        lambda pgid, sig: killpgs.append((pgid, sig)),
+    )
+    worker_pool._kill_scratch_subagent(scratch)
+    assert killpgs == [(424242, 9)]
+
+
+@pytest.mark.asyncio
+async def test_stop_subagent_process_kills_group_after_leader_exits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signals: list[tuple[str, int, int]] = []
+
+    class _FakeProc:
+        pid = 111
+        returncode = 0  # leader already exited
+
+        def terminate(self) -> None:
+            raise AssertionError("should use killpg")
+
+        def kill(self) -> None:
+            signals.append(("kill", self.pid, 9))
+
+        async def wait(self) -> int:
+            return 0
+
+    def _fake_killpg(pgid: int, sig: int) -> None:
+        signals.append(("killpg", pgid, int(sig)))
+
+    monkeypatch.setattr(worker_pool, "_SUPPORTS_PROCESS_GROUPS", True)
+    monkeypatch.setattr(worker_pool.os, "killpg", _fake_killpg)
+    monkeypatch.setattr(worker_pool.asyncio, "sleep", AsyncMock())
+
+    proc = _FakeProc()
+    await worker_pool._stop_subagent_process(proc, pgid=111)  # type: ignore[arg-type]
+    assert ("killpg", 111, int(worker_pool.signal.SIGTERM)) in signals
+    assert ("killpg", 111, int(worker_pool.signal.SIGKILL)) in signals
+
+
+@pytest.mark.asyncio
+async def test_stop_subagent_process_kills_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signals: list[tuple[str, int, int]] = []
+
+    class _FakeProc:
+        pid = 111
+        returncode = None
+
+        def terminate(self) -> None:
+            raise AssertionError("should use killpg for process groups")
+
+        def kill(self) -> None:
+            signals.append(("kill", self.pid, 9))
+
+        async def wait(self) -> int:
+            self.returncode = -9
+            return -9
+
+    def _fake_killpg(pgid: int, sig: int) -> None:
+        signals.append(("killpg", pgid, int(sig)))
+
+    async def _fake_wait_for(awaitable, timeout=None):  # noqa: ANN001, ARG001
+        if asyncio.iscoroutine(awaitable):
+            awaitable.close()
+        raise TimeoutError()
+
+    monkeypatch.setattr(worker_pool, "_SUPPORTS_PROCESS_GROUPS", True)
+    monkeypatch.setattr(worker_pool.os, "killpg", _fake_killpg)
+    monkeypatch.setattr(worker_pool.asyncio, "wait_for", _fake_wait_for)
+
+    proc = _FakeProc()
+    await worker_pool._stop_subagent_process(proc, pgid=111)  # type: ignore[arg-type]
+    assert ("killpg", 111, int(worker_pool.signal.SIGTERM)) in signals
+    assert ("killpg", 111, int(worker_pool.signal.SIGKILL)) in signals
+
+
+@pytest.mark.asyncio
+async def test_claim_heartbeat_swallows_renew_errors(
+    sqlite_backend: SQLiteStorageBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = sqlite_backend.runs()
+
+    async def boom(*_a, **_k):
+        raise RuntimeError("db down")
+
+    store.renew_claim = boom  # type: ignore[method-assign]
+    monkeypatch.setattr(worker_pool.asyncio, "sleep", AsyncMock())
+    # Should return, not raise.
+    await worker_pool._claim_heartbeat(store, "run-x", "worker-a", stale_claim_ms=40)
+
+
+@pytest.mark.asyncio
 async def test_worker_pool_executes_claimed_run_once(
     sqlite_backend: SQLiteStorageBackend,
     tmp_path: Path,
@@ -83,6 +283,56 @@ async def test_worker_pool_executes_claimed_run_once(
     assert row is not None
     assert row.status == "completed"
     assert executed == ["do work"]
+
+
+@pytest.mark.asyncio
+async def test_execute_claimed_run_times_out_and_records_failure(
+    sqlite_backend: SQLiteStorageBackend,
+    tmp_path: Path,
+) -> None:
+    store = sqlite_backend.runs()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    env = _make_envelope()
+    await store.record_pending(
+        run_id="worker-run-timeout",
+        parent_run_id="parent",
+        script="subagents/x.py",
+        envelope=env,
+        scratch_dir=scratch,
+    )
+    assert await store.claim("worker-run-timeout", "worker-a") is True
+
+    async def _hanging_spawn(
+        script: str,
+        envelope,
+        *,
+        scratch_dir: Path,
+        subprocess_exec=None,
+        on_event=None,
+        extra_env=None,
+    ):
+        del script, envelope, scratch_dir, subprocess_exec, on_event, extra_env
+        await asyncio.sleep(3600)
+        yield TurnComplete(request_id="req-never", usage=UsageTotals())
+
+    with patch.object(worker_pool, "spawn_subagent", side_effect=_hanging_spawn):
+        row = await store.get_run("worker-run-timeout")
+        assert row is not None
+        await worker_pool.execute_claimed_run(
+            store,
+            row,
+            script=tmp_path / "worker.py",
+            worker_id="worker-a",
+            timeout_sec=0.05,
+        )
+
+    row = await store.get_run("worker-run-timeout")
+    assert row is not None
+    assert row.status == "failed"
+    assert row.error_json is not None
+    assert "exit_reason=timeout" in row.error_json
+    assert "progress.jsonl" in row.error_json
 
 
 @pytest.mark.asyncio
@@ -305,8 +555,8 @@ async def test_queue_mode_enqueue_then_worker_executes_e2e(
             ctx=_ctx(),
         )
     )
-    assert err is None and out is not None
-    run_id = json.loads(out)["run_id"]
+    assert err is not None and out is None
+    run_id = json.loads(err)["details"]["run_id"]
 
     execution_count = 0
 
@@ -393,3 +643,51 @@ async def test_stale_worker_does_not_overwrite_reclaimed_run(
     assert row.status == "running"
     assert row.worker_id == "worker-b"
     assert row.result_json is None
+
+
+@pytest.mark.asyncio
+async def test_reaper_only_kills_after_successful_reset(
+    sqlite_backend: SQLiteStorageBackend,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = sqlite_backend.runs()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    env = _make_envelope(task="renewed")
+    await store.record_pending(
+        run_id="worker-run-renew-reap",
+        parent_run_id="parent",
+        script="subagents/x.py",
+        envelope=env,
+        scratch_dir=scratch,
+    )
+    assert await store.claim("worker-run-renew-reap", "worker-live") is True
+    await asyncio.sleep(0.02)
+
+    kills: list[Path] = []
+    monkeypatch.setattr(
+        worker_pool,
+        "_kill_scratch_subagent",
+        lambda path: kills.append(path),
+    )
+
+    stale_rows = await store.list_stale_claims(stale_after_ms=10)
+    assert len(stale_rows) == 1
+    assert await store.renew_claim("worker-run-renew-reap", "worker-live") is True
+
+    # Same gate as run_worker_loop: kill only if atomic reset wins.
+    for stale in stale_rows:
+        if not await store.reset_stale_claim(
+            stale.run_id,
+            10,
+            worker_id=stale.worker_id,
+        ):
+            continue
+        worker_pool._kill_scratch_subagent(Path(stale.scratch_dir))
+
+    assert kills == []
+    row = await store.get_run("worker-run-renew-reap")
+    assert row is not None
+    assert row.status == "running"
+    assert row.worker_id == "worker-live"

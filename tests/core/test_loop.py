@@ -737,7 +737,7 @@ async def test_run_cancellation_between_two_tools_second_skipped() -> None:
         ]
     )
     hist = FakeHistory()
-    exe = CancelAfterFirst()
+    exe = CancelAfterFirst(("first-ok", None))
     ctx = _ctx()
     events = []
     async for e in run(
@@ -754,6 +754,31 @@ async def test_run_cancellation_between_two_tools_second_skipped() -> None:
     assert [c.call_id for c in exe.calls] == ["a"]
     assert any(isinstance(e, Error) and "cancelled" in e.error.lower() for e in events)
     assert isinstance(events[-1], TurnComplete)
+
+    # Completed tool a must land in history; b gets an explicit cancel envelope
+    # (not a generic integrity "interrupted" on the next turn).
+    tool_user_msgs = [
+        m
+        for m in hist.rows
+        if m.role == "user" and any(isinstance(b, ToolResponse) for b in m.content)
+    ]
+    assert len(tool_user_msgs) == 1
+    by_id = {
+        b.id: b
+        for b in tool_user_msgs[0].content
+        if isinstance(b, ToolResponse)
+    }
+    assert set(by_id) == {"a", "b"}
+    assert by_id["a"].is_error is False
+    assert any(
+        isinstance(block, Text) and "first-ok" in block.text for block in by_id["a"].result
+    )
+    assert by_id["b"].is_error is True
+    cancel_text = " ".join(
+        block.text for block in by_id["b"].result if isinstance(block, Text)
+    )
+    assert 'Tool "run_command" was cancelled' in cancel_text
+    assert "do not assume the tool never ran" in cancel_text
 
 
 @pytest.mark.asyncio
@@ -876,12 +901,15 @@ async def test_run_empty_model_after_tools_retries_then_succeeds() -> None:
     assert isinstance(events[-1], TurnComplete)
     # A successful post-tool recovery must not surface an Error.
     assert not any(isinstance(e, Error) for e in events)
-    # Recovery note injected on the provider call after the empty post-tool turn.
+    # Post-tool empty uses a distinct note (answer from results; don't burn tools).
+    from monkeybot.core.runtime.turn_loop import _POST_TOOL_EMPTY_COMPLETION_NOTE
+
     followup_msgs = prov.stream_messages[2]
     system_text = "".join(
         b.text for m in followup_msgs if m.role == "system" for b in m.content if hasattr(b, "text")
     )
-    assert _EMPTY_COMPLETION_RECOVERY_NOTE in system_text
+    assert _POST_TOOL_EMPTY_COMPLETION_NOTE in system_text
+    assert _EMPTY_COMPLETION_RECOVERY_NOTE not in system_text
 
 
 @pytest.mark.asyncio
@@ -2533,7 +2561,7 @@ async def test_compact_history_does_not_persist_synthetic_tool_repairs() -> None
     assert turns == 1
     assert len(hist.reset_calls) == 1
     _, persisted = hist.reset_calls[0]
-    synthetic_marker = "Tool call interrupted or result missing"
+    synthetic_marker = "was interrupted or its result is missing"
     for msg in persisted:
         for block in msg.content:
             if isinstance(block, ToolResponse):
@@ -2577,7 +2605,8 @@ async def test_run_replays_repaired_history_to_provider() -> None:
     assert len(synthetic) == 1
     assert synthetic[0].is_error is True
     assert isinstance(synthetic[0].result[0], Text)
-    assert synthetic[0].result[0].text == "Tool call interrupted or result missing"
+    assert 'Tool "echo" was interrupted or its result is missing' in synthetic[0].result[0].text
+    assert "do not assume the tool never ran" in synthetic[0].result[0].text
 
     # The repair is in-memory only: the stored/persisted history must remain
     # unrepaired (still just the orphaned request, no synthesized result).

@@ -576,3 +576,28 @@ def test_build_skill_runtime_env_prepends_gateway_python_bin(tmp_path, monkeypat
     assert env["PATH"].split(os.pathsep)[0] == venv_bin
     assert env["MONKEYBOT_PYTHON"] == sys.executable
     assert env["MONKEYBOT_WORKSPACE_ROOT"] == str(tmp_path.resolve())
+
+
+def test_process_group_helpers_skip_on_windows(monkeypatch) -> None:
+    import monkeybot.core.tools.terminal as terminal
+
+    monkeypatch.setattr(terminal, "_SUPPORTS_PROCESS_GROUPS", False)
+    assert terminal._process_group_id(12345) is None
+
+    class _Proc:
+        returncode = None
+        killed = False
+
+        def kill(self) -> None:
+            self.killed = True
+
+    proc = _Proc()
+    calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        terminal.os,
+        "killpg",
+        lambda pgid, sig: calls.append((pgid, sig)),
+    )
+    terminal._kill_process_group(999, proc)  # type: ignore[arg-type]
+    assert calls == []
+    assert proc.killed is True

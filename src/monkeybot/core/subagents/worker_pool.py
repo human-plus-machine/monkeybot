@@ -6,17 +6,21 @@ import asyncio
 import contextlib
 import logging
 import os
+import signal
+import subprocess
+import sys
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from monkeybot.core.config.settings import auto_schema_enabled_from_config
+from monkeybot.core.config.settings import auto_schema_enabled_from_config, get_subagent_settings
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.backends import RunStore, StorageBackend, create_storage_backend
 from monkeybot.core.persistence.durable_runs import SubagentRunRow
 from monkeybot.core.runtime.events import Error, TurnComplete, event_to_json
 from monkeybot.core.subagents.subagent_proto import (
+    SUBAGENT_STDOUT_LINE_LIMIT,
     SubagentEnvelope,
     resolve_subagent_script,
     spawn_subagent,
@@ -25,7 +29,69 @@ from monkeybot.core.subagents.subagent_proto import (
 logger = logging.getLogger(__name__)
 
 _SHUTDOWN_FAILURE_MESSAGE = "subagent run cancelled during worker shutdown"
-_STALE_CLAIM_WARN_FRACTION = 0.8
+_SUPPORTS_PROCESS_GROUPS = sys.platform != "win32"
+
+
+def _process_group_id(pid: int | None) -> int | None:
+    if pid is None or not _SUPPORTS_PROCESS_GROUPS:
+        return None
+    try:
+        return os.getpgid(pid)
+    except ProcessLookupError:
+        return pid
+    except OSError:
+        return None
+
+
+def _kill_process_group(pgid: int | None, proc: asyncio.subprocess.Process | None = None) -> None:
+    """SIGKILL ``pgid`` when known so descendants die with the child.
+
+    Prefer the process group even when the direct child has already exited —
+    orphans can keep mutating the workspace or holding pipes open.
+    """
+    if pgid is not None and _SUPPORTS_PROCESS_GROUPS:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+            return
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    if proc is not None and proc.returncode is None:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+
+
+async def _stop_subagent_process(
+    proc: asyncio.subprocess.Process | None,
+    *,
+    pgid: int | None = None,
+) -> None:
+    """SIGTERM/SIGKILL the process group (or direct child) on timeout/cancel.
+
+    Do not skip cleanup just because the direct child already exited — the
+    group may still have descendants.
+    """
+    if proc is None and pgid is None:
+        return
+    try:
+        if pgid is not None and _SUPPORTS_PROCESS_GROUPS:
+            os.killpg(pgid, signal.SIGTERM)
+        elif proc is not None and proc.returncode is None:
+            proc.terminate()
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    if proc is not None and proc.returncode is None:
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=8.0)
+            return
+        except TimeoutError:
+            pass
+    else:
+        # Leader already gone; give group members a moment after SIGTERM.
+        await asyncio.sleep(0.05)
+    _kill_process_group(pgid, proc)
+    if proc is not None and proc.returncode is None:
+        with contextlib.suppress(ProcessLookupError):
+            await proc.wait()
 
 
 def _env_float(name: str, default: float) -> float:
@@ -81,21 +147,6 @@ def resolve_worker_id() -> str:
     return f"worker-{uuid.uuid4().hex[:12]}"
 
 
-async def _still_owns_run(
-    run_store: RunStore,
-    run_id: str,
-    worker_id: str,
-    *,
-    claimed_at: int | None = None,
-) -> bool:
-    row = await run_store.get_run(run_id)
-    if row is None or row.status != "running" or row.worker_id != worker_id:
-        return False
-    if claimed_at is not None and row.claimed_at != claimed_at:
-        return False
-    return True
-
-
 async def _fail_in_flight_runs(
     run_store: RunStore,
     run_ids: set[str],
@@ -105,32 +156,151 @@ async def _fail_in_flight_runs(
 ) -> None:
     for run_id in list(run_ids):
         try:
-            if await _still_owns_run(run_store, run_id, worker_id):
-                await run_store.record_failed(run_id, message)
+            await run_store.record_failed(run_id, message, worker_id=worker_id)
         except Exception:
             logger.exception("failed to mark run_id=%s as failed during shutdown", run_id)
         finally:
             run_ids.discard(run_id)
 
 
-async def _stale_claim_watchdog(
+def _process_identity(pid: int) -> str | None:
+    """Return a stable identity token for ``pid``, or None if the process is gone.
+
+    Used to avoid SIGKILL/killpg against a reused PID after the original
+    subagent exits. Prefer Linux ``/proc`` starttime (+ boot id); fall back to
+    ``ps`` start time on other Unix platforms.
+    """
+    if pid <= 0:
+        return None
+    proc_stat = Path(f"/proc/{pid}/stat")
+    if proc_stat.exists():
+        try:
+            raw = proc_stat.read_text(encoding="utf-8")
+            close = raw.rfind(")")
+            if close < 0:
+                return None
+            fields = raw[close + 1 :].split()
+            if len(fields) < 20:
+                return None
+            starttime = fields[19]
+            boot_id = ""
+            try:
+                boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(
+                    encoding="utf-8"
+                ).strip()
+            except OSError:
+                pass
+            return f"linux:{boot_id}:{starttime}"
+        except OSError:
+            return None
+    if not _SUPPORTS_PROCESS_GROUPS:
+        return None
+    try:
+        completed = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    token = (completed.stdout or "").strip()
+    if not token or completed.returncode != 0:
+        return None
+    return f"ps:{token}"
+
+
+def _write_subagent_pid(scratch: Path, pid: int) -> None:
+    identity = _process_identity(pid)
+    if identity is None:
+        logger.warning(
+            "skipping subagent.pid write for pid=%s under %s: process identity unavailable",
+            pid,
+            scratch,
+        )
+        return
+    try:
+        (scratch / "subagent.pid").write_text(f"{pid}\n{identity}\n", encoding="utf-8")
+    except OSError:
+        logger.warning("failed to write subagent.pid under %s", scratch)
+
+
+def _read_subagent_pid(scratch: Path) -> tuple[int, str] | None:
+    pid_path = scratch / "subagent.pid"
+    try:
+        lines = [
+            line.strip()
+            for line in pid_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    except OSError:
+        return None
+    if len(lines) < 2:
+        return None
+    try:
+        pid = int(lines[0])
+    except ValueError:
+        return None
+    identity = lines[1]
+    if pid <= 0 or not identity:
+        return None
+    return pid, identity
+
+
+def _kill_scratch_subagent(scratch: Path) -> None:
+    """Best-effort kill of a reclaimed run's child process (from scratch/subagent.pid)."""
+    recorded = _read_subagent_pid(scratch)
+    if recorded is None:
+        return
+    pid, expected_identity = recorded
+    current = _process_identity(pid)
+    if current is not None and current != expected_identity:
+        logger.warning(
+            "skipping reclaim kill for pid=%s under %s: identity mismatch "
+            "(possible PID reuse)",
+            pid,
+            scratch,
+        )
+        return
+    # Leader may already be gone; killpg still reaches orphaned group members.
+    if _SUPPORTS_PROCESS_GROUPS:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+            return
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        logger.warning("permission denied killing reclaimed subagent pid=%s", pid)
+
+
+async def _claim_heartbeat(
+    run_store: RunStore,
     run_id: str,
-    claimed_at: int,
+    worker_id: str,
     stale_claim_ms: int,
 ) -> None:
-    """Warn once when a run approaches the stale-claim reclaim window."""
-    warn_after_ms = int(stale_claim_ms * _STALE_CLAIM_WARN_FRACTION)
-    deadline_s = max(0.0, (claimed_at + warn_after_ms - int(time.time() * 1000)) / 1000.0)
-    if deadline_s > 0:
-        await asyncio.sleep(deadline_s)
-    logger.warning(
-        "subagent run_id=%s has been running for >=%.0f%% of MONKEYBOT_WORKER_STALE_CLAIM_MS "
-        "(%d ms); if execution exceeds the full window another worker may reclaim and "
-        "re-execute the run",
-        run_id,
-        _STALE_CLAIM_WARN_FRACTION * 100,
-        stale_claim_ms,
-    )
+    """Renew claimed_at while the run executes so live workers are not reclaimed."""
+    interval_s = max(1.0, (stale_claim_ms / 1000.0) / 4.0)
+    while True:
+        await asyncio.sleep(interval_s)
+        try:
+            ok = await run_store.renew_claim(run_id, worker_id)
+        except Exception:
+            logger.exception(
+                "claim heartbeat failed %s",
+                kv(run_id=run_id, worker_id=worker_id),
+            )
+            return
+        if not ok:
+            logger.warning(
+                "claim heartbeat lost %s",
+                kv(run_id=run_id, worker_id=worker_id),
+            )
+            return
 
 
 async def execute_claimed_run(
@@ -140,6 +310,7 @@ async def execute_claimed_run(
     script: Path,
     worker_id: str,
     stale_claim_ms: int = 600_000,
+    timeout_sec: float | None = None,
 ) -> None:
     """Run one claimed subagent row to completion and persist the outcome."""
     envelope = SubagentEnvelope.from_json(row.envelope_json)
@@ -150,71 +321,114 @@ async def execute_claimed_run(
     scratch = Path(row.scratch_dir)
     errors: list[str] = []
     last_event_json: str | None = None
-    claimed_at = row.claimed_at
-    if claimed_at is None:
-        fresh = await run_store.get_run(row.run_id)
-        if fresh is not None:
-            claimed_at = fresh.claimed_at
-    watchdog: asyncio.Task[None] | None = None
-    if claimed_at is not None and stale_claim_ms > 0:
-        watchdog = asyncio.create_task(
-            _stale_claim_watchdog(row.run_id, claimed_at, stale_claim_ms),
-            name=f"monkeybot-stale-watchdog-{row.run_id}",
+    heartbeat: asyncio.Task[None] | None = None
+    if stale_claim_ms > 0:
+        heartbeat = asyncio.create_task(
+            _claim_heartbeat(run_store, row.run_id, worker_id, stale_claim_ms),
+            name=f"monkeybot-claim-heartbeat-{row.run_id}",
         )
 
     async def _record_failed_if_owner(message: str) -> bool:
-        if not await _still_owns_run(
-            run_store,
-            row.run_id,
-            worker_id,
-            claimed_at=claimed_at,
-        ):
+        ok = await run_store.record_failed(row.run_id, message, worker_id=worker_id)
+        if not ok:
             logger.warning(
                 "skipping failed outcome for run_id=%s worker_id=%s: claim lost",
                 row.run_id,
                 worker_id,
             )
-            return False
-        await run_store.record_failed(row.run_id, message)
-        return True
+        return ok
 
     async def _record_completed_if_owner(result_json: str) -> bool:
-        if not await _still_owns_run(
-            run_store,
-            row.run_id,
-            worker_id,
-            claimed_at=claimed_at,
-        ):
+        ok = await run_store.record_completed(
+            row.run_id, result_json, worker_id=worker_id
+        )
+        if not ok:
             logger.warning(
                 "skipping completed outcome for run_id=%s worker_id=%s: claim lost",
                 row.run_id,
                 worker_id,
             )
-            return False
-        await run_store.record_completed(row.run_id, result_json)
-        return True
+        return ok
 
-    try:
+    budget = get_subagent_settings().timeout_sec if timeout_sec is None else float(timeout_sec)
+    proc_holder: list[asyncio.subprocess.Process | None] = [None]
+    pgid_holder: list[int | None] = [None]
+
+    async def _subprocess_exec(*cmd: str | bytes) -> asyncio.subprocess.Process:
+        env = dict(os.environ)
+        env["PYTHONUNBUFFERED"] = "1"
+        # start_new_session so timeout/cancel can kill the whole process group
+        # (descendants would otherwise keep mutating the workspace).
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            env=env,
+            limit=SUBAGENT_STDOUT_LINE_LIMIT,
+            start_new_session=_SUPPORTS_PROCESS_GROUPS,
+        )
+        proc_holder[0] = proc
+        pgid_holder[0] = _process_group_id(proc.pid)
+        if proc.pid is not None:
+            _write_subagent_pid(scratch, proc.pid)
+        return proc
+
+    async def _consume() -> None:
+        nonlocal last_event_json
         async for evt in spawn_subagent(
             str(script),
             envelope,
             scratch_dir=scratch,
+            subprocess_exec=_subprocess_exec,
         ):
             if isinstance(evt, Error):
                 errors.append(evt.error)
             elif isinstance(evt, TurnComplete):
                 last_event_json = event_to_json(evt)
-    except asyncio.CancelledError:
-        await _record_failed_if_owner(_SHUTDOWN_FAILURE_MESSAGE)
-        raise
-    except Exception as exc:
-        logger.exception("worker failed executing run_id=%s", row.run_id)
-        errors.append(str(exc))
+
+    consume_task = asyncio.create_task(_consume())
+    try:
+        try:
+            await asyncio.wait_for(consume_task, timeout=budget)
+        except TimeoutError:
+            progress = scratch / "progress.jsonl"
+            msg = (
+                f"exit_reason=timeout: subagent exceeded {budget:g}s; "
+                f"inspect {progress}"
+            )
+            logger.warning(
+                "worker subagent timeout %s",
+                kv(run_id=row.run_id, timeout_sec=budget, progress=str(progress)),
+            )
+            errors.append(msg)
+            await _stop_subagent_process(proc_holder[0], pgid=pgid_holder[0])
+            if not consume_task.done():
+                consume_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await consume_task
+        except asyncio.CancelledError:
+            await _stop_subagent_process(proc_holder[0], pgid=pgid_holder[0])
+            if not consume_task.done():
+                consume_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await consume_task
+            await _record_failed_if_owner(_SHUTDOWN_FAILURE_MESSAGE)
+            raise
+        except Exception as exc:
+            logger.exception("worker failed executing run_id=%s", row.run_id)
+            errors.append(str(exc))
+            await _stop_subagent_process(proc_holder[0], pgid=pgid_holder[0])
+            if not consume_task.done():
+                consume_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await consume_task
     finally:
-        if watchdog is not None:
-            watchdog.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await watchdog
+        if heartbeat is not None:
+            heartbeat.cancel()
+            # renew_claim failures must not escape and skip outcome recording.
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await heartbeat
 
     if errors:
         logger.debug(
@@ -290,7 +504,27 @@ async def run_worker_loop(
     try:
         while True:
             try:
-                reset_count = await run_store.reset_stale_claims(stale_claim_ms)
+                stale_rows = await run_store.list_stale_claims(stale_claim_ms)
+                reset_count = 0
+                for stale in stale_rows:
+                    # Reset first; only kill if we won the reclaim so a renewed
+                    # heartbeat cannot leave a live run killed while still claimed.
+                    if not await run_store.reset_stale_claim(
+                        stale.run_id,
+                        stale_claim_ms,
+                        worker_id=stale.worker_id,
+                    ):
+                        continue
+                    reset_count += 1
+                    _kill_scratch_subagent(Path(stale.scratch_dir))
+                    logger.warning(
+                        "reclaiming stale subagent claim %s",
+                        kv(
+                            run_id=stale.run_id,
+                            worker_id=stale.worker_id or "",
+                            exit_reason="reclaimed",
+                        ),
+                    )
                 if reset_count:
                     logger.info(
                         "reset stale subagent claims %s",
@@ -335,8 +569,8 @@ def start_worker_pool_background(
     active_runs: set[str] = set()
     logger.info(
         "starting subagent worker pool worker_id=%s script=%s concurrency=%d "
-        "stale_claim_ms=%d (MONKEYBOT_WORKER_STALE_CLAIM_MS; runs without heartbeat "
-        "may be reclaimed and re-executed after this window)",
+        "stale_claim_ms=%d (MONKEYBOT_WORKER_STALE_CLAIM_MS; live runs heartbeat the "
+        "claim lease; stale runs are killed via scratch/subagent.pid then requeued)",
         wid,
         resolved_script,
         settings.concurrency,

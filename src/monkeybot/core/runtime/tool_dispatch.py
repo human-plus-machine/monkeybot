@@ -27,6 +27,7 @@ from monkeybot.core.hooks import HookEvent, HookManager
 from monkeybot.core.llm.provider import Provider, ToolCall
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.messages.tool_integrity import cancelled_tool_result_text
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.runtime.context_budget import ContextBudgeter
 from monkeybot.core.tools.inspector import InspectorToolCall, ToolInspector
@@ -590,26 +591,24 @@ async def _execute_parallel_chunk(
                 ),
             )
 
+    tasks = [asyncio.create_task(_run_parallel(c)) for c in allowed_exec]
+    outcomes: list[object]
     try:
-        outcomes = await asyncio.gather(
-            *[_run_parallel(c) for c in allowed_exec],
-            return_exceptions=True,
-        )
+        outcomes = list(await asyncio.gather(*tasks, return_exceptions=True))
     except asyncio.CancelledError:
-        yield Error(request_id=ctx.request_id, error="Request cancelled")
-        result.mcp_mutated = mcp_mutated
-        result.loops_mutated = loops_mutated
-        result.aborted = True
-        return
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        outcomes = list(await asyncio.gather(*tasks, return_exceptions=True))
+        saw_cancel = True
+    else:
+        saw_cancel = False
 
     for idx, outcome in enumerate(outcomes):
         call = allowed_exec[idx]
         if isinstance(outcome, asyncio.CancelledError):
-            yield Error(request_id=ctx.request_id, error="Request cancelled")
-            result.mcp_mutated = mcp_mutated
-            result.loops_mutated = loops_mutated
-            result.aborted = True
-            return
+            saw_cancel = True
+            continue
         if isinstance(outcome, Exception):
             logger.warning(
                 "tool execution failed %s",
@@ -639,6 +638,10 @@ async def _execute_parallel_chunk(
 
     result.mcp_mutated = mcp_mutated
     result.loops_mutated = loops_mutated
+    if saw_cancel:
+        yield Error(request_id=ctx.request_id, error="Request cancelled")
+        result.aborted = True
+        return
     result.aborted = False
 
 
@@ -838,6 +841,52 @@ async def _post_batch_budget_and_registry(
         )
 
 
+def _fill_abort_tool_responses(
+    *,
+    ordered: Sequence[ToolCall],
+    all_tool_responses: list[ContentBlock],
+    pending_chunk_responses: Sequence[ContentBlock] | None,
+    finish_tool: _FinishTool,
+    request_id: str,
+    thread_id: str,
+) -> list[ToolCallResult]:
+    """Merge pending chunk results; synthesize cancel envelopes for missing ids.
+
+    Mutates ``all_tool_responses`` in place. Returns SSE events for newly
+    synthesized cancel results (completed tools already emitted theirs).
+    """
+    if pending_chunk_responses:
+        all_tool_responses.extend(pending_chunk_responses)
+
+    responded_ids = {
+        block.id
+        for block in all_tool_responses
+        if isinstance(block, ToolResponse)
+    }
+    completed_count = len(responded_ids)
+    events: list[ToolCallResult] = []
+    for call in ordered:
+        if call.call_id in responded_ids:
+            continue
+        result_evt, tool_resp = finish_tool(
+            call, ToolExecutionResult.err(cancelled_tool_result_text(call.name))
+        )
+        events.append(result_evt)
+        all_tool_responses.append(tool_resp)
+        responded_ids.add(call.call_id)
+
+    logger.info(
+        "tool batch abort settle %s",
+        kv(
+            request_id=request_id,
+            thread_id=thread_id,
+            completed_count=completed_count,
+            cancelled_count=len(events),
+        ),
+    )
+    return events
+
+
 async def dispatch_tool_batch(
     *,
     ordered: Sequence[ToolCall],
@@ -861,8 +910,9 @@ async def dispatch_tool_batch(
 ) -> AsyncIterator[AgentEvent]:
     """Execute one provider tool-call batch; yield events; update ``state`` in place.
 
-    On cancellation mid-batch, sets ``state.aborted`` and returns so the caller can
-    ``return`` from the outer turn loop (same as the former inline ``return`` paths).
+    On cancellation mid-batch, settles completed results into history, synthesizes
+    cancel envelopes only for unrecorded call ids, sets ``state.aborted``, and
+    returns so the caller can ``return`` from the outer turn loop.
     """
     ctx = state.ctx
 
@@ -881,6 +931,7 @@ async def dispatch_tool_batch(
     all_tool_responses: list[ContentBlock] = []
     mcp_registry_mutated = False
     loops_registry_mutated = False
+    abort_pending: Sequence[ContentBlock] | None = None
     # Computed once per batch and reused for both chunking and dispatch
     # so the two stay consistent even if ctx.tools were ever mutated
     # mid-batch (e.g. by an MCP registry reload).
@@ -904,7 +955,8 @@ async def dispatch_tool_batch(
             yield Error(request_id=ctx.request_id, error="Request cancelled")
             state.aborted = True
             state.needs_followup_after_tools = False
-            return
+            abort_pending = None
+            break
 
         gate_result = _GateChunkResult()
         async for evt in _gate_chunk_calls(
@@ -920,7 +972,8 @@ async def dispatch_tool_batch(
         if gate_result.aborted:
             state.aborted = True
             state.needs_followup_after_tools = False
-            return
+            abort_pending = gate_result.chunk_responses
+            break
 
         allowed_exec = gate_result.allowed_exec
         chunk_responses = gate_result.chunk_responses
@@ -948,14 +1001,26 @@ async def dispatch_tool_batch(
         ):
             yield evt
 
+        mcp_registry_mutated = exec_result.mcp_mutated
+        loops_registry_mutated = exec_result.loops_mutated
         if exec_result.aborted:
             state.aborted = True
             state.needs_followup_after_tools = False
-            return
+            abort_pending = chunk_responses
+            break
 
-        mcp_registry_mutated = exec_result.mcp_mutated
-        loops_registry_mutated = exec_result.loops_mutated
         all_tool_responses.extend(chunk_responses)
+
+    if state.aborted:
+        for evt in _fill_abort_tool_responses(
+            ordered=ordered,
+            all_tool_responses=all_tool_responses,
+            pending_chunk_responses=abort_pending,
+            finish_tool=_finish_tool,
+            request_id=ctx.request_id,
+            thread_id=ctx.thread_id,
+        ):
+            yield evt
 
     async for evt in _post_batch_budget_and_registry(
         state=state,

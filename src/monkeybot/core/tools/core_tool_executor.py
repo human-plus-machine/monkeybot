@@ -664,6 +664,33 @@ def _built_in_tool_error(
     return _j(payload)
 
 
+_RUNTIME_NO_IDENTICAL_RETRY_HINT = (
+    "Do not retry identical arguments. Fix the underlying cause if you can act on it; "
+    "otherwise stop and report the blocker. If a spill or partial_output_path is present, "
+    "read_file that path before changing approach."
+)
+_TIMEOUT_NO_IDENTICAL_RETRY_HINT = (
+    "Do not retry identical arguments and do not bump timeouts. "
+    "If a spill or partial_output_path is present, read_file that path first; "
+    "otherwise narrow scope or diagnose from the error."
+)
+
+
+def _incomplete_scan_envelope(
+    exc: WorkspaceError,
+    hint: str,
+    valid_options: list[str],
+) -> str:
+    """Shared ok:false envelope when glob/grep cannot support absence conclusions."""
+    details: dict[str, Any] = {}
+    extra = getattr(exc, "details", None)
+    if isinstance(extra, dict):
+        details.update(extra)
+    details["code"] = "incomplete_scan"
+    details["valid_options"] = valid_options
+    return _built_in_tool_error("incomplete_scan", str(exc), hint, details)
+
+
 def _workspace_error_envelope(exc: WorkspaceError) -> str:
     code = getattr(exc, "code", "workspace_error")
     msg = str(exc)
@@ -1008,7 +1035,7 @@ class CoreToolExecutor(ToolExecutorPort):
                         _built_in_tool_error(
                             "runtime",
                             str(exc),
-                            "Fix the underlying issue described in message, then retry once if appropriate.",
+                            _RUNTIME_NO_IDENTICAL_RETRY_HINT,
                             {"tool": name},
                         ),
                     )
@@ -1039,13 +1066,23 @@ class CoreToolExecutor(ToolExecutorPort):
             result_text, err_text = None, str(exc)
         except SecurityError as exc:
             result_text, err_text = None, self._run_command_security_envelope(exc)
-        except (TimeoutError, ValueError, TypeError, OSError) as exc:
+        except TimeoutError as exc:
             result_text, err_text = (
                 None,
                 _built_in_tool_error(
                     "runtime",
                     str(exc),
-                    "Fix the underlying issue described in message, then retry once if appropriate.",
+                    _TIMEOUT_NO_IDENTICAL_RETRY_HINT,
+                    {"tool": name},
+                ),
+            )
+        except (ValueError, TypeError, OSError) as exc:
+            result_text, err_text = (
+                None,
+                _built_in_tool_error(
+                    "runtime",
+                    str(exc),
+                    _RUNTIME_NO_IDENTICAL_RETRY_HINT,
                     {"tool": name},
                 ),
             )
@@ -1305,6 +1342,21 @@ class CoreToolExecutor(ToolExecutorPort):
             payload = self._workspace.glob_paths(pattern, root=root)
             return (_j(payload), None)
         except WorkspaceError as exc:
+            if getattr(exc, "code", None) == "incomplete_scan":
+                return (
+                    None,
+                    _incomplete_scan_envelope(
+                        exc,
+                        "This result cannot be used to conclude absence. Narrow `root` or "
+                        "tighten `pattern`, then retry. Partial paths (if any) are in "
+                        "details.partial_paths — inspect those before re-issuing.",
+                        [
+                            "narrow root to a subdirectory",
+                            "use a tighter pattern (e.g. src/**/*.py instead of **/*)",
+                            "search for a specific filename instead of listing everything",
+                        ],
+                    ),
+                )
             return (None, _workspace_error_envelope(exc))
 
     def _tool_grep(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -1351,20 +1403,16 @@ class CoreToolExecutor(ToolExecutorPort):
             if getattr(exc, "code", None) == "incomplete_scan":
                 return (
                     None,
-                    _built_in_tool_error(
-                        "incomplete_scan",
-                        str(exc),
+                    _incomplete_scan_envelope(
+                        exc,
                         "This result cannot be used to conclude absence. Narrow `root` or "
                         'pass a `file_glob` (e.g. "*.py") so every candidate file can be '
                         "scanned, then retry.",
-                        {
-                            "code": "incomplete_scan",
-                            "valid_options": [
-                                "narrow root to a subdirectory",
-                                'pass file_glob such as "*.py" or "*.{ts,tsx}"',
-                                "page matches with offset after a complete narrower scan",
-                            ],
-                        },
+                        [
+                            "narrow root to a subdirectory",
+                            'pass file_glob such as "*.py" or "*.{ts,tsx}"',
+                            "page matches with offset after a complete narrower scan",
+                        ],
                     ),
                 )
             return (None, _workspace_error_envelope(exc))
@@ -1392,13 +1440,30 @@ class CoreToolExecutor(ToolExecutorPort):
             payload = plan_and_apply_patch(self._workspace, hunks)
             return (_j(payload), None)
         except PatchError as exc:
+            code = getattr(exc, "code", "patch_error")
+            details: dict[str, Any] = {"code": code}
+            extra = getattr(exc, "details", None)
+            if isinstance(extra, dict):
+                details.update(extra)
+            if code == "rollback_failed":
+                return (
+                    None,
+                    _built_in_tool_error(
+                        "runtime",
+                        str(exc),
+                        "Workspace may be partially modified. Re-read every dirty path "
+                        "in details before any retry; do not re-apply the same patch_text.",
+                        details,
+                    ),
+                )
             return (
                 None,
                 _built_in_tool_error(
                     "validation",
                     str(exc),
-                    "Fix the patch (markers, paths, or hunk context) and retry once.",
-                    {"code": getattr(exc, "code", "patch_error")},
+                    "Fix the patch (markers, paths, or hunk context). Re-read target "
+                    "files before retrying; do not retry identical patch_text.",
+                    details,
                 ),
             )
         except WorkspaceError as exc:
@@ -1671,8 +1736,8 @@ class CoreToolExecutor(ToolExecutorPort):
         scratch.mkdir(parents=True, exist_ok=True)
 
         # Queue mode: worker pool has no parent SessionBus/EventPublisherPort, so nested
-        # SubagentStarted/Event/Completed SSE is intentionally not emitted here. Clients
-        # should treat ``queued: true`` as async and reopen via ``child_thread_id`` later.
+        # SubagentStarted/Event/Completed SSE is intentionally not emitted here. Return
+        # ok:false / pending so ``ok`` never means terminal success while work is queued.
         queue_mode = os.environ.get("MONKEYBOT_TASK_QUEUE", "").strip().lower() in (
             "1",
             "true",
@@ -1690,22 +1755,21 @@ class CoreToolExecutor(ToolExecutorPort):
                     scratch_dir=scratch,
                 )
                 return (
-                    _j(
+                    None,
+                    _built_in_tool_error(
+                        "pending",
+                        "Subagent run queued for worker pool; work has not finished yet.",
+                        "Do not treat this as task completion. Wait for a terminal "
+                        "exit_reason (or reopen via child_thread_id) before reporting "
+                        "done or skipping follow-up work.",
                         {
-                            "ok": True,
                             "queued": True,
                             "run_id": run_id,
                             "child_thread_id": child_thread_id,
                             "subagent_type": subagent_type,
                             "scratch_dir": str(scratch),
-                            "message": (
-                                "Subagent run queued for worker pool. "
-                                "Nested SSE progress is not streamed in queue mode; "
-                                "use child_thread_id to reopen the nested transcript."
-                            ),
-                        }
+                        },
                     ),
-                    None,
                 )
             await self._run_store.record_started(
                 run_id=run_id,

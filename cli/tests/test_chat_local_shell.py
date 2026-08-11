@@ -29,10 +29,36 @@ def test_run_local_shell_uses_cwd(tmp_path: Path) -> None:
     assert code == 0
 
 
+def test_kill_process_tree_swallows_permission_error(monkeypatch) -> None:
+    monkeypatch.setattr(chat_local_shell, "_IS_WINDOWS", False)
+
+    def _boom_killpg(pid: int, sig: int) -> None:
+        raise PermissionError("race")
+
+    def _boom_kill(pid: int, sig: int) -> None:
+        raise ProcessLookupError()
+
+    monkeypatch.setattr(chat_local_shell.os, "killpg", _boom_killpg)
+    monkeypatch.setattr(chat_local_shell.os, "kill", _boom_kill)
+    chat_local_shell._kill_process_tree(4321)  # must not raise
+
+
 def test_run_local_shell_timeout(tmp_path: Path) -> None:
     out, code = run_local_shell(f"{sys.executable} -c 'import time; time.sleep(5)'", tmp_path, timeout=0.2)
     assert code is None
     assert "timed out" in out
+
+
+def test_run_local_shell_caps_unbounded_output(tmp_path: Path) -> None:
+    script = tmp_path / "flood.py"
+    script.write_text(
+        "import sys\nwhile True:\n    sys.stdout.write('y' * 4096)\n    sys.stdout.flush()\n",
+        encoding="utf-8",
+    )
+    out, code = run_local_shell(f"{sys.executable} {script}", tmp_path, timeout=5.0)
+    assert code is not None
+    assert len(out) <= chat_local_shell._MAX_CAPTURE_CHARS + 80
+    assert "output capped" in out
 
 
 def test_run_local_shell_timeout_kills_grandchildren(tmp_path: Path) -> None:

@@ -293,6 +293,56 @@ async def test_glob(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_glob_incomplete_scan_errors(tmp_path: Path) -> None:
+    from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService, WorkspaceSettings
+
+    root = tmp_path
+    for i in range(5):
+        (root / f"f{i}.txt").write_text(f"x{i}\n", encoding="utf-8")
+    svc = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GLOB_MAX_PATHS=2),
+    )
+    with pytest.raises(WorkspaceError) as ei:
+        svc.glob_paths("*.txt")
+    assert ei.value.code == "incomplete_scan"
+    assert isinstance(ei.value.details, dict)
+    assert ei.value.details["stop_reason"] == "max_paths"
+    assert ei.value.details["count"] == 2
+    assert len(ei.value.details["partial_paths"]) == 2
+
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    ex._workspace = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GLOB_MAX_PATHS=2),
+    )
+    ctx = _ctx()
+    _out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="1", name="glob", args={"pattern": "*.txt"}),
+            ctx=ctx,
+        )
+    )
+    assert err is not None
+    payload = json.loads(err)
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "incomplete_scan"
+    assert "cannot be used to conclude absence" in payload["message"]
+    assert "Narrow `root`" in payload["hint"]
+    assert payload["details"]["count"] == 2
+    assert len(payload["details"]["partial_paths"]) == 2
+
+
+@pytest.mark.asyncio
 async def test_grep(tmp_path: Path) -> None:
     root = tmp_path
     mem = tmp_path / "mem"
@@ -531,6 +581,160 @@ async def test_grep_incomplete_scan_errors_with_rg(tmp_path: Path) -> None:
     with pytest.raises(WorkspaceError) as ei:
         svc.grep("KNOWN_MATCH_TOKEN")
     assert ei.value.code == "incomplete_scan"
+
+
+@pytest.mark.asyncio
+async def test_grep_skipped_oversized_is_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService, WorkspaceSettings
+
+    monkeypatch.setattr("monkeybot.core.tools.workspace_service.shutil.which", lambda _name: None)
+    root = tmp_path
+    (root / "small.py").write_text("nope\n", encoding="utf-8")
+    (root / "big.py").write_bytes(b"SECRET_TOKEN\n" + b"x" * 200)
+    svc = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILE_BYTES=50, WORKSPACE_GREP_MAX_FILES=100),
+    )
+    with pytest.raises(WorkspaceError) as ei:
+        svc.grep("SECRET_TOKEN")
+    assert ei.value.code == "incomplete_scan"
+    assert ei.value.details is not None
+    assert ei.value.details["files_skipped_oversized"] == 1
+    assert ei.value.details["stop_reason"] == "skipped_files"
+
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    ex._workspace = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILE_BYTES=50, WORKSPACE_GREP_MAX_FILES=100),
+    )
+    _out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="1", name="grep", args={"pattern": "SECRET_TOKEN"}),
+            ctx=_ctx(),
+        )
+    )
+    assert err is not None
+    payload = json.loads(err)
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "incomplete_scan"
+    assert payload["details"]["files_skipped_oversized"] == 1
+
+
+@pytest.mark.asyncio
+async def test_grep_skipped_binary_is_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService, WorkspaceSettings
+
+    monkeypatch.setattr("monkeybot.core.tools.workspace_service.shutil.which", lambda _name: None)
+    root = tmp_path
+    (root / "a.py").write_text("hello\n", encoding="utf-8")
+    (root / "blob.bin").write_bytes(b"abc\x00defSECRET")
+    svc = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILES=100),
+    )
+    with pytest.raises(WorkspaceError) as ei:
+        svc.grep("SECRET")
+    assert ei.value.code == "incomplete_scan"
+    assert ei.value.details is not None
+    assert ei.value.details["files_skipped_binary"] == 1
+
+
+@pytest.mark.asyncio
+async def test_grep_skipped_oversized_incomplete_with_rg(tmp_path: Path) -> None:
+    import shutil
+
+    from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService, WorkspaceSettings
+
+    if shutil.which("rg") is None:
+        pytest.skip("rg not on PATH")
+
+    root = tmp_path
+    (root / "small.py").write_text("nope\n", encoding="utf-8")
+    (root / "big.py").write_bytes(b"SECRET_TOKEN\n" + b"x" * 200)
+    svc = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILE_BYTES=50, WORKSPACE_GREP_MAX_FILES=100),
+    )
+    with pytest.raises(WorkspaceError) as ei:
+        svc.grep("SECRET_TOKEN")
+    assert ei.value.code == "incomplete_scan"
+    assert ei.value.details is not None
+    assert ei.value.details["files_skipped_oversized"] == 1
+
+
+@pytest.mark.asyncio
+async def test_grep_rg_timeout_is_incomplete_no_python_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """rg TimeoutExpired must not fall through to unbounded Python walk."""
+    import shutil
+    import subprocess
+
+    from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService
+
+    if shutil.which("rg") is None:
+        pytest.skip("rg not on PATH")
+
+    root = tmp_path
+    (root / "a.py").write_text("needle\n", encoding="utf-8")
+    python_calls = {"n": 0}
+    real_grep_python = WorkspaceFileService._grep_python
+
+    def _track_python(self, *args, **kwargs):  # noqa: ANN001
+        python_calls["n"] += 1
+        return real_grep_python(self, *args, **kwargs)
+
+    def _timeout_run(*_a, **_kw):  # noqa: ANN001
+        raise subprocess.TimeoutExpired(cmd=["rg"], timeout=120)
+
+    monkeypatch.setattr(WorkspaceFileService, "_grep_python", _track_python)
+    monkeypatch.setattr(
+        "monkeybot.core.tools.workspace_service.subprocess.run",
+        _timeout_run,
+    )
+    svc = WorkspaceFileService(root)
+    with pytest.raises(WorkspaceError) as ei:
+        svc.grep("needle")
+    assert ei.value.code == "incomplete_scan"
+    assert ei.value.details is not None
+    assert ei.value.details["stop_reason"] == "rg_timed_out"
+    assert python_calls["n"] == 0
+
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    ex._workspace = WorkspaceFileService(root)
+    _out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="1", name="grep", args={"pattern": "needle"}),
+            ctx=_ctx(),
+        )
+    )
+    assert err is not None
+    payload = json.loads(err)
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "incomplete_scan"
+    assert payload["details"]["stop_reason"] == "rg_timed_out"
 
 
 @pytest.mark.asyncio
@@ -2114,11 +2318,12 @@ async def test_task_tool_queue_mode_enqueues_pending_run(
                 ctx=_ctx(),
             )
         )
-        assert err is None and out is not None
-        payload = json.loads(out)
-        assert payload["ok"] is True
-        assert payload["queued"] is True
-        row = await backend.runs().get_run(payload["run_id"])
+        assert err is not None and out is None
+        payload = json.loads(err)
+        assert payload["ok"] is False
+        assert payload["error_kind"] == "pending"
+        assert payload["details"]["queued"] is True
+        row = await backend.runs().get_run(payload["details"]["run_id"])
         assert row is not None
         assert row.status == "pending"
         stored = StoredEnvelope.from_json(row.envelope_json)
@@ -2328,6 +2533,35 @@ async def test_custom_tool_tool_execution_result_passthrough(tmp_path: Path) -> 
     assert result.error is None
     assert any(isinstance(b, Image) for b in result.blocks)
 
+
+@pytest.mark.asyncio
+async def test_extra_tool_runtime_error_forbids_identical_retry(tmp_path: Path) -> None:
+    from monkeybot.core.types.types_tools import ToolDef
+
+    class _BoomTool:
+        tool_def = ToolDef("boom", "raises", {"type": "object", "properties": {}})
+
+        async def execute(self, args: dict[str, object]) -> str:
+            del args
+            raise RuntimeError("boom")
+
+    (tmp_path / "mem").mkdir(exist_ok=True)
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_NoMCP(),
+        extra_tools=[_BoomTool()],
+    )
+    _out, err = unwrap_tool_execution_result(
+        await ex.execute(call=ToolCall(call_id="1", name="boom", args={}), ctx=_ctx())
+    )
+    assert err is not None
+    payload = json.loads(err)
+    assert payload["ok"] is False
+    assert "Do not retry identical arguments" in payload["hint"]
+    assert "if appropriate" not in payload["hint"]
 
 
 class _CatalogMCP(_NoMCP):
@@ -3254,18 +3488,20 @@ async def test_task_tool_queue_mode_includes_linkage_fields(
                 ctx=_ctx(),
             )
         )
-        assert err is None and out is not None
-        payload = json.loads(out)
-        assert payload["ok"] is True
-        assert payload["queued"] is True
-        assert isinstance(payload["child_thread_id"], str)
-        assert payload["child_thread_id"].startswith("subagent:t:")
-        assert payload["subagent_type"] == "researcher"
-        assert "Nested SSE progress is not streamed in queue mode" in payload["message"]
-        row = await backend.runs().get_run(payload["run_id"])
+        assert err is not None and out is None
+        payload = json.loads(err)
+        assert payload["ok"] is False
+        assert payload["error_kind"] == "pending"
+        details = payload["details"]
+        assert details["queued"] is True
+        assert isinstance(details["child_thread_id"], str)
+        assert details["child_thread_id"].startswith("subagent:t:")
+        assert details["subagent_type"] == "researcher"
+        assert "Do not treat this as task completion" in payload["hint"]
+        row = await backend.runs().get_run(details["run_id"])
         assert row is not None
         stored = StoredEnvelope.from_json(row.envelope_json)
-        assert stored.child_thread_id == payload["child_thread_id"]
+        assert stored.child_thread_id == details["child_thread_id"]
     finally:
         await backend.close()
 
@@ -3309,7 +3545,8 @@ async def test_task_tool_queue_mode_skips_nested_sse(
                 ctx=_ctx(event_publisher=pub),
             )
         )
-        assert err is None and out is not None
+        assert err is not None and out is None
+        assert json.loads(err)["error_kind"] == "pending"
         assert pub.events == []
     finally:
         await backend.close()

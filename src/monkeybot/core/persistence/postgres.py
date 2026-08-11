@@ -516,6 +516,87 @@ class PostgresRunStore:
             )
         return row is not None
 
+    async def renew_claim(self, run_id: str, worker_id: str) -> bool:
+        now_ms = int(time.time() * 1000)
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE subagent_runs
+                SET claimed_at = $1
+                WHERE run_id = $2
+                  AND status = 'running'
+                  AND worker_id = $3
+                """,
+                now_ms,
+                run_id,
+                worker_id,
+            )
+        try:
+            return int(result.split()[-1]) == 1
+        except (ValueError, IndexError):
+            return False
+
+    async def list_stale_claims(self, stale_after_ms: int) -> list[SubagentRunRow]:
+        cutoff = int(time.time() * 1000) - stale_after_ms
+        columns = ", ".join(_SUBAGENT_COLUMNS)
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT {columns} FROM subagent_runs
+                WHERE status = 'running'
+                  AND claimed_at IS NOT NULL
+                  AND claimed_at < $1
+                """,
+                cutoff,
+            )
+        return [_tuple_to_run_row(tuple(r)) for r in rows]
+
+    async def reset_stale_claim(
+        self,
+        run_id: str,
+        stale_after_ms: int,
+        *,
+        worker_id: str | None = None,
+    ) -> bool:
+        cutoff = int(time.time() * 1000) - stale_after_ms
+        async with self._pool.acquire() as conn:
+            if worker_id is None:
+                result = await conn.execute(
+                    """
+                    UPDATE subagent_runs
+                    SET status = 'pending',
+                        worker_id = NULL,
+                        claimed_at = NULL
+                    WHERE run_id = $1
+                      AND status = 'running'
+                      AND claimed_at IS NOT NULL
+                      AND claimed_at < $2
+                    """,
+                    run_id,
+                    cutoff,
+                )
+            else:
+                result = await conn.execute(
+                    """
+                    UPDATE subagent_runs
+                    SET status = 'pending',
+                        worker_id = NULL,
+                        claimed_at = NULL
+                    WHERE run_id = $1
+                      AND status = 'running'
+                      AND worker_id = $2
+                      AND claimed_at IS NOT NULL
+                      AND claimed_at < $3
+                    """,
+                    run_id,
+                    worker_id,
+                    cutoff,
+                )
+        try:
+            return int(result.split()[-1]) == 1
+        except (ValueError, IndexError):
+            return False
+
     async def reset_stale_claims(self, stale_after_ms: int) -> int:
         cutoff = int(time.time() * 1000) - stale_after_ms
         async with self._pool.acquire() as conn:
@@ -536,39 +617,94 @@ class PostgresRunStore:
         except (ValueError, IndexError):
             return 0
 
-    async def record_completed(self, run_id: str, result_json: str) -> None:
+    async def record_completed(
+        self,
+        run_id: str,
+        result_json: str,
+        *,
+        worker_id: str | None = None,
+    ) -> bool:
         now_ms = int(time.time() * 1000)
         async with self._pool.acquire() as conn:
-            await conn.execute(
-                """
-                UPDATE subagent_runs
-                SET status = 'completed',
-                    result_json = $1,
-                    finished_at = $2,
-                    error_json = NULL
-                WHERE run_id = $3
-                """,
-                result_json,
-                now_ms,
-                run_id,
-            )
+            if worker_id is None:
+                result = await conn.execute(
+                    """
+                    UPDATE subagent_runs
+                    SET status = 'completed',
+                        result_json = $1,
+                        finished_at = $2,
+                        error_json = NULL
+                    WHERE run_id = $3
+                    """,
+                    result_json,
+                    now_ms,
+                    run_id,
+                )
+            else:
+                result = await conn.execute(
+                    """
+                    UPDATE subagent_runs
+                    SET status = 'completed',
+                        result_json = $1,
+                        finished_at = $2,
+                        error_json = NULL
+                    WHERE run_id = $3
+                      AND status = 'running'
+                      AND worker_id = $4
+                    """,
+                    result_json,
+                    now_ms,
+                    run_id,
+                    worker_id,
+                )
+        try:
+            return int(result.split()[-1]) == 1
+        except (ValueError, IndexError):
+            return False
 
-    async def record_failed(self, run_id: str, error: str) -> None:
+    async def record_failed(
+        self,
+        run_id: str,
+        error: str,
+        *,
+        worker_id: str | None = None,
+    ) -> bool:
         now_ms = int(time.time() * 1000)
         err_payload = json.dumps({"message": error})
         async with self._pool.acquire() as conn:
-            await conn.execute(
-                """
-                UPDATE subagent_runs
-                SET status = 'failed',
-                    error_json = $1,
-                    finished_at = $2
-                WHERE run_id = $3
-                """,
-                err_payload,
-                now_ms,
-                run_id,
-            )
+            if worker_id is None:
+                result = await conn.execute(
+                    """
+                    UPDATE subagent_runs
+                    SET status = 'failed',
+                        error_json = $1,
+                        finished_at = $2
+                    WHERE run_id = $3
+                    """,
+                    err_payload,
+                    now_ms,
+                    run_id,
+                )
+            else:
+                result = await conn.execute(
+                    """
+                    UPDATE subagent_runs
+                    SET status = 'failed',
+                        error_json = $1,
+                        finished_at = $2
+                    WHERE run_id = $3
+                      AND status = 'running'
+                      AND worker_id = $4
+                    """,
+                    err_payload,
+                    now_ms,
+                    run_id,
+                    worker_id,
+                )
+        try:
+            return int(result.split()[-1]) == 1
+        except (ValueError, IndexError):
+            return False
 
     async def pending_runs(self) -> list[SubagentRunRow]:
         columns = ", ".join(_SUBAGENT_COLUMNS)
