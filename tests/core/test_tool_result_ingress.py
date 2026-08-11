@@ -75,6 +75,26 @@ def test_sanitize_keeps_unified_diff_in_json_data_field() -> None:
     assert sanitize_tool_result_text(raw) == raw
 
 
+def test_normalize_mcp_keeps_real_pr_diff_in_data_field() -> None:
+    """Real PR unified diff through MCP text-block normalize must not redact ``data``."""
+    from pathlib import Path
+
+    fixture = Path(__file__).parent / "fixtures" / "bitbucket_dc_style_pr.diff"
+    diff = fixture.read_text(encoding="utf-8")
+    assert len(diff) > 512
+    assert "diff --git" in diff and "+++" in diff
+
+    # Bitbucket DC MCP shape: JSON text content with the diff under ``data``.
+    payload = json.dumps({"success": True, "data": diff}, ensure_ascii=False)
+    result = SimpleNamespace(content=[SimpleNamespace(type="text", text=payload)])
+    out = _normalize_call_tool_result(result)
+
+    assert "omitted" not in out
+    parsed = json.loads(out)
+    assert parsed["success"] is True
+    assert parsed["data"] == diff
+
+
 def test_sanitize_keeps_long_non_blob_text_fields() -> None:
     """browser_get_elements ``tree`` must survive sanitize; spill/cap handle size."""
     tree = "\n".join(f"[{i}]<button>Item {i}</button>" for i in range(200))

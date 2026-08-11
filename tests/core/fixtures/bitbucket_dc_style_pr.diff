@@ -1,0 +1,456 @@
+diff --git a/src/monkeybot/core/context/tool_result_ingress.py b/src/monkeybot/core/context/tool_result_ingress.py
+index 29851b9..a0e146d 100644
+--- a/src/monkeybot/core/context/tool_result_ingress.py
++++ b/src/monkeybot/core/context/tool_result_ingress.py
+@@ -74,6 +74,12 @@ def blob_json_field_max_chars() -> int:
+     return _BLOB_JSON_FIELD_MAX_CHARS
+ 
+ 
++def _has_nontrivial_b64_markers(sample: str) -> bool:
++    """True when ``+/`` density looks like base64, not a lone slash or plus."""
++    plus_slash = sum(1 for ch in sample if ch in "+/")
++    return plus_slash >= 3 or (plus_slash / max(1, len(sample)) >= 0.02)
++
++
+ def _looks_like_base64(value: str) -> bool:
+     """Return True when *value* is likely base64, including short JSON field payloads."""
+     if not value:
+@@ -91,23 +97,46 @@ def _looks_like_base64(value: str) -> bool:
+     sample = stripped[:512]
+     if len(set(sample.strip("="))) <= 2:
+         return False
+-    if stripped.rstrip().endswith("=") or any(ch in "+/" for ch in sample):
++    if stripped.rstrip().endswith("="):
++        return True
++    if _has_nontrivial_b64_markers(sample):
+         return True
+     return len(set(sample)) >= 6
+ 
+ 
+ def _is_plausible_base64_run(text: str) -> bool:
++    """True for long runs that look like real base64 (not diffs / prose).
++
++    After the alphabet-ratio gate, unpadded alphanumeric-only base64 is still
++    accepted — padding / ``+/`` markers are sufficient but not required.
++    """
+     if len(text) < _MIN_BASE64_RUN:
+         return False
+     sample = text[:4096]
+     if len(set(sample.strip("="))) <= 2:
+         return False
+-    if any(ch in "+/" for ch in sample):
+-        return True
+-    if sample.rstrip().endswith("="):
+-        return True
+     allowed = sum(1 for ch in sample if ch.isalnum() or ch in "+/=\n\r")
+-    return allowed / max(1, len(sample)) >= 0.98 and len(set(sample)) >= 8
++    if allowed / max(1, len(sample)) < 0.98:
++        return False
++    return len(set(sample)) >= 8
++
++
++def _is_compact_non_text_blob(value: str) -> bool:
++    """Dense payloads without whitespace/punctuation — omit these by size.
++
++    Readable text (unified diffs, logs, JSON) has whitespace or punctuation
++    outside the base64 alphabet; those must survive sanitize so soft spill can
++    handle size. Compact ``"x" * N`` / binary-looking runs still redact.
++    """
++    sample = value[:4096]
++    if not sample:
++        return False
++    if any(ch.isspace() for ch in sample):
++        return False
++    for ch in sample:
++        if not (ch.isalnum() or ch in "+/="):
++            return False
++    return True
+ 
+ 
+ def _replace_long_b64(match: re.Match[str]) -> str:
+@@ -118,12 +147,18 @@ def _replace_long_b64(match: re.Match[str]) -> str:
+ 
+ 
+ def _should_redact_blob_field(key: str, value: str, *, max_field: int) -> bool:
+-    """True only for denylisted blob keys that look like binary/base64 or are oversized."""
++    """True for denylisted keys that look like binary/base64 or compact blobs.
++
++    Oversized plain text under denylisted keys (e.g. MCP ``data`` holding a
++    unified diff) is left intact — whole-result size is handled by soft spill.
++    """
+     if key.lower() not in _REDACT_JSON_KEYS:
+         return False
+     if _looks_like_base64(value):
+         return True
+-    return max_field > 0 and len(value) > max_field
++    if max_field > 0 and len(value) > max_field:
++        return _is_compact_non_text_blob(value)
++    return False
+ 
+ 
+ def _redact_json_value(key: str, value: Any, *, max_field: int) -> Any:
+diff --git a/src/monkeybot/core/tools/workspace_service.py b/src/monkeybot/core/tools/workspace_service.py
+index 060842c..1a67749 100644
+--- a/src/monkeybot/core/tools/workspace_service.py
++++ b/src/monkeybot/core/tools/workspace_service.py
+@@ -386,6 +386,119 @@ def _tally_grep_skip(kind: str, tallies: dict[str, int]) -> bool:
+     return True
+ 
+ 
++def _utf8_byte_offsets_to_char_offsets(
++    text: str,
++    byte_start: int,
++    byte_end: int | None = None,
++) -> tuple[int, int | None]:
++    """Map ripgrep UTF-8 byte offsets into Unicode character indices for *text*."""
++    encoded = text.encode("utf-8")
++
++    def _clamp_boundary(pos: int) -> int:
++        pos = max(0, min(pos, len(encoded)))
++        # Exclusive end at ``len(encoded)`` is already a valid boundary.
++        if pos >= len(encoded):
++            return len(encoded)
++        # Step back if *pos* lands mid multi-byte sequence.
++        while pos > 0 and (encoded[pos] & 0xC0) == 0x80:
++            pos -= 1
++        return pos
++
++    start = _clamp_boundary(byte_start)
++    char_start = len(encoded[:start].decode("utf-8"))
++    if byte_end is None:
++        return char_start, None
++    end = _clamp_boundary(max(byte_start, byte_end))
++    if end < start:
++        end = start
++    char_end = len(encoded[:end].decode("utf-8"))
++    return char_start, char_end
++
++
++def _clip_grep_match_line(
++    line: str,
++    match_start: int | None,
++    match_end: int | None = None,
++    *,
++    max_chars: int = 2000,
++) -> str:
++    """Clip a long grep hit so the match remains visible in the preview.
++
++    Short lines are returned unchanged. When ``match_start`` is missing, falls
++    back to a prefix clip (historical behavior). Otherwise centers a window on
++    ``[match_start, match_end)``, keeping the full match when it fits, and marks
++    truncation with leading/trailing ``…`` while staying within ``max_chars``.
++    """
++    if max_chars <= 0:
++        return ""
++    if len(line) <= max_chars:
++        return line
++    if match_start is None:
++        return line[:max_chars]
++
++    start = max(0, min(match_start, len(line)))
++    end = start if match_end is None else max(start, min(match_end, len(line)))
++    ellipsis = "…"
++    match_len = end - start
++
++    def _assemble(win_start: int, win_end: int) -> str:
++        parts: list[str] = []
++        if win_start > 0:
++            parts.append(ellipsis)
++        parts.append(line[win_start:win_end])
++        if win_end < len(line):
++            parts.append(ellipsis)
++        return "".join(parts)
++
++    # Match longer than the budget: keep as much of the match as possible.
++    if match_len >= max_chars:
++        need_lead = start > 0
++        budget = max_chars - (1 if need_lead else 0)
++        chunk_end = start + budget
++        need_trail = chunk_end < len(line)
++        if need_trail:
++            budget = max_chars - (1 if need_lead else 0) - 1
++            chunk_end = start + max(0, budget)
++        return _assemble(start, chunk_end)
++
++    # Match fits: center context around it, refining ellipsis costs.
++    need_lead = start > 0
++    need_trail = end < len(line)
++    win_start = start
++    win_end = end
++    for _ in range(3):
++        content_budget = max_chars - (1 if need_lead else 0) - (1 if need_trail else 0)
++        if content_budget < match_len:
++            content_budget = match_len
++        extra = content_budget - match_len
++        before = extra // 2
++        after = extra - before
++        win_start = start - before
++        win_end = end + after
++        if win_start < 0:
++            win_end = min(len(line), win_end - win_start)
++            win_start = 0
++        if win_end > len(line):
++            win_start = max(0, win_start - (win_end - len(line)))
++            win_end = len(line)
++        if win_start > start:
++            win_start = start
++        if win_end < end:
++            win_end = min(len(line), end)
++            if win_end - win_start > content_budget:
++                win_end = win_start + content_budget
++        new_need_lead = win_start > 0
++        new_need_trail = win_end < len(line)
++        if new_need_lead == need_lead and new_need_trail == need_trail:
++            break
++        need_lead, need_trail = new_need_lead, new_need_trail
++
++    result = _assemble(win_start, win_end)
++    if len(result) > max_chars:
++        return result[:max_chars]
++    return result
++
++
+ def _regex_needs_python_engine(pattern: str) -> bool:
+     """True when ``pattern`` uses Python ``re`` features unsupported by ripgrep."""
+     return _RG_UNSUPPORTED_RE.search(pattern) is not None
+@@ -949,7 +1062,10 @@ def glob_paths(self, pattern: str, root: str | None = None) -> GlobResult:
+                 if time.monotonic() > deadline:
+                     stop_reason = "timeout"
+                     break
+-                if not p.is_file():
++                if not (p.is_file() or p.is_dir()):
++                    continue
++                # ``Path.glob`` can yield the search root for patterns like ``.`` / ``*``.
++                if p.resolve() == base.resolve():
+                     continue
+                 try:
+                     self._as_repo_rel(p)
+@@ -1137,14 +1253,19 @@ def _grep_python(
+             files_scanned += 1
+             text = data.decode("utf-8", errors="replace")
+             for line_no, line in enumerate(text.splitlines(), start=1):
+-                if not regex.search(line):
++                m = regex.search(line)
++                if m is None:
+                     continue
+                 total_match_count += 1
+                 if total_match_count <= offset:
+                     continue
+                 if len(matches) < max_matches:
+                     matches.append(
+-                        {"path": rel, "line": line_no, "text": line[:2000]}
++                        {
++                            "path": rel,
++                            "line": line_no,
++                            "text": _clip_grep_match_line(line, m.start(), m.end()),
++                        }
+                     )
+ 
+         if candidates_remaining:
+@@ -1281,7 +1402,22 @@ def _grep_with_rg(
+                 text = lines_info.get("text") if isinstance(lines_info, dict) else ""
+                 if not isinstance(text, str):
+                     text = ""
+-                text = text.rstrip("\n\r")[:2000]
++                text = text.rstrip("\n\r")
++                match_start: int | None = None
++                match_end: int | None = None
++                submatches = data.get("submatches")
++                if isinstance(submatches, list) and submatches:
++                    first = submatches[0]
++                    if isinstance(first, dict):
++                        raw_start = first.get("start")
++                        raw_end = first.get("end")
++                        if isinstance(raw_start, int):
++                            # rg submatches are UTF-8 byte offsets into the line.
++                            end_arg = raw_end if isinstance(raw_end, int) else None
++                            match_start, match_end = _utf8_byte_offsets_to_char_offsets(
++                                text, raw_start, end_arg
++                            )
++                text = _clip_grep_match_line(text, match_start, match_end)
+                 line_no = data.get("line_number")
+                 if not isinstance(line_no, int):
+                     line_no = 0
+diff --git a/tests/core/test_core_tool_executor.py b/tests/core/test_core_tool_executor.py
+index 3929a66..1eda8d4 100644
+--- a/tests/core/test_core_tool_executor.py
++++ b/tests/core/test_core_tool_executor.py
+@@ -292,6 +292,25 @@ async def test_glob(tmp_path: Path) -> None:
+     assert "notes.md" not in out
+ 
+ 
++def test_glob_paths_matches_directories(tmp_path: Path) -> None:
++    """Checkout probes must see directories, not only files."""
++    from monkeybot.core.tools.workspace_service import WorkspaceFileService
++
++    root = tmp_path
++    checkout = root / "repos" / "EPCAP" / "agentic-platform-monorepo"
++    checkout.mkdir(parents=True)
++    (checkout / "README.md").write_text("hi\n", encoding="utf-8")
++    svc = WorkspaceFileService(root)
++
++    exact = svc.glob_paths("EPCAP/agentic-platform-monorepo", root="repos")
++    assert exact["ok"] is True
++    assert "repos/EPCAP/agentic-platform-monorepo" in exact["paths"]
++
++    wildcard = svc.glob_paths("EPCAP/*", root="repos")
++    assert wildcard["ok"] is True
++    assert "repos/EPCAP/agentic-platform-monorepo" in wildcard["paths"]
++
++
+ @pytest.mark.asyncio
+ async def test_glob_incomplete_scan_errors(tmp_path: Path) -> None:
+     from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService, WorkspaceSettings
+@@ -846,6 +865,101 @@ def _paths(result: dict) -> set[str]:
+     assert _paths(with_rg) == _paths(without_rg) == {"other/test_x.py"}
+ 
+ 
++def test_clip_grep_match_line_centers_on_match() -> None:
++    from monkeybot.core.tools.workspace_service import _clip_grep_match_line
++
++    needle = "chore/dead-code"
++    prefix = "x" * 2500
++    suffix = "y" * 2500
++    line = prefix + needle + suffix
++    start = len(prefix)
++    end = start + len(needle)
++
++    clipped = _clip_grep_match_line(line, start, end, max_chars=2000)
++    assert needle in clipped
++    assert len(clipped) <= 2000
++    assert clipped.startswith("…")
++    assert clipped.endswith("…")
++
++
++def test_clip_grep_match_line_short_unchanged() -> None:
++    from monkeybot.core.tools.workspace_service import _clip_grep_match_line
++
++    line = "short line with needle here"
++    assert _clip_grep_match_line(line, 16, 22, max_chars=2000) == line
++
++
++def test_clip_grep_match_line_missing_start_is_prefix() -> None:
++    from monkeybot.core.tools.workspace_service import _clip_grep_match_line
++
++    line = "a" * 3000
++    assert _clip_grep_match_line(line, None, None, max_chars=2000) == line[:2000]
++
++
++def test_utf8_byte_offsets_to_char_offsets_for_rg() -> None:
++    """rg submatches are UTF-8 byte offsets; clipping must use character indices."""
++    from monkeybot.core.tools.workspace_service import (
++        _clip_grep_match_line,
++        _utf8_byte_offsets_to_char_offsets,
++    )
++
++    needle = "NEEDLE"
++    # ``ä`` is 2 UTF-8 bytes; enough multibyte prefix that byte≠char indices diverge.
++    prefix = "ä" * 1500
++    suffix = "x" * 1500
++    line = prefix + needle + suffix
++    byte_start = len(prefix.encode("utf-8"))
++    byte_end = byte_start + len(needle.encode("utf-8"))
++    assert byte_start != len(prefix)
++
++    char_start, char_end = _utf8_byte_offsets_to_char_offsets(line, byte_start, byte_end)
++    assert char_start == len(prefix)
++    assert char_end == len(prefix) + len(needle)
++
++    # Using raw byte offsets as char indices would miss the needle in the window.
++    wrong = _clip_grep_match_line(line, byte_start, byte_end, max_chars=200)
++    assert needle not in wrong
++
++    clipped = _clip_grep_match_line(line, char_start, char_end, max_chars=200)
++    assert needle in clipped
++
++
++def test_grep_long_line_preview_contains_needle(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    """Mid-line needles past the 2000-char prefix must appear in match text."""
++    import shutil
++
++    from monkeybot.core.tools.workspace_service import WorkspaceFileService, WorkspaceSettings
++
++    root = tmp_path
++    needle = "chore/dead-code"
++    (root / "spill.json").write_text(
++        ("{" + '"pad":"' + ("z" * 4000) + '","ref":"' + needle + '"}'),
++        encoding="utf-8",
++    )
++    svc = WorkspaceFileService(
++        root,
++        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_MATCHES=50, WORKSPACE_GREP_MAX_FILES=100),
++    )
++    rg_bin = shutil.which("rg")
++
++    monkeypatch.setattr("monkeybot.core.tools.workspace_service.shutil.which", lambda _name: None)
++    py_result = svc.grep(needle)
++    assert py_result["ok"] is True
++    assert py_result["match_count"] >= 1
++    assert any(needle in m["text"] for m in py_result["matches"])
++
++    if rg_bin is None:
++        return
++
++    monkeypatch.undo()
++    rg_result = svc.grep(needle)
++    assert rg_result["ok"] is True
++    assert rg_result["match_count"] >= 1
++    assert any(needle in m["text"] for m in rg_result["matches"])
++
++
+ @pytest.mark.asyncio
+ async def test_apply_patch_tool(tmp_path: Path) -> None:
+     root = tmp_path
+diff --git a/tests/core/test_tool_result_ingress.py b/tests/core/test_tool_result_ingress.py
+index dd235a1..cd889c5 100644
+--- a/tests/core/test_tool_result_ingress.py
++++ b/tests/core/test_tool_result_ingress.py
+@@ -51,6 +51,30 @@ def test_sanitize_keeps_short_plain_text_in_json_data_field() -> None:
+     assert parsed["data"] == "not base64 text"
+ 
+ 
++def test_sanitize_keeps_unified_diff_in_json_data_field() -> None:
++    """Bitbucket DC MCP returns diffs in ``data``; size must not omit plain text."""
++    diff = (
++        "diff --git a/src/foo.py b/src/foo.py\n"
++        "--- a/src/foo.py\n"
++        "+++ b/src/foo.py\n"
++        "@@ -1,5 +1,8 @@\n"
++        " def greet(name):\n"
++        "-    return f'hi {name}'\n"
++        "+    # chore/dead-code cleanup\n"
++        "+    return f'hello {name}'\n"
++        "+\n"
++        "+def unused():\n"
++        "+    pass\n"
++    )
++    # Stretch past the blob-field size threshold while staying text-like.
++    while len(diff) < 800:
++        diff += "+    # more context line with /path/and+++markers\n"
++    assert len(diff) > 512
++    payload = {"success": True, "data": diff}
++    raw = json.dumps(payload)
++    assert sanitize_tool_result_text(raw) == raw
++
++
+ def test_sanitize_keeps_long_non_blob_text_fields() -> None:
+     """browser_get_elements ``tree`` must survive sanitize; spill/cap handle size."""
+     tree = "\n".join(f"[{i}]<button>Item {i}</button>" for i in range(200))
+@@ -84,6 +108,15 @@ def test_sanitize_redacts_long_bare_base64_run() -> None:
+     assert "base64 run" in out
+ 
+ 
++def test_sanitize_redacts_long_alphanumeric_base64_run() -> None:
++    """Unpadded alphanumeric-only base64 must still redact (no +/ or = required)."""
++    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
++    blob = (alphabet * 20)[:1200]
++    out = sanitize_tool_result_text(blob)
++    assert blob not in out
++    assert "base64 run" in out
++
++
+ def test_sanitize_keeps_repeated_plain_text() -> None:
+     text = "x" * 40_000
+     assert sanitize_tool_result_text(text) == text
