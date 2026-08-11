@@ -1312,6 +1312,9 @@ class ChatApp(App[int]):
         composer = self.query_one("#prompt", Composer)
         composer.push_history(value)
         self._mount_user(value.strip())
+        # Set before scheduling the @work worker so /new|/resume|/model cannot
+        # race the gap between dispatch and worker start.
+        self._submit_in_flight = True
         self._submit_message(value)
 
     @on(Composer.Submitted)

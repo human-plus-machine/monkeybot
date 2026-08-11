@@ -6,11 +6,10 @@ Output is local-only — never sent to the agent.
 from __future__ import annotations
 
 import os
-import select
 import signal
 import subprocess
 import sys
-import time
+import threading
 from pathlib import Path
 
 _IS_WINDOWS = sys.platform == "win32"
@@ -30,36 +29,27 @@ def _popen_kwargs_for_platform() -> dict[str, object]:
 
 
 def _kill_process_tree(pid: int) -> None:
+    """Best-effort kill of the shell process group/tree.
+
+    Swallow lookup/permission races — leader exit can make killpg raise
+    ``PermissionError`` even though descendants still need a signal.
+    """
     if _IS_WINDOWS:
-        # os.killpg doesn't exist on Windows; taskkill /T walks the tree
-        # rooted at pid (which CREATE_NEW_PROCESS_GROUP made a group leader).
-        subprocess.run(
-            ["taskkill", "/F", "/T", "/PID", str(pid)],
-            capture_output=True,
-            check=False,
-        )
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                capture_output=True,
+                check=False,
+            )
+        except OSError:
+            pass
         return
     try:
         os.killpg(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-
-
-def _drain_and_reap(proc: subprocess.Popen[str]) -> None:
-    """Best-effort drain + wait so pipe-backed children do not hang."""
-    if proc.stdout is not None:
+    except (ProcessLookupError, PermissionError, OSError):
         try:
-            while proc.stdout.read(_READ_CHUNK):
-                pass
-        except Exception:
-            pass
-    try:
-        proc.wait(timeout=2)
-    except Exception:
-        _kill_process_tree(proc.pid)
-        try:
-            proc.wait(timeout=1)
-        except Exception:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
             pass
 
 
@@ -75,50 +65,6 @@ def _append_capped(chunks: list[str], total: int, data: str) -> tuple[int, bool]
     return total + remain, True
 
 
-def _read_output_posix(proc: subprocess.Popen[str], *, deadline: float) -> tuple[str, bool, bool]:
-    """Return ``(output, timed_out, capped)`` using select-bounded reads."""
-    assert proc.stdout is not None
-    chunks: list[str] = []
-    total = 0
-    timed_out = False
-    capped = False
-    while True:
-        now = time.monotonic()
-        if now >= deadline:
-            timed_out = True
-            break
-        ready, _, _ = select.select([proc.stdout], [], [], min(0.2, deadline - now))
-        if not ready:
-            if proc.poll() is not None:
-                rest = proc.stdout.read()
-                if rest:
-                    total, capped = _append_capped(chunks, total, rest)
-                break
-            continue
-        chunk = proc.stdout.read(_READ_CHUNK)
-        if chunk == "":
-            break
-        total, capped = _append_capped(chunks, total, chunk)
-        if capped:
-            break
-    return "".join(chunks), timed_out, capped
-
-
-def _read_output_windows(proc: subprocess.Popen[str], *, timeout: float) -> tuple[str, bool, bool]:
-    """Windows pipes are not select()-able; use communicate with a post-cap."""
-    timed_out = False
-    try:
-        output, _ = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        _kill_process_tree(proc.pid)
-        output, _ = proc.communicate()
-    capped = len(output) > _MAX_CAPTURE_CHARS
-    if capped:
-        output = output[:_MAX_CAPTURE_CHARS]
-    return output, timed_out, capped
-
-
 def run_local_shell(command: str, cwd: Path, *, timeout: float = 120.0) -> tuple[str, int | None]:
     """Run ``command`` in a shell, returning merged stdout+stderr and the exit code.
 
@@ -127,8 +73,9 @@ def run_local_shell(command: str, cwd: Path, *, timeout: float = 120.0) -> tuple
     kills the shell itself, leaving children it spawned (e.g. a backgrounded
     ``sleep``) running past the reported timeout.
 
-    Output is capped at ``_MAX_CAPTURE_CHARS`` so unbounded writers cannot
-    exhaust memory before the TUI truncates for display.
+    Output is capped at ``_MAX_CAPTURE_CHARS`` while streaming (never fully
+    buffered first), so unbounded writers cannot exhaust memory before the
+    TUI truncates for display. Works the same on POSIX and Windows.
     """
     proc = subprocess.Popen(
         command,
@@ -139,24 +86,82 @@ def run_local_shell(command: str, cwd: Path, *, timeout: float = 120.0) -> tuple
         text=True,
         **_popen_kwargs_for_platform(),
     )
-    deadline = time.monotonic() + timeout
-    try:
-        if _IS_WINDOWS:
-            output, timed_out, capped = _read_output_windows(proc, timeout=timeout)
-        else:
-            output, timed_out, capped = _read_output_posix(proc, deadline=deadline)
-            if timed_out or capped:
-                _kill_process_tree(proc.pid)
-            _drain_and_reap(proc)
-    except Exception:
-        _kill_process_tree(proc.pid)
-        _drain_and_reap(proc)
-        raise
+    assert proc.stdout is not None
 
+    chunks: list[str] = []
+    state = {"total": 0, "capped": False}
+    stop_reader = threading.Event()
+
+    def _reader() -> None:
+        stdout = proc.stdout
+        if stdout is None:
+            return
+        try:
+            while not stop_reader.is_set():
+                chunk = stdout.read(_READ_CHUNK)
+                if chunk == "":
+                    break
+                state["total"], hit = _append_capped(chunks, state["total"], chunk)
+                if hit:
+                    state["capped"] = True
+                    _kill_process_tree(proc.pid)
+                    break
+        except (ValueError, OSError):
+            # stdout closed from the main thread to unblock a stuck read.
+            return
+
+    reader = threading.Thread(target=_reader, name="monkeybot-local-shell-reader", daemon=True)
+    reader.start()
+
+    timed_out = False
+    try:
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            _kill_process_tree(proc.pid)
+
+        # Shell may have exited while a descendant still holds the pipe —
+        # kill the tree and close stdout so the reader cannot block forever.
+        if reader.is_alive():
+            _kill_process_tree(proc.pid)
+            stop_reader.set()
+            try:
+                proc.stdout.close()
+            except OSError:
+                pass
+            reader.join(timeout=2.0)
+            if reader.is_alive() and not timed_out:
+                # Still stuck after kill+close: treat as timeout so the TUI
+                # always gets a bounded result instead of hanging.
+                timed_out = True
+        else:
+            reader.join(timeout=0.1)
+    except Exception:
+        timed_out = True
+        _kill_process_tree(proc.pid)
+        stop_reader.set()
+        try:
+            proc.stdout.close()
+        except OSError:
+            pass
+        reader.join(timeout=1.0)
+
+    try:
+        if proc.poll() is None:
+            _kill_process_tree(proc.pid)
+            try:
+                proc.wait(timeout=1)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    output = "".join(chunks)
     if timed_out:
         # ``None`` means timed out (distinct from a real exit status).
         return output + f"\n(timed out after {timeout:.0f}s)", None
-    if capped:
+    if state["capped"]:
         output += f"\n… (output capped at {_MAX_CAPTURE_CHARS} chars)"
     return output, proc.returncode
 

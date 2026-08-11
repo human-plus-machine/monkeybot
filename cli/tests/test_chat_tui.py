@@ -1601,6 +1601,35 @@ def test_slash_new_blocked_while_submit_in_flight(tmp_path: Path) -> None:
     asyncio.run(_run())
 
 
+def test_send_user_message_sets_submit_in_flight_before_worker(tmp_path: Path) -> None:
+    """Regression: flag must be set synchronously before @work schedules."""
+    app = ChatApp(
+        base="http://127.0.0.1:9",
+        agent_root=tmp_path,
+        provider="fake",
+        model="m",
+        spawned_gateway=False,
+    )
+    app._connect_session = lambda: None  # type: ignore[method-assign]
+    scheduled: list[str] = []
+
+    def _capture_submit(message: str) -> None:
+        scheduled.append(message)
+        assert app._submit_in_flight is True
+
+    app._submit_message = _capture_submit  # type: ignore[method-assign]
+    app._mount_user = lambda _t: None  # type: ignore[method-assign]
+    # Avoid Textual widget lookups outside run_test.
+    class _Composer:
+        def push_history(self, _line: str) -> None:
+            return None
+
+    app.query_one = lambda *_a, **_k: _Composer()  # type: ignore[method-assign]
+    app._send_user_message("hello")
+    assert scheduled == ["hello"]
+    assert app._submit_in_flight is True
+
+
 def test_slash_model_no_arg_shows_current(tmp_path: Path) -> None:
     async def _run() -> None:
         app = ChatApp(
