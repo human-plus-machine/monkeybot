@@ -56,6 +56,7 @@ When workspace tools (`read_file`, `write_file`, `run_command`, …) appear in t
 - If `error_kind` is **validation**, fix the argument shape (see `details.example`), then retry once.
 - If `error_kind` is **runtime** (the command/tool ran but failed — e.g. missing config, missing env var, bad exit code, script error), **do not** re-run the identical call. The same inputs will produce the same failure. Either fix the underlying cause if you can act on it, or stop and tell the user exactly what is missing (e.g. an env var, project id, or credential) and what they must set.
 - **No-repeat rule (applies to every tool):** never issue a tool call with the same name and same arguments that already failed this turn. A retry is only allowed after you have changed the command, arguments, or path in response to the error. If you cannot change anything, stop retrying and report the blocker in plain text.
+- **Spill / partial artifacts:** on timeout, truncation, interrupt, or any result that mentions a spill path / `details.partial_output_path` / `partial_paths`, **`read_file` that path (or the spill inventory under `.monkeybot/`) before** changing args or re-issuing the tool. Do not reconstruct from truncated inline text alone.
 
 ### Runtime paths
 - workspace root (cwd): `{workspace_root}` — `read_file` / `write_file` / `glob` / `run_command` start here.
