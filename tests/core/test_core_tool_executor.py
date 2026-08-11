@@ -292,6 +292,25 @@ async def test_glob(tmp_path: Path) -> None:
     assert "notes.md" not in out
 
 
+def test_glob_paths_matches_directories(tmp_path: Path) -> None:
+    """Checkout probes must see directories, not only files."""
+    from monkeybot.core.tools.workspace_service import WorkspaceFileService
+
+    root = tmp_path
+    checkout = root / "repos" / "EPCAP" / "agentic-platform-monorepo"
+    checkout.mkdir(parents=True)
+    (checkout / "README.md").write_text("hi\n", encoding="utf-8")
+    svc = WorkspaceFileService(root)
+
+    exact = svc.glob_paths("EPCAP/agentic-platform-monorepo", root="repos")
+    assert exact["ok"] is True
+    assert "repos/EPCAP/agentic-platform-monorepo" in exact["paths"]
+
+    wildcard = svc.glob_paths("EPCAP/*", root="repos")
+    assert wildcard["ok"] is True
+    assert "repos/EPCAP/agentic-platform-monorepo" in wildcard["paths"]
+
+
 @pytest.mark.asyncio
 async def test_glob_incomplete_scan_errors(tmp_path: Path) -> None:
     from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService, WorkspaceSettings
@@ -844,6 +863,101 @@ async def test_grep_path_glob_parity(tmp_path: Path, monkeypatch: pytest.MonkeyP
     monkeypatch.setattr("monkeybot.core.tools.workspace_service.shutil.which", lambda _name: None)
     without_rg = svc.grep("PATH_GLOB_HIT", file_glob="test_*.py")
     assert _paths(with_rg) == _paths(without_rg) == {"other/test_x.py"}
+
+
+def test_clip_grep_match_line_centers_on_match() -> None:
+    from monkeybot.core.tools.workspace_service import _clip_grep_match_line
+
+    needle = "chore/dead-code"
+    prefix = "x" * 2500
+    suffix = "y" * 2500
+    line = prefix + needle + suffix
+    start = len(prefix)
+    end = start + len(needle)
+
+    clipped = _clip_grep_match_line(line, start, end, max_chars=2000)
+    assert needle in clipped
+    assert len(clipped) <= 2000
+    assert clipped.startswith("…")
+    assert clipped.endswith("…")
+
+
+def test_clip_grep_match_line_short_unchanged() -> None:
+    from monkeybot.core.tools.workspace_service import _clip_grep_match_line
+
+    line = "short line with needle here"
+    assert _clip_grep_match_line(line, 16, 22, max_chars=2000) == line
+
+
+def test_clip_grep_match_line_missing_start_is_prefix() -> None:
+    from monkeybot.core.tools.workspace_service import _clip_grep_match_line
+
+    line = "a" * 3000
+    assert _clip_grep_match_line(line, None, None, max_chars=2000) == line[:2000]
+
+
+def test_utf8_byte_offsets_to_char_offsets_for_rg() -> None:
+    """rg submatches are UTF-8 byte offsets; clipping must use character indices."""
+    from monkeybot.core.tools.workspace_service import (
+        _clip_grep_match_line,
+        _utf8_byte_offsets_to_char_offsets,
+    )
+
+    needle = "NEEDLE"
+    # ``ä`` is 2 UTF-8 bytes; enough multibyte prefix that byte≠char indices diverge.
+    prefix = "ä" * 1500
+    suffix = "x" * 1500
+    line = prefix + needle + suffix
+    byte_start = len(prefix.encode("utf-8"))
+    byte_end = byte_start + len(needle.encode("utf-8"))
+    assert byte_start != len(prefix)
+
+    char_start, char_end = _utf8_byte_offsets_to_char_offsets(line, byte_start, byte_end)
+    assert char_start == len(prefix)
+    assert char_end == len(prefix) + len(needle)
+
+    # Using raw byte offsets as char indices would miss the needle in the window.
+    wrong = _clip_grep_match_line(line, byte_start, byte_end, max_chars=200)
+    assert needle not in wrong
+
+    clipped = _clip_grep_match_line(line, char_start, char_end, max_chars=200)
+    assert needle in clipped
+
+
+def test_grep_long_line_preview_contains_needle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mid-line needles past the 2000-char prefix must appear in match text."""
+    import shutil
+
+    from monkeybot.core.tools.workspace_service import WorkspaceFileService, WorkspaceSettings
+
+    root = tmp_path
+    needle = "chore/dead-code"
+    (root / "spill.json").write_text(
+        ("{" + '"pad":"' + ("z" * 4000) + '","ref":"' + needle + '"}'),
+        encoding="utf-8",
+    )
+    svc = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_MATCHES=50, WORKSPACE_GREP_MAX_FILES=100),
+    )
+    rg_bin = shutil.which("rg")
+
+    monkeypatch.setattr("monkeybot.core.tools.workspace_service.shutil.which", lambda _name: None)
+    py_result = svc.grep(needle)
+    assert py_result["ok"] is True
+    assert py_result["match_count"] >= 1
+    assert any(needle in m["text"] for m in py_result["matches"])
+
+    if rg_bin is None:
+        return
+
+    monkeypatch.undo()
+    rg_result = svc.grep(needle)
+    assert rg_result["ok"] is True
+    assert rg_result["match_count"] >= 1
+    assert any(needle in m["text"] for m in rg_result["matches"])
 
 
 @pytest.mark.asyncio
