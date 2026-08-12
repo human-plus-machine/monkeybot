@@ -346,6 +346,38 @@ def test_export_failure_on_unwritable_db(
     assert exporter._disabled is True
 
 
+def test_operational_error_does_not_disable_exporter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Transient sqlite lock errors must leave the exporter retryable."""
+    db_path = tmp_path / "traces.db"
+    exporter = SqliteSpanExporter(_config(db_path))
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    mem = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(mem))
+    trace.set_tracer_provider(provider)
+    with trace.get_tracer("t").start_as_current_span("x"):
+        pass
+    finished = mem.get_finished_spans()
+
+    boom_once = {"armed": True}
+    real_batch = exporter._export_batch
+
+    def _maybe_boom(spans: object) -> None:
+        if boom_once["armed"]:
+            boom_once["armed"] = False
+            raise sqlite3.OperationalError("database is locked")
+        real_batch(spans)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(exporter, "_export_batch", _maybe_boom)
+    assert exporter.export(finished) is SpanExportResult.FAILURE
+    assert exporter._disabled is False
+    assert exporter.export(finished) is SpanExportResult.SUCCESS
+    exporter.shutdown()
+
+
 def test_concurrent_same_trace_insert_no_integrity_error(tmp_path: Path) -> None:
     """Two exporters racing the first insert for one trace_id must both succeed."""
     import threading

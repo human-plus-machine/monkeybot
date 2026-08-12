@@ -40,6 +40,9 @@ _MAX_PERSISTED_VALUE_BYTES = 4096
 _SCHEMA_VERSION = "1"
 _RETENTION_INTERVAL_SEC = 60.0
 _CONNECT_TIMEOUT_SEC = 5.0
+# journal_mode=WAL takes a brief exclusive lock that bypasses busy_timeout;
+# retry a few times so concurrent first-openers do not fail the connection.
+_WAL_RETRY_DELAYS_MS = (0, 5, 10, 25, 50, 100)
 
 _SCHEMA_DDLS: tuple[str, ...] = (
     """create table if not exists schema_meta (
@@ -244,30 +247,31 @@ def _duration_ms(start_time_ns: int, end_time_ns: int) -> float:
     return (end_time_ns - start_time_ns) / 1_000_000
 
 
-def _root_claim(
+def _is_root_candidate(span_name: str, parent_span_id: str | None) -> bool:
+    """True when this span may own the trace root (run span or parentless)."""
+    return span_name == "monkeybot.run" or parent_span_id is None
+
+
+def _should_replace_root(
+    span_name: str, parent_span_id: str | None, existing_root_name: str | None
+) -> bool:
+    """True when an existing traces row should adopt this span as root.
+
+    ``monkeybot.run`` always wins; a parentless span only wins when the current
+    root is missing or is not already ``monkeybot.run``.
+    """
+    if span_name == "monkeybot.run":
+        return True
+    return parent_span_id is None and existing_root_name != "monkeybot.run"
+
+
+def _root_fields(
     *,
     span_name: str,
-    parent_span_id: str | None,
     span_id: str,
     input_value: str | None,
     output_value: str | None,
-    existing_root_name: str | None = None,
-) -> dict[str, Any] | None:
-    """Return root-claim fields when this span should own (or take) the trace root.
-
-    ``existing_root_name is None`` means "claim if this span is a root candidate"
-    (used when building the span row). Passing the current DB root decides whether
-    an update should replace it (``monkeybot.run`` always wins).
-    """
-    is_run = span_name == "monkeybot.run"
-    is_orphan_root = parent_span_id is None
-    if existing_root_name is None:
-        if not (is_run or is_orphan_root):
-            return None
-    elif is_run:
-        pass
-    elif not (is_orphan_root and existing_root_name != "monkeybot.run"):
-        return None
+) -> dict[str, Any]:
     return {
         "root_span_id": span_id,
         "root_name": span_name,
@@ -296,12 +300,15 @@ def _span_row(span: ReadableSpan, config: SqliteExporterConfig, now_ms: int) -> 
     input_value = _first_attr(attrs, _INPUT_VALUE_KEYS)
     output_value = _first_attr(attrs, _OUTPUT_VALUE_KEYS)
     span_id = _format_span_id(span.context.span_id)
-    claim = _root_claim(
-        span_name=span.name,
-        parent_span_id=parent_id,
-        span_id=span_id,
-        input_value=input_value,
-        output_value=output_value,
+    claim = (
+        _root_fields(
+            span_name=span.name,
+            span_id=span_id,
+            input_value=input_value,
+            output_value=output_value,
+        )
+        if _is_root_candidate(span.name, parent_id)
+        else None
     )
 
     return {
@@ -413,8 +420,26 @@ update traces set
     select (max(end_time_ns) - min(start_time_ns)) / 1000000.0
     from spans where spans.trace_id = traces.trace_id
   )
-where exists (select 1 from spans where spans.trace_id = traces.trace_id)
+where trace_id = ?
+  and exists (select 1 from spans where spans.trace_id = traces.trace_id)
 """
+
+
+def _set_wal_mode(conn: sqlite3.Connection) -> None:
+    """Set WAL journal mode with bounded retry (exclusive lock bypasses busy_timeout)."""
+    last_err: sqlite3.OperationalError | None = None
+    for delay_ms in _WAL_RETRY_DELAYS_MS:
+        if delay_ms:
+            time.sleep(delay_ms / 1000.0)
+        try:
+            row = conn.execute("pragma journal_mode = WAL").fetchone()
+            if row is not None and str(row[0]).lower() == "wal":
+                return
+        except sqlite3.OperationalError as exc:
+            last_err = exc
+    if last_err is not None:
+        raise last_err
+    raise sqlite3.OperationalError("failed to set journal_mode=WAL")
 
 
 class SqliteSpanExporter(SpanExporter):
@@ -432,37 +457,55 @@ class SqliteSpanExporter(SpanExporter):
             return self._conn
         db_path = self._config.db_path
         db_path.parent.mkdir(parents=True, exist_ok=True)
+        # isolation_level=None: manual BEGIN IMMEDIATE so existence SELECTs sit
+        # under the write lock (Python's IMMEDIATE mode only begins before DML).
         conn = sqlite3.connect(
             db_path,
             check_same_thread=False,
             timeout=_CONNECT_TIMEOUT_SEC,
-            isolation_level="IMMEDIATE",
+            isolation_level=None,
         )
-        conn.row_factory = sqlite3.Row
-        conn.execute("pragma journal_mode = WAL")
-        conn.execute("pragma busy_timeout = 5000")
-        conn.execute("pragma synchronous = NORMAL")
+        try:
+            conn.row_factory = sqlite3.Row
+            # busy_timeout before journal_mode so other waits honor it; WAL itself
+            # still needs its own retry (_set_wal_mode) because that exclusive lock
+            # does not go through the busy handler.
+            conn.execute("pragma busy_timeout = 5000")
+            _set_wal_mode(conn)
+            conn.execute("pragma synchronous = NORMAL")
+        except Exception:
+            conn.close()
+            raise
         self._conn = conn
         return conn
+
+    def _begin_immediate(self, conn: sqlite3.Connection) -> None:
+        conn.execute("BEGIN IMMEDIATE")
 
     def _ensure_schema(self, conn: sqlite3.Connection) -> None:
         if self._schema_ready:
             return
-        for ddl in _SCHEMA_DDLS:
-            conn.execute(ddl)
-        row = conn.execute(
-            "select value from schema_meta where key = 'schema_version'"
-        ).fetchone()
-        if row is None:
-            conn.execute(
-                "insert into schema_meta (key, value) values (?, ?)",
-                ("schema_version", _SCHEMA_VERSION),
-            )
-        elif str(row[0]) != _SCHEMA_VERSION:
-            raise RuntimeError(
-                f"unsupported traces DB schema_version={row[0]!r}, expected {_SCHEMA_VERSION!r}"
-            )
-        conn.commit()
+        self._begin_immediate(conn)
+        try:
+            for ddl in _SCHEMA_DDLS:
+                conn.execute(ddl)
+            row = conn.execute(
+                "select value from schema_meta where key = 'schema_version'"
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    "insert into schema_meta (key, value) values (?, ?)",
+                    ("schema_version", _SCHEMA_VERSION),
+                )
+            elif str(row[0]) != _SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"unsupported traces DB schema_version={row[0]!r}, "
+                    f"expected {_SCHEMA_VERSION!r}"
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         self._schema_ready = True
 
     def _upsert_trace(
@@ -493,14 +536,19 @@ class SqliteSpanExporter(SpanExporter):
             "from traces where trace_id = ?",
             (row["trace_id"],),
         ).fetchone()
-        assert existing is not None
-        replace = _root_claim(
-            span_name=row["name"],
-            parent_span_id=row["parent_span_id"],
-            span_id=row["span_id"],
-            input_value=row["input_value"],
-            output_value=row["output_value"],
-            existing_root_name=existing["root_name"],
+        if existing is None:
+            raise RuntimeError(
+                f"trace row missing after insert for trace_id={row['trace_id']!r}"
+            )
+        replace = (
+            _root_fields(
+                span_name=row["name"],
+                span_id=row["span_id"],
+                input_value=row["input_value"],
+                output_value=row["output_value"],
+            )
+            if _should_replace_root(row["name"], row["parent_span_id"], existing["root_name"])
+            else None
         )
         conn.execute(
             _UPDATE_TRACE_SQL,
@@ -535,7 +583,8 @@ class SqliteSpanExporter(SpanExporter):
         conn = self._ensure_connection()
         self._ensure_schema(conn)
         now_ms = int(time.time() * 1000)
-        with conn:
+        self._begin_immediate(conn)
+        try:
             for span in spans:
                 row = _span_row(span, self._config, now_ms)
                 existing = conn.execute(
@@ -546,6 +595,10 @@ class SqliteSpanExporter(SpanExporter):
                     {k: v for k, v in row.items() if k not in {"claim", "is_error"}},
                 )
                 self._upsert_trace(conn, row, is_new_span=existing is None)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
     def _maybe_run_retention(self, *, force: bool = False) -> None:
         if self._config.retention_days <= 0 and self._config.max_spans <= 0:
@@ -562,20 +615,48 @@ class SqliteSpanExporter(SpanExporter):
         except Exception as exc:
             logger.warning("sqlite trace retention failed: %s", exc)
 
+    def _recompute_trace_rollups(
+        self, conn: sqlite3.Connection, trace_ids: set[str]
+    ) -> None:
+        for trace_id in trace_ids:
+            conn.execute(_RECOMPUTE_TRACE_ROLLUPS_SQL, (trace_id,))
+
     def _run_retention_locked(self, conn: sqlite3.Connection) -> None:
         if self._config.retention_days > 0:
             cutoff_ns = int((time.time() - self._config.retention_days * 86400) * 1_000_000_000)
-            with conn:
+            self._begin_immediate(conn)
+            try:
+                affected = {
+                    str(row[0])
+                    for row in conn.execute(
+                        "select distinct trace_id from spans where start_time_ns < ?",
+                        (cutoff_ns,),
+                    ).fetchall()
+                }
                 conn.execute("delete from spans where start_time_ns < ?", (cutoff_ns,))
                 conn.execute(_DELETE_ORPHAN_TRACES_SQL)
-                conn.execute(_RECOMPUTE_TRACE_ROLLUPS_SQL)
+                self._recompute_trace_rollups(conn, affected)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
 
         if self._config.max_spans > 0:
-            with conn:
+            self._begin_immediate(conn)
+            try:
                 count_row = conn.execute("select count(*) from spans").fetchone()
                 span_count = int(count_row[0]) if count_row is not None else 0
                 overage = span_count - self._config.max_spans
                 if overage > 0:
+                    affected = {
+                        str(row[0])
+                        for row in conn.execute(
+                            "select distinct trace_id from spans where span_id in ("
+                            "  select span_id from spans order by start_time_ns asc limit ?"
+                            ")",
+                            (overage,),
+                        ).fetchall()
+                    }
                     conn.execute(
                         "delete from spans where span_id in ("
                         "  select span_id from spans order by start_time_ns asc limit ?"
@@ -583,7 +664,11 @@ class SqliteSpanExporter(SpanExporter):
                         (overage,),
                     )
                     conn.execute(_DELETE_ORPHAN_TRACES_SQL)
-                    conn.execute(_RECOMPUTE_TRACE_ROLLUPS_SQL)
+                    self._recompute_trace_rollups(conn, affected)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
         if not spans:
@@ -595,7 +680,14 @@ class SqliteSpanExporter(SpanExporter):
                 self._export_batch(spans)
             self._maybe_run_retention()
             return SpanExportResult.SUCCESS
+        except sqlite3.OperationalError as exc:
+            # Transient lock / busy — BatchSpanProcessor will retry next batch.
+            if not self._export_error_logged:
+                logger.warning("sqlite span export failed (will retry): %s", exc)
+                self._export_error_logged = True
+            return SpanExportResult.FAILURE
         except Exception as exc:
+            # Unrecoverable (bad path, schema mismatch, etc.): stop trying.
             self._disabled = True
             if not self._export_error_logged:
                 logger.warning("sqlite span export failed: %s", exc)
