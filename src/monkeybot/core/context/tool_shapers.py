@@ -69,7 +69,7 @@ def classify_content(text: str, *, tool_name: str, hint: str | None = None) -> C
     stripped = text.lstrip()
     if tool_name in ("run_command",):
         return "logs"
-    if tool_name in ("web_search", "search_memory", "task") and stripped.startswith(("{", "[")):
+    if tool_name in ("web_search", "task") and stripped.startswith(("{", "[")):
         return "json"
     if tool_name in ("read_file", "write_file", "replace_in_file", "glob"):
         return "code"
@@ -250,7 +250,7 @@ def exceeds_tool_output_budget(text: str, *, tool_name: str, budget: ToolOutputB
     lines = text.splitlines()
     if budget.max_output_lines is not None and len(lines) > budget.max_output_lines:
         return True
-    if budget.max_array_items is not None and tool_name in ("web_search", "search_memory", "task"):
+    if budget.max_array_items is not None and tool_name in ("web_search", "task"):
         stripped = text.lstrip()
         if stripped.startswith(("[", "{")):
             try:

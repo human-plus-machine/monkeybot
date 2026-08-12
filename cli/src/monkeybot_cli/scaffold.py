@@ -6,7 +6,7 @@ import re
 from importlib import resources
 from importlib.resources.abc import Traversable
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 import yaml
 
@@ -28,8 +28,14 @@ _CONFIG_BUNDLE: Final[tuple[tuple[str, str], ...]] = (
     ("opensandbox.docker.toml", "opensandbox.docker.toml"),
 )
 
-_MEMORY_INDEX: Final = (
-    "# Memory Index\n\nAdd sections here or let memory tools populate this file.\n"
+# Reference copies — safe to overwrite on refresh. Live security/persona files are not.
+_REFRESH_OVERWRITE: Final[tuple[str, ...]] = (
+    "monkeybot.example.yaml",
+    "otel-collector.example.yaml",
+)
+_REFRESH_SKIP_MONKEYBOT_KEYS: Final[frozenset[str]] = frozenset({"model"})
+_MISSING_YAML_BANNER: Final = (
+    "\n# Added by `monkeybot refresh` from current CLI packaged defaults.\n"
 )
 
 
@@ -102,24 +108,16 @@ def write_active_config(
 
 
 def ensure_memory(dest: Path, *, force: bool) -> list[str]:
-    memory = dest / "memory"
-    memory.mkdir(parents=True, exist_ok=True)
-    lines: list[str] = []
-    for sub in ("episodic", "semantic", "procedural", "working", "raw"):
-        d = memory / sub
-        d.mkdir(parents=True, exist_ok=True)
-        keep = d / ".gitkeep"
-        if not keep.exists() or force:
-            keep.touch(exist_ok=True)
-            lines.append(f"  memory/{sub}/: ensured")
-    idx = memory / "INDEX.md"
-    if not idx.exists() or force:
-        existed = idx.exists()
-        idx.write_text(_MEMORY_INDEX, encoding="utf-8")
-        lines.append(f"  memory/INDEX.md: {'overwritten' if existed else 'created'}")
-    else:
-        lines.append("  memory/INDEX.md: skipped")
-    return lines or ["  memory/: ensured"]
+    palace = dest / "memory" / "mempalace"
+    palace.mkdir(parents=True, exist_ok=True)
+    identity = palace / "identity.txt"
+    if not identity.exists() or force:
+        identity.write_text(
+            f"## L0 — IDENTITY\nI am {dest.name}, a MonkeyBot agent.\n",
+            encoding="utf-8",
+        )
+        return [f"  memory/mempalace/: {'overwritten' if force else 'created'}"]
+    return ["  memory/mempalace/: skipped"]
 
 
 def ensure_workspace(dest: Path, *, force: bool) -> list[str]:
@@ -275,6 +273,171 @@ def write_agent_pyproject(
         encoding="utf-8",
     )
     return "overwritten" if existed else "created"
+
+
+def _load_mapping(path: Path) -> dict[str, Any]:
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    return raw if isinstance(raw, dict) else {}
+
+
+def _as_str_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if isinstance(item, str)]
+
+
+def _list_extras(existing: list[str], template: list[str]) -> list[str]:
+    present = set(template)
+    return [item for item in existing if item not in present]
+
+
+def _yaml_list_item(value: str) -> str:
+    dumped = yaml.safe_dump(value, allow_unicode=True).strip()
+    return f"  - {dumped}\n"
+
+
+def _append_list_extras(text: str, section_header: str, extras: list[str]) -> str:
+    """Insert extras after the last `  - ` item of a top-level YAML list section."""
+    if not extras:
+        return text
+    marker = f"{section_header}\n"
+    idx = text.find(marker)
+    if idx < 0:
+        return text
+    start = idx + len(marker)
+    rest = text[start:]
+    consumed = 0
+    last_item_end = 0
+    for line in rest.splitlines(keepends=True):
+        stripped = line.strip()
+        if line.startswith("  - ") or line.startswith("  -"):
+            consumed += len(line)
+            last_item_end = consumed
+            continue
+        if stripped == "" or not line.startswith(" "):
+            break
+        consumed += len(line)
+    if last_item_end == 0:
+        return text
+    addition = "".join(_yaml_list_item(item) for item in extras)
+    insert_at = start + last_item_end
+    return text[:insert_at] + addition + text[insert_at:]
+
+
+def refresh_command_allowlist(cfg_dir: Path) -> str:
+    """Rewrite from the packaged template, then re-append agent-only extras."""
+    dest = cfg_dir / "command_allowlist.yaml"
+    template = (resources.files(_DEFAULTS_PKG) / "command_allowlist.yaml").read_text(
+        encoding="utf-8"
+    )
+    label = "monkeybot_config/command_allowlist.yaml"
+    if not dest.exists():
+        dest.write_text(template, encoding="utf-8")
+        return f"  {label}: created"
+
+    existing = _load_mapping(dest)
+    tmpl = yaml.safe_load(template)
+    tmpl_map = tmpl if isinstance(tmpl, dict) else {}
+    text = template
+    text = _append_list_extras(
+        text,
+        "allowed_commands:",
+        _list_extras(
+            _as_str_list(existing.get("allowed_commands")),
+            _as_str_list(tmpl_map.get("allowed_commands")),
+        ),
+    )
+    text = _append_list_extras(
+        text,
+        "allowed_path_prefixes:",
+        _list_extras(
+            _as_str_list(existing.get("allowed_path_prefixes")),
+            _as_str_list(tmpl_map.get("allowed_path_prefixes")),
+        ),
+    )
+    text = _append_list_extras(
+        text,
+        "deny_patterns:",
+        _list_extras(
+            _as_str_list(existing.get("deny_patterns")),
+            _as_str_list(tmpl_map.get("deny_patterns")),
+        ),
+    )
+    if dest.read_text(encoding="utf-8") == text:
+        return f"  {label}: unchanged"
+    dest.write_text(text, encoding="utf-8")
+    return f"  {label}: updated"
+
+
+def refresh_permissions_if_default(cfg_dir: Path) -> str:
+    """Overwrite permissions.yaml only when it still has the empty default ruleset."""
+    dest = cfg_dir / "permissions.yaml"
+    label = "monkeybot_config/permissions.yaml"
+    src = resources.files(_DEFAULTS_PKG) / "permissions.yaml"
+    if not dest.exists():
+        dest.write_bytes(src.read_bytes())
+        return f"  {label}: created"
+    data = _load_mapping(dest)
+    rules = data.get("rules")
+    default = data.get("default", "allow")
+    if default != "allow" or (rules not in ([], None)):
+        return f"  {label}: skipped (customized)"
+    dest.write_bytes(src.read_bytes())
+    return f"  {label}: updated"
+
+
+def refresh_monkeybot_yaml(cfg_dir: Path) -> str:
+    """Append top-level keys that exist in the example but are missing from the live file."""
+    dest = cfg_dir / "monkeybot.yaml"
+    label = "monkeybot_config/monkeybot.yaml"
+    if not dest.exists():
+        return f"  {label}: skipped"
+    example_text = (resources.files(_DEFAULTS_PKG) / "monkeybot.example.yaml").read_text(
+        encoding="utf-8"
+    )
+    example = yaml.safe_load(example_text)
+    if not isinstance(example, dict):
+        return f"  {label}: skipped"
+    existing = _load_mapping(dest)
+    missing = {
+        key: value
+        for key, value in example.items()
+        if key not in existing and key not in _REFRESH_SKIP_MONKEYBOT_KEYS
+    }
+    if not missing:
+        return f"  {label}: unchanged"
+    dumped = yaml.safe_dump(missing, sort_keys=False, allow_unicode=True)
+    with dest.open("a", encoding="utf-8") as handle:
+        handle.write(_MISSING_YAML_BANNER)
+        handle.write(dumped)
+    return f"  {label}: updated"
+
+
+def run_refresh(*, dest: Path) -> list[str]:
+    """Bring an existing agent up to date with packaged CLI defaults.
+
+    Additive for live YAML: never deletes user entries, never rewrites AGENT.md
+    or mcp.json, never overwrites model settings. Reference example files are
+    replaced with the current packaged copies.
+    """
+    cfg_dir = dest / "monkeybot_config"
+    active = cfg_dir / "monkeybot.yaml"
+    if not active.is_file():
+        raise FileNotFoundError(f"not a scaffolded agent (missing {active})")
+
+    report: list[str] = []
+    for name in _REFRESH_OVERWRITE:
+        status = _install_file(
+            cfg_dir / name,
+            resources.files(_DEFAULTS_PKG) / name,
+            force=True,
+        )
+        report.append(f"  monkeybot_config/{name}: {status}")
+    report.append(refresh_command_allowlist(cfg_dir))
+    report.append(refresh_permissions_if_default(cfg_dir))
+    report.append(refresh_monkeybot_yaml(cfg_dir))
+    report.extend(ensure_memory(dest, force=False))
+    return report
 
 
 def run_new(

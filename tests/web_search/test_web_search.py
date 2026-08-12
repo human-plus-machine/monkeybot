@@ -10,13 +10,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from monkeybot.core.context import CustomTool, build_context
-from monkeybot.core.llm.provider import Done, TextDelta, ToolCall, UsageEvent
+from monkeybot.core.llm.provider import ToolCall
 from monkeybot.core.memory.subsystem import MemorySubsystem
-from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.tools.types import unwrap_tool_execution_result
 from monkeybot.core.types.types_tools import ToolDef
-from monkeybot.core.workspace import create_workspace_storage
+from tests.core.memory.helpers import make_memory_subsystem
 from monkeybot.web_search import build_backend
 from monkeybot.web_search.protocol import SearchResult
 from monkeybot.web_search.tool import WebSearchTool
@@ -62,18 +61,7 @@ class _FakeMCP:
 
 
 def _mem_sub(root: Path) -> MemorySubsystem:
-    p = Path(root)
-    p.mkdir(exist_ok=True)
-    uri = "local://" + str(p.resolve())
-    fake = ScriptedFakeProvider(
-        [TextDelta(text="x"), UsageEvent(input_tokens=1, output_tokens=1, cached_tokens=0), Done()]
-    )
-    return MemorySubsystem(
-        storage=create_workspace_storage(uri),
-        provider=fake,
-        model="gemini-2.5-flash",
-        memory_uri=uri,
-    )
+    return make_memory_subsystem(root)
 
 
 def _make_executor(tmp_path: Path, extra_tools: list | None = None) -> CoreToolExecutor:

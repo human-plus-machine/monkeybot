@@ -118,10 +118,6 @@ _CORE_TOOL_NAMES = frozenset(
         "glob",
         "grep",
         "apply_patch",
-        "search_memory",
-        "edit_memory",
-        "update_memory",
-        "forget",
         "search",
         "list_skills",
         "task",
@@ -969,14 +965,6 @@ class CoreToolExecutor(ToolExecutorPort):
                 result_text, err_text = self._tool_grep(args)
             elif name == "apply_patch":
                 result_text, err_text = self._tool_apply_patch(args)
-            elif name == "search_memory":
-                result_text, err_text = await self._tool_search_memory(args)
-            elif name == "edit_memory":
-                result_text, err_text = await self._tool_memory_mutate(args, action="edit")
-            elif name == "update_memory":
-                result_text, err_text = await self._tool_memory_mutate(args, action="update")
-            elif name == "forget":
-                result_text, err_text = await self._tool_memory_mutate(args, action="forget")
             elif name == "search":
                 result_text, err_text = await self._tool_search(args)
             elif name == "list_skills":
@@ -1469,116 +1457,6 @@ class CoreToolExecutor(ToolExecutorPort):
         except WorkspaceError as exc:
             return (None, _workspace_error_envelope(exc))
 
-    async def _tool_search_memory(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
-        query = _str_arg(args, "query", "q", "keyword", "phrase") or ""
-        path = _str_arg(args, "path")
-        if not query and not path:
-            return (
-                None,
-                _built_in_tool_error(
-                    "validation",
-                    "search_memory requires query or path.",
-                    'Keyword search: {"query": "deployment"}. '
-                    'Follow a Related link: {"path": "episodic/note.md"}.',
-                    {
-                        "field": "query",
-                        "example": {"query": "keyword"},
-                    },
-                ),
-            )
-        max_hits = _coerce_int(args.get("max_hits"), 40) or 40
-        if self._memory is None:
-            return (
-                None,
-                _built_in_tool_error(
-                    "validation",
-                    "search_memory requires memory to be configured.",
-                    "Enable the memory hook and set paths.memory_storage_uri in monkeybot.yaml.",
-                    {"field": "memory"},
-                ),
-            )
-        folder = _str_arg(args, "folder")
-        include_retired = bool(args.get("include_retired"))
-        payload = await self._memory.search_files(
-            query,
-            max_hits=max_hits,
-            skip_raw=True,
-            folder=folder,
-            include_retired=include_retired,
-            path=path,
-        )
-        if not payload.get("hits"):
-            note = payload.get("note") or ""
-            if path:
-                cross = (
-                    "memory path not found — paths are memory-relative "
-                    "(episodic|semantic|procedural|…), not workspace; "
-                    "do not use read_file"
-                )
-            else:
-                cross = "no memory matches — if this is about workspace content, use `search`"
-            payload["note"] = f"{note}; {cross}".strip("; ") if note else cross
-        return (_j(payload), None)
-
-    async def _tool_memory_mutate(
-        self,
-        args: dict[str, Any],
-        *,
-        action: str,
-    ) -> tuple[str | None, str | None]:
-        path = _str_arg(args, "path")
-        needs_content = action in ("edit", "update")
-        content = args.get("content") if needs_content else None
-        if not path or (needs_content and not isinstance(content, str)):
-            field = "path" if not path else "content"
-            examples = {
-                "edit": '{"path": "semantic/note.md", "content": "corrected fact"}',
-                "update": '{"path": "semantic/old.md", "content": "new fact"}',
-                "forget": '{"path": "semantic/stale.md"}',
-            }
-            tool_name = "forget" if action == "forget" else f"{action}_memory"
-            return (
-                None,
-                _built_in_tool_error(
-                    "validation",
-                    f"{tool_name} requires " + ("path and content." if needs_content else "path."),
-                    f"Example: {examples[action]}",
-                    {"field": field},
-                ),
-            )
-        if self._memory is None:
-            return (
-                None,
-                _built_in_tool_error(
-                    "validation",
-                    f"{action} requires memory to be configured.",
-                    "Enable the memory hook and set paths.memory_storage_uri.",
-                    {"field": "memory"},
-                ),
-            )
-        if action == "edit":
-            payload = await self._memory.edit_memory(path, str(content))
-        elif action == "update":
-            payload = await self._memory.update_memory(path, str(content))
-        else:
-            payload = await self._memory.forget(path)
-        if not payload.get("ok"):
-            logger.warning(
-                "memory mutate failed %s",
-                kv(action=action, path=path, error=payload.get("error")),
-            )
-            return (
-                None,
-                _built_in_tool_error(
-                    "validation",
-                    str(payload.get("error") or f"{action} failed"),
-                    "Use a path under episodic|semantic|procedural|working.",
-                    {"path": path},
-                ),
-            )
-        logger.info("memory mutate ok %s", kv(action=action, path=payload.get("path") or path))
-        return (_j(payload), None)
-
     async def _tool_search(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
         query = _str_arg(args, "query", "q")
         if not query:
@@ -1630,7 +1508,7 @@ class CoreToolExecutor(ToolExecutorPort):
             note = payload.get("note") or ""
             cross = (
                 "no knowledge matches — if this is about past sessions or preferences, "
-                "use `search_memory`"
+                "use `mempalace search` via `run_command`"
             )
             payload["note"] = f"{note}; {cross}".strip("; ") if note else cross
         return (_j(payload), None)

@@ -62,7 +62,6 @@ from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector,
 from monkeybot.core.tools.loop_inspector import LoopStartInspector
 from monkeybot.core.tools.permission import try_load_permission_inspector
 from monkeybot.core.types.content_blocks import ContentBlock, Text
-from monkeybot.core.workspace import create_workspace_storage
 from monkeybot.gateway.bootstrap import ensure_gateway_runtime_env, log_gateway_startup
 from monkeybot.gateway.sse.loop_port import UsagePort
 from monkeybot.gateway.sse.models import AgentUsageResponse, SessionUsageResponse
@@ -106,12 +105,6 @@ class _GatewayDeps:
 
 
 _deps = _GatewayDeps()
-
-
-def _memory_enabled() -> bool:
-    """Default on; explicit off via ``MONKEYBOT_MEMORY_HOOK_ENABLED=false``."""
-    raw = os.environ.get("MONKEYBOT_MEMORY_HOOK_ENABLED", "true").strip().lower()
-    return raw not in {"0", "false", "no", "off"}
 
 
 def _env_context_window_tokens() -> int:
@@ -610,57 +603,26 @@ async def _startup(fastapi_app: FastAPI) -> None:
     if _deps.web_search_tool is None and not vertex_gs:
         logger.info("web search disabled (WEB_SEARCH_BACKEND=none)")
 
-    if _memory_enabled():
-        try:
-            mem_uri = _memory_storage_uri()
-            storage = create_workspace_storage(mem_uri)
-            mgr = HookManager()
-            model_name = os.environ.get("MODEL_NAME", "gemini-2.5-flash")
-            memory = MemorySubsystem(
-                storage=storage,
-                provider=_deps.provider,
-                model=model_name,
-                memory_uri=mem_uri,
-            )
-            memory.register_hooks(mgr)
-            _deps.hook_manager = mgr
-            _deps.memory = memory
-            fastapi_app.state.memory = memory
-            logger.info("memory hook enabled (memory_storage_uri=%s)", mem_uri)
-            try:
-                gc_stats = await memory.gc_processed()
-                if gc_stats["deleted"] or gc_stats["errors"]:
-                    logger.info(
-                        "memory gc: scanned=%d deleted=%d errors=%d",
-                        gc_stats["scanned"],
-                        gc_stats["deleted"],
-                        gc_stats["errors"],
-                    )
-                working_gc = await memory.gc_working()
-                if working_gc["deleted"] or working_gc["errors"]:
-                    logger.info(
-                        "memory working gc: scanned=%d deleted=%d errors=%d",
-                        working_gc["scanned"],
-                        working_gc["deleted"],
-                        working_gc["errors"],
-                    )
-                rebuild = await memory.rebuild_graph()
-                if rebuild["upserted"] or rebuild["errors"]:
-                    logger.info(
-                        "memory graph rebuild: scanned=%d upserted=%d errors=%d",
-                        rebuild["scanned"],
-                        rebuild["upserted"],
-                        rebuild["errors"],
-                    )
-            except Exception as gc_exc:
-                logger.warning("memory gc on startup failed: %r", gc_exc)
-        except Exception as exc:
-            logger.warning("memory hook setup failed; continuing without: %r", exc)
-            _deps.hook_manager = None
-            _deps.memory = None
-            fastapi_app.state.memory = None
-    else:
-        logger.info("memory hook disabled via MONKEYBOT_MEMORY_HOOK_ENABLED")
+    try:
+        mem_uri = _memory_storage_uri()
+        layout = AgentLayout.from_environment()
+        mgr = HookManager()
+        memory = MemorySubsystem(
+            memory_uri=mem_uri,
+            db_url=layout.db_url,
+            agent_id=layout.agent_root.name,
+            agent_name=layout.agent_root.name,
+        )
+        await memory.ensure_ready()
+        memory.register_hooks(mgr)
+        _deps.hook_manager = mgr
+        _deps.memory = memory
+        fastapi_app.state.memory = memory
+        logger.info("memory enabled (memory_storage_uri=%s)", mem_uri)
+    except Exception as exc:
+        logger.warning("memory setup failed; continuing without: %r", exc)
+        _deps.hook_manager = None
+        _deps.memory = None
         fastapi_app.state.memory = None
 
     # Unified knowledge layer — FTS + ANN + links + search

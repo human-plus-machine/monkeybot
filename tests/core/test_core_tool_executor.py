@@ -13,27 +13,17 @@ from monkeybot.core.config.settings import SubagentConfig
 from monkeybot.core.context import LoopsToolRegistry, SkillRef, TurnContext, _discover_skills
 from monkeybot.core.llm.provider import Done, TextDelta, ToolCall, UsageEvent
 from monkeybot.core.memory.subsystem import MemorySubsystem
-from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.mcp.mcp_client import MCPDiagnosticError, MCPServerNotConnectedError
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.tools.types import unwrap_tool_execution_result
-from monkeybot.core.workspace import create_workspace_storage
+from monkeybot.core.types.types_tools import ToolDef
+from tests.core.memory.helpers import make_memory_subsystem
 
 
 def _mem_sub(root: Path) -> MemorySubsystem:
-    p = Path(root)
-    p.mkdir(exist_ok=True)
-    uri = "local://" + str(p.resolve())
-    fake = ScriptedFakeProvider(
-        [TextDelta(text="x"), UsageEvent(input_tokens=1, output_tokens=1, cached_tokens=0), Done()]
-    )
-    return MemorySubsystem(
-        storage=create_workspace_storage(uri),
-        provider=fake,
-        model="gemini-2.5-flash",
-        memory_uri=uri,
-    )
-from monkeybot.core.types.types_tools import ToolDef
+    # Palace sqlite files must not live inside the workspace under test (grep/glob).
+    resolved = Path(root).resolve()
+    return make_memory_subsystem(resolved.parent.parent / f"palace-{resolved.parent.name}-{resolved.name}")
 
 
 class _NoMCP:
@@ -1020,35 +1010,9 @@ async def test_apply_patch_tool(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_search_memory(tmp_path: Path) -> None:
-    root = tmp_path
-    mem = tmp_path / "mem"
-    mem.mkdir()
-    (mem / "a.md").write_text("hello alpha world", encoding="utf-8")
-    skills = tmp_path / "skills"
-    skills.mkdir()
-    ex = CoreToolExecutor(
-        workspace_root=root,
-        memory=_mem_sub(mem),
-        skills_path=skills,
-        mcp=_NoMCP(),
-    )
-    ctx = _ctx()
-    out, err = unwrap_tool_execution_result(await ex.execute(
-        call=ToolCall(call_id="1", name="search_memory", args={"query": "alpha"}),
-        ctx=ctx,
-    ))
-    assert err is None and out is not None
-    assert "alpha" in out
-    assert "a.md" in out
-
-
-@pytest.mark.asyncio
-async def test_search_memory_does_not_delegate_to_knowledge(tmp_path: Path) -> None:
+async def test_search_hits_knowledge_notes(tmp_path: Path) -> None:
     from monkeybot.core.knowledge import KnowledgeSubsystem
     from monkeybot.core.knowledge.types import KnowledgeSettings
-    from monkeybot.core.memory.subsystem import MemorySubsystem
-    from monkeybot.core.workspace.local import LocalWorkspaceStorage
 
     root = tmp_path / "ws"
     root.mkdir()
@@ -1077,38 +1041,16 @@ async def test_search_memory_does_not_delegate_to_knowledge(tmp_path: Path) -> N
         index_path=Path(settings.index_path),
     )
     await knowledge.ensure_ready()
-
-    mem_root = tmp_path / "memory"
-    mem_root.mkdir()
-    (mem_root / "semantic").mkdir()
-    (mem_root / "semantic" / "note.md").write_text(
-        "---\ntype: semantic\nstatus: active\n---\n"
-        "User prefers dark mode in the dashboard.\n",
-        encoding="utf-8",
-    )
-    storage = LocalWorkspaceStorage(mem_root)
-
-    class _FakeProvider:
-        async def complete(self, *args, **kwargs):  # noqa: ANN002, ANN003
-            raise AssertionError("should not call provider")
-
-    memory = MemorySubsystem(
-        storage=storage,
-        provider=_FakeProvider(),  # type: ignore[arg-type]
-        model="test",
-        memory_uri=f"local://{mem_root}",
-    )
     skills = tmp_path / "skills"
     skills.mkdir()
     try:
         ex = CoreToolExecutor(
             workspace_root=root,
-            memory=memory,
+            memory=_mem_sub(tmp_path / "memory"),
             knowledge=knowledge,
             skills_path=skills,
             mcp=_NoMCP(),
         )
-        ctx = _ctx()
         out, err = unwrap_tool_execution_result(
             await ex.execute(
                 call=ToolCall(
@@ -1116,96 +1058,15 @@ async def test_search_memory_does_not_delegate_to_knowledge(tmp_path: Path) -> N
                     name="search",
                     args={"query": "annual refund approval"},
                 ),
-                ctx=ctx,
+                ctx=_ctx(),
             )
         )
         assert err is None and out is not None
         payload = json.loads(out)
         assert payload["ok"] is True
         assert payload["hits"]
-
-        # search_memory must hit memory notes, not knowledge workspace hits
-        out2, err2 = unwrap_tool_execution_result(
-            await ex.execute(
-                call=ToolCall(
-                    call_id="2",
-                    name="search_memory",
-                    args={"query": "dark mode"},
-                ),
-                ctx=ctx,
-            )
-        )
-        assert err2 is None and out2 is not None
-        mem_payload = json.loads(out2)
-        assert mem_payload["ok"] is True
-        assert mem_payload["hits"]
-        assert any("dark mode" in h.get("snippet", "").lower() for h in mem_payload["hits"])
-        assert any("dark mode" in (h.get("body") or "").lower() for h in mem_payload["hits"])
-        assert all(
-            not str(h.get("path", "")).startswith("notes/")
-            and "policy.md" not in str(h.get("path", ""))
-            for h in mem_payload["hits"]
-        )
     finally:
         await knowledge.close()
-
-
-@pytest.mark.asyncio
-async def test_search_memory_path_lookup(tmp_path: Path) -> None:
-    from monkeybot.core.memory.note_format import format_memory_note
-
-    root = tmp_path
-    mem = tmp_path / "mem"
-    (mem / "episodic").mkdir(parents=True)
-    note = format_memory_note(
-        note_type="episodic",
-        status="active",
-        body="Vertex MCP image path details.",
-        related=["episodic/other.md"],
-    )
-    (mem / "episodic" / "vertex.md").write_text(note, encoding="utf-8")
-    skills = tmp_path / "skills"
-    skills.mkdir()
-    ex = CoreToolExecutor(
-        workspace_root=root,
-        memory=_mem_sub(mem),
-        skills_path=skills,
-        mcp=_NoMCP(),
-    )
-    ctx = _ctx()
-    out, err = unwrap_tool_execution_result(
-        await ex.execute(
-            call=ToolCall(
-                call_id="1",
-                name="search_memory",
-                args={"path": "episodic/vertex.md"},
-            ),
-            ctx=ctx,
-        )
-    )
-    assert err is None and out is not None
-    payload = json.loads(out)
-    assert payload["ok"] is True
-    assert len(payload["hits"]) == 1
-    hit = payload["hits"][0]
-    assert hit["path"] == "episodic/vertex.md"
-    assert "Vertex MCP" in hit["body"]
-    assert {"path": "episodic/other.md", "kind": "related"} in hit["links"]
-
-    out2, err2 = unwrap_tool_execution_result(
-        await ex.execute(
-            call=ToolCall(
-                call_id="2",
-                name="search_memory",
-                args={"path": "episodic/missing.md"},
-            ),
-            ctx=ctx,
-        )
-    )
-    assert err2 is None and out2 is not None
-    payload2 = json.loads(out2)
-    assert payload2["hits"] == []
-    assert "read_file" in (payload2.get("note") or "").lower()
 
 
 @pytest.mark.asyncio
@@ -1824,29 +1685,6 @@ async def test_task_tool_spawns_without_memory(tmp_path: Path, monkeypatch: pyte
     assert seen_uri == [""]
     payload = json.loads(out)
     assert payload["ok"] is True
-
-
-@pytest.mark.asyncio
-async def test_search_memory_without_memory_returns_validation_error(tmp_path: Path) -> None:
-    skills = tmp_path / "skills"
-    skills.mkdir()
-    ex = CoreToolExecutor(
-        workspace_root=tmp_path,
-        memory=None,
-        skills_path=skills,
-        mcp=_NoMCP(),
-    )
-    out, err = unwrap_tool_execution_result(
-        await ex.execute(
-            call=ToolCall(call_id="1", name="search_memory", args={"query": "alpha"}),
-            ctx=_ctx(),
-        )
-    )
-    assert out is None and err is not None
-    payload = json.loads(err)
-    assert payload["ok"] is False
-    assert payload["error_kind"] == "validation"
-    assert "memory" in payload["message"].lower()
 
 
 @pytest.mark.asyncio

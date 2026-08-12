@@ -189,7 +189,10 @@ class AgentLayout:
             ),
             db_url=resolve_sqlite_url(os.environ.get("DB_URL", "sqlite:///data/monkeybot.db"), root),
             memory_storage_uri=resolve_memory_storage_uri(
-                os.environ.get("MEMORY_STORAGE_URI", os.environ.get("MEMORY_PATH", "memory")),
+                os.environ.get(
+                    "MEMORY_STORAGE_URI",
+                    os.environ.get("MEMORY_PATH", "memory/mempalace"),
+                ),
                 root,
             ),
         )
@@ -206,6 +209,8 @@ class AgentLayout:
             "PERMISSION_CONFIG": str(self.permission_config_path),
             "DB_URL": self.db_url,
             "MEMORY_STORAGE_URI": self.memory_storage_uri,
+            "MEMPALACE_PALACE_PATH": self.memory_storage_uri.removeprefix("local://"),
+            "MEMPALACE_BACKEND": os.environ.get("MEMPALACE_BACKEND", "chroma"),
             "MONKEYBOT_PYTHON": sys.executable,
         }
         for key, value in values.items():

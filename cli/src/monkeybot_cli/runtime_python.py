@@ -16,6 +16,7 @@ Resolution order for an agent root:
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -58,6 +59,34 @@ def resolve_runtime_python(agent_root: Path) -> RuntimePython:
     return RuntimePython([sys.executable], "cli", agent_root)
 
 
+_HARNESS_PROBE = "import mempalace"
+
+
+def prepare_runtime_python(agent_root: Path) -> RuntimePython:
+    """Resolve the gateway interpreter, syncing the agent venv when harness deps are missing.
+
+    Agent ``.venv`` trees are created once and reused. New transitive deps on
+    ``monkeybot`` (e.g. ``mempalace``) do not install themselves; ``uv sync``
+    against the agent's ``pyproject.toml`` pulls them in.
+    """
+    runtime = resolve_runtime_python(agent_root)
+    if runtime.source != "venv" or not (agent_root / "pyproject.toml").is_file():
+        return runtime
+    if run_probe(runtime, _HARNESS_PROBE):
+        return runtime
+    print(
+        f"agent venv is missing harness packages; running uv sync in {agent_root}",
+        flush=True,
+    )
+    sync = subprocess.run(["uv", "sync"], cwd=agent_root, check=False)
+    if sync.returncode != 0 or not run_probe(runtime, _HARNESS_PROBE):
+        print(
+            "warning: uv sync did not make mempalace importable in the agent venv",
+            flush=True,
+        )
+    return runtime
+
+
 def gateway_argv(
     runtime: RuntimePython,
     *,
@@ -77,8 +106,6 @@ def run_probe(runtime: RuntimePython, code: str, *, timeout: float = 15.0) -> bo
     Used by ``doctor`` to verify extras/imports in the *gateway* interpreter
     rather than the CLI's own process.
     """
-    import subprocess
-
     kwargs: dict[str, object] = {}
     if runtime.source == "uv" and runtime.agent_root is not None:
         kwargs["cwd"] = str(runtime.agent_root)

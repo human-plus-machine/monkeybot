@@ -27,7 +27,6 @@ from monkeybot.core.runtime.events import AssistantDelta, Error, TurnComplete
 from monkeybot.core.runtime.loop import run as run_loop
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.tools.inspector import load_command_tier_policy
-from monkeybot.core.workspace import create_workspace_storage
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +59,8 @@ class HarnessDeps:
         """
         if self.knowledge is not None:
             await self.knowledge.close()
+        if self.memory is not None:
+            await self.memory.close()
         await self.storage.close()
         await self.mcp.disconnect_all()
 
@@ -105,8 +106,8 @@ async def create_harness_deps(
 
     Args:
         db_url: Passed to :func:`~monkeybot.core.persistence.backends.create_storage_backend`.
-        memory_storage_uri: When set, passed to :func:`~monkeybot.core.workspace.create_workspace_storage`
-            and wrapped in :class:`~monkeybot.core.memory.subsystem.MemorySubsystem`.
+        memory_storage_uri: When set, opens a per-agent MemPalace via
+            :class:`~monkeybot.core.memory.subsystem.MemorySubsystem`.
         mcp_config_path: When ``open_mcp`` is True and this path is a file,
             :meth:`~monkeybot.core.mcp.mcp_client.MCPClient.load_from_config` is called.
         provider: ``MODEL_PROVIDER`` override for :func:`~monkeybot.core.config.settings.get_provider_config`.
@@ -131,13 +132,16 @@ async def create_harness_deps(
         memory: MemorySubsystem | None = None
         uri = (memory_storage_uri or "").strip()
         if uri:
-            ws = create_workspace_storage(uri)
+            from monkeybot.core.layout import AgentLayout
+
+            layout = AgentLayout.from_environment()
             memory = MemorySubsystem(
-                storage=ws,
-                provider=prov,
-                model=model_str,
                 memory_uri=uri,
+                db_url=db_url,
+                agent_id=layout.agent_root.name,
+                agent_name=layout.agent_root.name,
             )
+            await memory.ensure_ready()
 
         knowledge: KnowledgeSubsystem | None = None
         if knowledge_enabled_from_config() and workspace_root is not None:
@@ -187,8 +191,8 @@ async def run_pattern_bc_turn(
 
     When ``hook_manager`` is ``None`` (typical for Lambda / short-lived handlers), the loop
     does not fire :class:`~monkeybot.core.hooks.HookManager` hooks, so :class:`~monkeybot.core.memory.hook.MemoryHook`
-    callbacks (automatic ``POST_TOOL`` / ``POST_TURN`` capture, organizer scheduling) never run.
-    ``deps.memory`` still powers the memory index, ``search_memory``, etc. To enable hook-driven
+    callbacks (automatic recall / writer drain) never run.
+    ``deps.memory`` still powers MemPalace wake-up. To enable hook-driven
     memory in FaaS, construct a ``HookManager``, ``memory.register_hooks(mgr)``, pass ``mgr``,
     and use positive hook timeouts where needed so work finishes before the handler returns.
 

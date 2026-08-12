@@ -52,7 +52,6 @@ SANITIZE_SKIP_TOOL_NAMES = frozenset(
         "write_file",
         "replace_in_file",
         "glob",
-        "search_memory",
         "search",
         "list_skills",
     }

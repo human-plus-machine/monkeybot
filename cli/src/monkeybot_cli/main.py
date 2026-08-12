@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from monkeybot_cli.commands import chat, doctor, loop, new, run_cmd, talk, validate
+from monkeybot_cli.commands import chat, doctor, loop, new, refresh, run_cmd, talk, validate
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -16,6 +16,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", help="JSON output (validate/doctor)")
     sub = parser.add_subparsers(dest="command", required=True)
     new.register(sub)
+    refresh.register(sub)
     validate.register(sub)
     doctor.register(sub)
     run_cmd.register(sub)

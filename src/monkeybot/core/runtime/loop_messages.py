@@ -188,7 +188,7 @@ def _append_extra_system_text(system: Message, extra: str | None) -> Message:
     """Return a new system Message with ``extra`` under a ``## Runtime notes`` section.
 
     Uses the same markdown heading style as the rest of the composed system prompt
-    (``## Memory index``, harness sections). When ``extra`` is empty/None the original
+    (``## Memory wake-up``, harness sections). When ``extra`` is empty/None the original
     message is returned unchanged.
     """
     if not extra:

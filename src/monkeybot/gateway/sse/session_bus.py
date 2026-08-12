@@ -319,10 +319,6 @@ class SessionRegistry:
         bus.abandon_pending_cancel_all()
         bus.cancel_follow_up_retry()
         bus.admission.clear_all()
-
-        from monkeybot.core.context.memory_prompt import evict_curation_cache
-
-        evict_curation_cache(session_id)
         return bus
 
     async def _cleanup_spill(self, session_id: str) -> None:

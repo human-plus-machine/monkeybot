@@ -86,9 +86,15 @@ Recent window by default; LLM curator only when the index is token-heavy. On cur
 
 When the prompt shows fewer entries than exist, a structural confidence score triggers a `search_memory` nudge. Skill names are always shown in full in the prompt; use `list_skills` to get the skills root path.
 
-## `memory_hook`
+## `memory`
 
-`enabled: true` — automatic memory capture after turns. Disable to manage memory manually.
+MemPalace is on whenever `paths.memory_storage_uri` is set. There is no enable/disable kill switch.
+
+| Field | Default | When to change |
+|---|---|---|
+| `engine` | `mempalace` | Leave as-is |
+| `backend` | `chroma` | Alternate MemPalace vector backend |
+| `embedding_model` | `embeddinggemma-300m` | Match the embedder the palace was built with |
 
 ## `subagents`
 
