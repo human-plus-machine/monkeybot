@@ -14,7 +14,7 @@ from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from fastapi import APIRouter, Depends, FastAPI, File, Request, Response, UploadFile
+from fastapi import APIRouter, Depends, FastAPI, File, Query, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -1178,6 +1178,32 @@ def create_app(
             raise
         logger.info("chat history deleted %s", kv(session_id=thread_id))
         return {"deleted": True}
+
+    @api.get("/api/memory/graph")
+    async def memory_graph(request: Request) -> dict[str, Any]:
+        """Deprecated note-graph snapshot; MemPalace returns an empty graph."""
+        memory = getattr(request.app.state, "memory", None)
+        if memory is not None:
+            export = getattr(memory, "export_graph", None)
+            if callable(export):
+                payload = await export()
+                if isinstance(payload, dict):
+                    return payload
+        return {"nodes": [], "edges": []}
+
+    @api.get("/api/memory/note")
+    async def memory_note(
+        request: Request,
+        path: str = Query(..., min_length=1),
+    ) -> dict[str, Any]:
+        """Deprecated note reader; MemPalace has no markdown notes."""
+        del request
+        return {
+            "path": path,
+            "content": "",
+            "deprecated": True,
+            "message": "memory notes are no longer stored as files",
+        }
 
     app.include_router(api)
     app.include_router(build_scheduler_router(loop_port=loop, registry=reg))

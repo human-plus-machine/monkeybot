@@ -53,6 +53,8 @@ ALLOWED_COMMANDS = [
     "mempalace",
 ]
 
+ALLOWED_MEMPALACE_SUBCOMMANDS = frozenset({"search"})
+
 # SECURITY: Path allowlist - modify with extreme caution
 # Only add paths that are safe for agent access
 ALLOWED_PATHS = [
@@ -376,6 +378,8 @@ class TerminalExecutor:
         """
         # CRITICAL: Validate command against allowlist
         self._validate_command(command)
+        if command == "mempalace":
+            self._validate_mempalace_args(args)
         
         # CRITICAL: Validate all paths in arguments
         self._validate_paths(args)
@@ -498,6 +502,25 @@ class TerminalExecutor:
                     "severity": "SECURITY_VIOLATION",
                     "command": command,
                     "allowed_commands": list(self._allowed_commands),
+                },
+            )
+            raise SecurityError(error_msg)
+
+    def _validate_mempalace_args(self, args: List[str]) -> None:
+        sub = args[0] if args else ""
+        if sub not in ALLOWED_MEMPALACE_SUBCOMMANDS:
+            error_msg = (
+                f"mempalace subcommand {sub!r} is not allowed; "
+                "only 'search' is permitted"
+            )
+            logger.error(
+                "Security violation: %s",
+                error_msg,
+                extra={
+                    "component": "terminal_executor",
+                    "severity": "SECURITY_VIOLATION",
+                    "command": "mempalace",
+                    "subcommand": sub,
                 },
             )
             raise SecurityError(error_msg)

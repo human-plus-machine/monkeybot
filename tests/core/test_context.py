@@ -605,7 +605,12 @@ async def test_refresh_memory_index_picks_up_new_entries(tmp_path: Path) -> None
     memory._palace.upsert_drawer(
         "d1",
         "first line",
-        {"wing": "main", "room": "conversation", "filed_at": "2026-01-01T00:00:00Z"},
+        {
+            "wing": "main",
+            "room": "conversation",
+            "thread_id": "t",
+            "filed_at": "2026-01-01T00:00:00Z",
+        },
     )
 
     ctx = await build_context(
@@ -621,7 +626,12 @@ async def test_refresh_memory_index_picks_up_new_entries(tmp_path: Path) -> None
     memory._palace.upsert_drawer(
         "d2",
         "second line",
-        {"wing": "main", "room": "conversation", "filed_at": "2026-01-02T00:00:00Z"},
+        {
+            "wing": "main",
+            "room": "conversation",
+            "thread_id": "t",
+            "filed_at": "2026-01-02T00:00:00Z",
+        },
     )
     refreshed = await refresh_memory_index(ctx)
     assert any("second line" in line for line in refreshed.memory_index)

@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 from monkeybot_cli.runtime_python import (
     RuntimePython,
     gateway_argv,
@@ -127,7 +129,8 @@ def test_prepare_runtime_python_skips_sync_when_no_pyproject(tmp_path: Path, mon
     monkeypatch.setattr("monkeybot_cli.runtime_python.subprocess.run", fake_run)
     runtime = prepare_runtime_python(tmp_path)
     assert runtime.source == "venv"
-    assert called == []
+    assert any("-c" in args[0] for args, _kwargs in called)
+    assert not any(args[0][:1] == ["uv"] for args, _kwargs in called)
 
 
 def test_prepare_runtime_python_syncs_when_mempalace_missing(tmp_path: Path, monkeypatch) -> None:
@@ -145,12 +148,79 @@ def test_prepare_runtime_python_syncs_when_mempalace_missing(tmp_path: Path, mon
         calls.append(list(argv))
 
         class Result:
-            returncode = 1 if argv[:1] != ["uv"] else 0
+            returncode = 0
 
+        argv_list = list(argv)
+        if argv_list[:1] != ["uv"] and "-c" in argv_list:
+            # First harness probe fails; the post-upgrade probe succeeds.
+            Result.returncode = 1 if not any(cmd[:2] == ["uv", "sync"] for cmd in calls[:-1]) else 0
         return Result()
 
     monkeypatch.setattr("monkeybot_cli.runtime_python.subprocess.run", fake_run)
     prepare_runtime_python(tmp_path)
     assert any(cmd[:2] == ["uv", "sync"] for cmd in calls)
+    assert any(cmd[:3] == ["uv", "lock", "--upgrade-package"] for cmd in calls)
     assert not any(cmd[:3] == ["uv", "pip", "install"] for cmd in calls)
     assert any("import mempalace" in " ".join(cmd) for cmd in calls)
+
+
+def test_prepare_runtime_python_fail_closed_when_upgrade_stale(tmp_path: Path, monkeypatch) -> None:
+    from monkeybot_cli.runtime_python import RuntimeUpgradeError
+
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "agent"\n', encoding="utf-8")
+    venv_bin = tmp_path / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    py = venv_bin / "python"
+    py.write_text("#!/bin/sh\n")
+    py.chmod(0o755)
+
+    def fake_run(argv, **kwargs):
+        del argv, kwargs
+
+        class Result:
+            returncode = 1
+
+        return Result()
+
+    monkeypatch.setattr("monkeybot_cli.runtime_python.subprocess.run", fake_run)
+    with pytest.raises(RuntimeUpgradeError, match="refusing to start"):
+        prepare_runtime_python(tmp_path)
+
+
+def test_prepare_runtime_python_fail_closed_without_pyproject(tmp_path: Path, monkeypatch) -> None:
+    from monkeybot_cli.runtime_python import RuntimeUpgradeError
+
+    venv_bin = tmp_path / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    py = venv_bin / "python"
+    py.write_text("#!/bin/sh\n")
+    py.chmod(0o755)
+
+    monkeypatch.setattr("monkeybot_cli.runtime_python.run_probe", lambda *a, **k: False)
+    with pytest.raises(RuntimeUpgradeError, match="missing monkeybot/mempalace"):
+        prepare_runtime_python(tmp_path)
+
+
+def test_prepare_runtime_python_probes_uv_runtime(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "agent"\n', encoding="utf-8")
+    calls: list[list[str]] = []
+    probes = {"n": 0}
+
+    def fake_run(argv, **kwargs):
+        del kwargs
+        calls.append(list(argv))
+
+        class Result:
+            returncode = 0
+
+        argv_list = list(argv)
+        if argv_list[:2] == ["uv", "run"] and "-c" in argv_list:
+            probes["n"] += 1
+            Result.returncode = 0 if probes["n"] > 1 else 1
+        return Result()
+
+    monkeypatch.setattr("monkeybot_cli.runtime_python.subprocess.run", fake_run)
+    runtime = prepare_runtime_python(tmp_path)
+    assert runtime.source == "uv"
+    assert any(cmd[:3] == ["uv", "lock", "--upgrade-package"] for cmd in calls)
+    assert any(cmd[:2] == ["uv", "sync"] for cmd in calls)

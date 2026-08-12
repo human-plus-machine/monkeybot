@@ -651,3 +651,24 @@ async def test_chat_history_disabled_returns_404(registry: SessionRegistry, monk
             r = await method(path)
             assert r.status_code == 404
             assert r.json()["error"]["code"] == "NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_deprecated_memory_routes_do_not_404(registry: SessionRegistry) -> None:
+    app = create_app(loop_port=FakeLoopPort(registry), registry=registry)
+
+    class _Memory:
+        async def export_graph(self, *, refresh: bool = False) -> dict[str, object]:
+            del refresh
+            return {"nodes": [], "edges": [], "deprecated": True}
+
+    app.state.memory = _Memory()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        graph = await client.get("/api/memory/graph")
+        assert graph.status_code == 200
+        assert graph.json()["deprecated"] is True
+        note = await client.get("/api/memory/note", params={"path": "INDEX.md"})
+        assert note.status_code == 200
+        body = note.json()
+        assert body["deprecated"] is True
+        assert body["path"] == "INDEX.md"

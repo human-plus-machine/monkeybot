@@ -9,7 +9,7 @@ Postgres implementation code loads until the factory is actually called.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from urllib.parse import parse_qs, unquote, urlparse
 
 if TYPE_CHECKING:
@@ -193,6 +193,8 @@ class StorageBackend(Protocol):
     def scheduled_loops(self) -> ScheduledLoopStore: ...
 
     def session_turns(self) -> SessionTurnLockStore: ...
+
+    def outbox(self) -> Any: ...
 
 
 @dataclass(frozen=True)

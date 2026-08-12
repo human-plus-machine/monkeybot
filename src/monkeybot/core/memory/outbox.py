@@ -1,10 +1,10 @@
-"""Durable memory outbox in the agent SQLite database."""
+"""Durable memory outbox: row model, SQL helpers, and the store protocol."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Protocol
 
 import aiosqlite
 
@@ -16,9 +16,31 @@ STATUS_PROCESSING = "processing"
 STATUS_COMMITTED = "committed"
 STATUS_DEAD = "dead"
 
-_MAX_ATTEMPTS = 8
 _LEASE_SECONDS = 30
 _GC_AFTER_DAYS = 7
+_MAX_BACKOFF_SECONDS = 300
+
+_PERMANENT_ERROR_CLASSES = frozenset(
+    {
+        "ValueError",
+        "TypeError",
+        "UnicodeError",
+        "UnicodeDecodeError",
+        "UnicodeEncodeError",
+        "PermanentMemoryError",
+    }
+)
+
+_OUTBOX_SELECT = """
+        SELECT id, thread_id, turn_id, message_id, role, content, workspace_id,
+               wing, room, created_at, status, attempts, next_attempt_at,
+               last_error, traceparent, lease_owner, lease_expires_at, agent_id
+        FROM memory_outbox
+"""
+
+
+class PermanentMemoryError(ValueError):
+    """Classified as a permanent outbox failure (dead-letter immediately)."""
 
 
 @dataclass(frozen=True)
@@ -40,6 +62,7 @@ class OutboxRow:
     traceparent: str | None
     lease_owner: str | None
     lease_expires_at: str | None
+    agent_id: str = ""
 
     def metadata(self) -> dict[str, str]:
         meta = {
@@ -52,13 +75,70 @@ class OutboxRow:
             "source_timestamp": self.created_at,
             "filed_at": self.created_at,
             "added_by": "monkeybot",
+            "agent_id": self.agent_id,
         }
         if self.workspace_id:
             meta["workspace_id"] = self.workspace_id
         return meta
 
 
+class OutboxStore(Protocol):
+    """Durable outbox used by the memory writer. Implemented per storage backend."""
+
+    async def insert_pending(
+        self,
+        *,
+        agent_id: str,
+        thread_id: str,
+        turn_id: str,
+        message_id: str,
+        role: str,
+        content: str,
+        workspace_id: str | None,
+        wing: str,
+        room: str,
+        created_at: str | None = None,
+        traceparent: str | None = None,
+        commit: bool = True,
+    ) -> str | None: ...
+
+    async def claim_batch(
+        self,
+        *,
+        agent_id: str,
+        lease_owner: str,
+        limit: int = 16,
+        lease_seconds: int = _LEASE_SECONDS,
+    ) -> list[OutboxRow]: ...
+
+    async def mark_committed(self, row_ids: list[str]) -> None: ...
+
+    async def mark_retry(
+        self,
+        row_id: str,
+        *,
+        error_class: str,
+        attempts: int,
+        permanent: bool | None = None,
+    ) -> None: ...
+
+    async def gc_committed(self, *, days: int = _GC_AFTER_DAYS) -> int: ...
+
+    async def pending_depth(self, *, agent_id: str | None = None) -> tuple[int, float]: ...
+
+    async def dead_depth(self, *, agent_id: str | None = None) -> int: ...
+
+    async def close(self) -> None: ...
+
+
+def is_permanent_error(error_class: str) -> bool:
+    return error_class in _PERMANENT_ERROR_CLASSES
+
+
 def _row_from_sql(row: Any) -> OutboxRow:
+    agent_id = ""
+    if len(row) > 17 and row[17] is not None:
+        agent_id = str(row[17])
     return OutboxRow(
         id=str(row[0]),
         thread_id=str(row[1]),
@@ -77,18 +157,37 @@ def _row_from_sql(row: Any) -> OutboxRow:
         traceparent=row[14],
         lease_owner=row[15],
         lease_expires_at=row[16],
+        agent_id=agent_id,
     )
 
 
 async def ensure_outbox_schema(conn: aiosqlite.Connection) -> None:
     await conn.execute(OUTBOX_DDL)
     await conn.execute(OUTBOX_INDEX_DDL)
+    await _ensure_outbox_agent_id_column(conn)
     await conn.commit()
+
+
+async def _ensure_outbox_agent_id_column(conn: aiosqlite.Connection) -> None:
+    cur = await conn.execute("PRAGMA table_info(memory_outbox)")
+    rows = await cur.fetchall()
+    await cur.close()
+    names = {str(r[1]) for r in rows}
+    if not names:
+        return
+    if "agent_id" not in names:
+        await conn.execute(
+            "ALTER TABLE memory_outbox ADD COLUMN agent_id TEXT NOT NULL DEFAULT ''"
+        )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memory_outbox_agent "
+        "ON memory_outbox(agent_id, status, created_at)"
+    )
 
 
 def backoff_iso(attempts: int, *, now: datetime | None = None) -> str:
     base = now or datetime.now(timezone.utc)
-    delay = min(300, 2 ** max(0, attempts))
+    delay = min(_MAX_BACKOFF_SECONDS, 2 ** max(0, attempts))
     return (base + timedelta(seconds=delay)).isoformat(timespec="seconds")
 
 
@@ -123,12 +222,13 @@ async def insert_pending(
     await conn.execute(
         """
         INSERT INTO memory_outbox (
-          id, thread_id, turn_id, message_id, role, content, workspace_id,
+          id, agent_id, thread_id, turn_id, message_id, role, content, workspace_id,
           wing, room, created_at, status, attempts, traceparent
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?)
         """,
         (
             row_id,
+            agent_id,
             thread_id,
             turn_id,
             message_id,
@@ -152,6 +252,7 @@ async def claim_batch(
     lease_owner: str,
     limit: int = 16,
     lease_seconds: int = _LEASE_SECONDS,
+    agent_id: str | None = None,
 ) -> list[OutboxRow]:
     now = datetime.now(timezone.utc)
     now_iso = now.isoformat(timespec="seconds")
@@ -165,19 +266,29 @@ async def claim_batch(
         """,
         (now_iso,),
     )
-    cur = await conn.execute(
-        """
-        SELECT id, thread_id, turn_id, message_id, role, content, workspace_id,
-               wing, room, created_at, status, attempts, next_attempt_at,
-               last_error, traceparent, lease_owner, lease_expires_at
-        FROM memory_outbox
+    if agent_id:
+        cur = await conn.execute(
+            _OUTBOX_SELECT
+            + """
+        WHERE status = 'pending'
+          AND agent_id = ?
+          AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+        ORDER BY created_at ASC
+        LIMIT ?
+        """,
+            (agent_id, now_iso, limit),
+        )
+    else:
+        cur = await conn.execute(
+            _OUTBOX_SELECT
+            + """
         WHERE status = 'pending'
           AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
         ORDER BY created_at ASC
         LIMIT ?
         """,
-        (now_iso, limit),
-    )
+            (now_iso, limit),
+        )
     rows = await cur.fetchall()
     await cur.close()
     claimed: list[OutboxRow] = []
@@ -219,8 +330,10 @@ async def mark_retry(
     *,
     error_class: str,
     attempts: int,
+    permanent: bool | None = None,
 ) -> None:
-    status = STATUS_DEAD if attempts >= _MAX_ATTEMPTS else STATUS_PENDING
+    dead = bool(permanent) if permanent is not None else is_permanent_error(error_class)
+    status = STATUS_DEAD if dead else STATUS_PENDING
     next_at = None if status == STATUS_DEAD else backoff_iso(attempts)
     await conn.execute(
         """
@@ -248,25 +361,112 @@ async def gc_committed(conn: aiosqlite.Connection, *, days: int = _GC_AFTER_DAYS
     return int(cur.rowcount or 0)
 
 
-async def pending_depth(conn: aiosqlite.Connection) -> tuple[int, float]:
-    cur = await conn.execute(
-        """
-        SELECT COUNT(*), MIN(created_at)
-        FROM memory_outbox
-        WHERE status IN ('pending', 'processing')
-        """
-    )
+def _age_from_oldest(oldest: Any) -> float:
+    if not oldest:
+        return 0.0
+    try:
+        created = datetime.fromisoformat(str(oldest))
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        return max(0.0, (datetime.now(timezone.utc) - created).total_seconds())
+    except ValueError:
+        return 0.0
+
+
+async def pending_depth(
+    conn: aiosqlite.Connection, *, agent_id: str | None = None
+) -> tuple[int, float]:
+    if agent_id:
+        cur = await conn.execute(
+            """
+            SELECT COUNT(*), MIN(created_at)
+            FROM memory_outbox
+            WHERE status IN ('pending', 'processing') AND agent_id = ?
+            """,
+            (agent_id,),
+        )
+    else:
+        cur = await conn.execute(
+            """
+            SELECT COUNT(*), MIN(created_at)
+            FROM memory_outbox
+            WHERE status IN ('pending', 'processing')
+            """
+        )
     row = await cur.fetchone()
     await cur.close()
     count = int(row[0] or 0) if row else 0
     oldest = row[1] if row else None
-    age = 0.0
-    if oldest:
-        try:
-            created = datetime.fromisoformat(str(oldest))
-            if created.tzinfo is None:
-                created = created.replace(tzinfo=timezone.utc)
-            age = max(0.0, (datetime.now(timezone.utc) - created).total_seconds())
-        except ValueError:
-            age = 0.0
-    return count, age
+    return count, _age_from_oldest(oldest)
+
+
+async def dead_depth(conn: aiosqlite.Connection, *, agent_id: str | None = None) -> int:
+    if agent_id:
+        cur = await conn.execute(
+            "SELECT COUNT(*) FROM memory_outbox WHERE status = 'dead' AND agent_id = ?",
+            (agent_id,),
+        )
+    else:
+        cur = await conn.execute("SELECT COUNT(*) FROM memory_outbox WHERE status = 'dead'")
+    row = await cur.fetchone()
+    await cur.close()
+    return int(row[0] or 0) if row else 0
+
+
+class SqliteOutboxStore:
+    """OutboxStore backed by a shared aiosqlite connection."""
+
+    def __init__(self, conn: aiosqlite.Connection, *, owns_connection: bool = False) -> None:
+        self._conn = conn
+        self._owns_connection = owns_connection
+
+    async def insert_pending(self, **kwargs: Any) -> str | None:
+        return await insert_pending(self._conn, **kwargs)
+
+    async def claim_batch(
+        self,
+        *,
+        agent_id: str,
+        lease_owner: str,
+        limit: int = 16,
+        lease_seconds: int = _LEASE_SECONDS,
+    ) -> list[OutboxRow]:
+        return await claim_batch(
+            self._conn,
+            agent_id=agent_id,
+            lease_owner=lease_owner,
+            limit=limit,
+            lease_seconds=lease_seconds,
+        )
+
+    async def mark_committed(self, row_ids: list[str]) -> None:
+        await mark_committed(self._conn, row_ids)
+
+    async def mark_retry(
+        self,
+        row_id: str,
+        *,
+        error_class: str,
+        attempts: int,
+        permanent: bool | None = None,
+    ) -> None:
+        await mark_retry(
+            self._conn,
+            row_id,
+            error_class=error_class,
+            attempts=attempts,
+            permanent=permanent,
+        )
+
+    async def gc_committed(self, *, days: int = _GC_AFTER_DAYS) -> int:
+        return await gc_committed(self._conn, days=days)
+
+    async def pending_depth(self, *, agent_id: str | None = None) -> tuple[int, float]:
+        return await pending_depth(self._conn, agent_id=agent_id)
+
+    async def dead_depth(self, *, agent_id: str | None = None) -> int:
+        return await dead_depth(self._conn, agent_id=agent_id)
+
+    async def close(self) -> None:
+        if self._owns_connection:
+            await self._conn.close()

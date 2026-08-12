@@ -378,6 +378,11 @@ class TestTerminalExecutorExecution:
         assert seen[0][1:3] == ("-m", "mempalace")
         assert seen[0][3:] == ("search", "q")
 
+    @pytest.mark.asyncio
+    async def test_mempalace_rejects_non_search_subcommand(self, executor, tmp_path):
+        with pytest.raises(SecurityError, match="only 'search' is permitted"):
+            await executor.execute("mempalace", ["repair", "rebuild-index"], cwd=tmp_path)
+
 
 class TestTerminalExecutorTimeout:
     """

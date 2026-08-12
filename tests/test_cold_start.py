@@ -66,6 +66,9 @@ async def test_health_under_budget(monkeypatch: pytest.MonkeyPatch) -> None:
         def register_hooks(self, _mgr: object) -> None:
             return
 
+        async def close(self) -> None:
+            return
+
     monkeypatch.setattr(MCPClient, "load_from_config", _skip_mcp_load)
     monkeypatch.setattr("monkeybot.gateway.sse.app.MemorySubsystem", _FastMemory)
     monkeypatch.setenv("DB_URL", "sqlite:///:memory:")

@@ -1696,7 +1696,12 @@ async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> N
     palace.upsert_drawer(
         "d1",
         "initial line",
-        {"wing": "main", "room": "conversation", "filed_at": "2026-01-01T00:00:00Z"},
+        {
+            "wing": "main",
+            "room": "conversation",
+            "thread_id": "t1",
+            "filed_at": "2026-01-01T00:00:00Z",
+        },
     )
 
     class CaptureFakeProvider:
@@ -1747,7 +1752,12 @@ async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> N
             palace.upsert_drawer(
                 "d2",
                 "new memory from tool",
-                {"wing": "main", "room": "conversation", "filed_at": "2026-01-02T00:00:00Z"},
+                {
+                    "wing": "main",
+                    "room": "conversation",
+                    "thread_id": "t1",
+                    "filed_at": "2026-01-02T00:00:00Z",
+                },
             )
             return ToolExecutionResult.ok_text("ok")
 

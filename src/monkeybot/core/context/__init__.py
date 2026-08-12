@@ -858,7 +858,7 @@ async def build_context(
         ValueError: When AGENT.md is missing or empty after normalization.
     """
     agent_md = _load_agent_md(agent_md_path)
-    memory_index = await memory.load_index() if memory is not None else []
+    memory_index = await memory.load_index(thread_id=thread_id) if memory is not None else []
     skills = _discover_skills(skills_path)
     registry = subagent_registry or {}
     type_names = sorted(registry)
@@ -910,7 +910,7 @@ async def refresh_memory_index(ctx: TurnContext) -> TurnContext:
         return ctx
 
     try:
-        fresh = await ctx.memory.load_index()
+        fresh = await ctx.memory.load_index(thread_id=ctx.thread_id)
         return dataclasses.replace(ctx, memory_index=fresh)
     except Exception as exc:
         _log.warning(

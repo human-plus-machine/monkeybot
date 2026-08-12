@@ -45,6 +45,7 @@ from monkeybot.core.llm.provider import (
 )
 from monkeybot.core.llm.usage import Usage as UsageRecord
 from monkeybot.core.mcp.mcp_client import MCPClient
+from monkeybot.core.memory.config import memory_enabled_from_config
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.persistence.backends import (
     StorageBackend,
@@ -604,21 +605,28 @@ async def _startup(fastapi_app: FastAPI) -> None:
         logger.info("web search disabled (WEB_SEARCH_BACKEND=none)")
 
     try:
-        mem_uri = _memory_storage_uri()
-        layout = AgentLayout.from_environment()
-        mgr = HookManager()
-        memory = MemorySubsystem(
-            memory_uri=mem_uri,
-            db_url=layout.db_url,
-            agent_id=layout.agent_root.name,
-            agent_name=layout.agent_root.name,
-        )
-        await memory.ensure_ready()
-        memory.register_hooks(mgr)
-        _deps.hook_manager = mgr
-        _deps.memory = memory
-        fastapi_app.state.memory = memory
-        logger.info("memory enabled (memory_storage_uri=%s)", mem_uri)
+        if not memory_enabled_from_config():
+            logger.info("memory disabled via memory.enabled / MONKEYBOT_MEMORY_HOOK_ENABLED")
+            _deps.hook_manager = None
+            _deps.memory = None
+            fastapi_app.state.memory = None
+        else:
+            mem_uri = _memory_storage_uri()
+            layout = AgentLayout.from_environment()
+            mgr = HookManager()
+            memory = MemorySubsystem(
+                memory_uri=mem_uri,
+                db_url=layout.db_url,
+                agent_id=layout.agent_root.name,
+                agent_name=layout.agent_root.name,
+                storage=backend,
+            )
+            await memory.ensure_ready()
+            memory.register_hooks(mgr)
+            _deps.hook_manager = mgr
+            _deps.memory = memory
+            fastapi_app.state.memory = memory
+            logger.info("memory enabled (memory_storage_uri=%s)", mem_uri)
     except Exception as exc:
         logger.warning("memory setup failed; continuing without: %r", exc)
         _deps.hook_manager = None
@@ -758,6 +766,20 @@ async def _shutdown(fastapi_app: FastAPI) -> None:
             fastapi_app.state.knowledge = None
         except Exception as exc:
             logger.warning("knowledge state clear failed: %s", exc)
+
+    memory = _deps.memory or getattr(fastapi_app.state, "memory", None)
+    if memory is not None:
+        close = getattr(memory, "close", None)
+        if callable(close):
+            try:
+                await close()
+            except Exception as exc:
+                logger.warning("memory close failed: %s", exc)
+        _deps.memory = None
+        try:
+            fastapi_app.state.memory = None
+        except Exception as exc:
+            logger.warning("memory state clear failed: %s", exc)
     worker_pool_handle = getattr(fastapi_app.state, "worker_pool", None)
     if worker_pool_handle is not None:
         from monkeybot.core.subagents.worker_pool import shutdown_worker_pool

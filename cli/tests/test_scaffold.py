@@ -141,7 +141,10 @@ def test_run_refresh_adds_template_commands_and_keeps_extras(tmp_path: Path) -> 
         "  - ./custom-data/\n"
         "deny_patterns:\n"
         '  - "^sudo\\\\s+"\n'
-        '  - "my-custom-deny"\n',
+        '  - "my-custom-deny"\n'
+        "tool_output:\n"
+        "  run_command:\n"
+        "    max_output_lines: 7\n",
         encoding="utf-8",
     )
     agent_md = tmp_path / "monkeybot_config" / "AGENT.md"
@@ -160,6 +163,8 @@ def test_run_refresh_adds_template_commands_and_keeps_extras(tmp_path: Path) -> 
     assert "  - ./custom-data/\n" in text
     assert "  - ../memory/mempalace/\n" in text
     assert "my-custom-deny" in text
+    assert "  - grep\n" not in text
+    assert "max_output_lines: 7" in text
     assert agent_md.read_text(encoding="utf-8") == "custom persona\n"
     assert '"mine"' in mcp.read_text(encoding="utf-8")
     refreshed_yaml = yaml_path.read_text(encoding="utf-8")

@@ -15,6 +15,7 @@ DEFAULT_DB_URL: Final[str] = "sqlite:///data/monkeybot.db"
 
 OUTBOX_DDL: Final[str] = """CREATE TABLE IF NOT EXISTS memory_outbox (
     id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL DEFAULT '',
     thread_id TEXT NOT NULL,
     turn_id TEXT NOT NULL,
     message_id TEXT NOT NULL,
@@ -34,7 +35,8 @@ OUTBOX_DDL: Final[str] = """CREATE TABLE IF NOT EXISTS memory_outbox (
 )"""
 
 OUTBOX_INDEX_DDL: Final[str] = (
-    "CREATE INDEX IF NOT EXISTS idx_memory_outbox_pending ON memory_outbox(status, created_at)"
+    "CREATE INDEX IF NOT EXISTS idx_memory_outbox_pending "
+    "ON memory_outbox(agent_id, status, created_at)"
 )
 
 _LEGACY_SCHEMA_MESSAGE = """Legacy conversation_history schema detected (tool_name and/or
@@ -187,6 +189,7 @@ async def apply_schema(conn: aiosqlite.Connection) -> None:
     await _ensure_turn_usage_cache_columns(conn)
     await _ensure_subagent_runs_claim_columns(conn)
     await _ensure_history_memory_columns(conn)
+    await _ensure_outbox_agent_id_column(conn)
     cursor = await conn.execute("PRAGMA table_info(conversation_history)")
     rows = await cursor.fetchall()
     await cursor.close()
@@ -235,6 +238,25 @@ async def _ensure_subagent_runs_claim_columns(conn: aiosqlite.Connection) -> Non
         await conn.execute("ALTER TABLE subagent_runs ADD COLUMN worker_id TEXT")
     if "claimed_at" not in names:
         await conn.execute("ALTER TABLE subagent_runs ADD COLUMN claimed_at INTEGER")
+    await conn.commit()
+
+
+async def _ensure_outbox_agent_id_column(conn: aiosqlite.Connection) -> None:
+    """Add agent_id on memory_outbox when upgrading an existing DB."""
+    cur = await conn.execute("PRAGMA table_info(memory_outbox)")
+    rows = await cur.fetchall()
+    await cur.close()
+    names = {str(r[1]) for r in rows}
+    if not names:
+        return
+    if "agent_id" not in names:
+        await conn.execute(
+            "ALTER TABLE memory_outbox ADD COLUMN agent_id TEXT NOT NULL DEFAULT ''"
+        )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_memory_outbox_agent "
+        "ON memory_outbox(agent_id, status, created_at)"
+    )
     await conn.commit()
 
 

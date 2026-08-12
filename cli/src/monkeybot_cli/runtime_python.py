@@ -59,30 +59,50 @@ def resolve_runtime_python(agent_root: Path) -> RuntimePython:
     return RuntimePython([sys.executable], "cli", agent_root)
 
 
-_HARNESS_PROBE = "import mempalace"
+_HARNESS_PROBE = (
+    "import mempalace, monkeybot; "
+    "from importlib.metadata import version; "
+    "ver = version('monkeybot'); "
+    "parts = [int(p) for p in ver.split('.')[:2]]; "
+    "assert parts >= [2, 2], ver"
+)
+
+
+class RuntimeUpgradeError(RuntimeError):
+    """Raised when the agent interpreter cannot be upgraded to a MemPalace-capable MonkeyBot."""
 
 
 def prepare_runtime_python(agent_root: Path) -> RuntimePython:
-    """Resolve the gateway interpreter, syncing the agent venv when harness deps are missing.
+    """Resolve the gateway interpreter, upgrading the agent lock when harness deps are missing.
 
-    Agent ``.venv`` trees are created once and reused. New transitive deps on
-    ``monkeybot`` (e.g. ``mempalace``) do not install themselves; ``uv sync``
-    against the agent's ``pyproject.toml`` pulls them in.
+    Verifies both MonkeyBot and MemPalace for venv and uv runtimes. On failure,
+    upgrades the monkeybot lock and syncs, then probes again. Fails closed if
+    the runtime is still stale.
     """
     runtime = resolve_runtime_python(agent_root)
-    if runtime.source != "venv" or not (agent_root / "pyproject.toml").is_file():
-        return runtime
+    has_project = (agent_root / "pyproject.toml").is_file()
     if run_probe(runtime, _HARNESS_PROBE):
         return runtime
+    if not has_project:
+        raise RuntimeUpgradeError(
+            "gateway interpreter is missing monkeybot/mempalace; "
+            "install monkeybot>=2.2 in this environment before starting the gateway"
+        )
     print(
-        f"agent venv is missing harness packages; running uv sync in {agent_root}",
+        f"agent runtime is missing harness packages; upgrading monkeybot lock in {agent_root}",
         flush=True,
     )
+    lock = subprocess.run(
+        ["uv", "lock", "--upgrade-package", "monkeybot"],
+        cwd=agent_root,
+        check=False,
+    )
     sync = subprocess.run(["uv", "sync"], cwd=agent_root, check=False)
-    if sync.returncode != 0 or not run_probe(runtime, _HARNESS_PROBE):
-        print(
-            "warning: uv sync did not make mempalace importable in the agent venv",
-            flush=True,
+    runtime = resolve_runtime_python(agent_root)
+    if lock.returncode != 0 or sync.returncode != 0 or not run_probe(runtime, _HARNESS_PROBE):
+        raise RuntimeUpgradeError(
+            "failed to upgrade the agent runtime to a MonkeyBot with MemPalace; "
+            "refusing to start a stale gateway"
         )
     return runtime
 

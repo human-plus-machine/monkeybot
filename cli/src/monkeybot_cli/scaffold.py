@@ -108,16 +108,24 @@ def write_active_config(
 
 
 def ensure_memory(dest: Path, *, force: bool) -> list[str]:
+    from monkeybot.core.memory.import_notes import migrate_memory_uri_in_yaml
+
     palace = dest / "memory" / "mempalace"
     palace.mkdir(parents=True, exist_ok=True)
     identity = palace / "identity.txt"
+    lines: list[str] = []
+    yaml_path = dest / "monkeybot_config" / "monkeybot.yaml"
+    if migrate_memory_uri_in_yaml(yaml_path):
+        lines.append("  monkeybot_config/monkeybot.yaml: migrated memory_storage_uri")
     if not identity.exists() or force:
         identity.write_text(
             f"## L0 — IDENTITY\nI am {dest.name}, a MonkeyBot agent.\n",
             encoding="utf-8",
         )
-        return [f"  memory/mempalace/: {'overwritten' if force else 'created'}"]
-    return ["  memory/mempalace/: skipped"]
+        lines.append(f"  memory/mempalace/: {'overwritten' if force else 'created'}")
+    else:
+        lines.append("  memory/mempalace/: skipped")
+    return lines
 
 
 def ensure_workspace(dest: Path, *, force: bool) -> list[str]:
@@ -324,8 +332,15 @@ def _append_list_extras(text: str, section_header: str, extras: list[str]) -> st
     return text[:insert_at] + addition + text[insert_at:]
 
 
+_REQUIRED_ALLOWLIST_COMMANDS: Final[tuple[str, ...]] = ("mempalace",)
+_REQUIRED_ALLOWLIST_PATHS: Final[tuple[str, ...]] = (
+    "../memory/mempalace/",
+    "../memory/mempalace",
+)
+
+
 def refresh_command_allowlist(cfg_dir: Path) -> str:
-    """Rewrite from the packaged template, then re-append agent-only extras."""
+    """Add required MemPalace entries without rewriting operator policy."""
     dest = cfg_dir / "command_allowlist.yaml"
     template = (resources.files(_DEFAULTS_PKG) / "command_allowlist.yaml").read_text(
         encoding="utf-8"
@@ -336,34 +351,27 @@ def refresh_command_allowlist(cfg_dir: Path) -> str:
         return f"  {label}: created"
 
     existing = _load_mapping(dest)
-    tmpl = yaml.safe_load(template)
-    tmpl_map = tmpl if isinstance(tmpl, dict) else {}
-    text = template
+    text = dest.read_text(encoding="utf-8")
+    original = text
     text = _append_list_extras(
         text,
         "allowed_commands:",
         _list_extras(
+            list(_REQUIRED_ALLOWLIST_COMMANDS),
             _as_str_list(existing.get("allowed_commands")),
-            _as_str_list(tmpl_map.get("allowed_commands")),
         ),
     )
     text = _append_list_extras(
         text,
         "allowed_path_prefixes:",
         _list_extras(
+            list(_REQUIRED_ALLOWLIST_PATHS),
             _as_str_list(existing.get("allowed_path_prefixes")),
-            _as_str_list(tmpl_map.get("allowed_path_prefixes")),
         ),
     )
-    text = _append_list_extras(
-        text,
-        "deny_patterns:",
-        _list_extras(
-            _as_str_list(existing.get("deny_patterns")),
-            _as_str_list(tmpl_map.get("deny_patterns")),
-        ),
-    )
-    if dest.read_text(encoding="utf-8") == text:
+    if "allowed_commands:" not in existing and "allowed_commands:" not in text:
+        text = text.rstrip() + "\nallowed_commands:\n  - mempalace\n"
+    if text == original:
         return f"  {label}: unchanged"
     dest.write_text(text, encoding="utf-8")
     return f"  {label}: updated"

@@ -50,17 +50,45 @@ class PalacePort(Protocol):
 
     def get_drawer(self, drawer_id: str) -> DrawerRecord | None: ...
 
-    def wake_up(self, wing: str | None = None) -> str: ...
+    def wake_up(self, wing: str | None = None, thread_id: str | None = None) -> str: ...
 
-    def recall(self, *, wing: str, room: str, n_results: int = 10) -> list[DrawerRecord]: ...
+    def recall(
+        self,
+        *,
+        wing: str,
+        room: str,
+        n_results: int = 10,
+        thread_id: str | None = None,
+    ) -> list[DrawerRecord]: ...
 
     def status(self) -> dict[str, Any]: ...
 
     def acquire_write_lock(self) -> AbstractContextManager[None]: ...
 
 
+_UNSUPPORTED_MEMORY_SCHEMES = ("gcs://", "s3://", "gs://")
+
+
+class UnsupportedMemoryURI(ValueError):
+    """Raised when memory_storage_uri uses a scheme MemPalace cannot persist."""
+
+
 def palace_path_from_uri(memory_uri: str) -> Path:
     raw = memory_uri.strip()
+    lowered = raw.lower()
+    for scheme in _UNSUPPORTED_MEMORY_SCHEMES:
+        if lowered.startswith(scheme):
+            raise UnsupportedMemoryURI(
+                f"MemPalace does not support {scheme} URIs ({raw!r}); "
+                "use a local:// path such as local://./memory/mempalace"
+            )
+    if "://" in raw and not raw.startswith("local://") and not Path(raw).exists():
+        scheme = raw.split("://", 1)[0]
+        if scheme not in ("", "file", "local"):
+            raise UnsupportedMemoryURI(
+                f"MemPalace does not support {scheme}:// URIs ({raw!r}); "
+                "use a local:// path such as local://./memory/mempalace"
+            )
     if raw.startswith("local://"):
         raw = raw[len("local://") :]
     return Path(raw).expanduser().resolve()
@@ -123,11 +151,13 @@ class InMemoryPalace:
     def get_drawer(self, drawer_id: str) -> DrawerRecord | None:
         return self._drawers.get(drawer_id)
 
-    def wake_up(self, wing: str | None = None) -> str:
+    def wake_up(self, wing: str | None = None, thread_id: str | None = None) -> str:
         identity = (self.palace_path / "identity.txt").read_text(encoding="utf-8").strip()
         drawers = list(self._drawers.values())
         if wing:
             drawers = [d for d in drawers if d.wing == wing]
+        if thread_id:
+            drawers = [d for d in drawers if d.metadata.get("thread_id") == thread_id]
         drawers.sort(key=lambda d: d.filed_at, reverse=True)
         lines = [identity, "", "## L1 — ESSENTIAL STORY"]
         if not drawers:
@@ -140,10 +170,19 @@ class InMemoryPalace:
             lines.append(f"- [{drawer.room}] {snippet}")
         return "\n".join(lines)
 
-    def recall(self, *, wing: str, room: str, n_results: int = 10) -> list[DrawerRecord]:
+    def recall(
+        self,
+        *,
+        wing: str,
+        room: str,
+        n_results: int = 10,
+        thread_id: str | None = None,
+    ) -> list[DrawerRecord]:
         matched = [
             d for d in self._drawers.values() if d.wing == wing and d.room == room
         ]
+        if thread_id:
+            matched = [d for d in matched if d.metadata.get("thread_id") == thread_id]
         matched.sort(key=lambda d: d.filed_at, reverse=True)
         return matched[: max(0, n_results)]
 
@@ -269,7 +308,25 @@ class MemPalaceAdapter:
             metadata=meta,
         )
 
-    def wake_up(self, wing: str | None = None) -> str:
+    def wake_up(self, wing: str | None = None, thread_id: str | None = None) -> str:
+        if thread_id:
+            identity = (self.palace_path / "identity.txt").read_text(encoding="utf-8").strip()
+            drawers = self.recall(
+                wing=wing or "main",
+                room=CONVERSATION_ROOM,
+                n_results=15,
+                thread_id=thread_id,
+            )
+            lines = [identity, "", "## L1 — ESSENTIAL STORY"]
+            if not drawers:
+                lines.append("No memories yet.")
+                return "\n".join(lines)
+            for drawer in drawers:
+                snippet = " ".join(drawer.content.split())
+                if len(snippet) > 200:
+                    snippet = snippet[:197] + "..."
+                lines.append(f"- [{drawer.room}] {snippet}")
+            return "\n".join(lines)
         from mempalace.layers import MemoryStack
 
         stack = MemoryStack(
@@ -280,42 +337,66 @@ class MemPalaceAdapter:
             return stack.wake_up(wing=wing)
         return stack.wake_up()
 
-    def recall(self, *, wing: str, room: str, n_results: int = 10) -> list[DrawerRecord]:
+    def recall(
+        self,
+        *,
+        wing: str,
+        room: str,
+        n_results: int = 10,
+        thread_id: str | None = None,
+    ) -> list[DrawerRecord]:
         try:
             col = self._collection(create=False)
         except Exception as exc:
             logger.warning("mempalace recall collection failed: %r", exc)
             return []
-        where: dict[str, Any] = {"$and": [{"wing": wing}, {"room": room}]}
+        clauses: list[dict[str, Any]] = [{"wing": wing}, {"room": room}]
+        if thread_id:
+            clauses.append({"thread_id": thread_id})
+        where: dict[str, Any] = {"$and": clauses}
         try:
-            result = col.get(
-                where=where,
-                include=["documents", "metadatas"],
-                limit=max(n_results * 8, 80),
-            )
+            # Fetch metadata only, sort by durable recency, then load the newest N.
+            meta_result = col.get(where=where, include=["metadatas"])
         except Exception as exc:
             logger.warning("mempalace recall failed: %r", exc)
             return []
-        ids = result.get("ids") or []
-        docs = result.get("documents") or []
-        metas = result.get("metadatas") or []
-        records: list[DrawerRecord] = []
-        for drawer_id, doc, meta in zip(ids, docs, metas, strict=False):
+        ids = meta_result.get("ids") or []
+        metas = meta_result.get("metadatas") or []
+        ranked: list[tuple[str, str, dict[str, str]]] = []
+        for drawer_id, meta in zip(ids, metas, strict=False):
             parsed = _stringify_meta(meta)
+            filed = parsed.get("source_timestamp") or parsed.get("filed_at") or ""
+            ranked.append((str(drawer_id), filed, parsed))
+        ranked.sort(key=lambda item: item[1], reverse=True)
+        top = ranked[: max(0, n_results)]
+        if not top:
+            return []
+        top_ids = [item[0] for item in top]
+        try:
+            docs_result = col.get(ids=top_ids, include=["documents", "metadatas"])
+        except Exception as exc:
+            logger.warning("mempalace recall documents failed: %r", exc)
+            return []
+        doc_ids = docs_result.get("ids") or []
+        docs = docs_result.get("documents") or []
+        doc_metas = docs_result.get("metadatas") or []
+        by_id: dict[str, tuple[str, dict[str, str]]] = {}
+        for drawer_id, doc, meta in zip(doc_ids, docs, doc_metas, strict=False):
+            by_id[str(drawer_id)] = (doc or "", _stringify_meta(meta))
+        records: list[DrawerRecord] = []
+        for drawer_id, filed, parsed in top:
+            doc, meta = by_id.get(drawer_id, ("", parsed))
             records.append(
                 DrawerRecord(
-                    drawer_id=str(drawer_id),
-                    content=doc or "",
-                    wing=parsed.get("wing") or wing,
-                    room=parsed.get("room") or room,
-                    filed_at=parsed.get("source_timestamp")
-                    or parsed.get("filed_at")
-                    or "",
-                    metadata=parsed,
+                    drawer_id=drawer_id,
+                    content=doc,
+                    wing=meta.get("wing") or wing,
+                    room=meta.get("room") or room,
+                    filed_at=meta.get("source_timestamp") or meta.get("filed_at") or filed,
+                    metadata=meta or parsed,
                 )
             )
-        records.sort(key=lambda d: d.filed_at, reverse=True)
-        return records[: max(0, n_results)]
+        return records
 
     def status(self) -> dict[str, Any]:
         from mempalace.layers import MemoryStack

@@ -80,6 +80,9 @@ async def test_asgi_lifespan_loads_agent_dotenv_before_observability(
         def register_hooks(self, _mgr: object) -> None:
             return
 
+        async def close(self) -> None:
+            return
+
     async def _skip_mcp_load(self: MCPClient, _path: object, *_a: object, **_kw: object) -> None:
         return
 
@@ -105,3 +108,38 @@ async def test_asgi_lifespan_loads_agent_dotenv_before_observability(
         os.environ.clear()
         os.environ.update(before)
         runtime_env.reset_runtime_env_state_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_gateway_lifespan_closes_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    from monkeybot.core.mcp.mcp_client import MCPClient
+
+    closed = {"n": 0}
+
+    class _FastMemory:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def ensure_ready(self) -> None:
+            return
+
+        def register_hooks(self, _mgr: object) -> None:
+            return
+
+        async def close(self) -> None:
+            closed["n"] += 1
+
+    async def _skip_mcp_load(self: MCPClient, _path: object, *_a: object, **_kw: object) -> None:
+        return
+
+    monkeypatch.setattr(MCPClient, "load_from_config", _skip_mcp_load)
+    monkeypatch.setattr("monkeybot.gateway.sse.app.MemorySubsystem", _FastMemory)
+    monkeypatch.setenv("MONKEYBOT_OTEL_ENABLED", "false")
+    monkeypatch.setenv("MONKEYBOT_MEMORY_HOOK_ENABLED", "1")
+    monkeypatch.setenv("MODEL_PROVIDER", "fake")
+    monkeypatch.setenv("DB_URL", "sqlite:///:memory:")
+    monkeypatch.setenv("MCP_CONFIG", "/nonexistent/mcp.json")
+    monkeypatch.setenv("COMMAND_ALLOWLIST_CONFIG", "/nonexistent/command_allowlist.yaml")
+    async with LifespanManager(app):
+        pass
+    assert closed["n"] == 1

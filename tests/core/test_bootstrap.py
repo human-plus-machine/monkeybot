@@ -67,6 +67,25 @@ async def test_create_harness_deps_memory_set_when_uri_given(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_create_harness_deps_honors_memory_disable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MONKEYBOT_MEMORY_HOOK_ENABLED", "0")
+    mem_root = tmp_path / "mem"
+    mem_root.mkdir()
+    uri = "local://" + str(mem_root.resolve())
+    db = tmp_path / "monkeybot.db"
+    deps = await create_harness_deps(
+        f"sqlite:///{db}",
+        uri,
+        open_mcp=False,
+        _provider_override=_fake(),
+    )
+    assert deps.memory is None
+    await deps.close()
+
+
+@pytest.mark.asyncio
 async def test_create_harness_deps_mcp_empty_when_open_mcp_false() -> None:
     deps = await create_harness_deps(
         "sqlite:///:memory:",

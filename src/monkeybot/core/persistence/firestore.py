@@ -6,7 +6,7 @@ import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from typing import cast
+from typing import Any, cast
 
 from google.cloud import firestore
 from google.cloud.firestore import AsyncClient
@@ -777,6 +777,239 @@ class FirestoreSessionTurnLockStore:
         return data.get("request_id") is not None
 
 
+class FirestoreOutboxStore:
+    """Firestore-backed memory outbox (one document per row)."""
+
+    def __init__(self, client: AsyncClient, prefix: str) -> None:
+        self._client = client
+        self._collection = _collection_name(prefix, "memory_outbox")
+
+    def _ref(self, row_id: str) -> Any:
+        return self._client.collection(self._collection).document(row_id)
+
+    def _row_from_data(self, row_id: str, data: dict[str, Any]) -> Any:
+        from monkeybot.core.memory.outbox import OutboxRow
+
+        return OutboxRow(
+            id=row_id,
+            thread_id=str(data.get("thread_id") or ""),
+            turn_id=str(data.get("turn_id") or ""),
+            message_id=str(data.get("message_id") or ""),
+            role=str(data.get("role") or ""),
+            content=data.get("content"),
+            workspace_id=data.get("workspace_id"),
+            wing=str(data.get("wing") or "main"),
+            room=str(data.get("room") or "conversation"),
+            created_at=str(data.get("created_at") or ""),
+            status=str(data.get("status") or "pending"),
+            attempts=int(data.get("attempts") or 0),
+            next_attempt_at=data.get("next_attempt_at"),
+            last_error=data.get("last_error"),
+            traceparent=data.get("traceparent"),
+            lease_owner=data.get("lease_owner"),
+            lease_expires_at=data.get("lease_expires_at"),
+            agent_id=str(data.get("agent_id") or ""),
+        )
+
+    async def insert_pending(
+        self,
+        *,
+        agent_id: str,
+        thread_id: str,
+        turn_id: str,
+        message_id: str,
+        role: str,
+        content: str,
+        workspace_id: str | None,
+        wing: str,
+        room: str,
+        created_at: str | None = None,
+        traceparent: str | None = None,
+        commit: bool = True,
+    ) -> str | None:
+        from monkeybot.core.memory.ids import outbox_id, utc_now_iso
+        from monkeybot.core.memory.outbox import STATUS_COMMITTED
+
+        del commit
+        row_id = outbox_id(
+            agent_id=agent_id, thread_id=thread_id, message_id=message_id, role=role
+        )
+        snap = await self._ref(row_id).get()
+        if snap.exists:
+            data = snap.to_dict() or {}
+            return None if str(data.get("status")) == STATUS_COMMITTED else row_id
+        await self._ref(row_id).set(
+            {
+                "id": row_id,
+                "agent_id": agent_id,
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+                "message_id": message_id,
+                "role": role,
+                "content": content,
+                "workspace_id": workspace_id,
+                "wing": wing,
+                "room": room,
+                "created_at": created_at or utc_now_iso(),
+                "status": "pending",
+                "attempts": 0,
+                "next_attempt_at": None,
+                "last_error": None,
+                "traceparent": traceparent,
+                "lease_owner": None,
+                "lease_expires_at": None,
+            }
+        )
+        return row_id
+
+    async def claim_batch(
+        self,
+        *,
+        agent_id: str,
+        lease_owner: str,
+        limit: int = 16,
+        lease_seconds: int = 30,
+    ) -> list[Any]:
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat(timespec="seconds")
+        expires = (now + timedelta(seconds=lease_seconds)).isoformat(timespec="seconds")
+        query = (
+            self._client.collection(self._collection)
+            .where(filter=FieldFilter("agent_id", "==", agent_id))
+            .where(filter=FieldFilter("status", "==", "pending"))
+            .order_by("created_at")
+            .limit(limit * 4)
+        )
+        docs = [doc async for doc in query.stream()]
+        claimed: list[Any] = []
+        for doc in docs:
+            if len(claimed) >= limit:
+                break
+            data = doc.to_dict() or {}
+            next_at = data.get("next_attempt_at")
+            if next_at and str(next_at) > now_iso:
+                continue
+            await doc.reference.update(
+                {
+                    "status": "processing",
+                    "lease_owner": lease_owner,
+                    "lease_expires_at": expires,
+                    "attempts": int(data.get("attempts") or 0) + 1,
+                }
+            )
+            claimed.append(self._row_from_data(doc.id, data))
+        expired_q = (
+            self._client.collection(self._collection)
+            .where(filter=FieldFilter("status", "==", "processing"))
+            .where(filter=FieldFilter("lease_expires_at", "<", now_iso))
+        )
+        async for doc in expired_q.stream():
+            await doc.reference.update(
+                {"status": "pending", "lease_owner": None, "lease_expires_at": None}
+            )
+        return claimed
+
+    async def mark_committed(self, row_ids: list[str]) -> None:
+        for row_id in row_ids:
+            await self._ref(row_id).update(
+                {
+                    "status": "committed",
+                    "lease_owner": None,
+                    "lease_expires_at": None,
+                    "last_error": None,
+                    "next_attempt_at": None,
+                }
+            )
+
+    async def mark_retry(
+        self,
+        row_id: str,
+        *,
+        error_class: str,
+        attempts: int,
+        permanent: bool | None = None,
+    ) -> None:
+        from monkeybot.core.memory.outbox import (
+            STATUS_DEAD,
+            STATUS_PENDING,
+            backoff_iso,
+            is_permanent_error,
+        )
+
+        dead = bool(permanent) if permanent is not None else is_permanent_error(error_class)
+        status = STATUS_DEAD if dead else STATUS_PENDING
+        next_at = None if status == STATUS_DEAD else backoff_iso(attempts)
+        await self._ref(row_id).update(
+            {
+                "status": status,
+                "last_error": error_class,
+                "next_attempt_at": next_at,
+                "lease_owner": None,
+                "lease_expires_at": None,
+            }
+        )
+
+    async def gc_committed(self, *, days: int = 7) -> int:
+        from datetime import datetime, timedelta, timezone
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(
+            timespec="seconds"
+        )
+        query = self._client.collection(self._collection).where(
+            filter=FieldFilter("status", "==", "committed")
+        )
+        n = 0
+        async for doc in query.stream():
+            data = doc.to_dict() or {}
+            if data.get("content") is None:
+                continue
+            created = str(data.get("created_at") or "")
+            if created and created < cutoff:
+                await doc.reference.update({"content": None})
+                n += 1
+        return n
+
+    async def pending_depth(self, *, agent_id: str | None = None) -> tuple[int, float]:
+        from datetime import datetime, timezone
+
+        query: Any = self._client.collection(self._collection)
+        if agent_id:
+            query = query.where(filter=FieldFilter("agent_id", "==", agent_id))
+        count = 0
+        oldest: str | None = None
+        async for doc in query.stream():
+            data = doc.to_dict() or {}
+            if str(data.get("status")) not in ("pending", "processing"):
+                continue
+            count += 1
+            created = str(data.get("created_at") or "")
+            if created and (oldest is None or created < oldest):
+                oldest = created
+        age = 0.0
+        if oldest:
+            try:
+                created_dt = datetime.fromisoformat(oldest)
+                if created_dt.tzinfo is None:
+                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                age = max(0.0, (datetime.now(timezone.utc) - created_dt).total_seconds())
+            except ValueError:
+                age = 0.0
+        return count, age
+
+    async def dead_depth(self, *, agent_id: str | None = None) -> int:
+        query: Any = self._client.collection(self._collection).where(
+            filter=FieldFilter("status", "==", "dead")
+        )
+        if agent_id:
+            query = query.where(filter=FieldFilter("agent_id", "==", agent_id))
+        return len([doc async for doc in query.stream()])
+
+    async def close(self) -> None:
+        return
+
+
 class FirestoreStorageBackend:
     """Firestore-backed storage backend using ``google.cloud.firestore.AsyncClient``."""
 
@@ -788,6 +1021,7 @@ class FirestoreStorageBackend:
         self._runs_store: FirestoreRunStore | None = None
         self._scheduled_loops_store: FirestoreScheduledLoopStore | None = None
         self._session_turn_lock_store: FirestoreSessionTurnLockStore | None = None
+        self._outbox_store: FirestoreOutboxStore | None = None
 
     async def open(self, *, run_schema: bool = True) -> None:
         """Open the Firestore client.
@@ -805,6 +1039,7 @@ class FirestoreStorageBackend:
         self._runs_store = FirestoreRunStore(self._client, prefix)
         self._scheduled_loops_store = FirestoreScheduledLoopStore(self._client, prefix)
         self._session_turn_lock_store = FirestoreSessionTurnLockStore(self._client, prefix)
+        self._outbox_store = FirestoreOutboxStore(self._client, prefix)
 
     async def close(self) -> None:
         if self._client is not None:
@@ -816,6 +1051,7 @@ class FirestoreStorageBackend:
             self._runs_store = None
             self._scheduled_loops_store = None
             self._session_turn_lock_store = None
+            self._outbox_store = None
 
     def history(self) -> FirestoreHistoryStore:
         if self._history_store is None:
@@ -841,3 +1077,8 @@ class FirestoreStorageBackend:
         if self._session_turn_lock_store is None:
             raise RuntimeError("FirestoreStorageBackend.open() has not been called")
         return self._session_turn_lock_store
+
+    def outbox(self) -> FirestoreOutboxStore:
+        if self._outbox_store is None:
+            raise RuntimeError("FirestoreStorageBackend.open() has not been called")
+        return self._outbox_store

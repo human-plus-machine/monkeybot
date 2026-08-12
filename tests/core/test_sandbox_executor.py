@@ -263,6 +263,18 @@ class TestSandboxExecutorAllowlist:
 
         mock_cls.create.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_mempalace_non_search_is_blocked(self, tmp_path):
+        executor = self._executor(tmp_path)
+        mock_cls, _ = _make_create_mock()
+        osb = _make_opensandbox_module(mock_cls)
+
+        with patch.dict(sys.modules, _opensandbox_sys_modules(osb)):
+            with pytest.raises(SecurityError, match="only 'search' is permitted"):
+                await executor.execute("mempalace", ["repair", "rebuild-index"])
+
+        mock_cls.create.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # SandboxExecutor — lazy creation and sandbox reuse

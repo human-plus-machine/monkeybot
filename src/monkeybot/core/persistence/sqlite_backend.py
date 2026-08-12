@@ -6,6 +6,8 @@ when a ``sqlite://`` URL is used — never loaded in Postgres-only deployments.
 
 from __future__ import annotations
 
+from typing import Any
+
 import aiosqlite
 
 from monkeybot.core.persistence.durable_runs import SQLiteRunStore
@@ -27,6 +29,7 @@ class SQLiteStorageBackend:
         self._runs_store: SQLiteRunStore | None = None
         self._scheduled_loops_store: SQLiteScheduledLoopStore | None = None
         self._session_turn_lock_store: SQLiteSessionTurnLockStore | None = None
+        self._outbox_store: Any | None = None
 
     async def open(self, *, run_schema: bool = True) -> None:
         self._conn = await open_connection(self._db_url)
@@ -37,6 +40,9 @@ class SQLiteStorageBackend:
         self._runs_store = SQLiteRunStore(self._conn)
         self._scheduled_loops_store = SQLiteScheduledLoopStore(self._conn)
         self._session_turn_lock_store = SQLiteSessionTurnLockStore(self._conn)
+        from monkeybot.core.memory.outbox import SqliteOutboxStore
+
+        self._outbox_store = SqliteOutboxStore(self._conn, owns_connection=False)
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -47,6 +53,7 @@ class SQLiteStorageBackend:
             self._runs_store = None
             self._scheduled_loops_store = None
             self._session_turn_lock_store = None
+            self._outbox_store = None
 
     def history(self) -> SQLiteHistoryStore:
         if self._history_store is None:
@@ -72,3 +79,8 @@ class SQLiteStorageBackend:
         if self._session_turn_lock_store is None:
             raise RuntimeError("SQLiteStorageBackend.open() has not been called")
         return self._session_turn_lock_store
+
+    def outbox(self) -> Any:
+        if self._outbox_store is None:
+            raise RuntimeError("SQLiteStorageBackend.open() has not been called")
+        return self._outbox_store

@@ -3,19 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import uuid
 
-import aiosqlite
-
-from monkeybot.core.memory import outbox as outbox_mod
 from monkeybot.core.memory.observability import (
     Timer,
     link_to_traceparent,
     log_event,
     memory_span,
 )
+from monkeybot.core.memory.outbox import OutboxRow, OutboxStore, is_permanent_error
 from monkeybot.core.memory.palace import PalacePort
 
 logger = logging.getLogger(__name__)
@@ -28,20 +25,24 @@ class MemoryWriter:
         self,
         *,
         palace: PalacePort,
-        db_url: str,
+        outbox: OutboxStore,
+        agent_id: str,
         backend: str,
         embedding_model: str,
     ) -> None:
         self._palace = palace
-        self._db_url = db_url
+        self._outbox = outbox
+        self._agent_id = agent_id
         self._backend = backend
         self._embedding_model = embedding_model
         self._wake = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
         self._stopped = False
         self._lease_owner = uuid.uuid4().hex
-        self._conn: aiosqlite.Connection | None = None
-        self._conn_lock = asyncio.Lock()
+        self._flush_lock = asyncio.Lock()
+        self._in_flight = 0
+        self._idle = asyncio.Event()
+        self._idle.set()
 
     def start(self) -> None:
         if self._task is None or self._task.done():
@@ -64,15 +65,14 @@ class MemoryWriter:
         return flushed
 
     async def stop(self) -> None:
+        """Cooperatively finish the in-flight write, then exit. Does not cancel."""
         self._stopped = True
         self._wake.set()
         task = self._task
         if task is not None and not task.done():
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+            await task
         self._task = None
-        await self._close_conn()
+        await self._idle.wait()
         log_event("writer_stop", memory_status="ok", memory_backend=self._backend)
 
     async def _run(self) -> None:
@@ -81,108 +81,96 @@ class MemoryWriter:
                 await self.flush_once()
             except Exception:
                 logger.warning("memory writer flush failed", exc_info=True)
-                await self._reset_conn()
+            if self._stopped:
+                break
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout=2.0)
             except TimeoutError:
                 continue
             self._wake.clear()
 
-    async def _connection(self) -> aiosqlite.Connection:
-        if self._conn is None:
-            from monkeybot.core.persistence.sqlite import open_connection
-
-            conn = await open_connection(self._db_url)
-            await outbox_mod.ensure_outbox_schema(conn)
-            self._conn = conn
-        return self._conn
-
-    async def _close_conn(self) -> None:
-        conn = self._conn
-        self._conn = None
-        if conn is not None:
-            await conn.close()
-
-    async def _reset_conn(self) -> None:
-        try:
-            await self._close_conn()
-        except Exception:
-            logger.debug("memory writer connection reset failed", exc_info=True)
-            self._conn = None
-
     async def flush_once(self) -> int:
-        async with self._conn_lock:
-            conn = await self._connection()
-            rows = await outbox_mod.claim_batch(conn, lease_owner=self._lease_owner)
-            if not rows:
-                return 0
-            log_event(
-                "outbox_claim",
-                memory_status="ok",
-                memory_batch_size=len(rows),
-                memory_backend=self._backend,
-            )
-            return await self._upsert_batch(conn, rows)
+        async with self._flush_lock:
+            self._in_flight += 1
+            self._idle.clear()
+            try:
+                rows = await self._outbox.claim_batch(
+                    agent_id=self._agent_id, lease_owner=self._lease_owner
+                )
+                if not rows:
+                    return 0
+                log_event(
+                    "outbox_claim",
+                    memory_status="ok",
+                    memory_batch_size=len(rows),
+                    memory_backend=self._backend,
+                )
+                return await self._commit_rows(rows)
+            finally:
+                self._in_flight -= 1
+                if self._in_flight == 0:
+                    self._idle.set()
 
-    async def _upsert_batch(
-        self, conn: aiosqlite.Connection, rows: list[outbox_mod.OutboxRow]
-    ) -> int:
+    async def _commit_rows(self, rows: list[OutboxRow]) -> int:
         timer = Timer()
-        lock_timer = Timer()
-        with self._palace.acquire_write_lock():
-            wait_ms = lock_timer.ms()
-            return await self._commit_rows(conn, rows, timer=timer, wait_ms=wait_ms)
-
-    async def _commit_rows(
-        self,
-        conn: aiosqlite.Connection,
-        rows: list[outbox_mod.OutboxRow],
-        *,
-        timer: Timer,
-        wait_ms: float,
-    ) -> int:
-        try:
-            with memory_span(
-                "monkeybot.memory.writer.flush",
-                **{
-                    "memory.backend": self._backend,
-                    "memory.embedding_model": self._embedding_model,
-                    "memory.operation": "flush",
-                    "memory.batch_size": len(rows),
-                },
-            ) as span:
-                if rows[0].traceparent:
-                    link_to_traceparent(span, rows[0].traceparent)
-                await asyncio.to_thread(self._upsert_rows, rows)
-                await outbox_mod.mark_committed(conn, [r.id for r in rows])
+        committed = 0
+        with memory_span(
+            "monkeybot.memory.writer.flush",
+            **{
+                "memory.backend": self._backend,
+                "memory.embedding_model": self._embedding_model,
+                "memory.operation": "flush",
+                "memory.batch_size": len(rows),
+            },
+        ) as span:
+            if rows[0].traceparent:
+                link_to_traceparent(span, rows[0].traceparent)
+            for row in rows:
+                try:
+                    await asyncio.to_thread(self._upsert_one, row)
+                    await self._outbox.mark_committed([row.id])
+                    committed += 1
+                except Exception as exc:
+                    error_class = type(exc).__name__
+                    permanent = is_permanent_error(error_class)
+                    logger.warning(
+                        "memory writer upsert failed id=%s permanent=%s: %r",
+                        row.id,
+                        permanent,
+                        exc,
+                    )
+                    log_event(
+                        "writer_retry" if not permanent else "writer_dead",
+                        memory_status="dead" if permanent else "retry",
+                        memory_error_class=error_class,
+                        memory_batch_size=1,
+                    )
+                    await self._outbox.mark_retry(
+                        row.id,
+                        error_class=error_class,
+                        attempts=row.attempts + 1,
+                        permanent=permanent,
+                    )
+            if committed:
                 log_event(
                     "writer_commit",
                     memory_status="committed",
-                    memory_batch_size=len(rows),
+                    memory_batch_size=committed,
                     memory_backend=self._backend,
                     memory_duration_ms=round(timer.ms(), 1),
-                    memory_lock_wait_ms=round(wait_ms, 1),
                 )
-            return len(rows)
-        except Exception as exc:
-            error_class = type(exc).__name__
-            logger.warning("memory writer upsert failed: %r", exc)
-            log_event(
-                "writer_retry",
-                memory_status="retry",
-                memory_error_class=error_class,
-                memory_batch_size=len(rows),
-            )
-            for row in rows:
-                await outbox_mod.mark_retry(
-                    conn,
-                    row.id,
-                    error_class=error_class,
-                    attempts=row.attempts + 1,
+            dead = await self._outbox.dead_depth(agent_id=self._agent_id)
+            if dead:
+                log_event(
+                    "outbox_dead_depth",
+                    memory_status="dead",
+                    memory_batch_size=dead,
+                    memory_backend=self._backend,
                 )
-            return 0
+        return committed
 
-    def _upsert_rows(self, rows: list[outbox_mod.OutboxRow]) -> None:
-        for row in rows:
+    def _upsert_one(self, row: OutboxRow) -> None:
+        """Lock ownership lives in this worker thread for the duration of the upsert."""
+        with self._palace.acquire_write_lock():
             content = row.content or ""
             self._palace.upsert_drawer(row.id, content, row.metadata())

@@ -34,6 +34,7 @@ class MemoryHook:
     async def on_pre_turn(self, payload: HookPayload) -> None:
         timer = Timer()
         wing = conversation_wing(workspace_id_from_env())
+        thread_id = payload.thread_id
         with memory_span(
             "monkeybot.memory.recall",
             **{
@@ -43,7 +44,9 @@ class MemoryHook:
             },
         ):
             try:
-                drawers = await self._memory.recall(wing=wing, room=CONVERSATION_ROOM)
+                drawers = await self._memory.recall(
+                    wing=wing, room=CONVERSATION_ROOM, thread_id=thread_id
+                )
             except Exception as exc:
                 logger.warning("memory L2 recall failed: %r", exc)
                 return

@@ -46,9 +46,9 @@ class TestEnvMap:
         """Config-file only (like paths.auto_schema) — no env var override."""
         assert ("web_search", "vertex_google_search") not in ENV_MAP
 
-    def test_memory_hook_kill_switch_not_in_env_map(self) -> None:
-        assert ("memory_hook", "enabled") not in ENV_MAP
-        assert "MONKEYBOT_MEMORY_HOOK_ENABLED" not in ENV_MAP.values()
+    def test_memory_hook_kill_switch_in_env_map(self) -> None:
+        assert ENV_MAP[("memory", "enabled")] == "MONKEYBOT_MEMORY_HOOK_ENABLED"
+        assert ENV_MAP[("memory_hook", "enabled")] == "MONKEYBOT_MEMORY_HOOK_ENABLED"
 
 
 class TestVertexGoogleSearchConfig:
