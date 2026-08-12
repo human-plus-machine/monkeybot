@@ -96,7 +96,15 @@ class FirestoreHistoryStore:
     async def _delete_thread_summary(self, thread_id: str) -> None:
         await self._client.collection(self._threads_collection).document(thread_id).delete()
 
-    async def append(self, thread_id: str, message: Message) -> None:
+    async def append(
+        self,
+        thread_id: str,
+        message: Message,
+        *,
+        turn_id: str | None = None,
+        message_id: str | None = None,
+    ) -> None:
+        del turn_id, message_id
         role = message.role
         if role not in _VALID_ROLES:
             raise ValueError(f"invalid role: {role!r}")

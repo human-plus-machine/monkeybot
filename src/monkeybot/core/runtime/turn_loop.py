@@ -23,6 +23,7 @@ from monkeybot.core.context.memory_prompt import (
     prepare_memory_for_prompt,
 )
 from monkeybot.core.hooks import HookEvent, HookManager
+from monkeybot.core.memory.ingest import persist_message
 from monkeybot.core.llm.provider import (
     Done,
     Message,
@@ -216,7 +217,14 @@ async def _drain_steers(
         steered = input_admission.pop_steer()
         if steered is None:
             break
-        await history.append(ctx.thread_id, Message(role="user", content=list(steered)))
+        await persist_message(
+            history,
+            Message(role="user", content=list(steered)),
+            thread_id=ctx.thread_id,
+            turn_id=ctx.request_id,
+            memory=ctx.memory,
+            ingest=True,
+        )
         preview = preview_text(steered)
         logger.info(
             "steer injected %s",
@@ -271,8 +279,6 @@ async def _prepare_turn_context(
     state: _TurnState,
     *,
     history: HistoryStore,
-    provider: Provider,
-    curator_provider: Provider | None,
     hook_manager: HookManager | None,
     attachment_store: AttachmentStore | None,
     attachment_catalog: SessionAttachmentCatalog | None,
@@ -306,13 +312,7 @@ async def _prepare_turn_context(
 
     index_fp = memory_index_fingerprint(state.ctx.memory_index)
     if state.memory_selection is None or state.memory_selection_fingerprint != index_fp:
-        u = latest_user_message_text(state.chat_messages) or state.user_text
-        state.memory_selection = await prepare_memory_for_prompt(
-            ctx=state.ctx,
-            user_message=u,
-            provider=provider,
-            curator_provider=curator_provider,
-        )
+        state.memory_selection = await prepare_memory_for_prompt(state.ctx)
         state.memory_selection_fingerprint = index_fp
         logger.debug(
             "memory prompt selection %s",
@@ -321,10 +321,6 @@ async def _prepare_turn_context(
                 thread_id=state.ctx.thread_id,
                 turn=state.turn_index,
                 memory_lines=len(state.memory_selection.lines),
-                total_lines=state.memory_selection.total_lines,
-                coverage=state.memory_selection.coverage,
-                confidence=state.memory_selection.confidence,
-                nudge_search=state.memory_selection.nudge_search,
             ),
         )
 
@@ -1040,9 +1036,13 @@ async def _persist_partial_assistant_on_abort(
         assist_blocks.append(Text(text=cleaned))
     if not assist_blocks:
         return
-    await history.append(
-        state.ctx.thread_id,
+    await persist_message(
+        history,
         Message(role="assistant", content=assist_blocks),
+        thread_id=state.ctx.thread_id,
+        turn_id=state.ctx.request_id,
+        memory=state.ctx.memory,
+        ingest=bool(cleaned),
     )
     if cleaned:
         last_assistant[0] = cleaned
@@ -1094,9 +1094,13 @@ async def _handle_empty_or_final_text(
             assist_blocks.append(thinking)
         assist_blocks.append(Text(text=cleaned_text))
         state.assistant_write_task = asyncio.create_task(
-            history.append(
-                state.ctx.thread_id,
+            persist_message(
+                history,
                 Message(role="assistant", content=assist_blocks),
+                thread_id=state.ctx.thread_id,
+                turn_id=state.ctx.request_id,
+                memory=state.ctx.memory,
+                ingest=True,
             )
         )
         last_assistant[0] = cleaned_text
@@ -1195,9 +1199,13 @@ async def _append_tool_requests_and_dispatch(
                 metadata=dict(c.metadata) if c.metadata else None,
             )
         )
-    await history.append(
-        state.ctx.thread_id,
+    await persist_message(
+        history,
         Message(role="assistant", content=assist_blocks),
+        thread_id=state.ctx.thread_id,
+        turn_id=state.ctx.request_id,
+        memory=state.ctx.memory,
+        ingest=False,
     )
 
     state.needs_followup_after_tools = True
@@ -1255,7 +1263,8 @@ async def _run_inner_core(
     transcript_writer: TranscriptWriter | None = None,
     vertex_google_search: bool = False,
     input_admission: InputAdmission | None = None,
-) -> AsyncIterator[AgentEvent]:
+    ) -> AsyncIterator[AgentEvent]:
+    del curator_provider
     from monkeybot.observability.spans import (
         begin_turn_span,
         end_turn_span,
@@ -1272,8 +1281,13 @@ async def _run_inner_core(
             exempt_names=_doom_loop_exempt_names(ctx.tools),
         ),
     )
-    await history.append(
-        state.ctx.thread_id, Message(role="user", content=list(user_content))
+    await persist_message(
+        history,
+        Message(role="user", content=list(user_content)),
+        thread_id=state.ctx.thread_id,
+        turn_id=state.ctx.request_id,
+        memory=state.ctx.memory,
+        ingest=True,
     )
 
     await _fire_hook(
@@ -1327,8 +1341,6 @@ async def _run_inner_core(
             async for evt in _prepare_turn_context(
                 state,
                 history=history,
-                provider=provider,
-                curator_provider=curator_provider,
                 hook_manager=hook_manager,
                 attachment_store=attachment_store,
                 attachment_catalog=attachment_catalog,

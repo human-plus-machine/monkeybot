@@ -61,6 +61,25 @@ def test_new_force_reports_overwritten_config(tmp_path: Path) -> None:
     assert "monkeybot_config/monkeybot.yaml: overwritten" in second.stdout
 
 
+def test_refresh_updates_existing_agent(tmp_path: Path) -> None:
+    created = _run_cli("new", "--dest", str(tmp_path), "--yes")
+    assert created.returncode == 0
+    allow = tmp_path / "monkeybot_config" / "command_allowlist.yaml"
+    allow.write_text("allowed_commands:\n  - bash\n  - officecli\n", encoding="utf-8")
+    result = _run_cli("refresh", "--dest", str(tmp_path))
+    assert result.returncode == 0, result.stderr
+    text = allow.read_text(encoding="utf-8")
+    assert "mempalace" in text
+    assert "officecli" in text
+    assert "command_allowlist.yaml: updated" in result.stdout
+
+
+def test_refresh_rejects_empty_dest(tmp_path: Path) -> None:
+    result = _run_cli("refresh", "--dest", str(tmp_path))
+    assert result.returncode == 2
+    assert "not a scaffolded agent" in result.stderr
+
+
 def test_write_active_config_reports_overwritten_on_force(tmp_path: Path) -> None:
     from monkeybot_cli.scaffold import write_active_config
 

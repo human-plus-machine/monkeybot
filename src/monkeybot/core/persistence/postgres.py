@@ -143,7 +143,15 @@ class PostgresHistoryStore:
             created_at,
         )
 
-    async def append(self, thread_id: str, message: Message) -> None:
+    async def append(
+        self,
+        thread_id: str,
+        message: Message,
+        *,
+        turn_id: str | None = None,
+        message_id: str | None = None,
+    ) -> None:
+        del turn_id, message_id
         async with self._pool.acquire() as conn:
             await self._insert_message(conn, thread_id, message)
 

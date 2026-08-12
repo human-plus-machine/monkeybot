@@ -36,9 +36,6 @@ context_curation:
   curator_model: thinkingmachines/inkling
   timeout_sec: 10
 
-memory_hook:
-  enabled: true
-
 subagents:
   timeout_sec: 600
   max_turns: 25

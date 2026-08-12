@@ -18,7 +18,6 @@ from monkeybot.core.prompts.headings import (
     CURRENT_DATE_HEADING,
     CURRENT_REQUEST_HEADING,
     MEMORY_INDEX_HEADING,
-    MEMORY_NUDGE_HEADING,
     SKILLS_HEADING,
     TODO_LIST_HEADING,
 )
@@ -117,18 +116,8 @@ def _memory_block(
     else:
         mem_lines = list(ctx.memory_index)
 
-    memory_bullets = "\n".join(f"- {line}" for line in mem_lines) if mem_lines else ""
-    mem_block = f"{MEMORY_INDEX_HEADING}{memory_bullets}" if memory_bullets else ""
-    if memory_selection is not None and memory_selection.nudge_search:
-        shown = len(memory_selection.lines)
-        total = memory_selection.total_lines
-        mem_block += (
-            f"{MEMORY_NUDGE_HEADING}"
-            f"Showing {shown} of {total} index entries "
-            f"(coverage {memory_selection.coverage:.0%}, confidence {memory_selection.confidence:.0%}). "
-            "Use `search_memory` with keywords when the task may depend on older "
-            "session context or preferences; use `search` for workspace/code."
-        )
+    memory_text = "\n".join(mem_lines) if mem_lines else ""
+    mem_block = f"{MEMORY_INDEX_HEADING}{memory_text}" if memory_text else ""
     return mem_block
 
 
@@ -225,7 +214,7 @@ def compose_system_prompt(
     memory, skills, todo list, current-request anchor) so implicit and explicit prompt caching
     can hit a contiguous prefix across turns.
 
-    When ``memory_selection`` is set, its lines (and optional search nudge) are used
+    When ``memory_selection`` is set, its lines are used
     instead of the full ``ctx.memory_index``. Skill names are always taken from
     ``ctx.skills`` (zero-cost discovery); use ``list_skills``/``read_file`` for the
     skills root path and full ``SKILL.md`` procedure.

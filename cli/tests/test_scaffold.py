@@ -4,8 +4,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+import yaml
+
 from monkeybot_cli.compat import COMPATIBLE_CORE_RANGE
-from monkeybot_cli.scaffold import monkeybot_dep_for_provider, run_new, write_agent_pyproject
+from monkeybot_cli.scaffold import (
+    monkeybot_dep_for_provider,
+    run_new,
+    run_refresh,
+    write_agent_pyproject,
+)
 
 
 def test_run_new_creates_bundle(tmp_path: Path) -> None:
@@ -21,7 +29,7 @@ def test_run_new_creates_bundle(tmp_path: Path) -> None:
     assert (cfg / "otel-collector.example.yaml").is_file()
     assert not (cfg / "env.example").exists()
     assert (tmp_path / ".env.example").is_file()
-    assert (tmp_path / "memory" / "INDEX.md").is_file()
+    assert (tmp_path / "memory" / "mempalace" / "identity.txt").is_file()
     assert (tmp_path / "skills").is_dir()
     assert not (tmp_path / "skills" / "browser").exists()
     assert not (tmp_path / "skills" / "image-generator").exists()
@@ -118,6 +126,68 @@ def test_write_agent_pyproject_force_overwrites(tmp_path: Path) -> None:
     assert status == "overwritten"
     text = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
     assert f'"monkeybot[bedrock,sandbox,web-search]{COMPATIBLE_CORE_RANGE}"' in text
+
+
+def test_run_refresh_adds_template_commands_and_keeps_extras(tmp_path: Path) -> None:
+    run_new(dest=tmp_path, force=False)
+    allow = tmp_path / "monkeybot_config" / "command_allowlist.yaml"
+    allow.write_text(
+        "allowed_commands:\n"
+        "  - cat\n"
+        "  - bash\n"
+        "  - officecli\n"
+        "allowed_path_prefixes:\n"
+        "  - ./skills/\n"
+        "  - ./custom-data/\n"
+        "deny_patterns:\n"
+        '  - "^sudo\\\\s+"\n'
+        '  - "my-custom-deny"\n',
+        encoding="utf-8",
+    )
+    agent_md = tmp_path / "monkeybot_config" / "AGENT.md"
+    agent_md.write_text("custom persona\n", encoding="utf-8")
+    mcp = tmp_path / "monkeybot_config" / "mcp.json"
+    mcp.write_text('{"mcpServers": {"mine": {}}}\n', encoding="utf-8")
+    yaml_path = tmp_path / "monkeybot_config" / "monkeybot.yaml"
+    doc = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
+    doc.pop("memory", None)
+    yaml_path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+
+    report = run_refresh(dest=tmp_path)
+    text = allow.read_text(encoding="utf-8")
+    assert "  - mempalace\n" in text
+    assert "  - officecli\n" in text
+    assert "  - ./custom-data/\n" in text
+    assert "  - ../memory/mempalace/\n" in text
+    assert "my-custom-deny" in text
+    assert agent_md.read_text(encoding="utf-8") == "custom persona\n"
+    assert '"mine"' in mcp.read_text(encoding="utf-8")
+    refreshed_yaml = yaml_path.read_text(encoding="utf-8")
+    assert "engine: mempalace" in refreshed_yaml
+    assert "custom persona" not in refreshed_yaml
+    joined = "\n".join(report)
+    assert "command_allowlist.yaml: updated" in joined
+    assert "monkeybot.yaml: updated" in joined
+
+
+def test_run_refresh_skips_custom_permissions_and_model(tmp_path: Path) -> None:
+    run_new(dest=tmp_path, force=False, provider="nvidia", model="keep-me")
+    perms = tmp_path / "monkeybot_config" / "permissions.yaml"
+    perms.write_text("default: deny\nrules:\n  - tool: '*'\n    pattern: '*'\n    effect: deny\n", encoding="utf-8")
+    yaml_path = tmp_path / "monkeybot_config" / "monkeybot.yaml"
+    before = yaml_path.read_text(encoding="utf-8")
+
+    report = run_refresh(dest=tmp_path)
+    assert perms.read_text(encoding="utf-8").startswith("default: deny")
+    after = yaml_path.read_text(encoding="utf-8")
+    assert "keep-me" in after
+    assert after == before or "keep-me" in after
+    assert "permissions.yaml: skipped (customized)" in "\n".join(report)
+
+
+def test_run_refresh_requires_existing_agent(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError, match="not a scaffolded agent"):
+        run_refresh(dest=tmp_path)
 
 
 def test_monkeybot_dep_for_provider_aliases() -> None:

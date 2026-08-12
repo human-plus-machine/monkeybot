@@ -34,7 +34,6 @@ When workspace tools (`read_file`, `write_file`, `run_command`, …) appear in t
 
 ### Core built-in tools (when present in the active tool list)
 - `read_file` / `write_file` / `replace_in_file` / `glob` / `grep` / `apply_patch` — paths are **workspace-relative** under the workspace root below. **`glob`** lists matching files (prefer over `run_command` + `ls`). **`grep`** searches file contents with a regex (prefer over `run_command` + `grep`). **`apply_patch`** applies a multi-file Codex-style patch (Add / Update / Delete / Move) fail-closed. Do not substitute a code block in chat for a file deliverable.
-- `search_memory` — past events, decisions, user preferences, prior sessions under the memory directory; **not** for code/workspace — use `search`. Never delegates to knowledge search. Hits return the **full note `body`** plus `links`; follow a neighbor with `search_memory(path=…)`. Memory paths are **not** workspace paths — never `read_file` them.
 {search_tool_line}{knowledge_search_block}{memory_teaching_block}- `list_skills` — resolves the skills root path for installed skills listed under `## Skills` below; read each skill's `SKILL.md` under that root for procedure.
 - `run_command` — allowlisted shell with optional `timeout` (seconds). {run_command_exec_note} Shell starts in **workspace root**; use the paths listed under Runtime paths below — do NOT guess directory names. `cd` is a shell builtin and cannot be used as a bare command; use `bash -c "cd <dir> && <cmd>"` instead. Pass **`argv` as a list** with the binary first (e.g. `{{"argv": ["ls", "."]}}`); do not pass `{{"command": "ls -R", "args": []}}` — that treats `ls -R` as the binary name.
 - `enable_mcp` / `disable_mcp` — connect or drop a server declared in mcp.json by name (e.g. `browser`). Success returns connection status + tools; failure returns the error (no separate status tool). New tools appear on the **next model step this turn**.
@@ -61,7 +60,7 @@ When workspace tools (`read_file`, `write_file`, `run_command`, …) appear in t
 ### Runtime paths
 - workspace root (cwd): `{workspace_root}` — `read_file` / `write_file` / `glob` / `run_command` start here.
 - runtime (inside workspace): `.monkeybot/` — spill, knowledge index, transcripts. Not memory.
-- memory storage: `{memory_storage_uri}` — durable session notes (typed folders + INDEX). **Outside** the workspace root (sibling `memory/` of `workspace/`). Use `search_memory` only; hit paths like `episodic/….md` are memory-relative keys for `search_memory(path=…)`, never for `read_file`. Prefer `search_memory` over shelling into this URI; if you must inspect via shell, use `../memory` from cwd (allowlisted)`.
+- memory storage: `{memory_storage_uri}` — MemPalace root (verbatim conversation drawers). **Outside** the workspace root. Prefer `mempalace search` via `run_command` for past-session recall. Do not `read_file` palace paths.
 - workspace `data/` (if present) is ordinary project files — **not** the memory store.
 
 ### MCP tools
@@ -102,7 +101,7 @@ _TODO_LIST_LINE = (
 _SEARCH_TOOL_LINE = (
     "- `search` — **local search index over the workspace** (+ knowledge notes): "
     "FTS + link graph + optional embeddings. Has **no** record of past conversations — "
-    "use `search_memory` for those. Not a substitute for `read_file`. Prefer `search` for "
+    "use `mempalace search` for those. Not a substitute for `read_file`. Prefer `search` for "
     "unfamiliar codebases, conceptual / cross-file / paraphrased questions; prefer "
     "`grep` for exact identifiers, filenames, or stack traces.\n"
 )
@@ -111,7 +110,7 @@ _KNOWLEDGE_SEARCH_BLOCK = """\
 ### Knowledge retrieval (`search`) — how to use it well
 - **Default:** when exploring or answering questions about code you have not already located, **call `search` before** broad `glob` / wandering `read_file`. Do **not** skip it because "the answer is in source" — the index *is* that source.
 - **When:** "where does X live?", "how does Y work?", multi-question repo Q&A, paraphrases without exact symbols, or when you lack a precise path/`grep` needle.
-- **Not for:** past sessions, user preferences, or "what did we decide earlier" — use `search_memory`.
+- **Not for:** past sessions, user preferences, or "what did we decide earlier" — use `mempalace search`.
 - **Locate-a-file / asset questions:** for "where is the logo / hero image / font file?" prefer `glob` on the plausible directory (e.g. `**/public/**`, `**/assets/**`) over `search`.
 - **Query shape:** one short, focused query per concept using distinctive nouns (mechanism, module role, behavior) — not the user's full multi-question dump pasted into ten parallel calls.
 - **Batching:** if answering several questions, issue a few high-signal searches (or one then refine), not near-duplicate parallel queries for every line item.
@@ -122,13 +121,10 @@ _KNOWLEDGE_SEARCH_BLOCK = """\
 """
 
 _MEMORY_TEACHING_BLOCK = """\
-### Memory retrieval (`search_memory`) — how to use it well
-- **Types:** `episodic` = what happened; `semantic` = durable facts; `procedural` = how-tos; `working` = short-lived scratch (usually not injected).
-- **Routing:** what happened / preferences / prior sessions → `search_memory`; how does code work → `search`; why is it this way → both, **memory first**.
-- **Full notes:** keyword hits include `body` (full note text) and `links` (`related` / `supersedes`). Soft 1-hop neighbors may appear as `via: graph` snippets without a full body.
-- **Traverse:** to open a neighbor, call `search_memory` with `path` set to that memory-relative path (e.g. `episodic/….md`). Do **not** use `read_file` — memory is a separate store from the workspace.
-- **Mutations:** when a stored fact is wrong, use `update_memory` (supersede) or `forget` — do not leave stale notes active.
-- **Index lines** under `## Memory index` are titles only — call `search_memory` for the full note.
+### Memory retrieval (`mempalace search`) — how to use it well
+- Past sessions live in the palace. Wake-up (identity + recent story) is already in this prompt.
+- Prefer `run_command` with `argv: ["mempalace", "search", "<query>"]` for older or specific recall.
+- Do not `read_file` palace paths. Automatic ingest already captured user and final assistant turns.
 """
 
 

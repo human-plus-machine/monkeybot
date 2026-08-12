@@ -54,8 +54,9 @@ async def test_create_harness_deps_memory_set_when_uri_given(tmp_path: Path) -> 
     mem_root = tmp_path / "mem"
     mem_root.mkdir()
     uri = "local://" + str(mem_root.resolve())
+    db = tmp_path / "monkeybot.db"
     deps = await create_harness_deps(
-        "sqlite:///:memory:",
+        f"sqlite:///{db}",
         uri,
         open_mcp=False,
         _provider_override=_fake(),

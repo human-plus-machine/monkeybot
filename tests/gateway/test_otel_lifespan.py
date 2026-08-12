@@ -65,11 +65,20 @@ async def test_asgi_lifespan_loads_agent_dotenv_before_observability(
     (config_dir / "monkeybot.yaml").write_text(
         "model:\n  provider: fake\n"
         "web_search:\n  backend: none\n"
-        "memory_hook:\n  enabled: false\n"
         "paths:\n  db_url: 'sqlite:///:memory:'\n",
         encoding="utf-8",
     )
     (agent / ".env").write_text("MONKEYBOT_OTEL_ENABLED=true\n", encoding="utf-8")
+
+    class _FastMemory:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def ensure_ready(self) -> None:
+            return
+
+        def register_hooks(self, _mgr: object) -> None:
+            return
 
     async def _skip_mcp_load(self: MCPClient, _path: object, *_a: object, **_kw: object) -> None:
         return
@@ -87,6 +96,7 @@ async def test_asgi_lifespan_loads_agent_dotenv_before_observability(
         monkeypatch.delenv("MONKEYBOT_CONFIG", raising=False)
         monkeypatch.delenv("MONKEYBOT_OTEL_ENABLED", raising=False)
         monkeypatch.setattr(MCPClient, "load_from_config", _skip_mcp_load)
+        monkeypatch.setattr("monkeybot.gateway.sse.app.MemorySubsystem", _FastMemory)
         monkeypatch.setattr("monkeybot.observability.init_observability", _observe_environment)
         async with LifespanManager(app):
             pass

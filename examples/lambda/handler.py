@@ -16,8 +16,8 @@ Model/provider: use MODEL_PROVIDER, MODEL_NAME, and provider secrets as in conta
 
 ``hook_manager=None`` (via :func:`~monkeybot.core.bootstrap.run_pattern_bc_turn`) means the
 agent loop does not run :class:`~monkeybot.core.hooks.HookManager` callbacks, so automatic
-memory hook capture (``POST_TOOL`` / ``POST_TURN``) is off; indexed memory and ``search_memory``
-still work. Enable hooks in FaaS only if you use positive timeouts so work completes before return.
+memory hook capture (recall / writer drain) is off; MemPalace wake-up
+still works. Enable hooks in FaaS only if you use positive timeouts so work completes before return.
 
 This example uses ``async def lambda_handler`` (Python 3.9+ on Lambda). If you must use a
 sync ``def handler``, bootstrap with ``asyncio.new_event_loop()`` and ``run_until_complete``

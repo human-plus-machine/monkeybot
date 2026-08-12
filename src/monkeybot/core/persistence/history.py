@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import cast
+from typing import Any, cast
 
 import aiosqlite
 
@@ -37,7 +37,14 @@ class SQLiteHistoryStore:
     def __init__(self, conn: aiosqlite.Connection) -> None:
         self._conn = conn
 
-    async def append(self, thread_id: str, message: Message) -> None:
+    async def append(
+        self,
+        thread_id: str,
+        message: Message,
+        *,
+        turn_id: str | None = None,
+        message_id: str | None = None,
+    ) -> None:
         """Validate ``message``, JSON-encode content blocks, insert one row."""
         _validate_message(message)
         payload = json.dumps(
@@ -48,12 +55,48 @@ class SQLiteHistoryStore:
         created_at = int(time.time() * 1000)
         await self._conn.execute(
             """
-            INSERT INTO conversation_history(thread_id, role, content, created_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO conversation_history(thread_id, role, content, created_at, turn_id, message_id)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (thread_id, message.role, payload, created_at),
+            (thread_id, message.role, payload, created_at, turn_id, message_id),
         )
         await self._conn.commit()
+
+    async def append_with_outbox(
+        self,
+        thread_id: str,
+        message: Message,
+        *,
+        turn_id: str,
+        message_id: str,
+        outbox: dict[str, Any],
+    ) -> None:
+        """Insert history and a pending memory outbox row in one transaction."""
+        from monkeybot.core.memory.outbox import insert_pending
+
+        _validate_message(message)
+        payload = json.dumps(
+            [b.to_dict() for b in message.content],
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        created_at = int(time.time() * 1000)
+        await self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            await self._conn.execute(
+                """
+                INSERT INTO conversation_history(
+                    thread_id, role, content, created_at, turn_id, message_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (thread_id, message.role, payload, created_at, turn_id, message_id),
+            )
+            await insert_pending(self._conn, commit=False, **outbox)
+            await self._conn.commit()
+        except Exception:
+            await self._conn.rollback()
+            raise
 
     async def load(self, thread_id: str, limit: int | None = None) -> list[Message]:
         """Return messages for ``thread_id``, oldest first.

@@ -445,7 +445,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Invariants:**
 - Write path uses `asyncio.Lock` shared with organizer.
-- `MONKEYBOT_MEMORY_HOOK_ENABLED=false` disables hook registration.
+- Memory is on whenever `paths.memory_storage_uri` is set.
 - Subagents get **no-op `HookManager`** to avoid duplicate writes.
 - `flush()` must be called before short-lived handlers exit if organizer work matters.
 
@@ -527,7 +527,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 directory that contains `monkeybot_config/`. The discovered agent root loads
 its `.env` before YAML values fill still-unset environment variables.
 
-**Major sections:** `runtime`, `paths`, `model`, `gateway`, `context_curation`, `memory_hook`, `subagents`, `tools`, `compression`, `web_search`, `sandbox`, `emission`, `fake_provider`, `includes`.
+**Major sections:** `runtime`, `paths`, `model`, `gateway`, `context_curation`, `memory`, `subagents`, `tools`, `compression`, `web_search`, `sandbox`, `emission`, `fake_provider`, `includes`.
 
 **Invariants:**
 - Secrets never belong in yaml.

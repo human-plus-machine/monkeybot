@@ -154,11 +154,11 @@ def test_volatile_markers_ignore_prose_under_the_heading() -> None:
 
 
 def test_build_cached_system_blocks_splits_volatile_tail() -> None:
-    system = "STABLE\n\n## Memory index\n- note"
+    system = "STABLE\n\n## Memory wake-up\n- note"
     blocks = build_cached_system_blocks(system)
     assert blocks == [
         {"type": "text", "text": "STABLE", "cache_control": {"type": "ephemeral"}},
-        {"type": "text", "text": "\n\n## Memory index\n- note"},
+        {"type": "text", "text": "\n\n## Memory wake-up\n- note"},
     ]
 
 
