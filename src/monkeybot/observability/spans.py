@@ -77,11 +77,22 @@ def truncate(value: str, *, max_bytes: int = _DEFAULT_MAX_BYTES) -> str:
     return clipped + _TRUNC_SUFFIX
 
 
-def _key_denied(key: str) -> bool:
+def is_denied_attribute_key(key: str) -> bool:
+    """True when ``key`` looks secret-ish and must not be persisted on spans.
+
+    Keys under ``gen_ai.`` are never denied so prompt/completion and usage can be
+    stored (including in the local SQLite traces DB). That is intentional for a
+    local-file sink; remote OTLP backends apply their own redaction.
+    """
     lower = key.lower()
     if lower.startswith("gen_ai."):
         return False
     return any(part in lower for part in _DENYLIST_SUBSTRINGS)
+
+
+def is_attr_truncation_exempt(key: str) -> bool:
+    """True when ``key`` keeps full length at set time and SQLite persist time."""
+    return key in _ATTR_ALLOWLIST_EXACT
 
 
 def set_span_attribute_safe(
@@ -89,9 +100,9 @@ def set_span_attribute_safe(
     key: str,
     value: str | int | bool | float,
 ) -> None:
-    if _key_denied(key):
+    if is_denied_attribute_key(key):
         return
-    if isinstance(value, str) and key not in _ATTR_ALLOWLIST_EXACT:
+    if isinstance(value, str) and not is_attr_truncation_exempt(key):
         value = truncate(value)
     span.set_attribute(key, value)
 
@@ -193,9 +204,7 @@ def set_llm_usage(
     if cache_read_tokens:
         set_span_attribute_safe(span, "gen_ai.usage.cache_read_tokens", cache_read_tokens)
     if cache_creation_tokens:
-        set_span_attribute_safe(
-            span, "gen_ai.usage.cache_creation_tokens", cache_creation_tokens
-        )
+        set_span_attribute_safe(span, "gen_ai.usage.cache_creation_tokens", cache_creation_tokens)
     total = input_tokens + output_tokens
     if total:
         set_span_attribute_safe(span, "gen_ai.usage.total_tokens", total)
