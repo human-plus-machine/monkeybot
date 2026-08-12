@@ -144,9 +144,7 @@ def add_tool_hook_span_event(*, phase: HookPhase, tool_name: str) -> None:
         return
     from opentelemetry import trace
 
-    event_name = (
-        "monkeybot.hook.pre_tool" if phase == "pre_tool" else "monkeybot.hook.post_tool"
-    )
+    event_name = "monkeybot.hook.pre_tool" if phase == "pre_tool" else "monkeybot.hook.post_tool"
     span = trace.get_current_span()
     if not span.is_recording():
         return

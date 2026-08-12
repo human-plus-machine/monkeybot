@@ -21,6 +21,7 @@ from monkeybot.observability.instrumentation import (
 )
 from monkeybot.observability.propagation import extract_traceparent, inject_traceparent
 from monkeybot.observability.spans import (
+    is_denied_attribute_key,
     set_llm_io,
     set_llm_usage,
     set_run_output,
@@ -57,7 +58,7 @@ def is_observability_enabled() -> bool:
 
 
 def _create_span_processor(exporter: str) -> Any:
-    """Build a span processor for ``otlp`` or ``console``. Tests may monkeypatch this."""
+    """Build a span processor for ``otlp``, ``console``, or ``sqlite``. Tests may monkeypatch."""
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
     if exporter == "otlp":
@@ -68,6 +69,23 @@ def _create_span_processor(exporter: str) -> Any:
         from opentelemetry.sdk.trace.export import ConsoleSpanExporter
 
         return BatchSpanProcessor(ConsoleSpanExporter())
+    if exporter == "sqlite":
+        from monkeybot.observability.sqlite_exporter import (
+            SqliteSpanExporter,
+            load_sqlite_exporter_config,
+        )
+
+        config = load_sqlite_exporter_config()
+        if config is None:
+            logger.info(
+                "observability disabled (OTEL_TRACES_EXPORTER=sqlite requires MONKEYBOT_TRACES_DB)"
+            )
+            return None
+        return BatchSpanProcessor(
+            SqliteSpanExporter(config),
+            schedule_delay_millis=500,
+            max_export_batch_size=64,
+        )
     return None
 
 
@@ -97,9 +115,9 @@ def init_observability() -> bool:
         return False
 
     exporter = os.environ.get("OTEL_TRACES_EXPORTER", "").strip().lower()
-    if exporter not in {"otlp", "console"}:
+    if exporter not in {"otlp", "console", "sqlite"}:
         logger.info(
-            "observability disabled (OTEL_TRACES_EXPORTER must be otlp or console, got %r)",
+            "observability disabled (OTEL_TRACES_EXPORTER must be otlp, console, or sqlite, got %r)",
             exporter or "<unset>",
         )
         return False
@@ -202,6 +220,7 @@ __all__ = [
     "get_tracer",
     "init_observability",
     "inject_traceparent",
+    "is_denied_attribute_key",
     "is_observability_enabled",
     "set_llm_io",
     "set_llm_usage",

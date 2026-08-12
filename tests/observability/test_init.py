@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+from pathlib import Path
 
 import pytest
 
@@ -105,6 +106,37 @@ def test_import_runtime_loop_with_observability_disabled(
     import monkeybot.core.runtime.loop as loop_mod
 
     assert loop_mod.run is not None
+    assert is_observability_enabled() is False
+
+
+def test_init_observability_sqlite_enabled(
+    monkeypatch: pytest.MonkeyPatch, reset_observability_state: None, tmp_path: Path
+) -> None:
+    db_path = tmp_path / "traces.db"
+    monkeypatch.setenv("MONKEYBOT_OTEL_ENABLED", "true")
+    monkeypatch.setenv("OTEL_TRACES_EXPORTER", "sqlite")
+    monkeypatch.setenv("MONKEYBOT_TRACES_DB", str(db_path))
+    assert init_observability() is True
+    assert is_observability_enabled() is True
+    shutdown_observability()
+
+
+def test_init_observability_sqlite_missing_db_returns_false(
+    monkeypatch: pytest.MonkeyPatch, reset_observability_state: None
+) -> None:
+    monkeypatch.setenv("MONKEYBOT_OTEL_ENABLED", "true")
+    monkeypatch.setenv("OTEL_TRACES_EXPORTER", "sqlite")
+    monkeypatch.delenv("MONKEYBOT_TRACES_DB", raising=False)
+    assert init_observability() is False
+    assert is_observability_enabled() is False
+
+
+def test_init_observability_rejects_unknown_exporter(
+    monkeypatch: pytest.MonkeyPatch, reset_observability_state: None
+) -> None:
+    monkeypatch.setenv("MONKEYBOT_OTEL_ENABLED", "true")
+    monkeypatch.setenv("OTEL_TRACES_EXPORTER", "jaeger")
+    assert init_observability() is False
     assert is_observability_enabled() is False
 
 

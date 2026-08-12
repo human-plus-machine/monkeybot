@@ -77,7 +77,8 @@ def truncate(value: str, *, max_bytes: int = _DEFAULT_MAX_BYTES) -> str:
     return clipped + _TRUNC_SUFFIX
 
 
-def _key_denied(key: str) -> bool:
+def is_denied_attribute_key(key: str) -> bool:
+    """True when ``key`` looks secret-ish and must not be persisted on spans."""
     lower = key.lower()
     if lower.startswith("gen_ai."):
         return False
@@ -89,7 +90,7 @@ def set_span_attribute_safe(
     key: str,
     value: str | int | bool | float,
 ) -> None:
-    if _key_denied(key):
+    if is_denied_attribute_key(key):
         return
     if isinstance(value, str) and key not in _ATTR_ALLOWLIST_EXACT:
         value = truncate(value)
@@ -193,9 +194,7 @@ def set_llm_usage(
     if cache_read_tokens:
         set_span_attribute_safe(span, "gen_ai.usage.cache_read_tokens", cache_read_tokens)
     if cache_creation_tokens:
-        set_span_attribute_safe(
-            span, "gen_ai.usage.cache_creation_tokens", cache_creation_tokens
-        )
+        set_span_attribute_safe(span, "gen_ai.usage.cache_creation_tokens", cache_creation_tokens)
     total = input_tokens + output_tokens
     if total:
         set_span_attribute_safe(span, "gen_ai.usage.total_tokens", total)
