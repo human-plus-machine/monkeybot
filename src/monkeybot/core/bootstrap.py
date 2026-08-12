@@ -21,7 +21,6 @@ from monkeybot.core.knowledge.config import knowledge_enabled_from_config
 from monkeybot.core.llm.provider import Provider
 from monkeybot.core.llm.usage import usage_from_totals
 from monkeybot.core.mcp.mcp_client import MCPClient
-from monkeybot.core.memory.config import memory_enabled_from_config
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.persistence.backends import StorageBackend, create_storage_backend
 from monkeybot.core.runtime.events import AssistantDelta, Error, TurnComplete
@@ -132,7 +131,7 @@ async def create_harness_deps(
 
         memory: MemorySubsystem | None = None
         uri = (memory_storage_uri or "").strip()
-        if uri and memory_enabled_from_config():
+        if uri:
             from monkeybot.core.layout import AgentLayout
 
             layout = AgentLayout.from_environment()
@@ -144,8 +143,8 @@ async def create_harness_deps(
                 storage=backend,
             )
             await memory.ensure_ready()
-        elif uri:
-            logger.info("memory disabled via memory.enabled / MONKEYBOT_MEMORY_HOOK_ENABLED")
+            os.environ["MEMPALACE_PALACE_PATH"] = str(memory.palace_path)
+            os.environ["MEMPALACE_BACKEND"] = memory.backend
 
         knowledge: KnowledgeSubsystem | None = None
         if knowledge_enabled_from_config() and workspace_root is not None:

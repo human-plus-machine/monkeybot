@@ -179,6 +179,20 @@ class PostgresHistoryStore:
         async with self._pool.acquire() as conn:
             await self._insert_message(conn, thread_id, message)
 
+    async def append_with_outbox(
+        self,
+        thread_id: str,
+        message: Message,
+        *,
+        turn_id: str,
+        message_id: str,
+        outbox: dict[str, Any],
+    ) -> None:
+        """Insert history and a pending memory outbox row in one transaction."""
+        async with self._pool.acquire() as conn, conn.transaction():
+            await self._insert_message(conn, thread_id, message)
+            await _insert_outbox_pending(conn, **outbox)
+
     async def load(self, thread_id: str, limit: int | None = None) -> list[Message]:
         async with self._pool.acquire() as conn:
             if limit is None:
@@ -1073,6 +1087,55 @@ class PostgresSessionTurnLockStore:
         return row is not None
 
 
+async def _insert_outbox_pending(
+    conn: asyncpg.Connection,
+    *,
+    agent_id: str,
+    thread_id: str,
+    turn_id: str,
+    message_id: str,
+    role: str,
+    content: str,
+    workspace_id: str | None,
+    wing: str,
+    room: str,
+    created_at: str | None = None,
+    traceparent: str | None = None,
+) -> str | None:
+    from monkeybot.core.memory.ids import outbox_id, utc_now_iso
+    from monkeybot.core.memory.outbox import STATUS_COMMITTED
+
+    row_id = outbox_id(
+        agent_id=agent_id, thread_id=thread_id, message_id=message_id, role=role
+    )
+    existing = await conn.fetchval("SELECT status FROM memory_outbox WHERE id = $1", row_id)
+    if existing is not None:
+        return None if str(existing) == STATUS_COMMITTED else row_id
+    await conn.execute(
+        """
+        INSERT INTO memory_outbox (
+          id, agent_id, thread_id, turn_id, message_id, role, content,
+          workspace_id, wing, room, created_at, status, attempts, traceparent
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending', 0, $12
+        )
+        """,
+        row_id,
+        agent_id,
+        thread_id,
+        turn_id,
+        message_id,
+        role,
+        content,
+        workspace_id,
+        wing,
+        room,
+        created_at or utc_now_iso(),
+        traceparent,
+    )
+    return row_id
+
+
 class PostgresOutboxStore:
     """Postgres-backed memory outbox (same table shape as SQLite)."""
 
@@ -1095,42 +1158,22 @@ class PostgresOutboxStore:
         traceparent: str | None = None,
         commit: bool = True,
     ) -> str | None:
-        from monkeybot.core.memory.ids import outbox_id, utc_now_iso
-        from monkeybot.core.memory.outbox import STATUS_COMMITTED
-
         del commit
-        row_id = outbox_id(
-            agent_id=agent_id, thread_id=thread_id, message_id=message_id, role=role
-        )
         async with self._pool.acquire() as conn:
-            existing = await conn.fetchval(
-                "SELECT status FROM memory_outbox WHERE id = $1", row_id
+            return await _insert_outbox_pending(
+                conn,
+                agent_id=agent_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                message_id=message_id,
+                role=role,
+                content=content,
+                workspace_id=workspace_id,
+                wing=wing,
+                room=room,
+                created_at=created_at,
+                traceparent=traceparent,
             )
-            if existing is not None:
-                return None if str(existing) == STATUS_COMMITTED else row_id
-            await conn.execute(
-                """
-                INSERT INTO memory_outbox (
-                  id, agent_id, thread_id, turn_id, message_id, role, content,
-                  workspace_id, wing, room, created_at, status, attempts, traceparent
-                ) VALUES (
-                  $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending', 0, $12
-                )
-                """,
-                row_id,
-                agent_id,
-                thread_id,
-                turn_id,
-                message_id,
-                role,
-                content,
-                workspace_id,
-                wing,
-                room,
-                created_at or utc_now_iso(),
-                traceparent,
-            )
-        return row_id
 
     async def claim_batch(
         self,

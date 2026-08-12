@@ -13,7 +13,7 @@ from browser_mcp import server
 
 
 @pytest.fixture(autouse=True)
-def _reset_bh_state(monkeypatch: pytest.MonkeyPatch):
+def _reset_bh_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     original_bh = server._bh
     original_bound = server._bound_cdp
     original_env_flag = server._env_set_from_in_app_file
@@ -22,6 +22,8 @@ def _reset_bh_state(monkeypatch: pytest.MonkeyPatch):
     server._env_set_from_in_app_file = False
     monkeypatch.delenv("BU_CDP_URL", raising=False)
     monkeypatch.delenv("BU_CDP_WS", raising=False)
+    # Ignore a developer machine's live MonkeyApp CDP file.
+    monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", tmp_path / "missing-in-app-cdp-url")
     yield
     server._bh = original_bh
     server._bound_cdp = original_bound

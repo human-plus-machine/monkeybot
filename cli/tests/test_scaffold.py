@@ -159,6 +159,9 @@ def test_run_refresh_adds_template_commands_and_keeps_extras(tmp_path: Path) -> 
     report = run_refresh(dest=tmp_path)
     text = allow.read_text(encoding="utf-8")
     assert "  - mempalace\n" in text
+    assert not any(line.strip() == "..." for line in text.splitlines())
+    parsed = yaml.safe_load(text)
+    assert "mempalace" in parsed["allowed_commands"]
     assert "  - officecli\n" in text
     assert "  - ./custom-data/\n" in text
     assert "  - ../memory/mempalace/\n" in text

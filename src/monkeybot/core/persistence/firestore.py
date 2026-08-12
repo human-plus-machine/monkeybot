@@ -71,8 +71,10 @@ class FirestoreHistoryStore:
 
     def __init__(self, client: AsyncClient, prefix: str) -> None:
         self._client = client
+        self._prefix = prefix
         self._collection = _collection_name(prefix, "conversation_history")
         self._threads_collection = _collection_name(prefix, "threads")
+        self._outbox_collection = _collection_name(prefix, "memory_outbox")
 
     async def _upsert_thread_summary(
         self,
@@ -123,6 +125,91 @@ class FirestoreHistoryStore:
             }
         )
         await self._upsert_thread_summary(thread_id, created_at=created_at, content=payload)
+
+    async def append_with_outbox(
+        self,
+        thread_id: str,
+        message: Message,
+        *,
+        turn_id: str,
+        message_id: str,
+        outbox: dict[str, Any],
+    ) -> None:
+        """Insert history and a pending memory outbox row in one batched write."""
+        from monkeybot.core.memory.ids import outbox_id, utc_now_iso
+        from monkeybot.core.memory.outbox import STATUS_COMMITTED
+
+        role = message.role
+        if role not in _VALID_ROLES:
+            raise ValueError(f"invalid role: {role!r}")
+        payload = json.dumps(
+            [b.to_dict() for b in message.content],
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        created_at = int(time.time() * 1000)
+        row_id = outbox_id(
+            agent_id=str(outbox.get("agent_id") or ""),
+            thread_id=str(outbox.get("thread_id") or thread_id),
+            message_id=str(outbox.get("message_id") or message_id),
+            role=str(outbox.get("role") or role),
+        )
+        outbox_ref = self._client.collection(self._outbox_collection).document(row_id)
+        snap = await outbox_ref.get()
+        if snap.exists:
+            data = snap.to_dict() or {}
+            if str(data.get("status")) == STATUS_COMMITTED:
+                await self.append(thread_id, message, turn_id=turn_id, message_id=message_id)
+                return
+        hist_ref = self._client.collection(self._collection).document()
+        thread_ref = self._client.collection(self._threads_collection).document(thread_id)
+        batch = self._client.batch()
+        batch.set(
+            hist_ref,
+            {
+                "thread_id": thread_id,
+                "role": role,
+                "content": payload,
+                "created_at": created_at,
+                "turn_id": turn_id,
+                "message_id": message_id,
+            },
+        )
+        batch.set(
+            thread_ref,
+            {
+                "thread_id": thread_id,
+                "last_message_at": created_at,
+                "message_count": firestore.Increment(1),
+                "last_content": payload,
+            },
+            merge=True,
+        )
+        if not snap.exists:
+            batch.set(
+                outbox_ref,
+                {
+                    "id": row_id,
+                    "agent_id": str(outbox.get("agent_id") or ""),
+                    "thread_id": thread_id,
+                    "turn_id": turn_id,
+                    "message_id": message_id,
+                    "role": role,
+                    "content": outbox.get("content"),
+                    "workspace_id": outbox.get("workspace_id"),
+                    "wing": outbox.get("wing") or "main",
+                    "room": outbox.get("room") or "conversation",
+                    "created_at": outbox.get("created_at") or utc_now_iso(),
+                    "status": "pending",
+                    "attempts": 0,
+                    "next_attempt_at": None,
+                    "last_error": None,
+                    "traceparent": outbox.get("traceparent"),
+                    "lease_owner": None,
+                    "lease_expires_at": None,
+                },
+            )
+        await batch.commit()
 
     async def load(self, thread_id: str, limit: int | None = None) -> list[Message]:
         if limit is not None:
@@ -887,28 +974,76 @@ class FirestoreOutboxStore:
         for doc in docs:
             if len(claimed) >= limit:
                 break
-            data = doc.to_dict() or {}
-            next_at = data.get("next_attempt_at")
-            if next_at and str(next_at) > now_iso:
-                continue
-            await doc.reference.update(
-                {
-                    "status": "processing",
-                    "lease_owner": lease_owner,
-                    "lease_expires_at": expires,
-                    "attempts": int(data.get("attempts") or 0) + 1,
-                }
+            transaction = self._client.transaction()
+
+            async def _claim_body(
+                txn: firestore.AsyncTransaction,
+                ref: firestore.AsyncDocumentReference,
+            ) -> Any | None:
+                snapshot = await ref.get(transaction=txn)
+                if not snapshot.exists:
+                    return None
+                data = snapshot.to_dict() or {}
+                if str(data.get("status")) != "pending":
+                    return None
+                next_at = data.get("next_attempt_at")
+                if next_at and str(next_at) > now_iso:
+                    return None
+                txn.update(
+                    ref,
+                    {
+                        "status": "processing",
+                        "lease_owner": lease_owner,
+                        "lease_expires_at": expires,
+                        "attempts": int(data.get("attempts") or 0) + 1,
+                    },
+                )
+                return self._row_from_data(ref.id, data)
+
+            claim_txn = cast(
+                Callable[
+                    [firestore.AsyncTransaction, firestore.AsyncDocumentReference],
+                    Awaitable[Any | None],
+                ],
+                firestore.async_transactional(_claim_body),
             )
-            claimed.append(self._row_from_data(doc.id, data))
+            row = await claim_txn(transaction, doc.reference)
+            if row is not None:
+                claimed.append(row)
         expired_q = (
             self._client.collection(self._collection)
             .where(filter=FieldFilter("status", "==", "processing"))
             .where(filter=FieldFilter("lease_expires_at", "<", now_iso))
         )
         async for doc in expired_q.stream():
-            await doc.reference.update(
-                {"status": "pending", "lease_owner": None, "lease_expires_at": None}
+            transaction = self._client.transaction()
+
+            async def _release_body(
+                txn: firestore.AsyncTransaction,
+                ref: firestore.AsyncDocumentReference,
+            ) -> None:
+                snapshot = await ref.get(transaction=txn)
+                if not snapshot.exists:
+                    return
+                data = snapshot.to_dict() or {}
+                if str(data.get("status")) != "processing":
+                    return
+                expires_at = data.get("lease_expires_at")
+                if not expires_at or str(expires_at) >= now_iso:
+                    return
+                txn.update(
+                    ref,
+                    {"status": "pending", "lease_owner": None, "lease_expires_at": None},
+                )
+
+            release_txn = cast(
+                Callable[
+                    [firestore.AsyncTransaction, firestore.AsyncDocumentReference],
+                    Awaitable[None],
+                ],
+                firestore.async_transactional(_release_body),
             )
+            await release_txn(transaction, doc.reference)
         return claimed
 
     async def mark_committed(self, row_ids: list[str]) -> None:

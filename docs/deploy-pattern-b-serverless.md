@@ -96,8 +96,9 @@ Package `monkeybot_config/` and `skills/` with the function artifact as
 read-only files. Use the agent root to resolve YAML paths; never rely on the
 function's working directory. `workspace/` is ephemeral, so use an absolute
 `MONKEYBOT_WORKSPACE_ROOT` only when the platform gives you a suitable temporary
-location. Durable history and memory must use `DB_URL` and
-`MEMORY_STORAGE_URI`.
+location. Durable history must use `DB_URL`. MemPalace (`MEMORY_STORAGE_URI`)
+needs a writable local path — ephemeral `/tmp` on FaaS, or a mounted volume.
+Object-store memory URIs are not supported.
 
 The static browser skill can be packaged with the artifact, but browser
 playbooks are workspace cache data. For an ephemeral function, use Browser Use
@@ -111,11 +112,8 @@ this remains a deployment pattern, not a tested FaaS configuration.
 Install monkeybot with only the extras you need:
 
 ```bash
-# Gemini + Postgres + GCS memory
-pip install "monkeybot[gemini,postgres,gcs]"
-
-# Gemini + Postgres + S3 memory
-pip install "monkeybot[gemini,postgres,aws]"
+# Gemini + Postgres (MemPalace is local-only — mount a volume or use /tmp)
+pip install "monkeybot[gemini,postgres]"
 ```
 
 No `[sandbox]` extra is needed — sandbox is not supported on FaaS.
@@ -133,7 +131,6 @@ No `[sandbox]` extra is needed — sandbox is not supported on FaaS.
 | Permission | Why |
 |---|---|
 | `secretsmanager:GetSecretValue` | Read DB URL and API keys from Secrets Manager |
-| `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`, `s3:ListBucket` | S3 memory bucket |
 | `rds-db:connect` | RDS IAM auth (optional) |
 
 **Handler:**
@@ -167,7 +164,7 @@ def lambda_handler(event, context):
 
 ```
 DB_URL          = postgresql://user:pass@rds-proxy.endpoint:5432/monkeybot?sslmode=require
-MEMORY_STORAGE_URI = s3://my-bucket/monkeybot-memory
+MEMORY_STORAGE_URI = local:///mnt/memory/mempalace
 GEMINI_API_KEY  = (from Secrets Manager via a Lambda extension or fetched at cold start)
 ```
 
@@ -197,7 +194,6 @@ CMD ["lambda_function.lambda_handler"]
 |---|---|
 | `roles/secretmanager.secretAccessor` | Read secrets |
 | `roles/aiplatform.user` | Call Vertex AI (if using Vertex provider) |
-| `roles/storage.objectAdmin` | GCS memory bucket |
 | `roles/cloudsql.client` | Cloud SQL (if using Cloud SQL) |
 
 **Handler (`main.py`):**
@@ -231,7 +227,7 @@ def monkeybot_handler(request):
 **`requirements.txt`:**
 
 ```
-monkeybot[gemini,postgres,gcs]
+monkeybot[gemini,postgres]
 functions-framework
 ```
 
@@ -248,7 +244,7 @@ gcloud functions deploy monkeybot-handler \
   --allow-unauthenticated \
   --memory 512MB \
   --timeout 300s \
-  --set-env-vars DB_URL=postgresql://...,MEMORY_STORAGE_URI=gcs://... \
+  --set-env-vars DB_URL=postgresql://...,MEMORY_STORAGE_URI=local:///mnt/memory/mempalace \
   --set-secrets GEMINI_API_KEY=gemini-api-key:latest
 ```
 
@@ -309,7 +305,7 @@ monkeybot[gemini,postgres]
 azure-functions
 ```
 
-**Note:** Azure Blob Storage memory backend (`[azure]` extra) is not yet released. Use a Postgres-only setup with `MEMORY_STORAGE_URI=local:///tmp/memory` for temporary local memory, or connect to an S3-compatible endpoint if available.
+**Note:** MemPalace is local-only. Use Postgres for history (`DB_URL`) and `MEMORY_STORAGE_URI=local:///tmp/memory` for ephemeral per-instance memory.
 
 ---
 
@@ -319,7 +315,7 @@ azure-functions
 
 **Constraints specific to Cloudflare:**
 - No `asyncio` event loop in the traditional sense — use Cloudflare's async handler model.
-- No persistent file system — `MEMORY_STORAGE_URI` must point to R2 (Cloudflare's S3-compatible object store) or an external S3/GCS bucket.
+- No persistent file system — MemPalace is ephemeral (`MEMORY_STORAGE_URI=local:///tmp/memory`). Workspace files may still use R2 via `create_workspace_storage`.
 - No persistent TCP connections between invocations — open and close `StorageBackend` per invocation (see Section 2).
 - `DB_URL` must point to a Hyperdrive-proxied Postgres connection or an external managed Postgres.
 

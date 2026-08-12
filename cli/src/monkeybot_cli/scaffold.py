@@ -300,7 +300,14 @@ def _list_extras(existing: list[str], template: list[str]) -> list[str]:
 
 
 def _yaml_list_item(value: str) -> str:
-    dumped = yaml.safe_dump(value, allow_unicode=True).strip()
+    dumped = yaml.safe_dump(
+        value,
+        allow_unicode=True,
+        default_flow_style=True,
+        explicit_end=False,
+    ).strip()
+    if dumped.endswith("..."):
+        dumped = dumped[:-3].rstrip()
     return f"  - {dumped}\n"
 
 

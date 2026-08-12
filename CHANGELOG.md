@@ -25,7 +25,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 - PDF extraction closes its file handle (previously leaked a descriptor per file on large scans), the code chunker no longer splits mid-function when a docstring contains an unbalanced brace, and `knowledge.chunk_overlap_ratio` is honored for markdown, code, and structured files.
 - `read_file` no longer applies a post-hoc 32k char chop after line selection (which made `end_line` lie and caused the model to skip unread lines when paging).
 - `read_file` reports `truncated: false` and omits `next_offset` when a read reaches the end of the file, instead of marking every complete read truncated and pointing past EOF. A line too long for the whole char budget is now marked inline where it was cut.
-- Tool results too large to inline as-is are shaped into still-valid JSON (with `… (+N more items)` markers) rather than inlined as a raw, unparseable JSON prefix.
+- Tool results too large to inline as-is are shaped into still-valid JSON (with `… (+N more items)` markers) rather than inlined as a raw JSON prefix.
 - Context summarization sizes its per-result cap from the active model's context window rather than a hardcoded 200k window.
 
 ### Changed
@@ -36,6 +36,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 ### Breaking
 
 - `subagents:` as a bare list of personas is no longer supported; wrap personas under `subagents.personas` in `monkeybot.yaml`. `SUBAGENT_TIMEOUT_SEC`, `SUBAGENT_MAX_TURNS`, and `MONKEYBOT_SUBAGENT_AGENT_MD` environment variable overrides are removed — set `subagents.timeout_sec`, `subagents.max_turns`, and per-persona `agent_md` in `monkeybot.yaml` instead. Top-level `subagents.agent_md` is also removed.
+- Core is **2.2.2**: note-based memory is replaced by MemPalace. `memory.enabled` / `memory_hook.enabled` / `MONKEYBOT_MEMORY_HOOK_ENABLED` are removed (memory is on whenever a palace URI is set). `gcs://` and `s3://` memory URIs are rejected; mount a local volume instead. CLI **0.4.1** requires `monkeybot>=2.2.2`.
 
 ## [cli v0.3.1] - 2026-07-28
 

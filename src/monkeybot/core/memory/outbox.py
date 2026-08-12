@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
@@ -416,12 +417,23 @@ async def dead_depth(conn: aiosqlite.Connection, *, agent_id: str | None = None)
 class SqliteOutboxStore:
     """OutboxStore backed by a shared aiosqlite connection."""
 
-    def __init__(self, conn: aiosqlite.Connection, *, owns_connection: bool = False) -> None:
+    def __init__(
+        self,
+        conn: aiosqlite.Connection,
+        *,
+        owns_connection: bool = False,
+        lock: asyncio.Lock | None = None,
+    ) -> None:
         self._conn = conn
         self._owns_connection = owns_connection
+        self._lock = lock or asyncio.Lock()
 
     async def insert_pending(self, **kwargs: Any) -> str | None:
-        return await insert_pending(self._conn, **kwargs)
+        commit = bool(kwargs.get("commit", True))
+        if not commit:
+            return await insert_pending(self._conn, **kwargs)
+        async with self._lock:
+            return await insert_pending(self._conn, **kwargs)
 
     async def claim_batch(
         self,
@@ -431,16 +443,18 @@ class SqliteOutboxStore:
         limit: int = 16,
         lease_seconds: int = _LEASE_SECONDS,
     ) -> list[OutboxRow]:
-        return await claim_batch(
-            self._conn,
-            agent_id=agent_id,
-            lease_owner=lease_owner,
-            limit=limit,
-            lease_seconds=lease_seconds,
-        )
+        async with self._lock:
+            return await claim_batch(
+                self._conn,
+                agent_id=agent_id,
+                lease_owner=lease_owner,
+                limit=limit,
+                lease_seconds=lease_seconds,
+            )
 
     async def mark_committed(self, row_ids: list[str]) -> None:
-        await mark_committed(self._conn, row_ids)
+        async with self._lock:
+            await mark_committed(self._conn, row_ids)
 
     async def mark_retry(
         self,
@@ -450,22 +464,26 @@ class SqliteOutboxStore:
         attempts: int,
         permanent: bool | None = None,
     ) -> None:
-        await mark_retry(
-            self._conn,
-            row_id,
-            error_class=error_class,
-            attempts=attempts,
-            permanent=permanent,
-        )
+        async with self._lock:
+            await mark_retry(
+                self._conn,
+                row_id,
+                error_class=error_class,
+                attempts=attempts,
+                permanent=permanent,
+            )
 
     async def gc_committed(self, *, days: int = _GC_AFTER_DAYS) -> int:
-        return await gc_committed(self._conn, days=days)
+        async with self._lock:
+            return await gc_committed(self._conn, days=days)
 
     async def pending_depth(self, *, agent_id: str | None = None) -> tuple[int, float]:
-        return await pending_depth(self._conn, agent_id=agent_id)
+        async with self._lock:
+            return await pending_depth(self._conn, agent_id=agent_id)
 
     async def dead_depth(self, *, agent_id: str | None = None) -> int:
-        return await dead_depth(self._conn, agent_id=agent_id)
+        async with self._lock:
+            return await dead_depth(self._conn, agent_id=agent_id)
 
     async def close(self) -> None:
         if self._owns_connection:

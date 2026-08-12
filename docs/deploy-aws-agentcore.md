@@ -77,7 +77,7 @@ Minimum for bootstrap examples:
 Set `LOG_LEVEL` to `INFO` or `info` (case-insensitive).
 
 Package `monkeybot_config/` and `skills/` as read-only handler inputs. AgentCore
-workspace is ephemeral unless you opt into [AgentCore filesystem mounts](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-filesystem-configurations.html); use `DB_URL` and `MEMORY_STORAGE_URI` for durable state. There is no Docker-socket sandbox. A remote sandbox, if configured, is compute-only and cannot mount workspace or skills paths; Browser Use Cloud is the portable browser option.
+workspace is ephemeral unless you opt into [AgentCore filesystem mounts](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-filesystem-configurations.html); use `DB_URL` for history and a mounted volume for `MEMORY_STORAGE_URI` (MemPalace is local-only). There is no Docker-socket sandbox. A remote sandbox, if configured, is compute-only and cannot mount workspace or skills paths; Browser Use Cloud is the portable browser option.
 
 ---
 
@@ -92,7 +92,7 @@ workspace is ephemeral unless you opt into [AgentCore filesystem mounts](https:/
 ## Model provider
 
 ```bash
-pip install "monkeybot[bedrock,postgres,aws]"
+pip install "monkeybot[bedrock,postgres]"
 export MODEL_PROVIDER=aws_bedrock
 export MODEL_NAME=anthropic.claude-sonnet-4-20250514-v1:0   # example; use your account id
 export AWS_REGION=us-east-1

@@ -47,11 +47,11 @@ The adapter is thin — it does not contain agent logic. All agent logic lives i
 ## 2. Dependency Installation
 
 ```bash
-pip install "monkeybot[gemini,postgres,gcs]"
+pip install "monkeybot[gemini,postgres]"
 ```
 
-No sandbox package setup is needed. Use only the storage extras appropriate for
-your platform (GCS for GCP, S3/postgres for AWS).
+No sandbox package setup is needed. Use the storage extras appropriate for
+your session DB (`postgres` or `firestore`). MemPalace is local-only.
 
 ---
 
@@ -72,7 +72,6 @@ AWS Bedrock AgentCore can invoke a **Lambda/action-group** handler or a **manage
 | Permission | Why |
 |---|---|
 | `secretsmanager:GetSecretValue` | Read DB URL and API keys |
-| `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`, `s3:ListBucket` | S3 memory bucket |
 | `bedrock:InvokeModel` | Call Bedrock-hosted models (if using Bedrock provider) |
 | `rds-db:connect` | RDS IAM auth (optional) |
 
@@ -109,7 +108,7 @@ async def _run_turn(event):
 
 ```
 DB_URL             = postgresql://user:pass@rds-proxy:5432/monkeybot?sslmode=require
-MEMORY_STORAGE_URI = s3://my-bucket/monkeybot-memory
+MEMORY_STORAGE_URI = local:///mnt/memory/mempalace
 AGENT_MD_PATH      = /app/monkeybot_config/AGENT.md
 SKILLS_PATH        = /app/skills
 MONKEYBOT_WORKSPACE_ROOT = /agent/workspace
@@ -141,7 +140,6 @@ filesystem-mount deployment model.
 |---|---|
 | `roles/aiplatform.user` | Call Vertex AI models and Agent Engine APIs |
 | `roles/secretmanager.secretAccessor` | Read secrets |
-| `roles/storage.objectAdmin` | GCS memory bucket |
 | `roles/cloudsql.client` | Cloud SQL (if using Cloud SQL) |
 
 **Adapter (`agent_engine_handler.py`):**
@@ -202,7 +200,7 @@ app = reasoning_engines.AdkApp(
 
 remote_app = reasoning_engines.ReasoningEngine.create(
     app,
-    requirements=["monkeybot[gemini,postgres,gcs]"],
+    requirements=["monkeybot[gemini,postgres]"],
     display_name="monkeybot",
     description="monkeybot via Vertex AI Agent Engine",
 )

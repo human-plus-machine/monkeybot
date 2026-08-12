@@ -164,20 +164,31 @@ def run_validate(args: argparse.Namespace) -> int:
     paths = merged.get("paths") if isinstance(merged.get("paths"), dict) else {}
     if isinstance(paths, dict):
         memory_uri = str(paths.get("memory_storage_uri", ""))
-    memory_backend = "gcs" if memory_uri.startswith("gcs://") else "local"
+    lowered = memory_uri.lower()
+    memory_ok = True
+    if lowered.startswith(("gcs://", "s3://", "gs://")):
+        memory_ok = False
+    elif "://" in memory_uri and not lowered.startswith(("local://", "file://")):
+        scheme = memory_uri.split("://", 1)[0]
+        if scheme not in ("", "file", "local"):
+            memory_ok = False
     check(
         report,
         id="memory.backend.supported",
         category="config",
         severity="error",
-        passed=memory_backend in {"local", "gcs", "drive"},
-        message=f"Unsupported memory backend from uri: {memory_uri}",
+        passed=memory_ok,
+        message=(
+            f"MemPalace requires a local:// memory URI, got: {memory_uri}"
+            if not memory_ok
+            else "MemPalace local memory URI"
+        ),
     )
 
     flat = _flatten_to_env(merged)
     flat.update({k: v for k, v in os.environ.items() if k.startswith(("GCP_", "GOOGLE_", "ANTHROPIC_VERTEX"))})
     norm_provider = normalize_model_provider(provider or "gemini")
-    needs_gcp = memory_backend == "gcs" or norm_provider == "vertex_anthropic"
+    needs_gcp = norm_provider == "vertex_anthropic"
     gcp_present = any(
         os.environ.get(k, "").strip() or flat.get(k, "").strip()
         for k in ("GCP_PROJECT_ID", "VERTEX_AI_PROJECT_ID", "ANTHROPIC_VERTEX_PROJECT_ID", "GOOGLE_CLOUD_PROJECT")
@@ -189,7 +200,7 @@ def run_validate(args: argparse.Namespace) -> int:
             category="config",
             severity="error",
             passed=gcp_present,
-            message="GCP project id required for gcs memory or vertex-claude provider",
+            message="GCP project id required for vertex-claude provider",
             remediation="Set gcp.project_id in monkeybot.yaml or GCP_PROJECT_ID in .env",
         )
     else:

@@ -320,13 +320,38 @@ class MemorySubsystem:
 
     async def export_graph(self, *, refresh: bool = False) -> dict[str, Any]:
         del refresh
+        drawers = await asyncio.to_thread(self._palace.list_drawers)
+        nodes = [
+            {
+                "id": drawer.drawer_id,
+                "path": drawer.drawer_id,
+                "type": drawer.room or CONVERSATION_ROOM,
+                "status": "active",
+                "wing": drawer.wing,
+                "filed_at": drawer.filed_at,
+            }
+            for drawer in drawers
+        ]
+        by_thread: dict[str, list[DrawerRecord]] = {}
+        for drawer in drawers:
+            tid = drawer.metadata.get("thread_id") or drawer.wing
+            by_thread.setdefault(tid, []).append(drawer)
+        edges: list[dict[str, str]] = []
+        for group in by_thread.values():
+            group.sort(key=lambda item: item.filed_at)
+            for left, right in zip(group, group[1:], strict=False):
+                edges.append(
+                    {
+                        "source": left.drawer_id,
+                        "target": right.drawer_id,
+                        "link_type": "conversation",
+                    }
+                )
         status = await asyncio.to_thread(self._palace.status)
         return {
-            "nodes": [],
-            "edges": [],
-            "deprecated": True,
+            "nodes": nodes,
+            "edges": edges,
             "engine": "mempalace",
-            "note": "Note-graph export was replaced by MemPalace drawers.",
             "palace": status,
         }
 
@@ -336,20 +361,29 @@ class MemorySubsystem:
         *,
         top_k: int = 5,
         path: str | None = None,
+        include_retired: bool = False,
+        **kwargs: Any,
     ) -> dict[str, Any]:
-        del query, top_k
-        if path:
-            record = await self.get_drawer(path)
-            if record is None:
-                return {"hits": [], "deprecated": True}
-            return {
-                "hits": [
-                    {
-                        "path": record["id"],
-                        "snippet": record["content"][:500],
-                        "type": record.get("room"),
-                    }
-                ],
-                "deprecated": True,
-            }
-        return {"hits": [], "deprecated": True, "note": "Use mempalace search via run_command."}
+        del query, top_k, include_retired, kwargs
+        path_norm = (path or "").replace("\\", "/").lstrip("./").strip()
+        if not path_norm:
+            return {"ok": True, "hits": [], "deprecated": True, "note": "Use mempalace search via run_command."}
+        record = await self.get_drawer(path_norm)
+        if record is None:
+            return {"ok": True, "path": path_norm, "hits": []}
+        body = str(record.get("content") or "")
+        return {
+            "ok": True,
+            "path": path_norm,
+            "hits": [
+                {
+                    "path": record["id"],
+                    "type": record.get("room") or CONVERSATION_ROOM,
+                    "status": "active",
+                    "body": body,
+                    "body_truncated": False,
+                    "links": [],
+                    "snippet": body[:500],
+                }
+            ],
+        }

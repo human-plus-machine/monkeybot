@@ -8,7 +8,7 @@ Environment (minimum):
   WORKSPACE_ROOT      — repo/workspace root for tools
 
 Optional:
-  MEMORY_STORAGE_URI  — local://, gcs://, s3:// (see Step 2 docs)
+  MEMORY_STORAGE_URI  — local:// path to a MemPalace root (object-store URIs are not supported)
   MCP_CONFIG          — path to mcpServers JSON; if unset, MCP stays empty
   MONKEYBOT_OPEN_MCP  — set to "true" to load MCP_CONFIG (default: false for Lambda)
 

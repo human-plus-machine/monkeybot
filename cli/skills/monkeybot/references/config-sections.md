@@ -21,7 +21,7 @@ Validate/doctor: `doctor` → `runtime.port.free`.
 | Field | Default | When to change |
 |---|---|---|
 | `agent_md` | `./monkeybot_config/AGENT.md` | Alternate system-prompt location |
-| `memory_storage_uri` | `local://./memory` | `gcs://…` for shared/cloud memory (requires GCP project) |
+| `memory_storage_uri` | `local://./memory/mempalace` | Local MemPalace root. Cloud object-store URIs (`gcs://`, `s3://`) are not supported. |
 | `skills_path` | `./skills` | Point at a different skills tree |
 | `db_url` | `sqlite:///data/monkeybot.db` | **Postgres for parallel subagents** — SQLite hits `database is locked` under concurrency |
 | `auto_schema` | `true` | Set `false` when migrations own the schema (managed Postgres with DML-only runtime user) |
@@ -29,7 +29,7 @@ Validate/doctor: `doctor` → `runtime.port.free`.
 | `command_allowlist_config` | `./monkeybot_config/command_allowlist.yaml` | Relocate the shell allowlist |
 | `workspace_root` | `./workspace` (if present) | Change the file-tool sandbox root |
 
-Validate check ids: `paths.agent_md.exists`, `paths.skills_path.exists`, `paths.mcp_config.exists`, `paths.command_allowlist.exists`, `paths.db_url.writable`, `memory.backend.supported`, `gcp.project.required` (for `gcs://` memory).
+Validate check ids: `paths.agent_md.exists`, `paths.skills_path.exists`, `paths.mcp_config.exists`, `paths.command_allowlist.exists`, `paths.db_url.writable`, `memory.backend.supported`.
 
 ## `model`
 
@@ -59,7 +59,7 @@ anthropic_vertex:
   region: us-east5
 ```
 
-Required when `memory_storage_uri` is `gcs://…` or `provider: vertex-claude` (validate `gcp.project.required`).
+Required when `provider: vertex-claude` (validate `gcp.project.required`).
 
 ## `gateway`
 

@@ -33,7 +33,7 @@ def test_run_run_derives_agent_root_from_off_tree_config(
     class _Proc:
         returncode = 0
 
-    def fake_run(cmd, env=None, cwd=None):  # type: ignore[no-untyped-def]
+    def fake_run(cmd, env=None, cwd=None, **_kwargs):  # type: ignore[no-untyped-def]
         captured["cmd"] = cmd
         captured["cwd"] = cwd
         return _Proc()
@@ -68,7 +68,7 @@ def test_run_run_preserves_explicit_cwd_with_explicit_config(
     class _Proc:
         returncode = 0
 
-    def fake_run(cmd, env=None, cwd=None):  # type: ignore[no-untyped-def]
+    def fake_run(cmd, env=None, cwd=None, **_kwargs):  # type: ignore[no-untyped-def]
         captured["cwd"] = cwd
         return _Proc()
 

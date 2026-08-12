@@ -135,7 +135,7 @@ def resolve_sqlite_url(raw: str, agent_root: Path) -> str:
 
 
 def resolve_memory_storage_uri(raw: str, agent_root: Path) -> str:
-    """Anchor local memory URIs while retaining cloud URI semantics."""
+    """Anchor local memory URIs. Object-store schemes pass through and are rejected when the palace opens."""
     value = raw.strip()
     if value.startswith(("gcs://", "s3://")):
         return value

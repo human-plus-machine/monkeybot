@@ -1,18 +1,18 @@
 # Cloud deployment
 
-monkeybot is **multi-cloud by architecture**, **GCP-first in documentation**. The harness is cloud-neutral: inject SQLite, Postgres, or Firestore for session storage; use `local://`, `gcs://`, or `s3://` for memory; pick any shipped LLM adapter. This is not a universal integration catalog — it is one owned runtime with explicit deployment patterns and optional extras per cloud SDK.
+monkeybot is **multi-cloud by architecture**, **GCP-first in documentation**. The harness is cloud-neutral: inject SQLite, Postgres, or Firestore for session storage; use a local filesystem or mounted volume for MemPalace (`local://`); pick any shipped LLM adapter. This is not a universal integration catalog — it is one owned runtime with explicit deployment patterns and optional extras per cloud SDK.
 
 ## Positioning
 
 | Area | GCP (most detailed guides) | AWS (shipped) | Azure / other |
 |---|---|---|---|
 | LLM | Vertex / Gemini — primary examples | Bedrock (`monkeybot[bedrock]`) | OpenAI-compat providers where applicable |
-| Object memory | GCS (`monkeybot[gcs]`) | S3 (`monkeybot[aws]`) | Azure Blob — planned ([BACKLOG](../BACKLOG.md)) |
+| MemPalace | Local volume / PVC (`local://`) | EBS / EFS volume (`local://`) | Same — object-store URIs are not supported |
 | Session DB | Cloud SQL, Firestore | RDS + Postgres URI | Azure Database for PostgreSQL (Pattern A addendum) |
 | Platform adapters | Cloud Run, Vertex AI Agent Engine | AgentCore, ECS, Lambda | Container Apps / Functions — thinner addenda |
 | Local dev | SQLite + `local://` — **no cloud account required** | Same | Same |
 
-**If you are not on GCP:** start with [Pattern A](deploy-pattern-a-container.md) or [Pattern B](deploy-pattern-b-serverless.md), set `DB_URL` and `MEMORY_STORAGE_URI` for your managed Postgres and object store, install the provider extra you need (`bedrock`, `openai`, …). GCS and Vertex are not required to run the harness.
+**If you are not on GCP:** start with [Pattern A](deploy-pattern-a-container.md) or [Pattern B](deploy-pattern-b-serverless.md), set `DB_URL` for managed Postgres and `MEMORY_STORAGE_URI` to a mounted volume (`local://…`), install the provider extra you need (`bedrock`, `openai`, …). GCS and Vertex are not required to run the harness.
 
 Pattern guides often **lead with GCP** service names because that is the primary production target; the **env-var contract is the same** on AWS and Azure — swap managed-service names and IAM using each guide’s addenda.
 
@@ -26,7 +26,7 @@ Gateway / platform handler  →  harness (run_loop, tools, MCP, providers)
 
 - **Gateway layer** — FastAPI SSE, or a user-owned Lambda / AgentCore / Agent Engine handler.
 - **Harness layer** — no I/O opinions; backends are injected; no global singletons or background tasks in `monkeybot.core.*`.
-- **Storage / memory** — SQLite/Postgres/Firestore and local/GCS/S3 via extras; factory at process startup, not inside the loop.
+- **Storage / memory** — SQLite/Postgres/Firestore for chat history; MemPalace on a local filesystem or mounted volume (`local://`). Workspace files may still use GCS/S3 via extras. Factory at process startup, not inside the loop.
 
 **Constraints (all patterns):** `run_loop()` must work in short-lived processes;
 all relative configuration resolves from the agent root; and no target may require
@@ -65,8 +65,8 @@ architecture guidance rather than a managed-cloud test claim.
 |---|---|---|---|---|---|---|
 | Local CLI | tested locally | plain directories | plain directory | SQLite + local memory | off or Compose sidecar | desktop Chrome or local headless |
 | Local Docker / Compose | configuration validated | baked into agent image | anonymous volume | SQLite volume or Postgres | Compose overlay | headless Chromium in image |
-| Cloud Run / ECS Fargate / Container Apps | pattern only | baked into image, read-only | ephemeral | managed DB + object memory | remote compute-only | in-image Chromium or Browser Use Cloud |
-| GKE / EKS / ECS-EC2 / VM | pattern only | baked into image | volume or `emptyDir` | managed DB + object memory, or PVC | co-located Docker-socket sidecar | Chromium sidecar or in-image |
+| Cloud Run / ECS Fargate / Container Apps | pattern only | baked into image, read-only | ephemeral | managed DB + volume-mounted MemPalace | remote compute-only | in-image Chromium or Browser Use Cloud |
+| GKE / EKS / ECS-EC2 / VM | pattern only | baked into image | volume or `emptyDir` | managed DB + volume-mounted MemPalace | co-located Docker-socket sidecar | Chromium sidecar or in-image |
 | AWS AgentCore | pattern only | handler bundle | ephemeral or platform file mount | managed session storage or URI overrides | none or remote compute-only | Browser Use Cloud |
 | Vertex Agent Engine | pattern only | source artifact | ephemeral temporary storage | URI overrides | none or remote compute-only | Browser Use Cloud |
 
@@ -81,7 +81,7 @@ Compose-only, not a cloud pattern.
 
 Cloud Run's writable filesystem is in-memory, so workspace artifacts,
 screenshots, and browser profiles count against instance memory. Configure
-managed `DB_URL` and `MEMORY_STORAGE_URI` for state that must survive recycling.
+managed `DB_URL` for history and a mounted volume for `MEMORY_STORAGE_URI` (MemPalace is local-only).
 
 ## Multi-process storage and task queue
 

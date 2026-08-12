@@ -1180,29 +1180,79 @@ def create_app(
         return {"deleted": True}
 
     @api.get("/api/memory/graph")
-    async def memory_graph(request: Request) -> dict[str, Any]:
-        """Deprecated note-graph snapshot; MemPalace returns an empty graph."""
+    async def memory_graph(
+        request: Request,
+        refresh: bool = False,
+    ) -> dict[str, Any]:
+        """Export memory drawers as note-shaped nodes for MonkeyApp."""
         memory = getattr(request.app.state, "memory", None)
-        if memory is not None:
-            export = getattr(memory, "export_graph", None)
-            if callable(export):
-                payload = await export()
-                if isinstance(payload, dict):
-                    return payload
-        return {"nodes": [], "edges": []}
+        if memory is None:
+            raise APIError(
+                404,
+                "NOT_FOUND",
+                "Memory layer is disabled",
+                uuid.uuid4().hex,
+            )
+        try:
+            payload = await memory.export_graph(refresh=refresh)
+        except Exception:
+            logger.exception("memory graph export failed refresh=%s", refresh)
+            raise
+        if not isinstance(payload, dict):
+            payload = {"nodes": [], "edges": [], "note": "invalid graph payload"}
+        nodes = payload.get("nodes")
+        edges = payload.get("edges")
+        logger.info(
+            "memory graph export refresh=%s nodes=%s edges=%s",
+            refresh,
+            len(nodes) if isinstance(nodes, list) else 0,
+            len(edges) if isinstance(edges, list) else 0,
+        )
+        return cast(dict[str, Any], payload)
 
     @api.get("/api/memory/note")
     async def memory_note(
         request: Request,
         path: str = Query(..., min_length=1),
     ) -> dict[str, Any]:
-        """Deprecated note reader; MemPalace has no markdown notes."""
-        del request
+        """Fetch one memory drawer body for the MonkeyApp inspector panel."""
+        memory = getattr(request.app.state, "memory", None)
+        if memory is None:
+            raise APIError(
+                404,
+                "NOT_FOUND",
+                "Memory layer is disabled",
+                uuid.uuid4().hex,
+            )
+        path_norm = (path or "").replace("\\", "/").lstrip("./").strip()
+        if not path_norm:
+            raise APIError(
+                400,
+                "BAD_REQUEST",
+                "path is required",
+                uuid.uuid4().hex,
+            )
+        try:
+            payload = await memory.search_files("", path=path_norm, include_retired=True)
+        except Exception:
+            logger.exception("memory note fetch failed path=%s", path_norm)
+            raise
+        hits = payload.get("hits") if isinstance(payload, dict) else None
+        if not isinstance(hits, list) or not hits:
+            raise APIError(
+                404,
+                "NOT_FOUND",
+                f"Memory note not found: {path_norm}",
+                uuid.uuid4().hex,
+            )
+        hit = hits[0] if isinstance(hits[0], dict) else {}
         return {
-            "path": path,
-            "content": "",
-            "deprecated": True,
-            "message": "memory notes are no longer stored as files",
+            "path": hit.get("path") or path_norm,
+            "type": hit.get("type") or "conversation",
+            "status": hit.get("status") or "active",
+            "body": hit.get("body") or "",
+            "body_truncated": bool(hit.get("body_truncated")),
+            "links": hit.get("links") or [],
         }
 
     app.include_router(api)

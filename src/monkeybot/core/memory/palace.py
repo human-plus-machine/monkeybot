@@ -61,6 +61,8 @@ class PalacePort(Protocol):
         thread_id: str | None = None,
     ) -> list[DrawerRecord]: ...
 
+    def list_drawers(self, *, limit: int = 2000) -> list[DrawerRecord]: ...
+
     def status(self) -> dict[str, Any]: ...
 
     def acquire_write_lock(self) -> AbstractContextManager[None]: ...
@@ -185,6 +187,11 @@ class InMemoryPalace:
             matched = [d for d in matched if d.metadata.get("thread_id") == thread_id]
         matched.sort(key=lambda d: d.filed_at, reverse=True)
         return matched[: max(0, n_results)]
+
+    def list_drawers(self, *, limit: int = 2000) -> list[DrawerRecord]:
+        drawers = list(self._drawers.values())
+        drawers.sort(key=lambda d: d.filed_at, reverse=True)
+        return drawers[: max(0, limit)]
 
     def status(self) -> dict[str, Any]:
         return {
@@ -397,6 +404,36 @@ class MemPalaceAdapter:
                 )
             )
         return records
+
+    def list_drawers(self, *, limit: int = 2000) -> list[DrawerRecord]:
+        try:
+            col = self._collection(create=False)
+        except Exception as exc:
+            logger.warning("mempalace list_drawers collection failed: %r", exc)
+            return []
+        try:
+            result = col.get(include=["documents", "metadatas"])
+        except Exception as exc:
+            logger.warning("mempalace list_drawers failed: %r", exc)
+            return []
+        ids = result.get("ids") or []
+        docs = result.get("documents") or []
+        metas = result.get("metadatas") or []
+        records: list[DrawerRecord] = []
+        for drawer_id, doc, meta in zip(ids, docs, metas, strict=False):
+            parsed = _stringify_meta(meta)
+            records.append(
+                DrawerRecord(
+                    drawer_id=str(drawer_id),
+                    content=doc or "",
+                    wing=parsed.get("wing") or "main",
+                    room=parsed.get("room") or CONVERSATION_ROOM,
+                    filed_at=parsed.get("source_timestamp") or parsed.get("filed_at") or "",
+                    metadata=parsed,
+                )
+            )
+        records.sort(key=lambda d: d.filed_at, reverse=True)
+        return records[: max(0, limit)]
 
     def status(self) -> dict[str, Any]:
         from mempalace.layers import MemoryStack

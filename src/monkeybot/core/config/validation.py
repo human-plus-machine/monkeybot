@@ -6,7 +6,7 @@ from typing import Any
 
 from monkeybot.core.config.settings import ConfigError, normalize_model_provider
 
-SUPPORTED_MEMORY_BACKENDS = frozenset({"local", "gcs", "drive"})
+SUPPORTED_MEMORY_BACKENDS = frozenset({"local"})
 SUPPORTED_SECRETS_PROVIDERS = frozenset({"env", "gcp_secret_manager"})
 SUPPORTED_MODEL_PROVIDERS = frozenset(
     {
@@ -64,20 +64,9 @@ def validate_provider_env(config: dict[str, str]) -> None:
     """
     memory_backend = config.get("MEMORY_BACKEND", "local")
     if memory_backend not in SUPPORTED_MEMORY_BACKENDS:
-        supported = ", ".join(sorted(SUPPORTED_MEMORY_BACKENDS))
-        if memory_backend == "s3":
-            raise ConfigError(
-                f"memory.backend is set to 's3' but AWS S3 is not yet supported.\n\n"
-                f"Currently supported backends: {supported}"
-            )
-        if memory_backend == "azure_blob":
-            raise ConfigError(
-                f"memory.backend is set to 'azure_blob' but Azure Blob Storage is not yet supported.\n\n"
-                f"Currently supported backends: {supported}"
-            )
         raise ConfigError(
-            f"memory.backend is set to '{memory_backend}' which is not supported.\n"
-            f"Currently supported backends: {supported}"
+            "MemPalace is local-only. Object-store memory backends (gcs, s3, drive) "
+            "are not supported. Set MEMORY_STORAGE_URI to a local:// path or mounted volume."
         )
 
     secrets_provider = config.get("SECRETS_PROVIDER", "env")
@@ -108,12 +97,6 @@ def validate_provider_env(config: dict[str, str]) -> None:
         or config.get("GOOGLE_CLOUD_PROJECT")
         or ""
     )
-
-    if memory_backend == "gcs" and not gcp_project:
-        raise ConfigError(
-            "memory.backend is set to 'gcs' but gcp.project_id is not configured.\n"
-            "Add 'gcp.project_id: your-project-id' to monkeybot.yaml"
-        )
 
     if secrets_provider == "gcp_secret_manager" and not gcp_project:
         raise ConfigError(
@@ -240,8 +223,11 @@ def validate_monkeybot_yaml_doc(doc: dict[str, Any], *, env: dict[str, str] | No
     paths = doc.get("paths") if isinstance(doc.get("paths"), dict) else {}
     if isinstance(paths, dict):
         memory_uri = str(paths.get("memory_storage_uri", ""))
-    if memory_uri.startswith("gcs://"):
-        flat["MEMORY_BACKEND"] = "gcs"
+    if memory_uri.lower().startswith(("gcs://", "s3://", "gs://")):
+        raise ConfigError(
+            "MemPalace requires a local:// memory URI. "
+            f"Object-store URIs are not supported, got: {memory_uri}"
+        )
     gcp = doc.get("gcp") if isinstance(doc.get("gcp"), dict) else {}
     if isinstance(gcp, dict) and gcp.get("project_id"):
         flat["GCP_PROJECT_ID"] = str(gcp["project_id"])

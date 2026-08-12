@@ -8,6 +8,7 @@ Durable conversation facts live here as ``Message`` rows with typed
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -34,8 +35,53 @@ def _validate_message(message: Message) -> None:
 class SQLiteHistoryStore:
     """Append/read conversation rows keyed by ``thread_id``."""
 
-    def __init__(self, conn: aiosqlite.Connection) -> None:
+    def __init__(
+        self,
+        conn: aiosqlite.Connection,
+        *,
+        lock: asyncio.Lock | None = None,
+    ) -> None:
         self._conn = conn
+        self._lock = lock or asyncio.Lock()
+        self._memory_columns: bool | None = None
+
+    async def _has_memory_columns(self) -> bool:
+        if self._memory_columns is None:
+            cur = await self._conn.execute("PRAGMA table_info(conversation_history)")
+            rows = await cur.fetchall()
+            await cur.close()
+            names = {str(r[1]) for r in rows}
+            self._memory_columns = "turn_id" in names and "message_id" in names
+        return self._memory_columns
+
+    async def _insert_history_row(
+        self,
+        thread_id: str,
+        role: str,
+        payload: str,
+        created_at: int,
+        *,
+        turn_id: str | None,
+        message_id: str | None,
+    ) -> None:
+        if await self._has_memory_columns():
+            await self._conn.execute(
+                """
+                INSERT INTO conversation_history(
+                    thread_id, role, content, created_at, turn_id, message_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (thread_id, role, payload, created_at, turn_id, message_id),
+            )
+            return
+        await self._conn.execute(
+            """
+            INSERT INTO conversation_history(thread_id, role, content, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (thread_id, role, payload, created_at),
+        )
 
     async def append(
         self,
@@ -53,14 +99,16 @@ class SQLiteHistoryStore:
             ensure_ascii=False,
         )
         created_at = int(time.time() * 1000)
-        await self._conn.execute(
-            """
-            INSERT INTO conversation_history(thread_id, role, content, created_at, turn_id, message_id)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (thread_id, message.role, payload, created_at, turn_id, message_id),
-        )
-        await self._conn.commit()
+        async with self._lock:
+            await self._insert_history_row(
+                thread_id,
+                message.role,
+                payload,
+                created_at,
+                turn_id=turn_id,
+                message_id=message_id,
+            )
+            await self._conn.commit()
 
     async def append_with_outbox(
         self,
@@ -81,22 +129,22 @@ class SQLiteHistoryStore:
             ensure_ascii=False,
         )
         created_at = int(time.time() * 1000)
-        await self._conn.execute("BEGIN IMMEDIATE")
-        try:
-            await self._conn.execute(
-                """
-                INSERT INTO conversation_history(
-                    thread_id, role, content, created_at, turn_id, message_id
+        async with self._lock:
+            await self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                await self._insert_history_row(
+                    thread_id,
+                    message.role,
+                    payload,
+                    created_at,
+                    turn_id=turn_id,
+                    message_id=message_id,
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (thread_id, message.role, payload, created_at, turn_id, message_id),
-            )
-            await insert_pending(self._conn, commit=False, **outbox)
-            await self._conn.commit()
-        except Exception:
-            await self._conn.rollback()
-            raise
+                await insert_pending(self._conn, commit=False, **outbox)
+                await self._conn.commit()
+            except Exception:
+                await self._conn.rollback()
+                raise
 
     async def load(self, thread_id: str, limit: int | None = None) -> list[Message]:
         """Return messages for ``thread_id``, oldest first.
@@ -156,17 +204,19 @@ class SQLiteHistoryStore:
 
     async def clear(self, thread_id: str) -> None:
         """Delete every stored message for ``thread_id``."""
-        await self._conn.execute(
-            "DELETE FROM conversation_history WHERE thread_id = ?", (thread_id,)
-        )
-        await self._conn.commit()
+        async with self._lock:
+            await self._conn.execute(
+                "DELETE FROM conversation_history WHERE thread_id = ?", (thread_id,)
+            )
+            await self._conn.commit()
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None:
         """Replace the thread transcript with ``messages`` (validated like ``append``)."""
-        await self._conn.execute(
-            "DELETE FROM conversation_history WHERE thread_id = ?", (thread_id,)
-        )
-        await self._conn.commit()
+        async with self._lock:
+            await self._conn.execute(
+                "DELETE FROM conversation_history WHERE thread_id = ?", (thread_id,)
+            )
+            await self._conn.commit()
         for msg in messages:
             await self.append(thread_id, msg)
 

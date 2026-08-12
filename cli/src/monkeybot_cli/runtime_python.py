@@ -63,8 +63,8 @@ _HARNESS_PROBE = (
     "import mempalace, monkeybot; "
     "from importlib.metadata import version; "
     "ver = version('monkeybot'); "
-    "parts = [int(p) for p in ver.split('.')[:2]]; "
-    "assert parts >= [2, 2], ver"
+    "parts = [int(p) for p in ver.split('.')[:3]]; "
+    "assert parts >= [2, 2, 2], ver"
 )
 
 
@@ -86,7 +86,7 @@ def prepare_runtime_python(agent_root: Path) -> RuntimePython:
     if not has_project:
         raise RuntimeUpgradeError(
             "gateway interpreter is missing monkeybot/mempalace; "
-            "install monkeybot>=2.2 in this environment before starting the gateway"
+            "install monkeybot>=2.2.2 in this environment before starting the gateway"
         )
     print(
         f"agent runtime is missing harness packages; upgrading monkeybot lock in {agent_root}",

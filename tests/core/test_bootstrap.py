@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -63,25 +64,7 @@ async def test_create_harness_deps_memory_set_when_uri_given(tmp_path: Path) -> 
     )
     assert isinstance(deps.memory, MemorySubsystem)
     assert deps.memory.uri == uri
-    await deps.close()
-
-
-@pytest.mark.asyncio
-async def test_create_harness_deps_honors_memory_disable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("MONKEYBOT_MEMORY_HOOK_ENABLED", "0")
-    mem_root = tmp_path / "mem"
-    mem_root.mkdir()
-    uri = "local://" + str(mem_root.resolve())
-    db = tmp_path / "monkeybot.db"
-    deps = await create_harness_deps(
-        f"sqlite:///{db}",
-        uri,
-        open_mcp=False,
-        _provider_override=_fake(),
-    )
-    assert deps.memory is None
+    assert os.environ.get("MEMPALACE_PALACE_PATH") == str(deps.memory.palace_path)
     await deps.close()
 
 

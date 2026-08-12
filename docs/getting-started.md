@@ -62,7 +62,7 @@ Important knobs (see **`monkeybot_config/monkeybot.example.yaml`** for all secti
 |---|---|
 | `paths.workspace_root` | Agent-writable file-tool sandbox (default `./workspace`). |
 | `paths.agent_md` | System prompt file (default `./monkeybot_config/AGENT.md`). |
-| `paths.memory_storage_uri` | Durable markdown memory root (`local://…`, `gcs://…`, `s3://…`); optional `INDEX.md` is surfaced in the prompt. Legacy `paths.memory_path` still maps to `MEMORY_PATH`. |
+| `paths.memory_storage_uri` | Durable MemPalace root (`local://…`). Cloud object-store URIs are not supported. |
 | `paths.skills_path` | Read-only trusted skill bundle root (default `./skills`). |
 | `paths.db_url` | SQLite URL for conversation + usage. |
 | `paths.mcp_config` / `paths.command_allowlist_config` | MCP map and run_command allowlist policy path. |

@@ -10,7 +10,7 @@ This document anchors the **monkeybot harness** — the runtime that owns turn s
 
 monkeybot is a thin **harness** for tool-using LLM agents. It owns orchestration; the gateway is transport; providers are adapters; MCP and custom tools extend capabilities at runtime.
 
-**Positioning:** The runtime is **multi-cloud-capable** (Postgres/SQLite/Firestore + local/GCS/S3 memory; multiple LLM adapters; Patterns A/B/C). **Docs and examples lean GCP-first** — see [Cloud deployment — Positioning](cloud-deployment-design.md#positioning) for what is shipped on AWS vs planned on Azure.
+**Positioning:** The runtime is **multi-cloud-capable** (Postgres/SQLite/Firestore + local MemPalace; multiple LLM adapters; Patterns A/B/C). **Docs and examples lean GCP-first** — see [Cloud deployment — Positioning](cloud-deployment-design.md#positioning) for what is shipped on AWS vs planned on Azure.
 
 ```
 Client (CLI / chat UI / serverless handler)
@@ -427,27 +427,25 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 ### 11. Memory subsystem
 
-**Purpose:** Durable markdown memory with automatic capture and LLM organizer.
+**Purpose:** Durable MemPalace capture and L2 recall.
 
-**Key files:** `core/memory/subsystem.py`, `hook.py`, `organizer.py`, `storage_ops.py`
+**Key files:** `core/memory/subsystem.py`, `hook.py`, `ingest.py`, `writer.py`, `palace.py`
 
-**Storage URI:** `local://`, `gcs://`, `s3://` via `create_workspace_storage()`
+**Storage URI:** `local://` only (a filesystem path or mounted volume). `gcs://` / `s3://` are rejected.
 
 **Hook lifecycle:**
 
 | Event | Behavior |
 |-------|----------|
-| `USER_MESSAGE` | Append to `chat_log.md` |
-| `PRE_TURN` | Inject memory search hits into `inject_memory_lines` |
-| `PRE_TOOL` | Inject file/query-specific memories into `inject_text` |
-| `POST_TOOL` | Capture raw observations (skip successful read-only tools) |
-| `POST_TURN` | Schedule debounced organizer |
+| History commit | Enqueue conversation drawers on the durable outbox |
+| `PRE_TURN` | Inject L2 workspace recall into `inject_memory_lines` |
+| `POST_TURN` | Wake the per-agent writer to drain the outbox |
+| `SESSION_END` | Flush remaining writer work |
 
 **Invariants:**
-- Write path uses `asyncio.Lock` shared with organizer.
-- Memory is on whenever `paths.memory_storage_uri` is set.
+- Memory is on whenever `paths.memory_storage_uri` is set. There is no enable/disable switch.
 - Subagents get **no-op `HookManager`** to avoid duplicate writes.
-- `flush()` must be called before short-lived handlers exit if organizer work matters.
+- `flush()` must be called before short-lived handlers exit if writer work matters.
 
 ---
 

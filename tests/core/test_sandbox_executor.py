@@ -587,6 +587,29 @@ class TestSandboxExecutorWorkspaceMount:
         return osb, _opensandbox_sys_modules(osb)
 
     @pytest.mark.asyncio
+    async def test_palace_is_not_mounted_into_sandbox(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MEMPALACE_PALACE_PATH", str(tmp_path / "memory" / "mempalace"))
+        abs_path = str(tmp_path.resolve())
+        cfg = SandboxConfig(
+            enabled=True, server_url="http://localhost:8080",
+            api_key=None, image="python:3.12", ttl_seconds=1800,
+        )
+        executor = SandboxExecutor(cfg, tmp_path)
+        mock_cls, _ = _make_create_mock()
+        osb, patches = self._patch_modules(mock_cls)
+
+        with patch.dict(sys.modules, patches):
+            await executor.execute("echo", [])
+
+        _, kwargs = mock_cls.create.call_args
+        volumes = kwargs.get("volumes", [])
+        assert len(volumes) == 1
+        assert volumes[0].host.path == abs_path
+        env = kwargs.get("env") or {}
+        assert "MEMPALACE_PALACE_PATH" not in env
+        assert "MEMORY_STORAGE_URI" not in env
+
+    @pytest.mark.asyncio
     async def test_absolute_workspace_path_in_volume(self, tmp_path, monkeypatch):
         monkeypatch.delenv("MEMPALACE_PALACE_PATH", raising=False)
         abs_path = str(tmp_path.resolve())

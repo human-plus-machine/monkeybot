@@ -135,7 +135,6 @@ async def test_gateway_lifespan_closes_memory(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(MCPClient, "load_from_config", _skip_mcp_load)
     monkeypatch.setattr("monkeybot.gateway.sse.app.MemorySubsystem", _FastMemory)
     monkeypatch.setenv("MONKEYBOT_OTEL_ENABLED", "false")
-    monkeypatch.setenv("MONKEYBOT_MEMORY_HOOK_ENABLED", "1")
     monkeypatch.setenv("MODEL_PROVIDER", "fake")
     monkeypatch.setenv("DB_URL", "sqlite:///:memory:")
     monkeypatch.setenv("MCP_CONFIG", "/nonexistent/mcp.json")

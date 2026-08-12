@@ -25,7 +25,7 @@ zone somewhere else.
 |---|---|---|---|
 | `GEMINI_API_KEY` | Yes (Gemini) | — | LLM provider key. Swap for `VERTEX_AI_PROJECT_ID` when using Vertex. |
 | `DB_URL` | No | `sqlite:///data/monkeybot.db` | Storage backend. Use `postgresql://user:pass@host:5432/db` for managed Postgres or `firestore://PROJECT/(default)` for Firestore. |
-| `MEMORY_STORAGE_URI` | No | `local://./memory` | Durable memory backend. Use `gcs://bucket/prefix` or `s3://bucket/prefix` for cloud object storage. |
+| `MEMORY_STORAGE_URI` | No | `local://./memory/mempalace` | Durable MemPalace root on a local filesystem or mounted volume. Object-store URIs (`gcs://`, `s3://`) are not supported. |
 | `MONKEYBOT_WORKSPACE_ROOT` | No | layout's `workspace/` | Absolute workspace path exported after layout resolve. |
 | `MONKEYBOT_WORKSPACE_ROOT_OVERRIDE` | No | — | Absolute remount of the agent workspace for one process. Beats yaml `paths.workspace_root`. |
 | `SANDBOX_ENABLED` | No | `false` | Set `true` to enable the OpenSandbox code-execution environment. |
@@ -87,19 +87,15 @@ docker push <registry>/<image>:<tag>
 
 ---
 
-## 4. Connect Cloud Object Storage for Memory
+## 4. Durable memory on a volume
 
-Install the appropriate extra and set `MEMORY_STORAGE_URI`:
+MemPalace requires a local filesystem. Mount a persistent volume (PVC, EBS, Cloud Storage FUSE, etc.) and point `MEMORY_STORAGE_URI` at it:
 
 ```bash
-# GCS — requires [gcs] extra
-MEMORY_STORAGE_URI=gcs://my-bucket/monkeybot-memory
-
-# S3 — requires [aws] extra
-MEMORY_STORAGE_URI=s3://my-bucket/monkeybot-memory
+MEMORY_STORAGE_URI=local:///mnt/memory/mempalace
 ```
 
-The factory (`create_workspace_storage`) reads the URI scheme and returns the right implementation. `append_text` operations under GCS/S3 are read-merge-write (not atomic) — the memory asyncio lock prevents races within a single process. Across multiple instances, avoid concurrent writes to the same memory key.
+Object-store URIs (`gcs://`, `s3://`) are rejected. Chat history still uses `DB_URL` (Postgres or Firestore).
 
 ---
 
@@ -155,7 +151,6 @@ on a separate VM/node in the VPC and use the compute-only contract.
 | `roles/secretmanager.secretAccessor` | Read secrets from Secret Manager |
 | `roles/aiplatform.user` | Call Vertex AI models (if using Vertex provider) |
 | `roles/cloudsql.client` | Connect to Cloud SQL via Auth Proxy (if using Cloud SQL) |
-| `roles/storage.objectAdmin` | Read/write GCS memory bucket (if using GCS) |
 
 **Managed DB:** Cloud SQL (Postgres). Use the Cloud SQL Auth Proxy or the direct connection string with `?sslmode=require`. The proxy runs as a sidecar if you're on GKE; on Cloud Run use the Cloud SQL connector via the connection name in `DB_URL`:
 
@@ -204,7 +199,7 @@ gcloud run deploy ${SERVICE} \
   --min-instances 0 \
   --max-instances 3 \
   --set-secrets GEMINI_API_KEY=gemini-api-key:latest \
-  --set-env-vars DB_URL=postgresql://...,MEMORY_STORAGE_URI=gcs://...
+  --set-env-vars DB_URL=postgresql://...,MEMORY_STORAGE_URI=local:///mnt/memory/mempalace
 ```
 
 **Workspace and sandbox on Cloud Run:** Cloud Run's filesystem is in memory, so
@@ -227,7 +222,7 @@ gcloud iam service-accounts add-iam-policy-binding ${SA} \
 
 **Managed DB:** Cloud SQL via the Cloud SQL Auth Proxy sidecar in the pod, or direct connection with `sslmode=require`.
 
-**Memory:** GCS bucket mounted via `MEMORY_STORAGE_URI=gcs://...` or a `PersistentVolumeClaim` with `MEMORY_STORAGE_URI=local:///mnt/memory`.
+**Memory:** A `PersistentVolumeClaim` with `MEMORY_STORAGE_URI=local:///mnt/memory/mempalace`.
 
 **Sandbox sidecar pod spec (excerpt):**
 
@@ -275,7 +270,7 @@ docker run -d \
   -p 8080:8080 \
   -e GEMINI_API_KEY=... \
   -e DB_URL=postgresql://... \
-  -e MEMORY_STORAGE_URI=gcs://... \
+  -e MEMORY_STORAGE_URI=local:///mnt/memory/mempalace \
   <registry>/monkeybot:latest
 ```
 
@@ -311,12 +306,11 @@ docker run -d \
 | Permission | Why |
 |---|---|
 | `secretsmanager:GetSecretValue` | Read secrets from Secrets Manager |
-| `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`, `s3:ListBucket` | S3 memory bucket (if using S3) |
 | `rds-db:connect` | RDS IAM auth (optional; alternatively use a DB password in Secrets Manager) |
 
 **Managed DB:** RDS Postgres. Use RDS Proxy in front of RDS for scale-to-zero (Fargate) to avoid connection exhaustion. Set `DB_URL` from a Secrets Manager secret.
 
-**Memory:** S3 bucket with `MEMORY_STORAGE_URI=s3://bucket/prefix`. Requires `[aws]` extra.
+**Memory:** Mount an EBS/EFS volume and set `MEMORY_STORAGE_URI=local:///mnt/memory/mempalace`.
 
 **Sandbox on ECS Fargate:** A remote OpenSandbox on EC2 is compute-only (no
 workspace or skills mounts). On ECS-EC2 launch type, a co-located
@@ -340,7 +334,7 @@ filesystem.
         {"name": "DB_URL", "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:monkeybot-db-url"}
       ],
       "environment": [
-        {"name": "MEMORY_STORAGE_URI", "value": "s3://my-bucket/monkeybot-memory"}
+        {"name": "MEMORY_STORAGE_URI", "value": "local:///mnt/memory/mempalace"}
       ]
     }
   ]
@@ -362,7 +356,7 @@ eksctl create iamserviceaccount \
   --approve
 ```
 
-**Managed DB:** RDS Postgres. **Memory:** S3 (`MEMORY_STORAGE_URI=s3://...`). Sandbox sidecar pod pattern is identical to GKE — see GKE addendum above, substituting `opensandbox` port as needed.
+**Managed DB:** RDS Postgres. **Memory:** EBS/EFS volume (`MEMORY_STORAGE_URI=local:///mnt/memory/mempalace`). Sandbox sidecar pod pattern is identical to GKE — see GKE addendum above, substituting `opensandbox` port as needed.
 
 ---
 

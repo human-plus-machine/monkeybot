@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import uuid
 
@@ -16,6 +17,8 @@ from monkeybot.core.memory.outbox import OutboxRow, OutboxStore, is_permanent_er
 from monkeybot.core.memory.palace import PalacePort
 
 logger = logging.getLogger(__name__)
+
+_STOP_TIMEOUT_S = 10.0
 
 
 class MemoryWriter:
@@ -64,15 +67,29 @@ class MemoryWriter:
                 break
         return flushed
 
-    async def stop(self) -> None:
-        """Cooperatively finish the in-flight write, then exit. Does not cancel."""
+    async def stop(self, *, timeout_s: float = _STOP_TIMEOUT_S) -> None:
+        """Finish the in-flight write if it completes within ``timeout_s``.
+
+        A hung embedder must not block gateway shutdown forever. After the
+        timeout the writer task is abandoned; the worker thread may still run.
+        """
         self._stopped = True
         self._wake.set()
         task = self._task
         if task is not None and not task.done():
-            await task
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=max(0.1, timeout_s))
+            except TimeoutError:
+                logger.warning(
+                    "memory writer stop timed out after %.1fs; abandoning in-flight write",
+                    timeout_s,
+                )
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, TimeoutError):
+                    await asyncio.wait_for(task, timeout=0.2)
         self._task = None
-        await self._idle.wait()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self._idle.wait(), timeout=0.2)
         log_event("writer_stop", memory_status="ok", memory_backend=self._backend)
 
     async def _run(self) -> None:

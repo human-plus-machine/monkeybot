@@ -66,8 +66,6 @@ ENV_MAP: dict[tuple[str, str], str] = {
     ("memory", "engine"): "MEMORY_ENGINE",
     ("memory", "backend"): "MEMPALACE_BACKEND",
     ("memory", "embedding_model"): "MEMPALACE_EMBEDDING_MODEL",
-    ("memory", "enabled"): "MONKEYBOT_MEMORY_HOOK_ENABLED",
-    ("memory_hook", "enabled"): "MONKEYBOT_MEMORY_HOOK_ENABLED",
     ("tools", "denied_patterns"): "MONKEYBOT_TOOL_DENIED_PATTERNS",
     ("compression", "resume_thinking_budget"): "MONKEYBOT_RESUME_THINKING_BUDGET",
     ("web_search", "backend"): "WEB_SEARCH_BACKEND",

@@ -69,7 +69,7 @@ model:
 | `VERTEX_AI_PROJECT_ID` | Yes (Vertex) | — | GCP project for Vertex AI. |
 | `VERTEX_AI_LOCATION` | No | `us-central1` | Vertex region. |
 | `DB_URL` | No | `sqlite:///data/monkeybot.db` | Storage backend. Postgres or Firestore recommended for production. |
-| `MEMORY_STORAGE_URI` | No | `local://./memory` | Durable memory backend. GCS/S3 for multi-instance. |
+| `MEMORY_STORAGE_URI` | No | `local://./memory/mempalace` | Durable MemPalace root on a local filesystem or mounted volume. Object-store URIs are not supported. |
 | `MCP_CONFIG` | No | `./monkeybot_config/mcp.json` | MCP server config, resolved from the agent root. |
 | `MONKEYBOT_WORKSPACE_ROOT` | No | layout's `workspace/` | Absolute workspace path exported after layout resolve. |
 | `MONKEYBOT_WORKSPACE_ROOT_OVERRIDE` | No | — | Absolute remount of the agent workspace for one process (e.g. Mac workspace memory dir). Beats yaml `paths.workspace_root`. |
@@ -185,7 +185,7 @@ docker run -p 8000:8000 \
   -e MODEL_PROVIDER=google_vertexai \
   -e VERTEX_AI_PROJECT_ID=your-project \
   -e DB_URL=postgresql://... \
-  -e MEMORY_STORAGE_URI=gcs://your-bucket/monkeybot-memory \
+  -e MEMORY_STORAGE_URI=local:///mnt/memory/mempalace \
   my-agent:realtime \
   python -m monkeybot.gateway.realtime_main
 ```
@@ -275,9 +275,9 @@ The simplest production deployment for Pattern D is a long-lived container behin
 
 **Recommended stack:**
 
-- Container: `monkeybot:realtime` with `realtime-gemini,postgres,gcs` extras.
+- Container: `monkeybot:realtime` with `realtime-gemini,postgres` extras.
 - Database: managed Postgres for `HistoryStore` and `RunStore`.
-- Memory: GCS or S3 object storage for `MEMORY_STORAGE_URI`.
+- Memory: mounted volume (`MEMORY_STORAGE_URI=local:///mnt/memory/mempalace`).
 - Load balancer: TCP/SSL passthrough with session affinity (cookie or source IP).
 - Autoscaling: target CPU/memory, but keep a minimum instance count > 0 for low latency.
 

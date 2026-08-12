@@ -46,9 +46,9 @@ class TestEnvMap:
         """Config-file only (like paths.auto_schema) — no env var override."""
         assert ("web_search", "vertex_google_search") not in ENV_MAP
 
-    def test_memory_hook_kill_switch_in_env_map(self) -> None:
-        assert ENV_MAP[("memory", "enabled")] == "MONKEYBOT_MEMORY_HOOK_ENABLED"
-        assert ENV_MAP[("memory_hook", "enabled")] == "MONKEYBOT_MEMORY_HOOK_ENABLED"
+    def test_memory_kill_switch_removed_from_env_map(self) -> None:
+        assert ("memory", "enabled") not in ENV_MAP
+        assert ("memory_hook", "enabled") not in ENV_MAP
 
 
 class TestVertexGoogleSearchConfig:
@@ -377,6 +377,19 @@ class TestValidateMonkeybotYamlDoc:
 
     def test_accepts_gemini(self) -> None:
         validate_monkeybot_yaml_doc({"model": {"provider": "gemini", "name": "gemini-3-flash"}})
+
+    def test_rejects_object_store_memory_uri(self) -> None:
+        with pytest.raises(ConfigError, match="local://"):
+            validate_monkeybot_yaml_doc(
+                {
+                    "model": {"provider": "gemini", "name": "gemini-3-flash"},
+                    "paths": {"memory_storage_uri": "gcs://bucket/mem"},
+                }
+            )
+
+    def test_rejects_legacy_object_store_memory_backend(self) -> None:
+        with pytest.raises(ConfigError, match="local-only"):
+            validate_provider_env({"MEMORY_BACKEND": "gcs", "MODEL_PROVIDER": "google_genai"})
 
 
 class TestAutoSchemaConfig:

@@ -854,6 +854,7 @@ class CoreToolExecutor(ToolExecutorPort):
         self._loops_registry = loops_registry if loops_registry is not None else LoopsToolRegistry()
         self._subagent_registry = dict(subagent_registry or {})
         self._terminal: TerminalExecutor | SandboxExecutor
+        self._host_terminal: TerminalExecutor | None = None
         if terminal is not None:
             self._terminal = terminal
             self._run_cmd_allowed_commands = tuple(terminal.allowed_commands)
@@ -876,13 +877,17 @@ class CoreToolExecutor(ToolExecutorPort):
             self._run_cmd_allowed_commands = cmds
             self._run_cmd_allowed_paths = paths
             _scfg = SandboxConfig.from_env()
-            self._terminal = (
-                SandboxExecutor(
+            if _scfg.enabled:
+                self._host_terminal = TerminalExecutor(
+                    allowed_commands=cmds, allowed_path_prefixes=paths
+                )
+                self._terminal = SandboxExecutor(
                     _scfg, workspace_root, skills_path=self._skills_path, allowed_commands=cmds
                 )
-                if _scfg.enabled
-                else TerminalExecutor(allowed_commands=cmds, allowed_path_prefixes=paths)
-            )
+            else:
+                self._terminal = TerminalExecutor(
+                    allowed_commands=cmds, allowed_path_prefixes=paths
+                )
         self._extra_tools: dict[str, Any] = {ct.tool_def.name: ct for ct in (extra_tools or [])}
 
     @property
@@ -1702,8 +1707,11 @@ class CoreToolExecutor(ToolExecutorPort):
         except ValueError as exc:
             return None, _run_command_parse_envelope(exc)
         timeout = _coerce_int(args.get("timeout"), 60) or 60
+        executor = self._terminal
+        if cmd == "mempalace" and self._host_terminal is not None:
+            executor = self._host_terminal
         try:
-            result = await self._terminal.execute(
+            result = await executor.execute(
                 cmd,
                 argv,
                 timeout=timeout,

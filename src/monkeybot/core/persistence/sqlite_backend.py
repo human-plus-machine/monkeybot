@@ -6,6 +6,7 @@ when a ``sqlite://`` URL is used — never loaded in Postgres-only deployments.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import aiosqlite
@@ -24,6 +25,7 @@ class SQLiteStorageBackend:
     def __init__(self, db_url: str) -> None:
         self._db_url = db_url
         self._conn: aiosqlite.Connection | None = None
+        self._tx_lock = asyncio.Lock()
         self._history_store: SQLiteHistoryStore | None = None
         self._usage_store: SQLiteUsageStore | None = None
         self._runs_store: SQLiteRunStore | None = None
@@ -35,14 +37,16 @@ class SQLiteStorageBackend:
         self._conn = await open_connection(self._db_url)
         if run_schema:
             await apply_schema(self._conn)
-        self._history_store = SQLiteHistoryStore(self._conn)
+        self._history_store = SQLiteHistoryStore(self._conn, lock=self._tx_lock)
         self._usage_store = SQLiteUsageStore(self._conn)
         self._runs_store = SQLiteRunStore(self._conn)
         self._scheduled_loops_store = SQLiteScheduledLoopStore(self._conn)
         self._session_turn_lock_store = SQLiteSessionTurnLockStore(self._conn)
         from monkeybot.core.memory.outbox import SqliteOutboxStore
 
-        self._outbox_store = SqliteOutboxStore(self._conn, owns_connection=False)
+        self._outbox_store = SqliteOutboxStore(
+            self._conn, owns_connection=False, lock=self._tx_lock
+        )
 
     async def close(self) -> None:
         if self._conn is not None:
