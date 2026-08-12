@@ -322,7 +322,9 @@ def test_idempotent_reexport(tmp_path: Path) -> None:
     assert span_count == (1,)
 
 
-def test_export_failure_on_unwritable_db(tmp_path: Path) -> None:
+def test_export_failure_on_unwritable_db(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     blocker = tmp_path / "blocker"
     blocker.write_text("not-a-directory", encoding="utf-8")
     db_path = blocker / "traces.db"
@@ -335,8 +337,61 @@ def test_export_failure_on_unwritable_db(tmp_path: Path) -> None:
     trace.set_tracer_provider(provider)
     with trace.get_tracer("t").start_as_current_span("x"):
         pass
-    result = exporter.export(mem.get_finished_spans())
-    assert result is SpanExportResult.FAILURE
+    finished = mem.get_finished_spans()
+    with caplog.at_level("WARNING"):
+        assert exporter.export(finished) is SpanExportResult.FAILURE
+        assert exporter.export(finished) is SpanExportResult.FAILURE
+    warnings = [r for r in caplog.records if "sqlite span export failed" in r.getMessage()]
+    assert len(warnings) == 1
+    assert exporter._disabled is True
+
+
+def test_concurrent_same_trace_insert_no_integrity_error(tmp_path: Path) -> None:
+    """Two exporters racing the first insert for one trace_id must both succeed."""
+    import threading
+
+    db_path = tmp_path / "traces.db"
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    mem = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(mem))
+    trace.set_tracer_provider(provider)
+    tracer = trace.get_tracer("t")
+    with tracer.start_as_current_span("root") as root:
+        root.set_attribute("openinference.span.kind", "AGENT")
+        with tracer.start_as_current_span("child") as child:
+            child.set_attribute("openinference.span.kind", "CHAIN")
+    finished = list(mem.get_finished_spans())
+    assert len(finished) == 2
+
+    barrier = threading.Barrier(2)
+    results: list[SpanExportResult] = []
+
+    def _export_one(span: object) -> None:
+        exporter = SqliteSpanExporter(_config(db_path))
+        barrier.wait(timeout=5)
+        results.append(exporter.export([span]))  # type: ignore[list-item]
+        exporter.shutdown()
+
+    threads = [
+        threading.Thread(target=_export_one, args=(finished[0],)),
+        threading.Thread(target=_export_one, args=(finished[1],)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert results == [SpanExportResult.SUCCESS, SpanExportResult.SUCCESS]
+    conn = sqlite3.connect(db_path)
+    assert conn.execute("select count(*) from spans").fetchone() == (2,)
+    trace_id = format(finished[0].context.trace_id, "032x")
+    row = conn.execute(
+        "select span_count from traces where trace_id = ?", (trace_id,)
+    ).fetchone()
+    conn.close()
+    assert row == (2,)
 
 
 def test_two_connections_same_file(tmp_path: Path) -> None:
@@ -422,16 +477,89 @@ def test_max_spans_pruning(tmp_path: Path) -> None:
     assert trace_count <= 2
 
 
-def test_force_flush_checkpoints(tmp_path: Path) -> None:
+def test_force_flush_checkpoints_without_pruning(tmp_path: Path) -> None:
     db_path = tmp_path / "traces.db"
-    exporter = SqliteSpanExporter(_config(db_path))
+    exporter = SqliteSpanExporter(_config(db_path, retention_days=1, max_spans=1))
     _provider(exporter)
     tracer = trace.get_tracer("t")
-    with tracer.start_as_current_span("monkeybot.run") as span:
+    with tracer.start_as_current_span("keep-me") as span:
         span.set_attribute("openinference.span.kind", "AGENT")
+    with tracer.start_as_current_span("also-keep") as span:
+        span.set_attribute("openinference.span.kind", "AGENT")
+
+    conn = sqlite3.connect(db_path)
+    old_ns = int((time.time() - 3 * 86400) * 1_000_000_000)
+    conn.execute("update spans set start_time_ns = ?, end_time_ns = ?", (old_ns, old_ns + 1))
+    conn.commit()
+    conn.close()
+
     assert exporter.force_flush() is True
+    conn = sqlite3.connect(db_path)
+    assert conn.execute("select count(*) from spans").fetchone() == (2,)
+    conn.close()
     exporter.shutdown()
     assert db_path.exists()
+
+
+def test_partial_prune_recomputes_trace_rollups(tmp_path: Path) -> None:
+    db_path = tmp_path / "traces.db"
+    exporter = SqliteSpanExporter(_config(db_path, retention_days=0, max_spans=2))
+    _provider(exporter)
+    tracer = trace.get_tracer("t")
+    with tracer.start_as_current_span("root") as root:
+        root.set_attribute("openinference.span.kind", "AGENT")
+        root.set_attribute("gen_ai.usage.total_tokens", 10)
+        for idx in range(3):
+            with tracer.start_as_current_span(f"child-{idx}") as child:
+                child.set_attribute("openinference.span.kind", "CHAIN")
+                child.set_attribute("gen_ai.usage.total_tokens", 1)
+                time.sleep(0.001)
+    trace_id = format(root.context.trace_id, "032x")
+    exporter._last_retention_at = 0.0
+    exporter._maybe_run_retention(force=True)
+    exporter.shutdown()
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    assert conn.execute("select count(*) from spans").fetchone()[0] == 2
+    trace_row = conn.execute("select * from traces where trace_id = ?", (trace_id,)).fetchone()
+    assert trace_row is not None
+    assert trace_row["span_count"] == 2
+    live_errors = conn.execute(
+        "select count(*) from spans where trace_id = ? and status_code = 'ERROR'",
+        (trace_id,),
+    ).fetchone()[0]
+    assert trace_row["error_count"] == live_errors
+    live_tokens = conn.execute(
+        "select coalesce(sum(total_tokens), 0) from spans where trace_id = ?",
+        (trace_id,),
+    ).fetchone()[0]
+    assert trace_row["total_tokens"] == live_tokens
+    conn.close()
+
+
+def test_schema_version_mismatch_fails(tmp_path: Path) -> None:
+    db_path = tmp_path / "traces.db"
+    exporter = SqliteSpanExporter(_config(db_path))
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    mem = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(mem))
+    trace.set_tracer_provider(provider)
+    with trace.get_tracer("t").start_as_current_span("x"):
+        pass
+    finished = list(mem.get_finished_spans())
+    assert exporter.export(finished) is SpanExportResult.SUCCESS
+    exporter.shutdown()
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("update schema_meta set value = '999' where key = 'schema_version'")
+    conn.commit()
+    conn.close()
+
+    exporter2 = SqliteSpanExporter(_config(db_path))
+    assert exporter2.export(finished) is SpanExportResult.FAILURE
 
 
 def test_denied_keys_dropped_and_values_clipped(tmp_path: Path) -> None:
@@ -441,18 +569,21 @@ def test_denied_keys_dropped_and_values_clipped(tmp_path: Path) -> None:
     _provider(exporter)
     tracer = trace.get_tracer("test")
     huge = "x" * 20_000
+    allowlisted = "y" * 6_000
     with tracer.start_as_current_span("monkeybot.run") as span:
         # Shapes emitted by FastAPI instrumentation / record_exception, not our helpers.
         span.set_attribute("http.request.header.authorization", "Bearer super-secret")
         span.set_attribute("db.password", "hunter2")
         span.set_attribute("gen_ai.usage.total_tokens", 42)
         span.set_attribute("http.url", huge)
+        span.set_attribute("input.value", allowlisted)
+        span.set_attribute("gen_ai.prompt", allowlisted)
         span.add_event("exception", {"exception.stacktrace": huge, "api_key": "leaked"})
     exporter.shutdown()
 
     conn = sqlite3.connect(db_path)
-    attrs_json, events_json, total = conn.execute(
-        "select attributes_json, events_json, total_tokens from spans"
+    attrs_json, events_json, total, input_value = conn.execute(
+        "select attributes_json, events_json, total_tokens, input_value from spans"
     ).fetchone()
     conn.close()
 
@@ -463,6 +594,10 @@ def test_denied_keys_dropped_and_values_clipped(tmp_path: Path) -> None:
     assert total == 42
     assert len(attrs["http.url"]) < 5_000
     assert attrs["http.url"].endswith("…[truncated]")
+    # Allowlisted I/O keys are not clipped to the 4 KiB persist limit.
+    assert attrs["input.value"] == allowlisted
+    assert attrs["gen_ai.prompt"] == allowlisted
+    assert input_value == allowlisted
 
     events = json.loads(events_json)
     assert "api_key" not in events[0]["attributes"]

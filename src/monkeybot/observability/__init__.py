@@ -81,6 +81,7 @@ def _create_span_processor(exporter: str) -> Any:
                 "observability disabled (OTEL_TRACES_EXPORTER=sqlite requires MONKEYBOT_TRACES_DB)"
             )
             return None
+        logger.info("sqlite span exporter db=%s", config.db_path)
         return BatchSpanProcessor(
             SqliteSpanExporter(config),
             schedule_delay_millis=500,

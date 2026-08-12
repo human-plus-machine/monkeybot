@@ -110,14 +110,21 @@ def test_import_runtime_loop_with_observability_disabled(
 
 
 def test_init_observability_sqlite_enabled(
-    monkeypatch: pytest.MonkeyPatch, reset_observability_state: None, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    reset_observability_state: None,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     db_path = tmp_path / "traces.db"
     monkeypatch.setenv("MONKEYBOT_OTEL_ENABLED", "true")
     monkeypatch.setenv("OTEL_TRACES_EXPORTER", "sqlite")
     monkeypatch.setenv("MONKEYBOT_TRACES_DB", str(db_path))
-    assert init_observability() is True
+    with caplog.at_level("INFO"):
+        assert init_observability() is True
     assert is_observability_enabled() is True
+    assert any(
+        f"sqlite span exporter db={db_path}" in r.getMessage() for r in caplog.records
+    )
     shutdown_observability()
 
 

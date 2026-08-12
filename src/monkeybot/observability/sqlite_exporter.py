@@ -1,4 +1,11 @@
-"""SQLite span exporter for local trace persistence (``OTEL_TRACES_EXPORTER=sqlite``)."""
+"""SQLite span exporter for local trace persistence (``OTEL_TRACES_EXPORTER=sqlite``).
+
+Persists completed OTel spans to ``MONKEYBOT_TRACES_DB``. Attribute sanitization
+re-applies the secret denylist at write time, but ``gen_ai.*`` keys (including
+``gen_ai.prompt`` / ``gen_ai.completion``) are intentionally kept so local
+trace UIs can show LLM I/O — this is a local file, not a redacted remote sink.
+Allowlisted I/O keys are not re-truncated at persist (parity with OTLP).
+"""
 
 from __future__ import annotations
 
@@ -16,17 +23,23 @@ from typing import Any
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 
-from monkeybot.observability.spans import is_denied_attribute_key, truncate
+from monkeybot.observability.spans import (
+    is_attr_truncation_exempt,
+    is_denied_attribute_key,
+    truncate,
+)
 
 logger = logging.getLogger(__name__)
 
 # Third-party instrumentation and OTel ``record_exception`` bypass
 # ``set_span_attribute_safe``; re-apply denylist + truncation at persist time.
+# Allowlisted keys (``is_attr_truncation_exempt``) skip the byte clip so local
+# SQLite stores the same prompt/output length as the OTLP exporter path.
 _MAX_PERSISTED_VALUE_BYTES = 4096
 
 _SCHEMA_VERSION = "1"
 _RETENTION_INTERVAL_SEC = 60.0
-_LOCK_RETRY_DELAYS_MS = (50, 150, 400)
+_CONNECT_TIMEOUT_SEC = 5.0
 
 _SCHEMA_DDLS: tuple[str, ...] = (
     """create table if not exists schema_meta (
@@ -101,7 +114,6 @@ class SqliteExporterConfig:
     max_spans: int = 200_000
     workspace_id: str | None = None
     agent_name_fallback: str | None = None
-    connect_timeout: float = 5.0
 
 
 def _env_int(name: str, default: int) -> int:
@@ -175,13 +187,15 @@ def _first_attr(attrs: Mapping[str, Any], keys: Sequence[str]) -> str | None:
     return None
 
 
-def _coerce_json_value(value: Any) -> Any:
+def _coerce_json_value(value: Any, *, key: str | None = None) -> Any:
     if isinstance(value, str):
+        if key is not None and is_attr_truncation_exempt(key):
+            return value
         return truncate(value, max_bytes=_MAX_PERSISTED_VALUE_BYTES)
     if isinstance(value, (int, float, bool)) or value is None:
         return value
     if isinstance(value, (list, tuple)):
-        return [_coerce_json_value(item) for item in value]
+        return [_coerce_json_value(item, key=key) for item in value]
     return truncate(str(value), max_bytes=_MAX_PERSISTED_VALUE_BYTES)
 
 
@@ -189,7 +203,7 @@ def _sanitize_attributes(attrs: Mapping[str, Any] | None) -> dict[str, Any]:
     if not attrs:
         return {}
     return {
-        key: _coerce_json_value(val)
+        key: _coerce_json_value(val, key=key)
         for key, val in attrs.items()
         if not is_denied_attribute_key(key)
     }
@@ -230,18 +244,36 @@ def _duration_ms(start_time_ns: int, end_time_ns: int) -> float:
     return (end_time_ns - start_time_ns) / 1_000_000
 
 
-def _claims_root(span_name: str, parent_span_id: str | None) -> bool:
-    return span_name == "monkeybot.run" or parent_span_id is None
+def _root_claim(
+    *,
+    span_name: str,
+    parent_span_id: str | None,
+    span_id: str,
+    input_value: str | None,
+    output_value: str | None,
+    existing_root_name: str | None = None,
+) -> dict[str, Any] | None:
+    """Return root-claim fields when this span should own (or take) the trace root.
 
-
-def _should_replace_root(
-    span_name: str, parent_span_id: str | None, existing_root_name: str | None
-) -> bool:
-    if span_name == "monkeybot.run":
-        return True
-    return parent_span_id is None and (
-        existing_root_name is None or existing_root_name != "monkeybot.run"
-    )
+    ``existing_root_name is None`` means "claim if this span is a root candidate"
+    (used when building the span row). Passing the current DB root decides whether
+    an update should replace it (``monkeybot.run`` always wins).
+    """
+    is_run = span_name == "monkeybot.run"
+    is_orphan_root = parent_span_id is None
+    if existing_root_name is None:
+        if not (is_run or is_orphan_root):
+            return None
+    elif is_run:
+        pass
+    elif not (is_orphan_root and existing_root_name != "monkeybot.run"):
+        return None
+    return {
+        "root_span_id": span_id,
+        "root_name": span_name,
+        "input_value": input_value,
+        "output_value": output_value,
+    }
 
 
 def _span_row(span: ReadableSpan, config: SqliteExporterConfig, now_ms: int) -> dict[str, Any]:
@@ -263,8 +295,14 @@ def _span_row(span: ReadableSpan, config: SqliteExporterConfig, now_ms: int) -> 
 
     input_value = _first_attr(attrs, _INPUT_VALUE_KEYS)
     output_value = _first_attr(attrs, _OUTPUT_VALUE_KEYS)
-    can_claim_root = _claims_root(span.name, parent_id)
     span_id = _format_span_id(span.context.span_id)
+    claim = _root_claim(
+        span_name=span.name,
+        parent_span_id=parent_id,
+        span_id=span_id,
+        input_value=input_value,
+        output_value=output_value,
+    )
 
     return {
         "span_id": span_id,
@@ -295,15 +333,12 @@ def _span_row(span: ReadableSpan, config: SqliteExporterConfig, now_ms: int) -> 
         "events_json": _serialize_events(span.events),
         "inserted_at": now_ms,
         "is_error": 1 if status_code == "ERROR" else 0,
-        "claim_root_span_id": span_id if can_claim_root else None,
-        "claim_root_name": span.name if can_claim_root else None,
-        "claim_input_value": input_value if can_claim_root else None,
-        "claim_output_value": output_value if can_claim_root else None,
+        "claim": claim,
     }
 
 
 _UPSERT_SPAN_SQL = """
-insert into spans (
+insert or replace into spans (
   span_id, trace_id, parent_span_id, name, kind, start_time_ns, end_time_ns, duration_ms,
   status_code, status_message, service_name, thread_id, request_id, agent_name, workspace_id,
   parent_run_id, subagent_type, tool_name, model, input_tokens, output_tokens, total_tokens,
@@ -314,35 +349,10 @@ insert into spans (
   :parent_run_id, :subagent_type, :tool_name, :model, :input_tokens, :output_tokens, :total_tokens,
   :input_value, :output_value, :attributes_json, :events_json, :inserted_at
 )
-on conflict(span_id) do update set
-  trace_id = excluded.trace_id,
-  parent_span_id = excluded.parent_span_id,
-  name = excluded.name,
-  kind = excluded.kind,
-  start_time_ns = excluded.start_time_ns,
-  end_time_ns = excluded.end_time_ns,
-  duration_ms = excluded.duration_ms,
-  status_code = excluded.status_code,
-  status_message = excluded.status_message,
-  service_name = excluded.service_name,
-  thread_id = excluded.thread_id,
-  request_id = excluded.request_id,
-  agent_name = excluded.agent_name,
-  workspace_id = excluded.workspace_id,
-  parent_run_id = excluded.parent_run_id,
-  subagent_type = excluded.subagent_type,
-  tool_name = excluded.tool_name,
-  model = excluded.model,
-  input_tokens = excluded.input_tokens,
-  output_tokens = excluded.output_tokens,
-  total_tokens = excluded.total_tokens,
-  input_value = excluded.input_value,
-  output_value = excluded.output_value,
-  attributes_json = excluded.attributes_json,
-  events_json = excluded.events_json,
-  inserted_at = excluded.inserted_at
 """
 
+# span_count/error_count/total_tokens start at 0/null; _UPDATE_TRACE_SQL always applies deltas
+# so concurrent first-inserts of the same trace_id cannot IntegrityError.
 _INSERT_TRACE_SQL = """
 insert into traces (
   trace_id, root_span_id, root_name, thread_id, request_id, agent_name, workspace_id,
@@ -350,9 +360,10 @@ insert into traces (
   input_value, output_value, updated_at
 ) values (
   :trace_id, :root_span_id, :root_name, :thread_id, :request_id, :agent_name,
-  :workspace_id, :start_time_ns, :end_time_ns, :duration_ms, 1, :is_error, :total_tokens,
+  :workspace_id, :start_time_ns, :end_time_ns, :duration_ms, 0, 0, null,
   :input_value, :output_value, :updated_at
 )
+on conflict(trace_id) do nothing
 """
 
 _UPDATE_TRACE_SQL = """
@@ -382,12 +393,28 @@ _DELETE_ORPHAN_TRACES_SQL = (
     "delete from traces where trace_id not in (select distinct trace_id from spans)"
 )
 
-
-def _is_lock_error(exc: BaseException) -> bool:
-    if not isinstance(exc, sqlite3.OperationalError):
-        return False
-    message = str(exc).lower()
-    return "locked" in message or "busy" in message
+_RECOMPUTE_TRACE_ROLLUPS_SQL = """
+update traces set
+  span_count = (select count(*) from spans where spans.trace_id = traces.trace_id),
+  error_count = (
+    select count(*) from spans
+    where spans.trace_id = traces.trace_id and spans.status_code = 'ERROR'
+  ),
+  total_tokens = (
+    select sum(total_tokens) from spans where spans.trace_id = traces.trace_id
+  ),
+  start_time_ns = (
+    select min(start_time_ns) from spans where spans.trace_id = traces.trace_id
+  ),
+  end_time_ns = (
+    select max(end_time_ns) from spans where spans.trace_id = traces.trace_id
+  ),
+  duration_ms = (
+    select (max(end_time_ns) - min(start_time_ns)) / 1000000.0
+    from spans where spans.trace_id = traces.trace_id
+  )
+where exists (select 1 from spans where spans.trace_id = traces.trace_id)
+"""
 
 
 class SqliteSpanExporter(SpanExporter):
@@ -397,6 +424,8 @@ class SqliteSpanExporter(SpanExporter):
         self._conn: sqlite3.Connection | None = None
         self._schema_ready = False
         self._last_retention_at = 0.0
+        self._disabled = False
+        self._export_error_logged = False
 
     def _ensure_connection(self) -> sqlite3.Connection:
         if self._conn is not None:
@@ -406,7 +435,8 @@ class SqliteSpanExporter(SpanExporter):
         conn = sqlite3.connect(
             db_path,
             check_same_thread=False,
-            timeout=self._config.connect_timeout,
+            timeout=_CONNECT_TIMEOUT_SEC,
+            isolation_level="IMMEDIATE",
         )
         conn.row_factory = sqlite3.Row
         conn.execute("pragma journal_mode = WAL")
@@ -420,49 +450,57 @@ class SqliteSpanExporter(SpanExporter):
             return
         for ddl in _SCHEMA_DDLS:
             conn.execute(ddl)
-        conn.execute(
-            "insert into schema_meta (key, value) values (?, ?) "
-            "on conflict(key) do update set value = excluded.value",
-            ("schema_version", _SCHEMA_VERSION),
-        )
+        row = conn.execute(
+            "select value from schema_meta where key = 'schema_version'"
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                "insert into schema_meta (key, value) values (?, ?)",
+                ("schema_version", _SCHEMA_VERSION),
+            )
+        elif str(row[0]) != _SCHEMA_VERSION:
+            raise RuntimeError(
+                f"unsupported traces DB schema_version={row[0]!r}, expected {_SCHEMA_VERSION!r}"
+            )
         conn.commit()
         self._schema_ready = True
 
     def _upsert_trace(
         self, conn: sqlite3.Connection, row: dict[str, Any], *, is_new_span: bool
     ) -> None:
+        claim = row["claim"]
+        updated_at = row["inserted_at"]
+        conn.execute(
+            _INSERT_TRACE_SQL,
+            {
+                "trace_id": row["trace_id"],
+                "root_span_id": claim["root_span_id"] if claim else None,
+                "root_name": claim["root_name"] if claim else None,
+                "thread_id": row["thread_id"],
+                "request_id": row["request_id"],
+                "agent_name": row["agent_name"],
+                "workspace_id": row["workspace_id"],
+                "start_time_ns": row["start_time_ns"],
+                "end_time_ns": row["end_time_ns"],
+                "duration_ms": row["duration_ms"],
+                "input_value": claim["input_value"] if claim else None,
+                "output_value": claim["output_value"] if claim else None,
+                "updated_at": updated_at,
+            },
+        )
         existing = conn.execute(
             "select root_span_id, root_name, input_value, output_value "
             "from traces where trace_id = ?",
             (row["trace_id"],),
         ).fetchone()
-        updated_at = row["inserted_at"]
-
-        if existing is None:
-            conn.execute(
-                _INSERT_TRACE_SQL,
-                {
-                    "trace_id": row["trace_id"],
-                    "root_span_id": row["claim_root_span_id"],
-                    "root_name": row["claim_root_name"],
-                    "thread_id": row["thread_id"],
-                    "request_id": row["request_id"],
-                    "agent_name": row["agent_name"],
-                    "workspace_id": row["workspace_id"],
-                    "start_time_ns": row["start_time_ns"],
-                    "end_time_ns": row["end_time_ns"],
-                    "duration_ms": row["duration_ms"],
-                    "is_error": row["is_error"],
-                    "total_tokens": row["total_tokens"],
-                    "input_value": row["claim_input_value"],
-                    "output_value": row["claim_output_value"],
-                    "updated_at": updated_at,
-                },
-            )
-            return
-
-        replace_root = _should_replace_root(
-            row["name"], row["parent_span_id"], existing["root_name"]
+        assert existing is not None
+        replace = _root_claim(
+            span_name=row["name"],
+            parent_span_id=row["parent_span_id"],
+            span_id=row["span_id"],
+            input_value=row["input_value"],
+            output_value=row["output_value"],
+            existing_root_name=existing["root_name"],
         )
         conn.execute(
             _UPDATE_TRACE_SQL,
@@ -478,14 +516,14 @@ class SqliteSpanExporter(SpanExporter):
                 "workspace_id": row["workspace_id"],
                 "token_delta": row["total_tokens"] if is_new_span else None,
                 "root_span_id": (
-                    row["claim_root_span_id"] if replace_root else existing["root_span_id"]
+                    replace["root_span_id"] if replace else existing["root_span_id"]
                 ),
-                "root_name": (row["claim_root_name"] if replace_root else existing["root_name"]),
+                "root_name": replace["root_name"] if replace else existing["root_name"],
                 "input_value": (
-                    row["claim_input_value"] if replace_root else existing["input_value"]
+                    replace["input_value"] if replace else existing["input_value"]
                 ),
                 "output_value": (
-                    row["claim_output_value"] if replace_root else existing["output_value"]
+                    replace["output_value"] if replace else existing["output_value"]
                 ),
                 "updated_at": updated_at,
             },
@@ -503,18 +541,21 @@ class SqliteSpanExporter(SpanExporter):
                 existing = conn.execute(
                     "select span_id from spans where span_id = ?", (row["span_id"],)
                 ).fetchone()
-                conn.execute(_UPSERT_SPAN_SQL, row)
+                conn.execute(
+                    _UPSERT_SPAN_SQL,
+                    {k: v for k, v in row.items() if k not in {"claim", "is_error"}},
+                )
                 self._upsert_trace(conn, row, is_new_span=existing is None)
 
     def _maybe_run_retention(self, *, force: bool = False) -> None:
         if self._config.retention_days <= 0 and self._config.max_spans <= 0:
             return
-        now = time.monotonic()
-        if not force and (now - self._last_retention_at) < _RETENTION_INTERVAL_SEC:
-            return
-        self._last_retention_at = now
         try:
             with self._lock:
+                now = time.monotonic()
+                if not force and (now - self._last_retention_at) < _RETENTION_INTERVAL_SEC:
+                    return
+                self._last_retention_at = now
                 if self._conn is None:
                     return
                 self._run_retention_locked(self._conn)
@@ -527,6 +568,7 @@ class SqliteSpanExporter(SpanExporter):
             with conn:
                 conn.execute("delete from spans where start_time_ns < ?", (cutoff_ns,))
                 conn.execute(_DELETE_ORPHAN_TRACES_SQL)
+                conn.execute(_RECOMPUTE_TRACE_ROLLUPS_SQL)
 
         if self._config.max_spans > 0:
             with conn:
@@ -541,24 +583,23 @@ class SqliteSpanExporter(SpanExporter):
                         (overage,),
                     )
                     conn.execute(_DELETE_ORPHAN_TRACES_SQL)
+                    conn.execute(_RECOMPUTE_TRACE_ROLLUPS_SQL)
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
         if not spans:
             return SpanExportResult.SUCCESS
-        try:
-            for attempt, delay_ms in enumerate(_LOCK_RETRY_DELAYS_MS):
-                try:
-                    with self._lock:
-                        self._export_batch(spans)
-                    self._maybe_run_retention()
-                    return SpanExportResult.SUCCESS
-                except sqlite3.OperationalError as exc:
-                    if not _is_lock_error(exc) or attempt == len(_LOCK_RETRY_DELAYS_MS) - 1:
-                        raise
-                    time.sleep(delay_ms / 1000.0)
+        if self._disabled:
             return SpanExportResult.FAILURE
+        try:
+            with self._lock:
+                self._export_batch(spans)
+            self._maybe_run_retention()
+            return SpanExportResult.SUCCESS
         except Exception as exc:
-            logger.warning("sqlite span export failed: %s", exc)
+            self._disabled = True
+            if not self._export_error_logged:
+                logger.warning("sqlite span export failed: %s", exc)
+                self._export_error_logged = True
             return SpanExportResult.FAILURE
 
     def force_flush(self, timeout_millis: int = 30000) -> bool:
@@ -568,8 +609,6 @@ class SqliteSpanExporter(SpanExporter):
                 if self._conn is None:
                     return True
                 self._conn.execute("pragma wal_checkpoint(PASSIVE)")
-                self._last_retention_at = 0.0
-                self._run_retention_locked(self._conn)
             return True
         except Exception as exc:
             logger.warning("sqlite span force_flush failed: %s", exc)
