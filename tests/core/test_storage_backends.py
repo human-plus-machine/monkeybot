@@ -124,6 +124,82 @@ async def test_postgres_open_run_schema_false_skips_apply_schema(
     await backend.close()
 
 
+def _require_asyncpg() -> None:
+    try:
+        import asyncpg  # noqa: F401
+    except ImportError:
+        pytest.skip("asyncpg is not installed")
+
+
+class _FakeAsyncpgConn:
+    """Records every SQL call and validates ``$N`` placeholder count vs. args passed.
+
+    A pure string-capture mock (recording the query but never checking arity)
+    would not have caught a real bug found while validating this fix against a
+    live Postgres: reset() passed 3 positional args against a 2-placeholder
+    query, which asyncpg rejects with "the server expects N arguments...".
+    Checking placeholder count here catches that class of bug without a live DB.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def _check_arity(self, query: str, args: tuple[object, ...]) -> None:
+        import re
+
+        placeholders = {int(m) for m in re.findall(r"\$(\d+)", query)}
+        expected = max(placeholders) if placeholders else 0
+        assert len(args) == expected, (
+            f"query expects {expected} args (placeholders {sorted(placeholders)}), "
+            f"got {len(args)}: {query!r}"
+        )
+
+    async def fetch(self, query: str, *args: object) -> list[object]:
+        self._check_arity(query, args)
+        self.calls.append((query, args))
+        return []
+
+    async def fetchval(self, query: str, *args: object) -> object:
+        self._check_arity(query, args)
+        self.calls.append((query, args))
+        return None
+
+    async def execute(self, query: str, *args: object) -> str:
+        self._check_arity(query, args)
+        self.calls.append((query, args))
+        return "OK"
+
+    def transaction(self) -> _FakeAsyncpgTransaction:
+        return _FakeAsyncpgTransaction()
+
+
+class _FakeAsyncpgTransaction:
+    async def __aenter__(self) -> None:
+        return None
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+
+class _FakeAsyncpgAcquire:
+    def __init__(self, conn: _FakeAsyncpgConn) -> None:
+        self._conn = conn
+
+    async def __aenter__(self) -> _FakeAsyncpgConn:
+        return self._conn
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+
+class _FakeAsyncpgPool:
+    def __init__(self, conn: _FakeAsyncpgConn) -> None:
+        self._conn = conn
+
+    def acquire(self) -> _FakeAsyncpgAcquire:
+        return _FakeAsyncpgAcquire(self._conn)
+
+
 @pytest.mark.asyncio
 async def test_postgres_list_threads_query_does_not_reference_ungrouped_column() -> None:
     """Regression for PR #179 review: PostgreSQL rejects a subquery that reads
@@ -132,44 +208,38 @@ async def test_postgres_list_threads_query_does_not_reference_ungrouped_column()
     instance. The scoped subquery must bind the scope as a query parameter
     (``$1``) instead of correlating through ``h.agent_scope``.
     """
-    try:
-        import asyncpg  # noqa: F401
-    except ImportError:
-        pytest.skip("asyncpg is not installed")
-
+    _require_asyncpg()
     from monkeybot.core.persistence.postgres import PostgresHistoryStore
 
-    class _FakeConn:
-        def __init__(self) -> None:
-            self.queries: list[str] = []
-
-        async def fetch(self, query: str, *args: object) -> list[object]:
-            self.queries.append(query)
-            return []
-
-    class _FakeAcquire:
-        def __init__(self, conn: _FakeConn) -> None:
-            self._conn = conn
-
-        async def __aenter__(self) -> _FakeConn:
-            return self._conn
-
-        async def __aexit__(self, *exc: object) -> None:
-            return None
-
-    class _FakePool:
-        def __init__(self, conn: _FakeConn) -> None:
-            self._conn = conn
-
-        def acquire(self) -> _FakeAcquire:
-            return _FakeAcquire(self._conn)
-
-    fake_conn = _FakeConn()
-    store = PostgresHistoryStore(_FakePool(fake_conn), "agent-a")  # type: ignore[arg-type]
+    fake_conn = _FakeAsyncpgConn()
+    store = PostgresHistoryStore(_FakeAsyncpgPool(fake_conn), "agent-a")  # type: ignore[arg-type]
     await store.list_threads()
 
-    assert len(fake_conn.queries) == 1
-    assert "h2.agent_scope = h.agent_scope" not in fake_conn.queries[0]
+    assert len(fake_conn.calls) == 1
+    query = fake_conn.calls[0][0]
+    assert "h2.agent_scope = h.agent_scope" not in query
+
+
+@pytest.mark.asyncio
+async def test_postgres_load_reset_clear_use_correct_arity() -> None:
+    """Regression: reset()/clear()/load() must pass exactly as many args as
+    their query has ``$N`` placeholders for — verified live against a real
+    Postgres instance (see test_storage_backends manual validation in the
+    PR #179 review response); this mock catches the same class of bug
+    without needing a live DB in CI.
+    """
+    _require_asyncpg()
+    from monkeybot.core.persistence.postgres import PostgresHistoryStore
+
+    fake_conn = _FakeAsyncpgConn()
+    store = PostgresHistoryStore(_FakeAsyncpgPool(fake_conn), "agent-a")  # type: ignore[arg-type]
+
+    await store.load("t1")
+    await store.load("t1", limit=5)
+    await store.clear("t1")
+    await store.reset("t1", [])
+
+    assert len(fake_conn.calls) == 4
 
 
 # ---------------------------------------------------------------------------
@@ -360,7 +430,6 @@ async def test_history_list_threads_isolated_by_agent_scope() -> None:
     try:
         conn = backend_a._conn
         assert conn is not None
-        backend_b = SQLiteStorageBackend.__new__(SQLiteStorageBackend)
         # Share the same connection/db to simulate one DB_URL, two agent roots.
         from monkeybot.core.persistence.history import SQLiteHistoryStore
 

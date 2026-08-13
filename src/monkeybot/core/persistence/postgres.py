@@ -125,12 +125,16 @@ async def _apply_schema(pool: asyncpg.Pool) -> None:
 async def _warn_if_legacy_unscoped_history(pool: asyncpg.Pool) -> None:
     """Log once if pre-migration (``agent_scope = ''``) rows remain.
 
-    Unlike SQLite (one file per agent root by default), a Postgres ``DB_URL``
-    is commonly shared across multiple agents, so auto-claiming legacy rows
-    for whichever gateway happens to migrate first would silently reassign
-    other agents' history. Surface the situation instead of masking it —
-    resolving it requires an operator who knows which legacy thread_id
-    belongs to which agent.
+    ``PostgresHistoryStore.load``/``reset``/``clear`` fall back to the legacy
+    ``''`` scope for an *already-known* ``thread_id`` (explicit ``--session``,
+    transcript backfill), so those keep working. ``list_threads`` deliberately
+    does not — auto-discovering an unscoped row would reopen the cross-agent
+    leak this scoping exists to close — so a legacy thread never surfaces via
+    ``--continue`` or the chat-history browse UI until an operator backfills
+    its ``agent_scope`` explicitly. Unlike SQLite (one file per agent root by
+    default), a Postgres ``DB_URL`` is commonly shared across multiple agents,
+    so that backfill can't be automatic: only an operator who knows which
+    legacy thread_id belongs to which agent can assign it correctly.
     """
     async with pool.acquire() as conn:
         exists = await conn.fetchval(
@@ -139,8 +143,9 @@ async def _warn_if_legacy_unscoped_history(pool: asyncpg.Pool) -> None:
     if exists:
         logger.warning(
             "conversation_history has pre-migration rows with agent_scope='' — "
-            "they are invisible to this (or any) agent-scoped gateway until an "
-            "operator backfills agent_scope for each legacy thread_id."
+            "they are only reachable via an already-known thread_id (load/reset), "
+            "not via list_threads/--continue, until an operator backfills "
+            "agent_scope for each legacy thread_id."
         )
 
 
@@ -156,6 +161,20 @@ class PostgresHistoryStore:
     def __init__(self, pool: asyncpg.Pool, agent_scope: str = "") -> None:
         self._pool = pool
         self._agent_scope = agent_scope
+
+    def _read_scopes(self) -> list[str]:
+        """Scopes a read-by-known-``thread_id`` call should see.
+
+        Includes the pre-migration ``''`` scope alongside the real one: a
+        caller resuming an *already-known* ``thread_id`` (explicit
+        ``--session``, transcript backfill) should still find it after
+        upgrading, since ``ALTER TABLE ... ADD COLUMN agent_scope DEFAULT ''``
+        backfills every existing row to ``''`` rather than to any particular
+        agent. ``list_threads`` deliberately does NOT use this — auto-discovery
+        of an unscoped row would reopen the cross-agent leak this scoping
+        exists to close; only an already-known id gets the legacy fallback.
+        """
+        return [self._agent_scope] if not self._agent_scope else [self._agent_scope, ""]
 
     async def _insert_message(self, conn: asyncpg.Connection, thread_id: str, message: Message) -> None:
         role = message.role
@@ -184,17 +203,18 @@ class PostgresHistoryStore:
             await self._insert_message(conn, thread_id, message)
 
     async def load(self, thread_id: str, limit: int | None = None) -> list[Message]:
+        scopes = self._read_scopes()
         async with self._pool.acquire() as conn:
             if limit is None:
                 rows = await conn.fetch(
                     """
                     SELECT id, role, content
                     FROM conversation_history
-                    WHERE thread_id = $1 AND agent_scope = $2
+                    WHERE thread_id = $1 AND agent_scope = ANY($2::text[])
                     ORDER BY created_at ASC, id ASC
                     """,
                     thread_id,
-                    self._agent_scope,
+                    scopes,
                 )
                 rows_chrono = list(rows)
             else:
@@ -202,12 +222,12 @@ class PostgresHistoryStore:
                     """
                     SELECT id, role, content
                     FROM conversation_history
-                    WHERE thread_id = $1 AND agent_scope = $2
+                    WHERE thread_id = $1 AND agent_scope = ANY($2::text[])
                     ORDER BY created_at DESC, id DESC
                     LIMIT $3
                     """,
                     thread_id,
-                    self._agent_scope,
+                    scopes,
                     limit,
                 )
                 rows_chrono = list(reversed(rows))
@@ -237,18 +257,23 @@ class PostgresHistoryStore:
     async def clear(self, thread_id: str) -> None:
         async with self._pool.acquire() as conn:
             await conn.execute(
-                "DELETE FROM conversation_history WHERE thread_id = $1 AND agent_scope = $2",
+                "DELETE FROM conversation_history WHERE thread_id = $1 AND agent_scope = ANY($2::text[])",
                 thread_id,
-                self._agent_scope,
+                self._read_scopes(),
             )
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None:
-        """Replace thread history atomically (single transaction)."""
+        """Replace thread history atomically (single transaction).
+
+        Deletes both this store's scope and the legacy ``''`` scope for
+        ``thread_id`` — an explicit reset of an already-known id fully adopts
+        it into the current scope, same as :meth:`load`.
+        """
         async with self._pool.acquire() as conn, conn.transaction():
             await conn.execute(
-                "DELETE FROM conversation_history WHERE thread_id = $1 AND agent_scope = $2",
+                "DELETE FROM conversation_history WHERE thread_id = $1 AND agent_scope = ANY($2::text[])",
                 thread_id,
-                self._agent_scope,
+                self._read_scopes(),
             )
             for msg in messages:
                 await self._insert_message(conn, thread_id, msg)

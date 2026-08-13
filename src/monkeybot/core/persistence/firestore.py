@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
@@ -66,6 +67,35 @@ def _field_float(row: dict[str, object], key: str, default: float = 0.0) -> floa
     return _float_value(row.get(key, default), default)
 
 
+_warned_legacy_unscoped_history = False
+
+
+def _warn_legacy_unscoped_history_possible() -> None:
+    """Log once per process that pre-migration Firestore documents may be unreachable.
+
+    Unlike Postgres (a real ``agent_scope = ''`` column, queryable), Firestore
+    documents written before this scoping existed have no ``agent_scope`` field
+    at all — a query can't distinguish "field equals ''" from "field absent,"
+    so ``FirestoreHistoryStore.load``/``reset``'s legacy-scope fallback (see
+    ``_read_scopes``) only reaches docs written with ``agent_scope=''``
+    (e.g. by an unscoped store), not truly pre-scoping documents. There is no
+    cheap existence check for "field missing" in Firestore, so this warns
+    unconditionally rather than only when legacy data is actually present.
+    """
+    global _warned_legacy_unscoped_history
+    if _warned_legacy_unscoped_history:
+        return
+    _warned_legacy_unscoped_history = True
+    logger.warning(
+        "Firestore conversation_history/threads documents written before "
+        "agent_scope existed have no agent_scope field and are not reachable "
+        "by this (or any) agent-scoped store's load/list_threads/reset — "
+        "Firestore cannot query for a missing field. If this deployment "
+        "predates agent-scoped history, those documents need an operator-run "
+        "backfill to set agent_scope before they become readable again."
+    )
+
+
 class FirestoreHistoryStore:
     """Firestore-backed conversation history store, scoped to ``agent_scope``.
 
@@ -86,6 +116,35 @@ class FirestoreHistoryStore:
         self._threads_collection = _collection_name(prefix, "threads")
         self._agent_scope = agent_scope
 
+    def _read_scopes(self) -> list[str]:
+        """Scopes a read-by-known-``thread_id`` call should see.
+
+        Includes the pre-migration ``''`` scope alongside the real one, same
+        rationale as :meth:`PostgresHistoryStore._read_scopes`: an already-known
+        ``thread_id`` (explicit ``--session``, transcript backfill) should still
+        resolve after upgrading. ``list_threads`` does NOT use this — it would
+        reopen the cross-agent leak this scoping exists to close.
+        """
+        return [self._agent_scope] if not self._agent_scope else [self._agent_scope, ""]
+
+    def _summary_doc_id(self, thread_id: str, scope: str | None = None) -> str:
+        """Scope-qualified key for the per-thread summary doc.
+
+        Keying purely by ``thread_id`` let two agents that reuse the same
+        explicit session id (nothing prevents ``--session <id>`` reuse across
+        agents) share one summary document: each ``set(..., merge=True)``
+        overwrote the other's ``agent_scope``/``message_count`` fields,
+        flipping which agent's ``list_threads`` the thread appeared under and
+        corrupting the message count. A short hash of the scope keeps summary
+        docs disjoint per agent without leaking a raw (possibly path-shaped)
+        scope value into a Firestore document id, which cannot contain ``/``.
+
+        ``scope`` defaults to this store's own scope; pass the legacy ``''``
+        scope explicitly to address the pre-migration summary doc (see reset()).
+        """
+        scope_key = hashlib.sha256((self._agent_scope if scope is None else scope).encode())
+        return f"{scope_key.hexdigest()[:16]}:{thread_id}"
+
     async def _upsert_thread_summary(
         self,
         thread_id: str,
@@ -93,8 +152,10 @@ class FirestoreHistoryStore:
         created_at: int,
         content: str,
     ) -> None:
-        """Maintain one summary doc per thread for indexed ``list_threads`` reads."""
-        thread_ref = self._client.collection(self._threads_collection).document(thread_id)
+        """Maintain one summary doc per (scope, thread) for indexed ``list_threads`` reads."""
+        thread_ref = self._client.collection(self._threads_collection).document(
+            self._summary_doc_id(thread_id)
+        )
         await thread_ref.set(
             {
                 "thread_id": thread_id,
@@ -106,8 +167,10 @@ class FirestoreHistoryStore:
             merge=True,
         )
 
-    async def _delete_thread_summary(self, thread_id: str) -> None:
-        await self._client.collection(self._threads_collection).document(thread_id).delete()
+    async def _delete_thread_summary(self, thread_id: str, *, scope: str | None = None) -> None:
+        await self._client.collection(self._threads_collection).document(
+            self._summary_doc_id(thread_id, scope)
+        ).delete()
 
     async def append(self, thread_id: str, message: Message) -> None:
         role = message.role
@@ -131,12 +194,13 @@ class FirestoreHistoryStore:
         await self._upsert_thread_summary(thread_id, created_at=created_at, content=payload)
 
     async def load(self, thread_id: str, limit: int | None = None) -> list[Message]:
+        scopes = self._read_scopes()
         if limit is not None:
             # Newest ``limit`` rows: query descending then reverse to chronological.
             query = (
                 self._client.collection(self._collection)
                 .where(filter=FieldFilter("thread_id", "==", thread_id))
-                .where(filter=FieldFilter("agent_scope", "==", self._agent_scope))
+                .where(filter=FieldFilter("agent_scope", "in", scopes))
                 .order_by("created_at", direction=firestore.Query.DESCENDING)
                 .limit(limit)
             )
@@ -146,7 +210,7 @@ class FirestoreHistoryStore:
             query = (
                 self._client.collection(self._collection)
                 .where(filter=FieldFilter("thread_id", "==", thread_id))
-                .where(filter=FieldFilter("agent_scope", "==", self._agent_scope))
+                .where(filter=FieldFilter("agent_scope", "in", scopes))
                 .order_by("created_at", direction=firestore.Query.ASCENDING)
             )
             rows = [doc async for doc in query.stream()]
@@ -183,10 +247,14 @@ class FirestoreHistoryStore:
         return out
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None:
+        """Replace thread history, deleting both this scope and the legacy ``''``
+        scope for ``thread_id`` — an explicit reset of an already-known id fully
+        adopts it into the current scope, same as :meth:`load`.
+        """
         query = (
             self._client.collection(self._collection)
             .where(filter=FieldFilter("thread_id", "==", thread_id))
-            .where(filter=FieldFilter("agent_scope", "==", self._agent_scope))
+            .where(filter=FieldFilter("agent_scope", "in", self._read_scopes()))
         )
         batch = self._client.batch()
         count = 0
@@ -199,7 +267,8 @@ class FirestoreHistoryStore:
                 count = 0
         if count:
             await batch.commit()
-        await self._delete_thread_summary(thread_id)
+        for scope in self._read_scopes():
+            await self._delete_thread_summary(thread_id, scope=scope)
         for msg in messages:
             await self.append(thread_id, msg)
 
@@ -811,6 +880,8 @@ class FirestoreStorageBackend:
             project=self._config.project,
             database=self._config.database,
         )
+        if self._agent_scope:
+            _warn_legacy_unscoped_history_possible()
         prefix = self._config.prefix
         self._history_store = FirestoreHistoryStore(self._client, prefix, self._agent_scope)
         self._usage_store = FirestoreUsageStore(self._client, prefix)
