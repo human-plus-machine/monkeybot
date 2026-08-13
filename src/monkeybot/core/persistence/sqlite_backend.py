@@ -19,8 +19,9 @@ from monkeybot.core.persistence.usage import SQLiteUsageStore
 class SQLiteStorageBackend:
     """SQLite-backed storage backend. One shared connection for the process lifetime."""
 
-    def __init__(self, db_url: str) -> None:
+    def __init__(self, db_url: str, agent_scope: str = "") -> None:
         self._db_url = db_url
+        self._agent_scope = agent_scope
         self._conn: aiosqlite.Connection | None = None
         self._history_store: SQLiteHistoryStore | None = None
         self._usage_store: SQLiteUsageStore | None = None
@@ -32,7 +33,7 @@ class SQLiteStorageBackend:
         self._conn = await open_connection(self._db_url)
         if run_schema:
             await apply_schema(self._conn)
-        self._history_store = SQLiteHistoryStore(self._conn)
+        self._history_store = SQLiteHistoryStore(self._conn, self._agent_scope)
         self._usage_store = SQLiteUsageStore(self._conn)
         self._runs_store = SQLiteRunStore(self._conn)
         self._scheduled_loops_store = SQLiteScheduledLoopStore(self._conn)

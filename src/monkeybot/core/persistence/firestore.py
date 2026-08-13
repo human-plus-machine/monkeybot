@@ -67,12 +67,24 @@ def _field_float(row: dict[str, object], key: str, default: float = 0.0) -> floa
 
 
 class FirestoreHistoryStore:
-    """Firestore-backed conversation history store."""
+    """Firestore-backed conversation history store, scoped to ``agent_scope``.
 
-    def __init__(self, client: AsyncClient, prefix: str) -> None:
+    ``agent_scope`` isolates threads when one Firestore database is shared
+    across gateways for different agent roots — without it, ``list_threads``
+    would surface another agent's newest transcript. Defaults to ``''``
+    (unscoped) for in-process/test callers; production gateways pass the
+    resolved agent root.
+
+    The compound ``agent_scope`` equality + ``last_message_at``/``created_at``
+    order-by queries below require a Firestore composite index per collection;
+    Firestore raises a clear error with a console link to create it on first use.
+    """
+
+    def __init__(self, client: AsyncClient, prefix: str, agent_scope: str = "") -> None:
         self._client = client
         self._collection = _collection_name(prefix, "conversation_history")
         self._threads_collection = _collection_name(prefix, "threads")
+        self._agent_scope = agent_scope
 
     async def _upsert_thread_summary(
         self,
@@ -89,6 +101,7 @@ class FirestoreHistoryStore:
                 "last_message_at": created_at,
                 "message_count": firestore.Increment(1),
                 "last_content": content,
+                "agent_scope": self._agent_scope,
             },
             merge=True,
         )
@@ -112,6 +125,7 @@ class FirestoreHistoryStore:
                 "role": role,
                 "content": payload,
                 "created_at": created_at,
+                "agent_scope": self._agent_scope,
             }
         )
         await self._upsert_thread_summary(thread_id, created_at=created_at, content=payload)
@@ -122,6 +136,7 @@ class FirestoreHistoryStore:
             query = (
                 self._client.collection(self._collection)
                 .where(filter=FieldFilter("thread_id", "==", thread_id))
+                .where(filter=FieldFilter("agent_scope", "==", self._agent_scope))
                 .order_by("created_at", direction=firestore.Query.DESCENDING)
                 .limit(limit)
             )
@@ -131,6 +146,7 @@ class FirestoreHistoryStore:
             query = (
                 self._client.collection(self._collection)
                 .where(filter=FieldFilter("thread_id", "==", thread_id))
+                .where(filter=FieldFilter("agent_scope", "==", self._agent_scope))
                 .order_by("created_at", direction=firestore.Query.ASCENDING)
             )
             rows = [doc async for doc in query.stream()]
@@ -167,8 +183,10 @@ class FirestoreHistoryStore:
         return out
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None:
-        query = self._client.collection(self._collection).where(
-            filter=FieldFilter("thread_id", "==", thread_id)
+        query = (
+            self._client.collection(self._collection)
+            .where(filter=FieldFilter("thread_id", "==", thread_id))
+            .where(filter=FieldFilter("agent_scope", "==", self._agent_scope))
         )
         batch = self._client.batch()
         count = 0
@@ -189,6 +207,7 @@ class FirestoreHistoryStore:
         cap = max(1, min(limit, 200))
         query = (
             self._client.collection(self._threads_collection)
+            .where(filter=FieldFilter("agent_scope", "==", self._agent_scope))
             .order_by("last_message_at", direction=firestore.Query.DESCENDING)
             .limit(cap)
         )
@@ -772,8 +791,9 @@ class FirestoreSessionTurnLockStore:
 class FirestoreStorageBackend:
     """Firestore-backed storage backend using ``google.cloud.firestore.AsyncClient``."""
 
-    def __init__(self, config: FirestoreConfig) -> None:
+    def __init__(self, config: FirestoreConfig, agent_scope: str = "") -> None:
         self._config = config
+        self._agent_scope = agent_scope
         self._client: AsyncClient | None = None
         self._history_store: FirestoreHistoryStore | None = None
         self._usage_store: FirestoreUsageStore | None = None
@@ -792,7 +812,7 @@ class FirestoreStorageBackend:
             database=self._config.database,
         )
         prefix = self._config.prefix
-        self._history_store = FirestoreHistoryStore(self._client, prefix)
+        self._history_store = FirestoreHistoryStore(self._client, prefix, self._agent_scope)
         self._usage_store = FirestoreUsageStore(self._client, prefix)
         self._runs_store = FirestoreRunStore(self._client, prefix)
         self._scheduled_loops_store = FirestoreScheduledLoopStore(self._client, prefix)

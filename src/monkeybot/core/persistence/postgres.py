@@ -39,7 +39,8 @@ _SCHEMA_DDLS: tuple[str, ...] = (
     thread_id TEXT NOT NULL,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
-    created_at BIGINT NOT NULL
+    created_at BIGINT NOT NULL,
+    agent_scope TEXT NOT NULL DEFAULT ''
 )""",
     """CREATE TABLE IF NOT EXISTS subagent_runs (
     run_id TEXT PRIMARY KEY,
@@ -80,6 +81,11 @@ _SCHEMA_DDLS: tuple[str, ...] = (
     "ALTER TABLE turn_usage ADD COLUMN IF NOT EXISTS cache_creation_tokens INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE subagent_runs ADD COLUMN IF NOT EXISTS worker_id TEXT",
     "ALTER TABLE subagent_runs ADD COLUMN IF NOT EXISTS claimed_at BIGINT",
+    # Must run before idx_history_scope_thread: the index references agent_scope,
+    # which pre-existing tables (created before this column existed) won't have yet.
+    "ALTER TABLE conversation_history ADD COLUMN IF NOT EXISTS agent_scope TEXT NOT NULL DEFAULT ''",
+    """CREATE INDEX IF NOT EXISTS idx_history_scope_thread
+    ON conversation_history(agent_scope, thread_id, created_at DESC, id DESC)""",
     """CREATE TABLE IF NOT EXISTS scheduled_loops (
     loop_id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL,
@@ -117,10 +123,17 @@ async def _apply_schema(pool: asyncpg.Pool) -> None:
 
 
 class PostgresHistoryStore:
-    """asyncpg-backed conversation history store."""
+    """asyncpg-backed conversation history store, scoped to ``agent_scope``.
 
-    def __init__(self, pool: asyncpg.Pool) -> None:
+    ``agent_scope`` isolates threads when one DB_URL is shared across gateways
+    for different agent roots — without it, ``list_threads`` would surface
+    another agent's newest transcript. Defaults to ``''`` (unscoped) for
+    in-process/test callers; production gateways pass the resolved agent root.
+    """
+
+    def __init__(self, pool: asyncpg.Pool, agent_scope: str = "") -> None:
         self._pool = pool
+        self._agent_scope = agent_scope
 
     async def _insert_message(self, conn: asyncpg.Connection, thread_id: str, message: Message) -> None:
         role = message.role
@@ -134,13 +147,14 @@ class PostgresHistoryStore:
         created_at = int(time.time() * 1000)
         await conn.execute(
             """
-            INSERT INTO conversation_history(thread_id, role, content, created_at)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO conversation_history(thread_id, role, content, created_at, agent_scope)
+            VALUES ($1, $2, $3, $4, $5)
             """,
             thread_id,
             message.role,
             payload,
             created_at,
+            self._agent_scope,
         )
 
     async def append(self, thread_id: str, message: Message) -> None:
@@ -154,10 +168,11 @@ class PostgresHistoryStore:
                     """
                     SELECT id, role, content
                     FROM conversation_history
-                    WHERE thread_id = $1
+                    WHERE thread_id = $1 AND agent_scope = $2
                     ORDER BY created_at ASC, id ASC
                     """,
                     thread_id,
+                    self._agent_scope,
                 )
                 rows_chrono = list(rows)
             else:
@@ -165,11 +180,12 @@ class PostgresHistoryStore:
                     """
                     SELECT id, role, content
                     FROM conversation_history
-                    WHERE thread_id = $1
+                    WHERE thread_id = $1 AND agent_scope = $2
                     ORDER BY created_at DESC, id DESC
-                    LIMIT $2
+                    LIMIT $3
                     """,
                     thread_id,
+                    self._agent_scope,
                     limit,
                 )
                 rows_chrono = list(reversed(rows))
@@ -199,14 +215,18 @@ class PostgresHistoryStore:
     async def clear(self, thread_id: str) -> None:
         async with self._pool.acquire() as conn:
             await conn.execute(
-                "DELETE FROM conversation_history WHERE thread_id = $1", thread_id
+                "DELETE FROM conversation_history WHERE thread_id = $1 AND agent_scope = $2",
+                thread_id,
+                self._agent_scope,
             )
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None:
         """Replace thread history atomically (single transaction)."""
         async with self._pool.acquire() as conn, conn.transaction():
             await conn.execute(
-                "DELETE FROM conversation_history WHERE thread_id = $1", thread_id
+                "DELETE FROM conversation_history WHERE thread_id = $1 AND agent_scope = $2",
+                thread_id,
+                self._agent_scope,
             )
             for msg in messages:
                 await self._insert_message(conn, thread_id, msg)
@@ -223,15 +243,17 @@ class PostgresHistoryStore:
                     (
                         SELECT h2.content
                         FROM conversation_history h2
-                        WHERE h2.thread_id = h.thread_id
+                        WHERE h2.thread_id = h.thread_id AND h2.agent_scope = h.agent_scope
                         ORDER BY h2.created_at DESC, h2.id DESC
                         LIMIT 1
                     ) AS last_content
                 FROM conversation_history h
+                WHERE h.agent_scope = $1
                 GROUP BY h.thread_id
                 ORDER BY last_message_at DESC
-                LIMIT $1
+                LIMIT $2
                 """,
+                self._agent_scope,
                 cap,
             )
         out: list[ChatThreadSummary] = []
@@ -1044,8 +1066,9 @@ class PostgresSessionTurnLockStore:
 class PostgresStorageBackend:
     """Postgres-backed storage backend using an asyncpg connection pool."""
 
-    def __init__(self, db_url: str) -> None:
+    def __init__(self, db_url: str, agent_scope: str = "") -> None:
         self._db_url = db_url
+        self._agent_scope = agent_scope
         self._pool: asyncpg.Pool | None = None
         self._history_store: PostgresHistoryStore | None = None
         self._usage_store: PostgresUsageStore | None = None
@@ -1061,7 +1084,7 @@ class PostgresStorageBackend:
         )
         if run_schema:
             await _apply_schema(self._pool)
-        self._history_store = PostgresHistoryStore(self._pool)
+        self._history_store = PostgresHistoryStore(self._pool, self._agent_scope)
         self._usage_store = PostgresUsageStore(self._pool)
         self._runs_store = PostgresRunStore(self._pool)
         self._scheduled_loops_store = PostgresScheduledLoopStore(self._pool)

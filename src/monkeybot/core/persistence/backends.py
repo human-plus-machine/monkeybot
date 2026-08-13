@@ -225,7 +225,7 @@ def _parse_firestore_config(db_url: str) -> FirestoreConfig | None:
     return FirestoreConfig(project=project, database=database, prefix=prefix)
 
 
-def create_storage_backend(db_url: str) -> StorageBackend:
+def create_storage_backend(db_url: str, *, agent_scope: str = "") -> StorageBackend:
     """Factory that returns the right backend for ``db_url``.
 
     Neither SQLite nor Postgres implementation code is imported until this
@@ -237,11 +237,18 @@ def create_storage_backend(db_url: str) -> StorageBackend:
       (requires ``pip install 'monkeybot[postgres]'``)
     - ``firestore://PROJECT/DATABASE`` → :class:`~monkeybot.core.persistence.firestore.FirestoreStorageBackend`
       (requires ``pip install 'monkeybot[firestore]'``)
+
+    ``agent_scope`` namespaces conversation history so gateways for different
+    agent roots that happen to share one ``db_url`` (a shared Postgres/Firestore
+    backend, or an explicit shared SQLite path) can't read or resume each
+    other's threads via ``list_threads``/``load``. Callers that own a single
+    gateway process should pass the resolved agent root; leaving it unset keeps
+    the previous unscoped (single-tenant) behavior.
     """
     if db_url.startswith("sqlite://"):
         from monkeybot.core.persistence.sqlite_backend import SQLiteStorageBackend
 
-        return SQLiteStorageBackend(db_url)
+        return SQLiteStorageBackend(db_url, agent_scope)
     pg_url = _normalize_postgres_db_url(db_url)
     if pg_url is not None:
         try:
@@ -251,7 +258,7 @@ def create_storage_backend(db_url: str) -> StorageBackend:
                 "asyncpg is not installed. "
                 "Run: pip install 'monkeybot[postgres]'"
             ) from exc
-        return PostgresStorageBackend(pg_url)
+        return PostgresStorageBackend(pg_url, agent_scope)
     fs_config = _parse_firestore_config(db_url)
     if fs_config is not None:
         try:
@@ -261,5 +268,5 @@ def create_storage_backend(db_url: str) -> StorageBackend:
                 "google-cloud-firestore is not installed. "
                 "Run: pip install 'monkeybot[firestore]'"
             ) from exc
-        return FirestoreStorageBackend(fs_config)
+        return FirestoreStorageBackend(fs_config, agent_scope)
     raise ValueError(f"Unsupported DB URL scheme: {db_url!r}")

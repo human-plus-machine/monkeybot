@@ -278,8 +278,8 @@ async def _async_main() -> None:
         except ValueError:
             agent_md_path = resolve_project_path("AGENT.md", agent_root)
 
-    db_url = AgentLayout.from_environment(agent_root=agent_root).db_url
-    backend = create_storage_backend(db_url)
+    layout = AgentLayout.from_environment(agent_root=agent_root)
+    backend = create_storage_backend(layout.db_url, agent_scope=str(layout.agent_root))
     mcp: MCPClient | None = None
     executor: CoreToolExecutor | None = None
     knowledge: KnowledgeSubsystem | None = None

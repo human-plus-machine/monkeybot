@@ -33,7 +33,8 @@ SCHEMA_DDLS: Final[tuple[str, ...]] = (
     thread_id TEXT NOT NULL,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    agent_scope TEXT NOT NULL DEFAULT ''
 )""",
     """CREATE TABLE IF NOT EXISTS subagent_runs (
     run_id TEXT PRIMARY KEY,
@@ -158,6 +159,7 @@ async def apply_schema(conn: aiosqlite.Connection) -> None:
     await _ensure_turn_usage_estimated_column(conn)
     await _ensure_turn_usage_cache_columns(conn)
     await _ensure_subagent_runs_claim_columns(conn)
+    await _ensure_conversation_history_agent_scope_column(conn)
     cursor = await conn.execute("PRAGMA table_info(conversation_history)")
     rows = await cursor.fetchall()
     await cursor.close()
@@ -206,6 +208,33 @@ async def _ensure_subagent_runs_claim_columns(conn: aiosqlite.Connection) -> Non
         await conn.execute("ALTER TABLE subagent_runs ADD COLUMN worker_id TEXT")
     if "claimed_at" not in names:
         await conn.execute("ALTER TABLE subagent_runs ADD COLUMN claimed_at INTEGER")
+    await conn.commit()
+
+
+async def _ensure_conversation_history_agent_scope_column(conn: aiosqlite.Connection) -> None:
+    """Add ``agent_scope`` when upgrading an existing DB.
+
+    Pre-migration rows backfill to ``''``, which matches the scope a backend
+    opened without an explicit ``agent_scope`` (e.g. in-process tests) already
+    writes under — no rows become orphaned.
+
+    The scoped index is created here, after the column exists, rather than in
+    ``SCHEMA_DDLS``: that DDL list runs first and would fail referencing a
+    column not yet added to a pre-existing table.
+    """
+    cur = await conn.execute("PRAGMA table_info(conversation_history)")
+    rows = await cur.fetchall()
+    await cur.close()
+    names = {str(r[1]) for r in rows}
+    if "agent_scope" not in names:
+        await conn.execute(
+            "ALTER TABLE conversation_history ADD COLUMN agent_scope TEXT NOT NULL DEFAULT ''"
+        )
+        await conn.commit()
+    await conn.execute(
+        """CREATE INDEX IF NOT EXISTS idx_history_scope_thread
+        ON conversation_history(agent_scope, thread_id, created_at DESC, id DESC)"""
+    )
     await conn.commit()
 
 

@@ -32,10 +32,18 @@ def _validate_message(message: Message) -> None:
 
 
 class SQLiteHistoryStore:
-    """Append/read conversation rows keyed by ``thread_id``."""
+    """Append/read conversation rows keyed by ``thread_id``, scoped to ``agent_scope``.
 
-    def __init__(self, conn: aiosqlite.Connection) -> None:
+    ``agent_scope`` isolates threads when one DB_URL is shared across gateways
+    for different agent roots (e.g. a shared Postgres/Firestore backend) — without
+    it, ``list_threads`` would surface another agent's newest transcript. Defaults
+    to ``''`` (unscoped) for in-process/test callers that only ever see their own
+    rows; production gateways pass the resolved agent root.
+    """
+
+    def __init__(self, conn: aiosqlite.Connection, agent_scope: str = "") -> None:
         self._conn = conn
+        self._agent_scope = agent_scope
 
     async def append(self, thread_id: str, message: Message) -> None:
         """Validate ``message``, JSON-encode content blocks, insert one row."""
@@ -48,15 +56,15 @@ class SQLiteHistoryStore:
         created_at = int(time.time() * 1000)
         await self._conn.execute(
             """
-            INSERT INTO conversation_history(thread_id, role, content, created_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO conversation_history(thread_id, role, content, created_at, agent_scope)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (thread_id, message.role, payload, created_at),
+            (thread_id, message.role, payload, created_at, self._agent_scope),
         )
         await self._conn.commit()
 
     async def load(self, thread_id: str, limit: int | None = None) -> list[Message]:
-        """Return messages for ``thread_id``, oldest first.
+        """Return messages for ``thread_id`` within this store's agent scope, oldest first.
 
         When ``limit`` is set, returns the newest ``limit`` rows. When ``None``,
         returns the full thread (compaction owns size — do not silently slide).
@@ -66,10 +74,10 @@ class SQLiteHistoryStore:
                 """
                 SELECT id, role, content, created_at
                 FROM conversation_history
-                WHERE thread_id = ?
+                WHERE thread_id = ? AND agent_scope = ?
                 ORDER BY created_at ASC, id ASC
                 """,
-                (thread_id,),
+                (thread_id, self._agent_scope),
             )
             rows = await cursor.fetchall()
             await cursor.close()
@@ -79,11 +87,11 @@ class SQLiteHistoryStore:
                 """
                 SELECT id, role, content, created_at
                 FROM conversation_history
-                WHERE thread_id = ?
+                WHERE thread_id = ? AND agent_scope = ?
                 ORDER BY created_at DESC, id DESC
                 LIMIT ?
                 """,
-                (thread_id, limit),
+                (thread_id, self._agent_scope, limit),
             )
             rows = await cursor.fetchall()
             await cursor.close()
@@ -112,23 +120,25 @@ class SQLiteHistoryStore:
         return out
 
     async def clear(self, thread_id: str) -> None:
-        """Delete every stored message for ``thread_id``."""
+        """Delete every stored message for ``thread_id`` within this store's agent scope."""
         await self._conn.execute(
-            "DELETE FROM conversation_history WHERE thread_id = ?", (thread_id,)
+            "DELETE FROM conversation_history WHERE thread_id = ? AND agent_scope = ?",
+            (thread_id, self._agent_scope),
         )
         await self._conn.commit()
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None:
         """Replace the thread transcript with ``messages`` (validated like ``append``)."""
         await self._conn.execute(
-            "DELETE FROM conversation_history WHERE thread_id = ?", (thread_id,)
+            "DELETE FROM conversation_history WHERE thread_id = ? AND agent_scope = ?",
+            (thread_id, self._agent_scope),
         )
         await self._conn.commit()
         for msg in messages:
             await self.append(thread_id, msg)
 
     async def list_threads(self, limit: int = 50) -> list[ChatThreadSummary]:
-        """Return recent threads ordered by last activity (newest first).
+        """Return recent threads in this store's agent scope, ordered by last activity (newest first).
 
         The correlated subquery on ``last_content`` is O(threads × messages) per call.
         For production SQLite load, add a composite index on
@@ -144,16 +154,17 @@ class SQLiteHistoryStore:
                 (
                     SELECT h2.content
                     FROM conversation_history h2
-                    WHERE h2.thread_id = h.thread_id
+                    WHERE h2.thread_id = h.thread_id AND h2.agent_scope = h.agent_scope
                     ORDER BY h2.created_at DESC, h2.id DESC
                     LIMIT 1
                 ) AS last_content
             FROM conversation_history h
+            WHERE h.agent_scope = ?
             GROUP BY h.thread_id
             ORDER BY last_message_at DESC
             LIMIT ?
             """,
-            (cap,),
+            (self._agent_scope, cap),
         )
         rows = await cursor.fetchall()
         await cursor.close()
