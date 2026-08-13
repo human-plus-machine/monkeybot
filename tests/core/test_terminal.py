@@ -383,6 +383,19 @@ class TestTerminalExecutorExecution:
         with pytest.raises(SecurityError, match="only 'search' is permitted"):
             await executor.execute("mempalace", ["repair", "rebuild-index"], cwd=tmp_path)
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "args",
+        [
+            ["--pre", "mempalace", ".", "README.md"],
+            ["--pre=mempalace", ".", "README.md"],
+            ["--hostname-bin=mempalace", "private", "README.md"],
+        ],
+    )
+    async def test_ripgrep_rejects_process_launch_options(self, executor, tmp_path, args):
+        with pytest.raises(SecurityError, match="launches a process"):
+            await executor.execute("rg", args, cwd=tmp_path)
+
 
 class TestTerminalExecutorTimeout:
     """

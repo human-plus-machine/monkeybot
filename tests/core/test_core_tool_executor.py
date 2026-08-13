@@ -1189,18 +1189,7 @@ async def test_run_command_cat_under_memory(tmp_path: Path, monkeypatch: pytest.
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "argv",
-    [
-        ["mempalace", "search", "private"],
-        ["bash", "-c", "mempalace search private"],
-        ["python", "-m", "mempalace", "search", "private"],
-    ],
-)
-async def test_run_command_mempalace_is_blocked_when_memory_disabled(
-    tmp_path: Path,
-    argv: list[str],
-) -> None:
+async def test_run_command_mempalace_is_blocked_when_memory_unavailable(tmp_path: Path) -> None:
     skills = tmp_path / "skills"
     skills.mkdir()
     ex = CoreToolExecutor(
@@ -1215,7 +1204,7 @@ async def test_run_command_mempalace_is_blocked_when_memory_disabled(
             call=ToolCall(
                 call_id="memory-disabled",
                 name="run_command",
-                args={"argv": argv},
+                args={"argv": ["mempalace", "search", "private"]},
             ),
             ctx=_ctx(),
         )
@@ -1224,7 +1213,49 @@ async def test_run_command_mempalace_is_blocked_when_memory_disabled(
     assert out is None and err is not None
     payload = json.loads(err)
     assert payload["error_kind"] == "policy"
-    assert "disabled" in payload["message"].lower()
+    assert "unavailable" in payload["message"].lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["bash", "-c", "echo shell-ok"], "shell-ok"),
+        (["python", "-c", "print('python-ok')"], "python-ok"),
+        (["git", "--version"], "git version"),
+        (["uv", "--version"], "uv "),
+        (["gh", "--version"], "gh version"),
+    ],
+)
+async def test_run_command_launchers_remain_available_without_memory(
+    tmp_path: Path,
+    argv: list[str],
+    expected: str,
+) -> None:
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=None,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="memory-unavailable",
+                name="run_command",
+                args={"argv": argv},
+            ),
+            ctx=_ctx(),
+        )
+    )
+
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert payload["ok"] is True
+    assert expected in payload["stdout"]
 
 
 @pytest.mark.asyncio

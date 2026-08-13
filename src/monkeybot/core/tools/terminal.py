@@ -54,6 +54,7 @@ ALLOWED_COMMANDS = [
 ]
 
 ALLOWED_MEMPALACE_SUBCOMMANDS = frozenset({"search"})
+_RG_PROCESS_LAUNCH_OPTIONS = frozenset({"--hostname-bin", "--pre"})
 
 # SECURITY: Path allowlist - modify with extreme caution
 # Only add paths that are safe for agent access
@@ -127,7 +128,9 @@ def _resolve_run_executable(
         return sys.executable, args
     found = shutil.which(command, path=env.get("PATH", os.defpath))
     if found:
-        return found, args
+        # Never load RIPGREP_CONFIG_PATH: a config can include --pre and turn
+        # an otherwise read-only search into an arbitrary process launcher.
+        return found, ["--no-config", *args] if command == "rg" else args
     if command == "mempalace":
         return sys.executable, ["-m", "mempalace", *args]
     return command, args
@@ -380,6 +383,8 @@ class TerminalExecutor:
         self._validate_command(command)
         if command == "mempalace":
             self._validate_mempalace_args(args)
+        elif command == "rg":
+            self._validate_rg_args(args)
         
         # CRITICAL: Validate all paths in arguments
         self._validate_paths(args)
@@ -521,6 +526,25 @@ class TerminalExecutor:
                     "severity": "SECURITY_VIOLATION",
                     "command": "mempalace",
                     "subcommand": sub,
+                },
+            )
+            raise SecurityError(error_msg)
+
+    def _validate_rg_args(self, args: List[str]) -> None:
+        """Reject ripgrep options that execute child processes."""
+        for arg in args:
+            option = arg.split("=", 1)[0]
+            if option not in _RG_PROCESS_LAUNCH_OPTIONS:
+                continue
+            error_msg = f"ripgrep option {option!r} is not allowed because it launches a process"
+            logger.error(
+                "Security violation: %s",
+                error_msg,
+                extra={
+                    "component": "terminal_executor",
+                    "severity": "SECURITY_VIOLATION",
+                    "command": "rg",
+                    "option": option,
                 },
             )
             raise SecurityError(error_msg)

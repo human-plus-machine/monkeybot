@@ -41,6 +41,17 @@ def _load_dotenv(workspace_dir: Path) -> None:
         logger.warning("Failed to load %s", env_file, exc_info=True)
 
 
+def _effective_config_path(workspace_dir: Path) -> Path:
+    """Resolve the config that the spawned gateway will read."""
+    configured = os.environ.get("MONKEYBOT_CONFIG", "").strip()
+    if not configured:
+        return (workspace_dir / "monkeybot_config" / "monkeybot.yaml").resolve()
+    path = Path(configured).expanduser()
+    if not path.is_absolute():
+        path = workspace_dir / path
+    return path.resolve()
+
+
 def _http_base_from_ws_url(url: str) -> str:
     parsed = urllib.parse.urlparse(url)
     host = parsed.hostname or "localhost"
@@ -100,15 +111,15 @@ async def start_gateway_if_needed(
         )
 
     _load_dotenv(workspace)
+    config_path = _effective_config_path(workspace)
     parsed = urllib.parse.urlparse(url)
     port = parsed.port or (443 if parsed.scheme == "wss" else 80)
 
     env = {**os.environ, "PORT": str(port)}
+    if os.environ.get("MONKEYBOT_CONFIG", "").strip():
+        env["MONKEYBOT_CONFIG"] = str(config_path)
     env.setdefault("LOG_LEVEL", "error")
-    runtime = prepare_runtime_python(
-        workspace,
-        workspace / "monkeybot_config" / "monkeybot.yaml",
-    )
+    runtime = prepare_runtime_python(workspace, config_path)
     cmd = gateway_argv(runtime, module=COMBINED_GATEWAY_MODULE)
 
     logger.info("Starting combined gateway on port %s from %s", port, workspace)

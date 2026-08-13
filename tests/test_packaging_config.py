@@ -46,7 +46,7 @@ def test_mempalace_is_only_a_memory_extra() -> None:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     assert all(not dependency.startswith("mempalace") for dependency in project["dependencies"])
     assert project["optional-dependencies"]["memory"] == ["mempalace>=3.7.0,<4"]
-    assert "monkeybot[memory,realtime]" in project["optional-dependencies"]["cli"]
+    assert project["optional-dependencies"]["cli"] == ["monkeybot[realtime]", "typer>=0.12.0"]
 
 
 def test_cli_wheel_includes_scaffold_defaults(tmp_path: Path) -> None:

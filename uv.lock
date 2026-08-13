@@ -2374,12 +2374,10 @@ claude = [
     { name = "anthropic" },
 ]
 cli = [
-    { name = "mempalace" },
     { name = "typer" },
     { name = "websockets" },
 ]
 cli-realtime = [
-    { name = "mempalace" },
     { name = "pyaudio" },
     { name = "pynput" },
     { name = "typer" },
@@ -2520,7 +2518,7 @@ requires-dist = [
     { name = "mcp", specifier = ">=1.0.0" },
     { name = "mempalace", marker = "extra == 'memory'", specifier = ">=3.7.0,<4" },
     { name = "monkeybot", extras = ["cli"], marker = "extra == 'cli-realtime'" },
-    { name = "monkeybot", extras = ["memory", "realtime"], marker = "extra == 'cli'" },
+    { name = "monkeybot", extras = ["realtime"], marker = "extra == 'cli'" },
     { name = "monkeybot", extras = ["realtime"], marker = "extra == 'realtime-gemini'" },
     { name = "numpy", specifier = ">=1.26.0,<2.5" },
     { name = "openai", marker = "extra == 'huggingface'", specifier = ">=1.0" },
