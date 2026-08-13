@@ -1319,6 +1319,44 @@ async def test_disabled_memory_is_unreachable_through_launchers(
     reason=f"host cannot isolate filesystems: {isolation_support().detail}",
 )
 @pytest.mark.asyncio
+async def test_disabled_memory_hides_faas_palace_under_temp_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Serverless deployments put the palace in /tmp, which is not a safe zone."""
+    workspace = tmp_path / "workspace"
+    skills = workspace / "skills"
+    skills.mkdir(parents=True)
+    faas_palace = tmp_path / "faas" / "memory"
+    faas_palace.mkdir(parents=True)
+    (faas_palace / "private.txt").write_text("PRIVATE-CONTENT", encoding="utf-8")
+    monkeypatch.setenv("MEMORY_STORAGE_URI", f"local://{faas_palace}")
+    ex = CoreToolExecutor(
+        workspace_root=workspace,
+        memory=None,
+        skills_path=skills,
+        mcp=_NoMCP(),
+        run_command_allowed_path_prefixes=[str(tmp_path)],
+    )
+
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="faas-palace",
+                name="run_command",
+                args={"argv": ["bash", "-c", f"cat {faas_palace}/private.txt"]},
+            ),
+            ctx=dataclasses.replace(_ctx(), user_id="u"),
+        )
+    )
+
+    assert "PRIVATE-CONTENT" not in (out or "") + (err or "")
+
+
+@pytest.mark.skipif(
+    not isolation_support().available,
+    reason=f"host cannot isolate filesystems: {isolation_support().detail}",
+)
+@pytest.mark.asyncio
 async def test_enabled_memory_remains_readable_through_launchers(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     skills = workspace / "skills"
