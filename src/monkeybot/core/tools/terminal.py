@@ -610,12 +610,12 @@ class TerminalExecutor:
 
         if len(output) > max_output_size:
             logger.warning(
-                f"Truncating {stream_name}: {len(output)} bytes -> {MAX_OUTPUT_SIZE} bytes",
+                f"Truncating {stream_name}: {len(output)} bytes -> {max_output_size} bytes",
                 extra={
                     "component": "terminal_executor",
                     "stream": stream_name,
                     "original_size": len(output),
-                    "truncated_size": MAX_OUTPUT_SIZE,
+                    "truncated_size": max_output_size,
                 },
             )
             return output[:max_output_size] + b"\n[Output truncated at 1MB limit]"
