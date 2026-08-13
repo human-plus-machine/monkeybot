@@ -135,7 +135,7 @@ async def start_gateway_if_needed(
         proc.terminate()
         try:
             await asyncio.wait_for(proc.wait(), timeout=5.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             proc.kill()
             await proc.wait()
         raise RuntimeError(f"Gateway failed to become reachable at {url}")
@@ -151,6 +151,6 @@ async def stop_gateway(proc: asyncio.subprocess.Process | None) -> None:
     proc.terminate()
     try:
         await asyncio.wait_for(proc.wait(), timeout=5.0)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         proc.kill()
         await proc.wait()

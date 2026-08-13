@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 import monkeybot_cli.realtime.gateway_manager as gateway_manager
-from monkeybot.cli.gateway_manager import _find_workspace_dir, _url_is_local
+import pytest
 from monkeybot_cli.runtime_python import RuntimePython
+
+from monkeybot.cli.gateway_manager import _find_workspace_dir, _url_is_local
 
 
 def test_find_workspace_dir(tmp_path: Path) -> None:
