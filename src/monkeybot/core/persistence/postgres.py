@@ -85,6 +85,12 @@ _SCHEMA_DDLS: tuple[str, ...] = (
     "ALTER TABLE turn_usage ADD COLUMN IF NOT EXISTS cache_creation_tokens INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE subagent_runs ADD COLUMN IF NOT EXISTS worker_id TEXT",
     "ALTER TABLE subagent_runs ADD COLUMN IF NOT EXISTS claimed_at BIGINT",
+    # IF NOT EXISTS (not a separate check-then-add) so concurrent startups from
+    # multiple agents against a freshly-upgraded, shared DB_URL can't race each
+    # other into a duplicate-column error.
+    "ALTER TABLE conversation_history ADD COLUMN IF NOT EXISTS agent_scope TEXT NOT NULL DEFAULT ''",
+    """CREATE INDEX IF NOT EXISTS idx_history_scope_thread
+    ON conversation_history(agent_scope, thread_id, created_at DESC, id DESC)""",
     """CREATE TABLE IF NOT EXISTS scheduled_loops (
     loop_id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL,
@@ -115,75 +121,27 @@ _SCHEMA_DDLS: tuple[str, ...] = (
 )
 
 
-async def _ensure_conversation_history_agent_scope_column(conn: asyncpg.Connection) -> bool:
-    """Add ``agent_scope`` when upgrading an existing DB. Returns True if it was just added.
-
-    Checked (not blindly ``ADD COLUMN IF NOT EXISTS``) so the caller can tell a
-    genuine upgrade — where legacy rows need :func:`backfill_legacy_agent_scope`
-    — apart from a fresh install (the ``CREATE TABLE`` above already includes
-    the column) or a DB some other agent already migrated.
-    """
-    exists = await conn.fetchval(
-        "SELECT EXISTS(SELECT 1 FROM information_schema.columns "
-        "WHERE table_name = 'conversation_history' AND column_name = 'agent_scope')"
-    )
-    column_added = not exists
-    if column_added:
-        await conn.execute(
-            "ALTER TABLE conversation_history ADD COLUMN agent_scope TEXT NOT NULL DEFAULT ''"
-        )
-    await conn.execute(
-        """CREATE INDEX IF NOT EXISTS idx_history_scope_thread
-        ON conversation_history(agent_scope, thread_id, created_at DESC, id DESC)"""
-    )
-    return column_added
-
-
-async def backfill_legacy_agent_scope(pool: asyncpg.Pool, agent_scope: str) -> None:
-    """Claim pre-migration rows (``agent_scope = ''``) for ``agent_scope``, once.
-
-    Call only immediately after :func:`_apply_schema` reports it just added the
-    ``agent_scope`` column — mirrors ``sqlite.backfill_legacy_agent_scope``.
-
-    A *standing* runtime read fallback to the legacy ``''`` scope (tried in an
-    earlier version of this fix) was rejected: any agent could read, delete, or
-    adopt any other agent's legacy thread just by guessing or reusing a
-    thread_id, indefinitely — worse than the leak this scoping exists to
-    close, since it never expires. A one-time backfill is bounded: whichever
-    gateway opens this DB first after upgrading claims the legacy rows, and
-    every open after that is a normal, fully-isolated scope with no standing
-    cross-agent door. If this ``db_url`` is genuinely shared by multiple
-    agents with real pre-upgrade history, the "first opener wins" tradeoff is
-    wrong for the others — that's inherent to disambiguating already-comingled
-    data with no owner recorded; only an operator who knows which legacy
-    thread_id belongs to which agent can resolve it, same as the warning below
-    already says.
-    """
-    if not agent_scope:
-        return
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE conversation_history SET agent_scope = $1 WHERE agent_scope = ''",
-            agent_scope,
-        )
-
-
-async def _apply_schema(pool: asyncpg.Pool) -> bool:
+async def _apply_schema(pool: asyncpg.Pool) -> None:
     async with pool.acquire() as conn:
         for ddl in _SCHEMA_DDLS:
             await conn.execute(ddl)
-        return await _ensure_conversation_history_agent_scope_column(conn)
 
 
 async def _warn_if_legacy_unscoped_history(pool: asyncpg.Pool) -> None:
     """Log once if pre-migration (``agent_scope = ''``) rows remain.
 
-    Expected to find nothing right after a successful
-    :func:`backfill_legacy_agent_scope` call; this covers the case where that
-    didn't run (a later agent opening a DB some earlier agent already migrated
-    and backfilled for itself) and rows are still stranded — reachable only by
-    an operator backfilling ``agent_scope`` per legacy thread_id by hand, since
-    there's no longer a runtime fallback that could reach them automatically.
+    Deliberately no automatic backfill: an earlier version of this fix claimed
+    every ``agent_scope = ''`` row for whichever agent happened to open the DB
+    first after migration. Reviewed and rejected (PR #179) — on a genuinely
+    shared ``db_url``, that agent could read every other agent's pre-upgrade
+    transcript while the real owners silently lost access, a deterministic
+    cross-agent leak, not a probabilistic one. Ambiguous shared history has no
+    safe automatic owner; those rows stay put and unreachable via
+    list_threads/load/reset until an operator who knows which legacy
+    thread_id belongs to which agent runs, per thread_id::
+
+        UPDATE conversation_history SET agent_scope = '<agent-id>'
+        WHERE thread_id = '<thread-id>' AND agent_scope = '';
     """
     async with pool.acquire() as conn:
         exists = await conn.fetchval(
@@ -191,10 +149,11 @@ async def _warn_if_legacy_unscoped_history(pool: asyncpg.Pool) -> None:
         )
     if exists:
         logger.warning(
-            "conversation_history has pre-migration rows with agent_scope='' that "
-            "this agent did not claim — they are not reachable via list_threads, "
-            "load, or reset until an operator backfills agent_scope for each "
-            "legacy thread_id by hand."
+            "conversation_history has rows with agent_scope='' that this agent "
+            "did not write — they are not reachable via list_threads, load, or "
+            "reset until an operator backfills agent_scope for each legacy "
+            "thread_id by hand (see _warn_if_legacy_unscoped_history docstring "
+            "for the exact UPDATE statement)."
         )
 
 
@@ -1168,10 +1127,8 @@ class PostgresStorageBackend:
             self._db_url, min_size=min_size, max_size=max_size
         )
         if run_schema:
-            agent_scope_migrated = await _apply_schema(self._pool)
-            if agent_scope_migrated and self._agent_scope:
-                await backfill_legacy_agent_scope(self._pool, self._agent_scope)
-            elif self._agent_scope:
+            await _apply_schema(self._pool)
+            if self._agent_scope:
                 await _warn_if_legacy_unscoped_history(self._pool)
         self._history_store = PostgresHistoryStore(self._pool, self._agent_scope)
         self._usage_store = PostgresUsageStore(self._pool)

@@ -82,16 +82,32 @@ def _warn_legacy_unscoped_history_possible() -> None:
     missing field, so there's no query-based way to reach them, and no cheap
     existence check for "field missing" to even detect the situation (unlike
     Postgres, where a real ``agent_scope = ''`` column is directly queryable
-    and countable). An earlier version of this fix tried a runtime fallback to
-    ``agent_scope in [scope, '']``, but that only ever reached docs some store
-    had *already* written with ``agent_scope=''`` (test/library callers) —
-    never genuinely pre-migration docs — while giving any agent-scoped store a
-    standing door into that shared ``''`` bucket, which could read, delete, or
-    adopt another agent's legacy-shaped thread by guessing or reusing a
-    thread_id. Removed; Firestore has no in-code backward-compatible read path
-    for genuinely pre-migration data — this warns unconditionally so operators
-    know a manual backfill (writing ``agent_scope`` onto every existing
-    document) is required, not just possible.
+    and countable, though there too an earlier version of this fix that
+    auto-claimed such rows for whichever agent opened first was found to leak
+    across agents and was rejected — see postgres.py). This warns
+    unconditionally, and deliberately does not attempt any automatic
+    remediation of its own, so operators know a manual migration is required.
+
+    That manual migration has two distinct parts, not one field patch:
+
+    1. ``conversation_history`` docs (individual messages) are looked up by
+       the ``thread_id``/``agent_scope`` *fields*, not by document id — so
+       setting ``agent_scope`` on the existing docs for a legacy thread_id is
+       sufficient and safe on its own.
+    2. ``threads`` summary docs (one per thread, for ``list_threads``) are
+       looked up by a *document id* derived from ``sha256(agent_scope +
+       thread_id)`` (see ``_summary_doc_id``). A legacy summary doc's id
+       predates that scheme, so merely adding ``agent_scope`` to it (leaving
+       it at its old id) makes it satisfy the query filter but not the id
+       lookup: the next ``append()`` to that thread creates a *second*,
+       correctly-keyed summary doc rather than updating it, and ``reset()``
+       only ever deletes the correctly-keyed one — leaving the old doc
+       dangling with a stale count/preview, still matched by ``list_threads``
+       and selectable by ``--continue``. The old summary doc must be
+       *deleted*, not patched; a correct replacement is created automatically
+       by the thread's next ``append()``, or an operator can precompute one
+       immediately at ``document(sha256(agent_scope + thread_id).hexdigest())``
+       if the thread needs to be listable before that.
     """
     global _warned_legacy_unscoped_history
     if _warned_legacy_unscoped_history:
@@ -103,8 +119,11 @@ def _warn_legacy_unscoped_history_possible() -> None:
         "by this (or any) agent-scoped store's load/list_threads/reset — "
         "Firestore cannot query for a missing field, and this store makes no "
         "attempt to guess it. If this deployment predates agent-scoped "
-        "history, those documents need an operator-run backfill to set "
-        "agent_scope before they become readable again."
+        "history: tag agent_scope onto the legacy conversation_history docs "
+        "for each thread_id, and DELETE (not patch) that thread's old "
+        "threads-collection summary doc — patching it in place leaves a "
+        "stale duplicate once the thread is next appended to (see "
+        "_warn_legacy_unscoped_history_possible docstring for why)."
     )
 
 
@@ -280,6 +299,16 @@ class FirestoreHistoryStore:
             await self.append(thread_id, msg)
 
     async def list_threads(self, limit: int = 50) -> list[ChatThreadSummary]:
+        """Return recent threads, newest first, excluding subagent transcripts.
+
+        Filtered here (client-side, not in the query) rather than only at
+        write time: an ``append()`` guard alone leaves *pre-existing* subagent
+        summary docs — written before that guard existed — still listable, so
+        a subagent that finished after its parent's last turn could still
+        outrank it as "newest" and get resumed by ``--continue`` instead of
+        the actual previous chat. Firestore has no server-side "does not
+        start with" filter to push this into the query itself.
+        """
         cap = max(1, min(limit, 200))
         query = (
             self._client.collection(self._threads_collection)
@@ -291,6 +320,8 @@ class FirestoreHistoryStore:
         async for doc in query.stream():
             data = doc.to_dict() or {}
             thread_id = str(data.get("thread_id") or doc.id)
+            if thread_id.startswith(SUBAGENT_THREAD_ID_PREFIX):
+                continue
             preview = preview_from_content_blob(str(data.get("last_content", "")))
             out.append(
                 ChatThreadSummary(

@@ -132,6 +132,54 @@ async def test_create_harness_deps_threads_agent_scope_to_storage_backend() -> N
 
 
 @pytest.mark.asyncio
+async def test_create_harness_deps_defaults_agent_scope_from_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for PR #179 review: isolation must not be opt-in-only —
+    when agent_scope isn't passed explicitly, create_harness_deps() should
+    pick up the same MONKEYBOT_AGENT_ID env var the gateway/subagent workers
+    already use (AgentLayout.export_environment), so an embedder that already
+    sets it for that reason gets isolation here for free.
+    """
+    monkeypatch.setenv("MONKEYBOT_AGENT_ID", "env-agent-id")
+    with patch(
+        "monkeybot.core.bootstrap.create_storage_backend",
+        wraps=create_storage_backend,
+    ) as spy:
+        deps = await create_harness_deps(
+            "sqlite:///:memory:",
+            None,
+            open_mcp=False,
+            _provider_override=_fake(),
+        )
+    spy.assert_called_once_with("sqlite:///:memory:", agent_scope="env-agent-id")
+    await deps.close()
+
+
+@pytest.mark.asyncio
+async def test_create_harness_deps_explicit_empty_agent_scope_overrides_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Passing agent_scope='' explicitly is a deliberate opt-out and must win
+    over MONKEYBOT_AGENT_ID, not be treated as "unset."
+    """
+    monkeypatch.setenv("MONKEYBOT_AGENT_ID", "env-agent-id")
+    with patch(
+        "monkeybot.core.bootstrap.create_storage_backend",
+        wraps=create_storage_backend,
+    ) as spy:
+        deps = await create_harness_deps(
+            "sqlite:///:memory:",
+            None,
+            open_mcp=False,
+            _provider_override=_fake(),
+            agent_scope="",
+        )
+    spy.assert_called_once_with("sqlite:///:memory:", agent_scope="")
+    await deps.close()
+
+
+@pytest.mark.asyncio
 async def test_create_harness_deps_closes_backend_on_memory_subsystem_failure(
     tmp_path: Path,
 ) -> None:

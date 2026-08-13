@@ -506,8 +506,15 @@ async def test_history_reset_does_not_cross_scope(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_history_backfills_legacy_rows_to_agent_scope_on_migration(tmp_path: Path) -> None:
-    """A pre-#179 DB (no agent_scope column) must not lose history on upgrade."""
+async def test_history_migration_does_not_auto_claim_legacy_rows(tmp_path: Path) -> None:
+    """Regression for PR #179 review: an earlier version of this fix claimed
+    every pre-migration (agent_scope='') row for whichever agent opened the DB
+    first. Reproduced directly here with two agents' legacy threads on one
+    file: that let the first opener read the second agent's secret and left
+    the second agent's own history empty. Migration must leave ambiguous
+    legacy rows unclaimed by anyone — only an explicit, per-thread operator
+    UPDATE (exercised below) may assign them.
+    """
     import time
 
     import aiosqlite
@@ -525,16 +532,62 @@ async def test_history_backfills_legacy_rows_to_agent_scope_on_migration(tmp_pat
     )
     await conn.execute(
         "INSERT INTO conversation_history(thread_id, role, content, created_at) VALUES (?,?,?,?)",
-        ("legacy-thread", "user", '[{"type":"text","text":"pre-upgrade"}]', int(time.time() * 1000)),
+        ("agent-a-legacy-thread", "user", '[{"type":"text","text":"a\'s secret"}]', int(time.time() * 1000)),
+    )
+    await conn.execute(
+        "INSERT INTO conversation_history(thread_id, role, content, created_at) VALUES (?,?,?,?)",
+        ("agent-b-legacy-thread", "user", '[{"type":"text","text":"b\'s secret"}]', int(time.time() * 1000)),
     )
     await conn.commit()
     await conn.close()
 
-    backend = SQLiteStorageBackend(f"sqlite:///{db_path}", agent_scope="my-agent-root")
+    backend_a = SQLiteStorageBackend(f"sqlite:///{db_path}", agent_scope="agent-a")
+    await backend_a.open(run_schema=True)
+    try:
+        # Migration must not have claimed either thread for agent-a.
+        assert await backend_a.history().list_threads() == []
+        assert await backend_a.history().load("agent-a-legacy-thread") == []
+        assert await backend_a.history().load("agent-b-legacy-thread") == []
+
+        # The documented manual path (see warn_if_legacy_unscoped_history) does
+        # restore access, scoped to exactly the thread an operator maps.
+        conn2 = backend_a._conn
+        assert conn2 is not None
+        await conn2.execute(
+            "UPDATE conversation_history SET agent_scope = ? WHERE thread_id = ? AND agent_scope = ''",
+            ("agent-a", "agent-a-legacy-thread"),
+        )
+        await conn2.commit()
+        assert [t.thread_id for t in await backend_a.history().list_threads()] == [
+            "agent-a-legacy-thread"
+        ]
+        # agent-b's still-unclaimed thread remains invisible to agent-a.
+        assert await backend_a.history().load("agent-b-legacy-thread") == []
+    finally:
+        await backend_a.close()
+
+
+@pytest.mark.asyncio
+async def test_history_warns_once_when_legacy_unscoped_rows_remain(tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    from monkeybot.core.persistence.sqlite import warn_if_legacy_unscoped_history
+
+    db_path = tmp_path / "legacy2.db"
+    backend = SQLiteStorageBackend(f"sqlite:///{db_path}", agent_scope="agent-a")
     await backend.open(run_schema=True)
     try:
-        threads = await backend.history().list_threads()
-        assert [t.thread_id for t in threads] == ["legacy-thread"]
+        conn = backend._conn
+        assert conn is not None
+        await conn.execute(
+            "INSERT INTO conversation_history(thread_id, role, content, created_at, agent_scope) "
+            "VALUES (?,?,?,?,?)",
+            ("stray-thread", "user", '[{"type":"text","text":"x"}]', 1, ""),
+        )
+        await conn.commit()
+        with patch("monkeybot.core.persistence.sqlite.logger") as mock_logger:
+            await warn_if_legacy_unscoped_history(conn)
+            mock_logger.warning.assert_called_once()
     finally:
         await backend.close()
 

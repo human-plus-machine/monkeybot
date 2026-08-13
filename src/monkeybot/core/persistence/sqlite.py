@@ -151,21 +151,15 @@ async def _log_legacy_schema_error(conn: aiosqlite.Connection) -> None:
     logger.error("Legacy conversation_history schema detected; db=%s", path)
 
 
-async def apply_schema(conn: aiosqlite.Connection) -> bool:
-    """Create tables/indexes; refuse legacy conversation_history shapes.
-
-    Returns True when ``agent_scope`` was just added to a pre-existing
-    ``conversation_history`` table — a fresh migration off the pre-agent-scope
-    schema. Callers use this to decide whether to claim legacy rows for the
-    scope they're about to open with (see :func:`backfill_legacy_agent_scope`).
-    """
+async def apply_schema(conn: aiosqlite.Connection) -> None:
+    """Create tables/indexes; refuse legacy conversation_history shapes."""
     for ddl in SCHEMA_DDLS:
         await conn.execute(ddl)
     await conn.commit()
     await _ensure_turn_usage_estimated_column(conn)
     await _ensure_turn_usage_cache_columns(conn)
     await _ensure_subagent_runs_claim_columns(conn)
-    agent_scope_migrated = await _ensure_conversation_history_agent_scope_column(conn)
+    await _ensure_conversation_history_agent_scope_column(conn)
     cursor = await conn.execute("PRAGMA table_info(conversation_history)")
     rows = await cursor.fetchall()
     await cursor.close()
@@ -173,7 +167,6 @@ async def apply_schema(conn: aiosqlite.Connection) -> bool:
     if "tool_name" in col_names or "tool_call_id" in col_names:
         await _log_legacy_schema_error(conn)
         raise RuntimeError(_LEGACY_SCHEMA_MESSAGE)
-    return agent_scope_migrated
 
 
 async def _ensure_turn_usage_estimated_column(conn: aiosqlite.Connection) -> None:
@@ -218,19 +211,28 @@ async def _ensure_subagent_runs_claim_columns(conn: aiosqlite.Connection) -> Non
     await conn.commit()
 
 
-async def _ensure_conversation_history_agent_scope_column(conn: aiosqlite.Connection) -> bool:
-    """Add ``agent_scope`` when upgrading an existing DB. Returns True if it was just added.
+async def _ensure_conversation_history_agent_scope_column(conn: aiosqlite.Connection) -> None:
+    """Add ``agent_scope`` when upgrading an existing DB.
 
     The scoped index is created here, after the column exists, rather than in
     ``SCHEMA_DDLS``: that DDL list runs first and would fail referencing a
     column not yet added to a pre-existing table.
+
+    Deliberately does not backfill legacy (``agent_scope = ''``) rows into
+    whichever agent_scope happens to open the DB first: reviewed and rejected
+    (PR #179) — an operator's SQLite file can be pointed at by more than one
+    agent root (an explicit shared absolute ``db_url``, or a config mistake),
+    and reproduced directly: opening as scope A on a DB holding both A's and
+    B's legacy threads let A read B's, and permanently emptied B's history the
+    moment A's open claimed everything. Ambiguous shared history has no safe
+    automatic owner; see :func:`warn_if_legacy_unscoped_history`, called by
+    ``SQLiteStorageBackend.open()``, for the required manual path instead.
     """
     cur = await conn.execute("PRAGMA table_info(conversation_history)")
     rows = await cur.fetchall()
     await cur.close()
     names = {str(r[1]) for r in rows}
-    column_added = "agent_scope" not in names
-    if column_added:
+    if "agent_scope" not in names:
         await conn.execute(
             "ALTER TABLE conversation_history ADD COLUMN agent_scope TEXT NOT NULL DEFAULT ''"
         )
@@ -240,31 +242,36 @@ async def _ensure_conversation_history_agent_scope_column(conn: aiosqlite.Connec
         ON conversation_history(agent_scope, thread_id, created_at DESC, id DESC)"""
     )
     await conn.commit()
-    return column_added
 
 
-async def backfill_legacy_agent_scope(conn: aiosqlite.Connection, agent_scope: str) -> None:
-    """Claim pre-migration rows (``agent_scope = ''``) for ``agent_scope``.
+async def warn_if_legacy_unscoped_history(conn: aiosqlite.Connection) -> None:
+    """Log once if pre-migration (``agent_scope = ''``) rows remain.
 
-    Call once, immediately after :func:`apply_schema` reports it just added the
-    ``agent_scope`` column — otherwise a gateway that now always opens history
-    with a nonempty agent-root scope would make every pre-upgrade conversation
-    invisible to ``--continue``, transcript backfill, and explicit ``--session``
-    resumes alike.
+    Those rows are not reachable via ``list_threads``, ``load``, or ``reset``
+    from any agent-scoped store — there is no automatic remediation (see
+    :func:`_ensure_conversation_history_agent_scope_column`) — so an operator
+    who knows which legacy thread_id belongs to which agent must run, per
+    thread_id::
 
-    Safe under the default deployment topology (one SQLite file per agent
-    root), where a freshly-migrated file has exactly one owner. Do not call
-    this against a ``db_url`` known to be shared across multiple agent roots —
-    it would reassign every other agent's legacy history to whichever gateway
-    happens to migrate first.
+        UPDATE conversation_history SET agent_scope = '<agent-id>'
+        WHERE thread_id = '<thread-id>' AND agent_scope = '';
+
+    against this DB file directly (e.g. via the ``sqlite3`` CLI) before that
+    thread becomes resumable again.
     """
-    if not agent_scope:
-        return
-    await conn.execute(
-        "UPDATE conversation_history SET agent_scope = ? WHERE agent_scope = ''",
-        (agent_scope,),
+    cur = await conn.execute(
+        "SELECT EXISTS(SELECT 1 FROM conversation_history WHERE agent_scope = '')"
     )
-    await conn.commit()
+    row = await cur.fetchone()
+    await cur.close()
+    if row and row[0]:
+        logger.warning(
+            "conversation_history has rows with agent_scope='' that this agent "
+            "did not write — they are not reachable via list_threads, load, or "
+            "reset until an operator backfills agent_scope for each legacy "
+            "thread_id by hand (see warn_if_legacy_unscoped_history docstring "
+            "for the exact UPDATE statement)."
+        )
 
 
 async def open_connection(db_url: str | None = None) -> aiosqlite.Connection:

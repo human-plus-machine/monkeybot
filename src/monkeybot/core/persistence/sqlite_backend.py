@@ -14,8 +14,8 @@ from monkeybot.core.persistence.session_turn_locks import SQLiteSessionTurnLockS
 from monkeybot.core.persistence.history import SQLiteHistoryStore
 from monkeybot.core.persistence.sqlite import (
     apply_schema,
-    backfill_legacy_agent_scope,
     open_connection,
+    warn_if_legacy_unscoped_history,
 )
 from monkeybot.core.persistence.usage import SQLiteUsageStore
 
@@ -36,9 +36,9 @@ class SQLiteStorageBackend:
     async def open(self, *, run_schema: bool = True) -> None:
         self._conn = await open_connection(self._db_url)
         if run_schema:
-            agent_scope_migrated = await apply_schema(self._conn)
-            if agent_scope_migrated and self._agent_scope:
-                await backfill_legacy_agent_scope(self._conn, self._agent_scope)
+            await apply_schema(self._conn)
+            if self._agent_scope:
+                await warn_if_legacy_unscoped_history(self._conn)
         self._history_store = SQLiteHistoryStore(self._conn, self._agent_scope)
         self._usage_store = SQLiteUsageStore(self._conn)
         self._runs_store = SQLiteRunStore(self._conn)

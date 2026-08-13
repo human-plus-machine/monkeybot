@@ -128,6 +128,22 @@ async def test_duplicate_session_returns_409(
 
 
 @pytest.mark.asyncio
+async def test_post_session_rejects_subagent_prefixed_id(
+    client: AsyncClient,
+) -> None:
+    """Regression for PR #179 review: a user-supplied session_id starting with
+    the reserved 'subagent:' prefix would be silently excluded from
+    list_threads/--continue (same filter that hides internal subagent
+    transcripts). Reject it at creation instead of accepting it silently.
+    """
+    r = await client.post("/sessions", json={"session_id": "subagent:foo"})
+    assert r.status_code == 400
+    err = r.json()["error"]
+    assert err["code"] == "BAD_REQUEST"
+    assert "reserved prefix" in err["message"]
+
+
+@pytest.mark.asyncio
 async def test_delete_session_returns_200_and_removes_it(
     client: AsyncClient,
     registry: SessionRegistry,

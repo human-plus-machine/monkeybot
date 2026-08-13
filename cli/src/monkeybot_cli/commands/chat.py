@@ -42,6 +42,8 @@ from monkeybot_cli.config_resolve import (
 )
 from monkeybot_cli.gateway_health import (
     occupied_gateway_message as _occupied_gateway_message,
+)
+from monkeybot_cli.gateway_health import (
     wait_for_health as _wait_for_health,
 )
 from monkeybot_cli.opensandbox_lifecycle import (

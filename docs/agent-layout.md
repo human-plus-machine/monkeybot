@@ -60,6 +60,13 @@ deploys. `AgentLayout.export_environment()` propagates the resolved value to
 child processes (subagent workers) as `MONKEYBOT_AGENT_ID`, so they stay
 consistent with the gateway without needing to set it themselves.
 
+Pattern B/C embedders (`create_harness_deps()`, see `docs/deploy-pattern-b-serverless.md`
+/ `docs/deploy-pattern-c-agent-platform.md`) have no agent-root concept to
+default to, but `create_harness_deps()` reads this same `MONKEYBOT_AGENT_ID`
+env var automatically when its `agent_scope` argument is left unset — set it
+whenever a `db_url` might ever be shared across more than one deployment or
+tenant.
+
 `monkeybot doctor` prints the resolved layout and flags a legacy `skills`
 directory nested inside `workspace`. It offers a preview only: inspect and
 resolve collisions before moving any existing files.
