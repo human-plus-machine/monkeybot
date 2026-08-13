@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import json
 import os
 import signal
 import subprocess
@@ -697,21 +698,32 @@ def _spawn_gateway(config_path: Path | None, agent_root: Path, port: int) -> _Sp
 
 
 def _resolve_continue_session_id(base: str) -> str | None:
-    """Look up the most recently used session id for this agent root, if any."""
+    """Look up the most recently used session id for this agent root, if any.
+
+    A malformed body (bad JSON, or valid JSON that isn't the expected shape)
+    is treated the same as an HTTP error — printed and swallowed here, not
+    raised — so a caller resolving this before entering its cleanup
+    try/finally (see run_chat) can't skip terminating a spawned gateway and
+    deleting its log file over a server response glitch.
+    """
     try:
         with httpx.Client(timeout=5.0) as client:
             resp = client.get(f"{base}/api/chat-history", params={"limit": 1})
             resp.raise_for_status()
-    except httpx.HTTPError as exc:
+        body = resp.json()
+    except (httpx.HTTPError, json.JSONDecodeError) as exc:
         print(
             f"{_DIM}Could not fetch chat history ({exc}) — starting a new session.{_RESET}",
             file=sys.stderr,
         )
         return None
-    threads = resp.json().get("threads") or []
-    if not threads:
+    threads = body.get("threads") if isinstance(body, dict) else None
+    if not isinstance(threads, list) or not threads:
         return None
-    sid = threads[0].get("session_id")
+    first = threads[0]
+    if not isinstance(first, dict):
+        return None
+    sid = first.get("session_id")
     return str(sid) if sid else None
 
 

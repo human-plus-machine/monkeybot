@@ -100,6 +100,7 @@ async def create_harness_deps(
     provider_override: Provider | None = None,
     _provider_override: Provider | None = None,
     workspace_root: Path | None = None,
+    agent_scope: str = "",
 ) -> HarnessDeps:
     """Open storage, optional memory, MCP, and resolve the LLM provider.
 
@@ -115,9 +116,20 @@ async def create_harness_deps(
         provider_override: Inject a custom :class:`~monkeybot.core.llm.provider.Provider` (skips config lookup).
         _provider_override: Deprecated alias for ``provider_override`` (tests).
         workspace_root: When set with knowledge enabled, constructs :class:`KnowledgeSubsystem`.
+        agent_scope: Namespaces conversation history in ``db_url``, same as the gateway's
+            resolved agent root (see :func:`~monkeybot.core.persistence.backends.create_storage_backend`).
+            Defaults to ``''`` (unscoped) for backward compatibility with existing Pattern B/C
+            embedders. **Set this explicitly** to a stable per-tenant/per-agent identity if
+            multiple ``create_harness_deps`` callers (e.g. one Lambda handler serving several
+            tenants) can ever point at the same ``db_url`` — otherwise every embedded agent
+            shares one global, unscoped conversation-history namespace and can read/resume
+            each other's threads via ``list_threads``/``load``, the same leak the gateway path
+            closes by always passing its resolved ``AgentLayout.agent_id``. Unlike the gateway,
+            this library entry point has no agent-root concept to default to, so there's no
+            equivalent implicit-but-imperfect fallback here — only an explicit opt-in.
     """
     override = provider_override if provider_override is not None else _provider_override
-    backend = create_storage_backend(db_url)
+    backend = create_storage_backend(db_url, agent_scope=agent_scope)
     await backend.open(run_schema=auto_schema_enabled_from_config())
     try:
         if override is not None:

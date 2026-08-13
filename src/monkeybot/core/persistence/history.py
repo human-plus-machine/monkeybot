@@ -17,7 +17,11 @@ import aiosqlite
 
 from monkeybot.core.types.content_blocks import ContentBlock
 from monkeybot.core.llm.provider import Message, Role
-from monkeybot.core.persistence.thread_summary import ChatThreadSummary, preview_from_content_blob
+from monkeybot.core.persistence.thread_summary import (
+    SUBAGENT_THREAD_ID_PREFIX,
+    ChatThreadSummary,
+    preview_from_content_blob,
+)
 
 logger = logging.getLogger("monkeybot.core.persistence.history")
 
@@ -140,6 +144,12 @@ class SQLiteHistoryStore:
     async def list_threads(self, limit: int = 50) -> list[ChatThreadSummary]:
         """Return recent threads in this store's agent scope, ordered by last activity (newest first).
 
+        Excludes subagent transcripts (``thread_id`` prefixed
+        ``SUBAGENT_THREAD_ID_PREFIX``) — otherwise a subagent that finishes
+        after its parent's last turn would outrank the parent as "newest,"
+        making ``--continue`` resume the subagent's transcript under the
+        main-agent prompt and tools instead of the actual previous chat.
+
         The correlated subquery on ``last_content`` is O(threads × messages) per call.
         For production SQLite load, add a composite index on
         ``conversation_history(thread_id, created_at DESC, id DESC)``.
@@ -159,12 +169,12 @@ class SQLiteHistoryStore:
                     LIMIT 1
                 ) AS last_content
             FROM conversation_history h
-            WHERE h.agent_scope = ?
+            WHERE h.agent_scope = ? AND h.thread_id NOT LIKE ? || '%'
             GROUP BY h.thread_id
             ORDER BY last_message_at DESC
             LIMIT ?
             """,
-            (self._agent_scope, cap),
+            (self._agent_scope, SUBAGENT_THREAD_ID_PREFIX, cap),
         )
         rows = await cursor.fetchall()
         await cursor.close()

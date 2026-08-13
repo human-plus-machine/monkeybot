@@ -52,6 +52,15 @@ _IMAGE_CAPABLE_TOOLS = frozenset({"load_file"})
 # Optional top-level fields elevated from task tool result JSON onto wire rows.
 _TASK_LINKAGE_KEYS: tuple[str, ...] = ("run_id", "child_thread_id", "subagent_type")
 
+# Subagent runs persist their own transcript under f"{SUBAGENT_THREAD_ID_PREFIX}{parent_thread_id}:{suffix}"
+# (see core_tool_executor._run_inline_subagent_with_progress and subagent_worker._async_main) —
+# the same literal, not centrally imported there since neither module otherwise depends on
+# persistence internals. list_threads() implementations filter this prefix out so a subagent
+# that happens to finish after its parent's last turn doesn't outrank the parent's own thread
+# as "newest" — which would make `monkeybot chat --continue` resume the subagent's transcript,
+# under the main-agent prompt and tools, instead of the actual previous conversation.
+SUBAGENT_THREAD_ID_PREFIX = "subagent:"
+
 
 @dataclass(frozen=True)
 class ChatThreadSummary:

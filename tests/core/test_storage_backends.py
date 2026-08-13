@@ -452,6 +452,36 @@ async def test_history_list_threads_isolated_by_agent_scope() -> None:
 
 
 @pytest.mark.asyncio
+async def test_history_list_threads_excludes_subagent_transcripts() -> None:
+    """Regression for PR #179 review: a subagent that finishes after its
+    parent's last turn must not outrank the parent as "newest" — otherwise
+    `monkeybot chat --continue` resumes the subagent's transcript under the
+    main-agent prompt and tools instead of the actual previous chat.
+    """
+    from monkeybot.core.persistence.thread_summary import SUBAGENT_THREAD_ID_PREFIX
+
+    backend = SQLiteStorageBackend("sqlite:///:memory:", agent_scope="agent-a")
+    await backend.open()
+    try:
+        store = backend.history()
+        await store.append("main-thread", Message.text("user", "hello"))
+        # Subagent finishes strictly after the parent's last message.
+        await store.append(
+            f"{SUBAGENT_THREAD_ID_PREFIX}main-thread:abc123",
+            Message.text("user", "subagent internal chatter"),
+        )
+
+        threads = await store.list_threads()
+        assert [t.thread_id for t in threads] == ["main-thread"]
+        # The subagent's own transcript is still fully readable by its exact id —
+        # only list_threads (auto-discovery / --continue) excludes it.
+        loaded = await store.load(f"{SUBAGENT_THREAD_ID_PREFIX}main-thread:abc123")
+        assert len(loaded) == 1
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
 async def test_history_reset_does_not_cross_scope(tmp_path: Path) -> None:
     from monkeybot.core.persistence.history import SQLiteHistoryStore
 

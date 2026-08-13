@@ -84,6 +84,48 @@ def test_resolve_continue_session_id_http_error(
     assert "starting a new session" in capsys.readouterr().err
 
 
+def test_resolve_continue_session_id_malformed_json(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Regression for PR #179 review: a 2xx response with malformed JSON must
+    be swallowed like an HTTP error, not raised — run_chat calls this before
+    entering its cleanup try/finally, so an uncaught exception here would
+    leave a spawned gateway process and log file behind.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"not json {{{")
+
+    _client_with_transport(monkeypatch, handler)
+    assert _resolve_continue_session_id("http://127.0.0.1:8080") is None
+    assert "starting a new session" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        [1, 2, 3],
+        "just a string",
+        {"threads": "not-a-list"},
+        {"threads": ["not-a-dict"]},
+        {"threads": None},
+    ],
+)
+def test_resolve_continue_session_id_invalid_threads_shape(
+    monkeypatch: pytest.MonkeyPatch, body: object
+) -> None:
+    """A 2xx response with valid JSON but an unexpected shape (non-object body,
+    threads not a list, or a non-dict thread entry) must resolve to None
+    rather than raising AttributeError/TypeError out of run_chat.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=body)
+
+    _client_with_transport(monkeypatch, handler)
+    assert _resolve_continue_session_id("http://127.0.0.1:8080") is None
+
+
 def test_run_chat_continue_resolves_and_sets_session(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
