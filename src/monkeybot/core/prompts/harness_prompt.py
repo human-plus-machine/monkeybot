@@ -201,6 +201,7 @@ def harness_fixed_context(
     run_command_opensandbox: bool = False,
     subagent_personas: Sequence[tuple[str, str]] | None = None,
     emission_style: bool = False,
+    include_memory_teaching: bool = True,
     catalog_mcp_servers: Sequence[str] | None = None,
     scheduled_loops_available: bool = False,
 ) -> str:
@@ -245,7 +246,7 @@ def harness_fixed_context(
         task_line=_TASK_LINE if include_task_tool else "",
         search_tool_line=_SEARCH_TOOL_LINE if include_knowledge_search else "",
         knowledge_search_block=_KNOWLEDGE_SEARCH_BLOCK if include_knowledge_search else "",
-        memory_teaching_block=_MEMORY_TEACHING_BLOCK,
+        memory_teaching_block=_MEMORY_TEACHING_BLOCK if include_memory_teaching else "",
         workspace_root=workspace_root,
         memory_storage_uri=memory_storage_uri,
     )

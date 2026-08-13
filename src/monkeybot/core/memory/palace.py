@@ -52,7 +52,14 @@ class PalacePort(Protocol):
 
     def wake_up(self, wing: str | None = None) -> str: ...
 
-    def recall(self, *, wing: str, room: str, n_results: int = 10) -> list[DrawerRecord]: ...
+    def recall(
+        self,
+        *,
+        wing: str,
+        room: str,
+        n_results: int = 10,
+        thread_id: str | None = None,
+    ) -> list[DrawerRecord]: ...
 
     def status(self) -> dict[str, Any]: ...
 
@@ -61,9 +68,16 @@ class PalacePort(Protocol):
 
 def palace_path_from_uri(memory_uri: str) -> Path:
     raw = memory_uri.strip()
-    if raw.startswith("local://"):
-        raw = raw[len("local://") :]
-    return Path(raw).expanduser().resolve()
+    if not raw:
+        raise ValueError("memory URI is empty")
+    scheme, _, rest = raw.partition("://")
+    if rest and scheme.lower() != "local":
+        raise ValueError(
+            f"unsupported memory URI {memory_uri!r}; MemPalace requires local:// "
+            "(object-store palaces are not supported)"
+        )
+    path = rest if rest else raw
+    return Path(path).expanduser().resolve()
 
 
 def default_identity_text(agent_name: str) -> str:
@@ -96,9 +110,7 @@ class InMemoryPalace:
         identity = self.palace_path / "identity.txt"
         if not identity.is_file():
             identity.write_text(default_identity_text(agent_name), encoding="utf-8")
-        (self.palace_path / EMBEDDER_IDENTITY_FILE).write_text(
-            embedding_model, encoding="utf-8"
-        )
+        (self.palace_path / EMBEDDER_IDENTITY_FILE).write_text(embedding_model, encoding="utf-8")
 
     def ensure_ready(self) -> None:
         return
@@ -140,9 +152,20 @@ class InMemoryPalace:
             lines.append(f"- [{drawer.room}] {snippet}")
         return "\n".join(lines)
 
-    def recall(self, *, wing: str, room: str, n_results: int = 10) -> list[DrawerRecord]:
+    def recall(
+        self,
+        *,
+        wing: str,
+        room: str,
+        n_results: int = 10,
+        thread_id: str | None = None,
+    ) -> list[DrawerRecord]:
         matched = [
-            d for d in self._drawers.values() if d.wing == wing and d.room == room
+            d
+            for d in self._drawers.values()
+            if d.wing == wing
+            and d.room == room
+            and (thread_id is None or d.metadata.get("thread_id") == thread_id)
         ]
         matched.sort(key=lambda d: d.filed_at, reverse=True)
         return matched[: max(0, n_results)]
@@ -212,7 +235,9 @@ class MemPalaceAdapter:
                 identity_path=str(self.palace_path / "identity.txt"),
             )
             stack.wake_up()
-            log_event("embedder_warm", memory_status="ok", memory_embedding_model=self.embedding_model)
+            log_event(
+                "embedder_warm", memory_status="ok", memory_embedding_model=self.embedding_model
+            )
         except Exception as exc:
             log_event(
                 "embedder_warm",
@@ -280,13 +305,23 @@ class MemPalaceAdapter:
             return stack.wake_up(wing=wing)
         return stack.wake_up()
 
-    def recall(self, *, wing: str, room: str, n_results: int = 10) -> list[DrawerRecord]:
+    def recall(
+        self,
+        *,
+        wing: str,
+        room: str,
+        n_results: int = 10,
+        thread_id: str | None = None,
+    ) -> list[DrawerRecord]:
         try:
             col = self._collection(create=False)
         except Exception as exc:
             logger.warning("mempalace recall collection failed: %r", exc)
             return []
-        where: dict[str, Any] = {"$and": [{"wing": wing}, {"room": room}]}
+        clauses: list[dict[str, Any]] = [{"wing": wing}, {"room": room}]
+        if thread_id:
+            clauses.append({"thread_id": thread_id})
+        where: dict[str, Any] = {"$and": clauses}
         try:
             result = col.get(
                 where=where,
@@ -302,15 +337,15 @@ class MemPalaceAdapter:
         records: list[DrawerRecord] = []
         for drawer_id, doc, meta in zip(ids, docs, metas, strict=False):
             parsed = _stringify_meta(meta)
+            if thread_id and parsed.get("thread_id") != thread_id:
+                continue
             records.append(
                 DrawerRecord(
                     drawer_id=str(drawer_id),
                     content=doc or "",
                     wing=parsed.get("wing") or wing,
                     room=parsed.get("room") or room,
-                    filed_at=parsed.get("source_timestamp")
-                    or parsed.get("filed_at")
-                    or "",
+                    filed_at=parsed.get("source_timestamp") or parsed.get("filed_at") or "",
                     metadata=parsed,
                 )
             )
@@ -360,9 +395,7 @@ def create_palace(
     path = palace_path_from_uri(memory_uri)
     be = (backend or os.environ.get("MEMPALACE_BACKEND") or DEFAULT_BACKEND).strip()
     model = (
-        embedding_model
-        or os.environ.get("MEMPALACE_EMBEDDING_MODEL")
-        or DEFAULT_EMBEDDING_MODEL
+        embedding_model or os.environ.get("MEMPALACE_EMBEDDING_MODEL") or DEFAULT_EMBEDDING_MODEL
     ).strip()
     if in_memory:
         return InMemoryPalace(path, agent_name=agent_name, backend="memory", embedding_model=model)

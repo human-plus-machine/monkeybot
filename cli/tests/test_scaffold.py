@@ -156,8 +156,8 @@ def test_run_refresh_adds_template_commands_and_keeps_extras(tmp_path: Path) -> 
     report = run_refresh(dest=tmp_path)
     text = allow.read_text(encoding="utf-8")
     assert "  - mempalace\n" in text
-    assert "  - officecli\n" in text
-    assert "  - ./custom-data/\n" in text
+    assert '  - "officecli"\n' in text
+    assert '  - "./custom-data/"\n' in text
     assert "  - ../memory/mempalace/\n" in text
     assert "my-custom-deny" in text
     assert agent_md.read_text(encoding="utf-8") == "custom persona\n"
@@ -203,3 +203,11 @@ def test_monkeybot_requirement_dedupes_provider_in_extras() -> None:
 
     dep = monkeybot_requirement(provider="openai", extras=["openai", "postgres"])
     assert dep == f"monkeybot[openai,postgres]{COMPATIBLE_CORE_RANGE}"
+
+
+def test_refresh_allowlist_does_not_emit_yaml_document_end() -> None:
+    from monkeybot_cli.scaffold import _yaml_list_item
+
+    item = _yaml_list_item("mempalace")
+    assert "..." not in item
+    assert item.strip() == '- "mempalace"'

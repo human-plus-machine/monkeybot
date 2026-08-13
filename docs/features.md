@@ -427,26 +427,27 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 ### 11. Memory subsystem
 
-**Purpose:** Durable markdown memory with automatic capture and LLM organizer.
+**Purpose:** Per-agent MemPalace drawers with durable SQLite outbox ingest and wake-up + L2 recall in the prompt.
 
-**Key files:** `core/memory/subsystem.py`, `hook.py`, `organizer.py`, `storage_ops.py`
+**Key files:** `core/memory/subsystem.py`, `hook.py`, `outbox.py`, `palace.py`, `writer.py`, `ingest.py`
 
-**Storage URI:** `local://`, `gcs://`, `s3://` via `create_workspace_storage()`
+**Storage URI:** `local://` only (object-store palaces are not supported in this release).
 
 **Hook lifecycle:**
 
 | Event | Behavior |
 |-------|----------|
-| `USER_MESSAGE` | Append to `chat_log.md` |
-| `PRE_TURN` | Inject memory search hits into `inject_memory_lines` |
-| `PRE_TOOL` | Inject file/query-specific memories into `inject_text` |
-| `POST_TOOL` | Capture raw observations (skip successful read-only tools) |
-| `POST_TURN` | Schedule debounced organizer |
+| History append | Enqueue user / final assistant text on the outbox (same SQLite transaction when possible) |
+| `PRE_TURN` | Inject thread-scoped L2 recall into `inject_memory_lines` |
+| `POST_TURN` | Wake the per-agent writer |
+| `SESSION_END` | Bounded outbox drain |
 
 **Invariants:**
-- Write path uses `asyncio.Lock` shared with organizer.
-- Memory is on whenever `paths.memory_storage_uri` is set.
-- Subagents get **no-op `HookManager`** to avoid duplicate writes.
+- Chat history is canonical; MemPalace drawers are an idempotent projection.
+- Recall is scoped to the current `thread_id` by default.
+- `memory.enabled: false` (or `MONKEYBOT_MEMORY_HOOK_ENABLED=0`) skips capture, wake-up, and prompt teaching. It is not a sandbox against shell access to palace files.
+- Postgres/Firestore history backends start without MemPalace.
+- Subagents can read the palace but do not register duplicate automatic-ingest hooks.
 - `flush()` must be called before short-lived handlers exit if organizer work matters.
 
 ---

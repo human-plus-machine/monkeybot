@@ -43,7 +43,9 @@ class MemoryHook:
             },
         ):
             try:
-                drawers = await self._memory.recall(wing=wing, room=CONVERSATION_ROOM)
+                drawers = await self._memory.recall(
+                    wing=wing, room=CONVERSATION_ROOM, thread_id=payload.thread_id
+                )
             except Exception as exc:
                 logger.warning("memory L2 recall failed: %r", exc)
                 return

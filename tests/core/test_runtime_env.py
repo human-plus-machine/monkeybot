@@ -207,12 +207,15 @@ def test_memory_storage_uri_sets_env(tmp_path: Path, monkeypatch: pytest.MonkeyP
     cfg_dir = tmp_path / "monkeybot_config"
     cfg_dir.mkdir()
     (cfg_dir / "monkeybot.yaml").write_text(
-        "paths:\n  memory_storage_uri: gcs://my-bucket/mem\n",
+        "paths:\n  memory_storage_uri: local://./memory/mempalace\n",
         encoding="utf-8",
     )
     monkeypatch.delenv("MEMORY_STORAGE_URI", raising=False)
     runtime_env.apply_monkeybot_runtime_env()
-    assert os.environ.get("MEMORY_STORAGE_URI") == "gcs://my-bucket/mem"
+    uri = os.environ.get("MEMORY_STORAGE_URI")
+    assert uri is not None
+    assert uri.startswith("local://")
+    assert uri.endswith("memory/mempalace")
 
 
 def test_legacy_memory_path_still_sets_memory_path_env(

@@ -70,6 +70,7 @@ class MemorySubsystem:
                 db_url=db_url,
                 backend=self.backend,
                 embedding_model=self.embedding_model,
+                agent_id=agent_id,
             )
             if writer_enabled
             else None
@@ -159,9 +160,15 @@ class MemorySubsystem:
             logger.warning("memory palace status failed: %r", exc)
         return lines
 
-    async def recall(self, *, wing: str, room: str = CONVERSATION_ROOM) -> list[DrawerRecord]:
+    async def recall(
+        self,
+        *,
+        wing: str,
+        room: str = CONVERSATION_ROOM,
+        thread_id: str | None = None,
+    ) -> list[DrawerRecord]:
         return await asyncio.to_thread(
-            self._palace.recall, wing=wing, room=room, n_results=10
+            self._palace.recall, wing=wing, room=room, n_results=10, thread_id=thread_id
         )
 
     def outbox_spec(

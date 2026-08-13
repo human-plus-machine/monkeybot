@@ -6,6 +6,10 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Breaking
+
+- Note-based memory (INDEX.md, curator, `search_memory` / `edit_memory` / `forget`) is replaced by per-agent MemPalace with a SQLite outbox. Capture can be turned off with `memory.enabled: false` or `MONKEYBOT_MEMORY_HOOK_ENABLED=0`. Object-store palace URIs (`gcs://`, `s3://`) are not supported; use `local://`. Postgres/Firestore history backends run without MemPalace until a later release.
+
 ### Added
 
 - `monkeybot chat` TUI gained Claude-Code-style interaction: `Esc` interrupts the active turn (double-tap while idle recalls your last message for editing), `Shift+Tab` cycles a client-side approval mode (`normal` / `auto-approve` / `deny-confirms` — auto-answers tool confirmation prompts only, elicitations still ask), `@` fuzzy-inserts a workspace file path, `!<command>` runs a local shell command shown in the transcript but never sent to the agent, and `?` opens a keyboard-shortcut overlay. New slash commands: `/clear` (alias of `/new`), `/model` (switches model by starting a fresh session), `/status`, `/config`.

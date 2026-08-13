@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from ulid import ULID
@@ -11,6 +12,8 @@ from monkeybot.core.memory.ids import conversation_wing
 from monkeybot.core.memory.observability import current_traceparent, log_event, memory_span
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.types.content_blocks import Text
+
+logger = logging.getLogger(__name__)
 
 
 def visible_text(message: Message) -> str:
@@ -49,18 +52,18 @@ async def persist_message(
     text = visible_text(message) if ingest else ""
     should_ingest = bool(ingest and _ingest_enabled(memory) and text)
     append_with = getattr(history, "append_with_outbox", None)
-    if should_ingest:
+    if should_ingest and callable(append_with):
         assert memory is not None
-        if callable(append_with):
-            with memory_span(
-                "monkeybot.memory.outbox.enqueue",
-                **{
-                    "memory.operation": "enqueue",
-                    "memory.role": message.role,
-                    "memory.wing": conversation_wing(workspace_id_from_env()),
-                    "memory.backend": getattr(memory, "backend", "chroma"),
-                },
-            ):
+        with memory_span(
+            "monkeybot.memory.outbox.enqueue",
+            **{
+                "memory.operation": "enqueue",
+                "memory.role": message.role,
+                "memory.wing": conversation_wing(workspace_id_from_env()),
+                "memory.backend": getattr(memory, "backend", "chroma"),
+            },
+        ):
+            try:
                 await append_with(
                     thread_id,
                     message,
@@ -77,7 +80,11 @@ async def persist_message(
                 )
                 log_event("outbox_enqueue", memory_role=message.role, memory_status="ok")
                 memory.wake_writer()
-            return
+                return
+            except Exception as exc:
+                logger.warning("atomic history+outbox failed; persisting history only: %r", exc)
+                await history.append(thread_id, message, turn_id=turn_id, message_id=mid)
+                return
     await history.append(thread_id, message, turn_id=turn_id, message_id=mid)
     if should_ingest:
         assert memory is not None
@@ -89,13 +96,16 @@ async def persist_message(
                 "memory.wing": conversation_wing(workspace_id_from_env()),
             },
         ):
-            await memory.enqueue(
-                thread_id=thread_id,
-                turn_id=turn_id,
-                message_id=mid,
-                role=message.role,
-                content=text,
-                traceparent=current_traceparent(),
-            )
-            log_event("outbox_enqueue", memory_role=message.role, memory_status="ok")
-            memory.wake_writer()
+            try:
+                await memory.enqueue(
+                    thread_id=thread_id,
+                    turn_id=turn_id,
+                    message_id=mid,
+                    role=message.role,
+                    content=text,
+                    traceparent=current_traceparent(),
+                )
+                log_event("outbox_enqueue", memory_role=message.role, memory_status="ok")
+                memory.wake_writer()
+            except Exception as exc:
+                logger.warning("outbox enqueue failed; history kept: %r", exc)

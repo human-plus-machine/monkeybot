@@ -135,12 +135,16 @@ def resolve_sqlite_url(raw: str, agent_root: Path) -> str:
 
 
 def resolve_memory_storage_uri(raw: str, agent_root: Path) -> str:
-    """Anchor local memory URIs while retaining cloud URI semantics."""
+    """Anchor local memory URIs at the agent root. Object-store schemes are rejected."""
     value = raw.strip()
-    if value.startswith(("gcs://", "s3://")):
-        return value
-    local_path = value.removeprefix("local://") or "memory"
-    return f"local://{resolve_agent_path(local_path, agent_root)}"
+    scheme, _, rest = value.partition("://")
+    if rest and scheme.lower() != "local":
+        raise ValueError(
+            f"unsupported memory URI {value!r}; MemPalace requires local:// "
+            "(object-store palaces are not supported)"
+        )
+    local_path = rest if rest else value
+    return f"local://{resolve_agent_path(local_path or 'memory/mempalace', agent_root)}"
 
 
 @dataclass(frozen=True)
@@ -187,7 +191,9 @@ class AgentLayout:
             permission_config_path=path_env(
                 "PERMISSION_CONFIG", "monkeybot_config/permissions.yaml"
             ),
-            db_url=resolve_sqlite_url(os.environ.get("DB_URL", "sqlite:///data/monkeybot.db"), root),
+            db_url=resolve_sqlite_url(
+                os.environ.get("DB_URL", "sqlite:///data/monkeybot.db"), root
+            ),
             memory_storage_uri=resolve_memory_storage_uri(
                 os.environ.get(
                     "MEMORY_STORAGE_URI",
@@ -209,10 +215,13 @@ class AgentLayout:
             "PERMISSION_CONFIG": str(self.permission_config_path),
             "DB_URL": self.db_url,
             "MEMORY_STORAGE_URI": self.memory_storage_uri,
-            "MEMPALACE_PALACE_PATH": self.memory_storage_uri.removeprefix("local://"),
-            "MEMPALACE_BACKEND": os.environ.get("MEMPALACE_BACKEND", "chroma"),
             "MONKEYBOT_PYTHON": sys.executable,
         }
+        from monkeybot.core.memory.config import memory_enabled_from_config
+
+        if memory_enabled_from_config():
+            values["MEMPALACE_PALACE_PATH"] = self.memory_storage_uri.removeprefix("local://")
+            values["MEMPALACE_BACKEND"] = os.environ.get("MEMPALACE_BACKEND", "chroma")
         for key, value in values.items():
             os.environ[key] = value
 

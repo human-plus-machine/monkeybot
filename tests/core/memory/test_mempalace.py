@@ -251,3 +251,153 @@ async def test_history_append_enqueues(db_url: str, tmp_path: Path) -> None:
     assert "hello palace" in lines
     await sub.close()
     await conn.close()
+
+
+def test_palace_uri_rejects_object_store() -> None:
+    from monkeybot.core.memory.palace import palace_path_from_uri
+
+    with pytest.raises(ValueError, match="unsupported memory URI"):
+        palace_path_from_uri("gcs://bucket/prefix")
+    with pytest.raises(ValueError, match="unsupported memory URI"):
+        palace_path_from_uri("s3://bucket/prefix")
+
+
+@pytest.mark.asyncio
+async def test_recall_is_thread_scoped(db_url: str, tmp_path: Path) -> None:
+    sub = _subsystem(tmp_path, db_url)
+    await sub.ensure_ready()
+    await sub.enqueue(
+        thread_id="secret",
+        turn_id="1",
+        message_id="m1",
+        role="user",
+        content="private other thread",
+    )
+    await sub.enqueue(
+        thread_id="t1",
+        turn_id="1",
+        message_id="m2",
+        role="user",
+        content="this thread only",
+    )
+    await sub.drain_writer(timeout_s=2)
+    drawers = await sub.recall(wing="main", room="conversation", thread_id="t1")
+    texts = [d.content for d in drawers]
+    assert "this thread only" in texts
+    assert "private other thread" not in texts
+    await sub.close()
+
+
+@pytest.mark.asyncio
+async def test_poison_row_does_not_dead_letter_siblings(db_url: str, tmp_path: Path) -> None:
+    from monkeybot.core.memory.outbox import STATUS_COMMITTED, STATUS_PENDING
+
+    palace = InMemoryPalace(tmp_path / "poison" / "mempalace", agent_name="agent-a")
+    original = palace.upsert_drawer
+
+    def flaky(drawer_id: str, content: str, metadata: dict[str, str]) -> None:
+        if "bad" in content:
+            raise RuntimeError("poison")
+        original(drawer_id, content, metadata)
+
+    palace.upsert_drawer = flaky  # type: ignore[method-assign]
+    sub = MemorySubsystem(
+        memory_uri=f"local://{palace.palace_path}",
+        db_url=db_url,
+        agent_id="agent-a",
+        agent_name="agent-a",
+        palace=palace,
+    )
+    await sub.enqueue(
+        thread_id="t",
+        turn_id="1",
+        message_id="bad",
+        role="user",
+        content="bad drawer",
+    )
+    await sub.enqueue(
+        thread_id="t",
+        turn_id="1",
+        message_id="ok",
+        role="user",
+        content="healthy drawer",
+    )
+    await sub.drain_writer(timeout_s=2)
+    conn = await open_connection(db_url)
+    cur = await conn.execute("SELECT message_id, status FROM memory_outbox ORDER BY message_id")
+    rows = {str(r[0]): str(r[1]) for r in await cur.fetchall()}
+    await cur.close()
+    await conn.close()
+    assert rows["ok"] == STATUS_COMMITTED
+    assert rows["bad"] == STATUS_PENDING
+    got = await sub.get_drawer(
+        outbox_id(agent_id="agent-a", thread_id="t", message_id="ok", role="user")
+    )
+    assert got is not None
+    assert "healthy" in got["content"]
+    await sub.close()
+
+
+@pytest.mark.asyncio
+async def test_history_survives_outbox_failure(db_url: str, tmp_path: Path) -> None:
+    from monkeybot.core.persistence.history import SQLiteHistoryStore
+
+    conn = await open_connection(db_url)
+    history = SQLiteHistoryStore(conn)
+
+    class Boom:
+        async def append_with_outbox(self, *args: object, **kwargs: object) -> None:
+            raise TimeoutError("outbox down")
+
+        async def append(self, thread_id: str, message: Message, **kwargs: object) -> None:
+            await history.append(thread_id, message, **kwargs)
+
+    sub = _subsystem(tmp_path, db_url)
+    await persist_message(
+        Boom(),  # type: ignore[arg-type]
+        Message(role="user", content=[Text(text="keep me")]),
+        thread_id="t1",
+        turn_id="turn-1",
+        memory=sub,
+        ingest=True,
+    )
+    loaded = await history.load("t1")
+    assert loaded
+    assert visible_text(loaded[0]) == "keep me"
+    await conn.close()
+    await sub.close()
+
+
+@pytest.mark.asyncio
+async def test_claim_batch_filters_by_agent(db_url: str) -> None:
+    from monkeybot.core.memory.outbox import claim_batch, insert_pending
+
+    conn = await open_connection(db_url)
+    await ensure_outbox_schema(conn)
+    await insert_pending(
+        conn,
+        agent_id="agent-a",
+        thread_id="t",
+        turn_id="1",
+        message_id="ma",
+        role="user",
+        content="for a",
+        workspace_id=None,
+        wing="main",
+        room="conversation",
+    )
+    await insert_pending(
+        conn,
+        agent_id="agent-b",
+        thread_id="t",
+        turn_id="1",
+        message_id="mb",
+        role="user",
+        content="for b",
+        workspace_id=None,
+        wing="main",
+        room="conversation",
+    )
+    claimed = await claim_batch(conn, lease_owner="w1", agent_id="agent-a")
+    await conn.close()
+    assert [row.content for row in claimed] == ["for a"]

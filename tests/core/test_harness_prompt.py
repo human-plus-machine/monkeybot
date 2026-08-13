@@ -54,7 +54,9 @@ def test_harness_includes_core_tools_and_protocol() -> None:
     assert "### Knowledge retrieval (`search`)" in out
     assert "one short, focused query per concept" in out
     assert "near-duplicate parallel" in out
-    assert "no record of past conversations" in out or "Has **no** record of past conversations" in out
+    assert (
+        "no record of past conversations" in out or "Has **no** record of past conversations" in out
+    )
     assert "call `search` before" in out
     assert "rank-1" in out
     assert "Long multi-item tasks" in out
@@ -62,6 +64,12 @@ def test_harness_includes_core_tools_and_protocol() -> None:
     assert "Evidence: unknown" in out
     assert "Path rule" in out
     assert "### Memory retrieval (`mempalace search`)" in out
+
+
+def test_harness_omits_memory_teaching_when_disabled() -> None:
+    out = harness_fixed_context(include_task_tool=False, include_memory_teaching=False)
+    assert "### Memory retrieval (`mempalace search`)" not in out
+    assert 'argv: ["mempalace", "search"' not in out
 
 
 def test_harness_omits_search_guidance_when_knowledge_disabled() -> None:
@@ -112,7 +120,9 @@ def test_harness_injects_runtime_paths() -> None:
     )
     assert "`/srv/bot`" in out
     assert "local:///srv/bot/memory" in out
-    assert "Outside** the workspace" in out or "Outside the workspace" in out or "**Outside**" in out
+    assert (
+        "Outside** the workspace" in out or "Outside the workspace" in out or "**Outside**" in out
+    )
     assert "not** the memory store" in out.lower() or "not the memory store" in out.lower()
 
 

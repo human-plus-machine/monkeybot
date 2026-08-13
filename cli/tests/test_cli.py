@@ -45,7 +45,7 @@ def test_new_scaffolds(tmp_path: Path) -> None:
     assert "MONKEYBOT_SUBAGENT_AGENT_MD" not in env_text
     assert "DB_URL" in env_text
     pyproject = (tmp_path / "pyproject.toml").read_text()
-    assert "monkeybot[gemini,sandbox,web-search]>=2.2.0,<3" in pyproject
+    assert "monkeybot[gemini,sandbox,web-search]>=3.0.0,<4" in pyproject
     assert "monkeybot-browser-mcp>=0.2.0,<1" in pyproject
     assert "package = false" in pyproject
     assert "[tool.uv.sources]" not in pyproject

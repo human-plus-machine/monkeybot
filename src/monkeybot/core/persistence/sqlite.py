@@ -15,6 +15,7 @@ DEFAULT_DB_URL: Final[str] = "sqlite:///data/monkeybot.db"
 
 OUTBOX_DDL: Final[str] = """CREATE TABLE IF NOT EXISTS memory_outbox (
     id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL DEFAULT '',
     thread_id TEXT NOT NULL,
     turn_id TEXT NOT NULL,
     message_id TEXT NOT NULL,

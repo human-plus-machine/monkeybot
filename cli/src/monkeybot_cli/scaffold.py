@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from importlib import resources
 from importlib.resources.abc import Traversable
@@ -151,7 +152,9 @@ def install_browser_skill(dest: Path, *, force: bool) -> str:
     """Install the bundled, trusted browser procedure into ``skills/browser``."""
     target = dest / "skills" / "browser" / "SKILL.md"
     target.parent.mkdir(parents=True, exist_ok=True)
-    return _install_file(target, resources.files(_DEFAULTS_PKG) / "browser" / "SKILL.md", force=force)
+    return _install_file(
+        target, resources.files(_DEFAULTS_PKG) / "browser" / "SKILL.md", force=force
+    )
 
 
 def install_image_generator_skill(dest: Path, *, force: bool) -> list[str]:
@@ -292,7 +295,7 @@ def _list_extras(existing: list[str], template: list[str]) -> list[str]:
 
 
 def _yaml_list_item(value: str) -> str:
-    dumped = yaml.safe_dump(value, allow_unicode=True).strip()
+    dumped = json.dumps(value, ensure_ascii=False)
     return f"  - {dumped}\n"
 
 

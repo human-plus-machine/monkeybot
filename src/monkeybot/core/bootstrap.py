@@ -133,15 +133,28 @@ async def create_harness_deps(
         uri = (memory_storage_uri or "").strip()
         if uri:
             from monkeybot.core.layout import AgentLayout
+            from monkeybot.core.memory.config import memory_enabled_from_config
 
-            layout = AgentLayout.from_environment()
-            memory = MemorySubsystem(
-                memory_uri=uri,
-                db_url=db_url,
-                agent_id=layout.agent_root.name,
-                agent_name=layout.agent_root.name,
-            )
-            await memory.ensure_ready()
+            if not memory_enabled_from_config():
+                logger.info("memory disabled (memory.enabled=false)")
+            elif not db_url.strip().lower().startswith("sqlite:"):
+                logger.warning(
+                    "MemPalace requires sqlite:// DB_URL; memory disabled (got %s)",
+                    db_url.split(":", 1)[0],
+                )
+            else:
+                try:
+                    layout = AgentLayout.from_environment()
+                    memory = MemorySubsystem(
+                        memory_uri=uri,
+                        db_url=db_url,
+                        agent_id=layout.agent_root.name,
+                        agent_name=layout.agent_root.name,
+                    )
+                    await memory.ensure_ready()
+                except Exception as exc:
+                    logger.warning("memory setup failed; continuing without: %r", exc)
+                    memory = None
 
         knowledge: KnowledgeSubsystem | None = None
         if knowledge_enabled_from_config() and workspace_root is not None:
