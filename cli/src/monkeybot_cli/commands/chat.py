@@ -617,6 +617,10 @@ async def _plain_chat_session(
                     print(f"\n{_DIM}Goodbye — shutting down gateway…{_RESET}")
                 else:
                     print(f"\n{_DIM}Goodbye.{_RESET}")
+                if controller.session_id:
+                    print(
+                        f"{_DIM}To continue this conversation, run: monkeybot chat --continue{_RESET}"
+                    )
                 break
             await controller.submit(user_line)
     finally:
@@ -692,6 +696,25 @@ def _spawn_gateway(config_path: Path | None, agent_root: Path, port: int) -> _Sp
     return _SpawnedGateway(proc=proc, log_path=Path(log_file.name), log_file=log_file)
 
 
+def _resolve_continue_session_id(base: str) -> str | None:
+    """Look up the most recently used session id for this agent root, if any."""
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            resp = client.get(f"{base}/api/chat-history", params={"limit": 1})
+            resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        print(
+            f"{_DIM}Could not fetch chat history ({exc}) — starting a new session.{_RESET}",
+            file=sys.stderr,
+        )
+        return None
+    threads = resp.json().get("threads") or []
+    if not threads:
+        return None
+    sid = threads[0].get("session_id")
+    return str(sid) if sid else None
+
+
 def run_chat(args: argparse.Namespace) -> int:
     cwd = Path(args.cwd).expanduser().resolve() if args.cwd else None
     config_path = resolve_config(args.config, cwd=cwd)
@@ -744,6 +767,14 @@ def run_chat(args: argparse.Namespace) -> int:
                     proc.wait(timeout=5)
             _cleanup_gateway_log(spawned)
             return 1
+
+    if getattr(args, "resume_last", False) and not getattr(args, "session", None):
+        resolved = _resolve_continue_session_id(base)
+        if resolved:
+            print(f"{_DIM}Continuing session {resolved[:8]}…{_RESET}")
+            args.session = resolved
+        else:
+            print(f"{_DIM}No previous conversation found — starting a new session.{_RESET}")
 
     provider, model = _model_banner_fields(args, config_path)
     animations_enabled = not (
@@ -820,6 +851,13 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
         "--session",
         dest="session",
         help="Resume an existing gateway session id (with transcript backfill when available)",
+    )
+    p.add_argument(
+        "--continue",
+        "-c",
+        dest="resume_last",
+        action="store_true",
+        help="Resume the most recent conversation for this agent root",
     )
     p.add_argument(
         "--model-provider", dest="model_provider", help="Override model provider for session"
