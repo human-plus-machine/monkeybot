@@ -335,13 +335,13 @@ def _refreshed_monkeybot_requirement(
 
 def _replace_toml_string(text: str, old: str, new: str) -> str | None:
     """Replace one parsed TOML string while preserving the surrounding document."""
-    for quote in ('"', "'"):
-        old_token = f"{quote}{old}{quote}"
-        if old_token in text:
-            return text.replace(old_token, f"{quote}{new}{quote}", 1)
     old_token = json.dumps(old, ensure_ascii=False)
     if old_token in text:
         return text.replace(old_token, json.dumps(new, ensure_ascii=False), 1)
+    literal_token = f"'{old}'"
+    if literal_token in text:
+        replacement = f"'{new}'" if "'" not in new else json.dumps(new, ensure_ascii=False)
+        return text.replace(literal_token, replacement, 1)
     return None
 
 

@@ -273,9 +273,10 @@ def test_run_refresh_removes_memory_extra_when_disabled(tmp_path: Path) -> None:
 
     run_refresh(dest=tmp_path)
 
-    text = pyproject.read_text(encoding="utf-8")
-    assert f"monkeybot[openai]{COMPATIBLE_CORE_RANGE}" in text
-    assert "monkeybot[openai,memory]" not in text
+    document = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    refreshed = Requirement(document["project"]["dependencies"][0])
+    assert refreshed.extras == {"openai"}
+    assert str(refreshed.specifier) == str(Requirement(f"monkeybot{COMPATIBLE_CORE_RANGE}").specifier)
 
 
 def test_run_refresh_skips_custom_permissions_and_model(tmp_path: Path) -> None:

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
+from packaging.requirements import Requirement
 
 from monkeybot_cli.runtime_python import (
     RuntimePython,
@@ -203,9 +205,10 @@ def test_prepare_runtime_python_removes_memory_extra_when_disabled(
 
     prepare_runtime_python(tmp_path)
 
-    text = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
-    assert "monkeybot>=3.0.0,<4" in text
-    assert "monkeybot[memory]" not in text
+    document = tomllib.loads((tmp_path / "pyproject.toml").read_text(encoding="utf-8"))
+    refreshed = Requirement(document["project"]["dependencies"][0])
+    assert not refreshed.extras
+    assert str(refreshed.specifier) == str(Requirement("monkeybot>=3.0.0,<4").specifier)
     probe_commands = [cmd for cmd in calls if "-c" in cmd]
     assert probe_commands
     assert all("import mempalace" not in " ".join(cmd) for cmd in probe_commands)
