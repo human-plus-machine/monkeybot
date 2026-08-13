@@ -67,9 +67,10 @@ class TestIsolatedArgv:
         executable, args = isolated_argv("/bin/cat", ["file"], [Path("/palace")], support=support)
 
         assert executable == sys.executable
-        assert args[0] == "-c"
-        assert "unshare" in args[1]
-        assert '"/palace"' in args[2] or "/palace" in args[2]
+        assert "-c" in args
+        bootstrap = args[args.index("-c") + 1]
+        assert "unshare" in bootstrap
+        assert "/palace" in args[args.index("-c") + 2]
         assert args[-2:] == ["/bin/cat", "file"]
 
     def test_sandbox_exec_argv_denies_hidden_subpaths(self):

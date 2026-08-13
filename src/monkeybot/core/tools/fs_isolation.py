@@ -137,7 +137,18 @@ def _sandbox_exec_profile(hidden: Sequence[str]) -> str:
 
 
 def _namespace_argv(executable: str, args: Sequence[str], hidden: Sequence[str]) -> list[str]:
-    return [sys.executable, "-c", _LINUX_BOOTSTRAP, json.dumps(list(hidden)), executable, *args]
+    # -S/-E keep the bootstrap's own startup minimal; it needs only the stdlib
+    # and must not be reconfigured by the environment it is sandboxing.
+    return [
+        sys.executable,
+        "-S",
+        "-E",
+        "-c",
+        _LINUX_BOOTSTRAP,
+        json.dumps(list(hidden)),
+        executable,
+        *args,
+    ]
 
 
 def _sandbox_exec_argv(executable: str, args: Sequence[str], hidden: Sequence[str]) -> list[str]:
@@ -246,10 +257,15 @@ def memory_hidden_paths(workspace_root: Path) -> tuple[Path, ...]:
     Covers the agent's own palace, any palace pointed at by the environment,
     and the shared MemPalace home that holds identity and config.
     """
-    candidates = [workspace_root / ".." / "memory", Path.home() / ".mempalace"]
+    candidates = [workspace_root / ".." / "memory"]
+    try:
+        candidates.append(Path.home() / ".mempalace")
+    except RuntimeError:
+        logger.debug("no home directory to hide; skipping the shared MemPalace home")
     for key in ("MEMPALACE_PALACE_PATH", "MEMORY_PATH", "MEMORY_STORAGE_URI"):
         raw = os.environ.get(key, "").strip()
-        if not raw or "://" in raw and not raw.startswith("local://"):
+        # Remote palaces (gcs://, s3://) have no local directory to hide.
+        if not raw or ("://" in raw and not raw.startswith("local://")):
             continue
         candidates.append(Path(raw.removeprefix("local://")).expanduser())
     resolved: list[Path] = []
