@@ -2346,7 +2346,7 @@ wheels = [
 
 [[package]]
 name = "monkeybot"
-version = "2.2.2"
+version = "3.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
@@ -2354,7 +2354,6 @@ dependencies = [
     { name = "google-genai" },
     { name = "httpx" },
     { name = "mcp" },
-    { name = "mempalace" },
     { name = "numpy" },
     { name = "pydantic" },
     { name = "python-dotenv" },
@@ -2375,10 +2374,12 @@ claude = [
     { name = "anthropic" },
 ]
 cli = [
+    { name = "mempalace" },
     { name = "typer" },
     { name = "websockets" },
 ]
 cli-realtime = [
+    { name = "mempalace" },
     { name = "pyaudio" },
     { name = "pynput" },
     { name = "typer" },
@@ -2412,6 +2413,9 @@ knowledge-ast = [
 knowledge-media = [
     { name = "pypdf" },
     { name = "python-docx" },
+]
+memory = [
+    { name = "mempalace" },
 ]
 nvidia = [
     { name = "openai" },
@@ -2514,9 +2518,9 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "langfuse", marker = "extra == 'evals'", specifier = ">=3.0.0" },
     { name = "mcp", specifier = ">=1.0.0" },
-    { name = "mempalace", specifier = ">=3.7.0,<4" },
+    { name = "mempalace", marker = "extra == 'memory'", specifier = ">=3.7.0,<4" },
     { name = "monkeybot", extras = ["cli"], marker = "extra == 'cli-realtime'" },
-    { name = "monkeybot", extras = ["realtime"], marker = "extra == 'cli'" },
+    { name = "monkeybot", extras = ["memory", "realtime"], marker = "extra == 'cli'" },
     { name = "monkeybot", extras = ["realtime"], marker = "extra == 'realtime-gemini'" },
     { name = "numpy", specifier = ">=1.26.0,<2.5" },
     { name = "openai", marker = "extra == 'huggingface'", specifier = ">=1.0" },
@@ -2552,7 +2556,7 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32.0" },
     { name = "websockets", marker = "extra == 'realtime'", specifier = ">=14.0" },
 ]
-provides-extras = ["gemini", "vertex", "claude", "vertex-claude", "bedrock", "openai", "huggingface", "ollama", "nvidia", "openrouter", "sandbox", "scheduler", "postgres", "firestore", "gcs", "aws", "council", "web-search", "evals", "realtime", "realtime-gemini", "cli", "cli-realtime", "observability", "knowledge-ast", "knowledge-media"]
+provides-extras = ["gemini", "vertex", "claude", "vertex-claude", "bedrock", "openai", "huggingface", "ollama", "nvidia", "openrouter", "sandbox", "memory", "scheduler", "postgres", "firestore", "gcs", "aws", "council", "web-search", "evals", "realtime", "realtime-gemini", "cli", "cli-realtime", "observability", "knowledge-ast", "knowledge-media"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -2596,7 +2600,7 @@ dev = [{ name = "pytest", specifier = ">=8.0.0" }]
 
 [[package]]
 name = "monkeybot-cli"
-version = "0.4.1"
+version = "0.5.0"
 source = { editable = "cli" }
 dependencies = [
     { name = "httpx" },

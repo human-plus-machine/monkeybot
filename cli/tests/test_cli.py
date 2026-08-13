@@ -45,7 +45,7 @@ def test_new_scaffolds(tmp_path: Path) -> None:
     assert "MONKEYBOT_SUBAGENT_AGENT_MD" not in env_text
     assert "DB_URL" in env_text
     pyproject = (tmp_path / "pyproject.toml").read_text()
-    assert "monkeybot[gemini,sandbox,web-search]>=2.2.2,<3" in pyproject
+    assert "monkeybot[gemini,memory,sandbox,web-search]>=3.0.0,<4" in pyproject
     assert "monkeybot-browser-mcp>=0.2.0,<1" in pyproject
     assert "package = false" in pyproject
     assert "[tool.uv.sources]" not in pyproject
@@ -71,6 +71,9 @@ def test_refresh_updates_existing_agent(tmp_path: Path) -> None:
     text = allow.read_text(encoding="utf-8")
     assert "mempalace" in text
     assert "officecli" in text
+    pyproject = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
+    assert "memory" in pyproject
+    assert ">=3.0.0,<4" in pyproject
     assert "command_allowlist.yaml: updated" in result.stdout
 
 

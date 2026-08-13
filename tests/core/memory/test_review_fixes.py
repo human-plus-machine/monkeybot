@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -23,9 +24,13 @@ from monkeybot.core.memory.outbox import (
 )
 from monkeybot.core.memory.palace import (
     InMemoryPalace,
+    MemoryDependencyError,
     MemPalaceAdapter,
     UnsupportedMemoryURI,
+    create_palace,
+    palace_instance_id,
     palace_path_from_uri,
+    palace_volume_lock,
 )
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.persistence.sqlite import apply_schema, open_connection
@@ -740,6 +745,61 @@ async def test_usage_cannot_commit_open_history_outbox_transaction(
 
 
 @pytest.mark.asyncio
+async def test_history_load_cannot_see_rolled_back_outbox_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.llm.provider import Message
+    from monkeybot.core.memory import outbox as outbox_mod
+    from monkeybot.core.types.content_blocks import Text
+
+    backend = SQLiteStorageBackend(f"sqlite:///{tmp_path / 'read-tx.db'}")
+    await backend.open()
+    try:
+        history = backend.history()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def gated_insert(conn: object, **kwargs: object) -> str | None:
+            del conn, kwargs
+            entered.set()
+            await release.wait()
+            raise RuntimeError("outbox boom")
+
+        monkeypatch.setattr(outbox_mod, "insert_pending", gated_insert)
+
+        async def do_append() -> None:
+            with pytest.raises(RuntimeError, match="outbox boom"):
+                await history.append_with_outbox(
+                    "t",
+                    Message(role="user", content=[Text(text="uncommitted")]),
+                    turn_id="1",
+                    message_id="m1",
+                    outbox={
+                        "agent_id": "agent-a",
+                        "thread_id": "t",
+                        "turn_id": "1",
+                        "message_id": "m1",
+                        "role": "user",
+                        "content": "uncommitted",
+                        "workspace_id": None,
+                        "wing": "main",
+                        "room": "conversation",
+                    },
+                )
+
+        append_task = asyncio.create_task(do_append())
+        await entered.wait()
+        load_task = asyncio.create_task(history.load("t"))
+        await asyncio.sleep(0.05)
+        assert not load_task.done()
+        release.set()
+        await append_task
+        assert await load_task == []
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
 async def test_managed_schema_upgrade_from_documented_ddl(tmp_path: Path) -> None:
     from monkeybot.core.llm.provider import Message
     from monkeybot.core.memory.ingest import persist_message
@@ -813,13 +873,20 @@ async def test_ambiguous_commit_does_not_duplicate_history() -> None:
     class _History:
         def __init__(self) -> None:
             self.rows: list[Message] = []
+            self.ids: set[str] = set()
+            self.calls = 0
 
         async def append_with_outbox(
             self, thread_id: str, message: Message, **kwargs: object
         ) -> None:
-            del thread_id, kwargs
-            self.rows.append(message)
-            raise TimeoutError("ack lost")
+            del thread_id
+            message_id = str(kwargs["message_id"])
+            if message_id not in self.ids:
+                self.ids.add(message_id)
+                self.rows.append(message)
+            self.calls += 1
+            if self.calls == 1:
+                raise TimeoutError("ack lost")
 
         async def append(self, thread_id: str, message: Message, **kwargs: object) -> None:
             del thread_id, kwargs
@@ -848,6 +915,46 @@ async def test_ambiguous_commit_does_not_duplicate_history() -> None:
         message_id="m",
     )
     assert len(history.rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_commit_before_write_retries_idempotently() -> None:
+    from monkeybot.core.llm.provider import Message
+    from monkeybot.core.memory.ingest import persist_message
+    from monkeybot.core.types.content_blocks import Text
+
+    class _History:
+        def __init__(self) -> None:
+            self.rows: list[Message] = []
+            self.calls = 0
+
+        async def append_with_outbox(
+            self, thread_id: str, message: Message, **kwargs: object
+        ) -> None:
+            del thread_id, kwargs
+            self.calls += 1
+            if self.calls == 1:
+                raise TimeoutError("failed before write")
+            self.rows.append(message)
+
+        async def append(self, thread_id: str, message: Message, **kwargs: object) -> None:
+            del thread_id, kwargs
+            self.rows.append(message)
+
+    history = _History()
+    memory = MagicMock(ingest_enabled=True, backend="chroma")
+    await persist_message(
+        history,  # type: ignore[arg-type]
+        Message(role="user", content=[Text(text="persist me")]),
+        thread_id="t",
+        turn_id="turn",
+        memory=memory,
+        ingest=True,
+        message_id="m",
+    )
+    assert history.calls == 2
+    assert len(history.rows) == 1
+    memory.wake_writer.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -942,6 +1049,49 @@ async def test_claims_are_partitioned_by_palace_id(db_url: str) -> None:
     await store.close()
 
 
+def test_palace_instance_id_is_atomic_across_concurrent_starts(tmp_path: Path) -> None:
+    palace_path = tmp_path / "shared-palace"
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        ids = list(pool.map(lambda _: palace_instance_id(palace_path), range(48)))
+    assert len(set(ids)) == 1
+    assert (palace_path / ".palace_id").read_text(encoding="utf-8").strip() == ids[0]
+
+
+def test_missing_optional_mempalace_has_actionable_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.memory import palace as palace_mod
+
+    monkeypatch.setattr(palace_mod, "find_spec", lambda name: None)
+    with pytest.raises(MemoryDependencyError, match=r"monkeybot\[memory\]"):
+        create_palace(f"local://{tmp_path / 'palace'}", agent_name="agent-a")
+
+
+def test_palace_volume_lock_serializes_writers(tmp_path: Path) -> None:
+    palace_path = tmp_path / "shared-palace"
+    entered: list[int] = []
+    active = 0
+    max_active = 0
+    guard = threading.Lock()
+
+    def write(index: int) -> None:
+        nonlocal active, max_active
+        with palace_volume_lock(palace_path):
+            with guard:
+                active += 1
+                max_active = max(max_active, active)
+                entered.append(index)
+            threading.Event().wait(0.01)
+            with guard:
+                active -= 1
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(write, range(16)))
+    assert sorted(entered) == list(range(16))
+    assert max_active == 1
+    assert (palace_path / ".palace_write.lock").is_file()
+
+
 def test_firestore_outbox_collection_id_is_stable() -> None:
     pytest.importorskip("google.cloud.firestore")
     from monkeybot.core.persistence.firestore import _memory_outbox_collection
@@ -967,6 +1117,52 @@ def test_firestore_outbox_collection_id_is_stable() -> None:
 
 
 @pytest.mark.asyncio
+async def test_firestore_claim_filters_palace_before_limiting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("google.cloud.firestore")
+    from monkeybot.core.persistence import firestore as firestore_mod
+
+    filters: list[tuple[str, str, object]] = []
+
+    class _Query:
+        def where(self, *, filter: tuple[str, str, object]) -> _Query:
+            filters.append(filter)
+            return self
+
+        def order_by(self, field: str) -> _Query:
+            del field
+            return self
+
+        def limit(self, count: int) -> _Query:
+            del count
+            return self
+
+        async def stream(self) -> Any:
+            if False:
+                yield None
+
+    monkeypatch.setattr(
+        firestore_mod,
+        "FieldFilter",
+        lambda field, operator, value: (field, operator, value),
+    )
+    store = object.__new__(firestore_mod.FirestoreOutboxStore)
+    store._client = object()  # type: ignore[attr-defined]
+    store._col = _Query()  # type: ignore[attr-defined]
+    assert (
+        await store.claim_batch(
+            agent_id="agent-a",
+            lease_owner="worker",
+            palace_id="palace-a",
+            limit=16,
+        )
+        == []
+    )
+    assert ("palace_id", "in", ["palace-a", ""]) in filters
+
+
+@pytest.mark.asyncio
 async def test_ephemeral_palace_rejected_for_postgres_storage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -986,3 +1182,39 @@ async def test_ephemeral_palace_rejected_for_postgres_storage(
     )
     with pytest.raises(RuntimeError, match="temp directory"):
         await sub.ensure_ready()
+
+
+@pytest.mark.asyncio
+async def test_ephemeral_palace_allowed_with_explicit_opt_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MONKEYBOT_MEMORY_ALLOW_EPHEMERAL", "1")
+
+    class _Outbox:
+        async def pending_depth(self, *, agent_id: str | None = None) -> tuple[int, float]:
+            del agent_id
+            return 0, 0.0
+
+        async def gc_committed(self, *, days: int = 7) -> int:
+            del days
+            return 0
+
+        async def dead_depth(self, *, agent_id: str | None = None) -> int:
+            del agent_id
+            return 0
+
+    class PostgresStorageBackend:
+        def outbox(self) -> _Outbox:
+            return _Outbox()
+
+    palace = InMemoryPalace(tmp_path / "ephemeral-opt-in", agent_name="agent-a")
+    sub = MemorySubsystem(
+        memory_uri=f"local://{palace.palace_path}",
+        db_url="postgresql://localhost/db",
+        agent_id="agent-a",
+        palace=palace,
+        storage=PostgresStorageBackend(),
+        writer_enabled=False,
+    )
+    await sub.ensure_ready()
+    await sub.close()

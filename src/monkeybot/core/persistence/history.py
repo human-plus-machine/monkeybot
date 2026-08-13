@@ -17,7 +17,7 @@ from typing import Any, cast
 import aiosqlite
 
 from monkeybot.core.llm.provider import Message, Role
-from monkeybot.core.persistence.sqlite import ConnLock
+from monkeybot.core.persistence.sqlite import ConnLock, with_conn_lock
 from monkeybot.core.persistence.thread_summary import ChatThreadSummary, preview_from_content_blob
 from monkeybot.core.types.content_blocks import ContentBlock
 
@@ -162,6 +162,7 @@ class SQLiteHistoryStore:
                 await self._conn.rollback()
                 raise
 
+    @with_conn_lock
     async def load(self, thread_id: str, limit: int | None = None) -> list[Message]:
         """Return messages for ``thread_id``, oldest first.
 
@@ -236,6 +237,7 @@ class SQLiteHistoryStore:
         for msg in messages:
             await self.append(thread_id, msg)
 
+    @with_conn_lock
     async def list_threads(self, limit: int = 50) -> list[ChatThreadSummary]:
         """Return recent threads ordered by last activity (newest first).
 

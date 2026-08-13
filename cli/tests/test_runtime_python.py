@@ -164,6 +164,48 @@ def test_prepare_runtime_python_syncs_when_mempalace_missing(tmp_path: Path, mon
     assert any("import mempalace" in " ".join(cmd) for cmd in calls)
 
 
+def test_prepare_runtime_python_refreshes_stale_pyproject_before_lock(
+    tmp_path: Path, monkeypatch
+) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        (
+            "[project]\n"
+            'name = "agent"\n'
+            "dependencies = [\n"
+            '  "monkeybot[nvidia,sandbox,web-search,observability]>=2.1.0,<3",\n'
+            "]\n"
+        ),
+        encoding="utf-8",
+    )
+    venv_bin = tmp_path / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    py = venv_bin / "python"
+    py.write_text("#!/bin/sh\n")
+    py.chmod(0o755)
+    pyproject_at_lock: list[str] = []
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        del kwargs
+        argv_list = list(argv)
+        calls.append(argv_list)
+        if argv_list[:3] == ["uv", "lock", "--upgrade-package"]:
+            pyproject_at_lock.append((tmp_path / "pyproject.toml").read_text(encoding="utf-8"))
+
+        class Result:
+            returncode = 0
+
+        if argv_list[:1] != ["uv"] and "-c" in argv_list:
+            Result.returncode = 1 if not any(cmd[:2] == ["uv", "sync"] for cmd in calls[:-1]) else 0
+        return Result()
+
+    monkeypatch.setattr("monkeybot_cli.runtime_python.subprocess.run", fake_run)
+    prepare_runtime_python(tmp_path)
+    assert pyproject_at_lock
+    assert "memory" in pyproject_at_lock[0]
+    assert ">=3.0.0,<4" in pyproject_at_lock[0]
+
+
 def test_prepare_runtime_python_fail_closed_when_upgrade_stale(tmp_path: Path, monkeypatch) -> None:
     from monkeybot_cli.runtime_python import RuntimeUpgradeError
 
@@ -179,6 +221,8 @@ def test_prepare_runtime_python_fail_closed_when_upgrade_stale(tmp_path: Path, m
 
         class Result:
             returncode = 1
+            stderr = "No module named 'mempalace'"
+            stdout = ""
 
         return Result()
 

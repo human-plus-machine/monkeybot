@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 import aiosqlite
@@ -200,7 +200,7 @@ async def _ensure_outbox_agent_id_column(conn: aiosqlite.Connection) -> None:
 
 
 def backoff_iso(attempts: int, *, now: datetime | None = None) -> str:
-    base = now or datetime.now(timezone.utc)
+    base = now or datetime.now(UTC)
     delay = min(_MAX_BACKOFF_SECONDS, 2 ** max(0, attempts))
     return (base + timedelta(seconds=delay)).isoformat(timespec="seconds")
 
@@ -269,7 +269,7 @@ async def claim_batch(
     agent_id: str | None = None,
     palace_id: str = "",
 ) -> list[OutboxRow]:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     now_iso = now.isoformat(timespec="seconds")
     expires = (now + timedelta(seconds=lease_seconds)).isoformat(timespec="seconds")
     await conn.execute("BEGIN IMMEDIATE")
@@ -377,7 +377,7 @@ async def mark_retry(
 
 
 async def gc_committed(conn: aiosqlite.Connection, *, days: int = _GC_AFTER_DAYS) -> int:
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
+    cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat(timespec="seconds")
     cur = await conn.execute(
         """
         UPDATE memory_outbox
@@ -396,8 +396,8 @@ def _age_from_oldest(oldest: Any) -> float:
     try:
         created = datetime.fromisoformat(str(oldest))
         if created.tzinfo is None:
-            created = created.replace(tzinfo=timezone.utc)
-        return max(0.0, (datetime.now(timezone.utc) - created).total_seconds())
+            created = created.replace(tzinfo=UTC)
+        return max(0.0, (datetime.now(UTC) - created).total_seconds())
     except ValueError:
         return 0.0
 

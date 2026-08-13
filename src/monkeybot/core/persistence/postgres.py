@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import time
+from datetime import UTC
 from typing import Any, cast
 
 import asyncpg
@@ -19,9 +20,9 @@ from monkeybot.core.persistence.durable_runs import (
     _tuple_to_run_row,
 )
 from monkeybot.core.persistence.scheduled_loops import (
+    _SCHEDULED_LOOP_COLUMNS,
     ScheduledLoopCreate,
     ScheduledLoopRow,
-    _SCHEDULED_LOOP_COLUMNS,
     _loop_id_from_create,
     _row_from_tuple,
     validate_loop_guards,
@@ -1220,26 +1221,25 @@ class PostgresOutboxStore:
         lease_seconds: int = 30,
         palace_id: str = "",
     ) -> list[Any]:
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         from monkeybot.core.memory.outbox import OutboxRow
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         now_iso = now.isoformat(timespec="seconds")
         expires = (now + timedelta(seconds=lease_seconds)).isoformat(timespec="seconds")
-        async with self._pool.acquire() as conn:
-            async with conn.transaction():
-                await conn.execute(
-                    """
+        async with self._pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                """
                     UPDATE memory_outbox
                     SET status = 'pending', lease_owner = NULL, lease_expires_at = NULL
                     WHERE status = 'processing'
                       AND lease_expires_at IS NOT NULL AND lease_expires_at < $1
                     """,
-                    now_iso,
-                )
-                rows = await conn.fetch(
-                    """
+                now_iso,
+            )
+            rows = await conn.fetch(
+                """
                     SELECT id, thread_id, turn_id, message_id, role, content, workspace_id,
                            wing, room, created_at, status, attempts, next_attempt_at,
                            last_error, traceparent, lease_owner, lease_expires_at, agent_id,
@@ -1253,15 +1253,15 @@ class PostgresOutboxStore:
                     LIMIT $4
                     FOR UPDATE SKIP LOCKED
                     """,
-                    agent_id,
-                    palace_id,
-                    now_iso,
-                    limit,
-                )
-                claimed: list[OutboxRow] = []
-                for raw in rows:
-                    await conn.execute(
-                        """
+                agent_id,
+                palace_id,
+                now_iso,
+                limit,
+            )
+            claimed: list[OutboxRow] = []
+            for raw in rows:
+                await conn.execute(
+                    """
                         UPDATE memory_outbox
                         SET status = 'processing', lease_owner = $1, lease_expires_at = $2,
                             attempts = attempts + 1,
@@ -1271,34 +1271,34 @@ class PostgresOutboxStore:
                             END
                         WHERE id = $4
                         """,
-                        lease_owner,
-                        expires,
-                        palace_id,
-                        raw["id"],
+                    lease_owner,
+                    expires,
+                    palace_id,
+                    raw["id"],
+                )
+                claimed.append(
+                    OutboxRow(
+                        id=str(raw["id"]),
+                        thread_id=str(raw["thread_id"]),
+                        turn_id=str(raw["turn_id"]),
+                        message_id=str(raw["message_id"]),
+                        role=str(raw["role"]),
+                        content=raw["content"],
+                        workspace_id=raw["workspace_id"],
+                        wing=str(raw["wing"]),
+                        room=str(raw["room"]),
+                        created_at=str(raw["created_at"]),
+                        status=str(raw["status"]),
+                        attempts=int(raw["attempts"] or 0),
+                        next_attempt_at=raw["next_attempt_at"],
+                        last_error=raw["last_error"],
+                        traceparent=raw["traceparent"],
+                        lease_owner=raw["lease_owner"],
+                        lease_expires_at=raw["lease_expires_at"],
+                        agent_id=str(raw["agent_id"] or ""),
+                        palace_id=str(raw["palace_id"] or ""),
                     )
-                    claimed.append(
-                        OutboxRow(
-                            id=str(raw["id"]),
-                            thread_id=str(raw["thread_id"]),
-                            turn_id=str(raw["turn_id"]),
-                            message_id=str(raw["message_id"]),
-                            role=str(raw["role"]),
-                            content=raw["content"],
-                            workspace_id=raw["workspace_id"],
-                            wing=str(raw["wing"]),
-                            room=str(raw["room"]),
-                            created_at=str(raw["created_at"]),
-                            status=str(raw["status"]),
-                            attempts=int(raw["attempts"] or 0),
-                            next_attempt_at=raw["next_attempt_at"],
-                            last_error=raw["last_error"],
-                            traceparent=raw["traceparent"],
-                            lease_owner=raw["lease_owner"],
-                            lease_expires_at=raw["lease_expires_at"],
-                            agent_id=str(raw["agent_id"] or ""),
-                            palace_id=str(raw["palace_id"] or ""),
-                        )
-                    )
+                )
         return claimed
 
     async def mark_committed(self, row_ids: list[str], *, lease_owner: str | None = None) -> int:
@@ -1384,9 +1384,9 @@ class PostgresOutboxStore:
             return 0
 
     async def gc_committed(self, *, days: int = 7) -> int:
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat(timespec="seconds")
         async with self._pool.acquire() as conn:
             result = await conn.execute(
                 """
@@ -1403,7 +1403,7 @@ class PostgresOutboxStore:
             return 0
 
     async def pending_depth(self, *, agent_id: str | None = None) -> tuple[int, float]:
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         async with self._pool.acquire() as conn:
             if agent_id:
@@ -1430,8 +1430,8 @@ class PostgresOutboxStore:
             try:
                 created = datetime.fromisoformat(str(oldest))
                 if created.tzinfo is None:
-                    created = created.replace(tzinfo=timezone.utc)
-                age = max(0.0, (datetime.now(timezone.utc) - created).total_seconds())
+                    created = created.replace(tzinfo=UTC)
+                age = max(0.0, (datetime.now(UTC) - created).total_seconds())
             except ValueError:
                 age = 0.0
         return count, age

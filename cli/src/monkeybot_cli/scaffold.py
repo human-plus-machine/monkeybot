@@ -259,10 +259,10 @@ def write_agent_pyproject(
     if path.exists() and not force:
         return "skipped"
     existed = path.exists()
-    # Sandbox + web search ship enabled in every generated agent config.
+    # Memory, sandbox, and web search ship enabled in every generated agent config.
     dep = monkeybot_requirement(
         provider=provider,
-        extras=["sandbox", "web-search", *(extras or [])],
+        extras=["memory", "sandbox", "web-search", *(extras or [])],
     )
     name = _sanitize_project_name(dest.name)
     path.write_text(
@@ -281,6 +281,39 @@ def write_agent_pyproject(
         encoding="utf-8",
     )
     return "overwritten" if existed else "created"
+
+
+_MONKEYBOT_DEP_RE: Final = re.compile(
+    r'(?P<prefix>["\']monkeybot)(?:\[(?P<extras>[^\]]*)\])?'
+    r'(?P<range>>=[^"\']+)(?P<suffix>["\'])'
+)
+
+
+def refresh_agent_pyproject(dest: Path) -> str:
+    """Upgrade the core range and add the MemPalace extra without dropping extras."""
+    path = dest / "pyproject.toml"
+    label = "pyproject.toml"
+    if not path.is_file():
+        return f"  {label}: skipped"
+    text = path.read_text(encoding="utf-8")
+
+    def replace(match: re.Match[str]) -> str:
+        extras = [item.strip() for item in (match.group("extras") or "").split(",") if item.strip()]
+        if "memory" not in extras:
+            extras.append("memory")
+        rendered = f"[{','.join(extras)}]" if extras else ""
+        return (
+            f"{match.group('prefix')}{rendered}"
+            f"{COMPATIBLE_CORE_RANGE}{match.group('suffix')}"
+        )
+
+    updated, count = _MONKEYBOT_DEP_RE.subn(replace, text, count=1)
+    if count == 0:
+        return f"  {label}: skipped"
+    if updated == text:
+        return f"  {label}: unchanged"
+    path.write_text(updated, encoding="utf-8")
+    return f"  {label}: updated"
 
 
 def _load_mapping(path: Path) -> dict[str, Any]:
@@ -452,6 +485,7 @@ def run_refresh(*, dest: Path) -> list[str]:
     report.append(refresh_permissions_if_default(cfg_dir))
     report.append(refresh_monkeybot_yaml(cfg_dir))
     report.extend(ensure_memory(dest, force=False))
+    report.append(refresh_agent_pyproject(dest))
     return report
 
 

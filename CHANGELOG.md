@@ -17,6 +17,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Gateway startup now refreshes the agent `pyproject.toml` (adds the `memory` extra and bumps the core range to 3.x) before `uv lock`/`uv sync`, so agents still pinned to `monkeybot<3` without MemPalace can upgrade instead of failing closed.
 - Stop mid-reply now cancels the in-flight provider token stream (instead of waiting for the full LLM call) and persists any already-streamed assistant text to history so follow-up turns keep matching what the user saw.
 - Chunking improvements now reach existing workspaces: a chunker version bump re-chunks indexed files even when their modification time never changed, so upgrades no longer require deleting `.monkeybot/knowledge/`.
 - Vector search scores only vectors from the active embedding model. Switching provider or `dimensions` purges the incomparable rows at startup and re-embeds them, instead of blending two models into one similarity ranking.
@@ -36,7 +37,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 ### Breaking
 
 - `subagents:` as a bare list of personas is no longer supported; wrap personas under `subagents.personas` in `monkeybot.yaml`. `SUBAGENT_TIMEOUT_SEC`, `SUBAGENT_MAX_TURNS`, and `MONKEYBOT_SUBAGENT_AGENT_MD` environment variable overrides are removed — set `subagents.timeout_sec`, `subagents.max_turns`, and per-persona `agent_md` in `monkeybot.yaml` instead. Top-level `subagents.agent_md` is also removed.
-- Core is **2.2.2**: note-based memory is replaced by MemPalace. `gcs://` and `s3://` memory URIs are rejected; mount a local volume instead. CLI **0.4.1** requires `monkeybot>=2.2.2`. Opt out of capture with `memory.enabled: false` or `MONKEYBOT_MEMORY_HOOK_ENABLED=0`.
+- Core is **3.0.0**: note-based memory is replaced by MemPalace. Install the optional `memory` extra to enable it. `gcs://` and `s3://` memory URIs are rejected; mount a local volume instead. CLI **0.5.0** requires `monkeybot>=3.0.0` and installs the memory runtime. Opt out of capture with `memory.enabled: false` or `MONKEYBOT_MEMORY_HOOK_ENABLED=0`.
 
 ## [cli v0.3.1] - 2026-07-28
 

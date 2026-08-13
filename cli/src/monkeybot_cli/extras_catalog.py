@@ -31,6 +31,7 @@ PROVIDER_CHOICES: tuple[ExtraChoice, ...] = (
 
 # Non-provider agent features (root ``[project.optional-dependencies]`` names).
 FEATURE_CHOICES: tuple[ExtraChoice, ...] = (
+    ExtraChoice("memory", "MemPalace durable memory"),
     ExtraChoice("postgres", "Postgres conversation store (parallel subagents)"),
     ExtraChoice("firestore", "Firestore storage"),
     ExtraChoice("gcs", "Google Cloud Storage"),

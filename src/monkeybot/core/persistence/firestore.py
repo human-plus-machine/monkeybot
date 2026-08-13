@@ -6,6 +6,7 @@ import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from datetime import UTC
 from typing import Any, cast
 
 from google.cloud import firestore
@@ -15,11 +16,11 @@ from google.cloud.firestore_v1.base_query import FieldFilter
 from monkeybot.core.llm.provider import Message, Role
 from monkeybot.core.llm.usage import Usage, UsageBreakdown, UsageBucket, UsageSummary
 from monkeybot.core.persistence.backends import FirestoreConfig
-from monkeybot.core.persistence.firestore_scheduled_loops import FirestoreScheduledLoopStore
 from monkeybot.core.persistence.durable_runs import (
     SubagentEnvelope,
     SubagentRunRow,
 )
+from monkeybot.core.persistence.firestore_scheduled_loops import FirestoreScheduledLoopStore
 from monkeybot.core.persistence.thread_summary import ChatThreadSummary, preview_from_content_blob
 from monkeybot.core.types.content_blocks import ContentBlock
 
@@ -1020,17 +1021,17 @@ class FirestoreOutboxStore:
         lease_seconds: int = 30,
         palace_id: str = "",
     ) -> list[Any]:
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         now_iso = now.isoformat(timespec="seconds")
         expires = (now + timedelta(seconds=lease_seconds)).isoformat(timespec="seconds")
-        query = (
-            self._col.where(filter=FieldFilter("agent_id", "==", agent_id))
-            .where(filter=FieldFilter("status", "==", "pending"))
-            .order_by("created_at")
-            .limit(limit * 4)
+        query = self._col.where(filter=FieldFilter("agent_id", "==", agent_id)).where(
+            filter=FieldFilter("status", "==", "pending")
         )
+        if palace_id:
+            query = query.where(filter=FieldFilter("palace_id", "in", [palace_id, ""]))
+        query = query.order_by("created_at").limit(limit * 4)
         docs = [doc async for doc in query.stream()]
         claimed: list[Any] = []
         for doc in docs:
@@ -1201,9 +1202,9 @@ class FirestoreOutboxStore:
         return 1 if await retry_txn(transaction, self._ref(row_id)) else 0
 
     async def gc_committed(self, *, days: int = 7) -> int:
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat(timespec="seconds")
         query = self._col.where(filter=FieldFilter("status", "==", "committed"))
         n = 0
         async for doc in query.stream():
@@ -1217,7 +1218,7 @@ class FirestoreOutboxStore:
         return n
 
     async def pending_depth(self, *, agent_id: str | None = None) -> tuple[int, float]:
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         query: Any = self._col
         if agent_id:
@@ -1237,8 +1238,8 @@ class FirestoreOutboxStore:
             try:
                 created_dt = datetime.fromisoformat(oldest)
                 if created_dt.tzinfo is None:
-                    created_dt = created_dt.replace(tzinfo=timezone.utc)
-                age = max(0.0, (datetime.now(timezone.utc) - created_dt).total_seconds())
+                    created_dt = created_dt.replace(tzinfo=UTC)
+                age = max(0.0, (datetime.now(UTC) - created_dt).total_seconds())
             except ValueError:
                 age = 0.0
         return count, age

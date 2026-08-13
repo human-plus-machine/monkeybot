@@ -4,4 +4,4 @@ from __future__ import annotations
 
 # Floor matches published ``monkeybot-cli`` → ``monkeybot[cli]`` bound.
 # Raise together when scaffolding or gateway APIs break compatibility.
-COMPATIBLE_CORE_RANGE = ">=2.2.2,<3"
+COMPATIBLE_CORE_RANGE = ">=3.0.0,<4"

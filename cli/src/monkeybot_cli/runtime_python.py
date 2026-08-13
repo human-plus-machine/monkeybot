@@ -21,6 +21,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from monkeybot_cli.scaffold import refresh_agent_pyproject
+
 DEFAULT_PORT = 8080
 SSE_GATEWAY_MODULE = "monkeybot.gateway.main"
 COMBINED_GATEWAY_MODULE = "monkeybot.gateway.realtime_main"
@@ -64,7 +66,7 @@ _HARNESS_PROBE = (
     "from importlib.metadata import version; "
     "ver = version('monkeybot'); "
     "parts = [int(p) for p in ver.split('.')[:3]]; "
-    "assert parts >= [2, 2, 2], ver"
+    "assert parts >= [3, 0, 0], ver"
 )
 
 
@@ -76,8 +78,9 @@ def prepare_runtime_python(agent_root: Path) -> RuntimePython:
     """Resolve the gateway interpreter, upgrading the agent lock when harness deps are missing.
 
     Verifies both MonkeyBot and MemPalace for venv and uv runtimes. On failure,
-    upgrades the monkeybot lock and syncs, then probes again. Fails closed if
-    the runtime is still stale.
+    refreshes the agent pyproject (memory extra + 3.x range), upgrades the
+    monkeybot lock, syncs, then probes again. Fails closed if the runtime is
+    still stale.
     """
     runtime = resolve_runtime_python(agent_root)
     has_project = (agent_root / "pyproject.toml").is_file()
@@ -86,12 +89,13 @@ def prepare_runtime_python(agent_root: Path) -> RuntimePython:
     if not has_project:
         raise RuntimeUpgradeError(
             "gateway interpreter is missing monkeybot/mempalace; "
-            "install monkeybot>=2.2.2 in this environment before starting the gateway"
+            "install monkeybot[memory]>=3.0.0 in this environment before starting the gateway"
         )
     print(
         f"agent runtime is missing harness packages; upgrading monkeybot lock in {agent_root}",
         flush=True,
     )
+    refresh_agent_pyproject(agent_root)
     lock = subprocess.run(
         ["uv", "lock", "--upgrade-package", "monkeybot"],
         cwd=agent_root,
@@ -100,9 +104,11 @@ def prepare_runtime_python(agent_root: Path) -> RuntimePython:
     sync = subprocess.run(["uv", "sync"], cwd=agent_root, check=False)
     runtime = resolve_runtime_python(agent_root)
     if lock.returncode != 0 or sync.returncode != 0 or not run_probe(runtime, _HARNESS_PROBE):
+        detail = _probe_failure_detail(runtime)
         raise RuntimeUpgradeError(
             "failed to upgrade the agent runtime to a MonkeyBot with MemPalace; "
             "refusing to start a stale gateway"
+            + (f" ({detail})" if detail else "")
         )
     return runtime
 
@@ -120,19 +126,40 @@ def gateway_argv(
     return [*runtime.argv, "-m", module]
 
 
+def _runtime_cwd(runtime: RuntimePython) -> dict[str, object]:
+    """Extra kwargs needed to run a probe under ``runtime`` (cwd for uv projects)."""
+    if runtime.source == "uv" and runtime.agent_root is not None:
+        return {"cwd": str(runtime.agent_root)}
+    return {}
+
+
 def run_probe(runtime: RuntimePython, code: str, *, timeout: float = 15.0) -> bool:
     """Run ``python -c code`` under ``runtime`` and return True on exit 0.
 
     Used by ``doctor`` to verify extras/imports in the *gateway* interpreter
     rather than the CLI's own process.
     """
-    kwargs: dict[str, object] = {}
-    if runtime.source == "uv" and runtime.agent_root is not None:
-        kwargs["cwd"] = str(runtime.agent_root)
     proc = subprocess.run(
         [*runtime.argv, "-c", code],
         capture_output=True,
         timeout=timeout,
-        **kwargs,
+        **_runtime_cwd(runtime),
     )
     return proc.returncode == 0
+
+
+def _probe_failure_detail(runtime: RuntimePython, *, timeout: float = 15.0) -> str:
+    try:
+        proc = subprocess.run(
+            [*runtime.argv, "-c", _HARNESS_PROBE],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            **_runtime_cwd(runtime),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return str(exc)
+    text = (proc.stderr or proc.stdout or "").strip()
+    if not text:
+        return f"probe exit {proc.returncode}"
+    return text[-500:]

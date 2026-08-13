@@ -97,7 +97,8 @@ read-only files. Use the agent root to resolve YAML paths; never rely on the
 function's working directory. `workspace/` is ephemeral, so use an absolute
 `MONKEYBOT_WORKSPACE_ROOT` only when the platform gives you a suitable temporary
 location. Durable history must use `DB_URL`. MemPalace (`MEMORY_STORAGE_URI`)
-needs a writable local path — ephemeral `/tmp` on FaaS, or a mounted volume.
+needs the `memory` extra and a writable local path — ephemeral `/tmp` on FaaS
+with `MONKEYBOT_MEMORY_ALLOW_EPHEMERAL=1`, or a mounted lock-capable volume.
 Object-store memory URIs are not supported.
 
 The static browser skill can be packaged with the artifact, but browser
@@ -112,8 +113,8 @@ this remains a deployment pattern, not a tested FaaS configuration.
 Install monkeybot with only the extras you need:
 
 ```bash
-# Gemini + Postgres (MemPalace is local-only — mount a volume or use /tmp)
-pip install "monkeybot[gemini,postgres]"
+# Gemini + Postgres + MemPalace (mount a volume or opt into replica-local /tmp)
+pip install "monkeybot[gemini,memory,postgres]"
 ```
 
 No `[sandbox]` extra is needed — sandbox is not supported on FaaS.
@@ -305,7 +306,11 @@ monkeybot[gemini,postgres]
 azure-functions
 ```
 
-**Note:** MemPalace is local-only. Use Postgres for history (`DB_URL`) and `MEMORY_STORAGE_URI=local:///tmp/memory` for ephemeral per-instance memory.
+**Note:** MemPalace is local-only. Use Postgres for history (`DB_URL`) and
+`MEMORY_STORAGE_URI=local:///tmp/memory` for ephemeral per-instance memory. This
+replica-local mode is intentionally not shared across cold starts, so set
+`MONKEYBOT_MEMORY_ALLOW_EPHEMERAL=1` to acknowledge that trade-off. Mount the
+same lock-capable volume in every replica instead when recall must be shared.
 
 ---
 
@@ -315,7 +320,7 @@ azure-functions
 
 **Constraints specific to Cloudflare:**
 - No `asyncio` event loop in the traditional sense — use Cloudflare's async handler model.
-- No persistent file system — MemPalace is ephemeral (`MEMORY_STORAGE_URI=local:///tmp/memory`). Workspace files may still use R2 via `create_workspace_storage`.
+- No persistent file system — MemPalace is ephemeral (`MEMORY_STORAGE_URI=local:///tmp/memory`) and requires `MONKEYBOT_MEMORY_ALLOW_EPHEMERAL=1`. Recall is replica-local and resets on cold start. Workspace files may still use R2 via `create_workspace_storage`.
 - No persistent TCP connections between invocations — open and close `StorageBackend` per invocation (see Section 2).
 - `DB_URL` must point to a Hyperdrive-proxied Postgres connection or an external managed Postgres.
 

@@ -10,6 +10,7 @@ import uuid
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
+from importlib.util import find_spec
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -23,6 +24,7 @@ DEFAULT_BACKEND = "chroma"
 CONVERSATION_ROOM = "conversation"
 EMBEDDER_IDENTITY_FILE = ".embedder_identity"
 PALACE_ID_FILE = ".palace_id"
+PALACE_WRITE_LOCK_FILE = ".palace_write.lock"
 L2_MAX_CHARS = 2000
 L2_MAX_DRAWERS = 12
 
@@ -74,8 +76,20 @@ class PalacePort(Protocol):
 _UNSUPPORTED_MEMORY_SCHEMES = ("gcs://", "s3://", "gs://")
 
 
-class UnsupportedMemoryURI(ValueError):
+class UnsupportedMemoryURI(ValueError):  # noqa: N818 - retained public API
     """Raised when memory_storage_uri uses a scheme MemPalace cannot persist."""
+
+
+class MemoryDependencyError(RuntimeError):
+    """Raised when MemPalace-backed memory is enabled without its package extra."""
+
+
+def mempalace_available() -> bool:
+    """Whether the optional MemPalace runtime is installed."""
+    try:
+        return find_spec("mempalace") is not None
+    except (ImportError, ValueError):
+        return False
 
 
 def palace_path_from_uri(memory_uri: str) -> Path:
@@ -99,17 +113,71 @@ def palace_path_from_uri(memory_uri: str) -> Path:
     return Path(raw).expanduser().resolve()
 
 
+@contextmanager
+def palace_volume_lock(palace_path: Path) -> Iterator[None]:
+    """Serialize palace mutations using a lock file on the palace volume."""
+    palace_path.mkdir(parents=True, exist_ok=True)
+    lock_path = palace_path / PALACE_WRITE_LOCK_FILE
+    with lock_path.open("a+b") as handle:
+        if os.name == "nt":
+            import msvcrt
+
+            locking = getattr(msvcrt, "locking")
+            lock_mode = getattr(msvcrt, "LK_LOCK")
+            unlock_mode = getattr(msvcrt, "LK_UNLCK")
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            locking(handle.fileno(), lock_mode, 1)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                locking(handle.fileno(), unlock_mode, 1)
+            return
+
+        import fcntl
+
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _write_palace_id(path: Path, token: str, *, exclusive: bool) -> None:
+    flags = os.O_WRONLY | os.O_CREAT
+    if exclusive:
+        flags |= os.O_EXCL
+    else:
+        flags |= os.O_TRUNC
+    fd = os.open(path, flags, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(token)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
 def palace_instance_id(palace_path: Path) -> str:
     """Stable id for this palace directory (shared volume ⇒ same id)."""
-    path = Path(palace_path) / PALACE_ID_FILE
+    path = palace_path / PALACE_ID_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
-    if path.is_file():
-        got = path.read_text(encoding="utf-8").strip()
-        if got:
-            return got
-    token = uuid.uuid4().hex
-    path.write_text(token, encoding="utf-8")
-    return token
+    with palace_volume_lock(path.parent):
+        if path.is_file():
+            got = path.read_text(encoding="utf-8").strip()
+            if got:
+                return got
+        token = uuid.uuid4().hex
+        try:
+            _write_palace_id(path, token, exclusive=True)
+        except FileExistsError:
+            got = path.read_text(encoding="utf-8").strip()
+            if got:
+                return got
+            _write_palace_id(path, token, exclusive=False)
+        return path.read_text(encoding="utf-8").strip()
 
 
 def palace_path_is_ephemeral(palace_path: Path) -> bool:
@@ -298,7 +366,7 @@ class MemPalaceAdapter:
     def acquire_write_lock(self) -> Iterator[None]:
         from mempalace.palace import mine_palace_lock
 
-        with mine_palace_lock(str(self.palace_path)):
+        with palace_volume_lock(self.palace_path), mine_palace_lock(str(self.palace_path)):
             yield
 
     def _collection(self, *, create: bool = True) -> Any:
@@ -511,4 +579,8 @@ def create_palace(
     ).strip()
     if in_memory:
         return InMemoryPalace(path, agent_name=agent_name, backend="memory", embedding_model=model)
+    if not mempalace_available():
+        raise MemoryDependencyError(
+            "MemPalace memory requires the optional dependency; install `monkeybot[memory]`"
+        )
     return MemPalaceAdapter(path, agent_name=agent_name, backend=be, embedding_model=model)

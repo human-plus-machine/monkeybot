@@ -82,6 +82,25 @@ async def _append_history(
     await append(thread_id, message)
 
 
+async def _append_atomic(
+    append_with: Any,
+    thread_id: str,
+    message: Message,
+    *,
+    turn_id: str,
+    message_id: str,
+    outbox: dict[str, Any],
+) -> None:
+    """Persist history + outbox using ``message_id`` as the idempotency key."""
+    await append_with(
+        thread_id,
+        message,
+        turn_id=turn_id,
+        message_id=message_id,
+        outbox=outbox,
+    )
+
+
 async def persist_message(
     history: HistoryStore,
     message: Message,
@@ -103,6 +122,14 @@ async def persist_message(
     append_with = getattr(history, "append_with_outbox", None)
     if should_ingest and callable(append_with):
         assert memory is not None
+        outbox = memory.outbox_spec(
+            thread_id=thread_id,
+            turn_id=turn_id,
+            message_id=mid,
+            role=message.role,
+            content=text,
+            traceparent=current_traceparent(),
+        )
         with memory_span(
             "monkeybot.memory.outbox.enqueue",
             **{
@@ -113,37 +140,50 @@ async def persist_message(
             },
         ):
             try:
-                await append_with(
+                await _append_atomic(
+                    append_with,
                     thread_id,
                     message,
                     turn_id=turn_id,
                     message_id=mid,
-                    outbox=memory.outbox_spec(
-                        thread_id=thread_id,
-                        turn_id=turn_id,
-                        message_id=mid,
-                        role=message.role,
-                        content=text,
-                        traceparent=current_traceparent(),
-                    ),
+                    outbox=outbox,
                 )
             except Exception as exc:
                 if _is_ambiguous_commit(exc):
                     logger.warning(
                         "atomic history+outbox acknowledgement lost; "
-                        "not retrying history append (message_id=%s): %r",
+                        "retrying idempotently (message_id=%s): %r",
                         mid,
                         exc,
                     )
+                    try:
+                        await _append_atomic(
+                            append_with,
+                            thread_id,
+                            message,
+                            turn_id=turn_id,
+                            message_id=mid,
+                            outbox=outbox,
+                        )
+                    except Exception as retry_exc:
+                        logger.warning(
+                            "idempotent history+outbox retry failed; "
+                            "falling back to history-only: %r",
+                            retry_exc,
+                        )
+                        await _append_history(
+                            history, thread_id, message, turn_id=turn_id, message_id=mid
+                        )
+                        return
+                else:
+                    logger.warning(
+                        "atomic history+outbox failed; falling back to history-only: %r",
+                        exc,
+                    )
+                    await _append_history(
+                        history, thread_id, message, turn_id=turn_id, message_id=mid
+                    )
                     return
-                logger.warning(
-                    "atomic history+outbox failed; falling back to history-only: %r",
-                    exc,
-                )
-                await _append_history(
-                    history, thread_id, message, turn_id=turn_id, message_id=mid
-                )
-                return
             log_event("outbox_enqueue", memory_role=message.role, memory_status="ok")
             memory.wake_writer()
         return

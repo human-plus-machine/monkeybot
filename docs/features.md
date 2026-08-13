@@ -446,7 +446,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - Memory is on by default when `paths.memory_storage_uri` is set. Set `memory.enabled: false` (or `MONKEYBOT_MEMORY_HOOK_ENABLED=0`) to disable capture, recall, and `mempalace search` teaching.
 - Subagents get **no-op `HookManager`** to avoid duplicate writes.
 - `flush()` must be called before short-lived handlers exit if writer work matters.
-- Replicated gateways with a shared Postgres/Firestore outbox must mount the same lock-capable volume at the palace path. Claims are partitioned by a `.palace_id` file in that directory. Ephemeral `/tmp` palaces with a shared outbox fail closed unless `MONKEYBOT_MEMORY_ALLOW_EPHEMERAL=1`.
+- Replicated gateways with a shared Postgres/Firestore outbox must mount the same lock-capable volume at the palace path. Claims are partitioned by an atomically created `.palace_id`, and Chroma writes are serialized by `.palace_write.lock` on that volume (not by a host-local lock). Ephemeral `/tmp` palaces with a shared outbox fail closed unless `MONKEYBOT_MEMORY_ALLOW_EPHEMERAL=1`; that opt-in provides replica-local recall only.
 - Firestore outbox documents live at `{prefix}/outbox/memory_outbox/{id}` so the shipped composite indexes in `src/monkeybot/core/persistence/firestore.indexes.json` apply to every prefix. Deploy with `gcloud firestore indexes composite create` (or Firebase `firestore:indexes`) from that manifest.
 
 ---
