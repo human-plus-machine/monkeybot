@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any, Final
 
 import yaml
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.version import InvalidVersion, Version
 
 from monkeybot_cli.compat import COMPATIBLE_CORE_RANGE
 from monkeybot_cli.extras_catalog import normalize_extra_token, provider_extra_name
@@ -285,26 +287,50 @@ def write_agent_pyproject(
     return "overwritten" if existed else "created"
 
 
-_MONKEYBOT_REQUIREMENT_RE: Final = re.compile(
-    r"^monkeybot(?:\[(?P<extras>[^\]]*)\])?[^;]*(?P<marker>\s*;.*)?$",
-    re.IGNORECASE,
-)
+def _supports_core_3(requirement: Requirement) -> bool:
+    """Return whether a version constraint has a plausible MonkeyBot 3.x match."""
+    if requirement.url or not requirement.specifier:
+        return True
+    candidates = {Version("3.0.0"), Version("3.1.0"), Version("3.999.999")}
+    for specifier in requirement.specifier:
+        raw = specifier.version.rstrip(".*")
+        try:
+            boundary = Version(raw)
+        except InvalidVersion:
+            continue
+        if boundary.major != 3:
+            continue
+        candidates.add(boundary)
+        release = (*boundary.release, 0, 0, 0)
+        candidates.add(Version(".".join(str(part) for part in release[:3])))
+        candidates.add(Version(".".join(str(part) for part in (*release[:2], release[2] + 1))))
+    return any(requirement.specifier.contains(candidate) for candidate in candidates)
 
 
 def _refreshed_monkeybot_requirement(
     requirement: str, *, include_memory: bool
 ) -> str | None:
-    match = _MONKEYBOT_REQUIREMENT_RE.fullmatch(requirement.strip())
-    if match is None:
+    try:
+        parsed = Requirement(requirement)
+    except InvalidRequirement:
         return None
-    extras = [item.strip() for item in (match.group("extras") or "").split(",") if item.strip()]
+    if parsed.name.lower().replace("_", "-") != "monkeybot":
+        return None
+    extras = sorted(parsed.extras)
     has_memory = any(normalize_extra_token(item) == "memory" for item in extras)
     if include_memory and not has_memory:
         extras.append("memory")
     elif not include_memory:
         extras = [item for item in extras if normalize_extra_token(item) != "memory"]
     rendered = f"[{','.join(extras)}]" if extras else ""
-    return f"monkeybot{rendered}{COMPATIBLE_CORE_RANGE}{match.group('marker') or ''}"
+    if parsed.url:
+        source = f" @ {parsed.url}"
+    elif _supports_core_3(parsed):
+        source = str(parsed.specifier)
+    else:
+        source = COMPATIBLE_CORE_RANGE
+    marker = f"; {parsed.marker}" if parsed.marker is not None else ""
+    return f"monkeybot{rendered}{source}{marker}"
 
 
 def _replace_toml_string(text: str, old: str, new: str) -> str | None:

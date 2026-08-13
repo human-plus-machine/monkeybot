@@ -75,18 +75,28 @@ class RuntimeUpgradeError(RuntimeError):
     """Raised when the agent interpreter cannot be upgraded to a compatible MonkeyBot."""
 
 
-def prepare_runtime_python(agent_root: Path) -> RuntimePython:
+def prepare_runtime_python(
+    agent_root: Path,
+    config_path: Path | str | None = None,
+) -> RuntimePython:
     """Resolve the gateway interpreter, upgrading its lock when dependencies are stale.
 
     MemPalace is required and installed only when memory is enabled for the
-    agent. Every runtime must contain a compatible MonkeyBot 3.x core.
+    effective gateway config. Every runtime must contain a compatible MonkeyBot
+    3.x core.
     """
     from monkeybot.core.memory.config import memory_enabled_from_config
 
     runtime = resolve_runtime_python(agent_root)
     has_project = (agent_root / "pyproject.toml").is_file()
-    config_path = agent_root / "monkeybot_config" / "monkeybot.yaml"
-    memory_enabled = memory_enabled_from_config(str(config_path) if config_path.is_file() else None)
+    effective_config = (
+        Path(config_path).expanduser().resolve()
+        if config_path is not None
+        else agent_root / "monkeybot_config" / "monkeybot.yaml"
+    )
+    memory_enabled = memory_enabled_from_config(
+        str(effective_config) if effective_config.is_file() else None
+    )
     probe = _MEMORY_PROBE if memory_enabled else _CORE_PROBE
     pyproject_updated = has_project and refresh_agent_pyproject(
         agent_root, include_memory=memory_enabled

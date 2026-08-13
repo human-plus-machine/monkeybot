@@ -109,6 +109,11 @@ _PARENT_CANCEL_TASK_ERR = "task: cancelled (parent)"
 
 _SPILL_DIR = ".monkeybot/spill"
 
+# When memory is disabled, only non-launching binaries may run. Denying
+# interpreters and process launchers at the tool boundary prevents indirect
+# MemPalace execution through bash, Python, uv, git aliases, or extensions.
+_MEMORY_DISABLED_SAFE_COMMANDS = frozenset({"cat", "echo", "grep", "ls", "rg"})
+
 _CORE_TOOL_NAMES = frozenset(
     {
         "load_file",
@@ -1707,13 +1712,13 @@ class CoreToolExecutor(ToolExecutorPort):
         except ValueError as exc:
             return None, _run_command_parse_envelope(exc)
         timeout = _coerce_int(args.get("timeout"), 60) or 60
-        if cmd == "mempalace" and self._memory is None:
+        if self._memory is None and cmd not in _MEMORY_DISABLED_SAFE_COMMANDS:
             return (
                 None,
                 _built_in_tool_error(
                     "policy",
-                    "Memory is disabled; mempalace commands are unavailable.",
-                    "Do not attempt memory recall while memory.enabled is false.",
+                    "Memory is disabled; commands capable of launching MemPalace are unavailable.",
+                    "Use a non-launching command or enable memory before invoking shells or interpreters.",
                 ),
             )
         executor = self._terminal

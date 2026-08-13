@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 import pytest
 import yaml
+from packaging.requirements import Requirement
 
 from monkeybot_cli.compat import COMPATIBLE_CORE_RANGE
 from monkeybot_cli.scaffold import (
     monkeybot_dep_for_provider,
+    refresh_agent_pyproject,
     run_new,
     run_refresh,
     write_agent_pyproject,
@@ -195,10 +198,60 @@ def test_run_refresh_preserves_pep508_dependency_marker(tmp_path: Path) -> None:
 
     run_refresh(dest=tmp_path)
 
-    text = pyproject.read_text(encoding="utf-8")
-    assert (
-        f'"monkeybot[memory]{COMPATIBLE_CORE_RANGE}; python_version >= \'3.11\'"' in text
+    document = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    refreshed = Requirement(document["project"]["dependencies"][0])
+    assert refreshed.name == "monkeybot"
+    assert refreshed.extras == {"memory"}
+    assert str(refreshed.specifier) == str(Requirement(f"monkeybot{COMPATIBLE_CORE_RANGE}").specifier)
+    assert str(refreshed.marker) == 'python_version >= "3.11"'
+
+
+def test_run_refresh_targets_exact_monkeybot_package_name(tmp_path: Path) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        (
+            "[project]\n"
+            'name = "agent"\n'
+            "dependencies = [\n"
+            '  "monkeybot-browser-mcp>=0.2.0,<1",\n'
+            '  "monkeybot>=2.2.2,<3",\n'
+            "]\n"
+        ),
+        encoding="utf-8",
     )
+
+    assert refresh_agent_pyproject(tmp_path).endswith(": updated")
+
+    text = pyproject.read_text(encoding="utf-8")
+    assert '"monkeybot-browser-mcp>=0.2.0,<1"' in text
+    assert f'"monkeybot[memory]{COMPATIBLE_CORE_RANGE}"' in text
+
+
+@pytest.mark.parametrize(
+    ("requirement", "expected"),
+    [
+        ("monkeybot==3.0.0", "monkeybot[memory]==3.0.0"),
+        (
+            "monkeybot @ https://packages.example/monkeybot.whl",
+            "monkeybot[memory] @ https://packages.example/monkeybot.whl",
+        ),
+    ],
+)
+def test_refresh_preserves_compatible_pins_and_direct_sources(
+    tmp_path: Path,
+    requirement: str,
+    expected: str,
+) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        f'[project]\nname = "agent"\ndependencies = ["{requirement}"]\n',
+        encoding="utf-8",
+    )
+
+    assert refresh_agent_pyproject(tmp_path).endswith(": updated")
+
+    document = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    assert Requirement(document["project"]["dependencies"][0]) == Requirement(expected)
 
 
 def test_run_refresh_removes_memory_extra_when_disabled(tmp_path: Path) -> None:

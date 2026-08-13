@@ -213,6 +213,60 @@ def test_prepare_runtime_python_removes_memory_extra_when_disabled(
     assert any(cmd[:2] == ["uv", "sync"] for cmd in calls)
 
 
+@pytest.mark.parametrize(
+    ("default_enabled", "explicit_enabled", "expects_memory"),
+    [(False, True, True), (True, False, False)],
+)
+def test_prepare_runtime_python_uses_explicit_config_for_memory_extra(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    default_enabled: bool,
+    explicit_enabled: bool,
+    expects_memory: bool,
+) -> None:
+    config_dir = tmp_path / "monkeybot_config"
+    config_dir.mkdir()
+    (config_dir / "monkeybot.yaml").write_text(
+        f"memory:\n  enabled: {str(default_enabled).lower()}\n",
+        encoding="utf-8",
+    )
+    explicit_config = tmp_path / "alternate.yaml"
+    explicit_config.write_text(
+        f"memory:\n  enabled: {str(explicit_enabled).lower()}\n",
+        encoding="utf-8",
+    )
+    initial = "monkeybot>=3.0.0,<4"
+    if not expects_memory:
+        initial = "monkeybot[memory]>=3.0.0,<4"
+    (tmp_path / "pyproject.toml").write_text(
+        f'[project]\nname = "agent"\ndependencies = ["{initial}"]\n',
+        encoding="utf-8",
+    )
+
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        del kwargs
+        calls.append(list(argv))
+
+        class Result:
+            returncode = 0
+            stderr = ""
+            stdout = ""
+
+        return Result()
+
+    monkeypatch.setattr("monkeybot_cli.runtime_python.subprocess.run", fake_run)
+
+    prepare_runtime_python(tmp_path, explicit_config)
+
+    text = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
+    assert ("monkeybot[memory]" in text) is expects_memory
+    probes = [" ".join(cmd) for cmd in calls if "-c" in cmd]
+    assert probes
+    assert any("import mempalace" in command for command in probes) is expects_memory
+
+
 def test_prepare_runtime_python_refreshes_stale_pyproject_before_lock(
     tmp_path: Path, monkeypatch
 ) -> None:

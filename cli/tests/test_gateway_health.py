@@ -59,7 +59,7 @@ def test_spawn_gateway_enables_transcript_capture(tmp_path: Path, monkeypatch) -
     monkeypatch.delenv("MONKEYBOT_TRANSCRIPT_ENABLED", raising=False)
     monkeypatch.setattr(
         "monkeybot_cli.commands.chat.prepare_runtime_python",
-        lambda root: RuntimePython([sys.executable], "cli", root),
+        lambda root, config_path=None: RuntimePython([sys.executable], "cli", root),
     )
     monkeypatch.setattr("monkeybot_cli.commands.chat.subprocess.Popen", fake_popen)
     spawned = _spawn_gateway(None, tmp_path, 8123)

@@ -105,7 +105,10 @@ async def start_gateway_if_needed(
 
     env = {**os.environ, "PORT": str(port)}
     env.setdefault("LOG_LEVEL", "error")
-    runtime = prepare_runtime_python(workspace)
+    runtime = prepare_runtime_python(
+        workspace,
+        workspace / "monkeybot_config" / "monkeybot.yaml",
+    )
     cmd = gateway_argv(runtime, module=COMBINED_GATEWAY_MODULE)
 
     logger.info("Starting combined gateway on port %s from %s", port, workspace)

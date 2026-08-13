@@ -46,7 +46,7 @@ def run_run(args: argparse.Namespace) -> int:
                     "Continuing without a healthy OpenSandbox — run_command may fail.",
                     flush=True,
                 )
-    runtime = prepare_runtime_python(agent_root)
+    runtime = prepare_runtime_python(agent_root, config_path)
     cmd = gateway_argv(runtime)
     try:
         proc = subprocess.run(cmd, env=env, cwd=agent_root)

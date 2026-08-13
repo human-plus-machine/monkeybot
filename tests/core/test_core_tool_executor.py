@@ -1189,7 +1189,18 @@ async def test_run_command_cat_under_memory(tmp_path: Path, monkeypatch: pytest.
 
 
 @pytest.mark.asyncio
-async def test_run_command_mempalace_is_blocked_when_memory_disabled(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["mempalace", "search", "private"],
+        ["bash", "-c", "mempalace search private"],
+        ["python", "-m", "mempalace", "search", "private"],
+    ],
+)
+async def test_run_command_mempalace_is_blocked_when_memory_disabled(
+    tmp_path: Path,
+    argv: list[str],
+) -> None:
     skills = tmp_path / "skills"
     skills.mkdir()
     ex = CoreToolExecutor(
@@ -1204,7 +1215,7 @@ async def test_run_command_mempalace_is_blocked_when_memory_disabled(tmp_path: P
             call=ToolCall(
                 call_id="memory-disabled",
                 name="run_command",
-                args={"argv": ["mempalace", "search", "private"]},
+                args={"argv": argv},
             ),
             ctx=_ctx(),
         )
