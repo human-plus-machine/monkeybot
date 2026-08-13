@@ -68,7 +68,7 @@ def test_talk_spawned_gateway_enables_transcript_capture(
     monkeypatch.setattr(
         talk_ui,
         "prepare_runtime_python",
-        lambda root: RuntimePython([sys.executable], "cli", root),
+        lambda root, config_path=None: RuntimePython([sys.executable], "cli", root),
     )
     monkeypatch.setattr(talk_ui.subprocess, "Popen", fake_popen)
     spawned = talk_ui._spawn_combined_gateway(None, tmp_path, 8123)

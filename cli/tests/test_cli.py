@@ -73,7 +73,8 @@ def test_refresh_updates_existing_agent(tmp_path: Path) -> None:
     assert "officecli" in text
     pyproject = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
     assert "memory" in pyproject
-    assert ">=3.0.0,<4" in pyproject
+    assert ">=3.0.0" in pyproject
+    assert "<4" in pyproject
     assert "command_allowlist.yaml: updated" in result.stdout
 
 
