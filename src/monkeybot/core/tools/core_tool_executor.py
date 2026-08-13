@@ -76,6 +76,7 @@ from monkeybot.core.subagents.subagent_proto import (
     resolve_task_agent_md_path,
     spawn_subagent,
 )
+from monkeybot.core.tools.fs_isolation import memory_hidden_paths
 from monkeybot.core.tools.inspector import coerce_run_command_argv
 from monkeybot.core.tools.sandbox_executor import SandboxConfig, SandboxExecutor
 from monkeybot.core.tools.spill_inventory import (
@@ -766,7 +767,6 @@ def _str_arg(args: dict[str, Any], *keys: str) -> str | None:
 
 
 _SHELL_OPERATOR_TOKENS = frozenset({"&&", "||", ";", "|", "&"})
-_PROCESS_LAUNCHERS = frozenset({"bash", "python", "python3", "uv", "git", "gh"})
 
 
 def _needs_shell_wrapper(stripped: str, parts: list[str]) -> bool:
@@ -820,28 +820,6 @@ def _parse_run_command(args: dict[str, Any]) -> tuple[str, list[str]]:
     )
 
 
-def _mentions_indirect_mempalace(command: str, argv: list[str]) -> bool:
-    """Detect common attempts to launch MemPalace behind an allowed launcher.
-
-    Environment and path isolation remain the primary boundary. This check also
-    gives nested shell/module invocations the same clear policy error as a
-    direct ``mempalace`` call.
-    """
-    if command not in _PROCESS_LAUNCHERS:
-        return False
-    tokens: list[str] = []
-    for arg in argv:
-        try:
-            tokens.extend(shlex.split(arg, posix=True))
-        except ValueError:
-            tokens.append(arg)
-    for token in tokens:
-        normalized = token.strip(" \t\r\n;&|(){}[]'\"").lower().replace("\\", "/")
-        if normalized == "mempalace" or normalized.endswith("/mempalace"):
-            return True
-    return False
-
-
 class CoreToolExecutor(ToolExecutorPort):
     """Executes built-in tools and delegates ``server__tool`` calls to :class:`MCPClient`."""
 
@@ -879,9 +857,8 @@ class CoreToolExecutor(ToolExecutorPort):
         self._terminal: TerminalExecutor | SandboxExecutor
         self._host_terminal: TerminalExecutor | None = None
         if terminal is not None:
-            self._terminal = terminal
-            self._run_cmd_allowed_commands = tuple(terminal.allowed_commands)
-            self._run_cmd_allowed_paths = tuple(terminal.allowed_path_prefixes)
+            cmds = tuple(terminal.allowed_commands)
+            paths = tuple(terminal.allowed_path_prefixes)
         else:
             cmds = (
                 tuple(run_command_allowed_commands)
@@ -893,35 +870,61 @@ class CoreToolExecutor(ToolExecutorPort):
                 if run_command_allowed_path_prefixes is not None
                 else tuple(ALLOWED_PATHS)
             )
-            if self._memory is None:
-                memory_root = (self._workspace.repo_root / "../memory").resolve()
-                paths = tuple(
-                    path
-                    for path in paths
-                    if not (
-                        (candidate := (self._workspace.repo_root / path).resolve()) == memory_root
-                        or memory_root in candidate.parents
-                    )
+        hidden_paths: tuple[Path, ...] = ()
+        if self._memory is None:
+            # Memory off is a capability decision, so it applies to whatever
+            # executor ends up running commands, including an injected one.
+            hidden_paths = memory_hidden_paths(self._workspace.repo_root)
+            paths = tuple(
+                path
+                for path in paths
+                if not self._under_hidden_path(
+                    (self._workspace.repo_root / path).resolve(), hidden_paths
                 )
-            # Allow absolute argv paths under the resolved skills root (list_skills
-            # returns this path; scripts live outside the workspace cwd).
-            skills = str(self._skills_path)
-            paths = tuple(dict.fromkeys((*paths, skills, f"{skills}/")))
-            self._run_cmd_allowed_commands = cmds
-            self._run_cmd_allowed_paths = paths
+            )
+            cmds = tuple(cmd for cmd in cmds if cmd != "mempalace")
+        # Allow absolute argv paths under the resolved skills root (list_skills
+        # returns this path; scripts live outside the workspace cwd).
+        skills = str(self._skills_path)
+        paths = tuple(dict.fromkeys((*paths, skills, f"{skills}/")))
+        self._run_cmd_allowed_commands = cmds
+        self._run_cmd_allowed_paths = paths
+        if terminal is not None:
+            self._terminal = (
+                terminal.restricted(
+                    allowed_commands=cmds,
+                    allowed_path_prefixes=paths,
+                    hidden_paths=hidden_paths,
+                )
+                if isinstance(terminal, TerminalExecutor)
+                else terminal
+            )
+        else:
             _scfg = SandboxConfig.from_env()
             if _scfg.enabled:
-                self._host_terminal = TerminalExecutor(
-                    allowed_commands=cmds, allowed_path_prefixes=paths
-                )
                 self._terminal = SandboxExecutor(
                     _scfg, workspace_root, skills_path=self._skills_path, allowed_commands=cmds
                 )
             else:
                 self._terminal = TerminalExecutor(
-                    allowed_commands=cmds, allowed_path_prefixes=paths
+                    allowed_commands=cmds,
+                    allowed_path_prefixes=paths,
+                    hidden_paths=hidden_paths,
                 )
+        if isinstance(self._terminal, SandboxExecutor):
+            # The palace is deliberately not mounted into the sandbox, so
+            # authorized memory reads need a host terminal regardless of
+            # whether the sandbox was auto-created or injected.
+            self._host_terminal = TerminalExecutor(
+                allowed_commands=cmds,
+                allowed_path_prefixes=paths,
+                hidden_paths=hidden_paths,
+            )
         self._extra_tools: dict[str, Any] = {ct.tool_def.name: ct for ct in (extra_tools or [])}
+
+    @staticmethod
+    def _under_hidden_path(candidate: Path, hidden_paths: Sequence[Path]) -> bool:
+        return any(candidate == root or root in candidate.parents for root in hidden_paths)
 
     @property
     def mcp(self) -> MCPClientPort:
@@ -968,8 +971,10 @@ class CoreToolExecutor(ToolExecutorPort):
         )
 
     async def aclose(self) -> None:
-        """Release resources held by the terminal executor for this session."""
+        """Release resources held by the terminal executors for this session."""
         await self._terminal.aclose()
+        if self._host_terminal is not None:
+            await self._host_terminal.aclose()
 
     async def execute(self, *, call: ToolCall, ctx: TurnContext) -> ToolExecutionResult:
         name = call.name
@@ -1747,15 +1752,6 @@ class CoreToolExecutor(ToolExecutorPort):
                 _built_in_tool_error(
                     "policy",
                     "Memory is unavailable; mempalace commands are disabled.",
-                    "Do not attempt memory recall when no memory subsystem is active.",
-                ),
-            )
-        if self._memory is None and _mentions_indirect_mempalace(cmd, argv):
-            return (
-                None,
-                _built_in_tool_error(
-                    "policy",
-                    "Memory is unavailable; nested MemPalace commands are disabled.",
                     "Do not attempt memory recall when no memory subsystem is active.",
                 ),
             )

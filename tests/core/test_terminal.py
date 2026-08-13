@@ -13,9 +13,17 @@ Security tests are marked with SECURITY comment for easy identification.
 """
 
 import asyncio
+import logging
 
 import pytest
 
+from monkeybot.core.tools import terminal as terminal_module
+from monkeybot.core.tools.fs_isolation import (
+    ISOLATION_ERROR_PREFIX,
+    ISOLATION_FAILURE_EXIT_CODE,
+    IsolationSupport,
+    isolation_support,
+)
 from monkeybot.core.tools.terminal import (
     ALLOWED_COMMANDS,
     ALLOWED_PATHS,
@@ -91,7 +99,7 @@ class TestTerminalExecutorSecurity:
         test_file.parent.mkdir(parents=True, exist_ok=True)
         test_file.write_text("Hello from allowed path")
 
-        result = await executor.execute("cat", [str(test_file)])
+        result = await executor.execute("cat", [str(test_file)], cwd=test_data_dir)
 
         assert result.exit_code == 0
         assert "Hello from allowed path" in result.stdout
@@ -160,6 +168,30 @@ class TestTerminalExecutorSecurity:
             )
 
     @pytest.mark.asyncio
+    async def test_temp_roots_are_not_implicitly_allowed(self, tmp_path):
+        """SECURITY: /tmp is a real palace location, never a blanket exemption."""
+        secret = tmp_path / "memory" / "private.txt"
+        secret.parent.mkdir(parents=True)
+        secret.write_text("PRIVATE-CONTENT", encoding="utf-8")
+        locked_down = TerminalExecutor(allowed_path_prefixes=[])
+
+        for temp_root in ("/tmp", "/var/folders", "/private/var/folders"):
+            with pytest.raises(SecurityError, match="not allowed"):
+                await locked_down.execute("cat", [f"{temp_root}/memory/private.txt"])
+
+    @pytest.mark.asyncio
+    async def test_temp_directory_is_allowed_when_explicitly_listed(self, tmp_path):
+        """Callers that need a temp directory opt in by listing it."""
+        secret = tmp_path / "notes.txt"
+        secret.write_text("explicitly allowed", encoding="utf-8")
+        executor = TerminalExecutor(allowed_path_prefixes=[str(tmp_path)])
+
+        result = await executor.execute("cat", [str(secret)])
+
+        assert result.exit_code == 0
+        assert "explicitly allowed" in result.stdout
+
+    @pytest.mark.asyncio
     async def test_subdirectory_of_allowed_path_succeeds(self, executor, test_data_dir):
         """SECURITY: Test that subdirectories of allowed paths are accessible."""
         # Create nested directory structure
@@ -168,7 +200,7 @@ class TestTerminalExecutorSecurity:
         nested_file = nested_dir / "file.txt"
         nested_file.write_text("Deep nested file")
 
-        result = await executor.execute("cat", [str(nested_file)])
+        result = await executor.execute("cat", [str(nested_file)], cwd=test_data_dir)
 
         assert result.exit_code == 0
         assert "Deep nested file" in result.stdout
@@ -730,6 +762,170 @@ class TestTerminalExecutorConstants:
             assert cmd not in ALLOWED_COMMANDS, (
                 f"Dangerous command '{cmd}' found in ALLOWED_COMMANDS!"
             )
+
+
+@pytest.mark.skipif(
+    not isolation_support().available,
+    reason=f"host cannot isolate filesystems: {isolation_support().detail}",
+)
+class TestTerminalExecutorFilesystemIsolation:
+    """A hidden directory must be unreachable however the child spells the path."""
+
+    @pytest.fixture
+    def hidden_secret(self, tmp_path):
+        secret_dir = tmp_path / "memory"
+        secret_dir.mkdir()
+        (secret_dir / "private.txt").write_text("PRIVATE-CONTENT", encoding="utf-8")
+        return secret_dir
+
+    @pytest.fixture
+    def isolated_executor(self, tmp_path, hidden_secret):
+        return TerminalExecutor(
+            allowed_path_prefixes=[str(tmp_path)],
+            hidden_paths=[hidden_secret],
+        )
+
+    @pytest.mark.asyncio
+    async def test_direct_read_of_hidden_path_finds_nothing(self, isolated_executor, hidden_secret):
+        result = await isolated_executor.execute("cat", [str(hidden_secret / "private.txt")])
+
+        assert result.exit_code != 0
+        assert "PRIVATE-CONTENT" not in result.stdout
+
+    @pytest.mark.asyncio
+    async def test_shell_variable_indirection_cannot_reach_hidden_path(
+        self, isolated_executor, hidden_secret
+    ):
+        result = await isolated_executor.execute(
+            "bash", ["-c", f'p={hidden_secret}; cat "$p"/private.txt']
+        )
+
+        assert "PRIVATE-CONTENT" not in result.stdout
+
+    @pytest.mark.asyncio
+    async def test_interpreter_file_io_cannot_reach_hidden_path(
+        self, isolated_executor, hidden_secret
+    ):
+        result = await isolated_executor.execute(
+            "python",
+            ["-c", f"print(open({str(hidden_secret / 'private.txt')!r}).read())"],
+        )
+
+        assert result.exit_code != 0
+        assert "PRIVATE-CONTENT" not in result.stdout
+
+    @pytest.mark.asyncio
+    async def test_hidden_directory_appears_empty(self, isolated_executor, hidden_secret):
+        result = await isolated_executor.execute("bash", ["-c", f"ls -A {hidden_secret}"])
+
+        assert result.stdout.strip() == ""
+
+    @pytest.mark.asyncio
+    async def test_visible_paths_and_tooling_still_work(self, isolated_executor, tmp_path):
+        visible = tmp_path / "notes.txt"
+        visible.write_text("VISIBLE", encoding="utf-8")
+
+        read = await isolated_executor.execute("cat", [str(visible)])
+        shell = await isolated_executor.execute("bash", ["-c", "echo shell-ok"])
+
+        assert read.exit_code == 0 and "VISIBLE" in read.stdout
+        assert shell.exit_code == 0 and "shell-ok" in shell.stdout
+
+    @pytest.mark.asyncio
+    async def test_host_filesystem_is_unchanged(self, isolated_executor, hidden_secret):
+        await isolated_executor.execute("bash", ["-c", f"ls -A {hidden_secret}"])
+
+        assert (hidden_secret / "private.txt").read_text(encoding="utf-8") == "PRIVATE-CONTENT"
+
+    @pytest.mark.asyncio
+    async def test_directory_created_after_construction_is_still_hidden(self, tmp_path):
+        late = tmp_path / "late-memory"
+        executor = TerminalExecutor(allowed_path_prefixes=[str(tmp_path)], hidden_paths=[late])
+        late.mkdir()
+        (late / "private.txt").write_text("PRIVATE-CONTENT", encoding="utf-8")
+
+        result = await executor.execute("bash", ["-c", f"cat {late}/private.txt"])
+
+        assert "PRIVATE-CONTENT" not in result.stdout
+
+
+class TestTerminalExecutorIsolationFallback:
+    """Isolation is never silently assumed."""
+
+    @pytest.mark.asyncio
+    async def test_unavailable_isolation_warns_once_and_still_runs(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        monkeypatch.setattr(
+            terminal_module,
+            "isolation_support",
+            lambda: IsolationSupport("none", "probe says no"),
+        )
+        monkeypatch.setattr(terminal_module, "_isolation_warning_emitted", False)
+        executor = TerminalExecutor(
+            allowed_path_prefixes=[str(tmp_path)], hidden_paths=[tmp_path / "memory"]
+        )
+
+        with caplog.at_level(logging.WARNING):
+            first = await executor.execute("echo", ["still-works"])
+            await executor.execute("echo", ["again"])
+
+        warnings = [r for r in caplog.records if "filesystem isolation unavailable" in r.message]
+        assert first.exit_code == 0
+        assert len(warnings) == 1
+
+    @pytest.mark.asyncio
+    async def test_failed_isolation_setup_raises_security_error(self, tmp_path, monkeypatch):
+        def broken_argv(executable, args, hidden_paths, *, support):
+            del executable, args, hidden_paths, support
+            return "bash", [
+                "-c",
+                f"echo '{ISOLATION_ERROR_PREFIX} unshare failed' >&2; "
+                f"exit {ISOLATION_FAILURE_EXIT_CODE}",
+            ]
+
+        monkeypatch.setattr(
+            terminal_module,
+            "isolation_support",
+            lambda: IsolationSupport("namespace", "forced"),
+        )
+        monkeypatch.setattr(terminal_module, "isolated_argv", broken_argv)
+        executor = TerminalExecutor(
+            allowed_path_prefixes=[str(tmp_path)], hidden_paths=[tmp_path / "memory"]
+        )
+
+        with pytest.raises(SecurityError, match="isolation could not be established"):
+            await executor.execute("echo", ["should-not-run"])
+
+
+class TestTerminalExecutorRestricted:
+    """`restricted()` narrows policy without mutating the caller's executor."""
+
+    def test_restricted_copy_leaves_original_untouched(self, tmp_path):
+        original = TerminalExecutor(
+            allowed_commands=["cat", "mempalace"], allowed_path_prefixes=["../memory", "./skills"]
+        )
+
+        derived = original.restricted(
+            allowed_commands=["cat"],
+            allowed_path_prefixes=["./skills"],
+            hidden_paths=[tmp_path / "memory"],
+        )
+
+        assert original.allowed_commands == ("cat", "mempalace")
+        assert original.allowed_path_prefixes == ("../memory", "./skills")
+        assert original.hidden_paths == ()
+        assert derived.allowed_commands == ("cat",)
+        assert derived.allowed_path_prefixes == ("./skills",)
+        assert derived.hidden_paths == (tmp_path / "memory",)
+
+    def test_restricted_defaults_inherit_from_source(self):
+        original = TerminalExecutor(allowed_commands=["cat"], allowed_path_prefixes=["./skills"])
+
+        derived = original.restricted()
+
+        assert derived.allowed_commands == original.allowed_commands
+        assert derived.allowed_path_prefixes == original.allowed_path_prefixes
 
 
 def test_build_skill_runtime_env_prepends_gateway_python_bin(tmp_path, monkeypatch) -> None:

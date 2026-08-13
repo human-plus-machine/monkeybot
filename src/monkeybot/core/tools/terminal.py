@@ -9,6 +9,9 @@ Security Model:
     - Deny by default: Only pre-approved commands and paths are allowed
     - Command allowlist: ALLOWED_COMMANDS defines executable binaries
     - Path allowlist: ALLOWED_PATHS defines accessible directories
+    - Filesystem isolation: ``hidden_paths`` are removed from the child's view
+      of the filesystem, which is what actually constrains shells and
+      interpreters (the path allowlist only screens arguments)
     - Timeout enforcement: All commands have maximum execution time
     - Output limits: Large outputs are truncated to prevent memory exhaustion
 
@@ -17,6 +20,8 @@ Example:
     >>> result = await executor.execute("ls", ["../memory/"])
     >>> print(result.stdout)
 """
+
+from __future__ import annotations
 
 import asyncio
 import contextlib
@@ -30,11 +35,21 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from monkeybot.core.tools.fs_isolation import (
+    isolated_argv,
+    isolation_failed,
+    isolation_support,
+)
+
 logger = logging.getLogger(__name__)
 
 # After the child exits or is killed, wait at most this long for stdout/stderr EOF.
 # Descendants that keep pipes open must not block execute() forever.
 _STREAM_DRAIN_TIMEOUT_SEC = 2.0
+
+# Hosts without namespace/seatbelt support degrade to argument validation only;
+# say so once rather than on every command.
+_isolation_warning_emitted = False
 
 # SECURITY: Command allowlist - modify with extreme caution
 # Only add commands that are essential and have been security reviewed
@@ -326,6 +341,7 @@ class TerminalExecutor:
         *,
         allowed_commands: Sequence[str] | None = None,
         allowed_path_prefixes: Sequence[str] | None = None,
+        hidden_paths: Sequence[Path | str] | None = None,
     ) -> None:
         self._allowed_commands: tuple[str, ...] = (
             tuple(allowed_commands) if allowed_commands is not None else tuple(ALLOWED_COMMANDS)
@@ -335,6 +351,7 @@ class TerminalExecutor:
             if allowed_path_prefixes is not None
             else tuple(ALLOWED_PATHS)
         )
+        self._hidden_paths: tuple[Path, ...] = tuple(Path(path) for path in (hidden_paths or ()))
 
     @property
     def allowed_commands(self) -> tuple[str, ...]:
@@ -344,8 +361,54 @@ class TerminalExecutor:
     def allowed_path_prefixes(self) -> tuple[str, ...]:
         return self._allowed_path_prefixes
 
+    @property
+    def hidden_paths(self) -> tuple[Path, ...]:
+        return self._hidden_paths
+
+    def restricted(
+        self,
+        *,
+        allowed_commands: Sequence[str] | None = None,
+        allowed_path_prefixes: Sequence[str] | None = None,
+        hidden_paths: Sequence[Path | str] | None = None,
+    ) -> TerminalExecutor:
+        """Return a copy with a narrower policy, leaving this instance untouched.
+
+        Lets a caller-supplied executor be brought under the owning component's
+        capability policy without mutating an object the caller still holds.
+        """
+        return TerminalExecutor(
+            allowed_commands=(
+                self._allowed_commands if allowed_commands is None else allowed_commands
+            ),
+            allowed_path_prefixes=(
+                self._allowed_path_prefixes
+                if allowed_path_prefixes is None
+                else allowed_path_prefixes
+            ),
+            hidden_paths=self._hidden_paths if hidden_paths is None else hidden_paths,
+        )
+
     async def aclose(self) -> None:
         """No-op — TerminalExecutor holds no persistent resources."""
+
+    async def _isolate(self, executable: str, args: list[str]) -> tuple[str, list[str]]:
+        """Wrap argv so hidden paths are absent from the child's filesystem."""
+        if not self._hidden_paths:
+            return executable, args
+        support = await asyncio.to_thread(isolation_support)
+        if not support.available:
+            global _isolation_warning_emitted
+            if not _isolation_warning_emitted:
+                _isolation_warning_emitted = True
+                logger.warning(
+                    "filesystem isolation unavailable (%s); private directories rely on "
+                    "argument validation alone on this host",
+                    support.detail,
+                    extra={"component": "terminal_executor", "severity": "SECURITY_DEGRADED"},
+                )
+            return executable, args
+        return isolated_argv(executable, args, self._hidden_paths, support=support)
 
     async def execute(
         self,
@@ -420,6 +483,7 @@ class TerminalExecutor:
         if env_overrides is not None:
             run_env.update(env_overrides)
         executable, exec_args = _resolve_run_executable(command, args, run_env)
+        executable, exec_args = await self._isolate(executable, exec_args)
         if env is None:
             env = run_env
 
@@ -495,10 +559,27 @@ class TerminalExecutor:
                 stderr=stderr,
             )
 
+        exit_code = process.returncode or 0
+        if self._hidden_paths and isolation_failed(exit_code, stderr):
+            # The child aborted before exec rather than run with a hidden path
+            # still visible; surface that as the security failure it is.
+            error_msg = f"Filesystem isolation could not be established: {stderr.strip()}"
+            logger.error(
+                "Security violation: %s",
+                error_msg,
+                extra={
+                    "component": "terminal_executor",
+                    "severity": "SECURITY_VIOLATION",
+                    "command": command,
+                    "hidden_paths": [str(path) for path in self._hidden_paths],
+                },
+            )
+            raise SecurityError(error_msg)
+
         return ExecutionResult(
             stdout=stdout,
             stderr=stderr,
-            exit_code=process.returncode or 0,
+            exit_code=exit_code,
         )
 
     def _validate_command(self, command: str) -> None:
@@ -605,22 +686,16 @@ class TerminalExecutor:
             - Uses resolved path ancestry to allow subdirectories
             - Empty args list is allowed (no paths to validate)
             - Non-path arguments (flags, values) are ignored
-            - Absolute paths starting with /tmp or /var/folders are allowed (for tests)
+            - No location is exempt: callers that need a temporary directory
+              (including tests) must list it in ``allowed_path_prefixes``
         """
 
         base = Path(cwd).resolve() if cwd is not None else Path.cwd().resolve()
         allowed_roots = tuple(
             self._resolved_path(prefix, cwd=base) for prefix in self._allowed_path_prefixes
         )
-        test_roots = tuple(
-            Path(prefix).resolve() for prefix in ("/tmp", "/var/folders", "/private/var/folders")
-        )
         for arg in self._path_candidates(command, args):
             candidate = self._resolved_path(arg, cwd=base)
-            if arg.startswith("/") and any(
-                candidate == root or root in candidate.parents for root in test_roots
-            ):
-                continue
             if any(candidate == root or root in candidate.parents for root in allowed_roots):
                 continue
             error_msg = f"Path '{arg}' not allowed"

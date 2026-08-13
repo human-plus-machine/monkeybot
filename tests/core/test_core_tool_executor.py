@@ -14,6 +14,7 @@ from monkeybot.core.context import LoopsToolRegistry, SkillRef, TurnContext, _di
 from monkeybot.core.llm.provider import Done, TextDelta, ToolCall, UsageEvent
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.mcp.mcp_client import MCPDiagnosticError, MCPServerNotConnectedError
+from monkeybot.core.tools.fs_isolation import isolation_support
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.tools.types import unwrap_tool_execution_result
 from monkeybot.core.types.types_tools import ToolDef
@@ -1252,7 +1253,7 @@ async def test_run_command_mempalace_is_blocked_when_memory_unavailable(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_run_command_nested_mempalace_is_blocked_when_memory_unavailable(
+async def test_run_command_drops_mempalace_capability_when_memory_unavailable(
     tmp_path: Path,
 ) -> None:
     skills = tmp_path / "skills"
@@ -1264,21 +1265,88 @@ async def test_run_command_nested_mempalace_is_blocked_when_memory_unavailable(
         mcp=_NoMCP(),
     )
 
+    assert "mempalace" not in ex._run_cmd_allowed_commands
+    assert "mempalace" not in ex._terminal.allowed_commands
+
+
+@pytest.mark.skipif(
+    not isolation_support().available,
+    reason=f"host cannot isolate filesystems: {isolation_support().detail}",
+)
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("call_id", "argv_template"),
+    [
+        ("shell-variable", ["bash", "-c", 'p={secret}; cat "$p"']),
+        ("interpreter-io", ["python", "-c", "print(open({secret!r}).read())"]),
+        ("nested-launcher", ["bash", "-c", "cat {secret}"]),
+    ],
+)
+async def test_disabled_memory_is_unreachable_through_launchers(
+    tmp_path: Path, call_id: str, argv_template: list[str]
+) -> None:
+    """Shells and interpreters can build any path, so the palace must be hidden."""
+    workspace = tmp_path / "workspace"
+    skills = workspace / "skills"
+    skills.mkdir(parents=True)
+    secret = tmp_path / "memory" / "private.txt"
+    secret.parent.mkdir()
+    secret.write_text("PRIVATE-CONTENT", encoding="utf-8")
+    ex = CoreToolExecutor(
+        workspace_root=workspace,
+        memory=None,
+        skills_path=skills,
+        mcp=_NoMCP(),
+        run_command_allowed_path_prefixes=[str(tmp_path)],
+    )
+
     out, err = unwrap_tool_execution_result(
         await ex.execute(
             call=ToolCall(
-                call_id="nested-memory-disabled",
+                call_id=call_id,
                 name="run_command",
-                args={"argv": ["bash", "-c", "mempalace wake-up"]},
+                args={"argv": [part.format(secret=str(secret)) for part in argv_template]},
             ),
             ctx=dataclasses.replace(_ctx(), user_id="u"),
         )
     )
 
-    assert out is None and err is not None
-    payload = json.loads(err)
-    assert payload["error_kind"] == "policy"
-    assert "nested" in payload["message"].lower()
+    assert "PRIVATE-CONTENT" not in (out or "") + (err or "")
+
+
+@pytest.mark.skipif(
+    not isolation_support().available,
+    reason=f"host cannot isolate filesystems: {isolation_support().detail}",
+)
+@pytest.mark.asyncio
+async def test_enabled_memory_remains_readable_through_launchers(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    skills = workspace / "skills"
+    skills.mkdir(parents=True)
+    secret = tmp_path / "memory" / "private.txt"
+    secret.parent.mkdir()
+    secret.write_text("PRIVATE-CONTENT", encoding="utf-8")
+    ex = CoreToolExecutor(
+        workspace_root=workspace,
+        memory=_mem_sub(tmp_path / "memory"),
+        skills_path=skills,
+        mcp=_NoMCP(),
+        run_command_allowed_path_prefixes=[str(tmp_path)],
+    )
+
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="memory-enabled-read",
+                name="run_command",
+                args={"argv": ["bash", "-c", f"cat {secret}"]},
+            ),
+            ctx=dataclasses.replace(_ctx(), user_id="u"),
+        )
+    )
+
+    assert err is None and out is not None
+    assert "PRIVATE-CONTENT" in out
 
 
 @pytest.mark.asyncio
@@ -2215,7 +2283,7 @@ import sys
 from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from monkeybot.core.tools.sandbox_executor import SandboxExecutor
+from monkeybot.core.tools.sandbox_executor import SandboxConfig, SandboxExecutor
 from monkeybot.core.tools.terminal import TerminalExecutor
 
 
@@ -2335,7 +2403,53 @@ class TestCoreToolExecutorSandboxSelection:
             mcp=_NoMCP(),
             terminal=injected,
         )
+        assert isinstance(ex._terminal, TerminalExecutor)
+        assert ex._host_terminal is None
+        # Memory is enabled here, so the injected policy is carried over intact.
+        assert ex._terminal.allowed_commands == injected.allowed_commands
+        assert ex._terminal.hidden_paths == ()
+
+    def test_injected_terminal_is_bound_by_memory_off_policy(self, tmp_path):
+        """A library caller's executor must not keep palace access we revoked."""
+        injected = TerminalExecutor()
+        skills = tmp_path / "skills"
+        skills.mkdir()
+
+        ex = CoreToolExecutor(
+            workspace_root=tmp_path,
+            memory=None,
+            skills_path=skills,
+            mcp=_NoMCP(),
+            terminal=injected,
+        )
+
+        assert "../memory" in injected.allowed_path_prefixes  # caller's object untouched
+        assert "mempalace" in injected.allowed_commands
+        assert not any(
+            prefix.startswith("../memory") for prefix in ex._terminal.allowed_path_prefixes
+        )
+        assert "mempalace" not in ex._terminal.allowed_commands
+        assert ex._terminal.hidden_paths
+
+    def test_injected_sandbox_gets_host_terminal_for_memory(self, tmp_path, monkeypatch):
+        """Injected sandboxes need a host terminal; the palace is never mounted."""
+        monkeypatch.delenv("SANDBOX_ENABLED", raising=False)
+        mem = tmp_path / "mem"
+        mem.mkdir()
+        skills = tmp_path / "skills"
+        skills.mkdir()
+        injected = SandboxExecutor(SandboxConfig.from_env(), tmp_path, skills_path=skills)
+
+        ex = CoreToolExecutor(
+            workspace_root=tmp_path,
+            memory=_mem_sub(mem),
+            skills_path=skills,
+            mcp=_NoMCP(),
+            terminal=injected,
+        )
+
         assert ex._terminal is injected
+        assert isinstance(ex._host_terminal, TerminalExecutor)
 
 
 class TestCoreToolExecutorAclose:
