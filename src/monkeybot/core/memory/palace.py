@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 import os
+import tempfile
 import threading
+import uuid
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
@@ -20,6 +22,7 @@ DEFAULT_EMBEDDING_MODEL = "embeddinggemma-300m"
 DEFAULT_BACKEND = "chroma"
 CONVERSATION_ROOM = "conversation"
 EMBEDDER_IDENTITY_FILE = ".embedder_identity"
+PALACE_ID_FILE = ".palace_id"
 L2_MAX_CHARS = 2000
 L2_MAX_DRAWERS = 12
 
@@ -94,6 +97,30 @@ def palace_path_from_uri(memory_uri: str) -> Path:
     if raw.startswith("local://"):
         raw = raw[len("local://") :]
     return Path(raw).expanduser().resolve()
+
+
+def palace_instance_id(palace_path: Path) -> str:
+    """Stable id for this palace directory (shared volume ⇒ same id)."""
+    path = Path(palace_path) / PALACE_ID_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_file():
+        got = path.read_text(encoding="utf-8").strip()
+        if got:
+            return got
+    token = uuid.uuid4().hex
+    path.write_text(token, encoding="utf-8")
+    return token
+
+
+def palace_path_is_ephemeral(palace_path: Path) -> bool:
+    """True when the palace lives under the process temp directory."""
+    resolved = Path(palace_path).expanduser().resolve()
+    tmp = Path(tempfile.gettempdir()).resolve()
+    try:
+        resolved.relative_to(tmp)
+        return True
+    except ValueError:
+        return False
 
 
 def default_identity_text(agent_name: str) -> str:

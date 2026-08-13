@@ -48,6 +48,25 @@ def _append_accepts_ids(append: Any) -> bool:
     return "turn_id" in params
 
 
+_AMBIGUOUS_COMMIT_NAMES = frozenset(
+    {
+        "TimeoutError",
+        "CancelledError",
+        "InterfaceError",
+        "OperationalError",
+        "InternalServerError",
+        "ConnectionError",
+        "OSError",
+    }
+)
+
+
+def _is_ambiguous_commit(exc: BaseException) -> bool:
+    if isinstance(exc, (TimeoutError, OSError, ConnectionError)):
+        return True
+    return type(exc).__name__ in _AMBIGUOUS_COMMIT_NAMES
+
+
 async def _append_history(
     history: HistoryStore,
     thread_id: str,
@@ -109,6 +128,14 @@ async def persist_message(
                     ),
                 )
             except Exception as exc:
+                if _is_ambiguous_commit(exc):
+                    logger.warning(
+                        "atomic history+outbox acknowledgement lost; "
+                        "not retrying history append (message_id=%s): %r",
+                        mid,
+                        exc,
+                    )
+                    return
                 logger.warning(
                     "atomic history+outbox failed; falling back to history-only: %r",
                     exc,

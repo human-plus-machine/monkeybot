@@ -36,7 +36,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 ### Breaking
 
 - `subagents:` as a bare list of personas is no longer supported; wrap personas under `subagents.personas` in `monkeybot.yaml`. `SUBAGENT_TIMEOUT_SEC`, `SUBAGENT_MAX_TURNS`, and `MONKEYBOT_SUBAGENT_AGENT_MD` environment variable overrides are removed — set `subagents.timeout_sec`, `subagents.max_turns`, and per-persona `agent_md` in `monkeybot.yaml` instead. Top-level `subagents.agent_md` is also removed.
-- Core is **2.2.2**: note-based memory is replaced by MemPalace. `memory.enabled` / `memory_hook.enabled` / `MONKEYBOT_MEMORY_HOOK_ENABLED` are removed (memory is on whenever a palace URI is set). `gcs://` and `s3://` memory URIs are rejected; mount a local volume instead. CLI **0.4.1** requires `monkeybot>=2.2.2`.
+- Core is **2.2.2**: note-based memory is replaced by MemPalace. `gcs://` and `s3://` memory URIs are rejected; mount a local volume instead. CLI **0.4.1** requires `monkeybot>=2.2.2`. Opt out of capture with `memory.enabled: false` or `MONKEYBOT_MEMORY_HOOK_ENABLED=0`.
 
 ## [cli v0.3.1] - 2026-07-28
 

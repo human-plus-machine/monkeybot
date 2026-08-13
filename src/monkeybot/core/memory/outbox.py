@@ -10,7 +10,7 @@ from typing import Any, Protocol
 import aiosqlite
 
 from monkeybot.core.memory.ids import outbox_id, utc_now_iso
-from monkeybot.core.persistence.sqlite import OUTBOX_DDL, OUTBOX_INDEX_DDL
+from monkeybot.core.persistence.sqlite import OUTBOX_DDL, OUTBOX_INDEX_DDL, ConnLock
 
 STATUS_PENDING = "pending"
 STATUS_PROCESSING = "processing"
@@ -35,7 +35,8 @@ _PERMANENT_ERROR_CLASSES = frozenset(
 _OUTBOX_SELECT = """
         SELECT id, thread_id, turn_id, message_id, role, content, workspace_id,
                wing, room, created_at, status, attempts, next_attempt_at,
-               last_error, traceparent, lease_owner, lease_expires_at, agent_id
+               last_error, traceparent, lease_owner, lease_expires_at, agent_id,
+               palace_id
         FROM memory_outbox
 """
 
@@ -64,6 +65,7 @@ class OutboxRow:
     lease_owner: str | None
     lease_expires_at: str | None
     agent_id: str = ""
+    palace_id: str = ""
 
     def metadata(self) -> dict[str, str]:
         meta = {
@@ -100,6 +102,7 @@ class OutboxStore(Protocol):
         room: str,
         created_at: str | None = None,
         traceparent: str | None = None,
+        palace_id: str = "",
         commit: bool = True,
     ) -> str | None: ...
 
@@ -108,11 +111,14 @@ class OutboxStore(Protocol):
         *,
         agent_id: str,
         lease_owner: str,
+        palace_id: str = "",
         limit: int = 16,
         lease_seconds: int = _LEASE_SECONDS,
     ) -> list[OutboxRow]: ...
 
-    async def mark_committed(self, row_ids: list[str]) -> None: ...
+    async def mark_committed(
+        self, row_ids: list[str], *, lease_owner: str | None = None
+    ) -> int: ...
 
     async def mark_retry(
         self,
@@ -121,7 +127,8 @@ class OutboxStore(Protocol):
         error_class: str,
         attempts: int,
         permanent: bool | None = None,
-    ) -> None: ...
+        lease_owner: str | None = None,
+    ) -> int: ...
 
     async def gc_committed(self, *, days: int = _GC_AFTER_DAYS) -> int: ...
 
@@ -140,6 +147,9 @@ def _row_from_sql(row: Any) -> OutboxRow:
     agent_id = ""
     if len(row) > 17 and row[17] is not None:
         agent_id = str(row[17])
+    palace_id = ""
+    if len(row) > 18 and row[18] is not None:
+        palace_id = str(row[18])
     return OutboxRow(
         id=str(row[0]),
         thread_id=str(row[1]),
@@ -159,6 +169,7 @@ def _row_from_sql(row: Any) -> OutboxRow:
         lease_owner=row[15],
         lease_expires_at=row[16],
         agent_id=agent_id,
+        palace_id=palace_id,
     )
 
 
@@ -177,12 +188,14 @@ async def _ensure_outbox_agent_id_column(conn: aiosqlite.Connection) -> None:
     if not names:
         return
     if "agent_id" not in names:
+        await conn.execute("ALTER TABLE memory_outbox ADD COLUMN agent_id TEXT NOT NULL DEFAULT ''")
+    if "palace_id" not in names:
         await conn.execute(
-            "ALTER TABLE memory_outbox ADD COLUMN agent_id TEXT NOT NULL DEFAULT ''"
+            "ALTER TABLE memory_outbox ADD COLUMN palace_id TEXT NOT NULL DEFAULT ''"
         )
     await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_memory_outbox_agent "
-        "ON memory_outbox(agent_id, status, created_at)"
+        "ON memory_outbox(agent_id, palace_id, status, created_at)"
     )
 
 
@@ -206,12 +219,11 @@ async def insert_pending(
     room: str,
     created_at: str | None = None,
     traceparent: str | None = None,
+    palace_id: str = "",
     commit: bool = True,
 ) -> str | None:
     """Insert a pending outbox row. Returns None when the id is already committed."""
-    row_id = outbox_id(
-        agent_id=agent_id, thread_id=thread_id, message_id=message_id, role=role
-    )
+    row_id = outbox_id(agent_id=agent_id, thread_id=thread_id, message_id=message_id, role=role)
     cur = await conn.execute("SELECT status FROM memory_outbox WHERE id = ?", (row_id,))
     existing = await cur.fetchone()
     await cur.close()
@@ -224,8 +236,8 @@ async def insert_pending(
         """
         INSERT INTO memory_outbox (
           id, agent_id, thread_id, turn_id, message_id, role, content, workspace_id,
-          wing, room, created_at, status, attempts, traceparent
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?)
+          wing, room, created_at, status, attempts, traceparent, palace_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)
         """,
         (
             row_id,
@@ -240,6 +252,7 @@ async def insert_pending(
             room,
             created_at or utc_now_iso(),
             traceparent,
+            palace_id,
         ),
     )
     if commit:
@@ -254,6 +267,7 @@ async def claim_batch(
     limit: int = 16,
     lease_seconds: int = _LEASE_SECONDS,
     agent_id: str | None = None,
+    palace_id: str = "",
 ) -> list[OutboxRow]:
     now = datetime.now(timezone.utc)
     now_iso = now.isoformat(timespec="seconds")
@@ -267,29 +281,28 @@ async def claim_batch(
         """,
         (now_iso,),
     )
+    params: list[Any] = []
+    where = [
+        "status = 'pending'",
+        "(next_attempt_at IS NULL OR next_attempt_at <= ?)",
+    ]
+    params.append(now_iso)
     if agent_id:
-        cur = await conn.execute(
-            _OUTBOX_SELECT
-            + """
-        WHERE status = 'pending'
-          AND agent_id = ?
-          AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+        where.append("agent_id = ?")
+        params.append(agent_id)
+    if palace_id:
+        where.append("(palace_id = ? OR palace_id = '' OR palace_id IS NULL)")
+        params.append(palace_id)
+    params.append(limit)
+    cur = await conn.execute(
+        _OUTBOX_SELECT
+        + f"""
+        WHERE {" AND ".join(where)}
         ORDER BY created_at ASC
         LIMIT ?
         """,
-            (agent_id, now_iso, limit),
-        )
-    else:
-        cur = await conn.execute(
-            _OUTBOX_SELECT
-            + """
-        WHERE status = 'pending'
-          AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-        ORDER BY created_at ASC
-        LIMIT ?
-        """,
-            (now_iso, limit),
-        )
+        tuple(params),
+    )
     rows = await cur.fetchall()
     await cur.close()
     claimed: list[OutboxRow] = []
@@ -299,30 +312,41 @@ async def claim_batch(
             """
             UPDATE memory_outbox
             SET status = 'processing', lease_owner = ?, lease_expires_at = ?,
-                attempts = attempts + 1
+                attempts = attempts + 1, palace_id = CASE
+                    WHEN palace_id IS NULL OR palace_id = '' THEN ?
+                    ELSE palace_id
+                END
             WHERE id = ?
             """,
-            (lease_owner, expires, row_id),
+            (lease_owner, expires, palace_id, row_id),
         )
         claimed.append(_row_from_sql(raw))
     await conn.commit()
     return claimed
 
 
-async def mark_committed(conn: aiosqlite.Connection, row_ids: list[str]) -> None:
+async def mark_committed(
+    conn: aiosqlite.Connection,
+    row_ids: list[str],
+    *,
+    lease_owner: str | None = None,
+) -> int:
     if not row_ids:
-        return
+        return 0
     placeholders = ",".join("?" * len(row_ids))
-    await conn.execute(
-        f"""
+    sql = f"""
         UPDATE memory_outbox
         SET status = 'committed', lease_owner = NULL, lease_expires_at = NULL,
             last_error = NULL, next_attempt_at = NULL
         WHERE id IN ({placeholders})
-        """,
-        tuple(row_ids),
-    )
+    """
+    params: list[Any] = list(row_ids)
+    if lease_owner:
+        sql += " AND lease_owner = ?"
+        params.append(lease_owner)
+    cur = await conn.execute(sql, tuple(params))
     await conn.commit()
+    return int(cur.rowcount or 0)
 
 
 async def mark_retry(
@@ -332,20 +356,24 @@ async def mark_retry(
     error_class: str,
     attempts: int,
     permanent: bool | None = None,
-) -> None:
+    lease_owner: str | None = None,
+) -> int:
     dead = bool(permanent) if permanent is not None else is_permanent_error(error_class)
     status = STATUS_DEAD if dead else STATUS_PENDING
     next_at = None if status == STATUS_DEAD else backoff_iso(attempts)
-    await conn.execute(
-        """
+    sql = """
         UPDATE memory_outbox
         SET status = ?, last_error = ?, next_attempt_at = ?,
             lease_owner = NULL, lease_expires_at = NULL
         WHERE id = ?
-        """,
-        (status, error_class, next_at, row_id),
-    )
+    """
+    params: list[Any] = [status, error_class, next_at, row_id]
+    if lease_owner:
+        sql += " AND lease_owner = ?"
+        params.append(lease_owner)
+    cur = await conn.execute(sql, tuple(params))
     await conn.commit()
+    return int(cur.rowcount or 0)
 
 
 async def gc_committed(conn: aiosqlite.Connection, *, days: int = _GC_AFTER_DAYS) -> int:
@@ -422,7 +450,7 @@ class SqliteOutboxStore:
         conn: aiosqlite.Connection,
         *,
         owns_connection: bool = False,
-        lock: asyncio.Lock | None = None,
+        lock: ConnLock | None = None,
     ) -> None:
         self._conn = conn
         self._owns_connection = owns_connection
@@ -442,6 +470,7 @@ class SqliteOutboxStore:
         lease_owner: str,
         limit: int = 16,
         lease_seconds: int = _LEASE_SECONDS,
+        palace_id: str = "",
     ) -> list[OutboxRow]:
         async with self._lock:
             return await claim_batch(
@@ -450,11 +479,12 @@ class SqliteOutboxStore:
                 lease_owner=lease_owner,
                 limit=limit,
                 lease_seconds=lease_seconds,
+                palace_id=palace_id,
             )
 
-    async def mark_committed(self, row_ids: list[str]) -> None:
+    async def mark_committed(self, row_ids: list[str], *, lease_owner: str | None = None) -> int:
         async with self._lock:
-            await mark_committed(self._conn, row_ids)
+            return await mark_committed(self._conn, row_ids, lease_owner=lease_owner)
 
     async def mark_retry(
         self,
@@ -463,14 +493,16 @@ class SqliteOutboxStore:
         error_class: str,
         attempts: int,
         permanent: bool | None = None,
-    ) -> None:
+        lease_owner: str | None = None,
+    ) -> int:
         async with self._lock:
-            await mark_retry(
+            return await mark_retry(
                 self._conn,
                 row_id,
                 error_class=error_class,
                 attempts=attempts,
                 permanent=permanent,
+                lease_owner=lease_owner,
             )
 
     async def gc_committed(self, *, days: int = _GC_AFTER_DAYS) -> int:

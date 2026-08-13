@@ -6,7 +6,6 @@ import asyncio
 import threading
 from pathlib import Path
 from typing import Any
-
 from unittest.mock import MagicMock
 
 import pytest
@@ -105,12 +104,8 @@ async def test_shared_sqlite_outbox_is_agent_scoped(db_url: str, tmp_path: Path)
     b = _subsystem(tmp_path, db_url, agent_id="agent-b")
     await a.ensure_ready()
     await b.ensure_ready()
-    await a.enqueue(
-        thread_id="t", turn_id="1", message_id="m", role="user", content="secret for A"
-    )
-    await b.enqueue(
-        thread_id="t", turn_id="1", message_id="m", role="user", content="secret for B"
-    )
+    await a.enqueue(thread_id="t", turn_id="1", message_id="m", role="user", content="secret for A")
+    await b.enqueue(thread_id="t", turn_id="1", message_id="m", role="user", content="secret for B")
     await asyncio.gather(a.drain_writer(timeout_s=2), b.drain_writer(timeout_s=2))
     a_text = "\n".join(d.content for d in await a.recall(wing="main", room="conversation"))
     b_text = "\n".join(d.content for d in await b.recall(wing="main", room="conversation"))
@@ -166,18 +161,14 @@ class _SlowPalace(InMemoryPalace):
 
 
 @pytest.mark.asyncio
-async def test_stop_awaits_in_flight_write_on_worker_thread(
-    db_url: str, tmp_path: Path
-) -> None:
+async def test_stop_awaits_in_flight_write_on_worker_thread(db_url: str, tmp_path: Path) -> None:
     from monkeybot.core.memory.writer import MemoryWriter
 
     palace = _SlowPalace(tmp_path / "slow" / "mempalace", agent_name="agent-a")
     sub = _subsystem(tmp_path, db_url, palace=palace)
     sub._writer_enabled = False
     await sub.ensure_ready()
-    await sub.enqueue(
-        thread_id="t", turn_id="1", message_id="m", role="user", content="slow write"
-    )
+    await sub.enqueue(thread_id="t", turn_id="1", message_id="m", role="user", content="slow write")
     store = await sub._ensure_outbox()
     writer = MemoryWriter(
         palace=palace,
@@ -222,11 +213,13 @@ async def test_storage_outbox_used_for_postgres_url(tmp_path: Path) -> None:
             self.claimed_for.append(agent_id)
             return []
 
-        async def mark_committed(self, row_ids: list[str]) -> None:
-            del row_ids
+        async def mark_committed(self, row_ids: list[str], **kwargs: Any) -> int:
+            del row_ids, kwargs
+            return 0
 
-        async def mark_retry(self, row_id: str, **kwargs: Any) -> None:
+        async def mark_retry(self, row_id: str, **kwargs: Any) -> int:
             del row_id, kwargs
+            return 0
 
         async def gc_committed(self, *, days: int = 7) -> int:
             del days
@@ -306,12 +299,22 @@ def test_migrate_memory_uri_writes_bak(tmp_path: Path) -> None:
     assert migrate_memory_uri_in_yaml(yaml_path) is False
 
 
-def test_memory_enabled_switch_is_retired(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_memory_enabled_switch_honors_yaml_and_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.delenv("MONKEYBOT_MEMORY_HOOK_ENABLED", raising=False)
     cfg = tmp_path / "monkeybot.yaml"
     cfg.write_text("memory:\n  enabled: false\n", encoding="utf-8")
+    assert memory_enabled_from_config(str(cfg)) is False
+    monkeypatch.setenv("MONKEYBOT_MEMORY_HOOK_ENABLED", "1")
     assert memory_enabled_from_config(str(cfg)) is True
     monkeypatch.setenv("MONKEYBOT_MEMORY_HOOK_ENABLED", "0")
+    cfg.write_text("memory:\n  enabled: true\n", encoding="utf-8")
+    assert memory_enabled_from_config(str(cfg)) is False
+    monkeypatch.delenv("MONKEYBOT_MEMORY_HOOK_ENABLED", raising=False)
+    cfg.write_text("memory_hook:\n  enabled: false\n", encoding="utf-8")
+    assert memory_enabled_from_config(str(cfg)) is False
+    cfg.write_text("memory:\n  enabled: true\nmemory_hook:\n  enabled: false\n", encoding="utf-8")
     assert memory_enabled_from_config(str(cfg)) is True
 
 
@@ -569,9 +572,7 @@ async def test_writer_stop_times_out_on_hung_embedder(db_url: str, tmp_path: Pat
     sub = _subsystem(tmp_path, db_url, palace=palace)
     sub._writer_enabled = False
     await sub.ensure_ready()
-    await sub.enqueue(
-        thread_id="t", turn_id="1", message_id="m", role="user", content="hung write"
-    )
+    await sub.enqueue(thread_id="t", turn_id="1", message_id="m", role="user", content="hung write")
     store = await sub._ensure_outbox()
     writer = MemoryWriter(
         palace=palace,
@@ -675,3 +676,313 @@ async def test_outbox_failure_does_not_fail_history_commit(tmp_path: Path) -> No
         message_id="m",
     )
     assert history.rows
+
+
+@pytest.mark.asyncio
+async def test_usage_cannot_commit_open_history_outbox_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.llm.provider import Message
+    from monkeybot.core.llm.usage import Usage
+    from monkeybot.core.memory import outbox as outbox_mod
+    from monkeybot.core.types.content_blocks import Text
+
+    backend = SQLiteStorageBackend(f"sqlite:///{tmp_path / 'tx.db'}")
+    await backend.open()
+    try:
+        history = backend.history()
+        usage = backend.usage()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def gated_insert(conn: object, **kwargs: object) -> str | None:
+            del conn, kwargs
+            entered.set()
+            await release.wait()
+            raise RuntimeError("outbox boom")
+
+        monkeypatch.setattr(outbox_mod, "insert_pending", gated_insert)
+        msg = Message(role="user", content=[Text(text="hi")])
+
+        async def do_append() -> None:
+            with pytest.raises(RuntimeError, match="outbox boom"):
+                await history.append_with_outbox(
+                    "t",
+                    msg,
+                    turn_id="1",
+                    message_id="m1",
+                    outbox={
+                        "agent_id": "agent-a",
+                        "thread_id": "t",
+                        "turn_id": "1",
+                        "message_id": "m1",
+                        "role": "user",
+                        "content": "hi",
+                        "workspace_id": None,
+                        "wing": "main",
+                        "room": "conversation",
+                    },
+                )
+
+        append_task = asyncio.create_task(do_append())
+        await entered.wait()
+        usage_task = asyncio.create_task(
+            usage.record("t", "model", Usage(input_tokens=1, output_tokens=1))
+        )
+        await asyncio.sleep(0.05)
+        assert not usage_task.done()
+        release.set()
+        await append_task
+        await usage_task
+        assert await history.load("t") == []
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_managed_schema_upgrade_from_documented_ddl(tmp_path: Path) -> None:
+    from monkeybot.core.llm.provider import Message
+    from monkeybot.core.memory.ingest import persist_message
+    from monkeybot.core.types.content_blocks import Text
+
+    db_path = tmp_path / "pre.db"
+    conn = await open_connection(f"sqlite:///{db_path}")
+    await conn.execute(
+        """
+        CREATE TABLE conversation_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            thread_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        )
+        """
+    )
+    await conn.commit()
+    await conn.close()
+
+    backend = SQLiteStorageBackend(f"sqlite:///{db_path}")
+    await backend.open(run_schema=False)
+    try:
+        sql_path = Path(__file__).resolve().parents[3] / "docs" / "migrations" / "memory-outbox.sql"
+        sql = sql_path.read_text(encoding="utf-8")
+        cleaned: list[str] = []
+        for line in sql.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("--"):
+                continue
+            cleaned.append(stripped)
+        for stmt in "\n".join(cleaned).split(";"):
+            stmt = stmt.strip()
+            if stmt:
+                await backend._conn.execute(stmt)  # type: ignore[union-attr]
+        await backend._conn.commit()  # type: ignore[union-attr]
+
+        palace = InMemoryPalace(tmp_path / "palace", agent_name="agent-a")
+        sub = MemorySubsystem(
+            memory_uri=f"local://{palace.palace_path}",
+            db_url=f"sqlite:///{db_path}",
+            agent_id="agent-a",
+            palace=palace,
+            storage=backend,
+        )
+        await sub.ensure_ready()
+        await persist_message(
+            backend.history(),
+            Message(role="user", content=[Text(text="upgraded")]),
+            thread_id="t",
+            turn_id="1",
+            memory=sub,
+            ingest=True,
+            message_id="m-up",
+        )
+        await sub.drain_writer(timeout_s=2)
+        drawers = await sub.recall(wing="main", room="conversation", thread_id="t")
+        assert any("upgraded" in d.content for d in drawers)
+        await sub.close()
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_commit_does_not_duplicate_history() -> None:
+    from monkeybot.core.llm.provider import Message
+    from monkeybot.core.memory.ingest import persist_message
+    from monkeybot.core.types.content_blocks import Text
+
+    class _History:
+        def __init__(self) -> None:
+            self.rows: list[Message] = []
+
+        async def append_with_outbox(
+            self, thread_id: str, message: Message, **kwargs: object
+        ) -> None:
+            del thread_id, kwargs
+            self.rows.append(message)
+            raise TimeoutError("ack lost")
+
+        async def append(self, thread_id: str, message: Message, **kwargs: object) -> None:
+            del thread_id, kwargs
+            self.rows.append(message)
+
+        async def load(self, thread_id: str, limit: int | None = None) -> list[Message]:
+            del thread_id, limit
+            return list(self.rows)
+
+        async def reset(self, thread_id: str, messages: list[Message]) -> None:
+            del thread_id
+            self.rows = list(messages)
+
+        async def list_threads(self, limit: int = 50) -> list[object]:
+            del limit
+            return []
+
+    history = _History()
+    await persist_message(
+        history,  # type: ignore[arg-type]
+        Message(role="user", content=[Text(text="once")]),
+        thread_id="t",
+        turn_id="turn",
+        memory=MagicMock(ingest_enabled=True, backend="chroma"),
+        ingest=True,
+        message_id="m",
+    )
+    assert len(history.rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_history_append_is_idempotent_on_message_id(tmp_path: Path) -> None:
+    from monkeybot.core.llm.provider import Message
+    from monkeybot.core.types.content_blocks import Text
+
+    backend = SQLiteStorageBackend(f"sqlite:///{tmp_path / 'idemp.db'}")
+    await backend.open()
+    try:
+        history = backend.history()
+        msg = Message(role="user", content=[Text(text="once")])
+        await history.append("t", msg, turn_id="1", message_id="same")
+        await history.append("t", msg, turn_id="1", message_id="same")
+        loaded = await history.load("t")
+        assert len(loaded) == 1
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_lease_owner_fences_commit_and_retry(db_url: str) -> None:
+    from monkeybot.core.memory.outbox import SqliteOutboxStore, claim_batch, mark_committed
+
+    conn = await open_connection(db_url)
+    await ensure_outbox_schema(conn)
+    store = SqliteOutboxStore(conn, owns_connection=True)
+    row_id = await store.insert_pending(
+        agent_id="a",
+        thread_id="t",
+        turn_id="1",
+        message_id="m",
+        role="user",
+        content="hi",
+        workspace_id=None,
+        wing="main",
+        room="conversation",
+        palace_id="p1",
+    )
+    assert row_id is not None
+    claimed = await claim_batch(conn, agent_id="a", lease_owner="owner-a", palace_id="p1")
+    assert claimed
+    n = await mark_committed(conn, [claimed[0].id], lease_owner="owner-b")
+    assert n == 0
+    cur = await conn.execute("SELECT status FROM memory_outbox WHERE id = ?", (claimed[0].id,))
+    row = await cur.fetchone()
+    await cur.close()
+    assert row is not None
+    assert str(row[0]) == "processing"
+    n = await mark_committed(conn, [claimed[0].id], lease_owner="owner-a")
+    assert n == 1
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_claims_are_partitioned_by_palace_id(db_url: str) -> None:
+    from monkeybot.core.memory.outbox import SqliteOutboxStore, claim_batch
+
+    conn = await open_connection(db_url)
+    await ensure_outbox_schema(conn)
+    store = SqliteOutboxStore(conn, owns_connection=True)
+    await store.insert_pending(
+        agent_id="a",
+        thread_id="t",
+        turn_id="1",
+        message_id="m1",
+        role="user",
+        content="one",
+        workspace_id=None,
+        wing="main",
+        room="conversation",
+        palace_id="palace-a",
+    )
+    await store.insert_pending(
+        agent_id="a",
+        thread_id="t",
+        turn_id="1",
+        message_id="m2",
+        role="user",
+        content="two",
+        workspace_id=None,
+        wing="main",
+        room="conversation",
+        palace_id="palace-b",
+    )
+    a_rows = await claim_batch(conn, agent_id="a", lease_owner="w1", palace_id="palace-a")
+    assert len(a_rows) == 1
+    assert a_rows[0].message_id == "m1"
+    b_rows = await claim_batch(conn, agent_id="a", lease_owner="w2", palace_id="palace-b")
+    assert len(b_rows) == 1
+    assert b_rows[0].message_id == "m2"
+    await store.close()
+
+
+def test_firestore_outbox_collection_id_is_stable() -> None:
+    pytest.importorskip("google.cloud.firestore")
+    from monkeybot.core.persistence.firestore import _memory_outbox_collection
+
+    class _Ref:
+        def __init__(self, name: str) -> None:
+            self.path = name
+
+        def document(self, name: str) -> _Ref:
+            return _Ref(f"{self.path}/{name}")
+
+        def collection(self, name: str) -> _Ref:
+            return _Ref(f"{self.path}/{name}")
+
+    class _Client:
+        def collection(self, name: str) -> _Ref:
+            return _Ref(name)
+
+    col = _memory_outbox_collection(_Client(), "mb")  # type: ignore[arg-type]
+    assert col.path == "mb/outbox/memory_outbox"
+    col_default = _memory_outbox_collection(_Client(), "")  # type: ignore[arg-type]
+    assert col_default.path == "_default/outbox/memory_outbox"
+
+
+@pytest.mark.asyncio
+async def test_ephemeral_palace_rejected_for_postgres_storage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("MONKEYBOT_MEMORY_ALLOW_EPHEMERAL", raising=False)
+
+    class PostgresStorageBackend:
+        def outbox(self) -> object:
+            raise AssertionError("should not open outbox")
+
+    palace = InMemoryPalace(tmp_path / "ephemeral", agent_name="agent-a")
+    sub = MemorySubsystem(
+        memory_uri=f"local://{palace.palace_path}",
+        db_url="postgresql://localhost/db",
+        agent_id="agent-a",
+        palace=palace,
+        storage=PostgresStorageBackend(),
+    )
+    with pytest.raises(RuntimeError, match="temp directory"):
+        await sub.ensure_ready()

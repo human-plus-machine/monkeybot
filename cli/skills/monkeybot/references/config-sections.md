@@ -88,10 +88,11 @@ When the prompt shows fewer entries than exist, a structural confidence score tr
 
 ## `memory`
 
-MemPalace is on whenever `paths.memory_storage_uri` is set. There is no enable/disable kill switch.
+MemPalace capture and recall are on by default. Set `enabled: false` to opt out (no ingest, no wake-up, no `mempalace search` teaching). Legacy `memory_hook.enabled` and `MONKEYBOT_MEMORY_HOOK_ENABLED` still work; the env var wins over YAML.
 
 | Field | Default | When to change |
 |---|---|---|
+| `enabled` | `true` | Set `false` to disable capture/recall for privacy or retention |
 | `engine` | `mempalace` | Leave as-is |
 | `backend` | `chroma` | Alternate MemPalace vector backend |
 | `embedding_model` | `embeddinggemma-300m` | Match the embedder the palace was built with |

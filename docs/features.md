@@ -397,7 +397,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **DB URL schemes:** `sqlite://`, `postgresql://` / `postgres://`, `firestore://PROJECT/DATABASE`
 
-**Auto schema:** SQLite and Postgres run idempotent DDL on `open()` when `paths.auto_schema` is `true` in monkeybot.yaml (default). Set `paths.auto_schema: false` when a migration process owns the schema. Firestore is schemaless — no DDL on `open()`.
+**Auto schema:** SQLite and Postgres run idempotent DDL on `open()` when `paths.auto_schema` is `true` in monkeybot.yaml (default). Set `paths.auto_schema: false` when a migration process owns the schema. Firestore is schemaless — no DDL on `open()`. When auto-schema is off, apply [docs/migrations/memory-outbox.sql](migrations/memory-outbox.sql) before enabling MemPalace (creates `memory_outbox` and the history `message_id` unique index).
 
 **Durable vs live events (OpenCode V2-aligned):**
 - **Conversation durability** lives in history (`Message` / `ContentBlock`), not an event ledger.
@@ -443,9 +443,11 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 | `SESSION_END` | Flush remaining writer work |
 
 **Invariants:**
-- Memory is on whenever `paths.memory_storage_uri` is set. There is no enable/disable switch.
+- Memory is on by default when `paths.memory_storage_uri` is set. Set `memory.enabled: false` (or `MONKEYBOT_MEMORY_HOOK_ENABLED=0`) to disable capture, recall, and `mempalace search` teaching.
 - Subagents get **no-op `HookManager`** to avoid duplicate writes.
 - `flush()` must be called before short-lived handlers exit if writer work matters.
+- Replicated gateways with a shared Postgres/Firestore outbox must mount the same lock-capable volume at the palace path. Claims are partitioned by a `.palace_id` file in that directory. Ephemeral `/tmp` palaces with a shared outbox fail closed unless `MONKEYBOT_MEMORY_ALLOW_EPHEMERAL=1`.
+- Firestore outbox documents live at `{prefix}/outbox/memory_outbox/{id}` so the shipped composite indexes in `src/monkeybot/core/persistence/firestore.indexes.json` apply to every prefix. Deploy with `gcloud firestore indexes composite create` (or Firebase `firestore:indexes`) from that manifest.
 
 ---
 

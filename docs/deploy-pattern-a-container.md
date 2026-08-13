@@ -80,7 +80,7 @@ docker push <registry>/<image>:<tag>
 
 1. Add the `[postgres]` extra to the agent's `pyproject.toml`, then update `uv.lock`.
 2. Set `DB_URL` to a `postgresql://` connection string pointing at your managed instance.
-3. By default monkeybot applies the schema on startup (`paths.auto_schema: true` in monkeybot.yaml). For DML-only runtime users, pre-create the schema via your migration tool and set `paths.auto_schema: false`.
+3. By default monkeybot applies the schema on startup (`paths.auto_schema: true` in monkeybot.yaml). For DML-only runtime users, pre-create the schema via your migration tool (include [docs/migrations/memory-outbox.sql](migrations/memory-outbox.sql)) and set `paths.auto_schema: false`.
 4. The gateway opens the connection pool once at startup and closes it on shutdown.
 
 **Short-lived processes (scale-to-zero):** On Cloud Run or ECS Fargate, a new instance starts a new connection pool. Postgres connection limits can be hit if many instances start simultaneously — consider a connection pooler (Cloud SQL Auth Proxy, RDS Proxy, PgBouncer) in front of the DB.

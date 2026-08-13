@@ -114,6 +114,7 @@ gateway:
   cors_allow_origins: "http://localhost:5173"
 
 memory:
+  enabled: true
   engine: mempalace
   backend: chroma
   embedding_model: embeddinggemma-300m

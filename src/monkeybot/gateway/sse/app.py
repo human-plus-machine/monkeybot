@@ -45,6 +45,7 @@ from monkeybot.core.llm.provider import (
 )
 from monkeybot.core.llm.usage import Usage as UsageRecord
 from monkeybot.core.mcp.mcp_client import MCPClient
+from monkeybot.core.memory.config import memory_enabled_from_config
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.persistence.backends import (
     StorageBackend,
@@ -604,22 +605,28 @@ async def _startup(fastapi_app: FastAPI) -> None:
         logger.info("web search disabled (WEB_SEARCH_BACKEND=none)")
 
     try:
-        mem_uri = _memory_storage_uri()
-        layout = AgentLayout.from_environment()
-        mgr = HookManager()
-        memory = MemorySubsystem(
-            memory_uri=mem_uri,
-            db_url=layout.db_url,
-            agent_id=layout.agent_root.name,
-            agent_name=layout.agent_root.name,
-            storage=backend,
-        )
-        await memory.ensure_ready()
-        memory.register_hooks(mgr)
-        _deps.hook_manager = mgr
-        _deps.memory = memory
-        fastapi_app.state.memory = memory
-        logger.info("memory enabled (memory_storage_uri=%s)", mem_uri)
+        if not memory_enabled_from_config():
+            logger.info("memory disabled (memory.enabled=false)")
+            _deps.hook_manager = None
+            _deps.memory = None
+            fastapi_app.state.memory = None
+        else:
+            mem_uri = _memory_storage_uri()
+            layout = AgentLayout.from_environment()
+            mgr = HookManager()
+            memory = MemorySubsystem(
+                memory_uri=mem_uri,
+                db_url=layout.db_url,
+                agent_id=layout.agent_root.name,
+                agent_name=layout.agent_root.name,
+                storage=backend,
+            )
+            await memory.ensure_ready()
+            memory.register_hooks(mgr)
+            _deps.hook_manager = mgr
+            _deps.memory = memory
+            fastapi_app.state.memory = memory
+            logger.info("memory enabled (memory_storage_uri=%s)", mem_uri)
     except Exception as exc:
         logger.warning("memory setup failed; continuing without: %r", exc)
         _deps.hook_manager = None

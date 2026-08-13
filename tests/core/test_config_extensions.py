@@ -46,7 +46,8 @@ class TestEnvMap:
         """Config-file only (like paths.auto_schema) — no env var override."""
         assert ("web_search", "vertex_google_search") not in ENV_MAP
 
-    def test_memory_kill_switch_removed_from_env_map(self) -> None:
+    def test_memory_enabled_not_in_env_map(self) -> None:
+        """YAML-only like knowledge.enabled — env override is MONKEYBOT_MEMORY_HOOK_ENABLED."""
         assert ("memory", "enabled") not in ENV_MAP
         assert ("memory_hook", "enabled") not in ENV_MAP
 

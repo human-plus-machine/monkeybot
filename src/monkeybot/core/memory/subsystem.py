@@ -21,6 +21,8 @@ from monkeybot.core.memory.palace import (
     DrawerRecord,
     PalacePort,
     create_palace,
+    palace_instance_id,
+    palace_path_is_ephemeral,
 )
 from monkeybot.core.memory.writer import MemoryWriter
 
@@ -30,6 +32,28 @@ logger = logging.getLogger(__name__)
 def _share_across_threads() -> bool:
     raw = os.environ.get("MONKEYBOT_MEMORY_SHARE_THREADS", "").strip().lower()
     return raw in ("1", "true", "yes")
+
+
+def _is_missing_outbox_table(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    name = type(exc).__name__.lower()
+    return (
+        "memory_outbox" in text
+        and (
+            "no such table" in text
+            or "does not exist" in text
+            or "undefinedtable" in name
+            or "undefined_table" in text
+        )
+    )
+
+
+def _shared_outbox_backend(db_url: str, storage: Any) -> bool:
+    del db_url
+    if storage is None:
+        return False
+    name = type(storage).__name__.lower()
+    return "postgres" in name or "firestore" in name
 
 
 class MemorySubsystem:
@@ -67,6 +91,7 @@ class MemorySubsystem:
             embedding_model=self.embedding_model,
         )
         self.backend = getattr(self._palace, "backend", self.backend)
+        self._palace_id = palace_instance_id(self._palace.palace_path)
         self.ingest_enabled = ingest_enabled
         self._writer_enabled = writer_enabled
         self._outbox: OutboxStore | None = outbox
@@ -125,12 +150,41 @@ class MemorySubsystem:
             agent_id=self._agent_id,
             backend=self.backend,
             embedding_model=self.embedding_model,
+            palace_id=self._palace_id,
         )
+
+    def _reject_ephemeral_shared_palace(self) -> None:
+        if not _shared_outbox_backend(self._db_url, self._storage):
+            return
+        logger.warning(
+            "Memory palace is local to this replica (palace_id=%s). "
+            "Replicated deployments must mount the same lock-capable volume at the palace path.",
+            self._palace_id,
+        )
+        allow = os.environ.get("MONKEYBOT_MEMORY_ALLOW_EPHEMERAL", "").strip().lower()
+        if allow in ("1", "true", "yes"):
+            return
+        if palace_path_is_ephemeral(self._palace.palace_path):
+            raise RuntimeError(
+                "MemPalace path is under the process temp directory while the outbox is "
+                "shared (Postgres/Firestore). Mount a persistent volume or set "
+                "MONKEYBOT_MEMORY_ALLOW_EPHEMERAL=1 to acknowledge replica-local memory."
+            )
 
     async def ensure_ready(self) -> None:
         if self._ready:
             return
+        self._reject_ephemeral_shared_palace()
         store = await self._ensure_outbox()
+        try:
+            await store.pending_depth(agent_id=self._agent_id)
+        except Exception as exc:
+            if _is_missing_outbox_table(exc):
+                raise RuntimeError(
+                    "memory_outbox table is missing. Apply docs/migrations/memory-outbox.sql "
+                    "or set paths.auto_schema: true"
+                ) from exc
+            logger.warning("memory outbox probe failed: %r", exc)
         try:
             n = await store.gc_committed()
             if n:
@@ -253,6 +307,7 @@ class MemorySubsystem:
             "room": CONVERSATION_ROOM,
             "created_at": utc_now_iso(),
             "traceparent": traceparent,
+            "palace_id": self._palace_id,
         }
 
     async def enqueue(

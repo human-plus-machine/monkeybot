@@ -16,9 +16,10 @@ from typing import Any, cast
 
 import aiosqlite
 
-from monkeybot.core.types.content_blocks import ContentBlock
 from monkeybot.core.llm.provider import Message, Role
+from monkeybot.core.persistence.sqlite import ConnLock
 from monkeybot.core.persistence.thread_summary import ChatThreadSummary, preview_from_content_blob
+from monkeybot.core.types.content_blocks import ContentBlock
 
 logger = logging.getLogger("monkeybot.core.persistence.history")
 
@@ -39,7 +40,7 @@ class SQLiteHistoryStore:
         self,
         conn: aiosqlite.Connection,
         *,
-        lock: asyncio.Lock | None = None,
+        lock: ConnLock | None = None,
     ) -> None:
         self._conn = conn
         self._lock = lock or asyncio.Lock()
@@ -65,15 +66,30 @@ class SQLiteHistoryStore:
         message_id: str | None,
     ) -> None:
         if await self._has_memory_columns():
-            await self._conn.execute(
-                """
-                INSERT INTO conversation_history(
-                    thread_id, role, content, created_at, turn_id, message_id
+            if message_id:
+                cur = await self._conn.execute(
+                    """
+                    SELECT 1 FROM conversation_history
+                    WHERE message_id = ? LIMIT 1
+                    """,
+                    (message_id,),
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (thread_id, role, payload, created_at, turn_id, message_id),
-            )
+                exists = await cur.fetchone()
+                await cur.close()
+                if exists is not None:
+                    return
+            try:
+                await self._conn.execute(
+                    """
+                    INSERT INTO conversation_history(
+                        thread_id, role, content, created_at, turn_id, message_id
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (thread_id, role, payload, created_at, turn_id, message_id),
+                )
+            except aiosqlite.IntegrityError:
+                return
             return
         await self._conn.execute(
             """

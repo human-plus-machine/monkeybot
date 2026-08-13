@@ -60,7 +60,7 @@ When workspace tools (`read_file`, `write_file`, `run_command`, …) appear in t
 ### Runtime paths
 - workspace root (cwd): `{workspace_root}` — `read_file` / `write_file` / `glob` / `run_command` start here.
 - runtime (inside workspace): `.monkeybot/` — spill, knowledge index, transcripts. Not memory.
-- memory storage: `{memory_storage_uri}` — MemPalace root (verbatim conversation drawers). **Outside** the workspace root. Prefer `mempalace search` via `run_command` for past-session recall. Do not `read_file` palace paths.
+{memory_storage_line}
 - workspace `data/` (if present) is ordinary project files — **not** the memory store.
 
 ### MCP tools
@@ -102,6 +102,13 @@ _SEARCH_TOOL_LINE = (
     "- `search` — **local search index over the workspace** (+ knowledge notes): "
     "FTS + link graph + optional embeddings. Has **no** record of past conversations — "
     "use `mempalace search` for those. Not a substitute for `read_file`. Prefer `search` for "
+    "unfamiliar codebases, conceptual / cross-file / paraphrased questions; prefer "
+    "`grep` for exact identifiers, filenames, or stack traces.\n"
+)
+
+_SEARCH_TOOL_LINE_NO_MEMORY = (
+    "- `search` — **local search index over the workspace** (+ knowledge notes): "
+    "FTS + link graph + optional embeddings. Not a substitute for `read_file`. Prefer `search` for "
     "unfamiliar codebases, conceptual / cross-file / paraphrased questions; prefer "
     "`grep` for exact identifiers, filenames, or stack traces.\n"
 )
@@ -196,6 +203,7 @@ def harness_fixed_context(
     include_web_search: bool = False,
     include_todo_list: bool = False,
     include_knowledge_search: bool = True,
+    include_memory: bool = True,
     workspace_root: str = "(not set)",
     memory_storage_uri: str = "(not set)",
     run_command_opensandbox: bool = False,
@@ -211,6 +219,7 @@ def harness_fixed_context(
     ``include_web_search`` should be True when a web search backend is active.
     ``include_todo_list`` should be True when the session-scoped ``todo_list`` tool is active.
     ``include_knowledge_search`` should be True when the local knowledge ``search`` tool is active.
+    ``include_memory`` should be True when MemPalace capture/recall is enabled.
     ``run_command_opensandbox`` should match whether ``run_command`` is routed through
     OpenSandbox (same signal as ``SandboxConfig.from_env().enabled``).
     ``subagent_personas`` lists configured named subagent types for the parent orchestrator.
@@ -236,6 +245,22 @@ def harness_fixed_context(
         if scheduled_loops_available
         else ""
     )
+    knowledge_block = _KNOWLEDGE_SEARCH_BLOCK if include_knowledge_search else ""
+    if knowledge_block and not include_memory:
+        knowledge_block = knowledge_block.replace(
+            " — use `mempalace search`",
+            "",
+        )
+    search_line = ""
+    if include_knowledge_search:
+        search_line = _SEARCH_TOOL_LINE if include_memory else _SEARCH_TOOL_LINE_NO_MEMORY
+    memory_line = (
+        f"- memory storage: `{memory_storage_uri}` — MemPalace root (verbatim conversation drawers). "
+        "**Outside** the workspace root. Prefer `mempalace search` via `run_command` for past-session recall. "
+        "Do not `read_file` palace paths."
+        if include_memory
+        else "- memory storage: (disabled)"
+    )
     body = _HARNESS_BODY.format(
         run_command_exec_note=exec_note,
         catalog_mcp_line=catalog_mcp_line,
@@ -243,11 +268,11 @@ def harness_fixed_context(
         web_search_line=_WEB_SEARCH_LINE if include_web_search else "",
         todo_list_line=_TODO_LIST_LINE if include_todo_list else "",
         task_line=_TASK_LINE if include_task_tool else "",
-        search_tool_line=_SEARCH_TOOL_LINE if include_knowledge_search else "",
-        knowledge_search_block=_KNOWLEDGE_SEARCH_BLOCK if include_knowledge_search else "",
-        memory_teaching_block=_MEMORY_TEACHING_BLOCK,
+        search_tool_line=search_line,
+        knowledge_search_block=knowledge_block,
+        memory_teaching_block=_MEMORY_TEACHING_BLOCK if include_memory else "",
         workspace_root=workspace_root,
-        memory_storage_uri=memory_storage_uri,
+        memory_storage_line=memory_line,
     )
     personas_block = _subagent_personas_block(subagent_personas or ())
     emission_block = _emission_section(

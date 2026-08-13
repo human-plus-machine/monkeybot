@@ -21,6 +21,7 @@ from monkeybot.core.knowledge.config import knowledge_enabled_from_config
 from monkeybot.core.llm.provider import Provider
 from monkeybot.core.llm.usage import usage_from_totals
 from monkeybot.core.mcp.mcp_client import MCPClient
+from monkeybot.core.memory.config import memory_enabled_from_config
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.persistence.backends import StorageBackend, create_storage_backend
 from monkeybot.core.runtime.events import AssistantDelta, Error, TurnComplete
@@ -131,7 +132,7 @@ async def create_harness_deps(
 
         memory: MemorySubsystem | None = None
         uri = (memory_storage_uri or "").strip()
-        if uri:
+        if uri and memory_enabled_from_config():
             from monkeybot.core.layout import AgentLayout
 
             layout = AgentLayout.from_environment()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import threading
 import uuid
 
 from monkeybot.core.memory.observability import (
@@ -32,12 +33,14 @@ class MemoryWriter:
         agent_id: str,
         backend: str,
         embedding_model: str,
+        palace_id: str = "",
     ) -> None:
         self._palace = palace
         self._outbox = outbox
         self._agent_id = agent_id
         self._backend = backend
         self._embedding_model = embedding_model
+        self._palace_id = palace_id
         self._wake = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
         self._stopped = False
@@ -112,7 +115,9 @@ class MemoryWriter:
             self._idle.clear()
             try:
                 rows = await self._outbox.claim_batch(
-                    agent_id=self._agent_id, lease_owner=self._lease_owner
+                    agent_id=self._agent_id,
+                    lease_owner=self._lease_owner,
+                    palace_id=self._palace_id,
                 )
                 if not rows:
                     return 0
@@ -144,8 +149,10 @@ class MemoryWriter:
                 link_to_traceparent(span, rows[0].traceparent)
             for row in rows:
                 try:
-                    await asyncio.to_thread(self._upsert_one, row)
-                    await self._outbox.mark_committed([row.id])
+                    await self._upsert_async(row)
+                    await self._outbox.mark_committed(
+                        [row.id], lease_owner=self._lease_owner
+                    )
                     committed += 1
                 except Exception as exc:
                     error_class = type(exc).__name__
@@ -167,6 +174,7 @@ class MemoryWriter:
                         error_class=error_class,
                         attempts=row.attempts + 1,
                         permanent=permanent,
+                        lease_owner=self._lease_owner,
                     )
             if committed:
                 log_event(
@@ -185,6 +193,32 @@ class MemoryWriter:
                     memory_backend=self._backend,
                 )
         return committed
+
+    async def _upsert_async(self, row: OutboxRow) -> None:
+        """Run the palace upsert on a daemon thread so process exit is not blocked.
+
+        ``asyncio.to_thread`` uses the default executor; Python joins those
+        threads at shutdown. A hung embedder must not keep the process alive
+        past the writer stop timeout.
+        """
+        error: list[BaseException] = []
+        done = threading.Event()
+
+        def run() -> None:
+            try:
+                self._upsert_one(row)
+            except BaseException as exc:
+                error.append(exc)
+            finally:
+                done.set()
+
+        threading.Thread(
+            target=run, name="memory-palace-upsert", daemon=True
+        ).start()
+        while not done.is_set():
+            await asyncio.sleep(0.05)
+        if error:
+            raise error[0]
 
     def _upsert_one(self, row: OutboxRow) -> None:
         """Lock ownership lives in this worker thread for the duration of the upsert."""
