@@ -285,8 +285,11 @@ def test_legacy_notes_import_is_idempotent(tmp_path: Path) -> None:
     palace = InMemoryPalace(root / "mempalace", agent_name="agent-a")
     first = import_legacy_notes(palace, agent_id="agent-a")
     assert first >= 2
-    second = import_legacy_notes(palace, agent_id="agent-a")
+    drawer_count = len(palace._drawers)
+    second = import_legacy_notes(palace, agent_id="renamed-agent")
     assert second == 0
+    assert len(palace._drawers) == drawer_count
+    assert (root / "mempalace" / ".notes_imported").is_file()
     contents = [d.content for d in palace._drawers.values()]
     assert any("Remember the cat" in c for c in contents)
     assert any("# Index" in c for c in contents)

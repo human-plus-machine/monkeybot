@@ -122,20 +122,21 @@ def palace_volume_lock(palace_path: Path) -> Iterator[None]:
         if os.name == "nt":
             import msvcrt
 
-            locking = getattr(msvcrt, "locking")
-            lock_mode = getattr(msvcrt, "LK_LOCK")
-            unlock_mode = getattr(msvcrt, "LK_UNLCK")
             handle.seek(0, os.SEEK_END)
             if handle.tell() == 0:
                 handle.write(b"\0")
                 handle.flush()
             handle.seek(0)
-            locking(handle.fileno(), lock_mode, 1)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)  # type: ignore[attr-defined]
             try:
                 yield
             finally:
                 handle.seek(0)
-                locking(handle.fileno(), unlock_mode, 1)
+                msvcrt.locking(  # type: ignore[attr-defined]
+                    handle.fileno(),
+                    msvcrt.LK_UNLCK,  # type: ignore[attr-defined]
+                    1,
+                )
             return
 
         import fcntl

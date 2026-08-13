@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+from datetime import UTC, datetime
 from pathlib import Path
 
 from monkeybot.core.memory.ids import utc_now_iso
@@ -20,9 +21,21 @@ _FRONTMATTER_RE = re.compile(
 _IMPORT_MARKER = ".notes_imported"
 
 
-def _note_drawer_id(agent_id: str, rel_posix: str) -> str:
+def _note_drawer_id(rel_posix: str) -> str:
+    payload = rel_posix.encode()
+    return "note_" + hashlib.sha256(payload).hexdigest()
+
+
+def _legacy_note_drawer_id(agent_id: str, rel_posix: str) -> str:
     payload = f"{agent_id}\0{rel_posix}".encode()
     return "note_" + hashlib.sha256(payload).hexdigest()
+
+
+def _already_imported(palace: PalacePort, *, agent_id: str, rel_posix: str) -> bool:
+    return (
+        palace.get_drawer(_note_drawer_id(rel_posix)) is not None
+        or palace.get_drawer(_legacy_note_drawer_id(agent_id, rel_posix)) is not None
+    )
 
 
 def _parse_note(text: str) -> tuple[str, str, str]:
@@ -55,10 +68,13 @@ def _legacy_notes_root(palace: PalacePort) -> Path | None:
 def import_legacy_notes(palace: PalacePort, *, agent_id: str) -> int:
     """Copy leftover markdown notes into the palace. Idempotent; never deletes sources."""
     marker = Path(palace.palace_path) / _IMPORT_MARKER
+    if marker.is_file():
+        return 0
     root = _legacy_notes_root(palace)
     if root is None or not root.is_dir():
         return 0
     imported = 0
+    complete = True
     for folder in _TYPED_FOLDERS:
         folder_path = root / folder
         if not folder_path.is_dir():
@@ -69,6 +85,7 @@ def import_legacy_notes(palace: PalacePort, *, agent_id: str) -> int:
                 text = path.read_text(encoding="utf-8")
             except OSError as exc:
                 logger.warning("legacy note read failed %s: %r", path, exc)
+                complete = False
                 continue
             note_type, status, body = _parse_note(text)
             if status == "forgotten":
@@ -76,17 +93,14 @@ def import_legacy_notes(palace: PalacePort, *, agent_id: str) -> int:
             body = body.strip()
             if not body:
                 continue
-            drawer_id = _note_drawer_id(agent_id, rel)
-            if palace.get_drawer(drawer_id) is not None:
+            drawer_id = _note_drawer_id(rel)
+            if _already_imported(palace, agent_id=agent_id, rel_posix=rel):
                 continue
             filed = utc_now_iso()
             try:
                 mtime = path.stat().st_mtime
-                from datetime import datetime, timezone
 
-                filed = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat(
-                    timespec="seconds"
-                )
+                filed = datetime.fromtimestamp(mtime, tz=UTC).isoformat(timespec="seconds")
             except OSError:
                 pass
             try:
@@ -111,17 +125,20 @@ def import_legacy_notes(palace: PalacePort, *, agent_id: str) -> int:
                     )
             except Exception as exc:
                 logger.warning("legacy note upsert failed %s: %r", rel, exc)
+                complete = False
                 continue
             imported += 1
     index_path = root / "INDEX.md"
     if index_path.is_file():
         try:
             index_text = index_path.read_text(encoding="utf-8").strip()
-        except OSError:
+        except OSError as exc:
+            logger.warning("legacy INDEX read failed: %r", exc)
+            complete = False
             index_text = ""
         if index_text:
-            drawer_id = _note_drawer_id(agent_id, "INDEX.md")
-            if palace.get_drawer(drawer_id) is None:
+            drawer_id = _note_drawer_id("INDEX.md")
+            if not _already_imported(palace, agent_id=agent_id, rel_posix="INDEX.md"):
                 try:
                     with palace.acquire_write_lock():
                         palace.upsert_drawer(
@@ -143,7 +160,8 @@ def import_legacy_notes(palace: PalacePort, *, agent_id: str) -> int:
                     imported += 1
                 except Exception as exc:
                     logger.warning("legacy INDEX import failed: %r", exc)
-    if imported or not marker.is_file():
+                    complete = False
+    if complete:
         try:
             marker.write_text(f"imported={imported}\n", encoding="utf-8")
         except OSError as exc:

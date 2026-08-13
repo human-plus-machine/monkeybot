@@ -26,6 +26,8 @@ def _clear_layout_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
         "PERMISSION_CONFIG",
         "DB_URL",
         "MEMORY_STORAGE_URI",
+        "MEMPALACE_PALACE_PATH",
+        "MEMPALACE_BACKEND",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -118,6 +120,26 @@ def test_yaml_workspace_root_wins_over_process_env(
         os.environ.clear()
         os.environ.update(before)
         runtime_env.reset_runtime_env_state_for_tests()
+
+
+def test_disabled_memory_does_not_export_mempalace_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent = tmp_path / "agent"
+    config = _write_agent(agent)
+    config.write_text(
+        config.read_text(encoding="utf-8") + "memory:\n  enabled: false\n",
+        encoding="utf-8",
+    )
+    _clear_layout_overrides(monkeypatch)
+    monkeypatch.setenv("MEMPALACE_PALACE_PATH", "/private/stale-palace")
+    monkeypatch.setenv("MEMPALACE_BACKEND", "chroma")
+    monkeypatch.chdir(agent)
+
+    bootstrap_agent_layout()
+
+    assert "MEMPALACE_PALACE_PATH" not in os.environ
+    assert "MEMPALACE_BACKEND" not in os.environ
 
 
 def test_yaml_workspace_root_wins_over_legacy_workspace_root(

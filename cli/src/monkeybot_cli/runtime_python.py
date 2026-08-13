@@ -61,41 +61,48 @@ def resolve_runtime_python(agent_root: Path) -> RuntimePython:
     return RuntimePython([sys.executable], "cli", agent_root)
 
 
-_HARNESS_PROBE = (
-    "import mempalace, monkeybot; "
+_CORE_PROBE = (
+    "import monkeybot; "
     "from importlib.metadata import version; "
     "ver = version('monkeybot'); "
     "parts = [int(p) for p in ver.split('.')[:3]]; "
-    "assert parts >= [3, 0, 0], ver"
+    "assert [3, 0, 0] <= parts < [4, 0, 0], ver"
 )
+_MEMORY_PROBE = f"import mempalace; {_CORE_PROBE}"
 
 
 class RuntimeUpgradeError(RuntimeError):
-    """Raised when the agent interpreter cannot be upgraded to a MemPalace-capable MonkeyBot."""
+    """Raised when the agent interpreter cannot be upgraded to a compatible MonkeyBot."""
 
 
 def prepare_runtime_python(agent_root: Path) -> RuntimePython:
-    """Resolve the gateway interpreter, upgrading the agent lock when harness deps are missing.
+    """Resolve the gateway interpreter, upgrading its lock when dependencies are stale.
 
-    Verifies both MonkeyBot and MemPalace for venv and uv runtimes. On failure,
-    refreshes the agent pyproject (memory extra + 3.x range), upgrades the
-    monkeybot lock, syncs, then probes again. Fails closed if the runtime is
-    still stale.
+    MemPalace is required and installed only when memory is enabled for the
+    agent. Every runtime must contain a compatible MonkeyBot 3.x core.
     """
+    from monkeybot.core.memory.config import memory_enabled_from_config
+
     runtime = resolve_runtime_python(agent_root)
     has_project = (agent_root / "pyproject.toml").is_file()
-    if run_probe(runtime, _HARNESS_PROBE):
+    config_path = agent_root / "monkeybot_config" / "monkeybot.yaml"
+    memory_enabled = memory_enabled_from_config(str(config_path) if config_path.is_file() else None)
+    probe = _MEMORY_PROBE if memory_enabled else _CORE_PROBE
+    pyproject_updated = has_project and refresh_agent_pyproject(
+        agent_root, include_memory=memory_enabled
+    ).endswith(": updated")
+    if run_probe(runtime, probe) and not pyproject_updated:
         return runtime
     if not has_project:
+        requirement = "monkeybot[memory]>=3.0.0,<4" if memory_enabled else "monkeybot>=3.0.0,<4"
         raise RuntimeUpgradeError(
-            "gateway interpreter is missing monkeybot/mempalace; "
-            "install monkeybot[memory]>=3.0.0 in this environment before starting the gateway"
+            "gateway interpreter is missing compatible harness packages; "
+            f"install {requirement} in this environment before starting the gateway"
         )
     print(
-        f"agent runtime is missing harness packages; upgrading monkeybot lock in {agent_root}",
+        f"agent runtime dependencies are stale; upgrading monkeybot lock in {agent_root}",
         flush=True,
     )
-    refresh_agent_pyproject(agent_root)
     lock = subprocess.run(
         ["uv", "lock", "--upgrade-package", "monkeybot"],
         cwd=agent_root,
@@ -103,12 +110,12 @@ def prepare_runtime_python(agent_root: Path) -> RuntimePython:
     )
     sync = subprocess.run(["uv", "sync"], cwd=agent_root, check=False)
     runtime = resolve_runtime_python(agent_root)
-    if lock.returncode != 0 or sync.returncode != 0 or not run_probe(runtime, _HARNESS_PROBE):
-        detail = _probe_failure_detail(runtime)
+    if lock.returncode != 0 or sync.returncode != 0 or not run_probe(runtime, probe):
+        detail = _probe_failure_detail(runtime, probe)
+        capability = "MonkeyBot with MemPalace" if memory_enabled else "MonkeyBot"
         raise RuntimeUpgradeError(
-            "failed to upgrade the agent runtime to a MonkeyBot with MemPalace; "
-            "refusing to start a stale gateway"
-            + (f" ({detail})" if detail else "")
+            f"failed to upgrade the agent runtime to a compatible {capability}; "
+            "refusing to start a stale gateway" + (f" ({detail})" if detail else "")
         )
     return runtime
 
@@ -148,10 +155,10 @@ def run_probe(runtime: RuntimePython, code: str, *, timeout: float = 15.0) -> bo
     return proc.returncode == 0
 
 
-def _probe_failure_detail(runtime: RuntimePython, *, timeout: float = 15.0) -> str:
+def _probe_failure_detail(runtime: RuntimePython, probe: str, *, timeout: float = 15.0) -> str:
     try:
         proc = subprocess.run(
-            [*runtime.argv, "-c", _HARNESS_PROBE],
+            [*runtime.argv, "-c", probe],
             capture_output=True,
             text=True,
             timeout=timeout,

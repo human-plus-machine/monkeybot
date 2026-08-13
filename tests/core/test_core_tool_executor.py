@@ -1189,6 +1189,34 @@ async def test_run_command_cat_under_memory(tmp_path: Path, monkeypatch: pytest.
 
 
 @pytest.mark.asyncio
+async def test_run_command_mempalace_is_blocked_when_memory_disabled(tmp_path: Path) -> None:
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=None,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="memory-disabled",
+                name="run_command",
+                args={"argv": ["mempalace", "search", "private"]},
+            ),
+            ctx=_ctx(),
+        )
+    )
+
+    assert out is None and err is not None
+    payload = json.loads(err)
+    assert payload["error_kind"] == "policy"
+    assert "disabled" in payload["message"].lower()
+
+
+@pytest.mark.asyncio
 async def test_run_command_blocked_command_returns_policy_envelope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -1707,6 +1707,15 @@ class CoreToolExecutor(ToolExecutorPort):
         except ValueError as exc:
             return None, _run_command_parse_envelope(exc)
         timeout = _coerce_int(args.get("timeout"), 60) or 60
+        if cmd == "mempalace" and self._memory is None:
+            return (
+                None,
+                _built_in_tool_error(
+                    "policy",
+                    "Memory is disabled; mempalace commands are unavailable.",
+                    "Do not attempt memory recall while memory.enabled is false.",
+                ),
+            )
         executor = self._terminal
         if cmd == "mempalace" and self._host_terminal is not None:
             executor = self._host_terminal

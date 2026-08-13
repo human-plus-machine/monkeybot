@@ -163,7 +163,7 @@ class AgentLayout:
     @classmethod
     def from_environment(
         cls, *, agent_root: Path | None = None, config_path: Path | None = None
-    ) -> "AgentLayout":
+    ) -> AgentLayout:
         root = (agent_root or resolve_agent_root(config_path=config_path)).resolve()
         cfg = config_path or resolve_config_path(agent_root=root)
 
@@ -209,10 +209,17 @@ class AgentLayout:
             "PERMISSION_CONFIG": str(self.permission_config_path),
             "DB_URL": self.db_url,
             "MEMORY_STORAGE_URI": self.memory_storage_uri,
-            "MEMPALACE_PALACE_PATH": self.memory_storage_uri.removeprefix("local://"),
-            "MEMPALACE_BACKEND": os.environ.get("MEMPALACE_BACKEND", "chroma"),
             "MONKEYBOT_PYTHON": sys.executable,
         }
+        from monkeybot.core.memory.config import memory_enabled_from_config
+
+        config_path = str(self.config_path) if self.config_path is not None else None
+        if memory_enabled_from_config(config_path):
+            values["MEMPALACE_PALACE_PATH"] = self.memory_storage_uri.removeprefix("local://")
+            values["MEMPALACE_BACKEND"] = os.environ.get("MEMPALACE_BACKEND", "chroma")
+        else:
+            os.environ.pop("MEMPALACE_PALACE_PATH", None)
+            os.environ.pop("MEMPALACE_BACKEND", None)
         for key, value in values.items():
             os.environ[key] = value
 

@@ -178,6 +178,53 @@ def test_run_refresh_adds_template_commands_and_keeps_extras(tmp_path: Path) -> 
     assert "monkeybot.yaml: updated" in joined
 
 
+def test_run_refresh_preserves_pep508_dependency_marker(tmp_path: Path) -> None:
+    run_new(dest=tmp_path, force=False)
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        (
+            "[project]\n"
+            'name = "marked-agent"\n'
+            'version = "0.1.0"\n'
+            "dependencies = [\n"
+            '  "monkeybot>=2.2.2,<3; python_version >= \'3.11\'",\n'
+            "]\n"
+        ),
+        encoding="utf-8",
+    )
+
+    run_refresh(dest=tmp_path)
+
+    text = pyproject.read_text(encoding="utf-8")
+    assert (
+        f'"monkeybot[memory]{COMPATIBLE_CORE_RANGE}; python_version >= \'3.11\'"' in text
+    )
+
+
+def test_run_refresh_removes_memory_extra_when_disabled(tmp_path: Path) -> None:
+    run_new(dest=tmp_path, force=False)
+    config = tmp_path / "monkeybot_config" / "monkeybot.yaml"
+    doc = yaml.safe_load(config.read_text(encoding="utf-8"))
+    doc["memory"]["enabled"] = False
+    config.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        (
+            "[project]\n"
+            'name = "disabled-memory-agent"\n'
+            'version = "0.1.0"\n'
+            f'dependencies = ["monkeybot[openai,memory]{COMPATIBLE_CORE_RANGE}"]\n'
+        ),
+        encoding="utf-8",
+    )
+
+    run_refresh(dest=tmp_path)
+
+    text = pyproject.read_text(encoding="utf-8")
+    assert f"monkeybot[openai]{COMPATIBLE_CORE_RANGE}" in text
+    assert "monkeybot[openai,memory]" not in text
+
+
 def test_run_refresh_skips_custom_permissions_and_model(tmp_path: Path) -> None:
     run_new(dest=tmp_path, force=False, provider="nvidia", model="keep-me")
     perms = tmp_path / "monkeybot_config" / "permissions.yaml"

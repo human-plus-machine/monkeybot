@@ -164,6 +164,55 @@ def test_prepare_runtime_python_syncs_when_mempalace_missing(tmp_path: Path, mon
     assert any("import mempalace" in " ".join(cmd) for cmd in calls)
 
 
+def test_prepare_runtime_python_removes_memory_extra_when_disabled(
+    tmp_path: Path, monkeypatch
+) -> None:
+    (tmp_path / "monkeybot_config").mkdir()
+    (tmp_path / "monkeybot_config" / "monkeybot.yaml").write_text(
+        "memory:\n  enabled: false\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pyproject.toml").write_text(
+        (
+            "[project]\n"
+            'name = "agent"\n'
+            'version = "0.1.0"\n'
+            'dependencies = ["monkeybot[memory]>=3.0.0,<4"]\n'
+        ),
+        encoding="utf-8",
+    )
+    venv_bin = tmp_path / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    py = venv_bin / "python"
+    py.write_text("#!/bin/sh\n")
+    py.chmod(0o755)
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        del kwargs
+        calls.append(list(argv))
+
+        class Result:
+            returncode = 0
+            stderr = ""
+            stdout = ""
+
+        return Result()
+
+    monkeypatch.setattr("monkeybot_cli.runtime_python.subprocess.run", fake_run)
+
+    prepare_runtime_python(tmp_path)
+
+    text = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
+    assert "monkeybot>=3.0.0,<4" in text
+    assert "monkeybot[memory]" not in text
+    probe_commands = [cmd for cmd in calls if "-c" in cmd]
+    assert probe_commands
+    assert all("import mempalace" not in " ".join(cmd) for cmd in probe_commands)
+    assert any(cmd[:3] == ["uv", "lock", "--upgrade-package"] for cmd in calls)
+    assert any(cmd[:2] == ["uv", "sync"] for cmd in calls)
+
+
 def test_prepare_runtime_python_refreshes_stale_pyproject_before_lock(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -241,7 +290,7 @@ def test_prepare_runtime_python_fail_closed_without_pyproject(tmp_path: Path, mo
     py.chmod(0o755)
 
     monkeypatch.setattr("monkeybot_cli.runtime_python.run_probe", lambda *a, **k: False)
-    with pytest.raises(RuntimeUpgradeError, match="missing monkeybot/mempalace"):
+    with pytest.raises(RuntimeUpgradeError, match="missing compatible harness packages"):
         prepare_runtime_python(tmp_path)
 
 

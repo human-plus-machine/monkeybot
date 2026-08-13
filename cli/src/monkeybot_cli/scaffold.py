@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import re
+import tomllib
 from importlib import resources
 from importlib.resources.abc import Traversable
 from pathlib import Path
@@ -283,32 +285,67 @@ def write_agent_pyproject(
     return "overwritten" if existed else "created"
 
 
-_MONKEYBOT_DEP_RE: Final = re.compile(
-    r'(?P<prefix>["\']monkeybot)(?:\[(?P<extras>[^\]]*)\])?'
-    r'(?P<range>>=[^"\']+)(?P<suffix>["\'])'
+_MONKEYBOT_REQUIREMENT_RE: Final = re.compile(
+    r"^monkeybot(?:\[(?P<extras>[^\]]*)\])?[^;]*(?P<marker>\s*;.*)?$",
+    re.IGNORECASE,
 )
 
 
-def refresh_agent_pyproject(dest: Path) -> str:
-    """Upgrade the core range and add the MemPalace extra without dropping extras."""
+def _refreshed_monkeybot_requirement(
+    requirement: str, *, include_memory: bool
+) -> str | None:
+    match = _MONKEYBOT_REQUIREMENT_RE.fullmatch(requirement.strip())
+    if match is None:
+        return None
+    extras = [item.strip() for item in (match.group("extras") or "").split(",") if item.strip()]
+    has_memory = any(normalize_extra_token(item) == "memory" for item in extras)
+    if include_memory and not has_memory:
+        extras.append("memory")
+    elif not include_memory:
+        extras = [item for item in extras if normalize_extra_token(item) != "memory"]
+    rendered = f"[{','.join(extras)}]" if extras else ""
+    return f"monkeybot{rendered}{COMPATIBLE_CORE_RANGE}{match.group('marker') or ''}"
+
+
+def _replace_toml_string(text: str, old: str, new: str) -> str | None:
+    """Replace one parsed TOML string while preserving the surrounding document."""
+    for quote in ('"', "'"):
+        old_token = f"{quote}{old}{quote}"
+        if old_token in text:
+            return text.replace(old_token, f"{quote}{new}{quote}", 1)
+    old_token = json.dumps(old, ensure_ascii=False)
+    if old_token in text:
+        return text.replace(old_token, json.dumps(new, ensure_ascii=False), 1)
+    return None
+
+
+def refresh_agent_pyproject(dest: Path, *, include_memory: bool = True) -> str:
+    """Upgrade the core range and align the MemPalace extra with agent configuration."""
     path = dest / "pyproject.toml"
     label = "pyproject.toml"
     if not path.is_file():
         return f"  {label}: skipped"
     text = path.read_text(encoding="utf-8")
-
-    def replace(match: re.Match[str]) -> str:
-        extras = [item.strip() for item in (match.group("extras") or "").split(",") if item.strip()]
-        if "memory" not in extras:
-            extras.append("memory")
-        rendered = f"[{','.join(extras)}]" if extras else ""
-        return (
-            f"{match.group('prefix')}{rendered}"
-            f"{COMPATIBLE_CORE_RANGE}{match.group('suffix')}"
+    try:
+        document = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return f"  {label}: skipped"
+    project = document.get("project")
+    dependencies = project.get("dependencies") if isinstance(project, dict) else None
+    if not isinstance(dependencies, list):
+        return f"  {label}: skipped"
+    updated: str | None = None
+    for requirement in dependencies:
+        if not isinstance(requirement, str):
+            continue
+        refreshed = _refreshed_monkeybot_requirement(
+            requirement, include_memory=include_memory
         )
-
-    updated, count = _MONKEYBOT_DEP_RE.subn(replace, text, count=1)
-    if count == 0:
+        if refreshed is None:
+            continue
+        updated = _replace_toml_string(text, requirement, refreshed)
+        break
+    if updated is None:
         return f"  {label}: skipped"
     if updated == text:
         return f"  {label}: unchanged"
@@ -485,7 +522,14 @@ def run_refresh(*, dest: Path) -> list[str]:
     report.append(refresh_permissions_if_default(cfg_dir))
     report.append(refresh_monkeybot_yaml(cfg_dir))
     report.extend(ensure_memory(dest, force=False))
-    report.append(refresh_agent_pyproject(dest))
+    from monkeybot.core.memory.config import memory_enabled_from_config
+
+    report.append(
+        refresh_agent_pyproject(
+            dest,
+            include_memory=memory_enabled_from_config(str(active)),
+        )
+    )
     return report
 
 

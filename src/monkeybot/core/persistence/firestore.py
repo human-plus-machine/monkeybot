@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
@@ -44,6 +45,11 @@ def _memory_outbox_collection(client: AsyncClient, prefix: str) -> Any:
     return client.collection(parent).document("outbox").collection("memory_outbox")
 
 
+def _history_document_id(message_id: str) -> str:
+    """Stable Firestore document ID for idempotent message delivery."""
+    return "message_" + hashlib.sha256(message_id.encode()).hexdigest()
+
+
 def _int_value(raw: object, default: int = 0) -> int:
     if isinstance(raw, int):
         return raw
@@ -76,6 +82,33 @@ def _field_float(row: dict[str, object], key: str, default: float = 0.0) -> floa
     return _float_value(row.get(key, default), default)
 
 
+def _history_row(
+    thread_id: str,
+    role: str,
+    payload: str,
+    created_at: int,
+    turn_id: str | None,
+    message_id: str | None,
+) -> dict[str, Any]:
+    return {
+        "thread_id": thread_id,
+        "role": role,
+        "content": payload,
+        "created_at": created_at,
+        "turn_id": turn_id,
+        "message_id": message_id,
+    }
+
+
+def _thread_summary_update(thread_id: str, created_at: int, payload: str) -> dict[str, Any]:
+    return {
+        "thread_id": thread_id,
+        "last_message_at": created_at,
+        "message_count": firestore.Increment(1),
+        "last_content": payload,
+    }
+
+
 class FirestoreHistoryStore:
     """Firestore-backed conversation history store."""
 
@@ -95,12 +128,7 @@ class FirestoreHistoryStore:
         """Maintain one summary doc per thread for indexed ``list_threads`` reads."""
         thread_ref = self._client.collection(self._threads_collection).document(thread_id)
         await thread_ref.set(
-            {
-                "thread_id": thread_id,
-                "last_message_at": created_at,
-                "message_count": firestore.Increment(1),
-                "last_content": content,
-            },
+            _thread_summary_update(thread_id, created_at, content),
             merge=True,
         )
 
@@ -118,31 +146,43 @@ class FirestoreHistoryStore:
         role = message.role
         if role not in _VALID_ROLES:
             raise ValueError(f"invalid role: {role!r}")
-        if message_id:
-            query = (
-                self._client.collection(self._collection)
-                .where(filter=FieldFilter("message_id", "==", message_id))
-                .limit(1)
-            )
-            async for _existing in query.stream():
-                return
         payload = json.dumps(
             [b.to_dict() for b in message.content],
             separators=(",", ":"),
             ensure_ascii=False,
         )
         created_at = int(time.time() * 1000)
-        await self._client.collection(self._collection).add(
-            {
-                "thread_id": thread_id,
-                "role": role,
-                "content": payload,
-                "created_at": created_at,
-                "turn_id": turn_id,
-                "message_id": message_id,
-            }
+        history_data = _history_row(thread_id, role, payload, created_at, turn_id, message_id)
+        if not message_id:
+            await self._client.collection(self._collection).add(history_data)
+            await self._upsert_thread_summary(thread_id, created_at=created_at, content=payload)
+            return
+
+        existing_query = (
+            self._client.collection(self._collection)
+            .where(filter=FieldFilter("message_id", "==", message_id))
+            .limit(1)
         )
-        await self._upsert_thread_summary(thread_id, created_at=created_at, content=payload)
+        async for _existing in existing_query.stream():
+            return
+        hist_ref = self._client.collection(self._collection).document(
+            _history_document_id(message_id)
+        )
+        thread_ref = self._client.collection(self._threads_collection).document(thread_id)
+        summary_fields = _thread_summary_update(thread_id, created_at, payload)
+
+        async def _append_body(txn: firestore.AsyncTransaction) -> None:
+            snapshot = await hist_ref.get(transaction=txn)
+            if snapshot.exists:
+                return
+            txn.set(hist_ref, history_data)
+            txn.set(thread_ref, summary_fields, merge=True)
+
+        append_txn = cast(
+            Callable[[firestore.AsyncTransaction], Awaitable[None]],
+            firestore.async_transactional(_append_body),
+        )
+        await append_txn(self._client.transaction())
 
     async def append_with_outbox(
         self,
@@ -153,9 +193,8 @@ class FirestoreHistoryStore:
         message_id: str,
         outbox: dict[str, Any],
     ) -> None:
-        """Insert history and a pending memory outbox row in one batched write."""
+        """Insert history and a pending memory outbox row in one transaction."""
         from monkeybot.core.memory.ids import outbox_id, utc_now_iso
-        from monkeybot.core.memory.outbox import STATUS_COMMITTED
 
         role = message.role
         if role not in _VALID_ROLES:
@@ -172,95 +211,59 @@ class FirestoreHistoryStore:
             message_id=str(outbox.get("message_id") or message_id),
             role=str(outbox.get("role") or role),
         )
-        outbox_ref = _memory_outbox_collection(self._client, self._prefix).document(row_id)
-        snap = await outbox_ref.get()
-        if snap.exists:
-            data = snap.to_dict() or {}
-            if str(data.get("status")) == STATUS_COMMITTED:
-                await self.append(thread_id, message, turn_id=turn_id, message_id=message_id)
-                return
-        if message_id:
-            existing_q = (
-                self._client.collection(self._collection)
-                .where(filter=FieldFilter("message_id", "==", message_id))
-                .limit(1)
-            )
-            async for _existing in existing_q.stream():
-                if not snap.exists:
-                    await outbox_ref.set(
-                        {
-                            "id": row_id,
-                            "agent_id": str(outbox.get("agent_id") or ""),
-                            "thread_id": thread_id,
-                            "turn_id": turn_id,
-                            "message_id": message_id,
-                            "role": role,
-                            "content": outbox.get("content"),
-                            "workspace_id": outbox.get("workspace_id"),
-                            "wing": outbox.get("wing") or "main",
-                            "room": outbox.get("room") or "conversation",
-                            "created_at": outbox.get("created_at") or utc_now_iso(),
-                            "status": "pending",
-                            "attempts": 0,
-                            "next_attempt_at": None,
-                            "last_error": None,
-                            "traceparent": outbox.get("traceparent"),
-                            "lease_owner": None,
-                            "lease_expires_at": None,
-                            "palace_id": str(outbox.get("palace_id") or ""),
-                        }
-                    )
-                return
-        hist_ref = self._client.collection(self._collection).document()
+        history_data = _history_row(thread_id, role, payload, created_at, turn_id, message_id)
+        outbox_data = {
+            "id": row_id,
+            "agent_id": str(outbox.get("agent_id") or ""),
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "message_id": message_id,
+            "role": role,
+            "content": outbox.get("content"),
+            "workspace_id": outbox.get("workspace_id"),
+            "wing": outbox.get("wing") or "main",
+            "room": outbox.get("room") or "conversation",
+            "created_at": outbox.get("created_at") or utc_now_iso(),
+            "status": "pending",
+            "attempts": 0,
+            "next_attempt_at": None,
+            "last_error": None,
+            "traceparent": outbox.get("traceparent"),
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "palace_id": str(outbox.get("palace_id") or ""),
+        }
+        legacy_history_exists = False
+        existing_query = (
+            self._client.collection(self._collection)
+            .where(filter=FieldFilter("message_id", "==", message_id))
+            .limit(1)
+        )
+        async for _existing in existing_query.stream():
+            legacy_history_exists = True
+            break
+
+        hist_ref = self._client.collection(self._collection).document(
+            _history_document_id(message_id)
+        )
         thread_ref = self._client.collection(self._threads_collection).document(thread_id)
-        batch = self._client.batch()
-        batch.set(
-            hist_ref,
-            {
-                "thread_id": thread_id,
-                "role": role,
-                "content": payload,
-                "created_at": created_at,
-                "turn_id": turn_id,
-                "message_id": message_id,
-            },
+        summary_fields = _thread_summary_update(thread_id, created_at, payload)
+        outbox_ref = _memory_outbox_collection(self._client, self._prefix).document(row_id)
+
+        async def _append_body(txn: firestore.AsyncTransaction) -> None:
+            history_snapshot = await hist_ref.get(transaction=txn)
+            outbox_snapshot = await outbox_ref.get(transaction=txn)
+            if not legacy_history_exists and not history_snapshot.exists:
+                txn.set(hist_ref, history_data)
+                txn.set(thread_ref, summary_fields, merge=True)
+            if not outbox_snapshot.exists:
+                txn.set(outbox_ref, outbox_data)
+
+        append_txn = cast(
+            Callable[[firestore.AsyncTransaction], Awaitable[None]],
+            firestore.async_transactional(_append_body),
         )
-        batch.set(
-            thread_ref,
-            {
-                "thread_id": thread_id,
-                "last_message_at": created_at,
-                "message_count": firestore.Increment(1),
-                "last_content": payload,
-            },
-            merge=True,
-        )
-        if not snap.exists:
-            batch.set(
-                outbox_ref,
-                {
-                    "id": row_id,
-                    "agent_id": str(outbox.get("agent_id") or ""),
-                    "thread_id": thread_id,
-                    "turn_id": turn_id,
-                    "message_id": message_id,
-                    "role": role,
-                    "content": outbox.get("content"),
-                    "workspace_id": outbox.get("workspace_id"),
-                    "wing": outbox.get("wing") or "main",
-                    "room": outbox.get("room") or "conversation",
-                    "created_at": outbox.get("created_at") or utc_now_iso(),
-                    "status": "pending",
-                    "attempts": 0,
-                    "next_attempt_at": None,
-                    "last_error": None,
-                    "traceparent": outbox.get("traceparent"),
-                    "lease_owner": None,
-                    "lease_expires_at": None,
-                    "palace_id": str(outbox.get("palace_id") or ""),
-                },
-            )
-        await batch.commit()
+        await append_txn(self._client.transaction())
 
     async def load(self, thread_id: str, limit: int | None = None) -> list[Message]:
         if limit is not None:
