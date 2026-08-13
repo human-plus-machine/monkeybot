@@ -80,6 +80,6 @@ def test_cli_wheel_includes_scaffold_defaults(tmp_path: Path) -> None:
             for line in zf.read(meta).decode().splitlines()
             if line.startswith("Requires-Dist: monkeybot")
         ]
-        assert any("monkeybot[cli]" in line for line in requires)
+        assert any("monkeybot[cli,memory]" in line for line in requires)
         assert any(">=3.0.0" in line and "<4" in line for line in requires)
         assert any("monkeybot-browser-mcp" in line for line in requires)

@@ -71,6 +71,7 @@ def test_gateway_argv_sse_only_module(tmp_path: Path) -> None:
         "monkeybot.gateway.main",
     ]
 
+
 def test_venv_takes_precedence_over_pyproject(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text('[project]\nname = "agent"\n', encoding="utf-8")
     venv_bin = tmp_path / ".venv" / "bin"
@@ -102,6 +103,7 @@ def test_run_probe_uv_sets_agent_root_cwd(tmp_path: Path, monkeypatch) -> None:
 
     def fake_run(argv, **kwargs):
         captured["cwd"] = kwargs.get("cwd")
+
         class Result:
             returncode = 0
 
@@ -133,6 +135,28 @@ def test_prepare_runtime_python_skips_sync_when_no_pyproject(tmp_path: Path, mon
     assert runtime.source == "venv"
     assert any("-c" in args[0] for args, _kwargs in called)
     assert not any(args[0][:1] == ["uv"] for args, _kwargs in called)
+
+
+def test_prepare_config_only_empty_yaml_uses_cli_memory_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_dir = tmp_path / "monkeybot_config"
+    config_dir.mkdir()
+    (config_dir / "monkeybot.yaml").write_text("{}\n", encoding="utf-8")
+    probes: list[str] = []
+
+    def fake_probe(runtime: RuntimePython, code: str, *, timeout: float = 15.0) -> bool:
+        del timeout
+        assert runtime.source == "cli"
+        probes.append(code)
+        return True
+
+    monkeypatch.setattr("monkeybot_cli.runtime_python.run_probe", fake_probe)
+
+    runtime = prepare_runtime_python(tmp_path)
+
+    assert runtime.source == "cli"
+    assert probes and "import mempalace" in probes[0]
 
 
 def test_prepare_runtime_python_syncs_when_mempalace_missing(tmp_path: Path, monkeypatch) -> None:

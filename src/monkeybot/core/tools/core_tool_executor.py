@@ -766,6 +766,7 @@ def _str_arg(args: dict[str, Any], *keys: str) -> str | None:
 
 
 _SHELL_OPERATOR_TOKENS = frozenset({"&&", "||", ";", "|", "&"})
+_PROCESS_LAUNCHERS = frozenset({"bash", "python", "python3", "uv", "git", "gh"})
 
 
 def _needs_shell_wrapper(stripped: str, parts: list[str]) -> bool:
@@ -819,6 +820,28 @@ def _parse_run_command(args: dict[str, Any]) -> tuple[str, list[str]]:
     )
 
 
+def _mentions_indirect_mempalace(command: str, argv: list[str]) -> bool:
+    """Detect common attempts to launch MemPalace behind an allowed launcher.
+
+    Environment and path isolation remain the primary boundary. This check also
+    gives nested shell/module invocations the same clear policy error as a
+    direct ``mempalace`` call.
+    """
+    if command not in _PROCESS_LAUNCHERS:
+        return False
+    tokens: list[str] = []
+    for arg in argv:
+        try:
+            tokens.extend(shlex.split(arg, posix=True))
+        except ValueError:
+            tokens.append(arg)
+    for token in tokens:
+        normalized = token.strip(" \t\r\n;&|(){}[]'\"").lower().replace("\\", "/")
+        if normalized == "mempalace" or normalized.endswith("/mempalace"):
+            return True
+    return False
+
+
 class CoreToolExecutor(ToolExecutorPort):
     """Executes built-in tools and delegates ``server__tool`` calls to :class:`MCPClient`."""
 
@@ -870,6 +893,16 @@ class CoreToolExecutor(ToolExecutorPort):
                 if run_command_allowed_path_prefixes is not None
                 else tuple(ALLOWED_PATHS)
             )
+            if self._memory is None:
+                memory_root = (self._workspace.repo_root / "../memory").resolve()
+                paths = tuple(
+                    path
+                    for path in paths
+                    if not (
+                        (candidate := (self._workspace.repo_root / path).resolve()) == memory_root
+                        or memory_root in candidate.parents
+                    )
+                )
             # Allow absolute argv paths under the resolved skills root (list_skills
             # returns this path; scripts live outside the workspace cwd).
             skills = str(self._skills_path)
@@ -1095,8 +1128,7 @@ class CoreToolExecutor(ToolExecutorPort):
             skip_sanitize = skip_tool_result_sanitize(name)
             budgets = spill_budgets_from_window(ctx.context_window_tokens)
             should_spill = (
-                name not in _SPILL_SKIP_TOOLS
-                and len(result_text) >= budgets.spill_threshold
+                name not in _SPILL_SKIP_TOOLS and len(result_text) >= budgets.spill_threshold
             )
             if should_spill:
                 result_text = write_spill_with_inventory(
@@ -1225,7 +1257,9 @@ class CoreToolExecutor(ToolExecutorPort):
 
         return self._media_result(mime, data_b64, meta)
 
-    def _tool_read_file(self, args: dict[str, Any], ctx: TurnContext) -> tuple[str | None, str | None]:
+    def _tool_read_file(
+        self, args: dict[str, Any], ctx: TurnContext
+    ) -> tuple[str | None, str | None]:
         path = _str_arg(args, "path", "file_path", "file")
         if not path:
             return (
@@ -1716,15 +1750,36 @@ class CoreToolExecutor(ToolExecutorPort):
                     "Do not attempt memory recall when no memory subsystem is active.",
                 ),
             )
+        if self._memory is None and _mentions_indirect_mempalace(cmd, argv):
+            return (
+                None,
+                _built_in_tool_error(
+                    "policy",
+                    "Memory is unavailable; nested MemPalace commands are disabled.",
+                    "Do not attempt memory recall when no memory subsystem is active.",
+                ),
+            )
         executor = self._terminal
         if cmd == "mempalace" and self._host_terminal is not None:
             executor = self._host_terminal
         try:
+            execute_kwargs: dict[str, Any] = {
+                "timeout": timeout,
+                "cwd": self._workspace.repo_root,
+            }
+            if (
+                cmd == "mempalace"
+                and self._memory is not None
+                and isinstance(executor, TerminalExecutor)
+            ):
+                execute_kwargs["env_overrides"] = {
+                    "MEMPALACE_PALACE_PATH": str(self._memory.palace_path),
+                    "MEMPALACE_BACKEND": self._memory.backend,
+                }
             result = await executor.execute(
                 cmd,
                 argv,
-                timeout=timeout,
-                cwd=self._workspace.repo_root,
+                **execute_kwargs,
             )
         except SecurityError as exc:
             return None, self._run_command_security_envelope(exc)

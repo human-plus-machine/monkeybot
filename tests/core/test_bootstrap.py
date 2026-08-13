@@ -51,7 +51,11 @@ async def test_create_harness_deps_no_memory_when_uri_none() -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_harness_deps_memory_set_when_uri_given(tmp_path: Path) -> None:
+async def test_create_harness_deps_memory_set_when_uri_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MEMPALACE_PALACE_PATH", "/existing/process-route")
+    monkeypatch.setenv("MEMPALACE_BACKEND", "chroma")
     mem_root = tmp_path / "mem"
     mem_root.mkdir()
     uri = "local://" + str(mem_root.resolve())
@@ -64,7 +68,8 @@ async def test_create_harness_deps_memory_set_when_uri_given(tmp_path: Path) -> 
     )
     assert isinstance(deps.memory, MemorySubsystem)
     assert deps.memory.uri == uri
-    assert os.environ.get("MEMPALACE_PALACE_PATH") == str(deps.memory.palace_path)
+    assert os.environ.get("MEMPALACE_PALACE_PATH") == "/existing/process-route"
+    assert os.environ.get("MEMPALACE_BACKEND") == "chroma"
     await deps.close()
 
 
@@ -118,10 +123,14 @@ async def test_create_harness_deps_closes_backend_on_memory_subsystem_failure(
     mem_root = tmp_path / "mem"
     mem_root.mkdir()
     uri = "local://" + str(mem_root.resolve())
-    with patch("monkeybot.core.bootstrap.create_storage_backend", return_value=backend), patch(
-        "monkeybot.core.bootstrap.MemorySubsystem",
-        side_effect=RuntimeError("boom"),
-    ), pytest.raises(RuntimeError, match="boom"):
+    with (
+        patch("monkeybot.core.bootstrap.create_storage_backend", return_value=backend),
+        patch(
+            "monkeybot.core.bootstrap.MemorySubsystem",
+            side_effect=RuntimeError("boom"),
+        ),
+        pytest.raises(RuntimeError, match="boom"),
+    ):
         await create_harness_deps(
             "sqlite:///:memory:",
             uri,
@@ -252,7 +261,9 @@ async def test_run_pattern_bc_turn_raises_on_error_event(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_run_pattern_bc_turn_default_run_command_allowlist(tmp_path: Path, monkeypatch) -> None:
+async def test_run_pattern_bc_turn_default_run_command_allowlist(
+    tmp_path: Path, monkeypatch
+) -> None:
     """Bootstrap must not pass an empty allowlist (issue #7)."""
     monkeypatch.delenv("COMMAND_ALLOWLIST_CONFIG", raising=False)
     (tmp_path / "skills").mkdir()

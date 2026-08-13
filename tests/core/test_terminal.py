@@ -36,7 +36,7 @@ def executor():
 def test_data_dir(tmp_path):
     """
     Create temporary test data directory.
-    
+
     Creates a directory structure that mimics the allowed paths:
         tmp_path/
             data/
@@ -56,7 +56,7 @@ def test_data_dir(tmp_path):
 class TestTerminalExecutorSecurity:
     """
     Security-focused tests for Terminal Executor.
-    
+
     These tests verify that the security boundary is properly enforced.
     ALL tests in this class must pass for the system to be secure.
     """
@@ -105,7 +105,7 @@ class TestTerminalExecutorSecurity:
             "/etc/shadow",
             "/root/.ssh/id_rsa",
             "/var/log/system.log",
-            "./unauthorized/path/file.txt"
+            "./unauthorized/path/file.txt",
         ]
 
         for path in dangerous_paths:
@@ -121,7 +121,7 @@ class TestTerminalExecutorSecurity:
         # These paths start with allowed prefixes but try to escape
         traversal_attempts = [
             "./unauthorized/path/file.txt",  # Not in allowed paths
-            "/etc/passwd",                     # System file
+            "/etc/passwd",  # System file
         ]
 
         # These should be blocked by the allowlist check
@@ -130,6 +130,34 @@ class TestTerminalExecutorSecurity:
                 await executor.execute("cat", [path])
 
             assert "not allowed" in str(exc_info.value).lower()
+
+    @pytest.mark.asyncio
+    async def test_allowed_prefix_cannot_be_escaped_with_dot_dot(self, executor, tmp_path):
+        workspace = tmp_path / "workspace"
+        (workspace / "skills").mkdir(parents=True)
+        secret = workspace / "secret.txt"
+        secret.write_text("secret", encoding="utf-8")
+
+        with pytest.raises(SecurityError, match="not allowed"):
+            await executor.execute(
+                "cat",
+                ["./skills/../secret.txt"],
+                cwd=workspace,
+            )
+
+    @pytest.mark.asyncio
+    async def test_shell_embedded_traversal_is_validated(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (tmp_path / "memory").mkdir()
+        memory_disabled_executor = TerminalExecutor(allowed_path_prefixes=["./skills", "./code"])
+
+        with pytest.raises(SecurityError, match="not allowed"):
+            await memory_disabled_executor.execute(
+                "bash",
+                ["-c", "cat ../memory/private.txt"],
+                cwd=workspace,
+            )
 
     @pytest.mark.asyncio
     async def test_subdirectory_of_allowed_path_succeeds(self, executor, test_data_dir):
@@ -180,7 +208,7 @@ class TestTerminalExecutorSecurity:
 class TestTerminalExecutorExecution:
     """
     Functional tests for Terminal Executor.
-    
+
     These tests verify correct execution behavior for valid commands.
     """
 
@@ -197,10 +225,7 @@ class TestTerminalExecutorExecution:
     async def test_failed_command_returns_error(self, executor):
         """Test that failed command returns non-zero exit code."""
         # Python with invalid syntax should exit with error
-        result = await executor.execute(
-            "python3",
-            ["-c", "import sys; sys.exit(1)"]
-        )
+        result = await executor.execute("python3", ["-c", "import sys; sys.exit(1)"])
 
         assert result.exit_code == 1
 
@@ -208,8 +233,7 @@ class TestTerminalExecutorExecution:
     async def test_command_with_stderr(self, executor):
         """Test that command writing to stderr is captured."""
         result = await executor.execute(
-            "python3",
-            ["-c", "import sys; sys.stderr.write('Error message\\n')"]
+            "python3", ["-c", "import sys; sys.stderr.write('Error message\\n')"]
         )
 
         assert "Error message" in result.stderr
@@ -218,8 +242,7 @@ class TestTerminalExecutorExecution:
     async def test_command_with_multiple_arguments(self, executor):
         """Test that commands with multiple arguments work."""
         result = await executor.execute(
-            "python3",
-            ["-c", "import sys; print('arg1'); print('arg2')"]
+            "python3", ["-c", "import sys; print('arg1'); print('arg2')"]
         )
 
         assert result.exit_code == 0
@@ -318,6 +341,77 @@ class TestTerminalExecutorExecution:
         assert seen_env.get("MONKEYBOT_PYTHON") == sys.executable
 
     @pytest.mark.asyncio
+    async def test_generic_child_does_not_inherit_memory_routing(
+        self, executor, tmp_path, monkeypatch
+    ):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        monkeypatch.setenv("MEMPALACE_PALACE_PATH", "/private/palace-b")
+        monkeypatch.setenv("MEMPALACE_BACKEND", "chroma")
+        monkeypatch.setenv("MEMORY_STORAGE_URI", "local:///private/palace-b")
+        seen_env: dict[str, str] = {}
+
+        async def fake_exec(*cmd, stdout=None, stderr=None, cwd=None, env=None, **kwargs):
+            del cmd, stdout, stderr, cwd, kwargs
+            nonlocal seen_env
+            seen_env = dict(env or {})
+            proc = MagicMock()
+            proc.pid = 12345
+            proc.returncode = 0
+            proc.stdout = MagicMock()
+            proc.stderr = MagicMock()
+            proc.stdout.read = AsyncMock(return_value=b"")
+            proc.stderr.read = AsyncMock(return_value=b"")
+            proc.wait = AsyncMock(return_value=0)
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+        await executor.execute("bash", ["-c", "echo safe"], cwd=tmp_path)
+
+        assert "MEMPALACE_PALACE_PATH" not in seen_env
+        assert "MEMPALACE_BACKEND" not in seen_env
+        assert "MEMORY_STORAGE_URI" not in seen_env
+
+    @pytest.mark.asyncio
+    async def test_direct_mempalace_uses_explicit_memory_route(
+        self, executor, tmp_path, monkeypatch
+    ):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        monkeypatch.setenv("MEMPALACE_PALACE_PATH", "/private/palace-b")
+        seen_env: dict[str, str] = {}
+
+        async def fake_exec(*cmd, stdout=None, stderr=None, cwd=None, env=None, **kwargs):
+            del cmd, stdout, stderr, cwd, kwargs
+            nonlocal seen_env
+            seen_env = dict(env or {})
+            proc = MagicMock()
+            proc.pid = 12345
+            proc.returncode = 0
+            proc.stdout = MagicMock()
+            proc.stderr = MagicMock()
+            proc.stdout.read = AsyncMock(return_value=b"")
+            proc.stderr.read = AsyncMock(return_value=b"")
+            proc.wait = AsyncMock(return_value=0)
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+        await executor.execute(
+            "mempalace",
+            ["search", "query"],
+            cwd=tmp_path,
+            env_overrides={
+                "MEMPALACE_PALACE_PATH": "/private/palace-a",
+                "MEMPALACE_BACKEND": "chroma",
+            },
+        )
+
+        assert seen_env["MEMPALACE_PALACE_PATH"] == "/private/palace-a"
+        assert seen_env["MEMPALACE_BACKEND"] == "chroma"
+
+    @pytest.mark.asyncio
     async def test_mempalace_uses_console_script_when_on_path(
         self, executor, tmp_path, monkeypatch
     ):
@@ -349,9 +443,7 @@ class TestTerminalExecutorExecution:
         assert seen[0][1:] == ("search", "q")
 
     @pytest.mark.asyncio
-    async def test_mempalace_falls_back_to_python_module(
-        self, executor, tmp_path, monkeypatch
-    ):
+    async def test_mempalace_falls_back_to_python_module(self, executor, tmp_path, monkeypatch):
         import asyncio
         import sys
         from unittest.mock import AsyncMock, MagicMock
@@ -400,7 +492,7 @@ class TestTerminalExecutorExecution:
 class TestTerminalExecutorTimeout:
     """
     Timeout handling tests for Terminal Executor.
-    
+
     These tests verify that long-running processes are properly killed.
     """
 
@@ -410,11 +502,7 @@ class TestTerminalExecutorTimeout:
         from monkeybot.core.tools.terminal import CommandTimeoutError
 
         with pytest.raises(CommandTimeoutError) as exc_info:
-            await executor.execute(
-                "python3",
-                ["-c", "import time; time.sleep(60)"],
-                timeout=1
-            )
+            await executor.execute("python3", ["-c", "import time; time.sleep(60)"], timeout=1)
 
         assert "timeout" in str(exc_info.value).lower()
         assert exc_info.value.timeout == 1
@@ -461,20 +549,17 @@ class TestTerminalExecutorTimeout:
                 ),
                 timeout=8,
             )
-        assert "descendant" in str(exc_info.value).lower() or "streams did not close" in str(
-            exc_info.value
-        ).lower()
+        assert (
+            "descendant" in str(exc_info.value).lower()
+            or "streams did not close" in str(exc_info.value).lower()
+        )
         assert "done" in exc_info.value.stdout
 
     @pytest.mark.asyncio
     async def test_fast_command_does_not_timeout(self, executor):
         """Test that fast commands complete before timeout."""
         # Set generous timeout for fast command
-        result = await executor.execute(
-            "echo",
-            ["Fast command"],
-            timeout=5
-        )
+        result = await executor.execute("echo", ["Fast command"], timeout=5)
 
         assert result.exit_code == 0
         assert "Fast command" in result.stdout
@@ -484,9 +569,7 @@ class TestTerminalExecutorTimeout:
         """Test that custom timeout values are respected."""
         # Command that sleeps 2 seconds should succeed with 3s timeout
         result = await executor.execute(
-            "python3",
-            ["-c", "import time; time.sleep(2); print('Done')"],
-            timeout=3
+            "python3", ["-c", "import time; time.sleep(2); print('Done')"], timeout=3
         )
 
         assert result.exit_code == 0
@@ -496,7 +579,7 @@ class TestTerminalExecutorTimeout:
 class TestTerminalExecutorOutputTruncation:
     """
     Output truncation tests for Terminal Executor.
-    
+
     These tests verify that large outputs don't cause memory issues.
     """
 
@@ -504,10 +587,7 @@ class TestTerminalExecutorOutputTruncation:
     async def test_large_stdout_truncated(self, executor):
         """Test that large stdout is truncated to 1MB."""
         # Generate 2MB of output
-        result = await executor.execute(
-            "python3",
-            ["-c", "print('x' * (2 * 1024 * 1024))"]
-        )
+        result = await executor.execute("python3", ["-c", "print('x' * (2 * 1024 * 1024))"])
 
         # Should be truncated to ~1MB
         assert len(result.stdout) <= 1024 * 1024 + 200  # Small buffer for message
@@ -518,8 +598,7 @@ class TestTerminalExecutorOutputTruncation:
         """Test that large stderr is truncated to 1MB."""
         # Generate 2MB of error output
         result = await executor.execute(
-            "python3",
-            ["-c", "import sys; sys.stderr.write('x' * (2 * 1024 * 1024))"]
+            "python3", ["-c", "import sys; sys.stderr.write('x' * (2 * 1024 * 1024))"]
         )
 
         # Should be truncated to ~1MB
@@ -529,10 +608,7 @@ class TestTerminalExecutorOutputTruncation:
     @pytest.mark.asyncio
     async def test_small_output_not_truncated(self, executor):
         """Test that small outputs are not truncated."""
-        result = await executor.execute(
-            "echo",
-            ["Small output"]
-        )
+        result = await executor.execute("echo", ["Small output"])
 
         assert result.exit_code == 0
         assert "Small output" in result.stdout
@@ -542,17 +618,14 @@ class TestTerminalExecutorOutputTruncation:
 class TestTerminalExecutorEdgeCases:
     """
     Edge case tests for Terminal Executor.
-    
+
     These tests verify handling of unusual but valid inputs.
     """
 
     @pytest.mark.asyncio
     async def test_command_with_special_characters_in_output(self, executor):
         """Test that special characters in output are handled correctly."""
-        result = await executor.execute(
-            "echo",
-            ["Special chars: !@#$%^&*()[]{}"]
-        )
+        result = await executor.execute("echo", ["Special chars: !@#$%^&*()[]{}"])
 
         assert result.exit_code == 0
         assert "Special chars" in result.stdout
@@ -560,10 +633,7 @@ class TestTerminalExecutorEdgeCases:
     @pytest.mark.asyncio
     async def test_command_with_unicode_output(self, executor):
         """Test that unicode output is decoded correctly."""
-        result = await executor.execute(
-            "python3",
-            ["-c", "print('Unicode: 你好世界 🚀')"]
-        )
+        result = await executor.execute("python3", ["-c", "print('Unicode: 你好世界 🚀')"])
 
         assert result.exit_code == 0
         # Unicode should be in output (or replaced if not valid UTF-8)
@@ -572,10 +642,7 @@ class TestTerminalExecutorEdgeCases:
     @pytest.mark.asyncio
     async def test_command_with_empty_output(self, executor):
         """Test that commands with no output work correctly."""
-        result = await executor.execute(
-            "python3",
-            ["-c", "pass"]
-        )
+        result = await executor.execute("python3", ["-c", "pass"])
 
         assert result.exit_code == 0
         assert result.stdout == ""
@@ -598,7 +665,7 @@ class TestTerminalExecutorEdgeCases:
 class TestTerminalExecutorConstants:
     """
     Tests for security constants configuration.
-    
+
     These tests document and verify the security configuration.
     """
 
@@ -644,16 +711,25 @@ class TestTerminalExecutorConstants:
     def test_no_dangerous_commands_in_allowlist(self):
         """Test that dangerous commands are not in allowlist."""
         dangerous_commands = [
-            "rm", "rmdir", "del",  # Deletion
-            "curl", "wget",         # Network access
-            "sudo", "su",           # Privilege escalation
-            "chmod", "chown",       # Permission changes
-            "kill", "killall",      # Process manipulation
-            "eval", "exec",         # Code execution
+            "rm",
+            "rmdir",
+            "del",  # Deletion
+            "curl",
+            "wget",  # Network access
+            "sudo",
+            "su",  # Privilege escalation
+            "chmod",
+            "chown",  # Permission changes
+            "kill",
+            "killall",  # Process manipulation
+            "eval",
+            "exec",  # Code execution
         ]
 
         for cmd in dangerous_commands:
-            assert cmd not in ALLOWED_COMMANDS, f"Dangerous command '{cmd}' found in ALLOWED_COMMANDS!"
+            assert cmd not in ALLOWED_COMMANDS, (
+                f"Dangerous command '{cmd}' found in ALLOWED_COMMANDS!"
+            )
 
 
 def test_build_skill_runtime_env_prepends_gateway_python_bin(tmp_path, monkeypatch) -> None:

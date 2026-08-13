@@ -144,8 +144,6 @@ async def create_harness_deps(
                 storage=backend,
             )
             await memory.ensure_ready()
-            os.environ["MEMPALACE_PALACE_PATH"] = str(memory.palace_path)
-            os.environ["MEMPALACE_BACKEND"] = memory.backend
 
         knowledge: KnowledgeSubsystem | None = None
         if knowledge_enabled_from_config() and workspace_root is not None:
