@@ -12,7 +12,11 @@ from monkeybot.core.persistence.durable_runs import SQLiteRunStore
 from monkeybot.core.persistence.scheduled_loops import SQLiteScheduledLoopStore
 from monkeybot.core.persistence.session_turn_locks import SQLiteSessionTurnLockStore
 from monkeybot.core.persistence.history import SQLiteHistoryStore
-from monkeybot.core.persistence.sqlite import apply_schema, open_connection
+from monkeybot.core.persistence.sqlite import (
+    apply_schema,
+    backfill_legacy_agent_scope,
+    open_connection,
+)
 from monkeybot.core.persistence.usage import SQLiteUsageStore
 
 
@@ -32,7 +36,9 @@ class SQLiteStorageBackend:
     async def open(self, *, run_schema: bool = True) -> None:
         self._conn = await open_connection(self._db_url)
         if run_schema:
-            await apply_schema(self._conn)
+            agent_scope_migrated = await apply_schema(self._conn)
+            if agent_scope_migrated and self._agent_scope:
+                await backfill_legacy_agent_scope(self._conn, self._agent_scope)
         self._history_store = SQLiteHistoryStore(self._conn, self._agent_scope)
         self._usage_store = SQLiteUsageStore(self._conn)
         self._runs_store = SQLiteRunStore(self._conn)

@@ -60,6 +60,33 @@ async def test_firestore_list_threads_uses_threads_collection(firestore_history)
 
 
 @pytest.mark.asyncio
+async def test_firestore_list_threads_isolated_by_agent_scope(require_emulator: None) -> None:
+    """Regression for PR #179 review: agents sharing one Firestore database
+    must not see each other's threads via list_threads/load.
+    """
+    prefix = f"test_{uuid.uuid4().hex[:8]}"
+    client = AsyncClient(project="monkeybot-test", database="(default)")
+    store_a = FirestoreHistoryStore(client, prefix, "agent-a")
+    store_b = FirestoreHistoryStore(client, prefix, "agent-b")
+    try:
+        await store_a.append("t1", Message(role="user", content=[Text(text="agent a's secret")]))
+        await store_b.append("t2", Message(role="user", content=[Text(text="agent b's secret")]))
+
+        threads_a = await store_a.list_threads(limit=10)
+        threads_b = await store_b.list_threads(limit=10)
+
+        assert [t.thread_id for t in threads_a] == ["t1"]
+        assert [t.thread_id for t in threads_b] == ["t2"]
+        assert await store_a.load("t2") == []
+        assert await store_b.load("t1") == []
+    finally:
+        for collection in (store_a._collection, store_a._threads_collection):
+            async for doc in client.collection(collection).stream():
+                await doc.reference.delete()
+        client.close()
+
+
+@pytest.mark.asyncio
 async def test_firestore_reset_rebuilds_thread_summary(firestore_history) -> None:
     store: FirestoreHistoryStore = firestore_history
     thread_id = "thread-reset"

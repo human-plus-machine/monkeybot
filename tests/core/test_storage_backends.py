@@ -124,6 +124,54 @@ async def test_postgres_open_run_schema_false_skips_apply_schema(
     await backend.close()
 
 
+@pytest.mark.asyncio
+async def test_postgres_list_threads_query_does_not_reference_ungrouped_column() -> None:
+    """Regression for PR #179 review: PostgreSQL rejects a subquery that reads
+    an outer-query column (``h.agent_scope``) not present in GROUP BY, with
+    "subquery uses ungrouped column" — verified against a real local Postgres
+    instance. The scoped subquery must bind the scope as a query parameter
+    (``$1``) instead of correlating through ``h.agent_scope``.
+    """
+    try:
+        import asyncpg  # noqa: F401
+    except ImportError:
+        pytest.skip("asyncpg is not installed")
+
+    from monkeybot.core.persistence.postgres import PostgresHistoryStore
+
+    class _FakeConn:
+        def __init__(self) -> None:
+            self.queries: list[str] = []
+
+        async def fetch(self, query: str, *args: object) -> list[object]:
+            self.queries.append(query)
+            return []
+
+    class _FakeAcquire:
+        def __init__(self, conn: _FakeConn) -> None:
+            self._conn = conn
+
+        async def __aenter__(self) -> _FakeConn:
+            return self._conn
+
+        async def __aexit__(self, *exc: object) -> None:
+            return None
+
+    class _FakePool:
+        def __init__(self, conn: _FakeConn) -> None:
+            self._conn = conn
+
+        def acquire(self) -> _FakeAcquire:
+            return _FakeAcquire(self._conn)
+
+    fake_conn = _FakeConn()
+    store = PostgresHistoryStore(_FakePool(fake_conn), "agent-a")  # type: ignore[arg-type]
+    await store.list_threads()
+
+    assert len(fake_conn.queries) == 1
+    assert "h2.agent_scope = h.agent_scope" not in fake_conn.queries[0]
+
+
 # ---------------------------------------------------------------------------
 # Factory tests
 # ---------------------------------------------------------------------------
@@ -297,6 +345,99 @@ async def test_history_reset_to_empty(sqlite_backend: SQLiteStorageBackend) -> N
 async def test_history_load_empty_thread_returns_empty(sqlite_backend: SQLiteStorageBackend) -> None:
     store = sqlite_backend.history()
     assert await store.load("nonexistent") == []
+
+
+# ---------------------------------------------------------------------------
+# agent_scope isolation — different agent roots sharing one DB_URL must not
+# see each other's threads (PR #179 review: chat.py:703).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_history_list_threads_isolated_by_agent_scope() -> None:
+    backend_a = SQLiteStorageBackend("sqlite:///:memory:", agent_scope="agent-a")
+    await backend_a.open()
+    try:
+        conn = backend_a._conn
+        assert conn is not None
+        backend_b = SQLiteStorageBackend.__new__(SQLiteStorageBackend)
+        # Share the same connection/db to simulate one DB_URL, two agent roots.
+        from monkeybot.core.persistence.history import SQLiteHistoryStore
+
+        store_a = backend_a.history()
+        store_b = SQLiteHistoryStore(conn, "agent-b")
+
+        await store_a.append("t1", Message.text("user", "agent a's secret"))
+        await store_b.append("t2", Message.text("user", "agent b's secret"))
+
+        threads_a = await store_a.list_threads()
+        threads_b = await store_b.list_threads()
+
+        assert [t.thread_id for t in threads_a] == ["t1"]
+        assert [t.thread_id for t in threads_b] == ["t2"]
+        # Neither agent can load the other's thread by id either.
+        assert await store_a.load("t2") == []
+        assert await store_b.load("t1") == []
+    finally:
+        await backend_a.close()
+
+
+@pytest.mark.asyncio
+async def test_history_reset_does_not_cross_scope(tmp_path: Path) -> None:
+    from monkeybot.core.persistence.history import SQLiteHistoryStore
+
+    db_path = tmp_path / "shared.db"
+    backend_a = SQLiteStorageBackend(f"sqlite:///{db_path}", agent_scope="agent-a")
+    await backend_a.open()
+    try:
+        conn = backend_a._conn
+        assert conn is not None
+        store_a = backend_a.history()
+        store_b = SQLiteHistoryStore(conn, "agent-b")
+
+        await store_a.append("same-id", Message.text("user", "a's message"))
+        await store_b.append("same-id", Message.text("user", "b's message"))
+
+        await store_a.reset("same-id", [])
+
+        assert await store_a.load("same-id") == []
+        assert await store_b.load("same-id") == [Message.text("user", "b's message")]
+    finally:
+        await backend_a.close()
+
+
+@pytest.mark.asyncio
+async def test_history_backfills_legacy_rows_to_agent_scope_on_migration(tmp_path: Path) -> None:
+    """A pre-#179 DB (no agent_scope column) must not lose history on upgrade."""
+    import time
+
+    import aiosqlite
+
+    db_path = tmp_path / "legacy.db"
+    conn = await aiosqlite.connect(str(db_path))
+    await conn.execute(
+        """CREATE TABLE conversation_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        thread_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+    )"""
+    )
+    await conn.execute(
+        "INSERT INTO conversation_history(thread_id, role, content, created_at) VALUES (?,?,?,?)",
+        ("legacy-thread", "user", '[{"type":"text","text":"pre-upgrade"}]', int(time.time() * 1000)),
+    )
+    await conn.commit()
+    await conn.close()
+
+    backend = SQLiteStorageBackend(f"sqlite:///{db_path}", agent_scope="my-agent-root")
+    await backend.open(run_schema=True)
+    try:
+        threads = await backend.history().list_threads()
+        assert [t.thread_id for t in threads] == ["legacy-thread"]
+    finally:
+        await backend.close()
 
 
 # ---------------------------------------------------------------------------

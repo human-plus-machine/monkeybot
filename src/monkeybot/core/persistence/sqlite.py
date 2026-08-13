@@ -151,15 +151,21 @@ async def _log_legacy_schema_error(conn: aiosqlite.Connection) -> None:
     logger.error("Legacy conversation_history schema detected; db=%s", path)
 
 
-async def apply_schema(conn: aiosqlite.Connection) -> None:
-    """Create tables/indexes; refuse legacy conversation_history shapes."""
+async def apply_schema(conn: aiosqlite.Connection) -> bool:
+    """Create tables/indexes; refuse legacy conversation_history shapes.
+
+    Returns True when ``agent_scope`` was just added to a pre-existing
+    ``conversation_history`` table — a fresh migration off the pre-agent-scope
+    schema. Callers use this to decide whether to claim legacy rows for the
+    scope they're about to open with (see :func:`backfill_legacy_agent_scope`).
+    """
     for ddl in SCHEMA_DDLS:
         await conn.execute(ddl)
     await conn.commit()
     await _ensure_turn_usage_estimated_column(conn)
     await _ensure_turn_usage_cache_columns(conn)
     await _ensure_subagent_runs_claim_columns(conn)
-    await _ensure_conversation_history_agent_scope_column(conn)
+    agent_scope_migrated = await _ensure_conversation_history_agent_scope_column(conn)
     cursor = await conn.execute("PRAGMA table_info(conversation_history)")
     rows = await cursor.fetchall()
     await cursor.close()
@@ -167,6 +173,7 @@ async def apply_schema(conn: aiosqlite.Connection) -> None:
     if "tool_name" in col_names or "tool_call_id" in col_names:
         await _log_legacy_schema_error(conn)
         raise RuntimeError(_LEGACY_SCHEMA_MESSAGE)
+    return agent_scope_migrated
 
 
 async def _ensure_turn_usage_estimated_column(conn: aiosqlite.Connection) -> None:
@@ -211,12 +218,8 @@ async def _ensure_subagent_runs_claim_columns(conn: aiosqlite.Connection) -> Non
     await conn.commit()
 
 
-async def _ensure_conversation_history_agent_scope_column(conn: aiosqlite.Connection) -> None:
-    """Add ``agent_scope`` when upgrading an existing DB.
-
-    Pre-migration rows backfill to ``''``, which matches the scope a backend
-    opened without an explicit ``agent_scope`` (e.g. in-process tests) already
-    writes under — no rows become orphaned.
+async def _ensure_conversation_history_agent_scope_column(conn: aiosqlite.Connection) -> bool:
+    """Add ``agent_scope`` when upgrading an existing DB. Returns True if it was just added.
 
     The scoped index is created here, after the column exists, rather than in
     ``SCHEMA_DDLS``: that DDL list runs first and would fail referencing a
@@ -226,7 +229,8 @@ async def _ensure_conversation_history_agent_scope_column(conn: aiosqlite.Connec
     rows = await cur.fetchall()
     await cur.close()
     names = {str(r[1]) for r in rows}
-    if "agent_scope" not in names:
+    column_added = "agent_scope" not in names
+    if column_added:
         await conn.execute(
             "ALTER TABLE conversation_history ADD COLUMN agent_scope TEXT NOT NULL DEFAULT ''"
         )
@@ -234,6 +238,31 @@ async def _ensure_conversation_history_agent_scope_column(conn: aiosqlite.Connec
     await conn.execute(
         """CREATE INDEX IF NOT EXISTS idx_history_scope_thread
         ON conversation_history(agent_scope, thread_id, created_at DESC, id DESC)"""
+    )
+    await conn.commit()
+    return column_added
+
+
+async def backfill_legacy_agent_scope(conn: aiosqlite.Connection, agent_scope: str) -> None:
+    """Claim pre-migration rows (``agent_scope = ''``) for ``agent_scope``.
+
+    Call once, immediately after :func:`apply_schema` reports it just added the
+    ``agent_scope`` column — otherwise a gateway that now always opens history
+    with a nonempty agent-root scope would make every pre-upgrade conversation
+    invisible to ``--continue``, transcript backfill, and explicit ``--session``
+    resumes alike.
+
+    Safe under the default deployment topology (one SQLite file per agent
+    root), where a freshly-migrated file has exactly one owner. Do not call
+    this against a ``db_url`` known to be shared across multiple agent roots —
+    it would reassign every other agent's legacy history to whichever gateway
+    happens to migrate first.
+    """
+    if not agent_scope:
+        return
+    await conn.execute(
+        "UPDATE conversation_history SET agent_scope = ? WHERE agent_scope = ''",
+        (agent_scope,),
     )
     await conn.commit()
 

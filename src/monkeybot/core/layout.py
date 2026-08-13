@@ -159,6 +159,7 @@ class AgentLayout:
     permission_config_path: Path
     db_url: str
     memory_storage_uri: str
+    agent_id: str
 
     @classmethod
     def from_environment(
@@ -192,12 +193,14 @@ class AgentLayout:
                 os.environ.get("MEMORY_STORAGE_URI", os.environ.get("MEMORY_PATH", "memory")),
                 root,
             ),
+            agent_id=os.environ.get("MONKEYBOT_AGENT_ID", "").strip() or str(root),
         )
 
     def export_environment(self) -> None:
         """Export absolute runtime paths for child processes and legacy consumers."""
         values = {
             "MONKEYBOT_AGENT_ROOT": str(self.agent_root),
+            "MONKEYBOT_AGENT_ID": self.agent_id,
             "MONKEYBOT_WORKSPACE_ROOT": str(self.workspace_root),
             "SKILLS_PATH": str(self.skills_path),
             "AGENT_MD": str(self.agent_md_path),

@@ -122,6 +122,28 @@ async def _apply_schema(pool: asyncpg.Pool) -> None:
             await conn.execute(ddl)
 
 
+async def _warn_if_legacy_unscoped_history(pool: asyncpg.Pool) -> None:
+    """Log once if pre-migration (``agent_scope = ''``) rows remain.
+
+    Unlike SQLite (one file per agent root by default), a Postgres ``DB_URL``
+    is commonly shared across multiple agents, so auto-claiming legacy rows
+    for whichever gateway happens to migrate first would silently reassign
+    other agents' history. Surface the situation instead of masking it —
+    resolving it requires an operator who knows which legacy thread_id
+    belongs to which agent.
+    """
+    async with pool.acquire() as conn:
+        exists = await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM conversation_history WHERE agent_scope = '')"
+        )
+    if exists:
+        logger.warning(
+            "conversation_history has pre-migration rows with agent_scope='' — "
+            "they are invisible to this (or any) agent-scoped gateway until an "
+            "operator backfills agent_scope for each legacy thread_id."
+        )
+
+
 class PostgresHistoryStore:
     """asyncpg-backed conversation history store, scoped to ``agent_scope``.
 
@@ -243,7 +265,7 @@ class PostgresHistoryStore:
                     (
                         SELECT h2.content
                         FROM conversation_history h2
-                        WHERE h2.thread_id = h.thread_id AND h2.agent_scope = h.agent_scope
+                        WHERE h2.thread_id = h.thread_id AND h2.agent_scope = $1
                         ORDER BY h2.created_at DESC, h2.id DESC
                         LIMIT 1
                     ) AS last_content
@@ -1084,6 +1106,8 @@ class PostgresStorageBackend:
         )
         if run_schema:
             await _apply_schema(self._pool)
+            if self._agent_scope:
+                await _warn_if_legacy_unscoped_history(self._pool)
         self._history_store = PostgresHistoryStore(self._pool, self._agent_scope)
         self._usage_store = PostgresUsageStore(self._pool)
         self._runs_store = PostgresRunStore(self._pool)
