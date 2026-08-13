@@ -444,6 +444,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Invariants:**
 - Memory is on by default when `paths.memory_storage_uri` is set. Set `memory.enabled: false` (or `MONKEYBOT_MEMORY_HOOK_ENABLED=0`) to disable capture, recall, and `mempalace search` teaching.
+- MemPalace ships as the `memory` extra (`monkeybot[memory]`). Scaffolded agents declare it in their own `pyproject.toml`; config-only agents get a CLI-managed runtime provisioned on demand (see [Runtime resolution](#16-cli)).
 - Subagents get **no-op `HookManager`** to avoid duplicate writes.
 - `flush()` must be called before short-lived handlers exit if writer work matters.
 - Replicated gateways with a shared Postgres/Firestore outbox must mount the same lock-capable volume at the palace path. Claims are partitioned by an atomically created `.palace_id`, and Chroma writes are serialized by `.palace_write.lock` on that volume (not by a host-local lock). Ephemeral `/tmp` palaces with a shared outbox fail closed unless `MONKEYBOT_MEMORY_ALLOW_EPHEMERAL=1`; that opt-in provides replica-local recall only.
@@ -567,8 +568,11 @@ session — no mid-session model swap exists), `/status`, `/config`. See
 1. `<agent>/.venv/bin/python` when a project venv exists
 2. `uv run python -m monkeybot.gateway.main` when `<agent>/pyproject.toml` exists but no `.venv`
 3. `sys.executable` (CLI interpreter) — legacy fallback for config-only trees
+4. `<cache>/monkeybot/runtimes/memory-<version>-py<x.y>[-<extras hash>]/bin/python` — a CLI-managed venv holding `monkeybot[memory]` pinned to the running core, provisioned on demand only for config-only trees that enable memory when the CLI env has no MemPalace
 
 `monkeybot doctor` remediation points at adding `monkeybot[<extra>]` to the agent project, then `uv sync`.
+
+The published `monkeybot-cli` stays lean (`monkeybot[cli]`): MemPalace pulls chromadb → onnxruntime, which ships no wheel for `manylinux2014` or musl targets, so an unconditional memory dependency would make the CLI uninstallable on common serverless/container bases. Preinstall it with `uv tool install --with 'monkeybot-cli[memory]' monkeybot-cli` to skip the on-demand provisioning step, or set `memory.enabled: false` in `monkeybot_config/monkeybot.yaml` to opt out entirely. Because step 4 replaces `sys.executable`, the managed runtime also mirrors every `monkeybot` extra the CLI env already satisfies (detected from installed metadata), so a config-only agent running on `monkeybot[openai]` keeps its provider once memory is enabled. The managed runtime is cached under `XDG_CACHE_HOME` (`LOCALAPPDATA` on Windows, else `~/.cache`), keyed by MonkeyBot version, Python version, and that mirrored extras set, and is reused offline once provisioned.
 
 ---
 

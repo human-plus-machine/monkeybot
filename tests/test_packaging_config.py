@@ -75,11 +75,19 @@ def test_cli_wheel_includes_scaffold_defaults(tmp_path: Path) -> None:
         assert any(n.endswith("scaffold_defaults/loop/SKILL.md") for n in names)
         assert any(n.endswith("scaffold_defaults/Dockerfile") for n in names)
         meta = next(n for n in names if n.endswith("METADATA"))
-        requires = [
-            line
-            for line in zf.read(meta).decode().splitlines()
-            if line.startswith("Requires-Dist: monkeybot")
-        ]
-        assert any("monkeybot[cli,memory]" in line for line in requires)
+        metadata = zf.read(meta).decode().splitlines()
+        requires = [line for line in metadata if line.startswith("Requires-Dist: monkeybot")]
+        assert any("monkeybot[cli]" in line for line in requires)
         assert any(">=3.0.0" in line and "<4" in line for line in requires)
         assert any("monkeybot-browser-mcp" in line for line in requires)
+
+        # MemPalace pulls chromadb -> onnxruntime, which has no manylinux2014/musl wheels:
+        # it must stay behind the opt-in `memory` extra, never an unconditional dependency.
+        unconditional = [line for line in requires if "extra ==" not in line]
+        assert unconditional
+        assert all("memory" not in line for line in unconditional)
+        assert any(
+            "extra ==" in line and "memory" in line and "monkeybot[memory]" in line
+            for line in requires
+        )
+        assert "Provides-Extra: memory" in metadata

@@ -1412,12 +1412,17 @@ version = "0.5.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
-    { name = "monkeybot", extra = ["cli", "memory"] },
+    { name = "monkeybot", extra = ["cli"] },
     { name = "monkeybot-browser-mcp" },
     { name = "packaging" },
     { name = "python-dotenv" },
     { name = "pyyaml" },
     { name = "textual" },
+]
+
+[package.optional-dependencies]
+memory = [
+    { name = "monkeybot", extra = ["memory"] },
 ]
 
 [package.dev-dependencies]
@@ -1430,13 +1435,15 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
-    { name = "monkeybot", extras = ["cli", "memory"], editable = "../" },
+    { name = "monkeybot", extras = ["cli"], editable = "../" },
+    { name = "monkeybot", extras = ["memory"], marker = "extra == 'memory'", editable = "../" },
     { name = "monkeybot-browser-mcp", editable = "../integrations/browser-mcp" },
     { name = "packaging", specifier = ">=26.2" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "textual", specifier = ">=8.2.8" },
 ]
+provides-extras = ["memory"]
 
 [package.metadata.requires-dev]
 dev = [
