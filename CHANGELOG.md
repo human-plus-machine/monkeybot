@@ -17,6 +17,9 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Stop during a tool confirmation now settles completed tool results into history (and synthesizes cancel envelopes for the rest) instead of escaping before abort settlement; the realtime confirm path does the same. Cancel after a finished provider stream also persists already-shown assistant text so follow-ups match what the user saw.
+- SQLite `history.reset` (compaction / load-max truncate) runs delete+reinsert in one transaction, matching Postgres, so a crash mid-reset cannot wipe or partially rewrite a thread.
+- Tool spill paths sanitize client `session_id` / `thread_id` components and refuse to write or delete outside `.monkeybot/spill`; `POST /sessions` rejects path-traversal session ids; session DELETE quiesces the active turn before removing spill dirs.
 - Stop mid-reply now cancels the in-flight provider token stream (instead of waiting for the full LLM call) and persists any already-streamed assistant text to history so follow-up turns keep matching what the user saw.
 - Chunking improvements now reach existing workspaces: a chunker version bump re-chunks indexed files even when their modification time never changed, so upgrades no longer require deleting `.monkeybot/knowledge/`.
 - Vector search scores only vectors from the active embedding model. Switching provider or `dimensions` purges the incomparable rows at startup and re-embeds them, instead of blending two models into one similarity ranking.
