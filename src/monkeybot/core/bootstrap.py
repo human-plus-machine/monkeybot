@@ -137,11 +137,6 @@ async def create_harness_deps(
 
             if not memory_enabled_from_config():
                 logger.info("memory disabled (memory.enabled=false)")
-            elif not db_url.strip().lower().startswith("sqlite:"):
-                logger.warning(
-                    "MemPalace requires sqlite:// DB_URL; memory disabled (got %s)",
-                    db_url.split(":", 1)[0],
-                )
             else:
                 try:
                     layout = AgentLayout.from_environment()
@@ -150,6 +145,7 @@ async def create_harness_deps(
                         db_url=db_url,
                         agent_id=layout.agent_root.name,
                         agent_name=layout.agent_root.name,
+                        storage=backend,
                     )
                     await memory.ensure_ready()
                 except Exception as exc:

@@ -613,17 +613,13 @@ async def _startup(fastapi_app: FastAPI) -> None:
         else:
             mem_uri = _memory_storage_uri()
             layout = AgentLayout.from_environment()
-            if not layout.db_url.strip().lower().startswith("sqlite:"):
-                raise ValueError(
-                    "MemPalace outbox requires sqlite:// DB_URL; "
-                    f"got {layout.db_url.split(':', 1)[0]!r}"
-                )
             mgr = HookManager()
             memory = MemorySubsystem(
                 memory_uri=mem_uri,
                 db_url=layout.db_url,
                 agent_id=layout.agent_root.name,
                 agent_name=layout.agent_root.name,
+                storage=backend,
             )
             await memory.ensure_ready()
             memory.register_hooks(mgr)

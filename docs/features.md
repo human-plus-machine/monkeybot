@@ -427,9 +427,9 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 ### 11. Memory subsystem
 
-**Purpose:** Per-agent MemPalace drawers with durable SQLite outbox ingest and wake-up + L2 recall in the prompt.
+**Purpose:** Per-agent MemPalace drawers with durable outbox ingest (SQLite, Postgres, or Firestore) and wake-up + L2 recall in the prompt.
 
-**Key files:** `core/memory/subsystem.py`, `hook.py`, `outbox.py`, `palace.py`, `writer.py`, `ingest.py`
+**Key files:** `core/memory/subsystem.py`, `hook.py`, `outbox.py`, `palace.py`, `writer.py`, `ingest.py`, `core/persistence/{sqlite,postgres,firestore}.py`
 
 **Storage URI:** `local://` only (object-store palaces are not supported in this release).
 
@@ -437,7 +437,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 | Event | Behavior |
 |-------|----------|
-| History append | Enqueue user / final assistant text on the outbox (same SQLite transaction when possible) |
+| History append | Enqueue user / final assistant text on the outbox (same transaction when the backend supports it) |
 | `PRE_TURN` | Inject thread-scoped L2 recall into `inject_memory_lines` |
 | `POST_TURN` | Wake the per-agent writer |
 | `SESSION_END` | Bounded outbox drain |
@@ -446,7 +446,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - Chat history is canonical; MemPalace drawers are an idempotent projection.
 - Recall is scoped to the current `thread_id` by default.
 - `memory.enabled: false` (or `MONKEYBOT_MEMORY_HOOK_ENABLED=0`) skips capture, wake-up, and prompt teaching. It is not a sandbox against shell access to palace files.
-- Postgres/Firestore history backends start without MemPalace.
+- Postgres/Firestore persist the memory outbox with replica `palace_id` claim partitioning. Replicated deployments must share a lock-capable palace volume.
 - Subagents can read the palace but do not register duplicate automatic-ingest hooks.
 - `flush()` must be called before short-lived handlers exit if organizer work matters.
 

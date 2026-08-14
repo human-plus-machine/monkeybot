@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 
 import aiosqlite
+
+from monkeybot.core.persistence.sqlite import TaskReentrantLock, with_conn_lock
 
 _DEFAULT_STALE_MS = 600_000
 
@@ -23,9 +26,16 @@ def session_turn_stale_ms() -> int:
 class SQLiteSessionTurnLockStore:
     """SQLite-backed exclusive turn lock per session."""
 
-    def __init__(self, conn: aiosqlite.Connection) -> None:
+    def __init__(
+        self,
+        conn: aiosqlite.Connection,
+        *,
+        lock: asyncio.Lock | TaskReentrantLock | None = None,
+    ) -> None:
         self._conn = conn
+        self._lock = lock or TaskReentrantLock()
 
+    @with_conn_lock
     async def release_stale_claims(self, stale_after_ms: int) -> int:
         cutoff = int(time.time() * 1000) - stale_after_ms
         cursor = await self._conn.execute(
@@ -41,6 +51,7 @@ class SQLiteSessionTurnLockStore:
         await self._conn.commit()
         return int(cursor.rowcount)
 
+    @with_conn_lock
     async def try_acquire(self, session_id: str, request_id: str) -> bool:
         await self.release_stale_claims(session_turn_stale_ms())
         now_ms = int(time.time() * 1000)
@@ -69,6 +80,7 @@ class SQLiteSessionTurnLockStore:
             await self._conn.rollback()
             return False
 
+    @with_conn_lock
     async def release(self, session_id: str, request_id: str) -> None:
         await self._conn.execute(
             """
@@ -80,6 +92,7 @@ class SQLiteSessionTurnLockStore:
         )
         await self._conn.commit()
 
+    @with_conn_lock
     async def is_busy(self, session_id: str) -> bool:
         cursor = await self._conn.execute(
             """

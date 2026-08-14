@@ -9,7 +9,7 @@ Postgres implementation code loads until the factory is actually called.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from urllib.parse import parse_qs, unquote, urlparse
 
 if TYPE_CHECKING:
@@ -31,14 +31,7 @@ class HistoryStore(Protocol):
 
     async def load(self, thread_id: str, limit: int | None = None) -> list[Message]: ...
 
-    async def append(
-        self,
-        thread_id: str,
-        message: Message,
-        *,
-        turn_id: str | None = None,
-        message_id: str | None = None,
-    ) -> None: ...
+    async def append(self, thread_id: str, message: Message) -> None: ...
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None: ...
 
@@ -193,6 +186,8 @@ class StorageBackend(Protocol):
     def scheduled_loops(self) -> ScheduledLoopStore: ...
 
     def session_turns(self) -> SessionTurnLockStore: ...
+
+    def outbox(self) -> Any: ...
 
 
 @dataclass(frozen=True)

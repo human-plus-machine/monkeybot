@@ -13,11 +13,7 @@ from monkeybot.core.memory.hook import MemoryHook
 from monkeybot.core.memory.ids import conversation_wing, utc_now_iso
 from monkeybot.core.memory.ingest import workspace_id_from_env
 from monkeybot.core.memory.observability import Timer, log_event, memory_span
-from monkeybot.core.memory.outbox import (
-    ensure_outbox_schema,
-    gc_committed,
-    insert_pending,
-)
+from monkeybot.core.memory.outbox import OutboxStore, SqliteOutboxStore
 from monkeybot.core.memory.palace import (
     CONVERSATION_ROOM,
     DEFAULT_BACKEND,
@@ -25,10 +21,39 @@ from monkeybot.core.memory.palace import (
     DrawerRecord,
     PalacePort,
     create_palace,
+    palace_instance_id,
+    palace_path_is_ephemeral,
 )
 from monkeybot.core.memory.writer import MemoryWriter
 
 logger = logging.getLogger(__name__)
+
+
+def _share_across_threads() -> bool:
+    raw = os.environ.get("MONKEYBOT_MEMORY_SHARE_THREADS", "").strip().lower()
+    return raw in ("1", "true", "yes")
+
+
+def _is_missing_outbox_table(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    name = type(exc).__name__.lower()
+    return (
+        "memory_outbox" in text
+        and (
+            "no such table" in text
+            or "does not exist" in text
+            or "undefinedtable" in name
+            or "undefined_table" in text
+        )
+    )
+
+
+def _shared_outbox_backend(db_url: str, storage: Any) -> bool:
+    del db_url
+    if storage is None:
+        return False
+    name = type(storage).__name__.lower()
+    return "postgres" in name or "firestore" in name
 
 
 class MemorySubsystem:
@@ -46,10 +71,13 @@ class MemorySubsystem:
         writer_enabled: bool = True,
         backend: str | None = None,
         embedding_model: str | None = None,
+        storage: Any | None = None,
+        outbox: OutboxStore | None = None,
     ) -> None:
         self._memory_uri = memory_uri.strip()
         self._db_url = db_url
         self._agent_id = agent_id
+        self._storage = storage
         self.backend = (backend or os.environ.get("MEMPALACE_BACKEND") or DEFAULT_BACKEND).strip()
         self.embedding_model = (
             embedding_model
@@ -63,18 +91,12 @@ class MemorySubsystem:
             embedding_model=self.embedding_model,
         )
         self.backend = getattr(self._palace, "backend", self.backend)
+        self._palace_id = palace_instance_id(self._palace.palace_path)
         self.ingest_enabled = ingest_enabled
-        self._writer = (
-            MemoryWriter(
-                palace=self._palace,
-                db_url=db_url,
-                backend=self.backend,
-                embedding_model=self.embedding_model,
-                agent_id=agent_id,
-            )
-            if writer_enabled
-            else None
-        )
+        self._writer_enabled = writer_enabled
+        self._outbox: OutboxStore | None = outbox
+        self._owned_outbox = False
+        self._writer: MemoryWriter | None = None
         self._hook = MemoryHook(self)
         self._ready = False
 
@@ -93,10 +115,89 @@ class MemorySubsystem:
     def register_hooks(self, manager: HookManager) -> None:
         self._hook.register(manager)
 
+    async def _ensure_outbox(self) -> OutboxStore:
+        if self._outbox is not None:
+            return self._outbox
+        if self._storage is not None:
+            self._outbox = self._storage.outbox()
+            return self._outbox
+        if not self._db_url.startswith("sqlite:"):
+            raise RuntimeError(
+                "Memory outbox requires a StorageBackend for non-SQLite DB_URL "
+                f"({self._db_url.split(':', 1)[0]}). Pass storage= when constructing "
+                "MemorySubsystem, or use sqlite:///."
+            )
+        if ":memory:" in self._db_url:
+            raise RuntimeError(
+                "sqlite:///:memory: outbox requires a shared StorageBackend or OutboxStore; "
+                "separate connections are distinct databases"
+            )
+        from monkeybot.core.memory.outbox import ensure_outbox_schema
+        from monkeybot.core.persistence.sqlite import open_connection
+
+        conn = await open_connection(self._db_url)
+        await ensure_outbox_schema(conn)
+        self._outbox = SqliteOutboxStore(conn, owns_connection=True)
+        self._owned_outbox = True
+        return self._outbox
+
+    def _ensure_writer(self, store: OutboxStore) -> None:
+        if not self._writer_enabled or self._writer is not None:
+            return
+        self._writer = MemoryWriter(
+            palace=self._palace,
+            outbox=store,
+            agent_id=self._agent_id,
+            backend=self.backend,
+            embedding_model=self.embedding_model,
+            palace_id=self._palace_id,
+        )
+
+    def _reject_ephemeral_shared_palace(self) -> None:
+        if not _shared_outbox_backend(self._db_url, self._storage):
+            return
+        logger.warning(
+            "Memory palace is local to this replica (palace_id=%s). "
+            "Replicated deployments must mount the same lock-capable volume at the palace path.",
+            self._palace_id,
+        )
+        allow = os.environ.get("MONKEYBOT_MEMORY_ALLOW_EPHEMERAL", "").strip().lower()
+        if allow in ("1", "true", "yes"):
+            return
+        if palace_path_is_ephemeral(self._palace.palace_path):
+            raise RuntimeError(
+                "MemPalace path is under the process temp directory while the outbox is "
+                "shared (Postgres/Firestore). Mount a persistent volume or set "
+                "MONKEYBOT_MEMORY_ALLOW_EPHEMERAL=1 to acknowledge replica-local memory."
+            )
+
     async def ensure_ready(self) -> None:
         if self._ready:
             return
-        await self._ensure_schema_and_gc()
+        self._reject_ephemeral_shared_palace()
+        store = await self._ensure_outbox()
+        try:
+            await store.pending_depth(agent_id=self._agent_id)
+        except Exception as exc:
+            if _is_missing_outbox_table(exc):
+                raise RuntimeError(
+                    "memory_outbox table is missing. Apply docs/migrations/memory-outbox.sql "
+                    "or set paths.auto_schema: true"
+                ) from exc
+            logger.warning("memory outbox probe failed: %r", exc)
+        try:
+            n = await store.gc_committed()
+            if n:
+                log_event("outbox_gc", memory_status="ok", memory_batch_size=n)
+            dead = await store.dead_depth(agent_id=self._agent_id)
+            if dead:
+                log_event(
+                    "outbox_dead_depth",
+                    memory_status="dead",
+                    memory_batch_size=dead,
+                )
+        except Exception as exc:
+            logger.warning("memory outbox gc failed: %r", exc)
         try:
             await asyncio.to_thread(self._palace.ensure_ready)
         except Exception as exc:
@@ -106,23 +207,12 @@ class MemorySubsystem:
                 memory_status="error",
                 memory_error_class=type(exc).__name__,
             )
+        self._ensure_writer(store)
         if self._writer is not None:
             self._writer.start()
         self._ready = True
 
-    async def _ensure_schema_and_gc(self) -> None:
-        from monkeybot.core.persistence.sqlite import open_connection
-
-        conn = await open_connection(self._db_url)
-        try:
-            await ensure_outbox_schema(conn)
-            n = await gc_committed(conn)
-            if n:
-                log_event("outbox_gc", memory_status="ok", memory_batch_size=n)
-        finally:
-            await conn.close()
-
-    async def load_index(self) -> list[str]:
+    async def load_index(self, *, thread_id: str | None = None) -> list[str]:
         """L0+L1 wake-up lines for the system prompt."""
         timer = Timer()
         wing = conversation_wing(workspace_id_from_env())
@@ -136,7 +226,11 @@ class MemorySubsystem:
             },
         ):
             try:
-                text = await asyncio.to_thread(self._palace.wake_up, wing)
+                text = await asyncio.to_thread(
+                    self._palace.wake_up,
+                    wing,
+                    None if _share_across_threads() else thread_id,
+                )
             except Exception as exc:
                 logger.warning("memory wake-up failed: %r", exc)
                 return []
@@ -167,8 +261,13 @@ class MemorySubsystem:
         room: str = CONVERSATION_ROOM,
         thread_id: str | None = None,
     ) -> list[DrawerRecord]:
+        scoped = None if _share_across_threads() else thread_id
         return await asyncio.to_thread(
-            self._palace.recall, wing=wing, room=room, n_results=10, thread_id=thread_id
+            self._palace.recall,
+            wing=wing,
+            room=room,
+            n_results=10,
+            thread_id=scoped,
         )
 
     def outbox_spec(
@@ -194,6 +293,7 @@ class MemorySubsystem:
             "room": CONVERSATION_ROOM,
             "created_at": utc_now_iso(),
             "traceparent": traceparent,
+            "palace_id": self._palace_id,
         }
 
     async def enqueue(
@@ -206,8 +306,6 @@ class MemorySubsystem:
         content: str,
         traceparent: str | None = None,
     ) -> str | None:
-        from monkeybot.core.persistence.sqlite import open_connection
-
         spec = self.outbox_spec(
             thread_id=thread_id,
             turn_id=turn_id,
@@ -216,18 +314,17 @@ class MemorySubsystem:
             content=content,
             traceparent=traceparent,
         )
-        conn = await open_connection(self._db_url)
-        try:
-            await ensure_outbox_schema(conn)
-            return await insert_pending(conn, **spec)
-        finally:
-            await conn.close()
+        store = await self._ensure_outbox()
+        self._ensure_writer(store)
+        return await store.insert_pending(**spec)
 
     def wake_writer(self) -> None:
         if self._writer is not None:
             self._writer.wake()
 
     async def drain_writer(self, *, timeout_s: float = 5.0) -> int:
+        store = await self._ensure_outbox()
+        self._ensure_writer(store)
         if self._writer is None:
             return 0
         return await self._writer.drain(timeout_s=timeout_s)
@@ -238,6 +335,12 @@ class MemorySubsystem:
     async def close(self) -> None:
         if self._writer is not None:
             await self._writer.stop()
+            self._writer = None
+        if self._owned_outbox and self._outbox is not None:
+            await self._outbox.close()
+            self._outbox = None
+            self._owned_outbox = False
+        self._ready = False
 
     async def get_drawer(self, drawer_id: str) -> dict[str, Any] | None:
         with memory_span(
@@ -254,4 +357,74 @@ class MemorySubsystem:
             "room": record.room,
             "filed_at": record.filed_at,
             "metadata": record.metadata,
+        }
+
+    async def export_graph(self, *, refresh: bool = False) -> dict[str, Any]:
+        del refresh
+        drawers = await asyncio.to_thread(self._palace.list_drawers)
+        nodes = [
+            {
+                "id": drawer.drawer_id,
+                "path": drawer.drawer_id,
+                "type": drawer.room or CONVERSATION_ROOM,
+                "status": "active",
+                "wing": drawer.wing,
+                "filed_at": drawer.filed_at,
+            }
+            for drawer in drawers
+        ]
+        by_thread: dict[str, list[DrawerRecord]] = {}
+        for drawer in drawers:
+            tid = drawer.metadata.get("thread_id") or drawer.wing
+            by_thread.setdefault(tid, []).append(drawer)
+        edges: list[dict[str, str]] = []
+        for group in by_thread.values():
+            group.sort(key=lambda item: item.filed_at)
+            for left, right in zip(group, group[1:], strict=False):
+                edges.append(
+                    {
+                        "source": left.drawer_id,
+                        "target": right.drawer_id,
+                        "link_type": "conversation",
+                    }
+                )
+        status = await asyncio.to_thread(self._palace.status)
+        return {
+            "nodes": nodes,
+            "edges": edges,
+            "engine": "mempalace",
+            "palace": status,
+        }
+
+    async def search_files(
+        self,
+        query: str,
+        *,
+        top_k: int = 5,
+        path: str | None = None,
+        include_retired: bool = False,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        del query, top_k, include_retired, kwargs
+        path_norm = (path or "").replace("\\", "/").lstrip("./").strip()
+        if not path_norm:
+            return {"ok": True, "hits": [], "deprecated": True, "note": "Use mempalace search via run_command."}
+        record = await self.get_drawer(path_norm)
+        if record is None:
+            return {"ok": True, "path": path_norm, "hits": []}
+        body = str(record.get("content") or "")
+        return {
+            "ok": True,
+            "path": path_norm,
+            "hits": [
+                {
+                    "path": record["id"],
+                    "type": record.get("room") or CONVERSATION_ROOM,
+                    "status": "active",
+                    "body": body,
+                    "body_truncated": False,
+                    "links": [],
+                    "snippet": body[:500],
+                }
+            ],
         }

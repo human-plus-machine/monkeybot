@@ -256,9 +256,9 @@ async def test_history_append_enqueues(db_url: str, tmp_path: Path) -> None:
 def test_palace_uri_rejects_object_store() -> None:
     from monkeybot.core.memory.palace import palace_path_from_uri
 
-    with pytest.raises(ValueError, match="unsupported memory URI"):
+    with pytest.raises(ValueError, match="does not support gcs://"):
         palace_path_from_uri("gcs://bucket/prefix")
-    with pytest.raises(ValueError, match="unsupported memory URI"):
+    with pytest.raises(ValueError, match="does not support s3://"):
         palace_path_from_uri("s3://bucket/prefix")
 
 
