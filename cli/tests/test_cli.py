@@ -72,12 +72,32 @@ def test_refresh_updates_existing_agent(tmp_path: Path) -> None:
     assert "mempalace" in text
     assert "officecli" in text
     assert "command_allowlist.yaml: updated" in result.stdout
+    pyproject = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
+    assert "monkeybot[gemini,sandbox,web-search]>=3.0.0,<4" in pyproject
 
 
 def test_refresh_rejects_empty_dest(tmp_path: Path) -> None:
     result = _run_cli("refresh", "--dest", str(tmp_path))
     assert result.returncode == 2
     assert "not a scaffolded agent" in result.stderr
+
+
+def test_run_fail_closed_when_venv_cannot_import_harness(tmp_path: Path) -> None:
+    cfg = tmp_path / "monkeybot_config"
+    cfg.mkdir()
+    (cfg / "monkeybot.yaml").write_text(
+        "model:\n  provider: fake\n  name: fake\n",
+        encoding="utf-8",
+    )
+    venv_bin = tmp_path / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    py = venv_bin / "python"
+    py.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    py.chmod(0o755)
+    result = _run_cli("run", "--cwd", str(tmp_path))
+    assert result.returncode == 2
+    assert "refusing to start" in result.stderr
+    assert "pyproject.toml" not in result.stderr
 
 
 def test_write_active_config_reports_overwritten_on_force(tmp_path: Path) -> None:
@@ -140,6 +160,29 @@ def test_validate_custom_config_anchors_paths_at_its_parent(tmp_path: Path) -> N
     checks = {check["id"]: check for check in json.loads(result.stdout)["checks"]}
     assert checks["paths.agent_md.exists"]["status"] == "pass"
     assert checks["paths.skills_path.exists"]["status"] == "pass"
+    assert checks["memory.backend.supported"]["status"] == "pass"
+
+
+def test_validate_rejects_object_store_memory_uri(tmp_path: Path) -> None:
+    config_dir = tmp_path / "monkeybot_config"
+    config_dir.mkdir()
+    (config_dir / "AGENT.md").write_text("# Agent\n", encoding="utf-8")
+    (config_dir / "skills").mkdir()
+    (config_dir / "monkeybot.yaml").write_text(
+        "model:\n"
+        "  provider: fake\n"
+        "  name: fake\n"
+        "paths:\n"
+        "  agent_md: AGENT.md\n"
+        "  skills_path: skills\n"
+        "  db_url: sqlite:///data/monkeybot.db\n"
+        "  memory_storage_uri: gcs://bucket/prefix\n",
+        encoding="utf-8",
+    )
+    result = _run_cli("validate", "--json", "--cwd", str(tmp_path))
+    checks = {check["id"]: check for check in json.loads(result.stdout)["checks"]}
+    assert checks["memory.backend.supported"]["status"] == "fail"
+    assert "local://" in checks["memory.backend.supported"]["message"]
 
 
 def test_talk_help_lists_realtime_flags() -> None:
@@ -210,3 +253,4 @@ def test_doctor_reports_layout_browser_sandbox_and_legacy_migration(tmp_path: Pa
     assert "do not move automatically" in checks["layout.legacy_nested_skills"]["remediation"]
     assert "disabled (bundled)" in checks["browser.bundled"]["message"]
     assert checks["sandbox.status"]["status"] == "pass"
+    assert checks["env.harness.compatible"]["status"] == "pass"

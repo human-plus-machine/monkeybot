@@ -12,6 +12,11 @@ Resolution order for an agent root:
 2. ``uv run python`` — when ``<root>/pyproject.toml`` exists but no ``.venv``.
 3. ``sys.executable`` — legacy / config-only trees (just ``monkeybot_config/``, no
    ``pyproject.toml``). In this case extras must be installed in the CLI env.
+
+``prepare_runtime_python`` probes that interpreter for a MonkeyBot 3.x core
+(and MemPalace when memory is enabled). A stale venv may be ``uv sync``'d against
+the existing lock; the CLI never rewrites ``pyproject.toml`` pins. A failed
+probe refuses to start the gateway.
 """
 
 from __future__ import annotations
@@ -21,9 +26,25 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from monkeybot_cli.compat import COMPATIBLE_CORE_RANGE
+
 DEFAULT_PORT = 8080
 SSE_GATEWAY_MODULE = "monkeybot.gateway.main"
 COMBINED_GATEWAY_MODULE = "monkeybot.gateway.realtime_main"
+
+# Stdlib-only snippet executed in the *agent* interpreter. Keep in sync with
+# ``COMPATIBLE_CORE_RANGE`` (asserted by tests).
+CORE_PROBE = (
+    "from importlib.metadata import version; "
+    "ver = version('monkeybot'); "
+    "parts = [int(p) for p in ver.split('.')[:3]]; "
+    "assert [3, 0, 0] <= parts < [4, 0, 0], ver"
+)
+MEMORY_PROBE = f"import mempalace; {CORE_PROBE}"
+
+
+class RuntimeUpgradeError(RuntimeError):
+    """Raised when the agent interpreter cannot run a compatible MonkeyBot gateway."""
 
 
 def _venv_python(agent_root: Path) -> Path | None:
@@ -59,30 +80,100 @@ def resolve_runtime_python(agent_root: Path) -> RuntimePython:
     return RuntimePython([sys.executable], "cli", agent_root)
 
 
-_HARNESS_PROBE = "import mempalace"
+def _runtime_cwd(runtime: RuntimePython) -> dict[str, object]:
+    """Extra kwargs needed to run a probe under ``runtime`` (cwd for uv projects)."""
+    if runtime.source == "uv" and runtime.agent_root is not None:
+        return {"cwd": str(runtime.agent_root)}
+    return {}
 
 
-def prepare_runtime_python(agent_root: Path) -> RuntimePython:
-    """Resolve the gateway interpreter, syncing the agent venv when harness deps are missing.
+def _probe_failure_detail(runtime: RuntimePython, probe: str, *, timeout: float = 15.0) -> str:
+    try:
+        proc = subprocess.run(
+            [*runtime.argv, "-c", probe],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            **_runtime_cwd(runtime),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return str(exc)
+    text = (proc.stderr or proc.stdout or "").strip()
+    if not text:
+        return f"probe exit {proc.returncode}"
+    return text[-500:]
 
-    Agent ``.venv`` trees are created once and reused. New transitive deps on
-    ``monkeybot`` (e.g. ``mempalace``) do not install themselves; ``uv sync``
-    against the agent's ``pyproject.toml`` pulls them in.
+
+def _upgrade_error(
+    *,
+    agent_root: Path,
+    memory_enabled: bool,
+    has_project: bool,
+    detail: str,
+) -> RuntimeUpgradeError:
+    range_ = COMPATIBLE_CORE_RANGE
+    if has_project:
+        how = f"pin monkeybot{range_} in {agent_root}/pyproject.toml, then `cd {agent_root} && uv sync`"
+    elif memory_enabled:
+        how = (
+            f"install monkeybot{range_} (includes MemPalace) in this environment, "
+            "or set `memory.enabled: false`"
+        )
+    else:
+        how = f"install monkeybot{range_} in this environment"
+    capability = "MemPalace and MonkeyBot" if memory_enabled else "MonkeyBot"
+    suffix = f" ({detail})" if detail else ""
+    return RuntimeUpgradeError(
+        f"gateway interpreter is missing a compatible {capability} {range_}; "
+        f"refusing to start{suffix}. {how}"
+    )
+
+
+def prepare_runtime_python(
+    agent_root: Path,
+    config_path: Path | str | None = None,
+) -> RuntimePython:
+    """Resolve the gateway interpreter and refuse to start if the harness is stale.
+
+    When memory is enabled the interpreter must import MemPalace and a MonkeyBot
+    3.x core. When memory is disabled only the core range is required. If the
+    agent has a ``pyproject.toml`` and the probe fails, ``uv sync`` is tried
+    once against the existing lock — pins are not rewritten.
     """
+    from monkeybot.core.memory.config import memory_enabled_from_config
+
     runtime = resolve_runtime_python(agent_root)
-    if runtime.source != "venv" or not (agent_root / "pyproject.toml").is_file():
+    has_project = (agent_root / "pyproject.toml").is_file()
+    effective_config = (
+        Path(config_path).expanduser().resolve()
+        if config_path is not None
+        else agent_root / "monkeybot_config" / "monkeybot.yaml"
+    )
+    memory_enabled = memory_enabled_from_config(
+        str(effective_config) if effective_config.is_file() else None
+    )
+    probe = MEMORY_PROBE if memory_enabled else CORE_PROBE
+    if run_probe(runtime, probe):
         return runtime
-    if run_probe(runtime, _HARNESS_PROBE):
-        return runtime
+    if not has_project:
+        raise _upgrade_error(
+            agent_root=agent_root,
+            memory_enabled=memory_enabled,
+            has_project=False,
+            detail=_probe_failure_detail(runtime, probe),
+        )
     print(
-        f"agent venv is missing harness packages; running uv sync in {agent_root}",
+        f"agent runtime is missing harness packages; running uv sync in {agent_root}",
         flush=True,
     )
     sync = subprocess.run(["uv", "sync"], cwd=agent_root, check=False)
-    if sync.returncode != 0 or not run_probe(runtime, _HARNESS_PROBE):
-        print(
-            "warning: uv sync did not make mempalace importable in the agent venv",
-            flush=True,
+    runtime = resolve_runtime_python(agent_root)
+    if sync.returncode != 0 or not run_probe(runtime, probe):
+        raise _upgrade_error(
+            agent_root=agent_root,
+            memory_enabled=memory_enabled,
+            has_project=True,
+            detail=_probe_failure_detail(runtime, probe),
         )
     return runtime
 
@@ -106,13 +197,10 @@ def run_probe(runtime: RuntimePython, code: str, *, timeout: float = 15.0) -> bo
     Used by ``doctor`` to verify extras/imports in the *gateway* interpreter
     rather than the CLI's own process.
     """
-    kwargs: dict[str, object] = {}
-    if runtime.source == "uv" and runtime.agent_root is not None:
-        kwargs["cwd"] = str(runtime.agent_root)
     proc = subprocess.run(
         [*runtime.argv, "-c", code],
         capture_output=True,
         timeout=timeout,
-        **kwargs,
+        **_runtime_cwd(runtime),
     )
     return proc.returncode == 0

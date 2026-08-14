@@ -5,8 +5,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 from monkeybot_cli.runtime_python import (
+    CORE_PROBE,
+    MEMORY_PROBE,
     RuntimePython,
+    RuntimeUpgradeError,
     gateway_argv,
     prepare_runtime_python,
     resolve_runtime_python,
@@ -108,7 +113,34 @@ def test_run_probe_uv_sets_agent_root_cwd(tmp_path: Path, monkeypatch) -> None:
     assert captured["cwd"] == str(tmp_path)
 
 
-def test_prepare_runtime_python_skips_sync_when_no_pyproject(tmp_path: Path, monkeypatch) -> None:
+def test_core_probe_matches_compatible_range() -> None:
+    from packaging.specifiers import SpecifierSet
+
+    from monkeybot_cli.compat import COMPATIBLE_CORE_RANGE
+
+    spec = SpecifierSet(COMPATIBLE_CORE_RANGE)
+    assert COMPATIBLE_CORE_RANGE == ">=3.0.0,<4"
+    assert spec.contains("3.0.0")
+    assert spec.contains("3.9.9")
+    assert not spec.contains("2.9.9")
+    assert not spec.contains("4.0.0")
+    assert "3, 0, 0" in CORE_PROBE
+    assert "4, 0, 0" in CORE_PROBE
+    assert MEMORY_PROBE.startswith("import mempalace")
+
+
+def _write_memory_config(root: Path, *, enabled: bool) -> None:
+    cfg = root / "monkeybot_config"
+    cfg.mkdir(parents=True, exist_ok=True)
+    (cfg / "monkeybot.yaml").write_text(
+        f"memory:\n  enabled: {str(enabled).lower()}\n",
+        encoding="utf-8",
+    )
+
+
+def test_prepare_runtime_python_skips_sync_when_probe_passes(
+    tmp_path: Path, monkeypatch
+) -> None:
     venv_bin = tmp_path / ".venv" / "bin"
     venv_bin.mkdir(parents=True)
     py = venv_bin / "python"
@@ -127,7 +159,8 @@ def test_prepare_runtime_python_skips_sync_when_no_pyproject(tmp_path: Path, mon
     monkeypatch.setattr("monkeybot_cli.runtime_python.subprocess.run", fake_run)
     runtime = prepare_runtime_python(tmp_path)
     assert runtime.source == "venv"
-    assert called == []
+    assert any("-c" in args[0] for args, _kwargs in called)
+    assert not any(args[0][:1] == ["uv"] for args, _kwargs in called)
 
 
 def test_prepare_runtime_python_syncs_when_mempalace_missing(tmp_path: Path, monkeypatch) -> None:
@@ -137,6 +170,7 @@ def test_prepare_runtime_python_syncs_when_mempalace_missing(tmp_path: Path, mon
     py = venv_bin / "python"
     py.write_text("#!/bin/sh\n")
     py.chmod(0o755)
+    original = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
 
     calls: list[list[str]] = []
 
@@ -145,12 +179,129 @@ def test_prepare_runtime_python_syncs_when_mempalace_missing(tmp_path: Path, mon
         calls.append(list(argv))
 
         class Result:
-            returncode = 1 if argv[:1] != ["uv"] else 0
+            returncode = 0
 
+        argv_list = list(argv)
+        if argv_list[:1] != ["uv"] and "-c" in argv_list:
+            Result.returncode = 1 if not any(cmd[:2] == ["uv", "sync"] for cmd in calls[:-1]) else 0
         return Result()
 
     monkeypatch.setattr("monkeybot_cli.runtime_python.subprocess.run", fake_run)
     prepare_runtime_python(tmp_path)
     assert any(cmd[:2] == ["uv", "sync"] for cmd in calls)
+    assert not any(cmd[:3] == ["uv", "lock", "--upgrade-package"] for cmd in calls)
     assert not any(cmd[:3] == ["uv", "pip", "install"] for cmd in calls)
     assert any("import mempalace" in " ".join(cmd) for cmd in calls)
+    assert (tmp_path / "pyproject.toml").read_text(encoding="utf-8") == original
+
+
+def test_prepare_runtime_python_probes_core_only_when_memory_disabled(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _write_memory_config(tmp_path, enabled=False)
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "agent"\n', encoding="utf-8")
+    probes: list[str] = []
+
+    def fake_probe(runtime: RuntimePython, code: str, *, timeout: float = 15.0) -> bool:
+        del runtime, timeout
+        probes.append(code)
+        return True
+
+    monkeypatch.setattr("monkeybot_cli.runtime_python.run_probe", fake_probe)
+    prepare_runtime_python(tmp_path)
+    assert probes
+    assert all("import mempalace" not in code for code in probes)
+
+
+def test_prepare_runtime_python_uses_explicit_config_for_memory_probe(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _write_memory_config(tmp_path, enabled=True)
+    explicit = tmp_path / "alternate.yaml"
+    explicit.write_text("memory:\n  enabled: false\n", encoding="utf-8")
+    probes: list[str] = []
+
+    def fake_probe(runtime: RuntimePython, code: str, *, timeout: float = 15.0) -> bool:
+        del runtime, timeout
+        probes.append(code)
+        return True
+
+    monkeypatch.setattr("monkeybot_cli.runtime_python.run_probe", fake_probe)
+    prepare_runtime_python(tmp_path, explicit)
+    assert probes
+    assert all("import mempalace" not in code for code in probes)
+
+
+def test_prepare_runtime_python_fail_closed_when_sync_stale(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "agent"\n', encoding="utf-8")
+    venv_bin = tmp_path / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    py = venv_bin / "python"
+    py.write_text("#!/bin/sh\n")
+    py.chmod(0o755)
+
+    def fake_run(argv, **kwargs):
+        del argv, kwargs
+
+        class Result:
+            returncode = 1
+            stderr = "No module named 'mempalace'"
+            stdout = ""
+
+        return Result()
+
+    monkeypatch.setattr("monkeybot_cli.runtime_python.subprocess.run", fake_run)
+    with pytest.raises(RuntimeUpgradeError, match="refusing to start"):
+        prepare_runtime_python(tmp_path)
+    assert (tmp_path / "pyproject.toml").read_text(encoding="utf-8") == '[project]\nname = "agent"\n'
+
+
+def test_prepare_runtime_python_fail_closed_without_pyproject(tmp_path: Path, monkeypatch) -> None:
+    _write_memory_config(tmp_path, enabled=False)
+    venv_bin = tmp_path / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    py = venv_bin / "python"
+    py.write_text("#!/bin/sh\n")
+    py.chmod(0o755)
+
+    monkeypatch.setattr("monkeybot_cli.runtime_python.run_probe", lambda *a, **k: False)
+    with pytest.raises(RuntimeUpgradeError, match="missing a compatible MonkeyBot") as excinfo:
+        prepare_runtime_python(tmp_path)
+    assert "uv sync" not in str(excinfo.value)
+    assert "memory.enabled" not in str(excinfo.value)
+
+
+def test_prepare_runtime_python_fail_closed_config_only_with_memory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _write_memory_config(tmp_path, enabled=True)
+    monkeypatch.setattr("monkeybot_cli.runtime_python.run_probe", lambda *a, **k: False)
+    with pytest.raises(RuntimeUpgradeError, match="MemPalace") as excinfo:
+        prepare_runtime_python(tmp_path)
+    assert "memory.enabled: false" in str(excinfo.value)
+    assert "uv sync" not in str(excinfo.value)
+
+
+def test_prepare_runtime_python_probes_uv_runtime(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "agent"\n', encoding="utf-8")
+    calls: list[list[str]] = []
+    probes = {"n": 0}
+
+    def fake_run(argv, **kwargs):
+        del kwargs
+        calls.append(list(argv))
+
+        class Result:
+            returncode = 0
+
+        argv_list = list(argv)
+        if argv_list[:2] == ["uv", "run"] and "-c" in argv_list:
+            probes["n"] += 1
+            Result.returncode = 0 if probes["n"] > 1 else 1
+        return Result()
+
+    monkeypatch.setattr("monkeybot_cli.runtime_python.subprocess.run", fake_run)
+    runtime = prepare_runtime_python(tmp_path)
+    assert runtime.source == "uv"
+    assert any(cmd[:2] == ["uv", "sync"] for cmd in calls)
+    assert not any(cmd[:3] == ["uv", "lock", "--upgrade-package"] for cmd in calls)

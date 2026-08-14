@@ -6,6 +6,7 @@ import argparse
 import sys
 
 from monkeybot_cli.commands import chat, doctor, loop, new, refresh, run_cmd, talk, validate
+from monkeybot_cli.runtime_python import RuntimeUpgradeError
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -33,6 +34,9 @@ def main(argv: list[str] | None = None) -> int:
         return int(args.func(args))
     except KeyboardInterrupt:
         return 130
+    except RuntimeUpgradeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

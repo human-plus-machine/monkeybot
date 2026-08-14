@@ -549,8 +549,8 @@ its `.env` before YAML values fill still-unset environment variables.
 |---------|---------|
 | `monkeybot new` | Scaffold `monkeybot_config/`, workspace, `.env.example` |
 | `monkeybot validate` | YAML, paths, MCP, provider env |
-| `monkeybot doctor` | Python, extras, credentials, port |
-| `monkeybot run` | Foreground gateway |
+| `monkeybot doctor` | Python, harness, extras, credentials, port |
+| `monkeybot run` | Foreground gateway (fail-closed harness probe) |
 | `monkeybot chat` | Spawn SSE gateway + REPL |
 | `monkeybot talk` | Realtime WebSocket client (audio/text) |
 
@@ -569,7 +569,9 @@ session — no mid-session model swap exists), `/status`, `/config`. See
 2. `uv run python -m monkeybot.gateway.main` when `<agent>/pyproject.toml` exists but no `.venv`
 3. `sys.executable` (CLI interpreter) — legacy fallback for config-only trees
 
-`monkeybot doctor` remediation points at adding `monkeybot[<extra>]` to the agent project, then `uv sync`.
+Before spawning the gateway, the CLI probes that interpreter for MonkeyBot `>=3.0.0,<4` and, when memory is enabled, MemPalace. A stale agent venv may be refreshed with `uv sync` against the existing lock; `pyproject.toml` pins are never rewritten. A failed probe prints an upgrade command and exits. `monkeybot doctor` reports the same check as `env.harness.compatible`.
+
+`monkeybot doctor` remediation for provider extras points at adding `monkeybot[<extra>]` to the agent project, then `uv sync`.
 
 ---
 

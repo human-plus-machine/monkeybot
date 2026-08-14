@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from monkeybot_cli.realtime import talk_ui
+from monkeybot_cli.runtime_python import RuntimePython
 from typer.testing import CliRunner
 
 from monkeybot.cli.main import app, run_talk_session
@@ -63,6 +64,11 @@ def test_talk_spawned_gateway_enables_transcript_capture(
         return object()
 
     monkeypatch.delenv("MONKEYBOT_TRANSCRIPT_ENABLED", raising=False)
+    monkeypatch.setattr(
+        talk_ui,
+        "prepare_runtime_python",
+        lambda *a, **k: RuntimePython(["python"], "cli"),
+    )
     monkeypatch.setattr(talk_ui.subprocess, "Popen", fake_popen)
     spawned = talk_ui._spawn_combined_gateway(None, tmp_path, 8123)
     try:
