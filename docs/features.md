@@ -567,7 +567,8 @@ session — no mid-session model swap exists), `/status`, `/config`. See
 
 1. `<agent>/.venv/bin/python` when a project venv exists
 2. `uv run python -m monkeybot.gateway.main` when `<agent>/pyproject.toml` exists but no `.venv`
-3. `sys.executable` (CLI interpreter) — legacy fallback for config-only trees
+3. `sys.executable` (CLI interpreter) — config-only trees, when that interpreter already has MonkeyBot 3.x (and MemPalace if memory is on)
+4. A CLI-managed cache venv (`~/.cache/monkeybot/runtimes/…`) — config-only trees with memory on when the CLI interpreter cannot import MemPalace. Pinned to the running MonkeyBot version; never rewrites an agent `pyproject.toml`.
 
 Before spawning the gateway, the CLI probes that interpreter for MonkeyBot `>=3.0.0,<4` and, when memory is enabled, MemPalace. A stale agent venv may be refreshed with `uv sync` against the existing lock; `pyproject.toml` pins are never rewritten. A failed probe prints an upgrade command and exits. `monkeybot doctor` reports the same check as `env.harness.compatible`.
 

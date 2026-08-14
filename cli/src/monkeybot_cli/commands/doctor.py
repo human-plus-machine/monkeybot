@@ -240,7 +240,12 @@ def run_doctor(args: argparse.Namespace) -> int:
             if (agent_root / "pyproject.toml").is_file()
             else (
                 f"Install monkeybot{COMPATIBLE_CORE_RANGE} in this environment"
-                + (", or set memory.enabled: false" if memory_on else "")
+                + (
+                    ", run the agent once to provision a managed MemPalace runtime, "
+                    "or set memory.enabled: false"
+                    if memory_on
+                    else ""
+                )
             )
         ),
     )
