@@ -524,7 +524,9 @@ async def test_history_reset_does_not_cross_scope(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_history_migration_does_not_auto_claim_legacy_rows(tmp_path: Path) -> None:
+async def test_history_migration_does_not_auto_claim_legacy_rows_when_not_owned(
+    tmp_path: Path,
+) -> None:
     """Regression for PR #179 review: an earlier version of this fix claimed
     every pre-migration (agent_scope='') row for whichever agent opened the DB
     first. Reproduced directly here with two agents' legacy threads on one
@@ -532,6 +534,13 @@ async def test_history_migration_does_not_auto_claim_legacy_rows(tmp_path: Path)
     the second agent's own history empty. Migration must leave ambiguous
     legacy rows unclaimed by anyone — only an explicit, per-thread operator
     UPDATE (exercised below) may assign them.
+
+    No agent_root is passed here, so db_owned_by_agent_root() can't confirm
+    single ownership — this is the "could be a shared file" case (an explicit
+    absolute DB_URL pointing multiple agents at one file, or an unknown
+    agent_root). Contrast with
+    test_history_migration_auto_claims_legacy_rows_when_owned_by_agent_root
+    below, the default-deployment case where auto-claiming *is* safe.
     """
     import time
 
@@ -583,6 +592,69 @@ async def test_history_migration_does_not_auto_claim_legacy_rows(tmp_path: Path)
         assert await backend_a.history().load("agent-b-legacy-thread") == []
     finally:
         await backend_a.close()
+
+
+@pytest.mark.asyncio
+async def test_history_migration_auto_claims_legacy_rows_when_owned_by_agent_root(
+    tmp_path: Path,
+) -> None:
+    """Regression for a later PR #179 review round: refusing to auto-claim is
+    right for a genuinely shared Postgres/Firestore backend or an explicit
+    shared SQLite path, but wrong for the *default* deployment — DB_URL left
+    relative, resolved under the agent root by resolve_sqlite_url — where
+    exactly one agent could ever sensibly own that file. Without this,
+    upgrading orphaned every existing local user's chat history: --continue,
+    explicit --session, and transcript backfill all silently returned empty.
+
+    Simulates the default layout: db file at <agent_root>/data/monkeybot.db,
+    passed with agent_root=<agent_root> as app.py/subagent_worker.py do.
+    """
+    import time
+
+    import aiosqlite
+
+    agent_root = tmp_path / "my-agent"
+    data_dir = agent_root / "data"
+    data_dir.mkdir(parents=True)
+    db_path = data_dir / "monkeybot.db"
+
+    conn = await aiosqlite.connect(str(db_path))
+    await conn.execute(
+        """CREATE TABLE conversation_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        thread_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+    )"""
+    )
+    await conn.execute(
+        "INSERT INTO conversation_history(thread_id, role, content, created_at) VALUES (?,?,?,?)",
+        ("my-old-chat", "user", '[{"type":"text","text":"pre-upgrade message"}]', int(time.time() * 1000)),
+    )
+    await conn.commit()
+    await conn.close()
+
+    backend = SQLiteStorageBackend(
+        f"sqlite:///{db_path}", agent_scope="my-agent-id", agent_root=agent_root
+    )
+    await backend.open(run_schema=True)
+    try:
+        assert [t.thread_id for t in await backend.history().list_threads()] == ["my-old-chat"]
+        assert len(await backend.history().load("my-old-chat")) == 1
+    finally:
+        await backend.close()
+
+
+def test_db_owned_by_agent_root() -> None:
+    from monkeybot.core.persistence.sqlite import db_owned_by_agent_root
+
+    root = Path("/agents/my-agent").resolve()
+    assert db_owned_by_agent_root(f"sqlite:///{root}/data/monkeybot.db", root) is True
+    assert db_owned_by_agent_root("sqlite:///:memory:", root) is True
+    assert db_owned_by_agent_root("sqlite:////shared/team.db", root) is False
+    assert db_owned_by_agent_root(f"sqlite:///{root}/data/monkeybot.db", None) is False
+    assert db_owned_by_agent_root("postgresql://localhost/db", root) is False
 
 
 @pytest.mark.asyncio

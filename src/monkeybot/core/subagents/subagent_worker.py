@@ -279,7 +279,9 @@ async def _async_main() -> None:
             agent_md_path = resolve_project_path("AGENT.md", agent_root)
 
     layout = AgentLayout.from_environment(agent_root=agent_root)
-    backend = create_storage_backend(layout.db_url, agent_scope=layout.agent_id)
+    backend = create_storage_backend(
+        layout.db_url, agent_scope=layout.agent_id, agent_root=layout.agent_root
+    )
     mcp: MCPClient | None = None
     executor: CoreToolExecutor | None = None
     knowledge: KnowledgeSubsystem | None = None

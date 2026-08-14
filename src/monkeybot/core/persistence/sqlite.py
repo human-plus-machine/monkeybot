@@ -127,6 +127,32 @@ def sqlite_path_from_db_url(db_url: str | None = None) -> str:
     return remainder
 
 
+def db_owned_by_agent_root(db_url: str, agent_root: Path | None) -> bool:
+    """True when ``db_url`` resolves to a file this ``agent_root`` uniquely owns.
+
+    The default deployment (``paths.db_url: sqlite:///data/monkeybot.db``,
+    left relative) is anchored under the agent root by
+    :func:`~monkeybot.core.layout.resolve_sqlite_url`, so by construction no
+    other agent would sensibly point there too — safe to auto-claim legacy
+    rows for on migration (see :func:`backfill_legacy_agent_scope`). An
+    operator-set *absolute* path is not anchored that way and may be
+    deliberately shared across agents (the case PR #179 review reproduced a
+    real cross-agent leak against) — never safe to auto-claim.
+    """
+    if agent_root is None:
+        return False
+    try:
+        path = sqlite_path_from_db_url(db_url)
+    except ValueError:
+        return False
+    if path == ":memory:":
+        return True  # ephemeral, in-process only — inherently single-owner
+    try:
+        return Path(path).resolve().is_relative_to(agent_root.resolve())
+    except (OSError, ValueError):
+        return False
+
+
 async def configure_connection(conn: aiosqlite.Connection) -> None:
     """PRAGMA journal_mode=WAL; foreign_keys=ON; synchronous=NORMAL."""
     await conn.execute("PRAGMA journal_mode=WAL")
@@ -151,15 +177,21 @@ async def _log_legacy_schema_error(conn: aiosqlite.Connection) -> None:
     logger.error("Legacy conversation_history schema detected; db=%s", path)
 
 
-async def apply_schema(conn: aiosqlite.Connection) -> None:
-    """Create tables/indexes; refuse legacy conversation_history shapes."""
+async def apply_schema(conn: aiosqlite.Connection) -> bool:
+    """Create tables/indexes; refuse legacy conversation_history shapes.
+
+    Returns True when ``agent_scope`` was just added to a pre-existing
+    ``conversation_history`` table — a fresh migration off the pre-agent-scope
+    schema. Callers use this to decide whether to claim legacy rows for the
+    scope they're about to open with (see :func:`backfill_legacy_agent_scope`).
+    """
     for ddl in SCHEMA_DDLS:
         await conn.execute(ddl)
     await conn.commit()
     await _ensure_turn_usage_estimated_column(conn)
     await _ensure_turn_usage_cache_columns(conn)
     await _ensure_subagent_runs_claim_columns(conn)
-    await _ensure_conversation_history_agent_scope_column(conn)
+    agent_scope_migrated = await _ensure_conversation_history_agent_scope_column(conn)
     cursor = await conn.execute("PRAGMA table_info(conversation_history)")
     rows = await cursor.fetchall()
     await cursor.close()
@@ -167,6 +199,7 @@ async def apply_schema(conn: aiosqlite.Connection) -> None:
     if "tool_name" in col_names or "tool_call_id" in col_names:
         await _log_legacy_schema_error(conn)
         raise RuntimeError(_LEGACY_SCHEMA_MESSAGE)
+    return agent_scope_migrated
 
 
 async def _ensure_turn_usage_estimated_column(conn: aiosqlite.Connection) -> None:
@@ -211,21 +244,19 @@ async def _ensure_subagent_runs_claim_columns(conn: aiosqlite.Connection) -> Non
     await conn.commit()
 
 
-async def _ensure_conversation_history_agent_scope_column(conn: aiosqlite.Connection) -> None:
-    """Add ``agent_scope`` when upgrading an existing DB.
+async def _ensure_conversation_history_agent_scope_column(conn: aiosqlite.Connection) -> bool:
+    """Add ``agent_scope`` when upgrading an existing DB. Returns True if it was just added.
 
     The scoped index is created here, after the column exists, rather than in
     ``SCHEMA_DDLS``, which runs first and would fail referencing a column not
-    yet on a pre-existing table. Never backfills legacy (``agent_scope=''``)
-    rows to any agent automatically — see
-    ``docs/migrations/agent-scope-namespacing.md`` for why, and for the
-    required manual path (:func:`warn_if_legacy_unscoped_history` below).
+    yet on a pre-existing table.
     """
     cur = await conn.execute("PRAGMA table_info(conversation_history)")
     rows = await cur.fetchall()
     await cur.close()
     names = {str(r[1]) for r in rows}
-    if "agent_scope" not in names:
+    column_added = "agent_scope" not in names
+    if column_added:
         try:
             await conn.execute(
                 "ALTER TABLE conversation_history ADD COLUMN agent_scope TEXT NOT NULL DEFAULT ''"
@@ -240,6 +271,26 @@ async def _ensure_conversation_history_agent_scope_column(conn: aiosqlite.Connec
     await conn.execute(
         """CREATE INDEX IF NOT EXISTS idx_history_scope_thread
         ON conversation_history(agent_scope, thread_id, created_at DESC, id DESC)"""
+    )
+    await conn.commit()
+    return column_added
+
+
+async def backfill_legacy_agent_scope(conn: aiosqlite.Connection, agent_scope: str) -> None:
+    """Claim pre-migration rows (``agent_scope = ''``) for ``agent_scope``, once.
+
+    Call only when :func:`apply_schema` reports a fresh migration AND
+    :func:`db_owned_by_agent_root` confirms this SQLite file is uniquely
+    owned by the agent about to claim it — see that function and
+    ``docs/migrations/agent-scope-namespacing.md`` for why unconditional
+    auto-claiming (rejected in PR #179 review) is unsafe for a file that
+    could be shared, but is correct here where ownership is unambiguous.
+    """
+    if not agent_scope:
+        return
+    await conn.execute(
+        "UPDATE conversation_history SET agent_scope = ? WHERE agent_scope = ''",
+        (agent_scope,),
     )
     await conn.commit()
 

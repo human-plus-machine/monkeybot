@@ -6,6 +6,8 @@ when a ``sqlite://`` URL is used — never loaded in Postgres-only deployments.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import aiosqlite
 
 from monkeybot.core.persistence.durable_runs import SQLiteRunStore
@@ -14,6 +16,8 @@ from monkeybot.core.persistence.session_turn_locks import SQLiteSessionTurnLockS
 from monkeybot.core.persistence.history import SQLiteHistoryStore
 from monkeybot.core.persistence.sqlite import (
     apply_schema,
+    backfill_legacy_agent_scope,
+    db_owned_by_agent_root,
     open_connection,
     warn_if_legacy_unscoped_history,
 )
@@ -23,9 +27,12 @@ from monkeybot.core.persistence.usage import SQLiteUsageStore
 class SQLiteStorageBackend:
     """SQLite-backed storage backend. One shared connection for the process lifetime."""
 
-    def __init__(self, db_url: str, agent_scope: str = "") -> None:
+    def __init__(
+        self, db_url: str, agent_scope: str = "", agent_root: Path | None = None
+    ) -> None:
         self._db_url = db_url
         self._agent_scope = agent_scope
+        self._agent_root = agent_root
         self._conn: aiosqlite.Connection | None = None
         self._history_store: SQLiteHistoryStore | None = None
         self._usage_store: SQLiteUsageStore | None = None
@@ -36,8 +43,13 @@ class SQLiteStorageBackend:
     async def open(self, *, run_schema: bool = True) -> None:
         self._conn = await open_connection(self._db_url)
         if run_schema:
-            await apply_schema(self._conn)
-            if self._agent_scope:
+            agent_scope_migrated = await apply_schema(self._conn)
+            if agent_scope_migrated and self._agent_scope:
+                if db_owned_by_agent_root(self._db_url, self._agent_root):
+                    await backfill_legacy_agent_scope(self._conn, self._agent_scope)
+                else:
+                    await warn_if_legacy_unscoped_history(self._conn)
+            elif self._agent_scope:
                 await warn_if_legacy_unscoped_history(self._conn)
         self._history_store = SQLiteHistoryStore(self._conn, self._agent_scope)
         self._usage_store = SQLiteUsageStore(self._conn)

@@ -550,7 +550,9 @@ async def _startup(fastapi_app: FastAPI) -> None:
 
     db_url = layout.db_url
 
-    backend = create_storage_backend(db_url, agent_scope=layout.agent_id)
+    backend = create_storage_backend(
+        db_url, agent_scope=layout.agent_id, agent_root=layout.agent_root
+    )
     await backend.open(run_schema=auto_schema_enabled_from_config())
     fastapi_app.state.storage = backend
     fastapi_app.state.usage = _UsageStoreAdapter(backend.usage())

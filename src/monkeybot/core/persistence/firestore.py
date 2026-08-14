@@ -75,28 +75,18 @@ _warned_legacy_unscoped_history = False
 
 
 def firestore_summary_doc_id(agent_scope: str, thread_id: str) -> str:
-    """Canonical id of a thread's ``threads``-collection summary doc.
-
-    ``sha256(agent_scope + "\\0" + thread_id)``, hex-encoded — a NUL
-    separator avoids concatenation collisions (e.g. ``("ab", "c")`` vs.
-    ``("a", "bc")``) since both components are arbitrary strings. A public,
-    top-level function (not just the equivalent private instance method)
-    so a manual migration script can compute the same id an operator needs
-    to write to (see ``docs/migrations/agent-scope-namespacing.md``) without
-    reimplementing the formula and risking it drifting from the real one.
+    """Canonical id of a thread's ``threads``-collection summary doc:
+    ``sha256(agent_scope + "\\0" + thread_id)``, hex-encoded. Public (not just
+    the equivalent private instance method) so a manual migration script can
+    compute the same id the store does — see
+    ``docs/migrations/agent-scope-namespacing.md``.
     """
     return hashlib.sha256(f"{agent_scope}\x00{thread_id}".encode()).hexdigest()
 
 
 def _warn_legacy_unscoped_history_possible() -> None:
-    """Log once per process that pre-migration Firestore documents may be unreachable.
-
-    Firestore documents written before this scoping existed have no
-    ``agent_scope`` field — a query can't match a missing field, so there's
-    no way to reach them or even cheaply detect they exist (unlike Postgres,
-    where ``agent_scope = ''`` is a real, countable column) — hence this
-    warns unconditionally. See ``docs/migrations/agent-scope-namespacing.md``
-    for the required (and Firestore-specific, two-part) manual migration.
+    """Log once per process that pre-migration Firestore documents may be
+    unreachable. See ``docs/migrations/agent-scope-namespacing.md``.
     """
     global _warned_legacy_unscoped_history
     if _warned_legacy_unscoped_history:
@@ -133,16 +123,7 @@ class FirestoreHistoryStore:
         self._agent_scope = agent_scope
 
     def _summary_doc_id(self, thread_id: str) -> str:
-        """This store's summary doc id for ``thread_id`` — see :func:`firestore_summary_doc_id`.
-
-        Scoping by a hash of (agent_scope, thread_id), not by raw
-        ``thread_id`` alone, fixes two bugs: (1) two agents reusing the same
-        explicit ``--session <id>`` would otherwise share one summary
-        document and stomp each other's ``agent_scope``/``message_count`` on
-        every write, and (2) a raw ``thread_id`` — never validated, accepted
-        verbatim from ``--session <id>`` — could contain ``/``, which
-        Firestore rejects in a document id.
-        """
+        """This store's summary doc id — see :func:`firestore_summary_doc_id`."""
         return firestore_summary_doc_id(self._agent_scope, thread_id)
 
     async def _upsert_thread_summary(

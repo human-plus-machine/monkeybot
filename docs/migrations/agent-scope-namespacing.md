@@ -3,11 +3,20 @@
 `conversation_history` (and, for Firestore, the `threads` summary collection)
 is namespaced per agent as of PR #179, closing a leak where gateways sharing
 one `db_url` could read and resume each other's threads. Rows/documents
-written before that change carry no assignment to any agent. Migration
-deliberately does not auto-claim them — see "Why there's no automatic
-migration" below — so an operator who knows which legacy `thread_id` belongs
-to which agent must assign it by hand before that thread becomes resumable
-again.
+written before that change carry no assignment to any agent.
+
+**Default local SQLite deployment (`paths.db_url` left relative, resolved
+under the agent root) migrates automatically** — the file lives inside a
+single agent's directory, so ownership is unambiguous by construction; on
+first startup after upgrading, all of that file's pre-existing rows are
+claimed for the agent opening it. Nothing to do here.
+
+**Everywhere else — a shared Postgres/Firestore backend, or an explicit
+absolute SQLite path outside any agent root** — migration deliberately does
+not auto-claim rows, since more than one agent could plausibly own them (see
+"Why there's no automatic migration for shared backends" below). An operator
+who knows which legacy `thread_id` belongs to which agent must assign it by
+hand before that thread becomes resumable again.
 
 ## SQLite / Postgres
 
@@ -48,15 +57,40 @@ Two distinct pieces, not one field patch:
    '<thread-id>'))"`) and write a new doc at that id if the thread needs to
    be listable before the next message.
 
-## Why there's no automatic migration
+Firestore also can't cheaply detect that legacy rows exist at all, unlike
+Postgres/SQLite: a truly pre-migration document has no `agent_scope` field,
+and a query can't match a missing field or count how many docs lack one —
+the warning this store logs is unconditional (once per process), not gated
+on an existence check the way Postgres's is.
 
-An earlier version of this fix auto-claimed every legacy row for whichever
-agent's gateway opened the database first after upgrading. Reviewed and
-rejected: on a database genuinely shared by more than one agent, that agent
-could read every other agent's pre-upgrade transcript, while the real
-owners silently lost access — a deterministic cross-agent leak, not a rare
-edge case (reproduced directly during review: opening as scope A on a
-database holding both A's and B's legacy threads let A read B's secret and
-permanently emptied B's own history). There is no way to infer the correct
-owner of already-comingled, unlabeled history automatically; only an
-operator with that knowledge can assign it correctly.
+### Why the summary doc id is a hash, not the raw `thread_id`
+
+Two independent bugs, both closed by keying the doc as
+`sha256(agent_scope + "\0" + thread_id)` instead of the raw `thread_id`:
+
+- Two agents that reuse the same explicit `--session <id>` (nothing prevents
+  that) would otherwise share one summary document, each write stomping the
+  other's `agent_scope`/`message_count` and flipping which agent's
+  `list_threads` the thread appeared under.
+- `thread_id` is accepted verbatim from `--session <id>` with no validation,
+  so it can contain `/`, which Firestore rejects in a document id.
+
+## Why there's no automatic migration for shared backends
+
+An earlier version of this fix auto-claimed every legacy row, on every
+backend including a shared one, for whichever agent's gateway opened the
+database first after upgrading. Reviewed and rejected: on a database
+genuinely shared by more than one agent, that agent could read every other
+agent's pre-upgrade transcript, while the real owners silently lost access —
+a deterministic cross-agent leak, not a rare edge case (reproduced directly
+during review: opening as scope A on a database holding both A's and B's
+legacy threads let A read B's secret and permanently emptied B's own
+history). There is no way to infer the correct owner of already-comingled,
+unlabeled history automatically on a backend more than one agent could be
+pointed at; only an operator with that knowledge can assign it correctly.
+
+The default local SQLite file is different in kind, not just in likelihood:
+it lives at a path anchored under one specific agent's own directory
+(`resolve_sqlite_url` in `layout.py`), so there is no comingling to
+disambiguate — auto-claiming there is safe and happens automatically (see
+`db_owned_by_agent_root` in `sqlite.py`).
