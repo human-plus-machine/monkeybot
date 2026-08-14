@@ -62,6 +62,27 @@ _TASK_LINKAGE_KEYS: tuple[str, ...] = ("run_id", "child_thread_id", "subagent_ty
 SUBAGENT_THREAD_ID_PREFIX = "subagent:"
 
 
+def reserved_thread_id_error(thread_id: str) -> str | None:
+    """Return an error message if ``thread_id`` collides with the reserved
+    subagent namespace (case-sensitive, matching the internal prefix exactly
+    — see ``SUBAGENT_THREAD_ID_PREFIX``), else ``None``.
+
+    Call this at every entry point that accepts a client-supplied session/
+    thread id before it's persisted — a session that collides is not
+    rejected outright by storage, but silently excluded from
+    ``list_threads``/``--continue`` with no indication why, which is worse
+    than a clear 400 at creation time.
+    """
+    if thread_id.startswith(SUBAGENT_THREAD_ID_PREFIX):
+        return (
+            f"session_id may not start with the reserved prefix "
+            f"{SUBAGENT_THREAD_ID_PREFIX!r} (used internally for subagent "
+            "transcripts) — a session with this id would be silently "
+            "excluded from list_threads/--continue."
+        )
+    return None
+
+
 @dataclass(frozen=True)
 class ChatThreadSummary:
     """One row in a chat-thread picker."""

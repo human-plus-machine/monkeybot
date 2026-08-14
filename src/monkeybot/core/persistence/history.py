@@ -149,6 +149,12 @@ class SQLiteHistoryStore:
         after its parent's last turn would outrank the parent as "newest,"
         making ``--continue`` resume the subagent's transcript under the
         main-agent prompt and tools instead of the actual previous chat.
+        Uses ``GLOB``, not ``LIKE``: SQLite's ``LIKE`` ASCII-folds case by
+        default, so ``NOT LIKE 'subagent:%'`` would also swallow an ordinary
+        user session literally named e.g. ``Subagent:foo`` even though the
+        internal prefix (and the reserved-namespace rejection at session
+        creation) is exact-case — ``GLOB`` matches case-sensitively, like
+        Postgres's ``LIKE`` and Python's ``str.startswith`` already do.
 
         The correlated subquery on ``last_content`` is O(threads × messages) per call.
         For production SQLite load, add a composite index on
@@ -169,7 +175,7 @@ class SQLiteHistoryStore:
                     LIMIT 1
                 ) AS last_content
             FROM conversation_history h
-            WHERE h.agent_scope = ? AND h.thread_id NOT LIKE ? || '%'
+            WHERE h.agent_scope = ? AND h.thread_id NOT GLOB ? || '*'
             GROUP BY h.thread_id
             ORDER BY last_message_at DESC
             LIMIT ?

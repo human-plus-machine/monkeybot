@@ -482,6 +482,24 @@ async def test_history_list_threads_excludes_subagent_transcripts() -> None:
 
 
 @pytest.mark.asyncio
+async def test_history_list_threads_case_variant_prefix_not_excluded() -> None:
+    """Regression for PR #179 review: SQLite's LIKE ASCII-folds case by
+    default, so a NOT LIKE 'subagent:%' exclusion also swallowed an ordinary
+    user session literally named e.g. 'Subagent:foo' — reproduced as
+    load=1, list_threads=[]. GLOB is case-sensitive and must not exclude it.
+    """
+    backend = SQLiteStorageBackend("sqlite:///:memory:", agent_scope="agent-a")
+    await backend.open()
+    try:
+        store = backend.history()
+        await store.append("Subagent:foo", Message.text("user", "a real user session"))
+        threads = await store.list_threads()
+        assert [t.thread_id for t in threads] == ["Subagent:foo"]
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
 async def test_history_reset_does_not_cross_scope(tmp_path: Path) -> None:
     from monkeybot.core.persistence.history import SQLiteHistoryStore
 
@@ -590,6 +608,49 @@ async def test_history_warns_once_when_legacy_unscoped_rows_remain(tmp_path: Pat
             mock_logger.warning.assert_called_once()
     finally:
         await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_agent_scope_migration_does_not_crash(tmp_path: Path) -> None:
+    """Regression for PR #179 review: the column-exists check and the ALTER
+    ran as two separate statements with no locking, so two gateways sharing
+    one SQLite file could both see the column missing and both attempt to
+    add it — the second ALTER TABLE ADD COLUMN then fails outright with
+    "duplicate column name". Two real aiosqlite connections against the same
+    file, migrated concurrently via asyncio.gather, must not crash.
+    """
+    import asyncio
+
+    import aiosqlite
+
+    from monkeybot.core.persistence.sqlite import (
+        _ensure_conversation_history_agent_scope_column,
+        apply_schema,
+    )
+
+    db_path = tmp_path / "concurrent.db"
+    setup = await aiosqlite.connect(str(db_path))
+    await apply_schema(setup)
+    # Roll back to the pre-migration shape so both connections race a real ALTER.
+    await setup.execute("DROP INDEX IF EXISTS idx_history_scope_thread")
+    await setup.execute("ALTER TABLE conversation_history DROP COLUMN agent_scope")
+    await setup.commit()
+    await setup.close()
+
+    conn1 = await aiosqlite.connect(str(db_path))
+    conn2 = await aiosqlite.connect(str(db_path))
+    try:
+        await asyncio.gather(
+            _ensure_conversation_history_agent_scope_column(conn1),
+            _ensure_conversation_history_agent_scope_column(conn2),
+        )
+        cur = await conn1.execute("PRAGMA table_info(conversation_history)")
+        names = {str(row[1]) for row in await cur.fetchall()}
+        await cur.close()
+        assert "agent_scope" in names
+    finally:
+        await conn1.close()
+        await conn2.close()
 
 
 # ---------------------------------------------------------------------------

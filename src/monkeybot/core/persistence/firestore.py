@@ -7,7 +7,7 @@ import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from typing import cast
+from typing import Any, cast
 
 from google.cloud import firestore
 from google.cloud.firestore import AsyncClient
@@ -74,40 +74,29 @@ def _field_float(row: dict[str, object], key: str, default: float = 0.0) -> floa
 _warned_legacy_unscoped_history = False
 
 
+def firestore_summary_doc_id(agent_scope: str, thread_id: str) -> str:
+    """Canonical id of a thread's ``threads``-collection summary doc.
+
+    ``sha256(agent_scope + "\\0" + thread_id)``, hex-encoded — a NUL
+    separator avoids concatenation collisions (e.g. ``("ab", "c")`` vs.
+    ``("a", "bc")``) since both components are arbitrary strings. A public,
+    top-level function (not just the equivalent private instance method)
+    so a manual migration script can compute the same id an operator needs
+    to write to (see ``docs/migrations/agent-scope-namespacing.md``) without
+    reimplementing the formula and risking it drifting from the real one.
+    """
+    return hashlib.sha256(f"{agent_scope}\x00{thread_id}".encode()).hexdigest()
+
+
 def _warn_legacy_unscoped_history_possible() -> None:
     """Log once per process that pre-migration Firestore documents may be unreachable.
 
     Firestore documents written before this scoping existed have no
-    ``agent_scope`` field at all — equality/``in`` queries can't match a
-    missing field, so there's no query-based way to reach them, and no cheap
-    existence check for "field missing" to even detect the situation (unlike
-    Postgres, where a real ``agent_scope = ''`` column is directly queryable
-    and countable, though there too an earlier version of this fix that
-    auto-claimed such rows for whichever agent opened first was found to leak
-    across agents and was rejected — see postgres.py). This warns
-    unconditionally, and deliberately does not attempt any automatic
-    remediation of its own, so operators know a manual migration is required.
-
-    That manual migration has two distinct parts, not one field patch:
-
-    1. ``conversation_history`` docs (individual messages) are looked up by
-       the ``thread_id``/``agent_scope`` *fields*, not by document id — so
-       setting ``agent_scope`` on the existing docs for a legacy thread_id is
-       sufficient and safe on its own.
-    2. ``threads`` summary docs (one per thread, for ``list_threads``) are
-       looked up by a *document id* derived from ``sha256(agent_scope +
-       thread_id)`` (see ``_summary_doc_id``). A legacy summary doc's id
-       predates that scheme, so merely adding ``agent_scope`` to it (leaving
-       it at its old id) makes it satisfy the query filter but not the id
-       lookup: the next ``append()`` to that thread creates a *second*,
-       correctly-keyed summary doc rather than updating it, and ``reset()``
-       only ever deletes the correctly-keyed one — leaving the old doc
-       dangling with a stale count/preview, still matched by ``list_threads``
-       and selectable by ``--continue``. The old summary doc must be
-       *deleted*, not patched; a correct replacement is created automatically
-       by the thread's next ``append()``, or an operator can precompute one
-       immediately at ``document(sha256(agent_scope + thread_id).hexdigest())``
-       if the thread needs to be listable before that.
+    ``agent_scope`` field — a query can't match a missing field, so there's
+    no way to reach them or even cheaply detect they exist (unlike Postgres,
+    where ``agent_scope = ''`` is a real, countable column) — hence this
+    warns unconditionally. See ``docs/migrations/agent-scope-namespacing.md``
+    for the required (and Firestore-specific, two-part) manual migration.
     """
     global _warned_legacy_unscoped_history
     if _warned_legacy_unscoped_history:
@@ -118,12 +107,8 @@ def _warn_legacy_unscoped_history_possible() -> None:
         "agent_scope existed have no agent_scope field and are not reachable "
         "by this (or any) agent-scoped store's load/list_threads/reset — "
         "Firestore cannot query for a missing field, and this store makes no "
-        "attempt to guess it. If this deployment predates agent-scoped "
-        "history: tag agent_scope onto the legacy conversation_history docs "
-        "for each thread_id, and DELETE (not patch) that thread's old "
-        "threads-collection summary doc — patching it in place leaves a "
-        "stale duplicate once the thread is next appended to (see "
-        "_warn_legacy_unscoped_history_possible docstring for why)."
+        "attempt to guess it. See docs/migrations/agent-scope-namespacing.md "
+        "for the required manual migration."
     )
 
 
@@ -148,26 +133,17 @@ class FirestoreHistoryStore:
         self._agent_scope = agent_scope
 
     def _summary_doc_id(self, thread_id: str) -> str:
-        """Scope-qualified key for the per-thread summary doc.
+        """This store's summary doc id for ``thread_id`` — see :func:`firestore_summary_doc_id`.
 
-        Keying purely by ``thread_id`` let two agents that reuse the same
-        explicit session id (nothing prevents ``--session <id>`` reuse across
-        agents) share one summary document: each ``set(..., merge=True)``
-        overwrote the other's ``agent_scope``/``message_count`` fields,
-        flipping which agent's ``list_threads`` the thread appeared under and
-        corrupting the message count.
-
-        Hashing ``agent_scope`` and ``thread_id`` together (rather than, say,
-        ``f"{hash(scope)}:{thread_id}"``) also fixes a second bug: a raw
-        ``thread_id`` appended into a Firestore document id breaks the moment
-        it contains ``/``, which Firestore treats as a path separator and
-        rejects in a document id — and ``thread_id`` is never validated
-        against that (``--session <id>`` accepts any string). A single hash of
-        both components sidesteps both the raw-scope-path and raw-thread_id
-        problems at once.
+        Scoping by a hash of (agent_scope, thread_id), not by raw
+        ``thread_id`` alone, fixes two bugs: (1) two agents reusing the same
+        explicit ``--session <id>`` would otherwise share one summary
+        document and stomp each other's ``agent_scope``/``message_count`` on
+        every write, and (2) a raw ``thread_id`` — never validated, accepted
+        verbatim from ``--session <id>`` — could contain ``/``, which
+        Firestore rejects in a document id.
         """
-        digest = hashlib.sha256(f"{self._agent_scope}\x00{thread_id}".encode())
-        return digest.hexdigest()
+        return firestore_summary_doc_id(self._agent_scope, thread_id)
 
     async def _upsert_thread_summary(
         self,
@@ -308,29 +284,46 @@ class FirestoreHistoryStore:
         outrank it as "newest" and get resumed by ``--continue`` instead of
         the actual previous chat. Firestore has no server-side "does not
         start with" filter to push this into the query itself.
+
+        Paginates past filtered-out docs rather than applying ``.limit(cap)``
+        before the filter: with a single unpaginated ``limit(1)`` query (what
+        ``--continue`` sends), a subagent summary ranked newest would consume
+        the entire page and get filtered out, returning nothing even though a
+        real thread is next in line.
         """
         cap = max(1, min(limit, 200))
-        query = (
-            self._client.collection(self._threads_collection)
-            .where(filter=FieldFilter("agent_scope", "==", self._agent_scope))
-            .order_by("last_message_at", direction=firestore.Query.DESCENDING)
-            .limit(cap)
-        )
         out: list[ChatThreadSummary] = []
-        async for doc in query.stream():
-            data = doc.to_dict() or {}
-            thread_id = str(data.get("thread_id") or doc.id)
-            if thread_id.startswith(SUBAGENT_THREAD_ID_PREFIX):
-                continue
-            preview = preview_from_content_blob(str(data.get("last_content", "")))
-            out.append(
-                ChatThreadSummary(
-                    thread_id=thread_id,
-                    last_message_at=_field_int(data, "last_message_at"),
-                    message_count=_field_int(data, "message_count"),
-                    preview=preview or "(empty)",
-                )
+        cursor: Any = None
+        while len(out) < cap:
+            query = (
+                self._client.collection(self._threads_collection)
+                .where(filter=FieldFilter("agent_scope", "==", self._agent_scope))
+                .order_by("last_message_at", direction=firestore.Query.DESCENDING)
             )
+            if cursor is not None:
+                query = query.start_after(cursor)
+            docs = [doc async for doc in query.limit(cap).stream()]
+            if not docs:
+                break
+            for doc in docs:
+                data = doc.to_dict() or {}
+                thread_id = str(data.get("thread_id") or doc.id)
+                if thread_id.startswith(SUBAGENT_THREAD_ID_PREFIX):
+                    continue
+                preview = preview_from_content_blob(str(data.get("last_content", "")))
+                out.append(
+                    ChatThreadSummary(
+                        thread_id=thread_id,
+                        last_message_at=_field_int(data, "last_message_at"),
+                        message_count=_field_int(data, "message_count"),
+                        preview=preview or "(empty)",
+                    )
+                )
+                if len(out) >= cap:
+                    break
+            cursor = docs[-1]
+            if len(docs) < cap:
+                break  # fewer than a full page came back — collection exhausted
         return out
 
 

@@ -130,15 +130,9 @@ async def _apply_schema(pool: asyncpg.Pool) -> None:
 async def _warn_if_legacy_unscoped_history(pool: asyncpg.Pool) -> None:
     """Log once if pre-migration (``agent_scope = ''``) rows remain.
 
-    Deliberately no automatic backfill: an earlier version of this fix claimed
-    every ``agent_scope = ''`` row for whichever agent happened to open the DB
-    first after migration. Reviewed and rejected (PR #179) — on a genuinely
-    shared ``db_url``, that agent could read every other agent's pre-upgrade
-    transcript while the real owners silently lost access, a deterministic
-    cross-agent leak, not a probabilistic one. Ambiguous shared history has no
-    safe automatic owner; those rows stay put and unreachable via
-    list_threads/load/reset until an operator who knows which legacy
-    thread_id belongs to which agent runs, per thread_id::
+    Unreachable via ``list_threads``/``load``/``reset`` until an operator
+    runs, per thread_id (see ``docs/migrations/agent-scope-namespacing.md``
+    for why there's no automatic backfill)::
 
         UPDATE conversation_history SET agent_scope = '<agent-id>'
         WHERE thread_id = '<thread-id>' AND agent_scope = '';

@@ -557,18 +557,11 @@ def create_app(
         created_at_ms = int(time.time() * 1000)
         sid = body.session_id or str(uuid.uuid4())
         if body.session_id:
-            from monkeybot.core.persistence.thread_summary import SUBAGENT_THREAD_ID_PREFIX
+            from monkeybot.core.persistence.thread_summary import reserved_thread_id_error
 
-            if sid.startswith(SUBAGENT_THREAD_ID_PREFIX):
-                raise APIError(
-                    400,
-                    "BAD_REQUEST",
-                    f"session_id may not start with the reserved prefix "
-                    f"{SUBAGENT_THREAD_ID_PREFIX!r} (used internally for subagent "
-                    "transcripts) — a session with this id would be silently "
-                    "excluded from list_threads/--continue.",
-                    uuid.uuid4().hex,
-                )
+            error_message = reserved_thread_id_error(sid)
+            if error_message is not None:
+                raise APIError(400, "BAD_REQUEST", error_message, uuid.uuid4().hex)
         session_provider = None
         session_model = None
         if body.model_provider or body.model_name:

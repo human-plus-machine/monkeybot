@@ -215,28 +215,28 @@ async def _ensure_conversation_history_agent_scope_column(conn: aiosqlite.Connec
     """Add ``agent_scope`` when upgrading an existing DB.
 
     The scoped index is created here, after the column exists, rather than in
-    ``SCHEMA_DDLS``: that DDL list runs first and would fail referencing a
-    column not yet added to a pre-existing table.
-
-    Deliberately does not backfill legacy (``agent_scope = ''``) rows into
-    whichever agent_scope happens to open the DB first: reviewed and rejected
-    (PR #179) — an operator's SQLite file can be pointed at by more than one
-    agent root (an explicit shared absolute ``db_url``, or a config mistake),
-    and reproduced directly: opening as scope A on a DB holding both A's and
-    B's legacy threads let A read B's, and permanently emptied B's history the
-    moment A's open claimed everything. Ambiguous shared history has no safe
-    automatic owner; see :func:`warn_if_legacy_unscoped_history`, called by
-    ``SQLiteStorageBackend.open()``, for the required manual path instead.
+    ``SCHEMA_DDLS``, which runs first and would fail referencing a column not
+    yet on a pre-existing table. Never backfills legacy (``agent_scope=''``)
+    rows to any agent automatically — see
+    ``docs/migrations/agent-scope-namespacing.md`` for why, and for the
+    required manual path (:func:`warn_if_legacy_unscoped_history` below).
     """
     cur = await conn.execute("PRAGMA table_info(conversation_history)")
     rows = await cur.fetchall()
     await cur.close()
     names = {str(r[1]) for r in rows}
     if "agent_scope" not in names:
-        await conn.execute(
-            "ALTER TABLE conversation_history ADD COLUMN agent_scope TEXT NOT NULL DEFAULT ''"
-        )
-        await conn.commit()
+        try:
+            await conn.execute(
+                "ALTER TABLE conversation_history ADD COLUMN agent_scope TEXT NOT NULL DEFAULT ''"
+            )
+            await conn.commit()
+        except aiosqlite.OperationalError as exc:
+            if "duplicate column name" not in str(exc):
+                raise
+            # Two gateways opened this same shared file concurrently and both
+            # saw the column missing; the other one's ALTER already committed
+            # between our check and this statement — fine, it exists now.
     await conn.execute(
         """CREATE INDEX IF NOT EXISTS idx_history_scope_thread
         ON conversation_history(agent_scope, thread_id, created_at DESC, id DESC)"""
@@ -247,17 +247,12 @@ async def _ensure_conversation_history_agent_scope_column(conn: aiosqlite.Connec
 async def warn_if_legacy_unscoped_history(conn: aiosqlite.Connection) -> None:
     """Log once if pre-migration (``agent_scope = ''``) rows remain.
 
-    Those rows are not reachable via ``list_threads``, ``load``, or ``reset``
-    from any agent-scoped store — there is no automatic remediation (see
-    :func:`_ensure_conversation_history_agent_scope_column`) — so an operator
-    who knows which legacy thread_id belongs to which agent must run, per
-    thread_id::
+    Unreachable via ``list_threads``/``load``/``reset`` from any agent-scoped
+    store until an operator runs, per thread_id (see
+    ``docs/migrations/agent-scope-namespacing.md``)::
 
         UPDATE conversation_history SET agent_scope = '<agent-id>'
         WHERE thread_id = '<thread-id>' AND agent_scope = '';
-
-    against this DB file directly (e.g. via the ``sqlite3`` CLI) before that
-    thread becomes resumable again.
     """
     cur = await conn.execute(
         "SELECT EXISTS(SELECT 1 FROM conversation_history WHERE agent_scope = '')"
