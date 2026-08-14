@@ -346,3 +346,38 @@ def test_importing_sqlite_does_not_import_google_cloud() -> None:
         sys.modules.pop(module_name, None)
     after = {k for k in sys.modules if k.startswith("google.cloud")}
     assert after == before
+
+
+@pytest.mark.asyncio
+async def test_history_reset_is_atomic_on_insert_failure(history_db) -> None:
+    """Crash mid-reset must not leave the thread empty after DELETE committed alone."""
+    _conn, history = history_db
+    thread_id = "t-atomic-reset"
+    await history.append(thread_id, Message.text("user", "keep-me"))
+    await history.append(thread_id, Message.text("assistant", "also-keep"))
+
+    original_insert = history._insert_message
+    calls = {"n": 0}
+
+    async def boom(thread_id: str, message: Message) -> None:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("simulated insert failure")
+        await original_insert(thread_id, message)
+
+    history._insert_message = boom  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="simulated insert failure"):
+        await history.reset(
+            thread_id,
+            [
+                Message.text("user", "new-a"),
+                Message.text("assistant", "new-b"),
+            ],
+        )
+
+    restored = await history.load(thread_id)
+    assert [b.text for m in restored for b in m.content if isinstance(b, Text)] == [
+        "keep-me",
+        "also-keep",
+    ]

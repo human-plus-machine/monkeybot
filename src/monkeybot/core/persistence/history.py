@@ -39,6 +39,11 @@ class SQLiteHistoryStore:
 
     async def append(self, thread_id: str, message: Message) -> None:
         """Validate ``message``, JSON-encode content blocks, insert one row."""
+        await self._insert_message(thread_id, message)
+        await self._conn.commit()
+
+    async def _insert_message(self, thread_id: str, message: Message) -> None:
+        """Insert one history row without committing (caller owns the transaction)."""
         _validate_message(message)
         payload = json.dumps(
             [b.to_dict() for b in message.content],
@@ -53,7 +58,6 @@ class SQLiteHistoryStore:
             """,
             (thread_id, message.role, payload, created_at),
         )
-        await self._conn.commit()
 
     async def load(self, thread_id: str, limit: int | None = None) -> list[Message]:
         """Return messages for ``thread_id``, oldest first.
@@ -119,13 +123,22 @@ class SQLiteHistoryStore:
         await self._conn.commit()
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None:
-        """Replace the thread transcript with ``messages`` (validated like ``append``)."""
-        await self._conn.execute(
-            "DELETE FROM conversation_history WHERE thread_id = ?", (thread_id,)
-        )
-        await self._conn.commit()
-        for msg in messages:
-            await self.append(thread_id, msg)
+        """Replace the thread transcript with ``messages`` (validated like ``append``).
+
+        Delete + re-insert run in a single SQLite transaction so a crash mid-reset
+        cannot leave the thread empty or only partially rewritten.
+        """
+        await self._conn.execute("BEGIN")
+        try:
+            await self._conn.execute(
+                "DELETE FROM conversation_history WHERE thread_id = ?", (thread_id,)
+            )
+            for msg in messages:
+                await self._insert_message(thread_id, msg)
+            await self._conn.commit()
+        except Exception:
+            await self._conn.rollback()
+            raise
 
     async def list_threads(self, limit: int = 50) -> list[ChatThreadSummary]:
         """Return recent threads ordered by last activity (newest first).
