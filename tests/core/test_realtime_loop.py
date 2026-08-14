@@ -397,7 +397,7 @@ class TestRunRealtimeTurn:
     async def test_tool_confirm_cancelled_error_propagates(self) -> None:
         import asyncio
 
-        from monkeybot.core.runtime.events import Error, ToolConfirmationRequestEvent
+        from monkeybot.core.runtime.events import Error, ToolCallResult, ToolConfirmationRequestEvent
         from monkeybot.core.tools.inspector import Decision
 
         class ConfirmInspector:
@@ -405,14 +405,17 @@ class TestRunRealtimeTurn:
                 del call, ctx
                 return Decision(kind="confirm", message="Allow?")
 
-        class NeverResolveBus:
+        class CancelOnRegisterBus:
             def register_pending(self, pending_key: str) -> asyncio.Future[object]:
                 del pending_key
-                return asyncio.get_running_loop().create_future()
+                fut: asyncio.Future[object] = asyncio.get_running_loop().create_future()
+                fut.cancel()
+                return fut
 
         history = FakeHistory()
         ctx = _ctx()
-        agen = run_realtime_turn(
+        events = []
+        async for ev in run_realtime_turn(
             "hi",
             "calling",
             [RealtimeToolCall(call_id="c1", name="shell", args={"cmd": "ls"})],
@@ -420,37 +423,18 @@ class TestRunRealtimeTurn:
             history=history,
             tool_executor=RecordingExecutor(),
             inspectors=[ConfirmInspector()],
-            pending_bus=NeverResolveBus(),
-        )
+            pending_bus=CancelOnRegisterBus(),
+        ):
+            events.append(ev)
 
-        while True:
-            ev = await agen.__anext__()
-            if isinstance(ev, ToolConfirmationRequestEvent):
-                break
-
-        # Next __anext__ resumes into the HITL await. Cancellation must not fall
-        # through as a normal tool deny — either CancelledError or a cancel Error.
-        wait_task = asyncio.create_task(agen.__anext__())
-        await asyncio.sleep(0)
-        assert not wait_task.done()
-        wait_task.cancel()
-        try:
-            result = await wait_task
-        except asyncio.CancelledError:
-            result = None
-        else:
-            assert isinstance(result, Error)
-            assert "cancel" in result.error.lower()
-            # Generator should stop after cancel rather than continuing tools.
-            trailing = []
-            try:
-                while True:
-                    trailing.append(await asyncio.wait_for(agen.__anext__(), timeout=0.05))
-            except (StopAsyncIteration, TimeoutError, asyncio.CancelledError):
-                pass
-            assert not any(isinstance(e, ToolCallResult) for e in trailing)
-        # Best-effort cleanup; a half-cancelled async gen may ignore GeneratorExit.
-        try:
-            await asyncio.wait_for(agen.aclose(), timeout=0.05)
-        except (TimeoutError, RuntimeError, asyncio.CancelledError):
-            pass
+        assert any(isinstance(e, Error) and "cancel" in e.error.lower() for e in events)
+        cancel_results = [
+            e for e in events if isinstance(e, ToolCallResult) and e.error
+        ]
+        assert cancel_results, "confirm-cancel must emit cancel tool results"
+        tool_msgs = [
+            m
+            for m in history.rows
+            if m.role == "user" and any(isinstance(b, ToolResponse) for b in m.content)
+        ]
+        assert tool_msgs, "confirm-cancel must settle tool responses into history"

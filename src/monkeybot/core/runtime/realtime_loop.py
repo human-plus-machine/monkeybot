@@ -29,6 +29,7 @@ from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
 from monkeybot.core.llm.provider import Message, ToolCall
 from monkeybot.core.llm.realtime_provider import RealtimeToolCall
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.messages.tool_integrity import cancelled_tool_result_text
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.runtime.events import (
@@ -395,6 +396,7 @@ async def run_realtime_turn(
         # 4. Dispatch tools sequentially (v1: no parallel subagent dispatch here).
         mcp_registry_mutated = False
         loops_registry_mutated = False
+        abort_confirm = False
         pending_calls = [_realtime_tool_call_to_tool_call(rtc) for rtc in assistant_tool_calls]
         # Realtime has no vendor length-limit signal; reject only all-parse_error batches.
         reject_batch = _should_reject_tool_batch(pending_calls, truncated=False)
@@ -484,10 +486,25 @@ async def run_realtime_turn(
                             pending_bus, fut, call.call_id, timeout_sec=None
                         )
                     except asyncio.CancelledError:
-                        # Do not swallow cancellation into a normal deny path —
-                        # re-raise so the outer handler tears down the turn and
-                        # the generator stops (client disconnect / abort).
-                        raise
+                        # Stop cancels the pending future. Settle this call and
+                        # any remaining tools into history before exiting so
+                        # prior completed results are not dropped.
+                        yield Error(
+                            request_id=ctx.request_id, error="Request cancelled"
+                        )
+                        remaining = pending_calls[pending_calls.index(call) :]
+                        for pending in remaining:
+                            event, response = _tool_outcome(
+                                pending,
+                                ctx.request_id,
+                                ToolExecutionResult.err(
+                                    cancelled_tool_result_text(pending.name)
+                                ),
+                            )
+                            yield event
+                            tool_results.append(response)
+                        abort_confirm = True
+                        break
                     if payload.get("_timeout"):
                         allowed = False
                         denial_message = "user did not respond in time"
@@ -537,6 +554,9 @@ async def run_realtime_turn(
                             ),
                         )
                     break
+
+            if abort_confirm:
+                break
 
             if not allowed:
                 result = ToolExecutionResult.err(denial_message or "tool call denied")

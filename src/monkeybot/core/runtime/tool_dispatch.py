@@ -236,7 +236,8 @@ async def _resolve_inspector_decision(
     """Run inspectors for one call; may yield ``ToolConfirmationRequestEvent``.
 
     Fills ``outcome`` with the final allow/deny decision. Re-raises
-    ``asyncio.CancelledError`` from the confirm wait so turn abort propagates.
+    ``asyncio.CancelledError`` from the confirm wait so the gate can abort and
+    settle the batch (caller must catch and set ``aborted``).
     """
     inspector_call = InspectorToolCall(
         call_id=call.call_id, name=call.name, args=dict(call.args)
@@ -388,13 +389,23 @@ async def _gate_chunk_calls(
             continue
 
         insp_outcome = _InspectorGateOutcome()
-        async for evt in _resolve_inspector_decision(
-            call=call,
-            ctx=ctx,
-            inspectors=inspectors,
-            outcome=insp_outcome,
-        ):
-            yield evt
+        try:
+            async for evt in _resolve_inspector_decision(
+                call=call,
+                ctx=ctx,
+                inspectors=inspectors,
+                outcome=insp_outcome,
+            ):
+                yield evt
+        except asyncio.CancelledError:
+            # Stop during confirm cancels the pending future. Settle like the
+            # cancelled-event abort path so earlier completed tools still land
+            # in history instead of escaping before _fill_abort_tool_responses.
+            yield Error(request_id=ctx.request_id, error="Request cancelled")
+            result.allowed_exec = allowed_exec
+            result.chunk_responses = chunk_responses
+            result.aborted = True
+            return
 
         if not insp_outcome.allowed:
             msg = insp_outcome.denial_message or "tool call denied"

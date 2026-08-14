@@ -827,6 +827,132 @@ async def test_run_cancels_mid_provider_text_stream() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_cancel_after_stream_persists_assistant_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop after a finished stream must still persist text the user already saw."""
+    cancel = asyncio.Event()
+
+    async def _cancel_after_stream(*_args: object, **_kwargs: object) -> None:
+        cancel.set()
+
+    monkeypatch.setattr(
+        "monkeybot.core.runtime.turn_loop._fire_after_provider_response",
+        _cancel_after_stream,
+    )
+
+    hist = FakeHistory()
+    events = []
+    async for e in run(
+        "u",
+        _ctx(),
+        provider=FakeProvider([[TextDelta(text="Visible reply"), Done()]]),
+        history=hist,
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        cancelled=cancel,
+        max_turns=2,
+    ):
+        events.append(e)
+
+    assert any(isinstance(e, Error) and "cancelled" in e.error.lower() for e in events)
+    assert [m.role for m in hist.rows] == ["user", "assistant"]
+    assert _flatten_text_from_message(hist.rows[1]) == "Visible reply"
+
+
+@pytest.mark.asyncio
+async def test_run_stop_during_confirm_settles_completed_tool_results() -> None:
+    """Stop while awaiting tool confirm must settle prior tool results into history."""
+
+    class CancelOnConfirmBus:
+        def __init__(self) -> None:
+            self.futures: list[asyncio.Future[Any]] = []
+
+        def register_pending(self, key: str) -> asyncio.Future[Any]:
+            del key
+            fut: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+            self.futures.append(fut)
+            return fut
+
+    bus = CancelOnConfirmBus()
+
+    class ConfirmOnlyRunCommand:
+        async def check(self, call, ctx):  # type: ignore[no-untyped-def]
+            del ctx
+            if call.name == "run_command":
+                return Decision(kind="confirm", message="Allow shell?")
+            return Decision(kind="allow")
+
+    class WriteThenShellExecutor(RecordingExecutor):
+        async def execute(self, *, call: ToolCall, ctx: TurnContext) -> ToolExecutionResult:
+            del ctx
+            self.calls.append(call)
+            if call.name == "write_file":
+                return ToolExecutionResult.ok_text("wrote-ok")
+            return ToolExecutionResult.ok_text("should-not-run")
+
+    tools = [
+        ToolDef("write_file", "Write a file", {}),
+        ToolDef("run_command", "Run shell", {}),
+    ]
+    ctx = dataclasses.replace(
+        _ctx(),
+        tools=tools,
+        sse_bus=bus,
+    )
+    prov = FakeProvider(
+        [
+            [
+                ToolCall(call_id="w1", name="write_file", args={"path": "a.txt"}),
+                ToolCall(call_id="c1", name="run_command", args={"command": "true"}),
+                Done(),
+            ],
+        ]
+    )
+    hist = FakeHistory()
+    events: list[object] = []
+
+    async def _consume() -> None:
+        async for e in run(
+            "u",
+            ctx,
+            provider=prov,
+            history=hist,
+            inspectors=[ConfirmOnlyRunCommand()],
+            tool_executor=WriteThenShellExecutor(),
+            max_turns=3,
+        ):
+            events.append(e)
+            if bus.futures and not bus.futures[-1].done():
+                bus.futures[-1].cancel()
+
+    await _consume()
+
+    assert any(isinstance(e, Error) and "cancelled" in e.error.lower() for e in events)
+    tool_msgs = [
+        m
+        for m in hist.rows
+        if m.role == "user" and any(isinstance(b, ToolResponse) for b in m.content)
+    ]
+    assert tool_msgs, "completed tool results must be settled into history on confirm-cancel"
+    responses = {
+        b.id: b
+        for m in tool_msgs
+        for b in m.content
+        if isinstance(b, ToolResponse)
+    }
+    assert "w1" in responses
+    assert responses["w1"].is_error is False
+    assert "wrote-ok" in " ".join(
+        t.text for t in responses["w1"].result if isinstance(t, Text)
+    )
+    assert "c1" in responses
+    assert responses["c1"].is_error is True
+    cancel_text = " ".join(
+        t.text for t in responses["c1"].result if isinstance(t, Text)
+    )
+    assert 'Tool "run_command" was cancelled' in cancel_text
+
+
+@pytest.mark.asyncio
 async def test_run_generator_closes_without_pending_tasks() -> None:
     cancel = asyncio.Event()
 

@@ -1367,8 +1367,14 @@ async def _run_inner_core(
             state.action = None
 
             if cancelled is not None and cancelled.is_set():
+                # Stream already finished (and may have been shown over SSE).
+                # Persist text the same way mid-stream abort does; do not append
+                # unsettled tool requests.
                 yield Error(request_id=state.ctx.request_id, error="Request cancelled")
                 state.needs_followup_after_tools = False
+                await _persist_partial_assistant_on_abort(
+                    state, history=history, last_assistant=last_assistant
+                )
                 break
 
             if not state.pending:
