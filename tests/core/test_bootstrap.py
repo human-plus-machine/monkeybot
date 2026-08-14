@@ -293,4 +293,9 @@ async def test_run_pattern_bc_turn_default_run_command_allowlist(tmp_path: Path,
 
     assert len(captured) == 1
     executor = captured[0]
-    assert tuple(executor._run_cmd_allowed_commands) == tuple(ALLOWED_COMMANDS)
+    # No memory URI was configured, so the memory capability is withheld while
+    # the rest of the default allowlist stays intact.
+    assert deps.memory is None
+    assert tuple(executor._run_cmd_allowed_commands) == tuple(
+        cmd for cmd in ALLOWED_COMMANDS if cmd != "mempalace"
+    )

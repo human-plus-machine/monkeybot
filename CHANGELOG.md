@@ -18,6 +18,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 - PDF, DOCX, and image files are indexed with the `knowledge-media` extra. Images use `knowledge.captions` (`off` / `path` / `llm`); DOCX indexing covers tables as well as paragraphs.
 - Subagents search the parent workspace index read-only, and a second gateway attempting to write the same index is refused.
 - Soft spill and unified `read_file` char budgets derive from `model.context_window`: large tool results always land on disk with a large inline body when headroom allows; `read_file` returns `next_offset` and never lies about `end_line`.
+- When memory is off, host `run_command` children cannot see palace files (Linux user+mount namespaces or macOS `sandbox-exec`). If isolation cannot be established, the command is refused. OpenSandbox does not mount the palace. `/tmp` and `/var/folders` are no longer implicitly allowlisted path prefixes.
 
 ### Fixed
 

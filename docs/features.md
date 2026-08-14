@@ -429,7 +429,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Purpose:** Per-agent MemPalace drawers with durable SQLite outbox ingest and wake-up + L2 recall in the prompt.
 
-**Key files:** `core/memory/subsystem.py`, `hook.py`, `outbox.py`, `palace.py`, `writer.py`, `ingest.py`
+**Key files:** `core/memory/subsystem.py`, `hook.py`, `outbox.py`, `palace.py`, `writer.py`, `ingest.py`, `core/tools/fs_isolation.py`
 
 **Storage URI:** `local://` only (object-store palaces are not supported in this release).
 
@@ -445,7 +445,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 **Invariants:**
 - Chat history is canonical; MemPalace drawers are an idempotent projection.
 - Recall is scoped to the current `thread_id` by default.
-- `memory.enabled: false` (or `MONKEYBOT_MEMORY_HOOK_ENABLED=0`) skips capture, wake-up, and prompt teaching. It is not a sandbox against shell access to palace files.
+- `memory.enabled: false` (or `MONKEYBOT_MEMORY_HOOK_ENABLED=0`) skips capture, wake-up, and prompt teaching. Host `run_command` children then cannot see palace files: Linux user+mount namespaces or macOS `sandbox-exec` hide those directories. If that isolation cannot be established, the command is refused rather than run with palace files visible. OpenSandbox does not mount the palace. The kill switch is not an argv denylist; `bash` remains allowed, and the OS hides the files.
 - Postgres/Firestore history backends start without MemPalace.
 - Subagents can read the palace but do not register duplicate automatic-ingest hooks.
 - `flush()` must be called before short-lived handlers exit if organizer work matters.
