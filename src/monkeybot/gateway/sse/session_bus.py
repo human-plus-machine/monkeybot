@@ -369,12 +369,14 @@ class SessionRegistry:
         return RemoveResult(deleted=True)
 
     async def remove_async(self, session_id: str) -> RemoveResult:
-        """Detach session, clean spill files, quiesce the turn, then analyze transcript."""
+        """Detach session, quiesce the turn, clean spill files, then analyze transcript."""
         bus = self._detach(session_id)
         if bus is None:
             return RemoveResult(deleted=False)
-        await self._cleanup_spill(session_id)
+        # Quiesce before spill cleanup so an in-flight turn cannot rewrite or
+        # read spill dirs after we delete them.
         await bus.quiesce_active_turn()
+        await self._cleanup_spill(session_id)
         writer = bus.transcript_writer
         if writer is None:
             return RemoveResult(deleted=True)

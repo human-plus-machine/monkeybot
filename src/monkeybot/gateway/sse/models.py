@@ -4,7 +4,7 @@ Pydantic models and API errors for the v2 SSE gateway.
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ErrorBody(BaseModel):
@@ -50,6 +50,15 @@ class CreateSessionRequest(BaseModel):
         max_length=200,
         description="Model id for the chosen provider. None → server env default.",
     )
+
+    @field_validator("session_id")
+    @classmethod
+    def _reject_path_traversal_session_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        if "/" in value or "\\" in value or ".." in value:
+            raise ValueError("session_id must not contain path separators or '..'")
+        return value
 
 
 class CreateSessionResponse(BaseModel):

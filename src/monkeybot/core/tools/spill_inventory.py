@@ -18,6 +18,7 @@ from monkeybot.core.context.tool_shapers import (
     shape_logs,
 )
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.path_safety import sanitize_path_component
 from monkeybot.core.runtime.context_budget import diff_inventory_lines
 
 logger = logging.getLogger(__name__)
@@ -385,6 +386,25 @@ def _safe_spill_filename(call_id: str) -> str:
     return safe or "call"
 
 
+def _spill_dir_for_thread(workspace_root: Path, thread_id: str) -> tuple[str, Path]:
+    """Return ``(relative posix dir, absolute resolved dir)`` under spill root.
+
+    ``thread_id`` / ``session_id`` may be client-supplied; sanitize and contain
+    under ``.monkeybot/spill`` so path traversal cannot escape the workspace.
+    """
+    safe_thread = sanitize_path_component(thread_id) or "thread"
+    rel = f"{_SPILL_DIR_REL.as_posix()}/{safe_thread}"
+    root = spill_root(workspace_root)
+    out_dir = (Path(workspace_root) / rel).resolve()
+    try:
+        out_dir.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(
+            f"spill path escapes spill root: thread_id={thread_id!r}"
+        ) from exc
+    return rel, out_dir
+
+
 def write_spill_with_inventory(
     text: str,
     workspace_root: Path,
@@ -400,9 +420,11 @@ def write_spill_with_inventory(
     body prefix plus a preview-free inventory note; otherwise history is the
     preview-carrying note only (body-less case).
     """
-    rel = f"{_SPILL_DIR_REL.as_posix()}/{thread_id}/{_safe_spill_filename(call_id)}.txt"
-    out_path = (Path(workspace_root) / rel).resolve()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    rel_dir, out_dir = _spill_dir_for_thread(workspace_root, thread_id)
+    filename = f"{_safe_spill_filename(call_id)}.txt"
+    rel = f"{rel_dir}/{filename}"
+    out_path = out_dir / filename
+    out_dir.mkdir(parents=True, exist_ok=True)
     out_path.write_text(text, encoding="utf-8")
     body_prefix, note = spill_inline_and_note(
         text, rel, tool_name=tool_name, inline_budget=inline_budget
@@ -461,12 +483,11 @@ def write_run_command_timeout_spill(
             "",
         ]
     )
-    rel = (
-        f"{_SPILL_DIR_REL.as_posix()}/{thread_id}/"
-        f"{_safe_spill_filename(f'{call_id}-timeout')}.txt"
-    )
-    out_path = (Path(workspace_root) / rel).resolve()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    rel_dir, out_dir = _spill_dir_for_thread(workspace_root, thread_id)
+    filename = f"{_safe_spill_filename(f'{call_id}-timeout')}.txt"
+    rel = f"{rel_dir}/{filename}"
+    out_path = out_dir / filename
+    out_dir.mkdir(parents=True, exist_ok=True)
     out_path.write_text(body, encoding="utf-8")
     logger.debug(
         "run_command timeout spill %s",
@@ -488,10 +509,34 @@ def session_spill_dirs(workspace_root: Path, session_id: str) -> list[Path]:
     can remove both with one namespace.
     """
     root = spill_root(workspace_root)
-    dirs: list[Path] = [root / session_id]
+    safe_session = sanitize_path_component(session_id) or "session"
+    dirs: list[Path] = [root / safe_session]
     if root.is_dir():
-        dirs.extend(sorted(root.glob(f"subagent:{session_id}:*")))
-    return dirs
+        # Match both sanitized and legacy raw layouts for cleanup.
+        dirs.extend(sorted(root.glob(f"subagent:{safe_session}:*")))
+        if safe_session != session_id:
+            legacy = (root / session_id).resolve()
+            try:
+                legacy.relative_to(root)
+            except ValueError:
+                pass
+            else:
+                dirs.append(legacy)
+                dirs.extend(sorted(root.glob(f"subagent:{session_id}:*")))
+    # De-dupe while preserving order; drop anything outside spill root.
+    seen: set[Path] = set()
+    contained: list[Path] = []
+    for path in dirs:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            continue
+        seen.add(resolved)
+        contained.append(resolved)
+    return contained
 
 
 def _rmtree_spill(path: Path) -> None:
