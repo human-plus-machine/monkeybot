@@ -37,10 +37,35 @@ The portable override contract is `MONKEYBOT_CONFIG`,
 `MONKEYBOT_WORKSPACE_ROOT`, `MONKEYBOT_WORKSPACE_ROOT_OVERRIDE` (absolute path;
 beats yaml `paths.workspace_root` for one process — used by Monkeybot Mac
 workspace sessions), `SKILLS_PATH`, `DB_URL`, `MEMORY_STORAGE_URI`,
-`MCP_CONFIG`, `SANDBOX_ENABLED`, `SANDBOX_SERVER_URL`, `SANDBOX_IMAGE`,
+`MCP_CONFIG`, `MONKEYBOT_AGENT_ID` (or yaml `paths.agent_id`; see below),
+`SANDBOX_ENABLED`, `SANDBOX_SERVER_URL`, `SANDBOX_IMAGE`,
 `SANDBOX_API_KEY` (with `SANDBOX_AUTH_TOKEN` accepted as a compatibility alias),
 `SANDBOX_SHARED_FILESYSTEM`, and `PORT`. Use absolute override values when a
 container or platform places a zone somewhere other than the agent root.
+
+### Agent identity (`MONKEYBOT_AGENT_ID` / `paths.agent_id`)
+
+Conversation history is namespaced per agent so that gateways for different
+agents sharing one `db_url` (a shared Postgres/Firestore backend, or an
+explicit shared SQLite path) can't read or resume each other's threads. The
+namespace defaults to the resolved agent root's absolute filesystem path,
+which is convenient but not durable: it changes if the agent is later moved,
+redeployed at a different mount point, or run as multiple replicas that need
+to keep sharing one conversation history — any of those silently strands the
+existing history under the old path.
+
+Set `MONKEYBOT_AGENT_ID` (or `paths.agent_id` in `monkeybot.yaml`) to a stable
+string when any of that applies, and keep the value unchanged across future
+deploys. `AgentLayout.export_environment()` propagates the resolved value to
+child processes (subagent workers) as `MONKEYBOT_AGENT_ID`, so they stay
+consistent with the gateway without needing to set it themselves.
+
+Pattern B/C embedders (`create_harness_deps()`, see `docs/deploy-pattern-b-serverless.md`
+/ `docs/deploy-pattern-c-agent-platform.md`) have no agent-root concept to
+default to, but `create_harness_deps()` reads this same `MONKEYBOT_AGENT_ID`
+env var automatically when its `agent_scope` argument is left unset — set it
+whenever a `db_url` might ever be shared across more than one deployment or
+tenant.
 
 `monkeybot doctor` prints the resolved layout and flags a legacy `skills`
 directory nested inside `workspace`. It offers a preview only: inspect and

@@ -617,6 +617,9 @@ async def run_worker_main() -> None:
         "subagent worker starting stale_claim_ms=%d (MONKEYBOT_WORKER_STALE_CLAIM_MS)",
         settings.stale_claim_ms,
     )
+    # No agent_scope: this worker only claims/records subagent_runs rows via
+    # .runs(), never .history() — conversation_history's agent-scope
+    # isolation (PR #179) doesn't apply to what this process touches.
     backend = create_storage_backend(db_url)
     await backend.open(run_schema=auto_schema_enabled_from_config())
     try:

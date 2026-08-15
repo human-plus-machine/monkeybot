@@ -39,6 +39,7 @@ ENV_MAP: dict[tuple[str, str], str] = {
     ("paths", "command_allowlist_config"): "COMMAND_ALLOWLIST_CONFIG",
     ("paths", "permission_config"): "PERMISSION_CONFIG",
     ("paths", "workspace_root"): "MONKEYBOT_WORKSPACE_ROOT",
+    ("paths", "agent_id"): "MONKEYBOT_AGENT_ID",
     ("model", "provider"): "MODEL_PROVIDER",
     ("model", "name"): "MODEL_NAME",
     ("model", "temperature"): "MODEL_TEMPERATURE",

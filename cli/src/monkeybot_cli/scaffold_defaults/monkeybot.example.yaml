@@ -73,6 +73,13 @@ paths:
   db_url: sqlite:///data/monkeybot.db
   # Apply SQLite/Postgres DDL on startup (true | false). Default true. Set false when migrations own the schema.
   auto_schema: true
+  # Durable identity used to namespace conversation history when db_url is shared
+  # across agents/replicas. Defaults to this agent root's filesystem path, which
+  # breaks if the agent is later moved or mounted somewhere else. Set this
+  # explicitly (and keep it stable across deploys) for relocatable agents or
+  # multi-replica deployments that must keep sharing one conversation history.
+  # agent_id: my-agent
+
   mcp_config: ./monkeybot_config/mcp.json
   command_allowlist_config: ./monkeybot_config/command_allowlist.yaml
   # Soft permission ruleset (allow/ask/deny). Hard allowlists stay in command_allowlist.yaml.

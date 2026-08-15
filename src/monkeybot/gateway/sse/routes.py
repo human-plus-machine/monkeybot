@@ -556,6 +556,12 @@ def create_app(
         """Create a session and its event bus."""
         created_at_ms = int(time.time() * 1000)
         sid = body.session_id or str(uuid.uuid4())
+        if body.session_id:
+            from monkeybot.core.persistence.thread_summary import reserved_thread_id_error
+
+            error_message = reserved_thread_id_error(sid)
+            if error_message is not None:
+                raise APIError(400, "BAD_REQUEST", error_message, uuid.uuid4().hex)
         session_provider = None
         session_model = None
         if body.model_provider or body.model_name:

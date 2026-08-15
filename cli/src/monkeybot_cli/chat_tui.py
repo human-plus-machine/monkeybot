@@ -1821,6 +1821,8 @@ class ChatApp(App[int]):
             else "Goodbye."
         )
         self._mount_system(msg)
+        if self._session_id:
+            self._mount_system("To continue this conversation, run: monkeybot chat --continue")
         self._close_session_and_exit()
 
     @work(exclusive=True)

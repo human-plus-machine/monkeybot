@@ -101,6 +101,7 @@ async def create_harness_deps(
     provider_override: Provider | None = None,
     _provider_override: Provider | None = None,
     workspace_root: Path | None = None,
+    agent_scope: str | None = None,
 ) -> HarnessDeps:
     """Open storage, optional memory, MCP, and resolve the LLM provider.
 
@@ -116,9 +117,26 @@ async def create_harness_deps(
         provider_override: Inject a custom :class:`~monkeybot.core.llm.provider.Provider` (skips config lookup).
         _provider_override: Deprecated alias for ``provider_override`` (tests).
         workspace_root: When set with knowledge enabled, constructs :class:`KnowledgeSubsystem`.
+        agent_scope: Namespaces conversation history in ``db_url``, same as the gateway's
+            resolved agent root (see :func:`~monkeybot.core.persistence.backends.create_storage_backend`).
+            **Required** whenever more than one ``create_harness_deps`` caller (e.g. one Lambda
+            handler serving several tenants, or several agent-platform deployments) can ever
+            point at the same ``db_url`` — otherwise every embedded agent shares one global,
+            unscoped conversation-history namespace and can read/resume each other's
+            same-named sessions via ``list_threads``/``load``, the exact leak this scoping
+            exists to close. Defaults to ``None``, which resolves ``MONKEYBOT_AGENT_ID`` from
+            the process environment (empty string if unset) — the same env var
+            ``AgentLayout.export_environment()`` sets for the gateway and its subagent workers,
+            so an embedder that already exports it for that reason gets it here for free. Pass
+            ``''`` explicitly only to deliberately opt out of scoping (single-tenant embedding
+            with no shared ``db_url``); passing a concrete value always wins over the
+            environment.
     """
     override = provider_override if provider_override is not None else _provider_override
-    backend = create_storage_backend(db_url)
+    resolved_agent_scope = (
+        os.environ.get("MONKEYBOT_AGENT_ID", "").strip() if agent_scope is None else agent_scope
+    )
+    backend = create_storage_backend(db_url, agent_scope=resolved_agent_scope)
     await backend.open(run_schema=auto_schema_enabled_from_config())
     try:
         if override is not None:

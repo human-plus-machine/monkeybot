@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from monkeybot.core.persistence.backends import ScheduledLoopStore, StorageBackend
 from monkeybot.core.persistence.scheduled_loops import ScheduledLoopCreate, ScheduledLoopRow
+from monkeybot.core.persistence.thread_summary import reserved_thread_id_error
 from monkeybot.core.types.content_blocks import Text
 from monkeybot.gateway.sse.loop_port import LoopPort
 from monkeybot.gateway.sse.models import APIError
@@ -89,6 +90,9 @@ def build_scheduler_router(*, loop_port: LoopPort, registry: SessionRegistry) ->
                 "confirmed=true is required to register a scheduled loop via REST/CLI",
                 uuid.uuid4().hex,
             )
+        error_message = reserved_thread_id_error(body.session_id)
+        if error_message is not None:
+            raise APIError(400, "BAD_REQUEST", error_message, uuid.uuid4().hex)
         try:
             interval_ms = parse_interval_ms(body.interval)
             max_runtime_ms = parse_optional_duration_ms(body.max_runtime)
@@ -172,6 +176,9 @@ def build_scheduler_router(*, loop_port: LoopPort, registry: SessionRegistry) ->
     ) -> dict[str, Any]:
         """Run one agent turn synchronously (scheduler worker / internal automation)."""
         if reg_dep.get(body.session_id) is None:
+            error_message = reserved_thread_id_error(body.session_id)
+            if error_message is not None:
+                raise APIError(400, "BAD_REQUEST", error_message, uuid.uuid4().hex)
             await ensurer.ensure_session(body.session_id)
         turn_locks = _storage_backend(request).session_turns()
         acquired = await turn_locks.try_acquire(body.session_id, body.request_id)

@@ -419,7 +419,8 @@ async def test_append_without_memory_columns_when_schema_is_legacy(tmp_path: Pat
             thread_id TEXT NOT NULL,
             role TEXT NOT NULL,
             content TEXT NOT NULL,
-            created_at INTEGER NOT NULL
+            created_at INTEGER NOT NULL,
+            agent_scope TEXT NOT NULL DEFAULT ''
         )
         """
     )
@@ -736,7 +737,8 @@ async def test_managed_schema_upgrade_from_documented_ddl(tmp_path: Path) -> Non
             thread_id TEXT NOT NULL,
             role TEXT NOT NULL,
             content TEXT NOT NULL,
-            created_at INTEGER NOT NULL
+            created_at INTEGER NOT NULL,
+            agent_scope TEXT NOT NULL DEFAULT ''
         )
         """
     )
@@ -797,7 +799,8 @@ async def test_unmigrated_history_refuses_atomic_outbox_append(tmp_path: Path) -
             thread_id TEXT NOT NULL,
             role TEXT NOT NULL,
             content TEXT NOT NULL,
-            created_at INTEGER NOT NULL
+            created_at INTEGER NOT NULL,
+            agent_scope TEXT NOT NULL DEFAULT ''
         )
         """
     )

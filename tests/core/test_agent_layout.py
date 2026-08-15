@@ -26,6 +26,7 @@ def _clear_layout_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
         "PERMISSION_CONFIG",
         "DB_URL",
         "MEMORY_STORAGE_URI",
+        "MONKEYBOT_AGENT_ID",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -92,6 +93,51 @@ def test_bootstrap_layout_is_identical_from_every_launch_cwd(
         assert realtime_paths() == (layout.workspace_root, layout.skills_path)
         assert cli_agent_root() == layout.agent_root
         assert subagent_worker.resolve_agent_project_root() == layout.agent_root
+    finally:
+        os.environ.clear()
+        os.environ.update(before)
+        runtime_env.reset_runtime_env_state_for_tests()
+
+
+def test_agent_id_defaults_to_agent_root_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no explicit identity set, agent_id falls back to the resolved
+    agent root path (PR #179 review: this default strands history if the
+    agent is later moved — paths.agent_id/MONKEYBOT_AGENT_ID is the escape
+    hatch, covered by test_agent_id_env_override_wins below).
+    """
+    agent = tmp_path / "agent"
+    _write_agent(agent)
+    before = dict(os.environ)
+    try:
+        runtime_env.reset_runtime_env_state_for_tests()
+        _clear_layout_overrides(monkeypatch)
+        monkeypatch.chdir(agent)
+        layout = bootstrap_agent_layout()
+        assert layout.agent_id == str(layout.agent_root)
+    finally:
+        os.environ.clear()
+        os.environ.update(before)
+        runtime_env.reset_runtime_env_state_for_tests()
+
+
+def test_agent_id_env_override_wins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``MONKEYBOT_AGENT_ID`` (or yaml ``paths.agent_id``) gives a durable
+    identity that survives moving the agent root or mounting it elsewhere.
+    """
+    agent = tmp_path / "agent"
+    _write_agent(agent)
+    before = dict(os.environ)
+    try:
+        runtime_env.reset_runtime_env_state_for_tests()
+        _clear_layout_overrides(monkeypatch)
+        monkeypatch.chdir(agent)
+        monkeypatch.setenv("MONKEYBOT_AGENT_ID", "stable-agent-id")
+        layout = bootstrap_agent_layout()
+        assert layout.agent_id == "stable-agent-id"
+        # Propagated to child processes (subagent workers), same as DB_URL etc.
+        assert os.environ["MONKEYBOT_AGENT_ID"] == "stable-agent-id"
     finally:
         os.environ.clear()
         os.environ.update(before)

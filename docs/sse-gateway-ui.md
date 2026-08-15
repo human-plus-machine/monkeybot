@@ -51,7 +51,7 @@ Errors use a common envelope:
 | `POST` | `/sessions/{session_id}/frontend-tool-results/{tool_call_id}` | Return a frontend tool result. Body: `{ "result": ContentBlock[], "is_error": boolean }` (blocks are JSON objects matching `ContentBlock` schema). **202** `{ "ok": true }`. |
 | `GET` | `/api/workspace/tree` | Optional directory listing under the gateway workspace. Query `path` (repo-relative). Disabled when `MONKEYBOT_WORKSPACE_API` is `0` / `false` / `no` / `off`. |
 | `GET` | `/api/workspace/file` | Optional file slice read. Query `path` (required), `offset` (1-based line, default 1), `limit` (default 200). Same env gate as tree. |
-| `GET` | `/api/chat-history` | Optional recent-threads listing. Disabled when `MONKEYBOT_CHAT_HISTORY_API` is `0` / `false` / `no` / `off`. |
+| `GET` | `/api/chat-history` | Optional recent-threads listing, newest first. Disabled when `MONKEYBOT_CHAT_HISTORY_API` is `0` / `false` / `no` / `off`. `monkeybot chat -c`/`--continue` uses this to auto-resume the most recent session for the current agent root. |
 | `GET` | `/api/chat-history/{session_id}` | Optional persisted user/assistant text for one thread. Same env gate as the list endpoint. |
 | `DELETE` | `/api/chat-history/{session_id}` | Clear one persisted transcript and any backend-specific thread summary. Same env gate; uses the configured `DB_URL` backend (SQLite, Postgres, or Firestore). Returns `{ "deleted": true }` as an idempotent wipe acknowledgment, even when no thread exists. |
 

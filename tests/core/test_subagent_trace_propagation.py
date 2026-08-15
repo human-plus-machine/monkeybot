@@ -343,7 +343,7 @@ def _install_worker_mocks(
     backend.open = AsyncMock()
     backend.close = AsyncMock()
     backend.history.return_value = MagicMock()
-    monkeypatch.setattr(subagent_worker, "create_storage_backend", lambda _url: backend)
+    monkeypatch.setattr(subagent_worker, "create_storage_backend", lambda _url, **_kw: backend)
 
     mcp = MagicMock()
     mcp.load_from_config = AsyncMock()
@@ -508,7 +508,7 @@ async def test_worker_completes_without_memory_uri(
     backend.open = AsyncMock()
     backend.close = AsyncMock()
     backend.history.return_value = MagicMock()
-    monkeypatch.setattr(subagent_worker, "create_storage_backend", lambda _url: backend)
+    monkeypatch.setattr(subagent_worker, "create_storage_backend", lambda _url, **_kw: backend)
 
     mcp = MagicMock()
     mcp.load_from_config = AsyncMock()
