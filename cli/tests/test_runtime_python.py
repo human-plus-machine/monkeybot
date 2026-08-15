@@ -256,6 +256,33 @@ def test_prepare_runtime_python_fail_closed_when_sync_stale(tmp_path: Path, monk
     assert (tmp_path / "pyproject.toml").read_text(encoding="utf-8") == '[project]\nname = "agent"\n'
 
 
+def test_prepare_runtime_python_fail_closed_when_uv_missing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "agent"\n', encoding="utf-8")
+    venv_bin = tmp_path / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    py = venv_bin / "python"
+    py.write_text("#!/bin/sh\n")
+    py.chmod(0o755)
+
+    def fake_run(argv, **kwargs):
+        del kwargs
+        if argv[:2] == ["uv", "sync"]:
+            raise FileNotFoundError("uv")
+
+        class Result:
+            returncode = 1
+            stderr = ""
+            stdout = ""
+
+        return Result()
+
+    monkeypatch.setattr("monkeybot_cli.runtime_python.subprocess.run", fake_run)
+    with pytest.raises(RuntimeUpgradeError, match="refusing to start"):
+        prepare_runtime_python(tmp_path)
+
+
 def test_prepare_runtime_python_fail_closed_without_pyproject(tmp_path: Path, monkeypatch) -> None:
     _write_memory_config(tmp_path, enabled=False)
     venv_bin = tmp_path / ".venv" / "bin"

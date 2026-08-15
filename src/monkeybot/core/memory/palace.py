@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import logging
 import os
-import threading
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
+from importlib.util import find_spec
 from pathlib import Path
 from typing import Any, Protocol
 
 from monkeybot.core.memory.ids import utc_now_iso
 from monkeybot.core.memory.observability import log_event
+from monkeybot.core.memory.uri import object_store_memory_scheme
 
 logger = logging.getLogger(__name__)
 
@@ -66,17 +67,30 @@ class PalacePort(Protocol):
     def acquire_write_lock(self) -> AbstractContextManager[None]: ...
 
 
+class MemoryDependencyError(RuntimeError):
+    """Raised when MemPalace-backed memory is enabled without ``monkeybot[memory]``."""
+
+
+def mempalace_available() -> bool:
+    """Whether the optional MemPalace runtime is installed."""
+    try:
+        return find_spec("mempalace") is not None
+    except (ImportError, ValueError):
+        return False
+
+
 def palace_path_from_uri(memory_uri: str) -> Path:
     raw = memory_uri.strip()
     if not raw:
         raise ValueError("memory URI is empty")
-    scheme, _, rest = raw.partition("://")
-    if rest and scheme.lower() != "local":
+    remote = object_store_memory_scheme(raw)
+    if remote:
         raise ValueError(
-            f"unsupported memory URI {memory_uri!r}; MemPalace requires local:// "
-            "(object-store palaces are not supported)"
+            f"unsupported memory URI {memory_uri!r}; MemPalace does not support "
+            f"{remote} (use local://)"
         )
-    path = rest if rest else raw
+    scheme, _, rest = raw.partition("://")
+    path = rest if rest and scheme.lower() in {"local", "file"} else raw
     return Path(path).expanduser().resolve()
 
 
@@ -87,95 +101,6 @@ def default_identity_text(agent_name: str) -> str:
         f"I am {name}, a MonkeyBot agent.\n"
         f"I remember verbatim conversation turns in this palace.\n"
     )
-
-
-class InMemoryPalace:
-    """Process-local palace used by tests (no embedder, no Chroma)."""
-
-    def __init__(
-        self,
-        palace_path: Path,
-        *,
-        agent_name: str = "test-agent",
-        backend: str = "memory",
-        embedding_model: str = DEFAULT_EMBEDDING_MODEL,
-    ) -> None:
-        self.palace_path = Path(palace_path)
-        self.backend = backend
-        self.embedding_model = embedding_model
-        self._agent_name = agent_name
-        self._lock = threading.Lock()
-        self._drawers: dict[str, DrawerRecord] = {}
-        self.palace_path.mkdir(parents=True, exist_ok=True)
-        identity = self.palace_path / "identity.txt"
-        if not identity.is_file():
-            identity.write_text(default_identity_text(agent_name), encoding="utf-8")
-        (self.palace_path / EMBEDDER_IDENTITY_FILE).write_text(embedding_model, encoding="utf-8")
-
-    def ensure_ready(self) -> None:
-        return
-
-    @contextmanager
-    def acquire_write_lock(self) -> Iterator[None]:
-        with self._lock:
-            yield
-
-    def upsert_drawer(self, drawer_id: str, content: str, metadata: dict[str, str]) -> None:
-        filed_at = metadata.get("filed_at") or metadata.get("source_timestamp") or utc_now_iso()
-        record = DrawerRecord(
-            drawer_id=drawer_id,
-            content=content,
-            wing=metadata.get("wing") or "main",
-            room=metadata.get("room") or CONVERSATION_ROOM,
-            filed_at=filed_at,
-            metadata=dict(metadata),
-        )
-        self._drawers[drawer_id] = record
-
-    def get_drawer(self, drawer_id: str) -> DrawerRecord | None:
-        return self._drawers.get(drawer_id)
-
-    def wake_up(self, wing: str | None = None) -> str:
-        identity = (self.palace_path / "identity.txt").read_text(encoding="utf-8").strip()
-        drawers = list(self._drawers.values())
-        if wing:
-            drawers = [d for d in drawers if d.wing == wing]
-        drawers.sort(key=lambda d: d.filed_at, reverse=True)
-        lines = [identity, "", "## L1 — ESSENTIAL STORY"]
-        if not drawers:
-            lines.append("No memories yet.")
-            return "\n".join(lines)
-        for drawer in drawers[:15]:
-            snippet = " ".join(drawer.content.split())
-            if len(snippet) > 200:
-                snippet = snippet[:197] + "..."
-            lines.append(f"- [{drawer.room}] {snippet}")
-        return "\n".join(lines)
-
-    def recall(
-        self,
-        *,
-        wing: str,
-        room: str,
-        n_results: int = 10,
-        thread_id: str | None = None,
-    ) -> list[DrawerRecord]:
-        matched = [
-            d
-            for d in self._drawers.values()
-            if d.wing == wing
-            and d.room == room
-            and (thread_id is None or d.metadata.get("thread_id") == thread_id)
-        ]
-        matched.sort(key=lambda d: d.filed_at, reverse=True)
-        return matched[: max(0, n_results)]
-
-    def status(self) -> dict[str, Any]:
-        return {
-            "palace_path": str(self.palace_path),
-            "total_drawers": len(self._drawers),
-            "backend": self.backend,
-        }
 
 
 def _stringify_meta(meta: dict[str, Any] | None) -> dict[str, str]:
@@ -390,13 +315,14 @@ def create_palace(
     agent_name: str,
     backend: str | None = None,
     embedding_model: str | None = None,
-    in_memory: bool = False,
 ) -> PalacePort:
     path = palace_path_from_uri(memory_uri)
     be = (backend or os.environ.get("MEMPALACE_BACKEND") or DEFAULT_BACKEND).strip()
     model = (
         embedding_model or os.environ.get("MEMPALACE_EMBEDDING_MODEL") or DEFAULT_EMBEDDING_MODEL
     ).strip()
-    if in_memory:
-        return InMemoryPalace(path, agent_name=agent_name, backend="memory", embedding_model=model)
+    if not mempalace_available():
+        raise MemoryDependencyError(
+            "MemPalace memory requires the optional dependency; install `monkeybot[memory]`"
+        )
     return MemPalaceAdapter(path, agent_name=agent_name, backend=be, embedding_model=model)

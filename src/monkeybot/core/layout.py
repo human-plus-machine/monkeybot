@@ -16,6 +16,11 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from monkeybot.core.memory.uri import (
+    DEFAULT_LOCAL_MEMORY_RELPATH,
+    object_store_memory_scheme,
+)
+
 _log = logging.getLogger(__name__)
 
 
@@ -135,16 +140,26 @@ def resolve_sqlite_url(raw: str, agent_root: Path) -> str:
 
 
 def resolve_memory_storage_uri(raw: str, agent_root: Path) -> str:
-    """Anchor local memory URIs at the agent root. Object-store schemes are rejected."""
+    """Anchor local memory URIs at the agent root.
+
+    Object-store schemes are not supported. Log once and fall back to
+    ``local://`` under the agent root so existing ``gcs://`` / ``s3://``
+    deployments still boot.
+    """
     value = raw.strip()
-    scheme, _, rest = value.partition("://")
-    if rest and scheme.lower() != "local":
-        raise ValueError(
-            f"unsupported memory URI {value!r}; MemPalace requires local:// "
-            "(object-store palaces are not supported)"
+    remote = object_store_memory_scheme(value)
+    if remote:
+        fallback = f"local://{resolve_agent_path(DEFAULT_LOCAL_MEMORY_RELPATH, agent_root)}"
+        _log.warning(
+            "unsupported memory URI %r (%s); falling back to %s",
+            value,
+            remote,
+            fallback,
         )
-    local_path = rest if rest else value
-    return f"local://{resolve_agent_path(local_path or 'memory/mempalace', agent_root)}"
+        return fallback
+    scheme, _, rest = value.partition("://")
+    local_path = rest if rest and scheme.lower() in {"local", "file"} else value
+    return f"local://{resolve_agent_path(local_path or DEFAULT_LOCAL_MEMORY_RELPATH, agent_root)}"
 
 
 @dataclass(frozen=True)

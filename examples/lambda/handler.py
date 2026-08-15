@@ -8,11 +8,19 @@ Environment (minimum):
   WORKSPACE_ROOT      — repo/workspace root for tools
 
 Optional:
-  MEMORY_STORAGE_URI  — local://, gcs://, s3:// (see Step 2 docs)
+  MEMORY_STORAGE_URI  — local:// path (gcs:// and s3:// fall back to local:// under the agent root)
   MCP_CONFIG          — path to mcpServers JSON; if unset, MCP stays empty
   MONKEYBOT_OPEN_MCP  — set to "true" to load MCP_CONFIG (default: false for Lambda)
+  MONKEYBOT_MEMORY_HOOK_ENABLED — set to 0 to skip capture/wake-up (or omit monkeybot[memory])
 
 Model/provider: use MODEL_PROVIDER, MODEL_NAME, and provider secrets as in container deploys.
+
+Memory capture uses a durable SQLite outbox. ``run_pattern_bc_turn`` drains pending
+rows at the end of each invocation; ``HarnessDeps.close()`` drains again before
+stopping the writer. Do not rely on a background writer surviving a frozen Lambda
+event loop — if you construct ``HarnessDeps`` yourself, call ``await memory.drain_writer()``
+(or ``await deps.close()``) before the invocation returns. On ephemeral ``/tmp``
+SQLite this is the difference between capturing the turn and losing it.
 
 ``hook_manager=None`` (via :func:`~monkeybot.core.bootstrap.run_pattern_bc_turn`) means the
 agent loop does not run :class:`~monkeybot.core.hooks.HookManager` callbacks, so automatic

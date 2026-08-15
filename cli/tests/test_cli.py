@@ -45,7 +45,7 @@ def test_new_scaffolds(tmp_path: Path) -> None:
     assert "MONKEYBOT_SUBAGENT_AGENT_MD" not in env_text
     assert "DB_URL" in env_text
     pyproject = (tmp_path / "pyproject.toml").read_text()
-    assert "monkeybot[gemini,sandbox,web-search]>=3.0.0,<4" in pyproject
+    assert "monkeybot[gemini,sandbox,web-search,memory]>=3.0.0,<4" in pyproject
     assert "monkeybot-browser-mcp>=0.2.0,<1" in pyproject
     assert "package = false" in pyproject
     assert "[tool.uv.sources]" not in pyproject
@@ -66,14 +66,14 @@ def test_refresh_updates_existing_agent(tmp_path: Path) -> None:
     assert created.returncode == 0
     allow = tmp_path / "monkeybot_config" / "command_allowlist.yaml"
     allow.write_text("allowed_commands:\n  - bash\n  - officecli\n", encoding="utf-8")
+    original_pyproject = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
     result = _run_cli("refresh", "--dest", str(tmp_path))
     assert result.returncode == 0, result.stderr
     text = allow.read_text(encoding="utf-8")
     assert "mempalace" in text
     assert "officecli" in text
     assert "command_allowlist.yaml: updated" in result.stdout
-    pyproject = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
-    assert "monkeybot[gemini,sandbox,web-search]>=3.0.0,<4" in pyproject
+    assert (tmp_path / "pyproject.toml").read_text(encoding="utf-8") == original_pyproject
 
 
 def test_refresh_rejects_empty_dest(tmp_path: Path) -> None:

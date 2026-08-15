@@ -215,26 +215,15 @@ async def mark_committed(
     if not row_ids:
         return
     for row_id in row_ids:
-        if lease_owner:
-            await conn.execute(
-                """
-                UPDATE memory_outbox
-                SET status = 'committed', lease_owner = NULL, lease_expires_at = NULL,
-                    last_error = NULL, next_attempt_at = NULL
-                WHERE id = ? AND lease_owner = ?
-                """,
-                (row_id, lease_owner),
-            )
-        else:
-            await conn.execute(
-                """
-                UPDATE memory_outbox
-                SET status = 'committed', lease_owner = NULL, lease_expires_at = NULL,
-                    last_error = NULL, next_attempt_at = NULL
-                WHERE id = ?
-                """,
-                (row_id,),
-            )
+        await conn.execute(
+            """
+            UPDATE memory_outbox
+            SET status = 'committed', lease_owner = NULL, lease_expires_at = NULL,
+                last_error = NULL, next_attempt_at = NULL
+            WHERE id = ? AND (? IS NULL OR lease_owner = ?)
+            """,
+            (row_id, lease_owner, lease_owner),
+        )
     await conn.commit()
 
 
@@ -248,26 +237,15 @@ async def mark_retry(
 ) -> None:
     status = STATUS_DEAD if error_class in _PERMANENT_ERRORS else STATUS_PENDING
     next_at = None if status == STATUS_DEAD else backoff_iso(attempts)
-    if lease_owner:
-        await conn.execute(
-            """
-            UPDATE memory_outbox
-            SET status = ?, last_error = ?, next_attempt_at = ?,
-                lease_owner = NULL, lease_expires_at = NULL
-            WHERE id = ? AND lease_owner = ?
-            """,
-            (status, error_class, next_at, row_id, lease_owner),
-        )
-    else:
-        await conn.execute(
-            """
-            UPDATE memory_outbox
-            SET status = ?, last_error = ?, next_attempt_at = ?,
-                lease_owner = NULL, lease_expires_at = NULL
-            WHERE id = ?
-            """,
-            (status, error_class, next_at, row_id),
-        )
+    await conn.execute(
+        """
+        UPDATE memory_outbox
+        SET status = ?, last_error = ?, next_attempt_at = ?,
+            lease_owner = NULL, lease_expires_at = NULL
+        WHERE id = ? AND (? IS NULL OR lease_owner = ?)
+        """,
+        (status, error_class, next_at, row_id, lease_owner, lease_owner),
+    )
     await conn.commit()
 
 
@@ -275,9 +253,8 @@ async def gc_committed(conn: aiosqlite.Connection, *, days: int = _GC_AFTER_DAYS
     cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat(timespec="seconds")
     cur = await conn.execute(
         """
-        UPDATE memory_outbox
-        SET content = NULL
-        WHERE status = 'committed' AND content IS NOT NULL AND created_at < ?
+        DELETE FROM memory_outbox
+        WHERE status = 'committed' AND created_at < ?
         """,
         (cutoff,),
     )

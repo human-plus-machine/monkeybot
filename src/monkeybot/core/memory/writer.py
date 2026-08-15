@@ -134,11 +134,11 @@ class MemoryWriter:
                     memory_batch_size=len(rows),
                     memory_backend=self._backend,
                 )
-                return await self._upsert_batch(conn, rows)
+                return await self._upsert_rows(conn, rows)
         finally:
             self._flushing.set()
 
-    async def _upsert_batch(
+    async def _upsert_rows(
         self, conn: aiosqlite.Connection, rows: list[outbox_mod.OutboxRow]
     ) -> int:
         committed = 0
@@ -159,7 +159,7 @@ class MemoryWriter:
                     ) as span:
                         if row.traceparent:
                             link_to_traceparent(span, row.traceparent)
-                        await asyncio.to_thread(self._upsert_rows, [row])
+                        await asyncio.to_thread(self._upsert_row, row)
                 await outbox_mod.mark_committed(conn, [row.id], lease_owner=self._lease_owner)
                 log_event(
                     "writer_commit",
@@ -188,7 +188,5 @@ class MemoryWriter:
                 )
         return committed
 
-    def _upsert_rows(self, rows: list[outbox_mod.OutboxRow]) -> None:
-        for row in rows:
-            content = row.content or ""
-            self._palace.upsert_drawer(row.id, content, row.metadata())
+    def _upsert_row(self, row: outbox_mod.OutboxRow) -> None:
+        self._palace.upsert_drawer(row.id, row.content or "", row.metadata())

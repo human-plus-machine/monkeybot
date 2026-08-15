@@ -232,11 +232,9 @@ class MemorySubsystem:
             return 0
         return await self._writer.drain(timeout_s=timeout_s)
 
-    async def flush(self) -> None:
-        await self.drain_writer()
-
     async def close(self) -> None:
         if self._writer is not None:
+            await self.drain_writer()
             await self._writer.stop()
 
     async def get_drawer(self, drawer_id: str) -> dict[str, Any] | None:

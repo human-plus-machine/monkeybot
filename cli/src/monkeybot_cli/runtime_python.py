@@ -166,7 +166,15 @@ def prepare_runtime_python(
         f"agent runtime is missing harness packages; running uv sync in {agent_root}",
         flush=True,
     )
-    sync = subprocess.run(["uv", "sync"], cwd=agent_root, check=False)
+    try:
+        sync = subprocess.run(["uv", "sync"], cwd=agent_root, check=False)
+    except FileNotFoundError as exc:
+        raise _upgrade_error(
+            agent_root=agent_root,
+            memory_enabled=memory_enabled,
+            has_project=True,
+            detail=str(exc),
+        ) from exc
     runtime = resolve_runtime_python(agent_root)
     if sync.returncode != 0 or not run_probe(runtime, probe):
         raise _upgrade_error(
