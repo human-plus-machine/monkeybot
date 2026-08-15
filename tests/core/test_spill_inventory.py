@@ -145,9 +145,38 @@ def test_create_session_rejects_dot_session_id() -> None:
         CreateSessionRequest(session_id=".")
 
 
+def test_create_session_rejects_glob_session_id() -> None:
     from pydantic import ValidationError
 
     from monkeybot.gateway.sse.models import CreateSessionRequest
 
     with pytest.raises(ValidationError):
         CreateSessionRequest(session_id="*")
+
+
+def test_write_spill_allows_symlinked_monkeybot_dir(tmp_path: Path) -> None:
+    from monkeybot.core.tools.spill_inventory import write_spill_with_inventory
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    store = tmp_path / "store"
+    store.mkdir()
+    (ws / ".monkeybot").symlink_to(store)
+
+    out = write_spill_with_inventory("payload", ws, "thread-1", "call-1")
+    assert ".monkeybot/spill/thread-1/call-1.txt" in out
+    written = list((store / "spill").rglob("call-1.txt"))
+    assert len(written) == 1
+
+
+def test_session_spill_dirs_skips_traversal_legacy_id(tmp_path: Path) -> None:
+    root = tmp_path / ".monkeybot" / "spill"
+    (root / "victim").mkdir(parents=True)
+    (root / "victim" / "keep.txt").write_text("x")
+    (root / "a___victim").mkdir(parents=True)
+
+    dirs = session_spill_dirs(tmp_path, "a/../victim")
+    names = {p.name for p in dirs}
+    assert names == {"a___victim"}
+    assert "victim" not in names
+    assert (root / "victim" / "keep.txt").is_file()

@@ -23,6 +23,9 @@ from monkeybot.core.tools.workspace_service import AGENT_READ_DEFAULT_LINES
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.todo_list.store import TodoListStore
 
+# Bounded ring of pending keys that have been resolved / abandoned / Stop-cancelled.
+TERMINATED_PENDING_KEYS_MAXLEN: int = 256
+
 
 @runtime_checkable
 class CustomTool(Protocol):

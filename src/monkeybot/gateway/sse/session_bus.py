@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
+from monkeybot.core.context import TERMINATED_PENDING_KEYS_MAXLEN
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.persistence.transcript_analyzer import analyze_transcript
@@ -103,7 +104,9 @@ class SessionBus:
         self._subscribers: set[asyncio.Queue[str]] = set()
         self._lock = asyncio.Lock()
         self.pending_responses: dict[str, asyncio.Future[Any]] = {}
-        self.terminated_pending_keys: deque[str] = deque(maxlen=256)
+        self.terminated_pending_keys: deque[str] = deque(
+            maxlen=TERMINATED_PENDING_KEYS_MAXLEN
+        )
         self.attachment_catalog: SessionAttachmentCatalog | None = None
         self.todo_store: TodoListStore | None = None
         """Process-local session todo list (not shared across gateway replicas)."""

@@ -148,7 +148,11 @@ async def _await_user_response_any(
 
 
 def confirm_wait_stopped_by_user(bus: object | None, pending_key: str) -> bool:
-    """True when Stop abandoned the confirm future; False when the turn task was cancelled."""
+    """True when Stop abandoned the confirm future; False when the turn task was cancelled.
+
+    ``unknown`` fails closed (re-raise): Stop always records terminated keys via
+    ``abandon_pending_cancel_all``, so an unknown key is not treated as user Stop.
+    """
     if bus is None:
         return False
     checker = getattr(bus, "is_pending_or_terminal", None)
@@ -163,15 +167,4 @@ def confirm_wait_stopped_by_user(bus: object | None, pending_key: str) -> bool:
             fut = pending.get(pending_key)
             return isinstance(fut, asyncio.Future) and fut.cancelled()
         return False
-    # Stop via abandon_pending_cancel_all removes the key without terminated tracking.
-    return True
-
-
-def uncancel_current_task() -> None:
-    """Clear a pending task-cancellation count after handling ``CancelledError``."""
-    try:
-        cur = asyncio.current_task()
-        if cur is not None and getattr(cur, "uncancel", None):
-            cur.uncancel()
-    except Exception:
-        pass
+    return False

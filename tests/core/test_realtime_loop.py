@@ -572,4 +572,4 @@ class TestRunRealtimeTurn:
             await task
         except asyncio.CancelledError:
             pass
-        assert task.cancelling() == 0
+        assert task.cancelled()

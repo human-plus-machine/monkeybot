@@ -109,19 +109,10 @@ class SQLiteHistoryStore:
         message_id: str | None = None,
     ) -> None:
         """Validate ``message``, JSON-encode content blocks, insert one row."""
-        _validate_message(message)
-        payload = json.dumps(
-            [b.to_dict() for b in message.content],
-            separators=(",", ":"),
-            ensure_ascii=False,
-        )
-        created_at = int(time.time() * 1000)
         async with self._lock:
-            await self._insert_history_row(
+            await self._insert_message(
                 thread_id,
-                message.role,
-                payload,
-                created_at,
+                message,
                 turn_id=turn_id,
                 message_id=message_id,
             )

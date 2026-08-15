@@ -62,7 +62,6 @@ from .tool_batch import (
     _rejected_tool_batch_error,
     _should_reject_tool_batch,
     confirm_wait_stopped_by_user,
-    uncancel_current_task,
 )
 
 logger = logging.getLogger("monkeybot.core.runtime.loop.tool_dispatch")
@@ -236,9 +235,9 @@ async def _resolve_inspector_decision(
 ) -> AsyncIterator[AgentEvent]:
     """Run inspectors for one call; may yield ``ToolConfirmationRequestEvent``.
 
-    Fills ``outcome`` with the final allow/deny decision. Re-raises
-    ``asyncio.CancelledError`` from the confirm wait so the gate can abort and
-    settle the batch (caller must catch and set ``aborted``).
+    Fills ``outcome`` with the final allow/deny decision. Propagates
+    ``asyncio.CancelledError`` from the confirm wait so the gate can distinguish
+    Stop (settle/abort) from turn-task cancellation (re-raise).
     """
     inspector_call = InspectorToolCall(
         call_id=call.call_id, name=call.name, args=dict(call.args)
@@ -279,15 +278,9 @@ async def _resolve_inspector_decision(
                     arguments=dict(call.args),
                     prompt=decision.message,
                 )
-                try:
-                    payload = await _await_user_response_any(
-                        bus, fut, call.call_id, timeout_sec=None
-                    )
-                except asyncio.CancelledError:
-                    # Re-raise so turn cancellation (client disconnect /
-                    # abort) propagates; do not continue the tool loop
-                    # on a dead session.
-                    raise
+                payload = await _await_user_response_any(
+                    bus, fut, call.call_id, timeout_sec=None
+                )
                 if payload.get("_timeout"):
                     outcome.allowed = False
                     to = int(
@@ -420,7 +413,6 @@ async def _gate_chunk_calls(
                     result, allowed_exec=allowed_exec, chunk_responses=chunk_responses
                 )
                 return
-            uncancel_current_task()
             raise
 
         if not insp_outcome.allowed:

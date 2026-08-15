@@ -497,8 +497,30 @@ def write_run_command_timeout_spill(
 
 
 def spill_root(workspace_root: Path) -> Path:
-    """Return ``.monkeybot/spill`` under ``workspace_root``."""
-    return Path(workspace_root).resolve() / _SPILL_DIR_REL
+    """Return ``.monkeybot/spill`` under ``workspace_root`` (fully resolved).
+
+    Resolve the spill directory itself so containment checks stay valid when
+    ``.monkeybot`` or ``spill`` is a symlink into storage outside the workspace
+    tree.
+    """
+    return (Path(workspace_root).resolve() / _SPILL_DIR_REL).resolve()
+
+
+def _legacy_spill_id_safe(session_id: str) -> bool:
+    """True when a raw session id is safe as a single legacy spill directory name.
+
+    Reject separators, ``..``, reserved names, and glob metacharacters so
+    ``root / session_id`` cannot resolve onto a sibling session directory.
+    """
+    if session_id in ("", ".", ".."):
+        return False
+    if any(ch in session_id for ch in "/\\"):
+        return False
+    if ".." in session_id:
+        return False
+    if any(ch in session_id for ch in GLOB_METACHARACTERS):
+        return False
+    return True
 
 
 def session_spill_dirs(workspace_root: Path, session_id: str) -> list[Path]:
@@ -513,9 +535,7 @@ def session_spill_dirs(workspace_root: Path, session_id: str) -> list[Path]:
     dirs: list[Path] = [root / safe_session]
     if root.is_dir():
         dirs.extend(sorted(root.glob(f"subagent:{safe_session}:*")))
-        if safe_session != session_id and not any(
-            ch in session_id for ch in GLOB_METACHARACTERS
-        ):
+        if safe_session != session_id and _legacy_spill_id_safe(session_id):
             legacy = (root / session_id).resolve()
             try:
                 legacy.relative_to(root)

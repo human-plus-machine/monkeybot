@@ -67,7 +67,6 @@ from .tool_batch import (
     _rejected_tool_batch_error,
     _should_reject_tool_batch,
     confirm_wait_stopped_by_user,
-    uncancel_current_task,
 )
 
 logger = logging.getLogger("monkeybot.core.runtime.realtime_loop")
@@ -296,7 +295,6 @@ async def _resolve_realtime_inspector_decision(
             )
         except asyncio.CancelledError:
             if not confirm_wait_stopped_by_user(pending_bus, call.call_id):
-                uncancel_current_task()
                 raise
             yield Error(request_id=ctx.request_id, error="Request cancelled")
             remaining = pending_calls[call_index:]
@@ -747,16 +745,6 @@ async def run_realtime_turn(
         if tool_results_out is not None:
             tool_results_out.extend(tool_results)
     except asyncio.CancelledError:
-        try:
-            cur = asyncio.current_task()
-            if cur is not None and getattr(cur, "uncancel", None):
-                cur.uncancel()
-        except Exception:
-            logger.warning(
-                "realtime uncancel cleanup failed %s",
-                kv(request_id=ctx.request_id, thread_id=ctx.thread_id),
-                exc_info=True,
-            )
         yield Error(request_id=ctx.request_id, error="Realtime turn cancelled")
         raise
     except Exception as exc:

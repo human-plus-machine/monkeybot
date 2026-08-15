@@ -860,6 +860,77 @@ async def test_run_cancel_after_stream_persists_assistant_text(monkeypatch: pyte
 
 
 @pytest.mark.asyncio
+async def test_run_cancel_after_stream_settles_pending_tool_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stop after a finished stream must settle ToolRequest + cancel ToolResponse pairs."""
+    cancel = asyncio.Event()
+
+    async def _cancel_after_stream(*_args: object, **_kwargs: object) -> None:
+        cancel.set()
+
+    monkeypatch.setattr(
+        "monkeybot.core.runtime.turn_loop._fire_after_provider_response",
+        _cancel_after_stream,
+    )
+
+    hist = FakeHistory()
+    events = []
+    async for e in run(
+        "u",
+        _ctx(),
+        provider=FakeProvider(
+            [
+                [
+                    TextDelta(text="Calling tool"),
+                    ToolCall(call_id="c1", name="read_file", args={"path": "a.txt"}),
+                    Done(),
+                ]
+            ]
+        ),
+        history=hist,
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        cancelled=cancel,
+        max_turns=2,
+    ):
+        events.append(e)
+
+    assert any(isinstance(e, Error) and "cancelled" in e.error.lower() for e in events)
+    assert [m.role for m in hist.rows] == ["user", "assistant", "user"]
+    assist = hist.rows[1]
+    assert any(isinstance(b, ToolRequest) and b.id == "c1" for b in assist.content)
+    assert _flatten_text_from_message(assist) == "Calling tool"
+    tool_msgs = [
+        m
+        for m in hist.rows
+        if m.role == "user" and any(isinstance(b, ToolResponse) for b in m.content)
+    ]
+    assert len(tool_msgs) == 1
+    responses = {
+        b.id: b for b in tool_msgs[0].content if isinstance(b, ToolResponse)
+    }
+    assert "c1" in responses
+    assert responses["c1"].is_error is True
+    cancel_text = " ".join(
+        t.text for t in responses["c1"].result if isinstance(t, Text)
+    )
+    assert "cancelled" in cancel_text.lower()
+
+
+def test_confirm_wait_stopped_by_user_unknown_is_not_stop() -> None:
+    from monkeybot.core.runtime.tool_batch import confirm_wait_stopped_by_user
+
+    class UnknownBus:
+        def is_pending_or_terminal(self, key: str) -> str:
+            del key
+            return "unknown"
+
+    assert confirm_wait_stopped_by_user(UnknownBus(), "c1") is False
+    assert confirm_wait_stopped_by_user(None, "c1") is False
+
+
+@pytest.mark.asyncio
 async def test_run_stop_during_confirm_settles_completed_tool_results() -> None:
     """Stop while awaiting tool confirm must settle prior tool results into history."""
     from collections import deque
