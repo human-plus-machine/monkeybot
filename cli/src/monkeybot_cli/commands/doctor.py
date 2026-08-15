@@ -6,15 +6,14 @@ import argparse
 import json
 import os
 import shlex
-import subprocess
 import tomllib
 from pathlib import Path
 
 import httpx
-
 from monkeybot.core.layout import AgentLayout, bootstrap_agent_layout
 from monkeybot.core.memory.config import memory_enabled_from_config
 from monkeybot.core.tools.sandbox_executor import SandboxConfig
+
 from monkeybot_cli.compat import COMPATIBLE_CORE_RANGE
 from monkeybot_cli.config_resolve import (
     load_agent_dotenv,
@@ -28,6 +27,7 @@ from monkeybot_cli.providers import credentials_present, extra_module, spec_for_
 from monkeybot_cli.runtime_python import (
     CORE_PROBE,
     MEMORY_PROBE,
+    _probe,
     resolve_runtime_python,
     run_probe,
 )
@@ -35,20 +35,14 @@ from monkeybot_cli.runtime_python import (
 
 def _runtime_python_version(runtime, agent_root: Path) -> tuple[int, int, int]:
     """Ask the runtime interpreter for its version (major, minor, micro)."""
-    code = "import sys; print(sys.version_info[0], sys.version_info[1], sys.version_info[2])"
-    kwargs: dict[str, object] = {}
-    if runtime.source == "uv":
-        kwargs["cwd"] = str(agent_root)
-    proc = subprocess.run(
-        [*runtime.argv, "-c", code],
-        capture_output=True,
-        text=True,
-        timeout=15.0,
-        **kwargs,
+    del agent_root
+    ok, text = _probe(
+        runtime,
+        "import sys; print(sys.version_info[0], sys.version_info[1], sys.version_info[2])",
     )
-    if proc.returncode != 0:
+    if not ok:
         return (0, 0, 0)
-    parts = proc.stdout.strip().split()
+    parts = text.split()
     if len(parts) < 3:
         return (0, 0, 0)
     try:

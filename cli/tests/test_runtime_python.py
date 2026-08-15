@@ -152,8 +152,10 @@ def test_core_probe_matches_compatible_range() -> None:
     assert spec.contains("3.1.0+local")
     assert not spec.contains("2.9.9")
     assert not spec.contains("4.0.0")
-    assert COMPATIBLE_CORE_RANGE in CORE_PROBE
-    assert "SpecifierSet" in CORE_PROBE
+    assert "packaging" not in CORE_PROBE
+    assert "split('+', 1)" in CORE_PROBE
+    assert "[3, 0, 0]" in CORE_PROBE
+    assert "[4, 0, 0]" in CORE_PROBE
     assert MEMORY_PROBE.startswith("import mempalace")
 
     def _probe_version(ver: str) -> int:

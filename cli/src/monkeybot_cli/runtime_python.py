@@ -32,15 +32,14 @@ DEFAULT_PORT = 8080
 SSE_GATEWAY_MODULE = "monkeybot.gateway.main"
 COMBINED_GATEWAY_MODULE = "monkeybot.gateway.realtime_main"
 
-# Executed in the *agent* interpreter. packaging is a MonkeyBot transitive dep
-# (pydantic); using SpecifierSet keeps local/pre PEP 440 versions aligned with
-# ``COMPATIBLE_CORE_RANGE``.
+# Stdlib-only snippet executed in the *agent* interpreter. Strip PEP 440 local
+# versions (``3.1.0+local``) so the tuple compare matches ``COMPATIBLE_CORE_RANGE``.
 CORE_PROBE = (
     "from importlib.metadata import version; "
-    "from packaging.specifiers import SpecifierSet; "
-    "from packaging.version import Version; "
-    f"ver = version('monkeybot'); "
-    f"assert Version(ver) in SpecifierSet({COMPATIBLE_CORE_RANGE!r}), ver"
+    "ver = version('monkeybot'); "
+    "public = ver.split('+', 1)[0]; "
+    "parts = ([int(p) for p in public.split('.')[:3]] + [0, 0, 0])[:3]; "
+    "assert [3, 0, 0] <= parts < [4, 0, 0], ver"
 )
 MEMORY_PROBE = f"import mempalace; {CORE_PROBE}"
 
@@ -108,7 +107,7 @@ def _probe(runtime: RuntimePython, code: str, *, timeout: float = 15.0) -> tuple
     except (OSError, subprocess.TimeoutExpired) as exc:
         return False, str(exc)
     if proc.returncode == 0:
-        return True, ""
+        return True, (proc.stdout or "").strip()
     text = (proc.stderr or proc.stdout or "").strip()
     if not text:
         return False, f"probe exit {proc.returncode}"
