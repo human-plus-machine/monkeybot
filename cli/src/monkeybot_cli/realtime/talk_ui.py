@@ -88,7 +88,10 @@ def _spawn_combined_gateway(
         errors="replace",
     )
     proc = subprocess.Popen(
-        gateway_argv(prepare_runtime_python(agent_root), module=COMBINED_GATEWAY_MODULE),
+        gateway_argv(
+            prepare_runtime_python(agent_root, config_path),
+            module=COMBINED_GATEWAY_MODULE,
+        ),
         env=env,
         cwd=agent_root,
         stdout=subprocess.DEVNULL,

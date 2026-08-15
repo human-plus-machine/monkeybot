@@ -12,6 +12,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `monkeybot run` / `chat` / `talk` refuse to start when the agent interpreter lacks MonkeyBot 3.x (and MemPalace when memory is enabled). A failed probe may `uv sync` an existing lock; it never rewrites `pyproject.toml`.
 - MemPalace outbox now persists on Postgres and Firestore (same table/document shape as SQLite), with replica `palace_id` claim partitioning. Replicated deployments must share a lock-capable palace volume.
 - `monkeybot chat` TUI gained Claude-Code-style interaction: `Esc` interrupts the active turn (double-tap while idle recalls your last message for editing), `Shift+Tab` cycles a client-side approval mode (`normal` / `auto-approve` / `deny-confirms` — auto-answers tool confirmation prompts only, elicitations still ask), `@` fuzzy-inserts a workspace file path, `!<command>` runs a local shell command shown in the transcript but never sent to the agent, and `?` opens a keyboard-shortcut overlay. New slash commands: `/clear` (alias of `/new`), `/model` (switches model by starting a fresh session), `/status`, `/config`.
 - Knowledge indexing follows document structure instead of fixed line windows: markdown headings, code definitions (tree-sitter via the optional `knowledge-ast` extra, brace/indent heuristic otherwise), and JSON/YAML/TOML top-level keys become chunk boundaries.
