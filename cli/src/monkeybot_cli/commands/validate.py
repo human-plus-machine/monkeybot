@@ -21,6 +21,7 @@ from monkeybot.core.config.runtime_env import ENV_MAP
 from monkeybot.core.config.settings import ConfigError, normalize_model_provider
 from monkeybot.core.config.yaml_loader import load_monkeybot_yaml_dict
 from monkeybot.core.layout import resolve_agent_root
+from monkeybot.core.memory.uri import object_store_memory_scheme
 
 from monkeybot_cli.config_resolve import load_agent_dotenv, resolve_config
 from monkeybot_cli.output import CommandReport, check
@@ -160,18 +161,14 @@ def run_validate(args: argparse.Namespace) -> int:
         field="model.name",
     )
 
-    memory_uri = ""
     paths = merged.get("paths") if isinstance(merged.get("paths"), dict) else {}
-    if isinstance(paths, dict):
+    if "MEMORY_STORAGE_URI" in os.environ:
+        memory_uri = os.environ["MEMORY_STORAGE_URI"]
+    elif "MEMORY_PATH" in os.environ:
+        memory_uri = os.environ["MEMORY_PATH"]
+    else:
         memory_uri = str(paths.get("memory_storage_uri", ""))
-    lowered = memory_uri.lower()
-    memory_ok = True
-    if lowered.startswith(("gcs://", "s3://", "gs://")):
-        memory_ok = False
-    elif "://" in memory_uri and not lowered.startswith(("local://", "file://")):
-        scheme = memory_uri.split("://", 1)[0]
-        if scheme not in ("", "file", "local"):
-            memory_ok = False
+    memory_ok = object_store_memory_scheme(memory_uri) is None
     check(
         report,
         id="memory.backend.supported",

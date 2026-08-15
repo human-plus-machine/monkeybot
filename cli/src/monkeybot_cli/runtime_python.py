@@ -32,19 +32,27 @@ DEFAULT_PORT = 8080
 SSE_GATEWAY_MODULE = "monkeybot.gateway.main"
 COMBINED_GATEWAY_MODULE = "monkeybot.gateway.realtime_main"
 
-# Stdlib-only snippet executed in the *agent* interpreter. Keep in sync with
-# ``COMPATIBLE_CORE_RANGE`` (asserted by tests).
+# Executed in the *agent* interpreter. packaging is a MonkeyBot transitive dep
+# (pydantic); using SpecifierSet keeps local/pre PEP 440 versions aligned with
+# ``COMPATIBLE_CORE_RANGE``.
 CORE_PROBE = (
     "from importlib.metadata import version; "
-    "ver = version('monkeybot'); "
-    "parts = [int(p) for p in ver.split('.')[:3]]; "
-    "assert [3, 0, 0] <= parts < [4, 0, 0], ver"
+    "from packaging.specifiers import SpecifierSet; "
+    "from packaging.version import Version; "
+    f"ver = version('monkeybot'); "
+    f"assert Version(ver) in SpecifierSet({COMPATIBLE_CORE_RANGE!r}), ver"
 )
 MEMORY_PROBE = f"import mempalace; {CORE_PROBE}"
 
 
 class RuntimeUpgradeError(RuntimeError):
     """Raised when the agent interpreter cannot run a compatible MonkeyBot gateway."""
+
+
+def report_runtime_upgrade_error(exc: RuntimeUpgradeError) -> int:
+    """Print a spawn refusal to stderr and return the CLI exit code."""
+    print(f"error: {exc}", file=sys.stderr)
+    return 2
 
 
 def _venv_python(agent_root: Path) -> Path | None:
@@ -87,21 +95,24 @@ def _runtime_cwd(runtime: RuntimePython) -> dict[str, object]:
     return {}
 
 
-def _probe_failure_detail(runtime: RuntimePython, probe: str, *, timeout: float = 15.0) -> str:
+def _probe(runtime: RuntimePython, code: str, *, timeout: float = 15.0) -> tuple[bool, str]:
+    """Run ``python -c code`` under ``runtime``. Never raises on spawn failure."""
     try:
         proc = subprocess.run(
-            [*runtime.argv, "-c", probe],
+            [*runtime.argv, "-c", code],
             capture_output=True,
             text=True,
             timeout=timeout,
             **_runtime_cwd(runtime),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return str(exc)
+        return False, str(exc)
+    if proc.returncode == 0:
+        return True, ""
     text = (proc.stderr or proc.stdout or "").strip()
     if not text:
-        return f"probe exit {proc.returncode}"
-    return text[-500:]
+        return False, f"probe exit {proc.returncode}"
+    return False, text[-500:]
 
 
 def _upgrade_error(
@@ -153,14 +164,15 @@ def prepare_runtime_python(
         str(effective_config) if effective_config.is_file() else None
     )
     probe = MEMORY_PROBE if memory_enabled else CORE_PROBE
-    if run_probe(runtime, probe):
+    ok, detail = _probe(runtime, probe)
+    if ok:
         return runtime
     if not has_project:
         raise _upgrade_error(
             agent_root=agent_root,
             memory_enabled=memory_enabled,
             has_project=False,
-            detail=_probe_failure_detail(runtime, probe),
+            detail=detail,
         )
     print(
         f"agent runtime is missing harness packages; running uv sync in {agent_root}",
@@ -176,12 +188,13 @@ def prepare_runtime_python(
             detail=str(exc),
         ) from exc
     runtime = resolve_runtime_python(agent_root)
-    if sync.returncode != 0 or not run_probe(runtime, probe):
+    ok, detail = _probe(runtime, probe)
+    if sync.returncode != 0 or not ok:
         raise _upgrade_error(
             agent_root=agent_root,
             memory_enabled=memory_enabled,
             has_project=True,
-            detail=_probe_failure_detail(runtime, probe),
+            detail=detail,
         )
     return runtime
 
@@ -203,12 +216,8 @@ def run_probe(runtime: RuntimePython, code: str, *, timeout: float = 15.0) -> bo
     """Run ``python -c code`` under ``runtime`` and return True on exit 0.
 
     Used by ``doctor`` to verify extras/imports in the *gateway* interpreter
-    rather than the CLI's own process.
+    rather than the CLI's own process. Missing interpreters and timeouts are
+    treated as a failed probe, not an uncaught spawn error.
     """
-    proc = subprocess.run(
-        [*runtime.argv, "-c", code],
-        capture_output=True,
-        timeout=timeout,
-        **_runtime_cwd(runtime),
-    )
-    return proc.returncode == 0
+    ok, _detail = _probe(runtime, code, timeout=timeout)
+    return ok
