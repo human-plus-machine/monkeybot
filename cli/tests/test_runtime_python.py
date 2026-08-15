@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as package_version
 from pathlib import Path
 
@@ -17,7 +16,6 @@ from monkeybot_cli.runtime_python import (
     MEMORY_PROBE,
     RuntimePython,
     RuntimeUpgradeError,
-    _monkeybot_extra_requirements,
     gateway_argv,
     managed_memory_runtime_dir,
     mirrored_monkeybot_extras,
@@ -467,6 +465,7 @@ def test_prepare_config_only_empty_yaml_reuses_cli_env_when_memory_present(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A config-only agent whose CLI env already has MemPalace needs no managed runtime."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     (tmp_path / "monkeybot_config").mkdir()
     (tmp_path / "monkeybot_config" / "monkeybot.yaml").write_text("{}\n", encoding="utf-8")
     monkeypatch.setattr("monkeybot_cli.runtime_python._probe", lambda *a, **k: (True, ""))
@@ -556,7 +555,7 @@ def _fake_uv(calls: list[list[str]], *, install_returncode: int = 0, stderr: str
             stderr = ""
 
         if argv_list[:2] == ["uv", "venv"]:
-            interpreter = Path(argv_list[2]) / "bin" / "python"
+            interpreter = Path(argv_list[-1]) / "bin" / "python"
             interpreter.parent.mkdir(parents=True, exist_ok=True)
             interpreter.write_text("#!/bin/sh\n")
             interpreter.chmod(0o755)
@@ -636,13 +635,15 @@ def test_prepare_config_only_provisions_managed_runtime_when_cache_cold(
     assert runtime.source == MANAGED_RUNTIME_SOURCE
     assert runtime.argv == [str(interpreter)]
     assert gateway_argv(runtime)[0] == str(interpreter)
-    assert calls[0] == ["uv", "venv", str(runtime_dir)]
+    assert calls[0][:4] == ["uv", "venv", "--python", sys.executable]
+    staging = Path(calls[0][-1])
+    assert staging != runtime_dir
     assert calls[1] == [
         "uv",
         "pip",
         "install",
         "--python",
-        str(interpreter),
+        str(staging / "bin" / "python"),
         pin,
     ]
     assert f"provisioning {pin}" in capsys.readouterr().out
@@ -671,7 +672,7 @@ def test_managed_runtime_pins_the_running_core_version(
 def test_managed_runtime_fail_closed_when_install_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _isolate_managed_cache(tmp_path, monkeypatch)
+    runtime_dir = _isolate_managed_cache(tmp_path, monkeypatch)
     calls: list[list[str]] = []
     monkeypatch.setattr(
         "monkeybot_cli.runtime_python.subprocess.run",
@@ -687,6 +688,9 @@ def test_managed_runtime_fail_closed_when_install_fails(
     assert "no wheel found for onnxruntime" in message
     assert "memory.enabled: false" in message
     assert "manylinux2014" in message and "musl" in message
+    assert not runtime_dir.exists()
+    cache_root = tmp_path / "cache" / "monkeybot" / "runtimes"
+    assert list(cache_root.glob(".*.tmp-*")) == []
 
 
 def test_managed_runtime_fail_closed_when_uv_missing(
@@ -707,7 +711,7 @@ def test_managed_runtime_fail_closed_when_uv_missing(
 def test_managed_runtime_fail_closed_when_probe_still_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _isolate_managed_cache(tmp_path, monkeypatch)
+    runtime_dir = _isolate_managed_cache(tmp_path, monkeypatch)
     calls: list[list[str]] = []
     monkeypatch.setattr("monkeybot_cli.runtime_python.subprocess.run", _fake_uv(calls))
     monkeypatch.setattr("monkeybot_cli.runtime_python.run_probe", lambda *a, **k: False)
@@ -716,6 +720,9 @@ def test_managed_runtime_fail_closed_when_probe_still_fails(
         provision_managed_memory_runtime(tmp_path)
 
     assert any(cmd[:3] == ["uv", "pip", "install"] for cmd in calls)
+    assert not runtime_dir.exists()
+    cache_root = tmp_path / "cache" / "monkeybot" / "runtimes"
+    assert list(cache_root.glob(".*.tmp-*")) == []
 
 
 def test_managed_runtime_mirrors_installed_extras(
@@ -752,85 +759,59 @@ def test_managed_runtime_dir_separates_distinct_extra_sets(
     assert managed_memory_runtime_dir("3.1.2", ("OpenAI",)) == openai
 
 
-def test_mirrored_extras_reports_only_fully_installed_extras(
+def test_mirrored_extras_uses_extra_installed_and_skips_unmirrored(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    mapping = {
-        "openai": [Requirement('openai>=1.0; extra == "openai"')],
-        "bedrock": [
-            Requirement('anthropic>=0.40.0; extra == "bedrock"'),
-            Requirement('boto3>=1.34.0; extra == "bedrock"'),
-        ],
-        "memory": [Requirement('mempalace>=3.7.0; extra == "memory"')],
-        "cli": [Requirement('typer>=0.12.0; extra == "cli"')],
-    }
-    installed = {"openai", "anthropic", "mempalace", "typer"}
     monkeypatch.setattr(
-        "monkeybot_cli.runtime_python._monkeybot_extra_requirements",
-        lambda: mapping,
-    )
-    monkeypatch.setattr(
-        "monkeybot_cli.runtime_python._package_installed",
-        lambda name: name in installed,
+        "monkeybot_cli.runtime_python.extra_installed",
+        lambda extra: extra in {"openai", "memory", "cli", "postgres", "cli-realtime"},
     )
 
-    assert mirrored_monkeybot_extras() == ("openai",)
+    assert mirrored_monkeybot_extras() == ("openai", "postgres")
 
 
-def test_mirrored_extras_resolves_self_referential_extras(
+def test_mirrored_extras_is_empty_when_nothing_installed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``realtime-gemini = ["monkeybot[realtime]", …]`` must follow the nested extra."""
-    mapping = {
-        "realtime": [Requirement('websockets>=14.0; extra == "realtime"')],
-        "realtime-gemini": [
-            Requirement('monkeybot[realtime]; extra == "realtime-gemini"'),
-            Requirement('google-genai>=1.0.0; extra == "realtime-gemini"'),
-        ],
-    }
-    monkeypatch.setattr(
-        "monkeybot_cli.runtime_python._monkeybot_extra_requirements",
-        lambda: mapping,
-    )
-    monkeypatch.setattr(
-        "monkeybot_cli.runtime_python._package_installed",
-        lambda name: name in {"google-genai"},
-    )
+    monkeypatch.setattr("monkeybot_cli.runtime_python.extra_installed", lambda extra: False)
 
     assert mirrored_monkeybot_extras() == ()
 
-    monkeypatch.setattr(
-        "monkeybot_cli.runtime_python._package_installed",
-        lambda name: name in {"google-genai", "websockets"},
-    )
-    assert mirrored_monkeybot_extras() == ("realtime", "realtime-gemini")
 
-
-def test_mirrored_extras_ignores_base_deps_with_unrelated_markers() -> None:
-    """Real metadata: base deps carrying markers must not be mistaken for extras."""
-    mapping = _monkeybot_extra_requirements()
-
-    assert "memory" in mapping
-    # httpx is a core dependency; mempalace is contributed only by the memory extra.
-    assert all(req.name != "httpx" for reqs in mapping.values() for req in reqs)
-    assert any(req.name == "mempalace" for req in mapping["memory"])
-    assert all(
-        req.name != "mempalace"
-        for extra, reqs in mapping.items()
-        if extra != "memory"
-        for req in reqs
-    )
-
-
-def test_mirrored_extras_is_empty_without_monkeybot_metadata(
-    monkeypatch: pytest.MonkeyPatch,
+def test_resolve_runtime_python_uses_ready_managed_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def raise_not_found() -> dict[str, list[Requirement]]:
-        raise PackageNotFoundError("monkeybot")
-
+    _write_memory_config(tmp_path, enabled=True)
+    runtime_dir = _isolate_managed_cache(tmp_path, monkeypatch)
+    interpreter = runtime_dir / "bin" / "python"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("#!/bin/sh\n")
+    interpreter.chmod(0o755)
     monkeypatch.setattr(
-        "monkeybot_cli.runtime_python._monkeybot_extra_requirements",
-        raise_not_found,
+        "monkeybot_cli.runtime_python.run_probe",
+        lambda runtime, code, **kwargs: runtime.source == MANAGED_RUNTIME_SOURCE,
     )
 
-    assert mirrored_monkeybot_extras() == ()
+    runtime = resolve_runtime_python(tmp_path, memory_enabled=True)
+
+    assert runtime.source == MANAGED_RUNTIME_SOURCE
+    assert runtime.argv == [str(interpreter)]
+
+
+def test_resolve_runtime_python_ignores_managed_cache_when_memory_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime_dir = _isolate_managed_cache(tmp_path, monkeypatch)
+    interpreter = runtime_dir / "bin" / "python"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("#!/bin/sh\n")
+    interpreter.chmod(0o755)
+    monkeypatch.setattr(
+        "monkeybot_cli.runtime_python.run_probe",
+        lambda *a, **k: pytest.fail("memory-off resolve must not probe the cache"),
+    )
+
+    runtime = resolve_runtime_python(tmp_path, memory_enabled=False)
+
+    assert runtime.source == "cli"
+    assert runtime.argv == [sys.executable]

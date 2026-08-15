@@ -85,6 +85,23 @@ def extra_module(extra: str) -> str:
         "ollama": "openai",
         "nvidia": "openai",
         "openrouter": "openai",
+        "postgres": "asyncpg",
+        "firestore": "google.cloud.firestore",
+        "gcs": "google.cloud.storage",
+        "sandbox": "opensandbox",
+        "web-search": "ddgs",
+        "memory": "mempalace",
+        "observability": "opentelemetry",
+        "scheduler": "croniter",
+        "council": "google.cloud.storage",
+        "aws": "boto3",
+        "realtime": "websockets",
+        "realtime-gemini": "google.genai",
+        "cli": "typer",
+        "cli-realtime": "pyaudio",
+        "evals": "deepeval",
+        "knowledge-ast": "tree_sitter_language_pack",
+        "knowledge-media": "pypdf",
     }
     return mapping.get(extra, extra)
 

@@ -26,6 +26,7 @@ from monkeybot_cli.output import CommandReport, check
 from monkeybot_cli.providers import credentials_present, extra_module, spec_for_provider
 from monkeybot_cli.runtime_python import (
     CORE_PROBE,
+    MANAGED_RUNTIME_SOURCE,
     MEMORY_PROBE,
     _probe,
     resolve_runtime_python,
@@ -68,10 +69,16 @@ def _agent_defines_project_extra(agent_root: Path, extra: str) -> bool:
 
 def _extra_remediation(extra: str, agent_root: Path, runtime) -> str:
     """Remediation text pointing at the agent project, not the CLI env."""
-    if runtime.source == "cli":
+    if runtime.source in {"cli", MANAGED_RUNTIME_SOURCE}:
+        refresh = (
+            ", then re-run the agent to refresh the managed runtime"
+            if runtime.source == MANAGED_RUNTIME_SOURCE
+            else ""
+        )
         return (
             "Config-only tree: install in the CLI env — "
             f"uv tool install --with 'monkeybot[{extra}]' monkeybot-cli"
+            f"{refresh}"
         )
     if _agent_defines_project_extra(agent_root, extra):
         return f"Install in the agent project: cd {agent_root} && uv sync --extra {extra}"
@@ -202,7 +209,9 @@ def run_doctor(args: argparse.Namespace) -> int:
         print(f"  workspace: {layout.workspace_root}")
         print(f"  skills: {layout.skills_path}")
         print(f"  data: {layout.data_root}")
-    runtime = resolve_runtime_python(agent_root)
+
+    memory_on = memory_enabled_from_config(str(config_path) if config_path else None)
+    runtime = resolve_runtime_python(agent_root, memory_enabled=memory_on)
 
     py_version = _runtime_python_version(runtime)
     py_ok = py_version >= (3, 11)
@@ -217,7 +226,6 @@ def run_doctor(args: argparse.Namespace) -> int:
         remediation=None if py_ok else "Install Python 3.11+ in the agent project environment",
     )
 
-    memory_on = memory_enabled_from_config(str(config_path) if config_path else None)
     harness_ok = run_probe(runtime, MEMORY_PROBE if memory_on else CORE_PROBE)
     check(
         report,
@@ -243,8 +251,8 @@ def run_doctor(args: argparse.Namespace) -> int:
                 + (
                     ", run the agent once to provision a managed MemPalace runtime, "
                     "or set memory.enabled: false"
-                    if memory_on
-                    else ""
+                    if memory_on and runtime.source == "cli"
+                    else (", or set memory.enabled: false" if memory_on else "")
                 )
             )
         ),
