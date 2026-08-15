@@ -10,8 +10,14 @@ Resolution order for an agent root:
 
 1. ``<root>/.venv/bin/python`` (or the Windows variant) — direct, no subprocess overhead.
 2. ``uv run python`` — when ``<root>/pyproject.toml`` exists but no ``.venv``.
-3. ``sys.executable`` — legacy / config-only trees (just ``monkeybot_config/``, no
-   ``pyproject.toml``). In this case extras must be installed in the CLI env.
+3. ``<cache>/monkeybot/runtimes/<key>/bin/python`` — a CLI-managed venv holding
+   ``monkeybot[memory]`` pinned to the running core version. Used only for
+   config-only trees with memory enabled when a previously provisioned cache
+   interpreter exists. The managed runtime also mirrors provider/storage extras
+   present in the CLI env (excluding extras whose probe module is a base dep).
+4. ``sys.executable`` — legacy / config-only trees (just ``monkeybot_config/``, no
+   ``pyproject.toml``). In this case extras must be installed in the CLI env,
+   unless memory is enabled and ``prepare_runtime_python`` provisions (3).
 
 ``prepare_runtime_python`` probes that interpreter for a MonkeyBot 3.x core
 (and MemPalace when memory is enabled). A stale venv may be ``uv sync``'d against
@@ -21,9 +27,18 @@ probe refuses to start the gateway.
 
 from __future__ import annotations
 
+import hashlib
+import os
+import shutil
 import subprocess
 import sys
+import tempfile
+import uuid
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _package_version
 from pathlib import Path
 
 from monkeybot_cli.compat import (
@@ -31,6 +46,8 @@ from monkeybot_cli.compat import (
     COMPATIBLE_CORE_RANGE,
     COMPATIBLE_CORE_UPPER_VERSION,
 )
+from monkeybot_cli.extras_catalog import FEATURE_CHOICES
+from monkeybot_cli.providers import PROVIDER_SPECS, extra_installed, extra_module
 
 DEFAULT_PORT = 8080
 SSE_GATEWAY_MODULE = "monkeybot.gateway.main"
@@ -82,7 +99,6 @@ if not (_key({COMPATIBLE_CORE_LOWER_VERSION!r}) <= _key(ver) < _key({COMPATIBLE_
 MEMORY_PROBE = f"import mempalace\n{CORE_PROBE}"
 
 
-
 class RuntimeUpgradeError(RuntimeError):
     """Raised when the agent interpreter cannot run a compatible MonkeyBot gateway."""
 
@@ -112,17 +128,27 @@ class RuntimePython:
     """
 
     argv: list[str]
-    source: str  # "venv" | "uv" | "cli"
+    source: str  # "venv" | "uv" | "cli" | "cli-managed"
     agent_root: Path | None = None
 
 
-def resolve_runtime_python(agent_root: Path) -> RuntimePython:
-    """Resolve the interpreter that should run the gateway for ``agent_root``."""
+def resolve_runtime_python(agent_root: Path, *, memory_enabled: bool = False) -> RuntimePython:
+    """Resolve the interpreter that should run the gateway for ``agent_root``.
+
+    Config-only trees with memory enabled reuse a previously provisioned
+    CLI-managed cache venv when the interpreter path exists. Doctor and
+    ``prepare_runtime_python`` share this lookup and each run a single harness
+    probe — resolve itself does not spawn a probe subprocess.
+    """
     venv_py = _venv_python(agent_root)
     if venv_py is not None:
         return RuntimePython([str(venv_py)], "venv", agent_root)
     if (agent_root / "pyproject.toml").is_file():
         return RuntimePython(["uv", "run", "python"], "uv", agent_root)
+    if memory_enabled:
+        cached = _existing_managed_runtime(agent_root)
+        if cached is not None:
+            return cached
     return RuntimePython([sys.executable], "cli", agent_root)
 
 
@@ -153,6 +179,12 @@ def _probe(runtime: RuntimePython, code: str, *, timeout: float = 15.0) -> tuple
     return False, text[-500:]
 
 
+def _probe_failure_detail(runtime: RuntimePython, probe: str, *, timeout: float = 15.0) -> str:
+    """Return the probe's stderr/stdout snippet, or a spawn/timeout message."""
+    _ok, detail = _probe(runtime, probe, timeout=timeout)
+    return detail
+
+
 def _upgrade_error(
     *,
     agent_root: Path,
@@ -169,8 +201,7 @@ def _upgrade_error(
         )
     elif memory_enabled:
         how = (
-            f"install monkeybot[memory]{range_} in this environment, "
-            "or set `memory.enabled: false`"
+            f"install monkeybot[memory]{range_} in this environment, or set `memory.enabled: false`"
         )
     else:
         how = f"install monkeybot{range_} in this environment"
@@ -182,6 +213,263 @@ def _upgrade_error(
     )
 
 
+MANAGED_RUNTIME_SOURCE = "cli-managed"
+
+# Extras that belong to the CLI *client* rather than the gateway. `cli` /
+# `cli-realtime` add typer and pyaudio without giving the gateway anything.
+# `memory` is always pinned into the managed runtime, so it is not mirrored.
+_UNMIRRORED_EXTRAS = frozenset({"memory", "cli", "cli-realtime"})
+
+# Probe modules that ship with base ``monkeybot`` — importing them does not mean
+# the corresponding optional extra is installed (e.g. ``gemini`` /
+# ``realtime-gemini`` both probe ``google.genai``, a core dependency).
+_BASE_PROBE_MODULES = frozenset({"google.genai"})
+
+
+def _cache_root() -> Path:
+    """Base cache directory: ``XDG_CACHE_HOME``, ``LOCALAPPDATA`` on Windows, else ``~/.cache``."""
+    xdg = os.environ.get("XDG_CACHE_HOME", "").strip()
+    if xdg:
+        return Path(xdg)
+    if sys.platform.startswith("win"):
+        local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+        if local_app_data:
+            return Path(local_app_data)
+    return Path.home() / ".cache"
+
+
+def _sanitize_key_part(value: str) -> str:
+    return "".join(char if (char.isalnum() or char in "._-") else "-" for char in value)
+
+
+def _mirrorable_extras() -> frozenset[str]:
+    extras = {spec.extra for spec in PROVIDER_SPECS.values() if spec.extra}
+    extras.update(choice.key for choice in FEATURE_CHOICES)
+    return frozenset(extras - _UNMIRRORED_EXTRAS)
+
+
+def mirrored_monkeybot_extras() -> tuple[str, ...]:
+    """Extras installed in the CLI env that the gateway needs after an interpreter swap.
+
+    Uses the same extra → import probe as ``doctor`` (``extra_installed`` /
+    ``extra_module``) over the extras catalog, instead of re-parsing package
+    metadata. Returns extras that are present in this process and belong on the
+    gateway, not CLI-only extras. Extras whose probe module is a base MonkeyBot
+    dependency are skipped — those probes are always true and would pollute the
+    pin and cache-key digest.
+    """
+    return tuple(
+        sorted(
+            extra
+            for extra in _mirrorable_extras()
+            if extra_module(extra) not in _BASE_PROBE_MODULES and extra_installed(extra)
+        )
+    )
+
+
+def managed_memory_runtime_dir(
+    monkeybot_version: str,
+    extras: Sequence[str] = (),
+) -> Path:
+    """Deterministic cache directory for the managed MemPalace runtime.
+
+    Keyed by the pinned MonkeyBot version, the CLI's Python version, and the
+    mirrored extras, so a CLI upgrade, Python upgrade, or extras change
+    provisions a fresh runtime instead of reusing a mismatched one.
+    """
+    key = (
+        f"memory-{_sanitize_key_part(monkeybot_version)}"
+        f"-py{sys.version_info.major}.{sys.version_info.minor}"
+    )
+    normalized = sorted(extra.lower() for extra in extras)
+    if normalized:
+        digest = hashlib.sha256(",".join(normalized).encode()).hexdigest()[:8]
+        key = f"{key}-{digest}"
+    return _cache_root() / "monkeybot" / "runtimes" / key
+
+
+def _managed_interpreter(runtime_dir: Path) -> Path | None:
+    for candidate in (runtime_dir / "bin" / "python", runtime_dir / "Scripts" / "python.exe"):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _managed_runtime(runtime_dir: Path, agent_root: Path) -> RuntimePython | None:
+    """Return the managed interpreter if the venv exists (no probe)."""
+    interpreter = _managed_interpreter(runtime_dir)
+    if interpreter is None:
+        return None
+    return RuntimePython([str(interpreter)], MANAGED_RUNTIME_SOURCE, agent_root)
+
+
+def _managed_if_ready(runtime_dir: Path, agent_root: Path) -> RuntimePython | None:
+    """Return the managed interpreter only when it already passes the memory probe."""
+    runtime = _managed_runtime(runtime_dir, agent_root)
+    if runtime is None:
+        return None
+    if run_probe(runtime, MEMORY_PROBE):
+        return runtime
+    return None
+
+
+def _existing_managed_runtime(agent_root: Path) -> RuntimePython | None:
+    """Locate a cached managed interpreter without probing it.
+
+    ``prepare_runtime_python`` / ``doctor`` own the single harness probe so a
+    warm cache does not pay for two interpreter spawns per start.
+    """
+    try:
+        monkeybot_version = _package_version("monkeybot")
+    except PackageNotFoundError:
+        return None
+    extras = mirrored_monkeybot_extras()
+    return _managed_runtime(managed_memory_runtime_dir(monkeybot_version, extras), agent_root)
+
+
+@contextmanager
+def _exclusive_file_lock(lock_path: Path) -> Iterator[None]:
+    """Block until this process holds ``lock_path`` (fcntl on POSIX, msvcrt on Windows)."""
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        if os.name == "nt":
+            import msvcrt
+
+            try:
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+        os.close(fd)
+
+
+def _managed_runtime_error(detail: str) -> RuntimeUpgradeError:
+    """Actionable fail-closed error for the managed MemPalace runtime."""
+    return RuntimeUpgradeError(
+        "memory is enabled but MemPalace could not be provisioned for this "
+        "config-only agent"
+        + (f" ({detail})" if detail else "")
+        + f"; install monkeybot[memory]{COMPATIBLE_CORE_RANGE} in this "
+        "environment, or set `memory.enabled: false` in "
+        "monkeybot_config/monkeybot.yaml. Note that some platforms "
+        "(manylinux2014, musl) ship no onnxruntime wheel for Python "
+        f"{sys.version_info.major}.{sys.version_info.minor}, so chromadb — "
+        "and therefore MemPalace — cannot be installed there."
+    )
+
+
+def _command_failure_detail(label: str, proc: subprocess.CompletedProcess[str]) -> str:
+    text = ((proc.stderr or "") or (proc.stdout or "")).strip()
+    return f"{label} exited {proc.returncode}" + (f": {text[-500:]}" if text else "")
+
+
+def _run_provisioning(argv: list[str], label: str) -> None:
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, check=False)
+    except OSError as exc:
+        raise _managed_runtime_error(f"{label} failed: {exc}") from exc
+    if proc.returncode != 0:
+        raise _managed_runtime_error(_command_failure_detail(label, proc))
+
+
+def provision_managed_memory_runtime(agent_root: Path) -> RuntimePython:
+    """Return a CLI-managed venv holding ``monkeybot[memory]`` at the running core version.
+
+    Extras the CLI env already satisfies are mirrored into the runtime alongside
+    ``memory``. A cached runtime that already passes the memory probe is reused
+    as-is. Otherwise the runtime is created in a staging directory with
+    ``uv venv --python`` pointing at this CLI interpreter, then swapped into
+    the cache with ``os.replace``. Pins in an agent ``pyproject.toml`` are never
+    rewritten.
+    """
+    try:
+        monkeybot_version = _package_version("monkeybot")
+    except PackageNotFoundError as exc:
+        raise _managed_runtime_error("the running monkeybot core version is unknown") from exc
+
+    extras = mirrored_monkeybot_extras()
+    runtime_dir = managed_memory_runtime_dir(monkeybot_version, extras)
+    cached = _managed_if_ready(runtime_dir, agent_root)
+    if cached is not None:
+        return cached
+
+    if shutil.which("uv") is None:
+        raise _managed_runtime_error("uv was not found on PATH")
+    extra_spec = ",".join(("memory", *extras))
+    requirement = f"monkeybot[{extra_spec}]=={monkeybot_version}"
+    print(
+        f"agent memory runtime is missing MemPalace; provisioning {requirement} in {runtime_dir}",
+        flush=True,
+    )
+    runtime_dir.parent.mkdir(parents=True, exist_ok=True)
+    with _exclusive_file_lock(runtime_dir.parent / f".{runtime_dir.name}.lock"):
+        cached = _managed_if_ready(runtime_dir, agent_root)
+        if cached is not None:
+            return cached
+        return _install_managed_runtime(runtime_dir, agent_root, requirement)
+
+
+def _retire_runtime_dir(runtime_dir: Path) -> None:
+    """Move ``runtime_dir`` aside so a live gateway is not deleted underneath.
+
+    Readers may still hold absolute paths into the old tree; renaming keeps the
+    inode tree intact instead of ``rmtree``-ing files out from under them.
+    Retired dirs are left in place (best-effort cleanup would reintroduce the
+    same hazard for any process still using that tree).
+    """
+    retired = runtime_dir.with_name(f".{runtime_dir.name}.retired-{uuid.uuid4().hex[:8]}")
+    os.replace(runtime_dir, retired)
+
+
+def _install_managed_runtime(
+    runtime_dir: Path,
+    agent_root: Path,
+    requirement: str,
+) -> RuntimePython:
+    """Create ``requirement`` in a staging dir, then atomically replace ``runtime_dir``."""
+    staging: Path | None = Path(
+        tempfile.mkdtemp(prefix=f".{runtime_dir.name}.tmp-", dir=runtime_dir.parent)
+    )
+    try:
+        # --relocatable keeps console-script shebangs / activate usable after
+        # the staging directory is moved into the cache key path.
+        _run_provisioning(
+            ["uv", "venv", "--python", sys.executable, "--relocatable", str(staging)],
+            "uv venv",
+        )
+        interpreter = _managed_interpreter(staging)
+        if interpreter is None:
+            raise _managed_runtime_error(f"no interpreter was created in {staging}")
+        _run_provisioning(
+            ["uv", "pip", "install", "--python", str(interpreter), requirement],
+            "uv pip install",
+        )
+        staged = RuntimePython([str(interpreter)], MANAGED_RUNTIME_SOURCE, agent_root)
+        if not run_probe(staged, MEMORY_PROBE):
+            raise _managed_runtime_error(_probe_failure_detail(staged, MEMORY_PROBE))
+        if runtime_dir.exists():
+            _retire_runtime_dir(runtime_dir)
+        os.replace(staging, runtime_dir)
+        staging = None
+    finally:
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
+    ready = _managed_runtime(runtime_dir, agent_root)
+    if ready is None:
+        raise _managed_runtime_error(f"no interpreter was created in {runtime_dir}")
+    return ready
+
+
 def prepare_runtime_python(
     agent_root: Path,
     config_path: Path | str | None = None,
@@ -191,11 +479,12 @@ def prepare_runtime_python(
     When memory is enabled the interpreter must import MemPalace and a MonkeyBot
     3.x core. When memory is disabled only the core range is required. If the
     agent has a ``pyproject.toml`` and the probe fails, ``uv sync`` is tried
-    once against the existing lock — pins are not rewritten.
+    once against the existing lock — pins are not rewritten. Config-only trees
+    (no ``pyproject.toml`` and no project ``.venv``) with memory enabled fall
+    back to a CLI-managed runtime provisioned on demand.
     """
     from monkeybot.core.memory.config import memory_enabled_from_config
 
-    runtime = resolve_runtime_python(agent_root)
     has_project = (agent_root / "pyproject.toml").is_file()
     effective_config = (
         Path(config_path).expanduser().resolve()
@@ -205,11 +494,14 @@ def prepare_runtime_python(
     memory_enabled = memory_enabled_from_config(
         str(effective_config) if effective_config.is_file() else None
     )
+    runtime = resolve_runtime_python(agent_root, memory_enabled=memory_enabled)
     probe = MEMORY_PROBE if memory_enabled else CORE_PROBE
     ok, detail = _probe(runtime, probe)
     if ok:
         return runtime
     if not has_project:
+        if memory_enabled and runtime.source in {"cli", MANAGED_RUNTIME_SOURCE}:
+            return provision_managed_memory_runtime(agent_root)
         raise _upgrade_error(
             agent_root=agent_root,
             memory_enabled=memory_enabled,
@@ -229,7 +521,7 @@ def prepare_runtime_python(
             has_project=True,
             detail=str(exc),
         ) from exc
-    runtime = resolve_runtime_python(agent_root)
+    runtime = resolve_runtime_python(agent_root, memory_enabled=memory_enabled)
     ok, detail = _probe(runtime, probe)
     if sync.returncode != 0 or not ok:
         raise _upgrade_error(
