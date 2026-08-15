@@ -55,14 +55,34 @@ async def test_create_harness_deps_memory_set_when_uri_given(tmp_path: Path) -> 
     mem_root = tmp_path / "mem"
     mem_root.mkdir()
     uri = "local://" + str(mem_root.resolve())
+    db = tmp_path / "monkeybot.db"
     deps = await create_harness_deps(
-        "sqlite:///:memory:",
+        f"sqlite:///{db}",
         uri,
         open_mcp=False,
         _provider_override=_fake(),
     )
     assert isinstance(deps.memory, MemorySubsystem)
     assert deps.memory.uri == uri
+    await deps.close()
+
+
+@pytest.mark.asyncio
+async def test_create_harness_deps_skips_memory_when_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MONKEYBOT_MEMORY_HOOK_ENABLED", "0")
+    mem_root = tmp_path / "mem"
+    mem_root.mkdir()
+    uri = "local://" + str(mem_root.resolve())
+    db = tmp_path / "monkeybot.db"
+    deps = await create_harness_deps(
+        f"sqlite:///{db}",
+        uri,
+        open_mcp=False,
+        _provider_override=_fake(),
+    )
+    assert deps.memory is None
     await deps.close()
 
 
@@ -180,7 +200,7 @@ async def test_create_harness_deps_explicit_empty_agent_scope_overrides_env(
 
 
 @pytest.mark.asyncio
-async def test_create_harness_deps_closes_backend_on_memory_subsystem_failure(
+async def test_create_harness_deps_continues_when_memory_subsystem_fails(
     tmp_path: Path,
 ) -> None:
     backend = MagicMock()
@@ -189,17 +209,23 @@ async def test_create_harness_deps_closes_backend_on_memory_subsystem_failure(
     mem_root = tmp_path / "mem"
     mem_root.mkdir()
     uri = "local://" + str(mem_root.resolve())
-    with patch("monkeybot.core.bootstrap.create_storage_backend", return_value=backend), patch(
-        "monkeybot.core.bootstrap.MemorySubsystem",
-        side_effect=RuntimeError("boom"),
-    ), pytest.raises(RuntimeError, match="boom"):
-        await create_harness_deps(
+    with (
+        patch("monkeybot.core.bootstrap.create_storage_backend", return_value=backend),
+        patch(
+            "monkeybot.core.bootstrap.MemorySubsystem",
+            side_effect=RuntimeError("boom"),
+        ),
+    ):
+        deps = await create_harness_deps(
             "sqlite:///:memory:",
             uri,
             open_mcp=False,
             _provider_override=_fake(),
         )
+    assert deps.memory is None
     backend.open.assert_awaited_once()
+    backend.close.assert_not_awaited()
+    await deps.close()
     backend.close.assert_awaited_once()
 
 

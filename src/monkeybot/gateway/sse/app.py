@@ -45,7 +45,8 @@ from monkeybot.core.llm.provider import (
 )
 from monkeybot.core.llm.usage import Usage as UsageRecord
 from monkeybot.core.mcp.mcp_client import MCPClient
-from monkeybot.core.memory.subsystem import MemorySubsystem
+from monkeybot.core.memory.config import memory_enabled_from_config
+from monkeybot.core.memory.subsystem import MemoryConfigurationError, MemorySubsystem
 from monkeybot.core.persistence.backends import (
     StorageBackend,
     UsageStore,
@@ -62,13 +63,11 @@ from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector,
 from monkeybot.core.tools.loop_inspector import LoopStartInspector
 from monkeybot.core.tools.permission import try_load_permission_inspector
 from monkeybot.core.types.content_blocks import ContentBlock, Text
-from monkeybot.core.workspace import create_workspace_storage
 from monkeybot.gateway.bootstrap import ensure_gateway_runtime_env, log_gateway_startup
 from monkeybot.gateway.sse.loop_port import UsagePort
 from monkeybot.gateway.sse.models import AgentUsageResponse, SessionUsageResponse
 from monkeybot.gateway.sse.routes import create_app as build_sse_app
 from monkeybot.gateway.sse.session_bus import SessionBus, SessionRegistry
-from monkeybot.providers.gemini import GeminiProvider
 from monkeybot.todo_list import TodoListStore, TodoListTool, todo_list_enabled_from_env
 from monkeybot.web_search import WebSearchTool
 from monkeybot.web_search import build_backend as _build_web_search_backend
@@ -94,7 +93,6 @@ class _GatewayDeps:
     mcp: MCPClient | None = None
     inspectors: list[ToolInspector] = field(default_factory=list)
     provider: Provider | None = None
-    curator_provider: Provider | None = None
     hook_manager: HookManager | None = None
     memory: MemorySubsystem | None = None
     knowledge: KnowledgeSubsystem | None = None
@@ -106,12 +104,6 @@ class _GatewayDeps:
 
 
 _deps = _GatewayDeps()
-
-
-def _memory_enabled() -> bool:
-    """Default on; explicit off via ``MONKEYBOT_MEMORY_HOOK_ENABLED=false``."""
-    raw = os.environ.get("MONKEYBOT_MEMORY_HOOK_ENABLED", "true").strip().lower()
-    return raw not in {"0", "false", "no", "off"}
 
 
 def _env_context_window_tokens() -> int:
@@ -296,22 +288,6 @@ def _resolve_provider() -> Provider:
     return get_provider_config(provider=mode).provider
 
 
-def _resolve_curator_provider(main_provider: Provider) -> Provider:
-    """Dedicated provider for context curation with thinking and token cap overrides.
-
-    Uses a small ``max_tokens`` (the curator only needs ~50 JSON tokens) and
-    ``thinking_budget=0`` to explicitly disable extended thinking, which can stall
-    preview models for 10s+ on a short JSON-only completion.
-
-    Fake / vertex_anthropic modes reuse ``main_provider`` — curation is no-op in tests
-    and vertex-claude has no thinking budget concept.
-    """
-    mode = normalize_model_provider(os.environ.get("MODEL_PROVIDER", "google_vertexai"))
-    if mode in ("fake", "vertex_anthropic"):
-        return main_provider
-    return GeminiProvider(thinking_budget=0, max_tokens=1024)
-
-
 class GatewayLoopPort:
     """Schedules :func:`~monkeybot.core.runtime.loop.run` and forwards events to the session bus."""
 
@@ -471,7 +447,6 @@ class GatewayLoopPort:
                 tool_executor=executor,
                 cancelled=cancel_event,
                 hook_manager=_deps.hook_manager,
-                curator_provider=_deps.curator_provider,
                 attachment_store=attachment_store,
                 attachment_catalog=bus.attachment_catalog,
                 transcript_writer=transcript_writer,
@@ -593,7 +568,6 @@ async def _startup(fastapi_app: FastAPI) -> None:
     _deps.inspectors = inspectors
 
     _deps.provider = _resolve_provider()
-    _deps.curator_provider = _resolve_curator_provider(_deps.provider)
 
     vertex_gs = vertex_google_search_enabled_from_config()
     try:
@@ -612,58 +586,42 @@ async def _startup(fastapi_app: FastAPI) -> None:
     if _deps.web_search_tool is None and not vertex_gs:
         logger.info("web search disabled (WEB_SEARCH_BACKEND=none)")
 
-    if _memory_enabled():
-        try:
+    try:
+        if not memory_enabled_from_config():
+            logger.info("memory disabled (memory.enabled=false)")
+            _deps.hook_manager = None
+            _deps.memory = None
+            fastapi_app.state.memory = None
+            fastapi_app.state.memory_status = "disabled"
+            fastapi_app.state.memory_detail = "memory.enabled=false"
+        else:
             mem_uri = _memory_storage_uri()
-            storage = create_workspace_storage(mem_uri)
+            layout = AgentLayout.from_environment()
             mgr = HookManager()
-            model_name = os.environ.get("MODEL_NAME", "gemini-2.5-flash")
             memory = MemorySubsystem(
-                storage=storage,
-                provider=_deps.provider,
-                model=model_name,
                 memory_uri=mem_uri,
+                db_url=layout.db_url,
+                agent_id=layout.agent_root.name,
+                agent_name=layout.agent_root.name,
+                storage=backend,
             )
+            await memory.ensure_ready()
             memory.register_hooks(mgr)
             _deps.hook_manager = mgr
             _deps.memory = memory
             fastapi_app.state.memory = memory
-            logger.info("memory hook enabled (memory_storage_uri=%s)", mem_uri)
-            try:
-                gc_stats = await memory.gc_processed()
-                if gc_stats["deleted"] or gc_stats["errors"]:
-                    logger.info(
-                        "memory gc: scanned=%d deleted=%d errors=%d",
-                        gc_stats["scanned"],
-                        gc_stats["deleted"],
-                        gc_stats["errors"],
-                    )
-                working_gc = await memory.gc_working()
-                if working_gc["deleted"] or working_gc["errors"]:
-                    logger.info(
-                        "memory working gc: scanned=%d deleted=%d errors=%d",
-                        working_gc["scanned"],
-                        working_gc["deleted"],
-                        working_gc["errors"],
-                    )
-                rebuild = await memory.rebuild_graph()
-                if rebuild["upserted"] or rebuild["errors"]:
-                    logger.info(
-                        "memory graph rebuild: scanned=%d upserted=%d errors=%d",
-                        rebuild["scanned"],
-                        rebuild["upserted"],
-                        rebuild["errors"],
-                    )
-            except Exception as gc_exc:
-                logger.warning("memory gc on startup failed: %r", gc_exc)
-        except Exception as exc:
-            logger.warning("memory hook setup failed; continuing without: %r", exc)
-            _deps.hook_manager = None
-            _deps.memory = None
-            fastapi_app.state.memory = None
-    else:
-        logger.info("memory hook disabled via MONKEYBOT_MEMORY_HOOK_ENABLED")
+            fastapi_app.state.memory_status = "enabled"
+            fastapi_app.state.memory_detail = None
+            logger.info("memory enabled (memory_storage_uri=%s)", mem_uri)
+    except MemoryConfigurationError:
+        raise
+    except Exception as exc:
+        logger.warning("memory setup failed; continuing without: %r", exc)
+        _deps.hook_manager = None
+        _deps.memory = None
         fastapi_app.state.memory = None
+        fastapi_app.state.memory_status = "unavailable"
+        fastapi_app.state.memory_detail = str(exc)
 
     # Unified knowledge layer — FTS + ANN + links + search
     if knowledge_enabled_from_config():
@@ -687,9 +645,7 @@ async def _startup(fastapi_app: FastAPI) -> None:
             async def _knowledge_startup_scan() -> None:
                 try:
                     await knowledge.ensure_ready()
-                    logger.info(
-                        "knowledge index ready (path=%s)", settings.index_path
-                    )
+                    logger.info("knowledge index ready (path=%s)", settings.index_path)
                 except Exception as scan_exc:
                     logger.warning("knowledge startup scan failed: %r", scan_exc)
 
@@ -798,6 +754,18 @@ async def _shutdown(fastapi_app: FastAPI) -> None:
             fastapi_app.state.knowledge = None
         except Exception as exc:
             logger.warning("knowledge state clear failed: %s", exc)
+
+    memory = _deps.memory or getattr(fastapi_app.state, "memory", None)
+    if memory is not None:
+        try:
+            await memory.close()
+        except Exception as exc:
+            logger.warning("memory close failed: %s", exc)
+        _deps.memory = None
+        try:
+            fastapi_app.state.memory = None
+        except Exception as exc:
+            logger.warning("memory state clear failed: %s", exc)
     worker_pool_handle = getattr(fastapi_app.state, "worker_pool", None)
     if worker_pool_handle is not None:
         from monkeybot.core.subagents.worker_pool import shutdown_worker_pool

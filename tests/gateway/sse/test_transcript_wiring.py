@@ -60,7 +60,6 @@ def _wire_start_turn_deps(
     gateway_app._deps.mcp = MagicMock()
     gateway_app._deps.provider = provider
     gateway_app._deps.inspectors = []
-    gateway_app._deps.curator_provider = provider
     gateway_app._deps.hook_manager = None
     gateway_app._deps.web_search_tool = None
 

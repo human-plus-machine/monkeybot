@@ -2,24 +2,33 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 import aiosqlite
 
 from monkeybot.core.llm.usage import Usage, UsageBreakdown, UsageBucket, UsageSummary
+from monkeybot.core.persistence.sqlite import TaskReentrantLock, with_conn_lock
 
 
 class SQLiteUsageStore:
     """Insert ``turn_usage`` rows and compute summaries."""
 
-    def __init__(self, conn: aiosqlite.Connection) -> None:
+    def __init__(
+        self,
+        conn: aiosqlite.Connection,
+        *,
+        lock: asyncio.Lock | TaskReentrantLock | None = None,
+    ) -> None:
         self._conn = conn
+        self._lock = lock or TaskReentrantLock()
 
     def _since_clause(self, since_ms: int | None) -> tuple[str, list[object]]:
         if since_ms is None:
             return "", []
         return "WHERE created_at >= ?", [since_ms]
 
+    @with_conn_lock
     async def record(
         self,
         thread_id: str,
@@ -59,6 +68,7 @@ class SQLiteUsageStore:
         )
         await self._conn.commit()
 
+    @with_conn_lock
     async def summary(
         self,
         thread_id: str | None = None,
@@ -153,6 +163,7 @@ class SQLiteUsageStore:
             cache_creation_tokens=int(row[8]),
         )
 
+    @with_conn_lock
     async def breakdown(self, since_ms: int | None = None) -> UsageBreakdown:
         """Aggregate usage by model and by UTC calendar day."""
         where_sql, params = self._since_clause(since_ms)

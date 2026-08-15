@@ -9,7 +9,6 @@ from collections.abc import Sequence
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.context import TurnContext
 from monkeybot.core.context.epoch import ContextEpochTracker, EpochAdmit, fingerprint_text
-from monkeybot.core.context.memory_prompt import MemoryPromptSelection
 from monkeybot.core.context.tool_result_ingress import summarize_tool_result_text
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.logging_utils import kv
@@ -69,7 +68,6 @@ def _admit_system_context(
     ctx: TurnContext,
     chat_messages: Sequence[Message],
     *,
-    memory_selection: MemoryPromptSelection | None = None,
     attachment_catalog: SessionAttachmentCatalog | None = None,
 ) -> EpochAdmit:
     """Compose stable/volatile tails and reconcile against the current context epoch."""
@@ -77,9 +75,7 @@ def _admit_system_context(
         attachment_catalog.list_records() if attachment_catalog is not None else None
     )
     stable = compose_stable_baseline(ctx, attachment_catalog=catalog)
-    volatile_parts = compose_volatile_tail_parts(
-        ctx, chat_messages=chat_messages, memory_selection=memory_selection
-    )
+    volatile_parts = compose_volatile_tail_parts(ctx, chat_messages=chat_messages)
     volatile = "".join(volatile_parts.values())
     # Excludes "current_date": it is never empty (always today's date), so it
     # must not count as "content" when deciding whether volatile sections were
@@ -188,7 +184,7 @@ def _append_extra_system_text(system: Message, extra: str | None) -> Message:
     """Return a new system Message with ``extra`` under a ``## Runtime notes`` section.
 
     Uses the same markdown heading style as the rest of the composed system prompt
-    (``## Memory index``, harness sections). When ``extra`` is empty/None the original
+    (``## Memory wake-up``, harness sections). When ``extra`` is empty/None the original
     message is returned unchanged.
     """
     if not extra:

@@ -16,6 +16,11 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from monkeybot.core.memory.uri import (
+    DEFAULT_LOCAL_MEMORY_RELPATH,
+    object_store_memory_scheme,
+)
+
 _log = logging.getLogger(__name__)
 
 
@@ -135,12 +140,26 @@ def resolve_sqlite_url(raw: str, agent_root: Path) -> str:
 
 
 def resolve_memory_storage_uri(raw: str, agent_root: Path) -> str:
-    """Anchor local memory URIs while retaining cloud URI semantics."""
+    """Anchor local memory URIs at the agent root.
+
+    Object-store schemes are not supported. Log once and fall back to
+    ``local://`` under the agent root so existing ``gcs://`` / ``s3://``
+    deployments still boot.
+    """
     value = raw.strip()
-    if value.startswith(("gcs://", "s3://")):
-        return value
-    local_path = value.removeprefix("local://") or "memory"
-    return f"local://{resolve_agent_path(local_path, agent_root)}"
+    remote = object_store_memory_scheme(value)
+    if remote:
+        fallback = f"local://{resolve_agent_path(DEFAULT_LOCAL_MEMORY_RELPATH, agent_root)}"
+        _log.warning(
+            "unsupported memory URI %r (%s); falling back to %s",
+            value,
+            remote,
+            fallback,
+        )
+        return fallback
+    scheme, _, rest = value.partition("://")
+    local_path = rest if rest and scheme.lower() in {"local", "file"} else value
+    return f"local://{resolve_agent_path(local_path or DEFAULT_LOCAL_MEMORY_RELPATH, agent_root)}"
 
 
 @dataclass(frozen=True)
@@ -188,9 +207,14 @@ class AgentLayout:
             permission_config_path=path_env(
                 "PERMISSION_CONFIG", "monkeybot_config/permissions.yaml"
             ),
-            db_url=resolve_sqlite_url(os.environ.get("DB_URL", "sqlite:///data/monkeybot.db"), root),
+            db_url=resolve_sqlite_url(
+                os.environ.get("DB_URL", "sqlite:///data/monkeybot.db"), root
+            ),
             memory_storage_uri=resolve_memory_storage_uri(
-                os.environ.get("MEMORY_STORAGE_URI", os.environ.get("MEMORY_PATH", "memory")),
+                os.environ.get(
+                    "MEMORY_STORAGE_URI",
+                    os.environ.get("MEMORY_PATH", "memory/mempalace"),
+                ),
                 root,
             ),
             agent_id=os.environ.get("MONKEYBOT_AGENT_ID", "").strip() or str(root),
@@ -211,6 +235,11 @@ class AgentLayout:
             "MEMORY_STORAGE_URI": self.memory_storage_uri,
             "MONKEYBOT_PYTHON": sys.executable,
         }
+        from monkeybot.core.memory.config import memory_enabled_from_config
+
+        if memory_enabled_from_config():
+            values["MEMPALACE_PALACE_PATH"] = self.memory_storage_uri.removeprefix("local://")
+            values["MEMPALACE_BACKEND"] = os.environ.get("MEMPALACE_BACKEND", "chroma")
         for key, value in values.items():
             os.environ[key] = value
 

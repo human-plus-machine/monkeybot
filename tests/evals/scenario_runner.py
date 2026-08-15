@@ -29,8 +29,6 @@ def tool_category(tool_name: str) -> str:
         return "read"
     if tool_name in write_tools:
         return "write"
-    if tool_name == "search_memory":
-        return "memory"
     if tool_name == "run_command":
         return "shell"
     if tool_name == "task":

@@ -56,13 +56,23 @@ async def test_health_under_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _skip_mcp_load(self: MCPClient, _path: object, *_a: object, **_kw: object) -> None:
         return
 
+    class _FastMemory:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        async def ensure_ready(self) -> None:
+            return
+
+        def register_hooks(self, _mgr: object) -> None:
+            return
+
     monkeypatch.setattr(MCPClient, "load_from_config", _skip_mcp_load)
+    monkeypatch.setattr("monkeybot.gateway.sse.app.MemorySubsystem", _FastMemory)
     monkeypatch.setenv("DB_URL", "sqlite:///:memory:")
     monkeypatch.setenv("MODEL_PROVIDER", "fake")
     monkeypatch.setenv("MONKEYBOT_OTEL_ENABLED", "false")
     monkeypatch.setenv("MCP_CONFIG", "/nonexistent/mcp.json")
     monkeypatch.setenv("COMMAND_ALLOWLIST_CONFIG", "/nonexistent/command_allowlist.yaml")
-    monkeypatch.setenv("MONKEYBOT_MEMORY_HOOK_ENABLED", "false")
 
     start = time.perf_counter()
     async with LifespanManager(app):
