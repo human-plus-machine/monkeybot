@@ -883,10 +883,11 @@ class CoreToolExecutor(ToolExecutorPort):
                 )
             )
             cmds = tuple(cmd for cmd in cmds if cmd != "mempalace")
-        # Allow absolute argv paths under the resolved skills root (list_skills
-        # returns this path; scripts live outside the workspace cwd).
-        skills = str(self._skills_path)
-        paths = tuple(dict.fromkeys((*paths, skills, f"{skills}/")))
+        if terminal is None:
+            # Allow absolute argv paths under the resolved skills root (list_skills
+            # returns this path; scripts live outside the workspace cwd).
+            skills = str(self._skills_path)
+            paths = tuple(dict.fromkeys((*paths, skills, f"{skills}/")))
         self._run_cmd_allowed_commands = cmds
         self._run_cmd_allowed_paths = paths
         if terminal is not None:

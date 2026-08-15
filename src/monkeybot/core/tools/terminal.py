@@ -183,6 +183,15 @@ class SecurityError(Exception):
     pass
 
 
+def validate_mempalace_subcommand(args: Sequence[str]) -> None:
+    """Reject mempalace argv except the host-authorized ``search`` subcommand."""
+    sub = args[0] if args else ""
+    if sub not in ALLOWED_MEMPALACE_SUBCOMMANDS:
+        raise SecurityError(
+            f"mempalace subcommand {sub!r} is not allowed; only 'search' is permitted"
+        )
+
+
 class CommandTimeoutError(TimeoutError):
     """Raised when a command exceeds its timeout; carries drained partial streams.
 
@@ -605,9 +614,11 @@ class TerminalExecutor:
             raise SecurityError(error_msg)
 
     def _validate_mempalace_args(self, args: list[str]) -> None:
-        sub = args[0] if args else ""
-        if sub not in ALLOWED_MEMPALACE_SUBCOMMANDS:
-            error_msg = f"mempalace subcommand {sub!r} is not allowed; only 'search' is permitted"
+        try:
+            validate_mempalace_subcommand(args)
+        except SecurityError as exc:
+            sub = args[0] if args else ""
+            error_msg = str(exc)
             logger.error(
                 "Security violation: %s",
                 error_msg,
@@ -618,7 +629,7 @@ class TerminalExecutor:
                     "subcommand": sub,
                 },
             )
-            raise SecurityError(error_msg)
+            raise SecurityError(error_msg) from exc
 
     def _validate_rg_args(self, args: list[str]) -> None:
         """Reject ripgrep options that execute child processes."""

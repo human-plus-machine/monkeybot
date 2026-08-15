@@ -148,6 +148,18 @@ class TestMemoryHiddenPaths:
 
         assert not any("bucket" in str(path) for path in hidden)
 
+    def test_mac_workspace_override_does_not_hide_workspace(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MEMPALACE_PALACE_PATH", raising=False)
+        monkeypatch.delenv("MEMORY_PATH", raising=False)
+        monkeypatch.delenv("MEMORY_STORAGE_URI", raising=False)
+        workspace = tmp_path / "workspaces" / "ws1" / "memory"
+        workspace.mkdir(parents=True)
+
+        hidden = memory_hidden_paths(workspace)
+
+        assert workspace.resolve() not in hidden
+        assert (Path.home() / ".mempalace").resolve() in hidden
+
 
 @pytest.mark.skipif(
     not sys.platform.startswith("linux"),
@@ -182,3 +194,18 @@ class TestLinuxBootstrap:
         assert proc.returncode == ISOLATION_FAILURE_EXIT_CODE
         assert ISOLATION_ERROR_PREFIX in proc.stderr
         assert isolation_failed(proc.returncode, proc.stderr)
+
+    def test_bootstrap_hides_directory_that_does_not_exist_yet(self, tmp_path):
+        secret_dir = tmp_path / "memory"
+        check = (
+            "import os, sys; "
+            "path = sys.argv[1]; "
+            "sys.exit(0 if os.path.isdir(path) and not os.listdir(path) else 4)"
+        )
+
+        proc = self._run(
+            [str(secret_dir)],
+            [sys.executable, "-c", check, str(secret_dir)],
+        )
+
+        assert proc.returncode == 0

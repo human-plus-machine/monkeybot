@@ -39,11 +39,11 @@ from typing import Any
 
 from monkeybot.core.tools.terminal import (
     ALLOWED_COMMANDS,
-    ALLOWED_MEMPALACE_SUBCOMMANDS,
     ALLOWED_PATHS,
     ExecutionResult,
     SecurityError,
     build_skill_runtime_env,
+    validate_mempalace_subcommand,
 )
 
 logger = logging.getLogger(__name__)
@@ -302,11 +302,7 @@ class SandboxExecutor:
         if command not in self._allowed_commands:
             raise SecurityError(f"Command '{command}' not allowed")
         if command == "mempalace":
-            sub = args[0] if args else ""
-            if sub not in ALLOWED_MEMPALACE_SUBCOMMANDS:
-                raise SecurityError(
-                    f"mempalace subcommand {sub!r} is not allowed; only 'search' is permitted"
-                )
+            validate_mempalace_subcommand(args)
 
         if not self._config.shared_filesystem and self._remote_requests_mounted_path(args, cwd):
             raise SecurityError(

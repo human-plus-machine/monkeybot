@@ -2401,6 +2401,26 @@ class TestCoreToolExecutorSandboxSelection:
         assert "mempalace" not in ex._terminal.allowed_commands
         assert ex._terminal.hidden_paths
 
+    def test_injected_terminal_preserves_caller_path_policy(self, tmp_path):
+        """Injected executors keep the caller's path allowlist (no skills widening)."""
+        injected = TerminalExecutor(allowed_path_prefixes=["."])
+        skills = tmp_path / "skills"
+        skills.mkdir()
+        mem = tmp_path / "mem"
+        mem.mkdir()
+
+        ex = CoreToolExecutor(
+            workspace_root=tmp_path,
+            memory=_mem_sub(mem),
+            skills_path=skills,
+            mcp=_NoMCP(),
+            terminal=injected,
+        )
+
+        assert "." in injected.allowed_path_prefixes
+        assert str(skills) not in injected.allowed_path_prefixes
+        assert ex._terminal.allowed_path_prefixes == injected.allowed_path_prefixes
+
     def test_injected_sandbox_gets_host_terminal_for_memory(self, tmp_path, monkeypatch):
         """Injected sandboxes need a host terminal; the palace is never mounted."""
         monkeypatch.delenv("SANDBOX_ENABLED", raising=False)

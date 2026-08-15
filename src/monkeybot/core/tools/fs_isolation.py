@@ -101,7 +101,10 @@ if libc.mount(b"none", b"/", None, MS_REC | MS_PRIVATE, None) != 0:
 
 for target in hidden:
     if not os.path.isdir(target):
-        continue
+        try:
+            os.makedirs(target, mode=0o500, exist_ok=True)
+        except OSError as exc:
+            _fail("cannot prepare hide mount point " + target + ": " + str(exc))
     flags = MS_RDONLY | MS_NOSUID | MS_NODEV
     if libc.mount(b"tmpfs", target.encode(), b"tmpfs", flags, b"size=0,mode=0500") != 0:
         _fail("cannot hide " + target + ": " + os.strerror(ctypes.get_errno()))
@@ -261,7 +264,14 @@ def memory_hidden_paths(workspace_root: Path) -> tuple[Path, ...]:
     Covers the agent's own palace, any palace pointed at by the environment,
     and the shared MemPalace home that holds identity and config.
     """
-    candidates = [workspace_root / ".." / "memory"]
+    resolved_workspace = workspace_root.expanduser().resolve()
+    agent_palace = (workspace_root / ".." / "memory").expanduser().resolve()
+    # Standard agent layout: <agent>/workspace with palace at <agent>/memory. Mac
+    # workspace overrides remap onto .../workspaces/<id>/memory, so ../memory
+    # collapses back to the workspace itself and must not be treated as a palace.
+    candidates: list[Path] = []
+    if agent_palace != resolved_workspace:
+        candidates.append(agent_palace)
     try:
         candidates.append(Path.home() / ".mempalace")
     except RuntimeError:
