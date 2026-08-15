@@ -646,6 +646,68 @@ async def test_history_migration_auto_claims_legacy_rows_when_owned_by_agent_roo
         await backend.close()
 
 
+@pytest.mark.asyncio
+async def test_history_migration_auto_claims_legacy_rows_when_unscoped_opener_ran_first(
+    tmp_path: Path,
+) -> None:
+    """Regression: backfill was gated on apply_schema() reporting that *this*
+    call added the agent_scope column, not on whether unclaimed legacy rows
+    exist. A worker that opens the shared default DB_URL unscoped (e.g.
+    subagents/worker.py, scheduler/worker.py) runs apply_schema() first and
+    consumes that one-shot signal; the scoped gateway then opens second, sees
+    the column already present, and silently takes the warn-only path —
+    orphaning the same pre-upgrade history
+    test_history_migration_auto_claims_legacy_rows_when_owned_by_agent_root
+    covers for the single-opener case.
+    """
+    import time
+
+    import aiosqlite
+
+    agent_root = tmp_path / "my-agent"
+    data_dir = agent_root / "data"
+    data_dir.mkdir(parents=True)
+    db_path = data_dir / "monkeybot.db"
+
+    conn = await aiosqlite.connect(str(db_path))
+    await conn.execute(
+        """CREATE TABLE conversation_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        thread_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+    )"""
+    )
+    await conn.execute(
+        "INSERT INTO conversation_history(thread_id, role, content, created_at) VALUES (?,?,?,?)",
+        (
+            "my-old-chat",
+            "user",
+            '[{"type":"text","text":"pre-upgrade message"}]',
+            int(time.time() * 1000),
+        ),
+    )
+    await conn.commit()
+    await conn.close()
+
+    # An unscoped worker opens (and migrates) the shared DB first.
+    unscoped = SQLiteStorageBackend(f"sqlite:///{db_path}")
+    await unscoped.open(run_schema=True)
+    await unscoped.close()
+
+    # The scoped gateway opens second, against an already-migrated schema.
+    backend = SQLiteStorageBackend(
+        f"sqlite:///{db_path}", agent_scope="my-agent-id", agent_root=agent_root
+    )
+    await backend.open(run_schema=True)
+    try:
+        assert [t.thread_id for t in await backend.history().list_threads()] == ["my-old-chat"]
+        assert len(await backend.history().load("my-old-chat")) == 1
+    finally:
+        await backend.close()
+
+
 def test_db_owned_by_agent_root() -> None:
     from monkeybot.core.persistence.sqlite import db_owned_by_agent_root
 

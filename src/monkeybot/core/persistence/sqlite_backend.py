@@ -47,14 +47,12 @@ class SQLiteStorageBackend:
     async def open(self, *, run_schema: bool = True) -> None:
         self._conn = await open_connection(self._db_url)
         if run_schema:
-            agent_scope_migrated = await apply_schema(self._conn)
-            if agent_scope_migrated and self._agent_scope:
+            await apply_schema(self._conn)
+            if self._agent_scope:
                 if db_owned_by_agent_root(self._db_url, self._agent_root):
                     await backfill_legacy_agent_scope(self._conn, self._agent_scope)
                 else:
                     await warn_if_legacy_unscoped_history(self._conn)
-            elif self._agent_scope:
-                await warn_if_legacy_unscoped_history(self._conn)
         self._history_store = SQLiteHistoryStore(
             self._conn, agent_scope=self._agent_scope, lock=self._tx_lock
         )

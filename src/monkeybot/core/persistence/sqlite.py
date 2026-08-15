@@ -268,21 +268,15 @@ async def _log_legacy_schema_error(conn: aiosqlite.Connection) -> None:
     logger.error("Legacy conversation_history schema detected; db=%s", path)
 
 
-async def apply_schema(conn: aiosqlite.Connection) -> bool:
-    """Create tables/indexes; refuse legacy conversation_history shapes.
-
-    Returns True when ``agent_scope`` was just added to a pre-existing
-    ``conversation_history`` table — a fresh migration off the pre-agent-scope
-    schema. Callers use this to decide whether to claim legacy rows for the
-    scope they're about to open with (see :func:`backfill_legacy_agent_scope`).
-    """
+async def apply_schema(conn: aiosqlite.Connection) -> None:
+    """Create tables/indexes; refuse legacy conversation_history shapes."""
     for ddl in SCHEMA_DDLS:
         await conn.execute(ddl)
     await conn.commit()
     await _ensure_turn_usage_estimated_column(conn)
     await _ensure_turn_usage_cache_columns(conn)
     await _ensure_subagent_runs_claim_columns(conn)
-    agent_scope_migrated = await _ensure_conversation_history_agent_scope_column(conn)
+    await _ensure_conversation_history_agent_scope_column(conn)
     await _ensure_history_memory_columns(conn)
     await _ensure_outbox_agent_id_column(conn)
     await _ensure_outbox_palace_id_column(conn)
@@ -293,7 +287,6 @@ async def apply_schema(conn: aiosqlite.Connection) -> bool:
     if "tool_name" in col_names or "tool_call_id" in col_names:
         await _log_legacy_schema_error(conn)
         raise RuntimeError(_LEGACY_SCHEMA_MESSAGE)
-    return agent_scope_migrated
 
 
 async def _ensure_turn_usage_estimated_column(conn: aiosqlite.Connection) -> None:
@@ -369,14 +362,20 @@ async def _ensure_conversation_history_agent_scope_column(conn: aiosqlite.Connec
 
 
 async def backfill_legacy_agent_scope(conn: aiosqlite.Connection, agent_scope: str) -> None:
-    """Claim pre-migration rows (``agent_scope = ''``) for ``agent_scope``, once.
+    """Claim pre-migration rows (``agent_scope = ''``) for ``agent_scope``.
 
-    Call only when :func:`apply_schema` reports a fresh migration AND
-    :func:`db_owned_by_agent_root` confirms this SQLite file is uniquely
-    owned by the agent about to claim it — see that function and
-    ``docs/migrations/agent-scope-namespacing.md`` for why unconditional
-    auto-claiming (rejected in PR #179 review) is unsafe for a file that
-    could be shared, but is correct here where ownership is unambiguous.
+    Idempotent — the UPDATE simply matches zero rows once nothing is left
+    unscoped, so callers should invoke this on every ``open()``, not just
+    once after a schema change. Gating it on "did this call just add the
+    column" instead is a bug: when another process's ``apply_schema()`` adds
+    the column first (e.g. an unscoped worker sharing the same DB_URL), the
+    scoped owner's own call sees the column already present and would never
+    claim its legacy rows. Call only when :func:`db_owned_by_agent_root`
+    confirms this SQLite file is uniquely owned by the agent about to claim
+    it — see that function and ``docs/migrations/agent-scope-namespacing.md``
+    for why unconditional auto-claiming (rejected in PR #179 review) is
+    unsafe for a file that could be shared, but is correct here where
+    ownership is unambiguous.
     """
     if not agent_scope:
         return

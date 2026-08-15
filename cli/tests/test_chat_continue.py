@@ -141,6 +141,22 @@ def test_run_chat_continue_resolves_and_sets_session(
     assert "Continuing session resolved" in capsys.readouterr().out
 
 
+def test_run_chat_continue_with_explicit_session_prefers_session(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--session wins silently unless we say so — a user who passes both flags
+    needs to know which one took effect."""
+    resolve_mock = MagicMock()
+    monkeypatch.setattr("monkeybot_cli.commands.chat._resolve_continue_session_id", resolve_mock)
+    args = build_parser().parse_args(
+        ["chat", "--url", "http://127.0.0.1:65001", "--session", "explicit-id", "--continue"]
+    )
+    run_chat(args)
+    assert args.session == "explicit-id"
+    resolve_mock.assert_not_called()
+    assert "ignoring --continue" in capsys.readouterr().out
+
+
 def test_bye_prints_continue_hint_in_plain_path(capsys: pytest.CaptureFixture[str]) -> None:
     args = MagicMock(
         model_provider=None,

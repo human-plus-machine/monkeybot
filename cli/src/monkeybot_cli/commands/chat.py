@@ -42,8 +42,6 @@ from monkeybot_cli.config_resolve import (
 )
 from monkeybot_cli.gateway_health import (
     occupied_gateway_message as _occupied_gateway_message,
-)
-from monkeybot_cli.gateway_health import (
     wait_for_health as _wait_for_health,
 )
 from monkeybot_cli.opensandbox_lifecycle import (
@@ -702,11 +700,8 @@ def _spawn_gateway(config_path: Path | None, agent_root: Path, port: int) -> _Sp
 def _resolve_continue_session_id(base: str) -> str | None:
     """Look up the most recently used session id for this agent root, if any.
 
-    A malformed body (bad JSON, or valid JSON that isn't the expected shape)
-    is treated the same as an HTTP error — printed and swallowed here, not
-    raised — so a caller resolving this before entering its cleanup
-    try/finally (see run_chat) can't skip terminating a spawned gateway and
-    deleting its log file over a server response glitch.
+    A malformed body is treated the same as an HTTP error: printed and
+    swallowed, never raised.
     """
     try:
         with httpx.Client(timeout=5.0) as client:
@@ -782,13 +777,16 @@ def run_chat(args: argparse.Namespace) -> int:
             _cleanup_gateway_log(spawned)
             return 1
 
-    if getattr(args, "resume_last", False) and not getattr(args, "session", None):
-        resolved = _resolve_continue_session_id(base)
-        if resolved:
-            print(f"{_DIM}Continuing session {resolved[:8]}…{_RESET}")
-            args.session = resolved
+    if getattr(args, "resume_last", False):
+        if getattr(args, "session", None):
+            print(f"{_DIM}--session was also passed — using it, ignoring --continue.{_RESET}")
         else:
-            print(f"{_DIM}No previous conversation found — starting a new session.{_RESET}")
+            resolved = _resolve_continue_session_id(base)
+            if resolved:
+                print(f"{_DIM}Continuing session {resolved[:8]}…{_RESET}")
+                args.session = resolved
+            else:
+                print(f"{_DIM}No previous conversation found — starting a new session.{_RESET}")
 
     provider, model = _model_banner_fields(args, config_path)
     animations_enabled = not (
