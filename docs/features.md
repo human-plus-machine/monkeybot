@@ -429,7 +429,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Purpose:** Per-agent MemPalace drawers with durable outbox ingest (SQLite, Postgres, or Firestore) and wake-up + L2 recall in the prompt.
 
-**Key files:** `core/memory/subsystem.py`, `hook.py`, `outbox.py`, `palace.py`, `writer.py`, `ingest.py`, `core/persistence/{sqlite,postgres,firestore}.py`
+**Key files:** `core/memory/subsystem.py`, `hook.py`, `outbox.py`, `palace.py`, `writer.py`, `ingest.py`, `core/persistence/{sqlite,postgres,firestore}.py`, `core/tools/fs_isolation.py`
 
 **Storage URI:** `local://` only (object-store palaces are not supported in this release).
 
@@ -445,7 +445,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 **Invariants:**
 - Chat history is canonical; MemPalace drawers are an idempotent projection.
 - Recall is scoped to the current `thread_id` by default.
-- `memory.enabled: false` (or `MONKEYBOT_MEMORY_HOOK_ENABLED=0`) skips capture, wake-up, and prompt teaching. It is not a sandbox against shell access to palace files.
+- `memory.enabled: false` (or `MONKEYBOT_MEMORY_HOOK_ENABLED=0`) skips capture, wake-up, and prompt teaching. Host `run_command` children then cannot see palace files: Linux user+mount namespaces or macOS `sandbox-exec` hide those directories. If that isolation cannot be established, the command is refused rather than run with palace files visible. OpenSandbox does not mount the palace. The kill switch is not an argv denylist; `bash` remains allowed, and the OS hides the files.
 - Postgres/Firestore persist the memory outbox with replica `palace_id` claim partitioning. Replicated deployments must share a lock-capable palace volume.
 - MemPalace (chromadb / onnxruntime) is the optional `monkeybot[memory]` extra. Missing the extra disables memory instead of failing startup.
 - Subagents can read the palace but do not register duplicate automatic-ingest hooks.
