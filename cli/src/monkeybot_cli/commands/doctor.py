@@ -251,7 +251,7 @@ def run_doctor(args: argparse.Namespace) -> int:
                 + (
                     ", run the agent once to provision a managed MemPalace runtime, "
                     "or set memory.enabled: false"
-                    if memory_on and runtime.source == "cli"
+                    if memory_on and runtime.source in {"cli", MANAGED_RUNTIME_SOURCE}
                     else (", or set memory.enabled: false" if memory_on else "")
                 )
             )

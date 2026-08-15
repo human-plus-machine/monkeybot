@@ -635,7 +635,7 @@ def test_prepare_config_only_provisions_managed_runtime_when_cache_cold(
     assert runtime.source == MANAGED_RUNTIME_SOURCE
     assert runtime.argv == [str(interpreter)]
     assert gateway_argv(runtime)[0] == str(interpreter)
-    assert calls[0][:4] == ["uv", "venv", "--python", sys.executable]
+    assert calls[0][:5] == ["uv", "venv", "--python", sys.executable, "--relocatable"]
     staging = Path(calls[0][-1])
     assert staging != runtime_dir
     assert calls[1] == [
@@ -647,6 +647,33 @@ def test_prepare_config_only_provisions_managed_runtime_when_cache_cold(
         pin,
     ]
     assert f"provisioning {pin}" in capsys.readouterr().out
+
+
+def test_managed_runtime_retires_existing_dir_instead_of_rmtree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-provision renames the old tree aside so live readers keep their files."""
+    runtime_dir = _isolate_managed_cache(tmp_path, monkeypatch)
+    old_interpreter = runtime_dir / "bin" / "python"
+    old_interpreter.parent.mkdir(parents=True)
+    old_interpreter.write_text("#!/bin/sh\n# stale\n")
+    old_interpreter.chmod(0o755)
+    calls: list[list[str]] = []
+    monkeypatch.setattr("monkeybot_cli.runtime_python.subprocess.run", _fake_uv(calls))
+    monkeypatch.setattr(
+        "monkeybot_cli.runtime_python.run_probe",
+        # First probe (cache reuse) fails; staged probe after install passes.
+        lambda runtime, code, **kwargs: Path(runtime.argv[0]).resolve() != old_interpreter.resolve(),
+    )
+
+    runtime = provision_managed_memory_runtime(tmp_path)
+
+    assert runtime.source == MANAGED_RUNTIME_SOURCE
+    assert runtime_dir.is_dir()
+    assert (runtime_dir / "bin" / "python").is_file()
+    retired = list((runtime_dir.parent).glob(f".{runtime_dir.name}.retired-*"))
+    assert len(retired) == 1
+    assert (retired[0] / "bin" / "python").read_text() == "#!/bin/sh\n# stale\n"
 
 
 def test_managed_runtime_pins_the_running_core_version(
@@ -685,6 +712,7 @@ def test_managed_runtime_fail_closed_when_install_fails(
 
     message = str(excinfo.value)
     assert "MemPalace could not be provisioned" in message
+    assert "monkeybot[memory]" in message
     assert "no wheel found for onnxruntime" in message
     assert "memory.enabled: false" in message
     assert "manylinux2014" in message and "musl" in message
@@ -770,6 +798,20 @@ def test_mirrored_extras_uses_extra_installed_and_skips_unmirrored(
     assert mirrored_monkeybot_extras() == ("openai", "postgres")
 
 
+def test_mirrored_extras_skips_base_probe_modules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``google.genai`` is a core dep — gemini / realtime-gemini must not pollute the mirror."""
+    monkeypatch.setattr("monkeybot_cli.runtime_python.extra_installed", lambda extra: True)
+
+    mirrored = mirrored_monkeybot_extras()
+
+    assert "gemini" not in mirrored
+    assert "realtime-gemini" not in mirrored
+    assert "openai" in mirrored
+    assert "postgres" in mirrored
+
+
 def test_mirrored_extras_is_empty_when_nothing_installed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -778,7 +820,7 @@ def test_mirrored_extras_is_empty_when_nothing_installed(
     assert mirrored_monkeybot_extras() == ()
 
 
-def test_resolve_runtime_python_uses_ready_managed_cache(
+def test_resolve_runtime_python_uses_managed_cache_without_probing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _write_memory_config(tmp_path, enabled=True)
@@ -789,13 +831,46 @@ def test_resolve_runtime_python_uses_ready_managed_cache(
     interpreter.chmod(0o755)
     monkeypatch.setattr(
         "monkeybot_cli.runtime_python.run_probe",
-        lambda runtime, code, **kwargs: runtime.source == MANAGED_RUNTIME_SOURCE,
+        lambda *a, **k: pytest.fail("resolve must not probe the managed cache"),
     )
 
     runtime = resolve_runtime_python(tmp_path, memory_enabled=True)
 
     assert runtime.source == MANAGED_RUNTIME_SOURCE
     assert runtime.argv == [str(interpreter)]
+
+
+def test_prepare_runtime_python_probes_managed_cache_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent_root = tmp_path / "agent"
+    agent_root.mkdir()
+    (agent_root / "monkeybot_config").mkdir()
+    (agent_root / "monkeybot_config" / "monkeybot.yaml").write_text("{}\n", encoding="utf-8")
+    runtime_dir = _isolate_managed_cache(tmp_path, monkeypatch)
+    interpreter = runtime_dir / "bin" / "python"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("#!/bin/sh\n")
+    interpreter.chmod(0o755)
+    probes: list[str] = []
+
+    def fake_probe(runtime: RuntimePython, code: str, *, timeout: float = 15.0) -> tuple[bool, str]:
+        del timeout
+        probes.append(runtime.source)
+        assert "import mempalace" in code
+        return True, ""
+
+    monkeypatch.setattr("monkeybot_cli.runtime_python._probe", fake_probe)
+    monkeypatch.setattr(
+        "monkeybot_cli.runtime_python.run_probe",
+        lambda *a, **k: pytest.fail("prepare must probe via _probe only"),
+    )
+
+    runtime = prepare_runtime_python(agent_root)
+
+    assert runtime.source == MANAGED_RUNTIME_SOURCE
+    assert runtime.argv == [str(interpreter)]
+    assert probes == [MANAGED_RUNTIME_SOURCE]
 
 
 def test_resolve_runtime_python_ignores_managed_cache_when_memory_off(
