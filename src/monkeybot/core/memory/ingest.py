@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 import logging
 from typing import Any
 
@@ -12,6 +11,7 @@ from monkeybot.core.llm.provider import Message
 from monkeybot.core.memory.ids import conversation_wing
 from monkeybot.core.memory.observability import current_traceparent, log_event, memory_span
 from monkeybot.core.persistence.backends import HistoryStore
+from monkeybot.core.persistence.errors import AmbiguousCommitError
 from monkeybot.core.types.content_blocks import Text
 
 logger = logging.getLogger(__name__)
@@ -38,35 +38,6 @@ def _ingest_enabled(memory: Any | None) -> bool:
     return memory is not None and getattr(memory, "ingest_enabled", True)
 
 
-def _append_accepts_ids(append: Any) -> bool:
-    try:
-        params = inspect.signature(append).parameters
-    except (TypeError, ValueError):
-        return False
-    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
-        return True
-    return "turn_id" in params
-
-
-_AMBIGUOUS_COMMIT_NAMES = frozenset(
-    {
-        "TimeoutError",
-        "CancelledError",
-        "InterfaceError",
-        "OperationalError",
-        "InternalServerError",
-        "ConnectionError",
-        "OSError",
-    }
-)
-
-
-def _is_ambiguous_commit(exc: BaseException) -> bool:
-    if isinstance(exc, (TimeoutError, OSError, ConnectionError)):
-        return True
-    return type(exc).__name__ in _AMBIGUOUS_COMMIT_NAMES
-
-
 async def _append_history(
     history: HistoryStore,
     thread_id: str,
@@ -75,11 +46,7 @@ async def _append_history(
     turn_id: str,
     message_id: str,
 ) -> None:
-    append: Any = history.append
-    if _append_accepts_ids(append):
-        await append(thread_id, message, turn_id=turn_id, message_id=message_id)
-        return
-    await append(thread_id, message)
+    await history.append(thread_id, message, turn_id=turn_id, message_id=message_id)
 
 
 async def _append_atomic(
@@ -149,7 +116,7 @@ async def persist_message(
                     outbox=outbox,
                 )
             except Exception as exc:
-                if _is_ambiguous_commit(exc):
+                if isinstance(exc, AmbiguousCommitError):
                     logger.warning(
                         "atomic history+outbox acknowledgement lost; "
                         "retrying idempotently (message_id=%s): %r",
@@ -208,9 +175,7 @@ async def persist_message(
                     traceparent=current_traceparent(),
                 )
             except Exception as exc:
-                logger.warning(
-                    "memory outbox enqueue failed after history commit: %r", exc
-                )
+                logger.warning("memory outbox enqueue failed after history commit: %r", exc)
                 log_event(
                     "outbox_enqueue",
                     memory_role=message.role,

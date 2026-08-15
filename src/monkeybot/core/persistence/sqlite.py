@@ -217,10 +217,11 @@ def sqlite_path_from_db_url(db_url: str | None = None) -> str:
 
 
 async def configure_connection(conn: aiosqlite.Connection) -> None:
-    """PRAGMA journal_mode=WAL; foreign_keys=ON; synchronous=NORMAL."""
+    """PRAGMA journal_mode=WAL; foreign_keys=ON; synchronous=NORMAL; busy_timeout=5000."""
     await conn.execute("PRAGMA journal_mode=WAL")
     await conn.execute("PRAGMA foreign_keys=ON")
     await conn.execute("PRAGMA synchronous=NORMAL")
+    await conn.execute("PRAGMA busy_timeout=5000")
 
 
 async def _connection_db_path(conn: aiosqlite.Connection) -> str:
@@ -283,9 +284,7 @@ async def _ensure_turn_usage_cache_columns(conn: aiosqlite.Connection) -> None:
     for col in ("cache_read_tokens", "cache_creation_tokens"):
         if col in names:
             continue
-        await conn.execute(
-            f"ALTER TABLE turn_usage ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0"
-        )
+        await conn.execute(f"ALTER TABLE turn_usage ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0")
     await conn.commit()
 
 
@@ -311,13 +310,7 @@ async def _ensure_outbox_agent_id_column(conn: aiosqlite.Connection) -> None:
     if not names:
         return
     if "agent_id" not in names:
-        await conn.execute(
-            "ALTER TABLE memory_outbox ADD COLUMN agent_id TEXT NOT NULL DEFAULT ''"
-        )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_memory_outbox_agent "
-        "ON memory_outbox(agent_id, status, created_at)"
-    )
+        await conn.execute("ALTER TABLE memory_outbox ADD COLUMN agent_id TEXT NOT NULL DEFAULT ''")
     await conn.commit()
 
 
@@ -349,10 +342,7 @@ async def _ensure_outbox_palace_id_column(conn: aiosqlite.Connection) -> None:
         await conn.execute(
             "ALTER TABLE memory_outbox ADD COLUMN palace_id TEXT NOT NULL DEFAULT ''"
         )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_memory_outbox_palace "
-        "ON memory_outbox(agent_id, palace_id, status, created_at)"
-    )
+    await conn.execute(OUTBOX_INDEX_DDL)
     await conn.commit()
 
 

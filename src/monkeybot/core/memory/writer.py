@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 from monkeybot.core.memory.observability import (
     Timer,
@@ -20,6 +20,9 @@ from monkeybot.core.memory.palace import PalacePort
 logger = logging.getLogger(__name__)
 
 _STOP_TIMEOUT_S = 10.0
+# Dedicated pool so a hung embedder is not joined via asyncio.to_thread's default
+# executor at interpreter exit. Never shut down.
+_UPSERT_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="memory-palace-upsert")
 
 
 class MemoryWriter:
@@ -134,94 +137,69 @@ class MemoryWriter:
                     self._idle.set()
 
     async def _commit_rows(self, rows: list[OutboxRow]) -> int:
-        timer = Timer()
         committed = 0
-        with memory_span(
-            "monkeybot.memory.writer.flush",
-            **{
-                "memory.backend": self._backend,
-                "memory.embedding_model": self._embedding_model,
-                "memory.operation": "flush",
-                "memory.batch_size": len(rows),
-            },
-        ) as span:
-            if rows[0].traceparent:
-                link_to_traceparent(span, rows[0].traceparent)
-            for row in rows:
-                try:
-                    await self._upsert_async(row)
-                    await self._outbox.mark_committed(
-                        [row.id], lease_owner=self._lease_owner
-                    )
-                    committed += 1
-                except Exception as exc:
-                    error_class = type(exc).__name__
-                    permanent = is_permanent_error(error_class)
-                    logger.warning(
-                        "memory writer upsert failed id=%s permanent=%s: %r",
-                        row.id,
-                        permanent,
-                        exc,
-                    )
-                    log_event(
-                        "writer_retry" if not permanent else "writer_dead",
-                        memory_status="dead" if permanent else "retry",
-                        memory_error_class=error_class,
-                        memory_batch_size=1,
-                    )
-                    await self._outbox.mark_retry(
-                        row.id,
-                        error_class=error_class,
-                        attempts=row.attempts + 1,
-                        permanent=permanent,
-                        lease_owner=self._lease_owner,
-                    )
-            if committed:
+        for row in rows:
+            timer = Timer()
+            try:
+                wait_ms = await self._upsert_async(row)
+                await self._outbox.mark_committed([row.id], lease_owner=self._lease_owner)
+                committed += 1
                 log_event(
                     "writer_commit",
                     memory_status="committed",
-                    memory_batch_size=committed,
+                    memory_batch_size=1,
                     memory_backend=self._backend,
                     memory_duration_ms=round(timer.ms(), 1),
+                    memory_lock_wait_ms=round(wait_ms, 1),
                 )
-            dead = await self._outbox.dead_depth(agent_id=self._agent_id)
-            if dead:
+            except Exception as exc:
+                error_class = type(exc).__name__
+                permanent = is_permanent_error(error_class)
+                logger.warning(
+                    "memory writer upsert failed id=%s permanent=%s: %r",
+                    row.id,
+                    permanent,
+                    exc,
+                )
                 log_event(
-                    "outbox_dead_depth",
-                    memory_status="dead",
-                    memory_batch_size=dead,
-                    memory_backend=self._backend,
+                    "writer_retry" if not permanent else "writer_dead",
+                    memory_status="dead" if permanent else "retry",
+                    memory_error_class=error_class,
+                    memory_batch_size=1,
+                )
+                await self._outbox.mark_retry(
+                    row.id,
+                    error_class=error_class,
+                    attempts=row.attempts + 1,
+                    permanent=permanent,
+                    lease_owner=self._lease_owner,
                 )
         return committed
 
-    async def _upsert_async(self, row: OutboxRow) -> None:
-        """Run the palace upsert on a daemon thread so process exit is not blocked.
+    async def _upsert_async(self, row: OutboxRow) -> float:
+        """Run the palace upsert off the event loop.
 
-        ``asyncio.to_thread`` uses the default executor; Python joins those
-        threads at shutdown. A hung embedder must not keep the process alive
-        past the writer stop timeout.
+        Uses a dedicated executor (never shut down) so a hung embedder is not
+        joined via ``asyncio.to_thread``'s default executor at interpreter exit.
         """
-        error: list[BaseException] = []
-        done = threading.Event()
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(_UPSERT_EXECUTOR, self._upsert_one, row)
 
-        def run() -> None:
-            try:
-                self._upsert_one(row)
-            except BaseException as exc:
-                error.append(exc)
-            finally:
-                done.set()
-
-        threading.Thread(
-            target=run, name="memory-palace-upsert", daemon=True
-        ).start()
-        while not done.is_set():
-            await asyncio.sleep(0.05)
-        if error:
-            raise error[0]
-
-    def _upsert_one(self, row: OutboxRow) -> None:
+    def _upsert_one(self, row: OutboxRow) -> float:
         """Lock ownership lives in this worker thread for the duration of the upsert."""
+        lock_timer = Timer()
         with self._palace.acquire_write_lock():
-            content = row.content or ""
-            self._palace.upsert_drawer(row.id, content, row.metadata())
+            wait_ms = lock_timer.ms()
+            with memory_span(
+                "monkeybot.memory.writer.flush",
+                **{
+                    "memory.backend": self._backend,
+                    "memory.embedding_model": self._embedding_model,
+                    "memory.operation": "flush",
+                    "memory.batch_size": 1,
+                },
+            ) as span:
+                if row.traceparent:
+                    link_to_traceparent(span, row.traceparent)
+                self._palace.upsert_drawer(row.id, row.content or "", row.metadata())
+            return wait_ms

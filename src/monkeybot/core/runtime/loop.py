@@ -71,7 +71,6 @@ async def run(
     cancelled: asyncio.Event | None = None,
     max_turns: int | None = None,
     hook_manager: HookManager | None = None,
-    curator_provider: Provider | None = None,
     attachment_store: AttachmentStore | None = None,
     attachment_catalog: SessionAttachmentCatalog | None = None,
     transcript_writer: TranscriptWriter | None = None,
@@ -88,9 +87,6 @@ async def run(
 
     ``input_admission`` (optional) supplies mid-turn steer injections drained at safe
     boundaries (after tool batches / before the next provider call).
-
-    ``curator_provider`` is an optional dedicated provider for context curation (e.g. with
-    ``thinking_budget=0``). Falls back to ``provider`` when not supplied.
 
     ``vertex_google_search`` opts into Gemini native ``google_search`` grounding for agent
     turns in this run (main agent or subagent). Only passed through to ``GeminiProvider``;
@@ -122,7 +118,6 @@ async def run(
             max_turns=max_turns,
             usage=usage,
             hook_manager=hook_manager,
-            curator_provider=curator_provider,
             trace_id_out=trace_id_capture,
             attachment_store=attachment_store,
             attachment_catalog=attachment_catalog,

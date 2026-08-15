@@ -25,6 +25,12 @@ _TRUE = frozenset({"1", "true", "yes", "on"})
 def _parse_bool(raw: object, *, field: str) -> bool:
     if isinstance(raw, bool):
         return raw
+    if isinstance(raw, str):
+        token = raw.strip().lower()
+        if token in _FALSE:
+            return False
+        if token in _TRUE:
+            return True
     raise ConfigError(f"{field} must be true or false, got {raw!r}")
 
 

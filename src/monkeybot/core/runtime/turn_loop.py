@@ -17,13 +17,7 @@ from monkeybot.core.context import (
     refresh_memory_index,
 )
 from monkeybot.core.context.epoch import ContextEpochTracker, EpochAdmit
-from monkeybot.core.context.memory_prompt import (
-    MemoryPromptSelection,
-    memory_index_fingerprint,
-    prepare_memory_for_prompt,
-)
 from monkeybot.core.hooks import HookEvent, HookManager
-from monkeybot.core.memory.ingest import persist_message
 from monkeybot.core.llm.provider import (
     Done,
     Message,
@@ -34,6 +28,7 @@ from monkeybot.core.llm.provider import (
 )
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.memory.ingest import persist_message
 from monkeybot.core.messages import convert_to_provider
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.persistence.transcript import TranscriptWriter
@@ -52,8 +47,8 @@ from monkeybot.core.types.content_blocks import (
 )
 from monkeybot.core.types.content_blocks import Thinking as ThinkingBlock
 from monkeybot.core.types.types_tools import ToolDef
-from monkeybot.providers.pricing import estimate_cost
 from monkeybot.providers._utils import note_anthropic_token_estimate_observation
+from monkeybot.providers.pricing import estimate_cost
 
 from .doom_loop import (
     _doom_loop_exempt_names,
@@ -153,7 +148,6 @@ async def _run_inner(
     max_turns: int | None,
     usage: Usage,
     hook_manager: HookManager | None = None,
-    curator_provider: Provider | None = None,
     trace_id_out: list[str | None] | None = None,
     attachment_store: AttachmentStore | None = None,
     attachment_catalog: SessionAttachmentCatalog | None = None,
@@ -177,7 +171,6 @@ async def _run_inner(
             max_turns=max_turns,
             usage=usage,
             hook_manager=hook_manager,
-            curator_provider=curator_provider,
             last_assistant=last_assistant,
             attachment_store=attachment_store,
             attachment_catalog=attachment_catalog,
@@ -251,8 +244,6 @@ class _TurnState:
     provider_messages_written: int = 0
     tools_dirty: bool = False
     assistant_write_task: asyncio.Task[None] | None = None
-    memory_selection: MemoryPromptSelection | None = None
-    memory_selection_fingerprint: str | None = None
     pre_turn_extra: str | None = None
     pre_tool_extra_next: str | None = None
     empty_completion_retries_left: int = _EMPTY_COMPLETION_RETRIES
@@ -310,25 +301,10 @@ async def _prepare_turn_context(
                     ],
                 )
 
-    index_fp = memory_index_fingerprint(state.ctx.memory_index)
-    if state.memory_selection is None or state.memory_selection_fingerprint != index_fp:
-        state.memory_selection = await prepare_memory_for_prompt(state.ctx)
-        state.memory_selection_fingerprint = index_fp
-        logger.debug(
-            "memory prompt selection %s",
-            kv(
-                request_id=state.ctx.request_id,
-                thread_id=state.ctx.thread_id,
-                turn=state.turn_index,
-                memory_lines=len(state.memory_selection.lines),
-            ),
-        )
-
     state.admit = _admit_system_context(
         state.epoch_tracker,
         state.ctx,
         state.chat_messages,
-        memory_selection=state.memory_selection,
         attachment_catalog=attachment_catalog,
     )
     for epoch_evt in _epoch_events(
@@ -393,7 +369,6 @@ async def _refresh_prompt_after_history_change(
         state.epoch_tracker,
         state.ctx,
         state.chat_messages,
-        memory_selection=state.memory_selection,
         attachment_catalog=attachment_catalog,
     )
     for epoch_evt in _epoch_events(
@@ -1228,7 +1203,6 @@ async def _append_tool_requests_and_dispatch(
         provider=provider,
         hook_manager=hook_manager,
         turn_index=state.turn_index,
-        memory_selection=state.memory_selection,
         pre_turn_extra=state.pre_turn_extra,
         attachment_store=attachment_store,
         attachment_catalog=attachment_catalog,
@@ -1256,15 +1230,13 @@ async def _run_inner_core(
     max_turns: int | None,
     usage: Usage,
     hook_manager: HookManager | None = None,
-    curator_provider: Provider | None = None,
     last_assistant: list[str],
     attachment_store: AttachmentStore | None = None,
     attachment_catalog: SessionAttachmentCatalog | None = None,
     transcript_writer: TranscriptWriter | None = None,
     vertex_google_search: bool = False,
     input_admission: InputAdmission | None = None,
-    ) -> AsyncIterator[AgentEvent]:
-    del curator_provider
+) -> AsyncIterator[AgentEvent]:
     from monkeybot.observability.spans import (
         begin_turn_span,
         end_turn_span,

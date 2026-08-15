@@ -148,6 +148,11 @@ class SQLiteHistoryStore:
         async with self._lock:
             await self._conn.execute("BEGIN IMMEDIATE")
             try:
+                if not await self._has_memory_columns():
+                    raise RuntimeError(
+                        "conversation_history is missing turn_id/message_id. "
+                        "Apply docs/migrations/memory-outbox.sql or set paths.auto_schema: true"
+                    )
                 await self._insert_history_row(
                     thread_id,
                     message.role,
@@ -158,8 +163,14 @@ class SQLiteHistoryStore:
                 )
                 await insert_pending(self._conn, commit=False, **outbox)
                 await self._conn.commit()
-            except Exception:
+            except Exception as exc:
                 await self._conn.rollback()
+                if isinstance(
+                    exc, (TimeoutError, OSError, ConnectionError, aiosqlite.OperationalError)
+                ):
+                    from monkeybot.core.persistence.errors import AmbiguousCommitError
+
+                    raise AmbiguousCommitError(str(exc)) from exc
                 raise
 
     @with_conn_lock

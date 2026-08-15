@@ -21,7 +21,7 @@ from monkeybot.core.knowledge.config import knowledge_enabled_from_config
 from monkeybot.core.llm.provider import Provider
 from monkeybot.core.llm.usage import usage_from_totals
 from monkeybot.core.mcp.mcp_client import MCPClient
-from monkeybot.core.memory.subsystem import MemorySubsystem
+from monkeybot.core.memory.subsystem import MemoryConfigurationError, MemorySubsystem
 from monkeybot.core.persistence.backends import StorageBackend, create_storage_backend
 from monkeybot.core.runtime.events import AssistantDelta, Error, TurnComplete
 from monkeybot.core.runtime.loop import run as run_loop
@@ -148,6 +148,8 @@ async def create_harness_deps(
                         storage=backend,
                     )
                     await memory.ensure_ready()
+                except MemoryConfigurationError:
+                    raise
                 except Exception as exc:
                     logger.warning("memory setup failed; continuing without: %r", exc)
                     memory = None
@@ -266,7 +268,7 @@ async def run_pattern_bc_turn(
     finally:
         await executor.aclose()
         if deps.memory is not None:
-            await deps.memory.flush()
+            await deps.memory.drain_writer()
 
     return "".join(parts)
 

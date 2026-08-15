@@ -21,6 +21,8 @@ from monkeybot.core.persistence.usage import SQLiteUsageStore
 class SQLiteStorageBackend:
     """SQLite-backed storage backend. One shared connection for the process lifetime."""
 
+    shares_outbox = False
+
     def __init__(self, db_url: str) -> None:
         self._db_url = db_url
         self._conn: aiosqlite.Connection | None = None

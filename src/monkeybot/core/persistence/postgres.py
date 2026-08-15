@@ -6,19 +6,29 @@ import json
 import logging
 import os
 import time
-from datetime import UTC
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import asyncpg
 
 from monkeybot.core.llm.provider import Message, Role
 from monkeybot.core.llm.usage import Usage, UsageBreakdown, UsageBucket, UsageSummary
+from monkeybot.core.memory.ids import outbox_id, utc_now_iso
+from monkeybot.core.memory.outbox import (
+    STATUS_COMMITTED,
+    STATUS_DEAD,
+    STATUS_PENDING,
+    OutboxRow,
+    backoff_iso,
+    is_permanent_error,
+)
 from monkeybot.core.persistence.durable_runs import (
     _SUBAGENT_COLUMNS,
     SubagentEnvelope,
     SubagentRunRow,
     _tuple_to_run_row,
 )
+from monkeybot.core.persistence.errors import AmbiguousCommitError
 from monkeybot.core.persistence.scheduled_loops import (
     _SCHEDULED_LOOP_COLUMNS,
     ScheduledLoopCreate,
@@ -223,11 +233,14 @@ class PostgresHistoryStore:
         outbox: dict[str, Any],
     ) -> None:
         """Insert history and a pending memory outbox row in one transaction."""
-        async with self._pool.acquire() as conn, conn.transaction():
-            await self._insert_message(
-                conn, thread_id, message, turn_id=turn_id, message_id=message_id
-            )
-            await _insert_outbox_pending(conn, **outbox)
+        try:
+            async with self._pool.acquire() as conn, conn.transaction():
+                await self._insert_message(
+                    conn, thread_id, message, turn_id=turn_id, message_id=message_id
+                )
+                await _insert_outbox_pending(conn, **outbox)
+        except (TimeoutError, OSError, ConnectionError, asyncpg.InterfaceError) as extra:
+            raise AmbiguousCommitError(str(extra)) from extra
 
     async def load(self, thread_id: str, limit: int | None = None) -> list[Message]:
         async with self._pool.acquire() as conn:
@@ -1137,9 +1150,6 @@ async def _insert_outbox_pending(
     traceparent: str | None = None,
     palace_id: str = "",
 ) -> str | None:
-    from monkeybot.core.memory.ids import outbox_id, utc_now_iso
-    from monkeybot.core.memory.outbox import STATUS_COMMITTED
-
     row_id = outbox_id(agent_id=agent_id, thread_id=thread_id, message_id=message_id, role=role)
     existing = await conn.fetchval("SELECT status FROM memory_outbox WHERE id = $1", row_id)
     if existing is not None:
@@ -1221,10 +1231,6 @@ class PostgresOutboxStore:
         lease_seconds: int = 30,
         palace_id: str = "",
     ) -> list[Any]:
-        from datetime import datetime, timedelta
-
-        from monkeybot.core.memory.outbox import OutboxRow
-
         now = datetime.now(UTC)
         now_iso = now.isoformat(timespec="seconds")
         expires = (now + timedelta(seconds=lease_seconds)).isoformat(timespec="seconds")
@@ -1235,8 +1241,10 @@ class PostgresOutboxStore:
                     SET status = 'pending', lease_owner = NULL, lease_expires_at = NULL
                     WHERE status = 'processing'
                       AND lease_expires_at IS NOT NULL AND lease_expires_at < $1
+                      AND agent_id = $2
                     """,
                 now_iso,
+                agent_id,
             )
             rows = await conn.fetch(
                 """
@@ -1340,13 +1348,6 @@ class PostgresOutboxStore:
         permanent: bool | None = None,
         lease_owner: str | None = None,
     ) -> int:
-        from monkeybot.core.memory.outbox import (
-            STATUS_DEAD,
-            STATUS_PENDING,
-            backoff_iso,
-            is_permanent_error,
-        )
-
         dead = bool(permanent) if permanent is not None else is_permanent_error(error_class)
         status = STATUS_DEAD if dead else STATUS_PENDING
         next_at = None if status == STATUS_DEAD else backoff_iso(attempts)
@@ -1384,15 +1385,12 @@ class PostgresOutboxStore:
             return 0
 
     async def gc_committed(self, *, days: int = 7) -> int:
-        from datetime import datetime, timedelta
-
         cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat(timespec="seconds")
         async with self._pool.acquire() as conn:
             result = await conn.execute(
                 """
-                UPDATE memory_outbox
-                SET content = NULL
-                WHERE status = 'committed' AND content IS NOT NULL AND created_at < $1
+                DELETE FROM memory_outbox
+                WHERE status = 'committed' AND created_at < $1
                 """,
                 cutoff,
             )
@@ -1403,8 +1401,6 @@ class PostgresOutboxStore:
             return 0
 
     async def pending_depth(self, *, agent_id: str | None = None) -> tuple[int, float]:
-        from datetime import datetime
-
         async with self._pool.acquire() as conn:
             if agent_id:
                 row = await conn.fetchrow(
@@ -1455,6 +1451,8 @@ class PostgresOutboxStore:
 
 class PostgresStorageBackend:
     """Postgres-backed storage backend using an asyncpg connection pool."""
+
+    shares_outbox = True
 
     def __init__(self, db_url: str) -> None:
         self._db_url = db_url

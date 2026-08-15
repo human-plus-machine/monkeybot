@@ -42,6 +42,12 @@ def test_opensandbox_is_only_a_sandbox_extra() -> None:
     assert project["optional-dependencies"]["sandbox"] == ["opensandbox>=0.1.7"]
 
 
+def test_mempalace_is_only_a_memory_extra() -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    assert all(not dependency.startswith("mempalace") for dependency in project["dependencies"])
+    assert project["optional-dependencies"]["memory"] == ["mempalace>=3.7.0,<4"]
+
+
 def test_cli_wheel_includes_scaffold_defaults(tmp_path: Path) -> None:
     """Published CLI wheel must ship scaffold_defaults for ``monkeybot new``."""
     if shutil.which("uv") is None:

@@ -36,6 +36,7 @@ FEATURE_CHOICES: tuple[ExtraChoice, ...] = (
     ExtraChoice("gcs", "Google Cloud Storage"),
     ExtraChoice("sandbox", "OpenSandbox code execution"),
     ExtraChoice("web-search", "DuckDuckGo web search (ddgs)"),
+    ExtraChoice("memory", "MemPalace long-term memory (chromadb / onnxruntime)"),
     ExtraChoice("observability", "OpenTelemetry tracing"),
     ExtraChoice("scheduler", "Cron scheduler"),
     ExtraChoice("council", "Council / multi-agent GCS helpers"),

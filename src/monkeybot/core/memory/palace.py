@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
-import threading
 import uuid
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
@@ -16,6 +15,7 @@ from typing import Any, Protocol
 
 from monkeybot.core.memory.ids import utc_now_iso
 from monkeybot.core.memory.observability import log_event
+from monkeybot.core.memory.uri import object_store_memory_scheme
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ class PalacePort(Protocol):
 
     def get_drawer(self, drawer_id: str) -> DrawerRecord | None: ...
 
-    def wake_up(self, wing: str | None = None, thread_id: str | None = None) -> str: ...
+    def wake_up(self, wing: str | None = None) -> str: ...
 
     def recall(
         self,
@@ -66,22 +66,13 @@ class PalacePort(Protocol):
         thread_id: str | None = None,
     ) -> list[DrawerRecord]: ...
 
-    def list_drawers(self, *, limit: int = 2000) -> list[DrawerRecord]: ...
-
     def status(self) -> dict[str, Any]: ...
 
     def acquire_write_lock(self) -> AbstractContextManager[None]: ...
 
 
-_UNSUPPORTED_MEMORY_SCHEMES = ("gcs://", "s3://", "gs://")
-
-
-class UnsupportedMemoryURI(ValueError):  # noqa: N818 - retained public API
-    """Raised when memory_storage_uri uses a scheme MemPalace cannot persist."""
-
-
 class MemoryDependencyError(RuntimeError):
-    """Raised when MemPalace-backed memory is enabled without its package extra."""
+    """Raised when MemPalace-backed memory is enabled without ``monkeybot[memory]``."""
 
 
 def mempalace_available() -> bool:
@@ -94,53 +85,27 @@ def mempalace_available() -> bool:
 
 def palace_path_from_uri(memory_uri: str) -> Path:
     raw = memory_uri.strip()
-    lowered = raw.lower()
-    for scheme in _UNSUPPORTED_MEMORY_SCHEMES:
-        if lowered.startswith(scheme):
-            raise UnsupportedMemoryURI(
-                f"MemPalace does not support {scheme} URIs ({raw!r}); "
-                "use a local:// path such as local://./memory/mempalace"
-            )
-    if "://" in raw and not raw.startswith("local://") and not Path(raw).exists():
-        scheme = raw.split("://", 1)[0]
-        if scheme not in ("", "file", "local"):
-            raise UnsupportedMemoryURI(
-                f"MemPalace does not support {scheme}:// URIs ({raw!r}); "
-                "use a local:// path such as local://./memory/mempalace"
-            )
-    if raw.startswith("local://"):
-        raw = raw[len("local://") :]
-    return Path(raw).expanduser().resolve()
+    if not raw:
+        raise ValueError("memory URI is empty")
+    remote = object_store_memory_scheme(raw)
+    if remote:
+        raise ValueError(
+            f"unsupported memory URI {memory_uri!r}; MemPalace does not support "
+            f"{remote} (use local://)"
+        )
+    scheme, _, rest = raw.partition("://")
+    path = rest if rest and scheme.lower() in {"local", "file"} else raw
+    return Path(path).expanduser().resolve()
 
 
 @contextmanager
 def palace_volume_lock(palace_path: Path) -> Iterator[None]:
-    """Serialize palace mutations using a lock file on the palace volume."""
+    """Serialize palace mutations using a POSIX flock on the palace volume."""
+    import fcntl
+
     palace_path.mkdir(parents=True, exist_ok=True)
     lock_path = palace_path / PALACE_WRITE_LOCK_FILE
     with lock_path.open("a+b") as handle:
-        if os.name == "nt":
-            import msvcrt
-
-            handle.seek(0, os.SEEK_END)
-            if handle.tell() == 0:
-                handle.write(b"\0")
-                handle.flush()
-            handle.seek(0)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)  # type: ignore[attr-defined]
-            try:
-                yield
-            finally:
-                handle.seek(0)
-                msvcrt.locking(  # type: ignore[attr-defined]
-                    handle.fileno(),
-                    msvcrt.LK_UNLCK,  # type: ignore[attr-defined]
-                    1,
-                )
-            return
-
-        import fcntl
-
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try:
             yield
@@ -162,8 +127,17 @@ def _write_palace_id(path: Path, token: str, *, exclusive: bool) -> None:
 
 
 def palace_instance_id(palace_path: Path) -> str:
-    """Stable id for this palace directory (shared volume ⇒ same id)."""
+    """Stable id for this palace directory (shared volume ⇒ same id).
+
+    Reads ``.palace_id`` without the volume lock. The flock is taken only on the
+    create path so constructing a subsystem does not stall behind an in-flight
+    embedding upsert.
+    """
     path = palace_path / PALACE_ID_FILE
+    if path.is_file():
+        got = path.read_text(encoding="utf-8").strip()
+        if got:
+            return got
     path.parent.mkdir(parents=True, exist_ok=True)
     with palace_volume_lock(path.parent):
         if path.is_file():
@@ -199,102 +173,6 @@ def default_identity_text(agent_name: str) -> str:
         f"I am {name}, a MonkeyBot agent.\n"
         f"I remember verbatim conversation turns in this palace.\n"
     )
-
-
-class InMemoryPalace:
-    """Process-local palace used by tests (no embedder, no Chroma)."""
-
-    def __init__(
-        self,
-        palace_path: Path,
-        *,
-        agent_name: str = "test-agent",
-        backend: str = "memory",
-        embedding_model: str = DEFAULT_EMBEDDING_MODEL,
-    ) -> None:
-        self.palace_path = Path(palace_path)
-        self.backend = backend
-        self.embedding_model = embedding_model
-        self._agent_name = agent_name
-        self._lock = threading.Lock()
-        self._drawers: dict[str, DrawerRecord] = {}
-        self.palace_path.mkdir(parents=True, exist_ok=True)
-        identity = self.palace_path / "identity.txt"
-        if not identity.is_file():
-            identity.write_text(default_identity_text(agent_name), encoding="utf-8")
-        (self.palace_path / EMBEDDER_IDENTITY_FILE).write_text(
-            embedding_model, encoding="utf-8"
-        )
-
-    def ensure_ready(self) -> None:
-        return
-
-    @contextmanager
-    def acquire_write_lock(self) -> Iterator[None]:
-        with self._lock:
-            yield
-
-    def upsert_drawer(self, drawer_id: str, content: str, metadata: dict[str, str]) -> None:
-        filed_at = metadata.get("filed_at") or metadata.get("source_timestamp") or utc_now_iso()
-        record = DrawerRecord(
-            drawer_id=drawer_id,
-            content=content,
-            wing=metadata.get("wing") or "main",
-            room=metadata.get("room") or CONVERSATION_ROOM,
-            filed_at=filed_at,
-            metadata=dict(metadata),
-        )
-        self._drawers[drawer_id] = record
-
-    def get_drawer(self, drawer_id: str) -> DrawerRecord | None:
-        return self._drawers.get(drawer_id)
-
-    def wake_up(self, wing: str | None = None, thread_id: str | None = None) -> str:
-        identity = (self.palace_path / "identity.txt").read_text(encoding="utf-8").strip()
-        drawers = list(self._drawers.values())
-        if wing:
-            drawers = [d for d in drawers if d.wing == wing]
-        if thread_id:
-            drawers = [d for d in drawers if d.metadata.get("thread_id") == thread_id]
-        drawers.sort(key=lambda d: d.filed_at, reverse=True)
-        lines = [identity, "", "## L1 — ESSENTIAL STORY"]
-        if not drawers:
-            lines.append("No memories yet.")
-            return "\n".join(lines)
-        for drawer in drawers[:15]:
-            snippet = " ".join(drawer.content.split())
-            if len(snippet) > 200:
-                snippet = snippet[:197] + "..."
-            lines.append(f"- [{drawer.room}] {snippet}")
-        return "\n".join(lines)
-
-    def recall(
-        self,
-        *,
-        wing: str,
-        room: str,
-        n_results: int = 10,
-        thread_id: str | None = None,
-    ) -> list[DrawerRecord]:
-        matched = [
-            d for d in self._drawers.values() if d.wing == wing and d.room == room
-        ]
-        if thread_id:
-            matched = [d for d in matched if d.metadata.get("thread_id") == thread_id]
-        matched.sort(key=lambda d: d.filed_at, reverse=True)
-        return matched[: max(0, n_results)]
-
-    def list_drawers(self, *, limit: int = 2000) -> list[DrawerRecord]:
-        drawers = list(self._drawers.values())
-        drawers.sort(key=lambda d: d.filed_at, reverse=True)
-        return drawers[: max(0, limit)]
-
-    def status(self) -> dict[str, Any]:
-        return {
-            "palace_path": str(self.palace_path),
-            "total_drawers": len(self._drawers),
-            "backend": self.backend,
-        }
 
 
 def _stringify_meta(meta: dict[str, Any] | None) -> dict[str, str]:
@@ -354,7 +232,9 @@ class MemPalaceAdapter:
                 identity_path=str(self.palace_path / "identity.txt"),
             )
             stack.wake_up()
-            log_event("embedder_warm", memory_status="ok", memory_embedding_model=self.embedding_model)
+            log_event(
+                "embedder_warm", memory_status="ok", memory_embedding_model=self.embedding_model
+            )
         except Exception as exc:
             log_event(
                 "embedder_warm",
@@ -411,25 +291,7 @@ class MemPalaceAdapter:
             metadata=meta,
         )
 
-    def wake_up(self, wing: str | None = None, thread_id: str | None = None) -> str:
-        if thread_id:
-            identity = (self.palace_path / "identity.txt").read_text(encoding="utf-8").strip()
-            drawers = self.recall(
-                wing=wing or "main",
-                room=CONVERSATION_ROOM,
-                n_results=15,
-                thread_id=thread_id,
-            )
-            lines = [identity, "", "## L1 — ESSENTIAL STORY"]
-            if not drawers:
-                lines.append("No memories yet.")
-                return "\n".join(lines)
-            for drawer in drawers:
-                snippet = " ".join(drawer.content.split())
-                if len(snippet) > 200:
-                    snippet = snippet[:197] + "..."
-                lines.append(f"- [{drawer.room}] {snippet}")
-            return "\n".join(lines)
+    def wake_up(self, wing: str | None = None) -> str:
         from mempalace.layers import MemoryStack
 
         stack = MemoryStack(
@@ -569,17 +431,12 @@ def create_palace(
     agent_name: str,
     backend: str | None = None,
     embedding_model: str | None = None,
-    in_memory: bool = False,
 ) -> PalacePort:
     path = palace_path_from_uri(memory_uri)
     be = (backend or os.environ.get("MEMPALACE_BACKEND") or DEFAULT_BACKEND).strip()
     model = (
-        embedding_model
-        or os.environ.get("MEMPALACE_EMBEDDING_MODEL")
-        or DEFAULT_EMBEDDING_MODEL
+        embedding_model or os.environ.get("MEMPALACE_EMBEDDING_MODEL") or DEFAULT_EMBEDDING_MODEL
     ).strip()
-    if in_memory:
-        return InMemoryPalace(path, agent_name=agent_name, backend="memory", embedding_model=model)
     if not mempalace_available():
         raise MemoryDependencyError(
             "MemPalace memory requires the optional dependency; install `monkeybot[memory]`"

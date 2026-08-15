@@ -1183,8 +1183,19 @@ def create_app(
     app.include_router(build_scheduler_router(loop_port=loop, registry=reg))
 
     @app.get("/health", response_model=HealthResponse)
-    async def health() -> HealthResponse:
+    async def health(request: Request) -> HealthResponse:
         """Liveness probe without authentication."""
-        return HealthResponse(status="ok", version="2.0.0")
+        raw = getattr(request.app.state, "memory_status", "unknown")
+        memory = cast(
+            Literal["enabled", "disabled", "unavailable", "unknown"],
+            raw if raw in ("enabled", "disabled", "unavailable", "unknown") else "unknown",
+        )
+        detail = getattr(request.app.state, "memory_detail", None)
+        return HealthResponse(
+            status="ok",
+            version="2.0.0",
+            memory=memory,
+            memory_detail=detail if isinstance(detail, str) else None,
+        )
 
     return app

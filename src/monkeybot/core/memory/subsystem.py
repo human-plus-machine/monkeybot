@@ -29,6 +29,10 @@ from monkeybot.core.memory.writer import MemoryWriter
 logger = logging.getLogger(__name__)
 
 
+class MemoryConfigurationError(RuntimeError):
+    """Operator-facing misconfiguration; the process must not start without memory."""
+
+
 def _share_across_threads() -> bool:
     raw = os.environ.get("MONKEYBOT_MEMORY_SHARE_THREADS", "").strip().lower()
     return raw in ("1", "true", "yes")
@@ -37,23 +41,18 @@ def _share_across_threads() -> bool:
 def _is_missing_outbox_table(exc: BaseException) -> bool:
     text = str(exc).lower()
     name = type(exc).__name__.lower()
-    return (
-        "memory_outbox" in text
-        and (
-            "no such table" in text
-            or "does not exist" in text
-            or "undefinedtable" in name
-            or "undefined_table" in text
-        )
+    return "memory_outbox" in text and (
+        "no such table" in text
+        or "does not exist" in text
+        or "undefinedtable" in name
+        or "undefined_table" in text
     )
 
 
-def _shared_outbox_backend(db_url: str, storage: Any) -> bool:
-    del db_url
+def _shared_outbox_backend(storage: Any) -> bool:
     if storage is None:
         return False
-    name = type(storage).__name__.lower()
-    return "postgres" in name or "firestore" in name
+    return bool(getattr(storage, "shares_outbox", False))
 
 
 class MemorySubsystem:
@@ -91,7 +90,7 @@ class MemorySubsystem:
             embedding_model=self.embedding_model,
         )
         self.backend = getattr(self._palace, "backend", self.backend)
-        self._palace_id = palace_instance_id(self._palace.palace_path)
+        self._palace_id = ""
         self.ingest_enabled = ingest_enabled
         self._writer_enabled = writer_enabled
         self._outbox: OutboxStore | None = outbox
@@ -154,7 +153,7 @@ class MemorySubsystem:
         )
 
     def _reject_ephemeral_shared_palace(self) -> None:
-        if not _shared_outbox_backend(self._db_url, self._storage):
+        if not _shared_outbox_backend(self._storage):
             return
         logger.warning(
             "Memory palace is local to this replica (palace_id=%s). "
@@ -165,7 +164,7 @@ class MemorySubsystem:
         if allow in ("1", "true", "yes"):
             return
         if palace_path_is_ephemeral(self._palace.palace_path):
-            raise RuntimeError(
+            raise MemoryConfigurationError(
                 "MemPalace path is under the process temp directory while the outbox is "
                 "shared (Postgres/Firestore). Mount a persistent volume or set "
                 "MONKEYBOT_MEMORY_ALLOW_EPHEMERAL=1 to acknowledge replica-local memory."
@@ -174,13 +173,15 @@ class MemorySubsystem:
     async def ensure_ready(self) -> None:
         if self._ready:
             return
+        if not self._palace_id:
+            self._palace_id = await asyncio.to_thread(palace_instance_id, self._palace.palace_path)
         self._reject_ephemeral_shared_palace()
         store = await self._ensure_outbox()
         try:
             await store.pending_depth(agent_id=self._agent_id)
         except Exception as exc:
             if _is_missing_outbox_table(exc):
-                raise RuntimeError(
+                raise MemoryConfigurationError(
                     "memory_outbox table is missing. Apply docs/migrations/memory-outbox.sql "
                     "or set paths.auto_schema: true"
                 ) from exc
@@ -200,19 +201,19 @@ class MemorySubsystem:
             logger.warning("memory outbox gc failed: %r", exc)
         try:
             await asyncio.to_thread(self._palace.ensure_ready)
-        except Exception as exc:
-            logger.warning("memory palace warm failed: %r", exc)
+        except Exception as extra:
+            logger.warning("memory palace warm failed: %r", extra)
             log_event(
                 "embedder_warm",
                 memory_status="error",
-                memory_error_class=type(exc).__name__,
+                memory_error_class=type(extra).__name__,
             )
         self._ensure_writer(store)
         if self._writer is not None:
             self._writer.start()
         self._ready = True
 
-    async def load_index(self, *, thread_id: str | None = None) -> list[str]:
+    async def load_index(self) -> list[str]:
         """L0+L1 wake-up lines for the system prompt."""
         timer = Timer()
         wing = conversation_wing(workspace_id_from_env())
@@ -226,13 +227,9 @@ class MemorySubsystem:
             },
         ):
             try:
-                text = await asyncio.to_thread(
-                    self._palace.wake_up,
-                    wing,
-                    None if _share_across_threads() else thread_id,
-                )
-            except Exception as exc:
-                logger.warning("memory wake-up failed: %r", exc)
+                text = await asyncio.to_thread(self._palace.wake_up, wing)
+            except Exception as extra:
+                logger.warning("memory wake-up failed: %r", extra)
                 return []
         lines = [ln for ln in text.splitlines() if ln.strip()]
         log_event(
@@ -250,8 +247,8 @@ class MemorySubsystem:
                 memory_backend=self.backend,
                 memory_drawer_count=status.get("total_drawers") or 0,
             )
-        except Exception as exc:
-            logger.warning("memory palace status failed: %r", exc)
+        except Exception as extra:
+            logger.warning("memory palace status failed: %r", extra)
         return lines
 
     async def recall(
@@ -329,11 +326,9 @@ class MemorySubsystem:
             return 0
         return await self._writer.drain(timeout_s=timeout_s)
 
-    async def flush(self) -> None:
-        await self.drain_writer()
-
     async def close(self) -> None:
         if self._writer is not None:
+            await self.drain_writer()
             await self._writer.stop()
             self._writer = None
         if self._owned_outbox and self._outbox is not None:

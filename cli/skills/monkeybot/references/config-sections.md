@@ -88,11 +88,11 @@ When the prompt shows fewer entries than exist, a structural confidence score tr
 
 ## `memory`
 
-MemPalace is on whenever `paths.memory_storage_uri` is set. There is no enable/disable kill switch.
+MemPalace capture, wake-up, and search teaching are on by default. Turn them off with `memory.enabled: false` or `MONKEYBOT_MEMORY_HOOK_ENABLED=0`. The vector stack is the optional `monkeybot[memory]` extra — omit it (and set `enabled: false`) when you do not want chromadb/onnxruntime.
 
 | Field | Default | When to change |
 |---|---|---|
-| `engine` | `mempalace` | Leave as-is |
+| `enabled` | `true` | Set `false` to skip capture, wake-up, and prompt teaching |
 | `backend` | `chroma` | Alternate MemPalace vector backend |
 | `embedding_model` | `embeddinggemma-300m` | Match the embedder the palace was built with |
 

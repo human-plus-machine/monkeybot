@@ -371,7 +371,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Purpose:** Bound memory-index prompt size via sliding window, optional LLM curator, and search nudges.
 
-**Key files:** `core/context/memory_prompt.py`, `core/context/curator.py`, `core/memory/index_format.py`, `core/memory/organizer.py`, `monkeybot.yaml` `context_curation:`
+**Key files:** `core/context/curator.py`, `core/memory/index_format.py`, `core/memory/organizer.py`, `monkeybot.yaml` `context_curation:`
 
 **How it works:**
 - **Organizer** appends INDEX.md entries in recency order and archives overflow to `INDEX.archive.md` (`memory_index_cap`, default 200).
@@ -447,8 +447,9 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - Recall is scoped to the current `thread_id` by default.
 - `memory.enabled: false` (or `MONKEYBOT_MEMORY_HOOK_ENABLED=0`) skips capture, wake-up, and prompt teaching. It is not a sandbox against shell access to palace files.
 - Postgres/Firestore persist the memory outbox with replica `palace_id` claim partitioning. Replicated deployments must share a lock-capable palace volume.
+- MemPalace (chromadb / onnxruntime) is the optional `monkeybot[memory]` extra. Missing the extra disables memory instead of failing startup.
 - Subagents can read the palace but do not register duplicate automatic-ingest hooks.
-- `flush()` must be called before short-lived handlers exit if organizer work matters.
+- `drain_writer()` runs at the end of Pattern B turns and again on `close()`, so short-lived / Lambda handlers flush the outbox before the process freezes.
 
 ---
 

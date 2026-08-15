@@ -19,7 +19,6 @@ STATUS_DEAD = "dead"
 
 _LEASE_SECONDS = 30
 _GC_AFTER_DAYS = 7
-_MAX_BACKOFF_SECONDS = 300
 
 _PERMANENT_ERROR_CLASSES = frozenset(
     {
@@ -32,11 +31,11 @@ _PERMANENT_ERROR_CLASSES = frozenset(
     }
 )
 
+# Column order is coupled to OutboxRow and _row_from_sql.
 _OUTBOX_SELECT = """
-        SELECT id, thread_id, turn_id, message_id, role, content, workspace_id,
+        SELECT id, agent_id, thread_id, turn_id, message_id, role, content, workspace_id,
                wing, room, created_at, status, attempts, next_attempt_at,
-               last_error, traceparent, lease_owner, lease_expires_at, agent_id,
-               palace_id
+               last_error, traceparent, lease_owner, lease_expires_at, palace_id
         FROM memory_outbox
 """
 
@@ -48,6 +47,7 @@ class PermanentMemoryError(ValueError):
 @dataclass(frozen=True)
 class OutboxRow:
     id: str
+    agent_id: str
     thread_id: str
     turn_id: str
     message_id: str
@@ -64,7 +64,6 @@ class OutboxRow:
     traceparent: str | None
     lease_owner: str | None
     lease_expires_at: str | None
-    agent_id: str = ""
     palace_id: str = ""
 
     def metadata(self) -> dict[str, str]:
@@ -144,64 +143,41 @@ def is_permanent_error(error_class: str) -> bool:
 
 
 def _row_from_sql(row: Any) -> OutboxRow:
-    agent_id = ""
-    if len(row) > 17 and row[17] is not None:
-        agent_id = str(row[17])
-    palace_id = ""
-    if len(row) > 18 and row[18] is not None:
-        palace_id = str(row[18])
     return OutboxRow(
         id=str(row[0]),
-        thread_id=str(row[1]),
-        turn_id=str(row[2]),
-        message_id=str(row[3]),
-        role=str(row[4]),
-        content=row[5],
-        workspace_id=row[6],
-        wing=str(row[7]),
-        room=str(row[8]),
-        created_at=str(row[9]),
-        status=str(row[10]),
-        attempts=int(row[11] or 0),
-        next_attempt_at=row[12],
-        last_error=row[13],
-        traceparent=row[14],
-        lease_owner=row[15],
-        lease_expires_at=row[16],
-        agent_id=agent_id,
-        palace_id=palace_id,
+        agent_id=str(row[1] or ""),
+        thread_id=str(row[2]),
+        turn_id=str(row[3]),
+        message_id=str(row[4]),
+        role=str(row[5]),
+        content=row[6],
+        workspace_id=row[7],
+        wing=str(row[8]),
+        room=str(row[9]),
+        created_at=str(row[10]),
+        status=str(row[11]),
+        attempts=int(row[12] or 0),
+        next_attempt_at=row[13],
+        last_error=row[14],
+        traceparent=row[15],
+        lease_owner=row[16],
+        lease_expires_at=row[17],
+        palace_id=str(row[18] or ""),
     )
 
 
 async def ensure_outbox_schema(conn: aiosqlite.Connection) -> None:
+    from monkeybot.core.persistence import sqlite as sqlite_mod
+
     await conn.execute(OUTBOX_DDL)
     await conn.execute(OUTBOX_INDEX_DDL)
-    await _ensure_outbox_agent_id_column(conn)
-    await conn.commit()
-
-
-async def _ensure_outbox_agent_id_column(conn: aiosqlite.Connection) -> None:
-    cur = await conn.execute("PRAGMA table_info(memory_outbox)")
-    rows = await cur.fetchall()
-    await cur.close()
-    names = {str(r[1]) for r in rows}
-    if not names:
-        return
-    if "agent_id" not in names:
-        await conn.execute("ALTER TABLE memory_outbox ADD COLUMN agent_id TEXT NOT NULL DEFAULT ''")
-    if "palace_id" not in names:
-        await conn.execute(
-            "ALTER TABLE memory_outbox ADD COLUMN palace_id TEXT NOT NULL DEFAULT ''"
-        )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_memory_outbox_agent "
-        "ON memory_outbox(agent_id, palace_id, status, created_at)"
-    )
+    await sqlite_mod._ensure_outbox_agent_id_column(conn)
+    await sqlite_mod._ensure_outbox_palace_id_column(conn)
 
 
 def backoff_iso(attempts: int, *, now: datetime | None = None) -> str:
     base = now or datetime.now(UTC)
-    delay = min(_MAX_BACKOFF_SECONDS, 2 ** max(0, attempts))
+    delay = min(300, 2 ** max(0, attempts))
     return (base + timedelta(seconds=delay)).isoformat(timespec="seconds")
 
 
@@ -273,14 +249,16 @@ async def claim_batch(
     now_iso = now.isoformat(timespec="seconds")
     expires = (now + timedelta(seconds=lease_seconds)).isoformat(timespec="seconds")
     await conn.execute("BEGIN IMMEDIATE")
-    await conn.execute(
-        """
+    expire_sql = """
         UPDATE memory_outbox
         SET status = 'pending', lease_owner = NULL, lease_expires_at = NULL
         WHERE status = 'processing' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?
-        """,
-        (now_iso,),
-    )
+    """
+    expire_params: list[Any] = [now_iso]
+    if agent_id:
+        expire_sql += " AND agent_id = ?"
+        expire_params.append(agent_id)
+    await conn.execute(expire_sql, tuple(expire_params))
     params: list[Any] = []
     where = [
         "status = 'pending'",
@@ -380,9 +358,8 @@ async def gc_committed(conn: aiosqlite.Connection, *, days: int = _GC_AFTER_DAYS
     cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat(timespec="seconds")
     cur = await conn.execute(
         """
-        UPDATE memory_outbox
-        SET content = NULL
-        WHERE status = 'committed' AND content IS NOT NULL AND created_at < ?
+        DELETE FROM memory_outbox
+        WHERE status = 'committed' AND created_at < ?
         """,
         (cutoff,),
     )

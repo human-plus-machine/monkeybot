@@ -114,7 +114,9 @@ gateway:
   cors_allow_origins: "http://localhost:5173"
 
 memory:
-  engine: mempalace
+  # Capture, wake-up, and `mempalace search` teaching. Set false to turn memory off.
+  # Env override: MONKEYBOT_MEMORY_HOOK_ENABLED=0
+  enabled: true
   backend: chroma
   embedding_model: embeddinggemma-300m
 

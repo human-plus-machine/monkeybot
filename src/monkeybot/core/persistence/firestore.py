@@ -7,20 +7,31 @@ import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from datetime import UTC
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
+from google.api_core import exceptions as google_exceptions
 from google.cloud import firestore
 from google.cloud.firestore import AsyncClient
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from monkeybot.core.llm.provider import Message, Role
 from monkeybot.core.llm.usage import Usage, UsageBreakdown, UsageBucket, UsageSummary
+from monkeybot.core.memory.ids import outbox_id, utc_now_iso
+from monkeybot.core.memory.outbox import (
+    STATUS_COMMITTED,
+    STATUS_DEAD,
+    STATUS_PENDING,
+    OutboxRow,
+    backoff_iso,
+    is_permanent_error,
+)
 from monkeybot.core.persistence.backends import FirestoreConfig
 from monkeybot.core.persistence.durable_runs import (
     SubagentEnvelope,
     SubagentRunRow,
 )
+from monkeybot.core.persistence.errors import AmbiguousCommitError
 from monkeybot.core.persistence.firestore_scheduled_loops import FirestoreScheduledLoopStore
 from monkeybot.core.persistence.thread_summary import ChatThreadSummary, preview_from_content_blob
 from monkeybot.core.types.content_blocks import ContentBlock
@@ -194,8 +205,6 @@ class FirestoreHistoryStore:
         outbox: dict[str, Any],
     ) -> None:
         """Insert history and a pending memory outbox row in one transaction."""
-        from monkeybot.core.memory.ids import outbox_id, utc_now_iso
-
         role = message.role
         if role not in _VALID_ROLES:
             raise ValueError(f"invalid role: {role!r}")
@@ -263,7 +272,19 @@ class FirestoreHistoryStore:
             Callable[[firestore.AsyncTransaction], Awaitable[None]],
             firestore.async_transactional(_append_body),
         )
-        await append_txn(self._client.transaction())
+        try:
+            await append_txn(self._client.transaction())
+        except (
+            TimeoutError,
+            OSError,
+            ConnectionError,
+            google_exceptions.DeadlineExceeded,
+            google_exceptions.ServiceUnavailable,
+            google_exceptions.InternalServerError,
+            google_exceptions.Aborted,
+            google_exceptions.Unknown,
+        ) as extra:
+            raise AmbiguousCommitError(str(extra)) from extra
 
     async def load(self, thread_id: str, limit: int | None = None) -> list[Message]:
         if limit is not None:
@@ -940,8 +961,6 @@ class FirestoreOutboxStore:
         return self._col.document(row_id)
 
     def _row_from_data(self, row_id: str, data: dict[str, Any]) -> Any:
-        from monkeybot.core.memory.outbox import OutboxRow
-
         return OutboxRow(
             id=row_id,
             thread_id=str(data.get("thread_id") or ""),
@@ -981,9 +1000,6 @@ class FirestoreOutboxStore:
         palace_id: str = "",
         commit: bool = True,
     ) -> str | None:
-        from monkeybot.core.memory.ids import outbox_id, utc_now_iso
-        from monkeybot.core.memory.outbox import STATUS_COMMITTED
-
         del commit
         row_id = outbox_id(agent_id=agent_id, thread_id=thread_id, message_id=message_id, role=role)
         snap = await self._ref(row_id).get()
@@ -1024,8 +1040,6 @@ class FirestoreOutboxStore:
         lease_seconds: int = 30,
         palace_id: str = "",
     ) -> list[Any]:
-        from datetime import datetime, timedelta
-
         now = datetime.now(UTC)
         now_iso = now.isoformat(timespec="seconds")
         expires = (now + timedelta(seconds=lease_seconds)).isoformat(timespec="seconds")
@@ -1080,8 +1094,10 @@ class FirestoreOutboxStore:
             row = await claim_txn(transaction, doc.reference)
             if row is not None:
                 claimed.append(row)
-        expired_q = self._col.where(filter=FieldFilter("status", "==", "processing")).where(
-            filter=FieldFilter("lease_expires_at", "<", now_iso)
+        expired_q = (
+            self._col.where(filter=FieldFilter("agent_id", "==", agent_id))
+            .where(filter=FieldFilter("status", "==", "processing"))
+            .where(filter=FieldFilter("lease_expires_at", "<", now_iso))
         )
         async for doc in expired_q.stream():
             transaction = self._client.transaction()
@@ -1161,13 +1177,6 @@ class FirestoreOutboxStore:
         permanent: bool | None = None,
         lease_owner: str | None = None,
     ) -> int:
-        from monkeybot.core.memory.outbox import (
-            STATUS_DEAD,
-            STATUS_PENDING,
-            backoff_iso,
-            is_permanent_error,
-        )
-
         dead = bool(permanent) if permanent is not None else is_permanent_error(error_class)
         status = STATUS_DEAD if dead else STATUS_PENDING
         next_at = None if status == STATUS_DEAD else backoff_iso(attempts)
@@ -1205,33 +1214,25 @@ class FirestoreOutboxStore:
         return 1 if await retry_txn(transaction, self._ref(row_id)) else 0
 
     async def gc_committed(self, *, days: int = 7) -> int:
-        from datetime import datetime, timedelta
-
         cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat(timespec="seconds")
         query = self._col.where(filter=FieldFilter("status", "==", "committed"))
         n = 0
         async for doc in query.stream():
             data = doc.to_dict() or {}
-            if data.get("content") is None:
-                continue
             created = str(data.get("created_at") or "")
             if created and created < cutoff:
-                await doc.reference.update({"content": None})
+                await doc.reference.delete()
                 n += 1
         return n
 
     async def pending_depth(self, *, agent_id: str | None = None) -> tuple[int, float]:
-        from datetime import datetime
-
-        query: Any = self._col
+        query: Any = self._col.where(filter=FieldFilter("status", "in", ["pending", "processing"]))
         if agent_id:
             query = query.where(filter=FieldFilter("agent_id", "==", agent_id))
         count = 0
         oldest: str | None = None
         async for doc in query.stream():
             data = doc.to_dict() or {}
-            if str(data.get("status")) not in ("pending", "processing"):
-                continue
             count += 1
             created = str(data.get("created_at") or "")
             if created and (oldest is None or created < oldest):
@@ -1259,6 +1260,8 @@ class FirestoreOutboxStore:
 
 class FirestoreStorageBackend:
     """Firestore-backed storage backend using ``google.cloud.firestore.AsyncClient``."""
+
+    shares_outbox = True
 
     def __init__(self, config: FirestoreConfig) -> None:
         self._config = config

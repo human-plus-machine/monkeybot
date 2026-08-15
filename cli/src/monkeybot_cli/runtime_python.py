@@ -78,7 +78,14 @@ def prepare_runtime_python(agent_root: Path) -> RuntimePython:
         f"agent venv is missing harness packages; running uv sync in {agent_root}",
         flush=True,
     )
-    sync = subprocess.run(["uv", "sync"], cwd=agent_root, check=False)
+    try:
+        sync = subprocess.run(["uv", "sync"], cwd=agent_root, check=False)
+    except FileNotFoundError:
+        print(
+            "warning: uv is not on PATH; did not make mempalace importable in the agent venv",
+            flush=True,
+        )
+        return runtime
     if sync.returncode != 0 or not run_probe(runtime, _HARNESS_PROBE):
         print(
             "warning: uv sync did not make mempalace importable in the agent venv",

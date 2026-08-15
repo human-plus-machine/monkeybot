@@ -2354,7 +2354,6 @@ dependencies = [
     { name = "google-genai" },
     { name = "httpx" },
     { name = "mcp" },
-    { name = "mempalace" },
     { name = "numpy" },
     { name = "pydantic" },
     { name = "python-dotenv" },
@@ -2412,6 +2411,9 @@ knowledge-ast = [
 knowledge-media = [
     { name = "pypdf" },
     { name = "python-docx" },
+]
+memory = [
+    { name = "mempalace" },
 ]
 nvidia = [
     { name = "openai" },
@@ -2471,7 +2473,7 @@ web-search = [
 dev = [
     { name = "anthropic", extra = ["bedrock", "vertex"] },
     { name = "asgi-lifespan" },
-    { name = "monkeybot", extra = ["knowledge-ast", "knowledge-media"] },
+    { name = "monkeybot", extra = ["knowledge-ast", "knowledge-media", "memory"] },
     { name = "monkeybot-cli" },
     { name = "mypy" },
     { name = "opentelemetry-api" },
@@ -2514,7 +2516,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "langfuse", marker = "extra == 'evals'", specifier = ">=3.0.0" },
     { name = "mcp", specifier = ">=1.0.0" },
-    { name = "mempalace", specifier = ">=3.7.0,<4" },
+    { name = "mempalace", marker = "extra == 'memory'", specifier = ">=3.7.0,<4" },
     { name = "monkeybot", extras = ["cli"], marker = "extra == 'cli-realtime'" },
     { name = "monkeybot", extras = ["realtime"], marker = "extra == 'cli'" },
     { name = "monkeybot", extras = ["realtime"], marker = "extra == 'realtime-gemini'" },
@@ -2552,7 +2554,7 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32.0" },
     { name = "websockets", marker = "extra == 'realtime'", specifier = ">=14.0" },
 ]
-provides-extras = ["gemini", "vertex", "claude", "vertex-claude", "bedrock", "openai", "huggingface", "ollama", "nvidia", "openrouter", "sandbox", "scheduler", "postgres", "firestore", "gcs", "aws", "council", "web-search", "evals", "realtime", "realtime-gemini", "cli", "cli-realtime", "observability", "knowledge-ast", "knowledge-media"]
+provides-extras = ["memory", "gemini", "vertex", "claude", "vertex-claude", "bedrock", "openai", "huggingface", "ollama", "nvidia", "openrouter", "sandbox", "scheduler", "postgres", "firestore", "gcs", "aws", "council", "web-search", "evals", "realtime", "realtime-gemini", "cli", "cli-realtime", "observability", "knowledge-ast", "knowledge-media"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -2560,6 +2562,7 @@ dev = [
     { name = "asgi-lifespan", specifier = ">=2.1.0" },
     { name = "monkeybot", extras = ["knowledge-ast"] },
     { name = "monkeybot", extras = ["knowledge-media"] },
+    { name = "monkeybot", extras = ["memory"] },
     { name = "monkeybot-cli", editable = "cli" },
     { name = "mypy", specifier = ">=1.13.0" },
     { name = "opentelemetry-api", specifier = ">=1.28" },

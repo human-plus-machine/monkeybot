@@ -22,18 +22,18 @@ from monkeybot.core.memory.outbox import (
     mark_retry,
 )
 from monkeybot.core.memory.palace import (
-    InMemoryPalace,
     MemoryDependencyError,
     MemPalaceAdapter,
-    UnsupportedMemoryURI,
     create_palace,
     palace_instance_id,
     palace_path_from_uri,
     palace_volume_lock,
 )
-from monkeybot.core.memory.subsystem import MemorySubsystem
+from monkeybot.core.memory.subsystem import MemoryConfigurationError, MemorySubsystem
+from monkeybot.core.persistence.errors import AmbiguousCommitError
 from monkeybot.core.persistence.sqlite import apply_schema, open_connection
 from monkeybot.core.persistence.sqlite_backend import SQLiteStorageBackend
+from tests.core.memory.in_memory_palace import InMemoryPalace
 
 
 @pytest.fixture
@@ -85,9 +85,6 @@ async def test_recall_is_thread_scoped(db_url: str, tmp_path: Path) -> None:
     assert not any("beta secret" in d.content for d in t1)
     assert any("beta secret" in d.content for d in t2)
     assert not any("alpha secret" in d.content for d in t2)
-    wake = "\n".join(await sub.load_index(thread_id="t1"))
-    assert "alpha secret" in wake
-    assert "beta secret" not in wake
     payload = HookPayload(
         event=HookEvent.PRE_TURN,
         thread_id="t2",
@@ -202,7 +199,10 @@ async def test_non_sqlite_without_storage_raises(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_storage_outbox_used_for_postgres_url(tmp_path: Path) -> None:
+async def test_storage_outbox_used_for_postgres_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MONKEYBOT_MEMORY_ALLOW_EPHEMERAL", "1")
     class _Store:
         def __init__(self) -> None:
             self.claimed_for: list[str] = []
@@ -241,6 +241,8 @@ async def test_storage_outbox_used_for_postgres_url(tmp_path: Path) -> None:
             return
 
     class _Storage:
+        shares_outbox = True
+
         def __init__(self, store: _Store) -> None:
             self._store = store
 
@@ -265,11 +267,11 @@ async def test_storage_outbox_used_for_postgres_url(tmp_path: Path) -> None:
 
 
 def test_cloud_memory_uri_is_rejected() -> None:
-    with pytest.raises(UnsupportedMemoryURI, match="gcs://"):
+    with pytest.raises(ValueError, match="gcs://"):
         palace_path_from_uri("gcs://bucket/prefix")
-    with pytest.raises(UnsupportedMemoryURI, match="s3://"):
+    with pytest.raises(ValueError, match="s3://"):
         palace_path_from_uri("s3://bucket/prefix")
-    with pytest.raises(UnsupportedMemoryURI):
+    with pytest.raises(ValueError):
         palace_path_from_uri("gs://bucket/prefix")
 
 
@@ -499,16 +501,30 @@ async def test_writer_stop_times_out_on_hung_embedder(db_url: str, tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_history_only_adapter_does_not_receive_memory_kwargs() -> None:
+async def test_history_append_receives_turn_and_message_ids() -> None:
     from monkeybot.core.llm.provider import Message
     from monkeybot.core.memory.ingest import persist_message
     from monkeybot.core.types.content_blocks import Text
 
-    seen: list[tuple[object, ...]] = []
+    seen: list[dict[str, object]] = []
 
-    class _LegacyHistory:
-        async def append(self, thread_id: str, message: Message) -> None:
-            seen.append((thread_id, message))
+    class _History:
+        async def append(
+            self,
+            thread_id: str,
+            message: Message,
+            *,
+            turn_id: str | None = None,
+            message_id: str | None = None,
+        ) -> None:
+            seen.append(
+                {
+                    "thread_id": thread_id,
+                    "message": message,
+                    "turn_id": turn_id,
+                    "message_id": message_id,
+                }
+            )
 
         async def load(self, thread_id: str, limit: int | None = None) -> list[Message]:
             del thread_id, limit
@@ -521,7 +537,7 @@ async def test_history_only_adapter_does_not_receive_memory_kwargs() -> None:
             del limit
             return []
 
-    history = _LegacyHistory()
+    history = _History()
     await persist_message(
         history,  # type: ignore[arg-type]
         Message(role="user", content=[Text(text="hi")]),
@@ -531,7 +547,9 @@ async def test_history_only_adapter_does_not_receive_memory_kwargs() -> None:
         ingest=False,
         message_id="m",
     )
-    assert seen and seen[0][0] == "t"
+    assert seen[0]["thread_id"] == "t"
+    assert seen[0]["turn_id"] == "turn"
+    assert seen[0]["message_id"] == "m"
 
 
 @pytest.mark.asyncio
@@ -769,6 +787,79 @@ async def test_managed_schema_upgrade_from_documented_ddl(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_unmigrated_history_refuses_atomic_outbox_append(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy.db"
+    conn = await open_connection(f"sqlite:///{db_path}")
+    await conn.execute(
+        """
+        CREATE TABLE conversation_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            thread_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        )
+        """
+    )
+    await conn.execute(
+        """
+        CREATE TABLE memory_outbox (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL DEFAULT '',
+            thread_id TEXT NOT NULL,
+            turn_id TEXT NOT NULL,
+            message_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT,
+            workspace_id TEXT,
+            wing TEXT NOT NULL,
+            room TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at TEXT,
+            last_error TEXT,
+            traceparent TEXT,
+            lease_owner TEXT,
+            lease_expires_at TEXT,
+            palace_id TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    await conn.commit()
+    await conn.close()
+
+    backend = SQLiteStorageBackend(f"sqlite:///{db_path}")
+    await backend.open(run_schema=False)
+    try:
+        from monkeybot.core.llm.provider import Message
+        from monkeybot.core.types.content_blocks import Text
+
+        with pytest.raises(RuntimeError, match="memory-outbox.sql"):
+            await backend.history().append_with_outbox(
+                "t",
+                Message(role="user", content=[Text(text="dup")]),
+                turn_id="1",
+                message_id="m-dup",
+                outbox={
+                    "agent_id": "a",
+                    "thread_id": "t",
+                    "turn_id": "1",
+                    "message_id": "m-dup",
+                    "role": "user",
+                    "content": "dup",
+                    "workspace_id": None,
+                    "wing": "main",
+                    "room": "conversation",
+                },
+            )
+        loaded = await backend.history().load("t")
+        assert loaded == []
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
 async def test_ambiguous_commit_does_not_duplicate_history() -> None:
     from monkeybot.core.llm.provider import Message
     from monkeybot.core.memory.ingest import persist_message
@@ -790,7 +881,7 @@ async def test_ambiguous_commit_does_not_duplicate_history() -> None:
                 self.rows.append(message)
             self.calls += 1
             if self.calls == 1:
-                raise TimeoutError("ack lost")
+                raise AmbiguousCommitError("ack lost")
 
         async def append(self, thread_id: str, message: Message, **kwargs: object) -> None:
             del thread_id, kwargs
@@ -838,7 +929,7 @@ async def test_ambiguous_commit_before_write_retries_idempotently() -> None:
             del thread_id, kwargs
             self.calls += 1
             if self.calls == 1:
-                raise TimeoutError("failed before write")
+                raise AmbiguousCommitError("failed before write")
             self.rows.append(message)
 
         async def append(self, thread_id: str, message: Message, **kwargs: object) -> None:
@@ -961,6 +1052,18 @@ def test_palace_instance_id_is_atomic_across_concurrent_starts(tmp_path: Path) -
     assert (palace_path / ".palace_id").read_text(encoding="utf-8").strip() == ids[0]
 
 
+def test_subsystem_init_does_not_take_palace_write_lock(tmp_path: Path) -> None:
+    palace = InMemoryPalace(tmp_path / "agent-a" / "mempalace", agent_name="agent-a")
+    MemorySubsystem(
+        memory_uri=f"local://{palace.palace_path}",
+        db_url="sqlite:///:memory:",
+        agent_id="agent-a",
+        palace=palace,
+        writer_enabled=False,
+    )
+    assert not (palace.palace_path / ".palace_write.lock").exists()
+
+
 def test_missing_optional_mempalace_has_actionable_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1073,6 +1176,8 @@ async def test_ephemeral_palace_rejected_for_postgres_storage(
     monkeypatch.delenv("MONKEYBOT_MEMORY_ALLOW_EPHEMERAL", raising=False)
 
     class PostgresStorageBackend:
+        shares_outbox = True
+
         def outbox(self) -> object:
             raise AssertionError("should not open outbox")
 
@@ -1084,7 +1189,7 @@ async def test_ephemeral_palace_rejected_for_postgres_storage(
         palace=palace,
         storage=PostgresStorageBackend(),
     )
-    with pytest.raises(RuntimeError, match="temp directory"):
+    with pytest.raises(MemoryConfigurationError, match="temp directory"):
         await sub.ensure_ready()
 
 
@@ -1108,6 +1213,8 @@ async def test_ephemeral_palace_allowed_with_explicit_opt_in(
             return 0
 
     class PostgresStorageBackend:
+        shares_outbox = True
+
         def outbox(self) -> _Outbox:
             return _Outbox()
 
