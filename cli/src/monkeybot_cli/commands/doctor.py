@@ -228,7 +228,8 @@ def run_doctor(args: argparse.Namespace) -> int:
         remediation=None
         if harness_ok
         else (
-            f"Pin monkeybot{COMPATIBLE_CORE_RANGE} in {agent_root}/pyproject.toml, then "
+            f"Pin monkeybot{'[memory]' if memory_on else ''}{COMPATIBLE_CORE_RANGE} "
+            f"in {agent_root}/pyproject.toml, then "
             f"cd {agent_root} && uv sync"
             if (agent_root / "pyproject.toml").is_file()
             else (

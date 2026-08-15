@@ -21,58 +21,62 @@ probe refuses to start the gateway.
 
 from __future__ import annotations
 
-import re
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from monkeybot_cli.compat import COMPATIBLE_CORE_RANGE
+from monkeybot_cli.compat import (
+    COMPATIBLE_CORE_LOWER_VERSION,
+    COMPATIBLE_CORE_RANGE,
+    COMPATIBLE_CORE_UPPER_VERSION,
+)
 
 DEFAULT_PORT = 8080
 SSE_GATEWAY_MODULE = "monkeybot.gateway.main"
 COMBINED_GATEWAY_MODULE = "monkeybot.gateway.realtime_main"
 
-
-def _release_tuple(version: str) -> list[int]:
-    """Return the PEP 440 release segment as ``[major, minor, micro]``.
-
-    Strips local (+…), epoch (!), and pre/post/dev suffixes so versions like
-    ``3.1.0+local``, ``3.1.post1``, and ``3.1rc1`` all map to a comparable triple.
-    """
-    public = version.split("+", 1)[0]
-    if "!" in public:
-        public = public.split("!", 1)[1]
-    match = re.match(r"^(\d+)(?:\.(\d+))?(?:\.(\d+))?", public)
-    if not match:
-        return [0, 0, 0]
-    return [int(match.group(i) or 0) for i in (1, 2, 3)]
-
-
-def _core_range_bounds(range_: str) -> tuple[list[int], list[int]]:
-    """Derive inclusive lower / exclusive upper release tuples from ``range_``."""
-    lower_m = re.search(r">=(\d+(?:\.\d+)*)", range_)
-    upper_m = re.search(r"<(\d+(?:\.\d+)*)", range_)
-    if lower_m is None or upper_m is None:
-        raise ValueError(f"unsupported COMPATIBLE_CORE_RANGE: {range_!r}")
-    return _release_tuple(lower_m.group(1)), _release_tuple(upper_m.group(1))
-
-
-_CORE_LOWER, _CORE_UPPER = _core_range_bounds(COMPATIBLE_CORE_RANGE)
-
-# Stdlib-only snippet executed in the *agent* interpreter. Bounds are injected
-# from ``COMPATIBLE_CORE_RANGE`` so the probe cannot silently diverge.
-CORE_PROBE = (
-    "from importlib.metadata import version; "
-    "import re; "
-    "ver = version('monkeybot'); "
-    "public = ver.split('+', 1)[0]; "
-    "public = public.split('!', 1)[-1]; "
-    "m = re.match(r'^(\\d+)(?:\\.(\\d+))?(?:\\.(\\d+))?', public); "
-    "parts = [int(m.group(i) or 0) for i in (1, 2, 3)] if m else [0, 0, 0]; "
-    f"assert {_CORE_LOWER!s} <= parts < {_CORE_UPPER!s}, ver"
+# Stdlib-only snippet executed in the *agent* interpreter. One embedded parser
+# compares the installed version against bounds from compat.py so SpecifierSet
+# defaults stay aligned (local ignored; epochs/pre/post/dev ordered correctly).
+_VERSION_RE = (
+    r"^(?:(?P<epoch>[0-9]+)!)?"
+    r"(?P<release>[0-9]+(?:\.[0-9]+)*)"
+    r"(?:[-_\.]?(?P<pre_l>a|b|c|rc|alpha|beta|pre|preview)[-_\.]?(?P<pre_n>[0-9]+)?)?"
+    r"(?:(?:[-_\.]?(?:post|rev|r)[-_\.]?(?P<post>[0-9]+))|-(?P<post2>[0-9]+))?"
+    r"(?:[-_\.]?dev[-_\.]?(?P<dev>[0-9]*))?"
+    r"$"
 )
-MEMORY_PROBE = f"import mempalace; {CORE_PROBE}"
+CORE_PROBE = f"""
+from importlib.metadata import version
+import re
+_PRE = {{"a": 0, "alpha": 0, "b": 1, "beta": 1, "c": 2, "rc": 2, "pre": 2, "preview": 2}}
+_RX = re.compile({_VERSION_RE!r}, re.I)
+
+def _key(v):
+    p = v.split("+", 1)[0]
+    m = _RX.fullmatch(p)
+    assert m, v
+    rel = [int(x) for x in m["release"].split(".")]
+    while len(rel) > 1 and rel[-1] == 0:
+        rel.pop()
+    pl = m["pre_l"]
+    if pl:
+        pre = (1, _PRE[pl.lower()], int(m["pre_n"] or 0))
+    elif m["dev"] is not None:
+        pre = (0, 0, 0)
+    else:
+        pre = (2, 0, 0)
+    pn = m["post"] if m["post"] is not None else m["post2"]
+    post = (1, int(pn)) if pn is not None else (0, 0)
+    dev = (0, int(m["dev"] or 0)) if m["dev"] is not None else (1, 0)
+    return (int(m["epoch"] or 0), tuple(rel), pre, post, dev)
+
+ver = version("monkeybot")
+assert _key({COMPATIBLE_CORE_LOWER_VERSION!r}) <= _key(ver) < _key({COMPATIBLE_CORE_UPPER_VERSION!r}), ver
+""".strip()
+MEMORY_PROBE = f"import mempalace\n{CORE_PROBE}"
+
 
 
 class RuntimeUpgradeError(RuntimeError):
@@ -153,8 +157,12 @@ def _upgrade_error(
     detail: str,
 ) -> RuntimeUpgradeError:
     range_ = COMPATIBLE_CORE_RANGE
+    extra = "[memory]" if memory_enabled else ""
     if has_project:
-        how = f"pin monkeybot{range_} in {agent_root}/pyproject.toml, then `cd {agent_root} && uv sync`"
+        how = (
+            f"pin monkeybot{extra}{range_} in {agent_root}/pyproject.toml, "
+            f"then `cd {agent_root} && uv sync`"
+        )
     elif memory_enabled:
         how = (
             f"install monkeybot[memory]{range_} in this environment, "

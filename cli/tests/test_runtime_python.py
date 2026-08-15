@@ -143,37 +143,44 @@ def test_run_probe_uv_sets_agent_root_cwd(tmp_path: Path, monkeypatch) -> None:
 def test_core_probe_matches_compatible_range() -> None:
     from packaging.specifiers import SpecifierSet
 
-    from monkeybot_cli.compat import COMPATIBLE_CORE_RANGE
-    from monkeybot_cli.runtime_python import _CORE_LOWER, _CORE_UPPER, _core_range_bounds
+    from monkeybot_cli.compat import (
+        COMPATIBLE_CORE_LOWER_VERSION,
+        COMPATIBLE_CORE_RANGE,
+        COMPATIBLE_CORE_UPPER_VERSION,
+    )
 
     spec = SpecifierSet(COMPATIBLE_CORE_RANGE)
     assert COMPATIBLE_CORE_RANGE == ">=3.0.0,<4"
-    assert spec.contains("3.0.0")
-    assert spec.contains("3.9.9")
-    assert spec.contains("3.1.0+local")
-    assert spec.contains("3.1.post1")
-    assert not spec.contains("2.9.9")
-    assert not spec.contains("4.0.0")
+    assert COMPATIBLE_CORE_LOWER_VERSION == "3.0.0"
+    assert COMPATIBLE_CORE_UPPER_VERSION == "4"
     assert "packaging" not in CORE_PROBE
-    assert _core_range_bounds(COMPATIBLE_CORE_RANGE) == (_CORE_LOWER, _CORE_UPPER)
-    assert str(_CORE_LOWER) in CORE_PROBE
-    assert str(_CORE_UPPER) in CORE_PROBE
+    assert repr(COMPATIBLE_CORE_LOWER_VERSION) in CORE_PROBE
+    assert repr(COMPATIBLE_CORE_UPPER_VERSION) in CORE_PROBE
     assert MEMORY_PROBE.startswith("import mempalace")
 
     def _probe_version(ver: str) -> int:
-        snippet = CORE_PROBE.replace("version('monkeybot')", repr(ver), 1)
+        snippet = CORE_PROBE.replace('version("monkeybot")', repr(ver), 1)
         return subprocess.run(
             [sys.executable, "-c", snippet],
             capture_output=True,
             text=True,
         ).returncode
 
-    assert _probe_version("3.1.0+local") == 0
-    assert _probe_version("3.0.0") == 0
-    assert _probe_version("3.1.post1") == 0
-    assert _probe_version("3.1rc1") == 0
-    assert _probe_version("2.9.9") != 0
-    assert _probe_version("4.0.0") != 0
+    cases = (
+        "3.0.0",
+        "3.9.9",
+        "3.1.0+local",
+        "3.1.post1",
+        "3.0rc1",
+        "3.1rc1",
+        "1!3.1.0",
+        "2.9.9",
+        "4.0.0",
+        "3.1.dev0",
+        "3.0.0a1",
+    )
+    for ver in cases:
+        assert (_probe_version(ver) == 0) is spec.contains(ver), ver
 
 
 def _write_memory_config(root: Path, *, enabled: bool) -> None:
@@ -183,6 +190,21 @@ def _write_memory_config(root: Path, *, enabled: bool) -> None:
         f"memory:\n  enabled: {str(enabled).lower()}\n",
         encoding="utf-8",
     )
+
+
+def test_prepare_runtime_python_project_memory_remediation_includes_extra(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _write_memory_config(tmp_path, enabled=True)
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "agent"\n', encoding="utf-8")
+    monkeypatch.setattr("monkeybot_cli.runtime_python._probe", lambda *a, **k: (False, "missing"))
+    monkeypatch.setattr(
+        "monkeybot_cli.runtime_python.subprocess.run",
+        lambda *a, **k: type("R", (), {"returncode": 1})(),
+    )
+    with pytest.raises(RuntimeUpgradeError, match="monkeybot\\[memory\\]") as excinfo:
+        prepare_runtime_python(tmp_path)
+    assert "pyproject.toml" in str(excinfo.value)
 
 
 def test_prepare_runtime_python_skips_sync_when_probe_passes(tmp_path: Path, monkeypatch) -> None:
