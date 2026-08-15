@@ -594,6 +594,77 @@ async def test_grep_incomplete_scan_errors_with_rg(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_grep_rg_file_cap_uses_candidate_count_when_summary_undercounts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail-closed even when rg JSON begin/summary only cover matching files."""
+    import json
+    from types import SimpleNamespace
+
+    from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService, WorkspaceSettings
+
+    root = tmp_path
+    for i in range(5):
+        (root / f"f{i}.py").write_text(f"MARKER_{i}\n", encoding="utf-8")
+    (root / "hit.py").write_text("KNOWN_MATCH_TOKEN\n", encoding="utf-8")
+
+    undercount = "\n".join(
+        [
+            json.dumps({"type": "begin", "data": {"path": {"text": "hit.py"}}}),
+            json.dumps(
+                {
+                    "type": "match",
+                    "data": {
+                        "path": {"text": "hit.py"},
+                        "lines": {"text": "KNOWN_MATCH_TOKEN\n"},
+                        "line_number": 1,
+                        "submatches": [{"start": 0, "end": 17}],
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "summary",
+                    "data": {
+                        "stats": {
+                            "searches": 1,
+                            "searches_with_match": 1,
+                            "matched_lines": 1,
+                            "matches": 1,
+                        }
+                    },
+                }
+            ),
+        ]
+    )
+
+    def fake_run(*_args, **_kwargs):
+        return SimpleNamespace(returncode=0, stdout=undercount, stderr="")
+
+    monkeypatch.setattr(
+        "monkeybot.core.tools.workspace_service.shutil.which",
+        lambda _name: "/usr/bin/rg",
+    )
+    monkeypatch.setattr(
+        "monkeybot.core.tools.workspace_service.subprocess.run",
+        fake_run,
+    )
+    # Avoid accidental Python fallback if the fake run is mishandled.
+    monkeypatch.setattr(
+        WorkspaceFileService,
+        "_grep_python",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("should not fall back")),
+    )
+
+    svc = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILES=2, WORKSPACE_GREP_MAX_MATCHES=50),
+    )
+    with pytest.raises(WorkspaceError) as ei:
+        svc.grep("KNOWN_MATCH_TOKEN")
+    assert ei.value.code == "incomplete_scan"
+
+@pytest.mark.asyncio
 async def test_grep_skipped_oversized_is_incomplete(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
