@@ -270,7 +270,7 @@ async def run_pattern_bc_turn(
     finally:
         await executor.aclose()
         if deps.memory is not None:
-            await deps.memory.flush()
+            await deps.memory.drain_writer()
 
     return "".join(parts)
 

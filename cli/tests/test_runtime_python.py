@@ -154,3 +154,27 @@ def test_prepare_runtime_python_syncs_when_mempalace_missing(tmp_path: Path, mon
     assert any(cmd[:2] == ["uv", "sync"] for cmd in calls)
     assert not any(cmd[:3] == ["uv", "pip", "install"] for cmd in calls)
     assert any("import mempalace" in " ".join(cmd) for cmd in calls)
+
+
+def test_prepare_runtime_python_warns_when_uv_missing(tmp_path: Path, monkeypatch, capsys) -> None:
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "agent"\n', encoding="utf-8")
+    venv_bin = tmp_path / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    py = venv_bin / "python"
+    py.write_text("#!/bin/sh\n")
+    py.chmod(0o755)
+
+    def fake_run(argv, **kwargs):
+        del kwargs
+        if argv[:2] == ["uv", "sync"]:
+            raise FileNotFoundError("uv")
+
+        class Result:
+            returncode = 1
+
+        return Result()
+
+    monkeypatch.setattr("monkeybot_cli.runtime_python.subprocess.run", fake_run)
+    runtime = prepare_runtime_python(tmp_path)
+    assert runtime.source == "venv"
+    assert "uv is not on PATH" in capsys.readouterr().out

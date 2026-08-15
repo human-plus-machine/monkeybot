@@ -8,7 +8,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Breaking
 
-- Note-based memory (INDEX.md, curator, `search_memory` / `edit_memory` / `forget`) is replaced by per-agent MemPalace with a SQLite outbox. Capture can be turned off with `memory.enabled: false` or `MONKEYBOT_MEMORY_HOOK_ENABLED=0`. Object-store palace URIs (`gcs://`, `s3://`) are not supported; use `local://`. Postgres/Firestore history backends run without MemPalace until a later release.
+- Note-based memory (INDEX.md, curator, `search_memory` / `edit_memory` / `forget`) is replaced by per-agent MemPalace with a SQLite outbox. Capture can be turned off with `memory.enabled: false` or `MONKEYBOT_MEMORY_HOOK_ENABLED=0`. Object-store palace URIs (`gcs://`, `s3://`) fall back to `local://` under the agent root. Postgres/Firestore history backends run without MemPalace until a later release. MemPalace itself is the optional `monkeybot[memory]` extra.
 
 ### Added
 

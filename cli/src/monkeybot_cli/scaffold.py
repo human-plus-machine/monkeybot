@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 from importlib import resources
 from importlib.resources.abc import Traversable
@@ -257,7 +256,7 @@ def write_agent_pyproject(
     # Sandbox + web search ship enabled in every generated agent config.
     dep = monkeybot_requirement(
         provider=provider,
-        extras=["sandbox", "web-search", *(extras or [])],
+        extras=["sandbox", "web-search", "memory", *(extras or [])],
     )
     name = _sanitize_project_name(dest.name)
     path.write_text(
@@ -294,41 +293,12 @@ def _list_extras(existing: list[str], template: list[str]) -> list[str]:
     return [item for item in existing if item not in present]
 
 
-def _yaml_list_item(value: str) -> str:
-    dumped = json.dumps(value, ensure_ascii=False)
-    return f"  - {dumped}\n"
-
-
-def _append_list_extras(text: str, section_header: str, extras: list[str]) -> str:
-    """Insert extras after the last `  - ` item of a top-level YAML list section."""
-    if not extras:
-        return text
-    marker = f"{section_header}\n"
-    idx = text.find(marker)
-    if idx < 0:
-        return text
-    start = idx + len(marker)
-    rest = text[start:]
-    consumed = 0
-    last_item_end = 0
-    for line in rest.splitlines(keepends=True):
-        stripped = line.strip()
-        if line.startswith("  - ") or line.startswith("  -"):
-            consumed += len(line)
-            last_item_end = consumed
-            continue
-        if stripped == "" or not line.startswith(" "):
-            break
-        consumed += len(line)
-    if last_item_end == 0:
-        return text
-    addition = "".join(_yaml_list_item(item) for item in extras)
-    insert_at = start + last_item_end
-    return text[:insert_at] + addition + text[insert_at:]
-
-
 def refresh_command_allowlist(cfg_dir: Path) -> str:
-    """Rewrite from the packaged template, then re-append agent-only extras."""
+    """Rewrite from the packaged template, then re-append agent-only extras.
+
+    Refresh always rewrites this file. Comments in a customized live copy are
+    not preserved; agent-only list entries are merged onto the current template.
+    """
     dest = cfg_dir / "command_allowlist.yaml"
     template = (resources.files(_DEFAULTS_PKG) / "command_allowlist.yaml").read_text(
         encoding="utf-8"
@@ -341,30 +311,18 @@ def refresh_command_allowlist(cfg_dir: Path) -> str:
     existing = _load_mapping(dest)
     tmpl = yaml.safe_load(template)
     tmpl_map = tmpl if isinstance(tmpl, dict) else {}
-    text = template
-    text = _append_list_extras(
-        text,
-        "allowed_commands:",
-        _list_extras(
-            _as_str_list(existing.get("allowed_commands")),
-            _as_str_list(tmpl_map.get("allowed_commands")),
-        ),
-    )
-    text = _append_list_extras(
-        text,
-        "allowed_path_prefixes:",
-        _list_extras(
-            _as_str_list(existing.get("allowed_path_prefixes")),
-            _as_str_list(tmpl_map.get("allowed_path_prefixes")),
-        ),
-    )
-    text = _append_list_extras(
-        text,
-        "deny_patterns:",
-        _list_extras(
-            _as_str_list(existing.get("deny_patterns")),
-            _as_str_list(tmpl_map.get("deny_patterns")),
-        ),
+    merged = dict(tmpl_map)
+    for key in ("allowed_commands", "allowed_path_prefixes", "deny_patterns"):
+        extras = _list_extras(
+            _as_str_list(existing.get(key)),
+            _as_str_list(tmpl_map.get(key)),
+        )
+        merged[key] = [*_as_str_list(tmpl_map.get(key)), *extras]
+    text = yaml.safe_dump(
+        merged,
+        sort_keys=False,
+        allow_unicode=True,
+        default_flow_style=False,
     )
     if dest.read_text(encoding="utf-8") == text:
         return f"  {label}: unchanged"
