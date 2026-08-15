@@ -37,15 +37,17 @@ SSE_GATEWAY_MODULE = "monkeybot.gateway.main"
 COMBINED_GATEWAY_MODULE = "monkeybot.gateway.realtime_main"
 
 # Stdlib-only snippet executed in the *agent* interpreter. One embedded parser
-# compares the installed version against bounds from compat.py so SpecifierSet
-# defaults stay aligned (local ignored; epochs/pre/post/dev ordered correctly).
+# compares the installed version against bounds derived from COMPATIBLE_CORE_RANGE
+# so SpecifierSet defaults stay aligned (local ignored; epochs/pre/post/dev ordered).
+# Uses ``raise`` rather than ``assert`` so ``python -O`` cannot strip the gate.
 _VERSION_RE = (
-    r"^(?:(?P<epoch>[0-9]+)!)?"
+    r"^\s*v?"
+    r"(?:(?P<epoch>[0-9]+)!)?"
     r"(?P<release>[0-9]+(?:\.[0-9]+)*)"
-    r"(?:[-_\.]?(?P<pre_l>a|b|c|rc|alpha|beta|pre|preview)[-_\.]?(?P<pre_n>[0-9]+)?)?"
-    r"(?:(?:[-_\.]?(?:post|rev|r)[-_\.]?(?P<post>[0-9]+))|-(?P<post2>[0-9]+))?"
+    r"(?:[-_\.]?(?P<pre_l>alpha|beta|preview|pre|rc|a|b|c)[-_\.]?(?P<pre_n>[0-9]+)?)?"
+    r"(?:(?:[-_\.]?(?:post|rev|r)[-_\.]?(?P<post>[0-9]*))|-(?P<post2>[0-9]+))?"
     r"(?:[-_\.]?dev[-_\.]?(?P<dev>[0-9]*))?"
-    r"$"
+    r"\s*$"
 )
 CORE_PROBE = f"""
 from importlib.metadata import version
@@ -56,7 +58,8 @@ _RX = re.compile({_VERSION_RE!r}, re.I)
 def _key(v):
     p = v.split("+", 1)[0]
     m = _RX.fullmatch(p)
-    assert m, v
+    if not m:
+        raise ValueError(v)
     rel = [int(x) for x in m["release"].split(".")]
     while len(rel) > 1 and rel[-1] == 0:
         rel.pop()
@@ -68,12 +71,13 @@ def _key(v):
     else:
         pre = (2, 0, 0)
     pn = m["post"] if m["post"] is not None else m["post2"]
-    post = (1, int(pn)) if pn is not None else (0, 0)
+    post = (1, int(pn or 0)) if pn is not None else (0, 0)
     dev = (0, int(m["dev"] or 0)) if m["dev"] is not None else (1, 0)
     return (int(m["epoch"] or 0), tuple(rel), pre, post, dev)
 
 ver = version("monkeybot")
-assert _key({COMPATIBLE_CORE_LOWER_VERSION!r}) <= _key(ver) < _key({COMPATIBLE_CORE_UPPER_VERSION!r}), ver
+if not (_key({COMPATIBLE_CORE_LOWER_VERSION!r}) <= _key(ver) < _key({COMPATIBLE_CORE_UPPER_VERSION!r})):
+    raise SystemExit(ver)
 """.strip()
 MEMORY_PROBE = f"import mempalace\n{CORE_PROBE}"
 

@@ -147,30 +147,36 @@ def test_core_probe_matches_compatible_range() -> None:
         COMPATIBLE_CORE_LOWER_VERSION,
         COMPATIBLE_CORE_RANGE,
         COMPATIBLE_CORE_UPPER_VERSION,
+        _bounds_from_range,
     )
 
     spec = SpecifierSet(COMPATIBLE_CORE_RANGE)
     assert COMPATIBLE_CORE_RANGE == ">=3.0.0,<4"
+    assert _bounds_from_range(COMPATIBLE_CORE_RANGE) == (
+        COMPATIBLE_CORE_LOWER_VERSION,
+        COMPATIBLE_CORE_UPPER_VERSION,
+    )
     assert COMPATIBLE_CORE_LOWER_VERSION == "3.0.0"
     assert COMPATIBLE_CORE_UPPER_VERSION == "4"
     assert "packaging" not in CORE_PROBE
+    assert "assert " not in CORE_PROBE
     assert repr(COMPATIBLE_CORE_LOWER_VERSION) in CORE_PROBE
     assert repr(COMPATIBLE_CORE_UPPER_VERSION) in CORE_PROBE
     assert MEMORY_PROBE.startswith("import mempalace")
 
-    def _probe_version(ver: str) -> int:
+    def _probe_version(ver: str, *, optimize: bool = False) -> int:
         snippet = CORE_PROBE.replace('version("monkeybot")', repr(ver), 1)
-        return subprocess.run(
-            [sys.executable, "-c", snippet],
-            capture_output=True,
-            text=True,
-        ).returncode
+        cmd = [sys.executable, "-O", "-c", snippet] if optimize else [sys.executable, "-c", snippet]
+        return subprocess.run(cmd, capture_output=True, text=True).returncode
 
     cases = (
         "3.0.0",
         "3.9.9",
         "3.1.0+local",
         "3.1.post1",
+        "3.1.post",
+        "v3.1",
+        " 3.1 ",
         "3.0rc1",
         "3.1rc1",
         "1!3.1.0",
@@ -181,6 +187,8 @@ def test_core_probe_matches_compatible_range() -> None:
     )
     for ver in cases:
         assert (_probe_version(ver) == 0) is spec.contains(ver), ver
+    assert _probe_version("2.9.9", optimize=True) != 0
+    assert _probe_version("3.1.0", optimize=True) == 0
 
 
 def _write_memory_config(root: Path, *, enabled: bool) -> None:
