@@ -83,32 +83,23 @@ class _FakeDocRef:
         return _FakeSnapshot(self.id, None if data is None else dict(data))
 
     async def update(self, fields: dict[str, Any]) -> None:
-        # Unconditional update path — used by the old buggy defer_tick.
         cur = dict(self._store.get(self.id, {}))
         cur.update(fields)
         self._store[self.id] = cur
 
 
 class _FakeQuery:
-    def __init__(self, store: dict[str, dict[str, Any]], filters: list[tuple[str, Any]]) -> None:
+    def __init__(
+        self, store: dict[str, dict[str, Any]], filters: list[tuple[str, str, Any]]
+    ) -> None:
         self._store = store
         self._filters = filters
 
     def where(self, *, filter: Any) -> "_FakeQuery":  # noqa: A002
-        field_path = getattr(filter, "field_path", None) or filter[0]
-        value = getattr(filter, "value", None)
-        if value is None and hasattr(filter, "op_string"):
-            value = filter.value
-        # FieldFilter stores via private attrs in google-cloud-firestore.
-        if hasattr(filter, "_FieldFilter__field_path"):
-            field_path = filter._FieldFilter__field_path
-            value = filter._FieldFilter__value
-            op = filter._FieldFilter__op_string
-        else:
-            op = "=="
-            if isinstance(filter, tuple):
-                field_path, op, value = filter
-        return _FakeQuery(self._store, [*self._filters, (field_path, op, value)])
+        return _FakeQuery(
+            self._store,
+            [*self._filters, (filter.field_path, filter.op_string, filter.value)],
+        )
 
     async def stream(self):
         for doc_id, data in list(self._store.items()):
@@ -125,7 +116,10 @@ class _FakeQuery:
                     ok = False
                     break
             if ok:
-                yield _FakeDocRef(self._store, doc_id)
+                # Real Firestore query.stream() yields DocumentSnapshots (id + to_dict).
+                snap = _FakeSnapshot(doc_id, dict(data))
+                snap.reference = _FakeDocRef(self._store, doc_id)  # type: ignore[attr-defined]
+                yield snap
 
 
 class _FakeCollection:
@@ -241,25 +235,19 @@ async def test_firestore_release_stale_skips_renewed_heartbeat(
     """Query sees stale claimed_at; transactional re-check sees renewed lease."""
     _install_fake_transactional(monkeypatch)
     client = _FakeClient()
-    # claimed_at looks stale to the query, but renew happens before txn commit.
     _seed_in_flight(client, worker_id="worker-a", claimed_at_ms=1)
     store = FirestoreScheduledLoopStore(client, prefix="t")  # type: ignore[arg-type]
 
     import monkeybot.core.persistence.firestore_scheduled_loops as mod
-    from google.cloud.firestore_v1.base_query import FieldFilter
-
-    # Force FieldFilter attribute access used by the fake query.
-    assert FieldFilter("claimed_at_ms", "<", 100)
 
     original_release = store._release_one_stale_claim
 
     async def _renew_then_release(loop_id: str, cutoff: int) -> bool:
-        # Heartbeat renews the lease after the query, before the write.
         client.docs[loop_id]["claimed_at_ms"] = cutoff + 50_000
         return await original_release(loop_id, cutoff)
 
     monkeypatch.setattr(store, "_release_one_stale_claim", _renew_then_release)
-    # Make now-based cutoff treat claimed_at_ms=1 as stale.
+    # now_ms = 100_000; cutoff = 99_000 → claimed_at_ms=1 matches the query.
     monkeypatch.setattr(mod.time, "time", lambda: 100.0)
 
     released = await store.release_stale_claims(stale_after_ms=1_000)
@@ -267,7 +255,7 @@ async def test_firestore_release_stale_skips_renewed_heartbeat(
     row = client.docs["loop-1"]
     assert row["tick_in_flight"] == 1
     assert row["worker_id"] == "worker-a"
-    assert row["claimed_at_ms"] == 50_000 + (100_000 - 1_000)
+    assert row["claimed_at_ms"] == 149_000
 
 
 @pytest.mark.asyncio
