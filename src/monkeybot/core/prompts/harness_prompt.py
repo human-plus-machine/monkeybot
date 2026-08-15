@@ -2,6 +2,10 @@
 
 The agent loop appends :func:`harness_fixed_context` after the operator-authored
 base prompt (AGENT.md) so tool/MCP protocol text lives in code, not in the bot file.
+
+Tool names, parameters, and when-to-use guidance live in the JSON ``tools`` payload
+(``ToolDef.to_model_schema()``). This fragment is protocol + paths only — not a
+second catalog of the same tools.
 """
 
 import os
@@ -28,128 +32,30 @@ _RUN_COMMAND_EXEC_NOTE_SANDBOX = (
 
 _HARNESS_BODY = """## monkeybot harness (fixed)
 
-This block is injected by the host every turn. Prefer the **active tool list** the model receives over any stale summary here.
-
-When workspace tools (`read_file`, `write_file`, `run_command`, …) appear in that list, you **have a writable workspace** — not a read-only chat window. Fulfill file and code requests with tools; do not paste full artifacts and instruct the user to save manually unless they explicitly asked to see code in chat.
-
-### Core built-in tools (when present in the active tool list)
-- `read_file` / `write_file` / `replace_in_file` / `glob` / `grep` / `apply_patch` — paths are **workspace-relative** under the workspace root below. **`glob`** lists matching files (prefer over `run_command` + `ls`). **`grep`** searches file contents with a regex (prefer over `run_command` + `grep`). **`apply_patch`** applies a multi-file Codex-style patch (Add / Update / Delete / Move) fail-closed. Do not substitute a code block in chat for a file deliverable.
-{search_tool_line}{knowledge_search_block}{memory_teaching_block}- `list_skills` — resolves the skills root path for installed skills listed under `## Skills` below; read each skill's `SKILL.md` under that root for procedure.
-- `run_command` — allowlisted shell with optional `timeout` (seconds). {run_command_exec_note} Shell starts in **workspace root**; use the paths listed under Runtime paths below — do NOT guess directory names. `cd` is a shell builtin and cannot be used as a bare command; use `bash -c "cd <dir> && <cmd>"` instead. Pass **`argv` as a list** with the binary first (e.g. `{{"argv": ["ls", "."]}}`); do not pass `{{"command": "ls -R", "args": []}}` — that treats `ls -R` as the binary name.
-- `enable_mcp` / `disable_mcp` — connect or drop a server declared in mcp.json by name (e.g. `browser`). Success returns connection status + tools; failure returns the error (no separate status tool). New tools appear on the **next model step this turn**.
-- `list_mcp_resources` / `read_mcp_resource` / `list_mcp_prompts` / `get_mcp_prompt` — appear only after `enable_mcp` succeeds; browse MCP resources and prompt templates from connected servers.
-- `enable_loops` — advertise scheduled-loop tools (`start_loop`, `loop_status`, `pause_loop`, `resume_loop`, `stop_loop`, `disable_loops`); they appear only after `enable_loops`, on the **next model step this turn**. Requires durable storage (`DB_URL`) and a running scheduler worker. Read the `loop` skill for procedure (guards, confirmation) before calling `start_loop`.
-{catalog_mcp_line}{catalog_loops_line}{web_search_line}{todo_list_line}{task_line}
-### Workspace deliverables
-- **New file or full rewrite** → `write_file`.
-- **Targeted change to an existing file** → `read_file` then `replace_in_file` (unique match; light fuzzy fallbacks; optional `replace_all`).
-- **Multi-file or multi-hunk edit** → `apply_patch` with a Codex-style `*** Begin Patch` … `*** End Patch` envelope (Add / Update / Delete / Move); fail-closed.
-- Tell the user the workspace-relative path when done.
-- **Do not claim** you lack filesystem access, cannot touch the user's machine, or are limited to "chat-only" output when workspace file tools are in the active tool list.
-- Chat text is for answers and brief excerpts — not a stand-in for a file the user asked you to produce.
+This block is injected by the host every turn. Prefer the **active JSON tool list** for names, parameters, and when-to-use guidance.
 
 ### Built-in tool errors (recovery)
-- A tool **failed** whenever its response contains `ok: false` (or `is_error`), even if the call itself "succeeded" (e.g. `run_command` returns `exit_code != 0` with an `ok:false` JSON body in `stdout`). Read the result; do not treat a non-empty response as success.
-- Failed built-in tools often return **JSON** with `ok: false`, `error_kind` (`policy` | `validation` | `runtime`), `message`, and `hint`.
-- If `error_kind` is **policy** (e.g. `run_command` blocked), **do not** retry the identical call; change the command or path per `hint` and the lists in `details`, then retry **once** after a single fix.
-- If `error_kind` is **validation**, fix the argument shape (see `details.example`), then retry once.
-- If `error_kind` is **runtime** (the command/tool ran but failed — e.g. missing config, missing env var, bad exit code, script error), **do not** re-run the identical call. The same inputs will produce the same failure. Either fix the underlying cause if you can act on it, or stop and tell the user exactly what is missing (e.g. an env var, project id, or credential) and what they must set.
-- **No-repeat rule (applies to every tool):** never issue a tool call with the same name and same arguments that already failed this turn. A retry is only allowed after you have changed the command, arguments, or path in response to the error. If you cannot change anything, stop retrying and report the blocker in plain text.
-- **Spill / partial artifacts:** on timeout, truncation, interrupt, or any result that mentions a spill path / `details.partial_output_path` / `partial_paths`, **`read_file` that path (or the spill inventory under `.monkeybot/`) before** changing args or re-issuing the tool. Do not reconstruct from truncated inline text alone.
+- A tool **failed** whenever its response contains `ok: false` (or `is_error`). Read the result; a non-empty response is not success.
+- Failed built-in tools often return JSON with `ok: false`, `error_kind` (`policy` | `validation` | `runtime`), `message`, and `hint`.
+- **policy:** do not retry the identical call; change command or path per `hint`, then retry once.
+- **validation:** fix the argument shape (see `details.example`), then retry once.
+- **runtime:** do not re-run the identical call. Fix the cause if you can, or stop and tell the user what is missing.
+- **No-repeat rule:** never issue a tool call with the same name and same arguments that already failed this turn. If you cannot change anything, stop and report the blocker in plain text.
+- **Spill / partial artifacts:** on timeout, truncation, interrupt, or any result that mentions a spill path / `details.partial_output_path` / `partial_paths`, **`read_file` that path** (or the spill inventory under `.monkeybot/`) **before** changing args or re-issuing the tool.
 
 ### Runtime paths
-- workspace root (cwd): `{workspace_root}` — `read_file` / `write_file` / `glob` / `run_command` start here.
+- workspace root (cwd): `{workspace_root}` — file and shell tools start here.
+- `run_command`: {run_command_exec_note}
 - runtime (inside workspace): `.monkeybot/` — spill, knowledge index, transcripts. Not memory.
 {memory_paths_line}- workspace `data/` (if present) is ordinary project files — **not** the memory store.
 
-### MCP tools
-- Names look like `server__tool` (double underscore).
-- Heavy MCP servers are **on-demand**: call `enable_mcp("name")` before using their `server__*` tools when they are not yet in the active tool list.
-- For server-published context (not callable tools), resource/prompt tools (`list_mcp_resources` / `read_mcp_resource`, `list_mcp_prompts` / `get_mcp_prompt`) appear in the tool list only after `enable_mcp`.
-- MCP tool errors are returned as plain error text (not structured JSON). Any response containing an HTTP error code (4xx / 5xx), "not found", "unauthorized", "forbidden", "permission denied", or similar access/availability signals means the tool **did not return usable data**.
-- When an MCP tool fails: state what failed in one sentence, then stop — do **not** fabricate, infer, or summarize content that the tool was supposed to fetch. If a fallback tool is available and meaningfully different, try it once; otherwise tell the user what is needed to proceed (e.g. correct credentials, a public URL, pasting the content directly).
-- Scheduled loops: agree the tick plan with the user, then call `start_loop` (requires confirmation); prefer `max_ticks`/`max_runtime` over `unbounded`. Put soft stop criteria in the tick `prompt` and call `stop_loop` when met. Call `disable_loops` when finished.
+### MCP
+- Names look like `server__tool` (double underscore). Call `enable_mcp` before using a server's tools when they are not yet in the active list; resource/prompt tools appear only after `enable_mcp`.
+{catalog_mcp_line}- MCP errors are plain text (not structured JSON). HTTP 4xx/5xx, "not found", "unauthorized", "forbidden", or similar means the tool **did not return usable data** — state what failed; do not fabricate content.
+- Call `enable_loops` before scheduled-loop tools appear.
 
 ### Skills
-- Installed skill names are listed under `## Skills` in this prompt. When a task matches one, use `list_skills` to get the skills root, then `read_file` on that skill's `SKILL.md` for procedure before running commands or steps it documents."""
-
-
-_TASK_LINE = (
-    "- `task` — subprocess subagent with the same workspace, memory, and MCP configuration; "
-    "pass `subagent_type` to select a named persona (see Subagent personas below). "
-    "Returns JSON (summary, errors, usage, `exit_reason`). When queue mode returns "
-    "`ok:false` / `error_kind:pending` / `queued:true`, the child has **not** finished — "
-    "do not treat that as completion. When you expect the subagent to "
-    "produce files, list them in `expect_files` and read `artifact_exists` from the result "
-    "instead of checking with a follow-up read_file or glob. "
-    "Nested `task` is disabled inside a subagent.\n"
-)
-
-_WEB_SEARCH_LINE = (
-    "- `web_search` — search the web for current information; "
-    "returns titles, URLs, and text snippets.\n"
-)
-
-_TODO_LIST_LINE = (
-    "- `todo_list` — maintain an ordered, session-scoped task list "
-    "(`add` / `complete` / `remove`). For `add`, pass `text` as a string or a "
-    "list of strings to append many items in one call. The live list appears "
-    "under `## Todo list` when non-empty; keep it updated as you work.\n"
-)
-
-def _search_tool_line(*, memory_on: bool) -> str:
-    recall = (
-        "use `mempalace search` for those"
-        if memory_on
-        else "past conversations are not in this index"
-    )
-    return (
-        "- `search` — **local search index over the workspace** (+ knowledge notes): "
-        "FTS + link graph + optional embeddings. Has **no** record of past conversations — "
-        f"{recall}. Not a substitute for `read_file`. Prefer `search` for "
-        "unfamiliar codebases, conceptual / cross-file / paraphrased questions; prefer "
-        "`grep` for exact identifiers, filenames, or stack traces.\n"
-    )
-
-
-def _knowledge_search_block(*, memory_on: bool) -> str:
-    recall = (
-        "use `mempalace search`"
-        if memory_on
-        else "they are not available from this index"
-    )
-    return (
-        "### Knowledge retrieval (`search`) — how to use it well\n"
-        "- **Default:** when exploring or answering questions about code you have not already located, "
-        "**call `search` before** broad `glob` / wandering `read_file`. Do **not** skip it because "
-        '"the answer is in source" — the index *is* that source.\n'
-        '- **When:** "where does X live?", "how does Y work?", multi-question repo Q&A, paraphrases '
-        "without exact symbols, or when you lack a precise path/`grep` needle.\n"
-        f'- **Not for:** past sessions, user preferences, or "what did we decide earlier" — {recall}.\n'
-        '- **Locate-a-file / asset questions:** for "where is the logo / hero image / font file?" '
-        "prefer `glob` on the plausible directory (e.g. `**/public/**`, `**/assets/**`) over `search`.\n"
-        "- **Query shape:** one short, focused query per concept using distinctive nouns "
-        "(mechanism, module role, behavior) — not the user's full multi-question dump pasted into "
-        "ten parallel calls.\n"
-        "- **Batching:** if answering several questions, issue a few high-signal searches "
-        "(or one then refine), not near-duplicate parallel queries for every line item.\n"
-        "- **Hit fields:** `score` is normalized per query (top hit ≈ 1.0). Optional `cosine` "
-        "(ANN; < 0.45 ≈ weak semantic match), `bm25` (FTS; more negative ≈ stronger lexical match), "
-        "and `signals` (`fts` / `ann` / `graph`).\n"
-        "- **After hits:** `read_file` hits until the normalized score drops sharply "
-        "(typically the top 3–5), including rank-1 even if the name looks unexpected. "
-        "Skip only obvious noise (lockfiles). If the top hits all look off-topic, reformulate once; "
-        "if two reformulations fail, fall back to `grep` / `glob`.\n"
-        "- **Answer only after reading:** a `search` snippet is never sufficient evidence — "
-        "snippets truncate and can mislead. Before emitting an answer or `Evidence:` line, "
-        "`read_file` the file you will cite and confirm the exact source lines (for binary assets "
-        "like images/PDFs, `glob` existence is enough). Never emit a file path you have not "
-        "confirmed via `read_file` / `glob` this session; if still unknown, write `Evidence: unknown`.\n"
-        "- **Long multi-item tasks:** when a task has more than ~10 enumerable items "
-        "(question lists, checklists), write incremental results to a workspace file early "
-        "(e.g. `answers.md`) and update it as you go. Do not wait until the end — context may "
-        "be compacted mid-task.\n"
-    )
+- Installed skill names are listed under `## Skills` in this prompt. When a task matches one, use `list_skills` to get the skills root, then `read_file` that skill's `SKILL.md` before following it."""
 
 
 def _memory_paths_line(*, memory_on: bool, memory_storage_uri: str) -> str:
@@ -159,17 +65,7 @@ def _memory_paths_line(*, memory_on: bool, memory_storage_uri: str) -> str:
             "drawers). **Outside** the workspace root. Prefer `mempalace search` via "
             "`run_command` for past-session recall. Do not `read_file` palace paths.\n"
         )
-    return (
-        "- memory storage: disabled — do not call `mempalace search` or read palace paths.\n"
-    )
-
-
-_MEMORY_TEACHING_BLOCK = """\
-### Memory retrieval (`mempalace search`) — how to use it well
-- Past sessions live in the palace. Wake-up (identity + recent story) is already in this prompt.
-- Prefer `run_command` with `argv: ["mempalace", "search", "<query>"]` for older or specific recall.
-- Do not `read_file` palace paths. Automatic ingest already captured user and final assistant turns.
-"""
+    return "- memory storage: disabled — do not call `mempalace search` or read palace paths.\n"
 
 
 # Always-on terse-emission guidance (Levers 1-2 of the honey writing style).
@@ -237,66 +133,43 @@ def _subagent_personas_block(personas: Sequence[tuple[str, str]]) -> str:
 def harness_fixed_context(
     *,
     include_task_tool: bool,
-    include_web_search: bool = False,
-    include_todo_list: bool = False,
-    include_knowledge_search: bool = True,
     workspace_root: str = "(not set)",
     memory_storage_uri: str = "(not set)",
     run_command_opensandbox: bool = False,
     subagent_personas: Sequence[tuple[str, str]] | None = None,
     emission_style: bool = False,
-    include_memory_teaching: bool = True,
+    memory_on: bool = True,
     catalog_mcp_servers: Sequence[str] | None = None,
-    scheduled_loops_available: bool = False,
 ) -> str:
-    """Runtime-owned description of core tools, paths, MCP naming, and strict tool-call rules.
+    """Runtime-owned protocol, paths, MCP naming, and strict tool-call rules.
 
+    Tool catalogs belong in the JSON ``tools`` payload, not this markdown.
     ``workspace_root`` and ``memory_storage_uri`` are injected once at
     context-build time so the model always uses correct paths in shell commands.
-    ``include_web_search`` should be True when a web search backend is active.
-    ``include_todo_list`` should be True when the session-scoped ``todo_list`` tool is active.
-    ``include_knowledge_search`` should be True when the local knowledge ``search`` tool is active.
     ``run_command_opensandbox`` should match whether ``run_command`` is routed through
     OpenSandbox (same signal as ``SandboxConfig.from_env().enabled``).
     ``subagent_personas`` lists configured named subagent types for the parent orchestrator.
     ``emission_style`` opts in the terse emission-guidance block (env
     ``MONKEYBOT_EMISSION_STYLE``); the dense agent-to-agent sub-block is also gated
     on ``include_task_tool`` so it only appears when the ``task`` tool is active.
+    ``memory_on`` selects the memory-storage path line (URI vs disabled).
     ``catalog_mcp_servers`` lists mcp.json servers available via ``enable_mcp`` but not
     connected until the model activates them.
-    ``scheduled_loops_available`` adds a catalog hint when durable loop storage is wired.
     """
-    exec_note = _RUN_COMMAND_EXEC_NOTE_SANDBOX if run_command_opensandbox else _RUN_COMMAND_EXEC_NOTE_HOST
+    exec_note = (
+        _RUN_COMMAND_EXEC_NOTE_SANDBOX if run_command_opensandbox else _RUN_COMMAND_EXEC_NOTE_HOST
+    )
     catalog = [n.strip() for n in (catalog_mcp_servers or ()) if n and str(n).strip()]
     if catalog:
         names = ", ".join(f"`{n}`" for n in catalog)
-        catalog_mcp_line = (
-            f"- Configured MCP servers (call `enable_mcp` before use): {names}.\n"
-        )
+        catalog_mcp_line = f"- Configured MCP servers (call `enable_mcp` before use): {names}.\n"
     else:
         catalog_mcp_line = ""
-    catalog_loops_line = (
-        "- Scheduled loops available (call `enable_loops` before use): "
-        "prompt-first ticks via the scheduler worker.\n"
-        if scheduled_loops_available
-        else ""
-    )
     body = _HARNESS_BODY.format(
         run_command_exec_note=exec_note,
         catalog_mcp_line=catalog_mcp_line,
-        catalog_loops_line=catalog_loops_line,
-        web_search_line=_WEB_SEARCH_LINE if include_web_search else "",
-        todo_list_line=_TODO_LIST_LINE if include_todo_list else "",
-        task_line=_TASK_LINE if include_task_tool else "",
-        search_tool_line=_search_tool_line(memory_on=include_memory_teaching)
-        if include_knowledge_search
-        else "",
-        knowledge_search_block=_knowledge_search_block(memory_on=include_memory_teaching)
-        if include_knowledge_search
-        else "",
-        memory_teaching_block=_MEMORY_TEACHING_BLOCK if include_memory_teaching else "",
         memory_paths_line=_memory_paths_line(
-            memory_on=include_memory_teaching,
+            memory_on=memory_on,
             memory_storage_uri=memory_storage_uri,
         ),
         workspace_root=workspace_root,

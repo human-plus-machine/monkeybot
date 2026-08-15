@@ -334,22 +334,3 @@ def test_harness_precedes_volatile_sections() -> None:
     skills_idx = volatile.index(heading_marker(SKILLS_HEADING))
     current_idx = volatile.index(heading_marker(CURRENT_REQUEST_HEADING))
     assert date_idx < mem_idx < skills_idx < current_idx
-
-
-@pytest.mark.parametrize("include_task", [True, False])
-def test_harness_task_line_matches_tools(include_task: bool) -> None:
-    tools: list[ToolDef] = []
-    if include_task:
-        tools.append(
-            ToolDef(
-                "task",
-                "subagent",
-                {"type": "object", "properties": {}, "required": []},
-            )
-        )
-    ctx = _minimal_ctx(tools=tools)
-    out = compose_system_prompt(ctx)
-    if include_task:
-        assert "- `task` — subprocess" in out
-    else:
-        assert "- `task` — subprocess" not in out

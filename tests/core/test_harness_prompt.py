@@ -15,71 +15,38 @@ def test_harness_directs_list_skills_before_skill_work() -> None:
     assert "skills root" in out
 
 
-def test_harness_includes_core_tools_and_protocol() -> None:
+def test_harness_is_protocol_not_tool_catalog() -> None:
     out = harness_fixed_context(include_task_tool=False)
     assert "## monkeybot harness (fixed)" in out
-    assert "`read_file`" in out
-    assert "`write_file`" in out
-    assert "`replace_in_file`" in out
-    assert "`glob`" in out
-    assert "`grep`" in out
-    assert "`apply_patch`" in out
-    assert "*** Begin Patch" in out
+    assert "active JSON tool list" in out
     assert "`enable_mcp`" in out
-    assert "`list_mcp_resources`" in out
-    assert "`read_mcp_resource`" in out
-    assert "`list_mcp_prompts`" in out
-    assert "`get_mcp_prompt`" in out
     assert "appear only after `enable_mcp`" in out
     assert "`enable_loops`" in out
-    assert "appear only after `enable_loops`" in out
+    assert "before scheduled-loop tools appear" in out
     assert "`mcp_status`" not in out
-    assert "`add_mcp_server`" not in out
-    assert "`remove_mcp_server`" not in out
-    assert "`list_mcp_resource_templates`" not in out
     assert "`run_command`" in out
-    assert "argv" in out
     assert "`task` —" not in out
-    assert "### Workspace deliverables" in out
-    assert "New file or full rewrite" in out
-    assert "Targeted change to an existing file" in out
-    assert "Multi-file or multi-hunk edit" in out
-    assert "writable workspace" in out
+    assert "### Core built-in tools" not in out
+    assert "### Workspace deliverables" not in out
+    assert "### Knowledge retrieval (`search`)" not in out
+    assert "### Memory retrieval (`mempalace search`)" not in out
     assert "### Built-in tool errors (recovery)" in out
     assert "error_kind" in out
     assert "### Tool-call protocol (strict)" in out
     assert "native function-call channel" in out
     assert "Fulfillment rule" in out
     assert '{"tool_calls":' not in out
-    assert "### Knowledge retrieval (`search`)" in out
-    assert "one short, focused query per concept" in out
-    assert "near-duplicate parallel" in out
-    assert (
-        "no record of past conversations" in out or "Has **no** record of past conversations" in out
-    )
-    assert "call `search` before" in out
-    assert "rank-1" in out
-    assert "Long multi-item tasks" in out
-    assert "answers.md" in out or "workspace file" in out
-    assert "Evidence: unknown" in out
     assert "Path rule" in out
-    assert "### Memory retrieval (`mempalace search`)" in out
+    # Compact: protocol + paths, not the old ~15k tool manual.
+    assert len(out) < 6000
 
 
-def test_harness_omits_memory_teaching_when_disabled() -> None:
-    out = harness_fixed_context(include_task_tool=False, include_memory_teaching=False)
+def test_harness_omits_memory_uri_when_disabled() -> None:
+    out = harness_fixed_context(include_task_tool=False, memory_on=False)
     assert "### Memory retrieval (`mempalace search`)" not in out
     assert 'argv: ["mempalace", "search"' not in out
-    assert "Prefer `mempalace search`" not in out
     assert "memory storage: disabled" in out
     assert "do not call `mempalace search`" in out
-
-
-def test_harness_omits_search_guidance_when_knowledge_disabled() -> None:
-    out = harness_fixed_context(include_task_tool=False, include_knowledge_search=False)
-    assert "### Knowledge retrieval (`search`)" not in out
-    assert "- `search` — **local search index" not in out
-    assert "Path rule" in out  # always-on protocol keeps evidence path rules
 
 
 def test_harness_includes_runtime_error_and_no_repeat_guidance() -> None:
@@ -93,11 +60,10 @@ def test_harness_includes_runtime_error_and_no_repeat_guidance() -> None:
     assert "read_file that path" in out or "`read_file` that path" in out
 
 
-def test_harness_adds_task_line_when_enabled() -> None:
+def test_harness_does_not_catalog_task_tool() -> None:
     out = harness_fixed_context(include_task_tool=True)
-    assert "`task` — subprocess subagent" in out
-    assert "subagent_type" in out
-    assert "Nested `task` is disabled inside a subagent." in out
+    assert "`task` — subprocess subagent" not in out
+    assert "Nested `task` is disabled inside a subagent." not in out
 
 
 def test_harness_lists_subagent_personas() -> None:
@@ -127,15 +93,6 @@ def test_harness_injects_runtime_paths() -> None:
         "Outside** the workspace" in out or "Outside the workspace" in out or "**Outside**" in out
     )
     assert "not** the memory store" in out.lower() or "not the memory store" in out.lower()
-
-
-def test_harness_lists_scheduled_loops_when_available() -> None:
-    out = harness_fixed_context(
-        include_task_tool=False,
-        scheduled_loops_available=True,
-    )
-    assert "Scheduled loops available" in out
-    assert "`enable_loops`" in out
 
 
 def test_harness_default_paths_shown_when_not_provided() -> None:

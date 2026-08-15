@@ -547,7 +547,13 @@ def _core_tool_defs(
     run_schema: dict[str, object] = {
         "type": "object",
         "properties": {
-            "argv": {"type": "array", "items": {"type": "string"}},
+            "argv": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Command as [binary, ...args]. Preferred over a combined command string."
+                ),
+            },
             "command": {"type": "string"},
             "args": {"type": "array", "items": {"type": "string"}},
             "arguments": {"type": "array", "items": {"type": "string"}},
@@ -616,7 +622,13 @@ def _core_tool_defs(
     tools: list[ToolDef] = [
         ToolDef(
             "run_command",
-            "Run an allowlisted shell command with repo-scoped path checks (see TerminalExecutor).",
+            (
+                "Run an allowlisted shell command with optional timeout. "
+                'Pass argv as a list with the binary first (e.g. ["ls", "."]); '
+                "do not pass a combined string as the binary. Shell starts in "
+                "workspace root. cd is a builtin and is not a valid command — "
+                "pass workspace-relative paths to the binary instead."
+            ),
             run_schema,
         ),
         ToolDef(
@@ -692,7 +704,9 @@ def _core_tool_defs(
                 "Spawn a subprocess subagent with the same workspace, memory, and MCP configuration "
                 "to work on a delegated objective. Pass subagent_type to select a named persona "
                 "(see harness Subagent personas). Returns JSON with the subagent's streamed answer "
-                "summary, errors, and usage. Nested task calls are disabled inside the subagent.",
+                "summary, errors, and usage. When queue mode returns ok:false / error_kind:pending "
+                "/ queued:true, the child has not finished — do not treat that as completion. "
+                "Nested task calls are disabled inside the subagent.",
                 task_schema,
             ),
         )
@@ -845,7 +859,7 @@ async def build_context(
             Their ``tool_def`` is appended to the tool list advertised to the model and
             their ``execute`` method is dispatched by :class:`CoreToolExecutor`.
         subagent_registry: Optional map of named subagent personas from monkeybot.yaml.
-        scheduled_loops_available: True when durable loop storage is wired (shows harness hint).
+        scheduled_loops_available: True when durable loop storage is wired.
         loops_advertised: True when the caller's ``LoopsToolRegistry`` has ``enable_loops``
             active; includes scheduled-loop lifecycle tools immediately for this turn.
         todo_store: Optional session-scoped todo list store (parent agent); enables volatile
