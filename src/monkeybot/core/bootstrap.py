@@ -21,7 +21,7 @@ from monkeybot.core.knowledge.config import knowledge_enabled_from_config
 from monkeybot.core.llm.provider import Provider
 from monkeybot.core.llm.usage import usage_from_totals
 from monkeybot.core.mcp.mcp_client import MCPClient
-from monkeybot.core.memory.subsystem import MemorySubsystem
+from monkeybot.core.memory.subsystem import MemoryConfigurationError, MemorySubsystem
 from monkeybot.core.persistence.backends import StorageBackend, create_storage_backend
 from monkeybot.core.runtime.events import AssistantDelta, Error, TurnComplete
 from monkeybot.core.runtime.loop import run as run_loop
@@ -137,11 +137,6 @@ async def create_harness_deps(
 
             if not memory_enabled_from_config():
                 logger.info("memory disabled (memory.enabled=false)")
-            elif not db_url.strip().lower().startswith("sqlite:"):
-                logger.warning(
-                    "MemPalace requires sqlite:// DB_URL; memory disabled (got %s)",
-                    db_url.split(":", 1)[0],
-                )
             else:
                 try:
                     layout = AgentLayout.from_environment()
@@ -150,8 +145,11 @@ async def create_harness_deps(
                         db_url=db_url,
                         agent_id=layout.agent_root.name,
                         agent_name=layout.agent_root.name,
+                        storage=backend,
                     )
                     await memory.ensure_ready()
+                except MemoryConfigurationError:
+                    raise
                 except Exception as exc:
                     logger.warning("memory setup failed; continuing without: %r", exc)
                     memory = None

@@ -12,12 +12,12 @@ import asyncio
 import json
 import logging
 import time
-from contextlib import AbstractAsyncContextManager, nullcontext
 from typing import Any, cast
 
 import aiosqlite
 
 from monkeybot.core.llm.provider import Message, Role
+from monkeybot.core.persistence.sqlite import ConnLock, with_conn_lock
 from monkeybot.core.persistence.thread_summary import ChatThreadSummary, preview_from_content_blob
 from monkeybot.core.types.content_blocks import ContentBlock
 
@@ -36,12 +36,68 @@ def _validate_message(message: Message) -> None:
 class SQLiteHistoryStore:
     """Append/read conversation rows keyed by ``thread_id``."""
 
-    def __init__(self, conn: aiosqlite.Connection, *, tx_lock: asyncio.Lock | None = None) -> None:
+    def __init__(
+        self,
+        conn: aiosqlite.Connection,
+        *,
+        lock: ConnLock | None = None,
+    ) -> None:
         self._conn = conn
-        self._tx_lock = tx_lock
+        self._lock = lock or asyncio.Lock()
+        self._memory_columns: bool | None = None
 
-    def _tx(self) -> AbstractAsyncContextManager[None]:
-        return self._tx_lock if self._tx_lock is not None else nullcontext()
+    async def _has_memory_columns(self) -> bool:
+        if self._memory_columns is None:
+            cur = await self._conn.execute("PRAGMA table_info(conversation_history)")
+            rows = await cur.fetchall()
+            await cur.close()
+            names = {str(r[1]) for r in rows}
+            self._memory_columns = "turn_id" in names and "message_id" in names
+        return self._memory_columns
+
+    async def _insert_history_row(
+        self,
+        thread_id: str,
+        role: str,
+        payload: str,
+        created_at: int,
+        *,
+        turn_id: str | None,
+        message_id: str | None,
+    ) -> None:
+        if await self._has_memory_columns():
+            if message_id:
+                cur = await self._conn.execute(
+                    """
+                    SELECT 1 FROM conversation_history
+                    WHERE message_id = ? LIMIT 1
+                    """,
+                    (message_id,),
+                )
+                exists = await cur.fetchone()
+                await cur.close()
+                if exists is not None:
+                    return
+            try:
+                await self._conn.execute(
+                    """
+                    INSERT INTO conversation_history(
+                        thread_id, role, content, created_at, turn_id, message_id
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (thread_id, role, payload, created_at, turn_id, message_id),
+                )
+            except aiosqlite.IntegrityError:
+                return
+            return
+        await self._conn.execute(
+            """
+            INSERT INTO conversation_history(thread_id, role, content, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (thread_id, role, payload, created_at),
+        )
 
     async def append(
         self,
@@ -59,13 +115,14 @@ class SQLiteHistoryStore:
             ensure_ascii=False,
         )
         created_at = int(time.time() * 1000)
-        async with self._tx():
-            await self._conn.execute(
-                """
-                INSERT INTO conversation_history(thread_id, role, content, created_at, turn_id, message_id)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (thread_id, message.role, payload, created_at, turn_id, message_id),
+        async with self._lock:
+            await self._insert_history_row(
+                thread_id,
+                message.role,
+                payload,
+                created_at,
+                turn_id=turn_id,
+                message_id=message_id,
             )
             await self._conn.commit()
 
@@ -88,58 +145,68 @@ class SQLiteHistoryStore:
             ensure_ascii=False,
         )
         created_at = int(time.time() * 1000)
-        async with self._tx():
+        async with self._lock:
             await self._conn.execute("BEGIN IMMEDIATE")
             try:
-                await self._conn.execute(
-                    """
-                    INSERT INTO conversation_history(
-                        thread_id, role, content, created_at, turn_id, message_id
+                if not await self._has_memory_columns():
+                    raise RuntimeError(
+                        "conversation_history is missing turn_id/message_id. "
+                        "Apply docs/migrations/memory-outbox.sql or set paths.auto_schema: true"
                     )
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (thread_id, message.role, payload, created_at, turn_id, message_id),
+                await self._insert_history_row(
+                    thread_id,
+                    message.role,
+                    payload,
+                    created_at,
+                    turn_id=turn_id,
+                    message_id=message_id,
                 )
                 await insert_pending(self._conn, commit=False, **outbox)
                 await self._conn.commit()
-            except Exception:
+            except Exception as exc:
                 await self._conn.rollback()
+                if isinstance(
+                    exc, (TimeoutError, OSError, ConnectionError, aiosqlite.OperationalError)
+                ):
+                    from monkeybot.core.persistence.errors import AmbiguousCommitError
+
+                    raise AmbiguousCommitError(str(exc)) from exc
                 raise
 
+    @with_conn_lock
     async def load(self, thread_id: str, limit: int | None = None) -> list[Message]:
         """Return messages for ``thread_id``, oldest first.
 
         When ``limit`` is set, returns the newest ``limit`` rows. When ``None``,
         returns the full thread (compaction owns size — do not silently slide).
         """
-        async with self._tx():
-            if limit is None:
-                cursor = await self._conn.execute(
-                    """
-                    SELECT id, role, content, created_at
-                    FROM conversation_history
-                    WHERE thread_id = ?
-                    ORDER BY created_at ASC, id ASC
-                    """,
-                    (thread_id,),
-                )
-                rows = await cursor.fetchall()
-                await cursor.close()
-                rows_chrono = list(rows)
-            else:
-                cursor = await self._conn.execute(
-                    """
-                    SELECT id, role, content, created_at
-                    FROM conversation_history
-                    WHERE thread_id = ?
-                    ORDER BY created_at DESC, id DESC
-                    LIMIT ?
-                    """,
-                    (thread_id, limit),
-                )
-                rows = await cursor.fetchall()
-                await cursor.close()
-                rows_chrono = list(reversed(list(rows)))
+        if limit is None:
+            cursor = await self._conn.execute(
+                """
+                SELECT id, role, content, created_at
+                FROM conversation_history
+                WHERE thread_id = ?
+                ORDER BY created_at ASC, id ASC
+                """,
+                (thread_id,),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+            rows_chrono = list(rows)
+        else:
+            cursor = await self._conn.execute(
+                """
+                SELECT id, role, content, created_at
+                FROM conversation_history
+                WHERE thread_id = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (thread_id, limit),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+            rows_chrono = list(reversed(list(rows)))
         out: list[Message] = []
         for row in rows_chrono:
             row_id = int(row[0])
@@ -165,7 +232,7 @@ class SQLiteHistoryStore:
 
     async def clear(self, thread_id: str) -> None:
         """Delete every stored message for ``thread_id``."""
-        async with self._tx():
+        async with self._lock:
             await self._conn.execute(
                 "DELETE FROM conversation_history WHERE thread_id = ?", (thread_id,)
             )
@@ -173,13 +240,15 @@ class SQLiteHistoryStore:
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None:
         """Replace the thread transcript with ``messages`` (validated like ``append``)."""
-        await self._conn.execute(
-            "DELETE FROM conversation_history WHERE thread_id = ?", (thread_id,)
-        )
-        await self._conn.commit()
+        async with self._lock:
+            await self._conn.execute(
+                "DELETE FROM conversation_history WHERE thread_id = ?", (thread_id,)
+            )
+            await self._conn.commit()
         for msg in messages:
             await self.append(thread_id, msg)
 
+    @with_conn_lock
     async def list_threads(self, limit: int = 50) -> list[ChatThreadSummary]:
         """Return recent threads ordered by last activity (newest first).
 
