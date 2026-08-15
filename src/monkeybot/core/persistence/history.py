@@ -17,6 +17,7 @@ from typing import Any, cast
 import aiosqlite
 
 from monkeybot.core.llm.provider import Message, Role
+from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.sqlite import ConnLock, with_conn_lock
 from monkeybot.core.persistence.thread_summary import ChatThreadSummary, preview_from_content_blob
 from monkeybot.core.types.content_blocks import ContentBlock
@@ -268,6 +269,11 @@ class SQLiteHistoryStore:
                 await self._conn.commit()
             except Exception:
                 await self._conn.rollback()
+                logger.warning(
+                    "history reset rolled back %s",
+                    kv(thread_id=thread_id),
+                    exc_info=True,
+                )
                 raise
 
     @with_conn_lock

@@ -401,23 +401,27 @@ class TestRunRealtimeTurn:
 
         from monkeybot.core.runtime.events import Error, ToolCallResult, ToolConfirmationRequestEvent
         from monkeybot.core.tools.inspector import Decision
+        from monkeybot.core.types.content_blocks import ToolResponse
 
         class ConfirmInspector:
             async def check(self, call, ctx):  # type: ignore[no-untyped-def]
                 del call, ctx
                 return Decision(kind="confirm", message="Allow?")
 
-        class CancelOnRegisterBus:
+        class CancelOnConfirmBus:
+            def __init__(self) -> None:
+                self.futures: list[asyncio.Future[object]] = []
+
             def register_pending(self, pending_key: str) -> asyncio.Future[object]:
                 del pending_key
                 fut: asyncio.Future[object] = asyncio.get_running_loop().create_future()
-                fut.cancel()
+                self.futures.append(fut)
                 return fut
 
+        bus = CancelOnConfirmBus()
         history = FakeHistory()
         ctx = _ctx()
-        events = []
-        async for ev in run_realtime_turn(
+        agen = run_realtime_turn(
             "hi",
             "calling",
             [RealtimeToolCall(call_id="c1", name="shell", args={"cmd": "ls"})],
@@ -425,9 +429,21 @@ class TestRunRealtimeTurn:
             history=history,
             tool_executor=RecordingExecutor(),
             inspectors=[ConfirmInspector()],
-            pending_bus=CancelOnRegisterBus(),
-        ):
-            events.append(ev)
+            pending_bus=bus,
+        )
+
+        while True:
+            ev = await agen.__anext__()
+            if isinstance(ev, ToolConfirmationRequestEvent):
+                break
+
+        # Stop while blocked on HITL (cancel the pending future, not register_pending).
+        assert bus.futures and not bus.futures[-1].done()
+        bus.futures[-1].cancel()
+
+        events = [ev]
+        async for trailing in agen:
+            events.append(trailing)
 
         assert any(isinstance(e, Error) and "cancel" in e.error.lower() for e in events)
         cancel_results = [

@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from monkeybot.core.path_safety import GLOB_METACHARACTERS
+
 
 class ErrorBody(BaseModel):
     """Error payload matching design contract 1b."""
@@ -58,6 +60,10 @@ class CreateSessionRequest(BaseModel):
             return value
         if "/" in value or "\\" in value or ".." in value:
             raise ValueError("session_id must not contain path separators or '..'")
+        if any(ch in value for ch in GLOB_METACHARACTERS):
+            raise ValueError(
+                "session_id must not contain path separators, '..', or glob characters"
+            )
         return value
 
 

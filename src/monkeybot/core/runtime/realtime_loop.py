@@ -408,7 +408,7 @@ async def run_realtime_turn(
         # 4. Dispatch tools sequentially (v1: no parallel subagent dispatch here).
         mcp_registry_mutated = False
         loops_registry_mutated = False
-        abort_confirm = False
+        confirm_cancelled = False
         pending_calls = [_realtime_tool_call_to_tool_call(rtc) for rtc in assistant_tool_calls]
         # Realtime has no vendor length-limit signal; reject only all-parse_error batches.
         reject_batch = _should_reject_tool_batch(pending_calls, truncated=False)
@@ -505,6 +505,17 @@ async def run_realtime_turn(
                             request_id=ctx.request_id, error="Request cancelled"
                         )
                         remaining = pending_calls[pending_calls.index(call) :]
+                        logger.info(
+                            "realtime HITL cancelled %s",
+                            kv(
+                                request_id=ctx.request_id,
+                                thread_id=ctx.thread_id,
+                                call_id=call.call_id,
+                                approved=False,
+                                reason="cancelled",
+                                cancelled_count=len(remaining),
+                            ),
+                        )
                         for pending in remaining:
                             event, response = _tool_outcome(
                                 pending,
@@ -515,7 +526,7 @@ async def run_realtime_turn(
                             )
                             yield event
                             tool_results.append(response)
-                        abort_confirm = True
+                        confirm_cancelled = True
                         break
                     if payload.get("_timeout"):
                         allowed = False
@@ -567,7 +578,7 @@ async def run_realtime_turn(
                         )
                     break
 
-            if abort_confirm:
+            if confirm_cancelled:
                 break
 
             if not allowed:

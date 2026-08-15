@@ -28,6 +28,20 @@ def test_session_spill_dirs_includes_parent_and_subagent(tmp_path: Path) -> None
     assert names == {"sess-1", "subagent:sess-1:aaa", "subagent:sess-1:bbb"}
 
 
+def test_session_spill_dirs_glob_metachar_does_not_match_other_sessions(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / ".monkeybot" / "spill"
+    (root / "_").mkdir(parents=True)
+    (root / "subagent:_:aaa").mkdir(parents=True)
+    (root / "subagent:sess-1:bbb").mkdir(parents=True)
+
+    dirs = session_spill_dirs(tmp_path, "*")
+    names = {p.name for p in dirs}
+    assert names == {"_", "subagent:_:aaa"}
+    assert "subagent:sess-1:bbb" not in names
+
+
 @pytest.mark.asyncio
 async def test_cleanup_session_spill_files_concurrent(tmp_path: Path) -> None:
     root = tmp_path / ".monkeybot" / "spill"
@@ -101,3 +115,12 @@ def test_create_session_rejects_path_traversal_session_id() -> None:
 
     with pytest.raises(ValidationError):
         CreateSessionRequest(session_id="../../../tmp/x")
+
+
+def test_create_session_rejects_glob_metachar_session_id() -> None:
+    from pydantic import ValidationError
+
+    from monkeybot.gateway.sse.models import CreateSessionRequest
+
+    with pytest.raises(ValidationError):
+        CreateSessionRequest(session_id="*")

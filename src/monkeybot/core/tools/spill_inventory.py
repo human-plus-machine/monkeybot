@@ -18,7 +18,7 @@ from monkeybot.core.context.tool_shapers import (
     shape_logs,
 )
 from monkeybot.core.logging_utils import kv
-from monkeybot.core.path_safety import sanitize_path_component
+from monkeybot.core.path_safety import GLOB_METACHARACTERS, sanitize_path_component
 from monkeybot.core.runtime.context_budget import diff_inventory_lines
 
 logger = logging.getLogger(__name__)
@@ -512,17 +512,20 @@ def session_spill_dirs(workspace_root: Path, session_id: str) -> list[Path]:
     safe_session = sanitize_path_component(session_id) or "session"
     dirs: list[Path] = [root / safe_session]
     if root.is_dir():
-        # Match both sanitized and legacy raw layouts for cleanup.
         dirs.extend(sorted(root.glob(f"subagent:{safe_session}:*")))
-        if safe_session != session_id:
+        if safe_session != session_id and not any(
+            ch in session_id for ch in GLOB_METACHARACTERS
+        ):
             legacy = (root / session_id).resolve()
             try:
                 legacy.relative_to(root)
             except ValueError:
-                pass
+                logger.warning(
+                    "skipping legacy spill dir outside spill root %s",
+                    kv(session_id=session_id, legacy=str(legacy)),
+                )
             else:
                 dirs.append(legacy)
-                dirs.extend(sorted(root.glob(f"subagent:{session_id}:*")))
     # De-dupe while preserving order; drop anything outside spill root.
     seen: set[Path] = set()
     contained: list[Path] = []
