@@ -1381,7 +1381,7 @@ class WorkspaceFileService:
             etype = event.get("type")
             data = event.get("data") or {}
             if etype == "begin":
-                # One begin event per searched file — use for the file-cap check.
+                # begin is emitted for files with ≥1 match (not every file searched).
                 files_begun += 1
             elif etype == "match":
                 total_match_count += 1
@@ -1436,13 +1436,18 @@ class WorkspaceFileService:
         if files_begun > files_scanned:
             files_scanned = files_begun
 
+        tallies = {"oversized": 0, "binary": 0, "unreadable": 0}
+        candidate_count = 0
+        for fp, _rel in self._iter_grep_candidates(base, globs):
+            candidate_count += 1
+            kind, _data = _grep_classify(fp, max_file_bytes)
+            _tally_grep_skip(kind, tallies)
+        # Candidate walk is authoritative for WORKSPACE_GREP_MAX_FILES: begin
+        # events only cover matches, and some rg builds omit/under-count searches.
+        files_scanned = max(files_scanned, candidate_count)
         if files_scanned > max_files:
             _raise_grep_max_files(files_scanned, max_files)
 
-        tallies = {"oversized": 0, "binary": 0, "unreadable": 0}
-        for fp, _rel in self._iter_grep_candidates(base, globs):
-            kind, _data = _grep_classify(fp, max_file_bytes)
-            _tally_grep_skip(kind, tallies)
         _raise_if_grep_files_skipped(
             oversized=tallies["oversized"],
             binary=tallies["binary"],

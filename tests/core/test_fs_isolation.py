@@ -177,6 +177,19 @@ class TestMemoryHiddenPaths:
     reason="namespace bootstrap is linux-only",
 )
 class TestLinuxBootstrap:
+    @pytest.fixture(autouse=True)
+    def _require_live_namespace(self):
+        """Skip when this host cannot actually map a user+mount namespace.
+
+        Tests force ``IsolationSupport("namespace", ...)`` so they exercise the
+        bootstrap path, but GitHub Actions (and other locked-down hosts) often
+        reject ``uid_map`` writes. Probing first avoids false failures.
+        """
+        reset_isolation_support_cache()
+        support = isolation_support()
+        if support.mechanism != "namespace":
+            pytest.skip(support.detail)
+
     def _run(self, hidden: list[str], inner: list[str]) -> subprocess.CompletedProcess[str]:
         executable, args = isolated_argv(
             inner[0],
@@ -196,6 +209,7 @@ class TestLinuxBootstrap:
             ["/bin/sh", "-c", f"cat {secret_dir}/private.txt"],
         )
 
+        assert proc.returncode == 0
         assert "PRIVATE-CONTENT" not in proc.stdout
         assert (secret_dir / "private.txt").read_text(encoding="utf-8") == "PRIVATE-CONTENT"
 

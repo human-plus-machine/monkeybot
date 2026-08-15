@@ -7,6 +7,7 @@ import pytest
 
 from monkeybot.core.context import (
     SCHEDULED_LOOP_TOOL_NAMES,
+    _core_tool_defs,
     _discover_skills,
     _parse_skill_description,
     build_context,
@@ -191,6 +192,29 @@ def test_discover_skills_returns_frontmatter_descriptions(tmp_path: Path) -> Non
             "Generate images with Vertex AI Nano Banana Pro (Gemini image models) and display them in chat.",
         ),
     ]
+
+
+def test_core_tool_defs_keep_hot_path_and_moved_policy() -> None:
+    tools = {t.name: t for t in _core_tool_defs(include_task_tool=True)}
+    for name in (
+        "read_file",
+        "write_file",
+        "replace_in_file",
+        "glob",
+        "grep",
+        "run_command",
+        "list_skills",
+        "enable_mcp",
+        "enable_loops",
+    ):
+        assert name in tools
+    assert "Prefer over run_command+ls" in tools["glob"].description
+    assert "Prefer over run_command+grep" in tools["grep"].description
+    assert "argv as a list" in tools["run_command"].description
+    assert "bash" not in tools["run_command"].description.lower()
+    assert "cwd" in tools["run_command"].input_schema.get("properties", {})
+    assert "writable workspace" in tools["write_file"].description
+    assert "queued:true" in tools["task"].description
 
 
 @pytest.mark.asyncio

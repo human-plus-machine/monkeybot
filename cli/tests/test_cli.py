@@ -289,7 +289,9 @@ def test_doctor_reports_layout_browser_sandbox_and_legacy_migration(tmp_path: Pa
     cfg = tmp_path / "monkeybot_config"
     cfg.mkdir()
     (cfg / "monkeybot.yaml").write_text(
-        "model:\n  provider: fake\n  name: fake\npaths:\n  workspace_root: ./workspace\n",
+        "model:\n  provider: fake\n  name: fake\n"
+        "memory:\n  enabled: false\n"
+        "paths:\n  workspace_root: ./workspace\n",
         encoding="utf-8",
     )
     workspace = tmp_path / "workspace"
@@ -314,3 +316,4 @@ def test_doctor_reports_layout_browser_sandbox_and_legacy_migration(tmp_path: Pa
     assert "disabled (bundled)" in checks["browser.bundled"]["message"]
     assert checks["sandbox.status"]["status"] == "pass"
     assert checks["env.harness.compatible"]["status"] == "pass"
+    assert "MemPalace" not in checks["env.harness.compatible"]["message"]

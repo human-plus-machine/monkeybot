@@ -759,10 +759,13 @@ def test_paste_inserts_without_submit(tmp_path: Path) -> None:
             app._send_user_message = lambda value: submitted.append(value)  # type: ignore[method-assign]
 
             await composer._on_paste(Paste("line1\nline2\nline3"))
-            await pilot.pause()
+            assert composer._paste_guard is True
             assert "line1\nline2\nline3" in composer.text
             assert submitted == []
-            assert composer._paste_guard is True
+            await pilot.pause()
+            # Timer may clear the guard during pause; paste must still not submit.
+            assert "line1\nline2\nline3" in composer.text
+            assert submitted == []
 
     asyncio.run(_run())
 

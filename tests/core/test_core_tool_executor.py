@@ -594,6 +594,77 @@ async def test_grep_incomplete_scan_errors_with_rg(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_grep_rg_file_cap_uses_candidate_count_when_summary_undercounts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail-closed even when rg JSON begin/summary only cover matching files."""
+    import json
+    from types import SimpleNamespace
+
+    from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService, WorkspaceSettings
+
+    root = tmp_path
+    for i in range(5):
+        (root / f"f{i}.py").write_text(f"MARKER_{i}\n", encoding="utf-8")
+    (root / "hit.py").write_text("KNOWN_MATCH_TOKEN\n", encoding="utf-8")
+
+    undercount = "\n".join(
+        [
+            json.dumps({"type": "begin", "data": {"path": {"text": "hit.py"}}}),
+            json.dumps(
+                {
+                    "type": "match",
+                    "data": {
+                        "path": {"text": "hit.py"},
+                        "lines": {"text": "KNOWN_MATCH_TOKEN\n"},
+                        "line_number": 1,
+                        "submatches": [{"start": 0, "end": 17}],
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "summary",
+                    "data": {
+                        "stats": {
+                            "searches": 1,
+                            "searches_with_match": 1,
+                            "matched_lines": 1,
+                            "matches": 1,
+                        }
+                    },
+                }
+            ),
+        ]
+    )
+
+    def fake_run(*_args, **_kwargs):
+        return SimpleNamespace(returncode=0, stdout=undercount, stderr="")
+
+    monkeypatch.setattr(
+        "monkeybot.core.tools.workspace_service.shutil.which",
+        lambda _name: "/usr/bin/rg",
+    )
+    monkeypatch.setattr(
+        "monkeybot.core.tools.workspace_service.subprocess.run",
+        fake_run,
+    )
+    # Avoid accidental Python fallback if the fake run is mishandled.
+    monkeypatch.setattr(
+        WorkspaceFileService,
+        "_grep_python",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("should not fall back")),
+    )
+
+    svc = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILES=2, WORKSPACE_GREP_MAX_MATCHES=50),
+    )
+    with pytest.raises(WorkspaceError) as ei:
+        svc.grep("KNOWN_MATCH_TOKEN")
+    assert ei.value.code == "incomplete_scan"
+
+@pytest.mark.asyncio
 async def test_grep_skipped_oversized_is_incomplete(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1614,6 +1685,81 @@ async def test_run_command_malformed_args_returns_validation_envelope(
     assert payload["ok"] is False
     assert payload["error_kind"] == "validation"
     assert "example" in payload["details"]
+
+
+@pytest.mark.asyncio
+async def test_run_command_cwd_forwards_workspace_subdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from monkeybot.core.tools.terminal import ExecutionResult
+
+    monkeypatch.chdir(tmp_path)
+    sub = tmp_path / "pkg"
+    sub.mkdir()
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    terminal = MagicMock()
+    terminal.allowed_commands = ("pwd",)
+    terminal.allowed_path_prefixes = ("./",)
+    terminal.execute = AsyncMock(
+        return_value=ExecutionResult(exit_code=0, stdout=str(sub), stderr="")
+    )
+    terminal.aclose = AsyncMock()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+        terminal=terminal,
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="1",
+                name="run_command",
+                args={"argv": ["pwd"], "cwd": "pkg"},
+            ),
+            ctx=_ctx(),
+        )
+    )
+    assert err is None and out is not None
+    terminal.execute.assert_awaited_once()
+    assert terminal.execute.await_args.kwargs["cwd"] == sub.resolve()
+
+
+@pytest.mark.asyncio
+async def test_run_command_cwd_escape_returns_validation_envelope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="1",
+                name="run_command",
+                args={"argv": ["pwd"], "cwd": "../outside"},
+            ),
+            ctx=_ctx(),
+        )
+    )
+    assert out is None and err is not None
+    payload = json.loads(err)
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "validation"
 
 
 @pytest.mark.asyncio
