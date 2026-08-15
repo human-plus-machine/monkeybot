@@ -536,6 +536,10 @@ def session_spill_dirs(workspace_root: Path, session_id: str) -> list[Path]:
         try:
             resolved.relative_to(root)
         except ValueError:
+            logger.warning(
+                "skipping spill dir outside spill root %s",
+                kv(session_id=session_id, path=str(resolved)),
+            )
             continue
         seen.add(resolved)
         contained.append(resolved)
