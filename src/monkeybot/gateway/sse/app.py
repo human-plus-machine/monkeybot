@@ -46,7 +46,7 @@ from monkeybot.core.llm.provider import (
 from monkeybot.core.llm.usage import Usage as UsageRecord
 from monkeybot.core.mcp.mcp_client import MCPClient
 from monkeybot.core.memory.config import memory_enabled_from_config
-from monkeybot.core.memory.subsystem import MemorySubsystem
+from monkeybot.core.memory.subsystem import MemoryConfigurationError, MemorySubsystem
 from monkeybot.core.persistence.backends import (
     StorageBackend,
     UsageStore,
@@ -595,33 +595,24 @@ async def _startup(fastapi_app: FastAPI) -> None:
         else:
             mem_uri = _memory_storage_uri()
             layout = AgentLayout.from_environment()
-            if not layout.db_url.strip().lower().startswith("sqlite:"):
-                scheme = layout.db_url.split(":", 1)[0]
-                logger.warning(
-                    "MemPalace outbox requires sqlite:// DB_URL; memory disabled (got %s)",
-                    scheme,
-                )
-                _deps.hook_manager = None
-                _deps.memory = None
-                fastapi_app.state.memory = None
-                fastapi_app.state.memory_status = "unavailable"
-                fastapi_app.state.memory_detail = f"outbox requires sqlite:// DB_URL; got {scheme}"
-            else:
-                mgr = HookManager()
-                memory = MemorySubsystem(
-                    memory_uri=mem_uri,
-                    db_url=layout.db_url,
-                    agent_id=layout.agent_root.name,
-                    agent_name=layout.agent_root.name,
-                )
-                await memory.ensure_ready()
-                memory.register_hooks(mgr)
-                _deps.hook_manager = mgr
-                _deps.memory = memory
-                fastapi_app.state.memory = memory
-                fastapi_app.state.memory_status = "enabled"
-                fastapi_app.state.memory_detail = None
-                logger.info("memory enabled (memory_storage_uri=%s)", mem_uri)
+            mgr = HookManager()
+            memory = MemorySubsystem(
+                memory_uri=mem_uri,
+                db_url=layout.db_url,
+                agent_id=layout.agent_root.name,
+                agent_name=layout.agent_root.name,
+                storage=backend,
+            )
+            await memory.ensure_ready()
+            memory.register_hooks(mgr)
+            _deps.hook_manager = mgr
+            _deps.memory = memory
+            fastapi_app.state.memory = memory
+            fastapi_app.state.memory_status = "enabled"
+            fastapi_app.state.memory_detail = None
+            logger.info("memory enabled (memory_storage_uri=%s)", mem_uri)
+    except MemoryConfigurationError:
+        raise
     except Exception as exc:
         logger.warning("memory setup failed; continuing without: %r", exc)
         _deps.hook_manager = None
