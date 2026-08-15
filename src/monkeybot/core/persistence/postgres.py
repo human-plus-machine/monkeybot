@@ -886,7 +886,7 @@ class PostgresScheduledLoopStore:
 
     async def defer_tick(self, loop_id: str, *, worker_id: str, reason: str) -> None:
         row = await self.get(loop_id)
-        if row is None or row.worker_id != worker_id:
+        if row is None or row.worker_id != worker_id or not row.tick_in_flight:
             return
         now_ms = int(time.time() * 1000)
         async with self._pool.acquire() as conn:
@@ -895,7 +895,7 @@ class PostgresScheduledLoopStore:
                 UPDATE scheduled_loops
                 SET tick_in_flight = 0, worker_id = NULL, claimed_at_ms = NULL,
                     next_tick_at_ms = $1, last_error = $2
-                WHERE loop_id = $3 AND worker_id = $4
+                WHERE loop_id = $3 AND worker_id = $4 AND tick_in_flight = 1
                 """,
                 now_ms + row.interval_ms,
                 reason,

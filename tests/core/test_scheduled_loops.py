@@ -114,3 +114,65 @@ async def test_renew_tick_claim_prevents_stale_release(tmp_path) -> None:
     released = await store.release_stale_claims(100)
     assert released == 0
     await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_defer_tick_does_not_clear_reclaimed_claim(tmp_path) -> None:
+    """Stale worker defer must not wipe a claim reclaimed by another worker."""
+    db_url = f"sqlite:///{tmp_path / 'loops.db'}"
+    backend = SQLiteStorageBackend(db_url)
+    await backend.open()
+    store = backend.scheduled_loops()
+    await store.create(
+        ScheduledLoopCreate(
+            prompt="tick",
+            interval_ms=1000,
+            loop_id="race",
+            max_ticks=5,
+        )
+    )
+    claimed = await store.claim_tick("race", "worker-old")
+    assert claimed is not None
+    # Simulate lease expiry + reclaim by another worker.
+    await store._conn.execute(
+        "UPDATE scheduled_loops SET claimed_at_ms = 1 WHERE loop_id = ?",
+        ("race",),
+    )
+    await store._conn.commit()
+    released = await store.release_stale_claims(100)
+    assert released == 1
+    reclaimed = await store.claim_tick("race", "worker-new")
+    assert reclaimed is not None
+    assert reclaimed.worker_id == "worker-new"
+
+    await store.defer_tick("race", worker_id="worker-old", reason="session busy")
+    row = await store.get("race")
+    assert row is not None
+    assert row.tick_in_flight is True
+    assert row.worker_id == "worker-new"
+    await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_defer_tick_releases_own_claim(tmp_path) -> None:
+    db_url = f"sqlite:///{tmp_path / 'loops.db'}"
+    backend = SQLiteStorageBackend(db_url)
+    await backend.open()
+    store = backend.scheduled_loops()
+    await store.create(
+        ScheduledLoopCreate(
+            prompt="tick",
+            interval_ms=5000,
+            loop_id="defer-ok",
+            max_ticks=5,
+        )
+    )
+    claimed = await store.claim_tick("defer-ok", "worker-1")
+    assert claimed is not None
+    await store.defer_tick("defer-ok", worker_id="worker-1", reason="session busy")
+    row = await store.get("defer-ok")
+    assert row is not None
+    assert row.tick_in_flight is False
+    assert row.worker_id is None
+    assert row.last_error == "session busy"
+    await backend.close()

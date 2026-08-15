@@ -150,6 +150,41 @@ class FirestoreScheduledLoopStore:
             return None
         return await self.get(loop_id)
 
+    async def _release_one_stale_claim(self, loop_id: str, cutoff: int) -> bool:
+        """Transactionally clear one stale claim; no-op if heartbeat renewed past cutoff."""
+        doc_ref = self._doc(loop_id)
+        transaction = self._client.transaction()
+
+        async def _release_body(
+            txn: firestore.AsyncTransaction,
+            ref: firestore.AsyncDocumentReference,
+        ) -> bool:
+            snapshot = await ref.get(transaction=txn)
+            if not snapshot.exists:
+                return False
+            data = snapshot.to_dict() or {}
+            if int(cast(int, data.get("tick_in_flight", 0))) != 1:
+                return False
+            claimed_at = data.get("claimed_at_ms")
+            if claimed_at is None or int(cast(int, claimed_at)) >= cutoff:
+                return False
+            txn.update(
+                ref,
+                {
+                    "tick_in_flight": 0,
+                    "worker_id": None,
+                    "claimed_at_ms": None,
+                    "last_error": data.get("last_error") or "stale tick claim released",
+                },
+            )
+            return True
+
+        release_txn = cast(
+            Callable[[firestore.AsyncTransaction, firestore.AsyncDocumentReference], Awaitable[bool]],
+            firestore.async_transactional(_release_body),
+        )
+        return bool(await release_txn(transaction, doc_ref))
+
     async def release_stale_claims(self, stale_after_ms: int) -> int:
         cutoff = int(time.time() * 1000) - stale_after_ms
         query = (
@@ -158,29 +193,14 @@ class FirestoreScheduledLoopStore:
             .where(filter=FieldFilter("claimed_at_ms", "<", cutoff))
         )
         reset = 0
-        batch = self._client.batch()
-        count = 0
         async for doc in query.stream():
             data = doc.to_dict() or {}
             if data.get("claimed_at_ms") is None:
                 continue
-            batch.update(
-                doc.reference,
-                {
-                    "tick_in_flight": 0,
-                    "worker_id": None,
-                    "claimed_at_ms": None,
-                    "last_error": data.get("last_error") or "stale tick claim released",
-                },
-            )
-            reset += 1
-            count += 1
-            if count >= 400:
-                await batch.commit()
-                batch = self._client.batch()
-                count = 0
-        if count:
-            await batch.commit()
+            # Re-check claimed_at_ms inside a transaction so a renewed heartbeat
+            # between query and write cannot be wiped (SQL uses WHERE claimed_at_ms < ?).
+            if await self._release_one_stale_claim(doc.id, cutoff):
+                reset += 1
         return reset
 
     async def complete_tick(
@@ -254,19 +274,42 @@ class FirestoreScheduledLoopStore:
         return await self.get(loop_id)
 
     async def defer_tick(self, loop_id: str, *, worker_id: str, reason: str) -> None:
-        row = await self.get(loop_id)
-        if row is None or row.worker_id != worker_id:
-            return
-        now_ms = int(time.time() * 1000)
-        await self._doc(loop_id).update(
-            {
-                "tick_in_flight": 0,
-                "worker_id": None,
-                "claimed_at_ms": None,
-                "next_tick_at_ms": now_ms + row.interval_ms,
-                "last_error": reason,
-            }
+        """Release claim and push next tick forward (e.g. session busy).
+
+        Must re-check ``worker_id`` + ``tick_in_flight`` inside a transaction —
+        a stale-release + reclaim race can otherwise clear another worker's claim.
+        """
+        doc_ref = self._doc(loop_id)
+        transaction = self._client.transaction()
+
+        async def _defer_body(
+            txn: firestore.AsyncTransaction,
+            ref: firestore.AsyncDocumentReference,
+        ) -> None:
+            snapshot = await ref.get(transaction=txn)
+            if not snapshot.exists:
+                return
+            data = snapshot.to_dict() or {}
+            if data.get("worker_id") != worker_id or int(cast(int, data.get("tick_in_flight", 0))) != 1:
+                return
+            now_ms = int(time.time() * 1000)
+            interval_ms = int(cast(int, data.get("interval_ms", 0)))
+            txn.update(
+                ref,
+                {
+                    "tick_in_flight": 0,
+                    "worker_id": None,
+                    "claimed_at_ms": None,
+                    "next_tick_at_ms": now_ms + interval_ms,
+                    "last_error": reason,
+                },
+            )
+
+        defer_txn = cast(
+            Callable[[firestore.AsyncTransaction, firestore.AsyncDocumentReference], Awaitable[None]],
+            firestore.async_transactional(_defer_body),
         )
+        await defer_txn(transaction, doc_ref)
 
     async def renew_tick_claim(self, loop_id: str, worker_id: str) -> bool:
         doc_ref = self._doc(loop_id)

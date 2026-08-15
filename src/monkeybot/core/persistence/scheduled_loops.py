@@ -361,9 +361,13 @@ class SQLiteScheduledLoopStore:
         return await self.get(loop_id)
 
     async def defer_tick(self, loop_id: str, *, worker_id: str, reason: str) -> None:
-        """Release claim and push next tick forward (e.g. session busy)."""
+        """Release claim and push next tick forward (e.g. session busy).
+
+        ``WHERE worker_id`` + ``tick_in_flight = 1`` prevents clearing a claim that
+        was stale-released and reclaimed by another worker between our read and write.
+        """
         row = await self.get(loop_id)
-        if row is None or row.worker_id != worker_id:
+        if row is None or row.worker_id != worker_id or not row.tick_in_flight:
             return
         now_ms = int(time.time() * 1000)
         await self._conn.execute(
@@ -371,7 +375,7 @@ class SQLiteScheduledLoopStore:
             UPDATE scheduled_loops
             SET tick_in_flight = 0, worker_id = NULL, claimed_at_ms = NULL,
                 next_tick_at_ms = ?, last_error = ?
-            WHERE loop_id = ? AND worker_id = ?
+            WHERE loop_id = ? AND worker_id = ? AND tick_in_flight = 1
             """,
             (now_ms + row.interval_ms, reason, loop_id, worker_id),
         )

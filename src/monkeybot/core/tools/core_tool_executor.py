@@ -76,6 +76,11 @@ from monkeybot.core.subagents.subagent_proto import (
     resolve_task_agent_md_path,
     spawn_subagent,
 )
+from monkeybot.core.subagents.worker_pool import (
+    _SUPPORTS_PROCESS_GROUPS,
+    _process_group_id,
+    _stop_subagent_process,
+)
 from monkeybot.core.tools.inspector import coerce_run_command_argv
 from monkeybot.core.tools.sandbox_executor import SandboxConfig, SandboxExecutor
 from monkeybot.core.tools.spill_inventory import (
@@ -196,23 +201,6 @@ def _is_under_spill_path(workspace_root: Path, rel_path: str) -> bool:
         return True
     except ValueError:
         return False
-
-
-async def _stop_subagent_process(proc: asyncio.subprocess.Process | None) -> None:
-    """SIGTERM then reap; SIGKILL if still alive after a short wait."""
-    if proc is None or proc.returncode is not None:
-        return
-    try:
-        proc.terminate()
-    except ProcessLookupError:
-        return
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=8.0)
-    except TimeoutError:
-        with contextlib.suppress(ProcessLookupError):
-            proc.kill()
-        with contextlib.suppress(ProcessLookupError):
-            await proc.wait()
 
 
 def _task_child_env(
@@ -364,6 +352,7 @@ async def _await_subagent_drain(
     cancelled: asyncio.Event | None,
     timeout: float,
     proc_holder: list[asyncio.subprocess.Process | None],
+    pgid_holder: list[int | None],
     accum: _SubagentDrainAccum,
     run_id: str,
 ) -> None:
@@ -377,7 +366,7 @@ async def _await_subagent_drain(
             except TimeoutError:
                 errors.append(f"task: subagent exceeded {timeout:g}s timeout")
                 accum.note_exit_reason("timeout", force=True)
-                await _stop_subagent_process(proc_holder[0])
+                await _stop_subagent_process(proc_holder[0], pgid=pgid_holder[0])
                 if not drain_task.done():
                     drain_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
@@ -392,7 +381,7 @@ async def _await_subagent_drain(
         if not done:
             errors.append(f"task: subagent exceeded {timeout:g}s timeout")
             accum.note_exit_reason("timeout", force=True)
-            await _stop_subagent_process(proc_holder[0])
+            await _stop_subagent_process(proc_holder[0], pgid=pgid_holder[0])
             cancel_wait.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await cancel_wait
@@ -419,7 +408,7 @@ async def _await_subagent_drain(
         else:
             errors.append(_PARENT_CANCEL_TASK_ERR)
             accum.note_exit_reason("cancelled", force=True)
-            await _stop_subagent_process(proc_holder[0])
+            await _stop_subagent_process(proc_holder[0], pgid=pgid_holder[0])
             if not drain_task.done():
                 drain_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -494,6 +483,7 @@ async def _run_inline_subagent_with_progress(
     """Spawn an inline subagent, forward nested SSE, always emit SubagentCompleted."""
     accum = _SubagentDrainAccum()
     proc_holder: list[asyncio.subprocess.Process | None] = [None]
+    pgid_holder: list[int | None] = [None]
     fail_count: list[int] = [0]
     label = subagent_type or "subagent"
 
@@ -501,6 +491,8 @@ async def _run_inline_subagent_with_progress(
         env = dict(os.environ)
         env.update(child_env)
         env["PYTHONUNBUFFERED"] = "1"
+        # start_new_session so timeout/cancel can kill the whole process group
+        # (descendants from shells / nested tools), matching the worker-pool path.
         p = await asyncio.create_subprocess_exec(
             *cmd,
             stdin=asyncio.subprocess.PIPE,
@@ -508,8 +500,10 @@ async def _run_inline_subagent_with_progress(
             stderr=asyncio.subprocess.DEVNULL,
             env=env,
             limit=SUBAGENT_STDOUT_LINE_LIMIT,
+            start_new_session=_SUPPORTS_PROCESS_GROUPS,
         )
         proc_holder[0] = p
+        pgid_holder[0] = _process_group_id(p.pid)
         return p
 
     logger.info(
@@ -569,6 +563,7 @@ async def _run_inline_subagent_with_progress(
                 cancelled=ctx.cancelled,
                 timeout=timeout,
                 proc_holder=proc_holder,
+                pgid_holder=pgid_holder,
                 accum=accum,
                 run_id=run_id,
             )
