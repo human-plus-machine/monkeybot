@@ -15,6 +15,7 @@ from monkeybot.core.llm.provider import Done, TextDelta, ToolCall, UsageEvent
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.mcp.mcp_client import MCPDiagnosticError, MCPServerNotConnectedError
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
+from monkeybot.core.tools.fs_isolation import isolation_support
 from monkeybot.core.tools.types import unwrap_tool_execution_result
 from monkeybot.core.types.types_tools import ToolDef
 from tests.core.memory.helpers import make_memory_subsystem
@@ -1189,6 +1190,313 @@ async def test_run_command_cat_under_memory(tmp_path: Path, monkeypatch: pytest.
 
 
 @pytest.mark.asyncio
+async def test_run_command_mempalace_is_blocked_when_memory_unavailable(tmp_path: Path) -> None:
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=None,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="memory-disabled",
+                name="run_command",
+                args={"argv": ["mempalace", "search", "private"]},
+            ),
+            ctx=_ctx(),
+        )
+    )
+
+    assert out is None and err is not None
+    payload = json.loads(err)
+    assert payload["error_kind"] == "policy"
+    assert "unavailable" in payload["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_run_command_drops_mempalace_capability_when_memory_unavailable(
+    tmp_path: Path,
+) -> None:
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=None,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+
+    assert "mempalace" not in ex._run_cmd_allowed_commands
+    assert "mempalace" not in ex._terminal.allowed_commands
+
+
+@pytest.mark.skipif(
+    not isolation_support().available,
+    reason=f"host cannot isolate filesystems: {isolation_support().detail}",
+)
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("call_id", "argv_template"),
+    [
+        ("shell-variable", ["bash", "-c", 'p={secret}; cat "$p"']),
+        ("interpreter-io", ["python", "-c", "print(open({secret!r}).read())"]),
+        ("nested-launcher", ["bash", "-c", "cat {secret}"]),
+    ],
+)
+async def test_disabled_memory_is_unreachable_through_launchers(
+    tmp_path: Path, call_id: str, argv_template: list[str]
+) -> None:
+    """Shells and interpreters can build any path, so the palace must be hidden."""
+    workspace = tmp_path / "workspace"
+    skills = workspace / "skills"
+    skills.mkdir(parents=True)
+    secret = tmp_path / "memory" / "private.txt"
+    secret.parent.mkdir()
+    secret.write_text("PRIVATE-CONTENT", encoding="utf-8")
+    ex = CoreToolExecutor(
+        workspace_root=workspace,
+        memory=None,
+        skills_path=skills,
+        mcp=_NoMCP(),
+        run_command_allowed_path_prefixes=[str(tmp_path)],
+    )
+
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id=call_id,
+                name="run_command",
+                args={"argv": [part.format(secret=str(secret)) for part in argv_template]},
+            ),
+            ctx=dataclasses.replace(_ctx(), user_id="u"),
+        )
+    )
+
+    assert "PRIVATE-CONTENT" not in (out or "") + (err or "")
+
+
+@pytest.mark.skipif(
+    not isolation_support().available,
+    reason=f"host cannot isolate filesystems: {isolation_support().detail}",
+)
+@pytest.mark.asyncio
+async def test_disabled_memory_hides_faas_palace_under_temp_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Serverless deployments put the palace in /tmp, which is not a safe zone."""
+    workspace = tmp_path / "workspace"
+    skills = workspace / "skills"
+    skills.mkdir(parents=True)
+    faas_palace = tmp_path / "faas" / "memory"
+    faas_palace.mkdir(parents=True)
+    (faas_palace / "private.txt").write_text("PRIVATE-CONTENT", encoding="utf-8")
+    monkeypatch.setenv("MEMORY_STORAGE_URI", f"local://{faas_palace}")
+    ex = CoreToolExecutor(
+        workspace_root=workspace,
+        memory=None,
+        skills_path=skills,
+        mcp=_NoMCP(),
+        run_command_allowed_path_prefixes=[str(tmp_path)],
+    )
+
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="faas-palace",
+                name="run_command",
+                args={"argv": ["bash", "-c", f"cat {faas_palace}/private.txt"]},
+            ),
+            ctx=dataclasses.replace(_ctx(), user_id="u"),
+        )
+    )
+
+    assert "PRIVATE-CONTENT" not in (out or "") + (err or "")
+
+
+@pytest.mark.skipif(
+    not isolation_support().available,
+    reason=f"host cannot isolate filesystems: {isolation_support().detail}",
+)
+@pytest.mark.asyncio
+async def test_enabled_memory_remains_readable_through_launchers(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    skills = workspace / "skills"
+    skills.mkdir(parents=True)
+    secret = tmp_path / "memory" / "private.txt"
+    secret.parent.mkdir()
+    secret.write_text("PRIVATE-CONTENT", encoding="utf-8")
+    ex = CoreToolExecutor(
+        workspace_root=workspace,
+        memory=_mem_sub(tmp_path / "memory"),
+        skills_path=skills,
+        mcp=_NoMCP(),
+        run_command_allowed_path_prefixes=[str(tmp_path)],
+    )
+
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="memory-enabled-read",
+                name="run_command",
+                args={"argv": ["bash", "-c", f"cat {secret}"]},
+            ),
+            ctx=dataclasses.replace(_ctx(), user_id="u"),
+        )
+    )
+
+    assert err is None and out is not None
+    assert "PRIVATE-CONTENT" in out
+
+
+@pytest.mark.asyncio
+async def test_run_command_memory_path_is_blocked_when_memory_unavailable(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    private = tmp_path / "memory" / "private.txt"
+    private.parent.mkdir()
+    private.write_text("PRIVATE-CONTENT", encoding="utf-8")
+    skills = workspace / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=workspace,
+        memory=None,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="memory-path-disabled",
+                name="run_command",
+                args={"argv": ["cat", "../memory/private.txt"]},
+            ),
+            ctx=dataclasses.replace(_ctx(), user_id="u"),
+        )
+    )
+
+    assert out is None and err is not None
+    payload = json.loads(err)
+    assert payload["error_kind"] == "policy"
+    assert "PRIVATE-CONTENT" not in err
+    assert "../memory/private.txt" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_direct_mempalace_route_is_owned_by_each_executor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.tools.terminal import ExecutionResult, TerminalExecutor
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    skills = workspace / "skills"
+    skills.mkdir()
+    palace_a = _mem_sub(tmp_path / "memory-a")
+    palace_b = _mem_sub(tmp_path / "memory-b")
+    seen: list[dict[str, str]] = []
+
+    async def fake_execute(
+        self,
+        command,
+        args,
+        timeout=60,
+        *,
+        cwd=None,
+        env_overrides=None,
+    ):
+        del self, command, args, timeout, cwd
+        seen.append(dict(env_overrides or {}))
+        return ExecutionResult(stdout="ok", stderr="", exit_code=0)
+
+    monkeypatch.setattr(TerminalExecutor, "execute", fake_execute)
+    monkeypatch.setenv("MEMPALACE_PALACE_PATH", str(palace_b.palace_path))
+    executor_a = CoreToolExecutor(
+        workspace_root=workspace,
+        memory=palace_a,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    executor_b = CoreToolExecutor(
+        workspace_root=workspace,
+        memory=palace_b,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+
+    for executor, call_id in ((executor_a, "palace-a"), (executor_b, "palace-b")):
+        out, err = unwrap_tool_execution_result(
+            await executor.execute(
+                call=ToolCall(
+                    call_id=call_id,
+                    name="run_command",
+                    args={"argv": ["mempalace", "search", "query"]},
+                ),
+                ctx=dataclasses.replace(_ctx(), user_id="u"),
+            )
+        )
+        assert err is None and out is not None
+
+    assert [entry["MEMPALACE_PALACE_PATH"] for entry in seen] == [
+        str(palace_a.palace_path),
+        str(palace_b.palace_path),
+    ]
+    assert seen[0]["MEMPALACE_PALACE_PATH"] != str(palace_b.palace_path)
+
+
+@pytest.mark.skipif(
+    not isolation_support().available,
+    reason=f"host cannot isolate filesystems: {isolation_support().detail}",
+)
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["bash", "-c", "echo shell-ok"], "shell-ok"),
+        (["python", "-c", "print('python-ok')"], "python-ok"),
+        (["git", "--version"], "git version"),
+        (["uv", "--version"], "uv "),
+        (["gh", "--version"], "gh version"),
+    ],
+)
+async def test_run_command_launchers_remain_available_without_memory(
+    tmp_path: Path,
+    argv: list[str],
+    expected: str,
+) -> None:
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=None,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="memory-unavailable",
+                name="run_command",
+                args={"argv": argv},
+            ),
+            ctx=_ctx(),
+        )
+    )
+
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert payload["ok"] is True
+    assert expected in payload["stdout"]
+
+
+@pytest.mark.asyncio
 async def test_run_command_blocked_command_returns_policy_envelope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2020,7 +2328,7 @@ import sys
 from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from monkeybot.core.tools.sandbox_executor import SandboxExecutor
+from monkeybot.core.tools.sandbox_executor import SandboxConfig, SandboxExecutor
 from monkeybot.core.tools.terminal import TerminalExecutor
 
 
@@ -2140,7 +2448,93 @@ class TestCoreToolExecutorSandboxSelection:
             mcp=_NoMCP(),
             terminal=injected,
         )
+        assert isinstance(ex._terminal, TerminalExecutor)
+        assert ex._host_terminal is None
+        # Memory is enabled here, so the injected policy is carried over intact.
+        assert ex._terminal.allowed_commands == injected.allowed_commands
+        assert ex._terminal.hidden_paths == ()
+
+    def test_injected_terminal_is_bound_by_memory_off_policy(self, tmp_path):
+        """A library caller's executor must not keep palace access we revoked."""
+        injected = TerminalExecutor()
+        skills = tmp_path / "skills"
+        skills.mkdir()
+
+        ex = CoreToolExecutor(
+            workspace_root=tmp_path,
+            memory=None,
+            skills_path=skills,
+            mcp=_NoMCP(),
+            terminal=injected,
+        )
+
+        assert "../memory" in injected.allowed_path_prefixes  # caller's object untouched
+        assert "mempalace" in injected.allowed_commands
+        assert not any(
+            prefix.startswith("../memory") for prefix in ex._terminal.allowed_path_prefixes
+        )
+        assert "mempalace" not in ex._terminal.allowed_commands
+        assert ex._terminal.hidden_paths
+
+    def test_injected_terminal_preserves_caller_path_policy(self, tmp_path):
+        """Injected executors keep the caller's path allowlist (no skills widening)."""
+        injected = TerminalExecutor(allowed_path_prefixes=["."])
+        skills = tmp_path / "skills"
+        skills.mkdir()
+        mem = tmp_path / "mem"
+        mem.mkdir()
+
+        ex = CoreToolExecutor(
+            workspace_root=tmp_path,
+            memory=_mem_sub(mem),
+            skills_path=skills,
+            mcp=_NoMCP(),
+            terminal=injected,
+        )
+
+        assert "." in injected.allowed_path_prefixes
+        assert str(skills) not in injected.allowed_path_prefixes
+        assert ex._terminal.allowed_path_prefixes == injected.allowed_path_prefixes
+
+    def test_injected_terminal_preserves_caller_hidden_paths_when_memory_on(self, tmp_path):
+        """Memory-on must pass None into restricted(), not () which would clear."""
+        extra = tmp_path / "extra-hidden"
+        extra.mkdir()
+        injected = TerminalExecutor(hidden_paths=[extra])
+        skills = tmp_path / "skills"
+        skills.mkdir()
+        mem = tmp_path / "mem"
+        mem.mkdir()
+
+        ex = CoreToolExecutor(
+            workspace_root=tmp_path,
+            memory=_mem_sub(mem),
+            skills_path=skills,
+            mcp=_NoMCP(),
+            terminal=injected,
+        )
+
+        assert ex._terminal.hidden_paths == (extra,)
+
+    def test_injected_sandbox_gets_host_terminal_for_memory(self, tmp_path, monkeypatch):
+        """Injected sandboxes need a host terminal; the palace is never mounted."""
+        monkeypatch.delenv("SANDBOX_ENABLED", raising=False)
+        mem = tmp_path / "mem"
+        mem.mkdir()
+        skills = tmp_path / "skills"
+        skills.mkdir()
+        injected = SandboxExecutor(SandboxConfig.from_env(), tmp_path, skills_path=skills)
+
+        ex = CoreToolExecutor(
+            workspace_root=tmp_path,
+            memory=_mem_sub(mem),
+            skills_path=skills,
+            mcp=_NoMCP(),
+            terminal=injected,
+        )
+
         assert ex._terminal is injected
+        assert isinstance(ex._host_terminal, TerminalExecutor)
 
 
 class TestCoreToolExecutorAclose:
