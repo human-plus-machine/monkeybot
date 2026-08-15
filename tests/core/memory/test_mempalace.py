@@ -12,10 +12,10 @@ from monkeybot.core.llm.provider import Message
 from monkeybot.core.memory.ids import conversation_wing, outbox_id
 from monkeybot.core.memory.ingest import persist_message, visible_text
 from monkeybot.core.memory.outbox import ensure_outbox_schema, insert_pending
-from monkeybot.core.memory.palace import InMemoryPalace
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.persistence.sqlite import apply_schema, open_connection
 from monkeybot.core.types.content_blocks import Text, Thinking
+from tests.core.memory.in_memory_palace import InMemoryPalace
 
 
 @pytest.fixture
@@ -256,10 +256,29 @@ async def test_history_append_enqueues(db_url: str, tmp_path: Path) -> None:
 def test_palace_uri_rejects_object_store() -> None:
     from monkeybot.core.memory.palace import palace_path_from_uri
 
-    with pytest.raises(ValueError, match="unsupported memory URI"):
+    with pytest.raises(ValueError, match="does not support gcs://"):
         palace_path_from_uri("gcs://bucket/prefix")
-    with pytest.raises(ValueError, match="unsupported memory URI"):
+    with pytest.raises(ValueError, match="does not support s3://"):
         palace_path_from_uri("s3://bucket/prefix")
+
+
+def test_layout_falls_back_from_object_store_uri(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from monkeybot.core.layout import AgentLayout, resolve_memory_storage_uri
+
+    uri = resolve_memory_storage_uri("gcs://bucket/mem", tmp_path)
+    assert uri.startswith("local://")
+    assert uri.endswith("memory/mempalace")
+    monkeypatch.setenv("MEMORY_STORAGE_URI", "s3://bucket/mem")
+    layout = AgentLayout.from_environment(agent_root=tmp_path)
+    assert layout.memory_storage_uri.startswith("local://")
+
+
+def test_create_palace_requires_memory_extra(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from monkeybot.core.memory import palace as palace_mod
+
+    monkeypatch.setattr(palace_mod, "mempalace_available", lambda: False)
+    with pytest.raises(palace_mod.MemoryDependencyError, match="monkeybot\\[memory\\]"):
+        palace_mod.create_palace(f"local://{tmp_path / 'p'}", agent_name="a")
 
 
 @pytest.mark.asyncio
@@ -401,3 +420,66 @@ async def test_claim_batch_filters_by_agent(db_url: str) -> None:
     claimed = await claim_batch(conn, lease_owner="w1", agent_id="agent-a")
     await conn.close()
     assert [row.content for row in claimed] == ["for a"]
+
+
+@pytest.mark.asyncio
+async def test_gc_committed_deletes_old_rows(db_url: str) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from monkeybot.core.memory.outbox import STATUS_COMMITTED, gc_committed
+
+    conn = await open_connection(db_url)
+    await ensure_outbox_schema(conn)
+    old = (datetime.now(UTC) - timedelta(days=8)).isoformat(timespec="seconds")
+    await conn.execute(
+        """
+        INSERT INTO memory_outbox (
+            id, agent_id, thread_id, turn_id, message_id, role, content,
+            workspace_id, wing, room, created_at, status, attempts
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "old-row",
+            "a",
+            "t",
+            "1",
+            "m",
+            "user",
+            "gone",
+            None,
+            "main",
+            "conversation",
+            old,
+            STATUS_COMMITTED,
+            1,
+        ),
+    )
+    await conn.commit()
+    deleted = await gc_committed(conn, days=7)
+    cur = await conn.execute("SELECT COUNT(*) FROM memory_outbox WHERE id = 'old-row'")
+    remaining = (await cur.fetchone())[0]
+    await cur.close()
+    await conn.close()
+    assert deleted == 1
+    assert remaining == 0
+
+
+@pytest.mark.asyncio
+async def test_second_connection_waits_on_busy_timeout(tmp_path: Path) -> None:
+    db = tmp_path / "lock.db"
+    url = f"sqlite:///{db}"
+    first = await open_connection(url)
+    second = await open_connection(url)
+    await first.execute("BEGIN IMMEDIATE")
+
+    async def begin_second() -> None:
+        await second.execute("BEGIN IMMEDIATE")
+        await second.commit()
+
+    waiter = asyncio.create_task(begin_second())
+    await asyncio.sleep(0.15)
+    assert not waiter.done()
+    await first.commit()
+    await asyncio.wait_for(waiter, timeout=2)
+    await first.close()
+    await second.close()

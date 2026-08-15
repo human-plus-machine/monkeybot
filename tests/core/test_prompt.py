@@ -6,7 +6,6 @@ import pytest
 
 from monkeybot.core.attachments.catalog import AttachmentRecord
 from monkeybot.core.context import SkillRef, TurnContext
-from monkeybot.core.context.memory_prompt import MemoryPromptSelection
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.prompts.headings import (
     CURRENT_DATE_HEADING,
@@ -41,7 +40,17 @@ def _minimal_ctx(
     )
 
 
-def test_compose_memory_selection_omits_unlisted_lines() -> None:
+def test_compose_omits_wake_up_and_teaching_when_memory_off() -> None:
+    ctx = _minimal_ctx()
+    assert ctx.memory is None
+    out = compose_system_prompt(ctx)
+    assert "## Memory wake-up" not in out
+    assert "### Memory retrieval (`mempalace search`)" not in out
+    assert 'argv: ["mempalace", "search"' not in out
+    assert "do not call `mempalace search`" in out
+
+
+def test_compose_uses_memory_index_lines() -> None:
     ctx = _minimal_ctx(
         memory_index=["a", "b"],
         skills=[
@@ -49,11 +58,10 @@ def test_compose_memory_selection_omits_unlisted_lines() -> None:
             SkillRef(name="s2", description="d2"),
         ],
     )
-    selection = MemoryPromptSelection(lines=["a"])
-    out = compose_system_prompt(ctx, memory_selection=selection)
+    out = compose_system_prompt(ctx)
     mem_section = out.split("## Memory wake-up", 1)[1].split("## Skills", 1)[0]
     assert "a" in mem_section
-    assert "b" not in mem_section
+    assert "b" in mem_section
     assert "\n\n## Skills\n- s1\n- s2" in out
 
 

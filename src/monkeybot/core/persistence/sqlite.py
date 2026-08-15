@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import Final
+from typing import Any, Final, TypeVar, cast
 
 import aiosqlite
 
@@ -31,12 +33,71 @@ OUTBOX_DDL: Final[str] = """CREATE TABLE IF NOT EXISTS memory_outbox (
     last_error TEXT,
     traceparent TEXT,
     lease_owner TEXT,
-    lease_expires_at TEXT
+    lease_expires_at TEXT,
+    palace_id TEXT NOT NULL DEFAULT ''
 )"""
 
 OUTBOX_INDEX_DDL: Final[str] = (
-    "CREATE INDEX IF NOT EXISTS idx_memory_outbox_pending ON memory_outbox(status, created_at)"
+    "CREATE INDEX IF NOT EXISTS idx_memory_outbox_pending "
+    "ON memory_outbox(agent_id, palace_id, status, created_at)"
 )
+
+HISTORY_MESSAGE_ID_INDEX_DDL: Final[str] = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_history_message_id "
+    "ON conversation_history(message_id) WHERE message_id IS NOT NULL AND message_id != ''"
+)
+
+
+class TaskReentrantLock:
+    """asyncio lock the owning task may re-enter (nested store methods)."""
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._owner: asyncio.Task[Any] | None = None
+        self._depth = 0
+
+    async def acquire(self) -> None:
+        task = asyncio.current_task()
+        if self._owner is task:
+            self._depth += 1
+            return
+        await self._lock.acquire()
+        self._owner = task
+        self._depth = 1
+
+    def release(self) -> None:
+        task = asyncio.current_task()
+        if self._owner is not task:
+            raise RuntimeError("TaskReentrantLock.release() by non-owner")
+        self._depth -= 1
+        if self._depth == 0:
+            self._owner = None
+            self._lock.release()
+
+    async def __aenter__(self) -> TaskReentrantLock:
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        self.release()
+
+
+F = TypeVar("F", bound=Callable[..., Any])
+ConnLock = asyncio.Lock | TaskReentrantLock
+
+
+def with_conn_lock(fn: F) -> F:
+    """Serialize a store method on ``self._lock`` (re-entrant for nested calls)."""
+
+    async def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        async with self._lock:
+            return await fn(self, *args, **kwargs)
+
+    wrapper.__name__ = fn.__name__
+    wrapper.__doc__ = fn.__doc__
+    wrapper.__qualname__ = fn.__qualname__
+    return cast(F, wrapper)
+
 
 _LEGACY_SCHEMA_MESSAGE = """Legacy conversation_history schema detected (tool_name and/or
 tool_call_id columns present). The on-disk format changed in the
@@ -156,10 +217,11 @@ def sqlite_path_from_db_url(db_url: str | None = None) -> str:
 
 
 async def configure_connection(conn: aiosqlite.Connection) -> None:
-    """PRAGMA journal_mode=WAL; foreign_keys=ON; synchronous=NORMAL."""
+    """PRAGMA journal_mode=WAL; foreign_keys=ON; synchronous=NORMAL; busy_timeout=5000."""
     await conn.execute("PRAGMA journal_mode=WAL")
     await conn.execute("PRAGMA foreign_keys=ON")
     await conn.execute("PRAGMA synchronous=NORMAL")
+    await conn.execute("PRAGMA busy_timeout=5000")
 
 
 async def _connection_db_path(conn: aiosqlite.Connection) -> str:
@@ -188,6 +250,8 @@ async def apply_schema(conn: aiosqlite.Connection) -> None:
     await _ensure_turn_usage_cache_columns(conn)
     await _ensure_subagent_runs_claim_columns(conn)
     await _ensure_history_memory_columns(conn)
+    await _ensure_outbox_agent_id_column(conn)
+    await _ensure_outbox_palace_id_column(conn)
     cursor = await conn.execute("PRAGMA table_info(conversation_history)")
     rows = await cursor.fetchall()
     await cursor.close()
@@ -220,9 +284,7 @@ async def _ensure_turn_usage_cache_columns(conn: aiosqlite.Connection) -> None:
     for col in ("cache_read_tokens", "cache_creation_tokens"):
         if col in names:
             continue
-        await conn.execute(
-            f"ALTER TABLE turn_usage ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0"
-        )
+        await conn.execute(f"ALTER TABLE turn_usage ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0")
     await conn.commit()
 
 
@@ -239,6 +301,19 @@ async def _ensure_subagent_runs_claim_columns(conn: aiosqlite.Connection) -> Non
     await conn.commit()
 
 
+async def _ensure_outbox_agent_id_column(conn: aiosqlite.Connection) -> None:
+    """Add agent_id on memory_outbox when upgrading an existing DB."""
+    cur = await conn.execute("PRAGMA table_info(memory_outbox)")
+    rows = await cur.fetchall()
+    await cur.close()
+    names = {str(r[1]) for r in rows}
+    if not names:
+        return
+    if "agent_id" not in names:
+        await conn.execute("ALTER TABLE memory_outbox ADD COLUMN agent_id TEXT NOT NULL DEFAULT ''")
+    await conn.commit()
+
+
 async def _ensure_history_memory_columns(conn: aiosqlite.Connection) -> None:
     """Add turn_id / message_id on conversation_history for the memory outbox."""
     cur = await conn.execute("PRAGMA table_info(conversation_history)")
@@ -251,6 +326,23 @@ async def _ensure_history_memory_columns(conn: aiosqlite.Connection) -> None:
         await conn.execute("ALTER TABLE conversation_history ADD COLUMN turn_id TEXT")
     if "message_id" not in names:
         await conn.execute("ALTER TABLE conversation_history ADD COLUMN message_id TEXT")
+    await conn.execute(HISTORY_MESSAGE_ID_INDEX_DDL)
+    await conn.commit()
+
+
+async def _ensure_outbox_palace_id_column(conn: aiosqlite.Connection) -> None:
+    """Add palace_id on memory_outbox when upgrading an existing DB."""
+    cur = await conn.execute("PRAGMA table_info(memory_outbox)")
+    rows = await cur.fetchall()
+    await cur.close()
+    names = {str(r[1]) for r in rows}
+    if not names:
+        return
+    if "palace_id" not in names:
+        await conn.execute(
+            "ALTER TABLE memory_outbox ADD COLUMN palace_id TEXT NOT NULL DEFAULT ''"
+        )
+    await conn.execute(OUTBOX_INDEX_DDL)
     await conn.commit()
 
 

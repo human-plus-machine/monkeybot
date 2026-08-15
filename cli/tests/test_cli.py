@@ -45,7 +45,7 @@ def test_new_scaffolds(tmp_path: Path) -> None:
     assert "MONKEYBOT_SUBAGENT_AGENT_MD" not in env_text
     assert "DB_URL" in env_text
     pyproject = (tmp_path / "pyproject.toml").read_text()
-    assert "monkeybot[gemini,sandbox,web-search]>=3.0.0,<4" in pyproject
+    assert "monkeybot[gemini,sandbox,web-search,memory]>=3.0.0,<4" in pyproject
     assert "monkeybot-browser-mcp>=0.2.0,<1" in pyproject
     assert "package = false" in pyproject
     assert "[tool.uv.sources]" not in pyproject
@@ -66,14 +66,14 @@ def test_refresh_updates_existing_agent(tmp_path: Path) -> None:
     assert created.returncode == 0
     allow = tmp_path / "monkeybot_config" / "command_allowlist.yaml"
     allow.write_text("allowed_commands:\n  - bash\n  - officecli\n", encoding="utf-8")
+    original_pyproject = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
     result = _run_cli("refresh", "--dest", str(tmp_path))
     assert result.returncode == 0, result.stderr
     text = allow.read_text(encoding="utf-8")
     assert "mempalace" in text
     assert "officecli" in text
     assert "command_allowlist.yaml: updated" in result.stdout
-    pyproject = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
-    assert "monkeybot[gemini,sandbox,web-search]>=3.0.0,<4" in pyproject
+    assert (tmp_path / "pyproject.toml").read_text(encoding="utf-8") == original_pyproject
 
 
 def test_refresh_rejects_empty_dest(tmp_path: Path) -> None:
@@ -135,7 +135,11 @@ def test_validate_missing_config(tmp_path: Path) -> None:
     assert any(c["id"] == "config.file.exists" for c in data["checks"])
 
 
-def test_validate_custom_config_anchors_paths_at_its_parent(tmp_path: Path) -> None:
+def test_validate_custom_config_anchors_paths_at_its_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("MEMORY_STORAGE_URI", raising=False)
+    monkeypatch.delenv("MEMORY_PATH", raising=False)
     config_dir = tmp_path / "custom-config"
     config_dir.mkdir()
     (config_dir / "AGENT.md").write_text("# Agent\n", encoding="utf-8")
@@ -163,7 +167,11 @@ def test_validate_custom_config_anchors_paths_at_its_parent(tmp_path: Path) -> N
     assert checks["memory.backend.supported"]["status"] == "pass"
 
 
-def test_validate_rejects_object_store_memory_uri(tmp_path: Path) -> None:
+def test_validate_rejects_object_store_memory_uri(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("MEMORY_STORAGE_URI", raising=False)
+    monkeypatch.delenv("MEMORY_PATH", raising=False)
     config_dir = tmp_path / "monkeybot_config"
     config_dir.mkdir()
     (config_dir / "AGENT.md").write_text("# Agent\n", encoding="utf-8")
@@ -183,6 +191,58 @@ def test_validate_rejects_object_store_memory_uri(tmp_path: Path) -> None:
     checks = {check["id"]: check for check in json.loads(result.stdout)["checks"]}
     assert checks["memory.backend.supported"]["status"] == "fail"
     assert "local://" in checks["memory.backend.supported"]["message"]
+
+
+def test_validate_rejects_object_store_memory_uri_from_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_dir = tmp_path / "monkeybot_config"
+    config_dir.mkdir()
+    (config_dir / "AGENT.md").write_text("# Agent\n", encoding="utf-8")
+    (config_dir / "skills").mkdir()
+    (config_dir / "monkeybot.yaml").write_text(
+        "model:\n"
+        "  provider: fake\n"
+        "  name: fake\n"
+        "paths:\n"
+        "  agent_md: AGENT.md\n"
+        "  skills_path: skills\n"
+        "  db_url: sqlite:///data/monkeybot.db\n"
+        "  memory_storage_uri: local://memory\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("MEMORY_PATH", raising=False)
+    monkeypatch.setenv("MEMORY_STORAGE_URI", "gcs://bucket/from-env")
+    result = _run_cli("validate", "--json", "--cwd", str(tmp_path))
+    checks = {check["id"]: check for check in json.loads(result.stdout)["checks"]}
+    assert checks["memory.backend.supported"]["status"] == "fail"
+    assert "gcs://bucket/from-env" in checks["memory.backend.supported"]["message"]
+
+
+def test_validate_rejects_object_store_memory_path_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_dir = tmp_path / "monkeybot_config"
+    config_dir.mkdir()
+    (config_dir / "AGENT.md").write_text("# Agent\n", encoding="utf-8")
+    (config_dir / "skills").mkdir()
+    (config_dir / "monkeybot.yaml").write_text(
+        "model:\n"
+        "  provider: fake\n"
+        "  name: fake\n"
+        "paths:\n"
+        "  agent_md: AGENT.md\n"
+        "  skills_path: skills\n"
+        "  db_url: sqlite:///data/monkeybot.db\n"
+        "  memory_storage_uri: local://memory\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("MEMORY_STORAGE_URI", raising=False)
+    monkeypatch.setenv("MEMORY_PATH", "s3://bucket/legacy")
+    result = _run_cli("validate", "--json", "--cwd", str(tmp_path))
+    checks = {check["id"]: check for check in json.loads(result.stdout)["checks"]}
+    assert checks["memory.backend.supported"]["status"] == "fail"
+    assert "s3://bucket/legacy" in checks["memory.backend.supported"]["message"]
 
 
 def test_talk_help_lists_realtime_flags() -> None:

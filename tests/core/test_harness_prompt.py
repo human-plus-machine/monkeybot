@@ -70,6 +70,9 @@ def test_harness_omits_memory_teaching_when_disabled() -> None:
     out = harness_fixed_context(include_task_tool=False, include_memory_teaching=False)
     assert "### Memory retrieval (`mempalace search`)" not in out
     assert 'argv: ["mempalace", "search"' not in out
+    assert "Prefer `mempalace search`" not in out
+    assert "memory storage: disabled" in out
+    assert "do not call `mempalace search`" in out
 
 
 def test_harness_omits_search_guidance_when_knowledge_disabled() -> None:

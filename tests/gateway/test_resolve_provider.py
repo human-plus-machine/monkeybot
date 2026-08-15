@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from monkeybot.core.config.settings import normalize_model_provider
-from monkeybot.core.llm.provider import Done, TextDelta
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.gateway.sse import app as gateway_app
 from monkeybot.providers.gemini import GeminiProvider
@@ -59,15 +58,6 @@ def test_resolve_provider_google_genai_missing_api_key(monkeypatch: pytest.Monke
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     with pytest.raises(ValueError, match="GEMINI_API_KEY"):
         gateway_app._resolve_provider()
-
-
-def test_resolve_curator_reuses_main_for_vertex_anthropic(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("MODEL_PROVIDER", "vertex-claude")
-    main = ScriptedFakeProvider([TextDelta(text="x"), Done()])
-    curator = gateway_app._resolve_curator_provider(main)
-    assert curator is main
 
 
 def test_resolve_provider_openrouter(monkeypatch: pytest.MonkeyPatch) -> None:

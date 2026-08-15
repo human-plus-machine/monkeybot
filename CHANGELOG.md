@@ -8,17 +8,19 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Breaking
 
-- Note-based memory (INDEX.md, curator, `search_memory` / `edit_memory` / `forget`) is replaced by per-agent MemPalace with a SQLite outbox. Capture can be turned off with `memory.enabled: false` or `MONKEYBOT_MEMORY_HOOK_ENABLED=0`. Object-store palace URIs (`gcs://`, `s3://`) are not supported; use `local://`. Postgres/Firestore history backends run without MemPalace until a later release.
+- Note-based memory (INDEX.md, curator, `search_memory` / `edit_memory` / `forget`) is replaced by per-agent MemPalace with a durable outbox on SQLite, Postgres, and Firestore. Capture can be turned off with `memory.enabled: false` or `MONKEYBOT_MEMORY_HOOK_ENABLED=0`. Object-store palace URIs (`gcs://`, `s3://`) are not supported; use `local://`. MemPalace itself is the optional `monkeybot[memory]` extra.
 
 ### Added
 
-- `monkeybot run` / `chat` / `talk` refuse to start when the agent interpreter lacks MonkeyBot 3.x (and MemPalace when memory is enabled). A failed probe may `uv sync` an existing lock; it never rewrites `pyproject.toml`. Config-only agents with memory on get a cached CLI-managed venv when the CLI interpreter itself cannot import MemPalace. Config-only agents (no `pyproject.toml`) with memory on get a CLI-managed cache venv holding `monkeybot[memory]` pinned to the running core, reused offline.
+- `monkeybot run` / `chat` / `talk` refuse to start when the agent interpreter lacks MonkeyBot 3.x (and MemPalace when memory is enabled). A failed probe may `uv sync` an existing lock; it never rewrites `pyproject.toml`. Config-only agents with memory on get a CLI-managed cache venv holding `monkeybot[memory]` pinned to the running core, reused offline.
+- MemPalace outbox now persists on Postgres and Firestore (same table/document shape as SQLite), with replica `palace_id` claim partitioning. Replicated deployments must share a lock-capable palace volume.
 - `monkeybot chat` TUI gained Claude-Code-style interaction: `Esc` interrupts the active turn (double-tap while idle recalls your last message for editing), `Shift+Tab` cycles a client-side approval mode (`normal` / `auto-approve` / `deny-confirms` — auto-answers tool confirmation prompts only, elicitations still ask), `@` fuzzy-inserts a workspace file path, `!<command>` runs a local shell command shown in the transcript but never sent to the agent, and `?` opens a keyboard-shortcut overlay. New slash commands: `/clear` (alias of `/new`), `/model` (switches model by starting a fresh session), `/status`, `/config`.
 - Knowledge indexing follows document structure instead of fixed line windows: markdown headings, code definitions (tree-sitter via the optional `knowledge-ast` extra, brace/indent heuristic otherwise), and JSON/YAML/TOML top-level keys become chunk boundaries.
 - Embeddings run on NVIDIA, OpenAI, any OpenAI-compatible endpoint, Voyage, or Gemini via `knowledge.embeddings.provider`. Misconfigured or unavailable providers degrade to keyword + graph search rather than failing the turn.
 - PDF, DOCX, and image files are indexed with the `knowledge-media` extra. Images use `knowledge.captions` (`off` / `path` / `llm`); DOCX indexing covers tables as well as paragraphs.
 - Subagents search the parent workspace index read-only, and a second gateway attempting to write the same index is refused.
 - Soft spill and unified `read_file` char budgets derive from `model.context_window`: large tool results always land on disk with a large inline body when headroom allows; `read_file` returns `next_offset` and never lies about `end_line`.
+- When memory is off, host `run_command` children cannot see palace files (Linux user+mount namespaces or macOS `sandbox-exec`). If isolation cannot be established, the command is refused. OpenSandbox does not mount the palace. `/tmp` and `/var/folders` are no longer implicitly allowlisted path prefixes.
 
 ### Fixed
 

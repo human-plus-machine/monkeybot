@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from monkeybot.core.memory.palace import InMemoryPalace
 from monkeybot.core.memory.subsystem import MemorySubsystem
+from tests.core.memory.in_memory_palace import InMemoryPalace
 
 
 def make_memory_subsystem(

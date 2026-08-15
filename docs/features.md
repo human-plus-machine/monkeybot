@@ -371,7 +371,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Purpose:** Bound memory-index prompt size via sliding window, optional LLM curator, and search nudges.
 
-**Key files:** `core/context/memory_prompt.py`, `core/context/curator.py`, `core/memory/index_format.py`, `core/memory/organizer.py`, `monkeybot.yaml` `context_curation:`
+**Key files:** `core/context/curator.py`, `core/memory/index_format.py`, `core/memory/organizer.py`, `monkeybot.yaml` `context_curation:`
 
 **How it works:**
 - **Organizer** appends INDEX.md entries in recency order and archives overflow to `INDEX.archive.md` (`memory_index_cap`, default 200).
@@ -427,9 +427,9 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 ### 11. Memory subsystem
 
-**Purpose:** Per-agent MemPalace drawers with durable SQLite outbox ingest and wake-up + L2 recall in the prompt.
+**Purpose:** Per-agent MemPalace drawers with durable outbox ingest (SQLite, Postgres, or Firestore) and wake-up + L2 recall in the prompt.
 
-**Key files:** `core/memory/subsystem.py`, `hook.py`, `outbox.py`, `palace.py`, `writer.py`, `ingest.py`
+**Key files:** `core/memory/subsystem.py`, `hook.py`, `outbox.py`, `palace.py`, `writer.py`, `ingest.py`, `core/persistence/{sqlite,postgres,firestore}.py`, `core/tools/fs_isolation.py`
 
 **Storage URI:** `local://` only (object-store palaces are not supported in this release).
 
@@ -437,7 +437,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 | Event | Behavior |
 |-------|----------|
-| History append | Enqueue user / final assistant text on the outbox (same SQLite transaction when possible) |
+| History append | Enqueue user / final assistant text on the outbox (same transaction when the backend supports it) |
 | `PRE_TURN` | Inject thread-scoped L2 recall into `inject_memory_lines` |
 | `POST_TURN` | Wake the per-agent writer |
 | `SESSION_END` | Bounded outbox drain |
@@ -445,10 +445,11 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 **Invariants:**
 - Chat history is canonical; MemPalace drawers are an idempotent projection.
 - Recall is scoped to the current `thread_id` by default.
-- `memory.enabled: false` (or `MONKEYBOT_MEMORY_HOOK_ENABLED=0`) skips capture, wake-up, and prompt teaching. It is not a sandbox against shell access to palace files.
-- Postgres/Firestore history backends start without MemPalace.
+- `memory.enabled: false` (or `MONKEYBOT_MEMORY_HOOK_ENABLED=0`) skips capture, wake-up, and prompt teaching. Host `run_command` children then cannot see palace files: Linux user+mount namespaces or macOS `sandbox-exec` hide those directories. If that isolation cannot be established, the command is refused rather than run with palace files visible. OpenSandbox does not mount the palace. The kill switch is not an argv denylist; `bash` remains allowed, and the OS hides the files.
+- Postgres/Firestore persist the memory outbox with replica `palace_id` claim partitioning. Replicated deployments must share a lock-capable palace volume.
+- MemPalace (chromadb / onnxruntime) is the optional `monkeybot[memory]` extra. Missing the extra disables memory instead of failing startup.
 - Subagents can read the palace but do not register duplicate automatic-ingest hooks.
-- `flush()` must be called before short-lived handlers exit if organizer work matters.
+- `drain_writer()` runs at the end of Pattern B turns and again on `close()`, so short-lived / Lambda handlers flush the outbox before the process freezes.
 
 ---
 
@@ -568,7 +569,7 @@ session — no mid-session model swap exists), `/status`, `/config`. See
 1. `<agent>/.venv/bin/python` when a project venv exists
 2. `uv run python -m monkeybot.gateway.main` when `<agent>/pyproject.toml` exists but no `.venv`
 3. `sys.executable` (CLI interpreter) — config-only trees, when that interpreter already has MonkeyBot 3.x (and MemPalace if memory is on)
-4. A CLI-managed cache venv (`~/.cache/monkeybot/runtimes/…`) — config-only trees with memory on when the CLI interpreter cannot import MemPalace. Pinned to the running MonkeyBot version; never rewrites an agent `pyproject.toml`.
+4. A CLI-managed cache venv (`~/.cache/monkeybot/runtimes/…`) — config-only trees with memory on when the CLI interpreter cannot import MemPalace. Pinned to `monkeybot[memory]==<running version>`; never rewrites an agent `pyproject.toml`.
 
 Before spawning the gateway, the CLI probes that interpreter for MonkeyBot `>=3.0.0,<4` and, when memory is enabled, MemPalace. A stale agent venv may be refreshed with `uv sync` against the existing lock; `pyproject.toml` pins are never rewritten. A failed probe prints an upgrade command and exits. `monkeybot doctor` reports the same check as `env.harness.compatible`.
 

@@ -46,7 +46,7 @@ from monkeybot.core.llm.provider import (
 from monkeybot.core.llm.usage import Usage as UsageRecord
 from monkeybot.core.mcp.mcp_client import MCPClient
 from monkeybot.core.memory.config import memory_enabled_from_config
-from monkeybot.core.memory.subsystem import MemorySubsystem
+from monkeybot.core.memory.subsystem import MemoryConfigurationError, MemorySubsystem
 from monkeybot.core.persistence.backends import (
     StorageBackend,
     UsageStore,
@@ -68,7 +68,6 @@ from monkeybot.gateway.sse.loop_port import UsagePort
 from monkeybot.gateway.sse.models import AgentUsageResponse, SessionUsageResponse
 from monkeybot.gateway.sse.routes import create_app as build_sse_app
 from monkeybot.gateway.sse.session_bus import SessionBus, SessionRegistry
-from monkeybot.providers.gemini import GeminiProvider
 from monkeybot.todo_list import TodoListStore, TodoListTool, todo_list_enabled_from_env
 from monkeybot.web_search import WebSearchTool
 from monkeybot.web_search import build_backend as _build_web_search_backend
@@ -94,7 +93,6 @@ class _GatewayDeps:
     mcp: MCPClient | None = None
     inspectors: list[ToolInspector] = field(default_factory=list)
     provider: Provider | None = None
-    curator_provider: Provider | None = None
     hook_manager: HookManager | None = None
     memory: MemorySubsystem | None = None
     knowledge: KnowledgeSubsystem | None = None
@@ -290,22 +288,6 @@ def _resolve_provider() -> Provider:
     return get_provider_config(provider=mode).provider
 
 
-def _resolve_curator_provider(main_provider: Provider) -> Provider:
-    """Dedicated provider for context curation with thinking and token cap overrides.
-
-    Uses a small ``max_tokens`` (the curator only needs ~50 JSON tokens) and
-    ``thinking_budget=0`` to explicitly disable extended thinking, which can stall
-    preview models for 10s+ on a short JSON-only completion.
-
-    Fake / vertex_anthropic modes reuse ``main_provider`` — curation is no-op in tests
-    and vertex-claude has no thinking budget concept.
-    """
-    mode = normalize_model_provider(os.environ.get("MODEL_PROVIDER", "google_vertexai"))
-    if mode in ("fake", "vertex_anthropic"):
-        return main_provider
-    return GeminiProvider(thinking_budget=0, max_tokens=1024)
-
-
 class GatewayLoopPort:
     """Schedules :func:`~monkeybot.core.runtime.loop.run` and forwards events to the session bus."""
 
@@ -465,7 +447,6 @@ class GatewayLoopPort:
                 tool_executor=executor,
                 cancelled=cancel_event,
                 hook_manager=_deps.hook_manager,
-                curator_provider=_deps.curator_provider,
                 attachment_store=attachment_store,
                 attachment_catalog=bus.attachment_catalog,
                 transcript_writer=transcript_writer,
@@ -585,7 +566,6 @@ async def _startup(fastapi_app: FastAPI) -> None:
     _deps.inspectors = inspectors
 
     _deps.provider = _resolve_provider()
-    _deps.curator_provider = _resolve_curator_provider(_deps.provider)
 
     vertex_gs = vertex_google_search_enabled_from_config()
     try:
@@ -610,32 +590,36 @@ async def _startup(fastapi_app: FastAPI) -> None:
             _deps.hook_manager = None
             _deps.memory = None
             fastapi_app.state.memory = None
+            fastapi_app.state.memory_status = "disabled"
+            fastapi_app.state.memory_detail = "memory.enabled=false"
         else:
             mem_uri = _memory_storage_uri()
             layout = AgentLayout.from_environment()
-            if not layout.db_url.strip().lower().startswith("sqlite:"):
-                raise ValueError(
-                    "MemPalace outbox requires sqlite:// DB_URL; "
-                    f"got {layout.db_url.split(':', 1)[0]!r}"
-                )
             mgr = HookManager()
             memory = MemorySubsystem(
                 memory_uri=mem_uri,
                 db_url=layout.db_url,
                 agent_id=layout.agent_root.name,
                 agent_name=layout.agent_root.name,
+                storage=backend,
             )
             await memory.ensure_ready()
             memory.register_hooks(mgr)
             _deps.hook_manager = mgr
             _deps.memory = memory
             fastapi_app.state.memory = memory
+            fastapi_app.state.memory_status = "enabled"
+            fastapi_app.state.memory_detail = None
             logger.info("memory enabled (memory_storage_uri=%s)", mem_uri)
+    except MemoryConfigurationError:
+        raise
     except Exception as exc:
         logger.warning("memory setup failed; continuing without: %r", exc)
         _deps.hook_manager = None
         _deps.memory = None
         fastapi_app.state.memory = None
+        fastapi_app.state.memory_status = "unavailable"
+        fastapi_app.state.memory_detail = str(exc)
 
     # Unified knowledge layer — FTS + ANN + links + search
     if knowledge_enabled_from_config():

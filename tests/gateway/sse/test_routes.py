@@ -231,6 +231,19 @@ async def test_health_returns_200(app) -> None:
         body = r.json()
         assert body["status"] == "ok"
         assert body["version"] == "2.0.0"
+        assert body["memory"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_health_reports_memory_status(app) -> None:
+    app.state.memory_status = "unavailable"
+    app.state.memory_detail = "outbox requires sqlite:// DB_URL; got postgresql"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        r = await client.get("/health")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["memory"] == "unavailable"
+        assert body["memory_detail"] == "outbox requires sqlite:// DB_URL; got postgresql"
 
 
 def test_get_events_returns_404_for_unknown_session(registry: SessionRegistry) -> None:

@@ -52,7 +52,7 @@ def test_run_new_creates_bundle(tmp_path: Path) -> None:
     mcp = (cfg / "mcp.json").read_text(encoding="utf-8")
     assert '"browser"' in mcp and '"enabled": true' in mcp
     pyproject = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
-    assert f"monkeybot[gemini,sandbox,web-search]{COMPATIBLE_CORE_RANGE}" in pyproject
+    assert f"monkeybot[gemini,sandbox,web-search,memory]{COMPATIBLE_CORE_RANGE}" in pyproject
     assert '"monkeybot-browser-mcp>=0.2.0,<1"' in pyproject
     assert "[tool.uv]\npackage = false" in pyproject
     assert "[tool.uv.sources]" not in pyproject
@@ -82,7 +82,7 @@ def test_write_agent_pyproject_maps_provider_extra(tmp_path: Path) -> None:
     assert status == "created"
     text = (dest / "pyproject.toml").read_text(encoding="utf-8")
     assert 'name = "my-cool-bot"' in text
-    assert f'"monkeybot[claude,sandbox,web-search]{COMPATIBLE_CORE_RANGE}"' in text
+    assert f'"monkeybot[claude,sandbox,web-search,memory]{COMPATIBLE_CORE_RANGE}"' in text
     assert "[tool.uv.sources]" not in text
 
 
@@ -95,7 +95,7 @@ def test_write_agent_pyproject_merges_feature_extras(tmp_path: Path) -> None:
     )
     text = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
     assert (
-        f'"monkeybot[openai,sandbox,web-search,postgres,observability]{COMPATIBLE_CORE_RANGE}"'
+        f'"monkeybot[openai,sandbox,web-search,memory,postgres,observability]{COMPATIBLE_CORE_RANGE}"'
         in text
     )
 
@@ -104,13 +104,13 @@ def test_write_agent_pyproject_fake_includes_sandbox(tmp_path: Path) -> None:
     status = write_agent_pyproject(tmp_path, provider="fake", force=False)
     assert status == "created"
     text = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
-    assert f'"monkeybot[sandbox,web-search]{COMPATIBLE_CORE_RANGE}"' in text
+    assert f'"monkeybot[sandbox,web-search,memory]{COMPATIBLE_CORE_RANGE}"' in text
 
 
 def test_write_agent_pyproject_fake_with_features(tmp_path: Path) -> None:
     write_agent_pyproject(tmp_path, provider="fake", extras=["postgres"], force=False)
     text = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
-    assert f'"monkeybot[sandbox,web-search,postgres]{COMPATIBLE_CORE_RANGE}"' in text
+    assert f'"monkeybot[sandbox,web-search,memory,postgres]{COMPATIBLE_CORE_RANGE}"' in text
 
 
 def test_write_agent_pyproject_skips_without_force(tmp_path: Path) -> None:
@@ -125,7 +125,7 @@ def test_write_agent_pyproject_force_overwrites(tmp_path: Path) -> None:
     status = write_agent_pyproject(tmp_path, provider="aws_bedrock", force=True)
     assert status == "overwritten"
     text = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
-    assert f'"monkeybot[bedrock,sandbox,web-search]{COMPATIBLE_CORE_RANGE}"' in text
+    assert f'"monkeybot[bedrock,sandbox,web-search,memory]{COMPATIBLE_CORE_RANGE}"' in text
 
 
 def test_run_refresh_adds_template_commands_and_keeps_extras(tmp_path: Path) -> None:
@@ -155,15 +155,15 @@ def test_run_refresh_adds_template_commands_and_keeps_extras(tmp_path: Path) -> 
 
     report = run_refresh(dest=tmp_path)
     text = allow.read_text(encoding="utf-8")
-    assert "  - mempalace\n" in text
-    assert '  - "officecli"\n' in text
-    assert '  - "./custom-data/"\n' in text
-    assert "  - ../memory/mempalace/\n" in text
+    assert "- mempalace\n" in text
+    assert "officecli" in text
+    assert "./custom-data/" in text
+    assert "../memory/mempalace/" in text
     assert "my-custom-deny" in text
     assert agent_md.read_text(encoding="utf-8") == "custom persona\n"
     assert '"mine"' in mcp.read_text(encoding="utf-8")
     refreshed_yaml = yaml_path.read_text(encoding="utf-8")
-    assert "engine: mempalace" in refreshed_yaml
+    assert "enabled: true" in refreshed_yaml
     assert "custom persona" not in refreshed_yaml
     joined = "\n".join(report)
     assert "command_allowlist.yaml: updated" in joined
@@ -205,9 +205,16 @@ def test_monkeybot_requirement_dedupes_provider_in_extras() -> None:
     assert dep == f"monkeybot[openai,postgres]{COMPATIBLE_CORE_RANGE}"
 
 
-def test_refresh_allowlist_does_not_emit_yaml_document_end() -> None:
-    from monkeybot_cli.scaffold import _yaml_list_item
+def test_refresh_allowlist_does_not_emit_yaml_document_end(tmp_path: Path) -> None:
+    from monkeybot_cli.scaffold import refresh_command_allowlist
 
-    item = _yaml_list_item("mempalace")
-    assert "..." not in item
-    assert item.strip() == '- "mempalace"'
+    cfg = tmp_path / "monkeybot_config"
+    cfg.mkdir()
+    (cfg / "command_allowlist.yaml").write_text(
+        "allowed_commands:\n  - officecli\n",
+        encoding="utf-8",
+    )
+    refresh_command_allowlist(cfg)
+    text = (cfg / "command_allowlist.yaml").read_text(encoding="utf-8")
+    assert "..." not in text
+    assert "officecli" in text

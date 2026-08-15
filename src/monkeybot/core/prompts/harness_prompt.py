@@ -60,8 +60,7 @@ When workspace tools (`read_file`, `write_file`, `run_command`, …) appear in t
 ### Runtime paths
 - workspace root (cwd): `{workspace_root}` — `read_file` / `write_file` / `glob` / `run_command` start here.
 - runtime (inside workspace): `.monkeybot/` — spill, knowledge index, transcripts. Not memory.
-- memory storage: `{memory_storage_uri}` — MemPalace root (verbatim conversation drawers). **Outside** the workspace root. Prefer `mempalace search` via `run_command` for past-session recall. Do not `read_file` palace paths.
-- workspace `data/` (if present) is ordinary project files — **not** the memory store.
+{memory_paths_line}- workspace `data/` (if present) is ordinary project files — **not** the memory store.
 
 ### MCP tools
 - Names look like `server__tool` (double underscore).
@@ -98,27 +97,72 @@ _TODO_LIST_LINE = (
     "under `## Todo list` when non-empty; keep it updated as you work.\n"
 )
 
-_SEARCH_TOOL_LINE = (
-    "- `search` — **local search index over the workspace** (+ knowledge notes): "
-    "FTS + link graph + optional embeddings. Has **no** record of past conversations — "
-    "use `mempalace search` for those. Not a substitute for `read_file`. Prefer `search` for "
-    "unfamiliar codebases, conceptual / cross-file / paraphrased questions; prefer "
-    "`grep` for exact identifiers, filenames, or stack traces.\n"
-)
+def _search_tool_line(*, memory_on: bool) -> str:
+    recall = (
+        "use `mempalace search` for those"
+        if memory_on
+        else "past conversations are not in this index"
+    )
+    return (
+        "- `search` — **local search index over the workspace** (+ knowledge notes): "
+        "FTS + link graph + optional embeddings. Has **no** record of past conversations — "
+        f"{recall}. Not a substitute for `read_file`. Prefer `search` for "
+        "unfamiliar codebases, conceptual / cross-file / paraphrased questions; prefer "
+        "`grep` for exact identifiers, filenames, or stack traces.\n"
+    )
 
-_KNOWLEDGE_SEARCH_BLOCK = """\
-### Knowledge retrieval (`search`) — how to use it well
-- **Default:** when exploring or answering questions about code you have not already located, **call `search` before** broad `glob` / wandering `read_file`. Do **not** skip it because "the answer is in source" — the index *is* that source.
-- **When:** "where does X live?", "how does Y work?", multi-question repo Q&A, paraphrases without exact symbols, or when you lack a precise path/`grep` needle.
-- **Not for:** past sessions, user preferences, or "what did we decide earlier" — use `mempalace search`.
-- **Locate-a-file / asset questions:** for "where is the logo / hero image / font file?" prefer `glob` on the plausible directory (e.g. `**/public/**`, `**/assets/**`) over `search`.
-- **Query shape:** one short, focused query per concept using distinctive nouns (mechanism, module role, behavior) — not the user's full multi-question dump pasted into ten parallel calls.
-- **Batching:** if answering several questions, issue a few high-signal searches (or one then refine), not near-duplicate parallel queries for every line item.
-- **Hit fields:** `score` is normalized per query (top hit ≈ 1.0). Optional `cosine` (ANN; < 0.45 ≈ weak semantic match), `bm25` (FTS; more negative ≈ stronger lexical match), and `signals` (`fts` / `ann` / `graph`).
-- **After hits:** `read_file` hits until the normalized score drops sharply (typically the top 3–5), including rank-1 even if the name looks unexpected. Skip only obvious noise (lockfiles). If the top hits all look off-topic, reformulate once; if two reformulations fail, fall back to `grep` / `glob`.
-- **Answer only after reading:** a `search` snippet is never sufficient evidence — snippets truncate and can mislead. Before emitting an answer or `Evidence:` line, `read_file` the file you will cite and confirm the exact source lines (for binary assets like images/PDFs, `glob` existence is enough). Never emit a file path you have not confirmed via `read_file` / `glob` this session; if still unknown, write `Evidence: unknown`.
-- **Long multi-item tasks:** when a task has more than ~10 enumerable items (question lists, checklists), write incremental results to a workspace file early (e.g. `answers.md`) and update it as you go. Do not wait until the end — context may be compacted mid-task.
-"""
+
+def _knowledge_search_block(*, memory_on: bool) -> str:
+    recall = (
+        "use `mempalace search`"
+        if memory_on
+        else "they are not available from this index"
+    )
+    return (
+        "### Knowledge retrieval (`search`) — how to use it well\n"
+        "- **Default:** when exploring or answering questions about code you have not already located, "
+        "**call `search` before** broad `glob` / wandering `read_file`. Do **not** skip it because "
+        '"the answer is in source" — the index *is* that source.\n'
+        '- **When:** "where does X live?", "how does Y work?", multi-question repo Q&A, paraphrases '
+        "without exact symbols, or when you lack a precise path/`grep` needle.\n"
+        f'- **Not for:** past sessions, user preferences, or "what did we decide earlier" — {recall}.\n'
+        '- **Locate-a-file / asset questions:** for "where is the logo / hero image / font file?" '
+        "prefer `glob` on the plausible directory (e.g. `**/public/**`, `**/assets/**`) over `search`.\n"
+        "- **Query shape:** one short, focused query per concept using distinctive nouns "
+        "(mechanism, module role, behavior) — not the user's full multi-question dump pasted into "
+        "ten parallel calls.\n"
+        "- **Batching:** if answering several questions, issue a few high-signal searches "
+        "(or one then refine), not near-duplicate parallel queries for every line item.\n"
+        "- **Hit fields:** `score` is normalized per query (top hit ≈ 1.0). Optional `cosine` "
+        "(ANN; < 0.45 ≈ weak semantic match), `bm25` (FTS; more negative ≈ stronger lexical match), "
+        "and `signals` (`fts` / `ann` / `graph`).\n"
+        "- **After hits:** `read_file` hits until the normalized score drops sharply "
+        "(typically the top 3–5), including rank-1 even if the name looks unexpected. "
+        "Skip only obvious noise (lockfiles). If the top hits all look off-topic, reformulate once; "
+        "if two reformulations fail, fall back to `grep` / `glob`.\n"
+        "- **Answer only after reading:** a `search` snippet is never sufficient evidence — "
+        "snippets truncate and can mislead. Before emitting an answer or `Evidence:` line, "
+        "`read_file` the file you will cite and confirm the exact source lines (for binary assets "
+        "like images/PDFs, `glob` existence is enough). Never emit a file path you have not "
+        "confirmed via `read_file` / `glob` this session; if still unknown, write `Evidence: unknown`.\n"
+        "- **Long multi-item tasks:** when a task has more than ~10 enumerable items "
+        "(question lists, checklists), write incremental results to a workspace file early "
+        "(e.g. `answers.md`) and update it as you go. Do not wait until the end — context may "
+        "be compacted mid-task.\n"
+    )
+
+
+def _memory_paths_line(*, memory_on: bool, memory_storage_uri: str) -> str:
+    if memory_on:
+        return (
+            f"- memory storage: `{memory_storage_uri}` — MemPalace root (verbatim conversation "
+            "drawers). **Outside** the workspace root. Prefer `mempalace search` via "
+            "`run_command` for past-session recall. Do not `read_file` palace paths.\n"
+        )
+    return (
+        "- memory storage: disabled — do not call `mempalace search` or read palace paths.\n"
+    )
+
 
 _MEMORY_TEACHING_BLOCK = """\
 ### Memory retrieval (`mempalace search`) — how to use it well
@@ -244,11 +288,18 @@ def harness_fixed_context(
         web_search_line=_WEB_SEARCH_LINE if include_web_search else "",
         todo_list_line=_TODO_LIST_LINE if include_todo_list else "",
         task_line=_TASK_LINE if include_task_tool else "",
-        search_tool_line=_SEARCH_TOOL_LINE if include_knowledge_search else "",
-        knowledge_search_block=_KNOWLEDGE_SEARCH_BLOCK if include_knowledge_search else "",
+        search_tool_line=_search_tool_line(memory_on=include_memory_teaching)
+        if include_knowledge_search
+        else "",
+        knowledge_search_block=_knowledge_search_block(memory_on=include_memory_teaching)
+        if include_knowledge_search
+        else "",
         memory_teaching_block=_MEMORY_TEACHING_BLOCK if include_memory_teaching else "",
+        memory_paths_line=_memory_paths_line(
+            memory_on=include_memory_teaching,
+            memory_storage_uri=memory_storage_uri,
+        ),
         workspace_root=workspace_root,
-        memory_storage_uri=memory_storage_uri,
     )
     personas_block = _subagent_personas_block(subagent_personas or ())
     emission_block = _emission_section(

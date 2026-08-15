@@ -63,7 +63,7 @@ ENV_MAP: dict[tuple[str, str], str] = {
     ("context_curation", "memory_token_threshold"): "CONTEXT_CURATION_MEMORY_TOKEN_THRESHOLD",
     ("context_curation", "curator_model"): "CONTEXT_CURATOR_MODEL",
     ("context_curation", "timeout_sec"): "CONTEXT_CURATION_TIMEOUT_SEC",
-    ("memory", "engine"): "MEMORY_ENGINE",
+    ("memory", "enabled"): "MONKEYBOT_MEMORY_HOOK_ENABLED",
     ("memory", "backend"): "MEMPALACE_BACKEND",
     ("memory", "embedding_model"): "MEMPALACE_EMBEDDING_MODEL",
     ("tools", "denied_patterns"): "MONKEYBOT_TOOL_DENIED_PATTERNS",

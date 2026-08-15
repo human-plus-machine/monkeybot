@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import logging
 import os
-import threading
+import tempfile
+import uuid
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
+from importlib.util import find_spec
 from pathlib import Path
 from typing import Any, Protocol
 
 from monkeybot.core.memory.ids import utc_now_iso
 from monkeybot.core.memory.observability import log_event
+from monkeybot.core.memory.uri import object_store_memory_scheme
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +23,8 @@ DEFAULT_EMBEDDING_MODEL = "embeddinggemma-300m"
 DEFAULT_BACKEND = "chroma"
 CONVERSATION_ROOM = "conversation"
 EMBEDDER_IDENTITY_FILE = ".embedder_identity"
+PALACE_ID_FILE = ".palace_id"
+PALACE_WRITE_LOCK_FILE = ".palace_write.lock"
 L2_MAX_CHARS = 2000
 L2_MAX_DRAWERS = 12
 
@@ -66,18 +71,99 @@ class PalacePort(Protocol):
     def acquire_write_lock(self) -> AbstractContextManager[None]: ...
 
 
+class MemoryDependencyError(RuntimeError):
+    """Raised when MemPalace-backed memory is enabled without ``monkeybot[memory]``."""
+
+
+def mempalace_available() -> bool:
+    """Whether the optional MemPalace runtime is installed."""
+    try:
+        return find_spec("mempalace") is not None
+    except (ImportError, ValueError):
+        return False
+
+
 def palace_path_from_uri(memory_uri: str) -> Path:
     raw = memory_uri.strip()
     if not raw:
         raise ValueError("memory URI is empty")
-    scheme, _, rest = raw.partition("://")
-    if rest and scheme.lower() != "local":
+    remote = object_store_memory_scheme(raw)
+    if remote:
         raise ValueError(
-            f"unsupported memory URI {memory_uri!r}; MemPalace requires local:// "
-            "(object-store palaces are not supported)"
+            f"unsupported memory URI {memory_uri!r}; MemPalace does not support "
+            f"{remote} (use local://)"
         )
-    path = rest if rest else raw
+    scheme, _, rest = raw.partition("://")
+    path = rest if rest and scheme.lower() in {"local", "file"} else raw
     return Path(path).expanduser().resolve()
+
+
+@contextmanager
+def palace_volume_lock(palace_path: Path) -> Iterator[None]:
+    """Serialize palace mutations using a POSIX flock on the palace volume."""
+    import fcntl
+
+    palace_path.mkdir(parents=True, exist_ok=True)
+    lock_path = palace_path / PALACE_WRITE_LOCK_FILE
+    with lock_path.open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _write_palace_id(path: Path, token: str, *, exclusive: bool) -> None:
+    flags = os.O_WRONLY | os.O_CREAT
+    if exclusive:
+        flags |= os.O_EXCL
+    else:
+        flags |= os.O_TRUNC
+    fd = os.open(path, flags, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(token)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def palace_instance_id(palace_path: Path) -> str:
+    """Stable id for this palace directory (shared volume ⇒ same id).
+
+    Reads ``.palace_id`` without the volume lock. The flock is taken only on the
+    create path so constructing a subsystem does not stall behind an in-flight
+    embedding upsert.
+    """
+    path = palace_path / PALACE_ID_FILE
+    if path.is_file():
+        got = path.read_text(encoding="utf-8").strip()
+        if got:
+            return got
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with palace_volume_lock(path.parent):
+        if path.is_file():
+            got = path.read_text(encoding="utf-8").strip()
+            if got:
+                return got
+        token = uuid.uuid4().hex
+        try:
+            _write_palace_id(path, token, exclusive=True)
+        except FileExistsError:
+            got = path.read_text(encoding="utf-8").strip()
+            if got:
+                return got
+            _write_palace_id(path, token, exclusive=False)
+        return path.read_text(encoding="utf-8").strip()
+
+
+def palace_path_is_ephemeral(palace_path: Path) -> bool:
+    """True when the palace lives under the process temp directory."""
+    resolved = Path(palace_path).expanduser().resolve()
+    tmp = Path(tempfile.gettempdir()).resolve()
+    try:
+        resolved.relative_to(tmp)
+        return True
+    except ValueError:
+        return False
 
 
 def default_identity_text(agent_name: str) -> str:
@@ -87,95 +173,6 @@ def default_identity_text(agent_name: str) -> str:
         f"I am {name}, a MonkeyBot agent.\n"
         f"I remember verbatim conversation turns in this palace.\n"
     )
-
-
-class InMemoryPalace:
-    """Process-local palace used by tests (no embedder, no Chroma)."""
-
-    def __init__(
-        self,
-        palace_path: Path,
-        *,
-        agent_name: str = "test-agent",
-        backend: str = "memory",
-        embedding_model: str = DEFAULT_EMBEDDING_MODEL,
-    ) -> None:
-        self.palace_path = Path(palace_path)
-        self.backend = backend
-        self.embedding_model = embedding_model
-        self._agent_name = agent_name
-        self._lock = threading.Lock()
-        self._drawers: dict[str, DrawerRecord] = {}
-        self.palace_path.mkdir(parents=True, exist_ok=True)
-        identity = self.palace_path / "identity.txt"
-        if not identity.is_file():
-            identity.write_text(default_identity_text(agent_name), encoding="utf-8")
-        (self.palace_path / EMBEDDER_IDENTITY_FILE).write_text(embedding_model, encoding="utf-8")
-
-    def ensure_ready(self) -> None:
-        return
-
-    @contextmanager
-    def acquire_write_lock(self) -> Iterator[None]:
-        with self._lock:
-            yield
-
-    def upsert_drawer(self, drawer_id: str, content: str, metadata: dict[str, str]) -> None:
-        filed_at = metadata.get("filed_at") or metadata.get("source_timestamp") or utc_now_iso()
-        record = DrawerRecord(
-            drawer_id=drawer_id,
-            content=content,
-            wing=metadata.get("wing") or "main",
-            room=metadata.get("room") or CONVERSATION_ROOM,
-            filed_at=filed_at,
-            metadata=dict(metadata),
-        )
-        self._drawers[drawer_id] = record
-
-    def get_drawer(self, drawer_id: str) -> DrawerRecord | None:
-        return self._drawers.get(drawer_id)
-
-    def wake_up(self, wing: str | None = None) -> str:
-        identity = (self.palace_path / "identity.txt").read_text(encoding="utf-8").strip()
-        drawers = list(self._drawers.values())
-        if wing:
-            drawers = [d for d in drawers if d.wing == wing]
-        drawers.sort(key=lambda d: d.filed_at, reverse=True)
-        lines = [identity, "", "## L1 — ESSENTIAL STORY"]
-        if not drawers:
-            lines.append("No memories yet.")
-            return "\n".join(lines)
-        for drawer in drawers[:15]:
-            snippet = " ".join(drawer.content.split())
-            if len(snippet) > 200:
-                snippet = snippet[:197] + "..."
-            lines.append(f"- [{drawer.room}] {snippet}")
-        return "\n".join(lines)
-
-    def recall(
-        self,
-        *,
-        wing: str,
-        room: str,
-        n_results: int = 10,
-        thread_id: str | None = None,
-    ) -> list[DrawerRecord]:
-        matched = [
-            d
-            for d in self._drawers.values()
-            if d.wing == wing
-            and d.room == room
-            and (thread_id is None or d.metadata.get("thread_id") == thread_id)
-        ]
-        matched.sort(key=lambda d: d.filed_at, reverse=True)
-        return matched[: max(0, n_results)]
-
-    def status(self) -> dict[str, Any]:
-        return {
-            "palace_path": str(self.palace_path),
-            "total_drawers": len(self._drawers),
-            "backend": self.backend,
-        }
 
 
 def _stringify_meta(meta: dict[str, Any] | None) -> dict[str, str]:
@@ -250,7 +247,7 @@ class MemPalaceAdapter:
     def acquire_write_lock(self) -> Iterator[None]:
         from mempalace.palace import mine_palace_lock
 
-        with mine_palace_lock(str(self.palace_path)):
+        with palace_volume_lock(self.palace_path), mine_palace_lock(str(self.palace_path)):
             yield
 
     def _collection(self, *, create: bool = True) -> Any:
@@ -323,13 +320,59 @@ class MemPalaceAdapter:
             clauses.append({"thread_id": thread_id})
         where: dict[str, Any] = {"$and": clauses}
         try:
-            result = col.get(
-                where=where,
-                include=["documents", "metadatas"],
-                limit=max(n_results * 8, 80),
-            )
+            # Fetch metadata only, sort by durable recency, then load the newest N.
+            meta_result = col.get(where=where, include=["metadatas"])
         except Exception as exc:
             logger.warning("mempalace recall failed: %r", exc)
+            return []
+        ids = meta_result.get("ids") or []
+        metas = meta_result.get("metadatas") or []
+        ranked: list[tuple[str, str, dict[str, str]]] = []
+        for drawer_id, meta in zip(ids, metas, strict=False):
+            parsed = _stringify_meta(meta)
+            filed = parsed.get("source_timestamp") or parsed.get("filed_at") or ""
+            ranked.append((str(drawer_id), filed, parsed))
+        ranked.sort(key=lambda item: item[1], reverse=True)
+        top = ranked[: max(0, n_results)]
+        if not top:
+            return []
+        top_ids = [item[0] for item in top]
+        try:
+            docs_result = col.get(ids=top_ids, include=["documents", "metadatas"])
+        except Exception as exc:
+            logger.warning("mempalace recall documents failed: %r", exc)
+            return []
+        doc_ids = docs_result.get("ids") or []
+        docs = docs_result.get("documents") or []
+        doc_metas = docs_result.get("metadatas") or []
+        by_id: dict[str, tuple[str, dict[str, str]]] = {}
+        for drawer_id, doc, meta in zip(doc_ids, docs, doc_metas, strict=False):
+            by_id[str(drawer_id)] = (doc or "", _stringify_meta(meta))
+        records: list[DrawerRecord] = []
+        for drawer_id, filed, parsed in top:
+            doc, meta = by_id.get(drawer_id, ("", parsed))
+            records.append(
+                DrawerRecord(
+                    drawer_id=drawer_id,
+                    content=doc,
+                    wing=meta.get("wing") or wing,
+                    room=meta.get("room") or room,
+                    filed_at=meta.get("source_timestamp") or meta.get("filed_at") or filed,
+                    metadata=meta or parsed,
+                )
+            )
+        return records
+
+    def list_drawers(self, *, limit: int = 2000) -> list[DrawerRecord]:
+        try:
+            col = self._collection(create=False)
+        except Exception as exc:
+            logger.warning("mempalace list_drawers collection failed: %r", exc)
+            return []
+        try:
+            result = col.get(include=["documents", "metadatas"])
+        except Exception as exc:
+            logger.warning("mempalace list_drawers failed: %r", exc)
             return []
         ids = result.get("ids") or []
         docs = result.get("documents") or []
@@ -337,20 +380,18 @@ class MemPalaceAdapter:
         records: list[DrawerRecord] = []
         for drawer_id, doc, meta in zip(ids, docs, metas, strict=False):
             parsed = _stringify_meta(meta)
-            if thread_id and parsed.get("thread_id") != thread_id:
-                continue
             records.append(
                 DrawerRecord(
                     drawer_id=str(drawer_id),
                     content=doc or "",
-                    wing=parsed.get("wing") or wing,
-                    room=parsed.get("room") or room,
+                    wing=parsed.get("wing") or "main",
+                    room=parsed.get("room") or CONVERSATION_ROOM,
                     filed_at=parsed.get("source_timestamp") or parsed.get("filed_at") or "",
                     metadata=parsed,
                 )
             )
         records.sort(key=lambda d: d.filed_at, reverse=True)
-        return records[: max(0, n_results)]
+        return records[: max(0, limit)]
 
     def status(self) -> dict[str, Any]:
         from mempalace.layers import MemoryStack
@@ -390,13 +431,14 @@ def create_palace(
     agent_name: str,
     backend: str | None = None,
     embedding_model: str | None = None,
-    in_memory: bool = False,
 ) -> PalacePort:
     path = palace_path_from_uri(memory_uri)
     be = (backend or os.environ.get("MEMPALACE_BACKEND") or DEFAULT_BACKEND).strip()
     model = (
         embedding_model or os.environ.get("MEMPALACE_EMBEDDING_MODEL") or DEFAULT_EMBEDDING_MODEL
     ).strip()
-    if in_memory:
-        return InMemoryPalace(path, agent_name=agent_name, backend="memory", embedding_model=model)
+    if not mempalace_available():
+        raise MemoryDependencyError(
+            "MemPalace memory requires the optional dependency; install `monkeybot[memory]`"
+        )
     return MemPalaceAdapter(path, agent_name=agent_name, backend=be, embedding_model=model)
