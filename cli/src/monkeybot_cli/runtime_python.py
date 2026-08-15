@@ -21,6 +21,7 @@ probe refuses to start the gateway.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -32,14 +33,44 @@ DEFAULT_PORT = 8080
 SSE_GATEWAY_MODULE = "monkeybot.gateway.main"
 COMBINED_GATEWAY_MODULE = "monkeybot.gateway.realtime_main"
 
-# Stdlib-only snippet executed in the *agent* interpreter. Strip PEP 440 local
-# versions (``3.1.0+local``) so the tuple compare matches ``COMPATIBLE_CORE_RANGE``.
+
+def _release_tuple(version: str) -> list[int]:
+    """Return the PEP 440 release segment as ``[major, minor, micro]``.
+
+    Strips local (+…), epoch (!), and pre/post/dev suffixes so versions like
+    ``3.1.0+local``, ``3.1.post1``, and ``3.1rc1`` all map to a comparable triple.
+    """
+    public = version.split("+", 1)[0]
+    if "!" in public:
+        public = public.split("!", 1)[1]
+    match = re.match(r"^(\d+)(?:\.(\d+))?(?:\.(\d+))?", public)
+    if not match:
+        return [0, 0, 0]
+    return [int(match.group(i) or 0) for i in (1, 2, 3)]
+
+
+def _core_range_bounds(range_: str) -> tuple[list[int], list[int]]:
+    """Derive inclusive lower / exclusive upper release tuples from ``range_``."""
+    lower_m = re.search(r">=(\d+(?:\.\d+)*)", range_)
+    upper_m = re.search(r"<(\d+(?:\.\d+)*)", range_)
+    if lower_m is None or upper_m is None:
+        raise ValueError(f"unsupported COMPATIBLE_CORE_RANGE: {range_!r}")
+    return _release_tuple(lower_m.group(1)), _release_tuple(upper_m.group(1))
+
+
+_CORE_LOWER, _CORE_UPPER = _core_range_bounds(COMPATIBLE_CORE_RANGE)
+
+# Stdlib-only snippet executed in the *agent* interpreter. Bounds are injected
+# from ``COMPATIBLE_CORE_RANGE`` so the probe cannot silently diverge.
 CORE_PROBE = (
     "from importlib.metadata import version; "
+    "import re; "
     "ver = version('monkeybot'); "
     "public = ver.split('+', 1)[0]; "
-    "parts = ([int(p) for p in public.split('.')[:3]] + [0, 0, 0])[:3]; "
-    "assert [3, 0, 0] <= parts < [4, 0, 0], ver"
+    "public = public.split('!', 1)[-1]; "
+    "m = re.match(r'^(\\d+)(?:\\.(\\d+))?(?:\\.(\\d+))?', public); "
+    "parts = [int(m.group(i) or 0) for i in (1, 2, 3)] if m else [0, 0, 0]; "
+    f"assert {_CORE_LOWER!s} <= parts < {_CORE_UPPER!s}, ver"
 )
 MEMORY_PROBE = f"import mempalace; {CORE_PROBE}"
 
@@ -126,7 +157,7 @@ def _upgrade_error(
         how = f"pin monkeybot{range_} in {agent_root}/pyproject.toml, then `cd {agent_root} && uv sync`"
     elif memory_enabled:
         how = (
-            f"install monkeybot{range_} (includes MemPalace) in this environment, "
+            f"install monkeybot[memory]{range_} in this environment, "
             "or set `memory.enabled: false`"
         )
     else:

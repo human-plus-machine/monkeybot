@@ -65,7 +65,7 @@ def test_runtime_python_version_returns_zeros_when_uv_missing(
         raise FileNotFoundError("uv")
 
     monkeypatch.setattr("monkeybot_cli.runtime_python.subprocess.run", fake_run)
-    assert _runtime_python_version(runtime, tmp_path) == (0, 0, 0)
+    assert _runtime_python_version(runtime) == (0, 0, 0)
 
 
 def test_runtime_python_version_returns_zeros_on_timeout(
@@ -78,4 +78,4 @@ def test_runtime_python_version_returns_zeros_on_timeout(
         raise subprocess.TimeoutExpired(cmd="uv", timeout=15)
 
     monkeypatch.setattr("monkeybot_cli.runtime_python.subprocess.run", fake_run)
-    assert _runtime_python_version(runtime, tmp_path) == (0, 0, 0)
+    assert _runtime_python_version(runtime) == (0, 0, 0)

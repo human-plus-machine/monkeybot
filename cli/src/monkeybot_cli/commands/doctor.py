@@ -33,9 +33,8 @@ from monkeybot_cli.runtime_python import (
 )
 
 
-def _runtime_python_version(runtime, agent_root: Path) -> tuple[int, int, int]:
+def _runtime_python_version(runtime) -> tuple[int, int, int]:
     """Ask the runtime interpreter for its version (major, minor, micro)."""
-    del agent_root
     ok, text = _probe(
         runtime,
         "import sys; print(sys.version_info[0], sys.version_info[1], sys.version_info[2])",
@@ -200,7 +199,7 @@ def run_doctor(args: argparse.Namespace) -> int:
         print(f"  data: {layout.data_root}")
     runtime = resolve_runtime_python(agent_root)
 
-    py_version = _runtime_python_version(runtime, agent_root)
+    py_version = _runtime_python_version(runtime)
     py_ok = py_version >= (3, 11)
     check(
         report,
@@ -233,7 +232,8 @@ def run_doctor(args: argparse.Namespace) -> int:
             f"cd {agent_root} && uv sync"
             if (agent_root / "pyproject.toml").is_file()
             else (
-                f"Install monkeybot{COMPATIBLE_CORE_RANGE} in this environment"
+                f"Install monkeybot{'[memory]' if memory_on else ''}"
+                f"{COMPATIBLE_CORE_RANGE} in this environment"
                 + (", or set memory.enabled: false" if memory_on else "")
             )
         ),

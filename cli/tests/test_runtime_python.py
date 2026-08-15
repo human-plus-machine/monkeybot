@@ -144,18 +144,20 @@ def test_core_probe_matches_compatible_range() -> None:
     from packaging.specifiers import SpecifierSet
 
     from monkeybot_cli.compat import COMPATIBLE_CORE_RANGE
+    from monkeybot_cli.runtime_python import _CORE_LOWER, _CORE_UPPER, _core_range_bounds
 
     spec = SpecifierSet(COMPATIBLE_CORE_RANGE)
     assert COMPATIBLE_CORE_RANGE == ">=3.0.0,<4"
     assert spec.contains("3.0.0")
     assert spec.contains("3.9.9")
     assert spec.contains("3.1.0+local")
+    assert spec.contains("3.1.post1")
     assert not spec.contains("2.9.9")
     assert not spec.contains("4.0.0")
     assert "packaging" not in CORE_PROBE
-    assert "split('+', 1)" in CORE_PROBE
-    assert "[3, 0, 0]" in CORE_PROBE
-    assert "[4, 0, 0]" in CORE_PROBE
+    assert _core_range_bounds(COMPATIBLE_CORE_RANGE) == (_CORE_LOWER, _CORE_UPPER)
+    assert str(_CORE_LOWER) in CORE_PROBE
+    assert str(_CORE_UPPER) in CORE_PROBE
     assert MEMORY_PROBE.startswith("import mempalace")
 
     def _probe_version(ver: str) -> int:
@@ -168,6 +170,8 @@ def test_core_probe_matches_compatible_range() -> None:
 
     assert _probe_version("3.1.0+local") == 0
     assert _probe_version("3.0.0") == 0
+    assert _probe_version("3.1.post1") == 0
+    assert _probe_version("3.1rc1") == 0
     assert _probe_version("2.9.9") != 0
     assert _probe_version("4.0.0") != 0
 
@@ -356,6 +360,7 @@ def test_prepare_runtime_python_fail_closed_config_only_with_memory(
     with pytest.raises(RuntimeUpgradeError, match="MemPalace") as excinfo:
         prepare_runtime_python(tmp_path)
     assert "memory.enabled: false" in str(excinfo.value)
+    assert "monkeybot[memory]" in str(excinfo.value)
     assert "uv sync" not in str(excinfo.value)
 
 
