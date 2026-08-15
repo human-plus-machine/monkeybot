@@ -23,10 +23,10 @@ dependencies = [
     # <2.5: newer numpy stub files use PEP 695 `type` statements that mypy
     # cannot parse while this project's [tool.mypy] targets python_version 3.11.
     "numpy>=1.26.0,<2.5",
-    "mempalace>=3.7.0,<4",
 ]
 
 [project.optional-dependencies]
+memory = ["mempalace>=3.7.0,<4"]
 gemini = ["google-genai>=1.0.0"]
 vertex = [
     "google-genai>=1.0.0",
@@ -96,6 +96,8 @@ dev = [
     "monkeybot[knowledge-ast]",
     # Exercise PDF/DOCX knowledge extraction in CI / local tests.
     "monkeybot[knowledge-media]",
+    # MemPalace is an optional extra; tests still exercise the adapter.
+    "monkeybot[memory]",
 ]
 
 [tool.uv]

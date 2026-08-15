@@ -209,7 +209,6 @@ async def test_start_turn_prefers_session_provider(
     gateway_app._deps.mcp = MagicMock()
     gateway_app._deps.provider = global_provider
     gateway_app._deps.inspectors = []
-    gateway_app._deps.curator_provider = global_provider
     gateway_app._deps.hook_manager = None
     gateway_app._deps.web_search_tool = None
 
@@ -265,7 +264,6 @@ async def test_start_turn_falls_back_to_env(
     gateway_app._deps.mcp = MagicMock()
     gateway_app._deps.provider = global_provider
     gateway_app._deps.inspectors = []
-    gateway_app._deps.curator_provider = global_provider
     gateway_app._deps.hook_manager = None
     gateway_app._deps.web_search_tool = None
 

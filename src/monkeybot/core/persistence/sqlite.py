@@ -156,10 +156,11 @@ def sqlite_path_from_db_url(db_url: str | None = None) -> str:
 
 
 async def configure_connection(conn: aiosqlite.Connection) -> None:
-    """PRAGMA journal_mode=WAL; foreign_keys=ON; synchronous=NORMAL."""
+    """PRAGMA journal_mode=WAL; foreign_keys=ON; synchronous=NORMAL; busy_timeout=5000."""
     await conn.execute("PRAGMA journal_mode=WAL")
     await conn.execute("PRAGMA foreign_keys=ON")
     await conn.execute("PRAGMA synchronous=NORMAL")
+    await conn.execute("PRAGMA busy_timeout=5000")
 
 
 async def _connection_db_path(conn: aiosqlite.Connection) -> str:
