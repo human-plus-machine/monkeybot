@@ -45,7 +45,7 @@ def test_new_scaffolds(tmp_path: Path) -> None:
     assert "MONKEYBOT_SUBAGENT_AGENT_MD" not in env_text
     assert "DB_URL" in env_text
     pyproject = (tmp_path / "pyproject.toml").read_text()
-    assert "monkeybot[gemini,sandbox,web-search]>=2.2.0,<3" in pyproject
+    assert "monkeybot[gemini,sandbox,web-search,memory]>=3.0.0,<4" in pyproject
     assert "monkeybot-browser-mcp>=0.2.0,<1" in pyproject
     assert "package = false" in pyproject
     assert "[tool.uv.sources]" not in pyproject
@@ -59,6 +59,25 @@ def test_new_force_reports_overwritten_config(tmp_path: Path) -> None:
     second = _run_cli("new", "--dest", str(tmp_path), "--yes", "--force")
     assert second.returncode == 0
     assert "monkeybot_config/monkeybot.yaml: overwritten" in second.stdout
+
+
+def test_refresh_updates_existing_agent(tmp_path: Path) -> None:
+    created = _run_cli("new", "--dest", str(tmp_path), "--yes")
+    assert created.returncode == 0
+    allow = tmp_path / "monkeybot_config" / "command_allowlist.yaml"
+    allow.write_text("allowed_commands:\n  - bash\n  - officecli\n", encoding="utf-8")
+    result = _run_cli("refresh", "--dest", str(tmp_path))
+    assert result.returncode == 0, result.stderr
+    text = allow.read_text(encoding="utf-8")
+    assert "mempalace" in text
+    assert "officecli" in text
+    assert "command_allowlist.yaml: updated" in result.stdout
+
+
+def test_refresh_rejects_empty_dest(tmp_path: Path) -> None:
+    result = _run_cli("refresh", "--dest", str(tmp_path))
+    assert result.returncode == 2
+    assert "not a scaffolded agent" in result.stderr
 
 
 def test_write_active_config_reports_overwritten_on_force(tmp_path: Path) -> None:

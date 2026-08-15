@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
+from contextlib import AbstractAsyncContextManager, nullcontext
 
 import aiosqlite
 
@@ -12,8 +14,12 @@ from monkeybot.core.llm.usage import Usage, UsageBreakdown, UsageBucket, UsageSu
 class SQLiteUsageStore:
     """Insert ``turn_usage`` rows and compute summaries."""
 
-    def __init__(self, conn: aiosqlite.Connection) -> None:
+    def __init__(self, conn: aiosqlite.Connection, *, tx_lock: asyncio.Lock | None = None) -> None:
         self._conn = conn
+        self._tx_lock = tx_lock
+
+    def _tx(self) -> AbstractAsyncContextManager[None]:
+        return self._tx_lock if self._tx_lock is not None else nullcontext()
 
     def _since_clause(self, since_ms: int | None) -> tuple[str, list[object]]:
         if since_ms is None:
@@ -31,33 +37,34 @@ class SQLiteUsageStore:
     ) -> None:
         """Persist one usage row at ``created_at`` = now (ms)."""
         now_ms = int(time.time() * 1000)
-        await self._conn.execute(
-            """
-            INSERT INTO turn_usage(
-                thread_id, run_id, model,
-                input_tokens, output_tokens, cached_tokens,
-                cost_usd, duration_ms, created_at, context_json,
-                estimated_prompt_tokens, cache_read_tokens, cache_creation_tokens
+        async with self._tx():
+            await self._conn.execute(
+                """
+                INSERT INTO turn_usage(
+                    thread_id, run_id, model,
+                    input_tokens, output_tokens, cached_tokens,
+                    cost_usd, duration_ms, created_at, context_json,
+                    estimated_prompt_tokens, cache_read_tokens, cache_creation_tokens
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    thread_id,
+                    run_id,
+                    model,
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.cached_tokens,
+                    usage.cost_usd,
+                    usage.duration_ms,
+                    now_ms,
+                    context_json,
+                    usage.estimated_prompt_tokens,
+                    usage.cache_read_tokens,
+                    usage.cache_creation_tokens,
+                ),
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                thread_id,
-                run_id,
-                model,
-                usage.input_tokens,
-                usage.output_tokens,
-                usage.cached_tokens,
-                usage.cost_usd,
-                usage.duration_ms,
-                now_ms,
-                context_json,
-                usage.estimated_prompt_tokens,
-                usage.cache_read_tokens,
-                usage.cache_creation_tokens,
-            ),
-        )
-        await self._conn.commit()
+            await self._conn.commit()
 
     async def summary(
         self,

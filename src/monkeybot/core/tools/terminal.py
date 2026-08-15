@@ -22,6 +22,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import shutil
 import signal
 import sys
 from collections.abc import Sequence
@@ -38,24 +39,25 @@ _STREAM_DRAIN_TIMEOUT_SEC = 2.0
 # SECURITY: Command allowlist - modify with extreme caution
 # Only add commands that are essential and have been security reviewed
 ALLOWED_COMMANDS = [
-    "cat",      # Read file contents
-    "ls",       # List directory contents
-    "grep",     # Search file contents (line-oriented)
-    "rg",       # ripgrep — fast content search (prefer builtin grep tool when available)
-    "echo",     # Print text (used in tests and debugging)
-    "python",   # Execute Python scripts (skills)
-    "python3",  # Execute Python scripts (skills)
-    "uv",       # Package runner (install subcommands blocked by deny_patterns)
-    "git",      # Version control (clone, branch, commit, push, etc.)
-    "gh",       # GitHub CLI (e.g. gh pr create)
-    "bash",     # Shell interpreter — use for builtins (cd, &&, pipes) via bash -c "..."
+    "cat",
+    "ls",
+    "grep",
+    "rg",
+    "echo",
+    "python",
+    "python3",
+    "uv",
+    "git",
+    "gh",
+    "bash",
+    "mempalace",
 ]
 
 # SECURITY: Path allowlist - modify with extreme caution
 # Only add paths that are safe for agent access
 ALLOWED_PATHS = [
-    "../memory/",        # Agent-home memory (cwd is workspace/)
-    "../memory",         # Same, when callers omit trailing slash
+    "../memory/",
+    "../memory",
     "./skills/",         # Skills directory
     "./skills",          # Same, when callers omit trailing slash
     "./global-skills/",  # Shared library authoring (Main Agent Studio)
@@ -107,6 +109,26 @@ def build_skill_runtime_env(*, cwd: Path | str) -> dict[str, str]:
             cred_path = cred_path.resolve()
         env[cred_env] = str(cred_path)
     return env
+
+
+def _resolve_run_executable(
+    command: str, args: List[str], env: dict[str, str]
+) -> tuple[str, List[str]]:
+    """Map an allowlisted binary to an argv the gateway can actually exec.
+
+    ``python``/``python3`` always use this interpreter. Other names are looked
+    up on the skill PATH (venv ``bin`` first). ``mempalace`` falls back to
+    ``python -m mempalace`` when the console script is missing — common when
+    the package is installed but scripts are not on PATH.
+    """
+    if command in ("python3", "python"):
+        return sys.executable, args
+    found = shutil.which(command, path=env.get("PATH", os.defpath))
+    if found:
+        return found, args
+    if command == "mempalace":
+        return sys.executable, ["-m", "mempalace", *args]
+    return command, args
 
 
 @dataclass
@@ -374,21 +396,30 @@ class TerminalExecutor:
             exec_cwd = str(Path(cwd).resolve())
             env = build_skill_runtime_env(cwd=exec_cwd)
 
-        executable = sys.executable if command in ("python3", "python") else command
+        run_env = env if env is not None else os.environ.copy()
+        executable, exec_args = _resolve_run_executable(command, args, run_env)
+        if env is None:
+            env = run_env
 
         # Concurrent stream pumps avoid PIPE-buffer deadlock while we wait on
         # the process, and preserve partial output when we kill on timeout.
         # On Unix, start_new_session=True makes the child a process-group leader
         # so we can kill descendants that would otherwise keep capture pipes open.
-        process = await asyncio.create_subprocess_exec(
-            executable,
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=exec_cwd,
-            env=env,
-            start_new_session=_SUPPORTS_PROCESS_GROUPS,
-        )
+        try:
+            process = await asyncio.create_subprocess_exec(
+                executable,
+                *exec_args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=exec_cwd,
+                env=env,
+                start_new_session=_SUPPORTS_PROCESS_GROUPS,
+            )
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(
+                f"Executable {command!r} not found on PATH ({executable}). "
+                "For mempalace, the gateway Python must have the mempalace package."
+            ) from exc
         assert process.stdout is not None and process.stderr is not None
         pgid = _process_group_id(process.pid)
         stdout_chunks: list[bytes] = []

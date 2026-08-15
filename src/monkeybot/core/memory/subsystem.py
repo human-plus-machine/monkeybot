@@ -1,447 +1,255 @@
-"""Single injection point for memory (storage + hook + organizer + graph)."""
+"""MemPalace memory subsystem: wake-up, L2 recall, and outbox writer."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
-import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
-
-import asyncio
 
 from monkeybot.core.hooks import HookManager
-from monkeybot.core.llm.provider import Provider
-from monkeybot.core.memory.graph import MemoryGraph, MemoryGraphStore
 from monkeybot.core.memory.hook import MemoryHook
-from monkeybot.core.memory.mutate import (
-    drop_index_paths,
-    edit_memory_note,
-    forget_memory_note,
-    update_memory_note,
+from monkeybot.core.memory.ids import conversation_wing, utc_now_iso
+from monkeybot.core.memory.ingest import workspace_id_from_env
+from monkeybot.core.memory.observability import Timer, log_event, memory_span
+from monkeybot.core.memory.outbox import (
+    ensure_outbox_schema,
+    gc_committed,
+    insert_pending,
 )
-from monkeybot.core.memory.note_format import (
-    TYPED_FOLDERS,
-    extract_memory_wiki_links,
-    folder_from_rel_path,
-    parse_memory_note,
+from monkeybot.core.memory.palace import (
+    CONVERSATION_ROOM,
+    DEFAULT_BACKEND,
+    DEFAULT_EMBEDDING_MODEL,
+    DrawerRecord,
+    PalacePort,
+    create_palace,
 )
-from monkeybot.core.memory.organizer import MemoryOrganizer
-from monkeybot.core.memory.repair import repair_memory_tree
-from monkeybot.core.memory.storage_ops import (
-    async_load_index,
-    async_load_memory_hit,
-    async_promote_to_memory,
-    async_search_memory_files,
-)
-from monkeybot.core.workspace.protocol import WorkspaceStorage
+from monkeybot.core.memory.writer import MemoryWriter
 
 logger = logging.getLogger(__name__)
 
 
-def _local_memory_root(memory_uri: str) -> Path | None:
-    raw = memory_uri.strip()
-    if raw.startswith("local://"):
-        path = raw[len("local://") :]
-        return Path(path).expanduser().resolve()
-    parsed = urlparse(raw)
-    if parsed.scheme in ("", "file"):
-        return Path(parsed.path or raw).expanduser().resolve()
-    return None
-
-
-def _working_ttl_days() -> float:
-    raw = os.environ.get("MEMORY_WORKING_TTL_DAYS", "7").strip()
-    try:
-        return max(0.0, float(raw))
-    except ValueError:
-        return 7.0
-
-
 class MemorySubsystem:
-    """Owns storage, hook, organizer, and the memory graph sidecar."""
+    """Owns the per-agent MemPalace root, durable outbox, and writer."""
 
     def __init__(
         self,
-        storage: WorkspaceStorage,
-        provider: Provider,
-        model: str,
         *,
         memory_uri: str,
-        max_retrieval_hits: int = 3,
-        graph: MemoryGraphStore | None = None,
+        db_url: str,
+        agent_id: str,
+        agent_name: str = "",
+        palace: PalacePort | None = None,
+        ingest_enabled: bool = True,
+        writer_enabled: bool = True,
+        backend: str | None = None,
+        embedding_model: str | None = None,
     ) -> None:
-        self._storage = storage
         self._memory_uri = memory_uri.strip()
-        self._hook = MemoryHook(
-            storage=storage,
-            organizer_runner=self._run_organizer_locked,
-            max_retrieval_hits=max_retrieval_hits,
+        self._db_url = db_url
+        self._agent_id = agent_id
+        self.backend = (backend or os.environ.get("MEMPALACE_BACKEND") or DEFAULT_BACKEND).strip()
+        self.embedding_model = (
+            embedding_model
+            or os.environ.get("MEMPALACE_EMBEDDING_MODEL")
+            or DEFAULT_EMBEDDING_MODEL
+        ).strip()
+        self._palace: PalacePort = palace or create_palace(
+            self._memory_uri,
+            agent_name=agent_name or agent_id,
+            backend=self.backend,
+            embedding_model=self.embedding_model,
         )
-        root = _local_memory_root(memory_uri)
-        if graph is not None:
-            self._graph: MemoryGraphStore | None = graph
-        elif root is not None:
-            self._graph = MemoryGraph(root / ".graph.sqlite")
-        else:
-            # Remote/shared backends need a shared graph store first.
-            self._graph = None
-            logger.info(
-                "memory graph disabled until shared storage exists (uri scheme non-local)"
+        self.backend = getattr(self._palace, "backend", self.backend)
+        self.ingest_enabled = ingest_enabled
+        self._writer = (
+            MemoryWriter(
+                palace=self._palace,
+                db_url=db_url,
+                backend=self.backend,
+                embedding_model=self.embedding_model,
+                agent_id=agent_id,
             )
-        self._graph_opened = False
-        self._organizer = MemoryOrganizer(
-            provider=provider,
-            model=model,
-            storage=storage,
-            on_note_written=self._on_note_written,
-            pre_run=self.gc_working,
+            if writer_enabled
+            else None
         )
+        self._hook = MemoryHook(self)
+        self._ready = False
 
     @property
     def uri(self) -> str:
         return self._memory_uri
 
     @property
-    def storage(self) -> WorkspaceStorage:
-        return self._storage
+    def palace_path(self) -> Path:
+        return self._palace.palace_path
 
     @property
-    def lock(self) -> asyncio.Lock:
-        return self._hook._lock  # noqa: SLF001 — shared with mutation tools
+    def agent_id(self) -> str:
+        return self._agent_id
 
     def register_hooks(self, manager: HookManager) -> None:
         self._hook.register(manager)
 
-    async def ensure_graph(self) -> MemoryGraphStore | None:
-        """Open the graph sidecar; return None if unavailable (best-effort)."""
-        if self._graph is None:
-            return None
-        if not self._graph_opened:
-            try:
-                await self._graph.open()
-                self._graph_opened = True
-            except Exception as exc:
-                logger.warning("memory graph open failed (continuing without graph): %r", exc)
-                return None
-        return self._graph
-
-    async def _on_note_written(self, path: str, text: str) -> None:
-        graph = await self.ensure_graph()
-        if graph is None:
+    async def ensure_ready(self) -> None:
+        if self._ready:
             return
+        await self._ensure_schema_and_gc()
         try:
-            meta, _ = parse_memory_note(text)
-            note_type = meta.type if meta is not None else (folder_from_rel_path(path) or "episodic")
-            status = meta.status if meta is not None else "active"
-            supersedes = meta.supersedes if meta is not None else None
-            links = [(t, "related") for t in extract_memory_wiki_links(text)]
-            if supersedes:
-                links.append((supersedes, "supersedes"))
-            await graph.upsert_note(
-                path,
-                note_type=note_type,
-                status=status,
-                updated_at=time.time(),
-                links=links,
-            )
+            await asyncio.to_thread(self._palace.ensure_ready)
         except Exception as exc:
-            logger.debug("memory graph note upsert skipped path=%s: %r", path, exc)
+            logger.warning("memory palace warm failed: %r", exc)
+            log_event(
+                "embedder_warm",
+                memory_status="error",
+                memory_error_class=type(exc).__name__,
+            )
+        if self._writer is not None:
+            self._writer.start()
+        self._ready = True
 
-    async def rebuild_graph(self) -> dict[str, int]:
-        """Scan typed memory folders and upsert every note into the sidecar graph.
+    async def _ensure_schema_and_gc(self) -> None:
+        from monkeybot.core.persistence.sqlite import open_connection
 
-        Used on gateway startup (and when the viz finds an empty graph) so notes
-        filed before the graph existed still appear in the UI.
-        """
-        graph = await self.ensure_graph()
-        if graph is None:
-            return {"scanned": 0, "upserted": 0, "errors": 0, "skipped": 1}
-        scanned = 0
-        upserted = 0
-        errors = 0
-        for folder in TYPED_FOLDERS:
-            try:
-                paths = await self._storage.list_files(f"{folder}/")
-            except Exception as exc:
-                logger.warning("rebuild_graph list %s/ failed: %r", folder, exc)
-                errors += 1
-                continue
-            for rel in paths:
-                rel_posix = rel.replace("\\", "/")
-                if not rel_posix.startswith(f"{folder}/") or not rel_posix.endswith(".md"):
-                    continue
-                if rel_posix.count("/") != 1:
-                    continue
-                scanned += 1
-                try:
-                    text = await self._storage.read_text(rel_posix)
-                    await self._on_note_written(rel_posix, text)
-                    upserted += 1
-                except Exception as exc:
-                    logger.warning("rebuild_graph failed for %s: %r", rel_posix, exc)
-                    errors += 1
-        return {"scanned": scanned, "upserted": upserted, "errors": errors}
-
-    async def _run_organizer_locked(self) -> Any:
-        async with self.lock:
-            return await self._organizer.run()
+        conn = await open_connection(self._db_url)
+        try:
+            await ensure_outbox_schema(conn)
+            n = await gc_committed(conn)
+            if n:
+                log_event("outbox_gc", memory_status="ok", memory_batch_size=n)
+        finally:
+            await conn.close()
 
     async def load_index(self) -> list[str]:
-        # Repair corruption first, then load. Do not swallow load failures here —
-        # refresh_memory_index relies on exceptions to keep a stale index on
-        # transient storage errors (OSError, etc.).
-        report = await repair_memory_tree(self._storage)
-        if report.quarantined or report.index_rebuilt or report.index_pruned:
-            logger.warning(
-                "memory repair applied uri=%s quarantined=%s rebuilt=%s pruned=%s entries=%s",
-                self._memory_uri,
-                report.quarantined,
-                report.index_rebuilt,
-                report.index_pruned,
-                report.entries_written,
-            )
-        lines = await async_load_index(self._storage)
-        # Drop working/ entries from the prompt window (demotion).
-        filtered: list[str] = []
-        for line in lines:
-            if "[[working/" in line.replace(" ", ""):
-                continue
-            filtered.append(line)
-        return filtered
-
-    async def search_files(
-        self,
-        query: str,
-        *,
-        max_hits: int = 40,
-        skip_raw: bool = True,
-        folder: str | None = None,
-        include_retired: bool = False,
-        path: str | None = None,
-    ) -> dict[str, Any]:
-        # Path lookup: fetch one note's full body for graph hops.
-        path_norm = (path or "").replace("\\", "/").lstrip("./").strip()
-        if path_norm:
-            hit = await async_load_memory_hit(
-                self._storage, path_norm, include_retired=include_retired
-            )
-            if hit is None:
-                return {
-                    "ok": True,
-                    "query": query,
-                    "path": path_norm,
-                    "hits": [],
-                    "note": f"memory note not found or not active: {path_norm}",
-                }
+        """L0+L1 wake-up lines for the system prompt."""
+        timer = Timer()
+        wing = conversation_wing(workspace_id_from_env())
+        with memory_span(
+            "monkeybot.memory.wake_up",
+            **{
+                "memory.operation": "wake_up",
+                "memory.wing": wing,
+                "memory.backend": self.backend,
+                "memory.embedding_model": self.embedding_model,
+            },
+        ):
             try:
-                graph = await self.ensure_graph()
-                if graph is not None:
-                    existing = {str(link.get("path")) for link in hit.get("links") or []}
-                    for nbr in await graph.neighbors(path_norm):
-                        if nbr in existing or nbr == path_norm:
-                            continue
-                        hit.setdefault("links", []).append({"path": nbr, "kind": "related"})
-                        existing.add(nbr)
+                text = await asyncio.to_thread(self._palace.wake_up, wing)
             except Exception as exc:
-                logger.debug("memory path neighbor enrich skipped: %r", exc)
-            return {
-                "ok": True,
-                "query": query,
-                "path": path_norm,
-                "hits": [hit],
-                "truncated": False,
-            }
-
-        skip: tuple[str, ...] = ("raw", "working") if skip_raw else ("working",)
-        if folder and folder.strip().lower() == "working":
-            skip = ("raw",) if skip_raw else ()
-        payload = await async_search_memory_files(
-            self._storage,
-            query,
-            max_hits=max_hits,
-            skip_relative_prefixes=skip,
-            folder=folder,
-            include_retired=include_retired,
+                logger.warning("memory wake-up failed: %r", exc)
+                return []
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        log_event(
+            "wake_up",
+            memory_status="ok",
+            memory_backend=self.backend,
+            memory_result_count=len(lines),
+            memory_duration_ms=round(timer.ms(), 1),
         )
-        # Soft 1-hop: load neighbor notes directly (no second full-tree scan).
         try:
-            graph = await self.ensure_graph()
-            if graph is None:
-                return payload
-            hits = list(payload.get("hits") or [])
-            seen = {h.get("path") for h in hits}
-            expand: set[str] = set()
-            for hit in hits:
-                hit_path = str(hit.get("path") or "")
-                if not hit_path:
-                    continue
-                for nbr in await graph.neighbors(hit_path):
-                    if nbr not in seen:
-                        expand.add(nbr)
-            for nbr in sorted(expand):
-                if len(hits) >= max_hits:
-                    break
-                soft = await async_load_memory_hit(
-                    self._storage,
-                    nbr,
-                    include_retired=include_retired,
-                    include_body=False,
-                    via="graph",
-                )
-                if soft is None or soft.get("path") in seen:
-                    continue
-                hits.append(soft)
-                seen.add(soft.get("path"))
-            payload["hits"] = hits
+            status = self._palace.status()
+            log_event(
+                "palace_status",
+                memory_status="ok",
+                memory_backend=self.backend,
+                memory_drawer_count=status.get("total_drawers") or 0,
+            )
         except Exception as exc:
-            logger.debug("memory graph expand skipped: %r", exc)
-        return payload
+            logger.warning("memory palace status failed: %r", exc)
+        return lines
 
-    async def edit_memory(self, path: str, content: str) -> dict[str, Any]:
-        async with self.lock:
-            graph = await self.ensure_graph()  # best-effort; mutations work without it
-            return await edit_memory_note(
-                self._storage, graph, path=path, content=content
-            )
-
-    async def update_memory(self, path: str, content: str) -> dict[str, Any]:
-        async with self.lock:
-            graph = await self.ensure_graph()  # best-effort; mutations work without it
-            return await update_memory_note(
-                self._storage, graph, path=path, content=content
-            )
-
-    async def forget(self, path: str) -> dict[str, Any]:
-        async with self.lock:
-            graph = await self.ensure_graph()  # best-effort; mutations work without it
-            return await forget_memory_note(self._storage, graph, path=path)
-
-    async def promote(self, run_id: str, file: Path) -> None:
-        await async_promote_to_memory(run_id, file, self._storage)
-
-    async def gc_processed(self, *, max_age_sec: float = 7 * 24 * 60 * 60) -> dict[str, int]:
-        return await self._storage.gc_prefix("raw/processed/", max_age_sec)
-
-    async def _note_updated_at(
+    async def recall(
         self,
-        path: str,
         *,
-        graph: MemoryGraphStore | None,
-        text: str,
-    ) -> float | None:
-        """Resolve note age: graph → storage mtime → None."""
-        if graph is not None:
-            try:
-                ts = await graph.get_updated_at(path)
-            except Exception as exc:
-                logger.debug("gc_working graph get_updated_at skipped %s: %r", path, exc)
-                ts = None
-            if ts is not None:
-                return ts
-            meta, _ = parse_memory_note(text)
-            if meta is not None:
-                await self._on_note_written(path, text)
-                try:
-                    ts = await graph.get_updated_at(path)
-                except Exception:
-                    ts = None
-                if ts is not None:
-                    return ts
+        wing: str,
+        room: str = CONVERSATION_ROOM,
+        thread_id: str | None = None,
+    ) -> list[DrawerRecord]:
+        return await asyncio.to_thread(
+            self._palace.recall, wing=wing, room=room, n_results=10, thread_id=thread_id
+        )
+
+    def outbox_spec(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str,
+        message_id: str,
+        role: str,
+        content: str,
+        traceparent: str | None,
+    ) -> dict[str, Any]:
+        ws = workspace_id_from_env()
+        return {
+            "agent_id": self._agent_id,
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "message_id": message_id,
+            "role": role,
+            "content": content,
+            "workspace_id": ws,
+            "wing": conversation_wing(ws),
+            "room": CONVERSATION_ROOM,
+            "created_at": utc_now_iso(),
+            "traceparent": traceparent,
+        }
+
+    async def enqueue(
+        self,
+        *,
+        thread_id: str,
+        turn_id: str,
+        message_id: str,
+        role: str,
+        content: str,
+        traceparent: str | None = None,
+    ) -> str | None:
+        from monkeybot.core.persistence.sqlite import open_connection
+
+        spec = self.outbox_spec(
+            thread_id=thread_id,
+            turn_id=turn_id,
+            message_id=message_id,
+            role=role,
+            content=content,
+            traceparent=traceparent,
+        )
+        conn = await open_connection(self._db_url)
         try:
-            return await self._storage.mtime(path)
-        except Exception as exc:
-            logger.debug("gc_working storage mtime failed %s: %r", path, exc)
-            return None
+            await ensure_outbox_schema(conn)
+            return await insert_pending(conn, **spec)
+        finally:
+            await conn.close()
 
-    async def gc_working(self, *, ttl_days: float | None = None) -> dict[str, int]:
-        """Delete expired working/ notes and drop them from INDEX + graph."""
-        ttl = _working_ttl_days() if ttl_days is None else ttl_days
-        if ttl <= 0:
-            return {"scanned": 0, "deleted": 0, "errors": 0}
-        cutoff = time.time() - ttl * 24 * 60 * 60
-        scanned = 0
-        deleted = 0
-        errors = 0
-        skipped_no_age = 0
-        drop: set[str] = set()
-        try:
-            paths = await self._storage.list_files("working/")
-        except Exception as exc:
-            logger.warning("gc_working list failed: %r", exc)
-            return {"scanned": 0, "deleted": 0, "errors": 1}
-        graph = await self.ensure_graph()
-        for rel in paths:
-            rel_posix = rel.replace("\\", "/")
-            if not rel_posix.startswith("working/") or not rel_posix.endswith(".md"):
-                continue
-            if rel_posix.count("/") != 1:
-                continue
-            scanned += 1
-            try:
-                text = await self._storage.read_text(rel_posix)
-                updated_at = await self._note_updated_at(
-                    rel_posix, graph=graph, text=text
-                )
-                if updated_at is None:
-                    skipped_no_age += 1
-                    continue
-                if updated_at >= cutoff:
-                    continue
-                await self._storage.delete(rel_posix)
-                if graph is not None:
-                    try:
-                        await graph.delete_note(rel_posix)
-                    except Exception as exc:
-                        logger.debug(
-                            "gc_working graph delete skipped %s: %r", rel_posix, exc
-                        )
-                drop.add(rel_posix)
-                deleted += 1
-            except Exception as exc:
-                logger.warning("gc_working failed for %s: %r", rel_posix, exc)
-                errors += 1
-        if skipped_no_age:
-            logger.warning(
-                "gc_working skipped %d note(s) with no age signal "
-                "(graph + storage mtime unavailable)",
-                skipped_no_age,
-            )
-        if drop:
-            await drop_index_paths(self._storage, drop)
-        return {"scanned": scanned, "deleted": deleted, "errors": errors}
+    def wake_writer(self) -> None:
+        if self._writer is not None:
+            self._writer.wake()
 
-    async def export_graph(self, *, refresh: bool = False) -> dict[str, Any]:
-        """Return memory-note nodes + wiki/supersedes edges for visualization.
-
-        When ``refresh`` is true (or the sidecar has no nodes yet), rescan note
-        files on disk into the graph so Reload in the Mac UI picks up new links.
-        """
-        graph = await self.ensure_graph()
-        if graph is None:
-            return {
-                "nodes": [],
-                "edges": [],
-                "note": "memory graph requires local:// storage",
-            }
-        if refresh:
-            await self.rebuild_graph()
-            return await graph.export_graph()
-        payload = await graph.export_graph()
-        if payload.get("nodes"):
-            return payload
-        # Empty sidecar (pre-graph notes on disk) — backfill once for the viz.
-        await self.rebuild_graph()
-        return await graph.export_graph()
-
-    async def flush(self) -> None:
-        await self._hook.flush()
+    async def drain_writer(self, *, timeout_s: float = 5.0) -> int:
+        if self._writer is None:
+            return 0
+        return await self._writer.drain(timeout_s=timeout_s)
 
     async def close(self) -> None:
-        if self._graph is not None and self._graph_opened:
-            await self._graph.close()
-            self._graph_opened = False
+        if self._writer is not None:
+            await self.drain_writer()
+            await self._writer.stop()
 
-
-__all__ = ["MemorySubsystem"]
+    async def get_drawer(self, drawer_id: str) -> dict[str, Any] | None:
+        with memory_span(
+            "monkeybot.memory.drawer.query",
+            **{"memory.operation": "drawer.query", "memory.backend": self.backend},
+        ):
+            record = await asyncio.to_thread(self._palace.get_drawer, drawer_id)
+        if record is None:
+            return None
+        return {
+            "id": record.drawer_id,
+            "content": record.content,
+            "wing": record.wing,
+            "room": record.room,
+            "filed_at": record.filed_at,
+            "metadata": record.metadata,
+        }

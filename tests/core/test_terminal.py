@@ -317,6 +317,67 @@ class TestTerminalExecutorExecution:
         assert seen_env.get("PATH") == f"{venv_bin}{os.pathsep}/custom/bin:/usr/bin"
         assert seen_env.get("MONKEYBOT_PYTHON") == sys.executable
 
+    @pytest.mark.asyncio
+    async def test_mempalace_uses_console_script_when_on_path(
+        self, executor, tmp_path, monkeypatch
+    ):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        seen: list[tuple[str, ...]] = []
+
+        async def fake_exec(*cmd, stdout=None, stderr=None, cwd=None, env=None, **kwargs):
+            del stdout, stderr, cwd, env, kwargs
+            seen.append(cmd)
+            proc = MagicMock()
+            proc.pid = 1
+            proc.returncode = 0
+            proc.stdout = MagicMock()
+            proc.stderr = MagicMock()
+            proc.stdout.read = AsyncMock(return_value=b"")
+            proc.stderr.read = AsyncMock(return_value=b"")
+            proc.wait = AsyncMock(return_value=0)
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(
+            "monkeybot.core.tools.terminal.shutil.which",
+            lambda name, path=None: "/opt/bin/mempalace" if name == "mempalace" else None,
+        )
+        await executor.execute("mempalace", ["search", "q"], cwd=tmp_path)
+        assert seen[0][0] == "/opt/bin/mempalace"
+        assert seen[0][1:] == ("search", "q")
+
+    @pytest.mark.asyncio
+    async def test_mempalace_falls_back_to_python_module(
+        self, executor, tmp_path, monkeypatch
+    ):
+        import asyncio
+        import sys
+        from unittest.mock import AsyncMock, MagicMock
+
+        seen: list[tuple[str, ...]] = []
+
+        async def fake_exec(*cmd, stdout=None, stderr=None, cwd=None, env=None, **kwargs):
+            del stdout, stderr, cwd, env, kwargs
+            seen.append(cmd)
+            proc = MagicMock()
+            proc.pid = 1
+            proc.returncode = 0
+            proc.stdout = MagicMock()
+            proc.stderr = MagicMock()
+            proc.stdout.read = AsyncMock(return_value=b"")
+            proc.stderr.read = AsyncMock(return_value=b"")
+            proc.wait = AsyncMock(return_value=0)
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr("monkeybot.core.tools.terminal.shutil.which", lambda *a, **k: None)
+        await executor.execute("mempalace", ["search", "q"], cwd=tmp_path)
+        assert seen[0][0] == sys.executable
+        assert seen[0][1:3] == ("-m", "mempalace")
+        assert seen[0][3:] == ("search", "q")
+
 
 class TestTerminalExecutorTimeout:
     """
@@ -526,7 +587,20 @@ class TestTerminalExecutorConstants:
     def test_allowed_commands_list(self):
         """Test that ALLOWED_COMMANDS contains expected commands."""
         # Document expected commands
-        expected_commands = ["cat", "ls", "grep", "rg", "echo", "python", "python3", "uv", "git", "gh", "bash"]
+        expected_commands = [
+            "cat",
+            "ls",
+            "grep",
+            "rg",
+            "echo",
+            "python",
+            "python3",
+            "uv",
+            "git",
+            "gh",
+            "bash",
+            "mempalace",
+        ]
 
         for cmd in expected_commands:
             assert cmd in ALLOWED_COMMANDS, f"Expected command '{cmd}' not in ALLOWED_COMMANDS"

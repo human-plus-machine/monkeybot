@@ -192,6 +192,7 @@ uv tool install --editable .
 | Command | Purpose |
 |---------|---------|
 | `new` | Scaffold `monkeybot_config/`, `workspace/`, `memory/`, `skills/`, `pyproject.toml`, `.env.example` |
+| `refresh` | Additive update of packaged YAML defaults on an existing agent (keeps AGENT.md, mcp.json, model) |
 | `validate` | Config + paths + MCP shape (`--check-mcp` for network) |
 | `doctor` | Python, provider extra, credentials, port |
 | `run` | Start SSE gateway subprocess |

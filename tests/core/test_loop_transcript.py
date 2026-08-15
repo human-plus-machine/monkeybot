@@ -67,8 +67,10 @@ class FakeHistory:
         del thread_id, limit
         return list(self.rows)
 
-    async def append(self, thread_id: str, message: Message) -> None:
-        del thread_id
+    async def append(
+        self, thread_id: str, message: Message, *, turn_id: str | None = None, message_id: str | None = None
+    ) -> None:
+        del thread_id, turn_id, message_id
         self.rows.append(message)
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None:

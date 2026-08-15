@@ -7,7 +7,6 @@ from datetime import date
 
 from monkeybot.core.attachments.catalog import AttachmentRecord
 from monkeybot.core.context import TurnContext
-from monkeybot.core.context.memory_prompt import MemoryPromptSelection
 from monkeybot.core.knowledge.config import knowledge_enabled_from_config
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.prompts.harness_prompt import (
@@ -18,7 +17,6 @@ from monkeybot.core.prompts.headings import (
     CURRENT_DATE_HEADING,
     CURRENT_REQUEST_HEADING,
     MEMORY_INDEX_HEADING,
-    MEMORY_NUDGE_HEADING,
     SKILLS_HEADING,
     TODO_LIST_HEADING,
 )
@@ -108,27 +106,10 @@ def _current_date_block() -> str:
     return f"{CURRENT_DATE_HEADING}{date.today().isoformat()}"
 
 
-def _memory_block(
-    ctx: TurnContext,
-    memory_selection: MemoryPromptSelection | None,
-) -> str:
-    if memory_selection is not None:
-        mem_lines = list(memory_selection.lines)
-    else:
-        mem_lines = list(ctx.memory_index)
-
-    memory_bullets = "\n".join(f"- {line}" for line in mem_lines) if mem_lines else ""
-    mem_block = f"{MEMORY_INDEX_HEADING}{memory_bullets}" if memory_bullets else ""
-    if memory_selection is not None and memory_selection.nudge_search:
-        shown = len(memory_selection.lines)
-        total = memory_selection.total_lines
-        mem_block += (
-            f"{MEMORY_NUDGE_HEADING}"
-            f"Showing {shown} of {total} index entries "
-            f"(coverage {memory_selection.coverage:.0%}, confidence {memory_selection.confidence:.0%}). "
-            "Use `search_memory` with keywords when the task may depend on older "
-            "session context or preferences; use `search` for workspace/code."
-        )
+def _memory_block(ctx: TurnContext) -> str:
+    mem_lines = list(ctx.memory_index)
+    memory_text = "\n".join(mem_lines) if mem_lines else ""
+    mem_block = f"{MEMORY_INDEX_HEADING}{memory_text}" if memory_text else ""
     return mem_block
 
 
@@ -155,6 +136,7 @@ def _harness_text(ctx: TurnContext) -> str:
         include_web_search=include_web_search,
         include_todo_list=include_todo_list,
         include_knowledge_search=knowledge_enabled_from_config(),
+        include_memory_teaching=ctx.memory is not None,
         workspace_root=str(ctx.workspace_root) if ctx.workspace_root is not None else "(not set)",
         memory_storage_uri=ctx.memory.uri if ctx.memory is not None else "(not set)",
         run_command_opensandbox=SandboxConfig.from_env().enabled,
@@ -180,13 +162,10 @@ def compose_volatile_tail(
     ctx: TurnContext,
     *,
     chat_messages: Sequence[Message] | None = None,
-    memory_selection: MemoryPromptSelection | None = None,
 ) -> str:
     """Volatile tail: current date + memory index + skills + current-request anchor."""
     return "".join(
-        compose_volatile_tail_parts(
-            ctx, chat_messages=chat_messages, memory_selection=memory_selection
-        ).values()
+        compose_volatile_tail_parts(ctx, chat_messages=chat_messages).values()
     )
 
 
@@ -194,7 +173,6 @@ def compose_volatile_tail_parts(
     ctx: TurnContext,
     *,
     chat_messages: Sequence[Message] | None = None,
-    memory_selection: MemoryPromptSelection | None = None,
 ) -> dict[str, str]:
     """Same sections as :func:`compose_volatile_tail`, individually named.
 
@@ -204,7 +182,7 @@ def compose_volatile_tail_parts(
     """
     return {
         "current_date": _current_date_block(),
-        "memory": _memory_block(ctx, memory_selection),
+        "memory": _memory_block(ctx),
         "skills": _skills_section(ctx),
         "todos": _todo_list_section(ctx),
         "current_request": _current_request_block(chat_messages),
@@ -215,7 +193,6 @@ def compose_system_prompt(
     ctx: TurnContext,
     *,
     chat_messages: Sequence[Message] | None = None,
-    memory_selection: MemoryPromptSelection | None = None,
     attachment_catalog: Sequence[AttachmentRecord] | None = None,
 ) -> str:
     """Build the system string: AGENT.md, harness, attachments, then volatile tail.
@@ -225,13 +202,9 @@ def compose_system_prompt(
     memory, skills, todo list, current-request anchor) so implicit and explicit prompt caching
     can hit a contiguous prefix across turns.
 
-    When ``memory_selection`` is set, its lines (and optional search nudge) are used
-    instead of the full ``ctx.memory_index``. Skill names are always taken from
-    ``ctx.skills`` (zero-cost discovery); use ``list_skills``/``read_file`` for the
-    skills root path and full ``SKILL.md`` procedure.
+    Skill names are always taken from ``ctx.skills`` (zero-cost discovery); use
+    ``list_skills``/``read_file`` for the skills root path and full ``SKILL.md`` procedure.
     """
     stable = compose_stable_baseline(ctx, attachment_catalog=attachment_catalog)
-    volatile = compose_volatile_tail(
-        ctx, chat_messages=chat_messages, memory_selection=memory_selection
-    )
+    volatile = compose_volatile_tail(ctx, chat_messages=chat_messages)
     return f"{stable}{volatile}"

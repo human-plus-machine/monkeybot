@@ -575,7 +575,8 @@ class TestSandboxExecutorWorkspaceMount:
         return osb, _opensandbox_sys_modules(osb)
 
     @pytest.mark.asyncio
-    async def test_absolute_workspace_path_in_volume(self, tmp_path):
+    async def test_absolute_workspace_path_in_volume(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MEMPALACE_PALACE_PATH", raising=False)
         abs_path = str(tmp_path.resolve())
         cfg = SandboxConfig(
             enabled=True, server_url="http://localhost:8080",
@@ -601,6 +602,7 @@ class TestSandboxExecutorWorkspaceMount:
 
     @pytest.mark.asyncio
     async def test_gcp_credentials_mounted_when_present(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MEMPALACE_PALACE_PATH", raising=False)
         creds = tmp_path / "gcp.json"
         creds.write_text('{"type":"service_account"}', encoding="utf-8")
         monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(creds))

@@ -13,6 +13,31 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_DB_URL: Final[str] = "sqlite:///data/monkeybot.db"
 
+OUTBOX_DDL: Final[str] = """CREATE TABLE IF NOT EXISTS memory_outbox (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL DEFAULT '',
+    thread_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT,
+    workspace_id TEXT,
+    wing TEXT NOT NULL,
+    room TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    last_error TEXT,
+    traceparent TEXT,
+    lease_owner TEXT,
+    lease_expires_at TEXT
+)"""
+
+OUTBOX_INDEX_DDL: Final[str] = (
+    "CREATE INDEX IF NOT EXISTS idx_memory_outbox_pending ON memory_outbox(status, created_at)"
+)
+
 _LEGACY_SCHEMA_MESSAGE = """Legacy conversation_history schema detected (tool_name and/or
 tool_call_id columns present). The on-disk format changed in the
 typed-message-content release. Choose one:
@@ -33,7 +58,9 @@ SCHEMA_DDLS: Final[tuple[str, ...]] = (
     thread_id TEXT NOT NULL,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    turn_id TEXT,
+    message_id TEXT
 )""",
     """CREATE TABLE IF NOT EXISTS subagent_runs (
     run_id TEXT PRIMARY KEY,
@@ -100,6 +127,8 @@ SCHEMA_DDLS: Final[tuple[str, ...]] = (
     request_id TEXT,
     claimed_at_ms INTEGER
 )""",
+    OUTBOX_DDL,
+    OUTBOX_INDEX_DDL,
 )
 
 
@@ -127,10 +156,11 @@ def sqlite_path_from_db_url(db_url: str | None = None) -> str:
 
 
 async def configure_connection(conn: aiosqlite.Connection) -> None:
-    """PRAGMA journal_mode=WAL; foreign_keys=ON; synchronous=NORMAL."""
+    """PRAGMA journal_mode=WAL; foreign_keys=ON; synchronous=NORMAL; busy_timeout=5000."""
     await conn.execute("PRAGMA journal_mode=WAL")
     await conn.execute("PRAGMA foreign_keys=ON")
     await conn.execute("PRAGMA synchronous=NORMAL")
+    await conn.execute("PRAGMA busy_timeout=5000")
 
 
 async def _connection_db_path(conn: aiosqlite.Connection) -> str:
@@ -158,6 +188,7 @@ async def apply_schema(conn: aiosqlite.Connection) -> None:
     await _ensure_turn_usage_estimated_column(conn)
     await _ensure_turn_usage_cache_columns(conn)
     await _ensure_subagent_runs_claim_columns(conn)
+    await _ensure_history_memory_columns(conn)
     cursor = await conn.execute("PRAGMA table_info(conversation_history)")
     rows = await cursor.fetchall()
     await cursor.close()
@@ -206,6 +237,21 @@ async def _ensure_subagent_runs_claim_columns(conn: aiosqlite.Connection) -> Non
         await conn.execute("ALTER TABLE subagent_runs ADD COLUMN worker_id TEXT")
     if "claimed_at" not in names:
         await conn.execute("ALTER TABLE subagent_runs ADD COLUMN claimed_at INTEGER")
+    await conn.commit()
+
+
+async def _ensure_history_memory_columns(conn: aiosqlite.Connection) -> None:
+    """Add turn_id / message_id on conversation_history for the memory outbox."""
+    cur = await conn.execute("PRAGMA table_info(conversation_history)")
+    rows = await cur.fetchall()
+    await cur.close()
+    names = {str(r[1]) for r in rows}
+    if not names:
+        return
+    if "turn_id" not in names:
+        await conn.execute("ALTER TABLE conversation_history ADD COLUMN turn_id TEXT")
+    if "message_id" not in names:
+        await conn.execute("ALTER TABLE conversation_history ADD COLUMN message_id TEXT")
     await conn.commit()
 
 

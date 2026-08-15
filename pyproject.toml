@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "monkeybot"
-version = "2.2.1"
+version = "3.0.0"
 description = "monkeybot agent harness — FastAPI SSE gateway, owned loop, SQLite, and MCP."
 requires-python = ">=3.11"
 readme = "README.md"
@@ -26,6 +26,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+memory = ["mempalace>=3.7.0,<4"]
 gemini = ["google-genai>=1.0.0"]
 vertex = [
     "google-genai>=1.0.0",
@@ -95,6 +96,8 @@ dev = [
     "monkeybot[knowledge-ast]",
     # Exercise PDF/DOCX knowledge extraction in CI / local tests.
     "monkeybot[knowledge-media]",
+    # MemPalace is an optional extra; tests still exercise the adapter.
+    "monkeybot[memory]",
 ]
 
 [tool.uv]

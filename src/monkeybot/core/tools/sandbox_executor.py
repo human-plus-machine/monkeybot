@@ -233,6 +233,20 @@ class SandboxExecutor:
                     )
                 )
                 mounted_paths.add(skills_str)
+            palace = os.environ.get("MEMPALACE_PALACE_PATH", "").strip()
+            if palace and palace not in mounted_paths:
+                palace_vol = re.sub(r"[^a-z0-9-]", "-", palace.lower()).strip("-")[:63]
+                volumes.append(
+                    Volume(
+                        name=palace_vol or "mempalace",
+                        host=Host(path=palace),
+                        mountPath=palace,
+                        readOnly=False,
+                    )
+                )
+                mounted_paths.add(palace)
+                runtime_env["MEMPALACE_PALACE_PATH"] = palace
+                runtime_env["MEMPALACE_BACKEND"] = os.environ.get("MEMPALACE_BACKEND", "chroma")
             for cred_env in ("GOOGLE_APPLICATION_CREDENTIALS", "GCP_AUTH_FILE"):
                 cred_path = runtime_env.get(cred_env, "").strip()
                 if not cred_path or cred_path in mounted_paths:

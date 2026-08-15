@@ -30,7 +30,9 @@ build/
 
 # Data (SQLite DB + memory files — never commit)
 data/
+/memory/
 .monkeybot/
+*.sqlite3
 workspace/.monkeybot/
 *.sqlite
 *.sqlite.writer-pid

@@ -68,7 +68,7 @@ realtime:
 
 paths:
   agent_md: ./monkeybot_config/AGENT.md
-  memory_storage_uri: local://./memory
+  memory_storage_uri: local://./memory/mempalace
   skills_path: ./skills
   db_url: sqlite:///data/monkeybot.db
   # Apply SQLite/Postgres DDL on startup (true | false). Default true. Set false when migrations own the schema.
@@ -113,18 +113,14 @@ gateway:
   # Default in code when unset: http://localhost:5173 (Vite dev). Add http://127.0.0.1:5173 if needed.
   cors_allow_origins: "http://localhost:5173"
 
-context_curation:
-  # When false, curation is skipped (env: CONTEXT_CURATION_ENABLED)
+memory:
+  # Capture, wake-up, and `mempalace search` teaching. Set false to turn memory off.
+  # Env override: MONKEYBOT_MEMORY_HOOK_ENABLED=0
   enabled: true
-  # Recent INDEX lines injected by default; also caps curator-selected lines
-  memory_window_lines: 12
-  memory_index_cap: 200
-  # Call LLM curator when estimated memory-index tokens exceed this
-  # (env: CONTEXT_CURATION_MEMORY_TOKEN_THRESHOLD). Below this, use the window only.
-  memory_token_threshold: 2000
-  # Separate small model for curator (env: CONTEXT_CURATOR_MODEL); empty uses main model id
-  curator_model: gemini-3-flash
-  timeout_sec: 10
+  backend: chroma
+  embedding_model: embeddinggemma-300m
+
+# context_curation is unused after MemPalace wake-up replaced INDEX.md + curator.
 
 emission:
   # Terse emission-style guidance injected into the cached harness prefix.
@@ -137,9 +133,6 @@ emission:
   # Env override: MONKEYBOT_EMISSION_STYLE — accepts off | terse | true | 1 | on | yes
   # (any value other than the terse-set means off).
   style: off
-
-memory_hook:
-  enabled: true
 
 # Unified knowledge layer: local FTS + ANN embeddings + note↔workspace links + search.
 # Embeddings stay off by default until configured.
