@@ -6,7 +6,7 @@ when a ``sqlite://`` URL is used — never loaded in Postgres-only deployments.
 
 from __future__ import annotations
 
-import asyncio
+from typing import Any
 
 import aiosqlite
 
@@ -14,32 +14,40 @@ from monkeybot.core.persistence.durable_runs import SQLiteRunStore
 from monkeybot.core.persistence.history import SQLiteHistoryStore
 from monkeybot.core.persistence.scheduled_loops import SQLiteScheduledLoopStore
 from monkeybot.core.persistence.session_turn_locks import SQLiteSessionTurnLockStore
-from monkeybot.core.persistence.sqlite import apply_schema, open_connection
+from monkeybot.core.persistence.sqlite import TaskReentrantLock, apply_schema, open_connection
 from monkeybot.core.persistence.usage import SQLiteUsageStore
 
 
 class SQLiteStorageBackend:
     """SQLite-backed storage backend. One shared connection for the process lifetime."""
 
+    shares_outbox = False
+
     def __init__(self, db_url: str) -> None:
         self._db_url = db_url
         self._conn: aiosqlite.Connection | None = None
+        self._tx_lock = TaskReentrantLock()
         self._history_store: SQLiteHistoryStore | None = None
         self._usage_store: SQLiteUsageStore | None = None
         self._runs_store: SQLiteRunStore | None = None
         self._scheduled_loops_store: SQLiteScheduledLoopStore | None = None
         self._session_turn_lock_store: SQLiteSessionTurnLockStore | None = None
-        self._tx_lock = asyncio.Lock()
+        self._outbox_store: Any | None = None
 
     async def open(self, *, run_schema: bool = True) -> None:
         self._conn = await open_connection(self._db_url)
         if run_schema:
             await apply_schema(self._conn)
-        self._history_store = SQLiteHistoryStore(self._conn, tx_lock=self._tx_lock)
-        self._usage_store = SQLiteUsageStore(self._conn, tx_lock=self._tx_lock)
-        self._runs_store = SQLiteRunStore(self._conn)
-        self._scheduled_loops_store = SQLiteScheduledLoopStore(self._conn)
-        self._session_turn_lock_store = SQLiteSessionTurnLockStore(self._conn)
+        self._history_store = SQLiteHistoryStore(self._conn, lock=self._tx_lock)
+        self._usage_store = SQLiteUsageStore(self._conn, lock=self._tx_lock)
+        self._runs_store = SQLiteRunStore(self._conn, lock=self._tx_lock)
+        self._scheduled_loops_store = SQLiteScheduledLoopStore(self._conn, lock=self._tx_lock)
+        self._session_turn_lock_store = SQLiteSessionTurnLockStore(self._conn, lock=self._tx_lock)
+        from monkeybot.core.memory.outbox import SqliteOutboxStore
+
+        self._outbox_store = SqliteOutboxStore(
+            self._conn, owns_connection=False, lock=self._tx_lock
+        )
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -50,6 +58,7 @@ class SQLiteStorageBackend:
             self._runs_store = None
             self._scheduled_loops_store = None
             self._session_turn_lock_store = None
+            self._outbox_store = None
 
     def history(self) -> SQLiteHistoryStore:
         if self._history_store is None:
@@ -75,3 +84,8 @@ class SQLiteStorageBackend:
         if self._session_turn_lock_store is None:
             raise RuntimeError("SQLiteStorageBackend.open() has not been called")
         return self._session_turn_lock_store
+
+    def outbox(self) -> Any:
+        if self._outbox_store is None:
+            raise RuntimeError("SQLiteStorageBackend.open() has not been called")
+        return self._outbox_store

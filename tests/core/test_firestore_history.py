@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 
@@ -96,3 +97,27 @@ async def test_firestore_load_skips_corrupt_rows(firestore_history) -> None:
     loaded = await store.load(thread_id)
     texts = [b.text for m in loaded for b in m.content if isinstance(b, Text)]
     assert texts == ["good", "also good"]
+
+
+@pytest.mark.asyncio
+async def test_firestore_concurrent_message_id_is_idempotent(firestore_history) -> None:
+    store: FirestoreHistoryStore = firestore_history
+    message = Message(role="user", content=[Text(text="deliver once")])
+
+    await asyncio.gather(
+        *[
+            store.append(
+                "thread-idempotent",
+                message,
+                turn_id="turn-1",
+                message_id="message-1",
+            )
+            for _ in range(8)
+        ]
+    )
+
+    loaded = await store.load("thread-idempotent")
+    assert len(loaded) == 1
+    threads = await store.list_threads(limit=10)
+    row = next(item for item in threads if item.thread_id == "thread-idempotent")
+    assert row.message_count == 1

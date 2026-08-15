@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-import json
+import asyncio
 import time
 import uuid
 from dataclasses import dataclass
 from typing import cast
 
 import aiosqlite
+
+from monkeybot.core.persistence.sqlite import TaskReentrantLock, with_conn_lock
 
 _SCHEDULED_LOOP_COLUMNS: tuple[str, ...] = (
     "loop_id",
@@ -130,9 +132,7 @@ def validate_loop_guards(
     if unbounded:
         return
     if max_ticks is None and max_runtime_ms is None:
-        raise ValueError(
-            "scheduled loops require max_ticks, max_runtime, or unbounded=true"
-        )
+        raise ValueError("scheduled loops require max_ticks, max_runtime, or unbounded=true")
 
 
 def _row_from_tuple(row: tuple[object, ...]) -> ScheduledLoopRow:
@@ -184,9 +184,16 @@ def format_tick_prompt(row: ScheduledLoopRow) -> str:
 class SQLiteScheduledLoopStore:
     """SQLite persistence for scheduled agent loops."""
 
-    def __init__(self, conn: aiosqlite.Connection) -> None:
+    def __init__(
+        self,
+        conn: aiosqlite.Connection,
+        *,
+        lock: asyncio.Lock | TaskReentrantLock | None = None,
+    ) -> None:
         self._conn = conn
+        self._lock = lock or TaskReentrantLock()
 
+    @with_conn_lock
     async def create(self, spec: ScheduledLoopCreate) -> ScheduledLoopRow:
         loop_id = _loop_id_from_create(spec)
         existing = await self.get(loop_id)
@@ -225,6 +232,7 @@ class SQLiteScheduledLoopStore:
             raise RuntimeError("failed to read scheduled loop after insert")
         return row
 
+    @with_conn_lock
     async def get(self, loop_id: str) -> ScheduledLoopRow | None:
         columns = ", ".join(_SCHEDULED_LOOP_COLUMNS)
         cursor = await self._conn.execute(
@@ -237,6 +245,7 @@ class SQLiteScheduledLoopStore:
             return None
         return _row_from_tuple(tuple(row))
 
+    @with_conn_lock
     async def list_all(self) -> list[ScheduledLoopRow]:
         columns = ", ".join(_SCHEDULED_LOOP_COLUMNS)
         cursor = await self._conn.execute(
@@ -246,6 +255,7 @@ class SQLiteScheduledLoopStore:
         await cursor.close()
         return [_row_from_tuple(tuple(r)) for r in rows]
 
+    @with_conn_lock
     async def list_due(self, now_ms: int) -> list[ScheduledLoopRow]:
         columns = ", ".join(_SCHEDULED_LOOP_COLUMNS)
         cursor = await self._conn.execute(
@@ -262,6 +272,7 @@ class SQLiteScheduledLoopStore:
         await cursor.close()
         return [_row_from_tuple(tuple(r)) for r in rows]
 
+    @with_conn_lock
     async def claim_tick(self, loop_id: str, worker_id: str) -> ScheduledLoopRow | None:
         """Atomically mark a due loop as in-flight; returns None if not claimable."""
         now_ms = int(time.time() * 1000)
@@ -281,6 +292,7 @@ class SQLiteScheduledLoopStore:
             return None
         return await self.get(loop_id)
 
+    @with_conn_lock
     async def release_stale_claims(self, stale_after_ms: int) -> int:
         """Reset in-flight ticks with no heartbeat after ``stale_after_ms``."""
         cutoff = int(time.time() * 1000) - stale_after_ms
@@ -298,6 +310,7 @@ class SQLiteScheduledLoopStore:
         await self._conn.commit()
         return int(cursor.rowcount)
 
+    @with_conn_lock
     async def renew_tick_claim(self, loop_id: str, worker_id: str) -> bool:
         """Extend the in-flight claim lease for a worker that is still executing a tick."""
         now_ms = int(time.time() * 1000)
@@ -314,6 +327,7 @@ class SQLiteScheduledLoopStore:
         await self._conn.commit()
         return cursor.rowcount == 1
 
+    @with_conn_lock
     async def complete_tick(
         self,
         loop_id: str,
@@ -360,6 +374,7 @@ class SQLiteScheduledLoopStore:
         await self._conn.commit()
         return await self.get(loop_id)
 
+    @with_conn_lock
     async def defer_tick(self, loop_id: str, *, worker_id: str, reason: str) -> None:
         """Release claim and push next tick forward (e.g. session busy)."""
         row = await self.get(loop_id)
@@ -377,7 +392,10 @@ class SQLiteScheduledLoopStore:
         )
         await self._conn.commit()
 
-    async def set_status(self, loop_id: str, status: str, *, stop_reason: str | None = None) -> bool:
+    @with_conn_lock
+    async def set_status(
+        self, loop_id: str, status: str, *, stop_reason: str | None = None
+    ) -> bool:
         if status not in _LOOP_STATUSES:
             raise ValueError(f"invalid loop status: {status}")
         cursor = await self._conn.execute(
@@ -395,6 +413,7 @@ class SQLiteScheduledLoopStore:
     async def pause(self, loop_id: str) -> bool:
         return await self.set_status(loop_id, "paused")
 
+    @with_conn_lock
     async def resume(self, loop_id: str) -> bool:
         row = await self.get(loop_id)
         if row is None:

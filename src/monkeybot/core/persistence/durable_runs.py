@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from dataclasses import dataclass
@@ -9,6 +10,8 @@ from pathlib import Path
 from typing import cast
 
 import aiosqlite
+
+from monkeybot.core.persistence.sqlite import TaskReentrantLock, with_conn_lock
 
 # Single envelope type for stdin protocol + durable persistence (avoid drift).
 from monkeybot.core.subagents.subagent_proto import SubagentEnvelope
@@ -74,9 +77,16 @@ def _tuple_to_run_row(row: tuple[object, ...]) -> SubagentRunRow:
 class SQLiteRunStore:
     """Persist lifecycle rows for subprocess subagents."""
 
-    def __init__(self, conn: aiosqlite.Connection) -> None:
+    def __init__(
+        self,
+        conn: aiosqlite.Connection,
+        *,
+        lock: asyncio.Lock | TaskReentrantLock | None = None,
+    ) -> None:
         self._conn = conn
+        self._lock = lock or TaskReentrantLock()
 
+    @with_conn_lock
     async def record_pending(
         self,
         run_id: str,
@@ -88,6 +98,7 @@ class SQLiteRunStore:
         """Insert a ``pending`` row for worker-pool consumption."""
         await self._record_run("pending", run_id, parent_run_id, script, envelope, scratch_dir)
 
+    @with_conn_lock
     async def record_started(
         self,
         run_id: str,
@@ -130,6 +141,7 @@ class SQLiteRunStore:
         )
         await self._conn.commit()
 
+    @with_conn_lock
     async def claim(self, run_id: str, worker_id: str) -> bool:
         """Atomically transition ``pending`` -> ``running``; return True if this caller won."""
         now_ms = int(time.time() * 1000)
@@ -146,6 +158,7 @@ class SQLiteRunStore:
         await self._conn.commit()
         return int(cursor.rowcount) == 1
 
+    @with_conn_lock
     async def renew_claim(self, run_id: str, worker_id: str) -> bool:
         """Extend the running claim lease for a worker still executing the run."""
         now_ms = int(time.time() * 1000)
@@ -162,6 +175,7 @@ class SQLiteRunStore:
         await self._conn.commit()
         return int(cursor.rowcount) == 1
 
+    @with_conn_lock
     async def list_stale_claims(self, stale_after_ms: int) -> list[SubagentRunRow]:
         """Return ``running`` rows whose claim lease is older than ``stale_after_ms``."""
         cutoff = int(time.time() * 1000) - stale_after_ms
@@ -178,6 +192,7 @@ class SQLiteRunStore:
         rows = await cursor.fetchall()
         return [_tuple_to_run_row(tuple(r)) for r in rows]
 
+    @with_conn_lock
     async def reset_stale_claim(
         self,
         run_id: str,
@@ -223,6 +238,7 @@ class SQLiteRunStore:
         await self._conn.commit()
         return int(cursor.rowcount) == 1
 
+    @with_conn_lock
     async def reset_stale_claims(self, stale_after_ms: int) -> int:
         """Reset ``running`` rows with stale ``claimed_at`` back to ``pending``."""
         cutoff = int(time.time() * 1000) - stale_after_ms
@@ -241,6 +257,7 @@ class SQLiteRunStore:
         await self._conn.commit()
         return int(cursor.rowcount)
 
+    @with_conn_lock
     async def record_completed(
         self,
         run_id: str,
@@ -283,6 +300,7 @@ class SQLiteRunStore:
         await self._conn.commit()
         return int(cursor.rowcount) == 1
 
+    @with_conn_lock
     async def record_failed(
         self,
         run_id: str,
@@ -324,6 +342,7 @@ class SQLiteRunStore:
         await self._conn.commit()
         return int(cursor.rowcount) == 1
 
+    @with_conn_lock
     async def pending_runs(self) -> list[SubagentRunRow]:
         """Return ``pending`` runs oldest-first (worker pool claim candidates)."""
         columns = ", ".join(_SUBAGENT_COLUMNS)
@@ -338,6 +357,7 @@ class SQLiteRunStore:
         await cursor.close()
         return [_tuple_to_run_row(tuple(row)) for row in rows]
 
+    @with_conn_lock
     async def get_run(self, run_id: str) -> SubagentRunRow | None:
         """Return full row or ``None``."""
         columns = ", ".join(_SUBAGENT_COLUMNS)
