@@ -18,7 +18,7 @@ from monkeybot_cli.opensandbox_lifecycle import (
     is_sandbox_enabled,
     server_url_from_config,
 )
-from monkeybot_cli.runtime_python import gateway_argv, resolve_runtime_python
+from monkeybot_cli.runtime_python import gateway_argv, prepare_runtime_python
 
 
 def run_run(args: argparse.Namespace) -> int:
@@ -46,7 +46,7 @@ def run_run(args: argparse.Namespace) -> int:
                     "Continuing without a healthy OpenSandbox — run_command may fail.",
                     flush=True,
                 )
-    runtime = resolve_runtime_python(agent_root)
+    runtime = prepare_runtime_python(agent_root, config_path)
     cmd = gateway_argv(runtime)
     try:
         proc = subprocess.run(cmd, env=env, cwd=agent_root)

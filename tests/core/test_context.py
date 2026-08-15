@@ -14,24 +14,13 @@ from monkeybot.core.context import (
     refresh_tools_after_loops_change,
     refresh_tools_after_mcp_change,
 )
-from monkeybot.core.llm.provider import Done, TextDelta, UsageEvent
 from monkeybot.core.memory.subsystem import MemorySubsystem
-from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.types.types_tools import ToolDef
-from monkeybot.core.workspace import create_workspace_storage
+from tests.core.memory.helpers import make_memory_subsystem
 
 
 def _memory_subsystem(mem_root: Path) -> MemorySubsystem:
-    uri = "local://" + str(mem_root.resolve())
-    fake = ScriptedFakeProvider(
-        [TextDelta(text="x"), UsageEvent(input_tokens=1, output_tokens=1, cached_tokens=0), Done()]
-    )
-    return MemorySubsystem(
-        storage=create_workspace_storage(uri),
-        provider=fake,
-        model="gemini-2.5-flash",
-        memory_uri=uri,
-    )
+    return make_memory_subsystem(mem_root)
 
 
 class FakeMCPClient:
@@ -211,7 +200,6 @@ async def test_build_context_merges_core_and_mcp_tools(tmp_path: Path) -> None:
 
     mem = tmp_path / "memory"
     mem.mkdir()
-    (mem / "INDEX.md").write_text("alpha summary\nbeta summary\n", encoding="utf-8")
 
     skills = tmp_path / "skills"
     research = skills / "research"
@@ -232,7 +220,7 @@ async def test_build_context_merges_core_and_mcp_tools(tmp_path: Path) -> None:
     )
 
     assert ctx.agent_md == "You are a helpful assistant."
-    assert ctx.memory_index == ["alpha summary", "beta summary"]
+    assert any("IDENTITY" in line or "No memories yet" in line for line in ctx.memory_index)
     assert len(ctx.skills) == 1
     assert ctx.skills[0].name == "research"
     assert ctx.skills[0].description == "Do research tasks."
@@ -246,11 +234,7 @@ async def test_build_context_merges_core_and_mcp_tools(tmp_path: Path) -> None:
         "glob",
         "grep",
         "apply_patch",
-        "search_memory",
         "search",
-        "edit_memory",
-        "update_memory",
-        "forget",
         "list_skills",
         "task",
         "enable_mcp",
@@ -289,7 +273,6 @@ async def test_build_context_omits_progressive_mcp_meta_without_connected_mcp(
     agent_path.write_text("You are a helpful assistant.\n", encoding="utf-8")
     mem = tmp_path / "mem"
     mem.mkdir()
-    (mem / "INDEX.md").write_text("- alpha\n", encoding="utf-8")
     skills = tmp_path / "skills"
     skills.mkdir()
     ctx = await build_context(
@@ -418,7 +401,6 @@ async def test_build_context_advertises_loop_tools_when_enabled(
     agent_path.write_text("You are a helpful assistant.\n", encoding="utf-8")
     mem = tmp_path / "mem"
     mem.mkdir()
-    (mem / "INDEX.md").write_text("- alpha\n", encoding="utf-8")
     skills = tmp_path / "skills"
     skills.mkdir()
     ctx = await build_context(
@@ -499,7 +481,7 @@ async def test_build_context_missing_index_yields_empty_memory(tmp_path: Path) -
         skills_path=skills,
         mcp_client=FakeMCPClient([]),
     )
-    assert ctx.memory_index == []
+    assert any("IDENTITY" in line or "No memories yet" in line for line in ctx.memory_index)
 
 
 @pytest.mark.asyncio
@@ -617,55 +599,32 @@ async def test_refresh_memory_index_picks_up_new_entries(tmp_path: Path) -> None
     agent_path.write_text("ok\n", encoding="utf-8")
     mem = tmp_path / "memory"
     mem.mkdir()
-    (mem / "INDEX.md").write_text("first line\n", encoding="utf-8")
     skills = tmp_path / "skills"
     skills.mkdir()
+    memory = _memory_subsystem(mem)
+    memory._palace.upsert_drawer(
+        "d1",
+        "first line",
+        {"wing": "main", "room": "conversation", "filed_at": "2026-01-01T00:00:00Z"},
+    )
 
     ctx = await build_context(
         "t",
         "r",
         agent_md_path=agent_path,
-        memory=_memory_subsystem(mem),
+        memory=memory,
         skills_path=skills,
         mcp_client=FakeMCPClient([]),
     )
-    assert ctx.memory_index == ["first line"]
+    assert any("first line" in line for line in ctx.memory_index)
 
-    (mem / "INDEX.md").write_text("first line\nsecond line\n", encoding="utf-8")
+    memory._palace.upsert_drawer(
+        "d2",
+        "second line",
+        {"wing": "main", "room": "conversation", "filed_at": "2026-01-02T00:00:00Z"},
+    )
     refreshed = await refresh_memory_index(ctx)
-    assert refreshed.memory_index == ["first line", "second line"]
-
-
-@pytest.mark.asyncio
-async def test_refresh_memory_index_repairs_corrupt_utf8(tmp_path: Path) -> None:
-    """Corrupt INDEX.md is quarantined/rebuilt; refresh returns the recovered index."""
-    agent_path = tmp_path / "AGENT.md"
-    agent_path.write_text("ok\n", encoding="utf-8")
-    mem = tmp_path / "memory"
-    mem.mkdir()
-    (mem / "episodic").mkdir()
-    (mem / "episodic" / "n.md").write_text(
-        "---\ntype: episodic\nstatus: active\n---\n\nRecovered after corrupt INDEX.\n",
-        encoding="utf-8",
-    )
-    (mem / "INDEX.md").write_text("valid line\n", encoding="utf-8")
-    skills = tmp_path / "skills"
-    skills.mkdir()
-
-    ctx = await build_context(
-        "t",
-        "r",
-        agent_md_path=agent_path,
-        memory=_memory_subsystem(mem),
-        skills_path=skills,
-        mcp_client=FakeMCPClient([]),
-    )
-    (mem / "INDEX.md").write_bytes(b"\xff\xfe")
-
-    out = await refresh_memory_index(ctx)
-
-    assert out is not ctx
-    assert any("episodic/n.md" in line for line in out.memory_index)
+    assert any("second line" in line for line in refreshed.memory_index)
 
 
 @pytest.mark.asyncio
@@ -678,7 +637,6 @@ async def test_refresh_memory_index_silent_fail_on_os_error(
     agent_path.write_text("ok\n", encoding="utf-8")
     mem = tmp_path / "memory"
     mem.mkdir()
-    (mem / "INDEX.md").write_text("stable\n", encoding="utf-8")
     skills = tmp_path / "skills"
     skills.mkdir()
 
@@ -690,15 +648,16 @@ async def test_refresh_memory_index_silent_fail_on_os_error(
         skills_path=skills,
         mcp_client=FakeMCPClient([]),
     )
+    original = list(ctx.memory_index)
 
-    async def boom(storage):
+    async def boom() -> list[str]:
         raise OSError("simulated read failure")
 
-    monkeypatch.setattr("monkeybot.core.memory.subsystem.async_load_index", boom)
+    monkeypatch.setattr(ctx.memory, "load_index", boom)
 
     with caplog.at_level(logging.WARNING, logger="monkeybot.core.context"):
         out = await refresh_memory_index(ctx)
 
     assert out is ctx
-    assert ctx.memory_index == ["stable"]
+    assert ctx.memory_index == original
     assert any("[MEMORY]" in r.message for r in caplog.records)

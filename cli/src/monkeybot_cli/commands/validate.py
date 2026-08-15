@@ -21,6 +21,7 @@ from monkeybot.core.config.runtime_env import ENV_MAP
 from monkeybot.core.config.settings import ConfigError, normalize_model_provider
 from monkeybot.core.config.yaml_loader import load_monkeybot_yaml_dict
 from monkeybot.core.layout import resolve_agent_root
+from monkeybot.core.memory.uri import object_store_memory_scheme
 
 from monkeybot_cli.config_resolve import load_agent_dotenv, resolve_config
 from monkeybot_cli.output import CommandReport, check
@@ -160,24 +161,31 @@ def run_validate(args: argparse.Namespace) -> int:
         field="model.name",
     )
 
-    memory_uri = ""
     paths = merged.get("paths") if isinstance(merged.get("paths"), dict) else {}
-    if isinstance(paths, dict):
+    if "MEMORY_STORAGE_URI" in os.environ:
+        memory_uri = os.environ["MEMORY_STORAGE_URI"]
+    elif "MEMORY_PATH" in os.environ:
+        memory_uri = os.environ["MEMORY_PATH"]
+    else:
         memory_uri = str(paths.get("memory_storage_uri", ""))
-    memory_backend = "gcs" if memory_uri.startswith("gcs://") else "local"
+    memory_ok = object_store_memory_scheme(memory_uri) is None
     check(
         report,
         id="memory.backend.supported",
         category="config",
         severity="error",
-        passed=memory_backend in {"local", "gcs", "drive"},
-        message=f"Unsupported memory backend from uri: {memory_uri}",
+        passed=memory_ok,
+        message=(
+            f"MemPalace requires a local:// memory URI, got: {memory_uri}"
+            if not memory_ok
+            else "MemPalace local memory URI"
+        ),
     )
 
     flat = _flatten_to_env(merged)
     flat.update({k: v for k, v in os.environ.items() if k.startswith(("GCP_", "GOOGLE_", "ANTHROPIC_VERTEX"))})
     norm_provider = normalize_model_provider(provider or "gemini")
-    needs_gcp = memory_backend == "gcs" or norm_provider == "vertex_anthropic"
+    needs_gcp = norm_provider == "vertex_anthropic"
     gcp_present = any(
         os.environ.get(k, "").strip() or flat.get(k, "").strip()
         for k in ("GCP_PROJECT_ID", "VERTEX_AI_PROJECT_ID", "ANTHROPIC_VERTEX_PROJECT_ID", "GOOGLE_CLOUD_PROJECT")
@@ -189,7 +197,7 @@ def run_validate(args: argparse.Namespace) -> int:
             category="config",
             severity="error",
             passed=gcp_present,
-            message="GCP project id required for gcs memory or vertex-claude provider",
+            message="GCP project id required for vertex-claude provider",
             remediation="Set gcp.project_id in monkeybot.yaml or GCP_PROJECT_ID in .env",
         )
     else:

@@ -371,7 +371,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Purpose:** Bound memory-index prompt size via sliding window, optional LLM curator, and search nudges.
 
-**Key files:** `core/context/memory_prompt.py`, `core/context/curator.py`, `core/memory/index_format.py`, `core/memory/organizer.py`, `monkeybot.yaml` `context_curation:`
+**Key files:** `core/context/curator.py`, `core/memory/index_format.py`, `core/memory/organizer.py`, `monkeybot.yaml` `context_curation:`
 
 **How it works:**
 - **Organizer** appends INDEX.md entries in recency order and archives overflow to `INDEX.archive.md` (`memory_index_cap`, default 200).
@@ -427,27 +427,29 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 ### 11. Memory subsystem
 
-**Purpose:** Durable markdown memory with automatic capture and LLM organizer.
+**Purpose:** Per-agent MemPalace drawers with durable outbox ingest (SQLite, Postgres, or Firestore) and wake-up + L2 recall in the prompt.
 
-**Key files:** `core/memory/subsystem.py`, `hook.py`, `organizer.py`, `storage_ops.py`
+**Key files:** `core/memory/subsystem.py`, `hook.py`, `outbox.py`, `palace.py`, `writer.py`, `ingest.py`, `core/persistence/{sqlite,postgres,firestore}.py`
 
-**Storage URI:** `local://`, `gcs://`, `s3://` via `create_workspace_storage()`
+**Storage URI:** `local://` only (object-store palaces are not supported in this release).
 
 **Hook lifecycle:**
 
 | Event | Behavior |
 |-------|----------|
-| `USER_MESSAGE` | Append to `chat_log.md` |
-| `PRE_TURN` | Inject memory search hits into `inject_memory_lines` |
-| `PRE_TOOL` | Inject file/query-specific memories into `inject_text` |
-| `POST_TOOL` | Capture raw observations (skip successful read-only tools) |
-| `POST_TURN` | Schedule debounced organizer |
+| History append | Enqueue user / final assistant text on the outbox (same transaction when the backend supports it) |
+| `PRE_TURN` | Inject thread-scoped L2 recall into `inject_memory_lines` |
+| `POST_TURN` | Wake the per-agent writer |
+| `SESSION_END` | Bounded outbox drain |
 
 **Invariants:**
-- Write path uses `asyncio.Lock` shared with organizer.
-- `MONKEYBOT_MEMORY_HOOK_ENABLED=false` disables hook registration.
-- Subagents get **no-op `HookManager`** to avoid duplicate writes.
-- `flush()` must be called before short-lived handlers exit if organizer work matters.
+- Chat history is canonical; MemPalace drawers are an idempotent projection.
+- Recall is scoped to the current `thread_id` by default.
+- `memory.enabled: false` (or `MONKEYBOT_MEMORY_HOOK_ENABLED=0`) skips capture, wake-up, and prompt teaching. It is not a sandbox against shell access to palace files.
+- Postgres/Firestore persist the memory outbox with replica `palace_id` claim partitioning. Replicated deployments must share a lock-capable palace volume.
+- MemPalace (chromadb / onnxruntime) is the optional `monkeybot[memory]` extra. Missing the extra disables memory instead of failing startup.
+- Subagents can read the palace but do not register duplicate automatic-ingest hooks.
+- `drain_writer()` runs at the end of Pattern B turns and again on `close()`, so short-lived / Lambda handlers flush the outbox before the process freezes.
 
 ---
 
@@ -527,7 +529,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 directory that contains `monkeybot_config/`. The discovered agent root loads
 its `.env` before YAML values fill still-unset environment variables.
 
-**Major sections:** `runtime`, `paths`, `model`, `gateway`, `context_curation`, `memory_hook`, `subagents`, `tools`, `compression`, `web_search`, `sandbox`, `emission`, `fake_provider`, `includes`.
+**Major sections:** `runtime`, `paths`, `model`, `gateway`, `context_curation`, `memory`, `subagents`, `tools`, `compression`, `web_search`, `sandbox`, `emission`, `fake_provider`, `includes`.
 
 **Invariants:**
 - Secrets never belong in yaml.
@@ -548,8 +550,8 @@ its `.env` before YAML values fill still-unset environment variables.
 |---------|---------|
 | `monkeybot new` | Scaffold `monkeybot_config/`, workspace, `.env.example` |
 | `monkeybot validate` | YAML, paths, MCP, provider env |
-| `monkeybot doctor` | Python, extras, credentials, port |
-| `monkeybot run` | Foreground gateway |
+| `monkeybot doctor` | Python, harness, extras, credentials, port |
+| `monkeybot run` | Foreground gateway (fail-closed harness probe) |
 | `monkeybot chat` | Spawn SSE gateway + REPL |
 | `monkeybot talk` | Realtime WebSocket client (audio/text) |
 
@@ -568,7 +570,9 @@ session — no mid-session model swap exists), `/status`, `/config`. See
 2. `uv run python -m monkeybot.gateway.main` when `<agent>/pyproject.toml` exists but no `.venv`
 3. `sys.executable` (CLI interpreter) — legacy fallback for config-only trees
 
-`monkeybot doctor` remediation points at adding `monkeybot[<extra>]` to the agent project, then `uv sync`.
+Before spawning the gateway, the CLI probes that interpreter for MonkeyBot `>=3.0.0,<4` and, when memory is enabled, MemPalace. A stale agent venv may be refreshed with `uv sync` against the existing lock; `pyproject.toml` pins are never rewritten. A failed probe prints an upgrade command and exits. `monkeybot doctor` reports the same check as `env.harness.compatible`.
+
+`monkeybot doctor` remediation for provider extras points at adding `monkeybot[<extra>]` to the agent project, then `uv sync`.
 
 ---
 

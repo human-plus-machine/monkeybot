@@ -46,6 +46,28 @@ class TestEnvMap:
         """Config-file only (like paths.auto_schema) — no env var override."""
         assert ("web_search", "vertex_google_search") not in ENV_MAP
 
+    def test_memory_enabled_kill_switch_in_env_map(self) -> None:
+        assert ENV_MAP[("memory", "enabled")] == "MONKEYBOT_MEMORY_HOOK_ENABLED"
+        assert ("memory", "engine") not in ENV_MAP
+
+
+class TestMemoryEnabledConfig:
+    def test_yaml_string_false(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from monkeybot.core.memory.config import memory_enabled_from_config
+
+        monkeypatch.delenv("MONKEYBOT_MEMORY_HOOK_ENABLED", raising=False)
+        cfg = tmp_path / "monkeybot.yaml"
+        cfg.write_text('memory:\n  enabled: "false"\n', encoding="utf-8")
+        assert memory_enabled_from_config(str(cfg)) is False
+
+    def test_yaml_string_true(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from monkeybot.core.memory.config import memory_enabled_from_config
+
+        monkeypatch.delenv("MONKEYBOT_MEMORY_HOOK_ENABLED", raising=False)
+        cfg = tmp_path / "monkeybot.yaml"
+        cfg.write_text('memory:\n  enabled: "true"\n', encoding="utf-8")
+        assert memory_enabled_from_config(str(cfg)) is True
+
 
 class TestVertexGoogleSearchConfig:
     def test_defaults_false_when_missing(self) -> None:

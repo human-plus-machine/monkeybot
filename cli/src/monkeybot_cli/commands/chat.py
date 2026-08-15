@@ -48,7 +48,7 @@ from monkeybot_cli.opensandbox_lifecycle import (
     is_sandbox_enabled,
     server_url_from_config,
 )
-from monkeybot_cli.runtime_python import DEFAULT_PORT, gateway_argv, resolve_runtime_python
+from monkeybot_cli.runtime_python import DEFAULT_PORT, gateway_argv, prepare_runtime_python
 from monkeybot_cli.terminal_markdown import MarkdownPlainStream
 
 _DIM = "\x1b[2m"
@@ -683,7 +683,7 @@ def _spawn_gateway(config_path: Path | None, agent_root: Path, port: int) -> _Sp
         errors="replace",
     )
     proc = subprocess.Popen(
-        gateway_argv(resolve_runtime_python(agent_root)),
+        gateway_argv(prepare_runtime_python(agent_root, config_path)),
         env=env,
         cwd=agent_root,
         stdout=subprocess.DEVNULL,

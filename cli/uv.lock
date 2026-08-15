@@ -4,8 +4,10 @@ requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
     "python_full_version >= '3.14' and sys_platform != 'win32'",
-    "python_full_version < '3.14' and sys_platform == 'win32'",
-    "python_full_version < '3.14' and sys_platform != 'win32'",
+    "python_full_version == '3.13.*' and sys_platform == 'win32'",
+    "python_full_version < '3.13' and sys_platform == 'win32'",
+    "python_full_version == '3.13.*' and sys_platform != 'win32'",
+    "python_full_version < '3.13' and sys_platform != 'win32'",
 ]
 
 [[package]]
@@ -615,7 +617,7 @@ wheels = [
 
 [[package]]
 name = "monkeybot"
-version = "2.2.1"
+version = "3.0.0"
 source = { editable = "../" }
 dependencies = [
     { name = "aiosqlite" },
@@ -663,6 +665,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "langfuse", marker = "extra == 'evals'", specifier = ">=3.0.0" },
     { name = "mcp", specifier = ">=1.0.0" },
+    { name = "mempalace", marker = "extra == 'memory'", specifier = ">=3.7.0,<4" },
     { name = "monkeybot", extras = ["cli"], marker = "extra == 'cli-realtime'" },
     { name = "monkeybot", extras = ["realtime"], marker = "extra == 'cli'" },
     { name = "monkeybot", extras = ["realtime"], marker = "extra == 'realtime-gemini'" },
@@ -700,7 +703,7 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32.0" },
     { name = "websockets", marker = "extra == 'realtime'", specifier = ">=14.0" },
 ]
-provides-extras = ["gemini", "vertex", "claude", "vertex-claude", "bedrock", "openai", "huggingface", "ollama", "nvidia", "openrouter", "sandbox", "scheduler", "postgres", "firestore", "gcs", "aws", "council", "web-search", "evals", "realtime", "realtime-gemini", "cli", "cli-realtime", "observability", "knowledge-ast", "knowledge-media"]
+provides-extras = ["memory", "gemini", "vertex", "claude", "vertex-claude", "bedrock", "openai", "huggingface", "ollama", "nvidia", "openrouter", "sandbox", "scheduler", "postgres", "firestore", "gcs", "aws", "council", "web-search", "evals", "realtime", "realtime-gemini", "cli", "cli-realtime", "observability", "knowledge-ast", "knowledge-media"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -708,6 +711,7 @@ dev = [
     { name = "asgi-lifespan", specifier = ">=2.1.0" },
     { name = "monkeybot", extras = ["knowledge-ast"] },
     { name = "monkeybot", extras = ["knowledge-media"] },
+    { name = "monkeybot", extras = ["memory"] },
     { name = "monkeybot-cli", editable = "." },
     { name = "mypy", specifier = ">=1.13.0" },
     { name = "opentelemetry-api", specifier = ">=1.28" },
@@ -744,7 +748,7 @@ dev = [{ name = "pytest", specifier = ">=8.0.0" }]
 
 [[package]]
 name = "monkeybot-cli"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },

@@ -13,7 +13,7 @@ import httpx
 from monkeybot_cli.runtime_python import (
     COMBINED_GATEWAY_MODULE,
     gateway_argv,
-    resolve_runtime_python,
+    prepare_runtime_python,
 )
 
 logger = logging.getLogger(__name__)
@@ -100,12 +100,15 @@ async def start_gateway_if_needed(
         )
 
     _load_dotenv(workspace)
+    config_path = workspace / "monkeybot_config" / "monkeybot.yaml"
     parsed = urllib.parse.urlparse(url)
     port = parsed.port or (443 if parsed.scheme == "wss" else 80)
 
     env = {**os.environ, "PORT": str(port)}
+    if os.environ.get("MONKEYBOT_CONFIG", "").strip():
+        env["MONKEYBOT_CONFIG"] = str(config_path)
     env.setdefault("LOG_LEVEL", "error")
-    runtime = resolve_runtime_python(workspace)
+    runtime = prepare_runtime_python(workspace, config_path)
     cmd = gateway_argv(runtime, module=COMBINED_GATEWAY_MODULE)
 
     logger.info("Starting combined gateway on port %s from %s", port, workspace)

@@ -12,6 +12,7 @@ from monkeybot_cli.commands.chat import (
     run_chat,
 )
 from monkeybot_cli.gateway_health import occupied_gateway_message, wait_for_health
+from monkeybot_cli.runtime_python import RuntimePython
 
 
 def test_occupied_gateway_message_none_when_free() -> None:
@@ -55,6 +56,10 @@ def test_spawn_gateway_enables_transcript_capture(tmp_path: Path, monkeypatch) -
         return object()
 
     monkeypatch.delenv("MONKEYBOT_TRANSCRIPT_ENABLED", raising=False)
+    monkeypatch.setattr(
+        "monkeybot_cli.commands.chat.prepare_runtime_python",
+        lambda *a, **k: RuntimePython(["python"], "cli"),
+    )
     monkeypatch.setattr("monkeybot_cli.commands.chat.subprocess.Popen", fake_popen)
     spawned = _spawn_gateway(None, tmp_path, 8123)
     try:

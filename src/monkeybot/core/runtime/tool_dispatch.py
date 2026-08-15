@@ -17,7 +17,6 @@ from monkeybot.core.context import (
     refresh_tools_after_mcp_change,
 )
 from monkeybot.core.context.epoch import ContextEpochTracker
-from monkeybot.core.context.memory_prompt import MemoryPromptSelection
 from monkeybot.core.context.tool_output_policy import resolve_tool_budget
 from monkeybot.core.context.tool_shapers import (
     exceeds_tool_output_budget,
@@ -735,7 +734,6 @@ async def _post_batch_budget_and_registry(
     history: HistoryStore,
     usage: Usage,
     provider: Provider,
-    memory_selection: MemoryPromptSelection | None,
     pre_turn_extra: str | None,
     attachment_store: AttachmentStore | None,
     attachment_catalog: SessionAttachmentCatalog | None,
@@ -782,7 +780,6 @@ async def _post_batch_budget_and_registry(
                 provider=provider,
                 attachment_store=attachment_store,
                 attachment_catalog=attachment_catalog,
-                memory_selection=memory_selection,
                 extra_system_text=pre_turn_extra,
                 vertex_google_search=vertex_google_search,
                 epoch=epoch_tracker,
@@ -912,7 +909,6 @@ async def dispatch_tool_batch(
     provider: Provider,
     hook_manager: HookManager | None,
     turn_index: int,
-    memory_selection: MemoryPromptSelection | None,
     pre_turn_extra: str | None,
     attachment_store: AttachmentStore | None,
     attachment_catalog: SessionAttachmentCatalog | None,
@@ -1043,7 +1039,6 @@ async def dispatch_tool_batch(
         history=history,
         usage=usage,
         provider=provider,
-        memory_selection=memory_selection,
         pre_turn_extra=pre_turn_extra,
         attachment_store=attachment_store,
         attachment_catalog=attachment_catalog,

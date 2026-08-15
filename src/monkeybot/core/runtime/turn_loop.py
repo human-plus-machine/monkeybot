@@ -17,11 +17,6 @@ from monkeybot.core.context import (
     refresh_memory_index,
 )
 from monkeybot.core.context.epoch import ContextEpochTracker, EpochAdmit
-from monkeybot.core.context.memory_prompt import (
-    MemoryPromptSelection,
-    memory_index_fingerprint,
-    prepare_memory_for_prompt,
-)
 from monkeybot.core.hooks import HookEvent, HookManager
 from monkeybot.core.llm.provider import (
     Done,
@@ -33,6 +28,7 @@ from monkeybot.core.llm.provider import (
 )
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.memory.ingest import persist_message
 from monkeybot.core.messages import convert_to_provider
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.persistence.transcript import TranscriptWriter
@@ -51,8 +47,8 @@ from monkeybot.core.types.content_blocks import (
 )
 from monkeybot.core.types.content_blocks import Thinking as ThinkingBlock
 from monkeybot.core.types.types_tools import ToolDef
-from monkeybot.providers.pricing import estimate_cost
 from monkeybot.providers._utils import note_anthropic_token_estimate_observation
+from monkeybot.providers.pricing import estimate_cost
 
 from .doom_loop import (
     _doom_loop_exempt_names,
@@ -152,7 +148,6 @@ async def _run_inner(
     max_turns: int | None,
     usage: Usage,
     hook_manager: HookManager | None = None,
-    curator_provider: Provider | None = None,
     trace_id_out: list[str | None] | None = None,
     attachment_store: AttachmentStore | None = None,
     attachment_catalog: SessionAttachmentCatalog | None = None,
@@ -176,7 +171,6 @@ async def _run_inner(
             max_turns=max_turns,
             usage=usage,
             hook_manager=hook_manager,
-            curator_provider=curator_provider,
             last_assistant=last_assistant,
             attachment_store=attachment_store,
             attachment_catalog=attachment_catalog,
@@ -216,7 +210,14 @@ async def _drain_steers(
         steered = input_admission.pop_steer()
         if steered is None:
             break
-        await history.append(ctx.thread_id, Message(role="user", content=list(steered)))
+        await persist_message(
+            history,
+            Message(role="user", content=list(steered)),
+            thread_id=ctx.thread_id,
+            turn_id=ctx.request_id,
+            memory=ctx.memory,
+            ingest=True,
+        )
         preview = preview_text(steered)
         logger.info(
             "steer injected %s",
@@ -243,8 +244,6 @@ class _TurnState:
     provider_messages_written: int = 0
     tools_dirty: bool = False
     assistant_write_task: asyncio.Task[None] | None = None
-    memory_selection: MemoryPromptSelection | None = None
-    memory_selection_fingerprint: str | None = None
     pre_turn_extra: str | None = None
     pre_tool_extra_next: str | None = None
     empty_completion_retries_left: int = _EMPTY_COMPLETION_RETRIES
@@ -271,8 +270,6 @@ async def _prepare_turn_context(
     state: _TurnState,
     *,
     history: HistoryStore,
-    provider: Provider,
-    curator_provider: Provider | None,
     hook_manager: HookManager | None,
     attachment_store: AttachmentStore | None,
     attachment_catalog: SessionAttachmentCatalog | None,
@@ -304,35 +301,10 @@ async def _prepare_turn_context(
                     ],
                 )
 
-    index_fp = memory_index_fingerprint(state.ctx.memory_index)
-    if state.memory_selection is None or state.memory_selection_fingerprint != index_fp:
-        u = latest_user_message_text(state.chat_messages) or state.user_text
-        state.memory_selection = await prepare_memory_for_prompt(
-            ctx=state.ctx,
-            user_message=u,
-            provider=provider,
-            curator_provider=curator_provider,
-        )
-        state.memory_selection_fingerprint = index_fp
-        logger.debug(
-            "memory prompt selection %s",
-            kv(
-                request_id=state.ctx.request_id,
-                thread_id=state.ctx.thread_id,
-                turn=state.turn_index,
-                memory_lines=len(state.memory_selection.lines),
-                total_lines=state.memory_selection.total_lines,
-                coverage=state.memory_selection.coverage,
-                confidence=state.memory_selection.confidence,
-                nudge_search=state.memory_selection.nudge_search,
-            ),
-        )
-
     state.admit = _admit_system_context(
         state.epoch_tracker,
         state.ctx,
         state.chat_messages,
-        memory_selection=state.memory_selection,
         attachment_catalog=attachment_catalog,
     )
     for epoch_evt in _epoch_events(
@@ -397,7 +369,6 @@ async def _refresh_prompt_after_history_change(
         state.epoch_tracker,
         state.ctx,
         state.chat_messages,
-        memory_selection=state.memory_selection,
         attachment_catalog=attachment_catalog,
     )
     for epoch_evt in _epoch_events(
@@ -1040,9 +1011,13 @@ async def _persist_partial_assistant_on_abort(
         assist_blocks.append(Text(text=cleaned))
     if not assist_blocks:
         return
-    await history.append(
-        state.ctx.thread_id,
+    await persist_message(
+        history,
         Message(role="assistant", content=assist_blocks),
+        thread_id=state.ctx.thread_id,
+        turn_id=state.ctx.request_id,
+        memory=state.ctx.memory,
+        ingest=bool(cleaned),
     )
     if cleaned:
         last_assistant[0] = cleaned
@@ -1094,9 +1069,13 @@ async def _handle_empty_or_final_text(
             assist_blocks.append(thinking)
         assist_blocks.append(Text(text=cleaned_text))
         state.assistant_write_task = asyncio.create_task(
-            history.append(
-                state.ctx.thread_id,
+            persist_message(
+                history,
                 Message(role="assistant", content=assist_blocks),
+                thread_id=state.ctx.thread_id,
+                turn_id=state.ctx.request_id,
+                memory=state.ctx.memory,
+                ingest=True,
             )
         )
         last_assistant[0] = cleaned_text
@@ -1195,9 +1174,13 @@ async def _append_tool_requests_and_dispatch(
                 metadata=dict(c.metadata) if c.metadata else None,
             )
         )
-    await history.append(
-        state.ctx.thread_id,
+    await persist_message(
+        history,
         Message(role="assistant", content=assist_blocks),
+        thread_id=state.ctx.thread_id,
+        turn_id=state.ctx.request_id,
+        memory=state.ctx.memory,
+        ingest=False,
     )
 
     state.needs_followup_after_tools = True
@@ -1220,7 +1203,6 @@ async def _append_tool_requests_and_dispatch(
         provider=provider,
         hook_manager=hook_manager,
         turn_index=state.turn_index,
-        memory_selection=state.memory_selection,
         pre_turn_extra=state.pre_turn_extra,
         attachment_store=attachment_store,
         attachment_catalog=attachment_catalog,
@@ -1248,7 +1230,6 @@ async def _run_inner_core(
     max_turns: int | None,
     usage: Usage,
     hook_manager: HookManager | None = None,
-    curator_provider: Provider | None = None,
     last_assistant: list[str],
     attachment_store: AttachmentStore | None = None,
     attachment_catalog: SessionAttachmentCatalog | None = None,
@@ -1272,8 +1253,13 @@ async def _run_inner_core(
             exempt_names=_doom_loop_exempt_names(ctx.tools),
         ),
     )
-    await history.append(
-        state.ctx.thread_id, Message(role="user", content=list(user_content))
+    await persist_message(
+        history,
+        Message(role="user", content=list(user_content)),
+        thread_id=state.ctx.thread_id,
+        turn_id=state.ctx.request_id,
+        memory=state.ctx.memory,
+        ingest=True,
     )
 
     await _fire_hook(
@@ -1327,8 +1313,6 @@ async def _run_inner_core(
             async for evt in _prepare_turn_context(
                 state,
                 history=history,
-                provider=provider,
-                curator_provider=curator_provider,
                 hook_manager=hook_manager,
                 attachment_store=attachment_store,
                 attachment_catalog=attachment_catalog,

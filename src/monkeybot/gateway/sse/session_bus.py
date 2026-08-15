@@ -319,10 +319,6 @@ class SessionRegistry:
         bus.abandon_pending_cancel_all()
         bus.cancel_follow_up_retry()
         bus.admission.clear_all()
-
-        from monkeybot.core.context.memory_prompt import evict_curation_cache
-
-        evict_curation_cache(session_id)
         return bus
 
     async def _cleanup_spill(self, session_id: str) -> None:
@@ -357,7 +353,7 @@ class SessionRegistry:
 
         Cancels outstanding pending-response futures so awaiting callers don't
         hang, then evicts the memory-curation cache entry for this thread id
-        (see ``memory_prompt._curation_cache``) so both structures share the
+        so both structures share the
         same lifecycle instead of growing unbounded for the life of the process.
 
         Does not run transcript analysis or spill cleanup — use

@@ -11,11 +11,14 @@ allowed_commands:
   - git
   - gh
   - bash
+  - mempalace
 
 # Path prefixes permitted in run_command argv (./ and / arguments).
 allowed_path_prefixes:
   - ../memory/
   - ../memory
+  - ../memory/mempalace/
+  - ../memory/mempalace
   - ./skills/
   - ./skills
   - ./global-skills/

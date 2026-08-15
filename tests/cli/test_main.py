@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from monkeybot_cli.realtime import talk_ui
+from monkeybot_cli.runtime_python import RuntimePython
 from typer.testing import CliRunner
 
 from monkeybot.cli.main import app, run_talk_session
@@ -63,6 +64,11 @@ def test_talk_spawned_gateway_enables_transcript_capture(
         return object()
 
     monkeypatch.delenv("MONKEYBOT_TRANSCRIPT_ENABLED", raising=False)
+    monkeypatch.setattr(
+        talk_ui,
+        "prepare_runtime_python",
+        lambda *a, **k: RuntimePython(["python"], "cli"),
+    )
     monkeypatch.setattr(talk_ui.subprocess, "Popen", fake_popen)
     spawned = talk_ui._spawn_combined_gateway(None, tmp_path, 8123)
     try:
@@ -81,3 +87,25 @@ def test_run_talk_session_returns_int_on_connect_failure() -> None:
         start_gateway=False,
     )
     assert code == 1
+
+
+def test_legacy_cli_talk_reports_runtime_upgrade_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot_cli.runtime_python import RuntimeUpgradeError
+
+    cfg = tmp_path / "monkeybot_config"
+    cfg.mkdir()
+    (cfg / "monkeybot.yaml").write_text("model:\n  name: fake\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("MONKEYBOT_CONFIG", raising=False)
+    monkeypatch.setattr(talk_ui, "health_ok", lambda base: False)
+
+    def boom(*_a: object, **_k: object) -> object:
+        raise RuntimeUpgradeError("gateway interpreter is missing a compatible MonkeyBot")
+
+    monkeypatch.setattr(talk_ui, "prepare_runtime_python", boom)
+    result = runner.invoke(app, ["talk", "--text", "--gateway-url", "ws://127.0.0.1:0"])
+    assert result.exit_code == 2
+    assert "error:" in result.output
+    assert "gateway interpreter is missing a compatible MonkeyBot" in result.output

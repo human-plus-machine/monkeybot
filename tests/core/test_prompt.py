@@ -6,7 +6,6 @@ import pytest
 
 from monkeybot.core.attachments.catalog import AttachmentRecord
 from monkeybot.core.context import SkillRef, TurnContext
-from monkeybot.core.context.memory_prompt import MemoryPromptSelection
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.prompts.headings import (
     CURRENT_DATE_HEADING,
@@ -41,7 +40,17 @@ def _minimal_ctx(
     )
 
 
-def test_compose_memory_selection_omits_unlisted_lines() -> None:
+def test_compose_omits_wake_up_and_teaching_when_memory_off() -> None:
+    ctx = _minimal_ctx()
+    assert ctx.memory is None
+    out = compose_system_prompt(ctx)
+    assert "## Memory wake-up" not in out
+    assert "### Memory retrieval (`mempalace search`)" not in out
+    assert 'argv: ["mempalace", "search"' not in out
+    assert "do not call `mempalace search`" in out
+
+
+def test_compose_uses_memory_index_lines() -> None:
     ctx = _minimal_ctx(
         memory_index=["a", "b"],
         skills=[
@@ -49,19 +58,10 @@ def test_compose_memory_selection_omits_unlisted_lines() -> None:
             SkillRef(name="s2", description="d2"),
         ],
     )
-    selection = MemoryPromptSelection(
-        lines=["a"],
-        total_lines=2,
-        coverage=0.5,
-        confidence=0.5,
-        nudge_search=True,
-        use_custom_lines=True,
-    )
-    out = compose_system_prompt(ctx, memory_selection=selection)
-    assert "- a" in out
-    assert "- b" not in out
-    assert "search_memory" in out
-    assert "Showing 1 of 2" in out
+    out = compose_system_prompt(ctx)
+    mem_section = out.split("## Memory wake-up", 1)[1].split("## Skills", 1)[0]
+    assert "a" in mem_section
+    assert "b" in mem_section
     assert "\n\n## Skills\n- s1\n- s2" in out
 
 
@@ -117,10 +117,10 @@ def test_compose_stable_and_volatile_split() -> None:
     assert "You are TestBot." in stable
     assert "monkeybot harness" in stable
     assert "\n\n## Current date\n" not in stable
-    assert "\n\n## Memory index\n" not in stable
+    assert "\n\n## Memory wake-up\n" not in stable
     assert "\n\n## Skills\n" not in stable
     assert f"\n\n## Current date\n{date.today().isoformat()}" in volatile
-    assert "- fact-a" in volatile
+    assert "fact-a" in volatile
     assert "\n\n## Skills\n- s1" in volatile
     assert compose_system_prompt(ctx) == f"{stable}{volatile}"
 
@@ -156,8 +156,8 @@ def test_memory_section_with_skills_block() -> None:
         skills=[SkillRef(name="s1", description="d1")],
     )
     out = compose_system_prompt(ctx)
-    assert "## Memory index" in out
-    assert "- Note A" in out
+    assert "## Memory wake-up" in out
+    assert "Note A" in out
     assert "\n\n## Skills\n- s1" in out
     assert "list_skills" in out
 

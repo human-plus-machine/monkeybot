@@ -21,9 +21,9 @@ from __future__ import annotations
 
 CURRENT_DATE_HEADING = "\n\n## Current date\n"
 MEMORY_INDEX_HEADING = (
-    "\n\n## Memory index\n"
-    "Stored memories from past sessions; entries are titles — "
-    "`search_memory` retrieves the full note.\n"
+    "\n\n## Memory wake-up\n"
+    "Past sessions live in the palace; prefer `mempalace search` to recall. "
+    "Do not read_file palace paths.\n"
 )
 MEMORY_NUDGE_HEADING = "\n\n## Memory\n"
 SKILLS_HEADING = "\n\n## Skills\n"

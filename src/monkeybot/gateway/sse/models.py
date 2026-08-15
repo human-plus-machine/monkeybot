@@ -158,6 +158,8 @@ class HealthResponse(BaseModel):
 
     status: Literal["ok"]
     version: Literal["2.0.0"]
+    memory: Literal["enabled", "disabled", "unavailable", "unknown"] = "unknown"
+    memory_detail: str | None = None
 
 
 class SessionUsageResponse(BaseModel):

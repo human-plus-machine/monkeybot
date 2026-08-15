@@ -27,7 +27,6 @@ from monkeybot.core.llm.provider import (
     UsageEvent,
 )
 from monkeybot.core.llm.usage import Usage
-from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.runtime.events import (
     AssistantDelta,
     ContextSummarized,
@@ -55,7 +54,6 @@ from monkeybot.core.tools.inspector import Decision
 from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.types.content_blocks import Image, Text, ToolRequest, ToolResponse
 from monkeybot.core.types.types_tools import ToolDef
-from monkeybot.core.workspace import create_workspace_storage
 
 
 def _flatten_text_from_message(m: Message) -> str:
@@ -159,8 +157,10 @@ class FakeHistory:
             return list(self.rows)
         return list(self.rows[-limit:]) if limit > 0 else []
 
-    async def append(self, thread_id: str, message: Message) -> None:
-        del thread_id
+    async def append(
+        self, thread_id: str, message: Message, *, turn_id: str | None = None, message_id: str | None = None
+    ) -> None:
+        del thread_id, turn_id, message_id
         self.rows.append(message)
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None:
@@ -1134,13 +1134,13 @@ def test_chunk_tool_calls_groups_consecutive_parallel_safe() -> None:
     a = ToolCall(call_id="a", name="read_file", args={"path": "a"})
     b = ToolCall(call_id="b", name="glob", args={"pattern": "*"})
     c = ToolCall(call_id="c", name="write_file", args={"path": "x", "content": ""})
-    d = ToolCall(call_id="d", name="search_memory", args={"query": "q"})
-    safe = frozenset({"read_file", "glob", "search_memory"})
+    d = ToolCall(call_id="d", name="grep", args={"pattern": "q"})
+    safe = frozenset({"read_file", "glob", "grep"})
     chunks = _chunk_tool_calls([a, b, c, d], parallel_safe=safe)
     assert [len(ch) for ch in chunks] == [2, 1, 1]
     assert [x.name for x in chunks[0]] == ["read_file", "glob"]
     assert chunks[1][0].name == "write_file"
-    assert chunks[2][0].name == "search_memory"
+    assert chunks[2][0].name == "grep"
 
 
 @pytest.mark.asyncio
@@ -1170,7 +1170,7 @@ async def test_parallel_safe_tools_results_in_submission_order() -> None:
             [
                 ToolCall(call_id="c1", name="read_file", args={"path": "c"}),
                 ToolCall(call_id="a1", name="glob", args={"pattern": "*"}),
-                ToolCall(call_id="b1", name="search_memory", args={"query": "q"}),
+                ToolCall(call_id="b1", name="grep", args={"pattern": "q"}),
                 Done(),
             ],
             [TextDelta(text="done"), Done()],
@@ -1180,7 +1180,7 @@ async def test_parallel_safe_tools_results_in_submission_order() -> None:
     tools = [
         ToolDef("read_file", "r", {"type": "object"}, parallel_safe=True),
         ToolDef("glob", "g", {"type": "object"}, parallel_safe=True),
-        ToolDef("search_memory", "s", {"type": "object"}, parallel_safe=True),
+        ToolDef("grep", "s", {"type": "object"}, parallel_safe=True),
     ]
     ctx = TurnContext(**{**_ctx().__dict__, "tools": tools})
     events: list[object] = []
@@ -1815,7 +1815,15 @@ def test_messages_for_provider_appends_update_after_trailing_assistant_message()
 async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> None:
     mem = tmp_path / "memory"
     mem.mkdir()
-    (mem / "INDEX.md").write_text("initial line\n", encoding="utf-8")
+    from tests.core.memory.helpers import make_memory_subsystem
+
+    mem_sys = make_memory_subsystem(mem)
+    palace = mem_sys._palace
+    palace.upsert_drawer(
+        "d1",
+        "initial line",
+        {"wing": "main", "room": "conversation", "filed_at": "2026-01-01T00:00:00Z"},
+    )
 
     class CaptureFakeProvider:
         def __init__(self, scripted: list[list[object]]) -> None:
@@ -1860,15 +1868,12 @@ async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> N
             return fake_provider_prompt_tokens(messages, tools)
 
     class BumpIndexExecutor(RecordingExecutor):
-        def __init__(self, memory_dir: Path) -> None:
-            super().__init__()
-            self._memory_dir = memory_dir
-
         async def execute(self, *, call: ToolCall, ctx: TurnContext) -> ToolExecutionResult:
             del call, ctx
-            (self._memory_dir / "INDEX.md").write_text(
-                "initial line\nnew memory from tool\n",
-                encoding="utf-8",
+            palace.upsert_drawer(
+                "d2",
+                "new memory from tool",
+                {"wing": "main", "room": "conversation", "filed_at": "2026-01-02T00:00:00Z"},
             )
             return ToolExecutionResult.ok_text("ok")
 
@@ -1881,15 +1886,8 @@ async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> N
             [TextDelta(text="done"), Done()],
         ]
     )
-    uri = "local://" + str(mem.resolve())
-    mem_sys = MemorySubsystem(
-        storage=create_workspace_storage(uri),
-        provider=prov,
-        model="gemini-2.5-flash",
-        memory_uri=uri,
-    )
     hist = FakeHistory()
-    exe = BumpIndexExecutor(mem)
+    exe = BumpIndexExecutor()
     ctx = TurnContext(
         thread_id="t1",
         request_id="r1",
@@ -2431,8 +2429,8 @@ async def test_system_prompt_snapshot_includes_skills_memory_and_attachments() -
     assert snaps
     text = snaps[0].text
     assert "\n\n## Skills\n- pdf-skill" in text
-    assert "## Memory index" in text
-    assert "- remembers the sky is blue" in text
+    assert "## Memory wake-up" in text
+    assert "remembers the sky is blue" in text
     assert "\n\n## Session attachments\n- att1 (report.pdf, application/pdf): Q1 report" in text
 
 
