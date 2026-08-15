@@ -559,6 +559,13 @@ def _core_tool_defs(
             "arguments": {"type": "array", "items": {"type": "string"}},
             "shell": {"type": "string"},
             "script": {"type": "string"},
+            "cwd": {
+                "type": "string",
+                "description": (
+                    "Optional workspace-relative working directory (defaults to workspace root). "
+                    "Use for subdirectory commands (npm, nested pytest, subrepo git) instead of cd."
+                ),
+            },
             "timeout": {"type": "integer"},
         },
         "required": [],
@@ -626,8 +633,9 @@ def _core_tool_defs(
                 "Run an allowlisted shell command with optional timeout. "
                 'Pass argv as a list with the binary first (e.g. ["ls", "."]); '
                 "do not pass a combined string as the binary. Shell starts in "
-                "workspace root. cd is a builtin and is not a valid command — "
-                "pass workspace-relative paths to the binary instead."
+                "workspace root unless cwd (workspace-relative) is set. "
+                "cd is a builtin and is not a valid command — pass cwd or "
+                "workspace-relative paths to the binary instead."
             ),
             run_schema,
         ),
@@ -644,7 +652,11 @@ def _core_tool_defs(
         ),
         ToolDef(
             "write_file",
-            "Write or replace a UTF-8 text file under the workspace root.",
+            (
+                "Write or replace a UTF-8 text file under the workspace root. "
+                "You have a writable workspace — do not claim you lack filesystem "
+                "access or are chat-only; use this tool for file deliverables."
+            ),
             write_schema,
         ),
         ToolDef(

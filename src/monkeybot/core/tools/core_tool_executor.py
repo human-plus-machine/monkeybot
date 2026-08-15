@@ -1690,6 +1690,21 @@ class CoreToolExecutor(ToolExecutorPort):
                 await self._run_store.record_failed(run_id, "; ".join(str(e) for e in errors))
         return (_j(payload), None)
 
+    def _resolve_run_command_cwd(self, args: dict[str, Any]) -> Path:
+        """Workspace-relative cwd for ``run_command`` (defaults to repo root)."""
+        raw = args.get("cwd")
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            return self._workspace.repo_root
+        if not isinstance(raw, str):
+            raise WorkspaceError("cwd must be a string", code="invalid_cwd")
+        cwd = self._workspace._resolve_root_dir(raw)
+        if not cwd.is_dir():
+            raise WorkspaceError(
+                f"cwd is not an existing directory: {raw.strip()}",
+                code="invalid_cwd",
+            )
+        return cwd
+
     async def _tool_run_command(
         self,
         args: dict[str, Any],
@@ -1701,13 +1716,17 @@ class CoreToolExecutor(ToolExecutorPort):
             cmd, argv = _parse_run_command(args)
         except ValueError as exc:
             return None, _run_command_parse_envelope(exc)
+        try:
+            cwd = self._resolve_run_command_cwd(args)
+        except WorkspaceError as exc:
+            return None, _workspace_error_envelope(exc)
         timeout = _coerce_int(args.get("timeout"), 60) or 60
         try:
             result = await self._terminal.execute(
                 cmd,
                 argv,
                 timeout=timeout,
-                cwd=self._workspace.repo_root,
+                cwd=cwd,
             )
         except SecurityError as exc:
             return None, self._run_command_security_envelope(exc)

@@ -35,6 +35,8 @@ def test_harness_is_protocol_not_tool_catalog() -> None:
     assert "### Tool-call protocol (strict)" in out
     assert "native function-call channel" in out
     assert "Fulfillment rule" in out
+    assert "Long multi-item tasks" in out
+    assert "compacted mid-task" in out
     assert '{"tool_calls":' not in out
     assert "Path rule" in out
     # Compact: protocol + paths, not the old ~15k tool manual.

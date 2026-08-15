@@ -1309,6 +1309,81 @@ async def test_run_command_malformed_args_returns_validation_envelope(
 
 
 @pytest.mark.asyncio
+async def test_run_command_cwd_forwards_workspace_subdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from monkeybot.core.tools.terminal import ExecutionResult
+
+    monkeypatch.chdir(tmp_path)
+    sub = tmp_path / "pkg"
+    sub.mkdir()
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    terminal = MagicMock()
+    terminal.allowed_commands = ("pwd",)
+    terminal.allowed_path_prefixes = ("./",)
+    terminal.execute = AsyncMock(
+        return_value=ExecutionResult(exit_code=0, stdout=str(sub), stderr="")
+    )
+    terminal.aclose = AsyncMock()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+        terminal=terminal,
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="1",
+                name="run_command",
+                args={"argv": ["pwd"], "cwd": "pkg"},
+            ),
+            ctx=_ctx(),
+        )
+    )
+    assert err is None and out is not None
+    terminal.execute.assert_awaited_once()
+    assert terminal.execute.await_args.kwargs["cwd"] == sub.resolve()
+
+
+@pytest.mark.asyncio
+async def test_run_command_cwd_escape_returns_validation_envelope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="1",
+                name="run_command",
+                args={"argv": ["pwd"], "cwd": "../outside"},
+            ),
+            ctx=_ctx(),
+        )
+    )
+    assert out is None and err is not None
+    payload = json.loads(err)
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "validation"
+
+
+@pytest.mark.asyncio
 async def test_run_command_timeout_hint_rejects_timeout_bump_retry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -89,7 +89,10 @@ def _current_request_block(chat_messages: Sequence[Message] | None) -> str:
 def _session_attachments_block(catalog: Sequence[AttachmentRecord] | None) -> str:
     if not catalog:
         return ""
-    lines = [f"- {r.attachment_id} ({r.filename}, {r.mime_type}): {r.description}" for r in catalog]
+    lines = [
+        f"- {r.attachment_id} ({r.filename}, {r.mime_type}): {r.description}"
+        for r in catalog
+    ]
     return "\n\n## Session attachments\n" + "\n".join(lines)
 
 
@@ -154,7 +157,9 @@ def compose_volatile_tail(
     chat_messages: Sequence[Message] | None = None,
 ) -> str:
     """Volatile tail: current date + memory index + skills + current-request anchor."""
-    return "".join(compose_volatile_tail_parts(ctx, chat_messages=chat_messages).values())
+    return "".join(
+        compose_volatile_tail_parts(ctx, chat_messages=chat_messages).values()
+    )
 
 
 def compose_volatile_tail_parts(

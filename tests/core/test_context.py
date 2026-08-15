@@ -212,6 +212,8 @@ def test_core_tool_defs_keep_hot_path_and_moved_policy() -> None:
     assert "Prefer over run_command+grep" in tools["grep"].description
     assert "argv as a list" in tools["run_command"].description
     assert "bash" not in tools["run_command"].description.lower()
+    assert "cwd" in tools["run_command"].input_schema.get("properties", {})
+    assert "writable workspace" in tools["write_file"].description
     assert "queued:true" in tools["task"].description
 
 

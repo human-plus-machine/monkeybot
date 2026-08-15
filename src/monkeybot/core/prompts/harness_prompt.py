@@ -44,10 +44,11 @@ This block is injected by the host every turn. Prefer the **active JSON tool lis
 - **Spill / partial artifacts:** on timeout, truncation, interrupt, or any result that mentions a spill path / `details.partial_output_path` / `partial_paths`, **`read_file` that path** (or the spill inventory under `.monkeybot/`) **before** changing args or re-issuing the tool.
 
 ### Runtime paths
-- workspace root (cwd): `{workspace_root}` — file and shell tools start here.
+- workspace root (cwd): `{workspace_root}` — file and shell tools start here; `run_command` may set a workspace-relative `cwd`.
 - `run_command`: {run_command_exec_note}
 - runtime (inside workspace): `.monkeybot/` — spill, knowledge index, transcripts. Not memory.
 {memory_paths_line}- workspace `data/` (if present) is ordinary project files — **not** the memory store.
+- **Long multi-item tasks:** when a task has more than ~10 enumerable items (question lists, checklists), write incremental results to a workspace file early and update it as you go — context may be compacted mid-task.
 
 ### MCP
 - Names look like `server__tool` (double underscore). Call `enable_mcp` before using a server's tools when they are not yet in the active list; resource/prompt tools appear only after `enable_mcp`.

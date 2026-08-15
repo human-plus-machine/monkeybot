@@ -200,7 +200,9 @@ async def test_todo_list_tool_add_many_atomic(tmp_path: Path) -> None:
         item = await store_full.add(f"keep-{i}")
         assert not isinstance(item, str)
     tool_full = TodoListTool(store_full)
-    over = json.loads(await tool_full.execute({"action": "add", "text": ["one-more", "two-more"]}))
+    over = json.loads(
+        await tool_full.execute({"action": "add", "text": ["one-more", "two-more"]})
+    )
     assert over["ok"] is False
     assert "would exceed max" in over["message"]
     assert len(store_full.items) == 49
