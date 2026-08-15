@@ -369,10 +369,12 @@ class SessionRegistry:
         bus = self._detach(session_id)
         if bus is None:
             return RemoveResult(deleted=False)
-        # Quiesce before spill cleanup so an in-flight turn cannot rewrite or
-        # read spill dirs after we delete them.
-        await bus.quiesce_active_turn()
-        await self._cleanup_spill(session_id)
+        try:
+            # Quiesce before spill cleanup so an in-flight turn cannot rewrite or
+            # read spill dirs after we delete them.
+            await bus.quiesce_active_turn()
+        finally:
+            await self._cleanup_spill(session_id)
         writer = bus.transcript_writer
         if writer is None:
             return RemoveResult(deleted=True)

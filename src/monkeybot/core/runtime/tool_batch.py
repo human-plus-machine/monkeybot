@@ -145,3 +145,33 @@ async def _await_user_response_any(
         if callable(ap):
             ap(pending_key)
         return {"_timeout": True}
+
+
+def confirm_wait_stopped_by_user(bus: object | None, pending_key: str) -> bool:
+    """True when Stop abandoned the confirm future; False when the turn task was cancelled."""
+    if bus is None:
+        return False
+    checker = getattr(bus, "is_pending_or_terminal", None)
+    if not callable(checker):
+        return False
+    status = checker(pending_key)
+    if status == "terminated":
+        return True
+    if status == "pending":
+        pending = getattr(bus, "pending_responses", None)
+        if isinstance(pending, dict):
+            fut = pending.get(pending_key)
+            return isinstance(fut, asyncio.Future) and fut.cancelled()
+        return False
+    # Stop via abandon_pending_cancel_all removes the key without terminated tracking.
+    return True
+
+
+def uncancel_current_task() -> None:
+    """Clear a pending task-cancellation count after handling ``CancelledError``."""
+    try:
+        cur = asyncio.current_task()
+        if cur is not None and getattr(cur, "uncancel", None):
+            cur.uncancel()
+    except Exception:
+        pass

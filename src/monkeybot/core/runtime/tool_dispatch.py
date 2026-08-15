@@ -61,6 +61,8 @@ from .tool_batch import (
     _parallel_tool_concurrency,
     _rejected_tool_batch_error,
     _should_reject_tool_batch,
+    confirm_wait_stopped_by_user,
+    uncancel_current_task,
 )
 
 logger = logging.getLogger("monkeybot.core.runtime.loop.tool_dispatch")
@@ -408,14 +410,18 @@ async def _gate_chunk_calls(
             ):
                 yield evt
         except asyncio.CancelledError:
-            # Stop during confirm cancels the pending future. Settle like the
-            # cancelled-event abort path so earlier completed tools still land
-            # in history instead of escaping before _fill_abort_tool_responses.
-            yield Error(request_id=ctx.request_id, error="Request cancelled")
-            _abort_gate_chunk(
-                result, allowed_exec=allowed_exec, chunk_responses=chunk_responses
-            )
-            return
+            bus = ctx.sse_bus
+            if confirm_wait_stopped_by_user(bus, call.call_id):
+                # Stop during confirm cancels the pending future. Settle like the
+                # cancelled-event abort path so earlier completed tools still land
+                # in history instead of escaping before _fill_abort_tool_responses.
+                yield Error(request_id=ctx.request_id, error="Request cancelled")
+                _abort_gate_chunk(
+                    result, allowed_exec=allowed_exec, chunk_responses=chunk_responses
+                )
+                return
+            uncancel_current_task()
+            raise
 
         if not insp_outcome.allowed:
             msg = insp_outcome.denial_message or "tool call denied"

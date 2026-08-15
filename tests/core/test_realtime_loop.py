@@ -396,8 +396,10 @@ class TestRunRealtimeTurn:
         assert result.error is None
         assert "Ada" in (result.result or "")
 
-    async def test_tool_confirm_cancelled_error_propagates(self) -> None:
+    async def test_tool_confirm_future_cancel_settles(self) -> None:
         import asyncio
+        from collections import deque
+        from typing import Literal
 
         from monkeybot.core.runtime.events import Error, ToolCallResult, ToolConfirmationRequestEvent
         from monkeybot.core.tools.inspector import Decision
@@ -410,13 +412,44 @@ class TestRunRealtimeTurn:
 
         class CancelOnConfirmBus:
             def __init__(self) -> None:
-                self.futures: list[asyncio.Future[object]] = []
+                self.pending_responses: dict[str, asyncio.Future[object]] = {}
+                self.terminated_pending_keys: deque[str] = deque(maxlen=256)
 
             def register_pending(self, pending_key: str) -> asyncio.Future[object]:
-                del pending_key
                 fut: asyncio.Future[object] = asyncio.get_running_loop().create_future()
-                self.futures.append(fut)
+                self.pending_responses[pending_key] = fut
                 return fut
+
+            def is_pending_or_terminal(
+                self, key: str
+            ) -> Literal["pending", "terminated", "unknown"]:
+                if key in self.pending_responses:
+                    return "pending"
+                if key in self.terminated_pending_keys:
+                    return "terminated"
+                return "unknown"
+
+            def resolve_pending(self, key: str, payload: object) -> bool:
+                fut = self.pending_responses.get(key)
+                if fut is None or fut.done():
+                    return False
+                fut.set_result(payload)
+                self.pending_responses.pop(key, None)
+                self.terminated_pending_keys.append(key)
+                return True
+
+            def abandon_pending_timeout(self, key: str) -> None:
+                fut = self.pending_responses.pop(key, None)
+                if fut is not None and not fut.done():
+                    fut.cancel()
+                self.terminated_pending_keys.append(key)
+
+            def abandon_pending_cancel_all(self) -> None:
+                for key in list(self.pending_responses.keys()):
+                    fut = self.pending_responses.pop(key, None)
+                    if fut is not None and not fut.done():
+                        fut.cancel()
+                    self.terminated_pending_keys.append(key)
 
         bus = CancelOnConfirmBus()
         history = FakeHistory()
@@ -437,9 +470,9 @@ class TestRunRealtimeTurn:
             if isinstance(ev, ToolConfirmationRequestEvent):
                 break
 
-        # Stop while blocked on HITL (cancel the pending future, not register_pending).
-        assert bus.futures and not bus.futures[-1].done()
-        bus.futures[-1].cancel()
+        fut = bus.pending_responses.get("c1")
+        assert fut is not None and not fut.done()
+        fut.cancel()
 
         events = [ev]
         async for trailing in agen:
@@ -456,3 +489,87 @@ class TestRunRealtimeTurn:
             if m.role == "user" and any(isinstance(b, ToolResponse) for b in m.content)
         ]
         assert tool_msgs, "confirm-cancel must settle tool responses into history"
+
+    async def test_tool_confirm_task_cancel_propagates(self) -> None:
+        import asyncio
+        from collections import deque
+        from typing import Literal
+
+        from monkeybot.core.runtime.events import ToolConfirmationRequestEvent
+        from monkeybot.core.tools.inspector import Decision
+
+        class ConfirmInspector:
+            async def check(self, call, ctx):  # type: ignore[no-untyped-def]
+                del call, ctx
+                return Decision(kind="confirm", message="Allow?")
+
+        class WaitOnConfirmBus:
+            def __init__(self) -> None:
+                self.pending_responses: dict[str, asyncio.Future[object]] = {}
+                self.terminated_pending_keys: deque[str] = deque(maxlen=256)
+                self.confirm_event = asyncio.Event()
+
+            def register_pending(self, pending_key: str) -> asyncio.Future[object]:
+                fut: asyncio.Future[object] = asyncio.get_running_loop().create_future()
+                self.pending_responses[pending_key] = fut
+                self.confirm_event.set()
+                return fut
+
+            def is_pending_or_terminal(
+                self, key: str
+            ) -> Literal["pending", "terminated", "unknown"]:
+                if key in self.pending_responses:
+                    return "pending"
+                if key in self.terminated_pending_keys:
+                    return "terminated"
+                return "unknown"
+
+            def resolve_pending(self, key: str, payload: object) -> bool:
+                fut = self.pending_responses.get(key)
+                if fut is None or fut.done():
+                    return False
+                fut.set_result(payload)
+                self.pending_responses.pop(key, None)
+                self.terminated_pending_keys.append(key)
+                return True
+
+            def abandon_pending_timeout(self, key: str) -> None:
+                fut = self.pending_responses.pop(key, None)
+                if fut is not None and not fut.done():
+                    fut.cancel()
+                self.terminated_pending_keys.append(key)
+
+            def abandon_pending_cancel_all(self) -> None:
+                for key in list(self.pending_responses.keys()):
+                    fut = self.pending_responses.pop(key, None)
+                    if fut is not None and not fut.done():
+                        fut.cancel()
+                    self.terminated_pending_keys.append(key)
+
+        bus = WaitOnConfirmBus()
+        history = FakeHistory()
+        ctx = _ctx()
+        agen = run_realtime_turn(
+            "hi",
+            "calling",
+            [RealtimeToolCall(call_id="c1", name="shell", args={"cmd": "ls"})],
+            ctx,
+            history=history,
+            tool_executor=RecordingExecutor(),
+            inspectors=[ConfirmInspector()],
+            pending_bus=bus,
+        )
+
+        async def _consume() -> None:
+            async for _ in agen:
+                pass
+
+        task = asyncio.create_task(_consume())
+        await bus.confirm_event.wait()
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        assert task.cancelling() == 0

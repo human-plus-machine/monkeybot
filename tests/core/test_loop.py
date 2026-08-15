@@ -41,6 +41,7 @@ from monkeybot.core.runtime.events import (
     ThinkingBlockDelta,
     ToolCallResult,
     ToolCallStarted,
+    ToolConfirmationRequestEvent,
     TurnComplete,
 )
 from monkeybot.core.runtime.history_compaction import _compact_history_if_needed
@@ -861,16 +862,49 @@ async def test_run_cancel_after_stream_persists_assistant_text(monkeypatch: pyte
 @pytest.mark.asyncio
 async def test_run_stop_during_confirm_settles_completed_tool_results() -> None:
     """Stop while awaiting tool confirm must settle prior tool results into history."""
+    from collections import deque
+    from typing import Literal
 
     class CancelOnConfirmBus:
         def __init__(self) -> None:
-            self.futures: list[asyncio.Future[Any]] = []
+            self.pending_responses: dict[str, asyncio.Future[Any]] = {}
+            self.terminated_pending_keys: deque[str] = deque(maxlen=256)
 
         def register_pending(self, key: str) -> asyncio.Future[Any]:
-            del key
             fut: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
-            self.futures.append(fut)
+            self.pending_responses[key] = fut
             return fut
+
+        def is_pending_or_terminal(
+            self, key: str
+        ) -> Literal["pending", "terminated", "unknown"]:
+            if key in self.pending_responses:
+                return "pending"
+            if key in self.terminated_pending_keys:
+                return "terminated"
+            return "unknown"
+
+        def resolve_pending(self, key: str, payload: Any) -> bool:
+            fut = self.pending_responses.get(key)
+            if fut is None or fut.done():
+                return False
+            fut.set_result(payload)
+            self.pending_responses.pop(key, None)
+            self.terminated_pending_keys.append(key)
+            return True
+
+        def abandon_pending_timeout(self, key: str) -> None:
+            fut = self.pending_responses.pop(key, None)
+            if fut is not None and not fut.done():
+                fut.cancel()
+            self.terminated_pending_keys.append(key)
+
+        def abandon_pending_cancel_all(self) -> None:
+            for key in list(self.pending_responses.keys()):
+                fut = self.pending_responses.pop(key, None)
+                if fut is not None and not fut.done():
+                    fut.cancel()
+                self.terminated_pending_keys.append(key)
 
     bus = CancelOnConfirmBus()
 
@@ -921,8 +955,10 @@ async def test_run_stop_during_confirm_settles_completed_tool_results() -> None:
             max_turns=3,
         ):
             events.append(e)
-            if bus.futures and not bus.futures[-1].done():
-                bus.futures[-1].cancel()
+            if isinstance(e, ToolConfirmationRequestEvent):
+                fut = bus.pending_responses.get("c1")
+                if fut is not None and not fut.done():
+                    fut.cancel()
 
     await _consume()
 
@@ -950,6 +986,100 @@ async def test_run_stop_during_confirm_settles_completed_tool_results() -> None:
         t.text for t in responses["c1"].result if isinstance(t, Text)
     )
     assert 'Tool "run_command" was cancelled' in cancel_text
+
+
+@pytest.mark.asyncio
+async def test_run_task_cancel_during_confirm_propagates() -> None:
+    """Task cancellation during HITL must not be swallowed as a Stop settle."""
+    from collections import deque
+    from typing import Literal
+
+    class WaitOnConfirmBus:
+        def __init__(self) -> None:
+            self.pending_responses: dict[str, asyncio.Future[Any]] = {}
+            self.terminated_pending_keys: deque[str] = deque(maxlen=256)
+            self.confirm_event = asyncio.Event()
+
+        def register_pending(self, key: str) -> asyncio.Future[Any]:
+            fut: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+            self.pending_responses[key] = fut
+            self.confirm_event.set()
+            return fut
+
+        def is_pending_or_terminal(
+            self, key: str
+        ) -> Literal["pending", "terminated", "unknown"]:
+            if key in self.pending_responses:
+                return "pending"
+            if key in self.terminated_pending_keys:
+                return "terminated"
+            return "unknown"
+
+        def resolve_pending(self, key: str, payload: Any) -> bool:
+            fut = self.pending_responses.get(key)
+            if fut is None or fut.done():
+                return False
+            fut.set_result(payload)
+            self.pending_responses.pop(key, None)
+            self.terminated_pending_keys.append(key)
+            return True
+
+        def abandon_pending_timeout(self, key: str) -> None:
+            fut = self.pending_responses.pop(key, None)
+            if fut is not None and not fut.done():
+                fut.cancel()
+            self.terminated_pending_keys.append(key)
+
+        def abandon_pending_cancel_all(self) -> None:
+            for key in list(self.pending_responses.keys()):
+                fut = self.pending_responses.pop(key, None)
+                if fut is not None and not fut.done():
+                    fut.cancel()
+                self.terminated_pending_keys.append(key)
+
+    bus = WaitOnConfirmBus()
+
+    class ConfirmShell:
+        async def check(self, call, ctx):  # type: ignore[no-untyped-def]
+            del ctx
+            if call.name == "run_command":
+                return Decision(kind="confirm", message="Allow shell?")
+            return Decision(kind="allow")
+
+    ctx = dataclasses.replace(
+        _ctx(),
+        tools=[ToolDef("run_command", "Run shell", {})],
+        sse_bus=bus,
+    )
+    prov = FakeProvider(
+        [[ToolCall(call_id="c1", name="run_command", args={"command": "true"}), Done()]]
+    )
+    hist = FakeHistory()
+
+    async def _consume() -> None:
+        async for _ in run(
+            "u",
+            ctx,
+            provider=prov,
+            history=hist,
+            inspectors=[ConfirmShell()],
+            tool_executor=RecordingExecutor(),
+            max_turns=2,
+        ):
+            pass
+
+    task = asyncio.create_task(_consume())
+    await bus.confirm_event.wait()
+    await asyncio.sleep(0.05)
+    task.cancel()
+    await task
+    assert task.cancelling() == 0
+    tool_msgs = [
+        m
+        for m in hist.rows
+        if m.role == "user" and any(isinstance(b, ToolResponse) for b in m.content)
+    ]
+    assert not tool_msgs, "task cancel must not settle confirm-cancel tool responses"
 
 
 @pytest.mark.asyncio

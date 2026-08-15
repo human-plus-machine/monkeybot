@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -58,6 +59,7 @@ class RealtimeConnectionState:
     idle_delivery_queue: asyncio.Queue[Any] = field(default_factory=asyncio.Queue)
     metrics: RealtimeMetrics = field(init=False)
     pending_responses: dict[str, asyncio.Future[Any]] = field(default_factory=dict)
+    terminated_pending_keys: deque[str] = field(default_factory=lambda: deque(maxlen=256))
     transcript_writer: TranscriptWriter | None = None
     todo_store: TodoListStore | None = None
     """Process-local session todo list (not shared across gateway replicas)."""
@@ -93,12 +95,15 @@ class RealtimeConnectionState:
             fut = self.pending_responses.pop(key, None)
             if fut is not None and not fut.done():
                 fut.cancel()
+            self.terminated_pending_keys.append(key)
 
     def is_pending_or_terminal(
         self, key: str
     ) -> Literal["pending", "terminated", "unknown"]:
         if key in self.pending_responses:
             return "pending"
+        if key in self.terminated_pending_keys:
+            return "terminated"
         return "unknown"
 
     def transition(self, new_state: RealtimeSessionState) -> None:

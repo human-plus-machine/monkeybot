@@ -117,7 +117,34 @@ def test_create_session_rejects_path_traversal_session_id() -> None:
         CreateSessionRequest(session_id="../../../tmp/x")
 
 
-def test_create_session_rejects_glob_metachar_session_id() -> None:
+def test_sanitize_path_component_reserved_names() -> None:
+    from monkeybot.core.path_safety import sanitize_path_component
+
+    assert sanitize_path_component(".") == "_"
+    assert sanitize_path_component("..") == "_"
+    assert sanitize_path_component("") == "_"
+
+
+def test_session_spill_dirs_dot_maps_to_safe_component(tmp_path: Path) -> None:
+    root = tmp_path / ".monkeybot" / "spill"
+    (root / "victim").mkdir(parents=True)
+    (root / "victim" / "keep.txt").write_text("x")
+
+    dirs = session_spill_dirs(tmp_path, ".")
+    names = {p.name for p in dirs}
+    assert names == {"_"}
+    assert (root / "victim" / "keep.txt").is_file()
+
+
+def test_create_session_rejects_dot_session_id() -> None:
+    from pydantic import ValidationError
+
+    from monkeybot.gateway.sse.models import CreateSessionRequest
+
+    with pytest.raises(ValidationError):
+        CreateSessionRequest(session_id=".")
+
+
     from pydantic import ValidationError
 
     from monkeybot.gateway.sse.models import CreateSessionRequest

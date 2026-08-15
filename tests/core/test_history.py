@@ -10,6 +10,7 @@ from typing import Any, cast
 
 import pytest
 import pytest_asyncio
+import aiosqlite
 
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.persistence.history import SQLiteHistoryStore
@@ -356,18 +357,22 @@ async def test_history_reset_is_atomic_on_insert_failure(history_db) -> None:
     await history.append(thread_id, Message.text("user", "keep-me"))
     await history.append(thread_id, Message.text("assistant", "also-keep"))
 
-    original_insert = history._insert_message
-    calls = {"n": 0}
+    original_execute = _conn.execute
+    insert_calls = 0
 
-    async def boom(thread_id: str, message: Message) -> None:
-        calls["n"] += 1
-        if calls["n"] == 2:
-            raise RuntimeError("simulated insert failure")
-        await original_insert(thread_id, message)
+    async def failing_execute(sql: str, *args: Any) -> Any:
+        nonlocal insert_calls
+        if "INSERT INTO conversation_history" in sql:
+            insert_calls += 1
+            if insert_calls == 2:
+                raise aiosqlite.OperationalError("simulated insert failure")
+        return await original_execute(sql, *args)
 
-    history._insert_message = boom  # type: ignore[method-assign]
+    _conn.execute = failing_execute  # type: ignore[method-assign]
 
-    with pytest.raises(RuntimeError, match="simulated insert failure"):
+    from monkeybot.core.persistence.errors import AmbiguousCommitError
+
+    with pytest.raises(AmbiguousCommitError, match="simulated insert failure"):
         await history.reset(
             thread_id,
             [

@@ -109,9 +109,21 @@ class SQLiteHistoryStore:
         message_id: str | None = None,
     ) -> None:
         """Validate ``message``, JSON-encode content blocks, insert one row."""
+        _validate_message(message)
+        payload = json.dumps(
+            [b.to_dict() for b in message.content],
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        created_at = int(time.time() * 1000)
         async with self._lock:
-            await self._insert_message(
-                thread_id, message, turn_id=turn_id, message_id=message_id
+            await self._insert_history_row(
+                thread_id,
+                message.role,
+                payload,
+                created_at,
+                turn_id=turn_id,
+                message_id=message_id,
             )
             await self._conn.commit()
 
@@ -267,13 +279,20 @@ class SQLiteHistoryStore:
                 for msg in messages:
                     await self._insert_message(thread_id, msg)
                 await self._conn.commit()
-            except Exception:
+            except Exception as exc:
                 await self._conn.rollback()
                 logger.warning(
                     "history reset rolled back %s",
                     kv(thread_id=thread_id),
                     exc_info=True,
                 )
+                if isinstance(
+                    exc,
+                    (TimeoutError, OSError, ConnectionError, aiosqlite.OperationalError),
+                ):
+                    from monkeybot.core.persistence.errors import AmbiguousCommitError
+
+                    raise AmbiguousCommitError(str(exc)) from exc
                 raise
 
     @with_conn_lock

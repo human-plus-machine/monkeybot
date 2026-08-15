@@ -525,7 +525,8 @@ def session_spill_dirs(workspace_root: Path, session_id: str) -> list[Path]:
                     kv(session_id=session_id, legacy=str(legacy)),
                 )
             else:
-                dirs.append(legacy)
+                if legacy != root:
+                    dirs.append(legacy)
     # De-dupe while preserving order; drop anything outside spill root.
     seen: set[Path] = set()
     contained: list[Path] = []
