@@ -381,6 +381,9 @@ class TerminalExecutor:
 
         Lets a caller-supplied executor be brought under the owning component's
         capability policy without mutating an object the caller still holds.
+
+        ``None`` for any argument means "keep this instance's value". An empty
+        sequence is an explicit override (clear that axis), not a preserve.
         """
         return TerminalExecutor(
             allowed_commands=(

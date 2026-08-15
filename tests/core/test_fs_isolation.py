@@ -83,6 +83,17 @@ class TestIsolatedArgv:
         assert '(deny file-read* file-write* (subpath "/palace"))' in args[1]
         assert args[-2:] == ["/bin/cat", "file"]
 
+    def test_sandbox_exec_rejects_seatbelt_metacharacters(self):
+        support = IsolationSupport("sandbox-exec", "test")
+
+        with pytest.raises(ValueError, match="seatbelt metacharacters"):
+            isolated_argv(
+                "/bin/cat",
+                ["file"],
+                [Path('/tmp/evil") (allow default)')],
+                support=support,
+            )
+
     def test_hidden_paths_are_resolved_before_wrapping(self, tmp_path):
         support = IsolationSupport("sandbox-exec", "test")
         hidden = tmp_path / "palace"
@@ -209,3 +220,9 @@ class TestLinuxBootstrap:
         )
 
         assert proc.returncode == 0
+        # Mount namespaces share the directory tree with the host: preparing
+        # the mount point creates secret_dir on the host. It must stay
+        # owner-writable so a later memory-on session can initialize into it.
+        assert secret_dir.is_dir()
+        assert secret_dir.stat().st_mode & 0o200
+        (secret_dir / "init.txt").write_text("ok", encoding="utf-8")

@@ -100,9 +100,14 @@ if libc.mount(b"none", b"/", None, MS_REC | MS_PRIVATE, None) != 0:
     _fail("cannot detach mount namespace: " + os.strerror(ctypes.get_errno()))
 
 for target in hidden:
+    # Mount namespaces isolate mounts, not the directory tree: makedirs here
+    # still creates the path on the host. Use owner-writable mode so a later
+    # memory-on session can initialize the palace; never leave a 0o500 stub.
+    # Mounting over the nearest existing ancestor would avoid creation but
+    # would also hide siblings (workspace under the agent dir, or $HOME).
     if not os.path.isdir(target):
         try:
-            os.makedirs(target, mode=0o500, exist_ok=True)
+            os.makedirs(target, mode=0o700, exist_ok=True)
         except OSError as exc:
             _fail("cannot prepare hide mount point " + target + ": " + str(exc))
     flags = MS_RDONLY | MS_NOSUID | MS_NODEV
@@ -134,8 +139,29 @@ class IsolationSupport:
         return self.mechanism != "none"
 
 
+_SEATBELT_PATH_METACHARS = frozenset('"()\\')
+
+
+def _seatbelt_subpath(path: str) -> str:
+    """Quote a path for a seatbelt ``(subpath "...")`` form.
+
+    Reject profile metacharacters rather than inventing an escape dialect:
+    a crafted ``MEMPALACE_PALACE_PATH`` must not close the deny early and
+    re-open ``(allow ...)``. Rejection is fail-closed (caller refuses exec).
+    """
+    if _SEATBELT_PATH_METACHARS.intersection(path):
+        raise ValueError(
+            "hidden path contains seatbelt metacharacters and cannot be isolated: "
+            + repr(path)
+        )
+    return path
+
+
 def _sandbox_exec_profile(hidden: Sequence[str]) -> str:
-    denies = "\n".join(f'(deny file-read* file-write* (subpath "{path}"))' for path in hidden)
+    denies = "\n".join(
+        f'(deny file-read* file-write* (subpath "{_seatbelt_subpath(path)}"))'
+        for path in hidden
+    )
     return f"(version 1)\n(allow default)\n{denies}\n"
 
 

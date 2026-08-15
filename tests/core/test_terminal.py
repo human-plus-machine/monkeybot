@@ -941,6 +941,14 @@ class TestTerminalExecutorRestricted:
         assert derived.allowed_commands == original.allowed_commands
         assert derived.allowed_path_prefixes == original.allowed_path_prefixes
 
+    def test_restricted_none_preserves_hidden_paths(self, tmp_path):
+        original = TerminalExecutor(hidden_paths=[tmp_path / "extra"])
+
+        derived = original.restricted(hidden_paths=None)
+
+        assert derived.hidden_paths == original.hidden_paths
+        assert derived.hidden_paths == (tmp_path / "extra",)
+
 
 def test_build_skill_runtime_env_prepends_gateway_python_bin(tmp_path, monkeypatch) -> None:
     """bash -c python3 must see the gateway venv before system python."""

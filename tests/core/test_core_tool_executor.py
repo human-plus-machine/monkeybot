@@ -2421,6 +2421,26 @@ class TestCoreToolExecutorSandboxSelection:
         assert str(skills) not in injected.allowed_path_prefixes
         assert ex._terminal.allowed_path_prefixes == injected.allowed_path_prefixes
 
+    def test_injected_terminal_preserves_caller_hidden_paths_when_memory_on(self, tmp_path):
+        """Memory-on must pass None into restricted(), not () which would clear."""
+        extra = tmp_path / "extra-hidden"
+        extra.mkdir()
+        injected = TerminalExecutor(hidden_paths=[extra])
+        skills = tmp_path / "skills"
+        skills.mkdir()
+        mem = tmp_path / "mem"
+        mem.mkdir()
+
+        ex = CoreToolExecutor(
+            workspace_root=tmp_path,
+            memory=_mem_sub(mem),
+            skills_path=skills,
+            mcp=_NoMCP(),
+            terminal=injected,
+        )
+
+        assert ex._terminal.hidden_paths == (extra,)
+
     def test_injected_sandbox_gets_host_terminal_for_memory(self, tmp_path, monkeypatch):
         """Injected sandboxes need a host terminal; the palace is never mounted."""
         monkeypatch.delenv("SANDBOX_ENABLED", raising=False)

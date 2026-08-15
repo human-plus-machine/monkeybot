@@ -870,7 +870,9 @@ class CoreToolExecutor(ToolExecutorPort):
                 if run_command_allowed_path_prefixes is not None
                 else tuple(ALLOWED_PATHS)
             )
-        hidden_paths: tuple[Path, ...] = ()
+        # None preserves an injected TerminalExecutor's hidden_paths via
+        # restricted(); only memory-off supplies an explicit override.
+        hidden_paths: tuple[Path, ...] | None = None
         if self._memory is None:
             # Memory off is a capability decision, so it applies to whatever
             # executor ends up running commands, including an injected one.
