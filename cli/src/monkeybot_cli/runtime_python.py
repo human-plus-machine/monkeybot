@@ -11,10 +11,14 @@ Resolution order for an agent root:
 1. ``<root>/.venv/bin/python`` (or the Windows variant) — direct, no subprocess overhead.
 2. ``uv run python`` — when ``<root>/pyproject.toml`` exists but no ``.venv``.
 3. ``<cache>/monkeybot/runtimes/<key>/bin/python`` — a CLI-managed venv holding
-   ``monkeybot[memory]`` pinned to the running core version. Used only for
-   config-only trees with memory enabled when a previously provisioned cache
-   interpreter exists. The managed runtime also mirrors provider/storage extras
-   present in the CLI env (excluding extras whose probe module is a base dep).
+   ``monkeybot[memory]``. When this process is running from a source checkout
+   (or ``MONKEYBOT_CHECKOUT`` points at one), the install is that tree plus
+   extras from PyPI; otherwise it is ``monkeybot[memory]==<running version>``.
+   Used only for config-only trees with memory enabled when a previously
+   provisioned cache interpreter exists. The managed runtime also mirrors
+   provider/storage extras present in the CLI env (excluding extras whose
+   probe module is a base dep) and the extra required by the agent's YAML
+   ``model.provider`` (so a thin CLI still gets ``tiktoken`` for NVIDIA/OpenAI).
 4. ``sys.executable`` — legacy / config-only trees (just ``monkeybot_config/``, no
    ``pyproject.toml``). In this case extras must be installed in the CLI env,
    unless memory is enabled and ``prepare_runtime_python`` provisions (3).
@@ -28,6 +32,7 @@ probe refuses to start the gateway.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -37,16 +42,20 @@ import uuid
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from importlib.metadata import PackageNotFoundError
+from importlib.metadata import PackageNotFoundError, distribution
 from importlib.metadata import version as _package_version
 from pathlib import Path
+from urllib.parse import unquote, urlparse
+from urllib.request import url2pathname
+
+import yaml
 
 from monkeybot_cli.compat import (
     COMPATIBLE_CORE_LOWER_VERSION,
     COMPATIBLE_CORE_RANGE,
     COMPATIBLE_CORE_UPPER_VERSION,
 )
-from monkeybot_cli.extras_catalog import FEATURE_CHOICES
+from monkeybot_cli.extras_catalog import FEATURE_CHOICES, provider_extra_name
 from monkeybot_cli.providers import PROVIDER_SPECS, extra_installed, extra_module
 
 DEFAULT_PORT = 8080
@@ -313,6 +322,36 @@ def _managed_if_ready(runtime_dir: Path, agent_root: Path) -> RuntimePython | No
     return None
 
 
+def _agent_provider_extras(agent_root: Path) -> tuple[str, ...]:
+    """Package extra required by ``model.provider`` in the agent's YAML, if any."""
+    config = agent_root / "monkeybot_config" / "monkeybot.yaml"
+    if not config.is_file():
+        return ()
+    try:
+        data = yaml.safe_load(config.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise _managed_runtime_error(f"could not read {config}: {exc}") from exc
+    if data is None:
+        return ()
+    if not isinstance(data, dict):
+        raise _managed_runtime_error(f"{config} is not a mapping")
+    model = data.get("model")
+    if model is None:
+        return ()
+    if not isinstance(model, dict):
+        raise _managed_runtime_error(f"{config} model is not a mapping")
+    raw = model.get("provider")
+    extra = provider_extra_name(raw if isinstance(raw, str) else None)
+    return (extra,) if extra else ()
+
+
+def _managed_runtime_extras(agent_root: Path) -> tuple[str, ...]:
+    """CLI-mirrored extras plus the extra required by this agent's YAML provider."""
+    extras = set(mirrored_monkeybot_extras())
+    extras.update(_agent_provider_extras(agent_root))
+    return tuple(sorted(extras))
+
+
 def _existing_managed_runtime(agent_root: Path) -> RuntimePython | None:
     """Locate a cached managed interpreter without probing it.
 
@@ -323,7 +362,7 @@ def _existing_managed_runtime(agent_root: Path) -> RuntimePython | None:
         monkeybot_version = _package_version("monkeybot")
     except PackageNotFoundError:
         return None
-    extras = mirrored_monkeybot_extras()
+    extras = _managed_runtime_extras(agent_root)
     return _managed_runtime(managed_memory_runtime_dir(monkeybot_version, extras), agent_root)
 
 
@@ -382,6 +421,93 @@ def _run_provisioning(argv: list[str], label: str) -> None:
         raise _managed_runtime_error(_command_failure_detail(label, proc))
 
 
+def _is_monkeybot_project(root: Path) -> bool:
+    pyproject = root / "pyproject.toml"
+    if not pyproject.is_file():
+        return False
+    try:
+        text = pyproject.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return 'name = "monkeybot"' in text or "name = 'monkeybot'" in text
+
+
+def _path_from_file_url(url: str) -> Path:
+    parsed = urlparse(url)
+    return Path(url2pathname(unquote(parsed.path)))
+
+
+def _checkout_from_direct_url() -> Path | None:
+    """Return the source tree recorded by a path / editable install (PEP 610)."""
+    try:
+        dist = distribution("monkeybot")
+    except PackageNotFoundError:
+        return None
+    raw = dist.read_text("direct_url.json")
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    url = str(data.get("url") or "")
+    if not url.startswith("file:"):
+        return None
+    path = _path_from_file_url(url)
+    if _is_monkeybot_project(path):
+        return path.resolve()
+    return None
+
+
+def _checkout_from_module_file(module_file: str | None) -> Path | None:
+    if not module_file:
+        return None
+    path = Path(module_file).resolve()
+    for parent in path.parents:
+        if _is_monkeybot_project(parent):
+            return parent
+    return None
+
+
+def _monkeybot_checkout_root() -> Path | None:
+    """Return the MonkeyBot source tree when this process can see a checkout.
+
+    ``MONKEYBOT_CHECKOUT`` wins when it points at a tree whose ``pyproject.toml``
+    names the ``monkeybot`` project. Otherwise walk from the running
+    ``monkeybot_cli`` / ``monkeybot`` modules, then the PEP 610 direct URL of
+    an editable or path install.
+    """
+    override = os.environ.get("MONKEYBOT_CHECKOUT", "").strip()
+    if override:
+        candidate = Path(override).expanduser()
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            resolved = None
+        if resolved is not None and _is_monkeybot_project(resolved):
+            return resolved
+    for mod_name in ("monkeybot_cli", "monkeybot"):
+        mod = sys.modules.get(mod_name)
+        if mod is None:
+            try:
+                mod = __import__(mod_name)
+            except ImportError:
+                continue
+        found = _checkout_from_module_file(getattr(mod, "__file__", None))
+        if found is not None:
+            return found
+    return _checkout_from_direct_url()
+
+
+def _managed_memory_requirement(monkeybot_version: str, extra_spec: str) -> str:
+    """Install spec for the managed runtime: local checkout when present, else PyPI pin."""
+    extras = f"[{extra_spec}]" if extra_spec else ""
+    checkout = _monkeybot_checkout_root()
+    if checkout is not None:
+        return f"monkeybot{extras} @ {checkout.resolve().as_uri()}"
+    return f"monkeybot{extras}=={monkeybot_version}"
+
+
 def provision_managed_memory_runtime(agent_root: Path) -> RuntimePython:
     """Return a CLI-managed venv holding ``monkeybot[memory]`` at the running core version.
 
@@ -390,14 +516,15 @@ def provision_managed_memory_runtime(agent_root: Path) -> RuntimePython:
     as-is. Otherwise the runtime is created in a staging directory with
     ``uv venv --python`` pointing at this CLI interpreter, then swapped into
     the cache with ``os.replace``. Pins in an agent ``pyproject.toml`` are never
-    rewritten.
+    rewritten. An unpublished checkout is installed from disk so MemPalace can
+    still come from PyPI.
     """
     try:
         monkeybot_version = _package_version("monkeybot")
     except PackageNotFoundError as exc:
         raise _managed_runtime_error("the running monkeybot core version is unknown") from exc
 
-    extras = mirrored_monkeybot_extras()
+    extras = _managed_runtime_extras(agent_root)
     runtime_dir = managed_memory_runtime_dir(monkeybot_version, extras)
     cached = _managed_if_ready(runtime_dir, agent_root)
     if cached is not None:
@@ -406,7 +533,7 @@ def provision_managed_memory_runtime(agent_root: Path) -> RuntimePython:
     if shutil.which("uv") is None:
         raise _managed_runtime_error("uv was not found on PATH")
     extra_spec = ",".join(("memory", *extras))
-    requirement = f"monkeybot[{extra_spec}]=={monkeybot_version}"
+    requirement = _managed_memory_requirement(monkeybot_version, extra_spec)
     print(
         f"agent memory runtime is missing MemPalace; provisioning {requirement} in {runtime_dir}",
         flush=True,

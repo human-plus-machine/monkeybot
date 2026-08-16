@@ -16,6 +16,8 @@ from monkeybot_cli.runtime_python import (
     MEMORY_PROBE,
     RuntimePython,
     RuntimeUpgradeError,
+    _managed_memory_requirement,
+    _monkeybot_checkout_root,
     gateway_argv,
     managed_memory_runtime_dir,
     mirrored_monkeybot_extras,
@@ -538,6 +540,10 @@ def _isolate_managed_cache(
         "monkeybot_cli.runtime_python.mirrored_monkeybot_extras",
         lambda: extras,
     )
+    monkeypatch.setattr(
+        "monkeybot_cli.runtime_python._monkeybot_checkout_root",
+        lambda: None,
+    )
     return managed_memory_runtime_dir(package_version("monkeybot"), extras)
 
 
@@ -649,6 +655,50 @@ def test_prepare_config_only_provisions_managed_runtime_when_cache_cold(
     assert f"provisioning {pin}" in capsys.readouterr().out
 
 
+def test_managed_runtime_installs_from_local_checkout_when_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    checkout = tmp_path / "monkeybot-src"
+    checkout.mkdir()
+    (checkout / "pyproject.toml").write_text('[project]\nname = "monkeybot"\n', encoding="utf-8")
+    _isolate_managed_cache(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "monkeybot_cli.runtime_python._monkeybot_checkout_root",
+        lambda: checkout,
+    )
+    calls: list[list[str]] = []
+    monkeypatch.setattr("monkeybot_cli.runtime_python.subprocess.run", _fake_uv(calls))
+    monkeypatch.setattr(
+        "monkeybot_cli.runtime_python.run_probe",
+        lambda runtime, code, **kwargs: runtime.source == MANAGED_RUNTIME_SOURCE,
+    )
+
+    provision_managed_memory_runtime(tmp_path)
+
+    install = next(cmd for cmd in calls if cmd[:3] == ["uv", "pip", "install"])
+    requirement = Requirement(install[-1])
+    assert requirement.name == "monkeybot"
+    assert requirement.extras == {"memory"}
+    assert requirement.url == checkout.resolve().as_uri()
+    assert str(requirement.specifier) == ""
+    assert f"provisioning {install[-1]}" in capsys.readouterr().out
+
+
+def test_managed_memory_requirement_uses_checkout_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkout = tmp_path / "from-env"
+    checkout.mkdir()
+    (checkout / "pyproject.toml").write_text('[project]\nname = "monkeybot"\n', encoding="utf-8")
+    monkeypatch.setenv("MONKEYBOT_CHECKOUT", str(checkout))
+
+    requirement = Requirement(_managed_memory_requirement("3.0.0", "memory"))
+
+    assert requirement.url == checkout.resolve().as_uri()
+    assert str(requirement.specifier) == ""
+    assert _monkeybot_checkout_root() == checkout.resolve()
+
+
 def test_managed_runtime_retires_existing_dir_instead_of_rmtree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -663,7 +713,9 @@ def test_managed_runtime_retires_existing_dir_instead_of_rmtree(
     monkeypatch.setattr(
         "monkeybot_cli.runtime_python.run_probe",
         # First probe (cache reuse) fails; staged probe after install passes.
-        lambda runtime, code, **kwargs: Path(runtime.argv[0]).resolve() != old_interpreter.resolve(),
+        lambda runtime, code, **kwargs: (
+            Path(runtime.argv[0]).resolve() != old_interpreter.resolve()
+        ),
     )
 
     runtime = provision_managed_memory_runtime(tmp_path)
@@ -771,6 +823,47 @@ def test_managed_runtime_mirrors_installed_extras(
     requirement = Requirement(install[-1])
     assert requirement.extras == {"memory", "openai", "postgres"}
     assert str(requirement.specifier) == f"=={package_version('monkeybot')}"
+
+
+def test_managed_runtime_includes_yaml_provider_extra(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Config-only NVIDIA agents need tiktoken even when the CLI env is thin."""
+    cfg = tmp_path / "monkeybot_config"
+    cfg.mkdir()
+    (cfg / "monkeybot.yaml").write_text(
+        "model:\n  provider: nvidia\nmemory:\n  enabled: true\n",
+        encoding="utf-8",
+    )
+    _isolate_managed_cache(tmp_path, monkeypatch)
+    calls: list[list[str]] = []
+    monkeypatch.setattr("monkeybot_cli.runtime_python.subprocess.run", _fake_uv(calls))
+    monkeypatch.setattr(
+        "monkeybot_cli.runtime_python.run_probe",
+        lambda runtime, code, **kwargs: runtime.source == MANAGED_RUNTIME_SOURCE,
+    )
+
+    provision_managed_memory_runtime(tmp_path)
+
+    install = next(cmd for cmd in calls if cmd[:3] == ["uv", "pip", "install"])
+    requirement = Requirement(install[-1])
+    assert requirement.extras == {"memory", "nvidia"}
+
+
+def test_managed_runtime_fail_closed_on_unreadable_yaml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = tmp_path / "monkeybot_config"
+    cfg.mkdir()
+    (cfg / "monkeybot.yaml").write_text("model: [\n", encoding="utf-8")
+    _isolate_managed_cache(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "monkeybot_cli.runtime_python.subprocess.run",
+        lambda *a, **k: pytest.fail("uv must not run when agent YAML is unreadable"),
+    )
+
+    with pytest.raises(RuntimeUpgradeError, match="could not read"):
+        provision_managed_memory_runtime(tmp_path)
 
 
 def test_managed_runtime_dir_separates_distinct_extra_sets(
