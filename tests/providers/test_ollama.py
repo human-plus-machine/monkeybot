@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import pytest
@@ -21,6 +22,7 @@ def test_reasoning_effort_for_thinking_budget() -> None:
 
 def test_resolve_base_url_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
     p = OllamaProvider()
     assert p._resolve_base_url("any-model") == "http://localhost:11434/v1"
 
@@ -50,6 +52,26 @@ def test_ollama_uses_custom_api_key_when_set(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("OLLAMA_API_KEY", "proxy-secret")
     provider = OllamaProvider()
     assert provider._api_key == "proxy-secret"
+
+
+def test_api_key_without_url_targets_ollama_cloud(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+    monkeypatch.setenv("OLLAMA_API_KEY", "ollama-cloud-key")
+    with caplog.at_level(logging.DEBUG, logger="monkeybot.providers.ollama"):
+        provider = OllamaProvider()
+    assert provider._api_key == "ollama-cloud-key"
+    assert provider._resolve_base_url("gpt-oss:120b") == "https://ollama.com/v1"
+    assert "host=https://ollama.com" in caplog.text
+
+
+def test_explicit_url_wins_over_cloud_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    monkeypatch.setenv("OLLAMA_API_KEY", "proxy-secret")
+    provider = OllamaProvider()
+    assert provider._api_key == "proxy-secret"
+    assert provider._resolve_base_url("m") == "http://localhost:11434/v1"
 
 
 def test_ollama_stores_thinking_budget() -> None:
