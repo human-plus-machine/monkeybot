@@ -8,7 +8,7 @@ version = "0.2.0"
 description = "monkeybot MCP server wrapping browser-harness for real-browser control and site playbooks."
 requires-python = ">=3.11"
 dependencies = [
-    "mcp>=1.0.0",
+    "mcp>=1.0.0,<2",
     "browser-harness>=0.1.3",
 ]
 

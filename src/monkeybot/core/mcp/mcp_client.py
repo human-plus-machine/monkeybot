@@ -735,6 +735,7 @@ class MCPClient:
             if auth is not None:
                 hdr.pop("Authorization", None)
                 hdr.pop("authorization", None)
+            # mcp 2.x wants httpx2.AsyncClient here; stay on httpx until that migration.
             http = httpx.AsyncClient(
                 headers=hdr if hdr else None,
                 auth=auth,

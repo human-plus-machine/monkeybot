@@ -17,7 +17,7 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "pyyaml>=6.0.2",
     "httpx>=0.27.0",
-    "mcp>=1.0.0",
+    "mcp>=1.0.0,<2",
     "python-ulid>=2.0.0",
     "google-genai>=1.0.0",
     # <2.5: newer numpy stub files use PEP 695 `type` statements that mypy
