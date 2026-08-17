@@ -2,16 +2,102 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import Final
+from typing import Any, Final, TypeVar, cast
 
 import aiosqlite
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_DB_URL: Final[str] = "sqlite:///data/monkeybot.db"
+
+OUTBOX_DDL: Final[str] = """CREATE TABLE IF NOT EXISTS memory_outbox (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL DEFAULT '',
+    thread_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT,
+    workspace_id TEXT,
+    wing TEXT NOT NULL,
+    room TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    last_error TEXT,
+    traceparent TEXT,
+    lease_owner TEXT,
+    lease_expires_at TEXT,
+    palace_id TEXT NOT NULL DEFAULT ''
+)"""
+
+OUTBOX_INDEX_DDL: Final[str] = (
+    "CREATE INDEX IF NOT EXISTS idx_memory_outbox_pending "
+    "ON memory_outbox(agent_id, palace_id, status, created_at)"
+)
+
+HISTORY_MESSAGE_ID_INDEX_DDL: Final[str] = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_history_message_id "
+    "ON conversation_history(message_id) WHERE message_id IS NOT NULL AND message_id != ''"
+)
+
+
+class TaskReentrantLock:
+    """asyncio lock the owning task may re-enter (nested store methods)."""
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._owner: asyncio.Task[Any] | None = None
+        self._depth = 0
+
+    async def acquire(self) -> None:
+        task = asyncio.current_task()
+        if self._owner is task:
+            self._depth += 1
+            return
+        await self._lock.acquire()
+        self._owner = task
+        self._depth = 1
+
+    def release(self) -> None:
+        task = asyncio.current_task()
+        if self._owner is not task:
+            raise RuntimeError("TaskReentrantLock.release() by non-owner")
+        self._depth -= 1
+        if self._depth == 0:
+            self._owner = None
+            self._lock.release()
+
+    async def __aenter__(self) -> TaskReentrantLock:
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        self.release()
+
+
+F = TypeVar("F", bound=Callable[..., Any])
+ConnLock = asyncio.Lock | TaskReentrantLock
+
+
+def with_conn_lock(fn: F) -> F:
+    """Serialize a store method on ``self._lock`` (re-entrant for nested calls)."""
+
+    async def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        async with self._lock:
+            return await fn(self, *args, **kwargs)
+
+    wrapper.__name__ = fn.__name__
+    wrapper.__doc__ = fn.__doc__
+    wrapper.__qualname__ = fn.__qualname__
+    return cast(F, wrapper)
+
 
 _LEGACY_SCHEMA_MESSAGE = """Legacy conversation_history schema detected (tool_name and/or
 tool_call_id columns present). The on-disk format changed in the
@@ -33,7 +119,10 @@ SCHEMA_DDLS: Final[tuple[str, ...]] = (
     thread_id TEXT NOT NULL,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    agent_scope TEXT NOT NULL DEFAULT '',
+    turn_id TEXT,
+    message_id TEXT
 )""",
     """CREATE TABLE IF NOT EXISTS subagent_runs (
     run_id TEXT PRIMARY KEY,
@@ -100,6 +189,8 @@ SCHEMA_DDLS: Final[tuple[str, ...]] = (
     request_id TEXT,
     claimed_at_ms INTEGER
 )""",
+    OUTBOX_DDL,
+    OUTBOX_INDEX_DDL,
 )
 
 
@@ -126,11 +217,38 @@ def sqlite_path_from_db_url(db_url: str | None = None) -> str:
     return remainder
 
 
+def db_owned_by_agent_root(db_url: str, agent_root: Path | None) -> bool:
+    """True when ``db_url`` resolves to a file this ``agent_root`` uniquely owns.
+
+    The default deployment (``paths.db_url: sqlite:///data/monkeybot.db``,
+    left relative) is anchored under the agent root by
+    :func:`~monkeybot.core.layout.resolve_sqlite_url`, so by construction no
+    other agent would sensibly point there too — safe to auto-claim legacy
+    rows for on migration (see :func:`backfill_legacy_agent_scope`). An
+    operator-set *absolute* path is not anchored that way and may be
+    deliberately shared across agents (the case PR #179 review reproduced a
+    real cross-agent leak against) — never safe to auto-claim.
+    """
+    if agent_root is None:
+        return False
+    try:
+        path = sqlite_path_from_db_url(db_url)
+    except ValueError:
+        return False
+    if path == ":memory:":
+        return True  # ephemeral, in-process only — inherently single-owner
+    try:
+        return Path(path).resolve().is_relative_to(agent_root.resolve())
+    except (OSError, ValueError):
+        return False
+
+
 async def configure_connection(conn: aiosqlite.Connection) -> None:
-    """PRAGMA journal_mode=WAL; foreign_keys=ON; synchronous=NORMAL."""
+    """PRAGMA journal_mode=WAL; foreign_keys=ON; synchronous=NORMAL; busy_timeout=5000."""
     await conn.execute("PRAGMA journal_mode=WAL")
     await conn.execute("PRAGMA foreign_keys=ON")
     await conn.execute("PRAGMA synchronous=NORMAL")
+    await conn.execute("PRAGMA busy_timeout=5000")
 
 
 async def _connection_db_path(conn: aiosqlite.Connection) -> str:
@@ -158,6 +276,10 @@ async def apply_schema(conn: aiosqlite.Connection) -> None:
     await _ensure_turn_usage_estimated_column(conn)
     await _ensure_turn_usage_cache_columns(conn)
     await _ensure_subagent_runs_claim_columns(conn)
+    await _ensure_conversation_history_agent_scope_column(conn)
+    await _ensure_history_memory_columns(conn)
+    await _ensure_outbox_agent_id_column(conn)
+    await _ensure_outbox_palace_id_column(conn)
     cursor = await conn.execute("PRAGMA table_info(conversation_history)")
     rows = await cursor.fetchall()
     await cursor.close()
@@ -190,9 +312,7 @@ async def _ensure_turn_usage_cache_columns(conn: aiosqlite.Connection) -> None:
     for col in ("cache_read_tokens", "cache_creation_tokens"):
         if col in names:
             continue
-        await conn.execute(
-            f"ALTER TABLE turn_usage ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0"
-        )
+        await conn.execute(f"ALTER TABLE turn_usage ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0")
     await conn.commit()
 
 
@@ -206,6 +326,133 @@ async def _ensure_subagent_runs_claim_columns(conn: aiosqlite.Connection) -> Non
         await conn.execute("ALTER TABLE subagent_runs ADD COLUMN worker_id TEXT")
     if "claimed_at" not in names:
         await conn.execute("ALTER TABLE subagent_runs ADD COLUMN claimed_at INTEGER")
+    await conn.commit()
+
+
+async def _ensure_conversation_history_agent_scope_column(conn: aiosqlite.Connection) -> bool:
+    """Add ``agent_scope`` when upgrading an existing DB. Returns True if it was just added.
+
+    The scoped index is created here, after the column exists, rather than in
+    ``SCHEMA_DDLS``, which runs first and would fail referencing a column not
+    yet on a pre-existing table.
+    """
+    cur = await conn.execute("PRAGMA table_info(conversation_history)")
+    rows = await cur.fetchall()
+    await cur.close()
+    names = {str(r[1]) for r in rows}
+    column_added = "agent_scope" not in names
+    if column_added:
+        try:
+            await conn.execute(
+                "ALTER TABLE conversation_history ADD COLUMN agent_scope TEXT NOT NULL DEFAULT ''"
+            )
+            await conn.commit()
+        except aiosqlite.OperationalError as exc:
+            if "duplicate column name" not in str(exc):
+                raise
+            # Two gateways opened this same shared file concurrently and both
+            # saw the column missing; the other one's ALTER already committed
+            # between our check and this statement — fine, it exists now.
+    await conn.execute(
+        """CREATE INDEX IF NOT EXISTS idx_history_scope_thread
+        ON conversation_history(agent_scope, thread_id, created_at DESC, id DESC)"""
+    )
+    await conn.commit()
+    return column_added
+
+
+async def backfill_legacy_agent_scope(conn: aiosqlite.Connection, agent_scope: str) -> None:
+    """Claim pre-migration rows (``agent_scope = ''``) for ``agent_scope``.
+
+    Idempotent — the UPDATE simply matches zero rows once nothing is left
+    unscoped, so callers should invoke this on every ``open()``, not just
+    once after a schema change. Gating it on "did this call just add the
+    column" instead is a bug: when another process's ``apply_schema()`` adds
+    the column first (e.g. an unscoped worker sharing the same DB_URL), the
+    scoped owner's own call sees the column already present and would never
+    claim its legacy rows. Call only when :func:`db_owned_by_agent_root`
+    confirms this SQLite file is uniquely owned by the agent about to claim
+    it — see that function and ``docs/migrations/agent-scope-namespacing.md``
+    for why unconditional auto-claiming (rejected in PR #179 review) is
+    unsafe for a file that could be shared, but is correct here where
+    ownership is unambiguous.
+    """
+    if not agent_scope:
+        return
+    await conn.execute(
+        "UPDATE conversation_history SET agent_scope = ? WHERE agent_scope = ''",
+        (agent_scope,),
+    )
+    await conn.commit()
+
+
+async def warn_if_legacy_unscoped_history(conn: aiosqlite.Connection) -> None:
+    """Log once if pre-migration (``agent_scope = ''``) rows remain.
+
+    Unreachable via ``list_threads``/``load``/``reset`` from any agent-scoped
+    store until an operator runs, per thread_id (see
+    ``docs/migrations/agent-scope-namespacing.md``)::
+
+        UPDATE conversation_history SET agent_scope = '<agent-id>'
+        WHERE thread_id = '<thread-id>' AND agent_scope = '';
+    """
+    cur = await conn.execute(
+        "SELECT EXISTS(SELECT 1 FROM conversation_history WHERE agent_scope = '')"
+    )
+    row = await cur.fetchone()
+    await cur.close()
+    if row and row[0]:
+        logger.warning(
+            "conversation_history has rows with agent_scope='' that this agent "
+            "did not write — they are not reachable via list_threads, load, or "
+            "reset until an operator backfills agent_scope for each legacy "
+            "thread_id by hand (see warn_if_legacy_unscoped_history docstring "
+            "for the exact UPDATE statement)."
+        )
+
+
+async def _ensure_outbox_agent_id_column(conn: aiosqlite.Connection) -> None:
+    """Add agent_id on memory_outbox when upgrading an existing DB."""
+    cur = await conn.execute("PRAGMA table_info(memory_outbox)")
+    rows = await cur.fetchall()
+    await cur.close()
+    names = {str(r[1]) for r in rows}
+    if not names:
+        return
+    if "agent_id" not in names:
+        await conn.execute("ALTER TABLE memory_outbox ADD COLUMN agent_id TEXT NOT NULL DEFAULT ''")
+    await conn.commit()
+
+
+async def _ensure_history_memory_columns(conn: aiosqlite.Connection) -> None:
+    """Add turn_id / message_id on conversation_history for the memory outbox."""
+    cur = await conn.execute("PRAGMA table_info(conversation_history)")
+    rows = await cur.fetchall()
+    await cur.close()
+    names = {str(r[1]) for r in rows}
+    if not names:
+        return
+    if "turn_id" not in names:
+        await conn.execute("ALTER TABLE conversation_history ADD COLUMN turn_id TEXT")
+    if "message_id" not in names:
+        await conn.execute("ALTER TABLE conversation_history ADD COLUMN message_id TEXT")
+    await conn.execute(HISTORY_MESSAGE_ID_INDEX_DDL)
+    await conn.commit()
+
+
+async def _ensure_outbox_palace_id_column(conn: aiosqlite.Connection) -> None:
+    """Add palace_id on memory_outbox when upgrading an existing DB."""
+    cur = await conn.execute("PRAGMA table_info(memory_outbox)")
+    rows = await cur.fetchall()
+    await cur.close()
+    names = {str(r[1]) for r in rows}
+    if not names:
+        return
+    if "palace_id" not in names:
+        await conn.execute(
+            "ALTER TABLE memory_outbox ADD COLUMN palace_id TEXT NOT NULL DEFAULT ''"
+        )
+    await conn.execute(OUTBOX_INDEX_DDL)
     await conn.commit()
 
 

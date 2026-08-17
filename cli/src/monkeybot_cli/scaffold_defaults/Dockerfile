@@ -16,8 +16,8 @@ RUN if [ "$INSTALL_CHROMIUM" = "1" ]; then \
 COPY monkeybot_config ./monkeybot_config
 COPY skills ./skills
 RUN useradd --create-home agent \
-    && mkdir -p workspace data/memory \
-    && chown -R agent:agent workspace data
+    && mkdir -p workspace data memory \
+    && chown -R agent:agent workspace data memory
 
 USER agent
 ENV PATH="/agent/.venv/bin:$PATH" PORT=8080

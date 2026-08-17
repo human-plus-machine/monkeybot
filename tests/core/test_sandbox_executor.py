@@ -263,6 +263,18 @@ class TestSandboxExecutorAllowlist:
 
         mock_cls.create.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_mempalace_non_search_is_blocked(self, tmp_path):
+        executor = self._executor(tmp_path)
+        mock_cls, _ = _make_create_mock()
+        osb = _make_opensandbox_module(mock_cls)
+
+        with patch.dict(sys.modules, _opensandbox_sys_modules(osb)):
+            with pytest.raises(SecurityError, match="only 'search' is permitted"):
+                await executor.execute("mempalace", ["repair", "rebuild-index"])
+
+        mock_cls.create.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # SandboxExecutor — lazy creation and sandbox reuse
@@ -575,7 +587,31 @@ class TestSandboxExecutorWorkspaceMount:
         return osb, _opensandbox_sys_modules(osb)
 
     @pytest.mark.asyncio
-    async def test_absolute_workspace_path_in_volume(self, tmp_path):
+    async def test_palace_is_not_mounted_into_sandbox(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MEMPALACE_PALACE_PATH", str(tmp_path / "memory" / "mempalace"))
+        abs_path = str(tmp_path.resolve())
+        cfg = SandboxConfig(
+            enabled=True, server_url="http://localhost:8080",
+            api_key=None, image="python:3.12", ttl_seconds=1800,
+        )
+        executor = SandboxExecutor(cfg, tmp_path)
+        mock_cls, _ = _make_create_mock()
+        osb, patches = self._patch_modules(mock_cls)
+
+        with patch.dict(sys.modules, patches):
+            await executor.execute("echo", [])
+
+        _, kwargs = mock_cls.create.call_args
+        volumes = kwargs.get("volumes", [])
+        assert len(volumes) == 1
+        assert volumes[0].host.path == abs_path
+        env = kwargs.get("env") or {}
+        assert "MEMPALACE_PALACE_PATH" not in env
+        assert "MEMORY_STORAGE_URI" not in env
+
+    @pytest.mark.asyncio
+    async def test_absolute_workspace_path_in_volume(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MEMPALACE_PALACE_PATH", raising=False)
         abs_path = str(tmp_path.resolve())
         cfg = SandboxConfig(
             enabled=True, server_url="http://localhost:8080",
@@ -601,6 +637,7 @@ class TestSandboxExecutorWorkspaceMount:
 
     @pytest.mark.asyncio
     async def test_gcp_credentials_mounted_when_present(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MEMPALACE_PALACE_PATH", raising=False)
         creds = tmp_path / "gcp.json"
         creds.write_text('{"type":"service_account"}', encoding="utf-8")
         monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(creds))
@@ -719,6 +756,29 @@ class TestSandboxExecutorWorkspaceMount:
         _, cc_kwargs = osb.config.ConnectionConfig.call_args
         assert cc_kwargs.get("api_key") == "mykey"
         assert cc_kwargs.get("use_server_proxy") is True
+
+    @pytest.mark.asyncio
+    async def test_cwd_forwarded_as_working_directory_in_shared_filesystem_mode(
+        self, tmp_path
+    ):
+        # Only the remote compute-only branch (working_directory == "/tmp") was
+        # covered before; the default shared-filesystem branch that forwards a
+        # resolved cwd straight through to RunCommandOpts had zero coverage.
+        subdir = tmp_path / "subdir"
+        subdir.mkdir()
+        cfg = SandboxConfig(
+            enabled=True, server_url="http://localhost:8080",
+            api_key=None, image="python:3.12", ttl_seconds=1800,
+        )
+        executor = SandboxExecutor(cfg, tmp_path)
+        mock_cls, sandbox = _make_create_mock()
+        osb, patches = self._patch_modules(mock_cls)
+
+        with patch.dict(sys.modules, patches):
+            await executor.execute("echo", ["hi"], cwd=subdir)
+
+        opts = sandbox.commands.run.call_args.kwargs["opts"]
+        assert opts.working_directory == str(subdir.resolve())
 
     @pytest.mark.asyncio
     async def test_api_key_none_when_not_set(self, tmp_path):

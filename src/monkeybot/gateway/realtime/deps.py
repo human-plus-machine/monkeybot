@@ -11,6 +11,7 @@ from typing import Any
 
 from monkeybot.core.attachments.store import AttachmentStore
 from monkeybot.core.config.settings import SubagentConfig
+from monkeybot.core.context import LoopsToolRegistry
 from monkeybot.core.hooks import HookManager
 from monkeybot.core.llm.realtime_provider import RealtimeProvider
 from monkeybot.core.mcp.ports_mcp import MCPClientPort
@@ -38,6 +39,7 @@ class RealtimeDependencies:
     realtime_provider: RealtimeProvider | None = None
     storage: StorageBackend | None = None
     attachment_store: AttachmentStore | None = None
+    loops_registry: LoopsToolRegistry = field(default_factory=LoopsToolRegistry)
     _frozen: bool = field(default=False, repr=False)
 
     def freeze(self) -> None:

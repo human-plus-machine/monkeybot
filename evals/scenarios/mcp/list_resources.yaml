@@ -1,0 +1,12 @@
+# Uses the in-process fixture MCP server wired up in
+# evals/smoke_agent/monkeybot_config/mcp.json (server "fixture", see
+# evals/smoke_agent/fixture_mcp_server.py). No network calls, CI-reachable.
+description: "Agent lists and reads an MCP resource from the fixture server"
+tags: [mcp]
+messages:
+  - "The MCP server 'fixture' exposes a resource. List its resources, then read the one you find and tell me what it says."
+assertions:
+  metrics: [response_relevancy]
+  required_tools: [list_mcp_resources, read_mcp_resource]
+  min_tool_calls: 2
+  max_tool_errors: 0

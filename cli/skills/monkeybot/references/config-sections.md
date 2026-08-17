@@ -21,10 +21,11 @@ Validate/doctor: `doctor` → `runtime.port.free`.
 | Field | Default | When to change |
 |---|---|---|
 | `agent_md` | `./monkeybot_config/AGENT.md` | Alternate system-prompt location |
-| `memory_storage_uri` | `local://./data/memory` | `gcs://…` for shared/cloud memory (requires GCP project) |
+| `memory_storage_uri` | `local://./memory` | `gcs://…` for shared/cloud memory (requires GCP project) |
 | `skills_path` | `./skills` | Point at a different skills tree |
 | `db_url` | `sqlite:///data/monkeybot.db` | **Postgres for parallel subagents** — SQLite hits `database is locked` under concurrency |
 | `auto_schema` | `true` | Set `false` when migrations own the schema (managed Postgres with DML-only runtime user) |
+| `agent_id` | resolved agent root path | **Set explicitly when this agent is relocatable** — moved to a new path, redeployed with a different mount point, or run as multiple replicas that must share one conversation history. Without it, conversation-history scoping (which agent owns which thread, on a shared `db_url`) keys off the filesystem path, so a path change strands existing history. Once set, keep the value stable across deploys. |
 | `mcp_config` | `./monkeybot_config/mcp.json` | Relocate MCP definitions |
 | `command_allowlist_config` | `./monkeybot_config/command_allowlist.yaml` | Relocate the shell allowlist |
 | `workspace_root` | `./workspace` (if present) | Change the file-tool sandbox root |
@@ -40,8 +41,8 @@ Validate check ids: `paths.agent_md.exists`, `paths.skills_path.exists`, `paths.
 | `temperature` | `0.7` | Lower for deterministic output, higher for creative |
 | `max_tokens` | `60000` | Cap per-response length |
 | `thinking_budget` | `-1` | Gemini: `-1` model default, `0` off, `N` token budget. Ollama reasoning models: `-1` server default, `0` off (`reasoning_effort: none`) |
-| `context_window` | `1000000` | Summarization trigger threshold (tokens) |
-| `max_turns` | `50` | Hard cap on turns per run |
+| `context_window` | `1000000` | Summarization trigger (tokens); also drives soft-spill / `read_file` char budgets |
+| `max_turns` | `1000` | Hard cap on turns per run |
 | `summarization_model` | (main model) | Cheaper model for history summarization (env `CONTEXT_SUMMARIZATION_MODEL`) |
 
 Validate check ids: `model.provider.supported`, `model.name.present`. Supported YAML providers: `gemini`/`vertex`, `openai`, `anthropic`, `vertex-claude`, `huggingface`, `ollama`, `aws_bedrock`, `fake`.
@@ -86,40 +87,48 @@ Recent window by default; LLM curator only when the index is token-heavy. On cur
 
 When the prompt shows fewer entries than exist, a structural confidence score triggers a `search_memory` nudge. Skill names are always shown in full in the prompt; use `list_skills` to get the skills root path.
 
-## `memory_hook`
+## `memory`
 
-`enabled: true` — automatic memory capture after turns. Disable to manage memory manually.
+MemPalace capture, wake-up, and search teaching are on by default. Turn them off with `memory.enabled: false` or `MONKEYBOT_MEMORY_HOOK_ENABLED=0`. The vector stack is the optional `monkeybot[memory]` extra — omit it (and set `enabled: false`) when you do not want chromadb/onnxruntime.
 
-## `subagent` and `subagents`
+| Field | Default | When to change |
+|---|---|---|
+| `enabled` | `true` | Set `false` to skip capture, wake-up, and prompt teaching |
+| `backend` | `chroma` | Alternate MemPalace vector backend |
+| `embedding_model` | `embeddinggemma-300m` | Match the embedder the palace was built with |
 
-`subagent` sets defaults for `task` calls:
+## `subagents`
+
+Global defaults for `task` calls, plus optional named personas:
 
 | Field | Default | Notes |
 |---|---|---|
 | `timeout_sec` | `600` | Per-subagent timeout |
-| `max_turns` | `25` | Per-subagent turn cap |
+| `max_turns` | `1000` | Per-subagent turn cap |
 | `vertex_google_search` | `false` | **Gemini only.** Enables native `google_search` grounding for subagent `task` runs. Config-file only. |
-| `agent_md` | (parent `AGENT.md`) | Default prompt when `task` omits `subagent_type` |
-
-`subagents[]` defines named personas the parent selects via `task(subagent_type=...)`:
+| `personas` | (none) | Named types selected via `task(subagent_type=...)`; each persona sets its own `agent_md` |
 
 ```yaml
 subagents:
-  - name: researcher
-    description: "Deep-dives a topic and returns a structured summary."
-    agent_md: ./monkeybot_config/agents/researcher.md
+  timeout_sec: 600
+  max_turns: 1000
+  vertex_google_search: false
+  personas:
+    - name: researcher
+      description: "Deep-dives a topic and returns a structured summary."
+      agent_md: ./monkeybot_config/agents/researcher.md
 ```
 
-Relative paths resolve from the bot project root, not `workspace/`. For parallel fan-out, use Postgres (`db_url`).
+Without a `subagent_type`, the task inherits the parent `AGENT.md` (`paths.agent_md`). Relative paths resolve from the bot project root, not `workspace/`. For parallel fan-out, use Postgres (`db_url`).
 
 ## `tools`
 
 | Field | Default | When to change |
 |---|---|---|
 | `denied_patterns` | (none) | Block substrings in tool args, e.g. `"rm -rf"` (also env `MONKEYBOT_TOOL_DENIED_PATTERNS`) |
-| `read_max_lines` / `read_default_lines` | (code defaults) | Tune file-read limits |
-| `spill_read_max_lines` / `spill_min_chars` | (code defaults) | Tune large-result spill behavior |
-| `result_budget_fraction` / `result_budget_floor_tokens` | (code defaults) | Advanced result-budgeting; rarely needed |
+| `read_max_lines` | `5000` | Cap on `read_file` `limit` (**YAML only** — no env override). Default when `limit` is omitted is harness-fixed at **2000** (pass `limit` to request more). |
+
+Spill and `read_file` char budgets are derived from `model.context_window` (retired keys `spill_min_chars` / `spill_read_max_lines` / `read_default_lines` warn and are ignored). Context pressure ratios and tool-result budget fractions are fixed in harness code (not YAML/env).
 
 For shell-command safety, pair `denied_patterns` with `monkeybot_config/command_allowlist.yaml`.
 
@@ -143,6 +152,16 @@ Tavily/Firecrawl need `TAVILY_API_KEY` / `FIRECRAWL_API_KEY` in `.env`. Doctor c
 | `ttl_seconds` | `1800` | Sandbox lifetime |
 
 Needs `SANDBOX_API_KEY` in `.env`.
+
+## `scheduler`
+
+Prompt-first scheduled loops (`start_loop`, `/scheduler/loops`). Requires durable storage (`paths.db_url`). Loops are registered at runtime — there is no static `jobs` list in YAML.
+
+| Field | Default | When to change |
+|---|---|---|
+| `enabled` | `false` | `true` runs the tick worker in-process on the gateway (local/dev). Production: leave `false` and run `python -m monkeybot.scheduler` as a separate process |
+
+Env override: `MONKEYBOT_SCHEDULER_ENABLED` (`1` \| `true` \| `yes` \| `on`).
 
 ## `includes`
 

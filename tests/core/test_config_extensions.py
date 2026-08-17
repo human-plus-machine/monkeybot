@@ -18,6 +18,7 @@ from monkeybot.core.config import (
     get_realtime_config,
     get_subagent_configs,
     get_subagent_registry,
+    get_subagent_settings,
     normalize_model_provider,
     reset_runtime_env_state_for_tests,
     subagent_vertex_google_search_from_config,
@@ -25,7 +26,8 @@ from monkeybot.core.config import (
     validate_provider_env,
     vertex_google_search_enabled_from_config,
 )
-from monkeybot.core.config.runtime_env import ENV_MAP
+from monkeybot.core.config.runtime_env import ENV_MAP, RETIRED_TOOLS_KEYS, warn_retired_tools_keys
+from monkeybot.core.tools.workspace_service import AGENT_READ_DEFAULT_LINES
 
 
 class TestEnvMap:
@@ -37,9 +39,34 @@ class TestEnvMap:
         assert ENV_MAP[("sandbox", "server_url")] == "SANDBOX_SERVER_URL"
         assert ENV_MAP[("sandbox", "image")] == "SANDBOX_IMAGE"
 
+    def test_scheduler_enabled_in_env_map(self) -> None:
+        assert ENV_MAP[("scheduler", "enabled")] == "MONKEYBOT_SCHEDULER_ENABLED"
+
     def test_vertex_google_search_not_in_env_map(self) -> None:
         """Config-file only (like paths.auto_schema) — no env var override."""
         assert ("web_search", "vertex_google_search") not in ENV_MAP
+
+    def test_memory_enabled_kill_switch_in_env_map(self) -> None:
+        assert ENV_MAP[("memory", "enabled")] == "MONKEYBOT_MEMORY_HOOK_ENABLED"
+        assert ("memory", "engine") not in ENV_MAP
+
+
+class TestMemoryEnabledConfig:
+    def test_yaml_string_false(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from monkeybot.core.memory.config import memory_enabled_from_config
+
+        monkeypatch.delenv("MONKEYBOT_MEMORY_HOOK_ENABLED", raising=False)
+        cfg = tmp_path / "monkeybot.yaml"
+        cfg.write_text('memory:\n  enabled: "false"\n', encoding="utf-8")
+        assert memory_enabled_from_config(str(cfg)) is False
+
+    def test_yaml_string_true(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from monkeybot.core.memory.config import memory_enabled_from_config
+
+        monkeypatch.delenv("MONKEYBOT_MEMORY_HOOK_ENABLED", raising=False)
+        cfg = tmp_path / "monkeybot.yaml"
+        cfg.write_text('memory:\n  enabled: "true"\n', encoding="utf-8")
+        assert memory_enabled_from_config(str(cfg)) is True
 
 
 class TestVertexGoogleSearchConfig:
@@ -69,17 +96,20 @@ class TestSubagentVertexGoogleSearchConfig:
 
     def test_reads_true_from_yaml(self, tmp_path: Path) -> None:
         config_path = tmp_path / "monkeybot.yaml"
-        config_path.write_text("subagent:\n  vertex_google_search: true\n", encoding="utf-8")
+        config_path.write_text("subagents:\n  vertex_google_search: true\n", encoding="utf-8")
         assert subagent_vertex_google_search_from_config(str(config_path)) is True
 
     def test_rejects_non_boolean(self, tmp_path: Path) -> None:
         config_path = tmp_path / "monkeybot.yaml"
-        config_path.write_text("subagent:\n  vertex_google_search: 1\n", encoding="utf-8")
+        config_path.write_text("subagents:\n  vertex_google_search: 1\n", encoding="utf-8")
         with pytest.raises(ConfigError, match="must be true or false"):
             subagent_vertex_google_search_from_config(str(config_path))
 
     def test_subagent_vertex_google_search_not_in_env_map(self) -> None:
-        assert ("subagent", "vertex_google_search") not in ENV_MAP
+        assert ("subagents", "vertex_google_search") not in ENV_MAP
+        assert ("subagent", "timeout_sec") not in ENV_MAP
+        assert ("subagent", "max_turns") not in ENV_MAP
+        assert ("subagent", "agent_md") not in ENV_MAP
 
 
 class TestVertexAnthropicProvider:
@@ -177,6 +207,58 @@ class TestSubagentConfig:
         assert cfg.skills == ["./skills/content-intelligence/"]
 
 
+class TestSubagentSettings:
+    def _write_config(self, tmp_path: Path, yaml_text: str) -> Path:
+        cfg_dir = tmp_path / "monkeybot_config"
+        cfg_dir.mkdir(parents=True)
+        path = cfg_dir / "monkeybot.yaml"
+        path.write_text(yaml_text, encoding="utf-8")
+        return path
+
+    def test_defaults_when_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        self._write_config(tmp_path, "model:\n  provider: gemini\n  name: test\n")
+        settings = get_subagent_settings()
+        assert settings.timeout_sec == 3600.0
+        assert settings.max_turns == 1000
+        assert settings.vertex_google_search is False
+
+    def test_reads_defaults_and_personas(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        self._write_config(
+            tmp_path,
+            "subagents:\n"
+            "  timeout_sec: 120\n"
+            "  max_turns: 10\n"
+            "  personas:\n"
+            "    - name: researcher\n"
+            "      description: Research.\n"
+            "      agent_md: ./agents/researcher.md\n",
+        )
+        settings = get_subagent_settings()
+        assert settings.timeout_sec == 120.0
+        assert settings.max_turns == 10
+        assert get_subagent_settings().timeout_sec == 120.0
+        configs = get_subagent_configs()
+        assert len(configs) == 1
+        assert configs[0].name == "researcher"
+        assert configs[0].agent_md == "./agents/researcher.md"
+
+    def test_top_level_agent_md_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        self._write_config(
+            tmp_path,
+            "subagents:\n"
+            "  agent_md: ./monkeybot_config/agents/default.md\n",
+        )
+        with pytest.raises(ConfigError, match="subagents.agent_md was removed"):
+            get_subagent_settings()
+
+
 class TestGetSubagentConfigs:
     def _write_config(self, tmp_path: Path, yaml_text: str) -> Path:
         cfg_dir = tmp_path / "monkeybot_config"
@@ -196,10 +278,11 @@ class TestGetSubagentConfigs:
             tmp_path,
             "model:\n  provider: gemini\n  name: test\n"
             "subagents:\n"
-            "  - name: content-intel\n"
-            "    description: Research content.\n"
-            "    skills:\n"
-            "      - ./skills/content-intelligence/\n",
+            "  personas:\n"
+            "    - name: content-intel\n"
+            "      description: Research content.\n"
+            "      skills:\n"
+            "        - ./skills/content-intelligence/\n",
         )
         configs = get_subagent_configs()
         assert len(configs) == 1
@@ -211,15 +294,27 @@ class TestGetSubagentConfigs:
         self._write_config(
             tmp_path,
             "subagents:\n"
-            "  - description: No name.\n"
-            "    skills: []\n"
-            "  - name: valid\n"
-            "    description: Valid.\n"
-            "    skills: []\n",
+            "  personas:\n"
+            "    - description: No name.\n"
+            "      skills: []\n"
+            "    - name: valid\n"
+            "      description: Valid.\n"
+            "      skills: []\n",
         )
         configs = get_subagent_configs()
         assert len(configs) == 1
         assert configs[0].name == "valid"
+
+    def test_bare_list_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        self._write_config(
+            tmp_path,
+            "subagents:\n"
+            "  - name: legacy\n"
+            "    description: Old shape.\n",
+        )
+        with pytest.raises(ConfigError, match="bare list is no longer supported"):
+            get_subagent_configs()
 
 
 class TestGetSubagentRegistry:
@@ -233,12 +328,13 @@ class TestGetSubagentRegistry:
         self._write_config(
             tmp_path,
             "subagents:\n"
-            "  - name: alpha\n"
-            "    description: First.\n"
-            "    agent_md: ./agents/alpha.md\n"
-            "  - name: beta\n"
-            "    description: Second.\n"
-            "    agent_md: ./agents/beta.md\n",
+            "  personas:\n"
+            "    - name: alpha\n"
+            "      description: First.\n"
+            "      agent_md: ./agents/alpha.md\n"
+            "    - name: beta\n"
+            "      description: Second.\n"
+            "      agent_md: ./agents/beta.md\n",
         )
         reg = get_subagent_registry()
         assert set(reg) == {"alpha", "beta"}
@@ -249,10 +345,11 @@ class TestGetSubagentRegistry:
         self._write_config(
             tmp_path,
             "subagents:\n"
-            "  - name: dup\n"
-            "    description: One.\n"
-            "  - name: dup\n"
-            "    description: Two.\n",
+            "  personas:\n"
+            "    - name: dup\n"
+            "      description: One.\n"
+            "    - name: dup\n"
+            "      description: Two.\n",
         )
         with pytest.raises(ConfigError, match="Duplicate subagent name"):
             get_subagent_registry()
@@ -262,9 +359,10 @@ class TestGetSubagentRegistry:
         self._write_config(
             tmp_path,
             "subagents:\n"
-            "  - name: legacy\n"
-            "    description: Legacy alias.\n"
-            "    prompt_file: ./agents/legacy.md\n",
+            "  personas:\n"
+            "    - name: legacy\n"
+            "      description: Legacy alias.\n"
+            "      prompt_file: ./agents/legacy.md\n",
         )
         reg = get_subagent_registry()
         assert reg["legacy"].agent_md == "./agents/legacy.md"
@@ -321,6 +419,45 @@ class TestAutoSchemaConfig:
 
     def test_not_mapped_to_env(self) -> None:
         assert ("paths", "auto_schema") not in ENV_MAP
+
+
+class TestReadDefaultLinesFixed:
+    def test_agent_default_is_2000(self) -> None:
+        assert AGENT_READ_DEFAULT_LINES == 2000
+
+    def test_retired_from_yaml(self) -> None:
+        assert "read_default_lines" in RETIRED_TOOLS_KEYS
+        assert ("tools", "read_default_lines") not in ENV_MAP
+
+    def test_yaml_key_warns_and_is_ignored(self) -> None:
+        found = warn_retired_tools_keys({"tools": {"read_default_lines": 20000}})
+        assert found == ["read_default_lines"]
+
+    def test_read_file_tool_advertises_fixed_default(self) -> None:
+        from monkeybot.core.context import _core_tool_defs
+
+        tools = {t.name: t for t in _core_tool_defs()}
+        read = tools["read_file"]
+        assert str(AGENT_READ_DEFAULT_LINES) in read.description
+        limit_desc = read.input_schema["properties"]["limit"]["description"]
+        assert str(AGENT_READ_DEFAULT_LINES) in limit_desc
+        assert "small" in limit_desc.lower() or "repeated" in limit_desc.lower()
+
+    def test_default_limit_clamped_to_read_max(self, tmp_path: Path) -> None:
+        from monkeybot.core.tools.workspace_service import WorkspaceFileService, WorkspaceSettings
+
+        (tmp_path / "wide.txt").write_text(
+            "\n".join(f"L{i}" for i in range(100)), encoding="utf-8"
+        )
+        svc = WorkspaceFileService(
+            tmp_path,
+            WorkspaceSettings(
+                WORKSPACE_READ_MAX_LINES=40,
+                WORKSPACE_READ_DEFAULT_LINES=AGENT_READ_DEFAULT_LINES,
+            ),
+        )
+        result = svc.read_file("wide.txt")
+        assert result["end_line"] - result["start_line"] + 1 == 40
 
 
 class TestRealtimeConfig:

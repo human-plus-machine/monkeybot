@@ -12,9 +12,11 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
+from textual.content import Content
 from textual.css.query import NoMatches
 from textual.events import Key, Paste
 from textual.message import Message
+from textual.screen import ModalScreen
 from textual.timer import Timer
 from textual.widgets import Collapsible, Markdown, Static, TextArea
 
@@ -25,7 +27,12 @@ from monkeybot_cli.chat_tool_display import format_tool_expand_body
 
 _SPIN = "⠋⠙⠹⠸⠴⠦⠧⠇⠏"
 _HISTORY_LIMIT = 500
-_COMPOSER_PLACEHOLDER = "Message the agent — / for commands"
+_COMPOSER_PLACEHOLDER = "Message the agent — / commands · @ files · ! shell"
+
+
+def _plain_title(text: str) -> Content:
+    """Collapsible titles parse Textual markup; tool argv often contains ``[`` / ``*``."""
+    return Content.from_text(text, markup=False)
 
 
 def write_osc52_clipboard(app: App[object], text: str) -> bool:
@@ -234,7 +241,7 @@ class EarlierTurns(Collapsible):
         self._body = Static("", classes="earlier-body")
         super().__init__(
             self._body,
-            title="  0 earlier turns",
+            title=_plain_title("  0 earlier turns"),  # type: ignore[arg-type]
             collapsed=True,
             collapsed_symbol="▶",
             expanded_symbol="▼",
@@ -247,7 +254,7 @@ class EarlierTurns(Collapsible):
         if len(self.digest_lines) > 40:
             self.digest_lines = self.digest_lines[-40:]
         noun = "turn" if self.omitted == 1 else "turns"
-        self.title = f"  {self.omitted} earlier {noun}"
+        self.title = _plain_title(f"  {self.omitted} earlier {noun}")  # type: ignore[assignment]
         preview = "\n".join(self.digest_lines[-20:])
         self._body.update(Text(preview, style="dim"))
 
@@ -441,7 +448,7 @@ class ToolCallBlock(Collapsible):
         )
         super().__init__(
             self._detail,
-            title=f"  {title}",
+            title=_plain_title(f"  {title}"),  # type: ignore[arg-type]
             collapsed=True,
             collapsed_symbol="▶",
             expanded_symbol="▼",
@@ -455,14 +462,14 @@ class ToolCallBlock(Collapsible):
             self._spin_timer = self.set_interval(0.08, self._tick_spinner)
             self._tick_spinner()
         else:
-            self.title = f"  {self.display_label}"
+            self.title = _plain_title(f"  {self.display_label}")  # type: ignore[assignment]
 
     def _tick_spinner(self) -> None:
         if self.status != "running":
             return
         glyph = _SPIN[self._spin_i % len(_SPIN)]
         self._spin_i += 1
-        self.title = f"  {glyph} {self.display_label}"
+        self.title = _plain_title(f"  {glyph} {self.display_label}")  # type: ignore[assignment]
 
     def mark_finished(self, *, error: object = None, result: str = "") -> None:
         self.status = "error" if error else "ok"
@@ -472,7 +479,7 @@ class ToolCallBlock(Collapsible):
             self._spin_timer.stop()
             self._spin_timer = None
         mark = "✗" if error else "✓"
-        self.title = f"  {mark} {self.display_label}"
+        self.title = _plain_title(f"  {mark} {self.display_label}")  # type: ignore[assignment]
         self._detail.update(
             format_tool_expand_body(
                 self.tool_name,
@@ -670,6 +677,76 @@ class ComposerBusySpinner(Static):
             self._timer = None
 
 
+_SHORTCUT_ROWS: tuple[tuple[str, str], ...] = (
+    ("Enter", "Send message"),
+    ("Ctrl+J / Alt+Enter / Shift+Enter", "Insert newline"),
+    ("↑ / ↓", "Recall history / navigate palette"),
+    ("Ctrl+R", "Reverse history search"),
+    ("Tab", "Complete highlighted palette entry"),
+    ("Esc", "Interrupt turn · dismiss palette/search · double-tap to recall last message"),
+    ("Shift+Tab", "Cycle approval mode (normal → auto-approve → deny-confirms)"),
+    ("Ctrl+C", "Cancel / clear composer / exit"),
+    ("Ctrl+U", "Toggle usage line"),
+    ("F1", "Toggle key hints"),
+    ("PageUp / PageDown", "Scroll transcript"),
+    ("y / n", "Approve / deny a confirmation prompt"),
+    ("Space", "Push-to-talk (realtime sessions)"),
+    ("@", "Fuzzy-pick a file to insert its path"),
+    ("!", "Run a local shell command (not sent to the agent)"),
+    ("/", "Slash commands — /help lists them all"),
+    ("?", "Show this overlay (when composer is empty)"),
+)
+
+
+class ShortcutsScreen(ModalScreen[None]):
+    """Full keyboard-shortcut reference, dismissed with Esc/q/?."""
+
+    DEFAULT_CSS = """
+    ShortcutsScreen {
+        align: center middle;
+    }
+    ShortcutsScreen > Vertical {
+        width: auto;
+        max-width: 90%;
+        height: auto;
+        max-height: 90%;
+        padding: 1 2;
+        border: round $border;
+        background: $surface;
+    }
+    ShortcutsScreen .title {
+        text-style: bold;
+        margin-bottom: 1;
+    }
+    ShortcutsScreen .row {
+        height: auto;
+        color: $foreground;
+    }
+    ShortcutsScreen .hint {
+        margin-top: 1;
+        color: $muted;
+        text-style: dim;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "dismiss_screen", "Close", show=False),
+        Binding("q", "dismiss_screen", "Close", show=False),
+        Binding("question_mark", "dismiss_screen", "Close", show=False),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static("Keyboard shortcuts", classes="title")
+            width = max(len(key) for key, _ in _SHORTCUT_ROWS)
+            for key, desc in _SHORTCUT_ROWS:
+                yield Static(f"  {key.ljust(width)}   {desc}", classes="row")
+            yield Static("Esc / q / ? to close", classes="hint")
+
+    def action_dismiss_screen(self) -> None:
+        self.dismiss(None)
+
+
 class Composer(TextArea):
     """Growing multiline input: Enter sends, Shift+Enter/Ctrl+J newline, history, slash."""
 
@@ -729,6 +806,14 @@ class Composer(TextArea):
         self._prefix_matches = None
         self._prefix_index = None
         self._draft = ""
+
+    def recall_last(self) -> None:
+        """Load the most recent submitted message back into the composer for editing."""
+        if not self._history:
+            return
+        self.load_text(self._history[-1])
+        self.move_cursor(self.document.end)
+        self._sync_height()
 
     def action_insert_newline(self) -> None:
         if self._search_mode:
@@ -895,11 +980,43 @@ class Composer(TextArea):
     def _clear_paste_guard(self) -> None:
         self._paste_guard = False
 
+    def _apply_at_completion(self) -> bool:
+        """If the @ file palette is open, splice the picked path in and return True."""
+        app = self.app
+        complete = getattr(app, "complete_at_from_palette", None)
+        if not callable(complete):
+            return False
+        try:
+            result = complete()
+        except Exception:
+            logger.exception("@ file completion failed")
+            return False
+        if result is None:
+            return False
+        filled, cursor = result
+        self.load_text(filled)
+        self.move_cursor(cursor)
+        self._sync_height()
+        return True
+
     def _on_key(self, event: Key) -> None:
         if self._search_mode:
             self._handle_search_key(event)
             return
+        if event.character == "?" and not self.text.strip():
+            with contextlib.suppress(Exception):
+                app = self.app
+                show = getattr(app, "action_show_shortcuts", None)
+                if callable(show):
+                    show()
+                    event.prevent_default()
+                    event.stop()
+                    return
         if event.key == "tab":
+            if self._apply_at_completion():
+                event.prevent_default()
+                event.stop()
+                return
             with contextlib.suppress(Exception):
                 app = self.app
                 if hasattr(app, "complete_slash_from_palette"):
@@ -914,6 +1031,10 @@ class Composer(TextArea):
             if self._paste_guard:
                 self.insert("\n")
                 self._sync_height()
+                event.prevent_default()
+                event.stop()
+                return
+            if self._apply_at_completion():
                 event.prevent_default()
                 event.stop()
                 return

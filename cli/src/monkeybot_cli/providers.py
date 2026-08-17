@@ -49,6 +49,7 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
         ("huggingface",), "huggingface", ("HF_TOKEN", "HUGGINGFACE_API_KEY")
     ),
     "nvidia": ProviderSpec(("nvidia",), "nvidia", ("NVIDIA_API_KEY",)),
+    "openrouter": ProviderSpec(("openrouter",), "openrouter", ("OPENROUTER_API_KEY",)),
     "ollama": ProviderSpec(
         # credential_env_vars is empty: credentials_optional=True short-circuits
         # credentials_present() before these are ever read, and OLLAMA_BASE_URL
@@ -83,6 +84,24 @@ def extra_module(extra: str) -> str:
         "huggingface": "openai",
         "ollama": "openai",
         "nvidia": "openai",
+        "openrouter": "openai",
+        "postgres": "asyncpg",
+        "firestore": "google.cloud.firestore",
+        "gcs": "google.cloud.storage",
+        "sandbox": "opensandbox",
+        "web-search": "ddgs",
+        "memory": "mempalace",
+        "observability": "opentelemetry",
+        "scheduler": "croniter",
+        "council": "google.cloud.storage",
+        "aws": "boto3",
+        "realtime": "websockets",
+        "realtime-gemini": "google.genai",
+        "cli": "typer",
+        "cli-realtime": "pyaudio",
+        "evals": "deepeval",
+        "knowledge-ast": "tree_sitter_language_pack",
+        "knowledge-media": "pypdf",
     }
     return mapping.get(extra, extra)
 
@@ -94,7 +113,11 @@ def extra_installed(extra: str) -> bool:
     (see ``monkeybot_cli.runtime_python``) so provider/storage extras declared
     on the agent project are detected, not the CLI's globals.
     """
-    return importlib.util.find_spec(extra_module(extra)) is not None
+    try:
+        return importlib.util.find_spec(extra_module(extra)) is not None
+    except ModuleNotFoundError:
+        # find_spec raises when a parent namespace (e.g. google.cloud) is absent.
+        return False
 
 
 def credentials_present(spec: ProviderSpec) -> bool:

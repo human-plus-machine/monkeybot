@@ -11,19 +11,35 @@ import os
 import shlex
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
-from monkeybot.core.attachments.config import IMAGE_MIME_TYPES
-from monkeybot.core.attachments.store import AttachmentStore, sniff_mime
-from monkeybot.core.config.settings import SubagentConfig
-from monkeybot.core.context import CustomTool, TurnContext
+from monkeybot.core.attachments.config import (
+    ALLOWED_MIME_TYPES,
+    IMAGE_MIME_TYPES,
+    max_image_bytes,
+    max_pdf_bytes,
+)
+from monkeybot.core.attachments.store import (
+    AttachmentStore,
+    attachment_workspace_path,
+    sniff_mime,
+)
+from monkeybot.core.config.settings import SubagentConfig, get_subagent_settings
+from monkeybot.core.context import (
+    SCHEDULED_LOOP_TOOL_DEFS,
+    CustomTool,
+    LoopsToolRegistry,
+    TurnContext,
+)
 from monkeybot.core.context.tool_result_ingress import (
     cap_tool_result_text,
     sanitize_tool_result_text,
     skip_tool_result_sanitize,
 )
+from monkeybot.core.knowledge.subsystem import KnowledgeSubsystem
 from monkeybot.core.llm.provider import ToolCall
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.mcp.mcp_client import (
@@ -34,19 +50,24 @@ from monkeybot.core.mcp.mcp_client import (
 from monkeybot.core.mcp.ports_mcp import MCPClientPort
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.persistence.backends import RunStore, ScheduledLoopStore
-from monkeybot.core.persistence.durable_runs import SubagentEnvelope as PersistedSubagentEnvelope
-from monkeybot.core.persistence.scheduled_loops import ScheduledLoopCreate
-from monkeybot.scheduler.interval import parse_interval_ms, parse_optional_duration_ms
 from monkeybot.core.persistence.runs import make_run_id
+from monkeybot.core.persistence.scheduled_loops import ScheduledLoopCreate
 from monkeybot.core.runtime.events import (
+    AgentEvent,
     AssistantDelta,
     Error,
+    SubagentCompleted,
+    SubagentStarted,
     ToolCallResult,
     ToolCallStarted,
     TurnComplete,
 )
 from monkeybot.core.runtime.loop import ToolExecutorPort
+from monkeybot.core.runtime.turn_loop import MAX_TURNS_ERROR
+from monkeybot.core.subagents.progress_publish import AssistantDeltaCoalescer, safe_publish
 from monkeybot.core.subagents.subagent_proto import (
+    SUBAGENT_EXIT_ERROR_PREFIX,
+    SUBAGENT_STDOUT_LINE_LIMIT,
     SubagentEnvelope,
     normalize_sqlite_db_url,
     resolve_agent_project_root,
@@ -55,21 +76,31 @@ from monkeybot.core.subagents.subagent_proto import (
     resolve_task_agent_md_path,
     spawn_subagent,
 )
+from monkeybot.core.tools.fs_isolation import memory_hidden_paths
+from monkeybot.core.tools.inspector import coerce_run_command_argv
 from monkeybot.core.tools.sandbox_executor import SandboxConfig, SandboxExecutor
-from monkeybot.core.tools.spill_inventory import spill_inventory_note, spill_min_chars_from_env
+from monkeybot.core.tools.spill_inventory import (
+    partial_output_tail,
+    spill_budgets_from_window,
+    write_run_command_timeout_spill,
+    write_spill_with_inventory,
+)
 from monkeybot.core.tools.terminal import (
     ALLOWED_COMMANDS,
     ALLOWED_PATHS,
+    CommandTimeoutError,
     SecurityError,
     TerminalExecutor,
 )
 from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.tools.workspace_service import (
+    AGENT_READ_DEFAULT_LINES,
     WorkspaceError,
     WorkspaceFileService,
     WorkspaceSettings,
 )
-from monkeybot.core.types.content_blocks import ContentBlock, File, Image, Text
+from monkeybot.core.types.content_blocks import File, Image
+from monkeybot.scheduler.interval import parse_interval_ms, parse_optional_duration_ms
 
 logger = logging.getLogger(__name__)
 
@@ -81,25 +112,22 @@ _SPILL_DIR = ".monkeybot/spill"
 
 _CORE_TOOL_NAMES = frozenset(
     {
-        "read_attachment",
-        "render_image",
+        "load_file",
         "read_file",
         "write_file",
         "replace_in_file",
         "glob",
         "grep",
         "apply_patch",
-        "search_memory",
+        "search",
         "list_skills",
         "task",
         "run_command",
-        "add_mcp_server",
-        "remove_mcp_server",
         "enable_mcp",
         "disable_mcp",
-        "mcp_status",
+        "enable_loops",
+        "disable_loops",
         "list_mcp_resources",
-        "list_mcp_resource_templates",
         "read_mcp_resource",
         "list_mcp_prompts",
         "get_mcp_prompt",
@@ -111,7 +139,8 @@ _CORE_TOOL_NAMES = frozenset(
     }
 )
 
-_SPILL_SKIP_TOOLS = frozenset({"read_file", "read_attachment"})
+_SPILL_SKIP_TOOLS = frozenset({"read_file", "load_file"})
+
 
 def _tool_handler_kind(name: str, *, mcp: MCPClientPort, extra_tools: dict[str, CustomTool]) -> str:
     if name in _CORE_TOOL_NAMES:
@@ -123,42 +152,30 @@ def _tool_handler_kind(name: str, *, mcp: MCPClientPort, extra_tools: dict[str, 
     return "unknown"
 
 
-def _safe_spill_filename(call_id: str) -> str:
-    safe = "".join(c for c in call_id if c.isalnum() or c in "-_")[:200]
-    return safe or "call"
-
-
-def _int_env(name: str, default: int) -> int:
-    raw = os.environ.get(name, "").strip()
-    if not raw:
+def _int_config(raw: object, default: int) -> int:
+    """Coerce a YAML scalar to int, falling back to the code default."""
+    if not isinstance(raw, int | float | str) or isinstance(raw, bool):
         return default
     try:
         return int(raw)
-    except ValueError:
+    except (TypeError, ValueError):
         return default
 
 
-def workspace_settings_from_env() -> WorkspaceSettings:
-    """Build workspace read limits from harness env (yaml-backed via runtime_env)."""
+@lru_cache(maxsize=4)
+def workspace_settings_from_config() -> WorkspaceSettings:
+    """Build agent workspace read limits (``read_max_lines`` from YAML; default lines fixed)."""
+    from monkeybot.core.config.yaml_loader import load_monkeybot_yaml_dict
+
+    _path, doc = load_monkeybot_yaml_dict()
+    tools = doc.get("tools") if isinstance(doc.get("tools"), dict) else {}
     return WorkspaceSettings(
-        WORKSPACE_READ_MAX_LINES=_int_env("MONKEYBOT_READ_MAX_LINES", 5000),
-        WORKSPACE_READ_DEFAULT_LINES=_int_env("MONKEYBOT_READ_DEFAULT_LINES", 2000),
-        WORKSPACE_SPILL_READ_MAX_LINES=_int_env("MONKEYBOT_SPILL_READ_MAX_LINES", 50_000),
+        WORKSPACE_READ_MAX_LINES=_int_config(
+            tools.get("read_max_lines") if isinstance(tools, dict) else None,
+            5000,
+        ),
+        WORKSPACE_READ_DEFAULT_LINES=AGENT_READ_DEFAULT_LINES,
     )
-
-
-def _write_spill_with_inventory(
-    text: str,
-    workspace_root: Path,
-    thread_id: str,
-    call_id: str,
-) -> str:
-    """Write raw ``text`` to spill file; return inventory pointer only (not inline body)."""
-    rel = f"{_SPILL_DIR}/{thread_id}/{_safe_spill_filename(call_id)}.txt"
-    out_path = (Path(workspace_root) / rel).resolve()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(text, encoding="utf-8")
-    return spill_inventory_note(text, rel)
 
 
 def _is_under_spill_path(workspace_root: Path, rel_path: str) -> bool:
@@ -195,6 +212,433 @@ async def _stop_subagent_process(proc: asyncio.subprocess.Process | None) -> Non
             await proc.wait()
 
 
+def _task_child_env(
+    *,
+    repo_root: Path,
+    agent_root: Path,
+    memory_uri: str,
+    skills_path: Path,
+) -> dict[str, str]:
+    """Build subprocess env overlays for a nested task worker."""
+    child_env = {
+        "MONKEYBOT_SUBAGENT_WORKSPACE": str(repo_root),
+        "MONKEYBOT_AGENT_ROOT": str(agent_root),
+        "MEMORY_STORAGE_URI": memory_uri,
+        "MONKEYBOT_SUBAGENT_SKILLS_PATH": str(skills_path),
+        "OTEL_SERVICE_NAME": _SUBAGENT_OTEL_SERVICE_NAME,
+    }
+    for env_key, raw_val in (
+        ("MCP_CONFIG", os.environ.get("MCP_CONFIG", "")),
+        ("COMMAND_ALLOWLIST_CONFIG", os.environ.get("COMMAND_ALLOWLIST_CONFIG", "")),
+    ):
+        if raw_val.strip():
+            child_env[env_key] = str(resolve_project_path(raw_val.strip(), agent_root))
+    db_raw = os.environ.get("DB_URL", "").strip()
+    if db_raw:
+        child_env["DB_URL"] = normalize_sqlite_db_url(db_raw, agent_root)
+    return child_env
+
+
+def _parse_expect_files(args: dict[str, Any]) -> list[str]:
+    """Validate the optional ``expect_files`` list. Raises ValueError with a reason."""
+    raw = args.get("expect_files")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError("expect_files must be a list of workspace-relative paths.")
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("expect_files entries must be non-empty strings.")
+        out.append(item.strip())
+    return out
+
+
+def _check_expected_artifacts(
+    workspace: WorkspaceFileService,
+    expect_files: list[str],
+) -> tuple[bool | None, list[dict[str, Any]]]:
+    """Return (all_present, per-path results). ``(None, [])`` when nothing was asked."""
+    if not expect_files:
+        return None, []
+    results: list[dict[str, Any]] = []
+    for rel in expect_files:
+        # Paths were validated at the trust boundary; re-resolve to follow any
+        # workspace root change during the run rather than caching a stale Path.
+        results.append({"path": rel, "exists": workspace.resolve_workspace_path(rel).is_file()})
+    return all(bool(r["exists"]) for r in results), results
+
+
+def _record_subagent_drain_event(
+    evt: AgentEvent,
+    *,
+    deltas: list[str],
+    errors: list[str],
+    tool_results: list[dict[str, str]],
+) -> tuple[int, TurnComplete | None]:
+    """Fold one worker event into drain accumulators. Returns (tool_delta, turn_complete)."""
+    if isinstance(evt, AssistantDelta):
+        deltas.append(evt.delta)
+        return 0, None
+    if isinstance(evt, ToolCallStarted):
+        return 1, None
+    if isinstance(evt, ToolCallResult):
+        snippet = (evt.result or evt.error or "").strip()
+        if len(snippet) > 600:
+            snippet = snippet[:600] + "…"
+        tool_results.append({"tool": evt.tool, "snippet": snippet})
+        return 0, None
+    if isinstance(evt, Error):
+        errors.append(evt.error)
+        return 0, None
+    if isinstance(evt, TurnComplete):
+        return 0, evt
+    return 0, None
+
+
+@dataclass
+class _SubagentDrainAccum:
+    """Mutable drain state for an inline ``task`` subprocess (no nonlocal soup)."""
+
+    deltas: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    tool_call_count: int = 0
+    tool_results: list[dict[str, str]] = field(default_factory=list)
+    turn_complete: TurnComplete | None = None
+    exit_reason: str | None = None
+
+    def note_exit_reason(self, reason: str, *, force: bool = False) -> None:
+        """Record why the run ended. First writer wins unless ``force``.
+
+        The parent detects ``timeout``/``cancelled`` and forces them, because those
+        kill the child and would otherwise be masked by the ``crashed`` its death
+        reports moments later.
+        """
+        if force or self.exit_reason is None:
+            self.exit_reason = reason
+
+    def record(self, evt: AgentEvent) -> None:
+        tool_delta, maybe_complete = _record_subagent_drain_event(
+            evt,
+            deltas=self.deltas,
+            errors=self.errors,
+            tool_results=self.tool_results,
+        )
+        self.tool_call_count += tool_delta
+        if maybe_complete is not None:
+            self.turn_complete = maybe_complete
+        if isinstance(evt, Error):
+            if evt.error == MAX_TURNS_ERROR:
+                self.note_exit_reason("max_turns")
+            elif evt.error.startswith(SUBAGENT_EXIT_ERROR_PREFIX):
+                self.note_exit_reason("crashed")
+
+    def to_payload(
+        self,
+        *,
+        scratch: Path,
+        run_id: str,
+        child_thread_id: str,
+        subagent_type: str | None,
+    ) -> dict[str, Any]:
+        return _task_result_payload(
+            errors=self.errors,
+            deltas=self.deltas,
+            tool_call_count=self.tool_call_count,
+            tool_results=self.tool_results,
+            turn_complete=self.turn_complete,
+            exit_reason=self.exit_reason,
+            scratch=scratch,
+            run_id=run_id,
+            child_thread_id=child_thread_id,
+            subagent_type=subagent_type,
+        )
+
+
+async def _await_subagent_drain(
+    *,
+    drain_task: asyncio.Task[None],
+    cancelled: asyncio.Event | None,
+    timeout: float,
+    proc_holder: list[asyncio.subprocess.Process | None],
+    accum: _SubagentDrainAccum,
+    run_id: str,
+) -> None:
+    """Wait for drain with parent cancel + timeout; record errors/exit_reason in place."""
+    errors = accum.errors
+    cancel_wait = asyncio.create_task(cancelled.wait()) if cancelled is not None else None
+    try:
+        if cancel_wait is None:
+            try:
+                await asyncio.wait_for(drain_task, timeout=timeout)
+            except TimeoutError:
+                errors.append(f"task: subagent exceeded {timeout:g}s timeout")
+                accum.note_exit_reason("timeout", force=True)
+                await _stop_subagent_process(proc_holder[0])
+                if not drain_task.done():
+                    drain_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await drain_task
+            return
+
+        done, _ = await asyncio.wait(
+            {drain_task, cancel_wait},
+            timeout=timeout,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if not done:
+            errors.append(f"task: subagent exceeded {timeout:g}s timeout")
+            accum.note_exit_reason("timeout", force=True)
+            await _stop_subagent_process(proc_holder[0])
+            cancel_wait.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await cancel_wait
+            if not drain_task.done():
+                drain_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await drain_task
+        elif drain_task in done:
+            if not cancel_wait.done():
+                cancel_wait.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await cancel_wait
+            try:
+                drain_task.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.warning(
+                    "subagent drain failed %s",
+                    kv(run_id=run_id, error=str(exc)),
+                    exc_info=True,
+                )
+                errors.append(str(exc))
+        else:
+            errors.append(_PARENT_CANCEL_TASK_ERR)
+            accum.note_exit_reason("cancelled", force=True)
+            await _stop_subagent_process(proc_holder[0])
+            if not drain_task.done():
+                drain_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await drain_task
+    finally:
+        if cancel_wait is not None and not cancel_wait.done():
+            cancel_wait.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await cancel_wait
+
+
+def _task_result_payload(
+    *,
+    errors: list[str],
+    deltas: list[str],
+    tool_call_count: int,
+    tool_results: list[dict[str, str]],
+    turn_complete: TurnComplete | None,
+    exit_reason: str | None = None,
+    scratch: Path,
+    run_id: str,
+    child_thread_id: str,
+    subagent_type: str | None,
+) -> dict[str, Any]:
+    """Assemble the task tool JSON payload from drain accumulators."""
+    usage_payload = None
+    if turn_complete is not None:
+        u = turn_complete.usage
+        usage_payload = {
+            "input_tokens": u.input_tokens,
+            "output_tokens": u.output_tokens,
+            "cached_tokens": u.cached_tokens,
+            "cost_usd": u.cost_usd,
+            "duration_ms": u.duration_ms,
+        }
+    full_text = "".join(deltas).strip()
+    ok = len(errors) == 0
+    return {
+        "ok": ok,
+        "exit_reason": exit_reason or ("completed" if ok else "error"),
+        "final_message": full_text,
+        "assistant_text": full_text,
+        "tool_call_count": tool_call_count,
+        "tool_results": tool_results[-10:],
+        "errors": errors,
+        "usage": usage_payload,
+        # Overwritten by _tool_task when the caller declared expect_files. None means
+        # "not asked" — never claim knowledge of artifacts nobody named.
+        "artifact_exists": None,
+        "artifacts": [],
+        "scratch_dir": str(scratch),
+        "run_id": run_id,
+        "child_thread_id": child_thread_id,
+        "subagent_type": subagent_type,
+    }
+
+
+async def _run_inline_subagent_with_progress(
+    *,
+    script: Path,
+    envelope: SubagentEnvelope,
+    scratch: Path,
+    child_env: dict[str, str],
+    timeout: float,
+    ctx: TurnContext,
+    call: ToolCall,
+    run_id: str,
+    child_thread_id: str,
+    subagent_type: str | None,
+    task: str,
+) -> dict[str, Any]:
+    """Spawn an inline subagent, forward nested SSE, always emit SubagentCompleted."""
+    accum = _SubagentDrainAccum()
+    proc_holder: list[asyncio.subprocess.Process | None] = [None]
+    fail_count: list[int] = [0]
+    label = subagent_type or "subagent"
+
+    async def _subprocess_exec(*cmd: str | bytes) -> asyncio.subprocess.Process:
+        env = dict(os.environ)
+        env.update(child_env)
+        env["PYTHONUNBUFFERED"] = "1"
+        p = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            env=env,
+            limit=SUBAGENT_STDOUT_LINE_LIMIT,
+        )
+        proc_holder[0] = p
+        return p
+
+    logger.info(
+        "subagent spawn %s",
+        kv(
+            run_id=run_id,
+            child_thread_id=child_thread_id,
+            subagent_type=subagent_type or "",
+            parent_call_id=call.call_id,
+        ),
+    )
+    await safe_publish(
+        ctx.event_publisher,
+        SubagentStarted(
+            request_id=ctx.request_id,
+            parent_call_id=call.call_id,
+            run_id=run_id,
+            child_thread_id=child_thread_id,
+            subagent_type=subagent_type,
+            task=task,
+            label=label,
+        ),
+        fail_count=fail_count,
+        run_id=run_id,
+    )
+    coalescer = AssistantDeltaCoalescer(
+        publisher=ctx.event_publisher,
+        correlation={
+            "request_id": ctx.request_id,
+            "parent_call_id": call.call_id,
+            "run_id": run_id,
+            "child_thread_id": child_thread_id,
+            "subagent_type": subagent_type,
+        },
+        fail_count=fail_count,
+    )
+
+    async def _on_event(evt: AgentEvent) -> None:
+        await coalescer.handle(evt)
+
+    async def _drain() -> None:
+        async for evt in spawn_subagent(
+            str(script),
+            envelope,
+            scratch_dir=scratch,
+            subprocess_exec=_subprocess_exec,
+            on_event=_on_event,
+        ):
+            accum.record(evt)
+
+    drain_task = asyncio.create_task(_drain())
+    payload: dict[str, Any] | None = None
+    try:
+        try:
+            await _await_subagent_drain(
+                drain_task=drain_task,
+                cancelled=ctx.cancelled,
+                timeout=timeout,
+                proc_holder=proc_holder,
+                accum=accum,
+                run_id=run_id,
+            )
+        finally:
+            await coalescer.aclose()
+        payload = accum.to_payload(
+            scratch=scratch,
+            run_id=run_id,
+            child_thread_id=child_thread_id,
+            subagent_type=subagent_type,
+        )
+    except Exception as exc:
+        logger.warning(
+            "subagent finalize failed %s",
+            kv(run_id=run_id, error=str(exc)),
+            exc_info=True,
+        )
+        if str(exc) not in accum.errors:
+            accum.errors.append(str(exc))
+        try:
+            payload = accum.to_payload(
+                scratch=scratch,
+                run_id=run_id,
+                child_thread_id=child_thread_id,
+                subagent_type=subagent_type,
+            )
+        except Exception:
+            payload = {
+                "ok": False,
+                "exit_reason": accum.exit_reason or "error",
+                "final_message": "",
+                "assistant_text": "",
+                "artifact_exists": None,
+                "artifacts": [],
+                "tool_call_count": accum.tool_call_count,
+                "tool_results": accum.tool_results[-10:],
+                "errors": list(accum.errors),
+                "usage": None,
+                "scratch_dir": str(scratch),
+                "run_id": run_id,
+                "child_thread_id": child_thread_id,
+                "subagent_type": subagent_type,
+            }
+    finally:
+        # Always emit a terminal event so the parent SSE UI cannot stick on "running".
+        done = payload or {
+            "ok": False,
+            "exit_reason": accum.exit_reason or "error",
+            "final_message": "",
+            "errors": list(accum.errors) or ["task: subagent finalize failed"],
+            "tool_call_count": accum.tool_call_count,
+        }
+        await safe_publish(
+            ctx.event_publisher,
+            SubagentCompleted(
+                request_id=ctx.request_id,
+                parent_call_id=call.call_id,
+                run_id=run_id,
+                child_thread_id=child_thread_id,
+                subagent_type=subagent_type,
+                ok=bool(done["ok"]),
+                final_message=str(done.get("final_message") or ""),
+                errors=list(done.get("errors") or accum.errors),
+                tool_call_count=int(done.get("tool_call_count") or accum.tool_call_count),
+            ),
+            fail_count=fail_count,
+            run_id=run_id,
+        )
+
+    assert payload is not None
+    return payload
+
+
 def _j(data: object) -> str:
     return json.dumps(data, ensure_ascii=False)
 
@@ -215,6 +659,33 @@ def _built_in_tool_error(
     if details:
         payload["details"] = details
     return _j(payload)
+
+
+_RUNTIME_NO_IDENTICAL_RETRY_HINT = (
+    "Do not retry identical arguments. Fix the underlying cause if you can act on it; "
+    "otherwise stop and report the blocker. If a spill or partial_output_path is present, "
+    "read_file that path before changing approach."
+)
+_TIMEOUT_NO_IDENTICAL_RETRY_HINT = (
+    "Do not retry identical arguments and do not bump timeouts. "
+    "If a spill or partial_output_path is present, read_file that path first; "
+    "otherwise narrow scope or diagnose from the error."
+)
+
+
+def _incomplete_scan_envelope(
+    exc: WorkspaceError,
+    hint: str,
+    valid_options: list[str],
+) -> str:
+    """Shared ok:false envelope when glob/grep cannot support absence conclusions."""
+    details: dict[str, Any] = {}
+    extra = getattr(exc, "details", None)
+    if isinstance(extra, dict):
+        details.update(extra)
+    details["code"] = "incomplete_scan"
+    details["valid_options"] = valid_options
+    return _built_in_tool_error("incomplete_scan", str(exc), hint, details)
 
 
 def _workspace_error_envelope(exc: WorkspaceError) -> str:
@@ -239,6 +710,11 @@ def _workspace_error_envelope(exc: WorkspaceError) -> str:
         hint = "Widen old_string until unique, or set replace_all=true."
     elif code == "invalid_offset":
         hint = 'Use "offset" as a positive integer (1 = first line).'
+    elif code == "invalid_file_glob":
+        hint = (
+            'Pass a valid filename glob such as "*.py" or "*.{ts,tsx}", '
+            "or a list of globs; fix unbalanced braces."
+        )
     elif code in ("write_failed", "glob_failed", "delete_failed"):
         hint = "Check disk permissions and path; retry after fixing the underlying issue."
     else:
@@ -315,9 +791,8 @@ def _argv_from_command_string(stripped: str) -> tuple[str, list[str]]:
 
 
 def _parse_run_command(args: dict[str, Any]) -> tuple[str, list[str]]:
-    argv_raw = args.get("argv")
-    if isinstance(argv_raw, list) and argv_raw:
-        argv = [str(x) for x in argv_raw]
+    argv = coerce_run_command_argv(args.get("argv"))
+    if argv:
         return argv[0], argv[1:]
 
     cmd = args.get("command")
@@ -345,7 +820,6 @@ def _parse_run_command(args: dict[str, Any]) -> tuple[str, list[str]]:
     )
 
 
-
 class CoreToolExecutor(ToolExecutorPort):
     """Executes built-in tools and delegates ``server__tool`` calls to :class:`MCPClient`."""
 
@@ -361,30 +835,30 @@ class CoreToolExecutor(ToolExecutorPort):
         run_command_allowed_commands: list[str] | tuple[str, ...] | None = None,
         run_command_allowed_path_prefixes: list[str] | tuple[str, ...] | None = None,
         attachment_store: AttachmentStore | None = None,
-        attachment_catalog: SessionAttachmentCatalog | None = None,
         run_store: RunStore | None = None,
         scheduled_loop_store: ScheduledLoopStore | None = None,
         subagent_registry: dict[str, SubagentConfig] | None = None,
+        loops_registry: LoopsToolRegistry | None = None,
+        knowledge: KnowledgeSubsystem | None = None,
     ) -> None:
-        ws_settings = workspace_settings_from_env()
+        ws_settings = workspace_settings_from_config()
         self._skills_path = Path(skills_path).resolve()
         self._workspace = WorkspaceFileService(
             Path(workspace_root).resolve(), settings=ws_settings, skills_root=self._skills_path
         )
-        self._spill_read_max_lines = ws_settings.WORKSPACE_SPILL_READ_MAX_LINES
-        self._spill_min_chars = spill_min_chars_from_env()
         self._memory = memory
+        self._knowledge = knowledge
         self._mcp = mcp
         self._attachment_store = attachment_store
-        self._attachment_catalog = attachment_catalog
         self._run_store = run_store
         self._scheduled_loop_store = scheduled_loop_store
+        self._loops_registry = loops_registry if loops_registry is not None else LoopsToolRegistry()
         self._subagent_registry = dict(subagent_registry or {})
         self._terminal: TerminalExecutor | SandboxExecutor
+        self._host_terminal: TerminalExecutor | None = None
         if terminal is not None:
-            self._terminal = terminal
-            self._run_cmd_allowed_commands = tuple(terminal.allowed_commands)
-            self._run_cmd_allowed_paths = tuple(terminal.allowed_path_prefixes)
+            cmds = tuple(terminal.allowed_commands)
+            paths = tuple(terminal.allowed_path_prefixes)
         else:
             cmds = (
                 tuple(run_command_allowed_commands)
@@ -396,22 +870,79 @@ class CoreToolExecutor(ToolExecutorPort):
                 if run_command_allowed_path_prefixes is not None
                 else tuple(ALLOWED_PATHS)
             )
-            self._run_cmd_allowed_commands = cmds
-            self._run_cmd_allowed_paths = paths
-            _scfg = SandboxConfig.from_env()
-            self._terminal = (
-                SandboxExecutor(_scfg, workspace_root, skills_path=self._skills_path, allowed_commands=cmds)
-                if _scfg.enabled
-                else TerminalExecutor(allowed_commands=cmds, allowed_path_prefixes=paths)
+        # None preserves an injected TerminalExecutor's hidden_paths via
+        # restricted(); only memory-off supplies an explicit override.
+        hidden_paths: tuple[Path, ...] | None = None
+        if self._memory is None:
+            # Memory off is a capability decision, so it applies to whatever
+            # executor ends up running commands, including an injected one.
+            hidden_paths = memory_hidden_paths(self._workspace.repo_root)
+            paths = tuple(
+                path
+                for path in paths
+                if not self._under_hidden_path(
+                    (self._workspace.repo_root / path).resolve(), hidden_paths
+                )
             )
-        self._extra_tools: dict[str, Any] = {
-            ct.tool_def.name: ct for ct in (extra_tools or [])
-        }
+            cmds = tuple(cmd for cmd in cmds if cmd != "mempalace")
+        if terminal is None:
+            # Allow absolute argv paths under the resolved skills root (list_skills
+            # returns this path; scripts live outside the workspace cwd).
+            skills = str(self._skills_path)
+            paths = tuple(dict.fromkeys((*paths, skills, f"{skills}/")))
+        self._run_cmd_allowed_commands = cmds
+        self._run_cmd_allowed_paths = paths
+        if terminal is not None:
+            self._terminal = (
+                terminal.restricted(
+                    allowed_commands=cmds,
+                    allowed_path_prefixes=paths,
+                    hidden_paths=hidden_paths,
+                )
+                if isinstance(terminal, TerminalExecutor)
+                else terminal
+            )
+        else:
+            _scfg = SandboxConfig.from_env()
+            if _scfg.enabled:
+                self._terminal = SandboxExecutor(
+                    _scfg, workspace_root, skills_path=self._skills_path, allowed_commands=cmds
+                )
+            else:
+                self._terminal = TerminalExecutor(
+                    allowed_commands=cmds,
+                    allowed_path_prefixes=paths,
+                    hidden_paths=hidden_paths,
+                )
+        if isinstance(self._terminal, SandboxExecutor):
+            # The palace is deliberately not mounted into the sandbox, so
+            # authorized memory reads need a host terminal regardless of
+            # whether the sandbox was auto-created or injected.
+            self._host_terminal = TerminalExecutor(
+                allowed_commands=cmds,
+                allowed_path_prefixes=paths,
+                hidden_paths=hidden_paths,
+            )
+        self._extra_tools: dict[str, Any] = {ct.tool_def.name: ct for ct in (extra_tools or [])}
+
+    @staticmethod
+    def _under_hidden_path(candidate: Path, hidden_paths: Sequence[Path]) -> bool:
+        return any(candidate == root or root in candidate.parents for root in hidden_paths)
 
     @property
     def mcp(self) -> MCPClientPort:
         """MCP client used for built-in MCP tools and ``server__tool`` dispatch."""
         return self._mcp
+
+    @property
+    def loops_advertised(self) -> bool:
+        """Whether scheduled-loop lifecycle tools are advertised to the model."""
+        return self._loops_registry.advertised
+
+    @property
+    def loops_registry(self) -> LoopsToolRegistry:
+        """Shared progressive-loop advertisement registry (process-scoped when wired by gateway)."""
+        return self._loops_registry
 
     def _run_command_security_envelope(self, exc: SecurityError) -> str:
         raw = str(exc)
@@ -443,8 +974,10 @@ class CoreToolExecutor(ToolExecutorPort):
         )
 
     async def aclose(self) -> None:
-        """Release resources held by the terminal executor for this session."""
+        """Release resources held by the terminal executors for this session."""
         await self._terminal.aclose()
+        if self._host_terminal is not None:
+            await self._host_terminal.aclose()
 
     async def execute(self, *, call: ToolCall, ctx: TurnContext) -> ToolExecutionResult:
         name = call.name
@@ -464,12 +997,10 @@ class CoreToolExecutor(ToolExecutorPort):
         )
 
         try:
-            if name == "read_attachment":
-                return self._tool_read_attachment(args, ctx)
-            if name == "render_image":
-                return self._tool_render_image(args, ctx)
+            if name == "load_file":
+                return self._tool_load_file(args, ctx)
             if name == "read_file":
-                result_text, err_text = self._tool_read_file(args)
+                result_text, err_text = self._tool_read_file(args, ctx)
             elif name == "write_file":
                 result_text, err_text = self._tool_write_file(args)
             elif name == "replace_in_file":
@@ -480,28 +1011,24 @@ class CoreToolExecutor(ToolExecutorPort):
                 result_text, err_text = self._tool_grep(args)
             elif name == "apply_patch":
                 result_text, err_text = self._tool_apply_patch(args)
-            elif name == "search_memory":
-                result_text, err_text = await self._tool_search_memory(args)
+            elif name == "search":
+                result_text, err_text = await self._tool_search(args)
             elif name == "list_skills":
                 result_text, err_text = self._tool_list_skills(ctx)
             elif name == "task":
                 result_text, err_text = await self._tool_task(call, ctx)
             elif name == "run_command":
-                result_text, err_text = await self._tool_run_command(args)
-            elif name == "add_mcp_server":
-                result_text, err_text = await self._tool_add_mcp_server(args)
-            elif name == "remove_mcp_server":
-                result_text, err_text = await self._tool_remove_mcp_server(args)
+                result_text, err_text = await self._tool_run_command(args, call=call, ctx=ctx)
             elif name == "enable_mcp":
                 result_text, err_text = await self._tool_enable_mcp(args)
             elif name == "disable_mcp":
                 result_text, err_text = await self._tool_disable_mcp(args)
-            elif name == "mcp_status":
-                result_text, err_text = self._tool_mcp_status(args)
+            elif name == "enable_loops":
+                result_text, err_text = await self._tool_enable_loops()
+            elif name == "disable_loops":
+                result_text, err_text = await self._tool_disable_loops()
             elif name == "list_mcp_resources":
                 result_text, err_text = await self._tool_list_mcp_resources(args)
-            elif name == "list_mcp_resource_templates":
-                result_text, err_text = await self._tool_list_mcp_resource_templates(args)
             elif name == "read_mcp_resource":
                 result_text, err_text = await self._tool_read_mcp_resource(args)
             elif name == "list_mcp_prompts":
@@ -537,11 +1064,14 @@ class CoreToolExecutor(ToolExecutorPort):
                         ),
                         exc_info=True,
                     )
-                    result_text, err_text = None, _built_in_tool_error(
-                        "runtime",
-                        str(exc),
-                        "Fix the underlying issue described in message, then retry once if appropriate.",
-                        {"tool": name},
+                    result_text, err_text = (
+                        None,
+                        _built_in_tool_error(
+                            "runtime",
+                            str(exc),
+                            _RUNTIME_NO_IDENTICAL_RETRY_HINT,
+                            {"tool": name},
+                        ),
                     )
             else:
                 mcp_pair = self._mcp.split_prefixed_tool(name)
@@ -553,11 +1083,14 @@ class CoreToolExecutor(ToolExecutorPort):
                     except MCPServerNotConnectedError as exc:
                         result_text, err_text = None, str(exc)
                 else:
-                    result_text, err_text = None, _built_in_tool_error(
-                        "runtime",
-                        f"unknown tool: {name}",
-                        "Use a tool from the active tool list for this turn.",
-                        {"tool": name},
+                    result_text, err_text = (
+                        None,
+                        _built_in_tool_error(
+                            "runtime",
+                            f"unknown tool: {name}",
+                            "Use a tool from the active tool list for this turn.",
+                            {"tool": name},
+                        ),
                     )
         except WorkspaceError as exc:
             result_text, err_text = None, _workspace_error_envelope(exc)
@@ -567,54 +1100,95 @@ class CoreToolExecutor(ToolExecutorPort):
             result_text, err_text = None, str(exc)
         except SecurityError as exc:
             result_text, err_text = None, self._run_command_security_envelope(exc)
-        except (TimeoutError, ValueError, TypeError, OSError) as exc:
-            result_text, err_text = None, _built_in_tool_error(
-                "runtime",
-                str(exc),
-                "Fix the underlying issue described in message, then retry once if appropriate.",
-                {"tool": name},
+        except TimeoutError as exc:
+            result_text, err_text = (
+                None,
+                _built_in_tool_error(
+                    "runtime",
+                    str(exc),
+                    _TIMEOUT_NO_IDENTICAL_RETRY_HINT,
+                    {"tool": name},
+                ),
+            )
+        except (ValueError, TypeError, OSError) as exc:
+            result_text, err_text = (
+                None,
+                _built_in_tool_error(
+                    "runtime",
+                    str(exc),
+                    _RUNTIME_NO_IDENTICAL_RETRY_HINT,
+                    {"tool": name},
+                ),
             )
         except Exception as exc:
             logger.exception("tool %s failed", name)
-            result_text, err_text = None, _built_in_tool_error(
-                "runtime",
-                str(exc),
-                "If this persists, stop retrying the same tool call and report the error.",
-                {"tool": name},
+            result_text, err_text = (
+                None,
+                _built_in_tool_error(
+                    "runtime",
+                    str(exc),
+                    "If this persists, stop retrying the same tool call and report the error.",
+                    {"tool": name},
+                ),
             )
 
         if err_text is None and result_text is not None:
             skip_sanitize = skip_tool_result_sanitize(name)
+            budgets = spill_budgets_from_window(ctx.context_window_tokens)
             should_spill = (
-                name not in _SPILL_SKIP_TOOLS
-                and self._spill_min_chars > 0
-                and len(result_text) >= self._spill_min_chars
+                name not in _SPILL_SKIP_TOOLS and len(result_text) >= budgets.spill_threshold
             )
             if should_spill:
-                result_text = _write_spill_with_inventory(
-                    result_text, self._workspace.repo_root, ctx.thread_id, call.call_id
+                result_text = write_spill_with_inventory(
+                    result_text,
+                    self._workspace.repo_root,
+                    ctx.thread_id,
+                    call.call_id,
+                    tool_name=name,
+                    inline_budget=budgets.inline_budget,
                 )
                 if not skip_sanitize:
                     result_text = sanitize_tool_result_text(result_text)
             else:
                 if not skip_sanitize:
                     result_text = sanitize_tool_result_text(result_text)
-                result_text = cap_tool_result_text(result_text)
+                # Floor at spill_threshold so sub-threshold results are never
+                # truncated without a spill file; read_file floors at read budget.
+                hard_cap = budgets.inline_hard_cap
+                if name == "read_file":
+                    hard_cap = max(hard_cap, budgets.spill_read_budget)
+                result_text = cap_tool_result_text(result_text, max_chars=hard_cap)
         if err_text is not None:
             return ToolExecutionResult.err(err_text)
         return ToolExecutionResult.ok_text(result_text or "")
 
-    def _tool_read_attachment(self, args: dict[str, Any], ctx: TurnContext) -> ToolExecutionResult:
+    def _tool_load_file(self, args: dict[str, Any], ctx: TurnContext) -> ToolExecutionResult:
         attachment_id = _str_arg(args, "attachment_id", "id")
-        if not attachment_id:
-            return ToolExecutionResult.err("read_attachment requires attachment_id")
+        path = _str_arg(args, "path", "file_path", "file")
+        if attachment_id and path:
+            return ToolExecutionResult.err(
+                "load_file accepts either attachment_id or path, not both"
+            )
+        if attachment_id:
+            return self._load_file_from_attachment(attachment_id, ctx)
+        if path:
+            return self._load_file_from_path(path, ctx)
+        return ToolExecutionResult.err("load_file requires attachment_id or path")
+
+    @staticmethod
+    def _media_result(mime: str, data_b64: str, meta: dict[str, object]) -> ToolExecutionResult:
+        if mime in IMAGE_MIME_TYPES:
+            return ToolExecutionResult.ok_blocks(
+                [Image(mime_type=mime, data=data_b64, metadata=meta)]
+            )
+        return ToolExecutionResult.ok_blocks([File(mime_type=mime, data=data_b64, metadata=meta)])
+
+    def _load_file_from_attachment(
+        self, attachment_id: str, ctx: TurnContext
+    ) -> ToolExecutionResult:
         if self._attachment_store is None:
             return ToolExecutionResult.err("Attachments are not enabled for this session")
-        catalog = self._attachment_catalog
-        if catalog is not None and not catalog.contains(attachment_id):
-            if not self._attachment_store.exists(ctx.thread_id, attachment_id):
-                return ToolExecutionResult.err(f"Unknown attachment_id: {attachment_id}")
-        elif not self._attachment_store.exists(ctx.thread_id, attachment_id):
+        if not self._attachment_store.exists(ctx.thread_id, attachment_id):
             return ToolExecutionResult.err(f"Unknown attachment_id: {attachment_id}")
         try:
             data_b64, mime, filename = self._attachment_store.read_base64(
@@ -624,20 +1198,14 @@ class CoreToolExecutor(ToolExecutorPort):
             return ToolExecutionResult.err(
                 f"Attachment {attachment_id} expired or removed; ask user to re-upload"
             )
-        meta: dict[str, object] = {"attachment_id": attachment_id, "filename": filename}
-        if mime in IMAGE_MIME_TYPES:
-            return ToolExecutionResult.ok_blocks(
-                [Image(mime_type=mime, data=data_b64, metadata=meta)]
-            )
-        return ToolExecutionResult.ok_blocks(
-            [File(mime_type=mime, data=data_b64, metadata=meta)]
-        )
+        meta: dict[str, object] = {
+            "attachment_id": attachment_id,
+            "filename": filename,
+            "path": attachment_workspace_path(ctx.thread_id, attachment_id),
+        }
+        return self._media_result(mime, data_b64, meta)
 
-    def _tool_render_image(self, args: dict[str, Any], ctx: TurnContext) -> ToolExecutionResult:
-        path = _str_arg(args, "path", "file_path", "file")
-        if not path:
-            return ToolExecutionResult.err("render_image requires path")
-        caption = _str_arg(args, "caption", "text") or ""
+    def _load_file_from_path(self, path: str, ctx: TurnContext) -> ToolExecutionResult:
         try:
             fp = self._workspace._resolve_under_root(path, label="path")
         except WorkspaceError as exc:
@@ -647,7 +1215,8 @@ class CoreToolExecutor(ToolExecutorPort):
         try:
             raw = fp.read_bytes()
         except OSError as exc:
-            return ToolExecutionResult.err(f"Failed to read image at {path}: {exc}")
+            return ToolExecutionResult.err(f"Failed to read file at {path}: {exc}")
+
         mime = sniff_mime(raw[:512])
         if mime is None:
             ext_map = {
@@ -656,12 +1225,21 @@ class CoreToolExecutor(ToolExecutorPort):
                 ".jpeg": "image/jpeg",
                 ".gif": "image/gif",
                 ".webp": "image/webp",
+                ".pdf": "application/pdf",
             }
             mime = ext_map.get(fp.suffix.lower())
-        if mime is None or mime not in IMAGE_MIME_TYPES:
+        if mime is None or mime not in ALLOWED_MIME_TYPES:
             return ToolExecutionResult.err(
-                f"render_image requires an image file (png/jpeg/gif/webp); got {mime or 'unknown'}"
+                "load_file supports images (png/jpeg/gif/webp) and PDF only; "
+                f"got {mime or 'unknown'}. For text files use read_file."
             )
+
+        max_bytes = max_image_bytes() if mime in IMAGE_MIME_TYPES else max_pdf_bytes()
+        if len(raw) > max_bytes:
+            return ToolExecutionResult.err(
+                f"File too large ({len(raw)} bytes); max for {mime} is {max_bytes}"
+            )
+
         data_b64 = base64.b64encode(raw).decode("ascii")
         filename = fp.name
         meta: dict[str, object] = {"filename": filename, "path": path}
@@ -674,16 +1252,22 @@ class CoreToolExecutor(ToolExecutorPort):
                     filename=filename,
                 )
                 meta["attachment_id"] = stored.attachment_id
-            except Exception as exc:
-                logger.warning("render_image attachment save failed: %s", exc)
-        blocks: list[ContentBlock] = [
-            Image(mime_type=mime, data=data_b64, metadata=meta),
-        ]
-        if caption.strip():
-            blocks.append(Text(text=caption.strip()))
-        return ToolExecutionResult.ok_blocks(blocks)
+            except Exception:
+                logger.warning(
+                    "load_file attachment save failed %s",
+                    kv(
+                        request_id=ctx.request_id,
+                        thread_id=ctx.thread_id,
+                        path=path,
+                    ),
+                    exc_info=True,
+                )
 
-    def _tool_read_file(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+        return self._media_result(mime, data_b64, meta)
+
+    def _tool_read_file(
+        self, args: dict[str, Any], ctx: TurnContext
+    ) -> tuple[str | None, str | None]:
         path = _str_arg(args, "path", "file_path", "file")
         if not path:
             return (
@@ -697,15 +1281,17 @@ class CoreToolExecutor(ToolExecutorPort):
             )
         offset = _coerce_int(args.get("offset"), 1) or 1
         limit = _coerce_int(args.get("limit"), None)
-        max_lines_cap = None
-        if _is_under_spill_path(self._workspace.repo_root, path):
-            max_lines_cap = self._spill_read_max_lines
+        budgets = spill_budgets_from_window(ctx.context_window_tokens)
+        # Budget content before JSON encoding (~10% headroom for escaping/envelope).
+        max_chars = max(1, int(budgets.spill_read_budget * 0.9))
+        spill_path = _is_under_spill_path(self._workspace.repo_root, path)
         try:
             payload = self._workspace.read_file(
                 path,
                 offset=offset,
                 limit=limit,
-                max_lines_cap=max_lines_cap,
+                max_chars=max_chars,
+                apply_default_limit=not spill_path,
             )
             return (_j(payload), None)
         except WorkspaceError as exc:
@@ -791,6 +1377,21 @@ class CoreToolExecutor(ToolExecutorPort):
             payload = self._workspace.glob_paths(pattern, root=root)
             return (_j(payload), None)
         except WorkspaceError as exc:
+            if getattr(exc, "code", None) == "incomplete_scan":
+                return (
+                    None,
+                    _incomplete_scan_envelope(
+                        exc,
+                        "This result cannot be used to conclude absence. Narrow `root` or "
+                        "tighten `pattern`, then retry. Partial paths (if any) are in "
+                        "details.partial_paths — inspect those before re-issuing.",
+                        [
+                            "narrow root to a subdirectory",
+                            "use a tighter pattern (e.g. src/**/*.py instead of **/*)",
+                            "search for a specific filename instead of listing everything",
+                        ],
+                    ),
+                )
             return (None, _workspace_error_envelope(exc))
 
     def _tool_grep(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -809,8 +1410,20 @@ class CoreToolExecutor(ToolExecutorPort):
         ignore_case = args.get("ignore_case", False)
         if not isinstance(ignore_case, bool):
             ignore_case = str(ignore_case).strip().lower() in ("1", "true", "yes", "on")
-        file_glob = _str_arg(args, "file_glob", "include", "glob")
+        file_glob_raw = args.get("file_glob")
+        if file_glob_raw is None:
+            file_glob_raw = args.get("include")
+        if file_glob_raw is None:
+            file_glob_raw = args.get("glob")
+        file_glob: str | list[str] | None
+        if isinstance(file_glob_raw, list):
+            file_glob = [str(x) for x in file_glob_raw]
+        elif isinstance(file_glob_raw, str) and file_glob_raw.strip():
+            file_glob = file_glob_raw.strip()
+        else:
+            file_glob = None
         max_matches = _coerce_int(args.get("max_matches"), None)
+        offset = _coerce_int(args.get("offset"), None)
         try:
             payload = self._workspace.grep(
                 pattern,
@@ -818,9 +1431,25 @@ class CoreToolExecutor(ToolExecutorPort):
                 ignore_case=ignore_case,
                 file_glob=file_glob,
                 max_matches=max_matches,
+                offset=offset,
             )
             return (_j(payload), None)
         except WorkspaceError as exc:
+            if getattr(exc, "code", None) == "incomplete_scan":
+                return (
+                    None,
+                    _incomplete_scan_envelope(
+                        exc,
+                        "This result cannot be used to conclude absence. Narrow `root` or "
+                        'pass a `file_glob` (e.g. "*.py") so every candidate file can be '
+                        "scanned, then retry.",
+                        [
+                            "narrow root to a subdirectory",
+                            'pass file_glob such as "*.py" or "*.{ts,tsx}"',
+                            "page matches with offset after a complete narrower scan",
+                        ],
+                    ),
+                )
             return (None, _workspace_error_envelope(exc))
 
     def _tool_apply_patch(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -846,49 +1475,93 @@ class CoreToolExecutor(ToolExecutorPort):
             payload = plan_and_apply_patch(self._workspace, hunks)
             return (_j(payload), None)
         except PatchError as exc:
+            code = getattr(exc, "code", "patch_error")
+            details: dict[str, Any] = {"code": code}
+            extra = getattr(exc, "details", None)
+            if isinstance(extra, dict):
+                details.update(extra)
+            if code == "rollback_failed":
+                return (
+                    None,
+                    _built_in_tool_error(
+                        "runtime",
+                        str(exc),
+                        "Workspace may be partially modified. Re-read every dirty path "
+                        "in details before any retry; do not re-apply the same patch_text.",
+                        details,
+                    ),
+                )
             return (
                 None,
                 _built_in_tool_error(
                     "validation",
                     str(exc),
-                    "Fix the patch (markers, paths, or hunk context) and retry once.",
-                    {"code": getattr(exc, "code", "patch_error")},
+                    "Fix the patch (markers, paths, or hunk context). Re-read target "
+                    "files before retrying; do not retry identical patch_text.",
+                    details,
                 ),
             )
         except WorkspaceError as exc:
             return (None, _workspace_error_envelope(exc))
 
-    async def _tool_search_memory(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
-        query = _str_arg(args, "query", "q", "keyword", "phrase")
+    async def _tool_search(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+        query = _str_arg(args, "query", "q")
         if not query:
             return (
                 None,
                 _built_in_tool_error(
                     "validation",
-                    "search_memory requires a non-empty query.",
-                    'Use query (or q / keyword / phrase), e.g. {"query": "deployment"}.',
-                    {"field": "query", "example": {"query": "keyword"}},
+                    "search requires a non-empty query.",
+                    'Use query, e.g. {"query": "refund policy"}.',
+                    {"field": "query", "example": {"query": "refund policy"}},
                 ),
             )
-        max_hits = _coerce_int(args.get("max_hits"), 40) or 40
-        if self._memory is None:
+        if self._knowledge is None:
             return (
                 None,
                 _built_in_tool_error(
                     "validation",
-                    "search_memory requires memory to be configured.",
-                    "Enable the memory hook and set paths.memory_storage_uri in monkeybot.yaml.",
-                    {"field": "memory"},
+                    "search requires the knowledge layer to be configured.",
+                    "Set knowledge.enabled: true in monkeybot.yaml.",
+                    {"field": "knowledge"},
                 ),
             )
-        payload = await self._memory.search_files(query, max_hits=max_hits, skip_raw=False)
+        limit = _coerce_int(args.get("limit"), None)
+        if limit is None:
+            limit = _coerce_int(args.get("max_hits"), self._knowledge.settings.default_limit) or (
+                self._knowledge.settings.default_limit
+            )
+        path_prefix = args.get("path_prefix")
+        if not isinstance(path_prefix, str) or not path_prefix.strip():
+            path_prefix = None
+        else:
+            path_prefix = path_prefix.strip()
+        source_raw = args.get("source")
+        source = "any"
+        if isinstance(source_raw, str) and source_raw.strip() in {
+            "any",
+            "note",
+            "workspace_file",
+        }:
+            source = source_raw.strip()
+        payload = await self._knowledge.search(
+            query,
+            limit=limit,
+            path_prefix=path_prefix,
+            source=source,  # type: ignore[arg-type]
+        )
+        hits = payload.get("hits") if isinstance(payload, dict) else None
+        if isinstance(payload, dict) and not hits:
+            note = payload.get("note") or ""
+            cross = (
+                "no knowledge matches — if this is about past sessions or preferences, "
+                "use `mempalace search` via `run_command`"
+            )
+            payload["note"] = f"{note}; {cross}".strip("; ") if note else cross
         return (_j(payload), None)
 
     def _tool_list_skills(self, ctx: TurnContext) -> tuple[str | None, str | None]:
-        rows = [
-            {"name": s.name, "description": s.description}
-            for s in ctx.skills
-        ]
+        rows = [{"name": s.name, "description": s.description} for s in ctx.skills]
         return (
             _j(
                 {
@@ -919,6 +1592,22 @@ class CoreToolExecutor(ToolExecutorPort):
             context_val = str(context_val)
 
         subagent_type = _str_arg(args, "subagent_type", "type", "persona")
+
+        try:
+            expect_files = _parse_expect_files(args)
+            for rel in expect_files:
+                self._workspace.resolve_workspace_path(rel, label="expect_files")
+        except (ValueError, WorkspaceError) as exc:
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    str(exc),
+                    "Pass expect_files as workspace-relative paths the subagent should create.",
+                    {"field": "expect_files", "expect_files": args.get("expect_files")},
+                ),
+            )
+
         agent_root = resolve_agent_project_root()
         try:
             agent_md_path = resolve_task_agent_md_path(
@@ -953,6 +1642,8 @@ class CoreToolExecutor(ToolExecutorPort):
 
         parent_label = f"{ctx.request_id}:{call.call_id}"
         traceparent = _inject_subagent_traceparent()
+        run_id = make_run_id()
+        child_thread_id = f"subagent:{ctx.thread_id}:{uuid.uuid4().hex[:10]}"
         envelope = SubagentEnvelope(
             task=task,
             context=context_val,
@@ -962,22 +1653,16 @@ class CoreToolExecutor(ToolExecutorPort):
             traceparent=traceparent,
             agent_md=str(agent_md_path),
             subagent_type=subagent_type,
+            parent_session_id=ctx.thread_id,
+            child_thread_id=child_thread_id,
         )
 
-        scratch = (self._workspace.repo_root / ".monkeybot" / "subagent-runs" / uuid.uuid4().hex)
+        scratch = self._workspace.repo_root / ".monkeybot" / "subagent-runs" / uuid.uuid4().hex
         scratch.mkdir(parents=True, exist_ok=True)
 
-        run_id = make_run_id()
-        persisted = PersistedSubagentEnvelope(
-            task=envelope.task,
-            context=envelope.context,
-            memory_storage_uri=envelope.memory_storage_uri,
-            parent_run_id=envelope.parent_run_id,
-            model=envelope.model,
-            traceparent=envelope.traceparent,
-            agent_md=envelope.agent_md,
-            subagent_type=envelope.subagent_type,
-        )
+        # Queue mode: worker pool has no parent SessionBus/EventPublisherPort, so nested
+        # SubagentStarted/Event/Completed SSE is intentionally not emitted here. Return
+        # ok:false / pending so ``ok`` never means terminal success while work is queued.
         queue_mode = os.environ.get("MONKEYBOT_TASK_QUEUE", "").strip().lower() in (
             "1",
             "true",
@@ -991,208 +1676,160 @@ class CoreToolExecutor(ToolExecutorPort):
                     run_id=run_id,
                     parent_run_id=parent_label,
                     script=str(script),
-                    envelope=persisted,
+                    envelope=envelope,
                     scratch_dir=scratch,
                 )
                 return (
-                    _j(
+                    None,
+                    _built_in_tool_error(
+                        "pending",
+                        "Subagent run queued for worker pool; work has not finished yet.",
+                        "Do not treat this as task completion. Wait for a terminal "
+                        "exit_reason (or reopen via child_thread_id) before reporting "
+                        "done or skipping follow-up work.",
                         {
-                            "ok": True,
                             "queued": True,
                             "run_id": run_id,
+                            "child_thread_id": child_thread_id,
+                            "subagent_type": subagent_type,
                             "scratch_dir": str(scratch),
-                            "message": "Subagent run queued for worker pool.",
-                        }
+                        },
                     ),
-                    None,
                 )
             await self._run_store.record_started(
                 run_id=run_id,
                 parent_run_id=parent_label,
                 script=str(script),
-                envelope=persisted,
+                envelope=envelope,
                 scratch_dir=scratch,
             )
 
-        child_env = {
-            "MONKEYBOT_SUBAGENT_WORKSPACE": str(self._workspace.repo_root),
-            "MONKEYBOT_AGENT_ROOT": str(agent_root),
-            "MEMORY_STORAGE_URI": memory_uri,
-            "MONKEYBOT_SUBAGENT_SKILLS_PATH": str(self._skills_path),
-            "OTEL_SERVICE_NAME": _SUBAGENT_OTEL_SERVICE_NAME,
-            "MONKEYBOT_SUBAGENT_AGENT_MD": str(agent_md_path),
-        }
+        child_env = _task_child_env(
+            repo_root=self._workspace.repo_root,
+            agent_root=agent_root,
+            memory_uri=memory_uri,
+            skills_path=self._skills_path,
+        )
+        payload = await _run_inline_subagent_with_progress(
+            script=script,
+            envelope=envelope,
+            scratch=scratch,
+            child_env=child_env,
+            timeout=get_subagent_settings().timeout_sec,
+            ctx=ctx,
+            call=call,
+            run_id=run_id,
+            child_thread_id=child_thread_id,
+            subagent_type=subagent_type,
+            task=task,
+        )
 
-        for env_key, raw_val in (
-            ("MCP_CONFIG", os.environ.get("MCP_CONFIG", "")),
-            ("COMMAND_ALLOWLIST_CONFIG", os.environ.get("COMMAND_ALLOWLIST_CONFIG", "")),
-        ):
-            if raw_val.strip():
-                child_env[env_key] = str(resolve_project_path(raw_val.strip(), agent_root))
+        artifact_exists, artifacts = _check_expected_artifacts(self._workspace, expect_files)
+        payload["artifact_exists"] = artifact_exists
+        payload["artifacts"] = artifacts
 
-        db_raw = os.environ.get("DB_URL", "").strip()
-        if db_raw:
-            child_env["DB_URL"] = normalize_sqlite_db_url(db_raw, agent_root)
-
-        timeout_raw = os.environ.get("SUBAGENT_TIMEOUT_SEC", "600").strip()
-        try:
-            timeout = max(1.0, float(timeout_raw))
-        except ValueError:
-            timeout = 600.0
-
-        deltas: list[str] = []
-        errors: list[str] = []
-        tool_call_count = 0
-        tool_results: list[dict[str, str]] = []
-        turn_complete: TurnComplete | None = None
-        proc_holder: list[asyncio.subprocess.Process | None] = [None]
-
-        async def _subprocess_exec(*cmd: str | bytes) -> asyncio.subprocess.Process:
-            env = dict(os.environ)
-            env.update(child_env)
-            env["PYTHONUNBUFFERED"] = "1"
-            p = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-                env=env,
-            )
-            proc_holder[0] = p
-            return p
-
-        async def _drain() -> None:
-            nonlocal turn_complete, tool_call_count
-            async for evt in spawn_subagent(
-                str(script),
-                envelope,
-                scratch_dir=scratch,
-                subprocess_exec=_subprocess_exec,
-            ):
-                if isinstance(evt, AssistantDelta):
-                    deltas.append(evt.delta)
-                elif isinstance(evt, ToolCallStarted):
-                    tool_call_count += 1
-                elif isinstance(evt, ToolCallResult):
-                    snippet = (evt.result or evt.error or "").strip()
-                    if len(snippet) > 600:
-                        snippet = snippet[:600] + "…"
-                    tool_results.append({"tool": evt.tool, "snippet": snippet})
-                elif isinstance(evt, Error):
-                    errors.append(evt.error)
-                elif isinstance(evt, TurnComplete):
-                    turn_complete = evt
-
-        drain_task = asyncio.create_task(_drain())
-        cancel_wait = asyncio.create_task(ctx.cancelled.wait()) if ctx.cancelled is not None else None
-
-        try:
-            if cancel_wait is None:
-                try:
-                    await asyncio.wait_for(drain_task, timeout=timeout)
-                except TimeoutError:
-                    errors.append(f"task: subagent exceeded {timeout:g}s timeout")
-                    await _stop_subagent_process(proc_holder[0])
-                    if not drain_task.done():
-                        drain_task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await drain_task
-            else:
-                done, _ = await asyncio.wait(
-                    {drain_task, cancel_wait},
-                    timeout=timeout,
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if not done:
-                    errors.append(f"task: subagent exceeded {timeout:g}s timeout")
-                    await _stop_subagent_process(proc_holder[0])
-                    cancel_wait.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await cancel_wait
-                    if not drain_task.done():
-                        drain_task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await drain_task
-                elif drain_task in done:
-                    if not cancel_wait.done():
-                        cancel_wait.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await cancel_wait
-                    try:
-                        drain_task.result()
-                    except asyncio.CancelledError:
-                        pass
-                    except Exception as exc:
-                        errors.append(str(exc))
-                else:
-                    errors.append(_PARENT_CANCEL_TASK_ERR)
-                    await _stop_subagent_process(proc_holder[0])
-                    if not drain_task.done():
-                        drain_task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await drain_task
-        finally:
-            if cancel_wait is not None and not cancel_wait.done():
-                cancel_wait.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await cancel_wait
-
-        usage_payload = None
-        if turn_complete is not None:
-            u = turn_complete.usage
-            usage_payload = {
-                "input_tokens": u.input_tokens,
-                "output_tokens": u.output_tokens,
-                "cached_tokens": u.cached_tokens,
-                "cost_usd": u.cost_usd,
-                "duration_ms": u.duration_ms,
-            }
-
-        full_text = "".join(deltas).strip()
-        final_text = full_text
-
-        payload = {
-            "ok": len(errors) == 0,
-            "final_message": final_text,
-            "assistant_text": full_text,
-            "tool_call_count": tool_call_count,
-            "tool_results": tool_results[-10:],
-            "errors": errors,
-            "usage": usage_payload,
-            "scratch_dir": str(scratch),
-            "run_id": run_id,
-        }
         if self._run_store is not None and not queue_mode:
             result_json = _j(payload)
+            errors = list(payload.get("errors") or [])
             if len(errors) == 0:
                 await self._run_store.record_completed(run_id, result_json)
             else:
-                await self._run_store.record_failed(run_id, "; ".join(errors))
+                await self._run_store.record_failed(run_id, "; ".join(str(e) for e in errors))
         return (_j(payload), None)
 
-    async def _tool_run_command(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+    def _resolve_run_command_cwd(self, args: dict[str, Any]) -> Path:
+        """Workspace-relative cwd for ``run_command`` (defaults to repo root)."""
+        raw = args.get("cwd")
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            return self._workspace.repo_root
+        if not isinstance(raw, str):
+            raise WorkspaceError("cwd must be a string", code="invalid_cwd")
+        cwd = self._workspace._resolve_root_dir(raw)
+        if not cwd.is_dir():
+            raise WorkspaceError(
+                f"cwd is not an existing directory: {raw.strip()}",
+                code="invalid_cwd",
+            )
+        return cwd
+
+    async def _tool_run_command(
+        self,
+        args: dict[str, Any],
+        *,
+        call: ToolCall,
+        ctx: TurnContext,
+    ) -> tuple[str | None, str | None]:
         try:
             cmd, argv = _parse_run_command(args)
         except ValueError as exc:
             return None, _run_command_parse_envelope(exc)
-        timeout = _coerce_int(args.get("timeout"), 60) or 60
         try:
-            result = await self._terminal.execute(
+            cwd = self._resolve_run_command_cwd(args)
+        except WorkspaceError as exc:
+            return None, _workspace_error_envelope(exc)
+        timeout = _coerce_int(args.get("timeout"), 60) or 60
+        if cmd == "mempalace" and self._memory is None:
+            return (
+                None,
+                _built_in_tool_error(
+                    "policy",
+                    "Memory is unavailable; mempalace commands are disabled.",
+                    "Do not attempt memory recall when no memory subsystem is active.",
+                ),
+            )
+        executor = self._terminal
+        if cmd == "mempalace" and self._host_terminal is not None:
+            executor = self._host_terminal
+        try:
+            execute_kwargs: dict[str, Any] = {
+                "timeout": timeout,
+                "cwd": cwd,
+            }
+            if (
+                cmd == "mempalace"
+                and self._memory is not None
+                and isinstance(executor, TerminalExecutor)
+            ):
+                execute_kwargs["env_overrides"] = {
+                    "MEMPALACE_PALACE_PATH": str(self._memory.palace_path),
+                    "MEMPALACE_BACKEND": self._memory.backend,
+                }
+            result = await executor.execute(
                 cmd,
                 argv,
-                timeout=timeout,
-                cwd=self._workspace.repo_root,
+                **execute_kwargs,
             )
         except SecurityError as exc:
             return None, self._run_command_security_envelope(exc)
-        except TimeoutError as exc:
+        except CommandTimeoutError as exc:
+            spill_path = write_run_command_timeout_spill(
+                workspace_root=self._workspace.repo_root,
+                thread_id=ctx.thread_id,
+                call_id=call.call_id,
+                stdout=exc.stdout,
+                stderr=exc.stderr,
+            )
+            details: dict[str, Any] = {
+                "partial_output_path": spill_path,
+                "stdout_chars": len(exc.stdout),
+                "stderr_chars": len(exc.stderr),
+            }
+            tail = partial_output_tail(exc.stdout, exc.stderr)
+            if tail:
+                details["partial_output_tail"] = tail
             return (
                 None,
                 _built_in_tool_error(
                     "runtime",
                     str(exc),
-                    "Increase run_command timeout (seconds) or use a shorter command, then retry once.",
-                    {"example": {"argv": ["git", "--version"], "timeout": 120}},
+                    "The process was killed mid-execution and may have left partial state "
+                    "(half-created databases, lock files, partial writes, dirty caches) that "
+                    "will affect subsequent runs. Do not re-run the same argv with a larger "
+                    "timeout — that is not a valid recovery. Diagnose instead: read_file "
+                    f"{spill_path} for what the process emitted before kill, narrow the "
+                    "command scope, or find and fix why it is slow, cleaning up any leftover "
+                    "state before retrying with a changed argv.",
+                    details,
                 ),
             )
         return (
@@ -1207,30 +1844,31 @@ class CoreToolExecutor(ToolExecutorPort):
             None,
         )
 
-    async def _tool_add_mcp_server(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
-        sname = _str_arg(args, "name", "server_name", "server")
+    async def _tool_enable_mcp(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+        sname = _str_arg(args, "name")
         if not sname:
-            return (None, "add_mcp_server requires name (or server_name / server)")
-        command = _str_arg(args, "command", "cmd")
-        if not command:
-            return (None, "add_mcp_server requires command")
-        raw_args = args.get("args")
-        arg_list = [str(x) for x in raw_args] if isinstance(raw_args, list) else []
-        env: dict[str, str] = {}
-        env_src = args.get("env")
-        if isinstance(env_src, dict):
-            for k, val in env_src.items():
-                env[str(k)] = "" if val is None else str(val)
-        defs = await self._mcp.connect(sname, command, arg_list, env)
+            return (None, "enable_mcp requires name")
+        already = self._mcp.is_connected(sname)
+        try:
+            defs = await self._mcp.connect_from_catalog(sname)
+        except MCPDiagnosticError as exc:
+            logger.warning("enable_mcp failed %s", kv(server=sname, error=str(exc)))
+            return (None, str(exc))
+        except MCPConnectionError as exc:
+            logger.warning("enable_mcp failed %s", kv(server=sname, error=str(exc)))
+            return (None, str(exc))
+        status_snap = self._mcp.status(sname)
         logger.info(
-            "add_mcp_server ok %s",
-            kv(server=sname, tools=len(defs)),
+            "enable_mcp ok %s",
+            kv(server=sname, already_connected=already, tools=len(defs)),
         )
         return (
             _j(
                 {
                     "ok": True,
                     "server": sname,
+                    "status": status_snap,
+                    "already_connected": already,
                     "tools": [{"name": t.name, "description": t.description} for t in defs],
                     "note": "New tools apply on the next model step this turn.",
                 }
@@ -1238,12 +1876,10 @@ class CoreToolExecutor(ToolExecutorPort):
             None,
         )
 
-    async def _disconnect_mcp_server(
-        self, *, tool_name: str, args: dict[str, Any]
-    ) -> tuple[str | None, str | None]:
-        sname = _str_arg(args, "name", "server_name", "server")
+    async def _tool_disable_mcp(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+        sname = _str_arg(args, "name")
         if not sname:
-            return (None, f"{tool_name} requires name (or server_name / server)")
+            return (None, "disable_mcp requires name")
         known = list(self._mcp.known_server_names())
         if sname not in known and not self._mcp.is_connected(sname):
             known_msg = ", ".join(known) if known else "(none)"
@@ -1252,7 +1888,7 @@ class CoreToolExecutor(ToolExecutorPort):
                 f"Unknown MCP server {sname!r}. Known servers: {known_msg}",
             )
         await self._mcp.disconnect(sname)
-        logger.info("%s ok %s", tool_name, kv(server=sname, disconnected=True))
+        logger.info("disable_mcp ok %s", kv(server=sname, disconnected=True))
         return (
             _j(
                 {
@@ -1265,50 +1901,48 @@ class CoreToolExecutor(ToolExecutorPort):
             None,
         )
 
-    async def _tool_remove_mcp_server(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
-        return await self._disconnect_mcp_server(tool_name="remove_mcp_server", args=args)
-
-    async def _tool_enable_mcp(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
-        sname = _str_arg(args, "name", "server_name", "server")
-        if not sname:
-            return (None, "enable_mcp requires name (or server_name / server)")
-        already = self._mcp.is_connected(sname)
-        try:
-            defs = await self._mcp.connect_from_catalog(sname)
-        except MCPDiagnosticError as exc:
-            logger.warning("enable_mcp failed %s", kv(server=sname, error=str(exc)))
-            return (None, str(exc))
-        except MCPConnectionError as exc:
-            logger.warning("enable_mcp failed %s", kv(server=sname, error=str(exc)))
-            return (None, str(exc))
+    async def _tool_enable_loops(self) -> tuple[str | None, str | None]:
+        store_or_err = self._require_loop_store()
+        if isinstance(store_or_err, tuple):
+            return None, store_or_err[1]
+        already = self._loops_registry.advertised
+        self._loops_registry.advertised = True
+        tools = [{"name": t.name, "description": t.description} for t in SCHEDULED_LOOP_TOOL_DEFS]
         logger.info(
-            "enable_mcp ok %s",
-            kv(server=sname, already_connected=already, tools=len(defs)),
+            "enable_loops ok %s",
+            kv(already_advertised=already, tools=len(tools)),
         )
         return (
             _j(
                 {
                     "ok": True,
-                    "server": sname,
-                    "already_connected": already,
-                    "tools": [{"name": t.name, "description": t.description} for t in defs],
+                    "already_advertised": already,
+                    "tools": tools,
                     "note": "New tools apply on the next model step this turn.",
                 }
             ),
             None,
         )
 
-    async def _tool_disable_mcp(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
-        return await self._disconnect_mcp_server(tool_name="disable_mcp", args=args)
-
-    def _tool_mcp_status(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
-        sname = _str_arg(args, "server", "name", "server_name")
-        snapshot = self._mcp.status(sname or None)
+    async def _tool_disable_loops(self) -> tuple[str | None, str | None]:
+        already = self._loops_registry.advertised
+        self._loops_registry.advertised = False
+        dropped = len(SCHEDULED_LOOP_TOOL_DEFS) if already else 0
+        logger.info(
+            "disable_loops ok %s",
+            kv(was_advertised=already, tools=dropped),
+        )
         return (
             _j(
                 {
                     "ok": True,
-                    "servers": snapshot if isinstance(snapshot, list) else [snapshot],
+                    "was_advertised": already,
+                    "tools_dropped": dropped,
+                    "disconnected": True,
+                    "note": (
+                        "Scheduled-loop tools drop on the next model step this turn. "
+                        "Running loops keep their scheduler state."
+                    ),
                 }
             ),
             None,
@@ -1342,31 +1976,18 @@ class CoreToolExecutor(ToolExecutorPort):
         return (_j({"ok": True, **ok_payload(result)}), None)
 
     async def _tool_list_mcp_resources(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
-        sname = _str_arg(args, "server", "name", "server_name") or None
+        sname = _str_arg(args, "server") or None
         return await self._mcp_meta_call(
             "list_mcp_resources",
             self._mcp.list_resources(sname),
             ok_payload=lambda resources: {"resources": resources, "count": len(resources)},
         )
 
-    async def _tool_list_mcp_resource_templates(
-        self, args: dict[str, Any]
-    ) -> tuple[str | None, str | None]:
-        sname = _str_arg(args, "server", "name", "server_name") or None
-        return await self._mcp_meta_call(
-            "list_mcp_resource_templates",
-            self._mcp.list_resource_templates(sname),
-            ok_payload=lambda templates: {
-                "resourceTemplates": templates,
-                "count": len(templates),
-            },
-        )
-
     async def _tool_read_mcp_resource(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
-        sname = _str_arg(args, "server", "name", "server_name")
-        uri = _str_arg(args, "uri", "resource_uri", "resource")
+        sname = _str_arg(args, "server")
+        uri = _str_arg(args, "uri")
         if not sname:
-            return (None, "read_mcp_resource requires server (or name / server_name)")
+            return (None, "read_mcp_resource requires server")
         if not uri:
             return (None, "read_mcp_resource requires uri")
         return await self._mcp_meta_call(
@@ -1375,7 +1996,7 @@ class CoreToolExecutor(ToolExecutorPort):
         )
 
     async def _tool_list_mcp_prompts(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
-        sname = _str_arg(args, "server", "name", "server_name") or None
+        sname = _str_arg(args, "server") or None
         return await self._mcp_meta_call(
             "list_mcp_prompts",
             self._mcp.list_prompts(sname),
@@ -1383,12 +2004,12 @@ class CoreToolExecutor(ToolExecutorPort):
         )
 
     async def _tool_get_mcp_prompt(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
-        sname = _str_arg(args, "server", "server_name")
-        prompt_name = _str_arg(args, "prompt", "name", "prompt_name")
+        sname = _str_arg(args, "server")
+        prompt_name = _str_arg(args, "prompt")
         if not sname:
-            return (None, "get_mcp_prompt requires server (or server_name)")
+            return (None, "get_mcp_prompt requires server")
         if not prompt_name:
-            return (None, "get_mcp_prompt requires prompt (or name / prompt_name)")
+            return (None, "get_mcp_prompt requires prompt")
         raw_args = args.get("arguments")
         prompt_args: dict[str, str] = {}
         if isinstance(raw_args, dict):

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "monkeybot"
-version = "2.2.0"
+version = "3.0.0"
 description = "monkeybot agent harness — FastAPI SSE gateway, owned loop, SQLite, and MCP."
 requires-python = ">=3.11"
 readme = "README.md"
@@ -17,12 +17,16 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "pyyaml>=6.0.2",
     "httpx>=0.27.0",
-    "mcp>=1.0.0",
+    "mcp>=1.0.0,<2",
     "python-ulid>=2.0.0",
     "google-genai>=1.0.0",
+    # <2.5: newer numpy stub files use PEP 695 `type` statements that mypy
+    # cannot parse while this project's [tool.mypy] targets python_version 3.11.
+    "numpy>=1.26.0,<2.5",
 ]
 
 [project.optional-dependencies]
+memory = ["mempalace>=3.7.0,<4"]
 gemini = ["google-genai>=1.0.0"]
 vertex = [
     "google-genai>=1.0.0",
@@ -32,10 +36,11 @@ vertex = [
 claude = ["anthropic>=0.40.0"]
 vertex-claude = ["anthropic[vertex]>=0.40.0"]
 bedrock = ["anthropic[bedrock]>=0.40.0", "boto3>=1.34.0"]
-openai = ["openai>=1.0", "tiktoken>=0.7.0"]
-huggingface = ["openai>=1.0", "tiktoken>=0.7.0"]
-ollama = ["openai>=1.0", "tiktoken>=0.7.0"]
-nvidia = ["openai>=1.0", "tiktoken>=0.7.0"]
+openai = ["openai>=1.0", "tiktoken>=0.7.0", "pypdf>=6.14.2"]
+huggingface = ["openai>=1.0", "tiktoken>=0.7.0", "pypdf>=6.14.2"]
+ollama = ["openai>=1.0", "tiktoken>=0.7.0", "pypdf>=6.14.2"]
+nvidia = ["openai>=1.0", "tiktoken>=0.7.0", "pypdf>=6.14.2"]
+openrouter = ["openai>=1.0", "tiktoken>=0.7.0", "pypdf>=6.14.2"]
 sandbox = ["opensandbox>=0.1.7"]
 scheduler = ["croniter>=2.0"]
 postgres = ["asyncpg>=0.29.0"]
@@ -60,6 +65,11 @@ observability = [
     "opentelemetry-exporter-otlp-proto-http>=1.28",
     "opentelemetry-instrumentation-fastapi>=0.62b1",
 ]
+# Optional AST-aware knowledge chunking (tree-sitter). Without this extra the
+# indexer falls back to an indent/brace heuristic for code suffixes.
+knowledge-ast = ["tree-sitter-language-pack>=1.6"]
+# Optional PDF/DOCX extraction for the knowledge indexer.
+knowledge-media = ["pypdf>=6.14.2", "python-docx>=1.1.0"]
 
 [dependency-groups]
 dev = [
@@ -82,6 +92,12 @@ dev = [
     "typer>=0.12.0",
     # Shims in src/monkeybot/cli re-export from monkeybot_cli (talk consolidation).
     "monkeybot-cli",
+    # Exercise tree-sitter code chunking in CI / local tests.
+    "monkeybot[knowledge-ast]",
+    # Exercise PDF/DOCX knowledge extraction in CI / local tests.
+    "monkeybot[knowledge-media]",
+    # MemPalace is an optional extra; tests still exercise the adapter.
+    "monkeybot[memory]",
 ]
 
 [tool.uv]

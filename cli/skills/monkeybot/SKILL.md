@@ -86,7 +86,7 @@ monkeybot new --dest /path/to/bot --provider openai --yes
 ```
 
 Creates `monkeybot_config/`, read-only `skills/`, writable `workspace/`,
-`data/memory/`, `.env.example`, a Dockerfile, and an agent `pyproject.toml`.
+`memory/`, `.env.example`, a Dockerfile, and an agent `pyproject.toml`.
 Use `--force` only when overwriting is explicitly requested.
 
 Then:
@@ -113,7 +113,7 @@ uv sync
 | `huggingface` | `HF_TOKEN` (or `HUGGINGFACE_API_KEY`) | `monkeybot[huggingface]` |
 | `ollama` | None required — `OLLAMA_BASE_URL` (default `http://localhost:11434`) for a non-default server | `monkeybot[ollama]` |
 
-**Agent-first dependencies.** The CLI is thin — it does **not** install provider/storage extras globally. `monkeybot new` scaffolds a `pyproject.toml` with the selected provider (and any `--with` extras). Run plain `uv sync` in the agent directory. `monkeybot run` / `chat` spawn the gateway from that project's interpreter (`.venv/bin/python`, else `uv run python`), and `doctor` checks extras in that same interpreter. For a config-only tree (just `monkeybot_config/`, no `pyproject.toml`) the gateway falls back to the CLI's interpreter, so extras must be installed in the CLI env (`uv tool install --with 'monkeybot[<extra>]' monkeybot-cli`).
+**Agent-first dependencies.** The CLI is thin — it does **not** install provider/storage extras globally. `monkeybot new` scaffolds a `pyproject.toml` with the selected provider (and any `--with` extras). Run plain `uv sync` in the agent directory. `monkeybot run` / `chat` spawn the gateway from that project's interpreter (`.venv/bin/python`, else `uv run python`), and `doctor` checks extras in that same interpreter. For a config-only tree (just `monkeybot_config/`, no `pyproject.toml`) the gateway uses the CLI's interpreter when it already has MonkeyBot 3.x (and MemPalace if memory is on). If memory is enabled and that interpreter cannot import MemPalace, `run` / `chat` provision a cached CLI-managed venv under `~/.cache/monkeybot/runtimes/` holding `monkeybot[memory]` pinned to the running core (never rewrites a `pyproject.toml`). `doctor` reuses that cache when it is already present. Otherwise extras must be installed in the CLI env (`uv tool install --with 'monkeybot[<extra>]' monkeybot-cli`).
 
 `doctor` is the source of truth for credentials and extras — when in doubt, run it and read the `remediation` field (add `monkeybot[<extra>]` to agent deps + `uv sync`).
 
@@ -156,13 +156,13 @@ Decision → config map:
 | "I have a custom web UI" | `gateway.cors_allow_origins` |
 | "Search the web" | `web_search.backend` + `.env` keys (Tavily/Firecrawl) |
 | "Run untrusted code" | `sandbox.enabled` + `SANDBOX_API_KEY` |
-| "Use specialist agents" | `subagents[]` + `monkeybot_config/agents/*.md` |
+| "Use specialist agents" | `subagents.personas` + `monkeybot_config/agents/*.md` |
 | "Connect external tools" | `mcp.json` (`mcpServers` object), then `validate --check-mcp` |
 | "Control cost / context size" | `model.*`, `context_curation.*` |
 | "Restrict dangerous commands" | `tools.denied_patterns`, `command_allowlist.yaml` |
 | "Multiple environments" | top-level `includes:` fragments |
 
-**Subagents (`task` tool):** share the parent `AGENT.md` (or `subagent.agent_md`). Relative paths resolve from the bot project root, not `workspace/`. Specialize via `task` / `context`, not separate agent type folders. For parallel `task` fan-out, prefer Postgres: add `monkeybot[postgres]` to the **agent** `pyproject.toml` dependencies, run `uv sync`, then set `DB_URL=postgresql://...` in `.env`.
+**Subagents (`task` tool):** without `subagent_type`, share the parent `AGENT.md`. With a persona, use that persona's `agent_md`. Relative paths resolve from the bot project root, not `workspace/`. Specialize via `task` / `context` or named personas. For parallel `task` fan-out, prefer Postgres: add `monkeybot[postgres]` to the **agent** `pyproject.toml` dependencies, run `uv sync`, then set `DB_URL=postgresql://...` in `.env`.
 
 **Observability** is mostly env + add `monkeybot[observability]` to agent deps + `uv sync` + an OTel collector — not `monkeybot.yaml`. See `docs/observability-runbook.md`.
 
@@ -191,7 +191,8 @@ uv tool install --editable .
 
 | Command | Purpose |
 |---------|---------|
-| `new` | Scaffold `monkeybot_config/`, `workspace/`, `data/memory/`, `skills/`, `pyproject.toml`, `.env.example` |
+| `new` | Scaffold `monkeybot_config/`, `workspace/`, `memory/`, `skills/`, `pyproject.toml`, `.env.example` |
+| `refresh` | Additive update of packaged YAML defaults on an existing agent (keeps AGENT.md, mcp.json, model) |
 | `validate` | Config + paths + MCP shape (`--check-mcp` for network) |
 | `doctor` | Python, provider extra, credentials, port |
 | `run` | Start SSE gateway subprocess |

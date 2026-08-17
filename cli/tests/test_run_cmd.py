@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from monkeybot_cli.commands.run_cmd import run_run
+from monkeybot_cli.runtime_python import RuntimePython
 
 
 def test_run_run_derives_agent_root_from_off_tree_config(
@@ -39,8 +41,12 @@ def test_run_run_derives_agent_root_from_off_tree_config(
         return _Proc()
 
     args = argparse.Namespace(cwd=None, config=str(cfg_dir / "monkeybot.yaml"), port=None)
+    runtime = RuntimePython([str(venv_py.resolve())], "venv", agent)
 
-    with patch("monkeybot_cli.commands.run_cmd.subprocess.run", side_effect=fake_run):
+    with (
+        patch("monkeybot_cli.commands.run_cmd.prepare_runtime_python", return_value=runtime),
+        patch("monkeybot_cli.commands.run_cmd.subprocess.run", side_effect=fake_run),
+    ):
         code = run_run(args)
 
     assert code == 0
@@ -73,8 +79,12 @@ def test_run_run_preserves_explicit_cwd_with_explicit_config(
         return _Proc()
 
     args = argparse.Namespace(cwd=str(explicit_cwd), config=str(cfg_dir / "monkeybot.yaml"), port=None)
+    runtime = RuntimePython([sys.executable], "cli", explicit_cwd)
 
-    with patch("monkeybot_cli.commands.run_cmd.subprocess.run", side_effect=fake_run):
+    with (
+        patch("monkeybot_cli.commands.run_cmd.prepare_runtime_python", return_value=runtime),
+        patch("monkeybot_cli.commands.run_cmd.subprocess.run", side_effect=fake_run),
+    ):
         run_run(args)
 
     assert Path(captured["cwd"]).resolve() == explicit_cwd.resolve()

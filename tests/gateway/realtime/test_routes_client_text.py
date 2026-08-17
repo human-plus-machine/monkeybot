@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -14,8 +16,13 @@ from monkeybot.core.llm.realtime_provider import (
     RealtimeToolCall,
     RealtimeTurnBoundary,
 )
+from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.runtime.utterance_buffer import UtteranceBuffer
-from monkeybot.gateway.realtime.routes import _handle_client_frames, _handle_provider_event
+from monkeybot.gateway.realtime.routes import (
+    _handle_assistant_boundary,
+    _handle_client_frames,
+    _handle_provider_event,
+)
 from monkeybot.gateway.realtime.session import RealtimeConnectionState
 
 
@@ -197,3 +204,46 @@ async def test_typed_text_tool_then_prose_commits_user_once(
         None,
     )
     assert boundary_calls == ["read README", ""]
+
+
+@pytest.mark.asyncio
+async def test_assistant_boundary_writes_talk_transcript(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = _state()
+    state.buffer.add_user_text("hello")
+    state.buffer.mark_user_turn_boundary()
+    state.buffer.add_assistant_text("hi")
+    state.buffer.mark_assistant_turn_boundary()
+    writer = TranscriptWriter("s1", workspace_root=tmp_path)
+    await writer.ensure_manifest()
+    state.transcript_writer = writer
+
+    history = MagicMock()
+    history.append = AsyncMock()
+    history.load = AsyncMock(return_value=[])
+    ctx = MagicMock()
+    ctx.memory = None
+    ctx.thread_id = "s1"
+    ctx.request_id = "r1"
+    ctx.model = "fake"
+    deps = MagicMock()
+    deps.inspectors = []
+    deps.hook_manager = None
+
+    monkeypatch.setattr(
+        "monkeybot.gateway.realtime.routes._create_tool_executor",
+        lambda *_args, **_kwargs: MagicMock(),
+    )
+
+    await _handle_assistant_boundary(
+        MagicMock(), state, ctx, history, deps, None, None
+    )
+
+    lines = [json.loads(line) for line in writer.path.read_text(encoding="utf-8").splitlines()]
+    types = [line["type"] for line in lines]
+    assert types[0] == "SessionManifest"
+    assert "UserMessage" in types
+    assert "AssistantTextEnded" in types
+    assert "TurnComplete" in types

@@ -55,3 +55,22 @@ class UsageSummary:
     last_estimated_prompt_tokens: int
     cache_read_tokens: int = 0
     cache_creation_tokens: int = 0
+
+
+@dataclass(frozen=True)
+class UsageBucket:
+    """One grouped slice of usage (by model name or UTC calendar day)."""
+
+    key: str
+    turns: int
+    input_tokens: int
+    output_tokens: int
+    cost_usd: float
+
+
+@dataclass(frozen=True)
+class UsageBreakdown:
+    """Per-model and per-day aggregates for the usage dashboard."""
+
+    by_model: list[UsageBucket]
+    by_day: list[UsageBucket]

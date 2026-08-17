@@ -55,6 +55,7 @@ async def _combined_lifespan(app: FastAPI) -> AsyncIterator[None]:
     deps.run_command_allowed_path_prefixes = sse_deps.run_command_allowed_path_prefixes
     deps.subagent_registry = sse_deps.subagent_registry
     deps.attachment_store = getattr(app.state, "attachment_store", None)
+    deps.loops_registry = sse_deps.loops_registry
 
     realtime_provider = normalize_model_provider(
         config.model.provider or os.environ.get("MODEL_PROVIDER", "google_vertexai")
@@ -89,8 +90,11 @@ def create_realtime_app(**kwargs: Any) -> FastAPI:
     # which leaves the chat TUI stuck on "thinking…".
     from monkeybot.gateway.sse.app import GatewayLoopPort, _StaticUsagePortZeros
     from monkeybot.gateway.sse.session_bus import SessionRegistry
+    from monkeybot.gateway.sse.workspace_layout import resolve_agent_workspace_root
 
-    registry = kwargs.pop("registry", None) or SessionRegistry()
+    registry = kwargs.pop("registry", None) or SessionRegistry(
+        workspace_root=resolve_agent_workspace_root()
+    )
     loop_port = kwargs.pop("loop_port", None) or GatewayLoopPort(registry)
     usage_port = kwargs.pop("usage_port", None) or _StaticUsagePortZeros()
 

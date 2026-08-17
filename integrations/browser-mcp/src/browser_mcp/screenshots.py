@@ -1,4 +1,4 @@
-"""Workspace screenshot paths for browser_screenshot (vision / render_image bridge)."""
+"""Workspace screenshot paths for browser_screenshot (vision / load_file bridge)."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def screenshots_dir() -> Path:
 
 
 def workspace_relative(abs_path: Path) -> str:
-    """Return a workspace-relative path suitable for ``render_image`` / ``read_file``."""
+    """Return a workspace-relative path suitable for ``load_file`` / ``read_file``."""
     resolved = abs_path.resolve()
     root = workspace_root()
     try:

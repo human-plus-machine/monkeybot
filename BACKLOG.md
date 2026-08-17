@@ -8,28 +8,11 @@
 - **Google Chat gateway** — incoming webhook + event handler for Google Chat spaces.
 - **Slack gateway** — Slack Events API / socket mode integration.
 
-### 2. Evals *(in progress)*
-- Integrate eval framework (langfuse, deepeval, or similar) into the harness — not just playground-level; needs to be first-class traceability in the agent loop.
-- **Memory accuracy verification** — script exists (`scripts/verify_memory.py`) but needs a real eval strategy, not a one-off script.
-
-### 3. Scheduler
-- Wire a `Scheduler` into the FastAPI lifespan as an optional background task when `config.yaml` has `scheduler.jobs`.
-- Needs significant design work for cloud runtimes: Lambda/Cloud Functions have no persistent process, GKE/ECS can use sidecar or CronJob, etc. Think through heartbeat / self-scheduling before implementing.
-
-### 4. Sandbox Workspace Protection
+### 2. Sandbox Workspace Protection
 - Add a hard-coded deny layer inside `SandboxExecutor` that blocks `run_command` from targeting harness-owned paths: `.monkeybot/`, `monkeybot.yaml`, `*.env`, `.agents/`, `config/`.
 - Path-level policy at the executor — distinct from `command_allowlist.yaml` which is command-level. Agent should retain free rw access to `./code/`, `./data/`, etc.
 
-### 5. HITL Completion
-- The loop and `/tool-confirmations` API endpoint exist; inspectors have `confirm` as a valid `Decision.kind` but no inspector currently returns it ("Story 5" placeholder).
-- Wire an inspector that returns `confirm` for configurable tool patterns, flowing through the existing `_await_user_response` path.
-
-### 6. DurableRunStore Wiring (crash recovery) — DONE
-- Subagent runs are persisted via `CoreToolExecutor` (`record_started` / `record_completed` / `record_failed`).
-- Queue mode: set `MONKEYBOT_TASK_QUEUE=1` to enqueue with `record_pending` instead of inline spawn.
-- Worker pool: standalone `python -m monkeybot.subagents.worker` consumes queued runs with atomic `claim()` (recommended for production — its own event loop, scales independently of the gateway). `MONKEYBOT_WORKER_POOL=1` runs the same loop in-process on the gateway and is development-only (competes with the SSE event loop).
-
-### 7. CLI-managed optional service dependencies
+### 3. CLI-managed optional service dependencies
 - `monkeybot chat` / `run` only spawn the gateway process; they don't start the Docker-backed optional services some `monkeybot.yaml` configs require: OpenSandbox (`sandbox.enabled`), Firestore emulator (`paths.db_url: firestore://...`), or the observability stack (Phoenix/Langfuse/OTel collector). Those used to be orchestrated by a demo `run.sh`; the CLI alone still can't fully run an agent that uses those features.
 - Decide and implement: should the CLI (`doctor`, `run`, `chat`) detect these from config and actually start/stop the containers, or just validate/warn with remediation hints while the user manages Docker manually?
 - Open sub-questions if going the "CLI starts services" route: where do per-project Docker assets live (`opensandbox.docker.toml`, OTel collector yaml, compose files) — agent-project-owned files referenced from `monkeybot.yaml`, or CLI-shipped generic templates; and is the sandbox worker image (project-specific extra deps) something the CLI should build, or stay manual/documented.
@@ -51,12 +34,18 @@
 
 ### Infra
 - **Postgres as production default** — backend exists; gateway still defaults to SQLite; decide when/if this becomes the default.
-
-### Memory
-- **INDEX.md size cap** *(deferred 2026-05-15)* — `MemoryOrganizer` appends without bound; acceptable for now via `ContextCurator` selection. When indices grow wastefully large, cap with a sliding window (N=200, archive to `INDEX.archive.md`) in `core/memory_organizer.py`.
+- **Firestore usage aggregation doesn't scale** — `FirestoreUsageStore.summary()`/`breakdown()` (agent-wide, no `thread_id`) stream the entire `turn_usage` collection into memory and aggregate in Python. Fine at small scale; revisit with a Firestore aggregation query or a scheduled rollup doc if `/usage` traffic or data volume grows.
+- **Knowledge ANN index (sqlite-vec)** — deliberately deferred. The numpy matrix cache in `sqlite_vector.py` holds through ~50–100k chunks and query cost is embed-API bound, not local ANN. Revisit only if measured ANN p95 exceeds ~20–50 ms or the resident matrix causes RAM pressure; the true scale escape hatch is `store.type: pgvector`, not `sqlite-vec` packaging.
 
 ### MCP
 - **MCP distro linkage** — confirm scaffolded `monkeybot.yaml` paths (`paths.mcp_config`, `paths.skills_path`) match deployment; smoke-test against real MCP servers beyond the bundled examples.
+
+### Tooling *(intentionally dropped — not completed)*
+
+Product decision to stop tracking these as active backlog items (not claiming they shipped):
+
+- **File-op tool audit** — Keep `write_file`; no plan to replace it with `create_file` + `find_and_replace` only.
+- **Custom subagents** — Named profiles with per-persona skills / MCP selections remain out of scope for now; workers continue to load the global skills path and `MCP_CONFIG`.
 
 ### Future platforms *(not scheduled)*
 
@@ -71,7 +60,3 @@ Moved from README — longer-term / speculative integrations without active impl
 - **Telegram** — Telegram bot interface
 - **DynamoDB** — checkpointer / job storage backend
 - **Cosmos DB** — Azure-native persistence options
-
-### Tooling
-- **File-op tool audit** — evaluate removing `write_file` in favor of `create_file` + `find_and_replace` in `core_tool_executor.py` and `workspace_tools.py` (reference: Claude Code patterns).
-- **Custom subagents** — allow operators to pre-configure named subagent profiles (own AGENT.md, restricted skill set, specific MCP servers) in `core_tool_executor.py`, `subagent_proto.py`, and `subagent_worker.py`.

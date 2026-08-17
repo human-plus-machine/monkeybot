@@ -89,7 +89,7 @@ class ContextSummarizing:
     kind: Literal["ContextSummarizing"] = "ContextSummarizing"
     request_id: str = ""
     estimated_tokens: int = 0
-    """Pre-stream input token count that tripped the summarization threshold (same basis as ``estimated_prompt_tokens`` on usage)."""
+    """Prompt-token estimate at summarization start (preflight for token pressure; counted on demand for count pressure)."""
     context_window_tokens: int = 0
 
 
@@ -98,6 +98,17 @@ class ContextSummarized:
     kind: Literal["ContextSummarized"] = "ContextSummarized"
     request_id: str = ""
     turns_summarized: int = 0
+
+
+@dataclass(frozen=True)
+class ContextUsage:
+    """Live current prompt size for context meters (not peak, not a summarization signal)."""
+
+    kind: Literal["ContextUsage"] = "ContextUsage"
+    request_id: str = ""
+    estimated_tokens: int = 0
+    """Current preflight / post-tool / post-compaction prompt size for UI meters."""
+    context_window_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -117,7 +128,10 @@ class ImageBlock:
     request_id: str = ""
     image_id: str = ""
     mime_type: str = ""
+    # Base64 pixels when no durable workspace path is available.
     data: str = ""
+    # Workspace-relative path; preferred over data for UI clients.
+    path: str = ""
 
 
 @dataclass(frozen=True)
@@ -174,7 +188,9 @@ class FrontendToolRequestEvent:
 class SystemNotificationEvent:
     kind: Literal["SystemNotificationEvent"] = "SystemNotificationEvent"
     request_id: str = ""
-    notification_type: Literal["thinkingMessage", "inlineMessage", "creditsExhausted"] = "inlineMessage"
+    notification_type: Literal["thinkingMessage", "inlineMessage", "creditsExhausted"] = (
+        "inlineMessage"
+    )
     msg: str = ""
     data: dict[str, object] | None = None
 
@@ -291,6 +307,49 @@ class ToolInputDeltaEvent:
     delta: str = ""
 
 
+@dataclass(frozen=True)
+class SubagentStarted:
+    """Lifecycle marker: nested subagent spawn beginning (parent SSE)."""
+
+    kind: Literal["SubagentStarted"] = "SubagentStarted"
+    request_id: str = ""  # parent request_id
+    parent_call_id: str = ""
+    run_id: str = ""
+    child_thread_id: str = ""
+    subagent_type: str | None = None
+    task: str = ""
+    label: str = ""
+
+
+@dataclass(frozen=True)
+class SubagentEvent:
+    """Wrapper for one forwarded child AgentEvent on the parent SSE bus."""
+
+    kind: Literal["SubagentEvent"] = "SubagentEvent"
+    request_id: str = ""  # parent request_id
+    parent_call_id: str = ""
+    run_id: str = ""
+    child_thread_id: str = ""
+    subagent_type: str | None = None
+    inner: AgentEvent = field(kw_only=True)
+
+
+@dataclass(frozen=True)
+class SubagentCompleted:
+    """Lifecycle marker: nested subagent drain finished (success/error/timeout/cancel)."""
+
+    kind: Literal["SubagentCompleted"] = "SubagentCompleted"
+    request_id: str = ""  # parent request_id
+    parent_call_id: str = ""
+    run_id: str = ""
+    child_thread_id: str = ""
+    subagent_type: str | None = None
+    ok: bool = True
+    final_message: str = ""
+    errors: list[str] = field(default_factory=list)
+    tool_call_count: int = 0
+
+
 AgentEvent: TypeAlias = (
     Thinking
     | AssistantDelta
@@ -300,6 +359,7 @@ AgentEvent: TypeAlias = (
     | Error
     | ContextSummarizing
     | ContextSummarized
+    | ContextUsage
     | SystemPromptSnapshot
     | ImageBlock
     | ThinkingBlockDelta
@@ -319,6 +379,9 @@ AgentEvent: TypeAlias = (
     | AssistantTextEnded
     | ThinkingBlockStarted
     | ToolInputDeltaEvent
+    | SubagentStarted
+    | SubagentEvent
+    | SubagentCompleted
 )
 
 # Durable vs live-only (OpenCode V2-style). Conversation history persists
@@ -343,6 +406,27 @@ DURABLE_EVENT_KINDS: frozenset[str] = frozenset(
         "QueuedInputAccepted",
         "ContextEpochStarted",
         "SystemContextUpdated",
+        "SubagentStarted",  # nested spawn boundary (parent SSE)
+        "SubagentCompleted",  # nested drain boundary (parent SSE)
+        # SubagentEvent is live-only; durable nested transcript is the child thread.
+    }
+)
+
+# v1 allowlist of child AgentEvent kinds that may be forwarded as SubagentEvent.inner.
+SUBAGENT_FORWARD_KINDS: frozenset[str] = frozenset(
+    {
+        "AssistantDelta",
+        "AssistantTextStarted",
+        "AssistantTextEnded",
+        "ThinkingBlockStarted",
+        "ThinkingBlockDelta",
+        "ThinkingBlockComplete",
+        "RedactedThinkingBlock",
+        "ToolCallStarted",
+        "ToolCallResult",
+        "ToolInputDelta",
+        "Error",
+        "TurnComplete",
     }
 )
 
@@ -350,6 +434,38 @@ DURABLE_EVENT_KINDS: frozenset[str] = frozenset(
 def is_durable_event(event: AgentEvent) -> bool:
     """Return True when ``event`` is a durable settlement/boundary event."""
     return event.kind in DURABLE_EVENT_KINDS
+
+
+def is_subagent_forwardable(event: AgentEvent) -> bool:
+    """Return True when ``event.kind`` is in the v1 nested-forward allowlist (1B)."""
+    return event.kind in SUBAGENT_FORWARD_KINDS
+
+
+def wrap_subagent_event(
+    *,
+    request_id: str,
+    parent_call_id: str,
+    run_id: str,
+    child_thread_id: str,
+    subagent_type: str | None,
+    inner: AgentEvent,
+) -> SubagentEvent | None:
+    """Wrap ``inner`` as ``SubagentEvent`` if allowlisted; otherwise return ``None``.
+
+    Denylisted kinds (SystemPromptSnapshot, Context*, confirmations, images,
+    grounding, steer/queue, nested Subagent*, legacy Thinking, etc.) are dropped
+    by returning None — callers must not publish.
+    """
+    if not is_subagent_forwardable(inner):
+        return None
+    return SubagentEvent(
+        request_id=request_id,
+        parent_call_id=parent_call_id,
+        run_id=run_id,
+        child_thread_id=child_thread_id,
+        subagent_type=subagent_type,
+        inner=inner,
+    )
 
 
 def _usage_from_obj(raw: object | None) -> UsageTotals:
@@ -379,6 +495,15 @@ def _usage_from_obj(raw: object | None) -> UsageTotals:
     )
 
 
+def _context_token_fields(payload: dict[str, Any]) -> tuple[int, int]:
+    """Parse ``estimated_tokens`` / ``context_window_tokens`` from a wire payload."""
+    et_raw = payload.get("estimated_tokens", 0)
+    cwt_raw = payload.get("context_window_tokens", 0)
+    et = int(et_raw) if isinstance(et_raw, (int, float)) else 0
+    cwt = int(cwt_raw) if isinstance(cwt_raw, (int, float)) else 0
+    return et, cwt
+
+
 def _args_from_obj(raw: object | None) -> dict[str, object]:
     if raw is None:
         return {}
@@ -387,13 +512,53 @@ def _args_from_obj(raw: object | None) -> dict[str, object]:
     return dict(raw)
 
 
+def _subagent_correlation_fields(
+    event: SubagentStarted | SubagentEvent | SubagentCompleted,
+) -> dict[str, object]:
+    """Shared parent-bus correlation fields for nested Subagent* wire payloads."""
+    return {
+        "parent_call_id": event.parent_call_id,
+        "run_id": event.run_id,
+        "child_thread_id": event.child_thread_id,
+        "subagent_type": event.subagent_type,
+    }
+
+
+def _parse_subagent_type(raw: object | None) -> str | None:
+    """Parse optional ``subagent_type`` (null/missing → None; non-str → error)."""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        return raw
+    raise EventDecodeError("subagent_type must be a string or null")
+
+
+def _parse_subagent_correlation(
+    payload: dict[str, Any],
+) -> tuple[str, str, str, str | None]:
+    """Parse parent_call_id, run_id, child_thread_id, subagent_type from wire."""
+    pc_raw = payload.get("parent_call_id", "")
+    parent_call_id = pc_raw if isinstance(pc_raw, str) else ""
+    run_raw = payload.get("run_id", "")
+    run_id = run_raw if isinstance(run_raw, str) else ""
+    ct_raw = payload.get("child_thread_id", "")
+    child_thread_id = ct_raw if isinstance(ct_raw, str) else ""
+    subagent_type = _parse_subagent_type(payload.get("subagent_type"))
+    return parent_call_id, run_id, child_thread_id, subagent_type
+
+
 def _story5_event_dict(event: AgentEvent) -> dict[str, object]:
     """Build JSON-serializable dict for Story 5 SSE types (1B §4.2; snake_case keys)."""
     base: dict[str, object] = {"type": event.kind, "request_id": event.request_id}
     if isinstance(event, ImageBlock):
-        out: dict[str, object] = {**base, "mime_type": event.mime_type, "data": event.data}
+        out: dict[str, object] = {**base, "mime_type": event.mime_type}
         if event.image_id:
             out["image_id"] = event.image_id
+        # Prefer path so clients load from disk; omit megabyte base64 when possible.
+        if event.path:
+            out["path"] = event.path
+        else:
+            out["data"] = event.data
         return out
     if isinstance(event, ThinkingBlockDelta):
         return {**base, "text": event.text, "signature": event.signature}
@@ -513,7 +678,7 @@ def event_to_json(event: AgentEvent) -> str:
             payload["trace_id"] = event.trace_id
     elif isinstance(event, Error):
         payload = {**base, "error": event.error}
-    elif isinstance(event, ContextSummarizing):
+    elif isinstance(event, (ContextSummarizing, ContextUsage)):
         payload = {
             **base,
             "estimated_tokens": event.estimated_tokens,
@@ -523,6 +688,28 @@ def event_to_json(event: AgentEvent) -> str:
         payload = {**base, "turns_summarized": event.turns_summarized}
     elif isinstance(event, SystemPromptSnapshot):
         payload = {**base, "inner_turn": event.inner_turn, "text": event.text}
+    elif isinstance(event, SubagentStarted):
+        payload = {
+            **base,
+            **_subagent_correlation_fields(event),
+            "task": event.task,
+            "label": event.label,
+        }
+    elif isinstance(event, SubagentCompleted):
+        payload = {
+            **base,
+            **_subagent_correlation_fields(event),
+            "ok": event.ok,
+            "final_message": event.final_message,
+            "errors": list(event.errors),
+            "tool_call_count": event.tool_call_count,
+        }
+    elif isinstance(event, SubagentEvent):
+        payload = {
+            **base,
+            **_subagent_correlation_fields(event),
+            "inner": json.loads(event_to_json(event.inner)),
+        }
     elif isinstance(
         event,
         (
@@ -563,7 +750,11 @@ def event_from_json(raw: str) -> AgentEvent:
         raise EventDecodeError("invalid JSON in AgentEvent payload") from exc
     if not isinstance(decoded, dict):
         raise EventDecodeError("AgentEvent payload must be a JSON object")
-    payload = decoded
+    return _event_from_dict(decoded)
+
+
+def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
+    """Decode a parsed JSON object into an AgentEvent (accepts ``type`` or ``kind``)."""
     t = payload.get("type") or payload.get("kind")
     if t is None:
         raise EventDecodeError("missing type in AgentEvent JSON")
@@ -611,9 +802,7 @@ def event_from_json(raw: str) -> AgentEvent:
             raise EventDecodeError("ToolCallResult error must be a string or null")
         call_id_raw = payload.get("call_id", "")
         call_id = call_id_raw if isinstance(call_id_raw, str) else ""
-        return ToolCallResult(
-            request_id=rid, tool=tool, result=result, error=err, call_id=call_id
-        )
+        return ToolCallResult(request_id=rid, tool=tool, result=result, error=err, call_id=call_id)
     if t == "TurnComplete":
         usage = _usage_from_obj(payload.get("usage"))
         trace_id_raw = payload.get("trace_id")
@@ -630,17 +819,15 @@ def event_from_json(raw: str) -> AgentEvent:
         err = err_raw if isinstance(err_raw, str) else ""
         return Error(request_id=rid, error=err)
     if t == "ContextSummarizing":
-        et_raw = payload.get("estimated_tokens", 0)
-        cwt_raw = payload.get("context_window_tokens", 0)
-        et = int(et_raw) if isinstance(et_raw, (int, float)) else 0
-        cwt = int(cwt_raw) if isinstance(cwt_raw, (int, float)) else 0
-        return ContextSummarizing(
-            request_id=rid, estimated_tokens=et, context_window_tokens=cwt
-        )
+        et, cwt = _context_token_fields(payload)
+        return ContextSummarizing(request_id=rid, estimated_tokens=et, context_window_tokens=cwt)
     if t == "ContextSummarized":
         ts_raw = payload.get("turns_summarized", 0)
         ts = int(ts_raw) if isinstance(ts_raw, (int, float)) else 0
         return ContextSummarized(request_id=rid, turns_summarized=ts)
+    if t == "ContextUsage":
+        et, cwt = _context_token_fields(payload)
+        return ContextUsage(request_id=rid, estimated_tokens=et, context_window_tokens=cwt)
     if t == "SystemPromptSnapshot":
         it_raw = payload.get("inner_turn", 0)
         inner_turn = int(it_raw) if isinstance(it_raw, (int, float)) else 0
@@ -651,10 +838,18 @@ def event_from_json(raw: str) -> AgentEvent:
         mt = payload.get("mime_type", "")
         data = payload.get("data", "")
         img_raw = payload.get("image_id", "")
+        path_raw = payload.get("path", "")
         mime_type = mt if isinstance(mt, str) else ""
         data_s = data if isinstance(data, str) else ""
         image_id = img_raw if isinstance(img_raw, str) else ""
-        return ImageBlock(request_id=rid, image_id=image_id, mime_type=mime_type, data=data_s)
+        path = path_raw.strip() if isinstance(path_raw, str) else ""
+        return ImageBlock(
+            request_id=rid,
+            image_id=image_id,
+            mime_type=mime_type,
+            data=data_s,
+            path=path,
+        )
     if t == "ThinkingBlockDelta":
         text_raw = payload.get("text", "")
         text = text_raw if isinstance(text_raw, str) else ""
@@ -716,9 +911,7 @@ def event_from_json(raw: str) -> AgentEvent:
             pl = dict(pl_raw)
         else:
             raise EventDecodeError("ActionRequiredEvent payload must be an object")
-        return ActionRequiredEvent(
-            request_id=rid, action_type=at, id=el_id, payload=pl
-        )
+        return ActionRequiredEvent(request_id=rid, action_type=at, id=el_id, payload=pl)
     if t == "FrontendToolRequest":
         tc = payload.get("tool_call_id", "")
         name_raw = payload.get("name", "")
@@ -749,9 +942,7 @@ def event_from_json(raw: str) -> AgentEvent:
             data_obj = dict(data_raw)
         else:
             raise EventDecodeError("SystemNotificationEvent data must be an object or null")
-        return SystemNotificationEvent(
-            request_id=rid, notification_type=nt, msg=msg, data=data_obj
-        )
+        return SystemNotificationEvent(request_id=rid, notification_type=nt, msg=msg, data=data_obj)
     if t == "GroundingEvent":
         sources_raw = payload.get("sources")
         sources: list[dict[str, str]] = []
@@ -815,5 +1006,62 @@ def event_from_json(raw: str) -> AgentEvent:
             call_id=cid_raw if isinstance(cid_raw, str) else "",
             tool=tool_raw if isinstance(tool_raw, str) else "",
             delta=delta_raw if isinstance(delta_raw, str) else "",
+        )
+    if t == "SubagentStarted":
+        parent_call_id, run_id, child_thread_id, subagent_type = _parse_subagent_correlation(
+            payload
+        )
+        task_raw = payload.get("task", "")
+        label_raw = payload.get("label", "")
+        return SubagentStarted(
+            request_id=rid,
+            parent_call_id=parent_call_id,
+            run_id=run_id,
+            child_thread_id=child_thread_id,
+            subagent_type=subagent_type,
+            task=task_raw if isinstance(task_raw, str) else "",
+            label=label_raw if isinstance(label_raw, str) else "",
+        )
+    if t == "SubagentEvent":
+        parent_call_id, run_id, child_thread_id, subagent_type = _parse_subagent_correlation(
+            payload
+        )
+        inner_raw = payload.get("inner")
+        if not isinstance(inner_raw, dict):
+            raise EventDecodeError("SubagentEvent inner must be an object")
+        inner_event = _event_from_dict(inner_raw)
+        return SubagentEvent(
+            request_id=rid,
+            parent_call_id=parent_call_id,
+            run_id=run_id,
+            child_thread_id=child_thread_id,
+            subagent_type=subagent_type,
+            inner=inner_event,
+        )
+    if t == "SubagentCompleted":
+        parent_call_id, run_id, child_thread_id, subagent_type = _parse_subagent_correlation(
+            payload
+        )
+        ok_raw = payload.get("ok", True)
+        if not isinstance(ok_raw, bool):
+            raise EventDecodeError("SubagentCompleted ok must be a boolean")
+        fm_raw = payload.get("final_message", "")
+        final_message = fm_raw if isinstance(fm_raw, str) else ""
+        errors_raw = payload.get("errors", [])
+        if not isinstance(errors_raw, list):
+            raise EventDecodeError("SubagentCompleted errors must be a list")
+        errors = [str(e) for e in errors_raw]
+        tcc_raw = payload.get("tool_call_count", 0)
+        tool_call_count = int(tcc_raw) if isinstance(tcc_raw, (int, float)) else 0
+        return SubagentCompleted(
+            request_id=rid,
+            parent_call_id=parent_call_id,
+            run_id=run_id,
+            child_thread_id=child_thread_id,
+            subagent_type=subagent_type,
+            ok=ok_raw,
+            final_message=final_message,
+            errors=errors,
+            tool_call_count=tool_call_count,
         )
     raise EventDecodeError(f"unknown AgentEvent type: {t!r}")

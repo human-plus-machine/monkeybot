@@ -14,10 +14,13 @@ from typing import Any, cast
 from monkeybot.core.config.settings import (
     auto_schema_enabled_from_config,
     get_provider_config,
+    get_subagent_settings,
     normalize_model_provider,
     subagent_vertex_google_search_from_config,
 )
 from monkeybot.core.context import TurnContext, build_context
+from monkeybot.core.knowledge import KnowledgeSubsystem, resolve_knowledge_settings
+from monkeybot.core.knowledge.config import knowledge_enabled_from_config
 from monkeybot.core.layout import AgentLayout, bootstrap_agent_layout
 from monkeybot.core.llm.provider import (
     Done,
@@ -30,19 +33,24 @@ from monkeybot.core.llm.provider import (
 from monkeybot.core.mcp.mcp_client import MCPClient
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.persistence.backends import HistoryStore, create_storage_backend
-from monkeybot.core.runtime.events import AgentEvent, Error, event_to_json
+from monkeybot.core.runtime.events import (
+    AgentEvent,
+    Error,
+    SystemPromptSnapshot,
+    event_to_json,
+)
 from monkeybot.core.runtime.loop import run as run_loop
 from monkeybot.core.subagents.subagent_proto import (
     SubagentEnvelope,
+    config_path_for_agent_root,
     resolve_agent_project_root,
+    resolve_default_agent_md_path,
     resolve_project_path,
-    resolve_subagent_agent_md_path,
 )
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector, ToolInspector
 from monkeybot.core.tools.permission import try_load_permission_inspector
-from monkeybot.core.workspace import create_workspace_storage
 from monkeybot.web_search import WebSearchTool
 from monkeybot.web_search import build_backend as _build_web_search_backend
 
@@ -166,6 +174,22 @@ async def _stream_run_loop_events(
             yield evt
 
 
+def _event_for_ndjson_pipe(evt: AgentEvent) -> AgentEvent:
+    """Shrink live-only payloads before writing to the parent NDJSON pipe.
+
+    ``SystemPromptSnapshot.text`` includes the full memory INDEX when curation is
+    off for subagents. Emitting that verbatim used to blow asyncio's 64 KiB
+    ``readline`` limit on the parent. Parent drain ignores the snapshot anyway.
+    """
+    if isinstance(evt, SystemPromptSnapshot):
+        return SystemPromptSnapshot(
+            request_id=evt.request_id,
+            inner_turn=evt.inner_turn,
+            text=f"[omitted {len(evt.text)} chars]",
+        )
+    return evt
+
+
 def _resolve_provider() -> Provider:
     mode = normalize_model_provider(os.environ.get("MODEL_PROVIDER", "google_vertexai"))
     if mode != "fake":
@@ -235,6 +259,7 @@ async def _async_main() -> None:
     reset_token: object | None = None
 
     agent_root = resolve_agent_project_root()
+    config_path = config_path_for_agent_root(agent_root)
     ws = Path(os.environ["MONKEYBOT_SUBAGENT_WORKSPACE"]).resolve()
     os.chdir(ws)
 
@@ -247,17 +272,21 @@ async def _async_main() -> None:
         if not agent_md_path.is_file():
             agent_md_path = resolve_project_path(envelope.agent_md, agent_root)
     else:
-        agent_md_path = resolve_subagent_agent_md_path(agent_root) or resolve_project_path(
-            "AGENT.md", agent_root
-        )
+        try:
+            agent_md_path = resolve_default_agent_md_path(agent_root)
+        except ValueError:
+            agent_md_path = resolve_project_path("AGENT.md", agent_root)
 
-    db_url = AgentLayout.from_environment(agent_root=agent_root).db_url
-    backend = create_storage_backend(db_url)
+    layout = AgentLayout.from_environment(agent_root=agent_root)
+    backend = create_storage_backend(
+        layout.db_url, agent_scope=layout.agent_id, agent_root=layout.agent_root
+    )
     mcp: MCPClient | None = None
     executor: CoreToolExecutor | None = None
+    knowledge: KnowledgeSubsystem | None = None
 
     try:
-        await backend.open(run_schema=auto_schema_enabled_from_config())
+        await backend.open(run_schema=auto_schema_enabled_from_config(config_path))
 
         mcp = MCPClient()
         mcp_config = resolve_project_path(
@@ -306,7 +335,14 @@ async def _async_main() -> None:
             inspectors.append(perm_insp)
 
         provider = _resolve_provider()
-        thread_id = f"subagent:{envelope.parent_run_id}:{uuid.uuid4().hex[:10]}"
+        # Prefer parent-allocated id so SSE progress and the child transcript share one key.
+        # Otherwise namespace spill dirs under the parent chat session so session-end
+        # cleanup can remove ``.monkeybot/spill/subagent:{session_id}:*``.
+        if envelope.child_thread_id:
+            thread_id = envelope.child_thread_id
+        else:
+            spill_session = envelope.parent_session_id or envelope.parent_run_id
+            thread_id = f"subagent:{spill_session}:{uuid.uuid4().hex[:10]}"
         request_id = f"sub-{uuid.uuid4().hex[:12]}"
 
         cap_raw = os.environ.get("MODEL_CONTEXT_WINDOW", "200000").strip()
@@ -328,13 +364,37 @@ async def _async_main() -> None:
 
         memory: MemorySubsystem | None = None
         if mem_uri:
-            storage = create_workspace_storage(mem_uri)
             memory = MemorySubsystem(
-                storage=storage,
-                provider=provider,
-                model=envelope.model,
                 memory_uri=mem_uri,
+                db_url=os.environ.get("DB_URL", "sqlite:///data/monkeybot.db"),
+                agent_id=agent_root.name,
+                agent_name=agent_root.name,
+                ingest_enabled=False,
+                writer_enabled=False,
             )
+
+        # Read-only knowledge search against the parent gateway's index.
+        # Subagents must not claim the writer lock or run indexing/hooks.
+        if knowledge_enabled_from_config(config_path):
+            try:
+                settings = resolve_knowledge_settings(
+                    agent_root=agent_root,
+                    config_path=Path(config_path) if config_path else None,
+                    workspace_root=ws,
+                )
+                knowledge = await KnowledgeSubsystem.create(
+                    workspace_root=ws,
+                    settings=settings,
+                    knowledge_root=Path(settings.knowledge_root),
+                    index_path=Path(settings.index_path),
+                    read_only=True,
+                )
+            except FileNotFoundError as exc:
+                logger.info("knowledge read-only open skipped (index not ready yet): %s", exc)
+                knowledge = None
+            except Exception as exc:
+                logger.warning("knowledge read-only setup failed for subagent: %r", exc)
+                knowledge = None
 
         ctx = await build_context(
             thread_id,
@@ -360,6 +420,7 @@ async def _async_main() -> None:
             extra_tools=extra_tools,
             run_command_allowed_commands=run_allow_cmds,
             run_command_allowed_path_prefixes=run_allow_paths,
+            knowledge=knowledge,
         )
         history = backend.history()
 
@@ -367,11 +428,7 @@ async def _async_main() -> None:
         if envelope.context.strip():
             body += "\n\n---\nContext from parent agent:\n" + envelope.context.strip()
 
-        max_turns_raw = os.environ.get("SUBAGENT_MAX_TURNS", "").strip()
-        if max_turns_raw:
-            max_turns = max(1, int(max_turns_raw))
-        else:
-            max_turns = max(1, int(os.environ.get("MAX_TURNS", "25")))
+        max_turns = get_subagent_settings(config_path).max_turns
 
         from monkeybot.observability.spans import span_subagent
 
@@ -379,9 +436,9 @@ async def _async_main() -> None:
         _clear_span_exporter_buffer()
         init_observability()
         try:
-            # Subagents read memory (index, search_memory) via MemorySubsystem but do not
-            # register memory hooks — chat_log / raw / organizer writes stay on the parent
-            # gateway to avoid duplicate or conflicting durable memory updates.
+            # Subagents read palace wake-up via MemorySubsystem but do not
+            # register ingest hooks or start a writer — parent owns automatic capture.
+            # Knowledge search is read-only against the parent index (no indexer/hooks).
             async with span_subagent(
                 thread_id=thread_id,
                 request_id=request_id,
@@ -398,9 +455,9 @@ async def _async_main() -> None:
                     tool_executor=executor,
                     run_id=request_id,
                     max_turns=max_turns,
-                    vertex_google_search=subagent_vertex_google_search_from_config(),
+                    vertex_google_search=subagent_vertex_google_search_from_config(config_path),
                 ):
-                    print(event_to_json(evt), flush=True)
+                    print(event_to_json(_event_for_ndjson_pipe(evt)), flush=True)
         finally:
             shutdown_observability()
     finally:
@@ -408,6 +465,11 @@ async def _async_main() -> None:
         _detach_trace(attach_token)
         if executor is not None:
             await executor.aclose()
+        if knowledge is not None:
+            try:
+                await knowledge.close()
+            except Exception as exc:
+                logger.warning("knowledge close failed in subagent: %r", exc)
         if mcp is not None:
             for name in list(getattr(mcp, "_servers", {}).keys()):
                 await mcp.disconnect(name)

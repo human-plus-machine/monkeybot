@@ -1,0 +1,10 @@
+# Writes to a new scratch path under the workspace (not an existing tracked file)
+# so the scenario never clobbers anything and is safe to re-run repeatedly.
+description: "Agent creates a new file via the write_file core tool"
+tags: [tools, core]
+messages:
+  - "Create a new file at scratch/eval_write_check.txt in this workspace containing the single line 'monkeybot write check ok', then confirm it was written."
+assertions:
+  metrics: [response_relevancy, faithfulness]
+  required_tools: [write_file]
+  max_tool_errors: 0

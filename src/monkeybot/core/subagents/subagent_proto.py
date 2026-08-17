@@ -13,7 +13,12 @@ from pathlib import Path
 from typing import Any
 
 from monkeybot.core.config.settings import SubagentConfig
-from monkeybot.core.layout import resolve_agent_path, resolve_agent_root, resolve_sqlite_url
+from monkeybot.core.layout import (
+    resolve_agent_path,
+    resolve_agent_root,
+    resolve_config_path,
+    resolve_sqlite_url,
+)
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.runtime.events import (
     AgentEvent,
@@ -24,6 +29,18 @@ from monkeybot.core.runtime.events import (
 )
 
 logger = logging.getLogger(__name__)
+
+# asyncio StreamReader defaults to 64 KiB per line. Subagents emit full
+# SystemPromptSnapshot NDJSON (AGENT.md + harness + memory INDEX.md) which
+# routinely exceeds that and used to fail with:
+#   "Separator is not found, and chunk exceed the limit"
+# Keep headroom for large tool results / snapshots on the parent←child pipe.
+SUBAGENT_STDOUT_LINE_LIMIT = 16 * 1024 * 1024  # 16 MiB
+
+# Prefix of the ``Error`` emitted when the child process itself dies. The parent
+# task tool matches on it to report ``exit_reason="crashed"`` — a contract, not
+# a log line.
+SUBAGENT_EXIT_ERROR_PREFIX = "subagent process exited with code"
 
 
 def _memory_storage_uri_from_dict(decoded: dict[str, Any]) -> str:
@@ -68,15 +85,28 @@ def resolve_project_path(raw: str, agent_root: Path | None = None) -> Path:
     return resolve_agent_path(raw, root)
 
 
-def resolve_subagent_agent_md_path(agent_root: Path | None = None) -> Path | None:
-    """Effective subagent AGENT.md path; ``MONKEYBOT_SUBAGENT_AGENT_MD`` wins over ``AGENT_MD``."""
+def config_path_for_agent_root(agent_root: Path | None = None) -> str | None:
+    """Resolve ``monkeybot.yaml`` for ``agent_root`` without consulting cwd."""
     root = agent_root if agent_root is not None else resolve_agent_project_root()
-    raw = os.environ.get("MONKEYBOT_SUBAGENT_AGENT_MD", "").strip()
-    if not raw:
-        raw = os.environ.get("AGENT_MD", "").strip()
-    if not raw:
-        return None
-    return resolve_project_path(raw, root)
+    cfg = resolve_config_path(agent_root=root)
+    return str(cfg) if cfg is not None else None
+
+
+def resolve_default_agent_md_path(agent_root: Path | None = None) -> Path:
+    """Resolve default AGENT.md for a task with no persona: env ``AGENT_MD`` → ``AGENT.md``.
+
+    Returns the first existing file. Raises if none of the candidates exist.
+    """
+    root = agent_root if agent_root is not None else resolve_agent_project_root()
+    raw = os.environ.get("AGENT_MD", "").strip()
+    if raw:
+        path = resolve_project_path(raw, root)
+        if path.is_file():
+            return path
+    default = resolve_project_path("AGENT.md", root)
+    if default.is_file():
+        return default
+    raise ValueError("No AGENT.md found for subagent (set paths.agent_md or a persona agent_md)")
 
 
 def resolve_task_agent_md_path(
@@ -85,7 +115,7 @@ def resolve_task_agent_md_path(
     registry: dict[str, SubagentConfig],
     agent_root: Path | None = None,
 ) -> Path:
-    """Resolve AGENT.md for a ``task`` spawn: registry type, then global subagent/parent defaults."""
+    """Resolve AGENT.md for a ``task`` spawn: registry persona, else parent defaults."""
     root = agent_root if agent_root is not None else resolve_agent_project_root()
     key = (subagent_type or "").strip()
     if key:
@@ -100,18 +130,7 @@ def resolve_task_agent_md_path(
             raise ValueError(f"agent_md for subagent_type {key!r} not found: {path}")
         return path
 
-    fallback = resolve_subagent_agent_md_path(root)
-    if fallback is not None and fallback.is_file():
-        return fallback
-    raw = os.environ.get("AGENT_MD", "").strip()
-    if raw:
-        path = resolve_project_path(raw, root)
-        if path.is_file():
-            return path
-    default = (root / "AGENT.md").resolve()
-    if default.is_file():
-        return default
-    raise ValueError("No AGENT.md found for subagent (set subagent.agent_md or paths.agent_md)")
+    return resolve_default_agent_md_path(root)
 
 
 def normalize_sqlite_db_url(db_url: str, agent_root: Path | None = None) -> str:
@@ -132,6 +151,8 @@ class SubagentEnvelope:
     traceparent: str | None = None
     agent_md: str | None = None
     subagent_type: str | None = None
+    parent_session_id: str | None = None
+    child_thread_id: str | None = None
 
     def to_json(self) -> str:
         """Serialize to a compact JSON object for stdin (UTF-8)."""
@@ -148,6 +169,10 @@ class SubagentEnvelope:
             payload["agent_md"] = self.agent_md
         if self.subagent_type is not None:
             payload["subagent_type"] = self.subagent_type
+        if self.parent_session_id is not None:
+            payload["parent_session_id"] = self.parent_session_id
+        if self.child_thread_id is not None:
+            payload["child_thread_id"] = self.child_thread_id
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
     @classmethod
@@ -169,6 +194,8 @@ class SubagentEnvelope:
             traceparent=_opt_traceparent(decoded),
             agent_md=_opt_str_field(decoded, "agent_md"),
             subagent_type=_opt_str_field(decoded, "subagent_type"),
+            parent_session_id=_opt_str_field(decoded, "parent_session_id"),
+            child_thread_id=_opt_str_field(decoded, "child_thread_id"),
         )
 
 
@@ -222,6 +249,10 @@ async def spawn_subagent(
     Stdout lines are UTF-8 NDJSON. Each line is appended to ``progress.jsonl`` under
     ``scratch_dir``. Parse failures yield :class:`Error` and continue.
 
+    The stdout ``StreamReader`` uses :data:`SUBAGENT_STDOUT_LINE_LIMIT` (not asyncio's
+    default 64 KiB) so large NDJSON events (e.g. ``SystemPromptSnapshot``) do not fail
+    with ``Separator is not found, and chunk exceed the limit``.
+
     After the process exits with code 0, writes ``output.json`` with
     ``event_to_json`` of the last successfully parsed event.
     """
@@ -256,7 +287,31 @@ async def spawn_subagent(
     last_evt: AgentEvent | None = None
 
     while True:
-        line_b = await stdout.readline()
+        try:
+            line_b = await stdout.readline()
+        except ValueError as exc:
+            # LimitOverrunError is surfaced as ValueError with this message when a
+            # single NDJSON line has no newline within the StreamReader limit.
+            msg = str(exc)
+            logger.warning(
+                "subagent NDJSON line exceeded pipe limit %s",
+                kv(
+                    script=script,
+                    parent_run_id=envelope.parent_run_id,
+                    limit=SUBAGENT_STDOUT_LINE_LIMIT,
+                    error=msg,
+                ),
+            )
+            yield Error(
+                request_id="",
+                error=(
+                    f"subagent NDJSON line exceeded StreamReader limit "
+                    f"({SUBAGENT_STDOUT_LINE_LIMIT} bytes): {msg}"
+                ),
+            )
+            if proc.returncode is None:
+                proc.kill()
+            break
         if not line_b:
             break
         raw_line = line_b.decode("utf-8").rstrip("\r\n")
@@ -284,7 +339,7 @@ async def spawn_subagent(
             "subagent process exited nonzero %s",
             kv(script=script, parent_run_id=envelope.parent_run_id, exit_code=code),
         )
-        yield Error(request_id="", error=f"subagent process exited with code {code}")
+        yield Error(request_id="", error=f"{SUBAGENT_EXIT_ERROR_PREFIX} {code}")
 
     if code == 0 and last_evt is not None:
         out_path = scratch_dir / "output.json"
@@ -306,6 +361,7 @@ async def _default_subprocess_exec(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
         env=env,
+        limit=SUBAGENT_STDOUT_LINE_LIMIT,
     )
 
 

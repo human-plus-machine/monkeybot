@@ -8,7 +8,7 @@ runtime:
 
 paths:
   agent_md: ./monkeybot_config/AGENT.md
-  memory_storage_uri: local://./data/memory
+  memory_storage_uri: local://./memory
   skills_path: ./skills
   workspace_root: ./workspace
   db_url: sqlite:///data/monkeybot.db
@@ -19,7 +19,7 @@ harness:
 
 model:
   provider: nvidia
-  name: meta/llama-3.3-70b-instruct
+  name: thinkingmachines/inkling
   context_window: 128000
   thinking_budget: -1
 
@@ -33,16 +33,12 @@ context_curation:
   memory_window_lines: 12
   memory_index_cap: 200
   memory_token_threshold: 2000
-  curator_model: meta/llama-3.3-70b-instruct
+  curator_model: thinkingmachines/inkling
   timeout_sec: 10
 
-memory_hook:
-  enabled: true
-
-subagent:
+subagents:
   timeout_sec: 600
   max_turns: 25
-  agent_md: ./monkeybot_config/AGENT.md
 
 web_search:
   backend: duckduckgo

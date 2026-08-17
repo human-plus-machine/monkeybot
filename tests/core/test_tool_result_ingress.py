@@ -51,6 +51,50 @@ def test_sanitize_keeps_short_plain_text_in_json_data_field() -> None:
     assert parsed["data"] == "not base64 text"
 
 
+def test_sanitize_keeps_unified_diff_in_json_data_field() -> None:
+    """Bitbucket DC MCP returns diffs in ``data``; size must not omit plain text."""
+    diff = (
+        "diff --git a/src/foo.py b/src/foo.py\n"
+        "--- a/src/foo.py\n"
+        "+++ b/src/foo.py\n"
+        "@@ -1,5 +1,8 @@\n"
+        " def greet(name):\n"
+        "-    return f'hi {name}'\n"
+        "+    # chore/dead-code cleanup\n"
+        "+    return f'hello {name}'\n"
+        "+\n"
+        "+def unused():\n"
+        "+    pass\n"
+    )
+    # Stretch past the blob-field size threshold while staying text-like.
+    while len(diff) < 800:
+        diff += "+    # more context line with /path/and+++markers\n"
+    assert len(diff) > 512
+    payload = {"success": True, "data": diff}
+    raw = json.dumps(payload)
+    assert sanitize_tool_result_text(raw) == raw
+
+
+def test_normalize_mcp_keeps_real_pr_diff_in_data_field() -> None:
+    """Real PR unified diff through MCP text-block normalize must not redact ``data``."""
+    from pathlib import Path
+
+    fixture = Path(__file__).parent / "fixtures" / "bitbucket_dc_style_pr.diff"
+    diff = fixture.read_text(encoding="utf-8")
+    assert len(diff) > 512
+    assert "diff --git" in diff and "+++" in diff
+
+    # Bitbucket DC MCP shape: JSON text content with the diff under ``data``.
+    payload = json.dumps({"success": True, "data": diff}, ensure_ascii=False)
+    result = SimpleNamespace(content=[SimpleNamespace(type="text", text=payload)])
+    out = _normalize_call_tool_result(result)
+
+    assert "omitted" not in out
+    parsed = json.loads(out)
+    assert parsed["success"] is True
+    assert parsed["data"] == diff
+
+
 def test_sanitize_keeps_long_non_blob_text_fields() -> None:
     """browser_get_elements ``tree`` must survive sanitize; spill/cap handle size."""
     tree = "\n".join(f"[{i}]<button>Item {i}</button>" for i in range(200))
@@ -78,6 +122,15 @@ def test_sanitize_keeps_long_result_string_field() -> None:
 
 def test_sanitize_redacts_long_bare_base64_run() -> None:
     alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    blob = (alphabet * 20)[:1200]
+    out = sanitize_tool_result_text(blob)
+    assert blob not in out
+    assert "base64 run" in out
+
+
+def test_sanitize_redacts_long_alphanumeric_base64_run() -> None:
+    """Unpadded alphanumeric-only base64 must still redact (no +/ or = required)."""
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
     blob = (alphabet * 20)[:1200]
     out = sanitize_tool_result_text(blob)
     assert blob not in out

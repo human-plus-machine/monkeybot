@@ -47,6 +47,62 @@ def test_post_hitl_failure_emits_hitl_failed() -> None:
     assert "Tool confirmation failed" in events[-1].payload["message"]
 
 
+def test_context_usage_event_emits_usage_updated() -> None:
+    from monkeybot.core.runtime.events import ContextUsage
+    from monkeybot_cli.chat_session import _TurnState
+
+    events: list[ChatUiEvent] = []
+
+    async def _run() -> None:
+        controller = ChatSessionController(
+            base="http://localhost:8080",
+            emit=events.append,
+        )
+        state = _TurnState()
+        await controller._dispatch_turn_event(
+            ContextUsage(
+                request_id="rid-1",
+                estimated_tokens=12_500,
+                context_window_tokens=200_000,
+            ),
+            "rid-1",
+            state,
+        )
+
+    asyncio.run(_run())
+    updated = [e for e in events if e.kind == "usage_updated"]
+    assert len(updated) == 1
+    usage = updated[0].payload["usage"]
+    assert usage is not None
+    assert usage.estimated_prompt_tokens == 12_500
+    assert usage.context_window_tokens == 200_000
+
+
+def test_context_summarized_does_not_fetch_usage() -> None:
+    """Persisted /usage mid-turn would clobber the live post-compaction ring."""
+    from monkeybot.core.runtime.events import ContextSummarized
+    from monkeybot_cli.chat_session import _TurnState
+
+    events: list[ChatUiEvent] = []
+
+    async def _run() -> None:
+        controller = ChatSessionController(
+            base="http://localhost:8080",
+            emit=events.append,
+        )
+        controller._fetch_usage = AsyncMock()  # type: ignore[method-assign]
+        state = _TurnState()
+        await controller._dispatch_turn_event(
+            ContextSummarized(request_id="rid-1", turns_summarized=4),
+            "rid-1",
+            state,
+        )
+        controller._fetch_usage.assert_not_awaited()
+
+    asyncio.run(_run())
+    assert any(e.kind == "summarized" and e.payload.get("turns") == 4 for e in events)
+
+
 def test_hitl_reader_confirm_yes() -> None:
     events: list[ChatUiEvent] = []
 
@@ -359,5 +415,38 @@ def test_turn_aborted_includes_cancel_ok() -> None:
         aborted = [e for e in events if e.kind == "turn_aborted"]
         assert aborted
         assert aborted[0].payload.get("cancel_ok") is True
+
+    asyncio.run(_run())
+
+
+def test_close_deletes_session_and_captures_report_dir() -> None:
+    async def _run() -> None:
+        controller = ChatSessionController(base="http://localhost:8080")
+        controller.session_id = "sess-close"
+        client = AsyncMock()
+        request = httpx.Request("DELETE", "http://localhost:8080/sessions/sess-close")
+        client.delete = AsyncMock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "deleted": True,
+                    "transcript_report_dir": "/tmp/ws/.monkeybot/transcripts/20260714T150000Z_sess-close",
+                },
+                request=request,
+            )
+        )
+        client.aclose = AsyncMock()
+        controller._client = client
+
+        await controller.close()
+        client.delete.assert_awaited_once_with("http://localhost:8080/sessions/sess-close")
+        assert (
+            controller.transcript_report_dir
+            == "/tmp/ws/.monkeybot/transcripts/20260714T150000Z_sess-close"
+        )
+        client.aclose.assert_awaited_once()
+        # Idempotent
+        await controller.close()
+        assert client.delete.await_count == 1
 
     asyncio.run(_run())

@@ -1,0 +1,18 @@
+description: "File edit request triggers a write-category tool"
+user_message: "Create a file named notes.txt with the text 'hello'."
+scripted_turns:
+  - - type: tool_call
+      call_id: c1
+      name: write_file
+      args:
+        path: "notes.txt"
+        content: "hello"
+    - type: done
+  - - type: text_delta
+      text: "Done, I created notes.txt."
+    - type: done
+assertions:
+  tool_categories_used:
+    - write
+  turn_completed: true
+  max_turns: 3

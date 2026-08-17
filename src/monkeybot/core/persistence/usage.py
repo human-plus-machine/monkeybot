@@ -2,19 +2,33 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 import aiosqlite
 
-from monkeybot.core.llm.usage import Usage, UsageSummary
+from monkeybot.core.llm.usage import Usage, UsageBreakdown, UsageBucket, UsageSummary
+from monkeybot.core.persistence.sqlite import TaskReentrantLock, with_conn_lock
 
 
 class SQLiteUsageStore:
     """Insert ``turn_usage`` rows and compute summaries."""
 
-    def __init__(self, conn: aiosqlite.Connection) -> None:
+    def __init__(
+        self,
+        conn: aiosqlite.Connection,
+        *,
+        lock: asyncio.Lock | TaskReentrantLock | None = None,
+    ) -> None:
         self._conn = conn
+        self._lock = lock or TaskReentrantLock()
 
+    def _since_clause(self, since_ms: int | None) -> tuple[str, list[object]]:
+        if since_ms is None:
+            return "", []
+        return "WHERE created_at >= ?", [since_ms]
+
+    @with_conn_lock
     async def record(
         self,
         thread_id: str,
@@ -54,6 +68,7 @@ class SQLiteUsageStore:
         )
         await self._conn.commit()
 
+    @with_conn_lock
     async def summary(
         self,
         thread_id: str | None = None,
@@ -147,3 +162,59 @@ class SQLiteUsageStore:
             cache_read_tokens=int(row[7]),
             cache_creation_tokens=int(row[8]),
         )
+
+    @with_conn_lock
+    async def breakdown(self, since_ms: int | None = None) -> UsageBreakdown:
+        """Aggregate usage by model and by UTC calendar day."""
+        where_sql, params = self._since_clause(since_ms)
+        agg = """
+                COUNT(*) AS turns,
+                COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(cost_usd), 0.0) AS cost_usd
+        """
+        model_sql = f"""
+            SELECT model, {agg}
+            FROM turn_usage
+            {where_sql}
+            GROUP BY model
+            ORDER BY cost_usd DESC, model ASC
+        """
+        day_sql = f"""
+            SELECT
+                strftime('%Y-%m-%d', created_at / 1000.0, 'unixepoch') AS day,
+                {agg}
+            FROM turn_usage
+            {where_sql}
+            GROUP BY day
+            ORDER BY day ASC
+        """
+
+        by_model: list[UsageBucket] = []
+        cursor = await self._conn.execute(model_sql, params)
+        async for row in cursor:
+            by_model.append(
+                UsageBucket(
+                    key=str(row[0]),
+                    turns=int(row[1]),
+                    input_tokens=int(row[2]),
+                    output_tokens=int(row[3]),
+                    cost_usd=float(row[4]),
+                )
+            )
+        await cursor.close()
+
+        by_day: list[UsageBucket] = []
+        cursor = await self._conn.execute(day_sql, params)
+        async for row in cursor:
+            by_day.append(
+                UsageBucket(
+                    key=str(row[0]),
+                    turns=int(row[1]),
+                    input_tokens=int(row[2]),
+                    output_tokens=int(row[3]),
+                    cost_usd=float(row[4]),
+                )
+            )
+        await cursor.close()
+        return UsageBreakdown(by_model=by_model, by_day=by_day)

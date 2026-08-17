@@ -28,9 +28,9 @@ runtime:
   # gateway_port: 8080
   # Internal debugging only (not agent-visible): write every AgentEvent and raw
   # provider request/response for each session to
-  # {workspace_root}/.monkeybot/transcripts/{session_id}.ndjson. Opt-in; default off.
+  # {workspace_root}/.monkeybot/transcripts/{UTC}_{session_id}/transcript.ndjson.
   # (env: MONKEYBOT_TRANSCRIPT_ENABLED)
-  transcript_enabled: false
+  transcript_enabled: true
 
 # Required: choose the conversational harness for this deployment.
 #   turn_based  - existing HTTP POST /reply + SSE (default, backwards-compatible)
@@ -68,11 +68,18 @@ realtime:
 
 paths:
   agent_md: ./monkeybot_config/AGENT.md
-  memory_storage_uri: local://./data/memory
+  memory_storage_uri: local://./memory/mempalace
   skills_path: ./skills
   db_url: sqlite:///data/monkeybot.db
   # Apply SQLite/Postgres DDL on startup (true | false). Default true. Set false when migrations own the schema.
   auto_schema: true
+  # Durable identity used to namespace conversation history when db_url is shared
+  # across agents/replicas. Defaults to this agent root's filesystem path, which
+  # breaks if the agent is later moved or mounted somewhere else. Set this
+  # explicitly (and keep it stable across deploys) for relocatable agents or
+  # multi-replica deployments that must keep sharing one conversation history.
+  # agent_id: my-agent
+
   mcp_config: ./monkeybot_config/mcp.json
   command_allowlist_config: ./monkeybot_config/command_allowlist.yaml
   # Soft permission ruleset (allow/ask/deny). Hard allowlists stay in command_allowlist.yaml.
@@ -80,7 +87,7 @@ paths:
   workspace_root: ./workspace
 
 model:
-  # gemini | openai | anthropic | vertex-claude | huggingface | ollama | nvidia | aws_bedrock | fake
+  # gemini | openai | anthropic | vertex-claude | huggingface | ollama | nvidia | openrouter | aws_bedrock | fake
   provider: gemini
   name: gemini-3.1-flash-live-preview
   temperature: 0.7
@@ -88,9 +95,9 @@ model:
   # Gemini: -1 = model default, 0 = off, N = token budget
   # Ollama (Gemma 4, Qwen3, …): -1 = server default, 0 = off (reasoning_effort: none)
   thinking_budget: -1
-  # Summarisation trigger (tokens)
+  # Summarisation trigger (tokens). Also drives soft-spill / read_file char budgets.
   context_window: 1000000
-  max_turns: 50
+  max_turns: 1000
   # Prompt-cache session hints: none | short | long (env: MODEL_CACHE_RETENTION)
   # cache_retention: short
   # Optional cheaper model for sync history summarization (env: CONTEXT_SUMMARIZATION_MODEL); omit = main model
@@ -113,18 +120,14 @@ gateway:
   # Default in code when unset: http://localhost:5173 (Vite dev). Add http://127.0.0.1:5173 if needed.
   cors_allow_origins: "http://localhost:5173"
 
-context_curation:
-  # When false, curation is skipped (env: CONTEXT_CURATION_ENABLED)
+memory:
+  # Capture, wake-up, and `mempalace search` teaching. Set false to turn memory off.
+  # Env override: MONKEYBOT_MEMORY_HOOK_ENABLED=0
   enabled: true
-  # Recent INDEX lines injected by default; also caps curator-selected lines
-  memory_window_lines: 12
-  memory_index_cap: 200
-  # Call LLM curator when estimated memory-index tokens exceed this
-  # (env: CONTEXT_CURATION_MEMORY_TOKEN_THRESHOLD). Below this, use the window only.
-  memory_token_threshold: 2000
-  # Separate small model for curator (env: CONTEXT_CURATOR_MODEL); empty uses main model id
-  curator_model: gemini-3-flash
-  timeout_sec: 10
+  backend: chroma
+  embedding_model: embeddinggemma-300m
+
+# context_curation is unused after MemPalace wake-up replaced INDEX.md + curator.
 
 emission:
   # Terse emission-style guidance injected into the cached harness prefix.
@@ -138,35 +141,61 @@ emission:
   # (any value other than the terse-set means off).
   style: off
 
-memory_hook:
+# Unified knowledge layer: local FTS + ANN embeddings + note↔workspace links + search.
+# Embeddings stay off by default until configured.
+# Index path is always {root}/index.sqlite (not configurable).
+knowledge:
   enabled: true
+  search:
+    default_limit: 10
+  indexer:
+    chunk_tokens: 700
+    chunk_overlap_ratio: 0.12
+  embeddings:
+    enabled: false
+    # provider: nvidia | openai | voyage | gemini | openai_compatible
+    # model / dimensions / base_url are optional — per-provider defaults apply.
+    provider: nvidia
+    # model: nvidia/nemotron-3-embed-1b          # openai → text-embedding-3-small
+    # dimensions: 1024                          # openai → 1536; voyage → 512; gemini → 768
+    # base_url: https://integrate.api.nvidia.com/v1
+    #   openai → https://api.openai.com/v1
+    #   voyage → https://api.voyageai.com/v1
+    #   openai_compatible → required (custom gateway)
+    batch_size: 32
+    # Auth env (by provider): NVIDIA_API_KEY | OPENAI_API_KEY | VOYAGE_API_KEY | GEMINI_API_KEY
+  store:
+    type: sqlite
+    path: .monkeybot/knowledge/vectors.sqlite
 
-subagent:
+subagents:
   timeout_sec: 600
-  max_turns: 25
+  max_turns: 1000
   # Gemini only: enable native google_search grounding for subagent task runs.
   # Config-file only (no env var override). Defaults to false.
   vertex_google_search: false
-  # Default AGENT.md for task calls with no subagent_type (relative to bot project root).
-  agent_md: ./monkeybot_config/AGENT.md
-
-# Named subagent personas — parent selects via task(subagent_type=...).
-# Add entries and matching AGENT.md files under monkeybot_config/agents/ when needed.
-# subagents:
-#   - name: researcher
-#     description: "Deep-dives a topic and returns a structured summary."
-#     agent_md: ./monkeybot_config/agents/researcher.md
+  # Named personas — parent selects via task(subagent_type=...).
+  # Without a subagent_type, the task inherits the parent AGENT.md (paths.agent_md).
+  # personas:
+  #   - name: researcher
+  #     description: "Deep-dives a topic and returns a structured summary."
+  #     agent_md: ./monkeybot_config/agents/researcher.md
 
 tools:
   # List of substrings blocked in tool args (also env MONKEYBOT_TOOL_DENIED_PATTERNS as comma-separated)
   # denied_patterns:
   #   - "rm -rf"
-  # read_max_lines: 50000
-  # read_default_lines: 20000
-  # spill_read_max_lines: 50000
-  # spill_min_chars: 8000
-  # result_budget_fraction: 0.8
-  # result_budget_floor_tokens: 2000
+  #
+  # read_file line governors:
+  #   - When limit is omitted, the harness always returns up to 2000 lines (not configurable).
+  #   - Pass limit to request more (or fewer); this cap is the max allowed limit.
+  # YAML only — no env override.
+  # read_max_lines: 5000
+  #
+  # Retired (warned and ignored if present):
+  #   read_default_lines, spill_min_chars, spill_read_max_lines
+  # Spill / read char budgets are derived from model.context_window (not configurable).
+  # Context pressure / result-budget ratios are fixed in harness code (not configurable).
 
 web_search:
   # duckduckgo | tavily | firecrawl | none  (Tavily/Firecrawl need keys in .env)
@@ -177,14 +206,34 @@ web_search:
   # Config-file only (no env var override).
   vertex_google_search: false
 
+# Session-scoped todo_list tool (parent agent only). Always on unless opted out.
+# Live list is injected under ## Todo list in the volatile prompt; todos.json is
+# mirrored under .monkeybot/transcripts/{session}/ for debugging unless
+# mirror_to_disk is false (env: MONKEYBOT_TODO_LIST_MIRROR_TO_DISK).
+todo_list:
+  enabled: true
+  mirror_to_disk: true
+
 sandbox:
+  # Opt-in: requires Docker Desktop (OpenSandbox). Leave false for normal Mac
+  # installs so the gateway starts without Docker. When enabled, ``monkeybot run``
+  # / ``chat`` try to start OpenSandbox on ``server_url`` (fail-fast if Docker is down).
   enabled: false
-  server_url: http://localhost:8080
+  # Keep off the gateway port (runtime.port, default 8080). Lifecycle default is 18080.
+  server_url: http://localhost:18080
   image: python:3.12
   ttl_seconds: 1800
   # Set false only for a remote sandbox server with no shared filesystem. It
   # then runs compute-only commands and refuses workspace/skills file access.
   shared_filesystem: true
+
+# Prompt-first scheduled loops (start_loop / /scheduler/loops). Requires paths.db_url.
+# There is no static jobs list — loops are registered at runtime by the agent or API.
+scheduler:
+  # When true, run the tick worker in-process on the gateway (dev-friendly).
+  # Production: leave false and run `python -m monkeybot.scheduler` as a separate process.
+  # Env override: MONKEYBOT_SCHEDULER_ENABLED (1 | true | yes | on).
+  enabled: false
 
 # Optional JSON for MODEL_PROVIDER=fake tests (env: MONKEYBOT_FAKE_PROVIDER_EVENTS)
 # fake_provider:

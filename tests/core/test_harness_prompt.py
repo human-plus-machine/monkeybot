@@ -15,36 +15,40 @@ def test_harness_directs_list_skills_before_skill_work() -> None:
     assert "skills root" in out
 
 
-def test_harness_includes_core_tools_and_protocol() -> None:
+def test_harness_is_protocol_not_tool_catalog() -> None:
     out = harness_fixed_context(include_task_tool=False)
     assert "## monkeybot harness (fixed)" in out
-    assert "`read_file`" in out
-    assert "`write_file`" in out
-    assert "`replace_in_file`" in out
-    assert "`glob`" in out
-    assert "`grep`" in out
-    assert "`apply_patch`" in out
-    assert "*** Begin Patch" in out
+    assert "active JSON tool list" in out
     assert "`enable_mcp`" in out
-    assert "`mcp_status`" in out
-    assert "`list_mcp_resources`" in out
-    assert "`read_mcp_resource`" in out
-    assert "`list_mcp_prompts`" in out
-    assert "`get_mcp_prompt`" in out
+    assert "appear only after `enable_mcp`" in out
+    assert "`enable_loops`" in out
+    assert "before scheduled-loop tools appear" in out
+    assert "`mcp_status`" not in out
     assert "`run_command`" in out
-    assert "argv" in out
     assert "`task` —" not in out
-    assert "### Workspace deliverables" in out
-    assert "New file or full rewrite" in out
-    assert "Targeted change to an existing file" in out
-    assert "Multi-file or multi-hunk edit" in out
-    assert "writable workspace" in out
+    assert "### Core built-in tools" not in out
+    assert "### Workspace deliverables" not in out
+    assert "### Knowledge retrieval (`search`)" not in out
+    assert "### Memory retrieval (`mempalace search`)" not in out
     assert "### Built-in tool errors (recovery)" in out
     assert "error_kind" in out
     assert "### Tool-call protocol (strict)" in out
     assert "native function-call channel" in out
     assert "Fulfillment rule" in out
+    assert "Long multi-item tasks" in out
+    assert "compacted mid-task" in out
     assert '{"tool_calls":' not in out
+    assert "Path rule" in out
+    # Compact: protocol + paths, not the old ~15k tool manual.
+    assert len(out) < 6000
+
+
+def test_harness_omits_memory_uri_when_disabled() -> None:
+    out = harness_fixed_context(include_task_tool=False, memory_on=False)
+    assert "### Memory retrieval (`mempalace search`)" not in out
+    assert 'argv: ["mempalace", "search"' not in out
+    assert "memory storage: disabled" in out
+    assert "do not call `mempalace search`" in out
 
 
 def test_harness_includes_runtime_error_and_no_repeat_guidance() -> None:
@@ -53,13 +57,15 @@ def test_harness_includes_runtime_error_and_no_repeat_guidance() -> None:
     assert "No-repeat rule" in out
     assert "same name and same arguments that already failed" in out
     assert "ok: false" in out
+    assert "Spill / partial artifacts" in out
+    assert "partial_output_path" in out
+    assert "read_file that path" in out or "`read_file` that path" in out
 
 
-def test_harness_adds_task_line_when_enabled() -> None:
+def test_harness_does_not_catalog_task_tool() -> None:
     out = harness_fixed_context(include_task_tool=True)
-    assert "`task` — subprocess subagent" in out
-    assert "subagent_type" in out
-    assert "Nested `task` is disabled inside a subagent." in out
+    assert "`task` — subprocess subagent" not in out
+    assert "Nested `task` is disabled inside a subagent." not in out
 
 
 def test_harness_lists_subagent_personas() -> None:
@@ -81,10 +87,14 @@ def test_harness_injects_runtime_paths() -> None:
     out = harness_fixed_context(
         include_task_tool=False,
         workspace_root="/srv/bot",
-        memory_storage_uri="local:///srv/bot/data/memory",
+        memory_storage_uri="local:///srv/bot/memory",
     )
     assert "`/srv/bot`" in out
-    assert "local:///srv/bot/data/memory" in out
+    assert "local:///srv/bot/memory" in out
+    assert (
+        "Outside** the workspace" in out or "Outside the workspace" in out or "**Outside**" in out
+    )
+    assert "not** the memory store" in out.lower() or "not the memory store" in out.lower()
 
 
 def test_harness_default_paths_shown_when_not_provided() -> None:

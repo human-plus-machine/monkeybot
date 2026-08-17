@@ -21,8 +21,26 @@ from monkeybot.core.types.content_blocks import (
 
 logger = logging.getLogger(__name__)
 
-_SYNTHETIC_MISSING_RESULT = "Tool call interrupted or result missing"
 _UNKNOWN_TOOL = "unknown_tool"
+
+MISSING_TOOL_RESULT_RECOVERY_HINT = (
+    "Inspect the workspace and any spill/partial outputs before re-issuing; "
+    "do not assume the tool never ran."
+)
+
+
+def cancelled_tool_result_text(tool_name: str) -> str:
+    return (
+        f'Tool "{tool_name}" was cancelled before a result was recorded. '
+        f"{MISSING_TOOL_RESULT_RECOVERY_HINT}"
+    )
+
+
+def interrupted_tool_result_text(tool_name: str) -> str:
+    return (
+        f'Tool "{tool_name}" was interrupted or its result is missing. '
+        f"{MISSING_TOOL_RESULT_RECOVERY_HINT}"
+    )
 
 
 def _log_repair(action: str, **fields: object) -> None:
@@ -113,7 +131,7 @@ def _synthetic_error_response(req: ToolRequest) -> ToolResponse:
     return ToolResponse(
         id=req.id,
         tool_name=req.name,
-        result=[Text(text=_SYNTHETIC_MISSING_RESULT)],
+        result=[Text(text=interrupted_tool_result_text(req.name))],
         is_error=True,
     )
 

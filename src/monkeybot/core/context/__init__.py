@@ -13,12 +13,15 @@ from typing import Any, Literal, Protocol, runtime_checkable
 import yaml
 
 from monkeybot.core.attachments.config import attachments_enabled_from_env
-from monkeybot.core.attachments.tools import read_attachment_tool_def, render_image_tool_def
+from monkeybot.core.attachments.tools import load_file_tool_def
 from monkeybot.core.config.settings import SubagentConfig
 from monkeybot.core.mcp.ports_mcp import MCPClientPort
 from monkeybot.core.memory.subsystem import MemorySubsystem
+from monkeybot.core.runtime.events import AgentEvent
 from monkeybot.core.tools.types import ToolExecutionResult
+from monkeybot.core.tools.workspace_service import AGENT_READ_DEFAULT_LINES
 from monkeybot.core.types.types_tools import ToolDef
+from monkeybot.todo_list.store import TodoListStore
 
 
 @runtime_checkable
@@ -58,11 +61,22 @@ class PendingResponseBusPort(Protocol):
 
     def resolve_pending(self, pending_key: str, payload: Any) -> bool: ...
 
-    def is_pending_or_terminal(self, pending_key: str) -> Literal["pending", "terminated", "unknown"]: ...
+    def is_pending_or_terminal(
+        self, pending_key: str
+    ) -> Literal["pending", "terminated", "unknown"]: ...
 
     def abandon_pending_timeout(self, pending_key: str) -> None: ...
 
     def abandon_pending_cancel_all(self) -> None: ...
+
+
+@runtime_checkable
+class EventPublisherPort(Protocol):
+    """Minimal sink for parent-session AgentEvents (keeps core free of gateway imports)."""
+
+    async def publish_event(self, event: AgentEvent) -> None:
+        """Serialize and publish onto the parent session SSE bus."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -98,17 +112,23 @@ class TurnContext:
     context_window_tokens: int = 200_000
     """Max input context for pre-flight checks; summarization triggers near this cap."""
     workspace_root: Path | None = None
-    """Workspace root for spill cleanup; optional for tests / minimal harness."""
+    """Workspace root for tools and spill file paths (from ``paths.workspace_root``); optional for tests."""
     memory: MemorySubsystem | None = None
     """Memory subsystem for index refresh and search; optional when memory is disabled."""
     context_curation_enabled: bool = True
     """When True (parent agent), optional LLM curation may narrow memory in the system prompt."""
     sse_bus: PendingResponseBusPort | None = None
     """Gateway session bus for Story 5 pending UI responses; None for CLI / harness."""
+    event_publisher: EventPublisherPort | None = None
+    """Optional parent SSE publisher for nested subagent progress; None for CLI / tests."""
     subagent_personas: tuple[tuple[str, str], ...] = ()
     """Named subagent types (name, description) advertised to the parent in the harness."""
     catalog_mcp_servers: tuple[str, ...] = ()
     """Configured MCP server names available via ``enable_mcp`` (not connected until activated)."""
+    scheduled_loops_available: bool = False
+    """True when durable loop storage is wired (DB_URL); advertise ``enable_loops`` catalog hint."""
+    todo_store: TodoListStore | None = None
+    """Session-scoped todo list (parent agent only); mutable store held by frozen context."""
 
 
 _log = logging.getLogger(__name__)
@@ -116,22 +136,209 @@ _log = logging.getLogger(__name__)
 # Built-in tools that mutate the live MCP registry; loop refreshes ctx.tools after these.
 MCP_REGISTRY_MUTATING_TOOLS = frozenset(
     {
-        "add_mcp_server",
-        "remove_mcp_server",
         "enable_mcp",
         "disable_mcp",
     }
 )
+
+# Built-in tools that mutate scheduled-loop tool advertisement; loop refreshes ctx.tools.
+LOOPS_REGISTRY_MUTATING_TOOLS = frozenset(
+    {
+        "enable_loops",
+        "disable_loops",
+    }
+)
+
+
+@dataclass
+class LoopsToolRegistry:
+    """Process-local progressive-loop advertisement (mirrors MCP client connection state).
+
+    Gateway deps hold one instance for the process lifetime so ``enable_loops`` sticks
+    across user turns until ``disable_loops`` (or process restart).
+
+    Not shared across gateway replicas: multi-instance deploys need a single replica
+    or sticky routing so enable/disable stays consistent for a session (same tradeoff
+    as in-process MCP connections).
+    """
+
+    advertised: bool = False
+
+
+# Resource/prompt meta-tools — advertised only after an MCP server is connected.
+_MCP_SERVER_FILTER_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "server": {
+            "type": "string",
+            "description": "Optional MCP server name. Omit to query all connected servers.",
+        },
+    },
+    "required": [],
+}
+MCP_PROGRESSIVE_META_TOOL_DEFS: tuple[ToolDef, ...] = (
+    ToolDef(
+        "list_mcp_resources",
+        "List MCP resources from connected servers. Optional server filter.",
+        _MCP_SERVER_FILTER_SCHEMA,
+        parallel_safe=True,
+    ),
+    ToolDef(
+        "read_mcp_resource",
+        "Read one MCP resource by server name and URI from list_mcp_resources.",
+        {
+            "type": "object",
+            "properties": {
+                "server": {
+                    "type": "string",
+                    "description": "MCP server name from list_mcp_resources.",
+                },
+                "uri": {
+                    "type": "string",
+                    "description": "Resource URI from list_mcp_resources.",
+                },
+            },
+            "required": ["server", "uri"],
+        },
+        parallel_safe=True,
+    ),
+    ToolDef(
+        "list_mcp_prompts",
+        "List MCP prompt templates from connected servers. Optional server filter.",
+        _MCP_SERVER_FILTER_SCHEMA,
+        parallel_safe=True,
+    ),
+    ToolDef(
+        "get_mcp_prompt",
+        "Fetch a named MCP prompt template (optional string arguments) from a connected server.",
+        {
+            "type": "object",
+            "properties": {
+                "server": {
+                    "type": "string",
+                    "description": "MCP server name from list_mcp_prompts.",
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "Prompt name from list_mcp_prompts.",
+                },
+                "arguments": {
+                    "type": "object",
+                    "description": "Optional string arguments for the prompt template.",
+                    "additionalProperties": {"type": "string"},
+                },
+            },
+            "required": ["server", "prompt"],
+        },
+        parallel_safe=True,
+    ),
+)
+MCP_PROGRESSIVE_META_TOOLS = frozenset(t.name for t in MCP_PROGRESSIVE_META_TOOL_DEFS)
+
+# Lifecycle tools — advertised only after ``enable_loops`` (or auto-advertise).
+SCHEDULED_LOOP_TOOL_DEFS: tuple[ToolDef, ...] = (
+    ToolDef(
+        "start_loop",
+        "Start a prompt-first scheduled loop after the user confirms. Pass the agreed "
+        "plan in prompt (BUSINESS/RULES). The scheduler fires that prompt on each tick. "
+        "Requires durable storage (DB_URL). Call ``enable_loops`` first when these tools "
+        "are not yet in the active tool list.",
+        {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "Agreed loop plan / tick instructions.",
+                },
+                "interval": {
+                    "type": "string",
+                    "description": "Tick interval, e.g. 20s, 5m, 1h.",
+                },
+                "loop_id": {"type": "string"},
+                "session_id": {
+                    "type": "string",
+                    "description": "Conversation thread for ticks (default loop-main).",
+                },
+                "max_ticks": {"type": "integer"},
+                "max_runtime": {
+                    "type": "string",
+                    "description": "Hard wall-clock limit, e.g. 1h.",
+                },
+                "unbounded": {
+                    "type": "boolean",
+                    "description": (
+                        "Opt out of max_ticks/max_runtime guards. "
+                        "Requires explicit user confirmation."
+                    ),
+                },
+                "skip_if_busy": {"type": "boolean"},
+            },
+            "required": ["prompt", "interval"],
+        },
+    ),
+    ToolDef(
+        "loop_status",
+        "Get status of one scheduled loop or list all loops.",
+        {
+            "type": "object",
+            "properties": {"loop_id": {"type": "string"}},
+            "required": [],
+        },
+        parallel_safe=True,
+        doom_loop_exempt=True,
+    ),
+    ToolDef(
+        "pause_loop",
+        "Pause a scheduled loop.",
+        {
+            "type": "object",
+            "properties": {"loop_id": {"type": "string"}},
+            "required": ["loop_id"],
+        },
+    ),
+    ToolDef(
+        "resume_loop",
+        "Resume a paused scheduled loop.",
+        {
+            "type": "object",
+            "properties": {"loop_id": {"type": "string"}},
+            "required": ["loop_id"],
+        },
+    ),
+    ToolDef(
+        "stop_loop",
+        "Stop a scheduled loop permanently.",
+        {
+            "type": "object",
+            "properties": {"loop_id": {"type": "string"}},
+            "required": ["loop_id"],
+        },
+    ),
+    ToolDef(
+        "disable_loops",
+        "Drop scheduled-loop tools from the next model step this turn. "
+        "Running loops keep their scheduler state; call `stop_loop` first to "
+        "end them.",
+        {"type": "object", "properties": {}, "required": []},
+    ),
+)
+SCHEDULED_LOOP_TOOL_NAMES = frozenset(t.name for t in SCHEDULED_LOOP_TOOL_DEFS)
+
+
+def _any_mcp_connected(mcp_client: Any) -> bool:
+    """True when any known MCP server has an active session."""
+    return any(mcp_client.is_connected(name) for name in mcp_client.known_server_names())
 
 
 def refresh_tools_after_mcp_change(
     ctx: TurnContext,
     mcp_client: Any,
 ) -> TurnContext:
-    """Rebuild ``ctx.tools`` after add/remove/enable/disable MCP (same user turn).
+    """Rebuild ``ctx.tools`` after enable/disable MCP (same user turn).
 
-    Drops tools prefixed with any known MCP server name (catalog + ever-connected),
-    then appends the current ``mcp_client.all_tools()`` snapshot.
+    Drops tools prefixed with any known MCP server name (catalog + ever-connected)
+    and progressive MCP meta-tools, then appends the current ``mcp_client.all_tools()``
+    snapshot plus resource/prompt meta-tools when any server is connected.
 
     Mutates ``ctx.tools`` in place (frozen dataclass allows mutating the list) so
     callers that hold the same ``TurnContext`` — including the realtime gateway —
@@ -141,9 +348,31 @@ def refresh_tools_after_mcp_change(
     kept = [
         t
         for t in ctx.tools
-        if not any(t.name.startswith(f"{prefix}__") for prefix in prefixes)
+        if t.name not in MCP_PROGRESSIVE_META_TOOLS
+        and not any(t.name.startswith(f"{prefix}__") for prefix in prefixes)
     ]
-    ctx.tools[:] = kept + list(mcp_client.all_tools())
+    rebuilt = kept + list(mcp_client.all_tools())
+    if _any_mcp_connected(mcp_client):
+        rebuilt.extend(MCP_PROGRESSIVE_META_TOOL_DEFS)
+    ctx.tools[:] = rebuilt
+    return ctx
+
+
+def refresh_tools_after_loops_change(
+    ctx: TurnContext,
+    *,
+    loops_advertised: bool,
+) -> TurnContext:
+    """Rebuild ``ctx.tools`` after enable/disable loops (same user turn).
+
+    Drops scheduled-loop progressive tools (lifecycle + ``disable_loops``), then
+    re-appends them when advertised. ``enable_loops`` stays in the core set.
+    Mutates ``ctx.tools`` in place.
+    """
+    kept = [t for t in ctx.tools if t.name not in SCHEDULED_LOOP_TOOL_NAMES]
+    if loops_advertised:
+        kept.extend(SCHEDULED_LOOP_TOOL_DEFS)
+    ctx.tools[:] = kept
     return ctx
 
 
@@ -153,12 +382,32 @@ def _core_tool_defs(
     subagent_type_names: Sequence[str] | None = None,
 ) -> list[ToolDef]:
     """Static core tools always available before MCP extensions."""
+    default_lines = AGENT_READ_DEFAULT_LINES
     read_schema: dict[str, object] = {
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "Repo-relative path under the workspace root."},
-            "offset": {"type": "integer", "description": "1-based start line (optional)."},
-            "limit": {"type": "integer", "description": "Max lines to return (optional)."},
+            "path": {
+                "type": "string",
+                "description": "Repo-relative path under the workspace root.",
+            },
+            "offset": {
+                "type": "integer",
+                "description": (
+                    "1-based start line (optional). Continue a truncated read from "
+                    "the payload's next_offset — do not page the file in tiny chunks."
+                ),
+            },
+            "limit": {
+                "type": "integer",
+                "description": (
+                    f"Max lines to return. Defaults to {default_lines} when omitted; "
+                    f"prefer omitting limit (or >= {default_lines}) over many small reads. "
+                    f"Pass a larger value when you need more of the file. Large reads are "
+                    f"additionally bounded by a context-derived char budget; check "
+                    f"truncated / next_offset. Avoid small limits (e.g. 40) with repeated "
+                    f"read_file calls — one larger read is cheaper."
+                ),
+            },
         },
         "required": ["path"],
     }
@@ -173,7 +422,10 @@ def _core_tool_defs(
     replace_schema: dict[str, object] = {
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "Repo-relative path under the workspace root."},
+            "path": {
+                "type": "string",
+                "description": "Repo-relative path under the workspace root.",
+            },
             "old_string": {
                 "type": "string",
                 "description": (
@@ -208,23 +460,47 @@ def _core_tool_defs(
         "properties": {
             "pattern": {
                 "type": "string",
-                "description": "Python regex to search for in file contents.",
+                "description": (
+                    "Python regex to search for in file contents. Prefer simple patterns: "
+                    "ripgrep may accelerate the search when available, but constructs that "
+                    "need Python re (lookaround, backreferences) always use the Python engine."
+                ),
             },
             "root": {
                 "type": "string",
-                "description": "Optional repo-relative directory to search under (default workspace root).",
+                "description": (
+                    "Optional repo-relative directory or file to search under "
+                    "(default workspace root). A file path searches just that file."
+                ),
             },
             "ignore_case": {
                 "type": "boolean",
                 "description": "Case-insensitive search (default false).",
             },
             "file_glob": {
-                "type": "string",
-                "description": 'Optional filename filter (e.g. "*.py", "*.{ts,tsx}").',
+                "description": (
+                    'Optional filename filter: a string (e.g. "*.py", "*.{ts,tsx}") or a list '
+                    "of globs. Brace expansion is supported. An unparseable glob is an error "
+                    "(never a silent empty match)."
+                ),
+                "oneOf": [
+                    {"type": "string"},
+                    {"type": "array", "items": {"type": "string"}},
+                ],
             },
             "max_matches": {
                 "type": "integer",
-                "description": "Cap on returned matches (default server limit).",
+                "description": (
+                    "Cap on returned matches in this page (default server limit). "
+                    "Does not stop the scan; check total_match_count and next_offset."
+                ),
+            },
+            "offset": {
+                "type": "integer",
+                "description": (
+                    "Skip this many matches before collecting the returned page "
+                    "(default 0). Continue from a prior response's next_offset."
+                ),
             },
         },
         "required": ["pattern"],
@@ -245,8 +521,25 @@ def _core_tool_defs(
     search_schema: dict[str, object] = {
         "type": "object",
         "properties": {
-            "query": {"type": "string"},
+            "query": {
+                "type": "string",
+                "description": (
+                    "One focused conceptual query (distinctive nouns). "
+                    "Avoid dumping many near-duplicate questions in parallel. "
+                    "Not for past conversations — use `mempalace search`."
+                ),
+            },
             "q": {"type": "string"},
+            "path_prefix": {
+                "type": "string",
+                "description": "Optional path filter (workspace-relative or notes/).",
+            },
+            "source": {
+                "type": "string",
+                "enum": ["any", "note", "workspace_file"],
+                "description": "Filter by provenance. Default any.",
+            },
+            "limit": {"type": "integer", "description": "Max hits (default ~10)."},
             "max_hits": {"type": "integer"},
         },
         "required": [],
@@ -254,30 +547,27 @@ def _core_tool_defs(
     run_schema: dict[str, object] = {
         "type": "object",
         "properties": {
-            "argv": {"type": "array", "items": {"type": "string"}},
+            "argv": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Command as [binary, ...args]. Preferred over a combined command string."
+                ),
+            },
             "command": {"type": "string"},
             "args": {"type": "array", "items": {"type": "string"}},
             "arguments": {"type": "array", "items": {"type": "string"}},
             "shell": {"type": "string"},
             "script": {"type": "string"},
+            "cwd": {
+                "type": "string",
+                "description": (
+                    "Optional workspace-relative working directory (defaults to workspace root). "
+                    "Use for subdirectory commands (npm, nested pytest, subrepo git) instead of cd."
+                ),
+            },
             "timeout": {"type": "integer"},
         },
-        "required": [],
-    }
-    mcp_add_schema: dict[str, object] = {
-        "type": "object",
-        "properties": {
-            "name": {"type": "string"},
-            "server_name": {"type": "string"},
-            "command": {"type": "string"},
-            "args": {"type": "array", "items": {"type": "string"}},
-            "env": {"type": "object"},
-        },
-        "required": [],
-    }
-    mcp_rm_schema: dict[str, object] = {
-        "type": "object",
-        "properties": {"name": {"type": "string"}, "server_name": {"type": "string"}},
         "required": [],
     }
     enable_mcp_schema: dict[str, object] = {
@@ -287,80 +577,18 @@ def _core_tool_defs(
                 "type": "string",
                 "description": "Server name from mcp.json (e.g. browser).",
             },
-            "server_name": {"type": "string"},
-            "server": {"type": "string"},
         },
-        "required": [],
+        "required": ["name"],
     }
     disable_mcp_schema: dict[str, object] = {
         "type": "object",
         "properties": {
-            "name": {"type": "string"},
-            "server_name": {"type": "string"},
-            "server": {"type": "string"},
-        },
-        "required": [],
-    }
-    mcp_server_filter_schema: dict[str, object] = {
-        "type": "object",
-        "properties": {
-            "server": {
+            "name": {
                 "type": "string",
-                "description": "Optional MCP server name. Omit to query all connected servers.",
-            },
-            "name": {"type": "string"},
-            "server_name": {"type": "string"},
-        },
-        "required": [],
-    }
-    read_mcp_resource_schema: dict[str, object] = {
-        "type": "object",
-        "properties": {
-            "server": {
-                "type": "string",
-                "description": "MCP server name exactly as returned by list_mcp_resources.",
-            },
-            "uri": {
-                "type": "string",
-                "description": "Resource URI from list_mcp_resources (not necessarily a file URL).",
-            },
-            "name": {"type": "string"},
-            "server_name": {"type": "string"},
-        },
-        "required": ["uri"],
-    }
-    get_mcp_prompt_schema: dict[str, object] = {
-        "type": "object",
-        "properties": {
-            "server": {
-                "type": "string",
-                "description": "MCP server name exactly as returned by list_mcp_prompts.",
-            },
-            "prompt": {
-                "type": "string",
-                "description": "Prompt name from list_mcp_prompts.",
-            },
-            "name": {"type": "string", "description": "Alias for prompt."},
-            "server_name": {"type": "string"},
-            "arguments": {
-                "type": "object",
-                "description": "Optional string arguments for the prompt template.",
-                "additionalProperties": {"type": "string"},
+                "description": "Connected MCP server name to disconnect.",
             },
         },
-        "required": [],
-    }
-    mcp_status_schema: dict[str, object] = {
-        "type": "object",
-        "properties": {
-            "server": {
-                "type": "string",
-                "description": "Optional server name; omit to list all tracked servers.",
-            },
-            "name": {"type": "string"},
-            "server_name": {"type": "string"},
-        },
-        "required": [],
+        "required": ["name"],
     }
     list_skills_schema: dict[str, object] = {"type": "object", "properties": {}}
     task_props: dict[str, object] = {
@@ -372,12 +600,21 @@ def _core_tool_defs(
             "type": "string",
             "description": "Optional background the parent already gathered (constraints, paths, prior tool output).",
         },
+        "expect_files": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Workspace-relative files the subagent is expected to create or update. "
+                "The result reports artifact_exists plus a per-path artifacts list, so you "
+                "do not need to check with a follow-up read_file or glob."
+            ),
+        },
     }
     type_names = sorted({n.strip() for n in (subagent_type_names or []) if n and str(n).strip()})
     subagent_type_schema: dict[str, object] = {
         "type": "string",
         "description": (
-            "Named subagent persona from monkeybot.yaml subagents registry. "
+            "Named subagent persona from monkeybot.yaml subagents.personas. "
             "Omit to use the default subagent AGENT.md."
         ),
     }
@@ -392,18 +629,34 @@ def _core_tool_defs(
     tools: list[ToolDef] = [
         ToolDef(
             "run_command",
-            "Run an allowlisted shell command with repo-scoped path checks (see TerminalExecutor).",
+            (
+                "Run an allowlisted shell command with optional timeout. "
+                'Pass argv as a list with the binary first (e.g. ["ls", "."]); '
+                "do not pass a combined string as the binary. Shell starts in "
+                "workspace root unless cwd (workspace-relative) is set. "
+                "cd is a builtin and is not a valid command — pass cwd or "
+                "workspace-relative paths to the binary instead."
+            ),
             run_schema,
         ),
         ToolDef(
             "read_file",
-            "Read a UTF-8 text file from the workspace with path validation.",
+            (
+                f"Read a UTF-8 text file from the workspace with path validation. "
+                f"Without limit, returns up to {default_lines} lines from offset. "
+                f"Prefer that default (or a larger limit) over many small reads; "
+                f"use offset+limit only to continue from next_offset when truncated."
+            ),
             read_schema,
             parallel_safe=True,
         ),
         ToolDef(
             "write_file",
-            "Write or replace a UTF-8 text file under the workspace root.",
+            (
+                "Write or replace a UTF-8 text file under the workspace root. "
+                "You have a writable workspace — do not claim you lack filesystem "
+                "access or are chat-only; use this tool for file deliverables."
+            ),
             write_schema,
         ),
         ToolDef(
@@ -414,13 +667,20 @@ def _core_tool_defs(
         ),
         ToolDef(
             "glob",
-            "List workspace file paths matching a glob pattern. Prefer over run_command+ls for discovery.",
+            "List workspace file paths matching a glob pattern. Prefer over run_command+ls for "
+            "discovery. For content questions ('how does X work?'), use `search` first. "
+            "A path list is evidence of absence only when the call succeeds with ok:true "
+            "(incomplete scans return ok:false / incomplete_scan — narrow root or pattern).",
             glob_schema,
             parallel_safe=True,
         ),
         ToolDef(
             "grep",
-            "Search workspace file contents with a Python regex. Prefer over run_command+grep.",
+            "Search workspace file contents with a Python regex. Prefer over run_command+grep. "
+            "Best for exact identifiers; for conceptual / paraphrased questions, use `search` first. "
+            "An empty match list is evidence of absence only when the payload has "
+            "scan_complete=true (incomplete scans return ok:false / incomplete_scan — narrow "
+            "root or pass file_glob). Capped pages still report total_match_count and next_offset.",
             grep_schema,
             parallel_safe=True,
         ),
@@ -431,8 +691,14 @@ def _core_tool_defs(
             apply_patch_schema,
         ),
         ToolDef(
-            "search_memory",
-            "Search markdown/text under the memory directory for a keyword or phrase.",
+            "search",
+            "Search the local workspace index (source files + knowledge notes) via "
+            "keyword FTS, link graph, and optional embeddings. Has no record of past "
+            "conversations — use `mempalace search` for those. Default first step for "
+            "unfamiliar code / conceptual / paraphrased / cross-file questions. "
+            "Hits return normalized score (top≈1.0), optional cosine/bm25/signals; "
+            "read until the score drops sharply (top 3–5). For locate-a-file/asset "
+            "questions prefer `glob`. Prefer `grep` for exact identifiers.",
             search_schema,
             parallel_safe=True,
         ),
@@ -450,7 +716,9 @@ def _core_tool_defs(
                 "Spawn a subprocess subagent with the same workspace, memory, and MCP configuration "
                 "to work on a delegated objective. Pass subagent_type to select a named persona "
                 "(see harness Subagent personas). Returns JSON with the subagent's streamed answer "
-                "summary, errors, and usage. Nested task calls are disabled inside the subagent.",
+                "summary, errors, and usage. When queue mode returns ok:false / error_kind:pending "
+                "/ queued:true, the child has not finished — do not treat that as completion. "
+                "Nested task calls are disabled inside the subagent.",
                 task_schema,
             ),
         )
@@ -459,8 +727,9 @@ def _core_tool_defs(
             ToolDef(
                 "enable_mcp",
                 "Connect a configured MCP server by name from mcp.json (e.g. browser). "
-                "Prefer this over add_mcp_server for known servers. New tools appear on "
-                "the next model step this turn.",
+                "On success returns connection status and discovered tools; on failure "
+                "returns the error (no separate status check needed). New server tools "
+                "and MCP resource/prompt tools appear on the next model step this turn.",
                 enable_mcp_schema,
             ),
             ToolDef(
@@ -470,130 +739,12 @@ def _core_tool_defs(
                 disable_mcp_schema,
             ),
             ToolDef(
-                "add_mcp_server",
-                "Connect an ad-hoc MCP stdio server by name/command; tools appear as "
-                "name__tool on the next model step this turn. Prefer enable_mcp for "
-                "servers already listed in mcp.json.",
-                mcp_add_schema,
-            ),
-            ToolDef(
-                "remove_mcp_server",
-                "Disconnect an MCP server by name and drop its tools (next model step).",
-                mcp_rm_schema,
-            ),
-            ToolDef(
-                "mcp_status",
-                "Show MCP server lifecycle status (catalogued / connected / failed / "
-                "needs_auth / disabled). Optional server name filters to one entry.",
-                mcp_status_schema,
-                parallel_safe=True,
-            ),
-            ToolDef(
-                "list_mcp_resources",
-                "List MCP resources from connected servers. Optional server filter. "
-                "Connect with enable_mcp first when the server is only catalogued.",
-                mcp_server_filter_schema,
-                parallel_safe=True,
-            ),
-            ToolDef(
-                "list_mcp_resource_templates",
-                "List MCP resource URI templates from connected servers. Optional server filter.",
-                mcp_server_filter_schema,
-                parallel_safe=True,
-            ),
-            ToolDef(
-                "read_mcp_resource",
-                "Read one MCP resource by server name and URI from list_mcp_resources.",
-                read_mcp_resource_schema,
-                parallel_safe=True,
-            ),
-            ToolDef(
-                "list_mcp_prompts",
-                "List MCP prompt templates from connected servers. Optional server filter.",
-                mcp_server_filter_schema,
-                parallel_safe=True,
-            ),
-            ToolDef(
-                "get_mcp_prompt",
-                "Fetch a named MCP prompt template (optional string arguments) from a connected server.",
-                get_mcp_prompt_schema,
-                parallel_safe=True,
-            ),
-            ToolDef(
-                "start_loop",
-                "Start a prompt-first scheduled loop after the user confirms. Pass the agreed "
-                "plan in prompt (BUSINESS/RULES). The scheduler fires that prompt on each tick. "
-                "Requires durable storage (DB_URL).",
-                {
-                    "type": "object",
-                    "properties": {
-                        "prompt": {
-                            "type": "string",
-                            "description": "Agreed loop plan / tick instructions.",
-                        },
-                        "interval": {
-                            "type": "string",
-                            "description": "Tick interval, e.g. 20s, 5m, 1h.",
-                        },
-                        "loop_id": {"type": "string"},
-                        "session_id": {
-                            "type": "string",
-                            "description": "Conversation thread for ticks (default loop-main).",
-                        },
-                        "max_ticks": {"type": "integer"},
-                        "max_runtime": {
-                            "type": "string",
-                            "description": "Hard wall-clock limit, e.g. 1h.",
-                        },
-                        "unbounded": {
-                            "type": "boolean",
-                            "description": (
-                                "Opt out of max_ticks/max_runtime guards. "
-                                "Requires explicit user confirmation."
-                            ),
-                        },
-                        "skip_if_busy": {"type": "boolean"},
-                    },
-                    "required": ["prompt", "interval"],
-                },
-            ),
-            ToolDef(
-                "loop_status",
-                "Get status of one scheduled loop or list all loops.",
-                {
-                    "type": "object",
-                    "properties": {"loop_id": {"type": "string"}},
-                    "required": [],
-                },
-                parallel_safe=True,
-                doom_loop_exempt=True,
-            ),
-            ToolDef(
-                "pause_loop",
-                "Pause a scheduled loop.",
-                {
-                    "type": "object",
-                    "properties": {"loop_id": {"type": "string"}},
-                    "required": ["loop_id"],
-                },
-            ),
-            ToolDef(
-                "resume_loop",
-                "Resume a paused scheduled loop.",
-                {
-                    "type": "object",
-                    "properties": {"loop_id": {"type": "string"}},
-                    "required": ["loop_id"],
-                },
-            ),
-            ToolDef(
-                "stop_loop",
-                "Stop a scheduled loop permanently.",
-                {
-                    "type": "object",
-                    "properties": {"loop_id": {"type": "string"}},
-                    "required": ["loop_id"],
-                },
+                "enable_loops",
+                "Advertise scheduled-loop tools (`start_loop`, `loop_status`, "
+                "`pause_loop`, `resume_loop`, `stop_loop`, `disable_loops`) on the "
+                "next model step this turn. Requires durable storage (DB_URL). "
+                "Prefer the loop skill for procedure before starting a loop.",
+                {"type": "object", "properties": {}, "required": []},
             ),
         ]
     )
@@ -688,8 +839,12 @@ async def build_context(
     workspace_root: Path | None = None,
     enable_context_curation: bool = True,
     sse_bus: PendingResponseBusPort | None = None,
+    event_publisher: EventPublisherPort | None = None,
     extra_tools: Sequence[CustomTool] | None = None,
     subagent_registry: dict[str, SubagentConfig] | None = None,
+    scheduled_loops_available: bool = False,
+    loops_advertised: bool = False,
+    todo_store: TodoListStore | None = None,
 ) -> TurnContext:
     """Assemble a TurnContext from filesystem paths and the MCP client snapshot.
 
@@ -697,7 +852,7 @@ async def build_context(
         thread_id: Conversation thread id.
         request_id: Per-request correlation id.
         agent_md_path: Path to AGENT.md (must be non-empty).
-        memory: Optional memory subsystem; when set, ``INDEX.md`` is loaded via storage.
+        memory: Optional memory subsystem; when set, L0+L1 wake-up is loaded.
         skills_path: Root directory for skill folders (each with ``SKILL.md``).
         mcp_client: Client exposing ``all_tools()`` for MCP-registered tools.
         user_id: Optional authenticated user.
@@ -708,12 +863,19 @@ async def build_context(
         include_task_tool: When False, omit the ``task`` tool (used by the subagent worker).
         cancelled: Optional cooperative-cancel handle for the parent turn (gateway / CLI).
         context_window_tokens: Model context budget for pre-flight and summarization triggers.
-        workspace_root: Optional workspace root for spill directory cleanup at run start.
+        workspace_root: Optional workspace root for tools/spill paths (``paths.workspace_root``).
         enable_context_curation: When False (e.g. subagent), skip LLM context curation for prompts.
+        sse_bus: Optional gateway bus for pending UI responses.
+        event_publisher: Optional parent SSE publisher for nested subagent progress.
         extra_tools: Optional list of in-process :class:`CustomTool` implementations.
             Their ``tool_def`` is appended to the tool list advertised to the model and
             their ``execute`` method is dispatched by :class:`CoreToolExecutor`.
         subagent_registry: Optional map of named subagent personas from monkeybot.yaml.
+        scheduled_loops_available: True when durable loop storage is wired.
+        loops_advertised: True when the caller's ``LoopsToolRegistry`` has ``enable_loops``
+            active; includes scheduled-loop lifecycle tools immediately for this turn.
+        todo_store: Optional session-scoped todo list store (parent agent); enables volatile
+            ``## Todo list`` injection. Pass the same store to ``TodoListTool`` via ``extra_tools``.
 
     Returns:
         Frozen :class:`TurnContext`.
@@ -734,9 +896,12 @@ async def build_context(
         )
     )
     if attachments_enabled_from_env():
-        tools.append(render_image_tool_def())
-        tools.append(read_attachment_tool_def())
+        tools.append(load_file_tool_def())
     tools.extend(mcp_client.all_tools())
+    if _any_mcp_connected(mcp_client):
+        tools.extend(MCP_PROGRESSIVE_META_TOOL_DEFS)
+    if loops_advertised and scheduled_loops_available:
+        tools.extend(SCHEDULED_LOOP_TOOL_DEFS)
     for ct in extra_tools or []:
         tools.append(ct.tool_def)
     catalog_names = tuple(mcp_client.catalog_names())
@@ -757,13 +922,16 @@ async def build_context(
         memory=memory,
         context_curation_enabled=enable_context_curation,
         sse_bus=sse_bus,
+        event_publisher=event_publisher,
         subagent_personas=personas,
         catalog_mcp_servers=catalog_names,
+        scheduled_loops_available=scheduled_loops_available,
+        todo_store=todo_store,
     )
 
 
 async def refresh_memory_index(ctx: TurnContext) -> TurnContext:
-    """Re-read ``INDEX.md`` via ``ctx.memory``; on failure return ``ctx`` unchanged."""
+    """Re-read MemPalace wake-up via ``ctx.memory``; on failure return ``ctx`` unchanged."""
     if ctx.memory is None:
         return ctx
 

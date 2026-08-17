@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "fixture": {
+      "enabled": true,
+      "autoConnect": true,
+      "command": "${MONKEYBOT_PYTHON}",
+      "args": [
+        "${MONKEYBOT_AGENT_ROOT}/fixture_mcp_server.py"
+      ]
+    }
+  }
+}

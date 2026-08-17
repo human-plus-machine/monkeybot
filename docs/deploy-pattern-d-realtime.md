@@ -69,9 +69,10 @@ model:
 | `VERTEX_AI_PROJECT_ID` | Yes (Vertex) | — | GCP project for Vertex AI. |
 | `VERTEX_AI_LOCATION` | No | `us-central1` | Vertex region. |
 | `DB_URL` | No | `sqlite:///data/monkeybot.db` | Storage backend. Postgres or Firestore recommended for production. |
-| `MEMORY_STORAGE_URI` | No | `local://./data/memory` | Durable memory backend. GCS/S3 for multi-instance. |
+| `MEMORY_STORAGE_URI` | No | `local://./memory` | Durable memory backend. GCS/S3 for multi-instance. |
 | `MCP_CONFIG` | No | `./monkeybot_config/mcp.json` | MCP server config, resolved from the agent root. |
-| `MONKEYBOT_WORKSPACE_ROOT` | No | layout's `workspace/` | Absolute workspace override for a platform mount. |
+| `MONKEYBOT_WORKSPACE_ROOT` | No | layout's `workspace/` | Absolute workspace path exported after layout resolve. |
+| `MONKEYBOT_WORKSPACE_ROOT_OVERRIDE` | No | — | Absolute remount of the agent workspace for one process (e.g. Mac workspace memory dir). Beats yaml `paths.workspace_root`. |
 | `LOG_LEVEL` | No | `info` | Logging verbosity. |
 | `PORT` / `GATEWAY_PORT` | No | `8000` | Port the gateway listens on. |
 | `GRACEFUL_SHUTDOWN_TIMEOUT_SEC` | No | `5` | Seconds to wait for open connections during shutdown. |

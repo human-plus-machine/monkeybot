@@ -51,8 +51,9 @@ Errors use a common envelope:
 | `POST` | `/sessions/{session_id}/frontend-tool-results/{tool_call_id}` | Return a frontend tool result. Body: `{ "result": ContentBlock[], "is_error": boolean }` (blocks are JSON objects matching `ContentBlock` schema). **202** `{ "ok": true }`. |
 | `GET` | `/api/workspace/tree` | Optional directory listing under the gateway workspace. Query `path` (repo-relative). Disabled when `MONKEYBOT_WORKSPACE_API` is `0` / `false` / `no` / `off`. |
 | `GET` | `/api/workspace/file` | Optional file slice read. Query `path` (required), `offset` (1-based line, default 1), `limit` (default 200). Same env gate as tree. |
-| `GET` | `/api/chat-history` | Optional recent-threads listing. Disabled when `MONKEYBOT_CHAT_HISTORY_API` is `0` / `false` / `no` / `off`. |
+| `GET` | `/api/chat-history` | Optional recent-threads listing, newest first. Disabled when `MONKEYBOT_CHAT_HISTORY_API` is `0` / `false` / `no` / `off`. `monkeybot chat -c`/`--continue` uses this to auto-resume the most recent session for the current agent root. |
 | `GET` | `/api/chat-history/{session_id}` | Optional persisted user/assistant text for one thread. Same env gate as the list endpoint. |
+| `DELETE` | `/api/chat-history/{session_id}` | Clear one persisted transcript and any backend-specific thread summary. Same env gate; uses the configured `DB_URL` backend (SQLite, Postgres, or Firestore). Returns `{ "deleted": true }` as an idempotent wipe acknowledgment, even when no thread exists. |
 
 ---
 
@@ -105,7 +106,7 @@ Common types you will handle in a chat UI:
 | `Error` | Recoverable stream error string in `error`. |
 | `ImageBlock` | Inline image (`mime_type`, base64 `data`). |
 | `ThinkingBlockDelta` / `ThinkingBlockComplete` / `RedactedThinkingBlock` | Extended thinking blocks where the model exposes them. |
-| `ToolConfirmationRequest` | User must approve/deny; POST to `tool-confirmations` with `tool_call_id`. |
+| `ToolConfirmationRequest` | User must approve/deny; POST to `tool-confirmations` with `tool_call_id`. The reference Textual client can auto-answer these client-side in `auto-approve`/`deny-confirms` mode (`Shift+Tab` in `monkeybot chat`) — this is purely a UI convenience, no gateway change; `ActionRequiredEvent` elicitations are never auto-answered. |
 | `ActionRequiredEvent` | e.g. `action_type: "elicitation"` with `id` and `payload`; POST to `elicitations/{id}`. |
 | `FrontendToolRequest` | UI-executed tool; POST result to `frontend-tool-results/{tool_call_id}`. |
 | `SystemNotificationEvent` | Toasts / inline system messages (`notification_type`, `msg`). |
@@ -216,7 +217,7 @@ Files are stored under `{workspace}/.monkeybot/attachments/{session_id}/{attachm
 1. Upload via `POST /attachments`.
 2. Reply with `attachmentRef` — provider sees pixels on that turn only.
 3. Turn end — history rewrites refs to frozen `text` descriptors; gateway emits `AttachmentDescriptor` SSE per attachment.
-4. Later turns — agent uses `read_attachment` tool to reload pixels when needed.
+4. Later turns — agent uses `load_file` tool to reload pixels when needed.
 
 ---
 

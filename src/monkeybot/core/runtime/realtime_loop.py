@@ -21,11 +21,12 @@ from monkeybot.core.attachments.store import AttachmentStore
 from monkeybot.core.context import (
     PendingResponseBusPort,
     TurnContext,
-    MCP_REGISTRY_MUTATING_TOOLS,
     refresh_memory_index,
+    refresh_tools_after_loops_change,
     refresh_tools_after_mcp_change,
 )
 from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
+from monkeybot.core.memory.ingest import persist_message
 from monkeybot.core.llm.provider import Message, ToolCall
 from monkeybot.core.llm.realtime_provider import RealtimeToolCall
 from monkeybot.core.logging_utils import kv
@@ -35,6 +36,7 @@ from monkeybot.core.runtime.events import (
     ActionRequiredEvent,
     AgentEvent,
     AssistantDelta,
+    AssistantTextEnded,
     AttachmentDescriptorEvent,
     Error,
     Thinking,
@@ -56,9 +58,10 @@ from monkeybot.core.types.content_blocks import (
     ToolResponse,
 )
 
-from .loop import (
-    ToolExecutorPort,
+from .loop_ports import ToolExecutorPort
+from .tool_batch import (
     _await_user_response_any,
+    _note_registry_mutation,
     _rejected_tool_batch_error,
     _should_reject_tool_batch,
 )
@@ -72,6 +75,12 @@ _REALTIME_MCP_NEW_SESSION_NOTE = (
     "MCP registry updated on the harness. Newly enabled MCP tool schemas are not "
     "pushed into the live voice session; start a new realtime session to advertise "
     "them to the model (v1 has no reconnect/resume)."
+)
+
+_REALTIME_LOOPS_NEW_SESSION_NOTE = (
+    "Scheduled-loop tool advertisement updated on the harness. Newly enabled loop "
+    "tool schemas are not pushed into the live voice session; start a new realtime "
+    "session to advertise them to the model (v1 has no reconnect/resume)."
 )
 
 
@@ -339,7 +348,14 @@ async def run_realtime_turn(
     try:
         # 1. Commit user message to history (skip empty audio-only placeholders).
         if user_text or any(not isinstance(b, Text) for b in blocks):
-            await history.append(ctx.thread_id, Message(role="user", content=list(blocks)))
+            await persist_message(
+                history,
+                Message(role="user", content=list(blocks)),
+                thread_id=ctx.thread_id,
+                turn_id=ctx.request_id,
+                memory=ctx.memory,
+                ingest=True,
+            )
             await _fire_hook(
                 hook_manager,
                 event=HookEvent.USER_MESSAGE,
@@ -364,6 +380,7 @@ async def run_realtime_turn(
         if assistant_text.strip():
             assistant_blocks.append(Text(text=assistant_text.strip()))
             yield AssistantDelta(request_id=ctx.request_id, delta=assistant_text.strip())
+            yield AssistantTextEnded(request_id=ctx.request_id, text=assistant_text.strip())
 
         tool_results: list[ContentBlock] = []
         for rtc in assistant_tool_calls:
@@ -378,13 +395,18 @@ async def run_realtime_turn(
 
         if assistant_blocks:
             # Await the assistant write so tool-response rows are always ordered after it.
-            await history.append(
-                ctx.thread_id,
+            await persist_message(
+                history,
                 Message(role="assistant", content=assistant_blocks),
+                thread_id=ctx.thread_id,
+                turn_id=ctx.request_id,
+                memory=ctx.memory,
+                ingest=bool(assistant_text.strip()) and not assistant_tool_calls,
             )
 
         # 4. Dispatch tools sequentially (v1: no parallel subagent dispatch here).
         mcp_registry_mutated = False
+        loops_registry_mutated = False
         pending_calls = [_realtime_tool_call_to_tool_call(rtc) for rtc in assistant_tool_calls]
         # Realtime has no vendor length-limit signal; reject only all-parse_error batches.
         reject_batch = _should_reject_tool_batch(pending_calls, truncated=False)
@@ -559,11 +581,12 @@ async def run_realtime_turn(
                             resolved_blocks = item
                     if resolved_blocks is not None:
                         result = ToolExecutionResult.ok_blocks(resolved_blocks)
-                if (
-                    result.error is None
-                    and call.name in MCP_REGISTRY_MUTATING_TOOLS
-                ):
-                    mcp_registry_mutated = True
+                mcp_registry_mutated, loops_registry_mutated = _note_registry_mutation(
+                    call,
+                    result,
+                    mcp_mutated=mcp_registry_mutated,
+                    loops_mutated=loops_registry_mutated,
+                )
 
             if inject_text and inject_texts_out is not None:
                 inject_texts_out.append(inject_text)
@@ -595,6 +618,21 @@ async def run_realtime_turn(
             # updated mid-session. Tell the model to start a new session if needed.
             if inject_texts_out is not None:
                 inject_texts_out.append(_REALTIME_MCP_NEW_SESSION_NOTE)
+
+        if loops_registry_mutated:
+            advertised = bool(getattr(tool_executor, "loops_advertised", False))
+            ctx = refresh_tools_after_loops_change(ctx, loops_advertised=advertised)
+            logger.info(
+                "refreshed ctx.tools after loops registry change (realtime) %s",
+                kv(
+                    request_id=ctx.request_id,
+                    thread_id=ctx.thread_id,
+                    loops_advertised=advertised,
+                    tool_count=len(ctx.tools),
+                ),
+            )
+            if inject_texts_out is not None:
+                inject_texts_out.append(_REALTIME_LOOPS_NEW_SESSION_NOTE)
 
         # 5. Append all tool responses as one user message (reuses loop.py semantics).
         if tool_results:

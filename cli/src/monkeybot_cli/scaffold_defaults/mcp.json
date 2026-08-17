@@ -1,6 +1,7 @@
 {
   "mcpServers": {
     "filesystem": {
+      "enabled": false,
       "command": "npx",
       "args": [
         "-y",
@@ -13,12 +14,14 @@
       }
     },
     "remote-http": {
+      "enabled": false,
       "url": "https://your-mcp-host.example.com/mcp",
       "headers": {
         "Authorization": "Bearer ${MY_STATIC_BEARER_TOKEN}"
       }
     },
     "remote-oauth": {
+      "enabled": false,
       "url": "https://your-mcp-host.example.com/mcp",
       "auth": {
         "flow": "client_credentials",
@@ -30,7 +33,7 @@
       }
     },
     "browser": {
-      "enabled": false,
+      "enabled": true,
       "command": "${MONKEYBOT_PYTHON}",
       "args": [
         "-m",
@@ -38,6 +41,7 @@
       ],
       "env": {
         "BU_NAME": "monkeybot",
+        "BU_CDP_URL": "${BU_CDP_URL}",
         "BROWSER_MCP_PLAYBOOKS_DIR": "${MONKEYBOT_WORKSPACE_ROOT}/browser/playbooks",
         "BROWSER_MCP_SCREENSHOTS_DIR": "${MONKEYBOT_WORKSPACE_ROOT}/browser/Screenshots"
       }

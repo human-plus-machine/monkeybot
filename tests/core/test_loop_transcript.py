@@ -30,7 +30,28 @@ def _ctx(*, workspace_root: Path | None = None) -> TurnContext:
         agent_md="# Agent",
         memory_index=[],
         skills=[],
-        tools=[ToolDef("run_command", "Run shell", {})],
+        tools=[
+            ToolDef(
+                "run_command",
+                "Run shell",
+                {"type": "object"},
+                parallel_safe=False,
+                doom_loop_exempt=False,
+            ),
+            ToolDef(
+                "read_file",
+                "Read a file",
+                {"type": "object", "properties": {"path": {"type": "string"}}},
+                parallel_safe=True,
+            ),
+            ToolDef(
+                "loop_status",
+                "Loop status",
+                {"type": "object"},
+                parallel_safe=True,
+                doom_loop_exempt=True,
+            ),
+        ],
         user_id=None,
         parent_run_id=None,
         model="gemini-2.5-flash",
@@ -46,8 +67,10 @@ class FakeHistory:
         del thread_id, limit
         return list(self.rows)
 
-    async def append(self, thread_id: str, message: Message) -> None:
-        del thread_id
+    async def append(
+        self, thread_id: str, message: Message, *, turn_id: str | None = None, message_id: str | None = None
+    ) -> None:
+        del thread_id, turn_id, message_id
         self.rows.append(message)
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None:
@@ -160,6 +183,13 @@ async def test_run_with_transcript_writer_captures_provider_request_and_response
     req = next(line for line in lines if line["type"] == "ProviderRequest")
     assert req["model"] == "gemini-2.5-flash"
     assert isinstance(req["messages"], list) and len(req["messages"]) >= 1
+    tools = req["tools"]
+    assert isinstance(tools, list) and len(tools) == 3
+    for tool in tools:
+        assert set(tool.keys()) == {"name", "description", "input_schema"}
+        assert "parallel_safe" not in tool
+        assert "doom_loop_exempt" not in tool
+    assert {t["name"] for t in tools} == {"run_command", "read_file", "loop_status"}
 
     resp = next(line for line in lines if line["type"] == "ProviderResponse")
     assert resp["text"] == "hi there"

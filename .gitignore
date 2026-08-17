@@ -30,6 +30,12 @@ build/
 
 # Data (SQLite DB + memory files — never commit)
 data/
+/memory/
+.monkeybot/
+*.sqlite3
+workspace/.monkeybot/
+*.sqlite
+*.sqlite.writer-pid
 
 # Testing & coverage
 .pytest_cache/
@@ -60,3 +66,6 @@ code/
 
 # Local venv for evals dependency experiments
 .evals-venv/
+
+# monkeythink
+.monkeythink/

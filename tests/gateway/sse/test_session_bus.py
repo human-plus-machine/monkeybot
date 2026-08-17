@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
-from monkeybot.core.context.memory_prompt import _curation_cache, reset_curation_cache_for_tests
+from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.runtime.events import Thinking
 from monkeybot.gateway.sse.session_bus import SessionBus, SessionRegistry
 from monkeybot.gateway.sse.sse import agent_event_to_wire_dict, format_active_requests
@@ -33,6 +34,35 @@ async def test_replay_buffer_caps_at_maxlen() -> None:
     assert len(replay) == 2
     assert '"i":3' in replay[0]
     assert '"i":4' in replay[1]
+
+
+@pytest.mark.asyncio
+async def test_nested_replay_lane_does_not_evict_primary() -> None:
+    bus = SessionBus(
+        created_at_ms=0,
+        agent_md=None,
+        replay_maxlen=2,
+        nested_replay_maxlen=2,
+    )
+    await bus.publish_data('{"lane":"primary","i":1}', lane="primary")
+    await bus.publish_data('{"lane":"primary","i":2}', lane="primary")
+    for i in range(5):
+        await bus.publish_data(f'{{"lane":"nested","i":{i}}}', lane="nested")
+    replay, _q = await bus.subscribe(0)
+    # Both primary frames survive despite nested overflow.
+    assert any('"lane":"primary","i":1' in frame for frame in replay)
+    assert any('"lane":"primary","i":2' in frame for frame in replay)
+    # Nested lane keeps only its last two.
+    nested_frames = [f for f in replay if '"lane":"nested"' in f]
+    assert len(nested_frames) == 2
+    assert '"i":3' in nested_frames[0]
+    assert '"i":4' in nested_frames[1]
+    seqs = []
+    for frame in replay:
+        for line in frame.splitlines():
+            if line.startswith("id:"):
+                seqs.append(int(line[len("id:") :].strip()))
+    assert seqs == sorted(seqs)
 
 
 @pytest.mark.asyncio
@@ -74,29 +104,54 @@ def test_registry_remove_drops_session_and_returns_true() -> None:
     reg.create("s1", agent_md=None, created_at_ms=0)
     assert reg.get("s1") is not None
 
-    assert reg.remove("s1") is True
+    result = reg.remove("s1")
+    assert result.deleted is True
+    assert result.transcript_report_dir is None
     assert reg.get("s1") is None
 
 
 def test_registry_remove_unknown_session_returns_false() -> None:
     reg = SessionRegistry()
-    assert reg.remove("nope") is False
+    assert reg.remove("nope").deleted is False
 
 
-def test_registry_remove_evicts_curation_cache_entry() -> None:
-    """SessionRegistry.remove must also clear memory_prompt._curation_cache.
+@pytest.mark.asyncio
+async def test_registry_remove_cleans_spill_files(tmp_path: Path) -> None:
+    """Session end removes parent and subagent spill dirs under the session namespace."""
+    spill = tmp_path / ".monkeybot" / "spill" / "s-spill"
+    spill.mkdir(parents=True)
+    (spill / "call.txt").write_text("payload", encoding="utf-8")
+    sub_spill = tmp_path / ".monkeybot" / "spill" / "subagent:s-spill:abc123"
+    sub_spill.mkdir(parents=True)
+    (sub_spill / "tool.txt").write_text("sub", encoding="utf-8")
+    other = tmp_path / ".monkeybot" / "spill" / "other-session"
+    other.mkdir(parents=True)
+    (other / "keep.txt").write_text("keep", encoding="utf-8")
+    other_sub = tmp_path / ".monkeybot" / "spill" / "subagent:other-session:xyz"
+    other_sub.mkdir(parents=True)
+    (other_sub / "keep.txt").write_text("keep", encoding="utf-8")
 
-    Otherwise per-thread curator selections outlive their session for the
-    life of the process (unbounded growth in a long-running gateway).
-    """
-    reset_curation_cache_for_tests()
-    reg = SessionRegistry()
-    reg.create("s1", agent_md=None, created_at_ms=0)
-    _curation_cache["s1"] = ("fingerprint", ["cached line"])
+    reg = SessionRegistry(workspace_root=tmp_path)
+    reg.create("s-spill", agent_md=None, created_at_ms=0)
+    assert (await reg.remove_async("s-spill")).deleted is True
 
-    reg.remove("s1")
+    assert not spill.exists()
+    assert not sub_spill.exists()
+    assert (other / "keep.txt").read_text(encoding="utf-8") == "keep"
+    assert (other_sub / "keep.txt").read_text(encoding="utf-8") == "keep"
 
-    assert "s1" not in _curation_cache
+
+@pytest.mark.asyncio
+async def test_registry_sync_remove_defers_spill_cleanup(tmp_path: Path) -> None:
+    """Sync remove detaches immediately; spill cleanup runs only on remove_async."""
+    spill = tmp_path / ".monkeybot" / "spill" / "s-sync"
+    spill.mkdir(parents=True)
+    (spill / "call.txt").write_text("payload", encoding="utf-8")
+
+    reg = SessionRegistry(workspace_root=tmp_path)
+    reg.create("s-sync", agent_md=None, created_at_ms=0)
+    assert reg.remove("s-sync").deleted is True
+    assert spill.exists()
 
 
 @pytest.mark.asyncio
@@ -109,3 +164,68 @@ async def test_registry_remove_cancels_pending_responses() -> None:
 
     assert fut.cancelled()
 
+
+@pytest.mark.asyncio
+async def test_registry_remove_async_analyzes_transcript(tmp_path: Path) -> None:
+    reg = SessionRegistry()
+    bus = reg.create("s-tx", agent_md=None, created_at_ms=0)
+    writer = TranscriptWriter("s-tx", workspace_root=tmp_path)
+    await writer.ensure_manifest(model="gpt-test", provider="fake")
+    await writer.write_user_message(request_id="r1", content="hi")
+    bus.transcript_writer = writer
+
+    result = await reg.remove_async("s-tx")
+    assert result.deleted is True
+    assert result.transcript_report_dir is not None
+    report_dir = Path(result.transcript_report_dir)
+    assert (report_dir / "brief.md").is_file()
+    assert (report_dir / "report.json").is_file()
+    assert (report_dir / "meta.json").is_file()
+
+
+@pytest.mark.asyncio
+async def test_registry_remove_async_awaits_active_turn_before_analysis(
+    tmp_path: Path,
+) -> None:
+    """DELETE during a running turn must not analyze until the turn finishes writing."""
+    import json
+
+    from monkeybot.core.runtime.events import TurnComplete, UsageTotals
+
+    reg = SessionRegistry()
+    bus = reg.create("s-race", agent_md=None, created_at_ms=0)
+    writer = TranscriptWriter("s-race", workspace_root=tmp_path)
+    await writer.ensure_manifest(model="gpt-test", provider="fake")
+    await writer.write_user_message(request_id="r1", content="hi")
+    bus.transcript_writer = writer
+    bus.current_request_id = "r1"
+
+    wrote_late = asyncio.Event()
+
+    async def _slow_turn() -> None:
+        # Simulate a turn that still has work after DELETE detaches the session.
+        await asyncio.sleep(0.05)
+        assert bus.cancel_requested_for == "r1"
+        await writer.write_event(
+            TurnComplete(request_id="r1", usage=UsageTotals(duration_ms=12))
+        )
+        bus.current_request_id = None
+        wrote_late.set()
+
+    bus.active_turn_task = asyncio.create_task(_slow_turn())
+
+    result = await reg.remove_async("s-race")
+    assert result.deleted is True
+    assert wrote_late.is_set()
+    assert result.transcript_report_dir is not None
+
+    lines = [
+        json.loads(line)
+        for line in writer.path.read_text(encoding="utf-8").splitlines()
+        if line
+    ]
+    types = [line.get("type") for line in lines]
+    assert "TurnComplete" in types
+    report = json.loads((Path(result.transcript_report_dir) / "report.json").read_text())
+    # Analysis ran after the late TurnComplete, so the turn is closed cleanly.
+    assert report["scorecard"]["turn_count"] >= 1

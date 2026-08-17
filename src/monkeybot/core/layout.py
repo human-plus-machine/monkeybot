@@ -8,12 +8,20 @@ or an arbitrary service-manager directory.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+from monkeybot.core.memory.uri import (
+    DEFAULT_LOCAL_MEMORY_RELPATH,
+    object_store_memory_scheme,
+)
+
+_log = logging.getLogger(__name__)
 
 
 def _config_root(path: Path) -> Path:
@@ -67,6 +75,56 @@ def resolve_agent_path(raw: str | Path, agent_root: Path) -> Path:
     return path.resolve() if path.is_absolute() else (agent_root / path).resolve()
 
 
+def resolve_workspace_root_override() -> Path | None:
+    """Absolute host path that remaps the agent workspace for one process.
+
+    Used by Monkeybot Mac workspace sessions so attachments / file tools land
+    under ``~/.monkeybot/workspaces/<id>/memory`` instead of the agent's
+    ``paths.workspace_root``. Relative values are ignored.
+    """
+    raw = os.environ.get("MONKEYBOT_WORKSPACE_ROOT_OVERRIDE", "").strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        _log.warning(
+            "Ignoring relative MONKEYBOT_WORKSPACE_ROOT_OVERRIDE=%r (must be absolute)",
+            raw,
+        )
+        return None
+    resolved = path.resolve()
+    _log.info(
+        "Workspace root remapped via MONKEYBOT_WORKSPACE_ROOT_OVERRIDE to %s",
+        resolved,
+    )
+    return resolved
+
+
+def resolve_workspace_root(*, agent_root: Path, config_path: Path | None = None) -> Path:
+    """Resolve workspace root from yaml, with an optional absolute process override.
+
+    ``MONKEYBOT_WORKSPACE_ROOT_OVERRIDE`` (absolute) wins when set — used by the
+    Mac app to remap a gateway onto a workspace shared-memory directory.
+    Otherwise ``paths.workspace_root`` in monkeybot.yaml is the source of truth
+    (plain ``MONKEYBOT_WORKSPACE_ROOT`` / legacy ``WORKSPACE_ROOT`` do not win).
+    When the yaml key is absent, falls back to ``<agent_root>/workspace``.
+    """
+    if override := resolve_workspace_root_override():
+        return override
+
+    workspace_raw = "workspace"
+    if config_path is not None:
+        from monkeybot.core.config.yaml_loader import load_monkeybot_yaml_dict
+
+        _, doc = load_monkeybot_yaml_dict(config_path)
+        paths = doc.get("paths") if isinstance(doc, dict) else None
+        if isinstance(paths, dict):
+            wr = paths.get("workspace_root")
+            if isinstance(wr, str) and wr.strip():
+                workspace_raw = wr.strip()
+    return resolve_agent_path(workspace_raw, agent_root)
+
+
 def resolve_sqlite_url(raw: str, agent_root: Path) -> str:
     """Anchor a relative ``sqlite:///`` URL at the agent root."""
     prefix = "sqlite:///"
@@ -82,12 +140,26 @@ def resolve_sqlite_url(raw: str, agent_root: Path) -> str:
 
 
 def resolve_memory_storage_uri(raw: str, agent_root: Path) -> str:
-    """Anchor local memory URIs while retaining cloud URI semantics."""
+    """Anchor local memory URIs at the agent root.
+
+    Object-store schemes are not supported. Log once and fall back to
+    ``local://`` under the agent root so existing ``gcs://`` / ``s3://``
+    deployments still boot.
+    """
     value = raw.strip()
-    if value.startswith(("gcs://", "s3://")):
-        return value
-    local_path = value.removeprefix("local://") or "data/memory"
-    return f"local://{resolve_agent_path(local_path, agent_root)}"
+    remote = object_store_memory_scheme(value)
+    if remote:
+        fallback = f"local://{resolve_agent_path(DEFAULT_LOCAL_MEMORY_RELPATH, agent_root)}"
+        _log.warning(
+            "unsupported memory URI %r (%s); falling back to %s",
+            value,
+            remote,
+            fallback,
+        )
+        return fallback
+    scheme, _, rest = value.partition("://")
+    local_path = rest if rest and scheme.lower() in {"local", "file"} else value
+    return f"local://{resolve_agent_path(local_path or DEFAULT_LOCAL_MEMORY_RELPATH, agent_root)}"
 
 
 @dataclass(frozen=True)
@@ -106,6 +178,7 @@ class AgentLayout:
     permission_config_path: Path
     db_url: str
     memory_storage_uri: str
+    agent_id: str
 
     @classmethod
     def from_environment(
@@ -117,12 +190,7 @@ class AgentLayout:
         def path_env(name: str, default: str) -> Path:
             return resolve_agent_path(os.environ.get(name, default), root)
 
-        workspace_raw = (
-            os.environ.get("MONKEYBOT_WORKSPACE_ROOT")
-            or os.environ.get("WORKSPACE_ROOT")
-            or "workspace"
-        )
-        workspace = resolve_agent_path(workspace_raw, root)
+        workspace = resolve_workspace_root(agent_root=root, config_path=cfg)
         data = root / "data"
         return cls(
             agent_root=root,
@@ -139,17 +207,24 @@ class AgentLayout:
             permission_config_path=path_env(
                 "PERMISSION_CONFIG", "monkeybot_config/permissions.yaml"
             ),
-            db_url=resolve_sqlite_url(os.environ.get("DB_URL", "sqlite:///data/monkeybot.db"), root),
+            db_url=resolve_sqlite_url(
+                os.environ.get("DB_URL", "sqlite:///data/monkeybot.db"), root
+            ),
             memory_storage_uri=resolve_memory_storage_uri(
-                os.environ.get("MEMORY_STORAGE_URI", os.environ.get("MEMORY_PATH", "data/memory")),
+                os.environ.get(
+                    "MEMORY_STORAGE_URI",
+                    os.environ.get("MEMORY_PATH", "memory/mempalace"),
+                ),
                 root,
             ),
+            agent_id=os.environ.get("MONKEYBOT_AGENT_ID", "").strip() or str(root),
         )
 
     def export_environment(self) -> None:
         """Export absolute runtime paths for child processes and legacy consumers."""
         values = {
             "MONKEYBOT_AGENT_ROOT": str(self.agent_root),
+            "MONKEYBOT_AGENT_ID": self.agent_id,
             "MONKEYBOT_WORKSPACE_ROOT": str(self.workspace_root),
             "SKILLS_PATH": str(self.skills_path),
             "AGENT_MD": str(self.agent_md_path),
@@ -160,6 +235,11 @@ class AgentLayout:
             "MEMORY_STORAGE_URI": self.memory_storage_uri,
             "MONKEYBOT_PYTHON": sys.executable,
         }
+        from monkeybot.core.memory.config import memory_enabled_from_config
+
+        if memory_enabled_from_config():
+            values["MEMPALACE_PALACE_PATH"] = self.memory_storage_uri.removeprefix("local://")
+            values["MEMPALACE_BACKEND"] = os.environ.get("MEMPALACE_BACKEND", "chroma")
         for key, value in values.items():
             os.environ[key] = value
 
@@ -174,6 +254,18 @@ def bootstrap_agent_layout(
     to the launcher process directory.
     """
     root = resolve_agent_root(cwd=cwd, config_path=config_path)
+
+    # One-shot: data/memory → memory for this agent root (before env/URI resolution).
+    # Set MONKEYBOT_MIGRATE_ALL_AGENTS=1 to also migrate every agent under ~/.monkeybot/agents/.
+    try:
+        from monkeybot.core.memory.migrate_layout import (
+            migrate_all_local_agent_memory_layouts,
+        )
+
+        migrate_all_local_agent_memory_layouts(include=root)
+    except Exception as exc:  # noqa: BLE001 — layout must still boot
+        _log.warning("Memory layout migrate skipped: %r", exc)
+
     env_file = root / ".env"
     if env_file.is_file():
         load_dotenv(env_file, override=False)
@@ -195,4 +287,6 @@ __all__ = [
     "resolve_config_path",
     "resolve_memory_storage_uri",
     "resolve_sqlite_url",
+    "resolve_workspace_root",
+    "resolve_workspace_root_override",
 ]

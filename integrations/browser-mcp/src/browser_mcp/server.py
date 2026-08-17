@@ -6,17 +6,33 @@ import atexit
 import contextlib
 import json
 import logging
+import os
 import signal
 import sys
+from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from browser_mcp import dom_indexing, playbooks, screenshots
+from browser_mcp import agentcore, dom_indexing, playbooks, screenshots
 
 logger = logging.getLogger(__name__)
 
 _bh: tuple[Any, Any] | None = None
+# CDP endpoint (BU_CDP_URL/WS or in-app file) the current daemon binding was ensured with,
+# or the literal "agentcore" when bound to the AgentCore backend.
+# Used instead of browser-harness's nonexistent daemon_browser_kind() to decide when to bounce.
+_bound_cdp: str | None = None
+_agentcore_admin: agentcore.AgentCoreAdmin | None = None
+# True when the last _apply_in_app_cdp_url() call set BU_CDP_URL/WS from the in-app file
+# (as opposed to an operator-supplied env var). Lets us clear that self-set value when the
+# file goes away, instead of falling back to a port we wrote from a now-stale file read.
+_env_set_from_in_app_file = False
+
+# Written by Monkeyapp when the in-app Electron CDP bridge is live. Prefer this over
+# auto-discovering the user's desktop Chrome (which wins when BU_CDP_URL is empty/stale).
+_IN_APP_CDP_URL_FILE = Path.home() / ".monkeybot" / "runtime" / "in-app-cdp-url"
+
 
 mcp = FastMCP(
     "browser",
@@ -44,14 +60,163 @@ mcp = FastMCP(
 )
 
 
-def _browser_harness() -> tuple[Any, Any]:
-    """Lazy import + daemon bootstrap on first browser tool use."""
+def _read_in_app_cdp_file() -> str | None:
+    try:
+        raw = _IN_APP_CDP_URL_FILE.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        logger.warning(
+            "browser-mcp: failed reading in-app CDP URL file %s",
+            _IN_APP_CDP_URL_FILE,
+            exc_info=True,
+        )
+        return None
+    return raw or None
+
+
+def _apply_in_app_cdp_url() -> str | None:
+    """Ensure BU_CDP_URL/WS points at Monkeyapp's bridge when one is published.
+
+    Prefers the in-app runtime file over process env: mcp.json often bakes a
+    concrete ``http://127.0.0.1:PORT`` from a previous launch, and that port is
+    dead after restart (WinError 10061 / connection refused). The file is
+    rewritten every time Electron's CDP bridge comes up.
+
+    When the file disappears (Monkeyapp closed) after having supplied the
+    active endpoint, the env var we set from it is cleared rather than left in
+    place -- otherwise the next call would fall back to that same self-set,
+    now-dead port, reintroducing the stale-endpoint bug this function exists
+    to avoid. Operator-supplied env vars (self-hosted headless Chrome, Browser
+    Use Cloud -- see docs/browser-mcp.md) are never touched by this path.
+
+    Returns the explicit CDP endpoint in use (file or env), or None.
+    """
+    global _env_set_from_in_app_file
+
+    file_url = _read_in_app_cdp_file()
+    if file_url:
+        if file_url.startswith("ws://") or file_url.startswith("wss://"):
+            os.environ["BU_CDP_WS"] = file_url
+            os.environ.pop("BU_CDP_URL", None)
+            _env_set_from_in_app_file = True
+            return file_url
+        if file_url.startswith("http://") or file_url.startswith("https://"):
+            os.environ["BU_CDP_URL"] = file_url
+            os.environ.pop("BU_CDP_WS", None)
+            _env_set_from_in_app_file = True
+            return file_url
+
+    if _env_set_from_in_app_file:
+        os.environ.pop("BU_CDP_WS", None)
+        os.environ.pop("BU_CDP_URL", None)
+        _env_set_from_in_app_file = False
+
+    ws = (os.environ.get("BU_CDP_WS") or "").strip()
+    http = (os.environ.get("BU_CDP_URL") or "").strip()
+    if ws:
+        return ws
+    if http:
+        return http
+    return None
+
+
+def _teardown_bound_backend() -> None:
+    """Tear down whatever backend _bh is currently bound to, if any.
+
+    Clears ``_bh`` before attempting the (possibly failing) teardown call, so a
+    raised exception here never leaves stale backend state behind for the next
+    ``_browser_harness()`` call to mistakenly reuse. Dispatches on ``_bound_cdp``
+    rather than introspecting ``_bh``'s admin object, since the non-agentcore
+    path always re-imports (and stops) the real ``browser_harness.admin``
+    module regardless of what's stored in ``_bh``.
+    """
     global _bh
     if _bh is None:
-        from browser_harness import admin, helpers
+        return
+    _, admin = _bh
+    is_agentcore = _bound_cdp == "agentcore"
+    _bh = None
+    if is_agentcore:
+        admin.stop_session()
+        from browser_mcp import playwright_helpers
 
-        admin.ensure_daemon()
-        _bh = (helpers, admin)
+        playwright_helpers.disconnect()
+    else:
+        from browser_harness import admin as bh_admin
+
+        bh_admin.restart_daemon()
+
+
+def _reconnect_agentcore() -> tuple[str, dict[str, str]]:
+    """Force a fresh AgentCore session (stop + restart) and return new ws creds.
+
+    Registered with playwright_helpers as its reconnect hook: a stale/expired
+    AgentCore session (~15-30 min TTL) leaves the old ws connection dead, and
+    plain ensure_session() would just re-sign headers for the same (already
+    dead) session, so the old session is explicitly stopped first.
+    """
+    assert _agentcore_admin is not None
+    _agentcore_admin.stop_session()
+    return _agentcore_admin.ensure_session()
+
+
+def _agentcore_browser_harness() -> tuple[Any, Any]:
+    """Bind _bh to the AgentCore backend (StartBrowserSession + Playwright CDP connect)."""
+    global _bh, _bound_cdp, _agentcore_admin
+    from browser_mcp import playwright_helpers
+
+    if _agentcore_admin is None:
+        _agentcore_admin = agentcore.AgentCoreAdmin(agentcore.resolve_region())
+
+    ws_url, headers = _agentcore_admin.ensure_session()
+    playwright_helpers.connect(ws_url, headers)
+    playwright_helpers.set_reconnect_hook(_reconnect_agentcore)
+    _bh = (playwright_helpers, _agentcore_admin)
+    _bound_cdp = "agentcore"
+    return _bh
+
+
+def _browser_harness() -> tuple[Any, Any]:
+    """Lazy import + daemon bootstrap on first browser tool use.
+
+    When an explicit CDP URL is configured (env or Monkeyapp runtime file) and the
+    live daemon was bound to a different endpoint (or none — i.e. local Chrome),
+    bounce it so tool calls drive the in-app panel instead. BROWSER_BACKEND=agentcore
+    (with no explicit CDP endpoint) dispatches to AWS Bedrock AgentCore Browser instead.
+    """
+    global _bh, _bound_cdp
+    cdp = _apply_in_app_cdp_url()
+
+    if agentcore.agentcore_backend_requested():
+        if _bh is not None and _bound_cdp == "agentcore":
+            return _bh
+        _teardown_bound_backend()
+        return _agentcore_browser_harness()
+
+    if _bh is not None and cdp == _bound_cdp:
+        return _bh
+
+    if _bound_cdp == "agentcore":
+        _teardown_bound_backend()
+
+    from browser_harness import admin, helpers
+
+    # Fresh process: _bound_cdp is None while an external local-Chrome daemon may
+    # still be alive. Restart whenever the desired CDP differs from what we last
+    # ensured (browser-harness 0.1.3 has no daemon_browser_kind() to query).
+    if admin.daemon_alive() and _bound_cdp != cdp:
+        logger.info(
+            "browser-mcp: replacing harness daemon for CDP %s (was %s)",
+            cdp,
+            _bound_cdp,
+        )
+        admin.restart_daemon()
+        _bh = None
+
+    admin.ensure_daemon()
+    _bh = (helpers, admin)
+    _bound_cdp = cdp
     return _bh
 
 
@@ -140,7 +305,7 @@ def browser_screenshot(full: bool = False, max_dim: int | None = 1800) -> str:
     apps, heavy shadow-DOM UIs, drag-and-drop, or visually confirming rendering/layout.
 
     Returns JSON with a workspace-relative path under ``./browser/Screenshots/`` (for
-    ``render_image`` on vision models) plus page metadata — not inline image bytes.
+    ``load_file`` on vision models) plus page metadata — not inline image bytes.
     """
     helpers, _ = _browser_harness()
     abs_path, rel_path = screenshots.allocate_screenshot_path()
@@ -155,7 +320,7 @@ def browser_screenshot(full: bool = False, max_dim: int | None = 1800) -> str:
             "title": info.get("title"),
             "viewport": {"w": info.get("w"), "h": info.get("h")},
             "note": (
-                "Screenshot saved under the agent workspace. Vision models: call render_image "
+                "Screenshot saved under the agent workspace. Vision models: call load_file "
                 "with path. Text-only models: use browser_get_elements instead of this tool. "
                 "Coordinate clicks use viewport metadata from this capture."
             ),
@@ -289,37 +454,57 @@ def browser_write_playbook(host: str, content: str, append: bool = False) -> str
     return _json_text(result)
 
 
-@mcp.tool()
-def browser_stop() -> str:
-    """Stop the browser-harness daemon (cleanup after browsing; important for cloud browsers)."""
+def _stop_active_backend_best_effort() -> None:
+    """Stop whatever backend may be active, matching the pre-agentcore contract
+    that browser_stop / shutdown always best-effort stop the browser-harness
+    daemon -- even in a fresh process where ``_bh`` was never bound here, since
+    an external/leftover daemon (e.g. a still-billing Browser Use Cloud session
+    from a prior process) may still be alive (see ``_browser_harness()``'s
+    "Fresh process" comment). AgentCore sessions are only ever started by this
+    process, so those are only stopped when actually bound.
+    """
+    global _bh
+    if _bound_cdp == "agentcore":
+        _teardown_bound_backend()
+        return
+    _bh = None
     from browser_harness import admin
 
     admin.restart_daemon()
-    global _bh
-    _bh = None
-    return _json_text({"ok": True, "message": "daemon stopped"})
+
+
+@mcp.tool()
+def browser_stop() -> str:
+    """Stop the active browser backend (cleanup after browsing; important for cloud/AgentCore browsers)."""
+    global _bound_cdp
+    try:
+        _stop_active_backend_best_effort()
+    except Exception as exc:
+        _bound_cdp = None
+        logger.warning("browser_stop: failed to stop browser backend", exc_info=True)
+        return _json_text({"ok": False, "error": str(exc)})
+    _bound_cdp = None
+    return _json_text({"ok": True, "message": "browser backend stopped"})
 
 
 def _stop_daemon_for_shutdown() -> None:
-    """Best-effort daemon stop on process exit (SIGTERM/SIGINT/atexit).
+    """Best-effort backend stop on process exit (SIGTERM/SIGINT/atexit).
 
     A crashed turn, abandoned conversation, or container SIGTERM can end this
     stdio process without the model ever calling ``browser_stop``. Closing this
-    process's own stdio pipes never reaches the detached browser-harness daemon
-    (started via ``start_new_session=True``), so without this hook a remote
-    Browser Use Cloud session -- and its billing -- would keep running
-    indefinitely. Idempotent: safe to call even if no daemon was ever started.
+    process's own stdio pipes never reaches a detached browser-harness daemon
+    (started via ``start_new_session=True``) or a live AgentCore session, so
+    without this hook a remote Browser Use Cloud / AgentCore session -- and its
+    billing -- would keep running indefinitely. Always attempts the stop, even
+    if this process never itself bound a backend (see
+    ``_stop_active_backend_best_effort``'s docstring). Idempotent.
     """
-    global _bh
-    if _bh is None:
-        return
-    _bh = None
+    global _bound_cdp
     try:
-        from browser_harness import admin
-
-        admin.restart_daemon()
+        _stop_active_backend_best_effort()
     except Exception:
-        logger.warning("browser-mcp shutdown: failed to stop browser-harness daemon", exc_info=True)
+        logger.warning("browser-mcp shutdown: failed to stop browser backend", exc_info=True)
+    _bound_cdp = None
 
 
 def _install_shutdown_handlers() -> None:

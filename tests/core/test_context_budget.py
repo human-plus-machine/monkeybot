@@ -106,21 +106,23 @@ def _text(block: ToolResponse) -> str:
 
 
 def test_compute_context_pressure_tier_thresholds() -> None:
-    from monkeybot.core.runtime.context_budget import compute_context_pressure_tier
+    from monkeybot.core.runtime.context_budget import (
+        SUMMARY_TRIGGER_RATIO,
+        compute_context_pressure_tier,
+    )
 
-    assert compute_context_pressure_tier(40_000, 100_000, light_ratio=0.5, moderate_ratio=0.7, aggressive_ratio=0.85) is None
-    assert compute_context_pressure_tier(55_000, 100_000, light_ratio=0.5, moderate_ratio=0.7, aggressive_ratio=0.85) == "light"
-    assert compute_context_pressure_tier(75_000, 100_000, light_ratio=0.5, moderate_ratio=0.7, aggressive_ratio=0.85) == "moderate"
-    assert compute_context_pressure_tier(90_000, 100_000, light_ratio=0.5, moderate_ratio=0.7, aggressive_ratio=0.85) == "aggressive"
+    assert compute_context_pressure_tier(40_000, 100_000) is None
+    assert compute_context_pressure_tier(55_000, 100_000) == "light"
+    assert compute_context_pressure_tier(75_000, 100_000) == "moderate"
+    assert compute_context_pressure_tier(90_000, 100_000) == "aggressive"
+    # Summarization fires at the same bar as aggressive shaping.
+    assert SUMMARY_TRIGGER_RATIO == 0.85
 
 
-def test_from_env_tightens_safety_fraction_under_pressure(monkeypatch) -> None:
+def test_for_window_tightens_safety_fraction_under_pressure() -> None:
     from monkeybot.core.runtime.context_budget import ContextBudgeter
 
-    monkeypatch.setenv("MONKEYBOT_PRESSURE_LIGHT_RATIO", "0.5")
-    monkeypatch.setenv("MONKEYBOT_PRESSURE_MODERATE_RATIO", "0.7")
-    monkeypatch.setenv("MONKEYBOT_PRESSURE_AGGRESSIVE_RATIO", "0.85")
-    budgeter = ContextBudgeter.from_env(window_tokens=100_000, used_tokens=75_000)
+    budgeter = ContextBudgeter.for_window(window_tokens=100_000, used_tokens=75_000)
     assert budgeter.pressure_tier == "moderate"
     assert budgeter.safety_fraction <= 0.45
 
@@ -163,15 +165,3 @@ def test_fit_still_sanitizes_run_command_blob_json_fields() -> None:
     parsed = json.loads(out)
     assert parsed["stdout"] == "x" * 2000
     assert "omitted" in parsed["data"]
-
-
-def test_invalid_pressure_ratio_logs_warning(monkeypatch, caplog) -> None:
-    from monkeybot.core.runtime.context_budget import pressure_light_ratio_from_env
-
-    monkeypatch.setenv("MONKEYBOT_PRESSURE_LIGHT_RATIO", "bogus")
-    with caplog.at_level("WARNING", logger="monkeybot.core.runtime.context_budget"):
-        assert pressure_light_ratio_from_env() == 0.50
-
-    assert "invalid env var value" in caplog.text
-    assert "name=MONKEYBOT_PRESSURE_LIGHT_RATIO" in caplog.text
-    assert "value=bogus" in caplog.text

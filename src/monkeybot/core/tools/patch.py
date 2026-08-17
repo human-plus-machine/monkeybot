@@ -28,6 +28,8 @@ from monkeybot.core.tools.text_normalize import normalize_unicode_punctuation
 from monkeybot.core.tools.workspace_service import WorkspaceError
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from monkeybot.core.tools.workspace_service import WorkspaceFileService
 
 logger = logging.getLogger(__name__)
@@ -39,9 +41,16 @@ END_MARKER = "*** End Patch"
 class PatchError(Exception):
     """Patch parse or apply validation failure (fail-closed; no disk writes yet)."""
 
-    def __init__(self, message: str, code: str = "patch_error") -> None:
+    def __init__(
+        self,
+        message: str,
+        code: str = "patch_error",
+        *,
+        details: dict[str, object] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.details: dict[str, object] = details or {}
 
 
 @dataclass(frozen=True)
@@ -324,15 +333,36 @@ def _plan_ops(workspace: WorkspaceFileService, hunks: list[Hunk]) -> list[_Plann
         raise PatchError("patch rejected: empty patch (no hunks)", code="empty_patch")
 
     planned: list[_PlannedOp] = []
+    # Destinations claimed by earlier add/move ops in this patch (canonical repo-rel).
+    reserved_dests: set[str] = set()
+    # Paths removed by earlier delete/move ops (may be re-added later).
+    removed_paths: set[str] = set()
+
+    def _canon(path: str) -> tuple[str, Path]:
+        fp = workspace.require_writable_path(path)
+        return workspace._as_repo_rel(fp), fp
+
+    def _require_absent_dest(path: str, *, action: str) -> str:
+        canon, fp = _canon(path)
+        exists_on_disk = fp.exists() and canon not in removed_paths
+        if exists_on_disk or canon in reserved_dests:
+            raise PatchError(
+                f"apply_patch verification failed: cannot {action} over existing path: {path}",
+                code="already_exists",
+            )
+        return canon
+
     for hunk in hunks:
         if isinstance(hunk, AddHunk):
-            workspace.require_writable_path(hunk.path)
+            canon = _require_absent_dest(hunk.path, action="add")
             content = hunk.contents
             if content and not content.endswith("\n"):
                 content = content + "\n"
             planned.append(_PlannedOp(action="add", path=hunk.path, content=content))
+            reserved_dests.add(canon)
+            removed_paths.discard(canon)
         elif isinstance(hunk, DeleteHunk):
-            fp = workspace.require_writable_path(hunk.path)
+            canon, fp = _canon(hunk.path)
             if not fp.is_file():
                 raise PatchError(
                     f"apply_patch verification failed: Failed to read file to delete: {hunk.path}",
@@ -342,15 +372,19 @@ def _plan_ops(workspace: WorkspaceFileService, hunks: list[Hunk]) -> list[_Plann
             planned.append(
                 _PlannedOp(action="delete", path=hunk.path, old_content=old)
             )
+            removed_paths.add(canon)
+            reserved_dests.discard(canon)
         else:
-            fp = workspace.require_writable_path(hunk.path)
+            canon_src, fp = _canon(hunk.path)
             if not fp.is_file():
                 raise PatchError(
                     f"apply_patch verification failed: Failed to read file to update: {hunk.path}",
                     code="not_found",
                 )
             if hunk.move_path:
-                workspace.require_writable_path(hunk.move_path)
+                canon_dest = _require_absent_dest(hunk.move_path, action="move")
+            else:
+                canon_dest = None
             old = fp.read_text(encoding="utf-8", errors="replace")
             new_content = derive_new_contents(hunk.path, hunk.chunks, old)
             if hunk.move_path:
@@ -363,6 +397,11 @@ def _plan_ops(workspace: WorkspaceFileService, hunks: list[Hunk]) -> list[_Plann
                         old_content=old,
                     )
                 )
+                assert canon_dest is not None
+                reserved_dests.add(canon_dest)
+                removed_paths.add(canon_src)
+                reserved_dests.discard(canon_src)
+                removed_paths.discard(canon_dest)
             else:
                 planned.append(
                     _PlannedOp(
@@ -375,8 +414,23 @@ def _plan_ops(workspace: WorkspaceFileService, hunks: list[Hunk]) -> list[_Plann
     return planned
 
 
-def _rollback_ops(workspace: WorkspaceFileService, done: list[_PlannedOp]) -> None:
-    """Best-effort undo of successfully applied ops (reverse order)."""
+def _op_paths(op: _PlannedOp) -> list[str]:
+    paths = [op.path]
+    if op.move_path is not None:
+        paths.append(op.move_path)
+    return paths
+
+
+def _rollback_ops(
+    workspace: WorkspaceFileService, done: list[_PlannedOp]
+) -> tuple[list[str], list[str]]:
+    """Best-effort undo of successfully applied ops (reverse order).
+
+    Returns ``(reverted_paths, dirty_paths)``. Dirty means rollback failed for
+    that op — the workspace may still reflect the partial apply.
+    """
+    reverted: list[str] = []
+    dirty: list[str] = []
     for op in reversed(done):
         try:
             if op.action == "add":
@@ -385,24 +439,42 @@ def _rollback_ops(workspace: WorkspaceFileService, done: list[_PlannedOp]) -> No
                 if op.old_content is not None:
                     workspace.write_file(op.path, op.old_content)
             elif op.action == "move":
+                move_dirty: list[str] = []
+                move_reverted: list[str] = []
                 if op.move_path is not None:
                     try:
                         workspace.delete_file(op.move_path)
-                    except WorkspaceError as exc:
-                        logger.warning(
-                            "apply_patch rollback: could not remove move dest %s",
-                            kv(path=op.move_path, error=str(exc)),
+                        move_reverted.append(op.move_path)
+                    except WorkspaceError:
+                        logger.exception(
+                            "apply_patch rollback failed %s",
+                            kv(action=op.action, path=op.path, move_path=op.move_path),
                         )
+                        move_dirty.append(op.move_path)
                 if op.old_content is not None:
-                    workspace.write_file(op.path, op.old_content)
+                    try:
+                        workspace.write_file(op.path, op.old_content)
+                        move_reverted.append(op.path)
+                    except WorkspaceError:
+                        logger.exception(
+                            "apply_patch rollback failed %s",
+                            kv(action=op.action, path=op.path, move_path=op.move_path),
+                        )
+                        move_dirty.append(op.path)
+                dirty.extend(move_dirty)
+                reverted.extend(move_reverted)
+                continue
             elif op.action == "delete":
                 if op.old_content is not None:
                     workspace.write_file(op.path, op.old_content)
+            reverted.extend(_op_paths(op))
         except WorkspaceError:
             logger.exception(
                 "apply_patch rollback failed %s",
                 kv(action=op.action, path=op.path, move_path=op.move_path),
             )
+            dirty.extend(_op_paths(op))
+    return reverted, dirty
 
 
 def _apply_ops(
@@ -438,7 +510,22 @@ def _apply_ops(
                 files.append({"path": op.path, "action": "delete"})
             done.append(op)
     except (WorkspaceError, PatchError) as exc:
-        _rollback_ops(workspace, done)
+        applied_paths = [p for op in done for p in _op_paths(op)]
+        reverted, dirty = _rollback_ops(workspace, done)
+        if dirty:
+            raise PatchError(
+                f"Patch apply failed ({exc}); rollback incomplete. "
+                f"Applied: {applied_paths or 'none'}. "
+                f"Reverted: {reverted or 'none'}. "
+                f"Still dirty: {dirty}. Re-read dirty paths before any retry.",
+                code="rollback_failed",
+                details={
+                    "applied_paths": applied_paths,
+                    "reverted_paths": reverted,
+                    "dirty_paths": dirty,
+                    "apply_error": str(exc),
+                },
+            ) from exc
         if isinstance(exc, PatchError):
             raise
         raise PatchError(str(exc), code=getattr(exc, "code", "write_failed")) from exc

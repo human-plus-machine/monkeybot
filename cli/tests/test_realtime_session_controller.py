@@ -299,3 +299,21 @@ def test_hitl_elicitation_maps_timeout_sec() -> None:
     assert events[-1].payload["hitl_kind"] == "elicit"
     assert events[-1].payload["elicitation_id"] == "e1"
     assert events[-1].payload["timeout_sec"] == 90.0
+
+
+def test_restart_session_raises_in_realtime_mode() -> None:
+    ctrl = RealtimeSessionController(
+        gateway_url="ws://127.0.0.1:8080",
+        session_id="s1",
+        emit=lambda _e: None,
+    )
+
+    async def _body() -> None:
+        try:
+            await ctrl.restart_session()
+        except RuntimeError as exc:
+            assert "not supported in realtime mode" in str(exc)
+            return
+        raise AssertionError("expected RuntimeError")
+
+    _run(_body())

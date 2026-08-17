@@ -564,6 +564,15 @@ def _normalize_call_tool_result(result: Any) -> str:
     return sanitize_tool_result_text("".join(chunks))
 
 
+def _unpack_streamable_http_streams(streams: Any) -> tuple[Any, Any]:
+    """Return ``(read, write)`` from an MCP 1.x 3-tuple or 2.x 2-tuple."""
+    if isinstance(streams, tuple) and len(streams) in (2, 3):
+        return streams[0], streams[1]
+    raise TypeError(
+        f"streamable_http_client must yield a 2-tuple or 3-tuple, got {streams!r}"
+    )
+
+
 class MCPClient:
     """MCP SDK client (stdio subprocesses and Streamable HTTP) for :class:`monkeybot.core.mcp.ports_mcp.MCPClientPort`."""
 
@@ -726,6 +735,7 @@ class MCPClient:
             if auth is not None:
                 hdr.pop("Authorization", None)
                 hdr.pop("authorization", None)
+            # mcp 2.x wants httpx2.AsyncClient here; stay on httpx until that migration.
             http = httpx.AsyncClient(
                 headers=hdr if hdr else None,
                 auth=auth,
@@ -735,9 +745,7 @@ class MCPClient:
             await stack.enter_async_context(http)
             transport_cm = streamable_http_client(url, http_client=http)
             read_write = await stack.enter_async_context(transport_cm)
-            if not isinstance(read_write, tuple) or len(read_write) != 3:
-                raise TypeError(f"streamable_http_client must yield a 3-tuple, got {read_write!r}")
-            read_s, write_s, _get_sid = read_write
+            read_s, write_s = _unpack_streamable_http_streams(read_write)
             session_cm = ClientSession(read_s, write_s)
             session = await stack.enter_async_context(session_cm)
             await session.initialize()
@@ -907,19 +915,7 @@ class MCPClient:
             capability="resources",
             list_method="list_resources",
             result_attr="resources",
-            missing_remedy="Use a server that supports resources, or call mcp_status.",
-        )
-
-    async def list_resource_templates(
-        self, server_name: str | None = None
-    ) -> list[dict[str, Any]]:
-        """List MCP resource templates from one or all connected servers."""
-        return await self._list_capability_items(
-            server_name=server_name,
-            capability="resources",
-            list_method="list_resource_templates",
-            result_attr="resourceTemplates",
-            missing_remedy="Use a server that supports resources, or call mcp_status.",
+            missing_remedy="Use a server that supports resources, or call enable_mcp first.",
         )
 
     async def read_resource(self, server_name: str, uri: str) -> dict[str, Any]:
@@ -930,7 +926,7 @@ class MCPClient:
             raise MCPDiagnosticError(
                 server_name,
                 f"MCP server {server_name!r} does not advertise resources capability",
-                remedy="Pick a resource-capable server from list_mcp_resources / mcp_status.",
+                remedy="Pick a resource-capable server from list_mcp_resources, or call enable_mcp.",
             )
         from pydantic import AnyUrl
 
@@ -950,7 +946,7 @@ class MCPClient:
             capability="prompts",
             list_method="list_prompts",
             result_attr="prompts",
-            missing_remedy="Use a server that supports prompts, or call mcp_status.",
+            missing_remedy="Use a server that supports prompts, or call enable_mcp first.",
         )
 
     async def get_prompt(
@@ -966,7 +962,7 @@ class MCPClient:
             raise MCPDiagnosticError(
                 server_name,
                 f"MCP server {server_name!r} does not advertise prompts capability",
-                remedy="Pick a prompt-capable server from list_mcp_prompts / mcp_status.",
+                remedy="Pick a prompt-capable server from list_mcp_prompts, or call enable_mcp.",
             )
         args_out = {str(k): str(v) for k, v in dict(arguments or {}).items()}
         result = await rec.session.get_prompt(prompt_name, arguments=args_out or None)
@@ -984,11 +980,20 @@ class MCPClient:
     async def connect_from_catalog(self, name: str) -> list[ToolDef]:
         """Connect a server previously registered by :meth:`load_from_config`.
 
-        Already-connected servers return their current tool list (no-op reconnect).
+        Re-reads ``mcp.json`` so late-bound env (e.g. Monkeyapp ``BU_CDP_URL``) is
+        applied. Already-connected servers reconnect only when their resolved
+        catalog spec changed; otherwise this is a no-op that returns current tools.
         Raises :class:`MCPDiagnosticError` when ``name`` is not in the catalog.
         """
+        previous = dict(self._catalog[name]) if name in self._catalog else None
+        if self._config_path is not None:
+            # Refresh catalog from disk without dropping other connected servers.
+            await self._reload_catalog_entry(name)
         if name in self._servers:
-            return list(self._servers[name].tools)
+            current = self._catalog.get(name)
+            if previous is not None and previous == current:
+                return list(self._servers[name].tools)
+            await self.disconnect(name)
         spec = self._catalog.get(name)
         if spec is None:
             known = self.catalog_names()
@@ -997,14 +1002,38 @@ class MCPClient:
                 name,
                 f"Unknown MCP server {name!r}. Known configured servers: {known_msg}",
                 remedy=(
-                    "Use a name from mcp.json (after load_from_config), or connect an "
-                    "ad-hoc stdio server with add_mcp_server."
+                    "Use a name from mcp.json (after load_from_config), then call enable_mcp."
                 ),
             )
         defs = await self._connect_from_spec(
             name, spec, mcp_json_path=self._config_path, raise_on_error=True
         )
         return defs
+
+    async def _reload_catalog_entry(self, name: str) -> None:
+        """Re-parse mcp.json and replace one catalog entry (env interpolation included)."""
+        path = self._config_path
+        if path is None or not path.is_file():
+            return
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            logger.warning("mcp catalog refresh failed reading %s", path, exc_info=True)
+            return
+        if not isinstance(raw, dict):
+            return
+        raw = interpolate_env_vars(raw)
+        servers_any = raw.get("mcpServers")
+        if not isinstance(servers_any, dict):
+            return
+        spec = servers_any.get(name)
+        if not isinstance(spec, dict):
+            self._catalog.pop(name, None)
+            return
+        if spec.get("enabled") is False:
+            self._catalog.pop(name, None)
+            return
+        self._catalog[name] = dict(spec)
 
     def _log_connect_failure(
         self,

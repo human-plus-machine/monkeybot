@@ -1,0 +1,17 @@
+description: "Shell request triggers a shell-category tool"
+user_message: "Run `echo hello` and tell me what it printed."
+scripted_turns:
+  - - type: tool_call
+      call_id: c1
+      name: run_command
+      args:
+        command: "echo hello"
+    - type: done
+  - - type: text_delta
+      text: "It printed hello."
+    - type: done
+assertions:
+  tool_categories_used:
+    - shell
+  turn_completed: true
+  max_turns: 3

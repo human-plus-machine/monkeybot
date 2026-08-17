@@ -6,14 +6,15 @@ import argparse
 import json
 import os
 import shlex
-import subprocess
 import tomllib
 from pathlib import Path
 
 import httpx
-
 from monkeybot.core.layout import AgentLayout, bootstrap_agent_layout
+from monkeybot.core.memory.config import memory_enabled_from_config
 from monkeybot.core.tools.sandbox_executor import SandboxConfig
+
+from monkeybot_cli.compat import COMPATIBLE_CORE_RANGE
 from monkeybot_cli.config_resolve import (
     load_agent_dotenv,
     load_config_doc,
@@ -23,25 +24,25 @@ from monkeybot_cli.config_resolve import (
 from monkeybot_cli.gateway_health import port_free as _port_free
 from monkeybot_cli.output import CommandReport, check
 from monkeybot_cli.providers import credentials_present, extra_module, spec_for_provider
-from monkeybot_cli.runtime_python import resolve_runtime_python, run_probe
+from monkeybot_cli.runtime_python import (
+    CORE_PROBE,
+    MANAGED_RUNTIME_SOURCE,
+    MEMORY_PROBE,
+    _probe,
+    resolve_runtime_python,
+    run_probe,
+)
 
 
-def _runtime_python_version(runtime, agent_root: Path) -> tuple[int, int, int]:
+def _runtime_python_version(runtime) -> tuple[int, int, int]:
     """Ask the runtime interpreter for its version (major, minor, micro)."""
-    code = "import sys; print(sys.version_info[0], sys.version_info[1], sys.version_info[2])"
-    kwargs: dict[str, object] = {}
-    if runtime.source == "uv":
-        kwargs["cwd"] = str(agent_root)
-    proc = subprocess.run(
-        [*runtime.argv, "-c", code],
-        capture_output=True,
-        text=True,
-        timeout=15.0,
-        **kwargs,
+    ok, text = _probe(
+        runtime,
+        "import sys; print(sys.version_info[0], sys.version_info[1], sys.version_info[2])",
     )
-    if proc.returncode != 0:
+    if not ok:
         return (0, 0, 0)
-    parts = proc.stdout.strip().split()
+    parts = text.split()
     if len(parts) < 3:
         return (0, 0, 0)
     try:
@@ -68,10 +69,16 @@ def _agent_defines_project_extra(agent_root: Path, extra: str) -> bool:
 
 def _extra_remediation(extra: str, agent_root: Path, runtime) -> str:
     """Remediation text pointing at the agent project, not the CLI env."""
-    if runtime.source == "cli":
+    if runtime.source in {"cli", MANAGED_RUNTIME_SOURCE}:
+        refresh = (
+            ", then re-run the agent to refresh the managed runtime"
+            if runtime.source == MANAGED_RUNTIME_SOURCE
+            else ""
+        )
         return (
             "Config-only tree: install in the CLI env — "
             f"uv tool install --with 'monkeybot[{extra}]' monkeybot-cli"
+            f"{refresh}"
         )
     if _agent_defines_project_extra(agent_root, extra):
         return f"Install in the agent project: cd {agent_root} && uv sync --extra {extra}"
@@ -124,7 +131,11 @@ def _add_layout_checks(report: CommandReport, layout: AgentLayout) -> None:
         passed=not legacy_exists,
         message=(
             "Legacy workspace/skills detected"
-            + ("; destination skills/ is populated (resolve collision manually)" if collision else "")
+            + (
+                "; destination skills/ is populated (resolve collision manually)"
+                if collision
+                else ""
+            )
             if legacy_exists
             else "No legacy nested skills directory"
         ),
@@ -132,8 +143,7 @@ def _add_layout_checks(report: CommandReport, layout: AgentLayout) -> None:
             "Collision detected: do not move automatically; reconcile the two skill trees first."
             if collision
             else (
-                "Preview only (not executed): "
-                f"mv {shlex.quote(source)} {shlex.quote(destination)}"
+                f"Preview only (not executed): mv {shlex.quote(source)} {shlex.quote(destination)}"
             )
             if legacy_exists
             else None
@@ -153,7 +163,9 @@ def _add_layout_checks(report: CommandReport, layout: AgentLayout) -> None:
     browser_enabled = False
     if layout.mcp_config_path.is_file():
         try:
-            servers = json.loads(layout.mcp_config_path.read_text(encoding="utf-8")).get("mcpServers", {})
+            servers = json.loads(layout.mcp_config_path.read_text(encoding="utf-8")).get(
+                "mcpServers", {}
+            )
             browser = servers.get("browser", {}) if isinstance(servers, dict) else {}
             browser_enabled = bool(browser.get("enabled")) if isinstance(browser, dict) else False
         except (OSError, json.JSONDecodeError):
@@ -197,9 +209,11 @@ def run_doctor(args: argparse.Namespace) -> int:
         print(f"  workspace: {layout.workspace_root}")
         print(f"  skills: {layout.skills_path}")
         print(f"  data: {layout.data_root}")
-    runtime = resolve_runtime_python(agent_root)
 
-    py_version = _runtime_python_version(runtime, agent_root)
+    memory_on = memory_enabled_from_config(str(config_path) if config_path else None)
+    runtime = resolve_runtime_python(agent_root, memory_enabled=memory_on)
+
+    py_version = _runtime_python_version(runtime)
     py_ok = py_version >= (3, 11)
     check(
         report,
@@ -210,6 +224,38 @@ def run_doctor(args: argparse.Namespace) -> int:
         message=f"Python {py_version[0]}.{py_version[1]} ({runtime.source})",
         value=f"{py_version[0]}.{py_version[1]}.{py_version[2]}",
         remediation=None if py_ok else "Install Python 3.11+ in the agent project environment",
+    )
+
+    harness_ok = run_probe(runtime, MEMORY_PROBE if memory_on else CORE_PROBE)
+    check(
+        report,
+        id="env.harness.compatible",
+        category="env",
+        severity="error",
+        passed=harness_ok,
+        message=(
+            f"MonkeyBot {COMPATIBLE_CORE_RANGE}"
+            + (" with MemPalace" if memory_on else "")
+            + (" ready" if harness_ok else " missing in gateway interpreter")
+        ),
+        remediation=None
+        if harness_ok
+        else (
+            f"Pin monkeybot{'[memory]' if memory_on else ''}{COMPATIBLE_CORE_RANGE} "
+            f"in {agent_root}/pyproject.toml, then "
+            f"cd {agent_root} && uv sync"
+            if (agent_root / "pyproject.toml").is_file()
+            else (
+                f"Install monkeybot{'[memory]' if memory_on else ''}"
+                f"{COMPATIBLE_CORE_RANGE} in this environment"
+                + (
+                    ", run the agent once to provision a managed MemPalace runtime, "
+                    "or set memory.enabled: false"
+                    if memory_on and runtime.source in {"cli", MANAGED_RUNTIME_SOURCE}
+                    else (", or set memory.enabled: false" if memory_on else "")
+                )
+            )
+        ),
     )
 
     _, doc = load_config_doc(str(config_path) if config_path else None)

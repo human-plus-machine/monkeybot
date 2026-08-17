@@ -29,7 +29,7 @@ from monkeybot.core.attachments.store import (
     UnsupportedAttachmentTypeError,
 )
 from monkeybot.core.logging_utils import kv
-from monkeybot.core.runtime.context_budget import summarization_trigger_ratio_from_env
+from monkeybot.core.runtime.context_budget import SUMMARY_TRIGGER_RATIO
 from monkeybot.core.runtime.events import QueuedInputAccepted, event_to_json
 from monkeybot.core.runtime.input_admission import AdmissionQueueFullError, FollowUpItem
 from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService
@@ -39,10 +39,12 @@ from .loop_port import LoopPort, UsagePort
 from .models import (
     APIError,
     AdmissionAcceptedResponse,
+    AgentUsageResponse,
     AttachmentUploadResponse,
     CancelRequest,
     CreateSessionRequest,
     CreateSessionResponse,
+    DeleteSessionResponse,
     ElicitationPOST,
     FrontendToolResultPOST,
     HealthResponse,
@@ -183,7 +185,14 @@ def _schedule_turn(
                 session_id=session_id,
             )
 
-    asyncio.create_task(_turn())
+    task = asyncio.create_task(_turn())
+    bus.active_turn_task = task
+
+    def _clear(done: asyncio.Task[None]) -> None:
+        if bus.active_turn_task is done:
+            bus.active_turn_task = None
+
+    task.add_done_callback(_clear)
 
 
 async def _drain_follow_up(
@@ -380,7 +389,7 @@ class _StaticUsagePort:
             cw = max(1, int(cap_raw))
         except ValueError:
             cw = 200_000
-        st = max(1, int(cw * summarization_trigger_ratio_from_env()))
+        st = max(1, int(cw * SUMMARY_TRIGGER_RATIO))
         return {
             "session_id": session_id,
             "turns": 0,
@@ -398,6 +407,22 @@ class _StaticUsagePort:
             "context_window_tokens": cw,
         }
 
+    async def agent_usage(self, *, since: str | None) -> dict[str, Any]:
+        _ = since
+        return {
+            "turns": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cached_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_creation_tokens": 0,
+            "cost_usd": 0.0,
+            "period_start": 0,
+            "period_end": 0,
+            "by_model": [],
+            "by_day": [],
+        }
+
 
 async def _ping_loop(bus: SessionBus) -> None:
     """Emit `: ping N` heartbeats every 0.5s until cancelled."""
@@ -409,6 +434,23 @@ async def _ping_loop(bus: SessionBus) -> None:
             await bus.publish_comment(format_ping(n))
     except asyncio.CancelledError:
         raise
+
+
+def _validate_since(since: str | None, request_id: str) -> None:
+    """Reject a malformed ``since`` query param instead of silently ignoring it.
+
+    ``since`` is expected to be a unix-ms timestamp; anything else (e.g. a
+    negative number, empty string, or non-numeric text) would otherwise be
+    swallowed by the downstream ``str.isdigit()`` check and cause the filter
+    to be silently dropped rather than surfacing the caller's mistake.
+    """
+    if since is not None and not since.isdigit():
+        raise APIError(
+            400,
+            "BAD_REQUEST",
+            "`since` must be a non-negative integer (unix ms)",
+            request_id,
+        )
 
 
 def _parse_last_event_id(request: Request) -> int | None:
@@ -428,7 +470,7 @@ def _workspace_api_enabled() -> bool:
 
 
 def _api_workspace_root() -> Path:
-    """Workspace root for listing/reads; aligned with :func:`resolve_agent_workspace_root`."""
+    """Workspace root for listing/reads from ``paths.workspace_root`` in monkeybot.yaml."""
     return resolve_agent_workspace_root()
 
 
@@ -472,7 +514,7 @@ def create_app(
 
     For tests, pass FakeLoopPort / custom UsagePort. Story 8 wires the real loop.
     """
-    reg = registry or SessionRegistry()
+    reg = registry or SessionRegistry(workspace_root=resolve_agent_workspace_root())
     loop = loop_port or _default_loop_port(reg)
     usage = usage_port or _StaticUsagePort()
 
@@ -514,6 +556,12 @@ def create_app(
         """Create a session and its event bus."""
         created_at_ms = int(time.time() * 1000)
         sid = body.session_id or str(uuid.uuid4())
+        if body.session_id:
+            from monkeybot.core.persistence.thread_summary import reserved_thread_id_error
+
+            error_message = reserved_thread_id_error(sid)
+            if error_message is not None:
+                raise APIError(400, "BAD_REQUEST", error_message, uuid.uuid4().hex)
         session_provider = None
         session_model = None
         if body.model_provider or body.model_name:
@@ -550,18 +598,23 @@ def create_app(
             ) from None
         return CreateSessionResponse(session_id=sid, created_at=created_at_ms)
 
-    @api.delete("/sessions/{session_id}", status_code=204)
+    @api.delete("/sessions/{session_id}", response_model=DeleteSessionResponse)
     async def delete_session(
         session_id: str,
         reg_dep: SessionRegistry = Depends(get_registry),
-    ) -> Response:
+    ) -> DeleteSessionResponse:
         """End a session: cancel pending work and free its in-process state.
 
-        Idempotent — deleting an unknown or already-deleted session_id is a no-op
-        204 rather than a 404, since the end state (no session) is identical.
+        Idempotent — deleting an unknown or already-deleted session_id returns
+        ``deleted=false`` rather than a 404, since the end state (no session) is
+        identical. When transcripts were enabled for the session, runs offline
+        analysis and returns ``transcript_report_dir``.
         """
-        reg_dep.remove(session_id)
-        return Response(status_code=204)
+        result = await reg_dep.remove_async(session_id)
+        return DeleteSessionResponse(
+            deleted=result.deleted,
+            transcript_report_dir=result.transcript_report_dir,
+        )
 
     @api.post("/sessions/{session_id}/reply", response_model=ReplyResponse)
     async def post_reply(
@@ -969,6 +1022,7 @@ def create_app(
         reg_dep: SessionRegistry = Depends(get_registry),
     ) -> SessionUsageResponse:
         """Return token/cost aggregates for the session (UsagePort backend)."""
+        _validate_since(since, uuid.uuid4().hex)
         if reg_dep.get(session_id) is None:
             raise APIError(
                 404,
@@ -979,6 +1033,17 @@ def create_app(
         usage_ref: UsagePort = request.app.state.usage
         raw = await usage_ref.session_usage(session_id, since=since)
         return SessionUsageResponse.model_validate(raw)
+
+    @api.get("/usage", response_model=AgentUsageResponse)
+    async def get_agent_usage(
+        request: Request,
+        since: str | None = None,
+    ) -> AgentUsageResponse:
+        """Return agent-wide totals and spend split by model / UTC day."""
+        _validate_since(since, uuid.uuid4().hex)
+        usage_ref: UsagePort = request.app.state.usage
+        raw = await usage_ref.agent_usage(since=since)
+        return AgentUsageResponse.model_validate(raw)
 
     @api.get("/api/workspace/tree")
     async def workspace_tree(
@@ -1072,7 +1137,7 @@ def create_app(
         request: Request,
         limit: int = 200,
     ) -> dict[str, Any]:
-        """Return persisted user/assistant text for one chat thread."""
+        """Return persisted chat turns for one thread (user/assistant/thinking/tool)."""
         if not _chat_history_api_enabled():
             raise APIError(
                 404,
@@ -1087,15 +1152,56 @@ def create_app(
         messages = await backend.history().load(session_id.strip(), limit=cap)
         return {
             "session_id": session_id,
-            "messages": messages_to_wire(messages),
+            "messages": messages_to_wire(messages, thread_id=session_id.strip()),
         }
+
+    @api.delete("/api/chat-history/{session_id}")
+    async def chat_history_delete(
+        session_id: str,
+        request: Request,
+    ) -> dict[str, bool]:
+        """Clear one transcript and any backend-specific thread summary.
+
+        The ``deleted`` response is an idempotent wipe acknowledgment, not an
+        indication that a persisted thread previously existed.
+        """
+        if not _chat_history_api_enabled():
+            raise APIError(
+                404,
+                "NOT_FOUND",
+                "Chat history API is disabled",
+                uuid.uuid4().hex,
+            )
+        backend = _storage_backend(request)
+        thread_id = session_id.strip()
+        try:
+            await backend.history().reset(thread_id, [])
+        except Exception:
+            logger.exception(
+                "chat history delete failed %s",
+                kv(session_id=thread_id),
+            )
+            raise
+        logger.info("chat history deleted %s", kv(session_id=thread_id))
+        return {"deleted": True}
 
     app.include_router(api)
     app.include_router(build_scheduler_router(loop_port=loop, registry=reg))
 
     @app.get("/health", response_model=HealthResponse)
-    async def health() -> HealthResponse:
+    async def health(request: Request) -> HealthResponse:
         """Liveness probe without authentication."""
-        return HealthResponse(status="ok", version="2.0.0")
+        raw = getattr(request.app.state, "memory_status", "unknown")
+        memory = cast(
+            Literal["enabled", "disabled", "unavailable", "unknown"],
+            raw if raw in ("enabled", "disabled", "unavailable", "unknown") else "unknown",
+        )
+        detail = getattr(request.app.state, "memory_detail", None)
+        return HealthResponse(
+            status="ok",
+            version="2.0.0",
+            memory=memory,
+            memory_detail=detail if isinstance(detail, str) else None,
+        )
 
     return app

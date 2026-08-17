@@ -2,6 +2,10 @@
 
 The agent loop appends :func:`harness_fixed_context` after the operator-authored
 base prompt (AGENT.md) so tool/MCP protocol text lives in code, not in the bot file.
+
+Tool names, parameters, and when-to-use guidance live in the JSON ``tools`` payload
+(``ToolDef.to_model_schema()``). This fragment is protocol + paths only — not a
+second catalog of the same tools.
 """
 
 import os
@@ -13,6 +17,7 @@ HARNESS_TOOL_CALL_PROTOCOL = """
 - After tool results are returned to you, your next response MUST be natural-language text that addresses the user's request using those results. Do not return another empty turn.
 - If you have nothing more to do, give a short final answer; do not stay silent.
 - **Evidence rule:** Never produce a substantive answer about content you were supposed to fetch but could not. If every tool path to that content failed or errored, tell the user what blocked you and what they need to supply — do not synthesize, guess, or hallucinate the missing content.
+- **Path rule:** Never emit a workspace file path (including `Evidence:` lines) you have not confirmed via `read_file` / `glob` this session — a `search` hit alone is a lead, not confirmation. If the path is unknown, say `unknown` — do not guess filenames.
 - **Fulfillment rule:** When the user asks for a file or code change and the relevant tools are available, use them. Do not answer with only pasted code and manual save instructions."""
 
 
@@ -27,62 +32,41 @@ _RUN_COMMAND_EXEC_NOTE_SANDBOX = (
 
 _HARNESS_BODY = """## monkeybot harness (fixed)
 
-This block is injected by the host every turn. Prefer the **active tool list** the model receives over any stale summary here.
-
-When workspace tools (`read_file`, `write_file`, `run_command`, …) appear in that list, you **have a writable workspace** — not a read-only chat window. Fulfill file and code requests with tools; do not paste full artifacts and instruct the user to save manually unless they explicitly asked to see code in chat.
-
-### Core built-in tools (when present in the active tool list)
-- `read_file` / `write_file` / `replace_in_file` / `glob` / `grep` / `apply_patch` — paths are **workspace-relative** under the workspace root below. **`glob`** lists matching files (prefer over `run_command` + `ls`). **`grep`** searches file contents with a regex (prefer over `run_command` + `grep`). **`apply_patch`** applies a multi-file Codex-style patch (Add / Update / Delete / Move) fail-closed. Do not substitute a code block in chat for a file deliverable.
-- `search_memory` — keyword search under the configured memory directory; prefer this over shell commands for any memory lookup.
-- `list_skills` — resolves the skills root path for installed skills listed under `## Skills` below; read each skill's `SKILL.md` under that root for procedure.
-- `run_command` — allowlisted shell with optional `timeout` (seconds). {run_command_exec_note} Shell starts in **workspace root**; use the paths listed under Runtime paths below — do NOT guess directory names. `cd` is a shell builtin and cannot be used as a bare command; use `bash -c "cd <dir> && <cmd>"` instead. Pass **`argv` as a list** with the binary first (e.g. `{{"argv": ["ls", "."]}}`); do not pass `{{"command": "ls -R", "args": []}}` — that treats `ls -R` as the binary name.
-- `enable_mcp` / `disable_mcp` — connect or drop a server declared in mcp.json by name (e.g. `browser`). Prefer `enable_mcp` over inventing `add_mcp_server` command/args for known servers. New tools appear on the **next model step this turn**.
-- `add_mcp_server` / `remove_mcp_server` — ad-hoc stdio MCP connect/disconnect when the server is not in mcp.json; same next-step refresh.
-- `mcp_status` — lifecycle status for catalogued/connected/failed/needs_auth/disabled servers.
-- `list_mcp_resources` / `list_mcp_resource_templates` / `read_mcp_resource` — browse and read MCP resources (server must be connected; use `enable_mcp` first when catalogued).
-- `list_mcp_prompts` / `get_mcp_prompt` — list and fetch MCP prompt templates from connected servers.
-{catalog_mcp_line}{web_search_line}{task_line}
-### Workspace deliverables
-- **New file or full rewrite** → `write_file`.
-- **Targeted change to an existing file** → `read_file` then `replace_in_file` (unique match; light fuzzy fallbacks; optional `replace_all`).
-- **Multi-file or multi-hunk edit** → `apply_patch` with a Codex-style `*** Begin Patch` … `*** End Patch` envelope (Add / Update / Delete / Move); fail-closed.
-- Tell the user the workspace-relative path when done.
-- **Do not claim** you lack filesystem access, cannot touch the user's machine, or are limited to "chat-only" output when workspace file tools are in the active tool list.
-- Chat text is for answers and brief excerpts — not a stand-in for a file the user asked you to produce.
+This block is injected by the host every turn. Prefer the **active JSON tool list** for names, parameters, and when-to-use guidance.
 
 ### Built-in tool errors (recovery)
-- A tool **failed** whenever its response contains `ok: false` (or `is_error`), even if the call itself "succeeded" (e.g. `run_command` returns `exit_code != 0` with an `ok:false` JSON body in `stdout`). Read the result; do not treat a non-empty response as success.
-- Failed built-in tools often return **JSON** with `ok: false`, `error_kind` (`policy` | `validation` | `runtime`), `message`, and `hint`.
-- If `error_kind` is **policy** (e.g. `run_command` blocked), **do not** retry the identical call; change the command or path per `hint` and the lists in `details`, then retry **once** after a single fix.
-- If `error_kind` is **validation**, fix the argument shape (see `details.example`), then retry once.
-- If `error_kind` is **runtime** (the command/tool ran but failed — e.g. missing config, missing env var, bad exit code, script error), **do not** re-run the identical call. The same inputs will produce the same failure. Either fix the underlying cause if you can act on it, or stop and tell the user exactly what is missing (e.g. an env var, project id, or credential) and what they must set.
-- **No-repeat rule (applies to every tool):** never issue a tool call with the same name and same arguments that already failed this turn. A retry is only allowed after you have changed the command, arguments, or path in response to the error. If you cannot change anything, stop retrying and report the blocker in plain text.
+- A tool **failed** whenever its response contains `ok: false` (or `is_error`). Read the result; a non-empty response is not success.
+- Failed built-in tools often return JSON with `ok: false`, `error_kind` (`policy` | `validation` | `runtime`), `message`, and `hint`.
+- **policy:** do not retry the identical call; change command or path per `hint`, then retry once.
+- **validation:** fix the argument shape (see `details.example`), then retry once.
+- **runtime:** do not re-run the identical call. Fix the cause if you can, or stop and tell the user what is missing.
+- **No-repeat rule:** never issue a tool call with the same name and same arguments that already failed this turn. If you cannot change anything, stop and report the blocker in plain text.
+- **Spill / partial artifacts:** on timeout, truncation, interrupt, or any result that mentions a spill path / `details.partial_output_path` / `partial_paths`, **`read_file` that path** (or the spill inventory under `.monkeybot/`) **before** changing args or re-issuing the tool.
 
 ### Runtime paths
-- workspace root: `{workspace_root}`
-- memory storage: `{memory_storage_uri}` — always use `search_memory` to query; only use this URI/path directly in `run_command` for low-level inspection.
+- workspace root (cwd): `{workspace_root}` — file and shell tools start here; `run_command` may set a workspace-relative `cwd`.
+- `run_command`: {run_command_exec_note}
+- runtime (inside workspace): `.monkeybot/` — spill, knowledge index, transcripts. Not memory.
+{memory_paths_line}- workspace `data/` (if present) is ordinary project files — **not** the memory store.
+- **Long multi-item tasks:** when a task has more than ~10 enumerable items (question lists, checklists), write incremental results to a workspace file early and update it as you go — context may be compacted mid-task.
 
-### MCP tools
-- Names look like `server__tool` (double underscore).
-- Heavy MCP servers are **on-demand**: call `enable_mcp("name")` before using their `server__*` tools when they are not yet in the active tool list.
-- For server-published context (not callable tools), use `list_mcp_resources` / `read_mcp_resource` and `list_mcp_prompts` / `get_mcp_prompt` after the server is connected. Check `mcp_status` when unsure.
-- MCP tool errors are returned as plain error text (not structured JSON). Any response containing an HTTP error code (4xx / 5xx), "not found", "unauthorized", "forbidden", "permission denied", or similar access/availability signals means the tool **did not return usable data**.
-- When an MCP tool fails: state what failed in one sentence, then stop — do **not** fabricate, infer, or summarize content that the tool was supposed to fetch. If a fallback tool is available and meaningfully different, try it once; otherwise tell the user what is needed to proceed (e.g. correct credentials, a public URL, pasting the content directly).
+### MCP
+- Names look like `server__tool` (double underscore). Call `enable_mcp` before using a server's tools when they are not yet in the active list; resource/prompt tools appear only after `enable_mcp`.
+{catalog_mcp_line}- MCP errors are plain text (not structured JSON). HTTP 4xx/5xx, "not found", "unauthorized", "forbidden", or similar means the tool **did not return usable data** — state what failed; do not fabricate content.
+- Call `enable_loops` before scheduled-loop tools appear.
 
 ### Skills
-- Installed skill names are listed under `## Skills` in this prompt. When a task matches one, use `list_skills` to get the skills root, then `read_file` on that skill's `SKILL.md` for procedure before running commands or steps it documents."""
+- Installed skill names are listed under `## Skills` in this prompt. When a task matches one, use `list_skills` to get the skills root, then `read_file` that skill's `SKILL.md` before following it."""
 
 
-_TASK_LINE = (
-    "- `task` — subprocess subagent with the same workspace, memory, and MCP configuration; "
-    "pass `subagent_type` to select a named persona (see Subagent personas below). "
-    "Returns JSON (summary, errors, usage). Nested `task` is disabled inside a subagent.\n"
-)
-
-_WEB_SEARCH_LINE = (
-    "- `web_search` — search the web for current information; "
-    "returns titles, URLs, and text snippets.\n"
-)
+def _memory_paths_line(*, memory_on: bool, memory_storage_uri: str) -> str:
+    if memory_on:
+        return (
+            f"- memory storage: `{memory_storage_uri}` — MemPalace root (verbatim conversation "
+            "drawers). **Outside** the workspace root. Prefer `mempalace search` via "
+            "`run_command` for past-session recall. Do not `read_file` palace paths.\n"
+        )
+    return "- memory storage: disabled — do not call `mempalace search` or read palace paths.\n"
 
 
 # Always-on terse-emission guidance (Levers 1-2 of the honey writing style).
@@ -150,44 +134,46 @@ def _subagent_personas_block(personas: Sequence[tuple[str, str]]) -> str:
 def harness_fixed_context(
     *,
     include_task_tool: bool,
-    include_web_search: bool = False,
     workspace_root: str = "(not set)",
     memory_storage_uri: str = "(not set)",
     run_command_opensandbox: bool = False,
     subagent_personas: Sequence[tuple[str, str]] | None = None,
     emission_style: bool = False,
+    memory_on: bool = True,
     catalog_mcp_servers: Sequence[str] | None = None,
 ) -> str:
-    """Runtime-owned description of core tools, paths, MCP naming, and strict tool-call rules.
+    """Runtime-owned protocol, paths, MCP naming, and strict tool-call rules.
 
+    Tool catalogs belong in the JSON ``tools`` payload, not this markdown.
     ``workspace_root`` and ``memory_storage_uri`` are injected once at
     context-build time so the model always uses correct paths in shell commands.
-    ``include_web_search`` should be True when a web search backend is active.
     ``run_command_opensandbox`` should match whether ``run_command`` is routed through
     OpenSandbox (same signal as ``SandboxConfig.from_env().enabled``).
     ``subagent_personas`` lists configured named subagent types for the parent orchestrator.
     ``emission_style`` opts in the terse emission-guidance block (env
     ``MONKEYBOT_EMISSION_STYLE``); the dense agent-to-agent sub-block is also gated
     on ``include_task_tool`` so it only appears when the ``task`` tool is active.
+    ``memory_on`` selects the memory-storage path line (URI vs disabled).
     ``catalog_mcp_servers`` lists mcp.json servers available via ``enable_mcp`` but not
     connected until the model activates them.
     """
-    exec_note = _RUN_COMMAND_EXEC_NOTE_SANDBOX if run_command_opensandbox else _RUN_COMMAND_EXEC_NOTE_HOST
+    exec_note = (
+        _RUN_COMMAND_EXEC_NOTE_SANDBOX if run_command_opensandbox else _RUN_COMMAND_EXEC_NOTE_HOST
+    )
     catalog = [n.strip() for n in (catalog_mcp_servers or ()) if n and str(n).strip()]
     if catalog:
         names = ", ".join(f"`{n}`" for n in catalog)
-        catalog_mcp_line = (
-            f"- Configured MCP servers (call `enable_mcp` before use): {names}.\n"
-        )
+        catalog_mcp_line = f"- Configured MCP servers (call `enable_mcp` before use): {names}.\n"
     else:
         catalog_mcp_line = ""
     body = _HARNESS_BODY.format(
         run_command_exec_note=exec_note,
         catalog_mcp_line=catalog_mcp_line,
-        web_search_line=_WEB_SEARCH_LINE if include_web_search else "",
-        task_line=_TASK_LINE if include_task_tool else "",
+        memory_paths_line=_memory_paths_line(
+            memory_on=memory_on,
+            memory_storage_uri=memory_storage_uri,
+        ),
         workspace_root=workspace_root,
-        memory_storage_uri=memory_storage_uri,
     )
     personas_block = _subagent_personas_block(subagent_personas or ())
     emission_block = _emission_section(

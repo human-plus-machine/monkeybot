@@ -109,6 +109,54 @@ Call the `browser_stop` MCP tool when browsing is done — cloud sessions bill u
 
 For syncing cookies from a local Chrome profile into cloud browsers, see [browser-harness profile-sync](https://github.com/browser-use/browser-harness/blob/main/interaction-skills/profile-sync.md).
 
+### 4. AWS Bedrock AgentCore Browser
+
+AgentCore's managed browser sandbox, driven directly via Playwright over a
+SigV4-signed CDP WebSocket — bypasses `browser-harness` entirely for this mode
+(browser-harness 0.1.x cannot send the signed headers AgentCore's Automation
+endpoint requires). This backend is **only used when `BROWSER_BACKEND=agentcore`
+is set and no explicit `BU_CDP_WS`/`BU_CDP_URL` is configured** — an explicit
+CDP endpoint always wins, even with `BROWSER_BACKEND=agentcore` set.
+
+**Not in this version:** Live View, custom browsers, or S3 session recording.
+Only the AWS-managed system browser (`aws.browser.v1`) over the Automation
+(CDP) endpoint is supported.
+
+1. AWS credentials configured for the target account (`aws sso login`, or any
+   standard credential source `boto3` picks up) with the AgentCore Browser
+   permissions from [AWS's browser tool docs](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/browser-tool.html).
+2. Install the extra: `uv sync --extra agentcore --dev` (adds `bedrock-agentcore`,
+   `boto3`, `playwright` — no `playwright install` needed; this backend only
+   connects to AgentCore's already-running browser via `connect_over_cdp`, it
+   never launches a local Chromium).
+3. Configure env:
+
+```json
+"env": {
+  "BROWSER_BACKEND": "agentcore",
+  "AWS_REGION": "us-east-1",
+  "BROWSER_MCP_PLAYBOOKS_DIR": "${MONKEYBOT_WORKSPACE_ROOT}/browser/playbooks",
+  "BROWSER_MCP_SCREENSHOTS_DIR": "${MONKEYBOT_WORKSPACE_ROOT}/browser/Screenshots"
+}
+```
+
+Optionally set `AGENTCORE_BROWSER_ID` to use a custom browser identifier
+instead of the default `aws.browser.v1`. Session TTL is left at whatever the
+`bedrock-agentcore` SDK/service defaults to — not configured by this backend.
+
+Call `browser_stop` when browsing is done — like Browser Use Cloud, AgentCore
+sessions bill until stopped, and the same `MCPClient.disconnect()` safety net
+described above applies here too.
+
+Manual smoke test (not part of `pytest`):
+
+```bash
+cd integrations/browser-mcp
+uv sync --extra agentcore --dev
+AWS_PROFILE=... AWS_REGION=us-east-1 BROWSER_BACKEND=agentcore \
+  uv run python scripts/agentcore_smoke.py
+```
+
 ---
 
 ## Environment variables
@@ -119,6 +167,9 @@ For syncing cookies from a local Chrome profile into cloud browsers, see [browse
 | `BU_CDP_WS` | Direct CDP WebSocket (cloud or custom) |
 | `BU_NAME` | Daemon name; separate values for parallel browser sessions |
 | `BROWSER_USE_API_KEY` | Browser Use Cloud auth |
+| `BROWSER_BACKEND` | Set to `agentcore` to use AWS Bedrock AgentCore Browser (only when `BU_CDP_URL`/`BU_CDP_WS` are unset) |
+| `AWS_REGION` / `AWS_PROFILE` | AgentCore backend: target region and credential profile |
+| `AGENTCORE_BROWSER_ID` | AgentCore backend: browser identifier (default `aws.browser.v1`) |
 | `BROWSER_MCP_PLAYBOOKS_DIR` | Playbooks directory (agent-written site notes) |
 | `BROWSER_MCP_SCREENSHOTS_DIR` | Screenshot output directory (default: `{workspace}/browser/Screenshots`) |
 
@@ -151,7 +202,7 @@ This is the default, preferred workflow: no image tokens, no coordinate-guessing
 
 ### Fallback: screenshots + coordinates
 
-`browser_screenshot` + `browser_click(x, y)` is a **last-resort fallback**, for cases `browser_get_elements` can't handle: canvas-based apps, heavy shadow-DOM UIs, drag-and-drop, or visually confirming layout/rendering. `browser_screenshot` saves a PNG under **`workspace/browser/Screenshots/`** and returns JSON with a workspace-relative `path` (for `render_image` on vision models), `screenshots_dir`, url, title, and viewport — not inline base64 image bytes. This keeps tool results small for text-only models (Ollama) and avoids context-window blowups. Text-only models should use `browser_get_elements` (or `browser_js` for ad hoc extraction) instead of screenshots entirely, since they can't view images.
+`browser_screenshot` + `browser_click(x, y)` is a **last-resort fallback**, for cases `browser_get_elements` can't handle: canvas-based apps, heavy shadow-DOM UIs, drag-and-drop, or visually confirming layout/rendering. `browser_screenshot` saves a PNG under **`workspace/browser/Screenshots/`** and returns JSON with a workspace-relative `path` (for `load_file` on vision models), `screenshots_dir`, url, title, and viewport — not inline base64 image bytes. This keeps tool results small for text-only models (Ollama) and avoids context-window blowups. Text-only models should use `browser_get_elements` (or `browser_js` for ad hoc extraction) instead of screenshots entirely, since they can't view images.
 
 `browser-harness` is imported lazily on first browser tool call so listing MCP tools does not require Chrome to be running.
 

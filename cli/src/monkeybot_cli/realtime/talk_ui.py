@@ -34,7 +34,7 @@ from monkeybot_cli.runtime_python import (
     COMBINED_GATEWAY_MODULE,
     DEFAULT_PORT,
     gateway_argv,
-    resolve_runtime_python,
+    prepare_runtime_python,
 )
 
 
@@ -78,6 +78,7 @@ def _spawn_combined_gateway(
         env["MONKEYBOT_CONFIG"] = str(config_path)
     env["PORT"] = str(port)
     env.setdefault("LOG_LEVEL", "error")
+    env.setdefault("MONKEYBOT_TRANSCRIPT_ENABLED", "1")
     log_file = tempfile.NamedTemporaryFile(
         mode="w+",
         prefix="monkeybot-gateway-",
@@ -87,7 +88,10 @@ def _spawn_combined_gateway(
         errors="replace",
     )
     proc = subprocess.Popen(
-        gateway_argv(resolve_runtime_python(agent_root), module=COMBINED_GATEWAY_MODULE),
+        gateway_argv(
+            prepare_runtime_python(agent_root, config_path),
+            module=COMBINED_GATEWAY_MODULE,
+        ),
         env=env,
         cwd=agent_root,
         stdout=subprocess.DEVNULL,
@@ -214,6 +218,7 @@ def run_talk_ui_session(
                 spawned_gateway=spawned is not None,
                 verbose=verbose,
                 controller=controller,
+                config_path=config_path,
             )
         return asyncio.run(
             _plain_talk_session(controller=controller, spawned_gateway=spawned is not None)

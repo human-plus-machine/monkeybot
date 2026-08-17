@@ -2,13 +2,43 @@
 
 from __future__ import annotations
 
+import json
+
+import pytest
+
 from monkeybot.core.tools.core_tool_executor import _parse_run_command
+from monkeybot.core.tools.inspector import coerce_run_command_argv
 
 
 def test_parse_run_command_argv_list() -> None:
     cmd, argv = _parse_run_command({"argv": ["ls", "-R", "."]})
     assert cmd == "ls"
     assert argv == ["-R", "."]
+
+
+def test_parse_run_command_argv_json_string() -> None:
+    """LLM quirk: argv sent as a JSON-encoded list string instead of a real array."""
+    raw = json.dumps(["git", "-C", "repos/foo", "grep", "-n", "retry", "file.py"])
+    cmd, argv = _parse_run_command({"argv": raw})
+    assert cmd == "git"
+    assert argv == ["-C", "repos/foo", "grep", "-n", "retry", "file.py"]
+
+
+def test_parse_run_command_argv_invalid_string_raises() -> None:
+    with pytest.raises(ValueError, match="argv must be an array"):
+        _parse_run_command({"argv": "git status"})
+
+
+def test_coerce_run_command_argv_list_and_json_string() -> None:
+    assert coerce_run_command_argv(["ls", "."]) == ["ls", "."]
+    assert coerce_run_command_argv('["grep", "-n", "foo", "a.py"]') == [
+        "grep",
+        "-n",
+        "foo",
+        "a.py",
+    ]
+    assert coerce_run_command_argv(None) is None
+    assert coerce_run_command_argv([]) is None
 
 
 def test_parse_run_command_command_with_args() -> None:

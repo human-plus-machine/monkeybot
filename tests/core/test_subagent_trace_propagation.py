@@ -16,14 +16,13 @@ from opentelemetry import propagate, trace
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 from monkeybot.core.context import TurnContext
-from monkeybot.core.llm.provider import Done, TextDelta, ToolCall
+from monkeybot.core.llm.provider import ToolCall
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.runtime.events import TurnComplete, UsageTotals
 from monkeybot.core.subagents.subagent_proto import SubagentEnvelope
-from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.tools.types import unwrap_tool_execution_result
-from monkeybot.core.workspace import create_workspace_storage
+from tests.core.memory.helpers import make_memory_subsystem
 from monkeybot.observability.propagation import inject_traceparent
 from monkeybot.observability.spans import span_subagent, span_tool
 
@@ -31,17 +30,7 @@ _W3C_TRACEPARENT = re.compile(r"^00-[0-9a-f]{32}-[0-9a-f]{16}-0[1-9a-f]$")
 
 
 def _mem_sub(root: Path) -> MemorySubsystem:
-    root.mkdir(exist_ok=True)
-    uri = "local://" + str(root.resolve())
-    fake = ScriptedFakeProvider(
-        [TextDelta(text="x"), Done()],
-    )
-    return MemorySubsystem(
-        storage=create_workspace_storage(uri),
-        provider=fake,
-        model="gemini-2.5-flash",
-        memory_uri=uri,
-    )
+    return make_memory_subsystem(root)
 
 
 class _NoMCP:
@@ -354,7 +343,7 @@ def _install_worker_mocks(
     backend.open = AsyncMock()
     backend.close = AsyncMock()
     backend.history.return_value = MagicMock()
-    monkeypatch.setattr(subagent_worker, "create_storage_backend", lambda _url: backend)
+    monkeypatch.setattr(subagent_worker, "create_storage_backend", lambda _url, **_kw: backend)
 
     mcp = MagicMock()
     mcp.load_from_config = AsyncMock()
@@ -519,7 +508,7 @@ async def test_worker_completes_without_memory_uri(
     backend.open = AsyncMock()
     backend.close = AsyncMock()
     backend.history.return_value = MagicMock()
-    monkeypatch.setattr(subagent_worker, "create_storage_backend", lambda _url: backend)
+    monkeypatch.setattr(subagent_worker, "create_storage_backend", lambda _url, **_kw: backend)
 
     mcp = MagicMock()
     mcp.load_from_config = AsyncMock()
@@ -534,14 +523,6 @@ async def test_worker_completes_without_memory_uri(
         return _ctx()
 
     monkeypatch.setattr(subagent_worker, "build_context", _fake_build_context)
-
-    storage_calls: list[str] = []
-
-    def _boom_storage(uri: str) -> object:
-        storage_calls.append(uri)
-        raise AssertionError("create_workspace_storage should not run without memory URI")
-
-    monkeypatch.setattr(subagent_worker, "create_workspace_storage", _boom_storage)
 
     async def _fake_run_loop(*_a: object, **_k: object):
         yield TurnComplete(
@@ -574,4 +555,3 @@ async def test_worker_completes_without_memory_uri(
     await subagent_worker._async_main()
 
     assert seen_memory == [None]
-    assert storage_calls == []

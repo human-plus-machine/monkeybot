@@ -9,8 +9,15 @@ API key, and provider name (HuggingFace, Ollama).
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import contextlib
+import hashlib
+import io
 import json
 import logging
+import random
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
@@ -26,6 +33,8 @@ from monkeybot.core.llm.provider import (
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.types.content_blocks import (
     ContentBlock,
+    File,
+    Image,
     RedactedThinking,
     Text,
     Thinking,
@@ -62,11 +71,137 @@ def _system_prompt_from_message(message: Message) -> str:
     return "\n\n".join(texts)
 
 
-def _flatten_tool_response_text(block: ToolResponse) -> str:
+def _file_label(block: Image | File) -> str:
+    """Shared path/filename lookup for the placeholder/extracted-text builders below."""
+    meta = block.metadata or {}
+    label = meta.get("path") or meta.get("filename")
+    return str(label) if label else ""
+
+
+def _media_tool_placeholder(kind: str, block: Image | File) -> str:
+    """Text stand-in for image/file tool results on text-only OpenAI-compat models.
+
+    Chat Completions tool messages are text-only; pixels are already delivered to
+    the UI via ``ImageBlock`` SSE. Keep a short path/filename hint for the model.
+    """
+    label = _file_label(block)
+    label_bit = f", path={label}" if label else ""
+    return (
+        f"[{kind} loaded: mime={block.mime_type}{label_bit}, "
+        f"~{len(block.data or '')} base64 chars — pixels omitted for this provider; "
+        "already shown in the UI. Describe this media from the user request or "
+        "generation prompt used this turn; do not invent a different subject from "
+        "memory or prior sessions.]"
+    )
+
+
+def _user_file_placeholder(block: File) -> str:
+    """Text stand-in for a user-attached file OpenAI-compat can't ingest.
+
+    Chat Completions has no document wire type. Unlike ``_media_tool_placeholder``
+    (tool-result media already streamed to the UI as pixels), the model has never
+    seen these bytes — say so plainly instead of inviting it to "describe" content
+    it was never given, which just prompts a hallucinated summary. Used when
+    extraction isn't applicable (non-PDF) or found no text (scanned/image-only PDF).
+    """
+    label = _file_label(block)
+    label_bit = f" ({label})" if label else ""
+    return (
+        f"[File attachment{label_bit}, mime={block.mime_type}: this provider cannot "
+        "read file contents over the chat API. Tell the user this attachment type "
+        "isn't supported here instead of guessing at its contents.]"
+    )
+
+
+_MAX_EXTRACTED_PDF_CHARS = 20_000
+_PDF_TEXT_CACHE_MAX = 32
+# Hash → extracted text (or None). Avoids lru_cache retaining full base64 keys.
+_PDF_TEXT_CACHE: OrderedDict[tuple[str, int], str | None] = OrderedDict()
+
+
+def _extract_pdf_text_sync(data_b64: str, max_chars: int) -> str | None:
+    """Best-effort text layer extraction. Returns None on any failure or no text.
+
+    Bytes are an untrusted user upload (may be corrupt, encrypted, or a scanned
+    image-only PDF with no text layer) — any of that is a normal "nothing to
+    extract" outcome, not a bug, so failures fall back to the caller's placeholder
+    rather than raising. Cache is keyed by content sha256 so repeated history walks
+    do not re-parse the same attachment or retain giant base64 cache keys.
+    """
+    from pypdf import PdfReader  # noqa: PLC0415
+
+    digest = hashlib.sha256(data_b64.encode("ascii", errors="ignore")).hexdigest()
+    cache_key = (digest, max_chars)
+    if cache_key in _PDF_TEXT_CACHE:
+        _PDF_TEXT_CACHE.move_to_end(cache_key)
+        return _PDF_TEXT_CACHE[cache_key]
+
+    try:
+        reader = PdfReader(io.BytesIO(base64.b64decode(data_b64)))
+    except Exception:
+        _log.warning("PDF extraction failed to open document", exc_info=True)
+        _PDF_TEXT_CACHE[cache_key] = None
+        _PDF_TEXT_CACHE.move_to_end(cache_key)
+        while len(_PDF_TEXT_CACHE) > _PDF_TEXT_CACHE_MAX:
+            _PDF_TEXT_CACHE.popitem(last=False)
+        return None
+
+    parts: list[str] = []
+    total = 0
+    for page in reader.pages:
+        try:
+            text = (page.extract_text() or "").strip()
+        except Exception:
+            _log.warning("PDF extraction failed on one page, skipping it", exc_info=True)
+            continue
+        if text:
+            parts.append(text)
+            total += len(text)
+        if total >= max_chars:
+            break
+    text = "\n\n".join(parts).strip()
+    result = text or None
+    _PDF_TEXT_CACHE[cache_key] = result
+    _PDF_TEXT_CACHE.move_to_end(cache_key)
+    while len(_PDF_TEXT_CACHE) > _PDF_TEXT_CACHE_MAX:
+        _PDF_TEXT_CACHE.popitem(last=False)
+    return result
+
+
+async def _extract_pdf_text(block: File, max_chars: int = _MAX_EXTRACTED_PDF_CHARS) -> str | None:
+    """Off-thread PDF text extraction so parsing never blocks the gateway's event loop."""
+    if block.mime_type != "application/pdf":
+        return None
+    text = await asyncio.to_thread(_extract_pdf_text_sync, block.data, max_chars)
+    if text and len(text) > max_chars:
+        text = text[:max_chars].rstrip() + "\n\n[... PDF text truncated ...]"
+    return text
+
+
+def _extracted_file_text(block: File, text: str) -> str:
+    label = _file_label(block)
+    label_bit = f" ({label})" if label else ""
+    return f"[File attachment{label_bit}, extracted text follows:]\n{text}"
+
+
+async def _user_file_content(block: File) -> str:
+    """Real extracted text when available, else the existing can't-read placeholder."""
+    extracted = await _extract_pdf_text(block)
+    if extracted:
+        return _extracted_file_text(block, extracted)
+    return _user_file_placeholder(block)
+
+
+async def _flatten_tool_response_text(block: ToolResponse) -> str:
     parts: list[str] = []
     for b in block.result:
         if isinstance(b, Text):
             parts.append(b.text)
+        elif isinstance(b, Image):
+            parts.append(_media_tool_placeholder("image", b))
+        elif isinstance(b, File):
+            extracted = await _extract_pdf_text(b)
+            parts.append(_extracted_file_text(b, extracted) if extracted else _media_tool_placeholder("file", b))
         else:
             raise ValueError(
                 f"unsupported ToolResponse block for OpenAI-compat: {type(b).__name__}"
@@ -74,12 +209,14 @@ def _flatten_tool_response_text(block: ToolResponse) -> str:
     return "".join(parts)
 
 
-def messages_to_openai(messages: Sequence[Message]) -> tuple[str | None, list[dict[str, Any]]]:
+async def messages_to_openai(
+    messages: Sequence[Message],
+) -> tuple[str | None, list[dict[str, Any]]]:
     """Split system prompt text vs OpenAI Chat messages (block-native)."""
     system_parts: list[str] = []
     out: list[dict[str, Any]] = []
 
-    def flush_user_blocks(buf: list[ContentBlock]) -> None:
+    async def flush_user_blocks(buf: list[ContentBlock]) -> None:
         if not buf:
             return
         if len(buf) == 1 and isinstance(buf[0], Text):
@@ -89,6 +226,19 @@ def messages_to_openai(messages: Sequence[Message]) -> tuple[str | None, list[di
         for item in buf:
             if isinstance(item, Text):
                 content.append({"type": "text", "text": item.text})
+            elif isinstance(item, Image):
+                # Text-only OpenAI-compat models/servers may reject image_url
+                # outright; that surfaces as a normal upstream error, not a
+                # crash here. No capability check — model vision support isn't
+                # known ahead of the request.
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{item.mime_type};base64,{item.data}"},
+                    }
+                )
+            elif isinstance(item, File):
+                content.append({"type": "text", "text": await _user_file_content(item)})
             else:
                 raise ValueError(
                     f"unsupported user content block for OpenAI-compat: {type(item).__name__}"
@@ -147,35 +297,38 @@ def messages_to_openai(messages: Sequence[Message]) -> tuple[str | None, list[di
         buf: list[ContentBlock] = []
         for block in m.content:
             if isinstance(block, ToolResponse):
-                flush_user_blocks(buf)
+                await flush_user_blocks(buf)
                 buf.clear()
                 out.append(
                     {
                         "role": "tool",
                         "tool_call_id": block.id,
-                        "content": _flatten_tool_response_text(block),
+                        "content": await _flatten_tool_response_text(block),
                     }
                 )
             else:
                 buf.append(block)
-        flush_user_blocks(buf)
+        await flush_user_blocks(buf)
 
     joined_system = "\n\n".join(system_parts).strip()
     return (joined_system or None, out)
 
 
 def openai_tools(tools: Sequence[ToolDef]) -> list[dict[str, Any]]:
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": t.name,
-                "description": t.description,
-                "parameters": t.input_schema,
-            },
-        }
-        for t in tools
-    ]
+    out: list[dict[str, Any]] = []
+    for t in tools:
+        schema = t.to_model_schema()
+        out.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": schema["name"],
+                    "description": schema["description"],
+                    "parameters": schema["input_schema"],
+                },
+            }
+        )
+    return out
 
 
 def openai_messages_token_count(encoding: Any, oai_messages: list[dict[str, Any]]) -> int:
@@ -205,12 +358,12 @@ def openai_tools_token_count(encoding: Any, tools: list[dict[str, Any]]) -> int:
     return len(encoding.encode(json.dumps(tools, ensure_ascii=False, default=str)))
 
 
-def count_openai_compat_input_tokens(
+async def count_openai_compat_input_tokens(
     encoding: Any,
     messages: Sequence[Message],
     tools: Sequence[ToolDef],
 ) -> int:
-    system, oai_messages = messages_to_openai(messages)
+    system, oai_messages = await messages_to_openai(messages)
     if system:
         oai_messages = [{"role": "system", "content": system}, *oai_messages]
     tool_defs = openai_tools(tools) if tools else []
@@ -220,6 +373,86 @@ def count_openai_compat_input_tokens(
 
 
 _STREAM_USAGE_OPTIONS: dict[str, bool] = {"include_usage": True}
+
+_RATE_LIMIT_MAX_ATTEMPTS = 3
+_RATE_LIMIT_BASE_DELAY_S = 1.0
+
+
+def _rate_limit_retry_delay(attempt: int) -> float:
+    """Exponential backoff with jitter: ~1s, ~2s, ~4s, … for attempts 1, 2, 3."""
+    base: float = _RATE_LIMIT_BASE_DELAY_S * (2 ** (attempt - 1))
+    jitter: float = random.uniform(0, 0.5)
+    return base + jitter
+
+# NVIDIA's free build.nvidia.com tier is low-throughput and returns its own
+# worker/quota text instead of a clean 429, so callers that fan out concurrent
+# requests (parallel tool calls, subagents) can self-inflict a rate limit. Cap
+# in-flight requests for providers with a known low tier; others are unbounded.
+_LOW_THROUGHPUT_PROVIDER_CONCURRENCY: dict[str, int] = {"nvidia": 4}
+# Keyed by (provider, event loop): a Semaphore is bound to the loop it waits on,
+# so reusing one across loops (repeated asyncio.run, per-test event loops) raises.
+_provider_semaphores: dict[tuple[str, asyncio.AbstractEventLoop], asyncio.Semaphore] = {}
+
+
+class ProviderRateLimitError(Exception):
+    """Raised when an upstream provider's own rate limit is hit and retries are exhausted.
+
+    ``str(self)`` is a user-facing message; the raw upstream error is chained via
+    ``__cause__`` (see ``raise ... from exc``) for logs, not shown to the user.
+    """
+
+    def __init__(self, provider: str, model: str, original: BaseException) -> None:
+        super().__init__(
+            f"{provider} is temporarily rate-limiting requests for model {model!r}. "
+            "Please wait a moment and try again."
+        )
+        self.provider = provider
+        self.model = model
+        self.original = original
+
+
+def is_rate_limit_error(exc: BaseException) -> bool:
+    """Return True when *exc* looks like an upstream rate-limit / capacity error.
+
+    Covers standard OpenAI-SDK 429s (``RateLimitError``) plus backends like NVIDIA
+    that return their own quota text (e.g. "ResourceExhausted: Worker local total
+    request limit reached (N/M)") without a clean 429 status.
+    """
+    try:
+        from openai import APIStatusError, RateLimitError  # noqa: PLC0415
+
+        if isinstance(exc, RateLimitError):
+            return True
+        if isinstance(exc, APIStatusError) and exc.status_code == 429:
+            return True
+    except ImportError:
+        pass
+    msg = str(exc).lower()
+    return any(
+        phrase in msg
+        for phrase in (
+            # NVIDIA's build.nvidia.com worker/quota text, e.g. "ResourceExhausted:
+            # Worker local total request limit reached (N/M)". Deliberately specific
+            # (not a bare "rate limit" substring) to avoid misclassifying unrelated
+            # errors that happen to mention rate limits in passing.
+            "resourceexhausted",
+            "worker local total request limit",
+            "too many requests",
+        )
+    )
+
+
+def _provider_semaphore(provider: str) -> asyncio.Semaphore | None:
+    # ponytail: entries never evicted when a loop closes (fine for a gateway
+    # process, which has one loop for its lifetime); add eviction if a caller
+    # starts creating many short-lived loops in one process.
+    limit = _LOW_THROUGHPUT_PROVIDER_CONCURRENCY.get(provider)
+    if limit is None:
+        return None
+    key = (provider, asyncio.get_running_loop())
+    if key not in _provider_semaphores:
+        _provider_semaphores[key] = asyncio.Semaphore(limit)
+    return _provider_semaphores[key]
 
 
 async def iter_openai_compat_stream(
@@ -338,7 +571,7 @@ async def count_input_tokens_tiktoken(
         enc = tiktoken.encoding_for_model(model)
     except KeyError:
         enc = tiktoken.get_encoding("cl100k_base")
-    return count_openai_compat_input_tokens(enc, msgs, tools)
+    return await count_openai_compat_input_tokens(enc, msgs, tools)
 
 
 async def stream_chat_completions_with_tool_fallback(
@@ -353,14 +586,18 @@ async def stream_chat_completions_with_tool_fallback(
     max_tokens: int,
     reasoning_effort: str | None = None,
 ) -> AsyncIterator[ProviderEvent]:
-    """Shared ``stream`` body for OpenAI-compat providers that retry without
-    tools when the upstream server rejects function calling (HuggingFace,
-    Ollama, …).
+    """Shared ``stream`` body for OpenAI-compat providers.
+
+    Retries without tools when the upstream server rejects function calling
+    (HuggingFace, Ollama, …). Also retries with backoff on rate-limit/capacity
+    errors (raw upstream body may not be a clean 429, e.g. NVIDIA's own
+    "ResourceExhausted" text) and caps in-flight concurrency per provider; see
+    ``is_rate_limit_error`` / ``_provider_semaphore``.
     """
     from openai import AsyncOpenAI  # noqa: PLC0415
 
     msgs = list(messages)
-    system, oai_messages = messages_to_openai(msgs)
+    system, oai_messages = await messages_to_openai(msgs)
     if system:
         oai_messages = [{"role": "system", "content": system}, *oai_messages]
 
@@ -377,34 +614,60 @@ async def stream_chat_completions_with_tool_fallback(
     if reasoning_effort is not None:
         kwargs["reasoning_effort"] = reasoning_effort
 
-    try:
-        async for event in iter_openai_compat_stream(
-            client,
-            kwargs,
-            provider=provider,
-            n_messages=len(messages),
-            n_tools=len(tools),
-        ):
-            yield event
-    except Exception as exc:
-        if tools and is_tool_unsupported_error(exc):
-            _log.warning(
-                "%s model %r does not support tool calling; retrying without tools. Error: %s",
-                provider,
-                model,
-                exc,
-            )
-            kwargs.pop("tools", None)
-            async for event in iter_openai_compat_stream(
-                client,
-                kwargs,
-                provider=provider,
-                n_messages=len(messages),
-                n_tools=0,
-            ):
-                yield event
-        else:
-            raise
+    n_tools = len(tools)
+    sem = _provider_semaphore(provider)
+    # Counts rate-limit failures only, independent of tool-unsupported hops
+    # (switching to a tools-less request shouldn't burn a rate-limit retry).
+    rate_limit_attempts = 0
+    while True:
+        yielded_any = False
+        retry_delay: float | None = None
+        async with sem if sem is not None else contextlib.nullcontext():
+            try:
+                async for event in iter_openai_compat_stream(
+                    client,
+                    kwargs,
+                    provider=provider,
+                    n_messages=len(messages),
+                    n_tools=n_tools,
+                ):
+                    yielded_any = True
+                    yield event
+                return
+            except Exception as exc:
+                if n_tools and is_tool_unsupported_error(exc):
+                    _log.warning(
+                        "%s model %r does not support tool calling; "
+                        "retrying without tools. Error: %s",
+                        provider,
+                        model,
+                        exc,
+                    )
+                    kwargs.pop("tools", None)
+                    n_tools = 0
+                    continue
+                if not is_rate_limit_error(exc):
+                    raise
+                if yielded_any or rate_limit_attempts >= _RATE_LIMIT_MAX_ATTEMPTS - 1:
+                    # Already streamed partial output this attempt, or retries
+                    # exhausted: can't safely retry, but still hide the raw
+                    # upstream text (e.g. NVIDIA's internal worker/quota string).
+                    raise ProviderRateLimitError(provider, model, exc) from exc
+                rate_limit_attempts += 1
+                retry_delay = _rate_limit_retry_delay(rate_limit_attempts)
+                _log.warning(
+                    "%s rate-limited (attempt %d/%d); retrying in %.1fs: %s",
+                    provider,
+                    rate_limit_attempts,
+                    _RATE_LIMIT_MAX_ATTEMPTS,
+                    retry_delay,
+                    exc,
+                )
+        # Sleep outside the concurrency gate: a backing-off request must not
+        # hold an in-flight slot idle, or a burst of rate-limited callers can
+        # fill every slot with sleepers and starve everyone else.
+        if retry_delay is not None:
+            await asyncio.sleep(retry_delay)
 
 
 def is_tool_unsupported_error(exc: BaseException) -> bool:
@@ -438,8 +701,10 @@ def is_tool_unsupported_error(exc: BaseException) -> bool:
 
 
 __all__ = [
+    "ProviderRateLimitError",
     "count_input_tokens_tiktoken",
     "count_openai_compat_input_tokens",
+    "is_rate_limit_error",
     "is_tool_unsupported_error",
     "iter_openai_compat_stream",
     "messages_to_openai",

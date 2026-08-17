@@ -69,7 +69,7 @@ def classify_content(text: str, *, tool_name: str, hint: str | None = None) -> C
     stripped = text.lstrip()
     if tool_name in ("run_command",):
         return "logs"
-    if tool_name in ("web_search", "search_memory", "task") and stripped.startswith(("{", "[")):
+    if tool_name in ("web_search", "task") and stripped.startswith(("{", "[")):
         return "json"
     if tool_name in ("read_file", "write_file", "replace_in_file", "glob"):
         return "code"
@@ -228,13 +228,18 @@ def _shape_json_value(value: Any, *, max_array_items: int, depth: int = 0) -> An
     return value
 
 
+def shape_json_value(value: Any, *, max_array_items: int | None) -> Any:
+    """Shape an already-parsed JSON value (no re-parse)."""
+    cap = max_array_items if max_array_items is not None else max_array_items_from_env()
+    return _shape_json_value(value, max_array_items=cap)
+
+
 def shape_json(text: str, *, max_array_items: int | None) -> str:
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError:
         return text
-    cap = max_array_items if max_array_items is not None else max_array_items_from_env()
-    shaped = _shape_json_value(parsed, max_array_items=cap)
+    shaped = shape_json_value(parsed, max_array_items=max_array_items)
     return json.dumps(shaped, indent=2, ensure_ascii=False, default=str)
 
 
@@ -245,7 +250,7 @@ def exceeds_tool_output_budget(text: str, *, tool_name: str, budget: ToolOutputB
     lines = text.splitlines()
     if budget.max_output_lines is not None and len(lines) > budget.max_output_lines:
         return True
-    if budget.max_array_items is not None and tool_name in ("web_search", "search_memory", "task"):
+    if budget.max_array_items is not None and tool_name in ("web_search", "task"):
         stripped = text.lstrip()
         if stripped.startswith(("[", "{")):
             try:

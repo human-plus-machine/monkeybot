@@ -10,29 +10,21 @@ from pathlib import Path
 import pytest
 
 from monkeybot.core.config.settings import SubagentConfig
-from monkeybot.core.context import SkillRef, TurnContext, _discover_skills
+from monkeybot.core.context import LoopsToolRegistry, SkillRef, TurnContext, _discover_skills
 from monkeybot.core.llm.provider import Done, TextDelta, ToolCall, UsageEvent
 from monkeybot.core.memory.subsystem import MemorySubsystem
-from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
+from monkeybot.core.mcp.mcp_client import MCPDiagnosticError, MCPServerNotConnectedError
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
+from monkeybot.core.tools.fs_isolation import isolation_support
 from monkeybot.core.tools.types import unwrap_tool_execution_result
-from monkeybot.core.workspace import create_workspace_storage
+from monkeybot.core.types.types_tools import ToolDef
+from tests.core.memory.helpers import make_memory_subsystem
 
 
 def _mem_sub(root: Path) -> MemorySubsystem:
-    p = Path(root)
-    p.mkdir(exist_ok=True)
-    uri = "local://" + str(p.resolve())
-    fake = ScriptedFakeProvider(
-        [TextDelta(text="x"), UsageEvent(input_tokens=1, output_tokens=1, cached_tokens=0), Done()]
-    )
-    return MemorySubsystem(
-        storage=create_workspace_storage(uri),
-        provider=fake,
-        model="gemini-2.5-flash",
-        memory_uri=uri,
-    )
-from monkeybot.core.types.types_tools import ToolDef
+    # Palace sqlite files must not live inside the workspace under test (grep/glob).
+    resolved = Path(root).resolve()
+    return make_memory_subsystem(resolved.parent.parent / f"palace-{resolved.parent.name}-{resolved.name}")
 
 
 class _NoMCP:
@@ -97,7 +89,9 @@ class _MCPWithBlob:
 
     def __init__(self, *, blob_len: int = 1200) -> None:
         alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-        self._payload = json.dumps({"data": (alphabet * 20)[:blob_len]})
+        blob = (alphabet * ((blob_len // len(alphabet)) + 1))[:blob_len]
+        self._payload = json.dumps({"data": blob})
+        self._blob_len = blob_len
 
     async def connect(
         self,
@@ -156,26 +150,33 @@ class _MCPWithBlob:
         del path, raise_on_error
 
 
-def _ctx(skills: list[SkillRef] | None = None) -> TurnContext:
-    return TurnContext(
-        thread_id="t",
-        request_id="r",
-        agent_md="# Agent",
-        memory_index=[],
-        skills=skills or [],
-        tools=[],
-        user_id=None,
-        parent_run_id=None,
-        model="gemini-2.5-flash",
-    )
+def _ctx(
+    skills: list[SkillRef] | None = None,
+    *,
+    event_publisher: object | None = None,
+) -> TurnContext:
+    kwargs: dict[str, object] = {
+        "thread_id": "t",
+        "request_id": "r",
+        "agent_md": "# Agent",
+        "memory_index": [],
+        "skills": skills or [],
+        "tools": [],
+        "user_id": None,
+        "parent_run_id": None,
+        "model": "gemini-2.5-flash",
+    }
+    if event_publisher is not None:
+        kwargs["event_publisher"] = event_publisher
+    return TurnContext(**kwargs)  # type: ignore[arg-type]
 
 
 def _stub_agent_md_for_tasks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     agent = tmp_path / "AGENT.md"
     agent.write_text("# test agent\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("MONKEYBOT_AGENT_ROOT", str(tmp_path))
     monkeypatch.setenv("AGENT_MD", str(agent))
-    monkeypatch.setenv("MONKEYBOT_SUBAGENT_AGENT_MD", str(agent))
 
 
 @pytest.mark.asyncio
@@ -282,6 +283,75 @@ async def test_glob(tmp_path: Path) -> None:
     assert "notes.md" not in out
 
 
+def test_glob_paths_matches_directories(tmp_path: Path) -> None:
+    """Checkout probes must see directories, not only files."""
+    from monkeybot.core.tools.workspace_service import WorkspaceFileService
+
+    root = tmp_path
+    checkout = root / "repos" / "EPCAP" / "agentic-platform-monorepo"
+    checkout.mkdir(parents=True)
+    (checkout / "README.md").write_text("hi\n", encoding="utf-8")
+    svc = WorkspaceFileService(root)
+
+    exact = svc.glob_paths("EPCAP/agentic-platform-monorepo", root="repos")
+    assert exact["ok"] is True
+    assert "repos/EPCAP/agentic-platform-monorepo" in exact["paths"]
+
+    wildcard = svc.glob_paths("EPCAP/*", root="repos")
+    assert wildcard["ok"] is True
+    assert "repos/EPCAP/agentic-platform-monorepo" in wildcard["paths"]
+
+
+@pytest.mark.asyncio
+async def test_glob_incomplete_scan_errors(tmp_path: Path) -> None:
+    from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService, WorkspaceSettings
+
+    root = tmp_path
+    for i in range(5):
+        (root / f"f{i}.txt").write_text(f"x{i}\n", encoding="utf-8")
+    svc = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GLOB_MAX_PATHS=2),
+    )
+    with pytest.raises(WorkspaceError) as ei:
+        svc.glob_paths("*.txt")
+    assert ei.value.code == "incomplete_scan"
+    assert isinstance(ei.value.details, dict)
+    assert ei.value.details["stop_reason"] == "max_paths"
+    assert ei.value.details["count"] == 2
+    assert len(ei.value.details["partial_paths"]) == 2
+
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    ex._workspace = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GLOB_MAX_PATHS=2),
+    )
+    ctx = _ctx()
+    _out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="1", name="glob", args={"pattern": "*.txt"}),
+            ctx=ctx,
+        )
+    )
+    assert err is not None
+    payload = json.loads(err)
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "incomplete_scan"
+    assert "cannot be used to conclude absence" in payload["message"]
+    assert "Narrow `root`" in payload["hint"]
+    assert payload["details"]["count"] == 2
+    assert len(payload["details"]["partial_paths"]) == 2
+
+
 @pytest.mark.asyncio
 async def test_grep(tmp_path: Path) -> None:
     root = tmp_path
@@ -311,7 +381,9 @@ async def test_grep(tmp_path: Path) -> None:
     assert err is None and out is not None
     payload = json.loads(out)
     assert payload["ok"] is True
+    assert payload["scan_complete"] is True
     assert payload["match_count"] >= 1
+    assert payload["total_match_count"] >= payload["match_count"]
     assert any(m["path"] == "a.py" for m in payload["matches"])
 
 
@@ -323,7 +395,7 @@ async def test_grep_skips_noise_directories(tmp_path: Path) -> None:
     skills = tmp_path / "skills"
     skills.mkdir()
     (root / "a.py").write_text("def foo():\n    pass\n", encoding="utf-8")
-    for noisy_dir in ("node_modules", ".git", "__pycache__", ".venv"):
+    for noisy_dir in ("node_modules", ".git", "__pycache__", ".venv", ".monkeybot"):
         d = root / noisy_dir
         d.mkdir()
         (d / "junk.py").write_text("def foo():\n    pass\n", encoding="utf-8")
@@ -349,6 +421,605 @@ async def test_grep_skips_noise_directories(tmp_path: Path) -> None:
     assert payload["ok"] is True
     matched_paths = {m["path"] for m in payload["matches"]}
     assert matched_paths == {"a.py"}
+
+
+@pytest.mark.asyncio
+async def test_grep_root_file(tmp_path: Path) -> None:
+    root = tmp_path
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    (root / "only.py").write_text("unique_marker_xyz\n", encoding="utf-8")
+    (root / "other.py").write_text("unique_marker_xyz\n", encoding="utf-8")
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    ctx = _ctx()
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="1",
+                name="grep",
+                args={"pattern": "unique_marker_xyz", "root": "only.py"},
+            ),
+            ctx=ctx,
+        )
+    )
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert payload["ok"] is True
+    assert payload["scan_complete"] is True
+    assert payload["match_count"] == 1
+    assert payload["matches"][0]["path"] == "only.py"
+
+
+@pytest.mark.asyncio
+async def test_grep_brace_glob(tmp_path: Path) -> None:
+    root = tmp_path
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    (root / "a.py").write_text("BRACE_HIT\n", encoding="utf-8")
+    (root / "b.md").write_text("BRACE_HIT\n", encoding="utf-8")
+    (root / "c.txt").write_text("BRACE_HIT\n", encoding="utf-8")
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    ctx = _ctx()
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="1",
+                name="grep",
+                args={"pattern": "BRACE_HIT", "file_glob": "*.{py,md}"},
+            ),
+            ctx=ctx,
+        )
+    )
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert payload["ok"] is True
+    paths = {m["path"] for m in payload["matches"]}
+    assert paths == {"a.py", "b.md"}
+
+
+@pytest.mark.asyncio
+async def test_grep_unparseable_glob(tmp_path: Path) -> None:
+    root = tmp_path
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    (root / "a.py").write_text("x\n", encoding="utf-8")
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    ctx = _ctx()
+    _out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="1",
+                name="grep",
+                args={"pattern": "x", "file_glob": "*.{py"},
+            ),
+            ctx=ctx,
+        )
+    )
+    assert err is not None
+    payload = json.loads(err)
+    assert payload["ok"] is False
+    assert payload["details"]["code"] == "invalid_file_glob"
+
+
+@pytest.mark.asyncio
+async def test_grep_incomplete_scan_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService, WorkspaceSettings
+
+    monkeypatch.setattr("monkeybot.core.tools.workspace_service.shutil.which", lambda _name: None)
+    root = tmp_path
+    for i in range(5):
+        (root / f"f{i}.py").write_text(f"MARKER_{i}\n", encoding="utf-8")
+    (root / "hit.py").write_text("KNOWN_MATCH_TOKEN\n", encoding="utf-8")
+    svc = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILES=2, WORKSPACE_GREP_MAX_MATCHES=50),
+    )
+    with pytest.raises(WorkspaceError) as ei:
+        svc.grep("KNOWN_MATCH_TOKEN")
+    assert ei.value.code == "incomplete_scan"
+
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    ex._workspace = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILES=2, WORKSPACE_GREP_MAX_MATCHES=50),
+    )
+    ctx = _ctx()
+    _out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="1",
+                name="grep",
+                args={"pattern": "KNOWN_MATCH_TOKEN"},
+            ),
+            ctx=ctx,
+        )
+    )
+    assert err is not None
+    payload = json.loads(err)
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "incomplete_scan"
+
+
+@pytest.mark.asyncio
+async def test_grep_incomplete_scan_errors_with_rg(tmp_path: Path) -> None:
+    """rg path must honor WORKSPACE_GREP_MAX_FILES (not only the Python walker)."""
+    import shutil
+
+    from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService, WorkspaceSettings
+
+    if shutil.which("rg") is None:
+        pytest.skip("rg not on PATH")
+
+    root = tmp_path
+    for i in range(5):
+        (root / f"f{i}.py").write_text(f"MARKER_{i}\n", encoding="utf-8")
+    (root / "hit.py").write_text("KNOWN_MATCH_TOKEN\n", encoding="utf-8")
+    svc = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILES=2, WORKSPACE_GREP_MAX_MATCHES=50),
+    )
+    with pytest.raises(WorkspaceError) as ei:
+        svc.grep("KNOWN_MATCH_TOKEN")
+    assert ei.value.code == "incomplete_scan"
+
+
+@pytest.mark.asyncio
+async def test_grep_rg_file_cap_uses_candidate_count_when_summary_undercounts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail-closed even when rg JSON begin/summary only cover matching files."""
+    import json
+    from types import SimpleNamespace
+
+    from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService, WorkspaceSettings
+
+    root = tmp_path
+    for i in range(5):
+        (root / f"f{i}.py").write_text(f"MARKER_{i}\n", encoding="utf-8")
+    (root / "hit.py").write_text("KNOWN_MATCH_TOKEN\n", encoding="utf-8")
+
+    undercount = "\n".join(
+        [
+            json.dumps({"type": "begin", "data": {"path": {"text": "hit.py"}}}),
+            json.dumps(
+                {
+                    "type": "match",
+                    "data": {
+                        "path": {"text": "hit.py"},
+                        "lines": {"text": "KNOWN_MATCH_TOKEN\n"},
+                        "line_number": 1,
+                        "submatches": [{"start": 0, "end": 17}],
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "summary",
+                    "data": {
+                        "stats": {
+                            "searches": 1,
+                            "searches_with_match": 1,
+                            "matched_lines": 1,
+                            "matches": 1,
+                        }
+                    },
+                }
+            ),
+        ]
+    )
+
+    def fake_run(*_args, **_kwargs):
+        return SimpleNamespace(returncode=0, stdout=undercount, stderr="")
+
+    monkeypatch.setattr(
+        "monkeybot.core.tools.workspace_service.shutil.which",
+        lambda _name: "/usr/bin/rg",
+    )
+    monkeypatch.setattr(
+        "monkeybot.core.tools.workspace_service.subprocess.run",
+        fake_run,
+    )
+    # Avoid accidental Python fallback if the fake run is mishandled.
+    monkeypatch.setattr(
+        WorkspaceFileService,
+        "_grep_python",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("should not fall back")),
+    )
+
+    svc = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILES=2, WORKSPACE_GREP_MAX_MATCHES=50),
+    )
+    with pytest.raises(WorkspaceError) as ei:
+        svc.grep("KNOWN_MATCH_TOKEN")
+    assert ei.value.code == "incomplete_scan"
+
+@pytest.mark.asyncio
+async def test_grep_skipped_oversized_is_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService, WorkspaceSettings
+
+    monkeypatch.setattr("monkeybot.core.tools.workspace_service.shutil.which", lambda _name: None)
+    root = tmp_path
+    (root / "small.py").write_text("nope\n", encoding="utf-8")
+    (root / "big.py").write_bytes(b"SECRET_TOKEN\n" + b"x" * 200)
+    svc = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILE_BYTES=50, WORKSPACE_GREP_MAX_FILES=100),
+    )
+    with pytest.raises(WorkspaceError) as ei:
+        svc.grep("SECRET_TOKEN")
+    assert ei.value.code == "incomplete_scan"
+    assert ei.value.details is not None
+    assert ei.value.details["files_skipped_oversized"] == 1
+    assert ei.value.details["stop_reason"] == "skipped_files"
+
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    ex._workspace = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILE_BYTES=50, WORKSPACE_GREP_MAX_FILES=100),
+    )
+    _out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="1", name="grep", args={"pattern": "SECRET_TOKEN"}),
+            ctx=_ctx(),
+        )
+    )
+    assert err is not None
+    payload = json.loads(err)
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "incomplete_scan"
+    assert payload["details"]["files_skipped_oversized"] == 1
+
+
+@pytest.mark.asyncio
+async def test_grep_skipped_binary_is_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService, WorkspaceSettings
+
+    monkeypatch.setattr("monkeybot.core.tools.workspace_service.shutil.which", lambda _name: None)
+    root = tmp_path
+    (root / "a.py").write_text("hello\n", encoding="utf-8")
+    (root / "blob.bin").write_bytes(b"abc\x00defSECRET")
+    svc = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILES=100),
+    )
+    with pytest.raises(WorkspaceError) as ei:
+        svc.grep("SECRET")
+    assert ei.value.code == "incomplete_scan"
+    assert ei.value.details is not None
+    assert ei.value.details["files_skipped_binary"] == 1
+
+
+@pytest.mark.asyncio
+async def test_grep_skipped_oversized_incomplete_with_rg(tmp_path: Path) -> None:
+    import shutil
+
+    from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService, WorkspaceSettings
+
+    if shutil.which("rg") is None:
+        pytest.skip("rg not on PATH")
+
+    root = tmp_path
+    (root / "small.py").write_text("nope\n", encoding="utf-8")
+    (root / "big.py").write_bytes(b"SECRET_TOKEN\n" + b"x" * 200)
+    svc = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILE_BYTES=50, WORKSPACE_GREP_MAX_FILES=100),
+    )
+    with pytest.raises(WorkspaceError) as ei:
+        svc.grep("SECRET_TOKEN")
+    assert ei.value.code == "incomplete_scan"
+    assert ei.value.details is not None
+    assert ei.value.details["files_skipped_oversized"] == 1
+
+
+@pytest.mark.asyncio
+async def test_grep_rg_timeout_is_incomplete_no_python_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """rg TimeoutExpired must not fall through to unbounded Python walk."""
+    import shutil
+    import subprocess
+
+    from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService
+
+    if shutil.which("rg") is None:
+        pytest.skip("rg not on PATH")
+
+    root = tmp_path
+    (root / "a.py").write_text("needle\n", encoding="utf-8")
+    python_calls = {"n": 0}
+    real_grep_python = WorkspaceFileService._grep_python
+
+    def _track_python(self, *args, **kwargs):  # noqa: ANN001
+        python_calls["n"] += 1
+        return real_grep_python(self, *args, **kwargs)
+
+    def _timeout_run(*_a, **_kw):  # noqa: ANN001
+        raise subprocess.TimeoutExpired(cmd=["rg"], timeout=120)
+
+    monkeypatch.setattr(WorkspaceFileService, "_grep_python", _track_python)
+    monkeypatch.setattr(
+        "monkeybot.core.tools.workspace_service.subprocess.run",
+        _timeout_run,
+    )
+    svc = WorkspaceFileService(root)
+    with pytest.raises(WorkspaceError) as ei:
+        svc.grep("needle")
+    assert ei.value.code == "incomplete_scan"
+    assert ei.value.details is not None
+    assert ei.value.details["stop_reason"] == "rg_timed_out"
+    assert python_calls["n"] == 0
+
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    ex._workspace = WorkspaceFileService(root)
+    _out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="1", name="grep", args={"pattern": "needle"}),
+            ctx=_ctx(),
+        )
+    )
+    assert err is not None
+    payload = json.loads(err)
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "incomplete_scan"
+    assert payload["details"]["stop_reason"] == "rg_timed_out"
+
+
+@pytest.mark.asyncio
+async def test_grep_capped_complete_scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from monkeybot.core.tools.workspace_service import WorkspaceFileService, WorkspaceSettings
+
+    monkeypatch.setattr("monkeybot.core.tools.workspace_service.shutil.which", lambda _name: None)
+    root = tmp_path
+    (root / "a.py").write_text("HIT\nHIT\nHIT\n", encoding="utf-8")
+    svc = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_MATCHES=2, WORKSPACE_GREP_MAX_FILES=100),
+    )
+    page1 = svc.grep("HIT", max_matches=2, offset=0)
+    assert page1["ok"] is True
+    assert page1["scan_complete"] is True
+    assert page1["match_count"] == 2
+    assert page1["total_match_count"] == 3
+    assert page1.get("next_offset") == 2
+    page2 = svc.grep("HIT", max_matches=2, offset=page1["next_offset"])
+    assert page2["match_count"] == 1
+    assert page2["total_match_count"] == 3
+    assert "next_offset" not in page2
+
+
+@pytest.mark.asyncio
+async def test_grep_rg_and_python_parity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import shutil
+
+    from monkeybot.core.tools.workspace_service import WorkspaceFileService, WorkspaceSettings
+
+    root = tmp_path
+    (root / "a.py").write_text("parity_token_alpha\n", encoding="utf-8")
+    (root / "b.md").write_text("parity_token_alpha\n", encoding="utf-8")
+    (root / "c.txt").write_text("other\n", encoding="utf-8")
+    mb = root / ".monkeybot"
+    mb.mkdir()
+    (mb / "noise.py").write_text("parity_token_alpha\n", encoding="utf-8")
+    settings = WorkspaceSettings(WORKSPACE_GREP_MAX_MATCHES=50, WORKSPACE_GREP_MAX_FILES=100)
+    svc = WorkspaceFileService(root, settings=settings)
+
+    if shutil.which("rg") is None:
+        pytest.skip("rg not on PATH")
+
+    with_rg = svc.grep("parity_token_alpha", file_glob="*.{py,md}")
+    monkeypatch.setattr("monkeybot.core.tools.workspace_service.shutil.which", lambda _name: None)
+    without_rg = svc.grep("parity_token_alpha", file_glob="*.{py,md}")
+
+    assert with_rg["ok"] is True and without_rg["ok"] is True
+    assert with_rg.keys() == without_rg.keys()
+    assert {m["path"] for m in with_rg["matches"]} == {m["path"] for m in without_rg["matches"]}
+    assert with_rg["total_match_count"] == without_rg["total_match_count"]
+    assert with_rg["match_count"] == without_rg["match_count"]
+    assert with_rg["scan_complete"] is True and without_rg["scan_complete"] is True
+    assert all(not m["path"].startswith(".monkeybot") for m in with_rg["matches"])
+
+
+async def test_grep_path_glob_parity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Path-style file_glob must match the same files with and without rg."""
+    import shutil
+
+    from monkeybot.core.tools.workspace_service import WorkspaceFileService, WorkspaceSettings
+
+    root = tmp_path
+    (root / "src").mkdir()
+    (root / "src" / "nested").mkdir()
+    (root / "src" / "nested" / "deep.py").write_text("PATH_GLOB_HIT\n", encoding="utf-8")
+    (root / "src" / "top.py").write_text("PATH_GLOB_HIT\n", encoding="utf-8")
+    (root / "other").mkdir()
+    (root / "other" / "side.py").write_text("PATH_GLOB_HIT\n", encoding="utf-8")
+    (root / "other" / "test_x.py").write_text("PATH_GLOB_HIT\n", encoding="utf-8")
+    svc = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_MATCHES=50, WORKSPACE_GREP_MAX_FILES=100),
+    )
+    rg_bin = shutil.which("rg")
+
+    def _paths(result: dict) -> set[str]:
+        return {m["path"] for m in result["matches"]}
+
+    # Python-only: path globs and basename globs.
+    monkeypatch.setattr("monkeybot.core.tools.workspace_service.shutil.which", lambda _name: None)
+    assert _paths(svc.grep("PATH_GLOB_HIT", file_glob="src/**/*.py")) == {
+        "src/nested/deep.py",
+        "src/top.py",
+    }
+    assert _paths(svc.grep("PATH_GLOB_HIT", file_glob="src/*.py")) == {"src/top.py"}
+    assert _paths(svc.grep("PATH_GLOB_HIT", file_glob="test_*.py")) == {"other/test_x.py"}
+
+    if rg_bin is None:
+        pytest.skip("rg not on PATH")
+
+    monkeypatch.undo()
+    with_rg = svc.grep("PATH_GLOB_HIT", file_glob="src/**/*.py")
+    monkeypatch.setattr("monkeybot.core.tools.workspace_service.shutil.which", lambda _name: None)
+    without_rg = svc.grep("PATH_GLOB_HIT", file_glob="src/**/*.py")
+    assert _paths(with_rg) == _paths(without_rg) == {"src/nested/deep.py", "src/top.py"}
+
+    monkeypatch.undo()
+    with_rg = svc.grep("PATH_GLOB_HIT", file_glob="src/*.py")
+    monkeypatch.setattr("monkeybot.core.tools.workspace_service.shutil.which", lambda _name: None)
+    without_rg = svc.grep("PATH_GLOB_HIT", file_glob="src/*.py")
+    assert _paths(with_rg) == _paths(without_rg) == {"src/top.py"}
+
+    monkeypatch.undo()
+    with_rg = svc.grep("PATH_GLOB_HIT", file_glob="test_*.py")
+    monkeypatch.setattr("monkeybot.core.tools.workspace_service.shutil.which", lambda _name: None)
+    without_rg = svc.grep("PATH_GLOB_HIT", file_glob="test_*.py")
+    assert _paths(with_rg) == _paths(without_rg) == {"other/test_x.py"}
+
+
+def test_clip_grep_match_line_centers_on_match() -> None:
+    from monkeybot.core.tools.workspace_service import _clip_grep_match_line
+
+    needle = "chore/dead-code"
+    prefix = "x" * 2500
+    suffix = "y" * 2500
+    line = prefix + needle + suffix
+    start = len(prefix)
+    end = start + len(needle)
+
+    clipped = _clip_grep_match_line(line, start, end, max_chars=2000)
+    assert needle in clipped
+    assert len(clipped) <= 2000
+    assert clipped.startswith("…")
+    assert clipped.endswith("…")
+
+
+def test_clip_grep_match_line_short_unchanged() -> None:
+    from monkeybot.core.tools.workspace_service import _clip_grep_match_line
+
+    line = "short line with needle here"
+    assert _clip_grep_match_line(line, 16, 22, max_chars=2000) == line
+
+
+def test_clip_grep_match_line_missing_start_is_prefix() -> None:
+    from monkeybot.core.tools.workspace_service import _clip_grep_match_line
+
+    line = "a" * 3000
+    assert _clip_grep_match_line(line, None, None, max_chars=2000) == line[:2000]
+
+
+def test_utf8_byte_offsets_to_char_offsets_for_rg() -> None:
+    """rg submatches are UTF-8 byte offsets; clipping must use character indices."""
+    from monkeybot.core.tools.workspace_service import (
+        _clip_grep_match_line,
+        _utf8_byte_offsets_to_char_offsets,
+    )
+
+    needle = "NEEDLE"
+    # ``ä`` is 2 UTF-8 bytes; enough multibyte prefix that byte≠char indices diverge.
+    prefix = "ä" * 1500
+    suffix = "x" * 1500
+    line = prefix + needle + suffix
+    byte_start = len(prefix.encode("utf-8"))
+    byte_end = byte_start + len(needle.encode("utf-8"))
+    assert byte_start != len(prefix)
+
+    char_start, char_end = _utf8_byte_offsets_to_char_offsets(line, byte_start, byte_end)
+    assert char_start == len(prefix)
+    assert char_end == len(prefix) + len(needle)
+
+    # Using raw byte offsets as char indices would miss the needle in the window.
+    wrong = _clip_grep_match_line(line, byte_start, byte_end, max_chars=200)
+    assert needle not in wrong
+
+    clipped = _clip_grep_match_line(line, char_start, char_end, max_chars=200)
+    assert needle in clipped
+
+
+def test_grep_long_line_preview_contains_needle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mid-line needles past the 2000-char prefix must appear in match text."""
+    import shutil
+
+    from monkeybot.core.tools.workspace_service import WorkspaceFileService, WorkspaceSettings
+
+    root = tmp_path
+    needle = "chore/dead-code"
+    (root / "spill.json").write_text(
+        ("{" + '"pad":"' + ("z" * 4000) + '","ref":"' + needle + '"}'),
+        encoding="utf-8",
+    )
+    svc = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_MATCHES=50, WORKSPACE_GREP_MAX_FILES=100),
+    )
+    rg_bin = shutil.which("rg")
+
+    monkeypatch.setattr("monkeybot.core.tools.workspace_service.shutil.which", lambda _name: None)
+    py_result = svc.grep(needle)
+    assert py_result["ok"] is True
+    assert py_result["match_count"] >= 1
+    assert any(needle in m["text"] for m in py_result["matches"])
+
+    if rg_bin is None:
+        return
+
+    monkeypatch.undo()
+    rg_result = svc.grep(needle)
+    assert rg_result["ok"] is True
+    assert rg_result["match_count"] >= 1
+    assert any(needle in m["text"] for m in rg_result["matches"])
 
 
 @pytest.mark.asyncio
@@ -411,27 +1082,84 @@ async def test_apply_patch_tool(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_search_memory(tmp_path: Path) -> None:
-    root = tmp_path
-    mem = tmp_path / "mem"
-    mem.mkdir()
-    (mem / "a.md").write_text("hello alpha world", encoding="utf-8")
+async def test_search_hits_knowledge_notes(tmp_path: Path) -> None:
+    from monkeybot.core.knowledge import KnowledgeSubsystem
+    from monkeybot.core.knowledge.types import KnowledgeSettings
+
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "policy.md").write_text(
+        "Refund policy for annual plans requires approval.\n", encoding="utf-8"
+    )
+    knowledge_root = tmp_path / ".monkeybot" / "knowledge"
+    notes = knowledge_root / "notes"
+    notes.mkdir(parents=True)
+    (notes / "refund.md").write_text(
+        "Annual refunds.\n\n[[workspace:policy.md#L1-1]]\n",
+        encoding="utf-8",
+    )
+    settings = KnowledgeSettings(
+        enabled=True,
+        knowledge_root=str(knowledge_root),
+        index_path=str(knowledge_root / "index.sqlite"),
+        debounce_ms=0,
+        startup_scan=True,
+        default_limit=8,
+    )
+    knowledge = await KnowledgeSubsystem.create(
+        workspace_root=root,
+        settings=settings,
+        knowledge_root=knowledge_root,
+        index_path=Path(settings.index_path),
+    )
+    await knowledge.ensure_ready()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    try:
+        ex = CoreToolExecutor(
+            workspace_root=root,
+            memory=_mem_sub(tmp_path / "memory"),
+            knowledge=knowledge,
+            skills_path=skills,
+            mcp=_NoMCP(),
+        )
+        out, err = unwrap_tool_execution_result(
+            await ex.execute(
+                call=ToolCall(
+                    call_id="1",
+                    name="search",
+                    args={"query": "annual refund approval"},
+                ),
+                ctx=_ctx(),
+            )
+        )
+        assert err is None and out is not None
+        payload = json.loads(out)
+        assert payload["ok"] is True
+        assert payload["hits"]
+    finally:
+        await knowledge.close()
+
+
+@pytest.mark.asyncio
+async def test_search_without_knowledge_returns_validation_error(tmp_path: Path) -> None:
     skills = tmp_path / "skills"
     skills.mkdir()
     ex = CoreToolExecutor(
-        workspace_root=root,
-        memory=_mem_sub(mem),
+        workspace_root=tmp_path,
+        memory=None,
+        knowledge=None,
         skills_path=skills,
         mcp=_NoMCP(),
     )
-    ctx = _ctx()
-    out, err = unwrap_tool_execution_result(await ex.execute(
-        call=ToolCall(call_id="1", name="search_memory", args={"query": "alpha"}),
-        ctx=ctx,
-    ))
-    assert err is None and out is not None
-    assert "alpha" in out
-    assert "a.md" in out
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="1", name="search", args={"query": "x"}),
+            ctx=_ctx(),
+        )
+    )
+    assert out is None and err is not None
+    assert "knowledge" in err.lower() or "search" in err.lower()
 
 
 @pytest.mark.asyncio
@@ -508,12 +1236,13 @@ async def test_list_skills_returns_descriptions_from_discovered_skill_md(tmp_pat
 async def test_run_command_cat_under_memory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     agent_dir = tmp_path / "agent"
     ws = agent_dir / "workspace"
-    (ws / "data" / "memory").mkdir(parents=True)
-    (ws / "data" / "memory" / "f.md").write_text("inside", encoding="utf-8")
-    mem = ws / "data" / "memory"
+    ws.mkdir(parents=True)
+    mem = agent_dir / "memory"
+    mem.mkdir(parents=True)
+    (mem / "f.md").write_text("inside", encoding="utf-8")
     skills = ws / "skills"
     skills.mkdir()
-    monkeypatch.chdir(agent_dir)
+    monkeypatch.chdir(ws)
     ex = CoreToolExecutor(
         workspace_root=ws,
         memory=_mem_sub(mem),
@@ -524,11 +1253,318 @@ async def test_run_command_cat_under_memory(tmp_path: Path, monkeypatch: pytest.
         call=ToolCall(
             call_id="1",
             name="run_command",
-            args={"argv": ["cat", "./data/memory/f.md"]},
+            args={"argv": ["cat", "../memory/f.md"]},
         ),
         ctx=_ctx(),
     ))
     assert err is None and out is not None and "inside" in out
+
+
+@pytest.mark.asyncio
+async def test_run_command_mempalace_is_blocked_when_memory_unavailable(tmp_path: Path) -> None:
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=None,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="memory-disabled",
+                name="run_command",
+                args={"argv": ["mempalace", "search", "private"]},
+            ),
+            ctx=_ctx(),
+        )
+    )
+
+    assert out is None and err is not None
+    payload = json.loads(err)
+    assert payload["error_kind"] == "policy"
+    assert "unavailable" in payload["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_run_command_drops_mempalace_capability_when_memory_unavailable(
+    tmp_path: Path,
+) -> None:
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=None,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+
+    assert "mempalace" not in ex._run_cmd_allowed_commands
+    assert "mempalace" not in ex._terminal.allowed_commands
+
+
+@pytest.mark.skipif(
+    not isolation_support().available,
+    reason=f"host cannot isolate filesystems: {isolation_support().detail}",
+)
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("call_id", "argv_template"),
+    [
+        ("shell-variable", ["bash", "-c", 'p={secret}; cat "$p"']),
+        ("interpreter-io", ["python", "-c", "print(open({secret!r}).read())"]),
+        ("nested-launcher", ["bash", "-c", "cat {secret}"]),
+    ],
+)
+async def test_disabled_memory_is_unreachable_through_launchers(
+    tmp_path: Path, call_id: str, argv_template: list[str]
+) -> None:
+    """Shells and interpreters can build any path, so the palace must be hidden."""
+    workspace = tmp_path / "workspace"
+    skills = workspace / "skills"
+    skills.mkdir(parents=True)
+    secret = tmp_path / "memory" / "private.txt"
+    secret.parent.mkdir()
+    secret.write_text("PRIVATE-CONTENT", encoding="utf-8")
+    ex = CoreToolExecutor(
+        workspace_root=workspace,
+        memory=None,
+        skills_path=skills,
+        mcp=_NoMCP(),
+        run_command_allowed_path_prefixes=[str(tmp_path)],
+    )
+
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id=call_id,
+                name="run_command",
+                args={"argv": [part.format(secret=str(secret)) for part in argv_template]},
+            ),
+            ctx=dataclasses.replace(_ctx(), user_id="u"),
+        )
+    )
+
+    assert "PRIVATE-CONTENT" not in (out or "") + (err or "")
+
+
+@pytest.mark.skipif(
+    not isolation_support().available,
+    reason=f"host cannot isolate filesystems: {isolation_support().detail}",
+)
+@pytest.mark.asyncio
+async def test_disabled_memory_hides_faas_palace_under_temp_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Serverless deployments put the palace in /tmp, which is not a safe zone."""
+    workspace = tmp_path / "workspace"
+    skills = workspace / "skills"
+    skills.mkdir(parents=True)
+    faas_palace = tmp_path / "faas" / "memory"
+    faas_palace.mkdir(parents=True)
+    (faas_palace / "private.txt").write_text("PRIVATE-CONTENT", encoding="utf-8")
+    monkeypatch.setenv("MEMORY_STORAGE_URI", f"local://{faas_palace}")
+    ex = CoreToolExecutor(
+        workspace_root=workspace,
+        memory=None,
+        skills_path=skills,
+        mcp=_NoMCP(),
+        run_command_allowed_path_prefixes=[str(tmp_path)],
+    )
+
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="faas-palace",
+                name="run_command",
+                args={"argv": ["bash", "-c", f"cat {faas_palace}/private.txt"]},
+            ),
+            ctx=dataclasses.replace(_ctx(), user_id="u"),
+        )
+    )
+
+    assert "PRIVATE-CONTENT" not in (out or "") + (err or "")
+
+
+@pytest.mark.skipif(
+    not isolation_support().available,
+    reason=f"host cannot isolate filesystems: {isolation_support().detail}",
+)
+@pytest.mark.asyncio
+async def test_enabled_memory_remains_readable_through_launchers(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    skills = workspace / "skills"
+    skills.mkdir(parents=True)
+    secret = tmp_path / "memory" / "private.txt"
+    secret.parent.mkdir()
+    secret.write_text("PRIVATE-CONTENT", encoding="utf-8")
+    ex = CoreToolExecutor(
+        workspace_root=workspace,
+        memory=_mem_sub(tmp_path / "memory"),
+        skills_path=skills,
+        mcp=_NoMCP(),
+        run_command_allowed_path_prefixes=[str(tmp_path)],
+    )
+
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="memory-enabled-read",
+                name="run_command",
+                args={"argv": ["bash", "-c", f"cat {secret}"]},
+            ),
+            ctx=dataclasses.replace(_ctx(), user_id="u"),
+        )
+    )
+
+    assert err is None and out is not None
+    assert "PRIVATE-CONTENT" in out
+
+
+@pytest.mark.asyncio
+async def test_run_command_memory_path_is_blocked_when_memory_unavailable(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    private = tmp_path / "memory" / "private.txt"
+    private.parent.mkdir()
+    private.write_text("PRIVATE-CONTENT", encoding="utf-8")
+    skills = workspace / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=workspace,
+        memory=None,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="memory-path-disabled",
+                name="run_command",
+                args={"argv": ["cat", "../memory/private.txt"]},
+            ),
+            ctx=dataclasses.replace(_ctx(), user_id="u"),
+        )
+    )
+
+    assert out is None and err is not None
+    payload = json.loads(err)
+    assert payload["error_kind"] == "policy"
+    assert "PRIVATE-CONTENT" not in err
+    assert "../memory/private.txt" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_direct_mempalace_route_is_owned_by_each_executor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.tools.terminal import ExecutionResult, TerminalExecutor
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    skills = workspace / "skills"
+    skills.mkdir()
+    palace_a = _mem_sub(tmp_path / "memory-a")
+    palace_b = _mem_sub(tmp_path / "memory-b")
+    seen: list[dict[str, str]] = []
+
+    async def fake_execute(
+        self,
+        command,
+        args,
+        timeout=60,
+        *,
+        cwd=None,
+        env_overrides=None,
+    ):
+        del self, command, args, timeout, cwd
+        seen.append(dict(env_overrides or {}))
+        return ExecutionResult(stdout="ok", stderr="", exit_code=0)
+
+    monkeypatch.setattr(TerminalExecutor, "execute", fake_execute)
+    monkeypatch.setenv("MEMPALACE_PALACE_PATH", str(palace_b.palace_path))
+    executor_a = CoreToolExecutor(
+        workspace_root=workspace,
+        memory=palace_a,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    executor_b = CoreToolExecutor(
+        workspace_root=workspace,
+        memory=palace_b,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+
+    for executor, call_id in ((executor_a, "palace-a"), (executor_b, "palace-b")):
+        out, err = unwrap_tool_execution_result(
+            await executor.execute(
+                call=ToolCall(
+                    call_id=call_id,
+                    name="run_command",
+                    args={"argv": ["mempalace", "search", "query"]},
+                ),
+                ctx=dataclasses.replace(_ctx(), user_id="u"),
+            )
+        )
+        assert err is None and out is not None
+
+    assert [entry["MEMPALACE_PALACE_PATH"] for entry in seen] == [
+        str(palace_a.palace_path),
+        str(palace_b.palace_path),
+    ]
+    assert seen[0]["MEMPALACE_PALACE_PATH"] != str(palace_b.palace_path)
+
+
+@pytest.mark.skipif(
+    not isolation_support().available,
+    reason=f"host cannot isolate filesystems: {isolation_support().detail}",
+)
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["bash", "-c", "echo shell-ok"], "shell-ok"),
+        (["python", "-c", "print('python-ok')"], "python-ok"),
+        (["git", "--version"], "git version"),
+        (["uv", "--version"], "uv "),
+        (["gh", "--version"], "gh version"),
+    ],
+)
+async def test_run_command_launchers_remain_available_without_memory(
+    tmp_path: Path,
+    argv: list[str],
+    expected: str,
+) -> None:
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=None,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="memory-unavailable",
+                name="run_command",
+                args={"argv": argv},
+            ),
+            ctx=_ctx(),
+        )
+    )
+
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert payload["ok"] is True
+    assert expected in payload["stdout"]
 
 
 @pytest.mark.asyncio
@@ -649,6 +1685,196 @@ async def test_run_command_malformed_args_returns_validation_envelope(
     assert payload["ok"] is False
     assert payload["error_kind"] == "validation"
     assert "example" in payload["details"]
+
+
+@pytest.mark.asyncio
+async def test_run_command_cwd_forwards_workspace_subdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from monkeybot.core.tools.terminal import ExecutionResult
+
+    monkeypatch.chdir(tmp_path)
+    sub = tmp_path / "pkg"
+    sub.mkdir()
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    terminal = MagicMock()
+    terminal.allowed_commands = ("pwd",)
+    terminal.allowed_path_prefixes = ("./",)
+    terminal.execute = AsyncMock(
+        return_value=ExecutionResult(exit_code=0, stdout=str(sub), stderr="")
+    )
+    terminal.aclose = AsyncMock()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+        terminal=terminal,
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="1",
+                name="run_command",
+                args={"argv": ["pwd"], "cwd": "pkg"},
+            ),
+            ctx=_ctx(),
+        )
+    )
+    assert err is None and out is not None
+    terminal.execute.assert_awaited_once()
+    assert terminal.execute.await_args.kwargs["cwd"] == sub.resolve()
+
+
+@pytest.mark.asyncio
+async def test_run_command_cwd_escape_returns_validation_envelope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="1",
+                name="run_command",
+                args={"argv": ["pwd"], "cwd": "../outside"},
+            ),
+            ctx=_ctx(),
+        )
+    )
+    assert out is None and err is not None
+    payload = json.loads(err)
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "validation"
+
+
+@pytest.mark.asyncio
+async def test_run_command_timeout_hint_rejects_timeout_bump_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Timeout guidance must not push 'raise timeout and retry the same argv'."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from monkeybot.core.tools.terminal import CommandTimeoutError
+
+    monkeypatch.chdir(tmp_path)
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    terminal = MagicMock()
+    terminal.allowed_commands = ("python3",)
+    terminal.allowed_path_prefixes = ("./",)
+    terminal.execute = AsyncMock(
+        side_effect=CommandTimeoutError(
+            "Command exceeded 300s timeout",
+            timeout=300,
+            stdout="creating database test_epsilon_test\n",
+            stderr="still migrating…\n",
+        )
+    )
+    terminal.aclose = AsyncMock()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+        terminal=terminal,
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="1",
+                name="run_command",
+                args={"argv": ["python3", "-m", "pytest"], "timeout": 300},
+            ),
+            ctx=_ctx(),
+        )
+    )
+    assert out is None and err is not None
+    payload = json.loads(err)
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "runtime"
+    assert "300s" in payload["message"]
+    hint = payload["hint"].lower()
+    assert "partial state" in hint or "left partial" in hint
+    assert "not a valid recovery" in hint
+    assert "larger timeout" in hint
+    assert "increase" not in hint
+    assert "read_file" in hint
+    details = payload["details"]
+    assert "example" not in details
+    assert "avoid" not in details
+    assert "prefer" not in details
+    spill_rel = details["partial_output_path"]
+    assert spill_rel.endswith("-timeout.txt")
+    assert details["stdout_chars"] > 0
+    assert details["stderr_chars"] > 0
+    assert "test_epsilon_test" in details["partial_output_tail"]
+    # Full streams live on disk — not dumped as the error body.
+    spill_body = (tmp_path / spill_rel).read_text(encoding="utf-8")
+    assert "test_epsilon_test" in spill_body
+    assert "still migrating" in spill_body
+    assert spill_rel in payload["hint"]
+
+
+@pytest.mark.asyncio
+async def test_run_command_timeout_spills_partial_output_from_real_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end: killed process output is spilled; envelope points at the path."""
+    monkeypatch.chdir(tmp_path)
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="to1",
+                name="run_command",
+                args={
+                    "argv": [
+                        "python3",
+                        "-c",
+                        "import sys, time; print('before-hang', flush=True); time.sleep(60)",
+                    ],
+                    "timeout": 1,
+                },
+            ),
+            ctx=_ctx(),
+        )
+    )
+    assert out is None and err is not None
+    payload = json.loads(err)
+    assert payload["error_kind"] == "runtime"
+    spill_rel = payload["details"]["partial_output_path"]
+    spill_text = (tmp_path / spill_rel).read_text(encoding="utf-8")
+    assert "before-hang" in spill_text
+    assert "before-hang" in payload["details"].get("partial_output_tail", "")
+    # Envelope itself stays small — no multi-MB dump of streams at top level.
+    assert "before-hang" not in payload["message"]
+    assert len(json.dumps(payload)) < 8_000
 
 
 @pytest.mark.asyncio
@@ -828,9 +2054,9 @@ async def test_task_tool_unknown_subagent_type_returns_validation_error(
 ) -> None:
     root = tmp_path
     mem = tmp_path / "mem"
-    mem.mkdir()
+    mem.mkdir(exist_ok=True)
     skills = tmp_path / "skills"
-    skills.mkdir()
+    skills.mkdir(exist_ok=True)
     worker = root / "subagent_worker.py"
     worker.write_text("# placeholder\n", encoding="utf-8")
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
@@ -916,29 +2142,6 @@ async def test_task_tool_spawns_without_memory(tmp_path: Path, monkeypatch: pyte
 
 
 @pytest.mark.asyncio
-async def test_search_memory_without_memory_returns_validation_error(tmp_path: Path) -> None:
-    skills = tmp_path / "skills"
-    skills.mkdir()
-    ex = CoreToolExecutor(
-        workspace_root=tmp_path,
-        memory=None,
-        skills_path=skills,
-        mcp=_NoMCP(),
-    )
-    out, err = unwrap_tool_execution_result(
-        await ex.execute(
-            call=ToolCall(call_id="1", name="search_memory", args={"query": "alpha"}),
-            ctx=_ctx(),
-        )
-    )
-    assert out is None and err is not None
-    payload = json.loads(err)
-    assert payload["ok"] is False
-    assert payload["error_kind"] == "validation"
-    assert "memory" in payload["message"].lower()
-
-
-@pytest.mark.asyncio
 async def test_task_tool_parent_cancel_stops_hanging_subagent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     hang = asyncio.Event()
 
@@ -960,9 +2163,9 @@ async def test_task_tool_parent_cancel_stops_hanging_subagent(tmp_path: Path, mo
     root = tmp_path
     _stub_agent_md_for_tasks(root, monkeypatch)
     mem = tmp_path / "mem"
-    mem.mkdir()
+    mem.mkdir(exist_ok=True)
     skills = tmp_path / "skills"
-    skills.mkdir()
+    skills.mkdir(exist_ok=True)
     worker = root / "subagent_worker.py"
     worker.write_text("# placeholder\n", encoding="utf-8")
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
@@ -1003,15 +2206,16 @@ async def test_task_tool_parent_cancel_stops_hanging_subagent(tmp_path: Path, mo
 
 @pytest.mark.asyncio
 async def test_write_spill_with_inventory_writes_full_payload(tmp_path: Path) -> None:
-    from monkeybot.core.tools.core_tool_executor import _write_spill_with_inventory
+    from monkeybot.core.tools.spill_inventory import write_spill_with_inventory
 
     body = "x" * 25_000
-    out = _write_spill_with_inventory(body, tmp_path, "th1", "call-1")
+    out = write_spill_with_inventory(body, tmp_path, "th1", "call-1", tool_name="run_command")
     spill = tmp_path / ".monkeybot" / "spill" / "th1" / "call-1.txt"
     assert spill.read_text(encoding="utf-8") == body
     assert body not in out
     assert "Spill inventory" in out
     assert "25000 total chars" in out
+    assert "Preview:" in out
     assert ".monkeybot/spill/th1/call-1.txt" in out
 
 
@@ -1035,11 +2239,13 @@ async def test_list_skills_spills_large_json(tmp_path: Path) -> None:
     out, err = unwrap_tool_execution_result(await ex.execute(call=ToolCall(call_id="c-spill", name="list_skills", args={}), ctx=ctx))
     assert err is None and out is not None
     assert "Spill inventory" in out
-    assert len(out) < 2000
+    # Soft spill inlines a body prefix; preview is omitted when body is present.
+    assert "Preview:" not in out
     spill = root / ".monkeybot" / "spill" / "t" / "c-spill.txt"
     assert spill.is_file()
     raw = spill.read_text(encoding="utf-8")
     assert len(raw) > 20_000
+    assert raw[:200] in out
 
 
 @pytest.mark.asyncio
@@ -1134,13 +2340,14 @@ async def test_read_file_preserves_embedded_base64_blob(tmp_path: Path) -> None:
 async def test_spill_writes_raw_payload_before_sanitize(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    del monkeypatch  # env sizing knobs are retired; threshold is window-derived
     root = tmp_path
     mem = tmp_path / "mem"
     mem.mkdir()
     skills = tmp_path / "skills"
     skills.mkdir()
-    monkeypatch.setenv("MONKEYBOT_SPILL_MIN_CHARS", "500")
-    mcp = _MCPWithBlob()
+    # Payload must exceed window-derived spill_threshold (~16k at 200k window).
+    mcp = _MCPWithBlob(blob_len=20_000)
     ex = CoreToolExecutor(workspace_root=root, memory=_mem_sub(mem), skills_path=skills, mcp=mcp)
     out, err = unwrap_tool_execution_result(
         await ex.execute(
@@ -1154,9 +2361,11 @@ async def test_spill_writes_raw_payload_before_sanitize(
     assert spill.is_file()
     raw = spill.read_text(encoding="utf-8")
     parsed = json.loads(raw)
-    assert len(parsed["data"]) == 1200
+    assert len(parsed["data"]) == 20_000
     assert "omitted" not in parsed["data"]
-    assert mcp._payload[:80] not in out
+    # History is sanitized; raw base64 must not survive in the inline body.
+    assert "omitted" in out
+    assert parsed["data"][:80] not in out
 
 
 @pytest.mark.asyncio
@@ -1190,7 +2399,7 @@ import sys
 from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from monkeybot.core.tools.sandbox_executor import SandboxExecutor
+from monkeybot.core.tools.sandbox_executor import SandboxConfig, SandboxExecutor
 from monkeybot.core.tools.terminal import TerminalExecutor
 
 
@@ -1310,7 +2519,93 @@ class TestCoreToolExecutorSandboxSelection:
             mcp=_NoMCP(),
             terminal=injected,
         )
+        assert isinstance(ex._terminal, TerminalExecutor)
+        assert ex._host_terminal is None
+        # Memory is enabled here, so the injected policy is carried over intact.
+        assert ex._terminal.allowed_commands == injected.allowed_commands
+        assert ex._terminal.hidden_paths == ()
+
+    def test_injected_terminal_is_bound_by_memory_off_policy(self, tmp_path):
+        """A library caller's executor must not keep palace access we revoked."""
+        injected = TerminalExecutor()
+        skills = tmp_path / "skills"
+        skills.mkdir()
+
+        ex = CoreToolExecutor(
+            workspace_root=tmp_path,
+            memory=None,
+            skills_path=skills,
+            mcp=_NoMCP(),
+            terminal=injected,
+        )
+
+        assert "../memory" in injected.allowed_path_prefixes  # caller's object untouched
+        assert "mempalace" in injected.allowed_commands
+        assert not any(
+            prefix.startswith("../memory") for prefix in ex._terminal.allowed_path_prefixes
+        )
+        assert "mempalace" not in ex._terminal.allowed_commands
+        assert ex._terminal.hidden_paths
+
+    def test_injected_terminal_preserves_caller_path_policy(self, tmp_path):
+        """Injected executors keep the caller's path allowlist (no skills widening)."""
+        injected = TerminalExecutor(allowed_path_prefixes=["."])
+        skills = tmp_path / "skills"
+        skills.mkdir()
+        mem = tmp_path / "mem"
+        mem.mkdir()
+
+        ex = CoreToolExecutor(
+            workspace_root=tmp_path,
+            memory=_mem_sub(mem),
+            skills_path=skills,
+            mcp=_NoMCP(),
+            terminal=injected,
+        )
+
+        assert "." in injected.allowed_path_prefixes
+        assert str(skills) not in injected.allowed_path_prefixes
+        assert ex._terminal.allowed_path_prefixes == injected.allowed_path_prefixes
+
+    def test_injected_terminal_preserves_caller_hidden_paths_when_memory_on(self, tmp_path):
+        """Memory-on must pass None into restricted(), not () which would clear."""
+        extra = tmp_path / "extra-hidden"
+        extra.mkdir()
+        injected = TerminalExecutor(hidden_paths=[extra])
+        skills = tmp_path / "skills"
+        skills.mkdir()
+        mem = tmp_path / "mem"
+        mem.mkdir()
+
+        ex = CoreToolExecutor(
+            workspace_root=tmp_path,
+            memory=_mem_sub(mem),
+            skills_path=skills,
+            mcp=_NoMCP(),
+            terminal=injected,
+        )
+
+        assert ex._terminal.hidden_paths == (extra,)
+
+    def test_injected_sandbox_gets_host_terminal_for_memory(self, tmp_path, monkeypatch):
+        """Injected sandboxes need a host terminal; the palace is never mounted."""
+        monkeypatch.delenv("SANDBOX_ENABLED", raising=False)
+        mem = tmp_path / "mem"
+        mem.mkdir()
+        skills = tmp_path / "skills"
+        skills.mkdir()
+        injected = SandboxExecutor(SandboxConfig.from_env(), tmp_path, skills_path=skills)
+
+        ex = CoreToolExecutor(
+            workspace_root=tmp_path,
+            memory=_mem_sub(mem),
+            skills_path=skills,
+            mcp=_NoMCP(),
+            terminal=injected,
+        )
+
         assert ex._terminal is injected
+        assert isinstance(ex._host_terminal, TerminalExecutor)
 
 
 class TestCoreToolExecutorAclose:
@@ -1515,11 +2810,12 @@ async def test_task_tool_queue_mode_enqueues_pending_run(
                 ctx=_ctx(),
             )
         )
-        assert err is None and out is not None
-        payload = json.loads(out)
-        assert payload["ok"] is True
-        assert payload["queued"] is True
-        row = await backend.runs().get_run(payload["run_id"])
+        assert err is not None and out is None
+        payload = json.loads(err)
+        assert payload["ok"] is False
+        assert payload["error_kind"] == "pending"
+        assert payload["details"]["queued"] is True
+        row = await backend.runs().get_run(payload["details"]["run_id"])
         assert row is not None
         assert row.status == "pending"
         stored = StoredEnvelope.from_json(row.envelope_json)
@@ -1529,7 +2825,7 @@ async def test_task_tool_queue_mode_enqueues_pending_run(
 
 
 @pytest.mark.asyncio
-async def test_render_image_returns_image_block(tmp_path: Path) -> None:
+async def test_load_file_from_path_returns_image_block(tmp_path: Path) -> None:
     from monkeybot.core.attachments.store import FilesystemAttachmentStore
     from monkeybot.core.types.content_blocks import Image
 
@@ -1556,7 +2852,7 @@ async def test_render_image_returns_image_block(tmp_path: Path) -> None:
     )
 
     result = await ex.execute(
-        call=ToolCall(call_id="ri1", name="render_image", args={"path": rel}),
+        call=ToolCall(call_id="lf1", name="load_file", args={"path": rel}),
         ctx=_ctx(),
     )
     assert result.error is None
@@ -1568,17 +2864,135 @@ async def test_render_image_returns_image_block(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_render_image_rejects_non_image(tmp_path: Path) -> None:
+async def test_load_file_rejects_plain_text_path(tmp_path: Path) -> None:
     (tmp_path / "mem").mkdir(exist_ok=True)
     (tmp_path / "skills").mkdir(exist_ok=True)
     (tmp_path / "notes.txt").write_text("hello", encoding="utf-8")
     ex = _make_executor(tmp_path)
     result = await ex.execute(
-        call=ToolCall(call_id="ri2", name="render_image", args={"path": "./notes.txt"}),
+        call=ToolCall(call_id="lf2", name="load_file", args={"path": "./notes.txt"}),
         ctx=_ctx(),
     )
     assert result.error is not None
-    assert "image" in result.error.lower()
+    assert "read_file" in result.error.lower() or "pdf" in result.error.lower()
+
+
+@pytest.mark.asyncio
+async def test_load_file_from_path_returns_pdf_file_block(tmp_path: Path) -> None:
+    from monkeybot.core.types.content_blocks import File
+
+    (tmp_path / "mem").mkdir(exist_ok=True)
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    pdf_bytes = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n"
+    (tmp_path / "doc.pdf").write_bytes(pdf_bytes)
+    ex = _make_executor(tmp_path)
+    result = await ex.execute(
+        call=ToolCall(call_id="lf3", name="load_file", args={"path": "./doc.pdf"}),
+        ctx=_ctx(),
+    )
+    assert result.error is None
+    assert any(isinstance(b, File) for b in result.blocks)
+    block = next(b for b in result.blocks if isinstance(b, File))
+    assert block.mime_type == "application/pdf"
+
+
+@pytest.mark.asyncio
+async def test_load_file_from_attachment_id_returns_image_block(tmp_path: Path) -> None:
+    from monkeybot.core.attachments.store import FilesystemAttachmentStore
+    from monkeybot.core.types.content_blocks import Image
+
+    png = (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
+        b"\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc"
+        b"\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    ctx = _ctx()
+    store = FilesystemAttachmentStore(tmp_path)
+    stored = store.save(ctx.thread_id, data=png, mime_type="image/png", filename="up.png")
+
+    (tmp_path / "mem").mkdir(exist_ok=True)
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_NoMCP(),
+        attachment_store=store,
+    )
+
+    result = await ex.execute(
+        call=ToolCall(
+            call_id="lf4",
+            name="load_file",
+            args={"attachment_id": stored.attachment_id},
+        ),
+        ctx=ctx,
+    )
+    assert result.error is None
+    assert any(isinstance(b, Image) for b in result.blocks)
+    img = next(b for b in result.blocks if isinstance(b, Image))
+    assert img.mime_type == "image/png"
+    assert img.metadata is not None
+    assert img.metadata.get("attachment_id") == stored.attachment_id
+
+
+@pytest.mark.asyncio
+async def test_load_file_from_attachment_id_unknown_id_errors(tmp_path: Path) -> None:
+    from monkeybot.core.attachments.store import FilesystemAttachmentStore
+
+    (tmp_path / "mem").mkdir(exist_ok=True)
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_NoMCP(),
+        attachment_store=FilesystemAttachmentStore(tmp_path),
+    )
+
+    result = await ex.execute(
+        call=ToolCall(call_id="lf5", name="load_file", args={"attachment_id": "att_missing"}),
+        ctx=_ctx(),
+    )
+    assert result.error is not None
+    assert "att_missing" in result.error
+
+
+@pytest.mark.asyncio
+async def test_load_file_attachment_id_without_store_errors(tmp_path: Path) -> None:
+    ex = _make_executor(tmp_path)
+    result = await ex.execute(
+        call=ToolCall(call_id="lf6", name="load_file", args={"attachment_id": "att_x"}),
+        ctx=_ctx(),
+    )
+    assert result.error is not None
+    assert "not enabled" in result.error.lower()
+
+
+@pytest.mark.asyncio
+async def test_load_file_rejects_both_attachment_id_and_path(tmp_path: Path) -> None:
+    ex = _make_executor(tmp_path)
+    result = await ex.execute(
+        call=ToolCall(
+            call_id="lf7",
+            name="load_file",
+            args={"attachment_id": "att_x", "path": "./notes.txt"},
+        ),
+        ctx=_ctx(),
+    )
+    assert result.error is not None
+    assert "not both" in result.error.lower()
+
+
+@pytest.mark.asyncio
+async def test_load_file_requires_attachment_id_or_path(tmp_path: Path) -> None:
+    ex = _make_executor(tmp_path)
+    result = await ex.execute(
+        call=ToolCall(call_id="lf8", name="load_file", args={}),
+        ctx=_ctx(),
+    )
+    assert result.error is not None
+    assert "requires" in result.error.lower()
 
 
 @pytest.mark.asyncio
@@ -1611,6 +3025,35 @@ async def test_custom_tool_tool_execution_result_passthrough(tmp_path: Path) -> 
     assert result.error is None
     assert any(isinstance(b, Image) for b in result.blocks)
 
+
+@pytest.mark.asyncio
+async def test_extra_tool_runtime_error_forbids_identical_retry(tmp_path: Path) -> None:
+    from monkeybot.core.types.types_tools import ToolDef
+
+    class _BoomTool:
+        tool_def = ToolDef("boom", "raises", {"type": "object", "properties": {}})
+
+        async def execute(self, args: dict[str, object]) -> str:
+            del args
+            raise RuntimeError("boom")
+
+    (tmp_path / "mem").mkdir(exist_ok=True)
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_NoMCP(),
+        extra_tools=[_BoomTool()],
+    )
+    _out, err = unwrap_tool_execution_result(
+        await ex.execute(call=ToolCall(call_id="1", name="boom", args={}), ctx=_ctx())
+    )
+    assert err is not None
+    payload = json.loads(err)
+    assert payload["ok"] is False
+    assert "Do not retry identical arguments" in payload["hint"]
+    assert "if appropriate" not in payload["hint"]
 
 
 class _CatalogMCP(_NoMCP):
@@ -1647,6 +3090,20 @@ class _CatalogMCP(_NoMCP):
             out.extend(tools)
         return out
 
+    def status(self, name: str | None = None):
+        if name is None:
+            return [
+                {
+                    "name": n,
+                    "status": "connected" if n in self.connected else "catalogued",
+                }
+                for n in sorted(set(self._catalog) | set(self.connected))
+            ]
+        return {
+            "name": name,
+            "status": "connected" if name in self.connected else "catalogued",
+        }
+
 
 @pytest.mark.asyncio
 async def test_enable_mcp_connects_from_catalog(tmp_path: Path) -> None:
@@ -1666,6 +3123,7 @@ async def test_enable_mcp_connects_from_catalog(tmp_path: Path) -> None:
     body = json.loads(result.blocks[0].text)  # type: ignore[index]
     assert body["ok"] is True
     assert body["server"] == "browser"
+    assert body["status"]["status"] == "connected"
     assert body["tools"][0]["name"] == "browser__goto"
     assert "next model step" in body["note"]
 
@@ -1732,22 +3190,76 @@ async def test_disable_mcp_unknown_server_errors(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_remove_mcp_server_unknown_server_errors(tmp_path: Path) -> None:
-    mcp = _CatalogMCP()
+async def test_enable_loops_requires_store(tmp_path: Path) -> None:
     ex = CoreToolExecutor(
         workspace_root=tmp_path,
         memory=_mem_sub(tmp_path / "mem"),
         skills_path=tmp_path / "skills",
-        mcp=mcp,
+        mcp=_NoMCP(),
     )
     (tmp_path / "skills").mkdir(exist_ok=True)
     result = await ex.execute(
-        call=ToolCall(name="remove_mcp_server", args={"name": "nope"}, call_id="1"),
+        call=ToolCall(name="enable_loops", args={}, call_id="1"),
         ctx=_ctx(),
     )
     assert result.error is not None
-    assert "Unknown MCP server" in result.error
-    assert mcp.disconnected == []
+    assert "durable storage" in result.error
+
+
+@pytest.mark.asyncio
+async def test_enable_and_disable_loops_toggle_advertisement(tmp_path: Path) -> None:
+    registry = LoopsToolRegistry()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_NoMCP(),
+        scheduled_loop_store=object(),  # type: ignore[arg-type]
+        loops_registry=registry,
+    )
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    assert ex.loops_advertised is False
+    enabled = await ex.execute(
+        call=ToolCall(name="enable_loops", args={}, call_id="1"),
+        ctx=_ctx(),
+    )
+    assert enabled.error is None
+    body = json.loads(enabled.blocks[0].text)  # type: ignore[index]
+    assert body["ok"] is True
+    assert body["already_advertised"] is False
+    assert {t["name"] for t in body["tools"]} >= {
+        "start_loop",
+        "loop_status",
+        "pause_loop",
+        "resume_loop",
+        "stop_loop",
+        "disable_loops",
+    }
+    assert ex.loops_advertised is True
+    assert registry.advertised is True
+
+    # Same registry shared across a fresh executor (next user turn).
+    ex2 = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_NoMCP(),
+        scheduled_loop_store=object(),  # type: ignore[arg-type]
+        loops_registry=registry,
+    )
+    assert ex2.loops_advertised is True
+
+    disabled = await ex2.execute(
+        call=ToolCall(name="disable_loops", args={}, call_id="2"),
+        ctx=_ctx(),
+    )
+    assert disabled.error is None
+    dbody = json.loads(disabled.blocks[0].text)  # type: ignore[index]
+    assert dbody["ok"] is True
+    assert dbody["was_advertised"] is True
+    assert dbody["tools_dropped"] == len(body["tools"])
+    assert ex2.loops_advertised is False
+    assert registry.advertised is False
 
 
 class _ResourcesMCP(_NoMCP):
@@ -1773,10 +3285,6 @@ class _ResourcesMCP(_NoMCP):
     async def list_resources(self, server_name: str | None = None):
         del server_name
         return [{"server": "docs", "name": "readme", "uri": "docs://readme"}]
-
-    async def list_resource_templates(self, server_name: str | None = None):
-        del server_name
-        return [{"server": "docs", "name": "file", "uriTemplate": "file:///{path}"}]
 
     async def read_resource(self, server_name: str, uri: str):
         return {
@@ -1817,13 +3325,6 @@ async def test_mcp_resource_and_prompt_tools(tmp_path: Path) -> None:
     )
     ctx = _ctx()
 
-    status = await ex.execute(
-        call=ToolCall(name="mcp_status", args={}, call_id="s1"),
-        ctx=ctx,
-    )
-    assert status.error is None
-    assert json.loads(status.blocks[0].text)["servers"][0]["status"] == "connected"  # type: ignore[index]
-
     listed = await ex.execute(
         call=ToolCall(name="list_mcp_resources", args={}, call_id="r1"),
         ctx=ctx,
@@ -1861,3 +3362,945 @@ async def test_mcp_resource_and_prompt_tools(tmp_path: Path) -> None:
     )
     assert got.error is None
     assert json.loads(got.blocks[0].text)["name"] == "summarize"  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_read_mcp_resource_requires_server_and_uri(tmp_path: Path) -> None:
+    (tmp_path / "mem").mkdir(exist_ok=True)
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_ResourcesMCP(),
+    )
+    ctx = _ctx()
+
+    missing_server = await ex.execute(
+        call=ToolCall(name="read_mcp_resource", args={"uri": "docs://readme"}, call_id="r1"),
+        ctx=ctx,
+    )
+    assert missing_server.error == "read_mcp_resource requires server"
+
+    missing_uri = await ex.execute(
+        call=ToolCall(name="read_mcp_resource", args={"server": "docs"}, call_id="r2"),
+        ctx=ctx,
+    )
+    assert missing_uri.error == "read_mcp_resource requires uri"
+
+
+@pytest.mark.asyncio
+async def test_get_mcp_prompt_requires_server_and_prompt(tmp_path: Path) -> None:
+    (tmp_path / "mem").mkdir(exist_ok=True)
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_ResourcesMCP(),
+    )
+    ctx = _ctx()
+
+    missing_server = await ex.execute(
+        call=ToolCall(name="get_mcp_prompt", args={"prompt": "summarize"}, call_id="p1"),
+        ctx=ctx,
+    )
+    assert missing_server.error == "get_mcp_prompt requires server"
+
+    missing_prompt = await ex.execute(
+        call=ToolCall(name="get_mcp_prompt", args={"server": "docs"}, call_id="p2"),
+        ctx=ctx,
+    )
+    assert missing_prompt.error == "get_mcp_prompt requires prompt"
+
+
+class _ResourcesMCPNotConnected(_NoMCP):
+    """MCP stub whose resource/prompt calls fail: server unknown or missing capability."""
+
+    async def list_resources(self, server_name: str | None = None):
+        raise MCPServerNotConnectedError(server_name or "docs")
+
+    async def read_resource(self, server_name: str, uri: str):
+        del uri
+        raise MCPServerNotConnectedError(server_name)
+
+    async def list_prompts(self, server_name: str | None = None):
+        raise MCPDiagnosticError(
+            server_name or "docs",
+            f"MCP server {server_name!r} does not advertise prompts capability",
+            remedy="Use a server that supports prompts, or call enable_mcp first.",
+        )
+
+    async def get_prompt(
+        self,
+        server_name: str,
+        prompt_name: str,
+        arguments: dict[str, str] | None = None,
+    ):
+        del prompt_name, arguments
+        raise MCPDiagnosticError(
+            server_name,
+            f"MCP server {server_name!r} does not advertise prompts capability",
+            remedy="Use a server that supports prompts, or call enable_mcp first.",
+        )
+
+
+@pytest.mark.asyncio
+async def test_mcp_resource_and_prompt_tools_not_found_paths(tmp_path: Path) -> None:
+    (tmp_path / "mem").mkdir(exist_ok=True)
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_ResourcesMCPNotConnected(),
+    )
+    ctx = _ctx()
+
+    listed = await ex.execute(
+        call=ToolCall(name="list_mcp_resources", args={"server": "missing"}, call_id="r1"),
+        ctx=ctx,
+    )
+    assert listed.error is not None
+    assert "not connected" in listed.error
+
+    read = await ex.execute(
+        call=ToolCall(
+            name="read_mcp_resource",
+            args={"server": "missing", "uri": "docs://readme"},
+            call_id="r2",
+        ),
+        ctx=ctx,
+    )
+    assert read.error is not None
+    assert "not connected" in read.error
+
+    prompts = await ex.execute(
+        call=ToolCall(name="list_mcp_prompts", args={"server": "docs"}, call_id="p1"),
+        ctx=ctx,
+    )
+    assert prompts.error is not None
+    assert "does not advertise prompts capability" in prompts.error
+
+    got = await ex.execute(
+        call=ToolCall(
+            name="get_mcp_prompt",
+            args={"server": "docs", "prompt": "summarize"},
+            call_id="p2",
+        ),
+        ctx=ctx,
+    )
+    assert got.error is not None
+    assert "does not advertise prompts capability" in got.error
+
+
+# --- Story 2: subagent progress publishing ---------------------------------
+
+
+class _FakeEventPublisher:
+    """Captures publish_event calls for task-tool SSE tests."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.events: list[object] = []
+        self.fail = fail
+
+    async def publish_event(self, event: object) -> None:
+        if self.fail:
+            raise RuntimeError("publish boom")
+        self.events.append(event)
+
+
+def test_turn_context_event_publisher_defaults_none() -> None:
+    ctx = TurnContext(
+        thread_id="t",
+        request_id="r",
+        agent_md="# Agent",
+        memory_index=[],
+        skills=[],
+        tools=[],
+        user_id=None,
+        parent_run_id=None,
+        model="gemini-2.5-flash",
+    )
+    assert ctx.event_publisher is None
+
+
+@pytest.mark.asyncio
+async def test_build_context_accepts_event_publisher(tmp_path: Path) -> None:
+    from monkeybot.core.context import build_context
+
+    agent_path = tmp_path / "AGENT.md"
+    agent_path.write_text("You are helpful.\n", encoding="utf-8")
+    mem = tmp_path / "memory"
+    mem.mkdir()
+    (mem / "INDEX.md").write_text("", encoding="utf-8")
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    pub = _FakeEventPublisher()
+    ctx = await build_context(
+        "thread-1",
+        "req-1",
+        agent_md_path=agent_path,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp_client=_NoMCP(),
+        event_publisher=pub,
+    )
+    assert ctx.event_publisher is pub
+
+
+@pytest.mark.asyncio
+async def test_task_tool_result_includes_child_thread_id_and_subagent_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.runtime.events import TurnComplete, UsageTotals
+
+    agents = tmp_path / "monkeybot_config" / "agents"
+    agents.mkdir(parents=True)
+    (agents / "researcher.md").write_text("# researcher\n", encoding="utf-8")
+    (tmp_path / "monkeybot_config" / "AGENT.md").write_text("# parent\n", encoding="utf-8")
+
+    async def fake_spawn(
+        script: str,
+        envelope: object,
+        *,
+        scratch_dir: object,
+        subprocess_exec: object | None = None,
+        on_event: object | None = None,
+        extra_env: dict[str, str] | None = None,
+    ):
+        del script, scratch_dir, subprocess_exec, on_event, extra_env, envelope
+        yield TurnComplete(
+            request_id="r",
+            usage=UsageTotals(
+                input_tokens=1,
+                output_tokens=1,
+                cached_tokens=0,
+                cost_usd=0.0,
+                duration_ms=1,
+                estimated_prompt_tokens=0,
+            ),
+        )
+
+    monkeypatch.setattr("monkeybot.core.tools.core_tool_executor.spawn_subagent", fake_spawn)
+
+    root = tmp_path
+    _stub_agent_md_for_tasks(root, monkeypatch)
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    worker = root / "subagent_worker.py"
+    worker.write_text("# placeholder\n", encoding="utf-8")
+    monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
+    monkeypatch.setenv("MONKEYBOT_AGENT_ROOT", str(tmp_path))
+
+    registry = {
+        "researcher": SubagentConfig(
+            name="researcher",
+            description="research",
+            skills=[],
+            agent_md="./monkeybot_config/agents/researcher.md",
+        )
+    }
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+        subagent_registry=registry,
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="c-link",
+                name="task",
+                args={"task": "research topic", "subagent_type": "researcher"},
+            ),
+            ctx=_ctx(),
+        )
+    )
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert isinstance(payload["run_id"], str) and payload["run_id"]
+    assert isinstance(payload["child_thread_id"], str)
+    assert payload["child_thread_id"].startswith("subagent:t:")
+    assert payload["subagent_type"] == "researcher"
+
+
+@pytest.mark.asyncio
+async def test_task_tool_publishes_started_events_completed_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.runtime.events import (
+        AssistantDelta,
+        SubagentCompleted,
+        SubagentEvent,
+        SubagentStarted,
+        ToolCallStarted,
+        TurnComplete,
+        UsageTotals,
+    )
+
+    async def fake_spawn(
+        script: str,
+        envelope: object,
+        *,
+        scratch_dir: object,
+        subprocess_exec: object | None = None,
+        on_event: object | None = None,
+        extra_env: dict[str, str] | None = None,
+    ):
+        del script, scratch_dir, subprocess_exec, extra_env, envelope
+        events = [
+            AssistantDelta(request_id="r", delta="hi"),
+            ToolCallStarted(
+                request_id="r", tool="search", label="search", args={}, call_id="c1"
+            ),
+            TurnComplete(
+                request_id="r",
+                usage=UsageTotals(
+                    input_tokens=1,
+                    output_tokens=1,
+                    cached_tokens=0,
+                    cost_usd=0.0,
+                    duration_ms=1,
+                    estimated_prompt_tokens=0,
+                ),
+            ),
+        ]
+        for evt in events:
+            if on_event is not None:
+                await on_event(evt)  # type: ignore[misc]
+            yield evt
+
+    monkeypatch.setattr("monkeybot.core.tools.core_tool_executor.spawn_subagent", fake_spawn)
+
+    root = tmp_path
+    _stub_agent_md_for_tasks(root, monkeypatch)
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    worker = root / "subagent_worker.py"
+    worker.write_text("# placeholder\n", encoding="utf-8")
+    monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
+
+    pub = _FakeEventPublisher()
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="c-pub",
+                name="task",
+                args={"task": "do the thing", "context": "ctx"},
+            ),
+            ctx=_ctx(event_publisher=pub),
+        )
+    )
+    assert err is None and out is not None
+    kinds = [getattr(e, "kind", None) for e in pub.events]
+    assert kinds[0] == "SubagentStarted"
+    assert isinstance(pub.events[0], SubagentStarted)
+    assert "SubagentEvent" in kinds
+    assert any(isinstance(e, SubagentEvent) for e in pub.events)
+    assert kinds[-1] == "SubagentCompleted"
+    assert isinstance(pub.events[-1], SubagentCompleted)
+
+
+@pytest.mark.asyncio
+async def test_task_tool_noop_publish_when_publisher_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.runtime.events import AssistantDelta, TurnComplete, UsageTotals
+
+    async def fake_spawn(
+        script: str,
+        envelope: object,
+        *,
+        scratch_dir: object,
+        subprocess_exec: object | None = None,
+        on_event: object | None = None,
+        extra_env: dict[str, str] | None = None,
+    ):
+        del script, scratch_dir, subprocess_exec, extra_env, envelope
+        events = [
+            AssistantDelta(request_id="r", delta="ok"),
+            TurnComplete(
+                request_id="r",
+                usage=UsageTotals(
+                    input_tokens=1,
+                    output_tokens=1,
+                    cached_tokens=0,
+                    cost_usd=0.0,
+                    duration_ms=1,
+                    estimated_prompt_tokens=0,
+                ),
+            ),
+        ]
+        for evt in events:
+            if on_event is not None:
+                await on_event(evt)  # type: ignore[misc]
+            yield evt
+
+    monkeypatch.setattr("monkeybot.core.tools.core_tool_executor.spawn_subagent", fake_spawn)
+
+    root = tmp_path
+    _stub_agent_md_for_tasks(root, monkeypatch)
+    mem = tmp_path / "mem"
+    mem.mkdir(exist_ok=True)
+    skills = tmp_path / "skills"
+    skills.mkdir(exist_ok=True)
+    worker = root / "subagent_worker.py"
+    worker.write_text("# placeholder\n", encoding="utf-8")
+    monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
+
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="c-noop",
+                name="task",
+                args={"task": "do the thing"},
+            ),
+            ctx=_ctx(),
+        )
+    )
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert payload["ok"] is True
+    assert payload["assistant_text"] == "ok"
+    assert isinstance(payload.get("child_thread_id"), str)
+    assert payload["child_thread_id"].startswith("subagent:t:")
+    assert "run_id" in payload
+
+
+@pytest.mark.asyncio
+async def test_task_tool_publish_error_does_not_fail_tool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.runtime.events import AssistantDelta, TurnComplete, UsageTotals
+
+    async def fake_spawn(
+        script: str,
+        envelope: object,
+        *,
+        scratch_dir: object,
+        subprocess_exec: object | None = None,
+        on_event: object | None = None,
+        extra_env: dict[str, str] | None = None,
+    ):
+        del script, scratch_dir, subprocess_exec, extra_env, envelope
+        events = [
+            AssistantDelta(request_id="r", delta="hi"),
+            TurnComplete(
+                request_id="r",
+                usage=UsageTotals(
+                    input_tokens=1,
+                    output_tokens=1,
+                    cached_tokens=0,
+                    cost_usd=0.0,
+                    duration_ms=1,
+                    estimated_prompt_tokens=0,
+                ),
+            ),
+        ]
+        for evt in events:
+            if on_event is not None:
+                await on_event(evt)  # type: ignore[misc]
+            yield evt
+
+    monkeypatch.setattr("monkeybot.core.tools.core_tool_executor.spawn_subagent", fake_spawn)
+
+    root = tmp_path
+    _stub_agent_md_for_tasks(root, monkeypatch)
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    worker = root / "subagent_worker.py"
+    worker.write_text("# placeholder\n", encoding="utf-8")
+    monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
+
+    pub = _FakeEventPublisher(fail=True)
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="c-fail-pub",
+                name="task",
+                args={"task": "do the thing"},
+            ),
+            ctx=_ctx(event_publisher=pub),
+        )
+    )
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert payload["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_task_tool_sets_child_thread_id_on_envelope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.runtime.events import TurnComplete, UsageTotals
+
+    seen: list[object] = []
+
+    async def fake_spawn(
+        script: str,
+        envelope: object,
+        *,
+        scratch_dir: object,
+        subprocess_exec: object | None = None,
+        on_event: object | None = None,
+        extra_env: dict[str, str] | None = None,
+    ):
+        del script, scratch_dir, subprocess_exec, on_event, extra_env
+        seen.append(envelope)
+        yield TurnComplete(
+            request_id="r",
+            usage=UsageTotals(
+                input_tokens=1,
+                output_tokens=1,
+                cached_tokens=0,
+                cost_usd=0.0,
+                duration_ms=1,
+                estimated_prompt_tokens=0,
+            ),
+        )
+
+    monkeypatch.setattr("monkeybot.core.tools.core_tool_executor.spawn_subagent", fake_spawn)
+
+    root = tmp_path
+    _stub_agent_md_for_tasks(root, monkeypatch)
+    mem = tmp_path / "mem"
+    mem.mkdir(exist_ok=True)
+    skills = tmp_path / "skills"
+    skills.mkdir(exist_ok=True)
+    worker = root / "subagent_worker.py"
+    worker.write_text("# placeholder\n", encoding="utf-8")
+    monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
+
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="c-env",
+                name="task",
+                args={"task": "do the thing"},
+            ),
+            ctx=_ctx(),
+        )
+    )
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert len(seen) == 1
+    env = seen[0]
+    assert getattr(env, "child_thread_id", None) == payload["child_thread_id"]
+    assert isinstance(payload["child_thread_id"], str)
+    assert payload["child_thread_id"].startswith("subagent:t:")
+
+
+@pytest.mark.asyncio
+async def test_task_tool_queue_mode_includes_linkage_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.persistence.durable_runs import SubagentEnvelope as StoredEnvelope
+    from monkeybot.core.persistence.sqlite_backend import SQLiteStorageBackend
+
+    monkeypatch.setenv("MONKEYBOT_TASK_QUEUE", "1")
+    root = tmp_path
+    _stub_agent_md_for_tasks(root, monkeypatch)
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    worker = root / "subagent_worker.py"
+    worker.write_text("# placeholder\n", encoding="utf-8")
+    monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
+    monkeypatch.setenv("MONKEYBOT_AGENT_ROOT", str(tmp_path))
+
+    agents = tmp_path / "monkeybot_config" / "agents"
+    agents.mkdir(parents=True)
+    (agents / "researcher.md").write_text("# researcher\n", encoding="utf-8")
+    (tmp_path / "monkeybot_config" / "AGENT.md").write_text("# parent\n", encoding="utf-8")
+
+    registry = {
+        "researcher": SubagentConfig(
+            name="researcher",
+            description="research",
+            skills=[],
+            agent_md="./monkeybot_config/agents/researcher.md",
+        )
+    }
+
+    backend = SQLiteStorageBackend("sqlite:///:memory:")
+    await backend.open()
+    try:
+        ex = CoreToolExecutor(
+            workspace_root=root,
+            memory=_mem_sub(mem),
+            skills_path=skills,
+            mcp=_NoMCP(),
+            run_store=backend.runs(),
+            subagent_registry=registry,
+        )
+        out, err = unwrap_tool_execution_result(
+            await ex.execute(
+                call=ToolCall(
+                    call_id="c-q-link",
+                    name="task",
+                    args={
+                        "task": "queued task",
+                        "context": "ctx",
+                        "subagent_type": "researcher",
+                    },
+                ),
+                ctx=_ctx(),
+            )
+        )
+        assert err is not None and out is None
+        payload = json.loads(err)
+        assert payload["ok"] is False
+        assert payload["error_kind"] == "pending"
+        details = payload["details"]
+        assert details["queued"] is True
+        assert isinstance(details["child_thread_id"], str)
+        assert details["child_thread_id"].startswith("subagent:t:")
+        assert details["subagent_type"] == "researcher"
+        assert "Do not treat this as task completion" in payload["hint"]
+        row = await backend.runs().get_run(details["run_id"])
+        assert row is not None
+        stored = StoredEnvelope.from_json(row.envelope_json)
+        assert stored.child_thread_id == details["child_thread_id"]
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_task_tool_queue_mode_skips_nested_sse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Queue mode returns before SubagentStarted/Completed (no parent publisher reachability)."""
+    from monkeybot.core.persistence.sqlite_backend import SQLiteStorageBackend
+
+    monkeypatch.setenv("MONKEYBOT_TASK_QUEUE", "1")
+    root = tmp_path
+    _stub_agent_md_for_tasks(root, monkeypatch)
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    worker = root / "subagent_worker.py"
+    worker.write_text("# placeholder\n", encoding="utf-8")
+    monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
+
+    backend = SQLiteStorageBackend("sqlite:///:memory:")
+    await backend.open()
+    try:
+        pub = _FakeEventPublisher()
+        ex = CoreToolExecutor(
+            workspace_root=root,
+            memory=_mem_sub(mem),
+            skills_path=skills,
+            mcp=_NoMCP(),
+            run_store=backend.runs(),
+        )
+        out, err = unwrap_tool_execution_result(
+            await ex.execute(
+                call=ToolCall(
+                    call_id="c-q-sse",
+                    name="task",
+                    args={"task": "queued task", "context": "ctx"},
+                ),
+                ctx=_ctx(event_publisher=pub),
+            )
+        )
+        assert err is not None and out is None
+        assert json.loads(err)["error_kind"] == "pending"
+        assert pub.events == []
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_task_tool_publishes_completed_when_payload_build_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SubagentCompleted must still fire if finalize/payload assembly raises."""
+    from monkeybot.core.runtime.events import (
+        AssistantDelta,
+        SubagentCompleted,
+        SubagentStarted,
+        TurnComplete,
+        UsageTotals,
+    )
+
+    async def fake_spawn(
+        script: str,
+        envelope: object,
+        *,
+        scratch_dir: object,
+        subprocess_exec: object | None = None,
+        on_event: object | None = None,
+        extra_env: dict[str, str] | None = None,
+    ):
+        del script, scratch_dir, subprocess_exec, extra_env, envelope
+        events = [
+            AssistantDelta(request_id="r", delta="hi"),
+            TurnComplete(
+                request_id="r",
+                usage=UsageTotals(
+                    input_tokens=1,
+                    output_tokens=1,
+                    cached_tokens=0,
+                    cost_usd=0.0,
+                    duration_ms=1,
+                    estimated_prompt_tokens=0,
+                ),
+            ),
+        ]
+        for evt in events:
+            if on_event is not None:
+                await on_event(evt)  # type: ignore[misc]
+            yield evt
+
+    monkeypatch.setattr("monkeybot.core.tools.core_tool_executor.spawn_subagent", fake_spawn)
+
+    def boom(**_kwargs: object) -> dict[str, object]:
+        raise RuntimeError("payload boom")
+
+    monkeypatch.setattr(
+        "monkeybot.core.tools.core_tool_executor._task_result_payload",
+        boom,
+    )
+
+    root = tmp_path
+    _stub_agent_md_for_tasks(root, monkeypatch)
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    worker = root / "subagent_worker.py"
+    worker.write_text("# placeholder\n", encoding="utf-8")
+    monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
+
+    pub = _FakeEventPublisher()
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="c-finalize",
+                name="task",
+                args={"task": "do the thing"},
+            ),
+            ctx=_ctx(event_publisher=pub),
+        )
+    )
+    assert err is None and out is not None
+    kinds = [getattr(e, "kind", None) for e in pub.events]
+    assert kinds[0] == "SubagentStarted"
+    assert isinstance(pub.events[0], SubagentStarted)
+    assert kinds[-1] == "SubagentCompleted"
+    completed = pub.events[-1]
+    assert isinstance(completed, SubagentCompleted)
+    assert completed.ok is False
+    assert any("payload boom" in e for e in completed.errors)
+    payload = json.loads(out)
+    assert payload["ok"] is False
+    assert any("payload boom" in e for e in payload["errors"])
+
+
+def _fake_spawn_emitting(events: list[object]):
+    """Build a ``spawn_subagent`` stand-in that replays ``events`` from a child."""
+
+    async def fake_spawn(
+        script: str,
+        envelope: object,
+        *,
+        scratch_dir: object,
+        subprocess_exec: object | None = None,
+        on_event: object | None = None,
+        extra_env: dict[str, str] | None = None,
+    ):
+        del script, scratch_dir, subprocess_exec, extra_env, envelope
+        for evt in events:
+            if on_event is not None:
+                await on_event(evt)  # type: ignore[misc]
+            yield evt
+
+    return fake_spawn
+
+
+def _clean_child_events() -> list[object]:
+    from monkeybot.core.runtime.events import AssistantDelta, TurnComplete, UsageTotals
+
+    return [
+        AssistantDelta(request_id="r", delta="done"),
+        TurnComplete(
+            request_id="r",
+            usage=UsageTotals(
+                input_tokens=1,
+                output_tokens=1,
+                cached_tokens=0,
+                cost_usd=0.0,
+                duration_ms=1,
+                estimated_prompt_tokens=0,
+            ),
+        ),
+    ]
+
+
+async def _run_task_tool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    child_events: list[object],
+    args: dict[str, object],
+) -> dict[str, object]:
+    monkeypatch.setattr(
+        "monkeybot.core.tools.core_tool_executor.spawn_subagent",
+        _fake_spawn_emitting(child_events),
+    )
+    root = tmp_path
+    _stub_agent_md_for_tasks(root, monkeypatch)
+    mem = tmp_path / "mem"
+    mem.mkdir(exist_ok=True)
+    skills = tmp_path / "skills"
+    skills.mkdir(exist_ok=True)
+    worker = root / "subagent_worker.py"
+    worker.write_text("# placeholder\n", encoding="utf-8")
+    monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
+
+    ex = CoreToolExecutor(
+        workspace_root=root,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="c-exit", name="task", args=dict(args)),
+            ctx=_ctx(event_publisher=_FakeEventPublisher()),
+        )
+    )
+    # Rejected input comes back on the error channel; the caller asserts on it.
+    body = out if out is not None else err
+    assert body is not None
+    return json.loads(body)
+
+
+@pytest.mark.asyncio
+async def test_task_exit_reason_is_completed_on_a_clean_child_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = await _run_task_tool(
+        tmp_path,
+        monkeypatch,
+        child_events=_clean_child_events(),
+        args={"task": "do the thing"},
+    )
+    assert payload["ok"] is True
+    assert payload["exit_reason"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_task_exit_reason_distinguishes_max_turns_from_a_generic_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.runtime.events import Error
+    from monkeybot.core.runtime.turn_loop import MAX_TURNS_ERROR
+
+    max_turns = await _run_task_tool(
+        tmp_path,
+        monkeypatch,
+        child_events=[Error(request_id="r", error=MAX_TURNS_ERROR)],
+        args={"task": "do the thing"},
+    )
+    assert max_turns["ok"] is False
+    assert max_turns["exit_reason"] == "max_turns"
+
+    other = await _run_task_tool(
+        tmp_path,
+        monkeypatch,
+        child_events=[Error(request_id="r", error="provider blew up")],
+        args={"task": "do the thing"},
+    )
+    assert other["exit_reason"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_task_reports_artifact_existence_only_when_the_caller_names_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "landed.md").write_text("hi\n", encoding="utf-8")
+
+    unasked = await _run_task_tool(
+        tmp_path,
+        monkeypatch,
+        child_events=_clean_child_events(),
+        args={"task": "write the doc"},
+    )
+    # No expectation declared -> the harness must not claim to know.
+    assert unasked["artifact_exists"] is None
+    assert unasked["artifacts"] == []
+
+    checked = await _run_task_tool(
+        tmp_path,
+        monkeypatch,
+        child_events=_clean_child_events(),
+        args={"task": "write the doc", "expect_files": ["landed.md", "missing.md"]},
+    )
+    assert checked["artifact_exists"] is False
+    assert checked["artifacts"] == [
+        {"path": "landed.md", "exists": True},
+        {"path": "missing.md", "exists": False},
+    ]
+
+    all_there = await _run_task_tool(
+        tmp_path,
+        monkeypatch,
+        child_events=_clean_child_events(),
+        args={"task": "write the doc", "expect_files": ["landed.md"]},
+    )
+    assert all_there["artifact_exists"] is True
+
+
+@pytest.mark.asyncio
+async def test_task_rejects_expect_files_that_escape_the_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = await _run_task_tool(
+        tmp_path,
+        monkeypatch,
+        child_events=_clean_child_events(),
+        args={"task": "x", "expect_files": ["../outside.md"]},
+    )
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "validation"

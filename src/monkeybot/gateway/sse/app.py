@@ -12,18 +12,15 @@ import json
 import logging
 import os
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from monkeybot.gateway.bootstrap import ensure_gateway_runtime_env, log_gateway_startup
-
 from monkeybot.core.attachments.config import attachments_enabled_from_env
 from monkeybot.core.attachments.store import AttachmentStore, FilesystemAttachmentStore
-from monkeybot.core.layout import AgentLayout
 from monkeybot.core.config.settings import (
     ConfigError,
     SubagentConfig,
@@ -33,8 +30,11 @@ from monkeybot.core.config.settings import (
     normalize_model_provider,
     vertex_google_search_enabled_from_config,
 )
-from monkeybot.core.context import build_context
+from monkeybot.core.context import LoopsToolRegistry, build_context
 from monkeybot.core.hooks import HookManager
+from monkeybot.core.knowledge import KnowledgeSubsystem, resolve_knowledge_settings
+from monkeybot.core.knowledge.config import knowledge_enabled_from_config
+from monkeybot.core.layout import AgentLayout
 from monkeybot.core.llm.provider import (
     Done,
     Provider,
@@ -45,32 +45,45 @@ from monkeybot.core.llm.provider import (
 )
 from monkeybot.core.llm.usage import Usage as UsageRecord
 from monkeybot.core.mcp.mcp_client import MCPClient
-from monkeybot.core.memory.subsystem import MemorySubsystem
+from monkeybot.core.memory.config import memory_enabled_from_config
+from monkeybot.core.memory.subsystem import MemoryConfigurationError, MemorySubsystem
 from monkeybot.core.persistence.backends import (
     StorageBackend,
     UsageStore,
     create_storage_backend,
 )
 from monkeybot.core.persistence.transcript import TranscriptWriter, transcript_enabled_from_env
+from monkeybot.core.runtime.events import AgentEvent, TurnComplete, UsageTotals, event_to_json
 from monkeybot.core.runtime.events import Error as AgentError
-from monkeybot.core.runtime.events import TurnComplete, UsageTotals, event_to_json
 from monkeybot.core.runtime.loop import SUMMARY_TRIGGER_RATIO
 from monkeybot.core.runtime.loop import run as run_loop
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector, ToolInspector
-from monkeybot.core.tools.permission import try_load_permission_inspector
 from monkeybot.core.tools.loop_inspector import LoopStartInspector
+from monkeybot.core.tools.permission import try_load_permission_inspector
 from monkeybot.core.types.content_blocks import ContentBlock, Text
-from monkeybot.core.workspace import create_workspace_storage
+from monkeybot.gateway.bootstrap import ensure_gateway_runtime_env, log_gateway_startup
 from monkeybot.gateway.sse.loop_port import UsagePort
+from monkeybot.gateway.sse.models import AgentUsageResponse, SessionUsageResponse
 from monkeybot.gateway.sse.routes import create_app as build_sse_app
 from monkeybot.gateway.sse.session_bus import SessionBus, SessionRegistry
-from monkeybot.providers.gemini import GeminiProvider
+from monkeybot.todo_list import TodoListStore, TodoListTool, todo_list_enabled_from_env
 from monkeybot.web_search import WebSearchTool
 from monkeybot.web_search import build_backend as _build_web_search_backend
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _SessionBusEventPublisher:
+    """Adapt :class:`SessionBus` to :class:`EventPublisherPort` for nested subagent SSE."""
+
+    bus: SessionBus
+
+    async def publish_event(self, event: AgentEvent) -> None:
+        # Nested lane keeps chatty Subagent* traffic from evicting primary-turn replay.
+        await self.bus.publish_data(event_to_json(event), lane="nested")
 
 
 @dataclass
@@ -80,22 +93,17 @@ class _GatewayDeps:
     mcp: MCPClient | None = None
     inspectors: list[ToolInspector] = field(default_factory=list)
     provider: Provider | None = None
-    curator_provider: Provider | None = None
     hook_manager: HookManager | None = None
     memory: MemorySubsystem | None = None
+    knowledge: KnowledgeSubsystem | None = None
     web_search_tool: WebSearchTool | None = None
     run_command_allowed_commands: list[str] | None = None
     run_command_allowed_path_prefixes: list[str] | None = None
     subagent_registry: dict[str, SubagentConfig] = field(default_factory=dict)
+    loops_registry: LoopsToolRegistry = field(default_factory=LoopsToolRegistry)
 
 
 _deps = _GatewayDeps()
-
-
-def _memory_enabled() -> bool:
-    """Default on; explicit off via ``MONKEYBOT_MEMORY_HOOK_ENABLED=false``."""
-    raw = os.environ.get("MONKEYBOT_MEMORY_HOOK_ENABLED", "true").strip().lower()
-    return raw not in {"0", "false", "no", "off"}
 
 
 def _env_context_window_tokens() -> int:
@@ -118,10 +126,16 @@ def _memory_storage_uri() -> str:
 
 
 class _UsageStoreAdapter(UsagePort):
-    """GET /usage backed by the UsageStore returned from the storage backend."""
+    """Usage endpoints backed by the UsageStore from the storage backend."""
 
     def __init__(self, store: UsageStore) -> None:
         self._store = store
+
+    @staticmethod
+    def _parse_since(since: str | None) -> int | None:
+        if since is not None and since.isdigit():
+            return int(since)
+        return None
 
     async def session_usage(
         self,
@@ -129,9 +143,7 @@ class _UsageStoreAdapter(UsagePort):
         *,
         since: str | None,
     ) -> dict[str, Any]:
-        since_ms: int | None = None
-        if since is not None and since.isdigit():
-            since_ms = int(since)
+        since_ms = self._parse_since(since)
         s = await self._store.summary(thread_id=session_id, since_ms=since_ms)
         context_window_tokens = _env_context_window_tokens()
         summarization_threshold_tokens = max(1, int(context_window_tokens * SUMMARY_TRIGGER_RATIO))
@@ -152,6 +164,28 @@ class _UsageStoreAdapter(UsagePort):
             "context_window_tokens": context_window_tokens,
         }
 
+    async def agent_usage(self, *, since: str | None) -> dict[str, Any]:
+        since_ms = self._parse_since(since)
+        s = await self._store.summary(thread_id=None, since_ms=since_ms)
+        b = await self._store.breakdown(since_ms=since_ms)
+        return {
+            "turns": s.turns,
+            "input_tokens": s.input_tokens,
+            "output_tokens": s.output_tokens,
+            "cached_tokens": s.cached_tokens,
+            "cache_read_tokens": s.cache_read_tokens,
+            "cache_creation_tokens": s.cache_creation_tokens,
+            "cost_usd": s.cost_usd,
+            "period_start": s.period_start_ms if s.period_start_ms is not None else 0,
+            "period_end": s.period_end_ms if s.period_end_ms is not None else 0,
+            "by_model": [asdict(row) for row in b.by_model],
+            "by_day": [asdict(row) for row in b.by_day],
+        }
+
+
+def _zero_agent_usage() -> dict[str, Any]:
+    return AgentUsageResponse().model_dump()
+
 
 class _StaticUsagePortZeros(UsagePort):
     """Pre-startup placeholder so route wiring can construct the FastAPI app."""
@@ -164,22 +198,17 @@ class _StaticUsagePortZeros(UsagePort):
     ) -> dict[str, Any]:
         del since
         cw = _env_context_window_tokens()
-        return {
-            "session_id": session_id,
-            "turns": 0,
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "cached_tokens": 0,
-            "cache_read_tokens": 0,
-            "cache_creation_tokens": 0,
-            "cost_usd": 0.0,
-            "period_start": 0,
-            "period_end": 0,
-            "last_prompt_tokens": 0,
-            "estimated_prompt_tokens": 0,
-            "summarization_threshold_tokens": max(1, int(cw * SUMMARY_TRIGGER_RATIO)),
-            "context_window_tokens": cw,
-        }
+        return SessionUsageResponse(
+            session_id=session_id,
+            last_prompt_tokens=0,
+            estimated_prompt_tokens=0,
+            summarization_threshold_tokens=max(1, int(cw * SUMMARY_TRIGGER_RATIO)),
+            context_window_tokens=cw,
+        ).model_dump()
+
+    async def agent_usage(self, *, since: str | None) -> dict[str, Any]:
+        del since
+        return _zero_agent_usage()
 
 
 def _content_blocks_to_text(blocks: list[ContentBlock]) -> str:
@@ -257,22 +286,6 @@ def _resolve_provider() -> Provider:
     if mode == "fake":
         return _scripted_fake_provider()
     return get_provider_config(provider=mode).provider
-
-
-def _resolve_curator_provider(main_provider: Provider) -> Provider:
-    """Dedicated provider for context curation with thinking and token cap overrides.
-
-    Uses a small ``max_tokens`` (the curator only needs ~50 JSON tokens) and
-    ``thinking_budget=0`` to explicitly disable extended thinking, which can stall
-    preview models for 10s+ on a short JSON-only completion.
-
-    Fake / vertex_anthropic modes reuse ``main_provider`` — curation is no-op in tests
-    and vertex-claude has no thinking budget concept.
-    """
-    mode = normalize_model_provider(os.environ.get("MODEL_PROVIDER", "google_vertexai"))
-    if mode in ("fake", "vertex_anthropic"):
-        return main_provider
-    return GeminiProvider(thinking_budget=0, max_tokens=1024)
 
 
 class GatewayLoopPort:
@@ -358,7 +371,20 @@ class GatewayLoopPort:
                 rows = await history.load(session_id)
                 bus.attachment_catalog.rebuild_from_history(rows)
 
-            extra_tools = [_deps.web_search_tool] if _deps.web_search_tool is not None else []
+            extra_tools: list[Any] = (
+                [_deps.web_search_tool] if _deps.web_search_tool is not None else []
+            )
+            todo_store = None
+            if todo_list_enabled_from_env():
+                if bus.todo_store is None:
+                    bus.todo_store = TodoListStore(session_id, workspace_root=workspace_root)
+                    await bus.todo_store.hydrate_from_disk()
+                todo_store = bus.todo_store
+                extra_tools.append(TodoListTool(todo_store))
+
+            storage_backend = getattr(serving.state, "storage", None)
+            loops_available = storage_backend is not None
+            loops_advertised = loops_available and _deps.loops_registry.advertised
 
             try:
                 ctx = await build_context(
@@ -373,8 +399,12 @@ class GatewayLoopPort:
                     context_window_tokens=_env_context_window_tokens(),
                     workspace_root=workspace_root,
                     sse_bus=bus,
+                    event_publisher=_SessionBusEventPublisher(bus),
                     extra_tools=extra_tools,
                     subagent_registry=_deps.subagent_registry,
+                    scheduled_loops_available=loops_available,
+                    loops_advertised=loops_advertised,
+                    todo_store=todo_store,
                 )
             except Exception as exc:
                 logger.exception("build_context failed")
@@ -386,22 +416,22 @@ class GatewayLoopPort:
                 )
                 return
 
-            storage_backend = getattr(serving.state, "storage", None)
             executor = CoreToolExecutor(
                 workspace_root=workspace_root,
                 memory=getattr(serving.state, "memory", None),
+                knowledge=getattr(serving.state, "knowledge", None),
                 skills_path=skills_resolved,
                 mcp=mcp,
                 extra_tools=extra_tools,
                 run_command_allowed_commands=_deps.run_command_allowed_commands,
                 run_command_allowed_path_prefixes=_deps.run_command_allowed_path_prefixes,
                 attachment_store=attachment_store,
-                attachment_catalog=bus.attachment_catalog,
                 run_store=storage_backend.runs() if storage_backend is not None else None,
                 scheduled_loop_store=(
                     storage_backend.scheduled_loops() if storage_backend is not None else None
                 ),
                 subagent_registry=_deps.subagent_registry,
+                loops_registry=_deps.loops_registry,
             )
             if transcript_writer is not None:
                 await transcript_writer.write_user_message(
@@ -417,7 +447,6 @@ class GatewayLoopPort:
                 tool_executor=executor,
                 cancelled=cancel_event,
                 hook_manager=_deps.hook_manager,
-                curator_provider=_deps.curator_provider,
                 attachment_store=attachment_store,
                 attachment_catalog=bus.attachment_catalog,
                 transcript_writer=transcript_writer,
@@ -496,7 +525,9 @@ async def _startup(fastapi_app: FastAPI) -> None:
 
     db_url = layout.db_url
 
-    backend = create_storage_backend(db_url)
+    backend = create_storage_backend(
+        db_url, agent_scope=layout.agent_id, agent_root=layout.agent_root
+    )
     await backend.open(run_schema=auto_schema_enabled_from_config())
     fastapi_app.state.storage = backend
     fastapi_app.state.usage = _UsageStoreAdapter(backend.usage())
@@ -537,7 +568,6 @@ async def _startup(fastapi_app: FastAPI) -> None:
     _deps.inspectors = inspectors
 
     _deps.provider = _resolve_provider()
-    _deps.curator_provider = _resolve_curator_provider(_deps.provider)
 
     vertex_gs = vertex_google_search_enabled_from_config()
     try:
@@ -556,42 +586,78 @@ async def _startup(fastapi_app: FastAPI) -> None:
     if _deps.web_search_tool is None and not vertex_gs:
         logger.info("web search disabled (WEB_SEARCH_BACKEND=none)")
 
-    if _memory_enabled():
-        try:
+    try:
+        if not memory_enabled_from_config():
+            logger.info("memory disabled (memory.enabled=false)")
+            _deps.hook_manager = None
+            _deps.memory = None
+            fastapi_app.state.memory = None
+            fastapi_app.state.memory_status = "disabled"
+            fastapi_app.state.memory_detail = "memory.enabled=false"
+        else:
             mem_uri = _memory_storage_uri()
-            storage = create_workspace_storage(mem_uri)
+            layout = AgentLayout.from_environment()
             mgr = HookManager()
-            model_name = os.environ.get("MODEL_NAME", "gemini-2.5-flash")
             memory = MemorySubsystem(
-                storage=storage,
-                provider=_deps.provider,
-                model=model_name,
                 memory_uri=mem_uri,
+                db_url=layout.db_url,
+                agent_id=layout.agent_root.name,
+                agent_name=layout.agent_root.name,
+                storage=backend,
             )
+            await memory.ensure_ready()
             memory.register_hooks(mgr)
             _deps.hook_manager = mgr
             _deps.memory = memory
             fastapi_app.state.memory = memory
-            logger.info("memory hook enabled (memory_storage_uri=%s)", mem_uri)
-            try:
-                gc_stats = await memory.gc_processed()
-                if gc_stats["deleted"] or gc_stats["errors"]:
-                    logger.info(
-                        "memory gc: scanned=%d deleted=%d errors=%d",
-                        gc_stats["scanned"],
-                        gc_stats["deleted"],
-                        gc_stats["errors"],
-                    )
-            except Exception as gc_exc:
-                logger.warning("memory gc on startup failed: %r", gc_exc)
-        except Exception as exc:
-            logger.warning("memory hook setup failed; continuing without: %r", exc)
-            _deps.hook_manager = None
-            _deps.memory = None
-            fastapi_app.state.memory = None
-    else:
-        logger.info("memory hook disabled via MONKEYBOT_MEMORY_HOOK_ENABLED")
+            fastapi_app.state.memory_status = "enabled"
+            fastapi_app.state.memory_detail = None
+            logger.info("memory enabled (memory_storage_uri=%s)", mem_uri)
+    except MemoryConfigurationError:
+        raise
+    except Exception as exc:
+        logger.warning("memory setup failed; continuing without: %r", exc)
+        _deps.hook_manager = None
+        _deps.memory = None
         fastapi_app.state.memory = None
+        fastapi_app.state.memory_status = "unavailable"
+        fastapi_app.state.memory_detail = str(exc)
+
+    # Unified knowledge layer — FTS + ANN + links + search
+    if knowledge_enabled_from_config():
+        try:
+            layout = AgentLayout.from_environment()
+            settings = resolve_knowledge_settings(workspace_root=layout.workspace_root)
+            knowledge = await KnowledgeSubsystem.create(
+                workspace_root=layout.workspace_root,
+                settings=settings,
+                knowledge_root=Path(settings.knowledge_root),
+                index_path=Path(settings.index_path),
+            )
+            hook_mgr = _deps.hook_manager
+            if hook_mgr is None:
+                hook_mgr = HookManager()
+                _deps.hook_manager = hook_mgr
+            knowledge.register_hooks(hook_mgr)
+            _deps.knowledge = knowledge
+            fastapi_app.state.knowledge = knowledge
+
+            async def _knowledge_startup_scan() -> None:
+                try:
+                    await knowledge.ensure_ready()
+                    logger.info("knowledge index ready (path=%s)", settings.index_path)
+                except Exception as scan_exc:
+                    logger.warning("knowledge startup scan failed: %r", scan_exc)
+
+            asyncio.create_task(_knowledge_startup_scan())
+            logger.info("knowledge layer enabled (index=%s)", settings.index_path)
+        except Exception as exc:
+            logger.warning("knowledge layer setup failed; continuing without: %r", exc)
+            _deps.knowledge = None
+            fastapi_app.state.knowledge = None
+    else:
+        logger.info("knowledge layer disabled via knowledge.enabled")
+        fastapi_app.state.knowledge = None
 
     if attachments_enabled_from_env():
         try:
@@ -638,12 +704,12 @@ async def _startup(fastapi_app: FastAPI) -> None:
         )
         fastapi_app.state.worker_pool = start_worker_pool_background(backend)
 
-    from monkeybot.scheduler.engine import scheduler_enabled_from_env, start_scheduler_background
     from monkeybot.gateway.sse.scheduler_wiring import (
         GatewaySessionEnsurer,
         GatewayTickInvoker,
         StorageSessionBusyChecker,
     )
+    from monkeybot.scheduler.engine import scheduler_enabled_from_env, start_scheduler_background
 
     if scheduler_enabled_from_env():
         loop_port = GatewayLoopPort(_registry)
@@ -666,11 +732,40 @@ async def _shutdown(fastapi_app: FastAPI) -> None:
     except Exception as exc:
         logger.warning("observability shutdown failed: %s", exc)
 
+    # Analyze any remaining session transcripts before the process exits.
+    try:
+        await _registry.remove_all_async()
+    except Exception:
+        logger.warning("transcript analysis on shutdown failed", exc_info=True)
+
     mcp = _deps.mcp
     if mcp is not None:
         for name in list(getattr(mcp, "_servers", {}).keys()):
             await mcp.disconnect(name)
 
+    knowledge = _deps.knowledge or getattr(fastapi_app.state, "knowledge", None)
+    if knowledge is not None:
+        try:
+            await knowledge.close()
+        except Exception as exc:
+            logger.warning("knowledge close failed: %s", exc)
+        _deps.knowledge = None
+        try:
+            fastapi_app.state.knowledge = None
+        except Exception as exc:
+            logger.warning("knowledge state clear failed: %s", exc)
+
+    memory = _deps.memory or getattr(fastapi_app.state, "memory", None)
+    if memory is not None:
+        try:
+            await memory.close()
+        except Exception as exc:
+            logger.warning("memory close failed: %s", exc)
+        _deps.memory = None
+        try:
+            fastapi_app.state.memory = None
+        except Exception as exc:
+            logger.warning("memory state clear failed: %s", exc)
     worker_pool_handle = getattr(fastapi_app.state, "worker_pool", None)
     if worker_pool_handle is not None:
         from monkeybot.core.subagents.worker_pool import shutdown_worker_pool
@@ -699,7 +794,7 @@ async def _gateway_lifespan(fastapi_app: FastAPI) -> AsyncIterator[None]:
         await _shutdown(fastapi_app)
 
 
-_registry = SessionRegistry()
+_registry = SessionRegistry(workspace_root=_resolved_workspace_paths()[0])
 app = build_sse_app(
     registry=_registry,
     loop_port=GatewayLoopPort(_registry),

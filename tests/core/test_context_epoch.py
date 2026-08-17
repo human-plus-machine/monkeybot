@@ -199,6 +199,54 @@ def test_peek_on_fresh_tracker_opens_epoch_without_mutating() -> None:
     assert admit.epoch_id == 1
 
 
+def test_volatile_update_without_content_text_never_reports_cleared() -> None:
+    """Without ``volatile_content_text``, emptiness is judged on the full volatile
+    text — matching pre-existing behavior for callers that don't separate an
+    always-present source (like "current date") from actual content.
+    """
+    tracker = ContextEpochTracker()
+    tracker.reconcile(
+        stable_baseline="STABLE",
+        volatile_text="\n\n## Current date\n2026-07-15\n\n## Skills\n- s1",
+        stable_fingerprint="s1",
+        volatile_fingerprint="v1",
+    )
+    admit = tracker.reconcile(
+        stable_baseline="STABLE",
+        volatile_text="\n\n## Current date\n2026-07-15",
+        stable_fingerprint="s1",
+        volatile_fingerprint="v2",
+    )
+    assert admit.kind == "volatile_updated"
+    assert "were cleared" not in admit.mid_conversation_update
+    assert "## Current date" in admit.mid_conversation_update
+
+
+def test_volatile_content_text_reports_cleared_despite_always_present_date() -> None:
+    """When the caller supplies ``volatile_content_text`` that excludes the
+    always-present "current date" section, losing all real content (memory,
+    skills, current-request) still produces the "were cleared" message even
+    though ``volatile_text`` itself is never empty.
+    """
+    tracker = ContextEpochTracker()
+    tracker.reconcile(
+        stable_baseline="STABLE",
+        volatile_text="\n\n## Current date\n2026-07-15\n\n## Skills\n- s1",
+        stable_fingerprint="s1",
+        volatile_fingerprint="v1",
+        volatile_content_text="\n\n## Skills\n- s1",
+    )
+    admit = tracker.reconcile(
+        stable_baseline="STABLE",
+        volatile_text="\n\n## Current date\n2026-07-15",
+        stable_fingerprint="s1",
+        volatile_fingerprint="v2",
+        volatile_content_text="",
+    )
+    assert admit.kind == "volatile_updated"
+    assert "were cleared" in admit.mid_conversation_update
+
+
 def test_begin_new_epoch_after_compaction() -> None:
     tracker = ContextEpochTracker()
     tracker.reconcile(

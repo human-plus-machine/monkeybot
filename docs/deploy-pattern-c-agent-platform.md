@@ -87,7 +87,13 @@ _deps = None
 async def _ensure_deps():
     global _deps
     if _deps is None:
-        _deps = await create_harness_deps(os.environ["DB_URL"], os.environ.get("MEMORY_STORAGE_URI"))
+        # Required if DB_URL is ever shared with another deployment/tenant — namespaces
+        # conversation history so this deployment can't read/resume another one's sessions.
+        _deps = await create_harness_deps(
+            os.environ["DB_URL"],
+            os.environ.get("MEMORY_STORAGE_URI"),
+            agent_scope=os.environ.get("MONKEYBOT_AGENT_ID", ""),
+        )
     return _deps
 
 async def _run_turn(event):
@@ -154,7 +160,12 @@ from monkeybot.core.providers.gemini import GeminiProvider
 from monkeybot.core.harness import build_context, run_loop
 
 # Cold start — Agent Engine keeps the process warm between invocations.
-_backend = create_storage_backend(os.environ["DB_URL"])
+# MONKEYBOT_AGENT_ID is required if DB_URL is ever shared with another
+# deployment/tenant — namespaces conversation history so this deployment
+# can't read/resume another one's sessions.
+_backend = create_storage_backend(
+    os.environ["DB_URL"], agent_scope=os.environ.get("MONKEYBOT_AGENT_ID", "")
+)
 asyncio.get_event_loop().run_until_complete(_backend.open())
 _workspace = create_workspace_storage(os.environ["MEMORY_STORAGE_URI"])
 _provider = GeminiProvider()

@@ -9,7 +9,7 @@ read-only to file tools and are not mirrored into `workspace/`.
 
 | Skill | Purpose |
 |---|---|
-| [diagnostics](skills/diagnostics/) | Reference skill (`SKILL.md` + `run_command` / optional `@tool`) |
+| [diagnostics](skills/diagnostics/) | Reference skill (`SKILL.md` + plain async entry point) |
 | [browser](skills/browser/) | Browser MCP workflow + playbooks |
 | [image-generator](skills/image-generator/) | Vertex image generation script |
 

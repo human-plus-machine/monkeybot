@@ -30,6 +30,9 @@ def test_repair_synthesizes_missing_tool_result() -> None:
     assert len(responses) == 1
     assert responses[0].id == "c1"
     assert responses[0].is_error is True
+    assert isinstance(responses[0].result[0], Text)
+    assert 'Tool "echo" was interrupted or its result is missing' in responses[0].result[0].text
+    assert "do not assume the tool never ran" in responses[0].result[0].text
 
 
 def test_repair_skips_synthetic_assistant_for_unresolvable_orphan() -> None:
@@ -167,7 +170,7 @@ def test_repaired_orphan_history_converts_for_anthropic() -> None:
     assert len(converted) == 2
 
 
-def test_repaired_orphan_history_converts_for_openai() -> None:
+async def test_repaired_orphan_history_converts_for_openai() -> None:
     messages = [
         Message(
             role="user",
@@ -177,7 +180,7 @@ def test_repaired_orphan_history_converts_for_openai() -> None:
         ),
     ]
     repaired = repair_tool_turn_integrity(messages)
-    _system, converted = messages_to_openai(repaired)
+    _system, converted = await messages_to_openai(repaired)
     assert len(converted) == 2
 
 

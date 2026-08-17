@@ -11,12 +11,12 @@ from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._utils import (
     anthropic_tool_defs,
     build_anthropic_messages,
-    build_cached_system_blocks,
     count_anthropic_input_tokens,
     iter_anthropic_sdk_stream,
-    mark_last_tool_cached,
+    prepare_anthropic_cached_payload,
     split_leading_system,
 )
+from monkeybot.providers.model_capabilities import supports_param
 from monkeybot.providers.sampling import resolve_model_sampling
 
 
@@ -81,17 +81,12 @@ class ClaudeProvider:
         session_id = hints.session_id if hints is not None else None
 
         system, msgs = split_leading_system(messages)
-        converted_messages = build_anthropic_messages(msgs)
-        converted = anthropic_tool_defs(tools) if tools else None
-        system_param: Any = (
-            build_cached_system_blocks(system, cache_retention=retention)
-            if system
-            else anthropic.NOT_GIVEN
-        )
-        tools_param: Any = (
-            mark_last_tool_cached(converted, cache_retention=retention)
-            if converted
-            else anthropic.NOT_GIVEN
+        system_param, converted_messages, tools_param = prepare_anthropic_cached_payload(
+            system=system,
+            messages=msgs,
+            tools=tools,
+            cache_retention=retention,
+            not_given=anthropic.NOT_GIVEN,
         )
 
         stream_kwargs: dict[str, Any] = {
@@ -100,15 +95,22 @@ class ClaudeProvider:
             "messages": cast(Any, converted_messages),
             "tools": tools_param,
             "max_tokens": self._max_tokens,
-            "temperature": self._temperature,
         }
-        if thinking_budget is not None and thinking_budget > 0:
+        if supports_param(model, "temperature"):
+            stream_kwargs["temperature"] = self._temperature
+        if (
+            thinking_budget is not None
+            and thinking_budget > 0
+            and supports_param(model, "thinking")
+        ):
             stream_kwargs["thinking"] = {
                 "type": "enabled",
                 "budget_tokens": thinking_budget,
             }
-            # Anthropic requires temperature=1 when extended thinking is enabled.
-            stream_kwargs["temperature"] = 1
+            # Anthropic requires temperature=1 when extended thinking is enabled —
+            # but only send it to models that accept a temperature at all.
+            if supports_param(model, "temperature"):
+                stream_kwargs["temperature"] = 1
 
         client_kwargs: dict[str, Any] = {}
         if session_id and retention != "none":

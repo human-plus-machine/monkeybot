@@ -3,6 +3,7 @@ allowed_commands:
   - cat
   - ls
   - grep
+  - rg
   - echo
   - python
   - python3
@@ -10,16 +11,25 @@ allowed_commands:
   - git
   - gh
   - bash
+  - mempalace
 
 # Path prefixes permitted in run_command argv (./ and / arguments).
 allowed_path_prefixes:
-  - ./data/memory/
-  - ./data/memory
+  - ../memory/
+  - ../memory
+  - ../memory/mempalace/
+  - ../memory/mempalace
   - ./skills/
   - ./skills
+  - ./global-skills/
+  - ./global-skills
   - ./test-data/
   - ./code/
   - ./code
+  - ./generated-media/
+  - ./generated-media
+  - ./browser/
+  - ./browser
 
 # Optional: regexes matched against the normalized invocation (deny wins).
 # Omit this key to use built-in DEFAULT_DENY_PATTERNS (install blocking).

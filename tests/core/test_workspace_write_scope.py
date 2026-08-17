@@ -17,25 +17,25 @@ from monkeybot.core.tools.workspace_service import (
 def test_write_allowed_inside_scope() -> None:
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
-        (root / "data" / "memory").mkdir(parents=True)
+        (root / "artifacts").mkdir(parents=True)
         (root / "data" / "agent-contract").mkdir(parents=True)
         svc = WorkspaceFileService(
             root,
-            settings=WorkspaceSettings(WORKSPACE_WRITE_SCOPE_REL="data/memory"),
+            settings=WorkspaceSettings(WORKSPACE_WRITE_SCOPE_REL="artifacts"),
         )
-        out = svc.write_file("data/memory/hello.txt", "hi")
+        out = svc.write_file("artifacts/hello.txt", "hi")
         assert out["ok"] is True
-        assert (root / "data" / "memory" / "hello.txt").read_text() == "hi"
+        assert (root / "artifacts" / "hello.txt").read_text() == "hi"
 
 
 def test_write_rejected_outside_scope() -> None:
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
-        (root / "data" / "memory").mkdir(parents=True)
+        (root / "artifacts").mkdir(parents=True)
         (root / "other").mkdir(parents=True)
         svc = WorkspaceFileService(
             root,
-            settings=WorkspaceSettings(WORKSPACE_WRITE_SCOPE_REL="data/memory"),
+            settings=WorkspaceSettings(WORKSPACE_WRITE_SCOPE_REL="artifacts"),
         )
         with pytest.raises(WorkspaceError) as exc:
             svc.write_file("other/x.txt", "nope")
@@ -45,13 +45,13 @@ def test_write_rejected_outside_scope() -> None:
 def test_replace_rejected_outside_scope() -> None:
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
-        (root / "data" / "memory").mkdir(parents=True)
+        (root / "artifacts").mkdir(parents=True)
         p = root / "other" / "f.txt"
         p.parent.mkdir(parents=True)
         p.write_text("old", encoding="utf-8")
         svc = WorkspaceFileService(
             root,
-            settings=WorkspaceSettings(WORKSPACE_WRITE_SCOPE_REL="data/memory"),
+            settings=WorkspaceSettings(WORKSPACE_WRITE_SCOPE_REL="artifacts"),
         )
         with pytest.raises(WorkspaceError) as exc:
             svc.replace_in_file("other/f.txt", "old", "new")
@@ -61,11 +61,11 @@ def test_replace_rejected_outside_scope() -> None:
 def test_write_to_monkeybot_bypasses_write_scope() -> None:
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
-        (root / "data" / "memory").mkdir(parents=True)
+        (root / "artifacts").mkdir(parents=True)
         (root / ".monkeybot" / "spill").mkdir(parents=True)
         svc = WorkspaceFileService(
             root,
-            settings=WorkspaceSettings(WORKSPACE_WRITE_SCOPE_REL="data/memory"),
+            settings=WorkspaceSettings(WORKSPACE_WRITE_SCOPE_REL="artifacts"),
         )
         out = svc.write_file(".monkeybot/spill/x.txt", "allowed")
         assert out["ok"] is True
@@ -75,13 +75,13 @@ def test_write_to_monkeybot_bypasses_write_scope() -> None:
 def test_replace_in_monkeybot_bypasses_write_scope() -> None:
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
-        (root / "data" / "memory").mkdir(parents=True)
+        (root / "artifacts").mkdir(parents=True)
         p = root / ".monkeybot" / "note.txt"
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("old", encoding="utf-8")
         svc = WorkspaceFileService(
             root,
-            settings=WorkspaceSettings(WORKSPACE_WRITE_SCOPE_REL="data/memory"),
+            settings=WorkspaceSettings(WORKSPACE_WRITE_SCOPE_REL="artifacts"),
         )
         out = svc.replace_in_file(".monkeybot/note.txt", "old", "new")
         assert out["ok"] is True
@@ -95,3 +95,20 @@ def test_no_scope_allows_anywhere_under_repo() -> None:
         svc = WorkspaceFileService(root, settings=WorkspaceSettings())
         out = svc.write_file("anywhere/a.txt", "x")
         assert out["ok"] is True
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["..\\", "../", "foo/../bar", "..\\evil", "a\\..\\b", "", "   ", "/abs"],
+)
+def test_invalid_write_scope_fails_closed(bad: str) -> None:
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "other").mkdir()
+        svc = WorkspaceFileService(
+            root,
+            settings=WorkspaceSettings(WORKSPACE_WRITE_SCOPE_REL=bad),
+        )
+        with pytest.raises(WorkspaceError) as exc:
+            svc.write_file("other/x.txt", "nope")
+        assert exc.value.code == "invalid_write_scope"

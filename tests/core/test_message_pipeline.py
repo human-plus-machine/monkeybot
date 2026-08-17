@@ -8,6 +8,7 @@ from monkeybot.core.types.content_blocks import (
     AttachmentDescriptor,
     SystemNotification,
     Text,
+    Thinking,
     ToolRequest,
     ToolResponse,
 )
@@ -92,6 +93,48 @@ def test_transform_repairs_missing_tool_result() -> None:
         if isinstance(b, ToolResponse)
     ]
     assert any(b.id == "c1" for b in tool_results)
+
+
+def test_transform_strips_thinking_from_final_assistant_turns() -> None:
+    """Final-text Thinking is UI/history-only; keep it on tool-request turns."""
+    msgs = [
+        Message(role="user", content=[Text(text="hi")]),
+        Message(
+            role="assistant",
+            content=[
+                Thinking(thinking=" prior ", signature="sig-final"),
+                Text(text="hello"),
+            ],
+        ),
+        Message(role="user", content=[Text(text="use a tool")]),
+        Message(
+            role="assistant",
+            content=[
+                Thinking(thinking=" need tool ", signature="sig-tool"),
+                ToolRequest(id="c1", name="run_command", args={"command": "ls"}),
+            ],
+        ),
+        Message(
+            role="user",
+            content=[
+                ToolResponse(
+                    id="c1",
+                    tool_name="run_command",
+                    result=[Text(text="ok")],
+                )
+            ],
+        ),
+    ]
+    out = transform_context(msgs)
+    assert [m.role for m in out] == ["user", "assistant", "user", "assistant", "user"]
+    final = out[1]
+    assert all(not isinstance(b, Thinking) for b in final.content)
+    assert [b.text for b in final.content if isinstance(b, Text)] == ["hello"]
+    tool_turn = out[3]
+    thinking = [b for b in tool_turn.content if isinstance(b, Thinking)]
+    assert len(thinking) == 1
+    assert thinking[0].thinking == " need tool "
+    assert thinking[0].signature == "sig-tool"
 
 
 def test_convert_to_provider_passthrough_without_store() -> None:

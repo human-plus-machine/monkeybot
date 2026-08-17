@@ -12,14 +12,24 @@ Terminal Executor, including:
 Security tests are marked with SECURITY comment for easy identification.
 """
 
+import asyncio
+
 import pytest
 
+from monkeybot.core.tools import terminal as terminal_module
+from monkeybot.core.tools.fs_isolation import (
+    ISOLATION_ERROR_PREFIX,
+    ISOLATION_FAILURE_EXIT_CODE,
+    IsolationSupport,
+    isolation_support,
+)
 from monkeybot.core.tools.terminal import (
     ALLOWED_COMMANDS,
     ALLOWED_PATHS,
     ExecutionResult,
     SecurityError,
     TerminalExecutor,
+    build_skill_runtime_env,
 )
 
 
@@ -88,7 +98,7 @@ class TestTerminalExecutorSecurity:
         test_file.parent.mkdir(parents=True, exist_ok=True)
         test_file.write_text("Hello from allowed path")
 
-        result = await executor.execute("cat", [str(test_file)])
+        result = await executor.execute("cat", [str(test_file)], cwd=test_data_dir)
 
         assert result.exit_code == 0
         assert "Hello from allowed path" in result.stdout
@@ -129,6 +139,58 @@ class TestTerminalExecutorSecurity:
             assert "not allowed" in str(exc_info.value).lower()
 
     @pytest.mark.asyncio
+    async def test_allowed_prefix_cannot_be_escaped_with_dot_dot(self, executor, tmp_path):
+        workspace = tmp_path / "workspace"
+        (workspace / "skills").mkdir(parents=True)
+        secret = workspace / "secret.txt"
+        secret.write_text("secret", encoding="utf-8")
+
+        with pytest.raises(SecurityError, match="not allowed"):
+            await executor.execute(
+                "cat",
+                ["./skills/../secret.txt"],
+                cwd=workspace,
+            )
+
+    @pytest.mark.asyncio
+    async def test_shell_embedded_traversal_is_validated(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (tmp_path / "memory").mkdir()
+        memory_disabled_executor = TerminalExecutor(allowed_path_prefixes=["./skills", "./code"])
+
+        with pytest.raises(SecurityError, match="not allowed"):
+            await memory_disabled_executor.execute(
+                "bash",
+                ["-c", "cat ../memory/private.txt"],
+                cwd=workspace,
+            )
+
+    @pytest.mark.asyncio
+    async def test_temp_roots_are_not_implicitly_allowed(self, tmp_path):
+        """SECURITY: /tmp is a real palace location, never a blanket exemption."""
+        secret = tmp_path / "memory" / "private.txt"
+        secret.parent.mkdir(parents=True)
+        secret.write_text("PRIVATE-CONTENT", encoding="utf-8")
+        locked_down = TerminalExecutor(allowed_path_prefixes=[])
+
+        for temp_root in ("/tmp", "/var/folders", "/private/var/folders"):
+            with pytest.raises(SecurityError, match="not allowed"):
+                await locked_down.execute("cat", [f"{temp_root}/memory/private.txt"])
+
+    @pytest.mark.asyncio
+    async def test_temp_directory_is_allowed_when_explicitly_listed(self, tmp_path):
+        """Callers that need a temp directory opt in by listing it."""
+        secret = tmp_path / "notes.txt"
+        secret.write_text("explicitly allowed", encoding="utf-8")
+        executor = TerminalExecutor(allowed_path_prefixes=[str(tmp_path)])
+
+        result = await executor.execute("cat", [str(secret)])
+
+        assert result.exit_code == 0
+        assert "explicitly allowed" in result.stdout
+
+    @pytest.mark.asyncio
     async def test_subdirectory_of_allowed_path_succeeds(self, executor, test_data_dir):
         """SECURITY: Test that subdirectories of allowed paths are accessible."""
         # Create nested directory structure
@@ -137,7 +199,7 @@ class TestTerminalExecutorSecurity:
         nested_file = nested_dir / "file.txt"
         nested_file.write_text("Deep nested file")
 
-        result = await executor.execute("cat", [str(nested_file)])
+        result = await executor.execute("cat", [str(nested_file)], cwd=test_data_dir)
 
         assert result.exit_code == 0
         assert "Deep nested file" in result.stdout
@@ -259,12 +321,18 @@ class TestTerminalExecutorExecution:
 
         seen_env: dict[str, str] = {}
 
-        async def fake_exec(*cmd, stdout=None, stderr=None, cwd=None, env=None):
+        async def fake_exec(*cmd, stdout=None, stderr=None, cwd=None, env=None, **kwargs):
+            del kwargs
             nonlocal seen_env
             seen_env = dict(env or {})
             proc = MagicMock()
-            proc.communicate = AsyncMock(return_value=(b"ok", b""))
+            proc.pid = 12345
             proc.returncode = 0
+            proc.stdout = MagicMock()
+            proc.stderr = MagicMock()
+            proc.stdout.read = AsyncMock(return_value=b"")
+            proc.stderr.read = AsyncMock(return_value=b"")
+            proc.wait = AsyncMock(return_value=0)
             return proc
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
@@ -284,17 +352,179 @@ class TestTerminalExecutorExecution:
 
         seen_env: dict[str, str] = {}
 
-        async def fake_exec(*cmd, stdout=None, stderr=None, cwd=None, env=None):
+        async def fake_exec(*cmd, stdout=None, stderr=None, cwd=None, env=None, **kwargs):
+            del kwargs
             nonlocal seen_env
             seen_env = dict(env or {})
             proc = MagicMock()
-            proc.communicate = AsyncMock(return_value=(b"ok", b""))
+            proc.pid = 12345
             proc.returncode = 0
+            proc.stdout = MagicMock()
+            proc.stderr = MagicMock()
+            proc.stdout.read = AsyncMock(return_value=b"")
+            proc.stderr.read = AsyncMock(return_value=b"")
+            proc.wait = AsyncMock(return_value=0)
             return proc
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
         await executor.execute("echo", ["hi"], cwd=workspace)
-        assert seen_env.get("PATH") == "/custom/bin:/usr/bin"
+        import os
+        import sys
+        from pathlib import Path
+
+        venv_bin = str(Path(sys.executable).resolve().parent)
+        assert seen_env.get("PATH") == f"{venv_bin}{os.pathsep}/custom/bin:/usr/bin"
+        assert seen_env.get("MONKEYBOT_PYTHON") == sys.executable
+
+    @pytest.mark.asyncio
+    async def test_generic_child_does_not_inherit_memory_routing(
+        self, executor, tmp_path, monkeypatch
+    ):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        monkeypatch.setenv("MEMPALACE_PALACE_PATH", "/private/palace-b")
+        monkeypatch.setenv("MEMPALACE_BACKEND", "chroma")
+        monkeypatch.setenv("MEMORY_STORAGE_URI", "local:///private/palace-b")
+        seen_env: dict[str, str] = {}
+
+        async def fake_exec(*cmd, stdout=None, stderr=None, cwd=None, env=None, **kwargs):
+            del cmd, stdout, stderr, cwd, kwargs
+            nonlocal seen_env
+            seen_env = dict(env or {})
+            proc = MagicMock()
+            proc.pid = 12345
+            proc.returncode = 0
+            proc.stdout = MagicMock()
+            proc.stderr = MagicMock()
+            proc.stdout.read = AsyncMock(return_value=b"")
+            proc.stderr.read = AsyncMock(return_value=b"")
+            proc.wait = AsyncMock(return_value=0)
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+        await executor.execute("bash", ["-c", "echo safe"], cwd=tmp_path)
+
+        assert "MEMPALACE_PALACE_PATH" not in seen_env
+        assert "MEMPALACE_BACKEND" not in seen_env
+        assert "MEMORY_STORAGE_URI" not in seen_env
+
+    @pytest.mark.asyncio
+    async def test_direct_mempalace_uses_explicit_memory_route(
+        self, executor, tmp_path, monkeypatch
+    ):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        monkeypatch.setenv("MEMPALACE_PALACE_PATH", "/private/palace-b")
+        seen_env: dict[str, str] = {}
+
+        async def fake_exec(*cmd, stdout=None, stderr=None, cwd=None, env=None, **kwargs):
+            del cmd, stdout, stderr, cwd, kwargs
+            nonlocal seen_env
+            seen_env = dict(env or {})
+            proc = MagicMock()
+            proc.pid = 12345
+            proc.returncode = 0
+            proc.stdout = MagicMock()
+            proc.stderr = MagicMock()
+            proc.stdout.read = AsyncMock(return_value=b"")
+            proc.stderr.read = AsyncMock(return_value=b"")
+            proc.wait = AsyncMock(return_value=0)
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+        await executor.execute(
+            "mempalace",
+            ["search", "query"],
+            cwd=tmp_path,
+            env_overrides={
+                "MEMPALACE_PALACE_PATH": "/private/palace-a",
+                "MEMPALACE_BACKEND": "chroma",
+            },
+        )
+
+        assert seen_env["MEMPALACE_PALACE_PATH"] == "/private/palace-a"
+        assert seen_env["MEMPALACE_BACKEND"] == "chroma"
+
+    @pytest.mark.asyncio
+    async def test_mempalace_uses_console_script_when_on_path(
+        self, executor, tmp_path, monkeypatch
+    ):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        seen: list[tuple[str, ...]] = []
+
+        async def fake_exec(*cmd, stdout=None, stderr=None, cwd=None, env=None, **kwargs):
+            del stdout, stderr, cwd, env, kwargs
+            seen.append(cmd)
+            proc = MagicMock()
+            proc.pid = 1
+            proc.returncode = 0
+            proc.stdout = MagicMock()
+            proc.stderr = MagicMock()
+            proc.stdout.read = AsyncMock(return_value=b"")
+            proc.stderr.read = AsyncMock(return_value=b"")
+            proc.wait = AsyncMock(return_value=0)
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(
+            "monkeybot.core.tools.terminal.shutil.which",
+            lambda name, path=None: "/opt/bin/mempalace" if name == "mempalace" else None,
+        )
+        await executor.execute("mempalace", ["search", "q"], cwd=tmp_path)
+        assert seen[0][0] == "/opt/bin/mempalace"
+        assert seen[0][1:] == ("search", "q")
+
+    @pytest.mark.asyncio
+    async def test_mempalace_falls_back_to_python_module(
+        self, executor, tmp_path, monkeypatch
+    ):
+        import asyncio
+        import sys
+        from unittest.mock import AsyncMock, MagicMock
+
+        seen: list[tuple[str, ...]] = []
+
+        async def fake_exec(*cmd, stdout=None, stderr=None, cwd=None, env=None, **kwargs):
+            del stdout, stderr, cwd, env, kwargs
+            seen.append(cmd)
+            proc = MagicMock()
+            proc.pid = 1
+            proc.returncode = 0
+            proc.stdout = MagicMock()
+            proc.stderr = MagicMock()
+            proc.stdout.read = AsyncMock(return_value=b"")
+            proc.stderr.read = AsyncMock(return_value=b"")
+            proc.wait = AsyncMock(return_value=0)
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr("monkeybot.core.tools.terminal.shutil.which", lambda *a, **k: None)
+        await executor.execute("mempalace", ["search", "q"], cwd=tmp_path)
+        assert seen[0][0] == sys.executable
+        assert seen[0][1:3] == ("-m", "mempalace")
+        assert seen[0][3:] == ("search", "q")
+
+    @pytest.mark.asyncio
+    async def test_mempalace_rejects_non_search_subcommand(self, executor, tmp_path):
+        with pytest.raises(SecurityError, match="only 'search' is permitted"):
+            await executor.execute("mempalace", ["repair", "rebuild-index"], cwd=tmp_path)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "args",
+        [
+            ["--pre", "mempalace", ".", "README.md"],
+            ["--pre=mempalace", ".", "README.md"],
+            ["--hostname-bin=mempalace", "private", "README.md"],
+        ],
+    )
+    async def test_ripgrep_rejects_process_launch_options(self, executor, tmp_path, args):
+        with pytest.raises(SecurityError, match="launches a process"):
+            await executor.execute("rg", args, cwd=tmp_path)
 
 
 class TestTerminalExecutorTimeout:
@@ -307,7 +537,9 @@ class TestTerminalExecutorTimeout:
     @pytest.mark.asyncio
     async def test_timeout_kills_process(self, executor):
         """Test that timeout kills long-running process."""
-        with pytest.raises(TimeoutError) as exc_info:
+        from monkeybot.core.tools.terminal import CommandTimeoutError
+
+        with pytest.raises(CommandTimeoutError) as exc_info:
             await executor.execute(
                 "python3",
                 ["-c", "import time; time.sleep(60)"],
@@ -315,6 +547,54 @@ class TestTerminalExecutorTimeout:
             )
 
         assert "timeout" in str(exc_info.value).lower()
+        assert exc_info.value.timeout == 1
+
+    @pytest.mark.asyncio
+    async def test_timeout_preserves_partial_stdout(self, executor):
+        """Drained stdout/stderr from before kill are attached to the error."""
+        from monkeybot.core.tools.terminal import CommandTimeoutError
+
+        with pytest.raises(CommandTimeoutError) as exc_info:
+            await executor.execute(
+                "python3",
+                [
+                    "-c",
+                    "import sys, time; print('partial-out', flush=True); "
+                    "print('partial-err', file=sys.stderr, flush=True); time.sleep(60)",
+                ],
+                timeout=1,
+            )
+
+        assert "partial-out" in exc_info.value.stdout
+        assert "partial-err" in exc_info.value.stderr
+
+    @pytest.mark.asyncio
+    async def test_execute_does_not_hang_when_grandchild_holds_pipe(self, executor):
+        """Child exit with a pipe-holding descendant must error, not report success."""
+        from monkeybot.core.tools.terminal import CommandTimeoutError
+
+        # Parent prints and exits; forked child keeps the PIPE open for 60s.
+        # Unbounded stdout.read() would hang until the child exits.
+        with pytest.raises(CommandTimeoutError) as exc_info:
+            await asyncio.wait_for(
+                executor.execute(
+                    "python3",
+                    [
+                        "-c",
+                        "import os, sys, time\n"
+                        "if os.fork() == 0:\n"
+                        "    time.sleep(60)\n"
+                        "    os._exit(0)\n"
+                        "print('done', flush=True)\n",
+                    ],
+                    timeout=5,
+                ),
+                timeout=8,
+            )
+        assert "descendant" in str(exc_info.value).lower() or "streams did not close" in str(
+            exc_info.value
+        ).lower()
+        assert "done" in exc_info.value.stdout
 
     @pytest.mark.asyncio
     async def test_fast_command_does_not_timeout(self, executor):
@@ -455,7 +735,20 @@ class TestTerminalExecutorConstants:
     def test_allowed_commands_list(self):
         """Test that ALLOWED_COMMANDS contains expected commands."""
         # Document expected commands
-        expected_commands = ["cat", "ls", "grep", "echo", "python", "python3", "uv", "git", "gh", "bash"]
+        expected_commands = [
+            "cat",
+            "ls",
+            "grep",
+            "rg",
+            "echo",
+            "python",
+            "python3",
+            "uv",
+            "git",
+            "gh",
+            "bash",
+            "mempalace",
+        ]
 
         for cmd in expected_commands:
             assert cmd in ALLOWED_COMMANDS, f"Expected command '{cmd}' not in ALLOWED_COMMANDS"
@@ -464,10 +757,12 @@ class TestTerminalExecutorConstants:
         """Test that ALLOWED_PATHS contains expected paths."""
         # Document expected paths
         expected_paths = [
-            "./data/memory/",
-            "./data/memory",
+            "../memory/",
+            "../memory",
             "./skills/",
             "./skills",
+            "./global-skills/",
+            "./global-skills",
             "./test-data/",
             "./code/",
             "./code",
@@ -489,3 +784,206 @@ class TestTerminalExecutorConstants:
 
         for cmd in dangerous_commands:
             assert cmd not in ALLOWED_COMMANDS, f"Dangerous command '{cmd}' found in ALLOWED_COMMANDS!"
+
+
+@pytest.mark.skipif(
+    not isolation_support().available,
+    reason=f"host cannot isolate filesystems: {isolation_support().detail}",
+)
+class TestTerminalExecutorFilesystemIsolation:
+    """A hidden directory must be unreachable however the child spells the path."""
+
+    @pytest.fixture
+    def hidden_secret(self, tmp_path):
+        secret_dir = tmp_path / "memory"
+        secret_dir.mkdir()
+        (secret_dir / "private.txt").write_text("PRIVATE-CONTENT", encoding="utf-8")
+        return secret_dir
+
+    @pytest.fixture
+    def isolated_executor(self, tmp_path, hidden_secret):
+        return TerminalExecutor(
+            allowed_path_prefixes=[str(tmp_path)],
+            hidden_paths=[hidden_secret],
+        )
+
+    @pytest.mark.asyncio
+    async def test_direct_read_of_hidden_path_finds_nothing(self, isolated_executor, hidden_secret):
+        result = await isolated_executor.execute("cat", [str(hidden_secret / "private.txt")])
+
+        assert result.exit_code != 0
+        assert "PRIVATE-CONTENT" not in result.stdout
+
+    @pytest.mark.asyncio
+    async def test_shell_variable_indirection_cannot_reach_hidden_path(
+        self, isolated_executor, hidden_secret
+    ):
+        result = await isolated_executor.execute(
+            "bash", ["-c", f'p={hidden_secret}; cat "$p"/private.txt']
+        )
+
+        assert "PRIVATE-CONTENT" not in result.stdout
+
+    @pytest.mark.asyncio
+    async def test_interpreter_file_io_cannot_reach_hidden_path(
+        self, isolated_executor, hidden_secret
+    ):
+        result = await isolated_executor.execute(
+            "python",
+            ["-c", f"print(open({str(hidden_secret / 'private.txt')!r}).read())"],
+        )
+
+        assert result.exit_code != 0
+        assert "PRIVATE-CONTENT" not in result.stdout
+
+    @pytest.mark.asyncio
+    async def test_hidden_directory_appears_empty(self, isolated_executor, hidden_secret):
+        result = await isolated_executor.execute("bash", ["-c", f"ls -A {hidden_secret}"])
+
+        assert result.stdout.strip() == ""
+
+    @pytest.mark.asyncio
+    async def test_visible_paths_and_tooling_still_work(self, isolated_executor, tmp_path):
+        visible = tmp_path / "notes.txt"
+        visible.write_text("VISIBLE", encoding="utf-8")
+
+        read = await isolated_executor.execute("cat", [str(visible)])
+        shell = await isolated_executor.execute("bash", ["-c", "echo shell-ok"])
+
+        assert read.exit_code == 0 and "VISIBLE" in read.stdout
+        assert shell.exit_code == 0 and "shell-ok" in shell.stdout
+
+    @pytest.mark.asyncio
+    async def test_host_filesystem_is_unchanged(self, isolated_executor, hidden_secret):
+        await isolated_executor.execute("bash", ["-c", f"ls -A {hidden_secret}"])
+
+        assert (hidden_secret / "private.txt").read_text(encoding="utf-8") == "PRIVATE-CONTENT"
+
+    @pytest.mark.asyncio
+    async def test_directory_created_after_construction_is_still_hidden(self, tmp_path):
+        late = tmp_path / "late-memory"
+        executor = TerminalExecutor(allowed_path_prefixes=[str(tmp_path)], hidden_paths=[late])
+        late.mkdir()
+        (late / "private.txt").write_text("PRIVATE-CONTENT", encoding="utf-8")
+
+        result = await executor.execute("bash", ["-c", f"cat {late}/private.txt"])
+
+        assert "PRIVATE-CONTENT" not in result.stdout
+
+
+class TestTerminalExecutorIsolationFallback:
+    """Isolation is never silently assumed."""
+
+    @pytest.mark.asyncio
+    async def test_unavailable_isolation_refuses_to_run(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            terminal_module,
+            "isolation_support",
+            lambda: IsolationSupport("none", "probe says no"),
+        )
+        executor = TerminalExecutor(
+            allowed_path_prefixes=[str(tmp_path)], hidden_paths=[tmp_path / "memory"]
+        )
+
+        with pytest.raises(SecurityError, match="Filesystem isolation is unavailable"):
+            await executor.execute("echo", ["should-not-run"])
+
+    @pytest.mark.asyncio
+    async def test_failed_isolation_setup_raises_security_error(self, tmp_path, monkeypatch):
+        def broken_argv(executable, args, hidden_paths, *, support):
+            del executable, args, hidden_paths, support
+            return "bash", [
+                "-c",
+                f"echo '{ISOLATION_ERROR_PREFIX} unshare failed' >&2; "
+                f"exit {ISOLATION_FAILURE_EXIT_CODE}",
+            ]
+
+        monkeypatch.setattr(
+            terminal_module,
+            "isolation_support",
+            lambda: IsolationSupport("namespace", "forced"),
+        )
+        monkeypatch.setattr(terminal_module, "isolated_argv", broken_argv)
+        executor = TerminalExecutor(
+            allowed_path_prefixes=[str(tmp_path)], hidden_paths=[tmp_path / "memory"]
+        )
+
+        with pytest.raises(SecurityError, match="isolation could not be established"):
+            await executor.execute("echo", ["should-not-run"])
+
+
+class TestTerminalExecutorRestricted:
+    """`restricted()` narrows policy without mutating the caller's executor."""
+
+    def test_restricted_copy_leaves_original_untouched(self, tmp_path):
+        original = TerminalExecutor(
+            allowed_commands=["cat", "mempalace"], allowed_path_prefixes=["../memory", "./skills"]
+        )
+
+        derived = original.restricted(
+            allowed_commands=["cat"],
+            allowed_path_prefixes=["./skills"],
+            hidden_paths=[tmp_path / "memory"],
+        )
+
+        assert original.allowed_commands == ("cat", "mempalace")
+        assert original.allowed_path_prefixes == ("../memory", "./skills")
+        assert original.hidden_paths == ()
+        assert derived.allowed_commands == ("cat",)
+        assert derived.allowed_path_prefixes == ("./skills",)
+        assert derived.hidden_paths == (tmp_path / "memory",)
+
+    def test_restricted_defaults_inherit_from_source(self):
+        original = TerminalExecutor(allowed_commands=["cat"], allowed_path_prefixes=["./skills"])
+
+        derived = original.restricted()
+
+        assert derived.allowed_commands == original.allowed_commands
+        assert derived.allowed_path_prefixes == original.allowed_path_prefixes
+
+    def test_restricted_none_preserves_hidden_paths(self, tmp_path):
+        original = TerminalExecutor(hidden_paths=[tmp_path / "extra"])
+
+        derived = original.restricted(hidden_paths=None)
+
+        assert derived.hidden_paths == original.hidden_paths
+        assert derived.hidden_paths == (tmp_path / "extra",)
+
+
+def test_build_skill_runtime_env_prepends_gateway_python_bin(tmp_path, monkeypatch) -> None:
+    """bash -c python3 must see the gateway venv before system python."""
+    import os
+    import sys
+    from pathlib import Path
+
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    env = build_skill_runtime_env(cwd=tmp_path)
+    venv_bin = str(Path(sys.executable).resolve().parent)
+    assert env["PATH"].split(os.pathsep)[0] == venv_bin
+    assert env["MONKEYBOT_PYTHON"] == sys.executable
+    assert env["MONKEYBOT_WORKSPACE_ROOT"] == str(tmp_path.resolve())
+
+
+def test_process_group_helpers_skip_on_windows(monkeypatch) -> None:
+    import monkeybot.core.tools.terminal as terminal
+
+    monkeypatch.setattr(terminal, "_SUPPORTS_PROCESS_GROUPS", False)
+    assert terminal._process_group_id(12345) is None
+
+    class _Proc:
+        returncode = None
+        killed = False
+
+        def kill(self) -> None:
+            self.killed = True
+
+    proc = _Proc()
+    calls: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        terminal.os,
+        "killpg",
+        lambda pgid, sig: calls.append((pgid, sig)),
+    )
+    terminal._kill_process_group(999, proc)  # type: ignore[arg-type]
+    assert calls == []
+    assert proc.killed is True

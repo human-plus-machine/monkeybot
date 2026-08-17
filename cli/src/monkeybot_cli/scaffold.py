@@ -6,7 +6,7 @@ import re
 from importlib import resources
 from importlib.resources.abc import Traversable
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 import yaml
 
@@ -25,10 +25,17 @@ _CONFIG_BUNDLE: Final[tuple[tuple[str, str], ...]] = (
     ("permissions.yaml", "permissions.yaml"),
     ("AGENT.md", "AGENT.md"),
     ("otel-collector.example.yaml", "otel-collector.example.yaml"),
+    ("opensandbox.docker.toml", "opensandbox.docker.toml"),
 )
 
-_MEMORY_INDEX: Final = (
-    "# Memory Index\n\nAdd sections here or let memory tools populate this file.\n"
+# Reference copies — safe to overwrite on refresh. Live security/persona files are not.
+_REFRESH_OVERWRITE: Final[tuple[str, ...]] = (
+    "monkeybot.example.yaml",
+    "otel-collector.example.yaml",
+)
+_REFRESH_SKIP_MONKEYBOT_KEYS: Final[frozenset[str]] = frozenset({"model"})
+_MISSING_YAML_BANNER: Final = (
+    "\n# Added by `monkeybot refresh` from current CLI packaged defaults.\n"
 )
 
 
@@ -101,14 +108,16 @@ def write_active_config(
 
 
 def ensure_memory(dest: Path, *, force: bool) -> list[str]:
-    memory = dest / "data" / "memory"
-    memory.mkdir(parents=True, exist_ok=True)
-    idx = memory / "INDEX.md"
-    if not idx.exists() or force:
-        existed = idx.exists()
-        idx.write_text(_MEMORY_INDEX, encoding="utf-8")
-        return [f"  data/memory/INDEX.md: {'overwritten' if existed else 'created'}"]
-    return ["  data/memory/INDEX.md: skipped"]
+    palace = dest / "memory" / "mempalace"
+    palace.mkdir(parents=True, exist_ok=True)
+    identity = palace / "identity.txt"
+    if not identity.exists() or force:
+        identity.write_text(
+            f"## L0 — IDENTITY\nI am {dest.name}, a MonkeyBot agent.\n",
+            encoding="utf-8",
+        )
+        return [f"  memory/mempalace/: {'overwritten' if force else 'created'}"]
+    return ["  memory/mempalace/: skipped"]
 
 
 def ensure_workspace(dest: Path, *, force: bool) -> list[str]:
@@ -125,6 +134,15 @@ def ensure_workspace(dest: Path, *, force: bool) -> list[str]:
     else:
         lines.append("  workspace/.gitkeep: skipped")
 
+    for rel in (
+        "browser/playbooks",
+        "browser/Screenshots",
+        "generated-media/images",
+    ):
+        path = workspace / rel
+        path.mkdir(parents=True, exist_ok=True)
+        lines.append(f"  workspace/{rel}/: ensured")
+
     dest.joinpath("skills").mkdir(parents=True, exist_ok=True)
     return lines
 
@@ -133,7 +151,28 @@ def install_browser_skill(dest: Path, *, force: bool) -> str:
     """Install the bundled, trusted browser procedure into ``skills/browser``."""
     target = dest / "skills" / "browser" / "SKILL.md"
     target.parent.mkdir(parents=True, exist_ok=True)
-    return _install_file(target, resources.files(_DEFAULTS_PKG) / "browser" / "SKILL.md", force=force)
+    return _install_file(
+        target, resources.files(_DEFAULTS_PKG) / "browser" / "SKILL.md", force=force
+    )
+
+
+def install_image_generator_skill(dest: Path, *, force: bool) -> list[str]:
+    """Install the Vertex image-generator skill (SKILL.md + generate_image.py)."""
+    skill_dir = dest / "skills" / "image-generator"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    src = resources.files(_DEFAULTS_PKG) / "image-generator"
+    lines: list[str] = []
+    for name in ("SKILL.md", "generate_image.py"):
+        status = _install_file(skill_dir / name, src / name, force=force)
+        lines.append(f"  skills/image-generator/{name}: {status}")
+    return lines
+
+
+def install_loop_skill(dest: Path, *, force: bool) -> str:
+    """Install the bundled, trusted scheduled-loop procedure into ``skills/loop``."""
+    target = dest / "skills" / "loop" / "SKILL.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return _install_file(target, resources.files(_DEFAULTS_PKG) / "loop" / "SKILL.md", force=force)
 
 
 def install_env_example(dest: Path, *, force: bool) -> str:
@@ -214,9 +253,11 @@ def write_agent_pyproject(
     if path.exists() and not force:
         return "skipped"
     existed = path.exists()
-    # Sandbox is configured in every generated agent, so install its SDK with
-    # the provider dependencies rather than imposing it on every core install.
-    dep = monkeybot_requirement(provider=provider, extras=["sandbox", *(extras or [])])
+    # Sandbox + web search ship enabled in every generated agent config.
+    dep = monkeybot_requirement(
+        provider=provider,
+        extras=["sandbox", "web-search", "memory", *(extras or [])],
+    )
     name = _sanitize_project_name(dest.name)
     path.write_text(
         (
@@ -236,6 +277,130 @@ def write_agent_pyproject(
     return "overwritten" if existed else "created"
 
 
+def _load_mapping(path: Path) -> dict[str, Any]:
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    return raw if isinstance(raw, dict) else {}
+
+
+def _as_str_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if isinstance(item, str)]
+
+
+def _list_extras(existing: list[str], template: list[str]) -> list[str]:
+    present = set(template)
+    return [item for item in existing if item not in present]
+
+
+def refresh_command_allowlist(cfg_dir: Path) -> str:
+    """Rewrite from the packaged template, then re-append agent-only extras.
+
+    Refresh always rewrites this file. Comments in a customized live copy are
+    not preserved; agent-only list entries are merged onto the current template.
+    """
+    dest = cfg_dir / "command_allowlist.yaml"
+    template = (resources.files(_DEFAULTS_PKG) / "command_allowlist.yaml").read_text(
+        encoding="utf-8"
+    )
+    label = "monkeybot_config/command_allowlist.yaml"
+    if not dest.exists():
+        dest.write_text(template, encoding="utf-8")
+        return f"  {label}: created"
+
+    existing = _load_mapping(dest)
+    tmpl = yaml.safe_load(template)
+    tmpl_map = tmpl if isinstance(tmpl, dict) else {}
+    merged = dict(tmpl_map)
+    for key in ("allowed_commands", "allowed_path_prefixes", "deny_patterns"):
+        extras = _list_extras(
+            _as_str_list(existing.get(key)),
+            _as_str_list(tmpl_map.get(key)),
+        )
+        merged[key] = [*_as_str_list(tmpl_map.get(key)), *extras]
+    text = yaml.safe_dump(
+        merged,
+        sort_keys=False,
+        allow_unicode=True,
+        default_flow_style=False,
+    )
+    if dest.read_text(encoding="utf-8") == text:
+        return f"  {label}: unchanged"
+    dest.write_text(text, encoding="utf-8")
+    return f"  {label}: updated"
+
+
+def refresh_permissions_if_default(cfg_dir: Path) -> str:
+    """Overwrite permissions.yaml only when it still has the empty default ruleset."""
+    dest = cfg_dir / "permissions.yaml"
+    label = "monkeybot_config/permissions.yaml"
+    src = resources.files(_DEFAULTS_PKG) / "permissions.yaml"
+    if not dest.exists():
+        dest.write_bytes(src.read_bytes())
+        return f"  {label}: created"
+    data = _load_mapping(dest)
+    rules = data.get("rules")
+    default = data.get("default", "allow")
+    if default != "allow" or (rules not in ([], None)):
+        return f"  {label}: skipped (customized)"
+    dest.write_bytes(src.read_bytes())
+    return f"  {label}: updated"
+
+
+def refresh_monkeybot_yaml(cfg_dir: Path) -> str:
+    """Append top-level keys that exist in the example but are missing from the live file."""
+    dest = cfg_dir / "monkeybot.yaml"
+    label = "monkeybot_config/monkeybot.yaml"
+    if not dest.exists():
+        return f"  {label}: skipped"
+    example_text = (resources.files(_DEFAULTS_PKG) / "monkeybot.example.yaml").read_text(
+        encoding="utf-8"
+    )
+    example = yaml.safe_load(example_text)
+    if not isinstance(example, dict):
+        return f"  {label}: skipped"
+    existing = _load_mapping(dest)
+    missing = {
+        key: value
+        for key, value in example.items()
+        if key not in existing and key not in _REFRESH_SKIP_MONKEYBOT_KEYS
+    }
+    if not missing:
+        return f"  {label}: unchanged"
+    dumped = yaml.safe_dump(missing, sort_keys=False, allow_unicode=True)
+    with dest.open("a", encoding="utf-8") as handle:
+        handle.write(_MISSING_YAML_BANNER)
+        handle.write(dumped)
+    return f"  {label}: updated"
+
+
+def run_refresh(*, dest: Path) -> list[str]:
+    """Bring an existing agent up to date with packaged CLI defaults.
+
+    Additive for live YAML: never deletes user entries, never rewrites AGENT.md
+    or mcp.json, never overwrites model settings. Reference example files are
+    replaced with the current packaged copies.
+    """
+    cfg_dir = dest / "monkeybot_config"
+    active = cfg_dir / "monkeybot.yaml"
+    if not active.is_file():
+        raise FileNotFoundError(f"not a scaffolded agent (missing {active})")
+
+    report: list[str] = []
+    for name in _REFRESH_OVERWRITE:
+        status = _install_file(
+            cfg_dir / name,
+            resources.files(_DEFAULTS_PKG) / name,
+            force=True,
+        )
+        report.append(f"  monkeybot_config/{name}: {status}")
+    report.append(refresh_command_allowlist(cfg_dir))
+    report.append(refresh_permissions_if_default(cfg_dir))
+    report.append(refresh_monkeybot_yaml(cfg_dir))
+    report.extend(ensure_memory(dest, force=False))
+    return report
+
+
 def run_new(
     *,
     dest: Path,
@@ -244,7 +409,14 @@ def run_new(
     model: str | None = None,
     extras: list[str] | None = None,
 ) -> list[str]:
-    """Full scaffold: config bundle, trusted skills, writable state, and image files."""
+    """Full scaffold: config bundle, empty skills root, writable state, and image files.
+
+    Capability skills (``browser``, ``image-generator``, ``loop``) are packaged
+    under ``scaffold_defaults`` but not installed into new agents for now —
+    the Mac Main Agent loads them from ``~/.monkeybot/.internal/skills``
+    instead. Re-enable via ``install_*_skill`` when custom agents should get
+    them again.
+    """
     cfg_dir = dest / "monkeybot_config"
     report = install_config_bundle(cfg_dir, force=force)
     report.append(
@@ -253,7 +425,7 @@ def run_new(
     )
     report.extend(ensure_memory(dest, force=force))
     report.extend(ensure_workspace(dest, force=force))
-    report.append(f"  skills/browser/SKILL.md: {install_browser_skill(dest, force=force)}")
+    report.append("  skills/: ensured (empty — capability skills deferred)")
     report.append(f"  .env.example: {install_env_example(dest, force=force)}")
     report.extend(install_container_files(dest, force=force))
     report.append(

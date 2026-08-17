@@ -25,8 +25,9 @@ zone somewhere else.
 |---|---|---|---|
 | `GEMINI_API_KEY` | Yes (Gemini) | — | LLM provider key. Swap for `VERTEX_AI_PROJECT_ID` when using Vertex. |
 | `DB_URL` | No | `sqlite:///data/monkeybot.db` | Storage backend. Use `postgresql://user:pass@host:5432/db` for managed Postgres or `firestore://PROJECT/(default)` for Firestore. |
-| `MEMORY_STORAGE_URI` | No | `local://./data/memory` | Durable memory backend. Use `gcs://bucket/prefix` or `s3://bucket/prefix` for cloud object storage. |
-| `MONKEYBOT_WORKSPACE_ROOT` | No | layout's `workspace/` | Absolute workspace override for a container or platform mount. |
+| `MEMORY_STORAGE_URI` | No | `local://./memory` | Durable memory backend. Use `gcs://bucket/prefix` or `s3://bucket/prefix` for cloud object storage. |
+| `MONKEYBOT_WORKSPACE_ROOT` | No | layout's `workspace/` | Absolute workspace path exported after layout resolve. |
+| `MONKEYBOT_WORKSPACE_ROOT_OVERRIDE` | No | — | Absolute remount of the agent workspace for one process. Beats yaml `paths.workspace_root`. |
 | `SANDBOX_ENABLED` | No | `false` | Set `true` to enable the OpenSandbox code-execution environment. |
 | `SANDBOX_SERVER_URL` | If sandbox enabled | — | URL of the OpenSandbox server (e.g. `http://localhost:8080` for a sidecar, or a private IP for a VPC-separated service). |
 | `SANDBOX_IMAGE` | No | `python:3.12` | Override with a published MonkeyBot sandbox image or another execution image. |

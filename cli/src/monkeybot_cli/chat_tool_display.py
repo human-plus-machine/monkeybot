@@ -4,31 +4,36 @@ from __future__ import annotations
 
 from pathlib import Path
 
-_SUBAGENT_HINT_MAX = 60
-_TITLE_HINT_MAX = 72
-_DETAIL_MAX = 8000
-_SHELL_TAIL_LINES = 40
+from monkeybot.core.tools.tool_hint import (
+    DETAIL_MAX,
+    TITLE_HINT_MAX,
+    collapse_hint,
+    resolve_tool_hint,
+    task_hint,
+    task_subagent_label,
+    tool_collapsed_title,
+    tool_hint,
+    truncate_detail,
+    truncate_subagent_hint,
+)
 
-_TOOL_KIND: dict[str, str] = {
-    "run_command": "Shell",
-    "execute": "Shell",
-    "shell": "Shell",
-    "bash": "Shell",
-    "read_file": "Read",
-    "read": "Read",
-    "write_file": "Write",
-    "write": "Write",
-    "edit_file": "Edit",
-    "apply_patch": "Edit",
-    "str_replace": "Edit",
-    "grep": "Search",
-    "search": "Search",
-    "web_search": "Search",
-    "glob": "Glob",
-    "list_dir": "List",
-    "list_directory": "List",
-    "task": "Task",
-}
+# Re-export shared helpers so existing CLI imports keep working.
+__all__ = [
+    "DETAIL_MAX",
+    "TITLE_HINT_MAX",
+    "collapse_hint",
+    "format_tool_expand_body",
+    "resolve_tool_hint",
+    "task_hint",
+    "task_subagent_label",
+    "tool_collapsed_title",
+    "tool_display",
+    "tool_hint",
+    "tool_spinner_prefix",
+    "truncate_subagent_hint",
+]
+
+_SHELL_TAIL_LINES = 40
 
 _SHELL_TOOLS = frozenset({"run_command", "execute", "shell", "bash"})
 _READ_TOOLS = frozenset({"read_file", "read"})
@@ -76,99 +81,6 @@ _LANG_BY_SUFFIX: dict[str, str] = {
     ".html": "html",
     ".sql": "sql",
 }
-
-
-def collapse_hint(text: str) -> str:
-    return " ".join(text.split())
-
-
-def truncate_subagent_hint(text: str) -> str:
-    collapsed = collapse_hint(text)
-    if len(collapsed) <= _SUBAGENT_HINT_MAX:
-        return collapsed
-    return collapsed[:_SUBAGENT_HINT_MAX] + "…"
-
-
-def tool_hint(args: dict[str, object]) -> str:
-    """Summary of tool args for status lines."""
-    argv = args.get("argv")
-    if isinstance(argv, list) and argv:
-        return collapse_hint(" ".join(str(x) for x in argv))
-
-    cmd = args.get("command")
-    if isinstance(cmd, str) and cmd.strip():
-        extra = args.get("args")
-        if extra is None:
-            extra = args.get("arguments")
-        if isinstance(extra, list) and extra:
-            line = " ".join([cmd.strip(), *[str(x) for x in extra]])
-        else:
-            line = cmd.strip()
-        return collapse_hint(line)
-
-    for key in ("shell", "script", "path", "query", "url"):
-        val = args.get(key)
-        if isinstance(val, str) and val.strip():
-            return collapse_hint(val.strip())
-    keys = list(args.keys())
-    if len(keys) == 1:
-        key = keys[0]
-        val = args[key]
-        if isinstance(val, (str, int, bool, float)):
-            return collapse_hint(f"{key}: {val}")
-    if keys:
-        return f"{len(keys)} arg{'s' if len(keys) != 1 else ''}"
-    return ""
-
-
-def task_subagent_label(args: dict[str, object]) -> str:
-    for key in ("subagent_type", "type", "persona"):
-        val = args.get(key)
-        if isinstance(val, str) and val.strip():
-            return f"subagent:{val.strip()}"
-    return "subagent"
-
-
-def task_hint(args: dict[str, object]) -> str:
-    for key in ("task", "instructions", "prompt", "objective"):
-        val = args.get(key)
-        if isinstance(val, str) and val.strip():
-            return truncate_subagent_hint(val.strip())
-    return ""
-
-
-def tool_kind_label(tool: str) -> str:
-    key = tool.strip().lower().replace("-", "_")
-    if key in _TOOL_KIND:
-        return _TOOL_KIND[key]
-    cleaned = tool.strip().replace("_", " ").replace("-", " ")
-    return cleaned.title() if cleaned else "Tool"
-
-
-def resolve_tool_hint(tool: str, label: str, args: dict[str, object]) -> str:
-    """Shared hint used by collapsed titles and plain-path display."""
-    if tool == "task":
-        hint = task_hint(args)
-        if not hint and label.strip() and label.strip() != tool:
-            return truncate_subagent_hint(label.strip())
-        return hint
-    hint = tool_hint(args)
-    if not hint and label.strip() and label.strip() != tool:
-        return collapse_hint(label.strip())
-    return hint
-
-
-def tool_collapsed_title(tool: str, label: str, args: dict[str, object]) -> str:
-    """Short Cursor/Claude-style title: ``Shell  git status``."""
-    hint = resolve_tool_hint(tool, label, args)
-    if tool == "task":
-        base = task_subagent_label(args)
-        kind = "Task" if base == "subagent" else base
-    else:
-        kind = tool_kind_label(tool)
-    if hint and len(hint) > _TITLE_HINT_MAX:
-        hint = hint[:_TITLE_HINT_MAX] + "…"
-    return f"{kind}  {hint}" if hint else kind
 
 
 def tool_display(tool: str, label: str, args: dict[str, object]) -> str:
@@ -229,12 +141,6 @@ def _looks_like_diff(text: str) -> bool:
     return False
 
 
-def _truncate(text: str, max_chars: int) -> str:
-    if len(text) <= max_chars:
-        return text
-    return text[:max_chars] + "\n…"
-
-
 def _tail_lines(text: str, n: int = _SHELL_TAIL_LINES) -> str:
     lines = text.splitlines()
     if len(lines) <= n:
@@ -292,7 +198,7 @@ def format_tool_expand_body(
     *,
     result: str = "",
     error: object = None,
-    max_chars: int = _DETAIL_MAX,
+    max_chars: int = DETAIL_MAX,
 ) -> str:
     """Human-readable expand body as markdown (not raw JSON dump)."""
     key = _tool_key(tool)
@@ -320,15 +226,15 @@ def format_tool_expand_body(
 
     if key in _READ_TOOLS:
         lang = _language_for_path(_path_from_args(args))
-        parts.append(_fence(_truncate(result, max_chars), lang))
+        parts.append(_fence(truncate_detail(result, max_chars), lang))
     elif key in _EDIT_TOOLS and _looks_like_diff(result):
-        parts.append(_fence(_truncate(result, max_chars), "diff"))
+        parts.append(_fence(truncate_detail(result, max_chars), "diff"))
     elif key in _SHELL_TOOLS:
-        parts.append(_fence(_truncate(_tail_lines(result), max_chars), ""))
+        parts.append(_fence(truncate_detail(_tail_lines(result), max_chars), ""))
     elif key in _SEARCH_TOOLS:
         parts.append(_format_search_result(result, max_chars))
     else:
-        text = _truncate(result, max_chars)
+        text = truncate_detail(result, max_chars)
         parts.append(_fence(text, ""))
 
     return "\n".join(parts)

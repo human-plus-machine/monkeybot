@@ -25,6 +25,20 @@ def test_normalize_extra_token_features_and_providers() -> None:
     assert normalize_extra_token("not-a-real-extra") is None
 
 
+def test_extra_module_covers_catalog_extras() -> None:
+    from monkeybot_cli.extras_catalog import FEATURE_CHOICES
+    from monkeybot_cli.providers import PROVIDER_SPECS, extra_module
+
+    extras = {choice.key for choice in FEATURE_CHOICES} | {
+        spec.extra for spec in PROVIDER_SPECS.values() if spec.extra
+    }
+    assert extra_module("postgres") == "asyncpg"
+    assert extra_module("memory") == "mempalace"
+    assert extra_module("web-search") == "ddgs"
+    for extra in extras:
+        assert extra_module(extra), extra
+
+
 def test_provider_extra_name() -> None:
     assert provider_extra_name("openai") == "openai"
     assert provider_extra_name("anthropic") == "claude"
@@ -83,5 +97,6 @@ def test_new_with_extras_cli(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     text = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
     assert (
-        f'"monkeybot[openai,sandbox,postgres,bedrock]{COMPATIBLE_CORE_RANGE}"' in text
+        f'"monkeybot[openai,sandbox,web-search,memory,postgres,bedrock]{COMPATIBLE_CORE_RANGE}"'
+        in text
     )

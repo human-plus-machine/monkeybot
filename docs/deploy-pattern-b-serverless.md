@@ -42,7 +42,12 @@ _provider = None
 
 async def _cold_start():
     global _backend, _workspace, _mcp, _provider
-    _backend = create_storage_backend(os.environ["DB_URL"])
+    # MONKEYBOT_AGENT_ID is required if DB_URL is ever shared with another
+    # deployment/tenant — namespaces conversation history so this deployment
+    # can't read/resume another one's sessions.
+    _backend = create_storage_backend(
+        os.environ["DB_URL"], agent_scope=os.environ.get("MONKEYBOT_AGENT_ID", "")
+    )
     await _backend.open()
     _workspace = create_workspace_storage(os.environ["MEMORY_STORAGE_URI"])
     _mcp = MCPClient()
@@ -78,7 +83,9 @@ FaaS platforms reuse warm instances (containers) across invocations but may term
 
 ```python
 async def handle(session_id, message):
-    backend = create_storage_backend(os.environ["DB_URL"])
+    backend = create_storage_backend(
+        os.environ["DB_URL"], agent_scope=os.environ.get("MONKEYBOT_AGENT_ID", "")
+    )
     await backend.open()
     try:
         ctx = await build_context(session_id=session_id, storage=backend, ...)
@@ -146,7 +153,9 @@ from monkeybot.core.workspace import create_workspace_storage
 from monkeybot.core.providers.gemini import GeminiProvider
 from monkeybot.core.harness import build_context, run_loop
 
-_backend = create_storage_backend(os.environ["DB_URL"])
+_backend = create_storage_backend(
+    os.environ["DB_URL"], agent_scope=os.environ.get("MONKEYBOT_AGENT_ID", "")
+)
 asyncio.get_event_loop().run_until_complete(_backend.open())
 _workspace = create_workspace_storage(os.environ["MEMORY_STORAGE_URI"])
 _provider = GeminiProvider()
@@ -169,6 +178,7 @@ def lambda_handler(event, context):
 DB_URL          = postgresql://user:pass@rds-proxy.endpoint:5432/monkeybot?sslmode=require
 MEMORY_STORAGE_URI = s3://my-bucket/monkeybot-memory
 GEMINI_API_KEY  = (from Secrets Manager via a Lambda extension or fetched at cold start)
+MONKEYBOT_AGENT_ID = (required if DB_URL is ever shared with another deployment/tenant)
 ```
 
 **Timeout:** Lambda max is 15 minutes. Set your function timeout to match the longest expected agent run (agent turns can take 30–120 seconds depending on tools and LLM latency).
@@ -209,7 +219,9 @@ from monkeybot.core.workspace import create_workspace_storage
 from monkeybot.core.providers.gemini import GeminiProvider
 from monkeybot.core.harness import build_context, run_loop
 
-_backend = create_storage_backend(os.environ["DB_URL"])
+_backend = create_storage_backend(
+    os.environ["DB_URL"], agent_scope=os.environ.get("MONKEYBOT_AGENT_ID", "")
+)
 asyncio.get_event_loop().run_until_complete(_backend.open())
 _workspace = create_workspace_storage(os.environ["MEMORY_STORAGE_URI"])
 _provider = GeminiProvider()
@@ -283,7 +295,9 @@ from monkeybot.core.harness import build_context, run_loop
 
 app = func.FunctionApp()
 
-_backend = create_storage_backend(os.environ["DB_URL"])
+_backend = create_storage_backend(
+    os.environ["DB_URL"], agent_scope=os.environ.get("MONKEYBOT_AGENT_ID", "")
+)
 asyncio.get_event_loop().run_until_complete(_backend.open())
 _workspace = create_workspace_storage(os.environ["MEMORY_STORAGE_URI"])
 _provider = GeminiProvider()
@@ -335,7 +349,9 @@ from monkeybot.core.harness import build_context, run_loop
 
 async def on_fetch(request, env):
     payload = await request.json()
-    backend = create_storage_backend(env.DB_URL)
+    backend = create_storage_backend(
+        env.DB_URL, agent_scope=getattr(env, "MONKEYBOT_AGENT_ID", "")
+    )
     await backend.open()
     workspace = create_workspace_storage(env.MEMORY_STORAGE_URI)
     provider = GeminiProvider(api_key=env.GEMINI_API_KEY)

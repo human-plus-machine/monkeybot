@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 import fnmatch
+import json
+import logging
 import os
 import re
+import shutil
+import subprocess
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
+from monkeybot.core.logging_utils import kv
 from monkeybot.core.tools.text_normalize import normalize_unicode_punctuation
+
+logger = logging.getLogger(__name__)
 
 # Directories skipped when walking for grep: noisy, large, or not source content.
 _GREP_IGNORE_DIRS = frozenset(
@@ -29,8 +37,29 @@ _GREP_IGNORE_DIRS = frozenset(
         "dist",
         "build",
         ".next",
+        ".monkeybot",
+        ".terraform",
+        "target",
+        "vendor",
     }
 )
+
+# Wall-clock budget for the optional ripgrep accelerator. On expiry we fail closed
+# (incomplete_scan) instead of falling back to an unbounded Python walk.
+_RG_TIMEOUT_SEC = 120
+
+
+# One-level or nested ``{a,b}`` groups in filename globs (fnmatch has no brace expansion).
+_BRACE_GLOB_RE = re.compile(r"\{([^{}]+)\}")
+# Python ``re`` features that the Rust regex crate (ripgrep) does not support.
+_RG_UNSUPPORTED_RE = re.compile(
+    r"\(\?[=!<]|\\[1-9]|\(\?P=|\\g<"
+)
+
+
+# Appended when a single line exceeds the whole char budget and had to be cut
+# mid-line; the remainder is not reachable via ``offset``.
+_LINE_SLICED_MARKER = " …[line cut at char budget]"
 
 
 class ReadFileResult(TypedDict):
@@ -41,6 +70,7 @@ class ReadFileResult(TypedDict):
     end_line: int
     total_lines: int
     truncated: bool
+    next_offset: NotRequired[int]
 
 
 class WriteFileResult(TypedDict):
@@ -74,7 +104,6 @@ class GlobResult(TypedDict):
     pattern: str
     paths: list[str]
     count: int
-    truncated: bool
     duration_ms: int
 
 
@@ -84,18 +113,24 @@ class GrepResult(TypedDict):
     pattern: str
     matches: list[GrepMatch]
     match_count: int
+    total_match_count: int
     files_scanned: int
-    truncated: bool
+    scan_complete: bool
     duration_ms: int
+    next_offset: NotRequired[int]
 
 
 @dataclass
 class WorkspaceSettings:
-    """Defaults for workspace file limits (override via env in callers or pass explicit settings)."""
+    """Defaults for workspace file limits (YAML via callers, or pass explicit settings).
 
-    WORKSPACE_READ_MAX_LINES: int = 50000
-    WORKSPACE_READ_DEFAULT_LINES: int = 20000
-    WORKSPACE_SPILL_READ_MAX_LINES: int = 50_000
+    The agent path always supplies YAML-derived settings, so these defaults only
+    serve non-agent callers such as the gateway file-viewer endpoints, which are
+    not bound by any model context window and keep the historic generous limits.
+    """
+
+    WORKSPACE_READ_MAX_LINES: int = 50_000
+    WORKSPACE_READ_DEFAULT_LINES: int = 20_000
     WORKSPACE_WRITE_MAX_BYTES: int = 8_000_000
     WORKSPACE_GLOB_MAX_PATHS: int = 2000
     WORKSPACE_GLOB_TIMEOUT_SEC: float = 20.0
@@ -107,12 +142,23 @@ class WorkspaceSettings:
     WORKSPACE_WRITE_SCOPE_REL: str | None = None
 
 
+# Agent ``read_file`` default when ``limit`` is omitted (harness-fixed; not YAML/env).
+# Gateway file-viewer keeps the generous ``WorkspaceSettings`` default above.
+AGENT_READ_DEFAULT_LINES = 2000
+
+
 class WorkspaceError(Exception):
     """Logical error for workspace operations (maps to HTTP 400)."""
 
-    def __init__(self, message: str, code: str = "workspace_error") -> None:
+    def __init__(
+        self,
+        message: str,
+        code: str = "workspace_error",
+        details: dict[str, object] | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.details = details
 
 
 def _coerce_workspace_settings(settings: object | None) -> WorkspaceSettings:
@@ -125,7 +171,6 @@ def _coerce_workspace_settings(settings: object | None) -> WorkspaceSettings:
     for field in (
         "WORKSPACE_READ_MAX_LINES",
         "WORKSPACE_READ_DEFAULT_LINES",
-        "WORKSPACE_SPILL_READ_MAX_LINES",
         "WORKSPACE_WRITE_MAX_BYTES",
         "WORKSPACE_GLOB_MAX_PATHS",
         "WORKSPACE_GLOB_TIMEOUT_SEC",
@@ -138,6 +183,325 @@ def _coerce_workspace_settings(settings: object | None) -> WorkspaceSettings:
         if val is not None:
             setattr(out, field, val)
     return out
+
+
+def _expand_file_glob(pattern: str) -> list[str]:
+    """Expand ``{a,b}`` groups in a filename glob into concrete fnmatch patterns.
+
+    Raises :class:`WorkspaceError` on unbalanced braces or empty alternatives so
+    callers never silently match zero files from a malformed glob.
+    """
+    if pattern.count("{") != pattern.count("}"):
+        raise WorkspaceError(
+            f"Unbalanced braces in file_glob: {pattern!r}",
+            code="invalid_file_glob",
+        )
+    if "{" not in pattern:
+        if "}" in pattern:
+            raise WorkspaceError(
+                f"Unbalanced braces in file_glob: {pattern!r}",
+                code="invalid_file_glob",
+            )
+        return [pattern]
+    m = _BRACE_GLOB_RE.search(pattern)
+    if m is None:
+        raise WorkspaceError(
+            f"Unparseable file_glob: {pattern!r}",
+            code="invalid_file_glob",
+        )
+    inner = m.group(1)
+    alternatives = inner.split(",")
+    if not alternatives or any(not alt.strip() for alt in alternatives):
+        raise WorkspaceError(
+            f"Empty alternative in file_glob braces: {pattern!r}",
+            code="invalid_file_glob",
+        )
+    prefix = pattern[: m.start()]
+    suffix = pattern[m.end() :]
+    expanded: list[str] = []
+    for alt in alternatives:
+        expanded.extend(_expand_file_glob(f"{prefix}{alt}{suffix}"))
+    return expanded
+
+
+def _normalize_file_globs(file_glob: str | list[str] | None) -> list[str] | None:
+    """Normalize ``file_glob`` to a list of fnmatch patterns, or ``None`` for no filter."""
+    if file_glob is None:
+        return None
+    if isinstance(file_glob, str):
+        raw_items: list[str] = [file_glob]
+    elif isinstance(file_glob, list):
+        raw_items = [str(x) for x in file_glob]
+    else:
+        raise WorkspaceError(
+            "file_glob must be a string or list of strings",
+            code="invalid_file_glob",
+        )
+    if not raw_items:
+        raise WorkspaceError("file_glob must not be empty", code="invalid_file_glob")
+    out: list[str] = []
+    for item in raw_items:
+        s = item.strip()
+        if not s:
+            raise WorkspaceError(
+                "file_glob entries must be non-empty strings",
+                code="invalid_file_glob",
+            )
+        out.extend(_expand_file_glob(s))
+    if not out:
+        raise WorkspaceError(
+            f"file_glob matched no patterns: {file_glob!r}",
+            code="invalid_file_glob",
+        )
+    return out
+
+
+def _compile_path_glob(pattern: str) -> re.Pattern[str]:
+    """Compile a path glob where ``*``/``?`` do not cross ``/`` and ``**`` does."""
+    parts: list[str] = []
+    i = 0
+    n = len(pattern)
+    while i < n:
+        if pattern.startswith("**/", i):
+            parts.append("(?:.*/)?")
+            i += 3
+        elif pattern.startswith("**", i):
+            parts.append(".*")
+            i += 2
+        elif pattern[i] == "*":
+            parts.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            parts.append("[^/]")
+            i += 1
+        else:
+            parts.append(re.escape(pattern[i]))
+            i += 1
+    return re.compile(f"^{''.join(parts)}$")
+
+
+def _path_matches_globs(rel_path: str, globs: list[str] | None) -> bool:
+    """Match ``file_glob`` with ripgrep/gitignore-like rules.
+
+    Patterns without ``/`` match the basename in any directory (so ``*.py`` and
+    ``test_*.py`` work under nested folders). Patterns that contain ``/`` match
+    the workspace-relative path, with ``**`` spanning directories.
+    """
+    if globs is None:
+        return True
+    path = rel_path.replace("\\", "/").removeprefix("./")
+    name = path.rsplit("/", 1)[-1]
+    for raw in globs:
+        g = raw.replace("\\", "/").removeprefix("./")
+        if "/" not in g.rstrip("/"):
+            if fnmatch.fnmatch(name, g):
+                return True
+        elif _compile_path_glob(g).fullmatch(path) is not None:
+            return True
+    return False
+
+
+def _raise_if_grep_files_skipped(
+    *,
+    oversized: int,
+    binary: int,
+    unreadable: int,
+    files_scanned: int,
+    max_file_bytes: int,
+    partial_matches: list[GrepMatch] | None = None,
+) -> None:
+    """Fail closed when candidates were skipped — empty hits must not imply absence."""
+    total = oversized + binary + unreadable
+    if total == 0:
+        return
+    parts: list[str] = []
+    if oversized:
+        parts.append(f"{oversized} oversized (>{max_file_bytes} bytes)")
+    if binary:
+        parts.append(f"{binary} binary")
+    if unreadable:
+        parts.append(f"{unreadable} unreadable")
+    details: dict[str, object] = {
+        "stop_reason": "skipped_files",
+        "files_scanned": files_scanned,
+        "files_skipped_oversized": oversized,
+        "files_skipped_binary": binary,
+        "files_skipped_unreadable": unreadable,
+    }
+    if partial_matches:
+        cap = min(50, len(partial_matches))
+        details["partial_matches"] = partial_matches[:cap]
+        details["partial_matches_omitted"] = len(partial_matches) - cap
+    raise WorkspaceError(
+        f"grep skipped {total} candidate file(s) ({', '.join(parts)}); "
+        "results are incomplete and cannot be used to conclude absence",
+        code="incomplete_scan",
+        details=details,
+    )
+
+
+def _raise_grep_max_files(
+    files_scanned: int,
+    max_files: int,
+    extra_details: dict[str, object] | None = None,
+) -> None:
+    details: dict[str, object] = {
+        "stop_reason": "max_files",
+        "files_scanned": files_scanned,
+    }
+    if extra_details:
+        details.update(extra_details)
+    raise WorkspaceError(
+        f"grep scanned {files_scanned} files (limit {max_files}) and stopped early; "
+        "results are incomplete and cannot be used to conclude absence",
+        code="incomplete_scan",
+        details=details,
+    )
+
+
+def _grep_classify(
+    fp: Path, max_file_bytes: int
+) -> tuple[str, bytes | None]:
+    """Classify a candidate as ``ok`` / ``oversized`` / ``binary`` / ``unreadable``."""
+    try:
+        st = fp.stat()
+    except OSError:
+        return "unreadable", None
+    if st.st_size > max_file_bytes:
+        return "oversized", None
+    try:
+        data = fp.read_bytes()
+    except OSError:
+        return "unreadable", None
+    if b"\x00" in data[:8192]:
+        return "binary", None
+    return "ok", data
+
+
+def _tally_grep_skip(kind: str, tallies: dict[str, int]) -> bool:
+    """Bump skip tallies for a non-ok classify result. Returns True when skipped."""
+    if kind == "ok":
+        return False
+    tallies[kind] = tallies.get(kind, 0) + 1
+    return True
+
+
+def _utf8_byte_offsets_to_char_offsets(
+    text: str,
+    byte_start: int,
+    byte_end: int | None = None,
+) -> tuple[int, int | None]:
+    """Map ripgrep UTF-8 byte offsets into Unicode character indices for *text*."""
+    encoded = text.encode("utf-8")
+
+    def _clamp_boundary(pos: int) -> int:
+        pos = max(0, min(pos, len(encoded)))
+        # Exclusive end at ``len(encoded)`` is already a valid boundary.
+        if pos >= len(encoded):
+            return len(encoded)
+        # Step back if *pos* lands mid multi-byte sequence.
+        while pos > 0 and (encoded[pos] & 0xC0) == 0x80:
+            pos -= 1
+        return pos
+
+    start = _clamp_boundary(byte_start)
+    char_start = len(encoded[:start].decode("utf-8"))
+    if byte_end is None:
+        return char_start, None
+    end = _clamp_boundary(max(byte_start, byte_end))
+    if end < start:
+        end = start
+    char_end = len(encoded[:end].decode("utf-8"))
+    return char_start, char_end
+
+
+def _clip_grep_match_line(
+    line: str,
+    match_start: int | None,
+    match_end: int | None = None,
+    *,
+    max_chars: int = 2000,
+) -> str:
+    """Clip a long grep hit so the match remains visible in the preview.
+
+    Short lines are returned unchanged. When ``match_start`` is missing, falls
+    back to a prefix clip (historical behavior). Otherwise centers a window on
+    ``[match_start, match_end)``, keeping the full match when it fits, and marks
+    truncation with leading/trailing ``…`` while staying within ``max_chars``.
+    """
+    if max_chars <= 0:
+        return ""
+    if len(line) <= max_chars:
+        return line
+    if match_start is None:
+        return line[:max_chars]
+
+    start = max(0, min(match_start, len(line)))
+    end = start if match_end is None else max(start, min(match_end, len(line)))
+    ellipsis = "…"
+    match_len = end - start
+
+    def _assemble(win_start: int, win_end: int) -> str:
+        parts: list[str] = []
+        if win_start > 0:
+            parts.append(ellipsis)
+        parts.append(line[win_start:win_end])
+        if win_end < len(line):
+            parts.append(ellipsis)
+        return "".join(parts)
+
+    # Match longer than the budget: keep as much of the match as possible.
+    if match_len >= max_chars:
+        need_lead = start > 0
+        budget = max_chars - (1 if need_lead else 0)
+        chunk_end = start + budget
+        need_trail = chunk_end < len(line)
+        if need_trail:
+            budget = max_chars - (1 if need_lead else 0) - 1
+            chunk_end = start + max(0, budget)
+        return _assemble(start, chunk_end)
+
+    # Match fits: center context around it, refining ellipsis costs.
+    need_lead = start > 0
+    need_trail = end < len(line)
+    win_start = start
+    win_end = end
+    for _ in range(3):
+        content_budget = max_chars - (1 if need_lead else 0) - (1 if need_trail else 0)
+        if content_budget < match_len:
+            content_budget = match_len
+        extra = content_budget - match_len
+        before = extra // 2
+        after = extra - before
+        win_start = start - before
+        win_end = end + after
+        if win_start < 0:
+            win_end = min(len(line), win_end - win_start)
+            win_start = 0
+        if win_end > len(line):
+            win_start = max(0, win_start - (win_end - len(line)))
+            win_end = len(line)
+        if win_start > start:
+            win_start = start
+        if win_end < end:
+            win_end = min(len(line), end)
+            if win_end - win_start > content_budget:
+                win_end = win_start + content_budget
+        new_need_lead = win_start > 0
+        new_need_trail = win_end < len(line)
+        if new_need_lead == need_lead and new_need_trail == need_trail:
+            break
+        need_lead, need_trail = new_need_lead, new_need_trail
+
+    result = _assemble(win_start, win_end)
+    if len(result) > max_chars:
+        return result[:max_chars]
+    return result
+
+
+def _regex_needs_python_engine(pattern: str) -> bool:
+    """True when ``pattern`` uses Python ``re`` features unsupported by ripgrep."""
+    return _RG_UNSUPPORTED_RE.search(pattern) is not None
 
 
 def _is_disproportionate_match(search: str, old_string: str) -> bool:
@@ -405,9 +769,20 @@ class WorkspaceFileService:
         rel = self._settings.WORKSPACE_WRITE_SCOPE_REL
         if rel is None:
             return None
-        s = str(rel).strip().replace("\\", "/").lstrip("/")
-        if not s or ".." in s:
-            return None
+        raw = str(rel).strip().replace("\\", "/")
+        s = raw.lstrip("/")
+        if (
+            not s
+            or ".." in s
+            or raw.startswith("~")
+            or raw.startswith("/")
+        ):
+            # Fail closed: a configured-but-invalid scope must not disable enforcement.
+            raise WorkspaceError(
+                f"Invalid WORKSPACE_WRITE_SCOPE_REL: {rel!r} "
+                "(must be a non-empty repo-relative path without '..')",
+                code="invalid_write_scope",
+            )
         return (self._root / s).resolve()
 
     def _require_under_write_scope(self, fp: Path) -> None:
@@ -466,22 +841,24 @@ class WorkspaceFileService:
         *,
         offset: int = 1,
         limit: int | None = None,
-        max_lines_cap: int | None = None,
+        max_chars: int | None = None,
+        apply_default_limit: bool = True,
     ) -> ReadFileResult:
         if offset < 1:
             raise WorkspaceError("offset must be >= 1", code="invalid_offset")
-        max_lines = (
-            max_lines_cap
-            if max_lines_cap is not None
-            else self._settings.WORKSPACE_READ_MAX_LINES
-        )
+        max_lines = self._settings.WORKSPACE_READ_MAX_LINES
         if limit is None:
-            limit = self._settings.WORKSPACE_READ_DEFAULT_LINES
-        if limit < 1 or limit > max_lines:
+            if apply_default_limit:
+                # Default must respect the configured cap (same as an explicit limit).
+                limit = min(self._settings.WORKSPACE_READ_DEFAULT_LINES, max_lines)
+        elif limit < 1:
             raise WorkspaceError(
                 f"limit must be between 1 and {max_lines}",
                 code="invalid_limit",
             )
+        elif limit > max_lines:
+            # Char budget is the authority when present; otherwise clamp.
+            limit = max_lines
         fp = self._resolve_under_root(path)
         if not fp.is_file():
             raise WorkspaceError(f"Not a file: {path}", code="not_found")
@@ -499,19 +876,65 @@ class WorkspaceFileService:
                 "total_lines": total,
                 "truncated": False,
             }
-        end_idx = min(start_idx + limit, total)
-        chunk = lines[start_idx:end_idx]
-        width = max(6, len(str(end_idx)))
-        numbered = "\n".join(f"{start_idx + 1 + i:{width}d}|{chunk[i]}" for i in range(len(chunk)))
-        return {
+        end_cap = total if limit is None else min(start_idx + limit, total)
+
+        width = max(6, len(str(max(total, 1))))
+        if max_chars is None:
+            end_idx = end_cap
+            chunk = lines[start_idx:end_idx]
+            numbered = "\n".join(
+                f"{start_idx + 1 + i:{width}d}|{chunk[i]}" for i in range(len(chunk))
+            )
+            truncated = end_idx < total
+            result: ReadFileResult = {
+                "ok": True,
+                "path": self._as_repo_rel(fp),
+                "content": numbered,
+                "start_line": start_idx + 1,
+                "end_line": end_idx,
+                "total_lines": total,
+                "truncated": truncated,
+            }
+            if truncated:
+                result["next_offset"] = end_idx + 1
+            return result
+
+        # Char-bounded selection: accumulate numbered line length; never chop mid-slice.
+        selected: list[str] = []
+        used = 0
+        end_idx = start_idx
+        sliced = False
+        for i in range(start_idx, end_cap):
+            line = lines[i]
+            numbered_line = f"{i + 1:{width}d}|{line}"
+            add = len(numbered_line) + (1 if selected else 0)
+            if selected and used + add > max_chars:
+                break
+            if not selected and add > max_chars:
+                # Always advance at least one line so paging cannot deadlock. The
+                # remainder of this line is unreachable by offset, so say so.
+                kept = numbered_line[: max(1, max_chars)]
+                selected.append(f"{kept}{_LINE_SLICED_MARKER}")
+                end_idx = i + 1
+                sliced = True
+                break
+            selected.append(numbered_line)
+            used += add
+            end_idx = i + 1
+
+        more_lines = end_idx < total
+        out: ReadFileResult = {
             "ok": True,
             "path": self._as_repo_rel(fp),
-            "content": numbered,
+            "content": "\n".join(selected),
             "start_line": start_idx + 1,
             "end_line": end_idx,
             "total_lines": total,
-            "truncated": end_idx < total,
+            "truncated": more_lines or sliced,
         }
+        if more_lines:
+            out["next_offset"] = end_idx + 1
+        return out
 
     def write_file(self, path: str, content: str) -> WriteFileResult:
         if content is None:
@@ -632,14 +1055,17 @@ class WorkspaceFileService:
         deadline = time.monotonic() + self._settings.WORKSPACE_GLOB_TIMEOUT_SEC
         max_paths = self._settings.WORKSPACE_GLOB_MAX_PATHS
         paths: list[str] = []
-        truncated = False
+        stop_reason: str | None = None
         t0 = time.monotonic()
         try:
             for p in base.glob(effective_pattern):
                 if time.monotonic() > deadline:
-                    truncated = True
+                    stop_reason = "timeout"
                     break
-                if not p.is_file():
+                if not (p.is_file() or p.is_dir()):
+                    continue
+                # ``Path.glob`` can yield the search root for patterns like ``.`` / ``*``.
+                if p.resolve() == base.resolve():
                     continue
                 try:
                     self._as_repo_rel(p)
@@ -647,19 +1073,40 @@ class WorkspaceFileService:
                     continue
                 paths.append(self._as_repo_rel(p))
                 if len(paths) >= max_paths:
-                    truncated = True
+                    stop_reason = "max_paths"
                     break
         except OSError as e:
             raise WorkspaceError(f"Glob failed: {e}", code="glob_failed") from e
         paths.sort()
         duration_ms = int((time.monotonic() - t0) * 1000)
+        if stop_reason is not None:
+            reason = (
+                f"timeout after {self._settings.WORKSPACE_GLOB_TIMEOUT_SEC}s"
+                if stop_reason == "timeout"
+                else f"path cap {max_paths}"
+            )
+            # Cap mid-flight evidence so the error envelope stays model-sized.
+            partial_cap = min(100, len(paths))
+            raise WorkspaceError(
+                f"glob found {len(paths)} paths then stopped early ({reason}); "
+                "results are incomplete and cannot be used to conclude absence",
+                code="incomplete_scan",
+                details={
+                    "stop_reason": stop_reason,
+                    "count": len(paths),
+                    "partial_paths": paths[:partial_cap],
+                    "partial_paths_omitted": len(paths) - partial_cap,
+                    "root": self._as_repo_rel(base) if base != self._root else ".",
+                    "pattern": pattern,
+                    "duration_ms": duration_ms,
+                },
+            )
         return {
             "ok": True,
             "root": self._as_repo_rel(base) if base != self._root else ".",
             "pattern": pattern,
             "paths": paths,
             "count": len(paths),
-            "truncated": truncated,
             "duration_ms": duration_ms,
         }
 
@@ -669,81 +1116,356 @@ class WorkspaceFileService:
         *,
         root: str | None = None,
         ignore_case: bool = False,
-        file_glob: str | None = None,
+        file_glob: str | list[str] | None = None,
         max_matches: int | None = None,
+        offset: int | None = None,
     ) -> GrepResult:
         if not pattern or not str(pattern).strip():
             raise WorkspaceError("pattern is required", code="missing_pattern")
+        pat = pattern.strip()
         flags = re.IGNORECASE if ignore_case else 0
         try:
-            regex = re.compile(pattern.strip(), flags)
+            regex = re.compile(pat, flags)
         except re.error as e:
             raise WorkspaceError(f"Invalid regex: {e}", code="invalid_regex") from e
+        globs = _normalize_file_globs(file_glob)
         base = self._resolve_root_dir(root)
         max_m = max_matches if max_matches is not None else self._settings.WORKSPACE_GREP_MAX_MATCHES
+        if max_m < 1:
+            raise WorkspaceError("max_matches must be >= 1", code="invalid_max_matches")
+        off = 0 if offset is None else int(offset)
+        if off < 0:
+            raise WorkspaceError("offset must be >= 0", code="invalid_offset")
         max_files = self._settings.WORKSPACE_GREP_MAX_FILES
         max_file_bytes = self._settings.WORKSPACE_GREP_MAX_FILE_BYTES
-        matches: list[GrepMatch] = []
-        files_scanned = 0
-        truncated = False
         t0 = time.monotonic()
-        for dirpath, dirnames, filenames in os.walk(base):
-            dirnames[:] = sorted(d for d in dirnames if d not in _GREP_IGNORE_DIRS)
+
+        use_rg = shutil.which("rg") is not None and not _regex_needs_python_engine(pat)
+        if use_rg:
+            try:
+                return self._grep_with_rg(
+                    pat,
+                    base=base,
+                    ignore_case=ignore_case,
+                    globs=globs,
+                    max_matches=max_m,
+                    offset=off,
+                    max_files=max_files,
+                    max_file_bytes=max_file_bytes,
+                    t0=t0,
+                )
+            except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+                # Fall back to the pure-Python walker; do not change match semantics
+                # by failing closed when an optional accelerator is broken.
+                logger.warning("grep rg fallback %s", kv(error=str(exc)))
+
+        return self._grep_python(
+            regex,
+            pat,
+            base=base,
+            globs=globs,
+            max_matches=max_m,
+            offset=off,
+            max_files=max_files,
+            max_file_bytes=max_file_bytes,
+            t0=t0,
+        )
+
+    def _grep_result(
+        self,
+        *,
+        pattern: str,
+        base: Path,
+        matches: list[GrepMatch],
+        total_match_count: int,
+        files_scanned: int,
+        offset: int,
+        t0: float,
+    ) -> GrepResult:
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        payload: GrepResult = {
+            "ok": True,
+            "root": self._as_repo_rel(base) if base != self._root else ".",
+            "pattern": pattern,
+            "matches": matches,
+            "match_count": len(matches),
+            "total_match_count": total_match_count,
+            "files_scanned": files_scanned,
+            "scan_complete": True,
+            "duration_ms": duration_ms,
+        }
+        next_offset = offset + len(matches)
+        if next_offset < total_match_count:
+            payload["next_offset"] = next_offset
+        return payload
+
+    def _iter_grep_candidates(
+        self,
+        base: Path,
+        globs: list[str] | None,
+    ) -> Iterator[tuple[Path, str]]:
+        """Yield ``(path, repo-relative)`` for grep candidates under ``base``."""
+        walk_iter: Iterator[tuple[str, list[str], list[str]]]
+        if base.is_file():
+            walk_iter = iter([(str(base.parent), [], [base.name])])
+        else:
+            walk_iter = os.walk(base)
+        for dirpath, dirnames, filenames in walk_iter:
+            if not base.is_file():
+                dirnames[:] = sorted(d for d in dirnames if d not in _GREP_IGNORE_DIRS)
             for name in sorted(filenames):
-                if len(matches) >= max_m:
-                    truncated = True
-                    break
-                if files_scanned >= max_files:
-                    truncated = True
-                    break
                 fp = Path(dirpath) / name
                 try:
                     rel = self._as_repo_rel(fp)
                 except WorkspaceError:
                     continue
-                if file_glob and not fnmatch.fnmatch(fp.name, file_glob):
+                if not _path_matches_globs(rel, globs):
                     continue
-                try:
-                    st = fp.stat()
-                except OSError:
-                    continue
-                if st.st_size > max_file_bytes:
-                    continue
-                files_scanned += 1
-                try:
-                    data = fp.read_bytes()
-                except OSError:
-                    continue
-                if b"\x00" in data[:8192]:
-                    continue
-                text = data.decode("utf-8", errors="replace")
-                for line_no, line in enumerate(text.splitlines(), start=1):
-                    if len(matches) >= max_m:
-                        truncated = True
-                        break
-                    if regex.search(line):
-                        matches.append(
-                            {
-                                "path": rel,
-                                "line": line_no,
-                                "text": line[:2000],
-                            }
-                        )
-                if truncated:
-                    break
-            if truncated:
+                yield fp, rel
+
+    def _grep_python(
+        self,
+        regex: re.Pattern[str],
+        pattern: str,
+        *,
+        base: Path,
+        globs: list[str] | None,
+        max_matches: int,
+        offset: int,
+        max_files: int,
+        max_file_bytes: int,
+        t0: float,
+    ) -> GrepResult:
+        matches: list[GrepMatch] = []
+        files_scanned = 0
+        total_match_count = 0
+        candidates_remaining = False
+        tallies = {"oversized": 0, "binary": 0, "unreadable": 0}
+
+        for fp, rel in self._iter_grep_candidates(base, globs):
+            kind, data = _grep_classify(fp, max_file_bytes)
+            if _tally_grep_skip(kind, tallies):
+                continue
+            if files_scanned >= max_files:
+                candidates_remaining = True
                 break
-        duration_ms = int((time.monotonic() - t0) * 1000)
-        return {
-            "ok": True,
-            "root": self._as_repo_rel(base) if base != self._root else ".",
-            "pattern": pattern.strip(),
-            "matches": matches,
-            "match_count": len(matches),
-            "files_scanned": files_scanned,
-            "truncated": truncated,
-            "duration_ms": duration_ms,
-        }
+            assert data is not None
+            files_scanned += 1
+            text = data.decode("utf-8", errors="replace")
+            for line_no, line in enumerate(text.splitlines(), start=1):
+                m = regex.search(line)
+                if m is None:
+                    continue
+                total_match_count += 1
+                if total_match_count <= offset:
+                    continue
+                if len(matches) < max_matches:
+                    matches.append(
+                        {
+                            "path": rel,
+                            "line": line_no,
+                            "text": _clip_grep_match_line(line, m.start(), m.end()),
+                        }
+                    )
+
+        if candidates_remaining:
+            _raise_grep_max_files(
+                files_scanned,
+                max_files,
+                {
+                    "files_skipped_oversized": tallies["oversized"],
+                    "files_skipped_binary": tallies["binary"],
+                    "files_skipped_unreadable": tallies["unreadable"],
+                },
+            )
+
+        _raise_if_grep_files_skipped(
+            oversized=tallies["oversized"],
+            binary=tallies["binary"],
+            unreadable=tallies["unreadable"],
+            files_scanned=files_scanned,
+            max_file_bytes=max_file_bytes,
+            partial_matches=matches or None,
+        )
+
+        return self._grep_result(
+            pattern=pattern,
+            base=base,
+            matches=matches,
+            total_match_count=total_match_count,
+            files_scanned=files_scanned,
+            offset=offset,
+            t0=t0,
+        )
+
+    def _grep_with_rg(
+        self,
+        pattern: str,
+        *,
+        base: Path,
+        ignore_case: bool,
+        globs: list[str] | None,
+        max_matches: int,
+        offset: int,
+        max_files: int,
+        max_file_bytes: int,
+        t0: float,
+    ) -> GrepResult:
+        rg_bin = shutil.which("rg")
+        if not rg_bin:
+            raise OSError("rg not found")
+        cmd: list[str] = [
+            rg_bin,
+            "--json",
+            "--no-config",
+            "--hidden",
+            "--no-ignore",
+            "--max-filesize",
+            str(max_file_bytes),
+        ]
+        if ignore_case:
+            cmd.append("-i")
+        for ignore_dir in sorted(_GREP_IGNORE_DIRS):
+            # ``--no-ignore`` disables gitignore; these globs still apply. Prefer
+            # directory-name forms so nested paths like ``pkg/node_modules`` are skipped.
+            cmd.extend(["--glob", f"!{ignore_dir}"])
+            cmd.extend(["--glob", f"!**/{ignore_dir}/**"])
+        if globs:
+            for g in globs:
+                cmd.extend(["--glob", g])
+        # Search from the workspace root as cwd so path-style --glob patterns
+        # (e.g. src/**/*.py) match the same relative paths as the Python walker.
+        search_root = self._root.resolve()
+        search_path = base.resolve()
+        try:
+            rg_target = search_path.relative_to(search_root).as_posix() or "."
+        except ValueError:
+            rg_target = str(search_path)
+        cmd.extend(["--", pattern, rg_target])
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=_RG_TIMEOUT_SEC,
+                check=False,
+                cwd=str(search_root),
+            )
+        except subprocess.TimeoutExpired as exc:
+            # Do not fall back to unbounded Python walk after already spending the budget.
+            logger.warning(
+                "grep rg timed out %s",
+                kv(timeout_sec=_RG_TIMEOUT_SEC, pattern=pattern),
+            )
+            raise WorkspaceError(
+                f"grep rg timed out after {_RG_TIMEOUT_SEC}s; results are incomplete and "
+                "cannot be used to conclude absence",
+                code="incomplete_scan",
+                details={
+                    "stop_reason": "rg_timed_out",
+                    "timeout_sec": _RG_TIMEOUT_SEC,
+                },
+            ) from exc
+        # 0 = matches, 1 = no matches; anything else is a hard failure → caller falls back.
+        if proc.returncode not in (0, 1):
+            raise OSError(proc.stderr.strip() or f"rg exited {proc.returncode}")
+
+        matches: list[GrepMatch] = []
+        total_match_count = 0
+        files_begun = 0
+        files_scanned = 0
+        for line in proc.stdout.splitlines():
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            etype = event.get("type")
+            data = event.get("data") or {}
+            if etype == "begin":
+                # begin is emitted for files with ≥1 match (not every file searched).
+                files_begun += 1
+            elif etype == "match":
+                total_match_count += 1
+                if total_match_count <= offset or len(matches) >= max_matches:
+                    continue
+                path_info = data.get("path") or {}
+                path_text = path_info.get("text") if isinstance(path_info, dict) else None
+                if not isinstance(path_text, str):
+                    continue
+                fp = Path(path_text)
+                if not fp.is_absolute():
+                    fp = self._root / fp
+                try:
+                    rel = self._as_repo_rel(fp.resolve())
+                except WorkspaceError:
+                    continue
+                lines_info = data.get("lines") or {}
+                text = lines_info.get("text") if isinstance(lines_info, dict) else ""
+                if not isinstance(text, str):
+                    text = ""
+                text = text.rstrip("\n\r")
+                match_start: int | None = None
+                match_end: int | None = None
+                submatches = data.get("submatches")
+                if isinstance(submatches, list) and submatches:
+                    first = submatches[0]
+                    if isinstance(first, dict):
+                        raw_start = first.get("start")
+                        raw_end = first.get("end")
+                        if isinstance(raw_start, int):
+                            # rg submatches are UTF-8 byte offsets into the line.
+                            end_arg = raw_end if isinstance(raw_end, int) else None
+                            match_start, match_end = _utf8_byte_offsets_to_char_offsets(
+                                text, raw_start, end_arg
+                            )
+                text = _clip_grep_match_line(text, match_start, match_end)
+                line_no = data.get("line_number")
+                if not isinstance(line_no, int):
+                    line_no = 0
+                matches.append({"path": rel, "line": line_no, "text": text})
+            elif etype == "summary":
+                stats = data.get("stats") or {}
+                searches = stats.get("searches")
+                if isinstance(searches, int):
+                    files_scanned = searches
+                matched_lines = stats.get("matched_lines")
+                if isinstance(matched_lines, int):
+                    total_match_count = matched_lines
+
+        # Prefer the higher of begin-events vs summary.searches so a missing or
+        # under-counted summary cannot hide an over-cap scan.
+        if files_begun > files_scanned:
+            files_scanned = files_begun
+
+        tallies = {"oversized": 0, "binary": 0, "unreadable": 0}
+        candidate_count = 0
+        for fp, _rel in self._iter_grep_candidates(base, globs):
+            candidate_count += 1
+            kind, _data = _grep_classify(fp, max_file_bytes)
+            _tally_grep_skip(kind, tallies)
+        # Candidate walk is authoritative for WORKSPACE_GREP_MAX_FILES: begin
+        # events only cover matches, and some rg builds omit/under-count searches.
+        files_scanned = max(files_scanned, candidate_count)
+        if files_scanned > max_files:
+            _raise_grep_max_files(files_scanned, max_files)
+
+        _raise_if_grep_files_skipped(
+            oversized=tallies["oversized"],
+            binary=tallies["binary"],
+            unreadable=tallies["unreadable"],
+            files_scanned=files_scanned,
+            max_file_bytes=max_file_bytes,
+            partial_matches=matches or None,
+        )
+
+        return self._grep_result(
+            pattern=pattern,
+            base=base,
+            matches=matches,
+            total_match_count=total_match_count,
+            files_scanned=files_scanned,
+            offset=offset,
+            t0=t0,
+        )
 
     def _as_repo_rel(self, p: Path) -> str:
         if self._skills_root is not None:

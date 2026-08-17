@@ -13,13 +13,13 @@ from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._utils import (
     anthropic_tool_defs,
     build_anthropic_messages,
-    build_cached_system_blocks,
     count_anthropic_input_tokens,
     estimate_anthropic_input_tokens,
     iter_anthropic_sdk_stream,
-    mark_last_tool_cached,
+    prepare_anthropic_cached_payload,
     split_leading_system,
 )
+from monkeybot.providers.model_capabilities import supports_param
 from monkeybot.providers.sampling import resolve_model_sampling
 
 _log = logging.getLogger(__name__)
@@ -44,10 +44,9 @@ class VertexClaudeProvider:
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> None:
-        self._project_id = (
-            (project_id or "").strip()
-            or os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID", "").strip()
-        )
+        self._project_id = (project_id or "").strip() or os.environ.get(
+            "ANTHROPIC_VERTEX_PROJECT_ID", ""
+        ).strip()
         self._region = (
             (region or "").strip()
             or os.environ.get("ANTHROPIC_VERTEX_REGION", "").strip()
@@ -88,16 +87,17 @@ class VertexClaudeProvider:
         except Exception as exc:
             msg = str(exc).lower()
             if "token counting" in msg or "not supported" in msg:
-                _log.warning(
-                    "Vertex Claude count_tokens unavailable, using estimate %s",
-                    kv(provider="vertex_claude", model=model),
-                    exc_info=True,
-                )
-                return estimate_anthropic_input_tokens(
+                estimated = estimate_anthropic_input_tokens(
                     system=system,
                     messages=converted_messages,
                     tools=converted_tools,
                 )
+                _log.warning(
+                    "Vertex Claude count_tokens unavailable, using estimate %s",
+                    kv(provider="vertex_claude", model=model, estimated_tokens=estimated),
+                    exc_info=True,
+                )
+                return estimated
             raise
 
     async def stream(
@@ -115,18 +115,13 @@ class VertexClaudeProvider:
 
         retention = hints.cache_retention if hints is not None else "short"
         system, msgs = split_leading_system(messages)
-        converted_messages = build_anthropic_messages(msgs)
         client = AsyncAnthropicVertex(project_id=self._project_id, region=self._region)
-        converted = anthropic_tool_defs(tools) if tools else None
-        system_param: Any = (
-            build_cached_system_blocks(system, cache_retention=retention)
-            if system
-            else anthropic.NOT_GIVEN
-        )
-        tools_param: Any = (
-            mark_last_tool_cached(converted, cache_retention=retention)
-            if converted
-            else anthropic.NOT_GIVEN
+        system_param, converted_messages, tools_param = prepare_anthropic_cached_payload(
+            system=system,
+            messages=msgs,
+            tools=tools,
+            cache_retention=retention,
+            not_given=anthropic.NOT_GIVEN,
         )
 
         stream_kwargs: dict[str, Any] = {
@@ -135,8 +130,9 @@ class VertexClaudeProvider:
             "messages": cast(Any, converted_messages),
             "tools": tools_param,
             "max_tokens": self._max_tokens,
-            "temperature": self._temperature,
         }
+        if supports_param(model, "temperature"):
+            stream_kwargs["temperature"] = self._temperature
         async for event in iter_anthropic_sdk_stream(
             client,
             stream_kwargs,

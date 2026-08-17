@@ -8,16 +8,22 @@ Durable conversation facts live here as ``Message`` rows with typed
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
-from typing import cast
+from typing import Any, cast
 
 import aiosqlite
 
-from monkeybot.core.types.content_blocks import ContentBlock
 from monkeybot.core.llm.provider import Message, Role
-from monkeybot.core.persistence.thread_summary import ChatThreadSummary, preview_from_content_blob
+from monkeybot.core.persistence.sqlite import ConnLock, with_conn_lock
+from monkeybot.core.persistence.thread_summary import (
+    SUBAGENT_THREAD_ID_PREFIX,
+    ChatThreadSummary,
+    preview_from_content_blob,
+)
+from monkeybot.core.types.content_blocks import ContentBlock
 
 logger = logging.getLogger("monkeybot.core.persistence.history")
 
@@ -32,12 +38,88 @@ def _validate_message(message: Message) -> None:
 
 
 class SQLiteHistoryStore:
-    """Append/read conversation rows keyed by ``thread_id``."""
+    """Append/read conversation rows keyed by ``thread_id``, scoped to ``agent_scope``.
 
-    def __init__(self, conn: aiosqlite.Connection) -> None:
+    ``agent_scope`` isolates threads when one DB_URL is shared across gateways
+    for different agent roots (e.g. a shared Postgres/Firestore backend) — without
+    it, ``list_threads`` would surface another agent's newest transcript. Defaults
+    to ``''`` (unscoped) for in-process/test callers that only ever see their own
+    rows; production gateways pass the resolved agent root.
+    """
+
+    def __init__(
+        self,
+        conn: aiosqlite.Connection,
+        agent_scope: str = "",
+        *,
+        lock: ConnLock | None = None,
+    ) -> None:
         self._conn = conn
+        self._agent_scope = agent_scope
+        self._lock = lock or asyncio.Lock()
+        self._memory_columns: bool | None = None
 
-    async def append(self, thread_id: str, message: Message) -> None:
+    async def _has_memory_columns(self) -> bool:
+        if self._memory_columns is None:
+            cur = await self._conn.execute("PRAGMA table_info(conversation_history)")
+            rows = await cur.fetchall()
+            await cur.close()
+            names = {str(r[1]) for r in rows}
+            self._memory_columns = "turn_id" in names and "message_id" in names
+        return self._memory_columns
+
+    async def _insert_history_row(
+        self,
+        thread_id: str,
+        role: str,
+        payload: str,
+        created_at: int,
+        *,
+        turn_id: str | None,
+        message_id: str | None,
+    ) -> None:
+        if await self._has_memory_columns():
+            if message_id:
+                cur = await self._conn.execute(
+                    """
+                    SELECT 1 FROM conversation_history
+                    WHERE message_id = ? LIMIT 1
+                    """,
+                    (message_id,),
+                )
+                exists = await cur.fetchone()
+                await cur.close()
+                if exists is not None:
+                    return
+            try:
+                await self._conn.execute(
+                    """
+                    INSERT INTO conversation_history(
+                        thread_id, role, content, created_at, agent_scope, turn_id, message_id
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (thread_id, role, payload, created_at, self._agent_scope, turn_id, message_id),
+                )
+            except aiosqlite.IntegrityError:
+                return
+            return
+        await self._conn.execute(
+            """
+            INSERT INTO conversation_history(thread_id, role, content, created_at, agent_scope)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (thread_id, role, payload, created_at, self._agent_scope),
+        )
+
+    async def append(
+        self,
+        thread_id: str,
+        message: Message,
+        *,
+        turn_id: str | None = None,
+        message_id: str | None = None,
+    ) -> None:
         """Validate ``message``, JSON-encode content blocks, insert one row."""
         _validate_message(message)
         payload = json.dumps(
@@ -46,30 +128,98 @@ class SQLiteHistoryStore:
             ensure_ascii=False,
         )
         created_at = int(time.time() * 1000)
-        await self._conn.execute(
-            """
-            INSERT INTO conversation_history(thread_id, role, content, created_at)
-            VALUES (?, ?, ?, ?)
-            """,
-            (thread_id, message.role, payload, created_at),
-        )
-        await self._conn.commit()
+        async with self._lock:
+            await self._insert_history_row(
+                thread_id,
+                message.role,
+                payload,
+                created_at,
+                turn_id=turn_id,
+                message_id=message_id,
+            )
+            await self._conn.commit()
 
-    async def load(self, thread_id: str, limit: int = 100) -> list[Message]:
-        """Return up to ``limit`` messages for ``thread_id``, oldest first."""
-        cursor = await self._conn.execute(
-            """
-            SELECT id, role, content, created_at
-            FROM conversation_history
-            WHERE thread_id = ?
-            ORDER BY created_at DESC, id DESC
-            LIMIT ?
-            """,
-            (thread_id, limit),
+    async def append_with_outbox(
+        self,
+        thread_id: str,
+        message: Message,
+        *,
+        turn_id: str,
+        message_id: str,
+        outbox: dict[str, Any],
+    ) -> None:
+        """Insert history and a pending memory outbox row in one transaction."""
+        from monkeybot.core.memory.outbox import insert_pending
+
+        _validate_message(message)
+        payload = json.dumps(
+            [b.to_dict() for b in message.content],
+            separators=(",", ":"),
+            ensure_ascii=False,
         )
-        rows = await cursor.fetchall()
-        await cursor.close()
-        rows_chrono = list(reversed(list(rows)))
+        created_at = int(time.time() * 1000)
+        async with self._lock:
+            await self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                if not await self._has_memory_columns():
+                    raise RuntimeError(
+                        "conversation_history is missing turn_id/message_id. "
+                        "Apply docs/migrations/memory-outbox.sql or set paths.auto_schema: true"
+                    )
+                await self._insert_history_row(
+                    thread_id,
+                    message.role,
+                    payload,
+                    created_at,
+                    turn_id=turn_id,
+                    message_id=message_id,
+                )
+                await insert_pending(self._conn, commit=False, **outbox)
+                await self._conn.commit()
+            except Exception as exc:
+                await self._conn.rollback()
+                if isinstance(
+                    exc, (TimeoutError, OSError, ConnectionError, aiosqlite.OperationalError)
+                ):
+                    from monkeybot.core.persistence.errors import AmbiguousCommitError
+
+                    raise AmbiguousCommitError(str(exc)) from exc
+                raise
+
+    @with_conn_lock
+    async def load(self, thread_id: str, limit: int | None = None) -> list[Message]:
+        """Return messages for ``thread_id`` within this store's agent scope, oldest first.
+
+        When ``limit`` is set, returns the newest ``limit`` rows. When ``None``,
+        returns the full thread (compaction owns size — do not silently slide).
+        """
+        if limit is None:
+            cursor = await self._conn.execute(
+                """
+                SELECT id, role, content, created_at
+                FROM conversation_history
+                WHERE thread_id = ? AND agent_scope = ?
+                ORDER BY created_at ASC, id ASC
+                """,
+                (thread_id, self._agent_scope),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+            rows_chrono = list(rows)
+        else:
+            cursor = await self._conn.execute(
+                """
+                SELECT id, role, content, created_at
+                FROM conversation_history
+                WHERE thread_id = ? AND agent_scope = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (thread_id, self._agent_scope, limit),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+            rows_chrono = list(reversed(list(rows)))
         out: list[Message] = []
         for row in rows_chrono:
             row_id = int(row[0])
@@ -94,23 +244,40 @@ class SQLiteHistoryStore:
         return out
 
     async def clear(self, thread_id: str) -> None:
-        """Delete every stored message for ``thread_id``."""
-        await self._conn.execute(
-            "DELETE FROM conversation_history WHERE thread_id = ?", (thread_id,)
-        )
-        await self._conn.commit()
+        """Delete every stored message for ``thread_id`` within this store's agent scope."""
+        async with self._lock:
+            await self._conn.execute(
+                "DELETE FROM conversation_history WHERE thread_id = ? AND agent_scope = ?",
+                (thread_id, self._agent_scope),
+            )
+            await self._conn.commit()
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None:
         """Replace the thread transcript with ``messages`` (validated like ``append``)."""
-        await self._conn.execute(
-            "DELETE FROM conversation_history WHERE thread_id = ?", (thread_id,)
-        )
-        await self._conn.commit()
+        async with self._lock:
+            await self._conn.execute(
+                "DELETE FROM conversation_history WHERE thread_id = ? AND agent_scope = ?",
+                (thread_id, self._agent_scope),
+            )
+            await self._conn.commit()
         for msg in messages:
             await self.append(thread_id, msg)
 
+    @with_conn_lock
     async def list_threads(self, limit: int = 50) -> list[ChatThreadSummary]:
-        """Return recent threads ordered by last activity (newest first).
+        """Return recent threads in this store's agent scope, ordered by last activity (newest first).
+
+        Excludes subagent transcripts (``thread_id`` prefixed
+        ``SUBAGENT_THREAD_ID_PREFIX``) — otherwise a subagent that finishes
+        after its parent's last turn would outrank the parent as "newest,"
+        making ``--continue`` resume the subagent's transcript under the
+        main-agent prompt and tools instead of the actual previous chat.
+        Uses ``GLOB``, not ``LIKE``: SQLite's ``LIKE`` ASCII-folds case by
+        default, so ``NOT LIKE 'subagent:%'`` would also swallow an ordinary
+        user session literally named e.g. ``Subagent:foo`` even though the
+        internal prefix (and the reserved-namespace rejection at session
+        creation) is exact-case — ``GLOB`` matches case-sensitively, like
+        Postgres's ``LIKE`` and Python's ``str.startswith`` already do.
 
         The correlated subquery on ``last_content`` is O(threads × messages) per call.
         For production SQLite load, add a composite index on
@@ -126,16 +293,17 @@ class SQLiteHistoryStore:
                 (
                     SELECT h2.content
                     FROM conversation_history h2
-                    WHERE h2.thread_id = h.thread_id
+                    WHERE h2.thread_id = h.thread_id AND h2.agent_scope = h.agent_scope
                     ORDER BY h2.created_at DESC, h2.id DESC
                     LIMIT 1
                 ) AS last_content
             FROM conversation_history h
+            WHERE h.agent_scope = ? AND h.thread_id NOT GLOB ? || '*'
             GROUP BY h.thread_id
             ORDER BY last_message_at DESC
             LIMIT ?
             """,
-            (cap,),
+            (self._agent_scope, SUBAGENT_THREAD_ID_PREFIX, cap),
         )
         rows = await cursor.fetchall()
         await cursor.close()

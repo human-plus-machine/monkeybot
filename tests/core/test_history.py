@@ -80,7 +80,16 @@ async def test_apply_schema_creates_only_expected_history_columns() -> None:
         rows = await cursor.fetchall()
         await cursor.close()
         names = {str(r[1]) for r in rows}
-        assert names == {"id", "thread_id", "role", "content", "created_at"}
+        assert names == {
+            "id",
+            "thread_id",
+            "role",
+            "content",
+            "created_at",
+            "agent_scope",
+            "turn_id",
+            "message_id",
+        }
     finally:
         await conn.close()
 
@@ -146,7 +155,16 @@ async def test_apply_schema_succeeds_after_wipe_simulated(tmp_path: Path) -> Non
         rows = await cursor.fetchall()
         await cursor.close()
         names = {str(r[1]) for r in rows}
-        assert names == {"id", "thread_id", "role", "content", "created_at"}
+        assert names == {
+            "id",
+            "thread_id",
+            "role",
+            "content",
+            "created_at",
+            "agent_scope",
+            "turn_id",
+            "message_id",
+        }
     finally:
         await conn2.close()
 
@@ -280,6 +298,8 @@ async def test_history_append_load_ordering_limit_clear_reset(history_db) -> Non
     thread_limit = "t-limit"
     for i in range(150):
         await history.append(thread_limit, Message.text("user", f"m{i}"))
+    all_rows = await history.load(thread_limit)
+    assert len(all_rows) == 150
     limited = await history.load(thread_limit, limit=100)
     assert len(limited) == 100
     lim_texts = [b.text for m in limited for b in m.content if isinstance(b, Text)]

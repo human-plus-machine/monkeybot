@@ -27,9 +27,11 @@ from monkeybot.core.llm.provider import (
     UsageEvent,
 )
 from monkeybot.core.llm.usage import Usage
-from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.runtime.events import (
     AssistantDelta,
+    ContextSummarized,
+    ContextSummarizing,
+    ContextUsage,
     Error,
     GroundingEvent,
     ImageBlock,
@@ -41,21 +43,17 @@ from monkeybot.core.runtime.events import (
     ToolCallStarted,
     TurnComplete,
 )
-from monkeybot.core.runtime.loop import (
-    _chunk_tool_calls,
-    _compact_history_if_needed,
-    _image_events,
-    _merge_usage_event,
-    _messages_for_provider,
-    _usage_to_totals,
-    run,
-)
+from monkeybot.core.runtime.history_compaction import _compact_history_if_needed
+from monkeybot.core.runtime.loop import run
+from monkeybot.core.runtime.loop_messages import _messages_for_provider
+from monkeybot.core.runtime.loop_usage import _merge_usage_event, _usage_to_totals
+from monkeybot.core.runtime.tool_batch import _chunk_tool_calls
+from monkeybot.core.runtime.tool_dispatch import _image_events
 from monkeybot.core.testing.mocks_provider import fake_provider_prompt_tokens
 from monkeybot.core.tools.inspector import Decision
 from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.types.content_blocks import Image, Text, ToolRequest, ToolResponse
 from monkeybot.core.types.types_tools import ToolDef
-from monkeybot.core.workspace import create_workspace_storage
 
 
 def _flatten_text_from_message(m: Message) -> str:
@@ -153,12 +151,16 @@ class FakeHistory:
         self.rows: list[Message] = list(preload) if preload is not None else []
         self.reset_calls: list[tuple[str, list[Message]]] = []
 
-    async def load(self, thread_id: str, limit: int = 100) -> list[Message]:
-        del thread_id, limit
-        return list(self.rows)
-
-    async def append(self, thread_id: str, message: Message) -> None:
+    async def load(self, thread_id: str, limit: int | None = None) -> list[Message]:
         del thread_id
+        if limit is None:
+            return list(self.rows)
+        return list(self.rows[-limit:]) if limit > 0 else []
+
+    async def append(
+        self, thread_id: str, message: Message, *, turn_id: str | None = None, message_id: str | None = None
+    ) -> None:
+        del thread_id, turn_id, message_id
         self.rows.append(message)
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None:
@@ -338,6 +340,10 @@ async def test_run_no_tools_yields_assistant_then_turn_complete() -> None:
     assert any(isinstance(e, Thinking) for e in events)
     deltas = [e for e in events if isinstance(e, AssistantDelta)]
     assert [e.delta for e in deltas] == ["hi"]
+    usage_events = [e for e in events if isinstance(e, ContextUsage)]
+    assert len(usage_events) == 1
+    assert usage_events[0].estimated_tokens > 0
+    assert usage_events[0].context_window_tokens == 200_000
     assert isinstance(events[-1], TurnComplete)
     assert events[-1].usage.input_tokens == 1
     assert events[-1].usage.output_tokens == 2
@@ -558,7 +564,7 @@ async def test_run_usage_defaults_when_missing_usage_events() -> None:
     assert tc.usage.input_tokens == 0
     assert tc.usage.output_tokens == 0
     assert tc.usage.cached_tokens == 0
-    assert tc.usage.duration_ms == 0
+    assert tc.usage.duration_ms >= 0
 
 
 @pytest.mark.asyncio
@@ -731,7 +737,7 @@ async def test_run_cancellation_between_two_tools_second_skipped() -> None:
         ]
     )
     hist = FakeHistory()
-    exe = CancelAfterFirst()
+    exe = CancelAfterFirst(("first-ok", None))
     ctx = _ctx()
     events = []
     async for e in run(
@@ -748,6 +754,76 @@ async def test_run_cancellation_between_two_tools_second_skipped() -> None:
     assert [c.call_id for c in exe.calls] == ["a"]
     assert any(isinstance(e, Error) and "cancelled" in e.error.lower() for e in events)
     assert isinstance(events[-1], TurnComplete)
+
+    # Completed tool a must land in history; b gets an explicit cancel envelope
+    # (not a generic integrity "interrupted" on the next turn).
+    tool_user_msgs = [
+        m
+        for m in hist.rows
+        if m.role == "user" and any(isinstance(b, ToolResponse) for b in m.content)
+    ]
+    assert len(tool_user_msgs) == 1
+    by_id = {
+        b.id: b
+        for b in tool_user_msgs[0].content
+        if isinstance(b, ToolResponse)
+    }
+    assert set(by_id) == {"a", "b"}
+    assert by_id["a"].is_error is False
+    assert any(
+        isinstance(block, Text) and "first-ok" in block.text for block in by_id["a"].result
+    )
+    assert by_id["b"].is_error is True
+    cancel_text = " ".join(
+        block.text for block in by_id["b"].result if isinstance(block, Text)
+    )
+    assert 'Tool "run_command" was cancelled' in cancel_text
+    assert "do not assume the tool never ran" in cancel_text
+
+
+@pytest.mark.asyncio
+async def test_run_cancels_mid_provider_text_stream() -> None:
+    """Stop must interrupt token streaming, not wait for the full LLM call."""
+    cancel = asyncio.Event()
+
+    class CancelAfterFirstDelta(FakeProvider):
+        async def stream(
+            self,
+            messages: Sequence[Message],
+            tools: Sequence[ToolDef],
+            *,
+            model: str,
+            thinking_budget: int | None = None,
+            vertex_google_search: bool = False,
+        ) -> AsyncIterator[ProviderEvent]:
+            del messages, tools, model, thinking_budget, vertex_google_search
+            self.stream_calls += 1
+            yield TextDelta(text="Hello ")
+            cancel.set()
+            yield TextDelta(text="world — should not appear")
+            yield Done()
+
+    hist = FakeHistory()
+    events = []
+    async for e in run(
+        "u",
+        _ctx(),
+        provider=CancelAfterFirstDelta([[]]),
+        history=hist,
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        cancelled=cancel,
+        max_turns=2,
+    ):
+        events.append(e)
+
+    deltas = [e.delta for e in events if isinstance(e, AssistantDelta)]
+    assert deltas == ["Hello "]
+    assert any(isinstance(e, Error) and "cancelled" in e.error.lower() for e in events)
+    assert isinstance(events[-1], TurnComplete)
+    # Partial reply must land in history so follow-ups see what the user saw.
+    assert [m.role for m in hist.rows] == ["user", "assistant"]
+    assert _flatten_text_from_message(hist.rows[1]) == "Hello"
 
 
 @pytest.mark.asyncio
@@ -795,6 +871,9 @@ async def test_run_generator_closes_without_pending_tasks() -> None:
 @pytest.mark.asyncio
 async def test_run_empty_model_after_tools_retries_then_succeeds() -> None:
     """Regression: do not end the run after tools when the model streams no text (only Done)."""
+    from monkeybot.core.runtime.events import Error
+    from monkeybot.core.runtime.turn_loop import _EMPTY_COMPLETION_RECOVERY_NOTE
+
     prov = FakeProvider(
         [
             [ToolCall(call_id="c1", name="run_command", args={"command": "x"}), Done()],
@@ -820,6 +899,17 @@ async def test_run_empty_model_after_tools_retries_then_succeeds() -> None:
     deltas = [e.delta for e in events if isinstance(e, AssistantDelta)]
     assert deltas == ["summary"]
     assert isinstance(events[-1], TurnComplete)
+    # A successful post-tool recovery must not surface an Error.
+    assert not any(isinstance(e, Error) for e in events)
+    # Post-tool empty uses a distinct note (answer from results; don't burn tools).
+    from monkeybot.core.runtime.turn_loop import _POST_TOOL_EMPTY_COMPLETION_NOTE
+
+    followup_msgs = prov.stream_messages[2]
+    system_text = "".join(
+        b.text for m in followup_msgs if m.role == "system" for b in m.content if hasattr(b, "text")
+    )
+    assert _POST_TOOL_EMPTY_COMPLETION_NOTE in system_text
+    assert _EMPTY_COMPLETION_RECOVERY_NOTE not in system_text
 
 
 @pytest.mark.asyncio
@@ -828,7 +918,7 @@ async def test_run_tool_image_result_yields_image_block() -> None:
     prov = FakeProvider(
         [
             [
-                ToolCall(call_id="c1", name="render_image", args={"path": "./x.png"}),
+                ToolCall(call_id="c1", name="load_file", args={"path": "./x.png"}),
                 Done(),
             ],
             [TextDelta(text="done"), Done()],
@@ -918,18 +1008,22 @@ def test_chunk_tool_calls_groups_consecutive_parallel_safe() -> None:
     a = ToolCall(call_id="a", name="read_file", args={"path": "a"})
     b = ToolCall(call_id="b", name="glob", args={"pattern": "*"})
     c = ToolCall(call_id="c", name="write_file", args={"path": "x", "content": ""})
-    d = ToolCall(call_id="d", name="search_memory", args={"query": "q"})
-    safe = frozenset({"read_file", "glob", "search_memory"})
+    d = ToolCall(call_id="d", name="grep", args={"pattern": "q"})
+    safe = frozenset({"read_file", "glob", "grep"})
     chunks = _chunk_tool_calls([a, b, c, d], parallel_safe=safe)
     assert [len(ch) for ch in chunks] == [2, 1, 1]
     assert [x.name for x in chunks[0]] == ["read_file", "glob"]
     assert chunks[1][0].name == "write_file"
-    assert chunks[2][0].name == "search_memory"
+    assert chunks[2][0].name == "grep"
 
 
 @pytest.mark.asyncio
-async def test_parallel_safe_tools_results_in_call_id_order() -> None:
-    """Parallel-safe read tools run concurrently; results persist in call_id order."""
+async def test_parallel_safe_tools_results_in_submission_order() -> None:
+    """Parallel-safe read tools run concurrently; results persist in provider order.
+
+    Order follows the stream (not wall-clock completion or call_id sort) so Gemini
+    thought_signature stays on the first functionCall part.
+    """
     delays = {"c1": 0.04, "a1": 0.01, "b1": 0.02}
     concurrent = {"n": 0, "max": 0}
     lock = asyncio.Lock()
@@ -950,7 +1044,7 @@ async def test_parallel_safe_tools_results_in_call_id_order() -> None:
             [
                 ToolCall(call_id="c1", name="read_file", args={"path": "c"}),
                 ToolCall(call_id="a1", name="glob", args={"pattern": "*"}),
-                ToolCall(call_id="b1", name="search_memory", args={"query": "q"}),
+                ToolCall(call_id="b1", name="grep", args={"pattern": "q"}),
                 Done(),
             ],
             [TextDelta(text="done"), Done()],
@@ -960,7 +1054,7 @@ async def test_parallel_safe_tools_results_in_call_id_order() -> None:
     tools = [
         ToolDef("read_file", "r", {"type": "object"}, parallel_safe=True),
         ToolDef("glob", "g", {"type": "object"}, parallel_safe=True),
-        ToolDef("search_memory", "s", {"type": "object"}, parallel_safe=True),
+        ToolDef("grep", "s", {"type": "object"}, parallel_safe=True),
     ]
     ctx = TurnContext(**{**_ctx().__dict__, "tools": tools})
     events: list[object] = []
@@ -982,10 +1076,10 @@ async def test_parallel_safe_tools_results_in_call_id_order() -> None:
         if m.role == "user" and m.content and isinstance(m.content[0], ToolResponse)
     ]
     assert len(tool_resp_messages) == 1
-    assert [b.id for b in tool_resp_messages[0].content] == ["a1", "b1", "c1"]
+    assert [b.id for b in tool_resp_messages[0].content] == ["c1", "a1", "b1"]
 
     result_events = [e for e in events if isinstance(e, ToolCallResult)]
-    assert [e.result for e in result_events] == ["result:a1", "result:b1", "result:c1"]
+    assert [e.result for e in result_events] == ["result:c1", "result:a1", "result:b1"]
 
 
 @pytest.mark.asyncio
@@ -1130,10 +1224,11 @@ async def test_run_provider_raises_logs_exception(caplog: pytest.LogCaptureFixtu
 
 
 @pytest.mark.asyncio
-async def test_run_cleanup_spill_at_start(tmp_path: Path) -> None:
+async def test_run_preserves_spill_across_turns(tmp_path: Path) -> None:
+    """Spill files must survive turn starts so later turns can read inventory pointers."""
     spill = tmp_path / ".monkeybot" / "spill" / "t1"
     spill.mkdir(parents=True)
-    (spill / "prev.txt").write_text("stale", encoding="utf-8")
+    (spill / "prev.txt").write_text("keep", encoding="utf-8")
     prov = FakeProvider([[TextDelta(text="ok"), Done()]])
     hist = FakeHistory()
     ctx = _ctx(workspace_root=tmp_path)
@@ -1147,7 +1242,7 @@ async def test_run_cleanup_spill_at_start(tmp_path: Path) -> None:
         max_turns=3,
     ):
         pass
-    assert not spill.exists()
+    assert (spill / "prev.txt").read_text(encoding="utf-8") == "keep"
 
 
 @pytest.mark.asyncio
@@ -1192,11 +1287,66 @@ async def test_run_emits_context_summarize_events_when_over_cap(
     assert isinstance(summarizer_msgs[0].content[0], Text)
     assert "## Objective" in summarizer_msgs[0].content[0].text
     assert "## Relevant Files" in summarizer_msgs[0].content[0].text
+    assert "task-progress" in summarizer_msgs[0].content[0].text
+    assert "answer-format" in summarizer_msgs[0].content[0].text
     assert any(
-        isinstance(x, Text) and x.text.startswith("[Context Summary]:\n")
+        isinstance(x, Text)
+        and x.text.startswith("[Context Summary]:\n")
+        and "Standing instructions (still in effect after compaction)" in x.text
         for m in hist.rows
         for x in m.content
     )
+    summarizing = next(e for e in events if isinstance(e, ContextSummarizing))
+    summarized_idx = next(
+        i for i, e in enumerate(events) if isinstance(e, ContextSummarized)
+    )
+    post_usage = next(
+        (e for e in events[summarized_idx + 1 :] if isinstance(e, ContextUsage)),
+        None,
+    )
+    assert post_usage is not None
+    assert post_usage.estimated_tokens < summarizing.estimated_tokens
+    assert post_usage.estimated_tokens > 0
+
+
+@pytest.mark.asyncio
+async def test_run_emits_context_usage_after_tools_without_compaction() -> None:
+    """Tool dispatch still yields ContextUsage when needs_compaction is False."""
+    prov = FakeProvider(
+        [
+            [
+                ToolCall(call_id="c1", name="run_command", args={"command": "echo hi"}),
+                Done(),
+            ],
+            [TextDelta(text="done"), Done()],
+        ]
+    )
+    hist = FakeHistory()
+    events = []
+    async for e in run(
+        "u",
+        _ctx(context_window_tokens=200_000),
+        provider=prov,
+        history=hist,
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(("short result", None)),
+        max_turns=4,
+    ):
+        events.append(e)
+
+    assert not any(isinstance(e, ContextSummarizing) for e in events)
+    assert not any(isinstance(e, ContextSummarized) for e in events)
+
+    tool_result_idx = next(
+        i for i, e in enumerate(events) if isinstance(e, ToolCallResult)
+    )
+    post_tool_usage = next(
+        (e for e in events[tool_result_idx + 1 :] if isinstance(e, ContextUsage)),
+        None,
+    )
+    assert post_tool_usage is not None
+    assert post_tool_usage.estimated_tokens > 0
+    assert post_tool_usage.context_window_tokens == 200_000
 
 
 @pytest.mark.asyncio
@@ -1380,6 +1530,114 @@ async def test_run_no_context_summarize_events_when_under_cap(tmp_path: Path) ->
     assert hist.reset_calls == []
 
 
+@pytest.mark.asyncio
+async def test_run_does_not_compact_on_message_count_under_token_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Long chatty threads under the token bar must not compact on row count alone."""
+    monkeypatch.delenv("CONTEXT_SUMMARIZATION_MODEL", raising=False)
+    preload = [
+        Message(
+            role="user" if i % 2 == 0 else "assistant",
+            content=[Text(text=f"msg-{i}")],
+        )
+        for i in range(100)
+    ]
+    hist = FakeHistory(preload)
+    prov = FakeProvider([[TextDelta(text="final"), Done()]])
+    # Huge window so token path never fires.
+    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=2_000_000)
+    events = []
+    async for e in run(
+        "continue",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        max_turns=4,
+    ):
+        events.append(e)
+    kinds = [type(x).__name__ for x in events]
+    assert "ContextSummarizing" not in kinds
+    assert "ContextSummarized" not in kinds
+    assert hist.reset_calls == []
+    assert prov.stream_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_run_persists_load_max_tail_when_compact_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Load-max safety must history.reset the truncated tail, not only trim memory."""
+    import monkeybot.core.runtime.history_compaction as hc
+    import monkeybot.core.runtime.turn_loop as tl
+
+    monkeypatch.setattr(tl, "HISTORY_LOAD_MAX", 12)
+    monkeypatch.setattr(hc, "HISTORY_LOAD_MAX", 12)
+
+    preload = [
+        Message(
+            role="user" if i % 2 == 0 else "assistant",
+            content=[Text(text=f"row-{i}")],
+        )
+        for i in range(20)
+    ]
+    hist = FakeHistory(preload)
+    prov = FakeProvider([[TextDelta(text="final"), Done()]])
+    # Huge window: token compact won't fire; load-max still truncates oversize history.
+    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=2_000_000)
+    async for _ in run(
+        "continue",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        max_turns=4,
+    ):
+        pass
+
+    assert hist.reset_calls, "expected durable truncate via history.reset"
+    _thread, persisted = hist.reset_calls[-1]
+    assert len(persisted) == 12
+    flat_persisted = [b.text for m in persisted for b in m.content if isinstance(b, Text)]
+    assert "row-0" not in flat_persisted
+    assert "row-19" in flat_persisted
+    # Final assistant reply may append after the safety reset.
+    assert len(hist.rows) >= 12
+    assert len(hist.rows) <= 13
+
+
+@pytest.mark.asyncio
+async def test_run_loads_full_history_not_silent_100_slide(tmp_path: Path) -> None:
+    """Agent load must not drop oldest rows when under compact threshold."""
+    preload = [
+        Message(
+            role="user" if i % 2 == 0 else "assistant",
+            content=[Text(text=f"keep-{i}")],
+        )
+        for i in range(40)
+    ]
+    hist = FakeHistory(preload)
+    prov = FakeProvider([[TextDelta(text="final"), Done()]])
+    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=2_000_000)
+    async for _ in run(
+        "hello",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        max_turns=4,
+    ):
+        pass
+    # Original early content still present (plus new user/assistant rows).
+    flat = [b.text for m in hist.rows for b in m.content if isinstance(b, Text)]
+    assert "keep-0" in flat
+    assert hist.reset_calls == []
+
+
 def test_messages_for_provider_no_update_is_passthrough() -> None:
     system = Message(role="system", content=[Text(text="SYS")])
     history = [Message(role="user", content=[Text(text="hi")])]
@@ -1431,7 +1689,15 @@ def test_messages_for_provider_appends_update_after_trailing_assistant_message()
 async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> None:
     mem = tmp_path / "memory"
     mem.mkdir()
-    (mem / "INDEX.md").write_text("initial line\n", encoding="utf-8")
+    from tests.core.memory.helpers import make_memory_subsystem
+
+    mem_sys = make_memory_subsystem(mem)
+    palace = mem_sys._palace
+    palace.upsert_drawer(
+        "d1",
+        "initial line",
+        {"wing": "main", "room": "conversation", "filed_at": "2026-01-01T00:00:00Z"},
+    )
 
     class CaptureFakeProvider:
         def __init__(self, scripted: list[list[object]]) -> None:
@@ -1476,15 +1742,12 @@ async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> N
             return fake_provider_prompt_tokens(messages, tools)
 
     class BumpIndexExecutor(RecordingExecutor):
-        def __init__(self, memory_dir: Path) -> None:
-            super().__init__()
-            self._memory_dir = memory_dir
-
         async def execute(self, *, call: ToolCall, ctx: TurnContext) -> ToolExecutionResult:
             del call, ctx
-            (self._memory_dir / "INDEX.md").write_text(
-                "initial line\nnew memory from tool\n",
-                encoding="utf-8",
+            palace.upsert_drawer(
+                "d2",
+                "new memory from tool",
+                {"wing": "main", "room": "conversation", "filed_at": "2026-01-02T00:00:00Z"},
             )
             return ToolExecutionResult.ok_text("ok")
 
@@ -1497,15 +1760,8 @@ async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> N
             [TextDelta(text="done"), Done()],
         ]
     )
-    uri = "local://" + str(mem.resolve())
-    mem_sys = MemorySubsystem(
-        storage=create_workspace_storage(uri),
-        provider=prov,
-        model="gemini-2.5-flash",
-        memory_uri=uri,
-    )
     hist = FakeHistory()
-    exe = BumpIndexExecutor(mem)
+    exe = BumpIndexExecutor()
     ctx = TurnContext(
         thread_id="t1",
         request_id="r1",
@@ -1557,13 +1813,13 @@ async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_parallel_task_results_appended_in_call_id_order() -> None:
-    """Parallel task calls must append to history in call_id order regardless of completion order.
+async def test_parallel_task_results_appended_in_submission_order() -> None:
+    """Parallel task calls append in provider stream order, not completion order.
 
-    The executor finishes b1 first, then a1, then c1 (reverse alphabetical).
-    History and ToolCallResult events must still appear in sorted call_id order: a1, b1, c1.
-    This guards against regressions where appends happen inside the async task (completion order)
-    instead of after asyncio.gather (submission/call_id order).
+    The executor finishes b1 first, then a1, then c1. History and ToolCallResult
+    events must still follow submission order (c1, a1, b1) so Gemini
+    functionResponse parts align with functionCall parts (thought_signature on
+    the first FC).
     """
     # Reverse-alphabetical finish order: b1 (0.01s) → a1 (0.02s) → c1 (0.05s)
     delays = {"c1": 0.05, "a1": 0.02, "b1": 0.01}
@@ -1613,16 +1869,15 @@ async def test_parallel_task_results_appended_in_call_id_order() -> None:
         "parallel task responses must be consolidated into one user Message"
     )
     consolidated = tool_resp_messages[0].content
-    assert [b.id for b in consolidated] == ["a1", "b1", "c1"], (
-        "tool result blocks must be in call_id order within the consolidated message"
+    assert [b.id for b in consolidated] == ["c1", "a1", "b1"], (
+        "tool result blocks must follow provider submission order"
     )
 
     result_events = [e for e in events if isinstance(e, ToolCallResult)]
     assert [e.tool for e in result_events] == ["task", "task", "task"]
-    # Results must contain the correct payloads tied to call_ids
     result_bodies = [e.result for e in result_events]
-    assert result_bodies == ["result:a1", "result:b1", "result:c1"], (
-        "ToolCallResult events must be emitted in call_id order"
+    assert result_bodies == ["result:c1", "result:a1", "result:b1"], (
+        "ToolCallResult events must be emitted in submission order"
     )
 
 
@@ -1668,8 +1923,8 @@ async def test_serial_mixed_tool_results_consolidated_into_one_user_message() ->
     consolidated = tool_resp_messages[0].content
     by_id = {b.id: b.tool_name for b in consolidated}
     assert by_id == {"a": "read_file", "b": "run_command"}
-    assert [b.id for b in consolidated] == sorted(by_id), (
-        "tool result blocks must be in call_id order within the consolidated message"
+    assert [b.id for b in consolidated] == ["b", "a"], (
+        "tool result blocks must follow provider submission order"
     )
 
 
@@ -1905,6 +2160,9 @@ async def test_loop_follow_up_after_tool_uses_tool_response_detection() -> None:
     assert prov.stream_calls == 3
     deltas = [e.delta for e in events if isinstance(e, AssistantDelta)]
     assert deltas == ["summary"]
+    usage_events = [e for e in events if isinstance(e, ContextUsage)]
+    # Preflight per inner turn (3) + post-tool after the tool batch (1).
+    assert len(usage_events) >= 4
     assert any(
         m.role == "user" and any(isinstance(b, ToolResponse) for b in m.content)
         for m in hist.rows
@@ -2045,13 +2303,14 @@ async def test_system_prompt_snapshot_includes_skills_memory_and_attachments() -
     assert snaps
     text = snaps[0].text
     assert "\n\n## Skills\n- pdf-skill" in text
-    assert "## Memory index" in text
-    assert "- remembers the sky is blue" in text
+    assert "## Memory wake-up" in text
+    assert "remembers the sky is blue" in text
     assert "\n\n## Session attachments\n- att1 (report.pdf, application/pdf): Q1 report" in text
 
 
 @pytest.mark.asyncio
 async def test_inspector_dispatches_per_tool_request_block_order() -> None:
+    """Inspectors see tools in provider stream order (not sorted by call_id)."""
     insp = OrderRecordingInspector()
     prov = FakeProvider(
         [
@@ -2088,7 +2347,7 @@ async def test_inspector_dispatches_per_tool_request_block_order() -> None:
         max_turns=4,
     ):
         pass
-    assert insp.seen_call_ids == ["a1", "m2", "z9"]
+    assert insp.seen_call_ids == ["z9", "a1", "m2"]
 
 
 @pytest.mark.asyncio
@@ -2295,16 +2554,68 @@ async def test_compact_history_does_not_persist_synthetic_tool_repairs() -> None
         history=hist,
         provider=prov,
         model="gemini-2.5-flash",
+        window_tokens=100_000,
     )
     assert turns == 1
     assert len(hist.reset_calls) == 1
     _, persisted = hist.reset_calls[0]
-    synthetic_marker = "Tool call interrupted or result missing"
+    synthetic_marker = "was interrupted or its result is missing"
     for msg in persisted:
         for block in msg.content:
             if isinstance(block, ToolResponse):
                 texts = [b.text for b in block.result if isinstance(b, Text)]
                 assert synthetic_marker not in " ".join(texts)
+
+
+@pytest.mark.asyncio
+async def test_run_replays_repaired_history_to_provider() -> None:
+    """A corrupted stored turn (orphaned tool request, no result) must be repaired
+    in-memory before the *next* real turn hits the provider — this is the actual
+    wiring path (`turn_loop` -> `_load_agent_chat_history` -> `transform_context` ->
+    `repair_tool_turn_integrity`), not just the pure-function unit tests."""
+    broken_tail = Message(
+        role="assistant",
+        content=[ToolRequest(id="orphan-1", name="echo", args={})],
+    )
+    hist = FakeHistory([Message(role="user", content=[Text(text="earlier")]), broken_tail])
+    prov = FakeProvider([[TextDelta(text="ok"), Done()]])
+    ctx = _ctx()
+    async for _ in run(
+        "follow up",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        max_turns=4,
+    ):
+        pass
+
+    assert prov.stream_calls >= 1
+    sent = prov.stream_messages[0]
+    synthetic = [
+        b
+        for m in sent
+        if m.role == "user"
+        for b in m.content
+        if isinstance(b, ToolResponse) and b.id == "orphan-1"
+    ]
+    assert len(synthetic) == 1
+    assert synthetic[0].is_error is True
+    assert isinstance(synthetic[0].result[0], Text)
+    assert 'Tool "echo" was interrupted or its result is missing' in synthetic[0].result[0].text
+    assert "do not assume the tool never ran" in synthetic[0].result[0].text
+
+    # The repair is in-memory only: the stored/persisted history must remain
+    # unrepaired (still just the orphaned request, no synthesized result).
+    stored_tool_requests = [
+        b for m in hist.rows for b in m.content if isinstance(b, ToolRequest) and b.id == "orphan-1"
+    ]
+    stored_tool_responses = [
+        b for m in hist.rows for b in m.content if isinstance(b, ToolResponse) and b.id == "orphan-1"
+    ]
+    assert len(stored_tool_requests) == 1
+    assert stored_tool_responses == []
 
 
 @pytest.mark.asyncio

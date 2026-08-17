@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import json
 import os
 import signal
 import subprocess
@@ -48,7 +49,7 @@ from monkeybot_cli.opensandbox_lifecycle import (
     is_sandbox_enabled,
     server_url_from_config,
 )
-from monkeybot_cli.runtime_python import DEFAULT_PORT, gateway_argv, resolve_runtime_python
+from monkeybot_cli.runtime_python import DEFAULT_PORT, gateway_argv, prepare_runtime_python
 from monkeybot_cli.terminal_markdown import MarkdownPlainStream
 
 _DIM = "\x1b[2m"
@@ -617,10 +618,19 @@ async def _plain_chat_session(
                     print(f"\n{_DIM}Goodbye — shutting down gateway…{_RESET}")
                 else:
                     print(f"\n{_DIM}Goodbye.{_RESET}")
+                if controller.session_id:
+                    print(
+                        f"{_DIM}To continue this conversation, run: monkeybot chat --continue{_RESET}"
+                    )
                 break
             await controller.submit(user_line)
     finally:
         await controller.close()
+        if controller.transcript_report_dir:
+            print(
+                f"{_DIM}Transcript report → {controller.transcript_report_dir}{_RESET}",
+                flush=True,
+            )
         await renderer.stop_io_worker()
     return 1 if controller.stream_error else 0
 
@@ -668,6 +678,7 @@ def _spawn_gateway(config_path: Path | None, agent_root: Path, port: int) -> _Sp
         env["MONKEYBOT_CONFIG"] = str(config_path)
     env["PORT"] = str(port)
     env.setdefault("LOG_LEVEL", "error")
+    env.setdefault("MONKEYBOT_TRANSCRIPT_ENABLED", "1")
     log_file = tempfile.NamedTemporaryFile(
         mode="w+",
         prefix="monkeybot-gateway-",
@@ -677,13 +688,40 @@ def _spawn_gateway(config_path: Path | None, agent_root: Path, port: int) -> _Sp
         errors="replace",
     )
     proc = subprocess.Popen(
-        gateway_argv(resolve_runtime_python(agent_root)),
+        gateway_argv(prepare_runtime_python(agent_root, config_path)),
         env=env,
         cwd=agent_root,
         stdout=subprocess.DEVNULL,
         stderr=log_file,
     )
     return _SpawnedGateway(proc=proc, log_path=Path(log_file.name), log_file=log_file)
+
+
+def _resolve_continue_session_id(base: str) -> str | None:
+    """Look up the most recently used session id for this agent root, if any.
+
+    A malformed body is treated the same as an HTTP error: printed and
+    swallowed, never raised.
+    """
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            resp = client.get(f"{base}/api/chat-history", params={"limit": 1})
+            resp.raise_for_status()
+        body = resp.json()
+    except (httpx.HTTPError, json.JSONDecodeError) as exc:
+        print(
+            f"{_DIM}Could not fetch chat history ({exc}) — starting a new session.{_RESET}",
+            file=sys.stderr,
+        )
+        return None
+    threads = body.get("threads") if isinstance(body, dict) else None
+    if not isinstance(threads, list) or not threads:
+        return None
+    first = threads[0]
+    if not isinstance(first, dict):
+        return None
+    sid = first.get("session_id")
+    return str(sid) if sid else None
 
 
 def run_chat(args: argparse.Namespace) -> int:
@@ -710,6 +748,7 @@ def run_chat(args: argparse.Namespace) -> int:
             if not ensure_opensandbox_for_agent(
                 agent_root,
                 server_url=server_url_from_config(cfg_doc),
+                docker_wait_secs=2.0,
             ):
                 print(
                     f"{_DIM}Continuing without a healthy OpenSandbox — run_command may fail.{_RESET}",
@@ -738,6 +777,17 @@ def run_chat(args: argparse.Namespace) -> int:
             _cleanup_gateway_log(spawned)
             return 1
 
+    if getattr(args, "resume_last", False):
+        if getattr(args, "session", None):
+            print(f"{_DIM}--session was also passed — using it, ignoring --continue.{_RESET}")
+        else:
+            resolved = _resolve_continue_session_id(base)
+            if resolved:
+                print(f"{_DIM}Continuing session {resolved[:8]}…{_RESET}")
+                args.session = resolved
+            else:
+                print(f"{_DIM}No previous conversation found — starting a new session.{_RESET}")
+
     provider, model = _model_banner_fields(args, config_path)
     animations_enabled = not (
         bool(getattr(args, "no_animations", False))
@@ -761,6 +811,7 @@ def run_chat(args: argparse.Namespace) -> int:
                 resume_session_id=getattr(args, "session", None),
                 animations_enabled=animations_enabled,
                 theme_choice=theme_choice,
+                config_path=config_path,
             )
         return asyncio.run(_plain_chat_session(args, base, spawned_gateway=not attach))
     except KeyboardInterrupt:
@@ -771,9 +822,16 @@ def run_chat(args: argparse.Namespace) -> int:
         return 130
     finally:
         if proc and proc.poll() is None:
-            proc.kill()
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                proc.wait(timeout=1)
+            # Prefer graceful shutdown so gateway lifespan can analyze open sessions.
+            with contextlib.suppress(ProcessLookupError):
+                proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    proc.wait(timeout=1)
         if spawned is not None:
             _cleanup_gateway_log(spawned)
 
@@ -805,6 +863,13 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
         "--session",
         dest="session",
         help="Resume an existing gateway session id (with transcript backfill when available)",
+    )
+    p.add_argument(
+        "--continue",
+        "-c",
+        dest="resume_last",
+        action="store_true",
+        help="Resume the most recent conversation for this agent root",
     )
     p.add_argument(
         "--model-provider", dest="model_provider", help="Override model provider for session"

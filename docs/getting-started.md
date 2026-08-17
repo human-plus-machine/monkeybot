@@ -39,7 +39,7 @@ cd my-agent
 ```
 
 This creates an agent-root layout: `monkeybot_config/` and `skills/` are
-committed inputs; `workspace/` is agent-writable; `data/memory/` is local
+committed inputs; `workspace/` is agent-writable; `memory/` is local
 runtime state; and the project includes a `Dockerfile`, `.dockerignore`, and
 non-packaged agent `pyproject.toml`. The browser MCP package and browser skill
 are bundled but disabled by default. See [Agent project layout](agent-layout.md)
@@ -66,7 +66,7 @@ Important knobs (see **`monkeybot_config/monkeybot.example.yaml`** for all secti
 | `paths.skills_path` | Read-only trusted skill bundle root (default `./skills`). |
 | `paths.db_url` | SQLite URL for conversation + usage. |
 | `paths.mcp_config` / `paths.command_allowlist_config` | MCP map and run_command allowlist policy path. |
-| `subagent.agent_md` | Subagent prompt file (defaults to same as `paths.agent_md`). |
+| `subagents.personas[].agent_md` | Optional persona prompt for `task(subagent_type=...)`; without a type, inherits `paths.agent_md`. |
 | `model.provider` / `model.name` | Provider and model id (`gemini`, `openai`, `anthropic`, …). |
 | `runtime.port` | Gateway listen port. |
 
@@ -99,6 +99,23 @@ To watch gateway logs in another terminal:
 monkeybot run             # terminal 1
 monkeybot chat --attach   # terminal 2
 ```
+
+### Chat TUI shortcuts
+
+| Key | Action |
+| --- | --- |
+| `Esc` | Interrupt the running turn; press again within ~1.5s while idle to recall your last message for editing |
+| `Shift+Tab` | Cycle approval mode: `normal` → `auto-approve` (auto-answers tool confirmation prompts) → `deny-confirms` → back to `normal` |
+| `@` | Fuzzy-pick a workspace file (honors `.gitignore`) and insert its path |
+| `!<command>` | Run a local shell command — output shows in the transcript but is **never** sent to the agent |
+| `?` | Show the full keyboard-shortcut overlay (when the composer is empty) |
+| `Ctrl+R` | Reverse history search |
+| `Ctrl+C` | Cancel the current turn, clear the composer, or exit |
+
+New slash commands: `/clear` (alias of `/new`), `/model [<provider>/]<name>` (switches model by
+starting a fresh session — context is cleared), `/status` (session, model, connection, usage),
+`/config [edit]` (show or open `monkeybot.yaml`; changes need a gateway restart to take effect).
+Run `/help` in chat for the full list.
 
 ---
 

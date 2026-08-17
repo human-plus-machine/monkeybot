@@ -39,6 +39,7 @@ ENV_MAP: dict[tuple[str, str], str] = {
     ("paths", "command_allowlist_config"): "COMMAND_ALLOWLIST_CONFIG",
     ("paths", "permission_config"): "PERMISSION_CONFIG",
     ("paths", "workspace_root"): "MONKEYBOT_WORKSPACE_ROOT",
+    ("paths", "agent_id"): "MONKEYBOT_AGENT_ID",
     ("model", "provider"): "MODEL_PROVIDER",
     ("model", "name"): "MODEL_NAME",
     ("model", "temperature"): "MODEL_TEMPERATURE",
@@ -54,6 +55,7 @@ ENV_MAP: dict[tuple[str, str], str] = {
     ("anthropic_vertex", "region"): "ANTHROPIC_VERTEX_REGION",
     ("gateway", "pending_response_timeout_sec"): "PENDING_RESPONSE_TIMEOUT_SEC",
     ("gateway", "sse_replay_max"): "SSE_REPLAY_MAX",
+    ("gateway", "sse_nested_replay_max"): "SSE_NESTED_REPLAY_MAX",
     ("gateway", "graceful_shutdown_timeout_sec"): "GRACEFUL_SHUTDOWN_TIMEOUT_SEC",
     ("gateway", "cors_allow_origins"): "MONKEYBOT_CORS_ALLOW_ORIGINS",
     ("context_curation", "enabled"): "CONTEXT_CURATION_ENABLED",
@@ -62,28 +64,21 @@ ENV_MAP: dict[tuple[str, str], str] = {
     ("context_curation", "memory_token_threshold"): "CONTEXT_CURATION_MEMORY_TOKEN_THRESHOLD",
     ("context_curation", "curator_model"): "CONTEXT_CURATOR_MODEL",
     ("context_curation", "timeout_sec"): "CONTEXT_CURATION_TIMEOUT_SEC",
-    ("memory_hook", "enabled"): "MONKEYBOT_MEMORY_HOOK_ENABLED",
-    ("subagent", "timeout_sec"): "SUBAGENT_TIMEOUT_SEC",
-    ("subagent", "max_turns"): "SUBAGENT_MAX_TURNS",
-    ("subagent", "agent_md"): "MONKEYBOT_SUBAGENT_AGENT_MD",
+    ("memory", "enabled"): "MONKEYBOT_MEMORY_HOOK_ENABLED",
+    ("memory", "backend"): "MEMPALACE_BACKEND",
+    ("memory", "embedding_model"): "MEMPALACE_EMBEDDING_MODEL",
     ("tools", "denied_patterns"): "MONKEYBOT_TOOL_DENIED_PATTERNS",
-    ("tools", "read_max_lines"): "MONKEYBOT_READ_MAX_LINES",
-    ("tools", "read_default_lines"): "MONKEYBOT_READ_DEFAULT_LINES",
-    ("tools", "spill_read_max_lines"): "MONKEYBOT_SPILL_READ_MAX_LINES",
-    ("tools", "spill_min_chars"): "MONKEYBOT_SPILL_MIN_CHARS",
-    ("tools", "result_budget_fraction"): "MONKEYBOT_RESULT_BUDGET_FRACTION",
-    ("tools", "result_budget_floor_tokens"): "MONKEYBOT_RESULT_BUDGET_FLOOR_TOKENS",
-    ("compression", "light_ratio"): "MONKEYBOT_PRESSURE_LIGHT_RATIO",
-    ("compression", "moderate_ratio"): "MONKEYBOT_PRESSURE_MODERATE_RATIO",
-    ("compression", "aggressive_ratio"): "MONKEYBOT_PRESSURE_AGGRESSIVE_RATIO",
     ("compression", "resume_thinking_budget"): "MONKEYBOT_RESUME_THINKING_BUDGET",
     ("web_search", "backend"): "WEB_SEARCH_BACKEND",
     ("web_search", "max_results"): "WEB_SEARCH_MAX_RESULTS",
+    ("todo_list", "enabled"): "MONKEYBOT_TODO_LIST_ENABLED",
+    ("todo_list", "mirror_to_disk"): "MONKEYBOT_TODO_LIST_MIRROR_TO_DISK",
     ("sandbox", "enabled"): "SANDBOX_ENABLED",
     ("sandbox", "server_url"): "SANDBOX_SERVER_URL",
     ("sandbox", "image"): "SANDBOX_IMAGE",
     ("sandbox", "ttl_seconds"): "SANDBOX_TTL_SECONDS",
     ("sandbox", "shared_filesystem"): "SANDBOX_SHARED_FILESYSTEM",
+    ("scheduler", "enabled"): "MONKEYBOT_SCHEDULER_ENABLED",
     ("fake_provider", "events_json"): "MONKEYBOT_FAKE_PROVIDER_EVENTS",
     ("emission", "style"): "MONKEYBOT_EMISSION_STYLE",
     ("runtime", "transcript_enabled"): "MONKEYBOT_TRANSCRIPT_ENABLED",
@@ -104,6 +99,43 @@ ENV_MAP: dict[tuple[str, str], str] = {
 
 # Backward-compatible alias for internal/tests.
 _ENV_MAP = ENV_MAP
+
+# YAML keys that used to map to env but are retired. Still accepted in the file
+# (no unknown-key rejection), but warn so configs are not silently ignored.
+RETIRED_TOOLS_KEYS: frozenset[str] = frozenset(
+    {
+        "spill_min_chars",
+        "spill_read_max_lines",
+        "read_default_lines",
+    }
+)
+
+_SPILL_SIZING_RETIRED_MSG = (
+    "tools.{key} is retired and ignored — spill/read sizing is derived from "
+    "model.context_window (see docs/spill-dynamic-design.md)"
+)
+
+# Per-key overrides for keys whose replacement isn't the shared spill-sizing message.
+_RETIRED_TOOLS_WARNINGS_OVERRIDES: dict[str, str] = {
+    "read_default_lines": (
+        "tools.read_default_lines is retired and ignored — read_file defaults to 2000 lines; "
+        "pass limit to request more"
+    ),
+}
+
+
+def warn_retired_tools_keys(doc: Mapping[str, Any]) -> list[str]:
+    """Log one warning per retired ``tools.*`` key; return the keys found."""
+    tools = doc.get("tools")
+    if not isinstance(tools, dict):
+        return []
+    found: list[str] = []
+    for key in sorted(RETIRED_TOOLS_KEYS):
+        if key in tools:
+            found.append(key)
+            message = _RETIRED_TOOLS_WARNINGS_OVERRIDES.get(key) or _SPILL_SIZING_RETIRED_MSG.format(key=key)
+            logger.warning(message)
+    return found
 
 
 def reset_runtime_env_state_for_tests() -> None:
@@ -252,6 +284,8 @@ def apply_monkeybot_runtime_env(
     except Exception as exc:
         logger.error("Failed to load %s: %s", path, exc)
         raise
+
+    warn_retired_tools_keys(merged)
 
     _RUNTIME_ENV_APPLIED = True
     google_cloud_project = (os.environ.get("GOOGLE_CLOUD_PROJECT") or "").strip()

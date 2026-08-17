@@ -6,10 +6,10 @@ import pytest
 
 from monkeybot.core.llm.provider import Done, TextDelta, ToolCall
 from monkeybot.core.runtime.events import AssistantDelta, Error, ToolCallResult, TurnComplete
-from monkeybot.core.runtime.loop import (
+from monkeybot.core.runtime.loop import run
+from monkeybot.core.runtime.tool_batch import (
     _rejected_tool_batch_error,
     _should_reject_tool_batch,
-    run,
 )
 from monkeybot.core.tools.types import ToolExecutionResult
 from tests.core.test_loop import AllowInspector, FakeHistory, FakeProvider, RecordingExecutor, _ctx

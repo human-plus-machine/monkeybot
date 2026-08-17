@@ -44,6 +44,42 @@ def test_yaml_applies_when_env_unset(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert os.environ.get("MODEL_NAME") == "test-model-x"
 
 
+def test_scheduler_enabled_yaml_applies_and_enables_scheduler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from monkeybot.scheduler.engine import scheduler_enabled_from_env
+
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    (cfg_dir / "monkeybot.yaml").write_text(
+        "scheduler:\n  enabled: true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("MONKEYBOT_SCHEDULER_ENABLED", raising=False)
+    runtime_env.apply_monkeybot_runtime_env()
+    assert os.environ.get("MONKEYBOT_SCHEDULER_ENABLED") == "true"
+    assert scheduler_enabled_from_env() is True
+
+
+def test_scheduler_enabled_explicit_env_wins_over_yaml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from monkeybot.scheduler.engine import scheduler_enabled_from_env
+
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    (cfg_dir / "monkeybot.yaml").write_text(
+        "scheduler:\n  enabled: true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MONKEYBOT_SCHEDULER_ENABLED", "false")
+    runtime_env.apply_monkeybot_runtime_env()
+    assert os.environ.get("MONKEYBOT_SCHEDULER_ENABLED") == "false"
+    assert scheduler_enabled_from_env() is False
+
+
 def test_google_cloud_project_wins_over_yaml_gcp_project_id(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -95,7 +131,7 @@ def test_custom_config_paths_anchor_at_its_parent(tmp_path: Path, monkeypatch: p
         "paths:\n"
         "  workspace_root: workspace\n"
         "  db_url: sqlite:///data/monkeybot.db\n"
-        "  memory_storage_uri: local://data/memory\n",
+        "  memory_storage_uri: local://memory\n",
         encoding="utf-8",
     )
     for key in ("MONKEYBOT_WORKSPACE_ROOT", "DB_URL", "MEMORY_STORAGE_URI"):
@@ -105,7 +141,7 @@ def test_custom_config_paths_anchor_at_its_parent(tmp_path: Path, monkeypatch: p
 
     assert os.environ["MONKEYBOT_WORKSPACE_ROOT"] == str(config.parent / "workspace")
     assert os.environ["DB_URL"] == f"sqlite:///{config.parent / 'data' / 'monkeybot.db'}"
-    assert os.environ["MEMORY_STORAGE_URI"] == f"local://{config.parent / 'data' / 'memory'}"
+    assert os.environ["MEMORY_STORAGE_URI"] == f"local://{config.parent / 'memory'}"
 
 
 def test_includes_merge_overrides_base(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -166,17 +202,38 @@ def test_model_summarization_model_env(tmp_path: Path, monkeypatch: pytest.Monke
     assert os.environ.get("CONTEXT_SUMMARIZATION_MODEL") == "flash-lite"
 
 
+def test_paths_agent_id_sets_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``paths.agent_id`` maps to MONKEYBOT_AGENT_ID as a plain passthrough
+    (not path-anchored, unlike workspace_root/db_url) — the durable identity
+    operators set for relocatable agents or multi-replica deployments (PR #179
+    review: the default path-based identity strands history on a move).
+    """
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    (cfg_dir / "monkeybot.yaml").write_text(
+        "paths:\n  agent_id: my-stable-agent\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("MONKEYBOT_AGENT_ID", raising=False)
+    runtime_env.apply_monkeybot_runtime_env()
+    assert os.environ.get("MONKEYBOT_AGENT_ID") == "my-stable-agent"
+
+
 def test_memory_storage_uri_sets_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     cfg_dir = tmp_path / "monkeybot_config"
     cfg_dir.mkdir()
     (cfg_dir / "monkeybot.yaml").write_text(
-        "paths:\n  memory_storage_uri: gcs://my-bucket/mem\n",
+        "paths:\n  memory_storage_uri: local://./memory/mempalace\n",
         encoding="utf-8",
     )
     monkeypatch.delenv("MEMORY_STORAGE_URI", raising=False)
     runtime_env.apply_monkeybot_runtime_env()
-    assert os.environ.get("MEMORY_STORAGE_URI") == "gcs://my-bucket/mem"
+    uri = os.environ.get("MEMORY_STORAGE_URI")
+    assert uri is not None
+    assert uri.startswith("local://")
+    assert uri.endswith("memory/mempalace")
 
 
 def test_legacy_memory_path_still_sets_memory_path_env(
@@ -221,12 +278,51 @@ def test_tools_budget_env_keys(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
         monkeypatch.delenv(key, raising=False)
     runtime_env.reset_runtime_env_state_for_tests()
     runtime_env.apply_monkeybot_runtime_env()
-    assert os.environ.get("MONKEYBOT_READ_MAX_LINES") == "4000"
-    assert os.environ.get("MONKEYBOT_READ_DEFAULT_LINES") == "1500"
-    assert os.environ.get("MONKEYBOT_SPILL_READ_MAX_LINES") == "25000"
-    assert os.environ.get("MONKEYBOT_SPILL_MIN_CHARS") == "9000"
-    assert os.environ.get("MONKEYBOT_RESULT_BUDGET_FRACTION") == "0.75"
-    assert os.environ.get("MONKEYBOT_RESULT_BUDGET_FLOOR_TOKENS") == "1500"
+    # read_* / spill_* are no longer env-mapped (YAML-only max lines, or retired).
+    assert os.environ.get("MONKEYBOT_READ_MAX_LINES") is None
+    assert os.environ.get("MONKEYBOT_READ_DEFAULT_LINES") is None
+    assert os.environ.get("MONKEYBOT_SPILL_READ_MAX_LINES") is None
+    assert os.environ.get("MONKEYBOT_SPILL_MIN_CHARS") is None
+    # Result-budget / compression ratios are harness-fixed (not YAML/env knobs).
+    assert os.environ.get("MONKEYBOT_RESULT_BUDGET_FRACTION") is None
+    assert os.environ.get("MONKEYBOT_RESULT_BUDGET_FLOOR_TOKENS") is None
+    # Retired tools keys warn but do not reject.
+    found = runtime_env.warn_retired_tools_keys(
+        {
+            "tools": {
+                "spill_min_chars": 9000,
+                "spill_read_max_lines": 25000,
+                "read_default_lines": 1500,
+            }
+        }
+    )
+    assert found == ["read_default_lines", "spill_min_chars", "spill_read_max_lines"]
+
+
+def test_compression_ratios_not_mapped_from_yaml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    (cfg_dir / "monkeybot.yaml").write_text(
+        "compression:\n"
+        "  light_ratio: 0.1\n"
+        "  moderate_ratio: 0.2\n"
+        "  aggressive_ratio: 0.3\n",
+        encoding="utf-8",
+    )
+    for key in (
+        "MONKEYBOT_PRESSURE_LIGHT_RATIO",
+        "MONKEYBOT_PRESSURE_MODERATE_RATIO",
+        "MONKEYBOT_PRESSURE_AGGRESSIVE_RATIO",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    runtime_env.reset_runtime_env_state_for_tests()
+    runtime_env.apply_monkeybot_runtime_env()
+    assert os.environ.get("MONKEYBOT_PRESSURE_LIGHT_RATIO") is None
+    assert os.environ.get("MONKEYBOT_PRESSURE_MODERATE_RATIO") is None
+    assert os.environ.get("MONKEYBOT_PRESSURE_AGGRESSIVE_RATIO") is None
 
 
 def test_denied_patterns_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

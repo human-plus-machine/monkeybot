@@ -19,6 +19,7 @@ from monkeybot.core.runtime.events import (
     AssistantDelta,
     ContextSummarized,
     ContextSummarizing,
+    ContextUsage,
     Error,
     FrontendToolRequestEvent,
     GroundingEvent,
@@ -228,6 +229,7 @@ class ChatSessionController:
         self.usage = UsageStore()
         self.session_id: str | None = None
         self.stream_error = False
+        self.transcript_report_dir: str | None = None
         self._client: httpx.AsyncClient | None = None
         self._event_queue: asyncio.Queue[str | None] = asyncio.Queue()
         self._stream_task: asyncio.Task[None] | None = None
@@ -617,11 +619,21 @@ class ChatSessionController:
             )
             return
         if isinstance(evt, ContextSummarizing):
-            self._on_context_summarizing(evt)
+            self._on_context_usage_hint(
+                estimated_tokens=evt.estimated_tokens,
+                context_window_tokens=evt.context_window_tokens,
+            )
+            self._emit("summarizing", tokens=evt.estimated_tokens)
+            return
+        if isinstance(evt, ContextUsage):
+            self._on_context_usage_hint(
+                estimated_tokens=evt.estimated_tokens,
+                context_window_tokens=evt.context_window_tokens,
+            )
             return
         if isinstance(evt, ContextSummarized):
+            # Mid-turn /usage is stale; post-compaction ContextUsage updates the ring.
             self._emit("summarized", turns=evt.turns_summarized)
-            await self._fetch_usage()
             return
         if isinstance(evt, AssistantDelta):
             self._on_assistant_delta(evt, state)
@@ -644,13 +656,14 @@ class ChatSessionController:
 
         self._maybe_thinking_trace(evt, request_id)
 
-    def _on_context_summarizing(self, evt: ContextSummarizing) -> None:
+    def _on_context_usage_hint(
+        self, *, estimated_tokens: int, context_window_tokens: int
+    ) -> None:
         self.usage.update_context_hint(
-            estimated_prompt_tokens=evt.estimated_tokens,
-            context_window_tokens=evt.context_window_tokens,
+            estimated_prompt_tokens=estimated_tokens,
+            context_window_tokens=context_window_tokens,
         )
         self._emit("usage_updated", usage=self.usage.usage)
-        self._emit("summarizing", tokens=evt.estimated_tokens)
 
     def _on_assistant_delta(self, evt: AssistantDelta, state: _TurnState) -> None:
         if not state.assistant_started:
@@ -906,6 +919,20 @@ class ChatSessionController:
                 await asyncio.wait_for(self._stream_task, timeout=0.5)
         for task in list(self._cancel_tasks):
             task.cancel()
+        if self._client is not None and self.session_id is not None:
+            try:
+                resp = await self._client.delete(f"{self.base}/sessions/{self.session_id}")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    report = data.get("transcript_report_dir") if isinstance(data, dict) else None
+                    if isinstance(report, str) and report.strip():
+                        self.transcript_report_dir = report.strip()
+            except Exception:
+                logger.warning(
+                    "session DELETE on close failed session_id=%s",
+                    self.session_id,
+                    exc_info=True,
+                )
         if self._client is not None:
             await self._client.aclose()
             self._client = None

@@ -128,7 +128,23 @@ async def test_duplicate_session_returns_409(
 
 
 @pytest.mark.asyncio
-async def test_delete_session_returns_204_and_removes_it(
+async def test_post_session_rejects_subagent_prefixed_id(
+    client: AsyncClient,
+) -> None:
+    """Regression for PR #179 review: a user-supplied session_id starting with
+    the reserved 'subagent:' prefix would be silently excluded from
+    list_threads/--continue (same filter that hides internal subagent
+    transcripts). Reject it at creation instead of accepting it silently.
+    """
+    r = await client.post("/sessions", json={"session_id": "subagent:foo"})
+    assert r.status_code == 400
+    err = r.json()["error"]
+    assert err["code"] == "BAD_REQUEST"
+    assert "reserved prefix" in err["message"]
+
+
+@pytest.mark.asyncio
+async def test_delete_session_returns_200_and_removes_it(
     client: AsyncClient,
     registry: SessionRegistry,
 ) -> None:
@@ -137,16 +153,55 @@ async def test_delete_session_returns_204_and_removes_it(
     assert registry.get(sid) is not None
 
     r = await client.delete(f"/sessions/{sid}")
-    assert r.status_code == 204
+    assert r.status_code == 200
+    body = r.json()
+    assert body["deleted"] is True
+    assert body["transcript_report_dir"] is None
     assert registry.get(sid) is None
 
 
 @pytest.mark.asyncio
-async def test_delete_unknown_session_is_idempotent_204(
+async def test_delete_unknown_session_is_idempotent_200(
     client: AsyncClient,
 ) -> None:
     r = await client.delete("/sessions/does-not-exist")
-    assert r.status_code == 204
+    assert r.status_code == 200
+    body = r.json()
+    assert body["deleted"] is False
+    assert body["transcript_report_dir"] is None
+
+
+@pytest.mark.asyncio
+async def test_delete_session_writes_transcript_report(
+    client: AsyncClient,
+    registry: SessionRegistry,
+    tmp_path,
+) -> None:
+    from pathlib import Path
+
+    from monkeybot.core.persistence.transcript import TranscriptWriter
+
+    cr = await client.post("/sessions", json={})
+    sid = cr.json()["session_id"]
+    bus = registry.get(sid)
+    assert bus is not None
+    writer = TranscriptWriter(sid, workspace_root=Path(tmp_path))
+    await writer.ensure_manifest(model="gpt-test", provider="fake")
+    await writer.write_user_message(request_id="r1", content="hello")
+    bus.transcript_writer = writer
+
+    r = await client.delete(f"/sessions/{sid}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["deleted"] is True
+    assert body["transcript_report_dir"] is not None
+    report_dir = Path(body["transcript_report_dir"])
+    assert (report_dir / "transcript.ndjson").is_file()
+    assert (report_dir / "brief.md").is_file()
+    assert (report_dir / "report.json").is_file()
+    assert (report_dir / "meta.json").is_file()
+    brief = (report_dir / "brief.md").read_text(encoding="utf-8")
+    assert "## Session summary" in brief
 
 
 @pytest.mark.asyncio
@@ -192,6 +247,19 @@ async def test_health_returns_200(app) -> None:
         body = r.json()
         assert body["status"] == "ok"
         assert body["version"] == "2.0.0"
+        assert body["memory"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_health_reports_memory_status(app) -> None:
+    app.state.memory_status = "unavailable"
+    app.state.memory_detail = "outbox requires sqlite:// DB_URL; got postgresql"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        r = await client.get("/health")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["memory"] == "unavailable"
+        assert body["memory_detail"] == "outbox requires sqlite:// DB_URL; got postgresql"
 
 
 def test_get_events_returns_404_for_unknown_session(registry: SessionRegistry) -> None:
@@ -269,6 +337,38 @@ class _PopulatedUsagePort:
             "context_window_tokens": 200_000,
         }
 
+    async def agent_usage(self, *, since: str | None) -> dict[str, object]:
+        _ = since
+        return {
+            "turns": 2,
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "cached_tokens": 28,
+            "cache_read_tokens": 20,
+            "cache_creation_tokens": 8,
+            "cost_usd": 0.05,
+            "period_start": 1000,
+            "period_end": 2000,
+            "by_model": [
+                {
+                    "key": "gemini-2.5-flash",
+                    "turns": 2,
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "cost_usd": 0.05,
+                }
+            ],
+            "by_day": [
+                {
+                    "key": "2026-07-26",
+                    "turns": 2,
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "cost_usd": 0.05,
+                }
+            ],
+        }
+
 
 @pytest.mark.asyncio
 async def test_get_usage_zero_payload_has_cache_keys(
@@ -329,6 +429,55 @@ async def test_get_usage_404_for_unknown_session(client: AsyncClient) -> None:
     r = await client.get("/sessions/missing-session/usage")
     assert r.status_code == 404
     assert r.json()["error"]["code"] == "SESSION_NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_get_usage_rejects_malformed_since(client: AsyncClient) -> None:
+    cr = await client.post("/sessions", json={})
+    sid = cr.json()["session_id"]
+    r = await client.get(f"/sessions/{sid}/usage", params={"since": "not-a-number"})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "BAD_REQUEST"
+
+
+@pytest.mark.asyncio
+async def test_get_agent_usage_returns_totals(client: AsyncClient) -> None:
+    r = await client.get("/usage")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["turns"] == 0
+    assert body["cost_usd"] == 0.0
+    assert body["by_model"] == []
+    assert body["by_day"] == []
+    assert "input_tokens" in body
+    assert "cache_read_tokens" in body
+
+
+@pytest.mark.asyncio
+async def test_get_agent_usage_populated(
+    registry: SessionRegistry,
+) -> None:
+    usage_port: UsagePort = _PopulatedUsagePort()
+    app = create_app(
+        loop_port=FakeLoopPort(registry),
+        usage_port=usage_port,
+        registry=registry,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        r = await client.get("/usage")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["cost_usd"] == 0.05
+    assert body["by_model"][0]["key"] == "gemini-2.5-flash"
+    assert body["by_day"][0]["key"] == "2026-07-26"
+    assert "cached_tokens" not in body["by_model"][0]
+
+
+@pytest.mark.asyncio
+async def test_get_agent_usage_rejects_malformed_since(client: AsyncClient) -> None:
+    r = await client.get("/usage", params={"since": "-1"})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "BAD_REQUEST"
 
 
 @pytest.mark.asyncio
@@ -434,8 +583,15 @@ async def test_chat_history_list_and_detail(registry: SessionRegistry) -> None:
     await backend.open()
     try:
         hist = backend.history()
-        await hist.append("sess-a", Message(role="user", content=[Text(text="hello history")]))
-        await hist.append("sess-a", Message(role="assistant", content=[Text(text="hi there")]))
+        for session_id in ("main-agent-session", "project-agent-session"):
+            await hist.append(
+                session_id,
+                Message(role="user", content=[Text(text=f"hello {session_id}")]),
+            )
+            await hist.append(
+                session_id,
+                Message(role="assistant", content=[Text(text="hi there")]),
+            )
 
         app = create_app(loop_port=FakeLoopPort(registry), registry=registry)
         app.state.storage = backend
@@ -443,15 +599,71 @@ async def test_chat_history_list_and_detail(registry: SessionRegistry) -> None:
             r = await client.get("/api/chat-history")
             assert r.status_code == 200
             threads = r.json()["threads"]
-            assert any(t["session_id"] == "sess-a" for t in threads)
+            assert {t["session_id"] for t in threads} == {
+                "main-agent-session",
+                "project-agent-session",
+            }
 
-            rd = await client.get("/api/chat-history/sess-a")
+            rd = await client.get("/api/chat-history/main-agent-session")
             assert rd.status_code == 200
             body = rd.json()
-            assert body["session_id"] == "sess-a"
+            assert body["session_id"] == "main-agent-session"
             assert body["messages"][0]["role"] == "user"
-            assert "hello history" in body["messages"][0]["text"]
+            assert "hello main-agent-session" in body["messages"][0]["text"]
             assert body["messages"][1]["role"] == "assistant"
+
+            deleted = await client.delete("/api/chat-history/main-agent-session")
+            assert deleted.status_code == 200
+            assert deleted.json() == {"deleted": True}
+            assert await hist.load("main-agent-session") == []
+            assert len(await hist.load("project-agent-session")) == 2
+
+            deleted = await client.delete("/api/chat-history/project-agent-session")
+            assert deleted.status_code == 200
+            assert deleted.json() == {"deleted": True}
+            assert await hist.load("project-agent-session") == []
+
+            remaining = await client.get("/api/chat-history")
+            assert remaining.json()["threads"] == []
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_history_detail_includes_thinking(registry: SessionRegistry) -> None:
+    from monkeybot.core.llm.provider import Message
+    from monkeybot.core.persistence.sqlite_backend import SQLiteStorageBackend
+    from monkeybot.core.types.content_blocks import Text, Thinking
+
+    backend = SQLiteStorageBackend("sqlite:///:memory:")
+    await backend.open()
+    try:
+        hist = backend.history()
+        await hist.append(
+            "think-session",
+            Message(role="user", content=[Text(text="why?")]),
+        )
+        await hist.append(
+            "think-session",
+            Message(
+                role="assistant",
+                content=[
+                    Thinking(thinking="weigh options", signature="sig"),
+                    Text(text="because"),
+                ],
+            ),
+        )
+
+        app = create_app(loop_port=FakeLoopPort(registry), registry=registry)
+        app.state.storage = backend
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            rd = await client.get("/api/chat-history/think-session")
+            assert rd.status_code == 200
+            assert rd.json()["messages"] == [
+                {"role": "user", "text": "why?"},
+                {"role": "thinking", "text": "weigh options"},
+                {"role": "assistant", "text": "because"},
+            ]
     finally:
         await backend.close()
 
@@ -461,6 +673,10 @@ async def test_chat_history_disabled_returns_404(registry: SessionRegistry, monk
     monkeypatch.setenv("MONKEYBOT_CHAT_HISTORY_API", "0")
     app = create_app(loop_port=FakeLoopPort(registry), registry=registry)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        r = await client.get("/api/chat-history")
-        assert r.status_code == 404
-        assert r.json()["error"]["code"] == "NOT_FOUND"
+        for method, path in (
+            (client.get, "/api/chat-history"),
+            (client.delete, "/api/chat-history/session-a"),
+        ):
+            r = await method(path)
+            assert r.status_code == 404
+            assert r.json()["error"]["code"] == "NOT_FOUND"

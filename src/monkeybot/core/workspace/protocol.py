@@ -34,6 +34,13 @@ class WorkspaceStorage(Protocol):
     async def move(self, src: str, dest: str) -> None:
         """Move/rename ``src`` to ``dest`` (atomic when the backend allows)."""
 
+    async def mtime(self, path: str) -> float | None:
+        """Return unix mtime for ``path``, or ``None`` if unknown/missing.
+
+        Used by ``working/`` TTL GC when the memory graph sidecar is unavailable
+        (remote ``gcs://`` / ``s3://`` backends).
+        """
+
     async def gc_prefix(self, prefix: str, max_age_sec: float) -> dict[str, int]:
         """Best-effort GC of files under ``prefix`` older than ``max_age_sec``.
 

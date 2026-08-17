@@ -6,6 +6,73 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [core v3.0.0] - 2026-08-17
+
+### Breaking
+
+- Note-based memory (INDEX.md, curator, `search_memory` / `edit_memory` / `forget`) is replaced by per-agent MemPalace with a durable outbox on SQLite, Postgres, and Firestore. Capture can be turned off with `memory.enabled: false` or `MONKEYBOT_MEMORY_HOOK_ENABLED=0`. Object-store palace URIs (`gcs://`, `s3://`) are not supported; use `local://`. MemPalace itself is the optional `monkeybot[memory]` extra.
+- `subagents:` as a bare list of personas is no longer supported; wrap personas under `subagents.personas` in `monkeybot.yaml`. `SUBAGENT_TIMEOUT_SEC`, `SUBAGENT_MAX_TURNS`, and `MONKEYBOT_SUBAGENT_AGENT_MD` environment variable overrides are removed — set `subagents.timeout_sec`, `subagents.max_turns`, and per-persona `agent_md` in `monkeybot.yaml` instead. Top-level `subagents.agent_md` is also removed.
+
+### Added
+
+- MemPalace outbox now persists on Postgres and Firestore (same table/document shape as SQLite), with replica `palace_id` claim partitioning. Replicated deployments must share a lock-capable palace volume.
+- Knowledge indexing follows document structure instead of fixed line windows: markdown headings, code definitions (tree-sitter via the optional `knowledge-ast` extra, brace/indent heuristic otherwise), and JSON/YAML/TOML top-level keys become chunk boundaries.
+- Embeddings run on NVIDIA, OpenAI, any OpenAI-compatible endpoint, Voyage, or Gemini via `knowledge.embeddings.provider`. Misconfigured or unavailable providers degrade to keyword + graph search rather than failing the turn.
+- PDF, DOCX, and image files are indexed with the `knowledge-media` extra. Images use `knowledge.captions` (`off` / `path` / `llm`); DOCX indexing covers tables as well as paragraphs.
+- Subagents search the parent workspace index read-only, and a second gateway attempting to write the same index is refused.
+- Soft spill and unified `read_file` char budgets derive from `model.context_window`: large tool results always land on disk with a large inline body when headroom allows; `read_file` returns `next_offset` and never lies about `end_line`.
+- When memory is off, host `run_command` children cannot see palace files (Linux user+mount namespaces or macOS `sandbox-exec`). If isolation cannot be established, the command is refused. OpenSandbox does not mount the palace. `/tmp` and `/var/folders` are no longer implicitly allowlisted path prefixes.
+
+### Fixed
+
+- Streamable HTTP MCP connects accept both 2-tuple and 3-tuple transport yields from the MCP Python SDK.
+- Stop mid-reply now cancels the in-flight provider token stream (instead of waiting for the full LLM call) and persists any already-streamed assistant text to history so follow-up turns keep matching what the user saw.
+- Chunking improvements now reach existing workspaces: a chunker version bump re-chunks indexed files even when their modification time never changed, so upgrades no longer require deleting `.monkeybot/knowledge/`.
+- Vector search scores only vectors from the active embedding model. Switching provider or `dimensions` purges the incomparable rows at startup and re-embeds them, instead of blending two models into one similarity ranking.
+- The knowledge index writer lock is claimed atomically, so two gateways starting at the same moment can no longer both believe they own the index.
+- Embedding requests carry a per-request timeout, so one slow endpoint cannot stall an indexing pass; cached vector matrices are bounded by a memory budget with least-recently-used eviction.
+- PDF extraction closes its file handle (previously leaked a descriptor per file on large scans), the code chunker no longer splits mid-function when a docstring contains an unbalanced brace, and `knowledge.chunk_overlap_ratio` is honored for markdown, code, and structured files.
+- `read_file` no longer applies a post-hoc 32k char chop after line selection (which made `end_line` lie and caused the model to skip unread lines when paging).
+- `read_file` reports `truncated: false` and omits `next_offset` when a read reaches the end of the file, instead of marking every complete read truncated and pointing past EOF. A line too long for the whole char budget is now marked inline where it was cut.
+- Tool results too large to inline as-is are shaped into still-valid JSON (with `… (+N more items)` markers) rather than inlined as a raw, unparseable JSON prefix.
+- Context summarization sizes its per-result cap from the active model's context window rather than a hardcoded 200k window.
+
+### Changed
+
+- `mcp` is pinned to `>=1.0.0,<2` until Streamable HTTP can construct an `httpx2.AsyncClient` for MCP SDK 2.x (see #190).
+- Subagent defaults and named personas are now configured under a single `subagents:` YAML mapping (`subagents.timeout_sec`, `subagents.max_turns`, `subagents.vertex_google_search`, `subagents.personas`), replacing the separate `subagent:` defaults block and bare-list `subagents:` personas. Persona prompts live only on `subagents.personas[].agent_md`; tasks without a `subagent_type` inherit the parent `paths.agent_md`.
+- Spill sizing is window-derived (soft spill). `tools.spill_min_chars` / `tools.spill_read_max_lines` / `tools.read_default_lines` are retired (warned, ignored). `tools.read_max_lines` is YAML-only (env overrides removed). `read_file` defaults to 2000 lines when `limit` is omitted; pass `limit` to request more. Large ordinary reads can return more content than the old flat 32k cap.
+
+## [browser v0.3.0] - 2026-08-17
+
+### Added
+
+- AWS Bedrock AgentCore Browser backend via the optional `agentcore` extra (`bedrock-agentcore`, Playwright).
+- Prefer a Monkeyapp in-app CDP endpoint over desktop Chrome or a stale `BROWSER_CDP_*` env when the in-app CDP file is present.
+
+### Changed
+
+- `mcp` is pinned to `>=1.0.0,<2` (same Streamable HTTP constraint as core; see #190).
+
+## [cli v0.5.0] - 2026-08-17
+
+### Added
+
+- `monkeybot run` / `chat` / `talk` refuse to start when the agent interpreter lacks MonkeyBot 3.x (and MemPalace when memory is enabled). A failed probe may `uv sync` an existing lock; it never rewrites `pyproject.toml`. Config-only agents with memory on get a CLI-managed cache venv holding `monkeybot[memory]` pinned to the running core, reused offline. A local monkeybot checkout can provision that runtime from source; the cache invalidates when those sources change.
+- `monkeybot chat` TUI gained Claude-Code-style interaction: `Esc` interrupts the active turn (double-tap while idle recalls your last message for editing), `Shift+Tab` cycles a client-side approval mode (`normal` / `auto-approve` / `deny-confirms` — auto-answers tool confirmation prompts only, elicitations still ask), `@` fuzzy-inserts a workspace file path, `!<command>` runs a local shell command shown in the transcript but never sent to the agent, and `?` opens a keyboard-shortcut overlay. New slash commands: `/clear` (alias of `/new`), `/model` (switches model by starting a fresh session), `/status`, `/config`.
+- `monkeybot chat -c` / `--continue` resumes the most recent session for the current agent.
+
+### Changed
+
+- `monkeybot new` no longer scaffolds capability skills into new agents.
+- Declares `monkeybot[cli]>=3.0.0,<4` so a global CLI install pulls MonkeyBot 3.x.
+
+## [cli v0.3.1] - 2026-07-28
+
+### Changed
+
+- Scaffold `monkeybot.example.yaml` documents harness-fixed `read_file` default (2000 lines), YAML-only `tools.read_max_lines`, and retired `read_default_lines` / spill knobs. `model.context_window` notes that it also drives soft-spill / read char budgets.
+
 ## [core v2.2.0] - 2026-07-13
 
 ### Added

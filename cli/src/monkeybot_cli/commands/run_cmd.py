@@ -7,8 +7,18 @@ import os
 import subprocess
 from pathlib import Path
 
-from monkeybot_cli.config_resolve import load_agent_dotenv, resolve_agent_root, resolve_config
-from monkeybot_cli.runtime_python import gateway_argv, resolve_runtime_python
+from monkeybot_cli.config_resolve import (
+    load_agent_dotenv,
+    load_config_doc,
+    resolve_agent_root,
+    resolve_config,
+)
+from monkeybot_cli.opensandbox_lifecycle import (
+    ensure_opensandbox_for_agent,
+    is_sandbox_enabled,
+    server_url_from_config,
+)
+from monkeybot_cli.runtime_python import gateway_argv, prepare_runtime_python
 
 
 def run_run(args: argparse.Namespace) -> int:
@@ -23,7 +33,20 @@ def run_run(args: argparse.Namespace) -> int:
     # --cwd intentionally pins the subprocess and runtime directory. Without
     # it, an explicit config determines the agent root.
     agent_root = resolve_agent_root(cwd=cwd, config_path=config_path)
-    runtime = resolve_runtime_python(agent_root)
+    if config_path is not None:
+        _, cfg_doc = load_config_doc(config_path)
+        if is_sandbox_enabled(cfg_doc):
+            if not ensure_opensandbox_for_agent(
+                agent_root,
+                server_url=server_url_from_config(cfg_doc),
+                # Fail fast: Mac app health-checks the gateway immediately.
+                docker_wait_secs=2.0,
+            ):
+                print(
+                    "Continuing without a healthy OpenSandbox — run_command may fail.",
+                    flush=True,
+                )
+    runtime = prepare_runtime_python(agent_root, config_path)
     cmd = gateway_argv(runtime)
     try:
         proc = subprocess.run(cmd, env=env, cwd=agent_root)

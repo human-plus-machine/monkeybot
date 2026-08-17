@@ -1,28 +1,81 @@
-"""Spill inventory note helpers."""
+"""Tests for session-scoped spill cleanup and inventory previews."""
 
 from __future__ import annotations
 
-from monkeybot.core.runtime.context_budget import diff_inventory_lines
-from monkeybot.core.tools.spill_inventory import spill_inventory_note
+import json
+from pathlib import Path
+
+import pytest
+
+from monkeybot.core.tools.spill_inventory import (
+    _build_spill_preview,
+    cleanup_session_spill_files,
+    session_spill_dirs,
+    spill_inventory_note,
+)
 
 
-def test_diff_inventory_lists_changed_paths() -> None:
-    diff = "\n".join(
-        [
-            "diff --git a/src/foo.py b/src/foo.py",
-            "+++ b/src/foo.py",
-            "diff --git a/src/bar.py b/src/bar.py",
-            "+++ b/src/bar.py",
-        ]
+def test_session_spill_dirs_includes_parent_and_subagent(tmp_path: Path) -> None:
+    root = tmp_path / ".monkeybot" / "spill"
+    (root / "sess-1").mkdir(parents=True)
+    (root / "subagent:sess-1:aaa").mkdir(parents=True)
+    (root / "subagent:sess-1:bbb").mkdir(parents=True)
+    (root / "sess-2").mkdir(parents=True)
+    (root / "subagent:sess-2:ccc").mkdir(parents=True)
+
+    dirs = session_spill_dirs(tmp_path, "sess-1")
+    names = {p.name for p in dirs}
+    assert names == {"sess-1", "subagent:sess-1:aaa", "subagent:sess-1:bbb"}
+
+
+@pytest.mark.asyncio
+async def test_cleanup_session_spill_files_concurrent(tmp_path: Path) -> None:
+    root = tmp_path / ".monkeybot" / "spill"
+    for name in ("s1", "subagent:s1:one", "subagent:s1:two", "other"):
+        d = root / name
+        d.mkdir(parents=True)
+        (d / "x.txt").write_text("data", encoding="utf-8")
+
+    await cleanup_session_spill_files(tmp_path, "s1")
+
+    assert not (root / "s1").exists()
+    assert not (root / "subagent:s1:one").exists()
+    assert not (root / "subagent:s1:two").exists()
+    assert (root / "other" / "x.txt").read_text(encoding="utf-8") == "data"
+
+
+def test_spill_preview_unwraps_run_command_json_stdout() -> None:
+    rows = [{"id": i, "title": f"pr-{i}", "state": "OPEN"} for i in range(40)]
+    payload = json.dumps({"ok": True, "stdout": json.dumps(rows)})
+    kind, preview, unwrapped, _body_lines = _build_spill_preview(
+        payload, tool_name="run_command"
     )
-    paths = diff_inventory_lines(diff)
-    assert paths == ["src/foo.py", "src/bar.py"]
+    assert kind == "json"
+    assert unwrapped is True
+    assert "pr-0" in preview
+    assert len(preview) < len(payload)
+    assert preview.count('"id"') <= 20
 
 
-def test_spill_inventory_note_includes_counts_and_paths() -> None:
-    diff = "diff --git a/a.py b/a.py\n+line\n"
-    note = spill_inventory_note(diff, ".monkeybot/spill/t/call.txt")
-    assert "total chars" in note
-    assert "total lines" in note
-    assert "Changed files (1): a.py" in note
-    assert ".monkeybot/spill/t/call.txt" in note
+def test_spill_inventory_note_includes_preview_not_full_body() -> None:
+    body = ("line-%s\n" % ("x" * 200)) * 80
+    note = spill_inventory_note(body, ".monkeybot/spill/t/c.txt", tool_name="grep")
+    assert "Spill inventory" in note
+    assert "Preview:" in note
+    assert "kind=" in note
+    assert "tool=grep" in note
+    assert ".monkeybot/spill/t/c.txt" in note
+    assert body not in note
+    assert len(note) < 3500
+
+
+def test_spill_preview_code_uses_head_tail() -> None:
+    lines = [f"def f{i}():\n    return {i}" for i in range(100)]
+    text = "\n".join(lines)
+    kind, preview, _unwrapped, _body_lines = _build_spill_preview(
+        text, tool_name="read_file"
+    )
+    assert kind == "code"
+    assert "def f0():" in preview
+    assert "omitted from spill preview" in preview
+    assert len(preview) < len(text)

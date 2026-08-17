@@ -24,6 +24,18 @@ def test_sse_wire_shape_image_block() -> None:
     assert set(d.keys()) >= {"type", "request_id", "mime_type", "data"}
 
 
+def test_sse_wire_shape_image_block_with_path() -> None:
+    ev = ImageBlock(
+        request_id="r",
+        mime_type="image/png",
+        path="./generated-media/images/x.png",
+    )
+    d = json.loads(event_to_json(ev))
+    assert d["type"] == "ImageBlock"
+    assert d["path"] == "./generated-media/images/x.png"
+    assert "data" not in d
+
+
 def test_sse_wire_shape_thinking_block_delta() -> None:
     ev = ThinkingBlockDelta(request_id="r", text="frag", signature=None)
     d = json.loads(event_to_json(ev))

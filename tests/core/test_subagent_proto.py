@@ -11,15 +11,22 @@ from unittest.mock import AsyncMock
 import pytest
 
 from monkeybot.core.config.settings import SubagentConfig
-from monkeybot.core.runtime.events import AssistantDelta, Error, Thinking, event_to_json
+from monkeybot.core.runtime.events import (
+    AssistantDelta,
+    Error,
+    SystemPromptSnapshot,
+    Thinking,
+    event_to_json,
+)
 from monkeybot.core.subagents.subagent_proto import (
+    SUBAGENT_STDOUT_LINE_LIMIT,
     SubagentEnvelope,
     _default_subprocess_exec,
     default_subagent_script,
     normalize_sqlite_db_url,
     resolve_agent_project_root,
+    resolve_default_agent_md_path,
     resolve_project_path,
-    resolve_subagent_agent_md_path,
     resolve_subagent_script,
     resolve_task_agent_md_path,
     spawn_subagent,
@@ -93,17 +100,21 @@ def test_resolve_project_path_relative(tmp_path: Path) -> None:
     assert got == agent.resolve()
 
 
-def test_resolve_subagent_agent_md_prefers_override(
+def test_resolve_default_agent_md_path_uses_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    parent = tmp_path / "monkeybot_config" / "AGENT.md"
-    parent.parent.mkdir(parents=True)
+    cfg = tmp_path / "monkeybot_config"
+    cfg.mkdir()
+    parent = cfg / "AGENT.md"
     parent.write_text("# parent\n", encoding="utf-8")
-    override = tmp_path / "custom.md"
-    override.write_text("# custom\n", encoding="utf-8")
+    (cfg / "monkeybot.yaml").write_text("model:\n  provider: gemini\n", encoding="utf-8")
+    monkeypatch.delenv("MONKEYBOT_AGENT_ROOT", raising=False)
+    monkeypatch.delenv("MONKEYBOT_CONFIG", raising=False)
     monkeypatch.setenv("AGENT_MD", "./monkeybot_config/AGENT.md")
-    monkeypatch.setenv("MONKEYBOT_SUBAGENT_AGENT_MD", str(override))
-    assert resolve_subagent_agent_md_path(tmp_path) == override.resolve()
+    elsewhere = tmp_path / "scratch"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    assert resolve_default_agent_md_path(tmp_path) == parent.resolve()
 
 
 def test_normalize_sqlite_db_url_relative(tmp_path: Path) -> None:
@@ -127,6 +138,58 @@ def test_subagent_envelope_roundtrip_with_persona_fields() -> None:
     )
     restored = SubagentEnvelope.from_json(env.to_json())
     assert restored == env
+
+
+def test_subagent_envelope_roundtrip_parent_session_id() -> None:
+    env = SubagentEnvelope(
+        task="t",
+        context="c",
+        memory_storage_uri="local://m",
+        parent_run_id="p1",
+        parent_session_id="session-abc",
+    )
+    restored = SubagentEnvelope.from_json(env.to_json())
+    assert restored.parent_session_id == "session-abc"
+    assert restored == env
+
+
+def test_subagent_envelope_omits_null_parent_session_id() -> None:
+    env = SubagentEnvelope(
+        task="t",
+        context="c",
+        memory_storage_uri="local://m",
+        parent_run_id="p1",
+    )
+    payload = json.loads(env.to_json())
+    assert "parent_session_id" not in payload
+    assert SubagentEnvelope.from_json(env.to_json()).parent_session_id is None
+
+
+def test_proto_envelope_roundtrip_child_thread_id() -> None:
+    env = SubagentEnvelope(
+        task="t",
+        context="c",
+        memory_storage_uri="local://m",
+        parent_run_id="p1",
+        child_thread_id="subagent:sess:abc1234567",
+    )
+    payload = json.loads(env.to_json())
+    assert payload["child_thread_id"] == "subagent:sess:abc1234567"
+    restored = SubagentEnvelope.from_json(env.to_json())
+    assert restored == env
+    assert restored.child_thread_id == "subagent:sess:abc1234567"
+
+
+def test_proto_envelope_omits_null_child_thread_id() -> None:
+    env = SubagentEnvelope(
+        task="t",
+        context="c",
+        memory_storage_uri="local://m",
+        parent_run_id="p1",
+    )
+    payload = json.loads(env.to_json())
+    assert "child_thread_id" not in payload
+    assert SubagentEnvelope.from_json(env.to_json()).child_thread_id is None
 
 
 def test_resolve_task_agent_md_path_uses_registry(tmp_path: Path) -> None:
@@ -366,3 +429,62 @@ async def test_default_subprocess_exec_discards_stderr_to_avoid_deadlock(tmp_pat
     assert proc.stdout is not None
     assert (await asyncio.wait_for(proc.stdout.readline(), timeout=2)).strip() == b"ok"
     assert await asyncio.wait_for(proc.wait(), timeout=2) == 0
+
+
+@pytest.mark.asyncio
+async def test_default_subprocess_exec_reads_ndjson_lines_over_64kib(
+    tmp_path: Path,
+) -> None:
+    """Regression: SystemPromptSnapshot NDJSON can exceed asyncio's default 64 KiB limit."""
+    assert SUBAGENT_STDOUT_LINE_LIMIT > 65536
+    big_text = "m" * (70 * 1024)
+    line = event_to_json(
+        SystemPromptSnapshot(request_id="r", inner_turn=1, text=big_text)
+    )
+    assert len(line.encode("utf-8")) > 65536
+
+    script = tmp_path / "child.py"
+    script.write_text(
+        "import sys\n" f"sys.stdout.write({line!r} + '\\n')\n" "sys.stdout.flush()\n",
+        encoding="utf-8",
+    )
+    proc = await _default_subprocess_exec(sys.executable, "-u", str(script))
+    assert proc.stdout is not None
+    raw = await asyncio.wait_for(proc.stdout.readline(), timeout=5)
+    assert len(raw) > 65536
+    assert b'"type":"SystemPromptSnapshot"' in raw
+    assert await asyncio.wait_for(proc.wait(), timeout=2) == 0
+
+
+@pytest.mark.asyncio
+async def test_spawn_subagent_streams_oversized_system_prompt_snapshot(
+    tmp_scratch: Path,
+) -> None:
+    """End-to-end: parent can drain a >64 KiB SystemPromptSnapshot NDJSON line."""
+    big_text = "n" * (70 * 1024)
+    snap = SystemPromptSnapshot(request_id="r", inner_turn=0, text=big_text)
+    lines = [
+        event_to_json(Thinking(request_id="r")),
+        event_to_json(snap),
+        event_to_json(AssistantDelta(request_id="r", delta="done")),
+    ]
+    env = SubagentEnvelope(
+        task="t",
+        context="",
+        memory_storage_uri="local://m",
+        parent_run_id="p",
+    )
+
+    async def subprocess_exec(*_a: object, **_k: object) -> FakeProcess:
+        return FakeProcess(lines, exit_code=0)
+
+    collected = [evt async for evt in spawn_subagent(
+        "s.py",
+        env,
+        scratch_dir=tmp_scratch,
+        subprocess_exec=subprocess_exec,
+    )]
+    assert isinstance(collected[0], Thinking)
+    assert isinstance(collected[1], SystemPromptSnapshot)
+    assert len(collected[1].text) == 70 * 1024
+    assert isinstance(collected[2], AssistantDelta)

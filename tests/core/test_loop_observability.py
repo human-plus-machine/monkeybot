@@ -12,7 +12,8 @@ from monkeybot.core.llm.provider import (
     TextDelta,
     ToolCall,
 )
-from monkeybot.core.runtime.loop import _provider_messages_prompt_summary, run
+from monkeybot.core.runtime.loop import run
+from monkeybot.core.runtime.loop_messages import _provider_messages_prompt_summary
 from monkeybot.core.types.content_blocks import Text, ToolResponse
 from tests.core.test_loop import (
     AllowInspector,

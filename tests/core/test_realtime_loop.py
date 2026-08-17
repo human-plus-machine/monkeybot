@@ -7,6 +7,7 @@ from monkeybot.core.llm.provider import Message, ToolCall
 from monkeybot.core.llm.realtime_provider import RealtimeToolCall
 from monkeybot.core.runtime.events import (
     AssistantDelta,
+    AssistantTextEnded,
     Thinking,
     ToolCallResult,
     ToolCallStarted,
@@ -26,8 +27,10 @@ class FakeHistory:
         del thread_id, limit
         return list(self.rows)
 
-    async def append(self, thread_id: str, message: Message) -> None:
-        del thread_id
+    async def append(
+        self, thread_id: str, message: Message, *, turn_id: str | None = None, message_id: str | None = None
+    ) -> None:
+        del thread_id, turn_id, message_id
         self.rows.append(message)
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None:
@@ -81,6 +84,7 @@ class TestRunRealtimeTurn:
         assert any(isinstance(e, Thinking) for e in events)
         assert events
         assert any(isinstance(e, AssistantDelta) for e in events)
+        assert AssistantTextEnded(request_id="r1", text="hi there") in events
         assert any(isinstance(e, TurnComplete) for e in events)
         assert len(history.rows) == 2
         assert history.rows[0].role == "user"
@@ -251,6 +255,9 @@ class TestRunRealtimeTurn:
             def known_server_names(self) -> list[str]:
                 return ["browser"]
 
+            def is_connected(self, name: str) -> bool:
+                return name == "browser"
+
             def all_tools(self) -> list[ToolDef]:
                 return [ToolDef("browser__goto", "Go", {})]
 
@@ -279,12 +286,19 @@ class TestRunRealtimeTurn:
             )
         )
         assert any(t.name == "browser__goto" for t in ctx.tools)
+        assert any(t.name == "list_mcp_resources" for t in ctx.tools)
+        assert any(t.name == "read_mcp_resource" for t in ctx.tools)
+        assert any(t.name == "list_mcp_prompts" for t in ctx.tools)
+        assert any(t.name == "get_mcp_prompt" for t in ctx.tools)
         assert _REALTIME_MCP_NEW_SESSION_NOTE in inject_texts
 
     async def test_failed_enable_mcp_does_not_refresh_tools(self) -> None:
         class _Mcp:
             def known_server_names(self) -> list[str]:
                 return ["browser"]
+
+            def is_connected(self, name: str) -> bool:
+                return False
 
             def all_tools(self) -> list[ToolDef]:
                 return [ToolDef("browser__goto", "Go", {})]

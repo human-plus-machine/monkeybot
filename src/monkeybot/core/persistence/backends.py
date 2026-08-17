@@ -9,14 +9,14 @@ Postgres implementation code loads until the factory is actually called.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from urllib.parse import parse_qs, unquote, urlparse
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from monkeybot.core.llm.provider import Message
-    from monkeybot.core.llm.usage import Usage, UsageSummary
+    from monkeybot.core.llm.usage import Usage, UsageBreakdown, UsageSummary
     from monkeybot.core.persistence.durable_runs import SubagentEnvelope, SubagentRunRow
     from monkeybot.core.persistence.scheduled_loops import (
         ScheduledLoopCreate,
@@ -29,9 +29,16 @@ if TYPE_CHECKING:
 class HistoryStore(Protocol):
     """Protocol for conversation history persistence."""
 
-    async def load(self, thread_id: str, limit: int = 100) -> list[Message]: ...
+    async def load(self, thread_id: str, limit: int | None = None) -> list[Message]: ...
 
-    async def append(self, thread_id: str, message: Message) -> None: ...
+    async def append(
+        self,
+        thread_id: str,
+        message: Message,
+        *,
+        turn_id: str | None = None,
+        message_id: str | None = None,
+    ) -> None: ...
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None: ...
 
@@ -55,6 +62,11 @@ class UsageStore(Protocol):
         thread_id: str | None = None,
         since_ms: int | None = None,
     ) -> UsageSummary: ...
+
+    async def breakdown(
+        self,
+        since_ms: int | None = None,
+    ) -> UsageBreakdown: ...
 
 
 @runtime_checkable
@@ -81,11 +93,35 @@ class RunStore(Protocol):
 
     async def claim(self, run_id: str, worker_id: str) -> bool: ...
 
+    async def renew_claim(self, run_id: str, worker_id: str) -> bool: ...
+
+    async def list_stale_claims(self, stale_after_ms: int) -> list[SubagentRunRow]: ...
+
+    async def reset_stale_claim(
+        self,
+        run_id: str,
+        stale_after_ms: int,
+        *,
+        worker_id: str | None = None,
+    ) -> bool: ...
+
     async def reset_stale_claims(self, stale_after_ms: int) -> int: ...
 
-    async def record_completed(self, run_id: str, result_json: str) -> None: ...
+    async def record_completed(
+        self,
+        run_id: str,
+        result_json: str,
+        *,
+        worker_id: str | None = None,
+    ) -> bool: ...
 
-    async def record_failed(self, run_id: str, error: str) -> None: ...
+    async def record_failed(
+        self,
+        run_id: str,
+        error: str,
+        *,
+        worker_id: str | None = None,
+    ) -> bool: ...
 
     async def pending_runs(self) -> list[SubagentRunRow]: ...
 
@@ -158,6 +194,10 @@ class StorageBackend(Protocol):
 
     def session_turns(self) -> SessionTurnLockStore: ...
 
+    def outbox(self) -> Any: ...
+
+    shares_outbox: bool
+
 
 @dataclass(frozen=True)
 class FirestoreConfig:
@@ -196,7 +236,9 @@ def _parse_firestore_config(db_url: str) -> FirestoreConfig | None:
     return FirestoreConfig(project=project, database=database, prefix=prefix)
 
 
-def create_storage_backend(db_url: str) -> StorageBackend:
+def create_storage_backend(
+    db_url: str, *, agent_scope: str = "", agent_root: Path | None = None
+) -> StorageBackend:
     """Factory that returns the right backend for ``db_url``.
 
     Neither SQLite nor Postgres implementation code is imported until this
@@ -208,29 +250,43 @@ def create_storage_backend(db_url: str) -> StorageBackend:
       (requires ``pip install 'monkeybot[postgres]'``)
     - ``firestore://PROJECT/DATABASE`` → :class:`~monkeybot.core.persistence.firestore.FirestoreStorageBackend`
       (requires ``pip install 'monkeybot[firestore]'``)
+
+    ``agent_scope`` namespaces conversation history so gateways for different
+    agent roots that happen to share one ``db_url`` (a shared Postgres/Firestore
+    backend, or an explicit shared SQLite path) can't read or resume each
+    other's threads via ``list_threads``/``load``. Callers that own a single
+    gateway process should pass the resolved agent root; leaving it unset keeps
+    the previous unscoped (single-tenant) behavior.
+
+    ``agent_root``, SQLite only: when the resolved db file lives under this
+    path (the default deployment — ``paths.db_url`` left relative, anchored by
+    :func:`~monkeybot.core.layout.resolve_sqlite_url`), ownership is
+    unambiguous by construction, so a first-time migration to ``agent_scope``
+    safely claims that file's pre-existing rows instead of stranding them (see
+    ``docs/migrations/agent-scope-namespacing.md``). Ignored for Postgres/
+    Firestore and for an explicit absolute SQLite path outside ``agent_root``
+    — those may be genuinely shared, where auto-claiming is not safe.
     """
     if db_url.startswith("sqlite://"):
         from monkeybot.core.persistence.sqlite_backend import SQLiteStorageBackend
 
-        return SQLiteStorageBackend(db_url)
+        return SQLiteStorageBackend(db_url, agent_scope, agent_root)
     pg_url = _normalize_postgres_db_url(db_url)
     if pg_url is not None:
         try:
             from monkeybot.core.persistence.postgres import PostgresStorageBackend
         except ImportError as exc:
             raise RuntimeError(
-                "asyncpg is not installed. "
-                "Run: pip install 'monkeybot[postgres]'"
+                "asyncpg is not installed. Run: pip install 'monkeybot[postgres]'"
             ) from exc
-        return PostgresStorageBackend(pg_url)
+        return PostgresStorageBackend(pg_url, agent_scope)
     fs_config = _parse_firestore_config(db_url)
     if fs_config is not None:
         try:
             from monkeybot.core.persistence.firestore import FirestoreStorageBackend
         except ImportError as exc:
             raise RuntimeError(
-                "google-cloud-firestore is not installed. "
-                "Run: pip install 'monkeybot[firestore]'"
+                "google-cloud-firestore is not installed. Run: pip install 'monkeybot[firestore]'"
             ) from exc
-        return FirestoreStorageBackend(fs_config)
+        return FirestoreStorageBackend(fs_config, agent_scope)
     raise ValueError(f"Unsupported DB URL scheme: {db_url!r}")

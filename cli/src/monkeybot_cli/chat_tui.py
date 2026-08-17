@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import re
+import shlex
+import shutil
+import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
+from monkeybot.core.layout import resolve_workspace_root
+from monkeybot.core.persistence.transcript import resolve_session_artifact_dir
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -18,16 +25,24 @@ from textual.reactive import reactive
 from textual.widgets import Button, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
+from monkeybot_cli.chat_file_index import detect_at_token, fuzzy_filter_files, list_workspace_files
+from monkeybot_cli.chat_local_shell import run_local_shell, truncate_output
+from monkeybot_cli.chat_renderer import SessionController
 from monkeybot_cli.chat_session import (
     ChatSessionController,
     ChatUiEvent,
     HitlAnswer,
+    format_args_preview,
 )
-from monkeybot_cli.chat_status_bar import SessionUsageView, format_context_ring_markup, format_voice_status
+from monkeybot_cli.chat_status_bar import (
+    SessionUsageView,
+    format_context_ring_markup,
+    format_voice_status,
+)
 from monkeybot_cli.chat_theme import MONKEYBOT_DARK, MONKEYBOT_LIGHT, resolve_theme_name
 from monkeybot_cli.chat_tool_display import tool_collapsed_title
-
 from monkeybot_cli.chat_tui_widgets import (
+    _COMPOSER_PLACEHOLDER,
     AssistantTurn,
     Composer,
     ComposerBusySpinner,
@@ -35,17 +50,17 @@ from monkeybot_cli.chat_tui_widgets import (
     EmptyHint,
     GroundingBlock,
     HitlCard,
+    ShortcutsScreen,
     SystemLine,
     ThinkingLine,
     ThinkingTrace,
     ToolCallBlock,
     TranscriptPane,
     UserTurn,
-    _COMPOSER_PLACEHOLDER,
     write_osc52_clipboard,
 )
+from monkeybot_cli.config_resolve import load_config_doc, resolve_config
 from monkeybot_cli.exit_commands import is_exit_command
-from monkeybot_cli.chat_renderer import SessionController
 
 logger = logging.getLogger(__name__)
 
@@ -53,15 +68,44 @@ _HISTORY_LIMIT = 500
 _PENDING_LIMIT = 5
 _MAX_MOUNTED_TURNS = 200
 _SLASH_PREFIX_RE = re.compile(r"^/\S*$")
+_ESC_RECALL_WINDOW = 1.5
+_FILE_INDEX_TTL_SEC = 30.0
+
+_APPROVAL_MODES: tuple[str, ...] = ("normal", "auto-approve", "deny-confirms")
+
+_APPROVAL_MODE_EXPLANATIONS: dict[str, str] = {
+    "auto-approve": (
+        "mode: auto-approve — tool confirmation prompts are answered yes "
+        "automatically; input requests (elicitations) still ask"
+    ),
+    "deny-confirms": (
+        "mode: deny-confirms — tool confirmation prompts are answered no "
+        "automatically; input requests (elicitations) still ask"
+    ),
+}
+
+
+def cycle_approval_mode(mode: str) -> str:
+    """Return the next approval mode in the cycle, wrapping around."""
+    try:
+        idx = _APPROVAL_MODES.index(mode)
+    except ValueError:
+        idx = 0
+    return _APPROVAL_MODES[(idx + 1) % len(_APPROVAL_MODES)]
 
 _SLASH_SPECS: tuple[tuple[str, str], ...] = (
     ("/help", "Show commands and key hints"),
     ("/new", "Start a fresh session"),
+    ("/clear", "Start a fresh session (alias of /new)"),
     ("/resume", "Resume a session by id"),
+    ("/model", "Show or switch model — starts a new session"),
+    ("/status", "Session, model, connection, usage"),
+    ("/config", "Show agent monkeybot.yaml (edit: /config edit)"),
     ("/usage", "Toggle token/cost usage line (Ctrl+U)"),
     ("/timestamps", "Toggle turn timestamps"),
     ("/copy", "Copy last assistant reply"),
     ("/export", "Export transcript to a markdown file"),
+    ("/export-trace", "Export full debug trace (ndjson) for evals"),
     ("/bye", "Exit chat"),
 )
 
@@ -213,7 +257,7 @@ class ChatApp(App[int]):
     }
     #slash-palette {
         height: auto;
-        max-height: 6;
+        max-height: 8;
         background: $surface;
         color: $secondary;
         border: none;
@@ -244,6 +288,7 @@ class ChatApp(App[int]):
 
     BINDINGS = [
         Binding("ctrl+c", "ctrl_c", "Cancel/Exit", show=False, priority=True),
+        Binding("escape", "esc_key", "Interrupt/Recall", show=False, priority=True),
         Binding("f1", "toggle_hints", "Hints", show=False),
         Binding("ctrl+u", "toggle_usage", "Usage", show=False),
         Binding("pageup", "transcript_page_up", "Scroll up", show=False),
@@ -251,9 +296,11 @@ class ChatApp(App[int]):
         Binding("y", "hitl_approve", "Approve", show=False, priority=True),
         Binding("n", "hitl_deny", "Deny", show=False, priority=True),
         Binding("space", "toggle_ptt", "PTT", show=False),
+        Binding("shift+tab", "cycle_approval_mode", "Mode", show=False, priority=True),
     ]
 
     show_hints: reactive[bool] = reactive(False)
+    approval_mode: reactive[str] = reactive("normal")
 
     def __init__(
         self,
@@ -272,6 +319,7 @@ class ChatApp(App[int]):
         animations_enabled: bool = True,
         theme_choice: str = "auto",
         controller: SessionController | None = None,
+        config_path: Path | None = None,
     ) -> None:
         super().__init__()
         self.register_theme(MONKEYBOT_DARK)
@@ -279,6 +327,11 @@ class ChatApp(App[int]):
         self.theme = resolve_theme_name(theme_choice)
         self.base = base
         self.agent_root = agent_root
+        self.config_path = (
+            config_path.expanduser().resolve()
+            if config_path is not None
+            else None
+        )
         self.provider = provider
         self.model = model
         self.spawned_gateway = spawned_gateway
@@ -303,6 +356,7 @@ class ChatApp(App[int]):
         self._hitl_active = False
         self._hitl_kind: str | None = None
         self._turn_active = False
+        self._submit_in_flight = False
         self._open_tools: dict[str, ToolCallBlock] = {}
         self._anon_tools: list[ToolCallBlock] = []
         self._exit_code = 0
@@ -324,6 +378,10 @@ class ChatApp(App[int]):
         self._turn_count = 0
         self._auto_scroll = True
         self._session_id: str | None = resume_session_id
+        self._last_esc: float | None = None
+        self._palette_mode: str | None = None
+        self._file_index: list[str] | None = None
+        self._file_index_loaded_at: float | None = None
         self.title = "monkeybot chat"
 
     def compose(self) -> ComposeResult:
@@ -356,6 +414,10 @@ class ChatApp(App[int]):
 
     def _status_line(self) -> str:
         parts = [self._ring_text]
+        if self.approval_mode == "auto-approve":
+            parts.append("[yellow]⏵⏵ auto-approve[/]")
+        elif self.approval_mode == "deny-confirms":
+            parts.append("[red]⛔ deny-confirms[/]")
         if self._conn_text:
             parts.append(self._conn_text)
         if self._voice_text:
@@ -374,7 +436,7 @@ class ChatApp(App[int]):
         if self._hitl_status_flash:
             parts.append(self._hitl_status_flash)
         if self._turn_active and not self._hitl_active:
-            parts.append("working · Ctrl-C interrupt")
+            parts.append("working · Esc interrupt")
         elif self._hitl_active:
             if self._hitl_kind == "elicit":
                 parts.append("Enter submit · Ctrl-C cancel")
@@ -689,6 +751,7 @@ class ChatApp(App[int]):
         return self.query_one("#slash-palette", OptionList)
 
     def _hide_slash_palette(self) -> None:
+        self._palette_mode = None
         with contextlib.suppress(NoMatches):
             palette = self._palette()
             palette.display = False
@@ -726,6 +789,96 @@ class ChatApp(App[int]):
     def complete_slash_from_palette(self) -> str | None:
         return self.slash_submit_text(self.query_one("#prompt", Composer).text)
 
+    @property
+    def palette_mode(self) -> str | None:
+        return self._palette_mode
+
+    def _update_palette(self, composer: Composer) -> None:
+        text = composer.text
+        if self._hitl_active:
+            self._hide_slash_palette()
+            return
+        if _SLASH_PREFIX_RE.match(text):
+            self._update_slash_palette(text)
+            self._palette_mode = "slash" if self._palette().display else None
+            return
+        row, col = composer.cursor_location
+        line = composer.document.get_line(row)
+        token = detect_at_token(line, col)
+        if token is None:
+            self._hide_slash_palette()
+            return
+        _start, query = token
+        if (
+            self._file_index_loaded_at is None
+            or time.monotonic() - self._file_index_loaded_at > _FILE_INDEX_TTL_SEC
+        ):
+            self._load_file_index()
+        matches = fuzzy_filter_files(self._file_index or [], query)
+        palette = self._palette()
+        if not matches:
+            palette.display = False
+            palette.clear_options()
+            self._palette_mode = None
+            return
+        palette.set_options([Option(path, id=path) for path in matches])
+        palette.highlighted = 0
+        palette.display = True
+        self._palette_mode = "file"
+
+    def complete_at_from_palette(self) -> tuple[str, tuple[int, int]] | None:
+        """If the @ file palette is open, splice the selected path over the token.
+
+        Returns ``(new_text, cursor_location)`` so the caller never needs to reach
+        into app-private state to know where the cursor should land.
+        """
+        if self._palette_mode != "file":
+            return None
+        with contextlib.suppress(NoMatches):
+            palette = self._palette()
+            if not palette.display or palette.option_count == 0:
+                return None
+            idx = palette.highlighted if palette.highlighted is not None else 0
+            option = palette.get_option_at_index(idx)
+            if not option.id:
+                return None
+            composer = self.query_one("#prompt", Composer)
+            row, col = composer.cursor_location
+            line = composer.document.get_line(row)
+            token = detect_at_token(line, col)
+            if token is None:
+                return None
+            start, _query = token
+            inserted = f"{option.id} "
+            new_line = line[:start] + inserted + line[col:]
+            lines = composer.text.split("\n")
+            lines[row] = new_line
+            return "\n".join(lines), (row, start + len(inserted))
+        return None
+
+    @work(thread=True, exclusive=True, group="file-index")
+    def _load_file_index(self) -> None:
+        files = list_workspace_files(self.agent_root)
+        self._file_index = files
+        self._file_index_loaded_at = time.monotonic()
+        self.call_from_thread(self._refresh_file_palette)
+
+    def _refresh_file_palette(self) -> None:
+        """Re-run palette matching once a background file-index load completes.
+
+        Without this, typing ``@`` while the index is still loading leaves the
+        picker empty (no matches yet, so the palette hides itself) until the
+        user makes another edit. This re-checks the cursor position directly
+        rather than trusting ``_palette_mode``, since a still-loading index
+        means the palette was never shown as "file" mode in the first place.
+        """
+        with contextlib.suppress(NoMatches):
+            composer = self.query_one("#prompt", Composer)
+            row, col = composer.cursor_location
+            line = composer.document.get_line(row)
+            if detect_at_token(line, col) is not None:
+                self._update_palette(composer)
+
     def slash_palette_move(self, delta: int) -> bool:
         with contextlib.suppress(NoMatches):
             palette = self._palette()
@@ -744,11 +897,12 @@ class ChatApp(App[int]):
         # grows, until the user scrolls away (see _on_transcript_scroll).
         self._set_transcript_follow(True)
         self._connect_session()
+        self._load_file_index()
 
     @on(TextArea.Changed, "#prompt")
     def on_prompt_changed(self, event: TextArea.Changed) -> None:
         if isinstance(event.text_area, Composer) and not event.text_area.in_search:
-            self._update_slash_palette(event.text_area.text)
+            self._update_palette(event.text_area)
 
     @work(exclusive=True, group="session")
     async def _connect_session(self) -> None:
@@ -937,8 +1091,20 @@ class ChatApp(App[int]):
         self._finish_turn_ui()
 
     def _ev_hitl_required(self, p: dict) -> None:
-        self._hitl_active = True
         kind = str(p.get("hitl_kind") or "confirm")
+        if kind == "confirm" and self.approval_mode in ("auto-approve", "deny-confirms"):
+            approved = self.approval_mode == "auto-approve"
+            tool_name = str(p.get("tool_name") or "")
+            raw_args = p.get("arguments")
+            arguments = dict(raw_args) if isinstance(raw_args, dict) else {}
+            verb = "auto-approved" if approved else "auto-denied"
+            preview = f" {format_args_preview(arguments)}" if arguments else ""
+            self._mount_system(f"{verb}: {tool_name}{preview}".rstrip())
+            self._controller.provide_hitl_answer(
+                HitlAnswer(approved=approved, text="y" if approved else "n")
+            )
+            return
+        self._hitl_active = True
         self._hitl_kind = kind
         self._hitl_status_flash = None
         wrap = self.query_one("#composer-wrap")
@@ -1088,10 +1254,13 @@ class ChatApp(App[int]):
         self._clear_hitl_card()
         self._refresh_status()
 
-    def _flash_hitl_status(self, message: str) -> None:
+    def _flash_status(self, message: str) -> None:
         self._hitl_status_flash = message
         self._refresh_status()
         self.set_timer(1.5, self._clear_hitl_status_flash)
+
+    def _flash_hitl_status(self, message: str) -> None:
+        self._flash_status(message)
 
     def _clear_hitl_status_flash(self) -> None:
         self._hitl_status_flash = None
@@ -1110,11 +1279,42 @@ class ChatApp(App[int]):
         if self._hitl_active and self._hitl_kind == "confirm":
             self._finish_hitl_answer(HitlAnswer(approved=False, text="n"))
 
+    def _run_local_shell_cmd(self, raw: str, command: str) -> None:
+        if not command:
+            self._mount_system("Usage: !<command> — runs locally, not sent to the agent")
+            return
+        if self.approval_mode == "deny-confirms":
+            self._mount_system(
+                "! shell is disabled in deny-confirms mode — Shift+Tab to switch mode",
+                error=True,
+            )
+            return
+        append_history(self.agent_root, raw)
+        composer = self.query_one("#prompt", Composer)
+        composer.push_history(raw)
+        block = self._mount_tool(f"$ {command}", tool="local_shell", args={"command": command})
+        self._exec_local_shell(block, command)
+
+    @work(thread=True, group="local-shell")
+    def _exec_local_shell(self, block: ToolCallBlock, command: str) -> None:
+        output, code = run_local_shell(command, self.agent_root)
+        if code is None:
+            error: str | None = "timed out"
+        elif code != 0:
+            error = f"exit {code}"
+        else:
+            error = None
+        result = truncate_output(output)
+        self.call_from_thread(block.mark_finished, error=error, result=result)
+
     def _send_user_message(self, value: str) -> None:
         append_history(self.agent_root, value)
         composer = self.query_one("#prompt", Composer)
         composer.push_history(value)
         self._mount_user(value.strip())
+        # Set before scheduling the @work worker so /new|/resume|/model cannot
+        # race the gap between dispatch and worker start.
+        self._submit_in_flight = True
         self._submit_message(value)
 
     @on(Composer.Submitted)
@@ -1125,6 +1325,9 @@ class ChatApp(App[int]):
             self._resolve_hitl(value)
             return
         if not value.strip():
+            return
+        if value.lstrip().startswith("!"):
+            self._run_local_shell_cmd(value.strip(), value.lstrip()[1:].strip())
             return
         parsed = parse_slash_command(value)
         if parsed is not None:
@@ -1163,8 +1366,20 @@ class ChatApp(App[int]):
         if name == "new":
             self._cmd_new()
             return
+        if name == "clear":
+            self._cmd_new()
+            return
         if name == "resume":
             self._cmd_resume(arg)
+            return
+        if name == "model":
+            self._cmd_model(arg)
+            return
+        if name == "status":
+            self._cmd_status()
+            return
+        if name == "config":
+            self._cmd_config(arg)
             return
         if name == "usage":
             self._cmd_usage()
@@ -1178,6 +1393,9 @@ class ChatApp(App[int]):
         if name == "export":
             self._cmd_export()
             return
+        if name == "export-trace":
+            self._cmd_export_trace()
+            return
         self._mount_system("Unknown command — try /help", error=True)
 
     def _cmd_help(self) -> None:
@@ -1186,12 +1404,22 @@ class ChatApp(App[int]):
             lines.append(f"  {cmd}  —  {desc}")
         lines.append(
             "Keys: Enter send · Ctrl+J / Alt+Enter / Shift+Enter newline · "
-            "↑ history · Ctrl+R search · Ctrl+U usage · F1 hints"
+            "↑ history · Ctrl+R search · Ctrl+U usage · F1 hints · "
+            "Esc interrupt/recall (double-tap) · Shift+Tab mode · ? shortcuts"
         )
+        lines.append("Type @ to fuzzy-pick a file, or !<command> to run a local shell command.")
         self._mount_system("\n".join(lines))
 
+    def _session_mutating_blocked(self) -> bool:
+        """True while a turn is active or a reply submission is still in flight.
+
+        ``_turn_active`` is only set after the reply POST succeeds, so slash
+        commands that tear down the session must also gate on in-flight submit.
+        """
+        return self._turn_active or self._submit_in_flight
+
     def _cmd_new(self) -> None:
-        if self._turn_active:
+        if self._session_mutating_blocked():
             self._mount_system("Wait for the current turn to finish before /new")
             return
         self._pending.clear()
@@ -1202,7 +1430,7 @@ class ChatApp(App[int]):
         if not sid:
             self._mount_system("Usage: /resume <session_id>", error=True)
             return
-        if self._turn_active:
+        if self._session_mutating_blocked():
             self._mount_system("Wait for the current turn to finish before /resume")
             return
         self._pending.clear()
@@ -1215,7 +1443,7 @@ class ChatApp(App[int]):
         except RuntimeError as exc:
             self._mount_system(str(exc), error=True)
             return
-        self._reset_transcript_ui()
+        await self._reset_transcript_ui()
         self._mount_system("New session")
         self._refresh_status()
         self.query_one("#prompt", Composer).focus()
@@ -1227,15 +1455,137 @@ class ChatApp(App[int]):
         except RuntimeError as exc:
             self._mount_system(str(exc), error=True)
             return
-        self._reset_transcript_ui(keep_empty_hint=False)
+        await self._reset_transcript_ui(keep_empty_hint=False)
         self._mount_system(f"Resumed session {session_id[:8]}")
         self._refresh_status()
         self.query_one("#prompt", Composer).focus()
 
-    def _reset_transcript_ui(self, *, keep_empty_hint: bool = True) -> None:
+    def _cmd_model(self, arg: str) -> None:
+        spec = arg.strip()
+        if not spec:
+            self._mount_system(
+                f"model: {self.provider}/{self.model}\n"
+                "Usage: /model <name> | <provider>/<name> — starts a NEW session "
+                "(context is cleared)"
+            )
+            return
+        if self._session_mutating_blocked():
+            self._mount_system("Wait for the current turn to finish before /model")
+            return
+        if "/" in spec:
+            provider, _, name = spec.partition("/")
+        else:
+            provider, name = self.provider, spec
+        provider = provider.strip()
+        name = name.strip()
+        if not name:
+            self._mount_system("Usage: /model <name> | <provider>/<name>", error=True)
+            return
+        self._pending.clear()
+        self._change_model(provider, name)
+
+    @work(exclusive=True, group="session")
+    async def _change_model(self, provider: str, name: str) -> None:
+        controller = self._controller
+        prev_provider = getattr(controller, "model_provider", None)
+        prev_name = getattr(controller, "model_name", None)
+        if hasattr(controller, "model_provider"):
+            setattr(controller, "model_provider", provider)
+        if hasattr(controller, "model_name"):
+            setattr(controller, "model_name", name)
+        try:
+            await controller.restart_session()
+        except RuntimeError as exc:
+            if hasattr(controller, "model_provider"):
+                setattr(controller, "model_provider", prev_provider)
+            if hasattr(controller, "model_name"):
+                setattr(controller, "model_name", prev_name)
+            with contextlib.suppress(RuntimeError):
+                await controller.restart_session()
+            self._mount_system(f"Model switch failed: {exc}", error=True)
+            return
+        self.provider = provider
+        self.model = name
+        self._refresh_topbar()
+        await self._reset_transcript_ui()
+        self._mount_system(f"Model set to {provider}/{name} — new session started (context cleared)")
+        self._refresh_status()
+        self.query_one("#prompt", Composer).focus()
+
+    def _cmd_status(self) -> None:
+        usage = self._controller.usage.usage
+        lines = [
+            "Status:",
+            f"  session   {self._session_id or '(none)'}",
+            f"  model     {self.provider}/{self.model}",
+            f"  gateway   {gateway_host_label(self.base)}"
+            f" ({'spawned' if self.spawned_gateway else 'attached'})",
+            f"  agent     {self.agent_root}",
+            f"  mode      {self.approval_mode}",
+        ]
+        if self._controller.reconnecting:
+            conn = "reconnecting"
+        elif not self._controller.stream_alive:
+            conn = "disconnected"
+        else:
+            conn = "connected"
+        lines.append(f"  connection {conn}")
+        if self._pending:
+            lines.append(f"  queued    {len(self._pending)} waiting")
+        if usage is not None:
+            lines.append(
+                f"  usage     in={usage.input_tokens} out={usage.output_tokens} "
+                f"${usage.cost_usd:.4f}"
+            )
+        self._mount_system("\n".join(lines))
+
+    def _resolved_config_path(self) -> Path:
+        if self.config_path is not None:
+            return self.config_path
+        return self.agent_root / "monkeybot_config" / "monkeybot.yaml"
+
+    def _cmd_config(self, arg: str) -> None:
+        path = self._resolved_config_path()
+        if arg.strip().lower() == "edit":
+            editor = os.environ.get("EDITOR")
+            if not editor:
+                self._mount_system("Set $EDITOR to use /config edit", error=True)
+                return
+            try:
+                with self.suspend():
+                    subprocess.call([*shlex.split(editor), str(path)])
+            except (OSError, ValueError) as exc:
+                self._mount_system(f"Could not launch $EDITOR ({editor}): {exc}", error=True)
+                return
+            self._mount_system(
+                "Config edited — restart the gateway (a fresh `monkeybot chat`) to apply changes"
+            )
+            return
+        try:
+            _resolved_path, doc = load_config_doc(path if path.is_file() else None)
+        except Exception as exc:  # noqa: BLE001 - surface any YAML/parse error to the user
+            self._mount_system(f"Could not read config: {exc}", error=True)
+            return
+        def _section(key: str) -> dict[str, object]:
+            value = doc.get(key)
+            return value if isinstance(value, dict) else {}
+
+        model = _section("model")
+        runtime = _section("runtime")
+        sandbox = _section("sandbox")
+        lines = [
+            f"Config: {path}",
+            f"  model.provider   {model.get('provider', '(unset)')}",
+            f"  model.name       {model.get('name', '(unset)')}",
+            f"  runtime.port     {runtime.get('port', '(unset)')}",
+            f"  sandbox.enabled  {sandbox.get('enabled', False)}",
+            "Config changes apply only after restarting the gateway.",
+        ]
+        self._mount_system("\n".join(lines))
+
+    async def _reset_transcript_ui(self, *, keep_empty_hint: bool = True) -> None:
         transcript = self._transcript()
-        for child in list(transcript.children):
-            child.remove()
+        await transcript.remove_children()
         self._assistant = None
         self._thinking = None
         self._thinking_trace = None
@@ -1320,6 +1670,31 @@ class ChatApp(App[int]):
         path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
         return path
 
+    def _cmd_export_trace(self) -> None:
+        if not self._session_id:
+            self._mount_system("No active session to export a trace for", error=True)
+            return
+        config_path = self.config_path or resolve_config(None, cwd=self.agent_root)
+        workspace_root = resolve_workspace_root(agent_root=self.agent_root, config_path=config_path)
+        session_dir = resolve_session_artifact_dir(workspace_root, self._session_id)
+        src = session_dir / "transcript.ndjson"
+        if not src.is_file():
+            self._mount_system(
+                "No trace file found — enable transcript capture on the gateway and restart "
+                "(external gateways need MONKEYBOT_TRANSCRIPT_ENABLED=1)",
+                error=True,
+            )
+            return
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        dest = self.agent_root / "data" / f"trace_export_{ts}.ndjson"
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dest)
+        except OSError as exc:
+            self._mount_system(f"Trace export failed: {exc}", error=True)
+            return
+        self._mount_system(f"Exported trace to {dest}")
+
     def _finish_hitl_answer(self, answer: HitlAnswer) -> None:
         self._clear_hitl_ui()
         with contextlib.suppress(NoMatches):
@@ -1356,10 +1731,23 @@ class ChatApp(App[int]):
 
     @work(exclusive=True, group="submit")
     async def _submit_message(self, message: str) -> None:
-        await self._controller.submit(message)
-        if not self._controller.stream_alive:
-            self._exit_code = 1
-            self.exit(self._exit_code)
+        self._submit_in_flight = True
+        try:
+            await self._controller.submit(message)
+            if not self._controller.stream_alive:
+                self._exit_code = 1
+                self.exit(self._exit_code)
+        finally:
+            self._submit_in_flight = False
+
+    def action_show_shortcuts(self) -> None:
+        self.push_screen(ShortcutsScreen())
+
+    def action_cycle_approval_mode(self) -> None:
+        self.approval_mode = cycle_approval_mode(self.approval_mode)
+        explanation = _APPROVAL_MODE_EXPLANATIONS.get(self.approval_mode)
+        self._mount_system(explanation or "mode: normal — tool confirmations ask as usual")
+        self._refresh_status()
 
     def action_toggle_hints(self) -> None:
         self.show_hints = not self.show_hints
@@ -1377,6 +1765,36 @@ class ChatApp(App[int]):
                 composer.insert(" ")
                 return
         self._toggle_tui_ptt()
+
+    def action_esc_key(self) -> None:
+        if len(self.screen_stack) > 1:
+            self.pop_screen()
+            return
+        composer = self.query_one("#prompt", Composer)
+        if composer.in_search:
+            composer.action_cancel_search()
+            return
+        with contextlib.suppress(NoMatches):
+            palette = self._palette()
+            if palette.display:
+                self._hide_slash_palette()
+                return
+        if self._hitl_active:
+            self._finish_hitl_answer(HitlAnswer(cancelled=True))
+            return
+        if self._turn_active:
+            self._controller.abort_turn()
+            return
+        now = time.monotonic()
+        if (
+            self._last_esc is not None
+            and now - self._last_esc <= _ESC_RECALL_WINDOW
+        ):
+            self._last_esc = None
+            composer.recall_last()
+            return
+        self._last_esc = now
+        self._flash_status("Esc again to edit previous message")
 
     def action_ctrl_c(self) -> None:
         composer = self.query_one("#prompt", Composer)
@@ -1403,12 +1821,18 @@ class ChatApp(App[int]):
             else "Goodbye."
         )
         self._mount_system(msg)
+        if self._session_id:
+            self._mount_system("To continue this conversation, run: monkeybot chat --continue")
         self._close_session_and_exit()
 
     @work(exclusive=True)
     async def _close_session_and_exit(self) -> None:
         # Must not be named `_shutdown` — that shadows Textual.App._shutdown.
         await self._controller.close()
+        report_dir = getattr(self._controller, "transcript_report_dir", None)
+        if isinstance(report_dir, str) and report_dir:
+            self._mount_system(f"Transcript report → {report_dir}")
+            print(f"Transcript report → {report_dir}", flush=True)
         self._exit_code = 1 if self._controller.stream_error else self._exit_code
         self.exit(self._exit_code)
 
@@ -1470,6 +1894,7 @@ def run_chat_tui(
     animations_enabled: bool = True,
     theme_choice: str = "auto",
     controller: SessionController | None = None,
+    config_path: Path | None = None,
 ) -> int:
     app = ChatApp(
         base=base,
@@ -1486,6 +1911,7 @@ def run_chat_tui(
         animations_enabled=animations_enabled,
         theme_choice=theme_choice,
         controller=controller,
+        config_path=config_path,
     )
     result = app.run()
     return int(result) if isinstance(result, int) else 0

@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
 import aiosqlite
+
+from monkeybot.core.persistence.sqlite import TaskReentrantLock, with_conn_lock
+
+# Single envelope type for stdin protocol + durable persistence (avoid drift).
+from monkeybot.core.subagents.subagent_proto import SubagentEnvelope
 
 _SUBAGENT_COLUMNS: tuple[str, ...] = (
     "run_id",
@@ -24,6 +30,12 @@ _SUBAGENT_COLUMNS: tuple[str, ...] = (
     "worker_id",
     "claimed_at",
 )
+
+__all__ = [
+    "SQLiteRunStore",
+    "SubagentEnvelope",
+    "SubagentRunRow",
+]
 
 
 @dataclass(frozen=True)
@@ -42,77 +54,6 @@ class SubagentRunRow:
     scratch_dir: str
     worker_id: str | None = None
     claimed_at: int | None = None
-
-
-@dataclass
-class SubagentEnvelope:
-    """Minimal envelope persisted with each subagent run."""
-
-    task: str
-    context: str
-    memory_storage_uri: str
-    parent_run_id: str
-    model: str = "gemini-2.5-flash"
-    traceparent: str | None = None
-    agent_md: str | None = None
-    subagent_type: str | None = None
-
-    def to_json(self) -> str:
-        """Serialize envelope to JSON text."""
-        data = asdict(self)
-        if data.get("traceparent") is None:
-            data.pop("traceparent", None)
-        if data.get("agent_md") is None:
-            data.pop("agent_md", None)
-        if data.get("subagent_type") is None:
-            data.pop("subagent_type", None)
-        return json.dumps(data, sort_keys=True)
-
-    @classmethod
-    def from_json(cls, raw: str) -> SubagentEnvelope:
-        """Deserialize JSON text; raises ``ValueError`` on invalid input."""
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise ValueError("Invalid envelope JSON") from exc
-        if not isinstance(data, dict):
-            raise ValueError("Envelope JSON must be an object")
-        base_required = {"task", "context", "parent_run_id"}
-        missing = base_required - data.keys()
-        if missing:
-            raise ValueError(f"Envelope missing fields: {sorted(missing)}")
-        from monkeybot.core.subagents.subagent_proto import _memory_storage_uri_from_dict
-
-        uri = _memory_storage_uri_from_dict(data)
-        model = data.get("model", "gemini-2.5-flash")
-        if not isinstance(model, str):
-            raise ValueError("model must be a string when present")
-        for key in ("task", "context", "parent_run_id"):
-            if not isinstance(data[key], str):
-                raise ValueError(f"{key} must be a string")
-        traceparent = data.get("traceparent")
-        if traceparent is not None and not isinstance(traceparent, str):
-            raise ValueError("traceparent must be a string when present")
-        agent_md = data.get("agent_md")
-        if agent_md is not None and not isinstance(agent_md, str):
-            raise ValueError("agent_md must be a string when present")
-        subagent_type = data.get("subagent_type")
-        if subagent_type is not None and not isinstance(subagent_type, str):
-            raise ValueError("subagent_type must be a string when present")
-        return cls(
-            task=data["task"],
-            context=data["context"],
-            memory_storage_uri=uri.strip(),
-            parent_run_id=data["parent_run_id"],
-            model=model,
-            traceparent=traceparent.strip() if isinstance(traceparent, str) and traceparent.strip() else None,
-            agent_md=agent_md.strip() if isinstance(agent_md, str) and agent_md.strip() else None,
-            subagent_type=(
-                subagent_type.strip()
-                if isinstance(subagent_type, str) and subagent_type.strip()
-                else None
-            ),
-        )
 
 
 def _tuple_to_run_row(row: tuple[object, ...]) -> SubagentRunRow:
@@ -136,9 +77,16 @@ def _tuple_to_run_row(row: tuple[object, ...]) -> SubagentRunRow:
 class SQLiteRunStore:
     """Persist lifecycle rows for subprocess subagents."""
 
-    def __init__(self, conn: aiosqlite.Connection) -> None:
+    def __init__(
+        self,
+        conn: aiosqlite.Connection,
+        *,
+        lock: asyncio.Lock | TaskReentrantLock | None = None,
+    ) -> None:
         self._conn = conn
+        self._lock = lock or TaskReentrantLock()
 
+    @with_conn_lock
     async def record_pending(
         self,
         run_id: str,
@@ -150,6 +98,7 @@ class SQLiteRunStore:
         """Insert a ``pending`` row for worker-pool consumption."""
         await self._record_run("pending", run_id, parent_run_id, script, envelope, scratch_dir)
 
+    @with_conn_lock
     async def record_started(
         self,
         run_id: str,
@@ -192,6 +141,7 @@ class SQLiteRunStore:
         )
         await self._conn.commit()
 
+    @with_conn_lock
     async def claim(self, run_id: str, worker_id: str) -> bool:
         """Atomically transition ``pending`` -> ``running``; return True if this caller won."""
         now_ms = int(time.time() * 1000)
@@ -208,6 +158,87 @@ class SQLiteRunStore:
         await self._conn.commit()
         return int(cursor.rowcount) == 1
 
+    @with_conn_lock
+    async def renew_claim(self, run_id: str, worker_id: str) -> bool:
+        """Extend the running claim lease for a worker still executing the run."""
+        now_ms = int(time.time() * 1000)
+        cursor = await self._conn.execute(
+            """
+            UPDATE subagent_runs
+            SET claimed_at = ?
+            WHERE run_id = ?
+              AND status = 'running'
+              AND worker_id = ?
+            """,
+            (now_ms, run_id, worker_id),
+        )
+        await self._conn.commit()
+        return int(cursor.rowcount) == 1
+
+    @with_conn_lock
+    async def list_stale_claims(self, stale_after_ms: int) -> list[SubagentRunRow]:
+        """Return ``running`` rows whose claim lease is older than ``stale_after_ms``."""
+        cutoff = int(time.time() * 1000) - stale_after_ms
+        columns = ", ".join(_SUBAGENT_COLUMNS)
+        cursor = await self._conn.execute(
+            f"""
+            SELECT {columns} FROM subagent_runs
+            WHERE status = 'running'
+              AND claimed_at IS NOT NULL
+              AND claimed_at < ?
+            """,
+            (cutoff,),
+        )
+        rows = await cursor.fetchall()
+        return [_tuple_to_run_row(tuple(r)) for r in rows]
+
+    @with_conn_lock
+    async def reset_stale_claim(
+        self,
+        run_id: str,
+        stale_after_ms: int,
+        *,
+        worker_id: str | None = None,
+    ) -> bool:
+        """Atomically reset one stale ``running`` claim back to ``pending``.
+
+        Returns True only when this caller won the reset. Used before reclaim
+        kill so a renewed heartbeat cannot be killed while the claim stays live.
+        """
+        cutoff = int(time.time() * 1000) - stale_after_ms
+        if worker_id is None:
+            cursor = await self._conn.execute(
+                """
+                UPDATE subagent_runs
+                SET status = 'pending',
+                    worker_id = NULL,
+                    claimed_at = NULL
+                WHERE run_id = ?
+                  AND status = 'running'
+                  AND claimed_at IS NOT NULL
+                  AND claimed_at < ?
+                """,
+                (run_id, cutoff),
+            )
+        else:
+            cursor = await self._conn.execute(
+                """
+                UPDATE subagent_runs
+                SET status = 'pending',
+                    worker_id = NULL,
+                    claimed_at = NULL
+                WHERE run_id = ?
+                  AND status = 'running'
+                  AND worker_id = ?
+                  AND claimed_at IS NOT NULL
+                  AND claimed_at < ?
+                """,
+                (run_id, worker_id, cutoff),
+            )
+        await self._conn.commit()
+        return int(cursor.rowcount) == 1
+
+    @with_conn_lock
     async def reset_stale_claims(self, stale_after_ms: int) -> int:
         """Reset ``running`` rows with stale ``claimed_at`` back to ``pending``."""
         cutoff = int(time.time() * 1000) - stale_after_ms
@@ -226,38 +257,92 @@ class SQLiteRunStore:
         await self._conn.commit()
         return int(cursor.rowcount)
 
-    async def record_completed(self, run_id: str, result_json: str) -> None:
-        """Mark run completed with payload."""
-        now_ms = int(time.time() * 1000)
-        await self._conn.execute(
-            """
-            UPDATE subagent_runs
-            SET status = 'completed',
-                result_json = ?,
-                finished_at = ?,
-                error_json = NULL
-            WHERE run_id = ?
-            """,
-            (result_json, now_ms, run_id),
-        )
-        await self._conn.commit()
+    @with_conn_lock
+    async def record_completed(
+        self,
+        run_id: str,
+        result_json: str,
+        *,
+        worker_id: str | None = None,
+    ) -> bool:
+        """Mark run completed with payload.
 
-    async def record_failed(self, run_id: str, error: str) -> None:
-        """Mark run failed with JSON ``{\"message\": ...}`` error."""
+        When ``worker_id`` is set, only succeeds if that worker still owns a
+        ``running`` claim (atomic; avoids TOCTOU overwrite after reclaim).
+        """
+        now_ms = int(time.time() * 1000)
+        if worker_id is None:
+            cursor = await self._conn.execute(
+                """
+                UPDATE subagent_runs
+                SET status = 'completed',
+                    result_json = ?,
+                    finished_at = ?,
+                    error_json = NULL
+                WHERE run_id = ?
+                """,
+                (result_json, now_ms, run_id),
+            )
+        else:
+            cursor = await self._conn.execute(
+                """
+                UPDATE subagent_runs
+                SET status = 'completed',
+                    result_json = ?,
+                    finished_at = ?,
+                    error_json = NULL
+                WHERE run_id = ?
+                  AND status = 'running'
+                  AND worker_id = ?
+                """,
+                (result_json, now_ms, run_id, worker_id),
+            )
+        await self._conn.commit()
+        return int(cursor.rowcount) == 1
+
+    @with_conn_lock
+    async def record_failed(
+        self,
+        run_id: str,
+        error: str,
+        *,
+        worker_id: str | None = None,
+    ) -> bool:
+        """Mark run failed with JSON ``{\"message\": ...}`` error.
+
+        When ``worker_id`` is set, only succeeds if that worker still owns a
+        ``running`` claim (atomic; avoids TOCTOU overwrite after reclaim).
+        """
         now_ms = int(time.time() * 1000)
         err_payload = json.dumps({"message": error})
-        await self._conn.execute(
-            """
-            UPDATE subagent_runs
-            SET status = 'failed',
-                error_json = ?,
-                finished_at = ?
-            WHERE run_id = ?
-            """,
-            (err_payload, now_ms, run_id),
-        )
+        if worker_id is None:
+            cursor = await self._conn.execute(
+                """
+                UPDATE subagent_runs
+                SET status = 'failed',
+                    error_json = ?,
+                    finished_at = ?
+                WHERE run_id = ?
+                """,
+                (err_payload, now_ms, run_id),
+            )
+        else:
+            cursor = await self._conn.execute(
+                """
+                UPDATE subagent_runs
+                SET status = 'failed',
+                    error_json = ?,
+                    finished_at = ?
+                WHERE run_id = ?
+                  AND status = 'running'
+                  AND worker_id = ?
+                """,
+                (err_payload, now_ms, run_id, worker_id),
+            )
         await self._conn.commit()
+        return int(cursor.rowcount) == 1
 
+    @with_conn_lock
     async def pending_runs(self) -> list[SubagentRunRow]:
         """Return ``pending`` runs oldest-first (worker pool claim candidates)."""
         columns = ", ".join(_SUBAGENT_COLUMNS)
@@ -272,6 +357,7 @@ class SQLiteRunStore:
         await cursor.close()
         return [_tuple_to_run_row(tuple(row)) for row in rows]
 
+    @with_conn_lock
     async def get_run(self, run_id: str) -> SubagentRunRow | None:
         """Return full row or ``None``."""
         columns = ", ".join(_SUBAGENT_COLUMNS)

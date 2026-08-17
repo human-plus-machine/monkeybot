@@ -43,6 +43,7 @@ from monkeybot.core.tools.terminal import (
     ExecutionResult,
     SecurityError,
     build_skill_runtime_env,
+    validate_mempalace_subcommand,
 )
 
 logger = logging.getLogger(__name__)
@@ -270,6 +271,11 @@ class SandboxExecutor:
             ):
                 runtime_env.pop(key, None)
 
+        # MemPalace stays on the host. Do not leak the palace path into the
+        # sandbox (it is not mounted, and mempalace search runs on the host).
+        for key in ("MEMPALACE_PALACE_PATH", "MEMORY_STORAGE_URI", "MEMORY_PATH"):
+            runtime_env.pop(key, None)
+
         self._sandbox = await Sandbox.create(
             self._config.image,
             connection_config=connection_config,
@@ -295,6 +301,8 @@ class SandboxExecutor:
         """
         if command not in self._allowed_commands:
             raise SecurityError(f"Command '{command}' not allowed")
+        if command == "mempalace":
+            validate_mempalace_subcommand(args)
 
         if not self._config.shared_filesystem and self._remote_requests_mounted_path(args, cwd):
             raise SecurityError(

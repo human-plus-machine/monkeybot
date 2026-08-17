@@ -1,4 +1,4 @@
-# No pre-seeded memory fixture exists in evals/smoke_agent/workspace/data/memory/, so this states a
+# No pre-seeded memory fixture exists in evals/smoke_agent memory root, so this states a
 # fact and immediately asks about it in the same session rather than assuming prior content —
 # a judge-only version of this scenario had nothing deterministic to recall and was flaky.
 description: "A fact stated earlier in the same session is recalled when asked about later"

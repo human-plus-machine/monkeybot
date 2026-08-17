@@ -69,12 +69,16 @@ async def test_freeze_tool_result_media_includes_attachment_id() -> None:
         content=[
             ToolResponse(
                 id="call_1",
-                tool_name="render_image",
+                tool_name="load_file",
                 result=[
                     Image(
                         data="aW1n",
                         mime_type="image/png",
-                        metadata={"attachment_id": "att_gen1", "filename": "out.png"},
+                        metadata={
+                            "attachment_id": "att_gen1",
+                            "filename": "out.png",
+                            "path": "./generated-media/images/out.png",
+                        },
                     )
                 ],
             )
@@ -93,7 +97,8 @@ async def test_freeze_tool_result_media_includes_attachment_id() -> None:
     assert isinstance(frozen, ToolResponse)
     assert isinstance(frozen.result[0], Text)
     assert "att_gen1" in frozen.result[0].text
-    assert 'read_attachment("att_gen1")' in frozen.result[0].text
+    assert 'load_file(attachment_id="att_gen1")' in frozen.result[0].text
+    assert "path=./generated-media/images/out.png" in frozen.result[0].text
 
 
 @pytest.mark.asyncio
@@ -103,7 +108,7 @@ async def test_freeze_replaces_tool_result_media() -> None:
         content=[
             ToolResponse(
                 id="call_1",
-                tool_name="read_attachment",
+                tool_name="load_file",
                 result=[Image(data="aW1n", mime_type="image/png")],
             )
         ],
@@ -121,4 +126,5 @@ async def test_freeze_replaces_tool_result_media() -> None:
     assert isinstance(frozen, ToolResponse)
     assert len(frozen.result) == 1
     assert isinstance(frozen.result[0], Text)
-    assert "read_attachment" in frozen.result[0].text
+    assert "load_file" in frozen.result[0].text
+    assert "shown earlier" in frozen.result[0].text

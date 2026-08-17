@@ -78,7 +78,7 @@ class OpenAIProvider:
             enc = tiktoken.encoding_for_model(model)
         except KeyError:
             enc = tiktoken.get_encoding("cl100k_base")
-        return count_openai_compat_input_tokens(enc, msgs, tools)
+        return await count_openai_compat_input_tokens(enc, msgs, tools)
 
     async def stream(
         self,
@@ -94,7 +94,7 @@ class OpenAIProvider:
 
         msgs = list(messages)
 
-        system, oai_messages = messages_to_openai(msgs)
+        system, oai_messages = await messages_to_openai(msgs)
         if system:
             oai_messages = [{"role": "system", "content": system}, *oai_messages]
 

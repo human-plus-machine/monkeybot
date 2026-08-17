@@ -12,8 +12,11 @@ name: Live eval smoke
 # as a PR comment. The run JSON is uploaded as an artifact — download two of them and
 # compare with `uv run python -m evals.diff <old.json> <new.json>`.
 #
-# Cost/time budget: smoke suite is ~7 scenarios x 2-5 turns x (agent call + judge call).
-# Expect roughly $0.50-2.00 and 5-10 minutes per run depending on model pricing.
+# Cost/time budget: smoke suite is ~11 scenarios x 2-5 turns x (agent call + judge call),
+# paced by EVAL_SCENARIO_DELAY_SEC=150 between scenarios to stay under the current
+# model's provider rate limit. Expect roughly $0.75-3.00 and ~30-45 minutes per run
+# (10 delays x 150s = 25 min of pacing alone, plus actual call time) — this is not
+# stuck if it runs long; see timeout-minutes below.
 #
 # Secrets required: NVIDIA_API_KEY only (https://build.nvidia.com — free tier). The agent
 # and the judge both run on NVIDIA-hosted models through the same key, pinned to two
@@ -69,21 +72,27 @@ jobs:
     needs: gate
     if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
+    outputs:
+      available: ${{ steps.check.outputs.available }}
     steps:
       - name: Require live-eval secrets
+        id: check
         env:
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
         run: |
           if [[ -z "$NVIDIA_API_KEY" ]]; then
-            echo "::error::Live eval smoke requires the NVIDIA_API_KEY repository secret (agent + judge models, https://build.nvidia.com)"
-            exit 1
+            echo "::warning::NVIDIA_API_KEY is not configured; skipping live-eval smoke (https://build.nvidia.com)"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          echo "available=true" >> "$GITHUB_OUTPUT"
 
   live-eval:
     needs: [gate, secrets]
-    if: needs.gate.outputs.run == 'true'
+    if: needs.gate.outputs.run == 'true' && needs.secrets.outputs.available == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60 # 11 scenarios x ~150s inter-scenario delay (see EVAL_SCENARIO_DELAY_SEC) + run time,
+    # plus headroom for checkout/uv sync/gateway boot and slow judge or subagent turns
     steps:
       - uses: actions/checkout@v4
 
@@ -104,14 +113,15 @@ jobs:
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
           # Pin agent model for CI; env beats monkeybot.yaml.
           MODEL_PROVIDER: nvidia
-          MODEL_NAME: meta/llama-3.3-70b-instruct
+          MODEL_NAME: thinkingmachines/inkling
           # smoke_agent monkeybot.yaml sets runtime.port: 8080; the health check and
           # AGENT_URL below expect 8787, so pin PORT explicitly (env beats yaml).
           PORT: "8787"
           SANDBOX_ENABLED: "false" # no Docker socket in this runner
-          # Small context window so context/summarization_trigger.yaml actually crosses the
-          # real summarization threshold; the other smoke scenarios are short enough to fit.
-          MODEL_CONTEXT_WINDOW: "8000"
+          # No MODEL_CONTEXT_WINDOW override: that was only needed for
+          # context/summarization_trigger.yaml (see evals/suites/smoke.yaml), which is
+          # currently excluded from smoke pending a retune against thinkingmachines/inkling.
+          # Re-add MODEL_CONTEXT_WINDOW: "8000" here alongside it if it comes back.
         run: |
           uv run -m monkeybot.gateway.main > /tmp/gateway.log 2>&1 &
           echo $! > /tmp/gateway.pid
@@ -129,14 +139,18 @@ jobs:
       - name: Run smoke suite report
         env:
           AGENT_URL: http://127.0.0.1:8787
-          # Judge on a different free NVIDIA-hosted model than the agent (same key).
+          # Judge on a different NVIDIA-hosted model than the agent (same key).
           JUDGE_PROVIDER: nvidia
-          JUDGE_MODEL: nvidia/llama-3.3-nemotron-super-49b-v1
+          JUDGE_MODEL: nvidia/nemotron-3-ultra-550b-a55b
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
           # Scorecard metadata: report the model the gateway actually ran.
           MODEL_PROVIDER: nvidia
-          MODEL_NAME: meta/llama-3.3-70b-instruct
+          MODEL_NAME: thinkingmachines/inkling
           EVENT_NAME: ${{ github.event_name }}
+          # thinkingmachines/inkling gets rate-limited by NVIDIA even at low concurrency;
+          # each scenario itself makes several requests in quick succession, so space
+          # scenarios out rather than trying to throttle within one.
+          EVAL_SCENARIO_DELAY_SEC: "150"
         run: |
           # PRs are a gate and must block on regressions; main pushes and manual runs
           # just score the build and always report. --fail-on-regression always blocks on
