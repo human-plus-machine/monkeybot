@@ -24,6 +24,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Streamable HTTP MCP connects accept both MCP Python SDK 1.x (3-tuple with `get_session_id`) and 2.x (2-tuple / `TransportStreams`). Connecting a remote MCP server no longer raises `streamable_http_client must yield a 3-tuple` when `mcp` 2.x is installed as a transitive dependency.
 - Stop mid-reply now cancels the in-flight provider token stream (instead of waiting for the full LLM call) and persists any already-streamed assistant text to history so follow-up turns keep matching what the user saw.
 - Chunking improvements now reach existing workspaces: a chunker version bump re-chunks indexed files even when their modification time never changed, so upgrades no longer require deleting `.monkeybot/knowledge/`.
 - Vector search scores only vectors from the active embedding model. Switching provider or `dimensions` purges the incomparable rows at startup and re-embeds them, instead of blending two models into one similarity ranking.
