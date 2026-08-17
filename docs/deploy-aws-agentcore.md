@@ -77,7 +77,7 @@ Minimum for bootstrap examples:
 Set `LOG_LEVEL` to `INFO` or `info` (case-insensitive).
 
 Package `monkeybot_config/` and `skills/` as read-only handler inputs. AgentCore
-workspace is ephemeral unless you opt into [AgentCore filesystem mounts](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-filesystem-configurations.html); use `DB_URL` and `MEMORY_STORAGE_URI` for durable state. There is no Docker-socket sandbox. A remote sandbox, if configured, is compute-only and cannot mount workspace or skills paths; Browser Use Cloud is the portable browser option.
+workspace is ephemeral unless you opt into [AgentCore filesystem mounts](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-filesystem-configurations.html); use `DB_URL` and `MEMORY_STORAGE_URI` for durable state. There is no Docker-socket sandbox. A remote sandbox, if configured, is compute-only and cannot mount workspace or skills paths; Browser Use Cloud or AgentCore Browser (see [Browser MCP](browser-mcp.md)) are the portable browser options.
 
 ---
 

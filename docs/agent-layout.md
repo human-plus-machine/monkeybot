@@ -113,7 +113,7 @@ deployment guidance, not a claim that MonkeyBot runs that managed service in CI.
 | Local Docker / Compose | configuration validated | baked into the agent image | anonymous volume | SQLite volume or Postgres | Compose overlay | headless Chromium in image |
 | Cloud Run / ECS Fargate / Container Apps | pattern only | baked into image, read-only | ephemeral `/agent/workspace` | managed DB + object memory | remote, compute-only | in-image Chromium or Browser Use Cloud |
 | GKE / EKS / ECS-EC2 / VM | pattern only | baked into image | volume or `emptyDir` | managed DB + object memory, or PVC | co-located sidecar with Docker socket | Chromium sidecar or in-image |
-| AWS AgentCore | pattern only | handler bundle | ephemeral or platform file mounts | managed session storage or URI overrides | none or remote compute-only | Browser Use Cloud |
+| AWS AgentCore | pattern only | handler bundle | ephemeral or platform file mounts | managed session storage or URI overrides | none or remote compute-only | Browser Use Cloud or AgentCore Browser |
 | Vertex Agent Engine | pattern only | packaged source artifact | ephemeral temporary storage | URI overrides | none or remote compute-only | Browser Use Cloud |
 
 Cloud Run's writable filesystem is in memory: workspace files, screenshots, and
