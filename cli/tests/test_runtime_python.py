@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import os
 import subprocess
 import sys
 from importlib.metadata import version as package_version
@@ -897,7 +899,7 @@ def test_managed_runtime_fail_closed_on_unreadable_yaml(
 
 
 def test_resolve_managed_runtime_tolerates_bad_yaml(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Quiet resolve must stay total; bad YAML is fail-closed only at provision."""
     cfg = tmp_path / "monkeybot_config"
@@ -905,10 +907,12 @@ def test_resolve_managed_runtime_tolerates_bad_yaml(
     (cfg / "monkeybot.yaml").write_text("model: [\n", encoding="utf-8")
     _isolate_managed_cache(tmp_path, monkeypatch)
 
-    runtime = resolve_runtime_python(tmp_path, memory_enabled=True)
+    with caplog.at_level(logging.DEBUG, logger="monkeybot_cli.runtime_python"):
+        runtime = resolve_runtime_python(tmp_path, memory_enabled=True)
 
     assert runtime.source == "cli"
     assert runtime.argv == [sys.executable]
+    assert "skipping provider extras" in caplog.text
 
 
 def test_managed_runtime_dir_separates_checkout_from_pypi(
@@ -929,6 +933,28 @@ def test_managed_runtime_dir_separates_checkout_from_pypi(
 
     assert pypi != from_checkout
     assert from_checkout != other_checkout
+
+
+def test_managed_runtime_dir_invalidates_on_source_edit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Editing packaged source must not silently reuse a snapshot cache dir."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    checkout = tmp_path / "monkeybot-src"
+    pkg = checkout / "src" / "monkeybot"
+    pkg.mkdir(parents=True)
+    (checkout / "pyproject.toml").write_text('[project]\nname = "monkeybot"\n', encoding="utf-8")
+    source = pkg / "providers.py"
+    source.write_text("x = 1\n", encoding="utf-8")
+
+    before = managed_memory_runtime_dir("3.1.2", ("nvidia",), checkout=checkout)
+    source.write_text("x = 2\n", encoding="utf-8")
+    # Force a newer mtime even on filesystems with coarse timestamp resolution.
+    st = source.stat()
+    os.utime(source, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+    after = managed_memory_runtime_dir("3.1.2", ("nvidia",), checkout=checkout)
+
+    assert before != after
 
 
 def test_managed_runtime_dir_separates_distinct_extra_sets(

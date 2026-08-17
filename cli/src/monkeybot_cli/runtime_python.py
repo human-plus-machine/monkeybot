@@ -32,6 +32,7 @@ probe refuses to start the gateway.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import shutil
 import subprocess
@@ -55,6 +56,7 @@ from monkeybot_cli.extras_catalog import FEATURE_CHOICES, provider_extra_name
 from monkeybot_cli.providers import PROVIDER_SPECS, extra_installed, extra_module
 
 DEFAULT_PORT = 8080
+_log = logging.getLogger(__name__)
 SSE_GATEWAY_MODULE = "monkeybot.gateway.main"
 COMBINED_GATEWAY_MODULE = "monkeybot.gateway.realtime_main"
 
@@ -278,6 +280,34 @@ def mirrored_monkeybot_extras() -> tuple[str, ...]:
     )
 
 
+def _checkout_source_mtime_ns(checkout: Path) -> int:
+    """Newest mtime under the packaged source tree (and ``pyproject.toml``).
+
+    ``monkeybot @ file://`` is a snapshot copy, so the cache key must change when
+    anything that would be installed changes — not only when ``pyproject.toml``
+    itself is touched.
+    """
+    newest = 0
+    pyproject = checkout / "pyproject.toml"
+    try:
+        newest = max(newest, pyproject.stat().st_mtime_ns)
+    except OSError:
+        pass
+    src_root = checkout / "src"
+    if not src_root.is_dir():
+        return newest
+    for dirpath, dirnames, filenames in os.walk(src_root):
+        dirnames[:] = [name for name in dirnames if name != "__pycache__" and name != ".git"]
+        for name in filenames:
+            if name.endswith((".pyc", ".pyo")):
+                continue
+            try:
+                newest = max(newest, Path(dirpath, name).stat().st_mtime_ns)
+            except OSError:
+                continue
+    return newest
+
+
 def managed_memory_runtime_dir(
     monkeybot_version: str,
     extras: Sequence[str] = (),
@@ -287,11 +317,12 @@ def managed_memory_runtime_dir(
     """Deterministic cache directory for the managed MemPalace runtime.
 
     Keyed by the pinned MonkeyBot version, the CLI's Python version, mirrored
-    extras, and (when installing from a source tree) the resolved checkout
-    path plus ``pyproject.toml`` mtime. A CLI upgrade, Python upgrade, extras
-    change, or checkout move/edit provisions a fresh runtime instead of reusing
-    a mismatched one — important because ``monkeybot @ file://`` is a
-    snapshot copy, not an editable install.
+    extras, and (when installing from a source tree) the resolved checkout path
+    plus the newest mtime under ``src/`` / ``pyproject.toml``. A CLI upgrade,
+    Python upgrade, extras change, checkout move, or packaged-source edit
+    provisions a fresh runtime instead of reusing a mismatched one —
+    important because ``monkeybot @ file://`` is a snapshot copy, not an
+    editable install.
     """
     key = (
         f"memory-{_sanitize_key_part(monkeybot_version)}"
@@ -300,11 +331,7 @@ def managed_memory_runtime_dir(
     digest_parts = sorted(extra.lower() for extra in extras)
     if checkout is not None:
         resolved = checkout.resolve()
-        try:
-            mtime_ns = (resolved / "pyproject.toml").stat().st_mtime_ns
-        except OSError:
-            mtime_ns = 0
-        digest_parts.append(f"checkout:{resolved.as_posix()}:{mtime_ns}")
+        digest_parts.append(f"checkout:{resolved.as_posix()}:{_checkout_source_mtime_ns(resolved)}")
     if digest_parts:
         digest = hashlib.sha256(",".join(digest_parts).encode()).hexdigest()[:8]
         key = f"{key}-{digest}"
@@ -361,6 +388,7 @@ def _agent_provider_extras(
     except Exception as exc:
         if fail_closed:
             raise _managed_runtime_error(f"could not read {effective}: {exc}") from exc
+        _log.debug("skipping provider extras; could not read %s: %s", effective, exc)
         return ()
     model = data.get("model")
     if model is None:
@@ -368,6 +396,7 @@ def _agent_provider_extras(
     if not isinstance(model, dict):
         if fail_closed:
             raise _managed_runtime_error(f"{effective} model is not a mapping")
+        _log.debug("skipping provider extras; %s model is not a mapping", effective)
         return ()
     raw = model.get("provider")
     extra = provider_extra_name(raw if isinstance(raw, str) else None)
@@ -382,9 +411,7 @@ def _managed_runtime_extras(
 ) -> tuple[str, ...]:
     """CLI-mirrored extras plus the extra required by this agent's YAML provider."""
     extras = set(mirrored_monkeybot_extras())
-    extras.update(
-        _agent_provider_extras(agent_root, config_path, fail_closed=fail_closed)
-    )
+    extras.update(_agent_provider_extras(agent_root, config_path, fail_closed=fail_closed))
     return tuple(sorted(extras))
 
 
@@ -564,9 +591,7 @@ def provision_managed_memory_runtime(
     if shutil.which("uv") is None:
         raise _managed_runtime_error("uv was not found on PATH")
     extra_spec = ",".join(("memory", *extras))
-    requirement = _managed_memory_requirement(
-        monkeybot_version, extra_spec, checkout=checkout
-    )
+    requirement = _managed_memory_requirement(monkeybot_version, extra_spec, checkout=checkout)
     print(
         f"agent memory runtime is missing MemPalace; provisioning {requirement} in {runtime_dir}",
         flush=True,
