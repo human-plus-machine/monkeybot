@@ -564,6 +564,15 @@ def _normalize_call_tool_result(result: Any) -> str:
     return sanitize_tool_result_text("".join(chunks))
 
 
+def _unpack_streamable_http_streams(streams: Any) -> tuple[Any, Any]:
+    """Return ``(read, write)`` from an MCP 1.x 3-tuple or 2.x 2-tuple."""
+    if isinstance(streams, tuple) and len(streams) in (2, 3):
+        return streams[0], streams[1]
+    raise TypeError(
+        f"streamable_http_client must yield a 2-tuple or 3-tuple, got {streams!r}"
+    )
+
+
 class MCPClient:
     """MCP SDK client (stdio subprocesses and Streamable HTTP) for :class:`monkeybot.core.mcp.ports_mcp.MCPClientPort`."""
 
@@ -726,6 +735,7 @@ class MCPClient:
             if auth is not None:
                 hdr.pop("Authorization", None)
                 hdr.pop("authorization", None)
+            # mcp 2.x wants httpx2.AsyncClient here; stay on httpx until that migration.
             http = httpx.AsyncClient(
                 headers=hdr if hdr else None,
                 auth=auth,
@@ -735,9 +745,7 @@ class MCPClient:
             await stack.enter_async_context(http)
             transport_cm = streamable_http_client(url, http_client=http)
             read_write = await stack.enter_async_context(transport_cm)
-            if not isinstance(read_write, tuple) or len(read_write) != 3:
-                raise TypeError(f"streamable_http_client must yield a 3-tuple, got {read_write!r}")
-            read_s, write_s, _get_sid = read_write
+            read_s, write_s = _unpack_streamable_http_streams(read_write)
             session_cm = ClientSession(read_s, write_s)
             session = await stack.enter_async_context(session_cm)
             await session.initialize()

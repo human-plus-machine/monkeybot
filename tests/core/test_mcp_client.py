@@ -83,6 +83,36 @@ def _stub_hooks(session: SimpleNamespace) -> mc.MCPStdioHooks:
     return _Hooks()
 
 
+@pytest.mark.parametrize(
+    "streams",
+    [
+        ("read", "write"),
+        ("read", "write", "get_session_id"),
+    ],
+    ids=["2-tuple", "3-tuple"],
+)
+def test_unpack_streamable_http_streams_accepts_mcp_tuple_shapes(
+    streams: tuple[object, ...],
+) -> None:
+    assert mc._unpack_streamable_http_streams(streams) == ("read", "write")
+
+
+@pytest.mark.parametrize(
+    "streams",
+    [
+        ("only",),
+        ("a", "b", "c", "d"),
+        ["read", "write"],
+        "rw",
+        None,
+    ],
+    ids=["1-tuple", "4-tuple", "list", "str", "none"],
+)
+def test_unpack_streamable_http_streams_rejects_invalid_shapes(streams: object) -> None:
+    with pytest.raises(TypeError, match="2-tuple or 3-tuple"):
+        mc._unpack_streamable_http_streams(streams)
+
+
 @pytest.mark.asyncio
 async def test_connect_prefixes_tool_names() -> None:
     """``connect`` returns ``server__tool`` ``ToolDef`` names."""
