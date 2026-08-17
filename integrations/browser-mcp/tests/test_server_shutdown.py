@@ -26,12 +26,17 @@ def _reset_bh_state():
     server._bound_cdp = original_bound
 
 
-def test_stop_daemon_for_shutdown_noop_when_daemon_never_started() -> None:
-    """No daemon started yet -- shutdown hook must not import/touch browser_harness."""
+def test_stop_daemon_for_shutdown_still_stops_daemon_when_never_bound_here() -> None:
+    """No daemon bound by this process (_bh is None) -- shutdown must still
+
+    best-effort stop browser-harness's daemon, since a fresh process can't
+    tell an external/leftover daemon (e.g. a still-billing Browser Use Cloud
+    session from a prior process) apart from "nothing to stop" any other way.
+    """
     server._bh = None
     with patch("browser_harness.admin.restart_daemon") as mock_restart:
         server._stop_daemon_for_shutdown()
-    mock_restart.assert_not_called()
+    mock_restart.assert_called_once()
 
 
 def test_stop_daemon_for_shutdown_stops_running_daemon() -> None:
@@ -52,12 +57,17 @@ def test_stop_daemon_for_shutdown_swallows_errors() -> None:
 
 
 def test_stop_daemon_for_shutdown_is_idempotent() -> None:
-    """Calling the hook twice (e.g. atexit + explicit signal handler) is safe."""
+    """Calling the hook twice (e.g. atexit + explicit signal handler) is safe.
+
+    Each call best-effort re-attempts restart_daemon() (itself idempotent on
+    an already-stopped daemon), so it's called twice here, not once -- the
+    guarantee is "safe", not "only ever touches the daemon once".
+    """
     server._bh = (MagicMock(), MagicMock())
     with patch("browser_harness.admin.restart_daemon") as mock_restart:
         server._stop_daemon_for_shutdown()
         server._stop_daemon_for_shutdown()
-    mock_restart.assert_called_once()
+    assert mock_restart.call_count == 2
 
 
 def test_install_shutdown_handlers_registers_sigterm_and_sigint() -> None:
