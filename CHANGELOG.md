@@ -6,15 +6,16 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [core v3.0.0] - 2026-08-17
+
 ### Breaking
 
 - Note-based memory (INDEX.md, curator, `search_memory` / `edit_memory` / `forget`) is replaced by per-agent MemPalace with a durable outbox on SQLite, Postgres, and Firestore. Capture can be turned off with `memory.enabled: false` or `MONKEYBOT_MEMORY_HOOK_ENABLED=0`. Object-store palace URIs (`gcs://`, `s3://`) are not supported; use `local://`. MemPalace itself is the optional `monkeybot[memory]` extra.
+- `subagents:` as a bare list of personas is no longer supported; wrap personas under `subagents.personas` in `monkeybot.yaml`. `SUBAGENT_TIMEOUT_SEC`, `SUBAGENT_MAX_TURNS`, and `MONKEYBOT_SUBAGENT_AGENT_MD` environment variable overrides are removed — set `subagents.timeout_sec`, `subagents.max_turns`, and per-persona `agent_md` in `monkeybot.yaml` instead. Top-level `subagents.agent_md` is also removed.
 
 ### Added
 
-- `monkeybot run` / `chat` / `talk` refuse to start when the agent interpreter lacks MonkeyBot 3.x (and MemPalace when memory is enabled). A failed probe may `uv sync` an existing lock; it never rewrites `pyproject.toml`. Config-only agents with memory on get a CLI-managed cache venv holding `monkeybot[memory]` pinned to the running core, reused offline.
 - MemPalace outbox now persists on Postgres and Firestore (same table/document shape as SQLite), with replica `palace_id` claim partitioning. Replicated deployments must share a lock-capable palace volume.
-- `monkeybot chat` TUI gained Claude-Code-style interaction: `Esc` interrupts the active turn (double-tap while idle recalls your last message for editing), `Shift+Tab` cycles a client-side approval mode (`normal` / `auto-approve` / `deny-confirms` — auto-answers tool confirmation prompts only, elicitations still ask), `@` fuzzy-inserts a workspace file path, `!<command>` runs a local shell command shown in the transcript but never sent to the agent, and `?` opens a keyboard-shortcut overlay. New slash commands: `/clear` (alias of `/new`), `/model` (switches model by starting a fresh session), `/status`, `/config`.
 - Knowledge indexing follows document structure instead of fixed line windows: markdown headings, code definitions (tree-sitter via the optional `knowledge-ast` extra, brace/indent heuristic otherwise), and JSON/YAML/TOML top-level keys become chunk boundaries.
 - Embeddings run on NVIDIA, OpenAI, any OpenAI-compatible endpoint, Voyage, or Gemini via `knowledge.embeddings.provider`. Misconfigured or unavailable providers degrade to keyword + graph search rather than failing the turn.
 - PDF, DOCX, and image files are indexed with the `knowledge-media` extra. Images use `knowledge.captions` (`off` / `path` / `llm`); DOCX indexing covers tables as well as paragraphs.
@@ -42,9 +43,29 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 - Subagent defaults and named personas are now configured under a single `subagents:` YAML mapping (`subagents.timeout_sec`, `subagents.max_turns`, `subagents.vertex_google_search`, `subagents.personas`), replacing the separate `subagent:` defaults block and bare-list `subagents:` personas. Persona prompts live only on `subagents.personas[].agent_md`; tasks without a `subagent_type` inherit the parent `paths.agent_md`.
 - Spill sizing is window-derived (soft spill). `tools.spill_min_chars` / `tools.spill_read_max_lines` / `tools.read_default_lines` are retired (warned, ignored). `tools.read_max_lines` is YAML-only (env overrides removed). `read_file` defaults to 2000 lines when `limit` is omitted; pass `limit` to request more. Large ordinary reads can return more content than the old flat 32k cap.
 
-### Breaking
+## [browser v0.3.0] - 2026-08-17
 
-- `subagents:` as a bare list of personas is no longer supported; wrap personas under `subagents.personas` in `monkeybot.yaml`. `SUBAGENT_TIMEOUT_SEC`, `SUBAGENT_MAX_TURNS`, and `MONKEYBOT_SUBAGENT_AGENT_MD` environment variable overrides are removed — set `subagents.timeout_sec`, `subagents.max_turns`, and per-persona `agent_md` in `monkeybot.yaml` instead. Top-level `subagents.agent_md` is also removed.
+### Added
+
+- AWS Bedrock AgentCore Browser backend via the optional `agentcore` extra (`bedrock-agentcore`, Playwright).
+- Prefer a Monkeyapp in-app CDP endpoint over desktop Chrome or a stale `BROWSER_CDP_*` env when the in-app CDP file is present.
+
+### Changed
+
+- `mcp` is pinned to `>=1.0.0,<2` (same Streamable HTTP constraint as core; see #190).
+
+## [cli v0.5.0] - 2026-08-17
+
+### Added
+
+- `monkeybot run` / `chat` / `talk` refuse to start when the agent interpreter lacks MonkeyBot 3.x (and MemPalace when memory is enabled). A failed probe may `uv sync` an existing lock; it never rewrites `pyproject.toml`. Config-only agents with memory on get a CLI-managed cache venv holding `monkeybot[memory]` pinned to the running core, reused offline. A local monkeybot checkout can provision that runtime from source; the cache invalidates when those sources change.
+- `monkeybot chat` TUI gained Claude-Code-style interaction: `Esc` interrupts the active turn (double-tap while idle recalls your last message for editing), `Shift+Tab` cycles a client-side approval mode (`normal` / `auto-approve` / `deny-confirms` — auto-answers tool confirmation prompts only, elicitations still ask), `@` fuzzy-inserts a workspace file path, `!<command>` runs a local shell command shown in the transcript but never sent to the agent, and `?` opens a keyboard-shortcut overlay. New slash commands: `/clear` (alias of `/new`), `/model` (switches model by starting a fresh session), `/status`, `/config`.
+- `monkeybot chat -c` / `--continue` resumes the most recent session for the current agent.
+
+### Changed
+
+- `monkeybot new` no longer scaffolds capability skills into new agents.
+- Declares `monkeybot[cli]>=3.0.0,<4` so a global CLI install pulls MonkeyBot 3.x.
 
 ## [cli v0.3.1] - 2026-07-28
 
