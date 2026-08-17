@@ -689,7 +689,7 @@ def test_managed_memory_requirement_uses_checkout_env(
 ) -> None:
     checkout = tmp_path / "from-env"
     checkout.mkdir()
-    (checkout / "pyproject.toml").write_text('[project]\nname = "monkeybot"\n', encoding="utf-8")
+    (checkout / "pyproject.toml").write_text('[project]\nname="monkeybot"\n', encoding="utf-8")
     monkeypatch.setenv("MONKEYBOT_CHECKOUT", str(checkout))
 
     requirement = Requirement(_managed_memory_requirement("3.0.0", "memory"))
@@ -713,9 +713,7 @@ def test_managed_runtime_retires_existing_dir_instead_of_rmtree(
     monkeypatch.setattr(
         "monkeybot_cli.runtime_python.run_probe",
         # First probe (cache reuse) fails; staged probe after install passes.
-        lambda runtime, code, **kwargs: (
-            Path(runtime.argv[0]).resolve() != old_interpreter.resolve()
-        ),
+        lambda runtime, code, **kwargs: Path(runtime.argv[0]).resolve() != old_interpreter.resolve(),
     )
 
     runtime = provision_managed_memory_runtime(tmp_path)
@@ -850,6 +848,38 @@ def test_managed_runtime_includes_yaml_provider_extra(
     assert requirement.extras == {"memory", "nvidia"}
 
 
+def test_managed_runtime_uses_explicit_config_for_provider_extra(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--config`` elsewhere must still drive the provider extra into the pin."""
+    agent_root = tmp_path / "agent"
+    agent_root.mkdir()
+    (agent_root / "monkeybot_config").mkdir()
+    (agent_root / "monkeybot_config" / "monkeybot.yaml").write_text(
+        "model:\n  provider: openai\nmemory:\n  enabled: true\n",
+        encoding="utf-8",
+    )
+    explicit = tmp_path / "elsewhere" / "monkeybot.yaml"
+    explicit.parent.mkdir()
+    explicit.write_text(
+        "model:\n  provider: nvidia\nmemory:\n  enabled: true\n",
+        encoding="utf-8",
+    )
+    _isolate_managed_cache(tmp_path, monkeypatch)
+    calls: list[list[str]] = []
+    monkeypatch.setattr("monkeybot_cli.runtime_python.subprocess.run", _fake_uv(calls))
+    monkeypatch.setattr(
+        "monkeybot_cli.runtime_python.run_probe",
+        lambda runtime, code, **kwargs: runtime.source == MANAGED_RUNTIME_SOURCE,
+    )
+
+    provision_managed_memory_runtime(agent_root, config_path=explicit)
+
+    install = next(cmd for cmd in calls if cmd[:3] == ["uv", "pip", "install"])
+    requirement = Requirement(install[-1])
+    assert requirement.extras == {"memory", "nvidia"}
+
+
 def test_managed_runtime_fail_closed_on_unreadable_yaml(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -864,6 +894,41 @@ def test_managed_runtime_fail_closed_on_unreadable_yaml(
 
     with pytest.raises(RuntimeUpgradeError, match="could not read"):
         provision_managed_memory_runtime(tmp_path)
+
+
+def test_resolve_managed_runtime_tolerates_bad_yaml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Quiet resolve must stay total; bad YAML is fail-closed only at provision."""
+    cfg = tmp_path / "monkeybot_config"
+    cfg.mkdir()
+    (cfg / "monkeybot.yaml").write_text("model: [\n", encoding="utf-8")
+    _isolate_managed_cache(tmp_path, monkeypatch)
+
+    runtime = resolve_runtime_python(tmp_path, memory_enabled=True)
+
+    assert runtime.source == "cli"
+    assert runtime.argv == [sys.executable]
+
+
+def test_managed_runtime_dir_separates_checkout_from_pypi(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Checkout installs must not reuse a PyPI-keyed cache directory."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    checkout = tmp_path / "src"
+    checkout.mkdir()
+    (checkout / "pyproject.toml").write_text('[project]\nname = "monkeybot"\n', encoding="utf-8")
+
+    pypi = managed_memory_runtime_dir("3.1.2", ("nvidia",))
+    from_checkout = managed_memory_runtime_dir("3.1.2", ("nvidia",), checkout=checkout)
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "pyproject.toml").write_text('[project]\nname = "monkeybot"\n', encoding="utf-8")
+    other_checkout = managed_memory_runtime_dir("3.1.2", ("nvidia",), checkout=other)
+
+    assert pypi != from_checkout
+    assert from_checkout != other_checkout
 
 
 def test_managed_runtime_dir_separates_distinct_extra_sets(

@@ -59,14 +59,16 @@ def test_api_key_without_url_targets_ollama_cloud(
 ) -> None:
     monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
     monkeypatch.setenv("OLLAMA_API_KEY", "ollama-cloud-key")
-    with caplog.at_level(logging.DEBUG, logger="monkeybot.providers.ollama"):
+    with caplog.at_level(logging.WARNING, logger="monkeybot.providers.ollama"):
         provider = OllamaProvider()
     assert provider._api_key == "ollama-cloud-key"
     assert provider._resolve_base_url("gpt-oss:120b") == "https://ollama.com/v1"
     assert "host=https://ollama.com" in caplog.text
+    assert "local reverse proxy" in caplog.text
 
 
 def test_explicit_url_wins_over_cloud_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Key + explicit URL keeps local/proxy routing (pre-cloud behavior)."""
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
     monkeypatch.setenv("OLLAMA_API_KEY", "proxy-secret")
     provider = OllamaProvider()

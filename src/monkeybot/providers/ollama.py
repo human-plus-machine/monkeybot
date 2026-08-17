@@ -65,8 +65,9 @@ def _resolve_host_and_key() -> tuple[str, str]:
     if base:
         return base, api_key or _DUMMY_API_KEY
     if api_key:
-        _log.debug(
-            "OLLAMA_API_KEY set with no OLLAMA_BASE_URL; using Ollama Cloud %s",
+        _log.warning(
+            "OLLAMA_API_KEY set with no OLLAMA_BASE_URL; using Ollama Cloud %s "
+            "(set OLLAMA_BASE_URL explicitly for a local reverse proxy)",
             kv(host=_DEFAULT_CLOUD_URL),
         )
         return _DEFAULT_CLOUD_URL, api_key
@@ -163,7 +164,9 @@ class OllamaProvider:
     ) -> AsyncIterator[ProviderEvent]:
         budget = _resolve_thinking_budget(self._thinking_budget, override=thinking_budget)
         reasoning_effort = reasoning_effort_for_thinking_budget(budget)
-        effort_kw = {"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}
+        effort_kw = (
+            {"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}
+        )
         async for event in stream_chat_completions_with_tool_fallback(
             base_url=self._resolve_base_url(model),
             api_key=self._api_key,
