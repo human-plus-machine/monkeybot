@@ -65,6 +65,27 @@ def test_other_backend_value_not_requested(monkeypatch: pytest.MonkeyPatch) -> N
     assert agentcore.agentcore_backend_requested() is False
 
 
+# --- resolve_region() ---
+
+
+def test_resolve_region_defaults_to_us_east_1(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+    assert agentcore.resolve_region() == "us-east-1"
+
+
+def test_resolve_region_prefers_aws_region(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWS_REGION", "eu-west-1")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-west-2")
+    assert agentcore.resolve_region() == "eu-west-1"
+
+
+def test_resolve_region_falls_back_to_aws_default_region(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-west-2")
+    assert agentcore.resolve_region() == "us-west-2"
+
+
 # --- AgentCoreAdmin session lifecycle ---
 
 
@@ -156,7 +177,7 @@ def test_browser_harness_dispatches_to_agentcore(monkeypatch: pytest.MonkeyPatch
 
     with (
         patch("browser_mcp.agentcore.AgentCoreAdmin", return_value=fake_admin),
-        patch.dict("sys.modules", {"browser_mcp.playwright_helpers": fake_playwright_helpers}),
+        patch("browser_mcp.playwright_helpers", fake_playwright_helpers),
     ):
         helpers, admin = server._browser_harness()
 
@@ -208,7 +229,7 @@ def test_browser_stop_calls_stop_session_for_agentcore() -> None:
     server._bh = (MagicMock(), fake_admin)
     server._bound_cdp = "agentcore"
 
-    with patch.dict("sys.modules", {"browser_mcp.playwright_helpers": fake_playwright_helpers}):
+    with patch("browser_mcp.playwright_helpers", fake_playwright_helpers):
         server.browser_stop()
 
     fake_admin.stop_session.assert_called_once()
@@ -229,13 +250,44 @@ def test_browser_stop_does_not_call_stop_session_for_non_agentcore() -> None:
     mock_restart.assert_called_once()
 
 
+def test_browser_stop_stops_leftover_daemon_when_never_bound_here() -> None:
+    """Fresh process, _bh never set: browser_stop must still best-effort stop
+
+    browser-harness's daemon, since an external/leftover daemon (e.g. a
+    still-billing Browser Use Cloud session from a prior process) may be
+    alive -- matching _browser_harness()'s own "Fresh process" comment.
+    """
+    assert server._bh is None
+    with patch("browser_harness.admin.restart_daemon") as mock_restart:
+        result = server.browser_stop()
+
+    mock_restart.assert_called_once()
+    assert '"ok": true' in result.lower()
+
+
+def test_browser_stop_returns_error_payload_on_failure() -> None:
+    """A failing teardown surfaces {"ok": false, ...}, not a raw traceback --
+    matching the convention every other browser_* tool follows on failure."""
+    fake_admin = MagicMock()
+    fake_admin.stop_session.side_effect = RuntimeError("boom")
+    server._bh = (MagicMock(), fake_admin)
+    server._bound_cdp = "agentcore"
+
+    with patch("browser_mcp.playwright_helpers", MagicMock()):
+        result = server.browser_stop()
+
+    assert '"ok": false' in result.lower()
+    assert "boom" in result
+    assert server._bound_cdp is None
+
+
 def test_shutdown_stops_agentcore_session() -> None:
     fake_admin = MagicMock()
     fake_playwright_helpers = MagicMock()
     server._bh = (MagicMock(), fake_admin)
     server._bound_cdp = "agentcore"
 
-    with patch.dict("sys.modules", {"browser_mcp.playwright_helpers": fake_playwright_helpers}):
+    with patch("browser_mcp.playwright_helpers", fake_playwright_helpers):
         server._stop_daemon_for_shutdown()
 
     fake_admin.stop_session.assert_called_once()
@@ -254,3 +306,43 @@ def test_shutdown_swallows_agentcore_stop_errors() -> None:
 
     assert server._bh is None
     assert server._bound_cdp is None
+
+
+def test_shutdown_stops_leftover_daemon_when_never_bound_here() -> None:
+    """Same "fresh process, external daemon may be alive" safety net as
+
+    browser_stop applies to the atexit/SIGTERM hook too."""
+    assert server._bh is None
+    with patch("browser_harness.admin.restart_daemon") as mock_restart:
+        server._stop_daemon_for_shutdown()
+    mock_restart.assert_called_once()
+
+
+# --- AgentCore reconnect-on-stale-session hook ---
+
+
+def test_reconnect_agentcore_stops_and_restarts_session() -> None:
+    fake_admin = MagicMock()
+    fake_admin.ensure_session.return_value = ("wss://fresh/ws", {"Authorization": "sig2"})
+    server._agentcore_admin = fake_admin
+
+    result = server._reconnect_agentcore()
+
+    fake_admin.stop_session.assert_called_once()
+    fake_admin.ensure_session.assert_called_once()
+    assert result == ("wss://fresh/ws", {"Authorization": "sig2"})
+
+
+def test_agentcore_browser_harness_registers_reconnect_hook(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BROWSER_BACKEND", "agentcore")
+    fake_admin = MagicMock()
+    fake_admin.ensure_session.return_value = ("wss://example/ws", {"Authorization": "sig"})
+    fake_playwright_helpers = MagicMock()
+
+    with (
+        patch("browser_mcp.agentcore.AgentCoreAdmin", return_value=fake_admin),
+        patch("browser_mcp.playwright_helpers", fake_playwright_helpers),
+    ):
+        server._browser_harness()
+
+    fake_playwright_helpers.set_reconnect_hook.assert_called_once_with(server._reconnect_agentcore)

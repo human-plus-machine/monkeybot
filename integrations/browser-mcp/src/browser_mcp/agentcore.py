@@ -20,14 +20,13 @@ from typing import Any
 DEFAULT_IDENTIFIER = "aws.browser.v1"
 
 
+def resolve_region() -> str:
+    """AWS_REGION, falling back to AWS_DEFAULT_REGION, then us-east-1."""
+    return os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
+
+
 class AgentCoreAdmin:
-    """Owns one AgentCore browser session's lifecycle.
-
-    ``kind`` lets callers (server.py's browser_stop / shutdown hook) branch
-    on backend type without string-comparing ``_bound_cdp``.
-    """
-
-    kind = "agentcore"
+    """Owns one AgentCore browser session's lifecycle."""
 
     def __init__(self, region: str, identifier: str | None = None) -> None:
         self.region = region
@@ -41,7 +40,8 @@ class AgentCoreAdmin:
         Returns ``(ws_url, headers)`` from the session client's
         ``generate_ws_headers()`` -- ready for Playwright's
         ``connect_over_cdp(ws_url, headers=headers)``. Session TTL is left at
-        the AgentCore service default (15 minutes).
+        whatever the bedrock-agentcore SDK/service default is -- not
+        configured here.
         """
         if self._client is None:
             from bedrock_agentcore.tools.browser_client import browser_session

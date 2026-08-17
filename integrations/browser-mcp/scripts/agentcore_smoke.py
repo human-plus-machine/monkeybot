@@ -10,13 +10,11 @@ Usage:
 
 from __future__ import annotations
 
-import os
-
 from browser_mcp import agentcore, playwright_helpers
 
 
 def main() -> int:
-    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
+    region = agentcore.resolve_region()
     admin = agentcore.AgentCoreAdmin(region)
 
     print(f"[1/5] ensure_session (region={region}, identifier={admin.identifier}) ...")

@@ -148,17 +148,30 @@ def _teardown_bound_backend() -> None:
         bh_admin.restart_daemon()
 
 
+def _reconnect_agentcore() -> tuple[str, dict[str, str]]:
+    """Force a fresh AgentCore session (stop + restart) and return new ws creds.
+
+    Registered with playwright_helpers as its reconnect hook: a stale/expired
+    AgentCore session (~15-30 min TTL) leaves the old ws connection dead, and
+    plain ensure_session() would just re-sign headers for the same (already
+    dead) session, so the old session is explicitly stopped first.
+    """
+    assert _agentcore_admin is not None
+    _agentcore_admin.stop_session()
+    return _agentcore_admin.ensure_session()
+
+
 def _agentcore_browser_harness() -> tuple[Any, Any]:
     """Bind _bh to the AgentCore backend (StartBrowserSession + Playwright CDP connect)."""
     global _bh, _bound_cdp, _agentcore_admin
     from browser_mcp import playwright_helpers
 
     if _agentcore_admin is None:
-        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
-        _agentcore_admin = agentcore.AgentCoreAdmin(region)
+        _agentcore_admin = agentcore.AgentCoreAdmin(agentcore.resolve_region())
 
     ws_url, headers = _agentcore_admin.ensure_session()
     playwright_helpers.connect(ws_url, headers)
+    playwright_helpers.set_reconnect_hook(_reconnect_agentcore)
     _bh = (playwright_helpers, _agentcore_admin)
     _bound_cdp = "agentcore"
     return _bh
@@ -441,11 +454,35 @@ def browser_write_playbook(host: str, content: str, append: bool = False) -> str
     return _json_text(result)
 
 
+def _stop_active_backend_best_effort() -> None:
+    """Stop whatever backend may be active, matching the pre-agentcore contract
+    that browser_stop / shutdown always best-effort stop the browser-harness
+    daemon -- even in a fresh process where ``_bh`` was never bound here, since
+    an external/leftover daemon (e.g. a still-billing Browser Use Cloud session
+    from a prior process) may still be alive (see ``_browser_harness()``'s
+    "Fresh process" comment). AgentCore sessions are only ever started by this
+    process, so those are only stopped when actually bound.
+    """
+    global _bh
+    if _bound_cdp == "agentcore":
+        _teardown_bound_backend()
+        return
+    _bh = None
+    from browser_harness import admin
+
+    admin.restart_daemon()
+
+
 @mcp.tool()
 def browser_stop() -> str:
     """Stop the active browser backend (cleanup after browsing; important for cloud/AgentCore browsers)."""
-    _teardown_bound_backend()
     global _bound_cdp
+    try:
+        _stop_active_backend_best_effort()
+    except Exception as exc:
+        _bound_cdp = None
+        logger.warning("browser_stop: failed to stop browser backend", exc_info=True)
+        return _json_text({"ok": False, "error": str(exc)})
     _bound_cdp = None
     return _json_text({"ok": True, "message": "browser backend stopped"})
 
@@ -458,17 +495,15 @@ def _stop_daemon_for_shutdown() -> None:
     process's own stdio pipes never reaches a detached browser-harness daemon
     (started via ``start_new_session=True``) or a live AgentCore session, so
     without this hook a remote Browser Use Cloud / AgentCore session -- and its
-    billing -- would keep running indefinitely. Idempotent: safe to call even
-    if no backend was ever started.
+    billing -- would keep running indefinitely. Always attempts the stop, even
+    if this process never itself bound a backend (see
+    ``_stop_active_backend_best_effort``'s docstring). Idempotent.
     """
-    global _bh, _bound_cdp
-    if _bh is None:
-        return
+    global _bound_cdp
     try:
-        _teardown_bound_backend()
+        _stop_active_backend_best_effort()
     except Exception:
         logger.warning("browser-mcp shutdown: failed to stop browser backend", exc_info=True)
-    _bh = None
     _bound_cdp = None
 
 
