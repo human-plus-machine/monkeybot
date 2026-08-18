@@ -304,7 +304,17 @@ class SandboxExecutor:
         if command == "mempalace":
             validate_mempalace_subcommand(args)
 
-        if not self._config.shared_filesystem and self._remote_requests_mounted_path(args, cwd):
+        # CoreToolExecutor always passes cwd=workspace root. Compute-only already
+        # forces working_directory=/tmp, so the default harness cwd must not trip
+        # the mounted-path guard. Nested paths under workspace are still rejected.
+        check_cwd = cwd
+        if not self._config.shared_filesystem and cwd is not None:
+            if Path(cwd).resolve() == self._workspace_root:
+                check_cwd = None
+
+        if not self._config.shared_filesystem and self._remote_requests_mounted_path(
+            args, check_cwd
+        ):
             raise SecurityError(
                 "remote sandbox is compute-only and cannot access workspace or skills files"
             )

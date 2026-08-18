@@ -365,6 +365,24 @@ class TestSandboxExecutorLayoutMounts:
         assert sandbox.commands.run.call_args.kwargs["opts"].working_directory == "/tmp"
 
     @pytest.mark.asyncio
+    async def test_remote_compute_mode_allows_default_workspace_cwd(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        cfg = SandboxConfig(
+            True, "https://remote.example", None, "test", 30, shared_filesystem=False
+        )
+        executor = SandboxExecutor(cfg, workspace)
+        mock_cls, sandbox = _make_create_mock()
+        osb = _make_opensandbox_module(mock_cls)
+
+        with patch.dict(sys.modules, _opensandbox_sys_modules(osb)):
+            result = await executor.execute("python3", ["--version"], cwd=workspace)
+
+        assert result.exit_code == 0
+        mock_cls.create.assert_called_once()
+        assert sandbox.commands.run.call_args.kwargs["opts"].working_directory == "/tmp"
+
+    @pytest.mark.asyncio
     async def test_remote_compute_mode_rejects_paths_under_workspace_or_skills(self, tmp_path):
         workspace = tmp_path / "workspace"
         skills = tmp_path / "skills"
