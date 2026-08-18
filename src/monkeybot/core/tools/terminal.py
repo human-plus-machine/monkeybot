@@ -403,13 +403,28 @@ class TerminalExecutor:
     async def _isolate(self, executable: str, args: list[str]) -> tuple[str, list[str]]:
         """Wrap argv so hidden paths are absent from the child's filesystem.
 
-        If this host cannot hide those paths, refuse to exec. Argument
-        validation is not a sandbox: a shell can build any path at runtime.
+        If this host cannot hide those paths, refuse to exec when any of them
+        exist on disk. Argument validation is not a sandbox: a shell can
+        build any path at runtime. Missing hidden paths with no isolation
+        available means memory was never configured — nothing to hide.
         """
         if not self._hidden_paths:
             return executable, args
         support = await asyncio.to_thread(isolation_support)
         if not support.available:
+            existing = [path for path in self._hidden_paths if path.expanduser().exists()]
+            if not existing:
+                logger.info(
+                    "Filesystem isolation is unavailable on this host (%s); "
+                    "running unwrapped because none of the hidden paths exist "
+                    "(nothing to hide).",
+                    support.detail,
+                    extra={
+                        "component": "terminal_executor",
+                        "hidden_paths": [str(path) for path in self._hidden_paths],
+                    },
+                )
+                return executable, args
             raise SecurityError(
                 "Filesystem isolation is unavailable on this host "
                 f"({support.detail}); refusing to run commands while memory "
