@@ -6,6 +6,12 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [core v3.0.1] - 2026-08-18
+
+### Fixed
+
+- Host `run_command` no longer fail-closes every command when filesystem isolation is unavailable and none of the memory hidden paths exist on disk (typical in nested Linux containers with memory off). Isolation is still required — and the command still refused — when at least one palace path is present.
+
 ## [core v3.0.0] - 2026-08-17
 
 ### Breaking
