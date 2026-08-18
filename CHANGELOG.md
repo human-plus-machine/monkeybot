@@ -6,6 +6,12 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Core
+
+### Fixed
+
+- Compute-only OpenSandbox (`SANDBOX_SHARED_FILESYSTEM=false`) no longer rejects every `run_command` when the harness passes the default workspace-root cwd. Nested workspace cwd and workspace/skills path args are still refused.
+
 ## [core v3.0.1] - 2026-08-18
 
 ### Fixed
