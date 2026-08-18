@@ -441,12 +441,27 @@ def is_server_error(exc: BaseException) -> bool:
     diagnostic surfaced to the caller (see ``task`` tool results with
     ``tool_call_count: 0`` and ``errors: ["Internal server error"]``). Treat it as
     transient and retry with backoff, same as a rate limit.
+
+    Two distinct shapes observed in practice, both must be covered:
+    1. A clean HTTP 5xx before streaming starts — ``openai.APIStatusError`` with
+       a concrete ``status_code``.
+    2. A *mid-stream* protocol-level failure — the initial HTTP response is a
+       200, but an error chunk arrives inside the SSE body, which the OpenAI
+       SDK surfaces as a bare ``openai.APIError`` (the base class) with no
+       ``status_code`` attribute at all. Confirmed live against NVIDIA's
+       nemotron endpoint: ``openai.APIError: Internal server error`` raised
+       from ``openai/_streaming.py``'s ``__stream__``, not ``APIStatusError``.
     """
     try:
-        from openai import APIStatusError  # noqa: PLC0415
+        from openai import APIError, APIStatusError  # noqa: PLC0415
 
-        if isinstance(exc, APIStatusError) and exc.status_code is not None:
-            return bool(exc.status_code >= 500)
+        if isinstance(exc, APIStatusError):
+            return exc.status_code is not None and bool(exc.status_code >= 500)
+        if isinstance(exc, APIError):
+            # No status_code on this shape — the failure is generic-server-ish
+            # text NVIDIA emits mid-stream, not a validation/client error.
+            msg = str(getattr(exc, "message", None) or exc).lower()
+            return "internal server error" in msg
     except ImportError:
         pass
     return False

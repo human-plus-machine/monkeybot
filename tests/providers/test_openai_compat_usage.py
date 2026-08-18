@@ -516,7 +516,17 @@ def test_is_rate_limit_error_classifies_real_openai_types(
     assert not is_rate_limit_error(FakeAPIStatusError(500))
 
 
-class _FakeAPIStatusError(Exception):
+class _FakeAPIError(Exception):
+    """Mirrors real openai.APIError: base class, no status_code attribute."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+class _FakeAPIStatusError(_FakeAPIError):
+    """Mirrors real openai.APIStatusError: subclass of APIError, has status_code."""
+
     def __init__(self, status_code: int) -> None:
         super().__init__(f"status {status_code}")
         self.status_code = status_code
@@ -525,6 +535,7 @@ class _FakeAPIStatusError(Exception):
 def _install_fake_openai_with_status_error(monkeypatch: pytest.MonkeyPatch, client: Any) -> None:
     fake_openai = ModuleType("openai")
     fake_openai.AsyncOpenAI = lambda *_a, **_kw: client
+    fake_openai.APIError = _FakeAPIError
     fake_openai.APIStatusError = _FakeAPIStatusError
     monkeypatch.setitem(sys.modules, "openai", fake_openai)
 
@@ -532,6 +543,7 @@ def _install_fake_openai_with_status_error(monkeypatch: pytest.MonkeyPatch, clie
 def test_is_server_error_classifies_5xx_not_4xx(monkeypatch: pytest.MonkeyPatch) -> None:
     """A 5xx APIStatusError is a server error; a 4xx (or non-status exception) is not."""
     fake_openai = ModuleType("openai")
+    fake_openai.APIError = _FakeAPIError
     fake_openai.APIStatusError = _FakeAPIStatusError
     monkeypatch.setitem(sys.modules, "openai", fake_openai)
 
@@ -540,6 +552,24 @@ def test_is_server_error_classifies_5xx_not_4xx(monkeypatch: pytest.MonkeyPatch)
     assert not is_server_error(_FakeAPIStatusError(429))
     assert not is_server_error(_FakeAPIStatusError(400))
     assert not is_server_error(RuntimeError("Internal server error"))
+
+
+def test_is_server_error_classifies_mid_stream_api_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bare APIError (no status_code) with 'Internal server error' text is recognized.
+
+    Reproduces exactly what NVIDIA's nemotron endpoint does live: the initial
+    HTTP response is 200 OK, then an error chunk arrives mid-stream and the
+    OpenAI SDK raises the *base* APIError class (openai/_streaming.py
+    __stream__), not APIStatusError — this has no status_code attribute at
+    all, so the APIStatusError-only check misses it entirely.
+    """
+    fake_openai = ModuleType("openai")
+    fake_openai.APIError = _FakeAPIError
+    fake_openai.APIStatusError = _FakeAPIStatusError
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+
+    assert is_server_error(_FakeAPIError("Internal server error"))
+    assert not is_server_error(_FakeAPIError("Invalid request: missing required field"))
 
 
 @pytest.mark.asyncio
@@ -608,6 +638,51 @@ async def test_server_error_exhausted_raises_provider_server_error(
 
     assert "nvidia" in str(exc_info.value).lower()
     assert "status 500" in str(exc_info.value.original)
+
+
+@pytest.mark.asyncio
+async def test_mid_stream_server_error_surfaces_friendly_message_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reproduces the exact live failure: NVIDIA returns 200 OK, streams a
+    thinking/text chunk, then a bare APIError('Internal server error') mid-stream.
+    Partial output already streamed means it must not retry (would duplicate
+    output) — but the raw upstream text still must not reach the caller raw.
+    """
+
+    async def _create(**_kwargs: Any) -> Any:
+        async def _stream() -> Any:
+            yield _text_chunk("Searching Dice for")
+            raise _FakeAPIError("Internal server error")
+
+        return _stream()
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=_create)))
+    _install_fake_openai_with_status_error(monkeypatch, client)
+
+    async def _fake_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr("monkeybot.providers._openai_compat.asyncio.sleep", _fake_sleep)
+
+    with pytest.raises(ProviderServerError) as exc_info:
+        [
+            ev
+            async for ev in stream_chat_completions_with_tool_fallback(
+                base_url="https://integrate.api.nvidia.com/v1",
+                api_key="nvapi-test",
+                provider="nvidia",
+                messages=[],
+                tools=[],
+                model="nvidia/nemotron-3-ultra-550b-a55b",
+                temperature=0.7,
+                max_tokens=100,
+            )
+        ]
+
+    assert "Internal server error" not in str(exc_info.value)
+    assert "nvidia" in str(exc_info.value).lower()
+    assert "Internal server error" in str(exc_info.value.original)
 
 
 def _tool_call_text_chunk(text: str) -> SimpleNamespace:
