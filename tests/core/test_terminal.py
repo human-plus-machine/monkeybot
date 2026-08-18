@@ -876,17 +876,38 @@ class TestTerminalExecutorIsolationFallback:
 
     @pytest.mark.asyncio
     async def test_unavailable_isolation_refuses_to_run(self, tmp_path, monkeypatch):
+        palace = tmp_path / "memory"
+        palace.mkdir()
         monkeypatch.setattr(
             terminal_module,
             "isolation_support",
             lambda: IsolationSupport("none", "probe says no"),
         )
         executor = TerminalExecutor(
-            allowed_path_prefixes=[str(tmp_path)], hidden_paths=[tmp_path / "memory"]
+            allowed_path_prefixes=[str(tmp_path)], hidden_paths=[palace]
         )
 
         with pytest.raises(SecurityError, match="Filesystem isolation is unavailable"):
             await executor.execute("echo", ["should-not-run"])
+
+    @pytest.mark.asyncio
+    async def test_unavailable_isolation_runs_when_nothing_exists_to_hide(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            terminal_module,
+            "isolation_support",
+            lambda: IsolationSupport("none", "probe says no"),
+        )
+        executor = TerminalExecutor(
+            allowed_path_prefixes=[str(tmp_path)],
+            hidden_paths=[tmp_path / "missing-palace"],
+        )
+
+        result = await executor.execute("echo", ["ok-to-run"])
+
+        assert result.exit_code == 0
+        assert "ok-to-run" in result.stdout
 
     @pytest.mark.asyncio
     async def test_failed_isolation_setup_raises_security_error(self, tmp_path, monkeypatch):
