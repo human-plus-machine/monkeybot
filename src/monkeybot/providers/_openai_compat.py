@@ -17,6 +17,7 @@ import io
 import json
 import logging
 import random
+import re
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
@@ -411,6 +412,46 @@ class ProviderRateLimitError(Exception):
         self.original = original
 
 
+_SERVER_ERROR_MAX_ATTEMPTS = 3
+
+
+class ProviderServerError(Exception):
+    """Raised when an upstream provider returns a persistent 5xx and retries are exhausted.
+
+    ``str(self)`` is a user-facing message; the raw upstream error is chained via
+    ``__cause__`` (see ``raise ... from exc``) for logs, not shown to the user.
+    """
+
+    def __init__(self, provider: str, model: str, original: BaseException) -> None:
+        super().__init__(
+            f"{provider} returned a server error for model {model!r}. "
+            "Please wait a moment and try again."
+        )
+        self.provider = provider
+        self.model = model
+        self.original = original
+
+
+def is_server_error(exc: BaseException) -> bool:
+    """Return True when *exc* is a transient upstream 5xx (not a client/config error).
+
+    Some OpenAI-compat backends (e.g. NVIDIA's build.nvidia.com NIM endpoints)
+    return a bare 500 with a generic body like "Internal server error" instead of
+    a structured error. Left unhandled, that bare SDK message becomes the *only*
+    diagnostic surfaced to the caller (see ``task`` tool results with
+    ``tool_call_count: 0`` and ``errors: ["Internal server error"]``). Treat it as
+    transient and retry with backoff, same as a rate limit.
+    """
+    try:
+        from openai import APIStatusError  # noqa: PLC0415
+
+        if isinstance(exc, APIStatusError) and exc.status_code is not None:
+            return bool(exc.status_code >= 500)
+    except ImportError:
+        pass
+    return False
+
+
 def is_rate_limit_error(exc: BaseException) -> bool:
     """Return True when *exc* looks like an upstream rate-limit / capacity error.
 
@@ -455,6 +496,41 @@ def _provider_semaphore(provider: str) -> asyncio.Semaphore | None:
     return _provider_semaphores[key]
 
 
+_TEXT_TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
+
+
+def _extract_text_tool_calls(text: str) -> list[tuple[str, dict[str, Any]]]:
+    """Best-effort recovery for tool calls emitted as literal ``<tool_call>`` text.
+
+    Some OpenAI-compat backends (e.g. NIM/vLLM-hosted OSS models like NVIDIA's
+    nemotron line) emit a call as inline text using the Hermes-style
+    ``<tool_call>{"name": ..., "arguments": {...}}</tool_call>`` convention
+    instead of populating the structured ``delta.tool_calls`` field, when the
+    server's chat template isn't wired for native tool-calling. Left
+    unhandled, that text is indistinguishable from a normal reply — it's
+    shown to the user verbatim and the tool never actually runs (observed in
+    the wild: ``assistant_text`` containing literal ``<tool_call>...`` XML,
+    ``tool_call_count: 0``). Only called when no structured tool call arrived,
+    so this never overrides a well-behaved provider's real response.
+    """
+    found: list[tuple[str, dict[str, Any]]] = []
+    for match in _TEXT_TOOL_CALL_RE.finditer(text):
+        try:
+            payload = json.loads(match.group(1))
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        name = payload.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        args = payload.get("arguments", {})
+        if not isinstance(args, dict):
+            continue
+        found.append((name, args))
+    return found
+
+
 async def iter_openai_compat_stream(
     client: Any,
     kwargs: dict[str, Any],
@@ -477,6 +553,7 @@ async def iter_openai_compat_stream(
     cached_tokens = 0
     tool_buf: dict[int, dict[str, Any]] = {}
     finish_reason: str | None = None
+    text_chunks: list[str] = []
 
     try:
         stream = await client.chat.completions.create(**req)
@@ -496,6 +573,7 @@ async def iter_openai_compat_stream(
             if delta is None:
                 continue
             if delta.content:
+                text_chunks.append(delta.content)
                 yield TextDelta(text=delta.content)
             reasoning = _delta_reasoning_text(delta)
             if reasoning:
@@ -525,6 +603,18 @@ async def iter_openai_compat_stream(
                 provider="openai_compat",
             )
             yield ToolCall(call_id=tid, name=name, args=parsed, parse_error=parse_error)
+
+        if not tool_buf and n_tools:
+            # No structured tool call arrived even though tools were offered —
+            # check for a Hermes-style literal <tool_call> block before
+            # treating this as a plain text reply. See _extract_text_tool_calls.
+            recovered = _extract_text_tool_calls("".join(text_chunks))
+            for name, args in recovered:
+                _log.warning(
+                    "recovered literal <tool_call> text as a real tool call %s",
+                    kv(provider=provider, model=kwargs.get("model"), tool=name),
+                )
+                yield ToolCall(call_id=f"anon:{name}", name=name, args=args, parse_error=None)
     except Exception:
         _log.warning(
             "OpenAI-compat stream error %s",
@@ -616,9 +706,11 @@ async def stream_chat_completions_with_tool_fallback(
 
     n_tools = len(tools)
     sem = _provider_semaphore(provider)
-    # Counts rate-limit failures only, independent of tool-unsupported hops
-    # (switching to a tools-less request shouldn't burn a rate-limit retry).
+    # Each counts its own failure kind only, independent of the other retry
+    # paths (e.g. switching to a tools-less request shouldn't burn a
+    # rate-limit retry, and a rate limit shouldn't burn a server-error retry).
     rate_limit_attempts = 0
+    server_error_attempts = 0
     while True:
         yielded_any = False
         retry_delay: float | None = None
@@ -646,23 +738,40 @@ async def stream_chat_completions_with_tool_fallback(
                     kwargs.pop("tools", None)
                     n_tools = 0
                     continue
-                if not is_rate_limit_error(exc):
+                if is_rate_limit_error(exc):
+                    if yielded_any or rate_limit_attempts >= _RATE_LIMIT_MAX_ATTEMPTS - 1:
+                        # Already streamed partial output this attempt, or retries
+                        # exhausted: can't safely retry, but still hide the raw
+                        # upstream text (e.g. NVIDIA's internal worker/quota string).
+                        raise ProviderRateLimitError(provider, model, exc) from exc
+                    rate_limit_attempts += 1
+                    retry_delay = _rate_limit_retry_delay(rate_limit_attempts)
+                    _log.warning(
+                        "%s rate-limited (attempt %d/%d); retrying in %.1fs: %s",
+                        provider,
+                        rate_limit_attempts,
+                        _RATE_LIMIT_MAX_ATTEMPTS,
+                        retry_delay,
+                        exc,
+                    )
+                elif is_server_error(exc):
+                    if yielded_any or server_error_attempts >= _SERVER_ERROR_MAX_ATTEMPTS - 1:
+                        # Already streamed partial output this attempt, or retries
+                        # exhausted: surface a clear message instead of a bare
+                        # upstream 500 body (e.g. NVIDIA's "Internal server error").
+                        raise ProviderServerError(provider, model, exc) from exc
+                    server_error_attempts += 1
+                    retry_delay = _rate_limit_retry_delay(server_error_attempts)
+                    _log.warning(
+                        "%s server error (attempt %d/%d); retrying in %.1fs: %s",
+                        provider,
+                        server_error_attempts,
+                        _SERVER_ERROR_MAX_ATTEMPTS,
+                        retry_delay,
+                        exc,
+                    )
+                else:
                     raise
-                if yielded_any or rate_limit_attempts >= _RATE_LIMIT_MAX_ATTEMPTS - 1:
-                    # Already streamed partial output this attempt, or retries
-                    # exhausted: can't safely retry, but still hide the raw
-                    # upstream text (e.g. NVIDIA's internal worker/quota string).
-                    raise ProviderRateLimitError(provider, model, exc) from exc
-                rate_limit_attempts += 1
-                retry_delay = _rate_limit_retry_delay(rate_limit_attempts)
-                _log.warning(
-                    "%s rate-limited (attempt %d/%d); retrying in %.1fs: %s",
-                    provider,
-                    rate_limit_attempts,
-                    _RATE_LIMIT_MAX_ATTEMPTS,
-                    retry_delay,
-                    exc,
-                )
         # Sleep outside the concurrency gate: a backing-off request must not
         # hold an in-flight slot idle, or a burst of rate-limited callers can
         # fill every slot with sleepers and starve everyone else.
@@ -702,9 +811,11 @@ def is_tool_unsupported_error(exc: BaseException) -> bool:
 
 __all__ = [
     "ProviderRateLimitError",
+    "ProviderServerError",
     "count_input_tokens_tiktoken",
     "count_openai_compat_input_tokens",
     "is_rate_limit_error",
+    "is_server_error",
     "is_tool_unsupported_error",
     "iter_openai_compat_stream",
     "messages_to_openai",

@@ -218,6 +218,7 @@ def _task_child_env(
     agent_root: Path,
     memory_uri: str,
     skills_path: Path,
+    artifacts_path: Path | None,
 ) -> dict[str, str]:
     """Build subprocess env overlays for a nested task worker."""
     child_env = {
@@ -227,6 +228,8 @@ def _task_child_env(
         "MONKEYBOT_SUBAGENT_SKILLS_PATH": str(skills_path),
         "OTEL_SERVICE_NAME": _SUBAGENT_OTEL_SERVICE_NAME,
     }
+    if artifacts_path is not None:
+        child_env["MONKEYBOT_SUBAGENT_ARTIFACTS_PATH"] = str(artifacts_path)
     for env_key, raw_val in (
         ("MCP_CONFIG", os.environ.get("MCP_CONFIG", "")),
         ("COMMAND_ALLOWLIST_CONFIG", os.environ.get("COMMAND_ALLOWLIST_CONFIG", "")),
@@ -829,6 +832,7 @@ class CoreToolExecutor(ToolExecutorPort):
         workspace_root: Path,
         memory: MemorySubsystem | None,
         skills_path: Path,
+        artifacts_path: Path | None = None,
         mcp: MCPClientPort,
         terminal: TerminalExecutor | SandboxExecutor | None = None,
         extra_tools: Sequence[CustomTool] | None = None,
@@ -843,8 +847,12 @@ class CoreToolExecutor(ToolExecutorPort):
     ) -> None:
         ws_settings = workspace_settings_from_config()
         self._skills_path = Path(skills_path).resolve()
+        self._artifacts_path = Path(artifacts_path).resolve() if artifacts_path is not None else None
         self._workspace = WorkspaceFileService(
-            Path(workspace_root).resolve(), settings=ws_settings, skills_root=self._skills_path
+            Path(workspace_root).resolve(),
+            settings=ws_settings,
+            skills_root=self._skills_path,
+            artifacts_root=self._artifacts_path,
         )
         self._memory = memory
         self._knowledge = knowledge
@@ -906,7 +914,11 @@ class CoreToolExecutor(ToolExecutorPort):
             _scfg = SandboxConfig.from_env()
             if _scfg.enabled:
                 self._terminal = SandboxExecutor(
-                    _scfg, workspace_root, skills_path=self._skills_path, allowed_commands=cmds
+                    _scfg,
+                    workspace_root,
+                    skills_path=self._skills_path,
+                    artifacts_path=self._artifacts_path,
+                    allowed_commands=cmds,
                 )
             else:
                 self._terminal = TerminalExecutor(
@@ -1709,6 +1721,7 @@ class CoreToolExecutor(ToolExecutorPort):
             agent_root=agent_root,
             memory_uri=memory_uri,
             skills_path=self._skills_path,
+            artifacts_path=self._artifacts_path,
         )
         payload = await _run_inline_subagent_with_progress(
             script=script,

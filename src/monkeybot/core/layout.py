@@ -171,6 +171,7 @@ class AgentLayout:
     config_dir: Path
     workspace_root: Path
     skills_path: Path
+    artifacts_path: Path
     data_root: Path
     agent_md_path: Path
     mcp_config_path: Path
@@ -192,12 +193,27 @@ class AgentLayout:
 
         workspace = resolve_workspace_root(agent_root=root, config_path=cfg)
         data = root / "data"
+
+        def artifacts_path_default() -> Path:
+            # `artifacts/` is a sibling mount of the workspace root, not a child
+            # of it (the Mac app symlinks `<workspace_root>/artifacts` ->
+            # `<workspace_root's parent>/artifacts`). That parent is
+            # `agent_root` normally, but when `MONKEYBOT_WORKSPACE_ROOT_OVERRIDE`
+            # remaps `workspace` onto a shared workspace memory directory (see
+            # ``resolve_workspace_root``), the real artifacts mount moves with
+            # it — so derive the default from ``workspace``, not ``root``.
+            env = os.environ.get("ARTIFACTS_PATH")
+            if env:
+                return resolve_agent_path(env, root)
+            return (workspace.parent / "artifacts").resolve()
+
         return cls(
             agent_root=root,
             config_path=cfg,
             config_dir=root / "monkeybot_config",
             workspace_root=workspace,
             skills_path=path_env("SKILLS_PATH", "skills"),
+            artifacts_path=artifacts_path_default(),
             data_root=data.resolve(),
             agent_md_path=path_env("AGENT_MD", "monkeybot_config/AGENT.md"),
             mcp_config_path=path_env("MCP_CONFIG", "monkeybot_config/mcp.json"),
@@ -227,6 +243,7 @@ class AgentLayout:
             "MONKEYBOT_AGENT_ID": self.agent_id,
             "MONKEYBOT_WORKSPACE_ROOT": str(self.workspace_root),
             "SKILLS_PATH": str(self.skills_path),
+            "ARTIFACTS_PATH": str(self.artifacts_path),
             "AGENT_MD": str(self.agent_md_path),
             "MCP_CONFIG": str(self.mcp_config_path),
             "COMMAND_ALLOWLIST_CONFIG": str(self.command_allowlist_path),

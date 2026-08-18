@@ -11,7 +11,9 @@ import pytest
 from monkeybot.core.llm.provider import ThinkingDelta, UsageEvent
 from monkeybot.providers._openai_compat import (
     ProviderRateLimitError,
+    ProviderServerError,
     is_rate_limit_error,
+    is_server_error,
     iter_openai_compat_stream,
     stream_chat_completions_with_tool_fallback,
 )
@@ -512,3 +514,188 @@ def test_is_rate_limit_error_classifies_real_openai_types(
     assert is_rate_limit_error(FakeRateLimitError("too many requests"))
     assert is_rate_limit_error(FakeAPIStatusError(429))
     assert not is_rate_limit_error(FakeAPIStatusError(500))
+
+
+class _FakeAPIStatusError(Exception):
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"status {status_code}")
+        self.status_code = status_code
+
+
+def _install_fake_openai_with_status_error(monkeypatch: pytest.MonkeyPatch, client: Any) -> None:
+    fake_openai = ModuleType("openai")
+    fake_openai.AsyncOpenAI = lambda *_a, **_kw: client
+    fake_openai.APIStatusError = _FakeAPIStatusError
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+
+
+def test_is_server_error_classifies_5xx_not_4xx(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 5xx APIStatusError is a server error; a 4xx (or non-status exception) is not."""
+    fake_openai = ModuleType("openai")
+    fake_openai.APIStatusError = _FakeAPIStatusError
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+
+    assert is_server_error(_FakeAPIStatusError(500))
+    assert is_server_error(_FakeAPIStatusError(503))
+    assert not is_server_error(_FakeAPIStatusError(429))
+    assert not is_server_error(_FakeAPIStatusError(400))
+    assert not is_server_error(RuntimeError("Internal server error"))
+
+
+@pytest.mark.asyncio
+async def test_server_error_retries_with_backoff_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bare 5xx before any chunk is streamed retries and eventually succeeds."""
+    client = _flaky_client(
+        _FakeAPIStatusError(500), fail_times=1, chunks=[_text_chunk("hi")]
+    )
+    _install_fake_openai_with_status_error(monkeypatch, client)
+
+    sleeps: list[float] = []
+
+    async def _fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr("monkeybot.providers._openai_compat.asyncio.sleep", _fake_sleep)
+
+    events = [
+        ev
+        async for ev in stream_chat_completions_with_tool_fallback(
+            base_url="https://integrate.api.nvidia.com/v1",
+            api_key="nvapi-test",
+            provider="nvidia",
+            messages=[],
+            tools=[],
+            model="meta/llama-3.3-70b-instruct",
+            temperature=0.7,
+            max_tokens=100,
+        )
+    ]
+
+    assert client.calls["n"] == 2  # first attempt failed, second succeeded
+    assert len(sleeps) == 1
+    assert any(isinstance(ev, UsageEvent) for ev in events)
+
+
+@pytest.mark.asyncio
+async def test_server_error_exhausted_raises_provider_server_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After retries are exhausted, a bare 'Internal server error' never reaches callers raw."""
+    client = _failing_client(_FakeAPIStatusError(500))
+    _install_fake_openai_with_status_error(monkeypatch, client)
+
+    async def _fake_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr("monkeybot.providers._openai_compat.asyncio.sleep", _fake_sleep)
+
+    with pytest.raises(ProviderServerError) as exc_info:
+        [
+            ev
+            async for ev in stream_chat_completions_with_tool_fallback(
+                base_url="https://integrate.api.nvidia.com/v1",
+                api_key="nvapi-test",
+                provider="nvidia",
+                messages=[],
+                tools=[],
+                model="meta/llama-3.3-70b-instruct",
+                temperature=0.7,
+                max_tokens=100,
+            )
+        ]
+
+    assert "nvidia" in str(exc_info.value).lower()
+    assert "status 500" in str(exc_info.value.original)
+
+
+def _tool_call_text_chunk(text: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        usage=None,
+        choices=[
+            SimpleNamespace(
+                delta=SimpleNamespace(content=text, reasoning=None, tool_calls=None)
+            )
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_recovers_literal_tool_call_text_when_no_structured_call() -> None:
+    """A Hermes-style literal <tool_call> block is recovered as a real ToolCall.
+
+    Some NIM/vLLM-hosted models (e.g. NVIDIA's nemotron line) emit a call as
+    inline text instead of populating the structured tool_calls delta when the
+    server's chat template isn't wired for native tool-calling. Without
+    recovery, the tool never runs and the raw XML leaks into the chat as text.
+    """
+    client = _fake_client(
+        [
+            _tool_call_text_chunk(
+                '<tool_call>\n{"name": "write_file", '
+                '"arguments": {"path": "pipeline/jobs.json", "content": "{}"}}\n</tool_call>'
+            )
+        ]
+    )
+
+    events = [
+        ev
+        async for ev in iter_openai_compat_stream(
+            client,
+            {"model": "m", "tools": [{"type": "function", "function": {"name": "write_file"}}]},
+            provider="nvidia",
+            n_tools=1,
+        )
+    ]
+
+    from monkeybot.core.llm.provider import ToolCall
+
+    tool_calls = [ev for ev in events if isinstance(ev, ToolCall)]
+    assert len(tool_calls) == 1
+    assert tool_calls[0].name == "write_file"
+    assert tool_calls[0].args == {"path": "pipeline/jobs.json", "content": "{}"}
+
+
+@pytest.mark.asyncio
+async def test_does_not_recover_text_tool_call_when_structured_call_present() -> None:
+    """A real structured tool call must never be overridden/duplicated by text recovery."""
+
+    def _structured_tool_call_chunk() -> SimpleNamespace:
+        return SimpleNamespace(
+            usage=None,
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(
+                        content=None,
+                        reasoning=None,
+                        tool_calls=[
+                            SimpleNamespace(
+                                index=0,
+                                id="call_1",
+                                function=SimpleNamespace(
+                                    name="search_jobs", arguments='{"keyword": "python"}'
+                                ),
+                            )
+                        ],
+                    )
+                )
+            ],
+        )
+
+    client = _fake_client([_structured_tool_call_chunk()])
+
+    from monkeybot.core.llm.provider import ToolCall
+
+    events = [
+        ev
+        async for ev in iter_openai_compat_stream(
+            client,
+            {"model": "m", "tools": [{"type": "function", "function": {"name": "search_jobs"}}]},
+            provider="nvidia",
+            n_tools=1,
+        )
+    ]
+    tool_calls = [ev for ev in events if isinstance(ev, ToolCall)]
+    assert len(tool_calls) == 1
+    assert tool_calls[0].name == "search_jobs"

@@ -115,11 +115,15 @@ class SandboxExecutor:
         workspace_root: Path,
         *,
         skills_path: Path | None = None,
+        artifacts_path: Path | None = None,
         allowed_commands: Sequence[str] | None = None,
     ) -> None:
         self._config = config
         self._workspace_root = Path(workspace_root).resolve()
         self._skills_path = Path(skills_path).resolve() if skills_path is not None else None
+        self._artifacts_path = (
+            Path(artifacts_path).resolve() if artifacts_path is not None else None
+        )
         self._sandbox: Any = None
         self._allowed_commands: tuple[str, ...] = (
             tuple(allowed_commands) if allowed_commands is not None else tuple(ALLOWED_COMMANDS)
@@ -143,7 +147,9 @@ class SandboxExecutor:
         a remote sandbox resolves them below its own ``/tmp`` workdir.
         """
         mounted_roots = tuple(
-            root for root in (self._workspace_root, self._skills_path) if root is not None
+            root
+            for root in (self._workspace_root, self._skills_path, self._artifacts_path)
+            if root is not None
         )
         raw_values = [str(cwd)] if cwd is not None else []
         raw_values.extend(args)

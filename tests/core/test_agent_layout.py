@@ -20,6 +20,7 @@ def _clear_layout_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
         "MONKEYBOT_WORKSPACE_ROOT_OVERRIDE",
         "WORKSPACE_ROOT",
         "SKILLS_PATH",
+        "ARTIFACTS_PATH",
         "AGENT_MD",
         "MCP_CONFIG",
         "COMMAND_ALLOWLIST_CONFIG",
@@ -75,6 +76,7 @@ def test_bootstrap_layout_is_identical_from_every_launch_cwd(
         assert layout.agent_root == agent.resolve()
         assert layout.workspace_root == (agent / "workspace").resolve()
         assert layout.skills_path == (agent / "skills").resolve()
+        assert layout.artifacts_path == (agent / "artifacts").resolve()
         assert layout.db_url == f"sqlite:///{(agent / 'data' / 'monkeybot.db').resolve()}"
         assert layout.memory_storage_uri == f"local://{(agent / 'memory').resolve()}"
         assert os.environ["MODEL_NAME"] == "from-root-dotenv"
@@ -89,8 +91,12 @@ def test_bootstrap_layout_is_identical_from_every_launch_cwd(
         from monkeybot.gateway.realtime.routes import _resolved_workspace_paths as realtime_paths
         from monkeybot.gateway.sse.app import _resolved_workspace_paths as sse_paths
 
-        assert sse_paths() == (layout.workspace_root, layout.skills_path)
-        assert realtime_paths() == (layout.workspace_root, layout.skills_path)
+        assert sse_paths() == (layout.workspace_root, layout.skills_path, layout.artifacts_path)
+        assert realtime_paths() == (
+            layout.workspace_root,
+            layout.skills_path,
+            layout.artifacts_path,
+        )
         assert cli_agent_root() == layout.agent_root
         assert subagent_worker.resolve_agent_project_root() == layout.agent_root
     finally:
@@ -211,6 +217,11 @@ def test_workspace_root_override_beats_yaml(
 
         assert layout.workspace_root == custom.resolve()
         assert os.environ["MONKEYBOT_WORKSPACE_ROOT"] == str(custom.resolve())
+        # artifacts/ is a sibling mount of the *actual* workspace root, not of
+        # agent_root — when a workspace-memory override remaps workspace_root
+        # onto a shared dir (e.g. the Mac app's per-workspace memory dir), the
+        # artifacts default must move with it, not stay pinned to agent_root.
+        assert layout.artifacts_path == (custom.parent / "artifacts").resolve()
     finally:
         os.environ.clear()
         os.environ.update(before)
