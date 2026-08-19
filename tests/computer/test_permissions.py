@@ -331,7 +331,12 @@ class TestBuildPersistHook:
         assert d2.kind == "confirm"  # still asks — not silently allowed
 
     def test_skips_non_computer_tools(self, tmp_path: Path) -> None:
+        """Must return True (no-op, changing nothing) for a tool this package
+        doesn't own — returning False here previously broke "Always allow"
+        app-wide for every non-computer tool whenever computer tools were
+        enabled, since `remember_always_approval`'s veto semantics treat a
+        False return as "don't remember this, not even in-session"."""
         approvals_path = tmp_path / "approvals.json"
         hook = build_persist_hook(approvals_path)
-        hook("write_file", "/x")
+        assert hook("write_file", "/x") is True
         assert not approvals_path.exists()

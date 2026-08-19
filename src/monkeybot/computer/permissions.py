@@ -41,14 +41,13 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
-from monkeybot.computer import ALWAYS_SCOPE
+from monkeybot.computer import ALWAYS_SCOPE, is_computer_tool_name
 from monkeybot.computer.approvals import add_approval, load_approvals, to_permission_rules
 from monkeybot.computer.safety import precheck_policy
 from monkeybot.core.context import TurnContext
 from monkeybot.core.tools.inspector import Decision, InspectorToolCall
 from monkeybot.core.tools.permission import (
     Effect,
-    PermissionConfigError,
     PermissionRule,
     PermissionRuleset,
     SessionApprovals,
@@ -77,8 +76,6 @@ def _load_ruleset_fail_open(path: Path) -> PermissionRuleset:
         return load_permissions(path)
     except FileNotFoundError:
         logger.info("permissions.yaml missing (%s); user ruleset empty", path)
-    except PermissionConfigError:
-        logger.exception("permission ruleset load failed (%s)", path)
     except Exception:
         logger.exception("permission ruleset load failed (%s)", path)
     return PermissionRuleset(rules=(), default="allow")
@@ -89,10 +86,11 @@ class ComputerAwarePermissionInspector:
 
     Reloads the approvals overlay on every ``check()`` (cheap: one ``stat()`` call)
     and rebuilds its rules only when the file's ``(mtime_ns, size, inode)`` changes.
-    On a genuine change (not the first load), also clears
-    ``bus.session_approvals`` — otherwise a revoke in Settings would keep being
-    masked by the in-memory "already approved this session" cache until the
-    gateway process restarts.
+    On a genuine change (not the first load), also clears the ``computer_*``
+    entries from ``bus.session_approvals`` — otherwise a revoke in Settings
+    would keep being masked by the in-memory "already approved this session"
+    cache until the gateway process restarts. Scoped to ``computer_*`` only,
+    so it never discards unrelated approvals for other tools.
     """
 
     def __init__(
@@ -127,7 +125,10 @@ class ComputerAwarePermissionInspector:
         if self._overlay_stamp is not None:
             approvals = getattr(bus, "session_approvals", None)
             if isinstance(approvals, SessionApprovals):
-                approvals.clear()
+                # Scoped to computer_* keys only — this overlay only ever covers
+                # those, and a blanket clear() would also discard unrelated
+                # approvals the user granted this session for other tools.
+                approvals.clear_matching(is_computer_tool_name)
         self._overlay_stamp = stamp
 
     async def check(self, call: InspectorToolCall, ctx: TurnContext) -> Decision:
@@ -179,20 +180,31 @@ def build_computer_permission_inspector(
 def build_persist_hook(approvals_path: Path) -> Callable[[str, str], bool]:
     """Build the ``persist`` callback for ``permission.remember_always_approval``.
 
-    Only tools listed in ``computer.ALWAYS_SCOPE`` are ever remembered — mutating
-    tools like ``computer_move``/``computer_trash`` are excluded there because
-    their resource string is derived from the *source* path only, so an
-    "always" rule keyed on it would silently cover any destination. Returning
-    ``False`` for those tools tells ``remember_always_approval`` to skip *both*
-    the durable write and the in-memory ``SessionApprovals`` remember — refusing
-    only the durable half would leave the same over-broad grant alive for the
-    rest of the session, which is just as wrong. A client sending
-    ``always: true`` for one of those tools anyway (the app UI never offers the
-    button, but nothing stops a raw API call) is a no-op: the call was already
-    approved and executed once, it just isn't remembered.
+    This hook is wired onto ``TurnContext.approvals_persist`` for the *whole
+    session* once computer tools are enabled — ``tool_dispatch.py`` /
+    ``realtime_loop.py`` call it for every tool's "always" approval, not just
+    ``computer_*`` ones. It must be a no-op (return ``True``, changing nothing)
+    for any tool this package doesn't own, or turning computer tools on would
+    silently break "Always allow" for ``write_file``, ``run_command``, MCP
+    tools, and everything else in the session.
+
+    For tools this package *does* own: only those listed in
+    ``computer.ALWAYS_SCOPE`` are ever remembered — mutating tools like
+    ``computer_move``/``computer_trash`` are excluded there because their
+    resource string is derived from the *source* path only, so an "always"
+    rule keyed on it would silently cover any destination. Returning ``False``
+    for those tells ``remember_always_approval`` to skip *both* the durable
+    write and the in-memory ``SessionApprovals`` remember — refusing only the
+    durable half would leave the same over-broad grant alive for the rest of
+    the session, which is just as wrong. A client sending ``always: true`` for
+    one of those tools anyway (the app UI never offers the button, but nothing
+    stops a raw API call) is a no-op: the call was already approved and
+    executed once, it just isn't remembered.
     """
 
     def _persist(tool: str, resource: str) -> bool:
+        if not is_computer_tool_name(tool):
+            return True
         scope = ALWAYS_SCOPE.get(tool)
         if scope is None:
             return False

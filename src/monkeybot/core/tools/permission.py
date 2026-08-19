@@ -81,15 +81,18 @@ def resource_for_call(call: InspectorToolCall) -> str:
     command = call.args.get("command")
     if isinstance(command, str) and command.strip():
         return " ".join(command.strip().split())
-    # Lowest-priority lookups (checked last so no existing tool's resource string
-    # changes): computer_open_url / computer_open_app take a url/app arg instead
-    # of a path, and still deserve a readable resource string for permission rules.
-    url = call.args.get("url")
-    if isinstance(url, str) and url.strip():
-        return url.strip()
-    app = call.args.get("app")
-    if isinstance(app, str) and app.strip():
-        return app.strip()
+    # Lowest-priority lookups, and scoped to computer_* tool names specifically
+    # (not any tool with a "url"/"app" arg — an MCP tool happening to use one of
+    # those names must not have its resource string silently change underneath
+    # it): computer_open_url / computer_open_app take a url/app arg instead of a
+    # path, and still deserve a readable resource string for permission rules.
+    if call.name.startswith("computer_"):
+        url = call.args.get("url")
+        if isinstance(url, str) and url.strip():
+            return url.strip()
+        app = call.args.get("app")
+        if isinstance(app, str) and app.strip():
+            return app.strip()
     # Stable fallback for tool calls with none of the recognized shapes above.
     # Sort keys so the same logical args produce the same resource string
     # regardless of dict insertion order (e.g. across provider round-trips).
@@ -193,6 +196,16 @@ class SessionApprovals:
         cache would otherwise keep masking the ruleset until the gateway restarts.
         """
         self._keys.clear()
+
+    def clear_matching(self, predicate: Callable[[str], bool]) -> None:
+        """Drop only remembered approvals whose ``tool`` name satisfies ``predicate``.
+
+        Same purpose as :meth:`clear`, but scoped — a durable rule source that
+        only covers *some* tools (e.g. the ``computer_*`` approvals overlay)
+        must not discard unrelated approvals the user granted this session for
+        other tools when it reloads.
+        """
+        self._keys = {(tool, resource) for tool, resource in self._keys if not predicate(tool)}
 
 
 def remember_always_approval(

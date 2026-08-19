@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from monkeybot.computer import safety
+from monkeybot.core.tools.core_tool_executor import _built_in_tool_error
 from monkeybot.core.types.types_tools import ToolDef
 
 # Every tool name here must also appear in ``COMPUTER_TOOL_NAMES`` and
@@ -27,9 +28,9 @@ from monkeybot.core.types.types_tools import ToolDef
 
 
 def _err(kind: safety.ErrorKind, message: str, hint: str) -> str:
-    return json.dumps(
-        {"ok": False, "error_kind": kind, "message": message, "hint": hint}, ensure_ascii=False
-    )
+    # Delegates to the built-in tools' own envelope builder instead of
+    # duplicating its shape here, so the two can't drift apart.
+    return _built_in_tool_error(kind, message, hint)
 
 
 def _ok(**fields: Any) -> str:
@@ -368,10 +369,13 @@ class ComputerMoveTool:
                     "Pass overwrite=true to replace it, or pick a different name.",
                 )
             if dest.exists() and overwrite:
-                if dest.is_dir():
-                    shutil.rmtree(dest)
-                else:
-                    dest.unlink()
+                # Trash the clobbered item rather than deleting it outright —
+                # "trash, never delete" is a hard invariant of this tool family,
+                # and an overwrite is exactly the kind of destructive step a
+                # user could regret. check_trashable's protected-folder checks
+                # also apply here as a second guard against clobbering something
+                # like a top-level home folder.
+                safety.trash_path(dest)
 
             shutil.move(str(src), str(dest))
             return _ok(path=str(src), destination=str(dest))

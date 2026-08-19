@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Literal
 
+from monkeybot.computer.approvals import Scope as AlwaysScope
 from monkeybot.computer.tools import (
     ComputerClipboardReadTool,
     ComputerClipboardWriteTool,
@@ -31,6 +31,7 @@ from monkeybot.computer.tools import (
     ComputerOpenURLTool,
     ComputerTrashTool,
 )
+from monkeybot.core.context import CustomTool
 
 __all__ = [
     "ALWAYS_SCOPE",
@@ -41,8 +42,6 @@ __all__ = [
     "is_computer_tool_name",
     "should_enable_computer_tools",
 ]
-
-AlwaysScope = Literal["resource", "tool"]
 
 COMPUTER_TOOL_NAMES: frozenset[str] = frozenset(
     {
@@ -65,11 +64,12 @@ COMPUTER_TOOL_NAMES: frozenset[str] = frozenset(
 # would let the model move or trash that item to/as *anything* on every future
 # call — the destination is never part of what was approved. Excluding them
 # means the UI never offers "Always allow" for a mutating tool; every call
-# asks again by design.
+# asks again by design. `computer_open_app` is also excluded: launching an
+# app is broad and low-friction to re-approve, and a standing grant from a
+# single approval is more than that one click should buy.
 ALWAYS_SCOPE: dict[str, AlwaysScope] = {
     "computer_open": "resource",
     "computer_open_url": "resource",
-    "computer_open_app": "resource",
     "computer_clipboard_read": "tool",
     "computer_clipboard_write": "tool",
     "computer_list_dir": "resource",
@@ -96,7 +96,7 @@ def should_enable_computer_tools() -> bool:
     return computer_tools_enabled_from_env() and sys.platform == "darwin"
 
 
-def build_computer_tools() -> list[object]:
+def build_computer_tools() -> list[CustomTool]:
     """Instantiate all ``computer_*`` CustomTool objects.
 
     Callers should only invoke this behind :func:`should_enable_computer_tools`;

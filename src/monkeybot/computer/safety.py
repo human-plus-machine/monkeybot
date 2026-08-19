@@ -40,9 +40,16 @@ DEFAULT_TIMEOUT_SEC = 10.0
 
 _ENV_APP_HOME = "MONKEYBOT_APP_HOME"
 
-# Roots the tools may operate under. Anything outside all of these is denied
-# regardless of any other rule.
-_EXTRA_ALLOWED_ROOTS: tuple[str, ...] = ("/Volumes",)
+# The only root the tools may operate under is the user's home directory.
+# An earlier version also allowed "/Volumes" for external-disk access, but the
+# denylist below matches by *path string*, anchored at Path.home() — it was
+# never asked for, and macOS routinely exposes the boot volume itself under
+# /Volumes/<name> (a different mount of the same filesystem), which would
+# reach ~/Library/Keychains and friends by a path the denylist never sees
+# without following through the mount alias. No allowlisted alternate root
+# means no alternate path into a denied directory; a real "external volumes
+# too" feature needs an inode/device-identity-based check, not a path-prefix
+# one, and should get its own dedicated design + tests when someone asks.
 
 # Relative to the real user's home directory (``Path.home()``), resolved lazily
 # so this module has no import-time filesystem dependency.
@@ -133,11 +140,23 @@ _DENIED_APP_NAMES: frozenset[str] = frozenset(
         "terminal",
         "iterm",
         "iterm2",
+        "warp",
+        "ghostty",
+        "hyper",
+        "alacritty",
+        "kitty",
+        "wezterm",
         "script editor",
+        "script debugger",
         "automator",
         "console",
         "xcode",
         "activity monitor",
+        "visual studio code",
+        "vscode",
+        "code",
+        "cursor",
+        "android studio",
     }
 )
 
@@ -214,12 +233,7 @@ def _denied_dirs() -> tuple[Path, ...]:
 
 
 def _allowed_roots() -> tuple[Path, ...]:
-    roots = [Path.home().resolve()]
-    for raw in _EXTRA_ALLOWED_ROOTS:
-        p = Path(raw)
-        if p.exists():
-            roots.append(p.resolve())
-    return tuple(roots)
+    return (Path.home().resolve(),)
 
 
 def is_within(candidate: Path, root: Path) -> bool:
@@ -261,9 +275,9 @@ def _check_denied_dirs(path: Path) -> None:
 def resolve_user_path(raw: str, *, must_exist: bool = False) -> Path:
     """Expand, resolve, and hard-validate a user-supplied path.
 
-    Rejects anything outside the home directory (or an allowed extra root like
-    ``/Volumes``) after following symlinks, and anything under the denylisted
-    subdirectories or matching a denylisted filename pattern.
+    Rejects anything outside the user's home directory after following
+    symlinks, and anything under the denylisted subdirectories or matching a
+    denylisted filename pattern.
     """
     if not raw or not raw.strip():
         raise ComputerToolError("validation", "path is required", "Pass a non-empty path.")
@@ -274,7 +288,7 @@ def resolve_user_path(raw: str, *, must_exist: bool = False) -> Path:
         raise ComputerToolError(
             "policy",
             f"Path is outside allowed locations: {resolved}",
-            "computer_* tools only operate within the user's home directory (or a mounted volume).",
+            "computer_* tools only operate within the user's home directory.",
         )
 
     _check_denied_dirs(resolved)
@@ -514,7 +528,15 @@ def _count_items(path: Path, cap: int) -> int:
     return count
 
 
-def check_trashable(path: Path) -> None:
+def check_trashable_cheap(path: Path) -> None:
+    """The O(1) subset of :func:`check_trashable` — no directory walk.
+
+    Split out so ``precheck_policy`` (which runs on *every* call, approved or
+    not) can reject an obviously-protected path without paying for an
+    ``os.walk`` over a potentially huge directory just to show (or skip) an
+    approval card. The item-count check is deferred to :func:`check_trashable`,
+    which still runs unconditionally at actual execution time.
+    """
     home = Path.home().resolve()
     if path == home:
         raise ComputerToolError(
@@ -530,6 +552,10 @@ def check_trashable(path: Path) -> None:
         raise ComputerToolError(
             "policy", "Refusing to trash a volume root.", "Pick a specific item."
         )
+
+
+def check_trashable(path: Path) -> None:
+    check_trashable_cheap(path)
     if _count_items(path, _TRASH_MAX_ITEMS) > _TRASH_MAX_ITEMS:
         raise ComputerToolError(
             "policy",
@@ -539,20 +565,8 @@ def check_trashable(path: Path) -> None:
 
 
 def trash_path(path: Path) -> Path:
-    """Move ``path`` into ``~/.Trash``, never a hard delete.
-
-    Prefers ``send2trash`` when available (proper Finder trash semantics,
-    "Put Back" support); falls back to a plain move into ``~/.Trash`` — files
-    on other mounted volumes are moved cross-device rather than left in place.
-    """
+    """Move ``path`` into ``~/.Trash``, never a hard delete."""
     check_trashable(path)
-    try:
-        from send2trash import send2trash
-
-        send2trash(str(path))
-        return path
-    except ImportError:
-        pass
 
     home_trash = (Path.home() / ".Trash").resolve()
     home_trash.mkdir(exist_ok=True)
@@ -609,7 +623,7 @@ def precheck_policy(tool: str, args: dict[str, object]) -> ComputerToolError | N
             if exec_surface:
                 check_not_exec_surface(resolved)
             if trashable:
-                check_trashable(resolved)
+                check_trashable_cheap(resolved)
         except ComputerToolError as e:
             return e if e.kind == "policy" else None
         return None

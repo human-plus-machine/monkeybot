@@ -26,6 +26,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+#: Granularity of a durable "Always allow" grant: a specific resource, or the
+#: whole tool. Re-exported as ``computer.AlwaysScope`` — this is the one
+#: canonical definition, kept here since ``approvals.py`` has no dependency on
+#: ``computer/__init__.py`` (avoiding the reverse would risk a cycle).
 Scope = Literal["resource", "tool"]
 
 _LOCK_SUFFIX = ".lock"
@@ -128,6 +132,16 @@ def add_approval(path: Path, *, tool: str, resource: str, scope: Scope, created_
 
 
 def remove_approval(path: Path, *, tool: str, resource: str) -> bool:
+    """Delete a stored approval matching ``(tool, resource)`` exactly. Returns
+    whether a record was actually removed.
+
+    No production Python caller: revoking a rule from monkeyapp's Settings ->
+    Permissions UI reads and rewrites ``approvals.json`` directly in TypeScript
+    against the same file/lock format (see ``electron/main/agent-approvals.ts``),
+    rather than shelling out to this module. Kept here — and exercised by
+    ``tests/computer/test_approvals.py`` — as the reference implementation of
+    that format and for any future in-process (e.g. CLI) caller.
+    """
     with _file_lock(path):
         records = load_approvals(path)
         remaining = [r for r in records if not (r.tool == tool and r.resource == resource)]

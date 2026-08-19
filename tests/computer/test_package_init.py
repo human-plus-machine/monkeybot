@@ -62,6 +62,11 @@ class TestToolRegistry:
         assert "computer_move" not in computer.ALWAYS_SCOPE
         assert "computer_trash" not in computer.ALWAYS_SCOPE
 
+    def test_open_app_excluded_from_always_scope(self) -> None:
+        """A single approval to launch an app shouldn't buy a standing grant —
+        app launches always ask."""
+        assert "computer_open_app" not in computer.ALWAYS_SCOPE
+
     def test_is_computer_tool_name(self) -> None:
         assert computer.is_computer_tool_name("computer_open")
         assert not computer.is_computer_tool_name("write_file")

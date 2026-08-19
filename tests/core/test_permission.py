@@ -83,6 +83,14 @@ def test_existing_tools_unaffected_by_url_app_lookups() -> None:
     assert resource_for_call(call) == "{}"
 
 
+def test_url_app_lookups_scoped_to_computer_tools() -> None:
+    """A non-computer tool (e.g. an MCP tool) that happens to take a `url` or
+    `app` arg must not have its resource string silently change — only
+    computer_* tools get the url/app fallback."""
+    call = InspectorToolCall("1", "some_mcp_tool", {"url": "https://example.com"})
+    assert resource_for_call(call) == '{"url": "https://example.com"}'
+
+
 @pytest.mark.asyncio
 async def test_inspector_default_allow(tmp_path: Path) -> None:
     p = tmp_path / "permissions.yaml"
