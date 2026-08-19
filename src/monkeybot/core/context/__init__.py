@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
@@ -129,6 +129,13 @@ class TurnContext:
     """True when durable loop storage is wired (DB_URL); advertise ``enable_loops`` catalog hint."""
     todo_store: TodoListStore | None = None
     """Session-scoped todo list (parent agent only); mutable store held by frozen context."""
+    approvals_persist: Callable[[str, str], bool] | None = None
+    """Optional hook to durably persist an "Always allow" approval beyond the
+    in-memory session cache — e.g. the ``computer_*`` tools' ``approvals.json``
+    overlay (see ``monkeybot.computer.permissions.build_persist_hook``). Passed
+    to ``permission.remember_always_approval`` as its ``persist`` kwarg by
+    ``tool_dispatch.py`` / ``realtime_loop.py``. None when no such hook is wired
+    (the default for every deployment that doesn't enable computer tools)."""
 
 
 _log = logging.getLogger(__name__)
@@ -845,6 +852,7 @@ async def build_context(
     scheduled_loops_available: bool = False,
     loops_advertised: bool = False,
     todo_store: TodoListStore | None = None,
+    approvals_persist: Callable[[str, str], bool] | None = None,
 ) -> TurnContext:
     """Assemble a TurnContext from filesystem paths and the MCP client snapshot.
 
@@ -876,6 +884,8 @@ async def build_context(
             active; includes scheduled-loop lifecycle tools immediately for this turn.
         todo_store: Optional session-scoped todo list store (parent agent); enables volatile
             ``## Todo list`` injection. Pass the same store to ``TodoListTool`` via ``extra_tools``.
+        approvals_persist: Optional hook to durably persist "Always allow" approvals
+            beyond the in-memory session cache; see ``TurnContext.approvals_persist``.
 
     Returns:
         Frozen :class:`TurnContext`.
@@ -927,6 +937,7 @@ async def build_context(
         catalog_mcp_servers=catalog_names,
         scheduled_loops_available=scheduled_loops_available,
         todo_store=todo_store,
+        approvals_persist=approvals_persist,
     )
 
 

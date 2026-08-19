@@ -214,6 +214,18 @@ todo_list:
   enabled: true
   mirror_to_disk: true
 
+# Desktop-only, macOS-only local computer control (open/reveal files & folders,
+# launch apps, read/write the clipboard, browse/move/trash files) via
+# computer_* tools. Off by default — server/Cloud Run deployments should never
+# set this. The Monkeybot desktop app sets MONKEYBOT_COMPUTER_TOOLS when it
+# spawns a gateway with this feature turned on in its settings; every computer_*
+# call still asks for approval by default (a built-in permissions.yaml baseline,
+# not configurable here) and "Always allow" is scoped to the exact action, not
+# the whole tool. See monkeybot_config/permissions.yaml and
+# monkeybot_config/approvals.json (machine-written, do not hand-edit).
+computer:
+  enabled: false
+
 sandbox:
   # Opt-in: requires Docker Desktop (OpenSandbox). Leave false for normal Mac
   # installs so the gateway starts without Docker. When enabled, ``monkeybot run``

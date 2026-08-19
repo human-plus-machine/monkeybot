@@ -518,7 +518,10 @@ async def run_realtime_turn(
                         allowed = True
                         if payload.get("always"):
                             remember_always_approval(
-                                pending_bus, call.name, resource_for_call(inspector_call)
+                                pending_bus,
+                                call.name,
+                                resource_for_call(inspector_call),
+                                persist=ctx.approvals_persist,
                             )
                             logger.debug(
                                 "realtime HITL always %s",

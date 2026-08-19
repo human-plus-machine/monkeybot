@@ -116,8 +116,9 @@ def _parent_extra_tools(
     deps: RealtimeDependencies,
     todo_store: TodoListStore | None,
 ) -> list[Any]:
-    """Web search + optional session todo tool for the parent realtime agent."""
+    """Web search + computer_* + optional session todo tool for the parent realtime agent."""
     tools: list[Any] = [deps.web_search_tool] if deps.web_search_tool is not None else []
+    tools.extend(deps.computer_tools)
     if todo_store is not None:
         tools.append(TodoListTool(todo_store))
     return tools
@@ -162,6 +163,7 @@ async def _build_realtime_context(
         scheduled_loops_available=loops_available,
         loops_advertised=loops_advertised,
         todo_store=todo_store,
+        approvals_persist=deps.computer_approvals_persist,
     )
 
 

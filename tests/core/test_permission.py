@@ -17,6 +17,7 @@ from monkeybot.core.tools.permission import (
     SessionApprovals,
     evaluate,
     load_permissions,
+    remember_always_approval,
     resource_for_call,
 )
 
@@ -56,6 +57,30 @@ def test_resource_for_run_command() -> None:
 def test_resource_for_path() -> None:
     call = InspectorToolCall("1", "write_file", {"path": "./foo.txt", "content": "x"})
     assert resource_for_call(call) == "./foo.txt"
+
+
+def test_resource_for_url() -> None:
+    """computer_open_url has no `path` arg — must still get a readable resource string."""
+    call = InspectorToolCall("1", "computer_open_url", {"url": "https://example.com"})
+    assert resource_for_call(call) == "https://example.com"
+
+
+def test_resource_for_app() -> None:
+    call = InspectorToolCall("1", "computer_open_app", {"app": "Notes"})
+    assert resource_for_call(call) == "Notes"
+
+
+def test_resource_for_path_still_wins_over_url_and_app() -> None:
+    """path stays highest priority — url/app are only a fallback below it."""
+    call = InspectorToolCall("1", "computer_open", {"path": "/x", "url": "https://example.com"})
+    assert resource_for_call(call) == "/x"
+
+
+def test_existing_tools_unaffected_by_url_app_lookups() -> None:
+    """Adding url/app lookups must not change any resource string that previously
+    fell through to the JSON fallback for tools with neither arg shape."""
+    call = InspectorToolCall("1", "list_skills", {})
+    assert resource_for_call(call) == "{}"
 
 
 @pytest.mark.asyncio
@@ -157,6 +182,72 @@ def test_load_permissions_invalid_effect(tmp_path: Path) -> None:
     p.write_text("default: maybe\nrules: []\n", encoding="utf-8")
     with pytest.raises(PermissionConfigError):
         load_permissions(p)
+
+
+def test_remember_always_approval_calls_persist_hook_that_approves() -> None:
+    class _Bus:
+        session_approvals = SessionApprovals()
+
+    bus = _Bus()
+    calls: list[tuple[str, str]] = []
+
+    def _approve(t: str, r: str) -> bool:
+        calls.append((t, r))
+        return True
+
+    remember_always_approval(bus, "computer_open", "/x", persist=_approve)
+    assert calls == [("computer_open", "/x")]
+    assert bus.session_approvals.is_allowed("computer_open", "/x")
+
+
+def test_remember_always_approval_persist_hook_can_veto_session_remember() -> None:
+    """A persist hook returning False must skip the in-memory remember too — not
+    only the durable write. This is what lets the computer_* tools refuse to
+    remember `computer_move`/`computer_trash` at all (their resource is the
+    source path only, so an in-session-only remember would be just as wrong as a
+    durable one — see computer/permissions.py::build_persist_hook)."""
+
+    class _Bus:
+        session_approvals = SessionApprovals()
+
+    bus = _Bus()
+    remember_always_approval(bus, "computer_move", "/x", persist=lambda t, r: False)
+    assert not bus.session_approvals.is_allowed("computer_move", "/x")
+
+
+def test_remember_always_approval_without_persist_is_unchanged() -> None:
+    class _Bus:
+        session_approvals = SessionApprovals()
+
+    bus = _Bus()
+    remember_always_approval(bus, "write_file", "/x")  # no persist kwarg — default None
+    assert bus.session_approvals.is_allowed("write_file", "/x")
+
+
+def test_remember_always_approval_persist_failure_fails_closed() -> None:
+    """A broken persist hook must not break the turn (the action was already
+    approved and executed) — but it also must not silently grant a standing
+    approval it couldn't actually persist. Skipping the remember is the safe
+    direction: the user is just asked again next time."""
+
+    class _Bus:
+        session_approvals = SessionApprovals()
+
+    bus = _Bus()
+
+    def _boom(tool: str, resource: str) -> bool:
+        raise RuntimeError("disk full")
+
+    remember_always_approval(bus, "computer_open", "/x", persist=_boom)
+    assert not bus.session_approvals.is_allowed("computer_open", "/x")
+
+
+def test_session_approvals_clear() -> None:
+    approvals = SessionApprovals()
+    approvals.remember("computer_open", "/x")
+    assert approvals.is_allowed("computer_open", "/x")
+    approvals.clear()
+    assert not approvals.is_allowed("computer_open", "/x")
 
 
 def test_packaged_permissions_loads() -> None:

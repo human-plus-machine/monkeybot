@@ -73,6 +73,8 @@ ENV_MAP: dict[tuple[str, str], str] = {
     ("web_search", "max_results"): "WEB_SEARCH_MAX_RESULTS",
     ("todo_list", "enabled"): "MONKEYBOT_TODO_LIST_ENABLED",
     ("todo_list", "mirror_to_disk"): "MONKEYBOT_TODO_LIST_MIRROR_TO_DISK",
+    ("computer", "enabled"): "MONKEYBOT_COMPUTER_TOOLS",
+    ("paths", "approvals_config"): "MONKEYBOT_APPROVALS_CONFIG",
     ("sandbox", "enabled"): "SANDBOX_ENABLED",
     ("sandbox", "server_url"): "SANDBOX_SERVER_URL",
     ("sandbox", "image"): "SANDBOX_IMAGE",

@@ -296,7 +296,10 @@ async def _resolve_inspector_decision(
                     outcome.allowed = True
                     if payload.get("always"):
                         remember_always_approval(
-                            bus, call.name, resource_for_call(inspector_call)
+                            bus,
+                            call.name,
+                            resource_for_call(inspector_call),
+                            persist=ctx.approvals_persist,
                         )
                         logger.debug(
                             "tool inspector confirm %s",
