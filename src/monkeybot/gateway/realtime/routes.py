@@ -179,6 +179,7 @@ def _create_tool_executor(
         workspace_root=workspace_root,
         memory=deps.memory,
         skills_path=skills_path,
+        artifacts_path=AgentLayout.from_environment().artifacts_path,
         mcp=deps.mcp,
         extra_tools=_parent_extra_tools(deps, todo_store),
         run_command_allowed_commands=deps.run_command_allowed_commands,

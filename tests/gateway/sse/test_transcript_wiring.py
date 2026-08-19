@@ -54,7 +54,7 @@ def _wire_start_turn_deps(
     monkeypatch.setattr(
         gateway_app,
         "_resolved_workspace_paths",
-        lambda: (tmp_path, tmp_path / "skills"),
+        lambda: (tmp_path, tmp_path / "skills", tmp_path / "artifacts"),
     )
 
     gateway_app._deps.mcp = MagicMock()

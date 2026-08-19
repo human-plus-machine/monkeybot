@@ -214,6 +214,7 @@ async def run_pattern_bc_turn(
     agent_md_path: Path,
     skills_path: Path,
     workspace_root: Path,
+    artifacts_path: Path | None = None,
     hook_manager: HookManager | None = None,
 ) -> str:
     """Run one user message through :func:`~monkeybot.core.context.build_context` + :func:`~monkeybot.core.runtime.loop.run`.
@@ -251,6 +252,7 @@ async def run_pattern_bc_turn(
         memory=deps.memory,
         knowledge=deps.knowledge,
         skills_path=skills_path,
+        artifacts_path=artifacts_path,
         mcp=deps.mcp,
         run_command_allowed_commands=run_cmds,
         run_command_allowed_path_prefixes=run_paths,

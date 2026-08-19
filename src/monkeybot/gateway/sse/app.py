@@ -114,10 +114,10 @@ def _env_context_window_tokens() -> int:
         return 200_000
 
 
-def _resolved_workspace_paths() -> tuple[Path, Path]:
-    """Resolve writable workspace and read-only skills from the agent layout."""
+def _resolved_workspace_paths() -> tuple[Path, Path, Path | None]:
+    """Resolve writable workspace, read-only skills, and artifacts mount from the agent layout."""
     layout = AgentLayout.from_environment()
-    return layout.workspace_root, layout.skills_path
+    return layout.workspace_root, layout.skills_path, layout.artifacts_path
 
 
 def _memory_storage_uri() -> str:
@@ -348,7 +348,7 @@ class GatewayLoopPort:
             model_name = bus.model_name or os.environ.get("MODEL_NAME", "gemini-2.5-flash")
             agent_path = _default_agent_path(bus)
 
-            workspace_root, skills_resolved = _resolved_workspace_paths()
+            workspace_root, skills_resolved, artifacts_resolved = _resolved_workspace_paths()
 
             transcript_writer: TranscriptWriter | None = None
             if transcript_enabled_from_env():
@@ -421,6 +421,7 @@ class GatewayLoopPort:
                 memory=getattr(serving.state, "memory", None),
                 knowledge=getattr(serving.state, "knowledge", None),
                 skills_path=skills_resolved,
+                artifacts_path=artifacts_resolved,
                 mcp=mcp,
                 extra_tools=extra_tools,
                 run_command_allowed_commands=_deps.run_command_allowed_commands,
