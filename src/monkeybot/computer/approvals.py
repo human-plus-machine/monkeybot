@@ -21,6 +21,7 @@ import glob
 import json
 import os
 import tempfile
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +34,9 @@ from typing import Literal
 Scope = Literal["resource", "tool"]
 
 _LOCK_SUFFIX = ".lock"
+_LOCK_STALE_S = 5.0
+_LOCK_TIMEOUT_S = 5.0
+_LOCK_POLL_S = 0.025
 
 
 @dataclass(frozen=True)
@@ -49,24 +53,49 @@ def _lock_path(path: Path) -> Path:
 
 @contextlib.contextmanager
 def _file_lock(path: Path) -> Iterator[None]:
-    """Best-effort advisory lock so concurrent readers/writers don't tear the file.
+    """Cross-process mutual exclusion around ``path``, via exclusive-create on
+    the sibling ``.lock`` file rather than ``fcntl.flock``.
 
-    POSIX-only (``fcntl``); no-ops elsewhere since these tools are macOS-only
-    already (see ``safety.require_macos``).
+    This file is also written by monkeyapp's Electron main process on a revoke
+    (``electron/main/agent-approvals.ts::withApprovalsLock``), and Node has no
+    ``flock`` binding. ``flock`` and an exclusive-create lockfile are different
+    primitives that do not exclude each other — a Python holder of an flock
+    would not be visible to, or block, a Node process doing
+    create-if-absent on the same path. For the lock to mean anything across
+    that boundary both sides have to implement the *same* protocol against
+    the *same* path, so this uses exclusive-create + stale-reclaim, matching
+    the Electron side exactly. Reads/writes here are a few KB and take well
+    under a second, so a lock file older than ``_LOCK_STALE_S`` is treated as
+    abandoned (a crashed holder) rather than waited on.
     """
     lock_path = _lock_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        import fcntl
-
-        with open(lock_path, "w") as fh:
-            fcntl.flock(fh, fcntl.LOCK_EX)
+    deadline = time.monotonic() + _LOCK_TIMEOUT_S
+    fd: int | None = None
+    while fd is None:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
             try:
-                yield
-            finally:
-                fcntl.flock(fh, fcntl.LOCK_UN)
-    except ImportError:
+                age = time.time() - lock_path.stat().st_mtime
+            except OSError:
+                continue
+            if age > _LOCK_STALE_S:
+                with contextlib.suppress(OSError):
+                    lock_path.unlink()
+                continue
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Timed out waiting for the approvals lock: {lock_path}"
+                ) from None
+            time.sleep(_LOCK_POLL_S)
+    try:
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
         yield
+    finally:
+        with contextlib.suppress(OSError):
+            lock_path.unlink()
 
 
 def load_approvals(path: Path) -> list[ApprovalRecord]:
