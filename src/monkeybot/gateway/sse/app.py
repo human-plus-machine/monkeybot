@@ -114,7 +114,7 @@ def _env_context_window_tokens() -> int:
         return 200_000
 
 
-def _resolved_workspace_paths() -> tuple[Path, Path, Path]:
+def _resolved_workspace_paths() -> tuple[Path, Path, Path | None]:
     """Resolve writable workspace, read-only skills, and artifacts mount from the agent layout."""
     layout = AgentLayout.from_environment()
     return layout.workspace_root, layout.skills_path, layout.artifacts_path
