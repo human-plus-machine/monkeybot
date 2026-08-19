@@ -171,7 +171,7 @@ class AgentLayout:
     config_dir: Path
     workspace_root: Path
     skills_path: Path
-    artifacts_path: Path
+    artifacts_path: Path | None
     data_root: Path
     agent_md_path: Path
     mcp_config_path: Path
@@ -194,18 +194,18 @@ class AgentLayout:
         workspace = resolve_workspace_root(agent_root=root, config_path=cfg)
         data = root / "data"
 
-        def artifacts_path_default() -> Path:
-            # `artifacts/` is a sibling mount of the workspace root, not a child
-            # of it (the Mac app symlinks `<workspace_root>/artifacts` ->
-            # `<workspace_root's parent>/artifacts`). That parent is
-            # `agent_root` normally, but when `MONKEYBOT_WORKSPACE_ROOT_OVERRIDE`
-            # remaps `workspace` onto a shared workspace memory directory (see
-            # ``resolve_workspace_root``), the real artifacts mount moves with
-            # it — so derive the default from ``workspace``, not ``root``.
-            env = os.environ.get("ARTIFACTS_PATH")
-            if env:
-                return resolve_agent_path(env, root)
-            return (workspace.parent / "artifacts").resolve()
+        # artifacts_path is opt-in only (unlike skills_path, which always has a
+        # default) — it's a *writable* extra mount, and there's no single safe
+        # default location to derive: for a plain agent it'd be a sibling of
+        # agent_root, but for a customized `paths.workspace_root` (e.g.
+        # /code/myproject) that same derivation would land outside both the
+        # project and agent_root entirely. The caller that actually knows the
+        # real mount point (e.g. the Mac app, which symlinks
+        # `<workspace_root>/artifacts` -> a sibling directory) must set
+        # ARTIFACTS_PATH explicitly; absent that, no extra root is granted and
+        # `artifacts/...` paths are validated (and rejected) like any other.
+        artifacts_env = os.environ.get("ARTIFACTS_PATH")
+        artifacts_path = resolve_agent_path(artifacts_env, root) if artifacts_env else None
 
         return cls(
             agent_root=root,
@@ -213,7 +213,7 @@ class AgentLayout:
             config_dir=root / "monkeybot_config",
             workspace_root=workspace,
             skills_path=path_env("SKILLS_PATH", "skills"),
-            artifacts_path=artifacts_path_default(),
+            artifacts_path=artifacts_path,
             data_root=data.resolve(),
             agent_md_path=path_env("AGENT_MD", "monkeybot_config/AGENT.md"),
             mcp_config_path=path_env("MCP_CONFIG", "monkeybot_config/mcp.json"),
@@ -243,7 +243,6 @@ class AgentLayout:
             "MONKEYBOT_AGENT_ID": self.agent_id,
             "MONKEYBOT_WORKSPACE_ROOT": str(self.workspace_root),
             "SKILLS_PATH": str(self.skills_path),
-            "ARTIFACTS_PATH": str(self.artifacts_path),
             "AGENT_MD": str(self.agent_md_path),
             "MCP_CONFIG": str(self.mcp_config_path),
             "COMMAND_ALLOWLIST_CONFIG": str(self.command_allowlist_path),
@@ -252,6 +251,8 @@ class AgentLayout:
             "MEMORY_STORAGE_URI": self.memory_storage_uri,
             "MONKEYBOT_PYTHON": sys.executable,
         }
+        if self.artifacts_path is not None:
+            values["ARTIFACTS_PATH"] = str(self.artifacts_path)
         from monkeybot.core.memory.config import memory_enabled_from_config
 
         if memory_enabled_from_config():

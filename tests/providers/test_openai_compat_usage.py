@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from monkeybot.core.llm.provider import ThinkingDelta, UsageEvent
+from monkeybot.core.llm.provider import TextDelta, ThinkingDelta, ToolCall, UsageEvent
 from monkeybot.providers._openai_compat import (
     ProviderRateLimitError,
     ProviderServerError,
@@ -724,12 +724,154 @@ async def test_recovers_literal_tool_call_text_when_no_structured_call() -> None
         )
     ]
 
-    from monkeybot.core.llm.provider import ToolCall
-
     tool_calls = [ev for ev in events if isinstance(ev, ToolCall)]
     assert len(tool_calls) == 1
     assert tool_calls[0].name == "write_file"
     assert tool_calls[0].args == {"path": "pipeline/jobs.json", "content": "{}"}
+    assert tool_calls[0].call_id == "anon:write_file:0"
+
+    # The must-fix: the raw <tool_call> XML must never reach the caller as
+    # text — SSE deltas already sent can't be un-sent, so it has to never be
+    # sent in the first place, not just "also" turned into a ToolCall.
+    text_deltas = [ev for ev in events if isinstance(ev, TextDelta)]
+    assert not any("<tool_call>" in d.text for d in text_deltas)
+
+
+@pytest.mark.asyncio
+async def test_recovers_tool_call_split_across_chunks_with_surrounding_text() -> None:
+    """The <tool_call> tag can straddle chunk boundaries and sit beside real prose.
+
+    Reproduces the live shape: a model often narrates ("Let me search...")
+    before emitting the call. That prose must still stream live; only the
+    tag's content must be withheld.
+    """
+    chunks = [
+        "Let me search for that. ",
+        "<tool_",
+        'call>\n{"name": "search_jobs", "argum',
+        'ents": {"keyword": "python"}}\n</tool_c',
+        "all>",
+        " Done.",
+    ]
+    client = _fake_client([_tool_call_text_chunk(c) for c in chunks])
+
+    events = [
+        ev
+        async for ev in iter_openai_compat_stream(
+            client,
+            {"model": "m", "tools": [{"type": "function", "function": {"name": "search_jobs"}}]},
+            provider="nvidia",
+            n_tools=1,
+        )
+    ]
+
+    tool_calls = [ev for ev in events if isinstance(ev, ToolCall)]
+    assert len(tool_calls) == 1
+    assert tool_calls[0].name == "search_jobs"
+    assert tool_calls[0].args == {"keyword": "python"}
+
+    text_deltas = [ev for ev in events if isinstance(ev, TextDelta)]
+    assert not any("<tool_call>" in d.text or "tool_call>" in d.text for d in text_deltas)
+    assert "".join(d.text for d in text_deltas) == "Let me search for that.  Done."
+
+
+@pytest.mark.asyncio
+async def test_recovers_multiple_tool_call_spans_with_unique_ids() -> None:
+    """Two recovered calls in one turn must not collapse to the same call_id."""
+    text = (
+        '<tool_call>\n{"name": "read_file", "arguments": {"path": "a.md"}}\n</tool_call>'
+        '<tool_call>\n{"name": "read_file", "arguments": {"path": "b.md"}}\n</tool_call>'
+    )
+    client = _fake_client([_tool_call_text_chunk(text)])
+
+    events = [
+        ev
+        async for ev in iter_openai_compat_stream(
+            client,
+            {"model": "m", "tools": [{"type": "function", "function": {"name": "read_file"}}]},
+            provider="nvidia",
+            n_tools=1,
+        )
+    ]
+
+    tool_calls = [ev for ev in events if isinstance(ev, ToolCall)]
+    assert len(tool_calls) == 2
+    assert {tc.call_id for tc in tool_calls} == {"anon:read_file:0", "anon:read_file:1"}
+    assert [tc.args["path"] for tc in tool_calls] == ["a.md", "b.md"]
+
+
+@pytest.mark.asyncio
+async def test_recovers_hermes_string_arguments() -> None:
+    """Hermes commonly emits ``arguments`` as a JSON *string*, not an object."""
+    text = (
+        '<tool_call>\n{"name": "write_file", '
+        '"arguments": "{\\"path\\": \\"x.md\\", \\"content\\": \\"hi\\"}"}\n</tool_call>'
+    )
+    client = _fake_client([_tool_call_text_chunk(text)])
+
+    events = [
+        ev
+        async for ev in iter_openai_compat_stream(
+            client,
+            {"model": "m", "tools": [{"type": "function", "function": {"name": "write_file"}}]},
+            provider="nvidia",
+            n_tools=1,
+        )
+    ]
+
+    tool_calls = [ev for ev in events if isinstance(ev, ToolCall)]
+    assert len(tool_calls) == 1
+    assert tool_calls[0].args == {"path": "x.md", "content": "hi"}
+
+
+@pytest.mark.asyncio
+async def test_malformed_recovered_span_flushes_as_text_and_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A span that fails to parse fails open (visible text) instead of vanishing silently."""
+    text = "<tool_call>\nnot valid json at all\n</tool_call>"
+    client = _fake_client([_tool_call_text_chunk(text)])
+
+    with caplog.at_level("WARNING", logger="monkeybot.providers._openai_compat"):
+        events = [
+            ev
+            async for ev in iter_openai_compat_stream(
+                client,
+                {"model": "m", "tools": [{"type": "function", "function": {"name": "x"}}]},
+                provider="nvidia",
+                n_tools=1,
+            )
+        ]
+
+    assert not [ev for ev in events if isinstance(ev, ToolCall)]
+    text_deltas = [ev for ev in events if isinstance(ev, TextDelta)]
+    assert "".join(d.text for d in text_deltas) == text
+    assert "failed to parse" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_unterminated_tool_call_span_flushes_as_text_and_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The stream ending mid-span (truncation) must not swallow the content."""
+    text = '<tool_call>\n{"name": "search_jobs", "arguments": {}'  # never closed
+    client = _fake_client([_tool_call_text_chunk(text)])
+
+    with caplog.at_level("WARNING", logger="monkeybot.providers._openai_compat"):
+        events = [
+            ev
+            async for ev in iter_openai_compat_stream(
+                client,
+                {"model": "m", "tools": [{"type": "function", "function": {"name": "x"}}]},
+                provider="nvidia",
+                n_tools=1,
+            )
+        ]
+
+    assert not [ev for ev in events if isinstance(ev, ToolCall)]
+    text_deltas = [ev for ev in events if isinstance(ev, TextDelta)]
+    assert "".join(d.text for d in text_deltas) == text
+    assert "unterminated" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -759,8 +901,6 @@ async def test_does_not_recover_text_tool_call_when_structured_call_present() ->
         )
 
     client = _fake_client([_structured_tool_call_chunk()])
-
-    from monkeybot.core.llm.provider import ToolCall
 
     events = [
         ev

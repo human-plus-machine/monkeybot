@@ -724,13 +724,7 @@ class WorkspaceFileService:
         if segments[:1] == ("skills",) and self._skills_root is not None:
             return self._skills_root, segments[1:]
         if segments[:1] == ("artifacts",) and self._artifacts_root is not None:
-            # `artifacts/` under the workspace root is a symlink/junction out to a
-            # separately mounted directory (see monkeyapp's home.ts
-            # ensureArtifactsLayout), so its realpath legitimately falls outside
-            # `self._root`. Validate containment against the mounted artifacts
-            # root instead of treating that as an escape (matches the `skills`
-            # special-case above, the existing precedent for a separately
-            # mounted subtree).
+            # `artifacts/` is a mounted extra-root, same as `skills/` above.
             return self._artifacts_root, segments[1:]
         return self._root, segments
 

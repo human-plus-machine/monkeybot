@@ -17,9 +17,9 @@ import io
 import json
 import logging
 import random
-import re
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 from monkeybot.core.llm.provider import (
@@ -435,28 +435,15 @@ class ProviderServerError(Exception):
 def is_server_error(exc: BaseException) -> bool:
     """Return True when *exc* is a transient upstream 5xx (not a client/config error).
 
-    Some OpenAI-compat backends (e.g. NVIDIA's build.nvidia.com NIM endpoints)
-    return a bare 500 with a generic body like "Internal server error" instead of
-    a structured error. Left unhandled, that bare SDK message becomes the *only*
-    diagnostic surfaced to the caller (see ``task`` tool results with
-    ``tool_call_count: 0`` and ``errors: ["Internal server error"]``). Treat it as
-    transient and retry with backoff, same as a rate limit.
-
-    Two distinct shapes observed in practice, both must be covered:
-    1. A clean HTTP 5xx before streaming starts — ``openai.APIStatusError`` with
-       a concrete ``status_code``.
-    2. A *mid-stream* protocol-level failure — the initial HTTP response is a
-       200, but an error chunk arrives inside the SSE body, which the OpenAI
-       SDK surfaces as a bare ``openai.APIError`` (the base class) with no
-       ``status_code`` attribute at all. Confirmed live against NVIDIA's
-       nemotron endpoint: ``openai.APIError: Internal server error`` raised
-       from ``openai/_streaming.py``'s ``__stream__``, not ``APIStatusError``.
+    Covers a clean HTTP 5xx (``APIStatusError`` with a ``status_code``) and a
+    mid-stream protocol failure — HTTP 200, then an error chunk inside the SSE
+    body, which the SDK surfaces as a bare ``APIError`` with no ``status_code``.
     """
     try:
         from openai import APIError, APIStatusError  # noqa: PLC0415
 
         if isinstance(exc, APIStatusError):
-            return exc.status_code is not None and bool(exc.status_code >= 500)
+            return exc.status_code is not None and exc.status_code >= 500
         if isinstance(exc, APIError):
             # No status_code on this shape — the failure is generic-server-ish
             # text NVIDIA emits mid-stream, not a validation/client error.
@@ -465,6 +452,40 @@ def is_server_error(exc: BaseException) -> bool:
     except ImportError:
         pass
     return False
+
+
+def _retry_delay_or_raise(
+    *,
+    exc: BaseException,
+    provider: str,
+    model: str,
+    yielded_any: bool,
+    attempts: int,
+    max_attempts: int,
+    label: str,
+    error_cls: type[Exception],
+) -> tuple[int, float]:
+    """Shared backoff-or-raise policy for the rate-limit and server-error retry paths.
+
+    Returns ``(new_attempts, delay)`` to sleep before retrying. Raises
+    ``error_cls(provider, model, exc)`` — hiding the raw upstream text — once
+    output has already streamed this attempt (retrying would duplicate it) or
+    attempts are exhausted.
+    """
+    if yielded_any or attempts >= max_attempts - 1:
+        raise error_cls(provider, model, exc) from exc
+    attempts += 1
+    delay = _rate_limit_retry_delay(attempts)
+    _log.warning(
+        "%s %s (attempt %d/%d); retrying in %.1fs: %s",
+        provider,
+        label,
+        attempts,
+        max_attempts,
+        delay,
+        exc,
+    )
+    return attempts, delay
 
 
 def is_rate_limit_error(exc: BaseException) -> bool:
@@ -511,39 +532,114 @@ def _provider_semaphore(provider: str) -> asyncio.Semaphore | None:
     return _provider_semaphores[key]
 
 
-_TEXT_TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
+_TOOL_CALL_OPEN = "<tool_call>"
+_TOOL_CALL_CLOSE = "</tool_call>"
 
 
-def _extract_text_tool_calls(text: str) -> list[tuple[str, dict[str, Any]]]:
-    """Best-effort recovery for tool calls emitted as literal ``<tool_call>`` text.
+def _tag_prefix_overlap(s: str, tag: str) -> int:
+    """Length of the longest suffix of *s* that is a proper prefix of *tag*.
 
-    Some OpenAI-compat backends (e.g. NIM/vLLM-hosted OSS models like NVIDIA's
-    nemotron line) emit a call as inline text using the Hermes-style
-    ``<tool_call>{"name": ..., "arguments": {...}}</tool_call>`` convention
-    instead of populating the structured ``delta.tool_calls`` field, when the
-    server's chat template isn't wired for native tool-calling. Left
-    unhandled, that text is indistinguishable from a normal reply — it's
-    shown to the user verbatim and the tool never actually runs (observed in
-    the wild: ``assistant_text`` containing literal ``<tool_call>...`` XML,
-    ``tool_call_count: 0``). Only called when no structured tool call arrived,
-    so this never overrides a well-behaved provider's real response.
+    Used to hold back a small tail of streamed content that might be the
+    start of *tag* split across two chunks, without delaying unrelated text.
     """
-    found: list[tuple[str, dict[str, Any]]] = []
-    for match in _TEXT_TOOL_CALL_RE.finditer(text):
+    for k in range(min(len(s), len(tag) - 1), 0, -1):
+        if s.endswith(tag[:k]):
+            return k
+    return 0
+
+
+def _parse_text_tool_call(span: str) -> tuple[str, dict[str, Any]] | None:
+    """Parse one Hermes-style ``<tool_call>{...}</tool_call>`` span.
+
+    Recovers tool calls some OpenAI-compat backends (NIM/vLLM-hosted OSS
+    models, e.g. NVIDIA's nemotron line) emit as inline text instead of a
+    structured ``delta.tool_calls`` field. Returns None on any malformed
+    input — callers are expected to fail open (treat the span as plain text)
+    and log, not silently drop it.
+    """
+    inner = span[len(_TOOL_CALL_OPEN) : -len(_TOOL_CALL_CLOSE)].strip()
+    try:
+        payload = json.loads(inner)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    name = payload.get("name")
+    if not isinstance(name, str) or not name:
+        return None
+    args = payload.get("arguments", {})
+    if isinstance(args, str):
         try:
-            payload = json.loads(match.group(1))
+            args = json.loads(args)
         except (json.JSONDecodeError, ValueError):
-            continue
-        if not isinstance(payload, dict):
-            continue
-        name = payload.get("name")
-        if not isinstance(name, str) or not name:
-            continue
-        args = payload.get("arguments", {})
-        if not isinstance(args, dict):
-            continue
-        found.append((name, args))
-    return found
+            return None
+    if not isinstance(args, dict):
+        return None
+    return name, args
+
+
+@dataclass
+class _ToolCallSpanScanner:
+    """Incrementally splits streamed content into text vs. ``<tool_call>`` spans.
+
+    SSE deltas already sent to the caller can't be un-sent, so a model's raw
+    ``<tool_call>`` XML must never reach ``TextDelta`` in the first place —
+    only text outside a detected span is yielded live. Content inside a span
+    is withheld and collected in ``spans`` for the caller to resolve once the
+    stream ends (see ``iter_openai_compat_stream``). Only instantiated for
+    tool-enabled requests, so tool-less turns pay zero overhead.
+    """
+
+    held: str = ""
+    in_call: bool = False
+    call_buf: str = ""
+    spans: list[str] = field(default_factory=list)
+
+    def feed(self, chunk: str) -> list[str]:
+        """Return the text fragments (already outside any span) to yield now."""
+        out: list[str] = []
+        pending = self.held + chunk
+        self.held = ""
+        while True:
+            if not self.in_call:
+                if not pending:
+                    return out
+                idx = pending.find(_TOOL_CALL_OPEN)
+                if idx == -1:
+                    overlap = _tag_prefix_overlap(pending, _TOOL_CALL_OPEN)
+                    flush = pending[: len(pending) - overlap] if overlap else pending
+                    if flush:
+                        out.append(flush)
+                    self.held = pending[len(pending) - overlap :] if overlap else ""
+                    return out
+                before = pending[:idx]
+                if before:
+                    out.append(before)
+                self.in_call = True
+                self.call_buf = pending[idx:]
+                pending = ""
+                # Loop again — the close tag may already be in call_buf
+                # (whole span delivered in a single chunk).
+            else:
+                self.call_buf += pending
+                pending = ""
+                close_idx = self.call_buf.find(_TOOL_CALL_CLOSE)
+                if close_idx == -1:
+                    return out
+                end = close_idx + len(_TOOL_CALL_CLOSE)
+                self.spans.append(self.call_buf[:end])
+                pending = self.call_buf[end:]
+                self.in_call = False
+                self.call_buf = ""
+                # Loop again — leftover pending may hold more text or another span.
+
+    def flush_incomplete(self) -> str:
+        """At end of stream: anything held back or mid-span, as plain text (fail-open)."""
+        leftover = self.held + (self.call_buf if self.in_call else "")
+        self.held = ""
+        self.in_call = False
+        self.call_buf = ""
+        return leftover
 
 
 async def iter_openai_compat_stream(
@@ -568,7 +664,9 @@ async def iter_openai_compat_stream(
     cached_tokens = 0
     tool_buf: dict[int, dict[str, Any]] = {}
     finish_reason: str | None = None
-    text_chunks: list[str] = []
+    # Only scan for literal <tool_call> text when tools were actually offered —
+    # tool-less turns skip the scanner entirely (see _ToolCallSpanScanner).
+    scanner = _ToolCallSpanScanner() if n_tools else None
 
     try:
         stream = await client.chat.completions.create(**req)
@@ -588,8 +686,11 @@ async def iter_openai_compat_stream(
             if delta is None:
                 continue
             if delta.content:
-                text_chunks.append(delta.content)
-                yield TextDelta(text=delta.content)
+                if scanner is not None:
+                    for text in scanner.feed(delta.content):
+                        yield TextDelta(text=text)
+                else:
+                    yield TextDelta(text=delta.content)
             reasoning = _delta_reasoning_text(delta)
             if reasoning:
                 yield ThinkingDelta(text=reasoning)
@@ -605,6 +706,15 @@ async def iter_openai_compat_stream(
                         if tc.function.arguments:
                             slot["args"] += tc.function.arguments
 
+        if scanner is not None:
+            leftover = scanner.flush_incomplete()
+            if leftover:
+                _log.warning(
+                    "unterminated <tool_call> span at end of stream; flushing as text %s",
+                    kv(provider=provider, model=kwargs.get("model")),
+                )
+                yield TextDelta(text=leftover)
+
         for slot in tool_buf.values():
             name = str(slot.get("name") or "")
             if not name:
@@ -619,17 +729,37 @@ async def iter_openai_compat_stream(
             )
             yield ToolCall(call_id=tid, name=name, args=parsed, parse_error=parse_error)
 
-        if not tool_buf and n_tools:
-            # No structured tool call arrived even though tools were offered —
-            # check for a Hermes-style literal <tool_call> block before
-            # treating this as a plain text reply. See _extract_text_tool_calls.
-            recovered = _extract_text_tool_calls("".join(text_chunks))
-            for name, args in recovered:
-                _log.warning(
-                    "recovered literal <tool_call> text as a real tool call %s",
-                    kv(provider=provider, model=kwargs.get("model"), tool=name),
-                )
-                yield ToolCall(call_id=f"anon:{name}", name=name, args=args, parse_error=None)
+        if scanner is not None and scanner.spans:
+            if tool_buf:
+                # A well-behaved structured tool call also arrived this turn —
+                # never override it. The literal span(s) become visible text;
+                # they land here rather than inline since a buffered span
+                # can't be retroactively spliced back into an already-
+                # streamed transcript.
+                for span in scanner.spans:
+                    yield TextDelta(text=span)
+            else:
+                for i, span in enumerate(scanner.spans):
+                    parsed_call = _parse_text_tool_call(span)
+                    if parsed_call is None:
+                        _log.warning(
+                            "recovered <tool_call> span failed to parse; flushing as text %s",
+                            kv(
+                                provider=provider,
+                                model=kwargs.get("model"),
+                                snippet=span[:80],
+                            ),
+                        )
+                        yield TextDelta(text=span)
+                        continue
+                    name, args = parsed_call
+                    _log.warning(
+                        "recovered literal <tool_call> text as a real tool call %s",
+                        kv(provider=provider, model=kwargs.get("model"), tool=name),
+                    )
+                    yield ToolCall(
+                        call_id=f"anon:{name}:{i}", name=name, args=args, parse_error=None
+                    )
     except Exception:
         _log.warning(
             "OpenAI-compat stream error %s",
@@ -754,36 +884,26 @@ async def stream_chat_completions_with_tool_fallback(
                     n_tools = 0
                     continue
                 if is_rate_limit_error(exc):
-                    if yielded_any or rate_limit_attempts >= _RATE_LIMIT_MAX_ATTEMPTS - 1:
-                        # Already streamed partial output this attempt, or retries
-                        # exhausted: can't safely retry, but still hide the raw
-                        # upstream text (e.g. NVIDIA's internal worker/quota string).
-                        raise ProviderRateLimitError(provider, model, exc) from exc
-                    rate_limit_attempts += 1
-                    retry_delay = _rate_limit_retry_delay(rate_limit_attempts)
-                    _log.warning(
-                        "%s rate-limited (attempt %d/%d); retrying in %.1fs: %s",
-                        provider,
-                        rate_limit_attempts,
-                        _RATE_LIMIT_MAX_ATTEMPTS,
-                        retry_delay,
-                        exc,
+                    rate_limit_attempts, retry_delay = _retry_delay_or_raise(
+                        exc=exc,
+                        provider=provider,
+                        model=model,
+                        yielded_any=yielded_any,
+                        attempts=rate_limit_attempts,
+                        max_attempts=_RATE_LIMIT_MAX_ATTEMPTS,
+                        label="rate-limited",
+                        error_cls=ProviderRateLimitError,
                     )
                 elif is_server_error(exc):
-                    if yielded_any or server_error_attempts >= _SERVER_ERROR_MAX_ATTEMPTS - 1:
-                        # Already streamed partial output this attempt, or retries
-                        # exhausted: surface a clear message instead of a bare
-                        # upstream 500 body (e.g. NVIDIA's "Internal server error").
-                        raise ProviderServerError(provider, model, exc) from exc
-                    server_error_attempts += 1
-                    retry_delay = _rate_limit_retry_delay(server_error_attempts)
-                    _log.warning(
-                        "%s server error (attempt %d/%d); retrying in %.1fs: %s",
-                        provider,
-                        server_error_attempts,
-                        _SERVER_ERROR_MAX_ATTEMPTS,
-                        retry_delay,
-                        exc,
+                    server_error_attempts, retry_delay = _retry_delay_or_raise(
+                        exc=exc,
+                        provider=provider,
+                        model=model,
+                        yielded_any=yielded_any,
+                        attempts=server_error_attempts,
+                        max_attempts=_SERVER_ERROR_MAX_ATTEMPTS,
+                        label="server error",
+                        error_cls=ProviderServerError,
                     )
                 else:
                     raise

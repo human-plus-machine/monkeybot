@@ -107,9 +107,9 @@ def _pending_response_timeout_sec() -> float:
         return 300.0
 
 
-def _resolved_workspace_paths() -> tuple[Path, Path, Path]:
+def _resolved_workspace_paths() -> tuple[Path, Path]:
     layout = AgentLayout.from_environment()
-    return layout.workspace_root, layout.skills_path, layout.artifacts_path
+    return layout.workspace_root, layout.skills_path
 
 
 def _parent_extra_tools(
@@ -141,7 +141,7 @@ async def _build_realtime_context(
 ) -> TurnContext:
     if deps.mcp is None:
         raise RuntimeError("MCP client is not initialized")
-    workspace_root, skills_path, _artifacts_path = _resolved_workspace_paths()
+    workspace_root, skills_path = _resolved_workspace_paths()
     agent_path = AgentLayout.from_environment().agent_md_path
     model = os.environ.get("MODEL_NAME", "gemini-2.5-flash")
     loops_available = deps.storage is not None
@@ -173,13 +173,13 @@ def _create_tool_executor(
 ) -> CoreToolExecutor:
     if deps.mcp is None:
         raise RuntimeError("MCP client is not initialized")
-    workspace_root, skills_path, artifacts_path = _resolved_workspace_paths()
+    workspace_root, skills_path = _resolved_workspace_paths()
     storage = deps.storage
     return CoreToolExecutor(
         workspace_root=workspace_root,
         memory=deps.memory,
         skills_path=skills_path,
-        artifacts_path=artifacts_path,
+        artifacts_path=AgentLayout.from_environment().artifacts_path,
         mcp=deps.mcp,
         extra_tools=_parent_extra_tools(deps, todo_store),
         run_command_allowed_commands=deps.run_command_allowed_commands,
@@ -771,7 +771,7 @@ def create_realtime_router(
                 raise GatewayInternalError("Storage backend not initialized")
 
             history = storage.history()
-            workspace_root, _skills_path, _artifacts_path = _resolved_workspace_paths()
+            workspace_root, _skills_path = _resolved_workspace_paths()
             todo_store = await _maybe_todo_store(manager, session_id, workspace_root)
             ctx = await _build_realtime_context(session_id, request_id, deps, todo_store=todo_store)
             session_config = _make_realtime_session_config(ctx, manager.config)

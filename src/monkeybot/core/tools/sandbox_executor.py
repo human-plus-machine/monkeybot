@@ -240,6 +240,20 @@ class SandboxExecutor:
                     )
                 )
                 mounted_paths.add(skills_str)
+            if self._artifacts_path is not None:
+                artifacts_str = str(self._artifacts_path)
+                artifacts_vol_name = (
+                    re.sub(r"[^a-z0-9-]", "-", artifacts_str.lower()).strip("-")[:63]
+                )
+                volumes.append(
+                    Volume(
+                        name=artifacts_vol_name or "artifacts",
+                        host=Host(path=artifacts_str),
+                        mountPath=artifacts_str,
+                        readOnly=False,
+                    )
+                )
+                mounted_paths.add(artifacts_str)
             for cred_env in ("GOOGLE_APPLICATION_CREDENTIALS", "GCP_AUTH_FILE"):
                 cred_path = runtime_env.get(cred_env, "").strip()
                 if not cred_path or cred_path in mounted_paths:
