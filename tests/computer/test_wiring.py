@@ -7,6 +7,7 @@ actually be usable. Mirrors ``tests/web_search/test_web_search.py``'s pattern.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -138,6 +139,7 @@ async def test_core_tool_executor_dispatches_computer_clipboard_read(
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+    monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(
         computer_safety,
         "run_argv",

@@ -9,6 +9,7 @@ run against a real temp "home" directory instead — no OS-level side effects.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -38,6 +39,12 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture(autouse=True)
+def pretend_macos(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tool bodies hard-refuse on non-darwin; CI runs on Linux."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+
+
+@pytest.fixture(autouse=True)
 def no_real_subprocess(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fail loudly if a test forgets to stub ``run_argv`` and would hit real OS state."""
 
@@ -56,6 +63,16 @@ def _stub_run_argv(monkeypatch: pytest.MonkeyPatch, *, stdout: str = "", returnc
 
     monkeypatch.setattr(safety, "run_argv", fake)
     return calls
+
+
+class TestRequireMacos:
+    @pytest.mark.asyncio
+    async def test_refuses_on_non_macos(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sys, "platform", "linux")
+        result = json.loads(await ComputerClipboardReadTool().execute({}))
+        assert result["ok"] is False
+        assert result["error_kind"] == "policy"
+        assert "macOS" in result["message"]
 
 
 class TestComputerOpen:
