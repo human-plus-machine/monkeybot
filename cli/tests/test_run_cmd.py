@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import os
+import signal
+import subprocess
 import sys
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -32,20 +36,17 @@ def test_run_run_derives_agent_root_from_off_tree_config(
 
     captured: dict[str, object] = {}
 
-    class _Proc:
-        returncode = 0
-
-    def fake_run(cmd, env=None, cwd=None):  # type: ignore[no-untyped-def]
+    def fake_run_gateway(cmd, *, env, cwd):  # type: ignore[no-untyped-def]
         captured["cmd"] = cmd
         captured["cwd"] = cwd
-        return _Proc()
+        return 0
 
     args = argparse.Namespace(cwd=None, config=str(cfg_dir / "monkeybot.yaml"), port=None)
     runtime = RuntimePython([str(venv_py.resolve())], "venv", agent)
 
     with (
         patch("monkeybot_cli.commands.run_cmd.prepare_runtime_python", return_value=runtime),
-        patch("monkeybot_cli.commands.run_cmd.subprocess.run", side_effect=fake_run),
+        patch("monkeybot_cli.commands.run_cmd.run_gateway_process", side_effect=fake_run_gateway),
     ):
         code = run_run(args)
 
@@ -71,20 +72,44 @@ def test_run_run_preserves_explicit_cwd_with_explicit_config(
 
     captured: dict[str, object] = {}
 
-    class _Proc:
-        returncode = 0
-
-    def fake_run(cmd, env=None, cwd=None):  # type: ignore[no-untyped-def]
+    def fake_run_gateway(cmd, *, env, cwd):  # type: ignore[no-untyped-def]
         captured["cwd"] = cwd
-        return _Proc()
+        return 0
 
     args = argparse.Namespace(cwd=str(explicit_cwd), config=str(cfg_dir / "monkeybot.yaml"), port=None)
     runtime = RuntimePython([sys.executable], "cli", explicit_cwd)
 
     with (
         patch("monkeybot_cli.commands.run_cmd.prepare_runtime_python", return_value=runtime),
-        patch("monkeybot_cli.commands.run_cmd.subprocess.run", side_effect=fake_run),
+        patch("monkeybot_cli.commands.run_cmd.run_gateway_process", side_effect=fake_run_gateway),
     ):
         run_run(args)
 
     assert Path(captured["cwd"]).resolve() == explicit_cwd.resolve()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signal forwarding")
+def test_run_gateway_process_forwards_sigterm() -> None:
+    """SIGTERM on the CLI shim must reach uvicorn, not just kill the shim."""
+    inner = (
+        "import signal, sys, time;"
+        "signal.signal(signal.SIGTERM, lambda *_: sys.exit(42));"
+        "time.sleep(30)"
+    )
+    wrapper_src = (
+        "import os, sys\n"
+        "from pathlib import Path\n"
+        "from monkeybot_cli.commands.run_cmd import run_gateway_process\n"
+        f"raise SystemExit(run_gateway_process([sys.executable, '-c', {inner!r}], "
+        "env=os.environ.copy(), cwd=Path('.')))\n"
+    )
+    wrapper = subprocess.Popen([sys.executable, "-c", wrapper_src], env=os.environ.copy())
+    try:
+        time.sleep(0.4)
+        assert wrapper.poll() is None
+        wrapper.send_signal(signal.SIGTERM)
+        assert wrapper.wait(timeout=8) == 42
+    finally:
+        if wrapper.poll() is None:
+            wrapper.kill()
+            wrapper.wait(timeout=5)

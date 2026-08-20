@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import subprocess
 from pathlib import Path
 
@@ -19,6 +20,54 @@ from monkeybot_cli.opensandbox_lifecycle import (
     server_url_from_config,
 )
 from monkeybot_cli.runtime_python import gateway_argv, prepare_runtime_python
+
+
+def run_gateway_process(
+    cmd: list[str],
+    *,
+    env: dict[str, str],
+    cwd: Path,
+) -> int:
+    """Start the gateway and forward SIGINT/SIGTERM/SIGHUP to it.
+
+    ``subprocess.run`` does not forward those signals: this CLI shim dies and
+    leaves uvicorn holding the port. Electron's quit path (and Ctrl-C) depend
+    on SIGTERM reaching the grandchild.
+    """
+    proc = subprocess.Popen(cmd, env=env, cwd=cwd)
+
+    def _forward(signum: int, _frame: object | None) -> None:
+        if proc.poll() is None:
+            try:
+                proc.send_signal(signum)
+            except OSError:
+                pass
+
+    restored: dict[int, signal.Handlers] = {}
+    forwarded = [signal.SIGINT, signal.SIGTERM]
+    if hasattr(signal, "SIGHUP"):
+        forwarded.append(signal.SIGHUP)
+    for sig in forwarded:
+        try:
+            restored[int(sig)] = signal.signal(sig, _forward)
+        except (ValueError, OSError):
+            pass
+    try:
+        return int(proc.wait())
+    except KeyboardInterrupt:
+        _forward(int(signal.SIGINT), None)
+        try:
+            return int(proc.wait(timeout=8))
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            return 130
+    finally:
+        for sig, handler in restored.items():
+            try:
+                signal.signal(sig, handler)
+            except (ValueError, OSError):
+                pass
 
 
 def run_run(args: argparse.Namespace) -> int:
@@ -49,8 +98,7 @@ def run_run(args: argparse.Namespace) -> int:
     runtime = prepare_runtime_python(agent_root, config_path)
     cmd = gateway_argv(runtime)
     try:
-        proc = subprocess.run(cmd, env=env, cwd=agent_root)
-        return proc.returncode
+        return run_gateway_process(cmd, env=env, cwd=agent_root)
     except KeyboardInterrupt:
         return 130
 
