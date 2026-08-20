@@ -22,6 +22,7 @@ from monkeybot.core.llm.provider import (
 )
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.types.content_blocks import (
+    ContentBlock,
     File,
     Image,
     RedactedThinking,
@@ -33,26 +34,31 @@ from monkeybot.core.types.content_blocks import (
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._utils import (
     estimate_anthropic_input_tokens,
+    iter_stream_with_param_retry,
     safe_parse_tool_args,
     split_leading_system,
 )
+from monkeybot.providers.model_capabilities import supports_param
 
 _log = logging.getLogger(__name__)
 
 _GEO_PREFIXES = frozenset({"us", "eu", "apac", "ap", "global", "au", "jp", "ca", "us-gov"})
-_CONVERSE_UNSUPPORTED_INFERENCE: dict[str, frozenset[str]] = {
-    "xai": frozenset({"temperature"}),
-}
-_STRIPPABLE_INFERENCE = ("temperature", "topP", "topK")
+_STRIPPABLE_INFERENCE = ("temperature",)
 _UNSUPPORTED_FIELD_RE = re.compile(r"doesn't support the (\w+) field", re.IGNORECASE)
-_INFERENCE_PARAM_ALIASES = {
-    "temperature": "temperature",
-    "topp": "topP",
-    "top_p": "topP",
-    "topk": "topK",
-    "top_k": "topK",
-}
 _SENTINEL = object()
+_DOC_FORMATS = {
+    "pdf": "pdf",
+    "csv": "csv",
+    "html": "html",
+    "md": "md",
+    "markdown": "md",
+    "plain": "txt",
+    "txt": "txt",
+    "doc": "doc",
+    "docx": "docx",
+    "xls": "xls",
+    "xlsx": "xlsx",
+}
 
 
 def _strip_bedrock_prefix(model: str) -> str:
@@ -90,12 +96,6 @@ def uses_anthropic_bedrock(model: str) -> bool:
     return bedrock_vendor(model) == "anthropic"
 
 
-def converse_supports_param(model: str, param: str) -> bool:
-    """False when this Bedrock vendor is known to reject ``param`` on Converse."""
-    unsupported = _CONVERSE_UNSUPPORTED_INFERENCE.get(bedrock_vendor(model), frozenset())
-    return param not in unsupported
-
-
 def converse_tools(tools: Sequence[ToolDef]) -> dict[str, Any] | None:
     """Converse ``toolConfig``: ``tools[].toolSpec`` with ``inputSchema.json``."""
     if not tools:
@@ -124,21 +124,7 @@ def _image_format(mime_type: str) -> str:
 
 
 def _document_format(mime_type: str) -> str:
-    mime = mime_type.lower()
-    if "pdf" in mime:
-        return "pdf"
-    if "csv" in mime:
-        return "csv"
-    if "html" in mime:
-        return "html"
-    if "markdown" in mime or mime.endswith("/md"):
-        return "md"
-    if mime in {"text/plain", "text/txt"} or mime.endswith("/txt"):
-        return "txt"
-    subtype = mime.rsplit("/", 1)[-1]
-    if subtype in {"pdf", "csv", "doc", "docx", "xls", "xlsx", "html", "txt", "md"}:
-        return subtype
-    return "txt"
+    return _DOC_FORMATS.get(mime_type.rsplit("/", 1)[-1].lower(), "txt")
 
 
 def _document_name(block: File) -> str:
@@ -183,8 +169,13 @@ def _tool_result_content(result: list[Any]) -> list[dict[str, Any]]:
 
 
 def _converse_block(block: Any) -> dict[str, Any] | None:
-    if isinstance(block, (Thinking, RedactedThinking)):
-        return None
+    if isinstance(block, Thinking):
+        inner: dict[str, Any] = {"text": block.thinking}
+        if block.signature:
+            inner["signature"] = block.signature
+        return {"reasoningContent": {"reasoningText": inner}}
+    if isinstance(block, RedactedThinking):
+        return {"reasoningContent": {"redactedContent": block.data}}
     if isinstance(block, Text):
         return {"text": block.text}
     if isinstance(block, Image):
@@ -228,6 +219,9 @@ def messages_to_converse(messages: Sequence[Message]) -> tuple[str, list[dict[st
             out[-1]["content"].extend(content)
         else:
             out.append({"role": m.role, "content": content})
+    if not out or out[0]["role"] != "user":
+        # Converse requires the first message to be user (Anthropic does not).
+        out.insert(0, {"role": "user", "content": [{"text": "(continued)"}]})
     return system, out
 
 
@@ -239,10 +233,16 @@ def converse_request_kwargs(
     max_tokens: int,
     temperature: float,
 ) -> dict[str, Any]:
-    """Build ``converse_stream`` kwargs. Always sets ``inferenceConfig.maxTokens``."""
+    """Build ``converse_stream`` kwargs. Always sets ``inferenceConfig.maxTokens``.
+
+    ``hints.cache_retention`` / Converse ``cachePoint`` blocks are not wired on
+    this path. Claude still uses ``prepare_anthropic_cached_payload``; Nova/Llama
+    cache points are a follow-up. ``UsageEvent.cache_read_tokens`` staying 0
+    means caching was never requested, not that the model refused a cache hit.
+    """
     system, converse_msgs = messages_to_converse(messages)
     inference: dict[str, Any] = {"maxTokens": max_tokens}
-    if converse_supports_param(model, "temperature"):
+    if supports_param(model, "temperature"):
         inference["temperature"] = temperature
     kwargs: dict[str, Any] = {
         "modelId": _strip_bedrock_prefix(model),
@@ -267,19 +267,15 @@ def _copy_stream_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
 
 def _strip_unsupported_inference(kwargs: dict[str, Any], exc: Exception) -> list[str]:
     match = _UNSUPPORTED_FIELD_RE.search(str(exc))
-    if not match:
+    if not match or match.group(1).lower() != "temperature":
         return []
-    raw = match.group(1)
-    key = _INFERENCE_PARAM_ALIASES.get(raw.lower())
-    if key is None and raw in _STRIPPABLE_INFERENCE:
-        key = raw
     infer = kwargs.get("inferenceConfig")
-    if key is None or not isinstance(infer, dict) or key not in infer:
+    if not isinstance(infer, dict) or "temperature" not in infer:
         return []
     infer = dict(infer)
-    del infer[key]
+    del infer["temperature"]
     kwargs["inferenceConfig"] = infer
-    return [key]
+    return ["temperature"]
 
 
 def _tool_input_fragment(raw: Any) -> str:
@@ -323,6 +319,12 @@ async def _aiter_sync(sync_iterable: Any) -> AsyncIterator[Any]:
         yield item
 
 
+async def _close_event_stream(stream: Any) -> None:
+    close = getattr(stream, "close", None)
+    if callable(close):
+        await asyncio.to_thread(close)
+
+
 def _on_content_block_delta(
     delta_ev: Any,
     tools: dict[int, _ToolBuf],
@@ -353,8 +355,7 @@ def _on_content_block_delta(
         fragment = _tool_input_fragment(tool_delta.get("input"))
         if buf is not None and fragment:
             buf.buf += fragment
-            if buf.call_id:
-                yield ToolInputDelta(call_id=buf.call_id, name=buf.name, delta=fragment)
+            yield ToolInputDelta(call_id=buf.call_id, name=buf.name, delta=fragment)
 
 
 def _on_content_block_stop(
@@ -365,8 +366,13 @@ def _on_content_block_stop(
 ) -> Iterator[ProviderEvent]:
     idx = int(stop_ev.get("contentBlockIndex") or 0) if isinstance(stop_ev, dict) else 0
     buf = tools.pop(idx, None)
-    if buf is None or not buf.call_id:
+    if buf is None:
         return
+    if not buf.call_id:
+        _log.warning(
+            "converse toolUse missing toolUseId %s",
+            kv(provider=provider, name=buf.name),
+        )
     args, parse_error = safe_parse_tool_args(
         buf.buf,
         call_id=buf.call_id,
@@ -376,17 +382,38 @@ def _on_content_block_stop(
     yield ToolCall(call_id=buf.call_id, name=buf.name, args=args, parse_error=parse_error)
 
 
-async def _stream_converse_once(
-    client: Any,
-    kwargs: dict[str, Any],
+def _on_content_block_start(
+    start_ev: Any,
+    tools: dict[int, _ToolBuf],
+    *,
+    provider: str,
+) -> None:
+    if not isinstance(start_ev, dict):
+        return
+    start = start_ev.get("start") or {}
+    tool_use = start.get("toolUse") if isinstance(start, dict) else None
+    if not isinstance(tool_use, dict):
+        return
+    idx = int(start_ev.get("contentBlockIndex") or 0)
+    call_id = str(tool_use.get("toolUseId") or "")
+    name = str(tool_use.get("name") or "")
+    if not call_id:
+        _log.warning(
+            "converse toolUse missing toolUseId %s",
+            kv(provider=provider, name=name),
+        )
+    tools[idx] = _ToolBuf(call_id, name)
+
+
+async def _iter_converse_events(
+    stream: Any,
     *,
     provider: str,
 ) -> AsyncIterator[ProviderEvent]:
-    response = await asyncio.to_thread(client.converse_stream, **kwargs)
     tools: dict[int, _ToolBuf] = {}
     input_tokens = output_tokens = cache_read = cache_creation = 0
     stop_reason: str | None = None
-    async for event in _aiter_sync(response["stream"]):
+    async for event in _aiter_sync(stream):
         if not isinstance(event, dict):
             _log.warning(
                 "unexpected converse stream event %s",
@@ -394,14 +421,7 @@ async def _stream_converse_once(
             )
             continue
         if "contentBlockStart" in event:
-            start_ev = event["contentBlockStart"]
-            start = start_ev.get("start") or {}
-            tool_use = start.get("toolUse") if isinstance(start, dict) else None
-            if isinstance(tool_use, dict):
-                idx = int(start_ev.get("contentBlockIndex") or 0)
-                tools[idx] = _ToolBuf(
-                    str(tool_use.get("toolUseId") or ""), str(tool_use.get("name") or "")
-                )
+            _on_content_block_start(event["contentBlockStart"], tools, provider=provider)
         elif "contentBlockDelta" in event:
             for item in _on_content_block_delta(event["contentBlockDelta"], tools):
                 yield item
@@ -428,6 +448,21 @@ async def _stream_converse_once(
     yield Done(truncated=stop_reason == "max_tokens")
 
 
+async def _stream_converse_once(
+    client: Any,
+    kwargs: dict[str, Any],
+    *,
+    provider: str,
+) -> AsyncIterator[ProviderEvent]:
+    response = await asyncio.to_thread(client.converse_stream, **kwargs)
+    stream = response["stream"]
+    try:
+        async for event in _iter_converse_events(stream, provider=provider):
+            yield event
+    finally:
+        await _close_event_stream(stream)
+
+
 async def iter_converse_stream(
     client: Any,
     stream_kwargs: dict[str, Any],
@@ -439,69 +474,54 @@ async def iter_converse_stream(
 ) -> AsyncIterator[ProviderEvent]:
     """Stream ``converse_stream``, retrying once a rejected inference field is stripped."""
     kwargs = _copy_stream_kwargs(stream_kwargs)
-    for _attempt in range(len(_STRIPPABLE_INFERENCE) + 1):
-        started = False
-        try:
-            async for event in _stream_converse_once(client, kwargs, provider=provider):
-                started = True
-                yield event
-            return
-        except Exception as exc:
-            if not started:
-                dropped = _strip_unsupported_inference(kwargs, exc)
-                if dropped:
-                    _log.warning(
-                        "converse stream rejected params, retrying without them %s",
-                        kv(provider=provider, model=kwargs.get("modelId"), dropped=dropped),
-                    )
-                    continue
-            _log.warning(
-                error_message,
-                kv(
-                    provider=provider,
-                    model=kwargs.get("modelId"),
-                    n_messages=n_messages,
-                    n_tools=n_tools,
-                ),
-                exc_info=True,
-            )
-            raise
+    async for event in iter_stream_with_param_retry(
+        lambda kw: _stream_converse_once(client, kw, provider=provider),
+        kwargs,
+        strip_rejected=_strip_unsupported_inference,
+        max_attempts=len(_STRIPPABLE_INFERENCE) + 1,
+        provider=provider,
+        error_message=error_message,
+        model=kwargs.get("modelId"),
+        n_messages=n_messages,
+        n_tools=n_tools,
+        retry_message="converse stream rejected params, retrying without them %s",
+    ):
+        yield event
 
 
-async def count_converse_tokens_or_estimate(
-    client: Any,
-    *,
-    model: str,
+def _estimate_block(block: ContentBlock) -> dict[str, Any]:
+    if isinstance(block, Text):
+        return {"text": block.text}
+    if isinstance(block, Thinking):
+        return {"thinking": block.thinking}
+    if isinstance(block, Image):
+        return {"image": block.mime_type, "chars": len(block.data)}
+    if isinstance(block, File):
+        return {"file": block.mime_type, "chars": len(block.data)}
+    if isinstance(block, ToolRequest):
+        return {"toolRequest": {"id": block.id, "name": block.name, "args": dict(block.args)}}
+    if isinstance(block, ToolResponse):
+        return {
+            "toolResponse": {
+                "id": block.id,
+                "result": [_estimate_block(b) for b in block.result],
+            }
+        }
+    return {"type": type(block).__name__}
+
+
+def estimate_converse_input_tokens(
     messages: Sequence[Message],
     tools: Sequence[ToolDef],
 ) -> int:
-    """``count_tokens`` when available; otherwise character-based estimate."""
-    system, converse_msgs = messages_to_converse(messages)
-    tool_config = converse_tools(tools)
-    converse_input: dict[str, Any] = {"messages": list(converse_msgs)}
-    if system:
-        converse_input["system"] = [{"text": system}]
-    if tool_config:
-        converse_input["toolConfig"] = tool_config
-    try:
-        resp = await asyncio.to_thread(
-            client.count_tokens,
-            modelId=_strip_bedrock_prefix(model),
-            input={"converse": converse_input},
-        )
-        return int(resp["inputTokens"])
-    except Exception as exc:
-        msg = str(exc).lower()
-        if "token counting" in msg or "not supported" in msg or "bedrock" in msg:
-            estimated = estimate_anthropic_input_tokens(
-                system=system,
-                messages=converse_msgs,
-                tools=[tool_config] if tool_config else None,
-            )
-            _log.warning(
-                "Bedrock count_tokens unavailable, using estimate %s",
-                kv(provider="bedrock", model=model, estimated_tokens=estimated),
-                exc_info=True,
-            )
-            return estimated
-        raise
+    """Character estimate from harness messages. CountTokens is Anthropic-only."""
+    system, rest = split_leading_system(messages)
+    serializable = [
+        {"role": m.role, "content": [_estimate_block(b) for b in m.content]} for m in rest
+    ]
+    tool_defs = [t.to_model_schema() for t in tools] if tools else None
+    return estimate_anthropic_input_tokens(
+        system=system,
+        messages=serializable,
+        tools=tool_defs,
+    )

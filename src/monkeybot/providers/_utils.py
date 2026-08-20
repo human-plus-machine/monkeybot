@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from typing import Any, Literal
 
 from monkeybot.core.llm.provider import (
@@ -129,6 +129,49 @@ def _strip_rejected_params(kwargs: dict[str, Any], exc: Exception) -> list[str]:
     return dropped
 
 
+async def iter_stream_with_param_retry(
+    stream_once: Callable[[dict[str, Any]], AsyncIterator[ProviderEvent]],
+    kwargs: dict[str, Any],
+    *,
+    strip_rejected: Callable[[dict[str, Any], Exception], list[str]],
+    max_attempts: int,
+    provider: str,
+    error_message: str,
+    model: object,
+    n_messages: int | None = None,
+    n_tools: int | None = None,
+    retry_message: str,
+) -> AsyncIterator[ProviderEvent]:
+    """Run ``stream_once``; if it fails before any event, strip a blamed param and retry."""
+    for _attempt in range(max_attempts):
+        started = False
+        try:
+            async for event in stream_once(kwargs):
+                started = True
+                yield event
+            return
+        except Exception as exc:
+            if not started:
+                dropped = strip_rejected(kwargs, exc)
+                if dropped:
+                    _log.warning(
+                        retry_message,
+                        kv(provider=provider, model=model, dropped=dropped),
+                    )
+                    continue
+            _log.warning(
+                error_message,
+                kv(
+                    provider=provider,
+                    model=model,
+                    n_messages=n_messages,
+                    n_tools=n_tools,
+                ),
+                exc_info=True,
+            )
+            raise
+
+
 async def iter_anthropic_sdk_stream(
     client: Any,
     stream_kwargs: dict[str, Any],
@@ -150,33 +193,19 @@ async def iter_anthropic_sdk_stream(
     already received deltas.
     """
     kwargs = dict(stream_kwargs)  # never mutate the caller's dict
-    for _attempt in range(len(_STRIPPABLE_PARAMS) + 1):
-        started = False
-        try:
-            async for event in _stream_anthropic_once(client, kwargs, provider=provider):
-                started = True
-                yield event
-            return
-        except Exception as exc:
-            if not started:
-                dropped = _strip_rejected_params(kwargs, exc)
-                if dropped:
-                    _log.warning(
-                        "anthropic stream rejected params, retrying without them %s",
-                        kv(provider=provider, model=kwargs.get("model"), dropped=dropped),
-                    )
-                    continue
-            _log.warning(
-                error_message,
-                kv(
-                    provider=provider,
-                    model=kwargs.get("model"),
-                    n_messages=n_messages,
-                    n_tools=n_tools,
-                ),
-                exc_info=True,
-            )
-            raise
+    async for event in iter_stream_with_param_retry(
+        lambda kw: _stream_anthropic_once(client, kw, provider=provider),
+        kwargs,
+        strip_rejected=_strip_rejected_params,
+        max_attempts=len(_STRIPPABLE_PARAMS) + 1,
+        provider=provider,
+        error_message=error_message,
+        model=kwargs.get("model"),
+        n_messages=n_messages,
+        n_tools=n_tools,
+        retry_message="anthropic stream rejected params, retrying without them %s",
+    ):
+        yield event
 
 
 async def _stream_anthropic_once(
@@ -529,9 +558,7 @@ def prepare_anthropic_cached_payload(
     )
     converted_tools = anthropic_tool_defs(tools) if tools else None
     system_param: Any = (
-        build_cached_system_blocks(system, cache_retention=cache_retention)
-        if system
-        else not_given
+        build_cached_system_blocks(system, cache_retention=cache_retention) if system else not_given
     )
     tools_param: Any = (
         mark_last_tool_cached(converted_tools, cache_retention=cache_retention)
@@ -639,6 +666,7 @@ __all__ = [
     "estimate_anthropic_input_tokens",
     "estimate_cost",
     "iter_anthropic_sdk_stream",
+    "iter_stream_with_param_retry",
     "mark_conversation_cache_breakpoints",
     "mark_last_tool_cached",
     "note_anthropic_token_estimate_observation",

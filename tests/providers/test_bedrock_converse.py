@@ -15,19 +15,26 @@ from monkeybot.core.llm.provider import (
     ToolInputDelta,
     UsageEvent,
 )
-from monkeybot.core.types.content_blocks import Text, Thinking, ToolRequest, ToolResponse
+from monkeybot.core.types.content_blocks import (
+    File,
+    Image,
+    Text,
+    Thinking,
+    ToolRequest,
+    ToolResponse,
+)
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._bedrock_converse import (
     bedrock_vendor,
     converse_request_kwargs,
-    converse_supports_param,
     converse_tools,
-    count_converse_tokens_or_estimate,
+    estimate_converse_input_tokens,
     iter_converse_stream,
     messages_to_converse,
     uses_anthropic_bedrock,
 )
-from monkeybot.providers.bedrock import BedrockClaudeProvider
+from monkeybot.providers.bedrock import BedrockClaudeProvider, BedrockProvider
+from monkeybot.providers.model_capabilities import supports_param
 from tests.providers.conftest import make_anthropic_stream_mock
 
 _ECHO = ToolDef(
@@ -95,10 +102,10 @@ def test_grok_kwargs_omit_temperature_nova_keeps_it() -> None:
     )
     assert grok["inferenceConfig"] == {"maxTokens": 2048}
     assert "temperature" not in grok["inferenceConfig"]
-    assert converse_supports_param(_GROK, "temperature") is False
+    assert supports_param(_GROK, "temperature") is False
     assert nova["inferenceConfig"]["maxTokens"] == 2048
     assert nova["inferenceConfig"]["temperature"] == 0.2
-    assert converse_supports_param(_NOVA, "temperature") is True
+    assert supports_param(_NOVA, "temperature") is True
 
 
 def test_tool_round_trip_tooluse_and_toolresult() -> None:
@@ -152,15 +159,25 @@ def test_consecutive_user_messages_merge() -> None:
     ]
 
 
-def test_thinking_blocks_dropped() -> None:
+def test_thinking_mapped_to_reasoning_content() -> None:
     messages = [
+        Message.text("user", "hi"),
         Message(
             role="assistant",
-            content=[Thinking(thinking="secret"), Text(text="visible")],
-        )
+            content=[Thinking(thinking="secret", signature="sig"), Text(text="visible")],
+        ),
     ]
     _, converse_msgs = messages_to_converse(messages)
-    assert converse_msgs == [{"role": "assistant", "content": [{"text": "visible"}]}]
+    assert converse_msgs[1]["content"][0] == {
+        "reasoningContent": {"reasoningText": {"text": "secret", "signature": "sig"}},
+    }
+    assert converse_msgs[1]["content"][1] == {"text": "visible"}
+
+
+def test_assistant_first_history_prepends_user() -> None:
+    _, converse_msgs = messages_to_converse([Message.text("assistant", "prior")])
+    assert converse_msgs[0] == {"role": "user", "content": [{"text": "(continued)"}]}
+    assert converse_msgs[1] == {"role": "assistant", "content": [{"text": "prior"}]}
 
 
 def _converse_events() -> list[dict[str, object]]:
@@ -227,7 +244,7 @@ async def test_grok_stream_calls_converse_not_anthropic() -> None:
     provider = BedrockClaudeProvider(temperature=0.2, max_tokens=2048, aws_region="us-east-1")
     runtime = MagicMock()
     runtime.converse_stream.return_value = {"stream": iter(_text_stream())}
-    provider._runtime_client = lambda: runtime  # type: ignore[method-assign]
+    provider._runtime = runtime
     anthropic = MagicMock()
     provider._client = lambda: anthropic  # type: ignore[method-assign]
 
@@ -255,7 +272,7 @@ async def test_claude_stream_still_uses_anthropic_mock() -> None:
     client = make_anthropic_stream_mock(events)
     provider._client = lambda: client  # type: ignore[method-assign]
     runtime = MagicMock()
-    provider._runtime_client = lambda: runtime  # type: ignore[method-assign]
+    provider._runtime = runtime
 
     async for _ in provider.stream([Message.text("user", "hi")], [], model=_CLAUDE):
         pass
@@ -318,28 +335,115 @@ async def test_unexpected_stream_event_is_logged(caplog: pytest.LogCaptureFixtur
     assert any(isinstance(e, TextDelta) and e.text == "ok" for e in events)
 
 
-@pytest.mark.asyncio
-async def test_count_tokens_not_supported_falls_back_to_estimate() -> None:
-    client = MagicMock()
-    client.count_tokens.side_effect = RuntimeError("token counting is not supported")
-    n = await count_converse_tokens_or_estimate(
-        client,
-        model=_GROK,
-        messages=[Message.text("user", "hi")],
-        tools=[],
+def test_estimate_with_image_does_not_raise() -> None:
+    n = estimate_converse_input_tokens(
+        [
+            Message(
+                role="user",
+                content=[
+                    Text(text="see"),
+                    Image(mime_type="image/png", data="QQ=="),
+                    File(mime_type="application/pdf", data="QQ=="),
+                ],
+            )
+        ],
+        [],
     )
     assert n >= 1
-    client.count_tokens.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_count_tokens_access_denied_raises() -> None:
+async def test_converse_count_skips_count_tokens_api() -> None:
+    provider = BedrockClaudeProvider(aws_region="us-east-1")
+    runtime = MagicMock()
+    provider._runtime = runtime
+    n = await provider.count_input_tokens([Message.text("user", "hi")], [], model=_GROK)
+    assert n >= 1
+    runtime.count_tokens.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_runtime_client_is_cached() -> None:
+    provider = BedrockClaudeProvider(aws_region="us-east-1")
+    runtime = MagicMock()
+    builds: list[int] = []
+
+    def _build() -> MagicMock:
+        builds.append(1)
+        return runtime
+
+    provider._new_runtime_client = _build  # type: ignore[method-assign]
+    assert await provider._runtime_client() is runtime
+    assert await provider._runtime_client() is runtime
+    assert builds == [1]
+
+
+@pytest.mark.asyncio
+async def test_empty_tool_use_id_logs_and_emits_toolcall(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stream_events: list[dict[str, object]] = [
+        {
+            "contentBlockStart": {
+                "contentBlockIndex": 0,
+                "start": {"toolUse": {"toolUseId": "", "name": "echo"}},
+            }
+        },
+        {
+            "contentBlockDelta": {
+                "contentBlockIndex": 0,
+                "delta": {"toolUse": {"input": "{}"}},
+            }
+        },
+        {"contentBlockStop": {"contentBlockIndex": 0}},
+        {"messageStop": {"stopReason": "tool_use"}},
+    ]
     client = MagicMock()
-    client.count_tokens.side_effect = RuntimeError("AccessDeniedException")
-    with pytest.raises(RuntimeError, match="AccessDeniedException"):
-        await count_converse_tokens_or_estimate(
-            client,
-            model=_GROK,
-            messages=[Message.text("user", "hi")],
-            tools=[],
-        )
+    client.converse_stream.return_value = {"stream": iter(stream_events)}
+    with caplog.at_level("WARNING", logger="monkeybot.providers._bedrock_converse"):
+        events = [
+            e
+            async for e in iter_converse_stream(
+                client,
+                {"modelId": _GROK, "messages": [], "inferenceConfig": {"maxTokens": 8}},
+                provider="bedrock",
+                error_message="err %s",
+            )
+        ]
+    assert any("missing toolUseId" in rec.message for rec in caplog.records)
+    calls = [e for e in events if isinstance(e, ToolCall)]
+    assert len(calls) == 1
+    assert calls[0].name == "echo"
+
+
+@pytest.mark.asyncio
+async def test_converse_stream_is_closed() -> None:
+    class _Stream:
+        def __init__(self) -> None:
+            self.closed = False
+            self._it = iter(_text_stream())
+
+        def __iter__(self) -> _Stream:
+            return self
+
+        def __next__(self) -> dict[str, object]:
+            return next(self._it)
+
+        def close(self) -> None:
+            self.closed = True
+
+    stream = _Stream()
+    client = MagicMock()
+    client.converse_stream.return_value = {"stream": stream}
+    async for _ in iter_converse_stream(
+        client,
+        {"modelId": _GROK, "messages": [], "inferenceConfig": {"maxTokens": 8}},
+        provider="bedrock",
+        error_message="err %s",
+    ):
+        pass
+    assert stream.closed
+
+
+def test_bedrock_provider_alias() -> None:
+    assert BedrockProvider is BedrockClaudeProvider

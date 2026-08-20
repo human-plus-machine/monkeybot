@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from collections.abc import AsyncIterator, Sequence
@@ -12,7 +13,7 @@ from monkeybot.core.logging_utils import kv
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._bedrock_converse import (
     converse_request_kwargs,
-    count_converse_tokens_or_estimate,
+    estimate_converse_input_tokens,
     iter_converse_stream,
     uses_anthropic_bedrock,
 )
@@ -32,7 +33,11 @@ _log = logging.getLogger(__name__)
 
 
 class BedrockClaudeProvider:
-    """Bedrock models via Anthropic Bedrock (Claude) or Converse (everyone else)."""
+    """Bedrock models via Anthropic (Claude) or Converse (Grok, Nova, Llama, …).
+
+    The class name is historical — ``aws_bedrock`` constructs this type for every
+    vendor. Prefer the ``BedrockProvider`` alias.
+    """
 
     @property
     def name(self) -> str:
@@ -58,13 +63,15 @@ class BedrockClaudeProvider:
         sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens)
         self._temperature = sampling.temperature
         self._max_tokens = sampling.max_tokens
+        self._runtime: Any = None
+        self._runtime_lock = asyncio.Lock()
 
     def _client(self) -> Any:
         from anthropic import AsyncAnthropicBedrock  # noqa: PLC0415
 
         return AsyncAnthropicBedrock(aws_region=self._aws_region)
 
-    def _runtime_client(self) -> Any:
+    def _new_runtime_client(self) -> Any:
         import boto3  # noqa: PLC0415
         from botocore.config import Config  # noqa: PLC0415
 
@@ -73,6 +80,14 @@ class BedrockClaudeProvider:
             region_name=self._aws_region,
             config=Config(retries={"max_attempts": 5, "mode": "adaptive"}),
         )
+
+    async def _runtime_client(self) -> Any:
+        if self._runtime is not None:
+            return self._runtime
+        async with self._runtime_lock:
+            if self._runtime is None:
+                self._runtime = await asyncio.to_thread(self._new_runtime_client)
+            return self._runtime
 
     async def count_input_tokens(
         self,
@@ -85,12 +100,7 @@ class BedrockClaudeProvider:
     ) -> int:
         del thinking_budget, hints
         if not uses_anthropic_bedrock(model):
-            return await count_converse_tokens_or_estimate(
-                self._runtime_client(),
-                model=model,
-                messages=messages,
-                tools=tools,
-            )
+            return estimate_converse_input_tokens(messages, tools)
         import anthropic  # noqa: PLC0415
 
         system, msgs = split_leading_system(messages)
@@ -140,8 +150,9 @@ class BedrockClaudeProvider:
                 max_tokens=self._max_tokens,
                 temperature=self._temperature,
             )
+            client = await self._runtime_client()
             async for event in iter_converse_stream(
-                self._runtime_client(),
+                client,
                 kwargs,
                 provider="bedrock",
                 error_message="Bedrock Converse stream error: %s",
@@ -182,3 +193,6 @@ class BedrockClaudeProvider:
             n_tools=len(tools),
         ):
             yield event
+
+
+BedrockProvider = BedrockClaudeProvider

@@ -38,3 +38,10 @@ def test_bedrock_namespaced_ids_match() -> None:
 
 def test_vertex_suffixed_ids_match() -> None:
     assert supports_param("claude-sonnet-5@20260101", "temperature") is False
+
+
+def test_xai_grok_rejects_temperature() -> None:
+    assert supports_param("us.xai.grok-4.6", "temperature") is False
+    assert supports_param("xai.grok-4.6", "temperature") is False
+    assert supports_param("bedrock/us.xai.grok-4.6", "temperature") is False
+    assert supports_param("us.amazon.nova-pro-v1:0", "temperature") is True
