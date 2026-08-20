@@ -30,5 +30,5 @@ class UsagePort(Protocol):
     ) -> dict[str, Any]:
         """Return JSON-serializable dict matching GET /sessions/{id}/usage body."""
 
-    async def agent_usage(self, *, since: str | None) -> dict[str, Any]:
+    async def agent_usage(self, *, since: str | None, bucket: str | None = None) -> dict[str, Any]:
         """Return JSON-serializable dict matching GET /usage body (totals + breakdown)."""

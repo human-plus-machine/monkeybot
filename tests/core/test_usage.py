@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC
+
 import pytest
 import pytest_asyncio
 
@@ -228,11 +230,11 @@ def test_usage_summary_defaults_cache_fields_zero() -> None:
 
 @pytest.mark.asyncio
 async def test_usage_breakdown_by_model_and_day(usage_conn) -> None:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     store = SQLiteUsageStore(usage_conn)
-    day1 = int(datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc).timestamp() * 1000)
-    day2 = int(datetime(2026, 7, 26, 12, 0, tzinfo=timezone.utc).timestamp() * 1000)
+    day1 = int(datetime(2026, 7, 25, 12, 0, tzinfo=UTC).timestamp() * 1000)
+    day2 = int(datetime(2026, 7, 26, 12, 0, tzinfo=UTC).timestamp() * 1000)
     rows = [
         ("a", "gemini-2.5-flash", 10, 5, 0.02, day1),
         ("b", "gemini-2.5-flash", 20, 5, 0.03, day1),
@@ -261,9 +263,77 @@ async def test_usage_breakdown_by_model_and_day(usage_conn) -> None:
     assert [b.key for b in breakdown.by_day] == ["2026-07-25", "2026-07-26"]
     assert breakdown.by_day[0].turns == 2
     assert breakdown.by_day[1].cost_usd == pytest.approx(0.10)
+    assert [(p.bucket, p.model, p.turns) for p in breakdown.by_day_model] == [
+        ("2026-07-25", "gemini-2.5-flash", 2),
+        ("2026-07-26", "claude-sonnet-4", 1),
+    ]
+    assert breakdown.by_day_model[0].cost_usd == pytest.approx(0.05)
 
     filtered = await store.breakdown(since_ms=day2)
     assert len(filtered.by_model) == 1
     assert filtered.by_model[0].key == "claude-sonnet-4"
     assert len(filtered.by_day) == 1
     assert filtered.by_day[0].key == "2026-07-26"
+    assert len(filtered.by_day_model) == 1
+    assert filtered.by_day_model[0].model == "claude-sonnet-4"
+
+
+@pytest.mark.asyncio
+async def test_usage_breakdown_hour_and_week_buckets(usage_conn) -> None:
+    from datetime import datetime
+
+    store = SQLiteUsageStore(usage_conn)
+    morning = int(datetime(2026, 7, 26, 9, 0, tzinfo=UTC).timestamp() * 1000)
+    evening = int(datetime(2026, 7, 26, 18, 0, tzinfo=UTC).timestamp() * 1000)
+    next_week = int(datetime(2026, 8, 3, 12, 0, tzinfo=UTC).timestamp() * 1000)
+    rows = [
+        ("a", "gemini-2.5-flash", 10, 5, 0.02, morning),
+        ("b", "claude-sonnet-4", 20, 5, 0.08, evening),
+        ("c", "gemini-2.5-flash", 5, 2, 0.01, next_week),
+    ]
+    for tid, model, inp, out, cost, created in rows:
+        await usage_conn.execute(
+            """
+            INSERT INTO turn_usage(
+                thread_id, run_id, model,
+                input_tokens, output_tokens, cached_tokens,
+                cost_usd, duration_ms, created_at, context_json
+            )
+            VALUES (?, NULL, ?, ?, ?, 0, ?, 1, ?, NULL)
+            """,
+            (tid, model, inp, out, cost, created),
+        )
+    await usage_conn.commit()
+
+    hourly = await store.breakdown(bucket="hour")
+    assert [p.bucket for p in hourly.by_day_model] == [
+        "2026-07-26T09",
+        "2026-07-26T18",
+        "2026-08-03T12",
+    ]
+    weekly = await store.breakdown(bucket="week")
+    assert [p.bucket for p in weekly.by_day_model] == [
+        "2026-07-20",
+        "2026-07-20",
+        "2026-08-03",
+    ]
+    assert {p.model for p in weekly.by_day_model if p.bucket == "2026-07-20"} == {
+        "gemini-2.5-flash",
+        "claude-sonnet-4",
+    }
+
+
+def test_utc_bucket_key_aligns_week_to_monday() -> None:
+    from datetime import datetime
+
+    from monkeybot.core.persistence.usage_buckets import coerce_granularity, utc_bucket_key
+
+    sunday = int(datetime(2026, 7, 26, 12, 0, tzinfo=UTC).timestamp() * 1000)
+    monday = int(datetime(2026, 7, 20, 0, 0, tzinfo=UTC).timestamp() * 1000)
+    assert utc_bucket_key(sunday, "week") == "2026-07-20"
+    assert utc_bucket_key(monday, "week") == "2026-07-20"
+    assert utc_bucket_key(sunday, "hour") == "2026-07-26T12"
+    assert utc_bucket_key(sunday, "day") == "2026-07-26"
+    assert coerce_granularity(None) == "day"
+    with pytest.raises(ValueError):
+        coerce_granularity("month")

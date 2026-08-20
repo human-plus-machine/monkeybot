@@ -29,6 +29,7 @@ from monkeybot.core.attachments.store import (
     UnsupportedAttachmentTypeError,
 )
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.persistence.usage_buckets import coerce_granularity
 from monkeybot.core.runtime.context_budget import SUMMARY_TRIGGER_RATIO
 from monkeybot.core.runtime.events import QueuedInputAccepted, event_to_json
 from monkeybot.core.runtime.input_admission import AdmissionQueueFullError, FollowUpItem
@@ -37,9 +38,9 @@ from monkeybot.core.types.content_blocks import ContentBlock
 
 from .loop_port import LoopPort, UsagePort
 from .models import (
-    APIError,
     AdmissionAcceptedResponse,
     AgentUsageResponse,
+    APIError,
     AttachmentUploadResponse,
     CancelRequest,
     CreateSessionRequest,
@@ -407,8 +408,10 @@ class _StaticUsagePort:
             "context_window_tokens": cw,
         }
 
-    async def agent_usage(self, *, since: str | None) -> dict[str, Any]:
-        _ = since
+    async def agent_usage(
+        self, *, since: str | None, bucket: str | None = None
+    ) -> dict[str, Any]:
+        _ = since, bucket
         return {
             "turns": 0,
             "input_tokens": 0,
@@ -421,6 +424,7 @@ class _StaticUsagePort:
             "period_end": 0,
             "by_model": [],
             "by_day": [],
+            "by_day_model": [],
         }
 
 
@@ -451,6 +455,14 @@ def _validate_since(since: str | None, request_id: str) -> None:
             "`since` must be a non-negative integer (unix ms)",
             request_id,
         )
+
+
+def _validate_bucket(bucket: str | None, request_id: str) -> None:
+    """Reject an unknown ``bucket`` query param instead of silently defaulting."""
+    try:
+        coerce_granularity(bucket)
+    except ValueError as exc:
+        raise APIError(400, "BAD_REQUEST", str(exc), request_id) from exc
 
 
 def _parse_last_event_id(request: Request) -> int | None:
@@ -844,7 +856,7 @@ def create_app(
                         break
                     try:
                         frame = await asyncio.wait_for(q.get(), timeout=1.0)
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         continue
                     yield frame.encode("utf-8")
             except asyncio.CancelledError:
@@ -1038,11 +1050,14 @@ def create_app(
     async def get_agent_usage(
         request: Request,
         since: str | None = None,
+        bucket: str | None = None,
     ) -> AgentUsageResponse:
-        """Return agent-wide totals and spend split by model / UTC day."""
-        _validate_since(since, uuid.uuid4().hex)
+        """Return agent-wide totals and spend split by model / time bucket."""
+        rid = uuid.uuid4().hex
+        _validate_since(since, rid)
+        _validate_bucket(bucket, rid)
         usage_ref: UsagePort = request.app.state.usage
-        raw = await usage_ref.agent_usage(since=since)
+        raw = await usage_ref.agent_usage(since=since, bucket=bucket)
         return AgentUsageResponse.model_validate(raw)
 
     @api.get("/api/workspace/tree")

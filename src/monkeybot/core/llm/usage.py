@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Literal
 
 from monkeybot.core.runtime.events import UsageTotals
+
+UsageGranularity = Literal["hour", "day", "week"]
 
 
 @dataclass
@@ -69,8 +72,21 @@ class UsageBucket:
 
 
 @dataclass(frozen=True)
+class UsageSeriesPoint:
+    """One (time bucket, model) cell for the stacked-area usage chart."""
+
+    bucket: str
+    model: str
+    turns: int
+    input_tokens: int
+    output_tokens: int
+    cost_usd: float
+
+
+@dataclass(frozen=True)
 class UsageBreakdown:
-    """Per-model and per-day aggregates for the usage dashboard."""
+    """Per-model, per-day, and day×model aggregates for the usage dashboard."""
 
     by_model: list[UsageBucket]
     by_day: list[UsageBucket]
+    by_day_model: list[UsageSeriesPoint] = field(default_factory=list)

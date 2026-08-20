@@ -7,8 +7,16 @@ import time
 
 import aiosqlite
 
-from monkeybot.core.llm.usage import Usage, UsageBreakdown, UsageBucket, UsageSummary
+from monkeybot.core.llm.usage import (
+    Usage,
+    UsageBreakdown,
+    UsageBucket,
+    UsageGranularity,
+    UsageSeriesPoint,
+    UsageSummary,
+)
 from monkeybot.core.persistence.sqlite import TaskReentrantLock, with_conn_lock
+from monkeybot.core.persistence.usage_buckets import sqlite_bucket_sql
 
 
 class SQLiteUsageStore:
@@ -164,8 +172,13 @@ class SQLiteUsageStore:
         )
 
     @with_conn_lock
-    async def breakdown(self, since_ms: int | None = None) -> UsageBreakdown:
-        """Aggregate usage by model and by UTC calendar day."""
+    async def breakdown(
+        self,
+        since_ms: int | None = None,
+        *,
+        bucket: UsageGranularity = "day",
+    ) -> UsageBreakdown:
+        """Aggregate usage by model, UTC day, and (time bucket × model)."""
         where_sql, params = self._since_clause(since_ms)
         agg = """
                 COUNT(*) AS turns,
@@ -189,11 +202,26 @@ class SQLiteUsageStore:
             GROUP BY day
             ORDER BY day ASC
         """
+        series_sql = f"""
+            SELECT
+                {sqlite_bucket_sql(bucket)} AS bucket,
+                model,
+                {agg}
+            FROM turn_usage
+            {where_sql}
+            GROUP BY bucket, model
+            ORDER BY bucket ASC, cost_usd DESC, model ASC
+        """
+        by_model = await self._buckets(model_sql, params)
+        by_day = await self._buckets(day_sql, params)
+        by_day_model = await self._series(series_sql, params)
+        return UsageBreakdown(by_model=by_model, by_day=by_day, by_day_model=by_day_model)
 
-        by_model: list[UsageBucket] = []
-        cursor = await self._conn.execute(model_sql, params)
+    async def _buckets(self, sql: str, params: list[object]) -> list[UsageBucket]:
+        out: list[UsageBucket] = []
+        cursor = await self._conn.execute(sql, params)
         async for row in cursor:
-            by_model.append(
+            out.append(
                 UsageBucket(
                     key=str(row[0]),
                     turns=int(row[1]),
@@ -203,18 +231,21 @@ class SQLiteUsageStore:
                 )
             )
         await cursor.close()
+        return out
 
-        by_day: list[UsageBucket] = []
-        cursor = await self._conn.execute(day_sql, params)
+    async def _series(self, sql: str, params: list[object]) -> list[UsageSeriesPoint]:
+        out: list[UsageSeriesPoint] = []
+        cursor = await self._conn.execute(sql, params)
         async for row in cursor:
-            by_day.append(
-                UsageBucket(
-                    key=str(row[0]),
-                    turns=int(row[1]),
-                    input_tokens=int(row[2]),
-                    output_tokens=int(row[3]),
-                    cost_usd=float(row[4]),
+            out.append(
+                UsageSeriesPoint(
+                    bucket=str(row[0]),
+                    model=str(row[1]),
+                    turns=int(row[2]),
+                    input_tokens=int(row[3]),
+                    output_tokens=int(row[4]),
+                    cost_usd=float(row[5]),
                 )
             )
         await cursor.close()
-        return UsageBreakdown(by_model=by_model, by_day=by_day)
+        return out

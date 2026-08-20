@@ -337,8 +337,10 @@ class _PopulatedUsagePort:
             "context_window_tokens": 200_000,
         }
 
-    async def agent_usage(self, *, since: str | None) -> dict[str, object]:
-        _ = since
+    async def agent_usage(
+        self, *, since: str | None, bucket: str | None = None
+    ) -> dict[str, object]:
+        _ = since, bucket
         return {
             "turns": 2,
             "input_tokens": 10,
@@ -361,6 +363,16 @@ class _PopulatedUsagePort:
             "by_day": [
                 {
                     "key": "2026-07-26",
+                    "turns": 2,
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "cost_usd": 0.05,
+                }
+            ],
+            "by_day_model": [
+                {
+                    "bucket": "2026-07-26",
+                    "model": "gemini-2.5-flash",
                     "turns": 2,
                     "input_tokens": 10,
                     "output_tokens": 5,
@@ -449,6 +461,7 @@ async def test_get_agent_usage_returns_totals(client: AsyncClient) -> None:
     assert body["cost_usd"] == 0.0
     assert body["by_model"] == []
     assert body["by_day"] == []
+    assert body["by_day_model"] == []
     assert "input_tokens" in body
     assert "cache_read_tokens" in body
 
@@ -470,12 +483,21 @@ async def test_get_agent_usage_populated(
     assert body["cost_usd"] == 0.05
     assert body["by_model"][0]["key"] == "gemini-2.5-flash"
     assert body["by_day"][0]["key"] == "2026-07-26"
+    assert body["by_day_model"][0]["model"] == "gemini-2.5-flash"
+    assert body["by_day_model"][0]["bucket"] == "2026-07-26"
     assert "cached_tokens" not in body["by_model"][0]
 
 
 @pytest.mark.asyncio
 async def test_get_agent_usage_rejects_malformed_since(client: AsyncClient) -> None:
     r = await client.get("/usage", params={"since": "-1"})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "BAD_REQUEST"
+
+
+@pytest.mark.asyncio
+async def test_get_agent_usage_rejects_unknown_bucket(client: AsyncClient) -> None:
+    r = await client.get("/usage", params={"bucket": "month"})
     assert r.status_code == 400
     assert r.json()["error"]["code"] == "BAD_REQUEST"
 
