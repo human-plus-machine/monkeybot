@@ -1,4 +1,4 @@
-"""Anthropic Claude on AWS Bedrock (``AsyncAnthropicBedrock``)."""
+"""AWS Bedrock provider (Claude via Anthropic SDK; other models via Converse)."""
 
 from __future__ import annotations
 
@@ -10,6 +10,12 @@ from typing import Any
 from monkeybot.core.llm.provider import Message, ProviderCallHints, ProviderEvent
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.types.types_tools import ToolDef
+from monkeybot.providers._bedrock_converse import (
+    converse_request_kwargs,
+    count_converse_tokens_or_estimate,
+    iter_converse_stream,
+    uses_anthropic_bedrock,
+)
 from monkeybot.providers._utils import (
     anthropic_tool_defs,
     build_anthropic_messages,
@@ -26,7 +32,7 @@ _log = logging.getLogger(__name__)
 
 
 class BedrockClaudeProvider:
-    """Claude on AWS Bedrock via the Anthropic Bedrock client."""
+    """Bedrock models via Anthropic Bedrock (Claude) or Converse (everyone else)."""
 
     @property
     def name(self) -> str:
@@ -58,6 +64,16 @@ class BedrockClaudeProvider:
 
         return AsyncAnthropicBedrock(aws_region=self._aws_region)
 
+    def _runtime_client(self) -> Any:
+        import boto3  # noqa: PLC0415
+        from botocore.config import Config  # noqa: PLC0415
+
+        return boto3.client(
+            "bedrock-runtime",
+            region_name=self._aws_region,
+            config=Config(retries={"max_attempts": 5, "mode": "adaptive"}),
+        )
+
     async def count_input_tokens(
         self,
         messages: Sequence[Message],
@@ -68,6 +84,13 @@ class BedrockClaudeProvider:
         hints: ProviderCallHints | None = None,
     ) -> int:
         del thinking_budget, hints
+        if not uses_anthropic_bedrock(model):
+            return await count_converse_tokens_or_estimate(
+                self._runtime_client(),
+                model=model,
+                messages=messages,
+                tools=tools,
+            )
         import anthropic  # noqa: PLC0415
 
         system, msgs = split_leading_system(messages)
@@ -109,6 +132,25 @@ class BedrockClaudeProvider:
         hints: ProviderCallHints | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         del thinking_budget
+        if not uses_anthropic_bedrock(model):
+            kwargs = converse_request_kwargs(
+                model=model,
+                messages=messages,
+                tools=tools,
+                max_tokens=self._max_tokens,
+                temperature=self._temperature,
+            )
+            async for event in iter_converse_stream(
+                self._runtime_client(),
+                kwargs,
+                provider="bedrock",
+                error_message="Bedrock Converse stream error: %s",
+                n_messages=len(messages),
+                n_tools=len(tools),
+            ):
+                yield event
+            return
+
         import anthropic  # noqa: PLC0415
 
         retention = hints.cache_retention if hints is not None else "short"
