@@ -177,6 +177,7 @@ class AgentLayout:
     mcp_config_path: Path
     command_allowlist_path: Path
     permission_config_path: Path
+    approvals_path: Path
     db_url: str
     memory_storage_uri: str
     agent_id: str
@@ -223,6 +224,9 @@ class AgentLayout:
             permission_config_path=path_env(
                 "PERMISSION_CONFIG", "monkeybot_config/permissions.yaml"
             ),
+            approvals_path=path_env(
+                "MONKEYBOT_APPROVALS_CONFIG", "monkeybot_config/approvals.json"
+            ),
             db_url=resolve_sqlite_url(
                 os.environ.get("DB_URL", "sqlite:///data/monkeybot.db"), root
             ),
@@ -247,6 +251,7 @@ class AgentLayout:
             "MCP_CONFIG": str(self.mcp_config_path),
             "COMMAND_ALLOWLIST_CONFIG": str(self.command_allowlist_path),
             "PERMISSION_CONFIG": str(self.permission_config_path),
+            "MONKEYBOT_APPROVALS_CONFIG": str(self.approvals_path),
             "DB_URL": self.db_url,
             "MEMORY_STORAGE_URI": self.memory_storage_uri,
             "MONKEYBOT_PYTHON": sys.executable,

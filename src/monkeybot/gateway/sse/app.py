@@ -11,7 +11,7 @@ import contextlib
 import json
 import logging
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -19,6 +19,8 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from monkeybot.computer import build_computer_tools, should_enable_computer_tools
+from monkeybot.computer.permissions import build_computer_permission_inspector, build_persist_hook
 from monkeybot.core.attachments.config import attachments_enabled_from_env
 from monkeybot.core.attachments.store import AttachmentStore, FilesystemAttachmentStore
 from monkeybot.core.config.settings import (
@@ -101,6 +103,8 @@ class _GatewayDeps:
     run_command_allowed_path_prefixes: list[str] | None = None
     subagent_registry: dict[str, SubagentConfig] = field(default_factory=dict)
     loops_registry: LoopsToolRegistry = field(default_factory=LoopsToolRegistry)
+    computer_tools: list[Any] = field(default_factory=list)
+    computer_approvals_persist: Callable[[str, str], bool] | None = None
 
 
 _deps = _GatewayDeps()
@@ -374,6 +378,7 @@ class GatewayLoopPort:
             extra_tools: list[Any] = (
                 [_deps.web_search_tool] if _deps.web_search_tool is not None else []
             )
+            extra_tools.extend(_deps.computer_tools)
             todo_store = None
             if todo_list_enabled_from_env():
                 if bus.todo_store is None:
@@ -405,6 +410,7 @@ class GatewayLoopPort:
                     scheduled_loops_available=loops_available,
                     loops_advertised=loops_advertised,
                     todo_store=todo_store,
+                    approvals_persist=_deps.computer_approvals_persist,
                 )
             except Exception as exc:
                 logger.exception("build_context failed")
@@ -561,9 +567,14 @@ async def _startup(fastapi_app: FastAPI) -> None:
         inspectors.append(RulesInspector(denied))
 
     perm_path = layout.permission_config_path
-    perm_insp = try_load_permission_inspector(perm_path)
-    if perm_insp is not None:
-        inspectors.append(perm_insp)
+    if should_enable_computer_tools():
+        _deps.computer_tools = build_computer_tools()
+        _deps.computer_approvals_persist = build_persist_hook(layout.approvals_path)
+        inspectors.append(build_computer_permission_inspector(perm_path, layout.approvals_path))
+    else:
+        perm_insp = try_load_permission_inspector(perm_path)
+        if perm_insp is not None:
+            inspectors.append(perm_insp)
 
     inspectors.append(LoopStartInspector())
     _deps.inspectors = inspectors

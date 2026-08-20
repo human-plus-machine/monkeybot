@@ -6,6 +6,11 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Local computer control: nine opt-in, macOS-only `computer_*` tools (`computer/`) let the agent open/reveal files and folders, launch apps, open URLs, read/write the clipboard, and list/find/move/trash files under the user's home directory. Off by default (`computer.enabled: false` / `MONKEYBOT_COMPUTER_TOOLS`); intended for the Monkeybot desktop app, never a server deployment. Every call asks for approval by default via a built-in ruleset baseline (not `permissions.yaml`, which is fail-open); "Always allow" is scoped to the exact `(tool, resource)` approved and persists durably to `monkeybot_config/approvals.json` (a new machine-written file — never hand-edit). Hard security limits (home-directory confinement, credential-path denylist, exec-surface refusal on `open`, trash-not-delete) live in the tool bodies and cannot be bypassed by permission rules. See `docs/features.md` §22.
+- `permissions.yaml`'s `tool-confirmations` approval now supports a durable `persist` hook (`remember_always_approval(..., persist=...)`) in addition to the existing in-session `SessionApprovals` cache; `resource_for_call` gained `url`/`app` argument lookups for readable permission resource strings on tools with no `path` arg.
+
 ## [core v3.0.2] - 2026-08-18
 
 ### Fixed
