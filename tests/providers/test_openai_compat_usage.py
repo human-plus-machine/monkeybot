@@ -332,9 +332,7 @@ async def test_rate_limit_retries_with_backoff_then_succeeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A rate-limit error before any chunk is streamed retries and eventually succeeds."""
-    client = _flaky_client(
-        _NVIDIA_RESOURCE_EXHAUSTED, fail_times=1, chunks=[_text_chunk("hi")]
-    )
+    client = _flaky_client(_NVIDIA_RESOURCE_EXHAUSTED, fail_times=1, chunks=[_text_chunk("hi")])
     _install_fake_openai(monkeypatch, client)
 
     sleeps: list[float] = []
@@ -342,9 +340,7 @@ async def test_rate_limit_retries_with_backoff_then_succeeds(
     async def _fake_sleep(delay: float) -> None:
         sleeps.append(delay)
 
-    monkeypatch.setattr(
-        "monkeybot.providers._openai_compat.asyncio.sleep", _fake_sleep
-    )
+    monkeypatch.setattr("monkeybot.providers._openai_compat.asyncio.sleep", _fake_sleep)
 
     events = [
         ev
@@ -376,9 +372,7 @@ async def test_rate_limit_exhausted_raises_friendly_error_not_raw_text(
     async def _fake_sleep(_delay: float) -> None:
         return None
 
-    monkeypatch.setattr(
-        "monkeybot.providers._openai_compat.asyncio.sleep", _fake_sleep
-    )
+    monkeypatch.setattr("monkeybot.providers._openai_compat.asyncio.sleep", _fake_sleep)
 
     with pytest.raises(ProviderRateLimitError) as exc_info:
         [
@@ -408,9 +402,7 @@ async def test_rate_limit_backoff_sleeps_after_releasing_semaphore(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The concurrency slot must be released before backing off, not held idle."""
-    client = _flaky_client(
-        _NVIDIA_RESOURCE_EXHAUSTED, fail_times=1, chunks=[_text_chunk("hi")]
-    )
+    client = _flaky_client(_NVIDIA_RESOURCE_EXHAUSTED, fail_times=1, chunks=[_text_chunk("hi")])
     _install_fake_openai(monkeypatch, client)
 
     events: list[str] = []
@@ -430,9 +422,7 @@ async def test_rate_limit_backoff_sleeps_after_releasing_semaphore(
     async def _fake_sleep(_delay: float) -> None:
         events.append("sleep")
 
-    monkeypatch.setattr(
-        "monkeybot.providers._openai_compat.asyncio.sleep", _fake_sleep
-    )
+    monkeypatch.setattr("monkeybot.providers._openai_compat.asyncio.sleep", _fake_sleep)
 
     _ = [
         ev
@@ -471,9 +461,7 @@ async def test_mid_stream_rate_limit_does_not_retry(monkeypatch: pytest.MonkeyPa
     async def _fake_sleep(delay: float) -> None:
         sleeps.append(delay)
 
-    monkeypatch.setattr(
-        "monkeybot.providers._openai_compat.asyncio.sleep", _fake_sleep
-    )
+    monkeypatch.setattr("monkeybot.providers._openai_compat.asyncio.sleep", _fake_sleep)
 
     with pytest.raises(ProviderRateLimitError):
         [
@@ -577,9 +565,7 @@ async def test_server_error_retries_with_backoff_then_succeeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A bare 5xx before any chunk is streamed retries and eventually succeeds."""
-    client = _flaky_client(
-        _FakeAPIStatusError(500), fail_times=1, chunks=[_text_chunk("hi")]
-    )
+    client = _flaky_client(_FakeAPIStatusError(500), fail_times=1, chunks=[_text_chunk("hi")])
     _install_fake_openai_with_status_error(monkeypatch, client)
 
     sleeps: list[float] = []
@@ -689,9 +675,7 @@ def _tool_call_text_chunk(text: str) -> SimpleNamespace:
     return SimpleNamespace(
         usage=None,
         choices=[
-            SimpleNamespace(
-                delta=SimpleNamespace(content=text, reasoning=None, tool_calls=None)
-            )
+            SimpleNamespace(delta=SimpleNamespace(content=text, reasoning=None, tool_calls=None))
         ],
     )
 
@@ -914,3 +898,298 @@ async def test_does_not_recover_text_tool_call_when_structured_call_present() ->
     tool_calls = [ev for ev in events if isinstance(ev, ToolCall)]
     assert len(tool_calls) == 1
     assert tool_calls[0].name == "search_jobs"
+
+
+def _tool_call_delta_chunk(
+    *, id: str | None = None, name: str | None = None, arguments: str | None = None
+) -> SimpleNamespace:
+    """A structured tool_calls delta chunk with no `index` field at all.
+
+    Reproduces DeepSeek/Qwen-family backends proxied through OpenRouter,
+    which are known to omit `index` on tool_call deltas.
+    """
+    return SimpleNamespace(
+        usage=None,
+        choices=[
+            SimpleNamespace(
+                delta=SimpleNamespace(
+                    content=None,
+                    reasoning=None,
+                    tool_calls=[
+                        SimpleNamespace(
+                            index=None,
+                            id=id,
+                            function=SimpleNamespace(name=name, arguments=arguments),
+                        )
+                    ],
+                )
+            )
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_parallel_tool_calls_without_index_do_not_collapse() -> None:
+    """Two parallel tool calls with no `index` must not merge into one slot.
+
+    Before the fix, `int(tc.index or 0)` routed every deltas-without-index
+    chunk to the same buffer slot, clobbering the first call's name/args
+    with the second's and concatenating their argument strings into invalid
+    JSON.
+    """
+    chunks = [
+        _tool_call_delta_chunk(id="call_a", name="search_jobs"),
+        _tool_call_delta_chunk(arguments='{"keyword"'),
+        _tool_call_delta_chunk(arguments=': "python"}'),
+        _tool_call_delta_chunk(id="call_b", name="get_weather"),
+        _tool_call_delta_chunk(arguments='{"city": "Boston"}'),
+    ]
+    client = _fake_client(chunks)
+
+    events = [
+        ev
+        async for ev in iter_openai_compat_stream(
+            client,
+            {
+                "model": "m",
+                "tools": [
+                    {"type": "function", "function": {"name": "search_jobs"}},
+                    {"type": "function", "function": {"name": "get_weather"}},
+                ],
+            },
+            provider="openrouter",
+            n_tools=2,
+        )
+    ]
+
+    tool_calls = [ev for ev in events if isinstance(ev, ToolCall)]
+    assert len(tool_calls) == 2
+
+    search_call = next(tc for tc in tool_calls if tc.name == "search_jobs")
+    weather_call = next(tc for tc in tool_calls if tc.name == "get_weather")
+
+    assert search_call.call_id == "call_a"
+    assert search_call.args == {"keyword": "python"}
+    assert search_call.parse_error is None
+
+    assert weather_call.call_id == "call_b"
+    assert weather_call.args == {"city": "Boston"}
+    assert weather_call.parse_error is None
+
+
+@pytest.mark.asyncio
+async def test_parallel_tool_calls_without_index_or_id_get_unique_call_ids() -> None:
+    """Same-named parallel calls missing both `index` and `id` must not collide.
+
+    Before the fix, both fell back to the identical `anon:<name>` call_id,
+    so the second silently overwrote the first downstream (keyed by call_id).
+    """
+    chunks = [
+        _tool_call_delta_chunk(name="get_weather", arguments='{"city": "Boston"}'),
+        _tool_call_delta_chunk(name="get_weather", arguments='{"city": "Austin"}'),
+    ]
+    client = _fake_client(chunks)
+
+    events = [
+        ev
+        async for ev in iter_openai_compat_stream(
+            client,
+            {"model": "m", "tools": [{"type": "function", "function": {"name": "get_weather"}}]},
+            provider="openrouter",
+            n_tools=1,
+        )
+    ]
+
+    tool_calls = [ev for ev in events if isinstance(ev, ToolCall)]
+    assert len(tool_calls) == 2
+    assert len({tc.call_id for tc in tool_calls}) == 2
+    assert {tc.args["city"] for tc in tool_calls} == {"Boston", "Austin"}
+
+
+@pytest.mark.asyncio
+async def test_parallel_tool_calls_without_index_repeated_id_do_not_collapse() -> None:
+    """A host that echoes `id` on every delta for a call must not fragment it.
+
+    Before the fix, `elif tc.id or name` treated every delta still carrying
+    `id` as the start of a *new* call, so a call whose `id` repeats on its
+    argument-only continuation chunks got split across several nameless
+    slots — each dropped at emit (`if not name: continue`), losing the args
+    entirely.
+    """
+    chunks = [
+        _tool_call_delta_chunk(id="call_a", name="search_jobs"),
+        _tool_call_delta_chunk(id="call_a", arguments='{"keyword"'),
+        _tool_call_delta_chunk(id="call_a", arguments=': "python"}'),
+        _tool_call_delta_chunk(id="call_b", name="get_weather"),
+        _tool_call_delta_chunk(id="call_b", arguments='{"city": "Boston"}'),
+    ]
+    client = _fake_client(chunks)
+
+    events = [
+        ev
+        async for ev in iter_openai_compat_stream(
+            client,
+            {
+                "model": "m",
+                "tools": [
+                    {"type": "function", "function": {"name": "search_jobs"}},
+                    {"type": "function", "function": {"name": "get_weather"}},
+                ],
+            },
+            provider="openrouter",
+            n_tools=2,
+        )
+    ]
+
+    tool_calls = [ev for ev in events if isinstance(ev, ToolCall)]
+    assert len(tool_calls) == 2
+
+    search_call = next(tc for tc in tool_calls if tc.name == "search_jobs")
+    weather_call = next(tc for tc in tool_calls if tc.name == "get_weather")
+    assert search_call.call_id == "call_a"
+    assert search_call.args == {"keyword": "python"}
+    assert weather_call.call_id == "call_b"
+    assert weather_call.args == {"city": "Boston"}
+
+
+@pytest.mark.asyncio
+async def test_parallel_tool_calls_without_index_args_before_name_not_orphaned() -> None:
+    """Args arriving before a call's id/name must attach, not orphan.
+
+    Reproduces a host that streams the opening `{` of arguments before it
+    streams the function name. Before the fix, the args-only delta opened a
+    nameless fallback slot, and the later id/name delta opened a *second*
+    slot — the nameless one (holding the real args) was dropped at emit.
+    """
+    chunks = [
+        _tool_call_delta_chunk(arguments='{"keyword"'),
+        _tool_call_delta_chunk(id="call_a", name="search_jobs"),
+        _tool_call_delta_chunk(arguments=': "python"}'),
+    ]
+    client = _fake_client(chunks)
+
+    events = [
+        ev
+        async for ev in iter_openai_compat_stream(
+            client,
+            {"model": "m", "tools": [{"type": "function", "function": {"name": "search_jobs"}}]},
+            provider="openrouter",
+            n_tools=1,
+        )
+    ]
+
+    tool_calls = [ev for ev in events if isinstance(ev, ToolCall)]
+    assert len(tool_calls) == 1
+    assert tool_calls[0].name == "search_jobs"
+    assert tool_calls[0].call_id == "call_a"
+    assert tool_calls[0].args == {"keyword": "python"}
+    assert tool_calls[0].parse_error is None
+
+
+@pytest.mark.asyncio
+async def test_parallel_tool_calls_without_index_both_in_one_delta() -> None:
+    """Both calls arriving in a single `delta.tool_calls` array must still separate.
+
+    Some hosts emit the whole parallel-call batch atomically in one chunk
+    rather than interleaving deltas across multiple chunks.
+    """
+
+    def _chunk(tool_calls: list[SimpleNamespace]) -> SimpleNamespace:
+        return SimpleNamespace(
+            usage=None,
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(content=None, reasoning=None, tool_calls=tool_calls)
+                )
+            ],
+        )
+
+    chunks = [
+        _chunk(
+            [
+                SimpleNamespace(
+                    index=None,
+                    id="call_a",
+                    function=SimpleNamespace(name="search_jobs", arguments='{"keyword": "python"}'),
+                ),
+                SimpleNamespace(
+                    index=None,
+                    id="call_b",
+                    function=SimpleNamespace(name="get_weather", arguments='{"city": "Boston"}'),
+                ),
+            ]
+        )
+    ]
+    client = _fake_client(chunks)
+
+    events = [
+        ev
+        async for ev in iter_openai_compat_stream(
+            client,
+            {
+                "model": "m",
+                "tools": [
+                    {"type": "function", "function": {"name": "search_jobs"}},
+                    {"type": "function", "function": {"name": "get_weather"}},
+                ],
+            },
+            provider="openrouter",
+            n_tools=2,
+        )
+    ]
+
+    tool_calls = [ev for ev in events if isinstance(ev, ToolCall)]
+    assert len(tool_calls) == 2
+    assert {tc.call_id for tc in tool_calls} == {"call_a", "call_b"}
+    assert {tc.name for tc in tool_calls} == {"search_jobs", "get_weather"}
+
+
+@pytest.mark.asyncio
+async def test_indexed_parallel_tool_calls_still_disjoint() -> None:
+    """Hosts that DO send explicit `index` must still work exactly as before."""
+
+    def _chunk(index: int, *, id: str | None = None, name: str | None = None) -> SimpleNamespace:
+        return SimpleNamespace(
+            usage=None,
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(
+                        content=None,
+                        reasoning=None,
+                        tool_calls=[
+                            SimpleNamespace(
+                                index=index,
+                                id=id,
+                                function=SimpleNamespace(name=name, arguments=None),
+                            )
+                        ],
+                    )
+                )
+            ],
+        )
+
+    chunks = [
+        _chunk(0, id="call_a", name="search_jobs"),
+        _chunk(1, id="call_b", name="get_weather"),
+    ]
+    client = _fake_client(chunks)
+
+    events = [
+        ev
+        async for ev in iter_openai_compat_stream(
+            client,
+            {
+                "model": "m",
+                "tools": [
+                    {"type": "function", "function": {"name": "search_jobs"}},
+                    {"type": "function", "function": {"name": "get_weather"}},
+                ],
+            },
+            provider="openai",
+            n_tools=2,
+        )
+    ]
+
+    tool_calls = [ev for ev in events if isinstance(ev, ToolCall)]
+    assert len(tool_calls) == 2
+    assert {tc.call_id for tc in tool_calls} == {"call_a", "call_b"}
