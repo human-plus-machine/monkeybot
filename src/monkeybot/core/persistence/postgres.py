@@ -1059,7 +1059,7 @@ class PostgresScheduledLoopStore:
                 loop_id,
                 worker_id,
             )
-        return bool(status.split()[-1] == "1")
+        return str(status).endswith(" 1")
 
     async def renew_tick_claim(self, loop_id: str, worker_id: str) -> bool:
         now_ms = int(time.time() * 1000)

@@ -87,12 +87,15 @@ def _bool_field(raw: object, *, default: bool = False) -> bool:
 
 def doc_to_scheduled_loop_row(loop_id: str, data: dict[str, object]) -> ScheduledLoopRow:
     """Map a Firestore document (or JSON blob) to :class:`ScheduledLoopRow`."""
+    interval_ms = int(cast(int, data.get("interval_ms", 0)))
+    if interval_ms <= 0:
+        raise ValueError(f"scheduled loop {loop_id} has invalid interval_ms: {interval_ms}")
     return ScheduledLoopRow(
         loop_id=loop_id,
         session_id=str(data.get("session_id", "")),
         status=str(data.get("status", "")),
         prompt=str(data.get("prompt", "")),
-        interval_ms=int(cast(int, data.get("interval_ms", 0))),
+        interval_ms=interval_ms,
         max_ticks=_optional_int_field(data.get("max_ticks")),
         max_runtime_ms=_optional_int_field(data.get("max_runtime_ms")),
         skip_if_busy=_bool_field(data.get("skip_if_busy"), default=True),

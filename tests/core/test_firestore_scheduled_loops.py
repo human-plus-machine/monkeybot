@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 from unittest.mock import MagicMock
 
 import pytest
@@ -42,6 +42,11 @@ def test_doc_to_scheduled_loop_row_roundtrip_fields() -> None:
     assert row.tick_index == 2
 
 
+def test_doc_to_scheduled_loop_row_rejects_invalid_interval() -> None:
+    with pytest.raises(ValueError, match="invalid interval_ms"):
+        doc_to_scheduled_loop_row("bad", {"interval_ms": 0})
+
+
 class _FakeSnapshot:
     def __init__(self, doc_id: str, data: dict[str, Any] | None) -> None:
         self.id = doc_id
@@ -72,19 +77,22 @@ class _FakeTransaction:
 
 
 class _FakeDocRef:
-    def __init__(self, store: dict[str, dict[str, Any]], doc_id: str) -> None:
+    def __init__(
+        self,
+        store: dict[str, dict[str, Any]],
+        doc_id: str,
+        *,
+        get_in_txn_hook: Callable[[], None] | None = None,
+    ) -> None:
         self.id = doc_id
         self._store = store
-        self.reference = self
+        self._get_in_txn_hook = get_in_txn_hook
 
     async def get(self, transaction: _FakeTransaction | None = None) -> _FakeSnapshot:
+        if transaction is not None and self._get_in_txn_hook is not None:
+            self._get_in_txn_hook()
         data = self._store.get(self.id)
         return _FakeSnapshot(self.id, None if data is None else dict(data))
-
-    async def update(self, fields: dict[str, Any]) -> None:
-        cur = dict(self._store.get(self.id, {}))
-        cur.update(fields)
-        self._store[self.id] = cur
 
 
 class _FakeQuery:
@@ -115,18 +123,24 @@ class _FakeQuery:
                     ok = False
                     break
             if ok:
-                # Real Firestore query.stream() yields DocumentSnapshots (id + to_dict).
-                snap = _FakeSnapshot(doc_id, dict(data))
-                snap.reference = _FakeDocRef(self._store, doc_id)  # type: ignore[attr-defined]
-                yield snap
+                yield _FakeSnapshot(doc_id, dict(data))
 
 
 class _FakeCollection:
-    def __init__(self, store: dict[str, dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        store: dict[str, dict[str, Any]],
+        get_in_txn_hooks: dict[str, Callable[[], None]],
+    ) -> None:
         self._store = store
+        self._get_in_txn_hooks = get_in_txn_hooks
 
     def document(self, doc_id: str) -> _FakeDocRef:
-        return _FakeDocRef(self._store, doc_id)
+        return _FakeDocRef(
+            self._store,
+            doc_id,
+            get_in_txn_hook=self._get_in_txn_hooks.get(doc_id),
+        )
 
     def where(self, *, filter: Any) -> _FakeQuery:  # noqa: A002
         return _FakeQuery(self._store, []).where(filter=filter)
@@ -135,9 +149,10 @@ class _FakeCollection:
 class _FakeClient:
     def __init__(self) -> None:
         self.docs: dict[str, dict[str, Any]] = {}
+        self.get_in_txn_hooks: dict[str, Callable[[], None]] = {}
 
     def collection(self, _name: str) -> _FakeCollection:
-        return _FakeCollection(self.docs)
+        return _FakeCollection(self.docs, self.get_in_txn_hooks)
 
     def transaction(self) -> _FakeTransaction:
         return _FakeTransaction(self.docs)
@@ -227,6 +242,23 @@ async def test_firestore_defer_tick_releases_own_claim(
 
 
 @pytest.mark.asyncio
+async def test_firestore_defer_tick_rejects_invalid_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_transactional(monkeypatch)
+    client = _FakeClient()
+    _seed_in_flight(client, worker_id="worker-a", claimed_at_ms=1_000, interval_ms=0)
+    store = FirestoreScheduledLoopStore(client, prefix="t")  # type: ignore[arg-type]
+
+    deferred = await store.defer_tick("loop-1", worker_id="worker-a", reason="session busy")
+
+    assert deferred is False
+    row = client.docs["loop-1"]
+    assert row["worker_id"] == "worker-a"
+    assert row["tick_in_flight"] == 1
+
+
+@pytest.mark.asyncio
 async def test_firestore_release_stale_skips_renewed_heartbeat(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -238,15 +270,12 @@ async def test_firestore_release_stale_skips_renewed_heartbeat(
 
     import monkeybot.core.persistence.firestore_scheduled_loops as mod
 
-    original_release = store._release_one_stale_claim
-
-    async def _renew_then_release(loop_id: str, cutoff: int) -> bool:
-        client.docs[loop_id]["claimed_at_ms"] = cutoff + 50_000
-        return await original_release(loop_id, cutoff)
-
-    monkeypatch.setattr(store, "_release_one_stale_claim", _renew_then_release)
     # now_ms = 100_000; cutoff = 99_000 → claimed_at_ms=1 matches the query.
+    cutoff = 99_000
     monkeypatch.setattr(mod.time, "time", lambda: 100.0)
+    client.get_in_txn_hooks["loop-1"] = lambda: client.docs["loop-1"].__setitem__(
+        "claimed_at_ms", cutoff + 50_000
+    )
 
     released = await store.release_stale_claims(stale_after_ms=1_000)
     assert released == 0

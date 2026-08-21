@@ -232,30 +232,31 @@ class FirestoreScheduledLoopStore:
             data = snapshot.to_dict() or {}
             if data.get("worker_id") != worker_id or int(data.get("tick_in_flight", 0)) != 1:
                 return False
-            tick_index = int(cast(int, data.get("tick_index", 0))) + 1
-            status = str(data.get("status", "active"))
+            try:
+                row = doc_to_scheduled_loop_row(snapshot.id, data)
+            except ValueError as exc:
+                logger.error("%s", exc)
+                return False
+            tick_index = row.tick_index + 1
+            status = row.status
             stop_reason: str | None = None
-            interval_ms = int(cast(int, data.get("interval_ms", 0)))
-            started_at_ms = int(cast(int, data.get("started_at_ms", now_ms)))
+            started_at_ms = row.started_at_ms
             if error:
                 status = "failed"
                 stop_reason = "tick_error"
-            else:
-                max_ticks = data.get("max_ticks")
-                max_runtime_ms = data.get("max_runtime_ms")
-                if max_ticks is not None and tick_index >= int(cast(int, max_ticks)):
-                    status = "completed"
-                    stop_reason = "max_ticks"
-                elif (
-                    max_runtime_ms is not None
-                    and (now_ms - started_at_ms) >= int(cast(int, max_runtime_ms))
-                ):
-                    status = "completed"
-                    stop_reason = "max_runtime"
+            elif row.max_ticks is not None and tick_index >= row.max_ticks:
+                status = "completed"
+                stop_reason = "max_ticks"
+            elif (
+                row.max_runtime_ms is not None
+                and (now_ms - started_at_ms) >= row.max_runtime_ms
+            ):
+                status = "completed"
+                stop_reason = "max_runtime"
             next_tick_at = (
-                now_ms + interval_ms
+                now_ms + row.interval_ms
                 if status == "active"
-                else int(cast(int, data.get("next_tick_at_ms", now_ms)))
+                else row.next_tick_at_ms
             )
             txn.update(
                 ref,
@@ -300,9 +301,11 @@ class FirestoreScheduledLoopStore:
                     worker_id,
                 )
                 return False
-            row = doc_to_scheduled_loop_row(snapshot.id, data)
-            if row.interval_ms <= 0:
-                raise ValueError(f"scheduled loop {loop_id} has invalid interval_ms")
+            try:
+                row = doc_to_scheduled_loop_row(snapshot.id, data)
+            except ValueError as exc:
+                logger.error("%s", exc)
+                return False
             now_ms = int(time.time() * 1000)
             txn.update(
                 ref,
