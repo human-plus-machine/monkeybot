@@ -229,11 +229,11 @@ def get_provider_config(
             resolved_model,
         )
     if provider_key == "aws_bedrock":
-        from monkeybot.providers.bedrock import BedrockClaudeProvider  # noqa: PLC0415
+        from monkeybot.providers.bedrock import BedrockProvider  # noqa: PLC0415
 
         aws_region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
         return ProviderConfig(
-            BedrockClaudeProvider(
+            BedrockProvider(
                 aws_region=aws_region,
                 temperature=sampling.temperature,
                 max_tokens=sampling.max_tokens,

@@ -1,11 +1,11 @@
-"""Per-model sampling capability table for Anthropic-family providers.
+"""Per-model sampling capability table.
 
 Newer Claude models (Sonnet 5, Opus 4.7+) reject non-default ``temperature``
-and manual extended-thinking ``budget_tokens`` with HTTP 400. This table is
-the fast path: known model prefixes are gated here so no failed request is
-needed. For models not yet listed (a new release ahead of this table), the
-matching retry-and-strip fallback in :func:`iter_anthropic_sdk_stream
-<monkeybot.providers._utils.iter_anthropic_sdk_stream>` is the safety net —
+and manual extended-thinking ``budget_tokens`` with HTTP 400. xAI Grok on
+Bedrock rejects ``temperature``. This table is the fast path: known prefixes
+are gated here so no failed request is needed. For models not yet listed,
+the retry-and-strip fallback in :func:`iter_stream_with_param_retry
+<monkeybot.providers._utils.iter_stream_with_param_retry>` is the safety net —
 this table does not need to be exhaustive to stay correct, only to stay fast.
 
 Param names match the request kwargs the providers build (``temperature``,
@@ -23,17 +23,28 @@ UNSUPPORTED_SAMPLING_PARAMS: dict[str, frozenset[str]] = {
     "claude-sonnet-5": frozenset({"temperature", "thinking"}),
     "claude-opus-4-7": frozenset({"temperature", "thinking"}),
     "claude-opus-4-8": frozenset({"temperature", "thinking"}),
+    "xai": frozenset({"temperature"}),
 }
 
-# Bedrock ids namespace the model: ``anthropic.claude-...`` and cross-region
-# inference profiles like ``us.anthropic.claude-...``. Vertex ids are already
-# bare (``claude-sonnet-5@20260101``).
-_BEDROCK_NAMESPACE = re.compile(r"^(?:[a-z]{2,4}\.)?anthropic\.")
+# Bedrock ids: optional ``bedrock/``, geo inference-profile prefix, then
+# ``anthropic.`` for Claude. Vertex ids are already bare (``claude-sonnet-5@…``).
+BEDROCK_GEO_PREFIXES: frozenset[str] = frozenset(
+    {"us", "eu", "apac", "ap", "global", "au", "jp", "ca", "us-gov"}
+)
+_BEDROCK_SLASH = re.compile(r"^bedrock/", re.IGNORECASE)
+_BEDROCK_GEO = re.compile(
+    r"^(?:"
+    + "|".join(re.escape(p) for p in sorted(BEDROCK_GEO_PREFIXES, key=len, reverse=True))
+    + r")\."
+)
+_ANTHROPIC_NS = re.compile(r"^anthropic\.")
 
 
 def normalize_model(model: str) -> str:
     """Strip provider-specific namespacing so prefix keys match everywhere."""
-    return _BEDROCK_NAMESPACE.sub("", model)
+    name = _BEDROCK_SLASH.sub("", model.strip())
+    name = _BEDROCK_GEO.sub("", name)
+    return _ANTHROPIC_NS.sub("", name)
 
 
 def supports_param(model: str, param: str) -> bool:
