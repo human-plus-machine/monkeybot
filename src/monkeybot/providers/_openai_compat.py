@@ -667,13 +667,20 @@ async def iter_openai_compat_stream(
     cached_tokens = 0
     tool_buf: dict[int | str, dict[str, Any]] = {}
     # Some OpenAI-compat hosts (notably several DeepSeek/Qwen-family backends
-    # proxied through OpenRouter) omit `index` on tool_call deltas entirely.
-    # Falling back to a shared key (e.g. `0`) for all of them collapses
-    # parallel tool calls into one another. Since such hosts also don't
-    # interleave chunks across calls, treat a delta carrying `id` or
-    # `function.name` as the start of a new call and route argument-only
-    # deltas (no `id`/`name`) to whichever call most recently opened.
-    fallback_open_idx: str | None = None
+    # proxied through OpenRouter) omit `index` on tool_call deltas entirely —
+    # this is a real runtime possibility despite the SDK's `index: int` type
+    # hint, since streaming chunks are parsed via lenient `model_construct`,
+    # not validated. Falling back to a shared key (e.g. `0`) for all of them
+    # collapses parallel tool calls into one another.
+    #
+    # Without `index`, `id` is the only reliable correlation key — but hosts
+    # differ on whether they echo `id` on every delta for a call or only the
+    # first. `id_to_slot` makes both work: an `id` seen before reuses its
+    # slot; an unseen `id` (or, lacking any `id` at all, a `function.name`)
+    # opens a new one. Deltas with neither `id` nor `name` are pure argument
+    # continuations and attach to whichever call most recently opened.
+    id_to_slot: dict[str, int | str] = {}
+    fallback_open_idx: int | str | None = None
     fallback_counter = 0
     finish_reason: str | None = None
     # Only scan for literal <tool_call> text when tools were actually offered —
@@ -711,10 +718,32 @@ async def iter_openai_compat_stream(
                     idx: int | str
                     if tc.index is not None:
                         idx = int(tc.index)
-                    elif tc.id or (tc.function and tc.function.name):
-                        fallback_counter += 1
-                        idx = f"noidx:{fallback_counter}"
+                        if tc.id:
+                            id_to_slot[tc.id] = idx
+                    elif tc.id and tc.id in id_to_slot:
+                        # A host that echoes `id` on every delta for a call —
+                        # reuse its slot rather than opening a new one each time.
+                        idx = id_to_slot[tc.id]
                         fallback_open_idx = idx
+                    elif tc.id or (tc.function and tc.function.name):
+                        reuse_open = fallback_open_idx
+                        open_slot = tool_buf.get(reuse_open) if reuse_open is not None else None
+                        if (
+                            reuse_open is not None
+                            and open_slot is not None
+                            and not open_slot["id"]
+                            and not open_slot["name"]
+                        ):
+                            # Argument deltas arrived before this call's id/name —
+                            # attach to that already-open slot instead of orphaning
+                            # its buffered args in a second, nameless slot.
+                            idx = reuse_open
+                        else:
+                            fallback_counter += 1
+                            idx = f"noidx:{fallback_counter}"
+                            fallback_open_idx = idx
+                        if tc.id:
+                            id_to_slot[tc.id] = idx
                     elif fallback_open_idx is not None:
                         idx = fallback_open_idx
                     else:
