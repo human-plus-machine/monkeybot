@@ -12,7 +12,14 @@ from typing import Any, cast
 import asyncpg
 
 from monkeybot.core.llm.provider import Message, Role
-from monkeybot.core.llm.usage import Usage, UsageBreakdown, UsageBucket, UsageSummary
+from monkeybot.core.llm.usage import (
+    Usage,
+    UsageBreakdown,
+    UsageBucket,
+    UsageGranularity,
+    UsageSeriesPoint,
+    UsageSummary,
+)
 from monkeybot.core.memory.ids import outbox_id, utc_now_iso
 from monkeybot.core.memory.outbox import (
     STATUS_COMMITTED,
@@ -42,6 +49,7 @@ from monkeybot.core.persistence.thread_summary import (
     ChatThreadSummary,
     preview_from_content_blob,
 )
+from monkeybot.core.persistence.usage_buckets import postgres_bucket_sql
 from monkeybot.core.types.content_blocks import ContentBlock
 
 logger = logging.getLogger(__name__)
@@ -539,8 +547,13 @@ class PostgresUsageStore:
             cache_creation_tokens=int(row["cache_creation_tokens"]),
         )
 
-    async def breakdown(self, since_ms: int | None = None) -> UsageBreakdown:
-        """Aggregate usage by model and by UTC calendar day."""
+    async def breakdown(
+        self,
+        since_ms: int | None = None,
+        *,
+        bucket: UsageGranularity = "day",
+    ) -> UsageBreakdown:
+        """Aggregate usage by model, UTC day, and (time bucket × model)."""
         clauses: list[str] = []
         params: list[object] = []
         if since_ms is not None:
@@ -572,32 +585,59 @@ class PostgresUsageStore:
             GROUP BY day
             ORDER BY day ASC
         """
+        series_sql = f"""
+            SELECT
+                {postgres_bucket_sql(bucket)} AS bucket,
+                model,
+                {agg}
+            FROM turn_usage
+            {where_sql}
+            GROUP BY bucket, model
+            ORDER BY bucket ASC, cost_usd DESC, model ASC
+        """
 
         async with self._pool.acquire() as conn:
             model_rows = await conn.fetch(model_sql, *params)
             day_rows = await conn.fetch(day_sql, *params)
+            series_rows = await conn.fetch(series_sql, *params)
 
-        by_model = [
-            UsageBucket(
-                key=str(row["model"]),
-                turns=int(row["turns"]),
-                input_tokens=int(row["input_tokens"]),
-                output_tokens=int(row["output_tokens"]),
-                cost_usd=float(row["cost_usd"]),
-            )
-            for row in model_rows
-        ]
-        by_day = [
-            UsageBucket(
-                key=str(row["day"]),
-                turns=int(row["turns"]),
-                input_tokens=int(row["input_tokens"]),
-                output_tokens=int(row["output_tokens"]),
-                cost_usd=float(row["cost_usd"]),
-            )
-            for row in day_rows
-        ]
-        return UsageBreakdown(by_model=by_model, by_day=by_day)
+        return UsageBreakdown(
+            by_model=[_pg_usage_bucket(row, "model") for row in model_rows],
+            by_day=[_pg_usage_bucket(row, "day") for row in day_rows],
+            by_bucket_model=[_pg_usage_series(row) for row in series_rows],
+        )
+
+
+def _pg_usage_metrics(row: asyncpg.Record) -> tuple[int, int, int, float]:
+    return (
+        int(row["turns"]),
+        int(row["input_tokens"]),
+        int(row["output_tokens"]),
+        float(row["cost_usd"]),
+    )
+
+
+def _pg_usage_bucket(row: asyncpg.Record, key_field: str) -> UsageBucket:
+    turns, input_tokens, output_tokens, cost_usd = _pg_usage_metrics(row)
+    return UsageBucket(
+        key=str(row[key_field]),
+        turns=turns,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cost_usd=cost_usd,
+    )
+
+
+def _pg_usage_series(row: asyncpg.Record) -> UsageSeriesPoint:
+    turns, input_tokens, output_tokens, cost_usd = _pg_usage_metrics(row)
+    return UsageSeriesPoint(
+        bucket=str(row["bucket"]),
+        model=str(row["model"]),
+        turns=turns,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cost_usd=cost_usd,
+    )
 
 
 class PostgresRunStore:

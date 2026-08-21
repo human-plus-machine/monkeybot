@@ -45,7 +45,8 @@ from monkeybot.core.llm.provider import (
     ToolCall,
     UsageEvent,
 )
-from monkeybot.core.llm.usage import Usage as UsageRecord
+from monkeybot.core.llm.usage import Usage as UsageRecord, UsageGranularity
+from monkeybot.core.logging_utils import kv
 from monkeybot.core.mcp.mcp_client import MCPClient
 from monkeybot.core.memory.config import memory_enabled_from_config
 from monkeybot.core.memory.subsystem import MemoryConfigurationError, MemorySubsystem
@@ -168,10 +169,17 @@ class _UsageStoreAdapter(UsagePort):
             "context_window_tokens": context_window_tokens,
         }
 
-    async def agent_usage(self, *, since: str | None) -> dict[str, Any]:
+    async def agent_usage(
+        self, *, since: str | None, bucket: UsageGranularity | None = None
+    ) -> dict[str, Any]:
+        granularity: UsageGranularity = bucket or "day"
         since_ms = self._parse_since(since)
-        s = await self._store.summary(thread_id=None, since_ms=since_ms)
-        b = await self._store.breakdown(since_ms=since_ms)
+        try:
+            s = await self._store.summary(thread_id=None, since_ms=since_ms)
+            b = await self._store.breakdown(since_ms=since_ms, bucket=granularity)
+        except Exception:
+            logger.exception("agent usage query failed %s", kv(since=since, bucket=bucket))
+            raise
         return {
             "turns": s.turns,
             "input_tokens": s.input_tokens,
@@ -184,11 +192,8 @@ class _UsageStoreAdapter(UsagePort):
             "period_end": s.period_end_ms if s.period_end_ms is not None else 0,
             "by_model": [asdict(row) for row in b.by_model],
             "by_day": [asdict(row) for row in b.by_day],
+            "by_bucket_model": [asdict(row) for row in b.by_bucket_model],
         }
-
-
-def _zero_agent_usage() -> dict[str, Any]:
-    return AgentUsageResponse().model_dump()
 
 
 class _StaticUsagePortZeros(UsagePort):
@@ -210,9 +215,11 @@ class _StaticUsagePortZeros(UsagePort):
             context_window_tokens=cw,
         ).model_dump()
 
-    async def agent_usage(self, *, since: str | None) -> dict[str, Any]:
-        del since
-        return _zero_agent_usage()
+    async def agent_usage(
+        self, *, since: str | None, bucket: UsageGranularity | None = None
+    ) -> dict[str, Any]:
+        del since, bucket
+        return AgentUsageResponse().model_dump()
 
 
 def _content_blocks_to_text(blocks: list[ContentBlock]) -> str:

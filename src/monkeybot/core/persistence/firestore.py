@@ -16,7 +16,14 @@ from google.cloud.firestore import AsyncClient
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from monkeybot.core.llm.provider import Message, Role
-from monkeybot.core.llm.usage import Usage, UsageBreakdown, UsageBucket, UsageSummary
+from monkeybot.core.llm.usage import (
+    Usage,
+    UsageBreakdown,
+    UsageBucket,
+    UsageGranularity,
+    UsageSeriesPoint,
+    UsageSummary,
+)
 from monkeybot.core.memory.ids import outbox_id, utc_now_iso
 from monkeybot.core.memory.outbox import (
     STATUS_COMMITTED,
@@ -38,6 +45,7 @@ from monkeybot.core.persistence.thread_summary import (
     ChatThreadSummary,
     preview_from_content_blob,
 )
+from monkeybot.core.persistence.usage_buckets import utc_bucket_key
 from monkeybot.core.types.content_blocks import ContentBlock
 
 logger = logging.getLogger(__name__)
@@ -202,9 +210,11 @@ class FirestoreHistoryStore:
         )
 
     async def _delete_thread_summary(self, thread_id: str) -> None:
-        await self._client.collection(self._threads_collection).document(
-            self._summary_doc_id(thread_id)
-        ).delete()
+        await (
+            self._client.collection(self._threads_collection)
+            .document(self._summary_doc_id(thread_id))
+            .delete()
+        )
 
     async def append(
         self,
@@ -528,15 +538,14 @@ class FirestoreUsageStore:
     ) -> list[dict[str, object]]:
         collection = self._client.collection(self._collection)
         if thread_id is None:
-            doc_stream = collection.stream()
+            query: Any = collection
         else:
-            doc_stream = collection.where(filter=FieldFilter("thread_id", "==", thread_id)).stream()
+            query = collection.where(filter=FieldFilter("thread_id", "==", thread_id))
+        if since_ms is not None:
+            query = query.where(filter=FieldFilter("created_at", ">=", since_ms))
         rows: list[dict[str, object]] = []
-        async for doc in doc_stream:
+        async for doc in query.stream():
             data = doc.to_dict() or {}
-            created_at = _field_int(data, "created_at")
-            if since_ms is not None and created_at < since_ms:
-                continue
             rows.append(data)
         return rows
 
@@ -595,23 +604,31 @@ class FirestoreUsageStore:
             cache_creation_tokens=cache_creation_tokens,
         )
 
-    async def breakdown(self, since_ms: int | None = None) -> UsageBreakdown:
-        """Aggregate usage by model and by UTC calendar day (in-process).
+    async def breakdown(
+        self,
+        since_ms: int | None = None,
+        *,
+        bucket: UsageGranularity = "day",
+    ) -> UsageBreakdown:
+        """Aggregate usage by model, UTC day, and (time bucket × model) in-process.
 
-        When filtering with no thread, streams the entire ``turn_usage`` collection
+        When ``since_ms`` is ``None``, streams the entire ``turn_usage`` collection
         (small-scale only; not suitable for large production datasets).
         """
         rows = await self._fetch_usage_rows(None, since_ms)
         if not rows:
-            return UsageBreakdown(by_model=[], by_day=[])
+            return UsageBreakdown(by_model=[], by_day=[], by_bucket_model=[])
 
         by_model_map: dict[str, list[dict[str, object]]] = {}
         by_day_map: dict[str, list[dict[str, object]]] = {}
+        series_map: dict[tuple[str, str], list[dict[str, object]]] = {}
         for row in rows:
             model = str(row.get("model") or "unknown")
+            created_at = _field_int(row, "created_at")
             by_model_map.setdefault(model, []).append(row)
-            day = time.strftime("%Y-%m-%d", time.gmtime(_field_int(row, "created_at") / 1000.0))
+            day = utc_bucket_key(created_at, "day")
             by_day_map.setdefault(day, []).append(row)
+            series_map.setdefault((utc_bucket_key(created_at, bucket), model), []).append(row)
 
         def _bucket(key: str, group: list[dict[str, object]]) -> UsageBucket:
             return UsageBucket(
@@ -622,10 +639,24 @@ class FirestoreUsageStore:
                 cost_usd=sum(_field_float(r, "cost_usd") for r in group),
             )
 
+        def _series_point(bkey: str, model: str, group: list[dict[str, object]]) -> UsageSeriesPoint:
+            return UsageSeriesPoint(
+                bucket=bkey,
+                model=model,
+                turns=len(group),
+                input_tokens=sum(_field_int(r, "input_tokens") for r in group),
+                output_tokens=sum(_field_int(r, "output_tokens") for r in group),
+                cost_usd=sum(_field_float(r, "cost_usd") for r in group),
+            )
+
         by_model = [_bucket(k, g) for k, g in by_model_map.items()]
         by_model.sort(key=lambda b: (-b.cost_usd, b.key))
         by_day = [_bucket(k, g) for k, g in sorted(by_day_map.items())]
-        return UsageBreakdown(by_model=by_model, by_day=by_day)
+        by_bucket_model = [
+            _series_point(bkey, model, group) for (bkey, model), group in series_map.items()
+        ]
+        by_bucket_model.sort(key=lambda p: (p.bucket, -p.cost_usd, p.model))
+        return UsageBreakdown(by_model=by_model, by_day=by_day, by_bucket_model=by_bucket_model)
 
 
 def _doc_to_run_row(doc_id: str, data: dict[str, object]) -> SubagentRunRow:
