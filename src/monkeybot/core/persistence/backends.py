@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from monkeybot.core.llm.provider import Message
-    from monkeybot.core.llm.usage import Usage, UsageBreakdown, UsageSummary
+    from monkeybot.core.llm.usage import Usage, UsageBreakdown, UsageGranularity, UsageSummary
     from monkeybot.core.persistence.durable_runs import SubagentEnvelope, SubagentRunRow
     from monkeybot.core.persistence.scheduled_loops import (
         ScheduledLoopCreate,
@@ -66,6 +66,8 @@ class UsageStore(Protocol):
     async def breakdown(
         self,
         since_ms: int | None = None,
+        *,
+        bucket: UsageGranularity = "day",
     ) -> UsageBreakdown: ...
 
 

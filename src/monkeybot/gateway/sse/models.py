@@ -4,7 +4,9 @@ Pydantic models and API errors for the v2 SSE gateway.
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from monkeybot.core.path_safety import validate_session_id_component
 
 
 class ErrorBody(BaseModel):
@@ -50,6 +52,13 @@ class CreateSessionRequest(BaseModel):
         max_length=200,
         description="Model id for the chosen provider. None → server env default.",
     )
+
+    @field_validator("session_id")
+    @classmethod
+    def _reject_unsafe_session_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return validate_session_id_component(value)
 
 
 class CreateSessionResponse(BaseModel):
@@ -194,8 +203,19 @@ class UsageBucketResponse(BaseModel):
     cost_usd: float
 
 
+class UsageSeriesPointResponse(BaseModel):
+    """One (time bucket, model) cell in GET /usage ``by_bucket_model``."""
+
+    bucket: str
+    model: str
+    turns: int
+    input_tokens: int
+    output_tokens: int
+    cost_usd: float
+
+
 class AgentUsageResponse(BaseModel):
-    """GET /usage — agent-wide totals plus spend split by model and UTC day."""
+    """GET /usage — agent-wide totals plus spend split by model, UTC day, and series."""
 
     turns: int = 0
     input_tokens: int = 0
@@ -208,6 +228,7 @@ class AgentUsageResponse(BaseModel):
     period_end: int = 0
     by_model: list[UsageBucketResponse] = Field(default_factory=list)
     by_day: list[UsageBucketResponse] = Field(default_factory=list)
+    by_bucket_model: list[UsageSeriesPointResponse] = Field(default_factory=list)
 
 
 def error_payload_dict(code: str, message: str, request_id: str) -> dict[str, Any]:

@@ -18,6 +18,7 @@ from monkeybot.core.context.tool_shapers import (
     shape_logs,
 )
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.path_safety import is_legacy_path_component_safe, sanitize_path_component
 from monkeybot.core.runtime.context_budget import diff_inventory_lines
 
 logger = logging.getLogger(__name__)
@@ -229,9 +230,7 @@ def _spill_header(
     total_chars = len(text)
     total_lines = _line_count(text)
     unwrapped_bit = (
-        f" | unwrapped_lines={body_lines}"
-        if unwrapped and body_lines != total_lines
-        else ""
+        f" | unwrapped_lines={body_lines}" if unwrapped and body_lines != total_lines else ""
     )
     return (
         f"{_INVENTORY_PREFIX} {total_chars} total chars, {total_lines} total lines"
@@ -319,9 +318,7 @@ def spill_inventory_note(
     tool_name: str = "unknown",
 ) -> str:
     """Build an inventory note with a deterministic content preview (no LLM)."""
-    note, _kind = _spill_inventory_note_with_kind(
-        text, rel_spill_path, tool_name=tool_name
-    )
+    note, _kind = _spill_inventory_note_with_kind(text, rel_spill_path, tool_name=tool_name)
     return note
 
 
@@ -337,10 +334,9 @@ def spill_inline_and_note(
     When ``inline_budget > 0``, the note is preview-free (body already inlined).
     When ``inline_budget <= 0``, body_prefix is empty and the note carries a preview.
     """
+
     def _preview_only() -> tuple[str, str]:
-        note, _kind = _spill_inventory_note_with_kind(
-            text, rel_spill_path, tool_name=tool_name
-        )
+        note, _kind = _spill_inventory_note_with_kind(text, rel_spill_path, tool_name=tool_name)
         return "", note
 
     if inline_budget <= 0:
@@ -385,6 +381,34 @@ def _safe_spill_filename(call_id: str) -> str:
     return safe or "call"
 
 
+def _spill_dir_for_thread(workspace_root: Path, thread_id: str) -> tuple[str, Path] | None:
+    """Return ``(relative posix dir, absolute dir)`` under spill root, or None.
+
+    ``thread_id`` / ``session_id`` may be client-supplied; sanitize and contain
+    under ``.monkeybot/spill`` so path traversal cannot escape the workspace.
+    When the sanitized dir (or the ``_`` fallback) resolves outside the spill
+    root — typically a planted symlink — skip the write rather than escaping.
+    """
+    safe_thread = sanitize_path_component(thread_id)
+    root = spill_root(workspace_root)
+    for component in (safe_thread, "_"):
+        out_dir = root / component
+        if _spill_path_contained(root, out_dir) is None:
+            continue
+        rel = f"{_SPILL_DIR_REL.as_posix()}/{component}"
+        if component != safe_thread:
+            logger.warning(
+                "spill path escapes spill root, using contained fallback %s",
+                kv(thread_id=thread_id, safe_thread=safe_thread, fallback=component),
+            )
+        return rel, out_dir
+    logger.warning(
+        "spill write skipped; no contained directory %s",
+        kv(thread_id=thread_id, safe_thread=safe_thread),
+    )
+    return None
+
+
 def write_spill_with_inventory(
     text: str,
     workspace_root: Path,
@@ -396,13 +420,28 @@ def write_spill_with_inventory(
 ) -> str:
     """Write raw ``text`` to spill file; return soft-spill history text.
 
-    Always persists the full payload. When ``inline_budget > 0``, history keeps a
-    body prefix plus a preview-free inventory note; otherwise history is the
-    preview-carrying note only (body-less case).
+    Persists the full payload when a contained directory exists. When the
+    sanitized dir and the ``_`` fallback both escape the spill root, skip the
+    write and return an inline/truncated note. When ``inline_budget > 0``,
+    history keeps a body prefix plus a preview-free inventory note; otherwise
+    history is the preview-carrying note only (body-less case).
     """
-    rel = f"{_SPILL_DIR_REL.as_posix()}/{thread_id}/{_safe_spill_filename(call_id)}.txt"
-    out_path = (Path(workspace_root) / rel).resolve()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    rel_dir_out = _spill_dir_for_thread(workspace_root, thread_id)
+    if rel_dir_out is None:
+        body_prefix, note = spill_inline_and_note(
+            text, "(unavailable)", tool_name=tool_name, inline_budget=inline_budget
+        )
+        return f"{body_prefix}\n{note}" if body_prefix else note
+    rel_dir, out_dir = rel_dir_out
+    filename = f"{_safe_spill_filename(call_id)}.txt"
+    rel = f"{rel_dir}/{filename}"
+    out_path = out_dir / filename
+    if _spill_path_contained(spill_root(workspace_root), out_path) is None:
+        body_prefix, note = spill_inline_and_note(
+            text, "(unavailable)", tool_name=tool_name, inline_budget=inline_budget
+        )
+        return f"{body_prefix}\n{note}" if body_prefix else note
+    out_dir.mkdir(parents=True, exist_ok=True)
     out_path.write_text(text, encoding="utf-8")
     body_prefix, note = spill_inline_and_note(
         text, rel, tool_name=tool_name, inline_budget=inline_budget
@@ -424,7 +463,9 @@ def write_spill_with_inventory(
 _TIMEOUT_PARTIAL_TAIL_CHARS = 1500
 
 
-def partial_output_tail(stdout: str, stderr: str, *, max_chars: int = _TIMEOUT_PARTIAL_TAIL_CHARS) -> str:
+def partial_output_tail(
+    stdout: str, stderr: str, *, max_chars: int = _TIMEOUT_PARTIAL_TAIL_CHARS
+) -> str:
     """Return a short tail suitable for inlining in a timeout error envelope."""
     parts: list[str] = []
     if stdout:
@@ -461,12 +502,16 @@ def write_run_command_timeout_spill(
             "",
         ]
     )
-    rel = (
-        f"{_SPILL_DIR_REL.as_posix()}/{thread_id}/"
-        f"{_safe_spill_filename(f'{call_id}-timeout')}.txt"
-    )
-    out_path = (Path(workspace_root) / rel).resolve()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    rel_dir_out = _spill_dir_for_thread(workspace_root, thread_id)
+    if rel_dir_out is None:
+        return ""
+    rel_dir, out_dir = rel_dir_out
+    filename = f"{_safe_spill_filename(f'{call_id}-timeout')}.txt"
+    rel = f"{rel_dir}/{filename}"
+    out_path = out_dir / filename
+    if _spill_path_contained(spill_root(workspace_root), out_path) is None:
+        return ""
+    out_dir.mkdir(parents=True, exist_ok=True)
     out_path.write_text(body, encoding="utf-8")
     logger.debug(
         "run_command timeout spill %s",
@@ -476,8 +521,26 @@ def write_run_command_timeout_spill(
 
 
 def spill_root(workspace_root: Path) -> Path:
-    """Return ``.monkeybot/spill`` under ``workspace_root``."""
-    return Path(workspace_root).resolve() / _SPILL_DIR_REL
+    """Return ``.monkeybot/spill`` under ``workspace_root`` (fully resolved).
+
+    Resolve the spill directory itself so containment checks stay valid when
+    ``.monkeybot`` or ``spill`` is a symlink into storage outside the workspace
+    tree.
+    """
+    return (Path(workspace_root).resolve() / _SPILL_DIR_REL).resolve()
+
+
+def _spill_path_contained(root: Path, candidate: Path) -> Path | None:
+    """Return ``candidate`` when it resolves under ``root``; log and skip otherwise."""
+    try:
+        candidate.resolve().relative_to(root)
+    except ValueError:
+        logger.warning(
+            "skipping spill dir outside spill root %s",
+            kv(path=str(candidate)),
+        )
+        return None
+    return candidate
 
 
 def session_spill_dirs(workspace_root: Path, session_id: str) -> list[Path]:
@@ -488,10 +551,31 @@ def session_spill_dirs(workspace_root: Path, session_id: str) -> list[Path]:
     can remove both with one namespace.
     """
     root = spill_root(workspace_root)
-    dirs: list[Path] = [root / session_id]
+    safe_session = sanitize_path_component(session_id)
+    dirs: list[Path] = [root / safe_session]
     if root.is_dir():
-        dirs.extend(sorted(root.glob(f"subagent:{session_id}:*")))
-    return dirs
+        dirs.extend(sorted(root.glob(f"subagent:{safe_session}:*")))
+        if safe_session != session_id and is_legacy_path_component_safe(session_id):
+            legacy = root / session_id
+            if legacy.exists():
+                dirs.append(legacy)
+            # Prefix match — do not glob the raw id (it may contain metacharacters).
+            prefix = f"subagent:{session_id}:"
+            dirs.extend(sorted(p for p in root.iterdir() if p.name.startswith(prefix)))
+    # De-dupe while preserving order; drop anything outside spill root.
+    seen: set[Path] = set()
+    contained: list[Path] = []
+    for path in dirs:
+        if path in seen:
+            continue
+        contained_path = _spill_path_contained(root, path)
+        if contained_path is None:
+            continue
+        if contained_path in seen:
+            continue
+        seen.add(contained_path)
+        contained.append(contained_path)
+    return contained
 
 
 def _rmtree_spill(path: Path) -> None:
@@ -499,7 +583,10 @@ def _rmtree_spill(path: Path) -> None:
     if not path.exists():
         return
     try:
-        shutil.rmtree(path)
+        if path.is_symlink():
+            path.unlink()
+        else:
+            shutil.rmtree(path)
     except OSError:
         logger.warning("failed to remove spill directory path=%s", path, exc_info=True)
         raise

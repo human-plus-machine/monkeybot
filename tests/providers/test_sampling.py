@@ -9,7 +9,7 @@ import pytest
 
 from monkeybot.core.config.settings import get_provider_config
 from monkeybot.core.llm.provider import Message
-from monkeybot.providers.bedrock import BedrockClaudeProvider
+from monkeybot.providers.bedrock import BedrockProvider
 from monkeybot.providers.claude import ClaudeProvider
 from monkeybot.providers.gemini import GeminiProvider
 from monkeybot.providers.openai import OpenAIProvider
@@ -59,7 +59,7 @@ class TestProviderSamplingConstructors:
         assert provider._max_tokens == 8192
 
     def test_bedrock_stores_resolved_sampling(self) -> None:
-        provider = BedrockClaudeProvider(temperature=0.2, max_tokens=8192)
+        provider = BedrockProvider(temperature=0.2, max_tokens=8192)
         assert provider._temperature == 0.2
         assert provider._max_tokens == 8192
 
@@ -86,7 +86,7 @@ class TestGetProviderConfigSampling:
     def test_bedrock_threads_sampling_from_yaml_params(self, monkeypatch: pytest.MonkeyPatch) -> None:
         mock_instance = SimpleNamespace(name="bedrock")
         with patch(
-            "monkeybot.providers.bedrock.BedrockClaudeProvider",
+            "monkeybot.providers.bedrock.BedrockProvider",
             return_value=mock_instance,
         ) as mock_cls:
             cfg = get_provider_config(
@@ -117,7 +117,7 @@ class TestGetProviderConfigSampling:
 
 @pytest.mark.asyncio
 async def test_bedrock_stream_passes_sampling_to_api() -> None:
-    provider = BedrockClaudeProvider(temperature=0.2, max_tokens=8192, aws_region="us-east-1")
+    provider = BedrockProvider(temperature=0.2, max_tokens=8192, aws_region="us-east-1")
     events = [
         SimpleNamespace(
             type="message_start",

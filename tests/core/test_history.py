@@ -10,6 +10,7 @@ from typing import Any, cast
 
 import pytest
 import pytest_asyncio
+import aiosqlite
 
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.persistence.history import SQLiteHistoryStore
@@ -364,3 +365,42 @@ def test_importing_sqlite_does_not_import_google_cloud() -> None:
         sys.modules.pop(module_name, None)
     after = {k for k in sys.modules if k.startswith("google.cloud")}
     assert after == before
+
+
+@pytest.mark.asyncio
+async def test_history_reset_is_atomic_on_insert_failure(history_db) -> None:
+    """Crash mid-reset must not leave the thread empty after DELETE committed alone."""
+    _conn, history = history_db
+    thread_id = "t-atomic-reset"
+    await history.append(thread_id, Message.text("user", "keep-me"))
+    await history.append(thread_id, Message.text("assistant", "also-keep"))
+
+    original_execute = _conn.execute
+    insert_calls = 0
+
+    async def failing_execute(sql: str, *args: Any) -> Any:
+        nonlocal insert_calls
+        if "INSERT INTO conversation_history" in sql:
+            insert_calls += 1
+            if insert_calls == 2:
+                raise aiosqlite.OperationalError("simulated insert failure")
+        return await original_execute(sql, *args)
+
+    _conn.execute = failing_execute  # type: ignore[method-assign]
+
+    from monkeybot.core.persistence.errors import AmbiguousCommitError
+
+    with pytest.raises(AmbiguousCommitError, match="simulated insert failure"):
+        await history.reset(
+            thread_id,
+            [
+                Message.text("user", "new-a"),
+                Message.text("assistant", "new-b"),
+            ],
+        )
+
+    restored = await history.load(thread_id)
+    assert [b.text for m in restored for b in m.content if isinstance(b, Text)] == [
+        "keep-me",
+        "also-keep",
+    ]

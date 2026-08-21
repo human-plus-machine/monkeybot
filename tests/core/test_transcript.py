@@ -216,6 +216,18 @@ async def test_transcript_path_sanitizes_session_id(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_transcript_reuses_legacy_glob_session_dir(tmp_path: Path) -> None:
+    """Pre-sanitization transcript folders must still be found after glob rewrite."""
+    transcripts = tmp_path / ".monkeybot" / "transcripts"
+    legacy = transcripts / "20260101T000000Z_sess*1"
+    legacy.mkdir(parents=True)
+    (legacy / "transcript.ndjson").write_text("{}\n", encoding="utf-8")
+
+    writer = TranscriptWriter("sess*1", workspace_root=tmp_path)
+    assert writer.session_dir == legacy
+
+
+@pytest.mark.asyncio
 async def test_second_writer_reuses_existing_session_dir(tmp_path: Path) -> None:
     w1 = TranscriptWriter("sess-reuse", workspace_root=tmp_path)
     await w1.ensure_manifest(model="gpt-5")

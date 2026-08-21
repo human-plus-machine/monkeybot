@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Literal
 
+from monkeybot.providers.model_capabilities import BEDROCK_GEO_PREFIXES
+
 _log = logging.getLogger(__name__)
 
 # USD per 1M tokens: (input, output, cache_write, cache_read)
@@ -19,6 +21,12 @@ MODEL_PRICING: dict[str, tuple[float, float, float, float]] = {
     "gpt-5": (1.25, 10.00, 0.00, 0.125),
     "gemini-2.5-flash": (0.30, 2.50, 0.00, 0.075),
     "gemini-3-flash-preview": (0.30, 2.50, 0.00, 0.075),
+    # Bedrock Converse models (USD/M tokens; cache columns unused today).
+    # grok-4 prefix-matches grok-4.6, grok-4.1, etc. at current list rates.
+    "grok-4": (3.00, 15.00, 0.00, 0.00),
+    "nova-pro": (0.80, 3.20, 0.00, 0.00),
+    "nova-lite": (0.06, 0.24, 0.00, 0.00),
+    "llama3-3-70b-instruct": (0.72, 0.72, 0.00, 0.00),
 }
 
 # Anthropic 1-hour ephemeral cache writes are 2× base input (docs: prompt caching).
@@ -37,11 +45,12 @@ def normalize_model_id(model: str) -> str:
     # a provider ships an id whose bare name differs from the Anthropic/OpenAI one.
     name = name.split("/")[-1]  # litellm-style "aws_bedrock/us.anthropic.claude-..."
     name = name.split(":", 1)[0]  # bedrock version suffix ":0"
-    for region in ("us.", "eu.", "apac.", "global."):
-        if name.startswith(region):
-            name = name[len(region) :]
+    for region in sorted(BEDROCK_GEO_PREFIXES, key=len, reverse=True):
+        prefix = f"{region}."
+        if name.startswith(prefix):
+            name = name[len(prefix) :]
             break
-    for vendor in ("anthropic.", "meta.", "amazon.", "google."):
+    for vendor in ("anthropic.", "meta.", "amazon.", "google.", "xai."):
         if name.startswith(vendor):
             name = name[len(vendor) :]
             break

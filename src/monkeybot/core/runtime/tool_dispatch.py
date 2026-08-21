@@ -61,6 +61,7 @@ from .tool_batch import (
     _parallel_tool_concurrency,
     _rejected_tool_batch_error,
     _should_reject_tool_batch,
+    confirm_wait_stopped_by_user,
 )
 
 logger = logging.getLogger("monkeybot.core.runtime.loop.tool_dispatch")
@@ -234,8 +235,9 @@ async def _resolve_inspector_decision(
 ) -> AsyncIterator[AgentEvent]:
     """Run inspectors for one call; may yield ``ToolConfirmationRequestEvent``.
 
-    Fills ``outcome`` with the final allow/deny decision. Re-raises
-    ``asyncio.CancelledError`` from the confirm wait so turn abort propagates.
+    Fills ``outcome`` with the final allow/deny decision. Propagates
+    ``asyncio.CancelledError`` from the confirm wait so the gate can distinguish
+    Stop (settle/abort) from turn-task cancellation (re-raise).
     """
     inspector_call = InspectorToolCall(
         call_id=call.call_id, name=call.name, args=dict(call.args)
@@ -276,15 +278,9 @@ async def _resolve_inspector_decision(
                     arguments=dict(call.args),
                     prompt=decision.message,
                 )
-                try:
-                    payload = await _await_user_response_any(
-                        bus, fut, call.call_id, timeout_sec=None
-                    )
-                except asyncio.CancelledError:
-                    # Re-raise so turn cancellation (client disconnect /
-                    # abort) propagates; do not continue the tool loop
-                    # on a dead session.
-                    raise
+                payload = await _await_user_response_any(
+                    bus, fut, call.call_id, timeout_sec=None
+                )
                 if payload.get("_timeout"):
                     outcome.allowed = False
                     to = int(
@@ -390,13 +386,35 @@ async def _gate_chunk_calls(
             continue
 
         insp_outcome = _InspectorGateOutcome()
-        async for evt in _resolve_inspector_decision(
-            call=call,
-            ctx=ctx,
-            inspectors=inspectors,
-            outcome=insp_outcome,
-        ):
-            yield evt
+        try:
+            async for evt in _resolve_inspector_decision(
+                call=call,
+                ctx=ctx,
+                inspectors=inspectors,
+                outcome=insp_outcome,
+            ):
+                yield evt
+        except asyncio.CancelledError:
+            bus = ctx.sse_bus
+            if confirm_wait_stopped_by_user(bus, call.call_id, cancelled=cancelled):
+                # Stop during confirm cancels the pending future. Settle like the
+                # cancelled-event abort path so earlier completed tools still land
+                # in history instead of escaping before _fill_abort_tool_responses.
+                logger.info(
+                    "SSE HITL cancelled %s",
+                    kv(
+                        request_id=ctx.request_id,
+                        thread_id=ctx.thread_id,
+                        call_id=call.call_id,
+                        tool=call.name,
+                    ),
+                )
+                yield Error(request_id=ctx.request_id, error="Request cancelled")
+                result.allowed_exec = allowed_exec
+                result.chunk_responses = chunk_responses
+                result.aborted = True
+                return
+            raise
 
         if not insp_outcome.allowed:
             msg = insp_outcome.denial_message or "tool call denied"
