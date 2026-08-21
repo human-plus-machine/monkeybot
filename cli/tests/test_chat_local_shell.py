@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 import monkeybot_cli.chat_local_shell as chat_local_shell
+import monkeybot_cli.process_tree as process_tree
 from monkeybot_cli.chat_local_shell import run_local_shell, truncate_output
 
 
@@ -30,7 +31,7 @@ def test_run_local_shell_uses_cwd(tmp_path: Path) -> None:
 
 
 def test_kill_process_tree_swallows_permission_error(monkeypatch) -> None:
-    monkeypatch.setattr(chat_local_shell, "_IS_WINDOWS", False)
+    monkeypatch.setattr(process_tree, "IS_WINDOWS", False)
 
     def _boom_killpg(pid: int, sig: int) -> None:
         raise PermissionError("race")
@@ -38,9 +39,9 @@ def test_kill_process_tree_swallows_permission_error(monkeypatch) -> None:
     def _boom_kill(pid: int, sig: int) -> None:
         raise ProcessLookupError()
 
-    monkeypatch.setattr(chat_local_shell.os, "killpg", _boom_killpg)
-    monkeypatch.setattr(chat_local_shell.os, "kill", _boom_kill)
-    chat_local_shell._kill_process_tree(4321)  # must not raise
+    monkeypatch.setattr(process_tree.os, "killpg", _boom_killpg)
+    monkeypatch.setattr(process_tree.os, "kill", _boom_kill)
+    process_tree.kill_process_tree(4321)  # must not raise
 
 
 def test_run_local_shell_timeout(tmp_path: Path) -> None:
@@ -104,22 +105,22 @@ def test_run_local_shell_timeout_kills_grandchildren(tmp_path: Path) -> None:
 
 
 def test_popen_kwargs_use_process_group_on_posix(monkeypatch) -> None:
-    monkeypatch.setattr(chat_local_shell, "_IS_WINDOWS", False)
-    assert chat_local_shell._popen_kwargs_for_platform() == {"start_new_session": True}
+    monkeypatch.setattr(process_tree, "IS_WINDOWS", False)
+    assert process_tree.popen_kwargs_for_platform() == {"start_new_session": True}
 
 
 def test_popen_kwargs_use_new_process_group_on_windows(monkeypatch) -> None:
-    monkeypatch.setattr(chat_local_shell, "_IS_WINDOWS", True)
-    kwargs = chat_local_shell._popen_kwargs_for_platform()
+    monkeypatch.setattr(process_tree, "IS_WINDOWS", True)
+    kwargs = process_tree.popen_kwargs_for_platform()
     assert set(kwargs) == {"creationflags"}
 
 
 def test_kill_process_tree_uses_killpg_on_posix(monkeypatch) -> None:
-    monkeypatch.setattr(chat_local_shell, "_IS_WINDOWS", False)
+    monkeypatch.setattr(process_tree, "IS_WINDOWS", False)
     calls: list[tuple[int, int]] = []
-    monkeypatch.setattr(chat_local_shell.os, "killpg", lambda pid, sig: calls.append((pid, sig)))
-    chat_local_shell._kill_process_tree(4321)
-    assert calls == [(4321, chat_local_shell.signal.SIGKILL)]
+    monkeypatch.setattr(process_tree.os, "killpg", lambda pid, sig: calls.append((pid, sig)))
+    process_tree.kill_process_tree(4321)
+    assert calls == [(4321, process_tree.signal.SIGKILL)]
 
 
 def test_kill_process_tree_uses_taskkill_on_windows(monkeypatch) -> None:
@@ -128,14 +129,14 @@ def test_kill_process_tree_uses_taskkill_on_windows(monkeypatch) -> None:
     os.killpg doesn't exist on Windows, so the POSIX-only kill path would
     crash a timed-out `!` command instead of finishing the tool block there.
     """
-    monkeypatch.setattr(chat_local_shell, "_IS_WINDOWS", True)
+    monkeypatch.setattr(process_tree, "IS_WINDOWS", True)
     calls: list[list[str]] = []
     monkeypatch.setattr(
-        chat_local_shell.subprocess,
+        process_tree.subprocess,
         "run",
         lambda argv, **kwargs: calls.append(list(argv)),
     )
-    chat_local_shell._kill_process_tree(4321)
+    process_tree.kill_process_tree(4321)
     assert calls == [["taskkill", "/F", "/T", "/PID", "4321"]]
 
 
