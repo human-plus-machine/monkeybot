@@ -612,7 +612,7 @@ class FirestoreUsageStore:
     ) -> UsageBreakdown:
         """Aggregate usage by model, UTC day, and (time bucket × model) in-process.
 
-        When filtering with no thread, streams the entire ``turn_usage`` collection
+        When ``since_ms`` is ``None``, streams the entire ``turn_usage`` collection
         (small-scale only; not suitable for large production datasets).
         """
         rows = await self._fetch_usage_rows(None, since_ms)
@@ -626,7 +626,7 @@ class FirestoreUsageStore:
             model = str(row.get("model") or "unknown")
             created_at = _field_int(row, "created_at")
             by_model_map.setdefault(model, []).append(row)
-            day = time.strftime("%Y-%m-%d", time.gmtime(created_at / 1000.0))
+            day = utc_bucket_key(created_at, "day")
             by_day_map.setdefault(day, []).append(row)
             series_map.setdefault((utc_bucket_key(created_at, bucket), model), []).append(row)
 

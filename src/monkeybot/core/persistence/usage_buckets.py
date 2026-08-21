@@ -66,8 +66,8 @@ def sqlite_bucket_sql(granularity: UsageGranularity) -> str:
 def postgres_bucket_sql(granularity: UsageGranularity) -> str:
     """Postgres expression intended to match :func:`utc_bucket_key`.
 
-    Not exercised in CI (no Postgres service); parity verified by inspection and
-    the SQLite behavioural tests in ``tests/core/test_usage.py``.
+    Format strings are pinned in ``tests/core/test_usage.py``; SQLite behavioural
+    tests cover runtime parity for the SQLite path.
     """
     utc = "(to_timestamp(created_at / 1000.0) AT TIME ZONE 'UTC')"
     if granularity == "hour":

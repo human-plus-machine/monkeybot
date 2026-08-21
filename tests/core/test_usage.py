@@ -339,6 +339,26 @@ def test_utc_bucket_key_aligns_week_to_monday() -> None:
         coerce_granularity("month")
 
 
+def test_postgres_bucket_sql_formats() -> None:
+    from monkeybot.core.persistence.usage_buckets import postgres_bucket_sql
+
+    expected = {
+        "hour": (
+            "to_char((to_timestamp(created_at / 1000.0) AT TIME ZONE 'UTC'), "
+            "'YYYY-MM-DD\"T\"HH24')"
+        ),
+        "day": (
+            "to_char((to_timestamp(created_at / 1000.0) AT TIME ZONE 'UTC'), 'YYYY-MM-DD')"
+        ),
+        "week": (
+            "to_char((date_trunc('week', (to_timestamp(created_at / 1000.0) AT TIME ZONE "
+            "'UTC')))::date, 'YYYY-MM-DD')"
+        ),
+    }
+    for granularity, sql in expected.items():
+        assert postgres_bucket_sql(granularity) == sql  # type: ignore[arg-type]
+
+
 def test_validate_hour_bucket_window() -> None:
     from monkeybot.core.persistence.usage_buckets import (
         HOUR_BUCKET_MAX_LOOKBACK_MS,

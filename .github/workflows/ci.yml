@@ -19,7 +19,7 @@ jobs:
           version: "latest"
 
       - name: Sync dependencies
-        run: uv sync --extra claude --extra vertex-claude --extra bedrock
+        run: uv sync --extra claude --extra vertex-claude --extra bedrock --extra firestore
 
       - name: Mypy
         run: uv run mypy src/monkeybot
