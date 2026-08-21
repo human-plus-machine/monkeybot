@@ -25,6 +25,13 @@ def test_pricing_for_unknown_returns_zeros(caplog: pytest.LogCaptureFixture) -> 
     assert "unknown model for pricing lookup: nonexistent-model" in caplog.text
 
 
+def test_pricing_for_bedrock_converse_models() -> None:
+    assert pricing_for("us.xai.grok-4.6") == pricing_for("grok-4")
+    assert pricing_for("us.amazon.nova-pro-v1:0") == pricing_for("nova-pro")
+    assert pricing_for("us.meta.llama3-3-70b-instruct-v1:0") == pricing_for("llama3-3-70b-instruct")
+    assert pricing_for("us.xai.grok-4.6")[0] > 0.0
+
+
 def test_estimate_cost_input_output_only() -> None:
     assert estimate_cost("gpt-5", 1_000_000, 1_000_000) == pytest.approx(11.25)
 

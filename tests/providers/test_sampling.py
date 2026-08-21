@@ -86,7 +86,7 @@ class TestGetProviderConfigSampling:
     def test_bedrock_threads_sampling_from_yaml_params(self, monkeypatch: pytest.MonkeyPatch) -> None:
         mock_instance = SimpleNamespace(name="bedrock")
         with patch(
-            "monkeybot.providers.bedrock.BedrockClaudeProvider",
+            "monkeybot.providers.bedrock.BedrockProvider",
             return_value=mock_instance,
         ) as mock_cls:
             cfg = get_provider_config(

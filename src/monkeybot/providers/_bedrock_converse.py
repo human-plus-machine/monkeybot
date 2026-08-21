@@ -22,7 +22,6 @@ from monkeybot.core.llm.provider import (
 )
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.types.content_blocks import (
-    ContentBlock,
     File,
     Image,
     RedactedThinking,
@@ -31,6 +30,7 @@ from monkeybot.core.types.content_blocks import (
     ToolRequest,
     ToolResponse,
 )
+from monkeybot.core.attachments.text import filename_from_metadata
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._utils import (
     estimate_anthropic_input_tokens,
@@ -38,12 +38,11 @@ from monkeybot.providers._utils import (
     safe_parse_tool_args,
     split_leading_system,
 )
-from monkeybot.providers.model_capabilities import supports_param
+from monkeybot.providers.model_capabilities import BEDROCK_GEO_PREFIXES, supports_param
 
 _log = logging.getLogger(__name__)
 
-_GEO_PREFIXES = frozenset({"us", "eu", "apac", "ap", "global", "au", "jp", "ca", "us-gov"})
-_STRIPPABLE_INFERENCE = ("temperature",)
+_EMPTY_TOOL_RESULT = "(no output)"
 _UNSUPPORTED_FIELD_RE = re.compile(r"doesn't support the (\w+) field", re.IGNORECASE)
 _SENTINEL = object()
 _DOC_FORMATS = {
@@ -84,7 +83,7 @@ def bedrock_vendor(model: str) -> str:
     if "/" in name:
         return name.split("/", 1)[0].lower()
     parts = name.split(".")
-    if len(parts) >= 2 and parts[0].lower() in _GEO_PREFIXES:
+    if len(parts) >= 2 and parts[0].lower() in BEDROCK_GEO_PREFIXES:
         return parts[1].lower()
     if len(parts) >= 2:
         return parts[0].lower()
@@ -127,12 +126,44 @@ def _document_format(mime_type: str) -> str:
     return _DOC_FORMATS.get(mime_type.rsplit("/", 1)[-1].lower(), "txt")
 
 
-def _document_name(block: File) -> str:
-    meta = block.metadata or {}
-    raw = meta.get("filename") or meta.get("name") or "document"
-    if not isinstance(raw, str) or not raw.strip():
-        return "document"
-    return raw.strip()[:200]
+_CONVERSE_DOC_NAME_RE = re.compile(r"[^A-Za-z0-9 \-\(\)\[\]]")
+
+
+def _sanitize_document_stem(raw: str) -> str:
+    stem = raw.rsplit(".", 1)[0] if "." in raw else raw
+    cleaned = _CONVERSE_DOC_NAME_RE.sub("", stem).strip()
+    return cleaned or "document"
+
+
+class _DocumentNames:
+    __slots__ = ("_used",)
+
+    def __init__(self) -> None:
+        self._used: set[str] = set()
+
+    def next(self, block: File) -> str:
+        meta = block.metadata or {}
+        att_id = meta.get("attachment_id") or meta.get("attachmentId")
+        fallback = att_id.strip() if isinstance(att_id, str) and att_id.strip() else "document"
+        raw = filename_from_metadata(block.metadata, fallback=fallback)
+        base = _sanitize_document_stem(raw)
+        name = base
+        suffix = 2
+        while name in self._used:
+            name = f"{base}-{suffix}"
+            suffix += 1
+        self._used.add(name)
+        return name[:200]
+
+
+def _document_block(block: File, *, names: _DocumentNames) -> dict[str, Any]:
+    return {
+        "document": {
+            "format": _document_format(block.mime_type),
+            "name": names.next(block),
+            "source": {"bytes": base64.b64decode(block.data)},
+        }
+    }
 
 
 def _image_block(block: Image) -> dict[str, Any]:
@@ -144,17 +175,7 @@ def _image_block(block: Image) -> dict[str, Any]:
     }
 
 
-def _document_block(block: File) -> dict[str, Any]:
-    return {
-        "document": {
-            "format": _document_format(block.mime_type),
-            "name": _document_name(block),
-            "source": {"bytes": base64.b64decode(block.data)},
-        }
-    }
-
-
-def _tool_result_content(result: list[Any]) -> list[dict[str, Any]]:
+def _tool_result_content(result: list[Any], *, names: _DocumentNames) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for block in result:
         if isinstance(block, Text):
@@ -162,26 +183,30 @@ def _tool_result_content(result: list[Any]) -> list[dict[str, Any]]:
         elif isinstance(block, Image):
             out.append(_image_block(block))
         elif isinstance(block, File):
-            out.append(_document_block(block))
+            out.append(_document_block(block, names=names))
         else:
             raise ValueError(f"unsupported ToolResponse block for Converse: {type(block).__name__}")
-    return out or [{"text": ""}]
+    return out or [{"text": _EMPTY_TOOL_RESULT}]
 
 
-def _converse_block(block: Any) -> dict[str, Any] | None:
+def _converse_block(block: Any, *, names: _DocumentNames) -> dict[str, Any]:
     if isinstance(block, Thinking):
         inner: dict[str, Any] = {"text": block.thinking}
         if block.signature:
             inner["signature"] = block.signature
         return {"reasoningContent": {"reasoningText": inner}}
     if isinstance(block, RedactedThinking):
-        return {"reasoningContent": {"redactedContent": block.data}}
+        return {
+            "reasoningContent": {
+                "redactedContent": base64.b64decode(block.data),
+            }
+        }
     if isinstance(block, Text):
         return {"text": block.text}
     if isinstance(block, Image):
         return _image_block(block)
     if isinstance(block, File):
-        return _document_block(block)
+        return _document_block(block, names=names)
     if isinstance(block, ToolRequest):
         return {
             "toolUse": {
@@ -193,7 +218,7 @@ def _converse_block(block: Any) -> dict[str, Any] | None:
     if isinstance(block, ToolResponse):
         result: dict[str, Any] = {
             "toolUseId": block.id,
-            "content": _tool_result_content(block.result),
+            "content": _tool_result_content(block.result, names=names),
         }
         if block.is_error:
             result["status"] = "error"
@@ -204,15 +229,14 @@ def _converse_block(block: Any) -> dict[str, Any] | None:
 def messages_to_converse(messages: Sequence[Message]) -> tuple[str, list[dict[str, Any]]]:
     """Split leading system; map harness blocks; merge consecutive same-role turns."""
     system, rest = split_leading_system(messages)
+    doc_names = _DocumentNames()
     out: list[dict[str, Any]] = []
     for m in rest:
         if m.role not in ("user", "assistant"):
             raise ValueError(f"unsupported role for Converse messages: {m.role!r}")
         content: list[dict[str, Any]] = []
         for block in m.content:
-            mapped = _converse_block(block)
-            if mapped is not None:
-                content.append(mapped)
+            content.append(_converse_block(block, names=doc_names))
         if not content:
             continue
         if out and out[-1]["role"] == m.role:
@@ -239,6 +263,10 @@ def converse_request_kwargs(
     this path. Claude still uses ``prepare_anthropic_cached_payload``; Nova/Llama
     cache points are a follow-up. ``UsageEvent.cache_read_tokens`` staying 0
     means caching was never requested, not that the model refused a cache hit.
+
+    ``thinking_budget`` is not forwarded on this path — Converse reasoning is not
+    requested via ``additionalModelRequestFields`` yet; the mapper only round-trips
+    ``reasoningContent`` when the model emits it.
     """
     system, converse_msgs = messages_to_converse(messages)
     inference: dict[str, Any] = {"maxTokens": max_tokens}
@@ -267,15 +295,19 @@ def _copy_stream_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
 
 def _strip_unsupported_inference(kwargs: dict[str, Any], exc: Exception) -> list[str]:
     match = _UNSUPPORTED_FIELD_RE.search(str(exc))
-    if not match or match.group(1).lower() != "temperature":
+    if not match:
         return []
+    field = match.group(1)
     infer = kwargs.get("inferenceConfig")
-    if not isinstance(infer, dict) or "temperature" not in infer:
+    if not isinstance(infer, dict):
         return []
-    infer = dict(infer)
-    del infer["temperature"]
-    kwargs["inferenceConfig"] = infer
-    return ["temperature"]
+    for key in infer:
+        if key.lower() == field.lower():
+            updated = dict(infer)
+            del updated[key]
+            kwargs["inferenceConfig"] = updated
+            return [key]
+    return []
 
 
 def _tool_input_fragment(raw: Any) -> str:
@@ -296,6 +328,13 @@ def _reasoning_delta(delta: dict[str, Any]) -> ThinkingDelta | None:
     if isinstance(inner, dict):
         text = text or inner.get("text") or ""
         signature = signature or inner.get("signature")
+    redacted = rc.get("redactedContent")
+    if redacted is not None:
+        if isinstance(redacted, (bytes, bytearray)):
+            encoded = base64.b64encode(bytes(redacted)).decode("ascii")
+        else:
+            encoded = str(redacted)
+        return ThinkingDelta(text="", signature=encoded)
     if not text and not signature:
         return None
     return ThinkingDelta(text=str(text) if text else "", signature=signature)
@@ -382,6 +421,33 @@ def _on_content_block_stop(
     yield ToolCall(call_id=buf.call_id, name=buf.name, args=args, parse_error=parse_error)
 
 
+def _flush_buffered_tools(
+    tools: dict[int, _ToolBuf],
+    *,
+    provider: str,
+    truncated: bool,
+) -> Iterator[ProviderEvent]:
+    for idx in sorted(tools):
+        buf = tools[idx]
+        if not buf.call_id and not buf.name and not buf.buf:
+            continue
+        if not buf.call_id:
+            _log.warning(
+                "converse toolUse missing toolUseId %s",
+                kv(provider=provider, name=buf.name),
+            )
+        args, parse_error = safe_parse_tool_args(
+            buf.buf,
+            call_id=buf.call_id,
+            tool_name=buf.name,
+            provider=provider,
+        )
+        if truncated and parse_error is None:
+            parse_error = "truncated"
+        yield ToolCall(call_id=buf.call_id, name=buf.name, args=args, parse_error=parse_error)
+    tools.clear()
+
+
 def _on_content_block_start(
     start_ev: Any,
     tools: dict[int, _ToolBuf],
@@ -389,6 +455,10 @@ def _on_content_block_start(
     provider: str,
 ) -> None:
     if not isinstance(start_ev, dict):
+        _log.warning(
+            "unexpected converse stream event %s",
+            kv(kind="contentBlockStart", type=type(start_ev).__name__),
+        )
         return
     start = start_ev.get("start") or {}
     tool_use = start.get("toolUse") if isinstance(start, dict) else None
@@ -438,6 +508,13 @@ async def _iter_converse_events(
             output_tokens = int(usage.get("outputTokens") or 0)
             cache_read = int(usage.get("cacheReadInputTokens") or 0)
             cache_creation = int(usage.get("cacheWriteInputTokens") or 0)
+    if tools:
+        _log.warning(
+            "converse stream ended with buffered toolUse %s",
+            kv(provider=provider, n_tools=len(tools)),
+        )
+        for item in _flush_buffered_tools(tools, provider=provider, truncated=True):
+            yield item
     yield UsageEvent(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
@@ -478,7 +555,7 @@ async def iter_converse_stream(
         lambda kw: _stream_converse_once(client, kw, provider=provider),
         kwargs,
         strip_rejected=_strip_unsupported_inference,
-        max_attempts=len(_STRIPPABLE_INFERENCE) + 1,
+        max_attempts=2,
         provider=provider,
         error_message=error_message,
         model=kwargs.get("modelId"),
@@ -489,27 +566,6 @@ async def iter_converse_stream(
         yield event
 
 
-def _estimate_block(block: ContentBlock) -> dict[str, Any]:
-    if isinstance(block, Text):
-        return {"text": block.text}
-    if isinstance(block, Thinking):
-        return {"thinking": block.thinking}
-    if isinstance(block, Image):
-        return {"image": block.mime_type, "chars": len(block.data)}
-    if isinstance(block, File):
-        return {"file": block.mime_type, "chars": len(block.data)}
-    if isinstance(block, ToolRequest):
-        return {"toolRequest": {"id": block.id, "name": block.name, "args": dict(block.args)}}
-    if isinstance(block, ToolResponse):
-        return {
-            "toolResponse": {
-                "id": block.id,
-                "result": [_estimate_block(b) for b in block.result],
-            }
-        }
-    return {"type": type(block).__name__}
-
-
 def estimate_converse_input_tokens(
     messages: Sequence[Message],
     tools: Sequence[ToolDef],
@@ -517,7 +573,7 @@ def estimate_converse_input_tokens(
     """Character estimate from harness messages. CountTokens is Anthropic-only."""
     system, rest = split_leading_system(messages)
     serializable = [
-        {"role": m.role, "content": [_estimate_block(b) for b in m.content]} for m in rest
+        {"role": m.role, "content": [b.to_dict() for b in m.content]} for m in rest
     ]
     tool_defs = [t.to_model_schema() for t in tools] if tools else None
     return estimate_anthropic_input_tokens(

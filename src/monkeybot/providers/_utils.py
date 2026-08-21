@@ -170,6 +170,9 @@ async def iter_stream_with_param_retry(
                 exc_info=True,
             )
             raise
+    raise RuntimeError(
+        f"{provider} stream exhausted {max_attempts} attempts without emitting events"
+    )
 
 
 async def iter_anthropic_sdk_stream(

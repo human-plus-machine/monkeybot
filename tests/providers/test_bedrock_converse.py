@@ -180,6 +180,76 @@ def test_assistant_first_history_prepends_user() -> None:
     assert converse_msgs[1] == {"role": "assistant", "content": [{"text": "prior"}]}
 
 
+def test_document_name_sanitizes_and_deduplicates() -> None:
+    messages = [
+        Message(
+            role="user",
+            content=[
+                File(mime_type="application/pdf", data="QQ==", metadata={"filename": "quarterly_report_v2.pdf"}),
+                File(mime_type="application/pdf", data="QQ=="),
+                File(mime_type="application/pdf", data="QQ=="),
+            ],
+        )
+    ]
+    _, converse_msgs = messages_to_converse(messages)
+    names = [block["document"]["name"] for block in converse_msgs[0]["content"]]
+    assert names[0] == "quarterlyreportv2"
+    assert len(set(names)) == 3
+
+
+def test_empty_tool_result_uses_placeholder() -> None:
+    messages = [
+        Message.text("user", "hi"),
+        Message(
+            role="assistant",
+            content=[ToolRequest(id="c1", name="echo", args={"x": 1})],
+        ),
+        Message(
+            role="user",
+            content=[ToolResponse(id="c1", tool_name="echo", result=[])],
+        ),
+    ]
+    _, converse_msgs = messages_to_converse(messages)
+    tool_result = converse_msgs[-1]["content"][0]["toolResult"]
+    assert tool_result["content"] == [{"text": "(no output)"}]
+
+
+@pytest.mark.asyncio
+async def test_stream_flushes_truncated_tooluse(caplog: pytest.LogCaptureFixture) -> None:
+    stream_events: list[dict[str, object]] = [
+        {
+            "contentBlockStart": {
+                "contentBlockIndex": 0,
+                "start": {"toolUse": {"toolUseId": "t1", "name": "echo"}},
+            }
+        },
+        {
+            "contentBlockDelta": {
+                "contentBlockIndex": 0,
+                "delta": {"toolUse": {"input": '{"x":'}},
+            }
+        },
+        {"messageStop": {"stopReason": "max_tokens"}},
+        {"metadata": {"usage": {"inputTokens": 1, "outputTokens": 1}}},
+    ]
+    client = MagicMock()
+    client.converse_stream.return_value = {"stream": iter(stream_events)}
+    with caplog.at_level("WARNING", logger="monkeybot.providers._bedrock_converse"):
+        events = [
+            e
+            async for e in iter_converse_stream(
+                client,
+                {"modelId": _GROK, "messages": [], "inferenceConfig": {"maxTokens": 8}},
+                provider="bedrock",
+                error_message="err %s",
+            )
+        ]
+    calls = [e for e in events if isinstance(e, ToolCall)]
+    assert len(calls) == 1
+    assert calls[0].parse_error is not None
+    assert any("buffered toolUse" in rec.message for rec in caplog.records)
+
+
 def _converse_events() -> list[dict[str, object]]:
     return [
         {
@@ -446,4 +516,4 @@ async def test_converse_stream_is_closed() -> None:
 
 
 def test_bedrock_provider_alias() -> None:
-    assert BedrockProvider is BedrockClaudeProvider
+    assert BedrockClaudeProvider is BedrockProvider

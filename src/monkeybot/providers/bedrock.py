@@ -32,12 +32,8 @@ from monkeybot.providers.sampling import resolve_model_sampling
 _log = logging.getLogger(__name__)
 
 
-class BedrockClaudeProvider:
-    """Bedrock models via Anthropic (Claude) or Converse (Grok, Nova, Llama, …).
-
-    The class name is historical — ``aws_bedrock`` constructs this type for every
-    vendor. Prefer the ``BedrockProvider`` alias.
-    """
+class BedrockProvider:
+    """Bedrock models via Anthropic (Claude) or Converse (Grok, Nova, Llama, …)."""
 
     @property
     def name(self) -> str:
@@ -141,8 +137,12 @@ class BedrockClaudeProvider:
         thinking_budget: int | None = None,
         hints: ProviderCallHints | None = None,
     ) -> AsyncIterator[ProviderEvent]:
-        del thinking_budget
+        del thinking_budget  # Converse path does not request reasoning yet; see converse_request_kwargs.
         if not uses_anthropic_bedrock(model):
+            _log.info(
+                "Bedrock dispatch %s",
+                kv(provider="bedrock", model=model, path="converse"),
+            )
             kwargs = converse_request_kwargs(
                 model=model,
                 messages=messages,
@@ -162,6 +162,10 @@ class BedrockClaudeProvider:
                 yield event
             return
 
+        _log.info(
+            "Bedrock dispatch %s",
+            kv(provider="bedrock", model=model, path="anthropic"),
+        )
         import anthropic  # noqa: PLC0415
 
         retention = hints.cache_retention if hints is not None else "short"
@@ -195,4 +199,4 @@ class BedrockClaudeProvider:
             yield event
 
 
-BedrockProvider = BedrockClaudeProvider
+BedrockClaudeProvider = BedrockProvider

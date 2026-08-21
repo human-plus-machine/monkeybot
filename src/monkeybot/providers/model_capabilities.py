@@ -28,8 +28,15 @@ UNSUPPORTED_SAMPLING_PARAMS: dict[str, frozenset[str]] = {
 
 # Bedrock ids: optional ``bedrock/``, geo inference-profile prefix, then
 # ``anthropic.`` for Claude. Vertex ids are already bare (``claude-sonnet-5@…``).
+BEDROCK_GEO_PREFIXES: frozenset[str] = frozenset(
+    {"us", "eu", "apac", "ap", "global", "au", "jp", "ca", "us-gov"}
+)
 _BEDROCK_SLASH = re.compile(r"^bedrock/", re.IGNORECASE)
-_BEDROCK_GEO = re.compile(r"^(?:us-gov|apac|global|us|eu|ap|au|jp|ca)\.")
+_BEDROCK_GEO = re.compile(
+    r"^(?:"
+    + "|".join(re.escape(p) for p in sorted(BEDROCK_GEO_PREFIXES, key=len, reverse=True))
+    + r")\."
+)
 _ANTHROPIC_NS = re.compile(r"^anthropic\.")
 
 
