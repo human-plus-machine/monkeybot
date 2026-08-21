@@ -138,7 +138,11 @@ async def _await_user_response_any(
 
     Used by the gateway :func:`_await_user_response` and the inspector confirm path.
     """
-    t = timeout_sec if timeout_sec is not None else float(os.environ.get("PENDING_RESPONSE_TIMEOUT_SEC", "300"))
+    t = (
+        timeout_sec
+        if timeout_sec is not None
+        else float(os.environ.get("PENDING_RESPONSE_TIMEOUT_SEC", "300"))
+    )
     try:
         return await asyncio.wait_for(asyncio.shield(fut), timeout=t)
     except TimeoutError:
@@ -156,15 +160,10 @@ def confirm_wait_stopped_by_user(
 ) -> bool:
     """True when user Stop abandoned the confirm future.
 
-    Session DELETE and websocket teardown also mark keys terminated via
-    ``abandon_pending_cancel_all``; when ``cancelled`` is provided it must be
-    set to distinguish user Stop from disconnect teardown.
+    ``cancelled`` must already be set. Session DELETE and websocket teardown also
+    mark keys terminated via ``abandon_pending_cancel_all`` without setting the
+    Event; those paths re-raise instead of settling.
     """
-    if bus is None:
+    if bus is None or cancelled is None or not cancelled.is_set():
         return False
-    status = bus.is_pending_or_terminal(pending_key)
-    if status == "terminated":
-        if cancelled is not None and not cancelled.is_set():
-            return False
-        return True
-    return False
+    return bus.is_pending_or_terminal(pending_key) == "terminated"

@@ -337,6 +337,7 @@ class GatewayLoopPort:
         usage_store = backend.usage()
 
         cancel_event = asyncio.Event()
+        bus.turn_cancel_event = cancel_event
 
         async def _watch_cancel() -> None:
             while True:
@@ -487,6 +488,7 @@ class GatewayLoopPort:
             with contextlib.suppress(asyncio.CancelledError):
                 await watcher
             bus.cancel_requested_for = None
+            bus.turn_cancel_event = None
 
 
 def _cors_allow_origins() -> list[str]:

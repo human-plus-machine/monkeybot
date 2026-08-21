@@ -23,6 +23,7 @@ from monkeybot.core.tools.workspace_service import AGENT_READ_DEFAULT_LINES
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.todo_list.store import TodoListStore
 
+
 @runtime_checkable
 class CustomTool(Protocol):
     """Protocol for lightweight in-process tools added by framework users.

@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from monkeybot.core.path_safety import sanitize_path_component
 from monkeybot.core.attachments.config import (
     ALLOWED_MIME_TYPES,
     IMAGE_MIME_TYPES,
@@ -18,6 +17,10 @@ from monkeybot.core.attachments.config import (
     max_attachments_per_session,
     max_image_bytes,
     max_pdf_bytes,
+)
+from monkeybot.core.path_safety import (
+    resolve_legacy_or_sanitized_dir,
+    sanitize_path_component,
 )
 
 
@@ -93,7 +96,9 @@ class FilesystemAttachmentStore:
         self._root = workspace_root.resolve()
 
     def _session_dir(self, session_id: str) -> Path:
-        return self._root / ".monkeybot" / "attachments" / sanitize_path_component(session_id)
+        return resolve_legacy_or_sanitized_dir(
+            self._root / ".monkeybot" / "attachments", session_id
+        )
 
     def _path_for(self, session_id: str, attachment_id: str) -> Path:
         return self._session_dir(session_id) / sanitize_path_component(attachment_id)

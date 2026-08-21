@@ -21,10 +21,10 @@ from monkeybot.core.llm.realtime_provider import (
     RealtimeTurnBoundary,
     RealtimeUsage,
 )
-from monkeybot.gateway.pending_response_bus import TERMINATED_PENDING_KEYS_MAXLEN
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.runtime.utterance_buffer import UtteranceBuffer
+from monkeybot.gateway.pending_response_bus import TERMINATED_PENDING_KEYS_MAXLEN
 from monkeybot.todo_list.store import TodoListStore
 
 from .metrics import RealtimeMetrics
@@ -66,6 +66,7 @@ class RealtimeConnectionState:
     transcript_writer: TranscriptWriter | None = None
     todo_store: TodoListStore | None = None
     """Process-local session todo list (not shared across gateway replicas)."""
+    cancelled: asyncio.Event = field(default_factory=asyncio.Event)
     _closed: bool = False
 
     def __post_init__(self) -> None:
@@ -103,9 +104,7 @@ class RealtimeConnectionState:
                 fut.cancel()
             self.terminated_pending_keys.append(key)
 
-    def is_pending_or_terminal(
-        self, key: str
-    ) -> Literal["pending", "terminated", "unknown"]:
+    def is_pending_or_terminal(self, key: str) -> Literal["pending", "terminated", "unknown"]:
         if key in self.pending_responses:
             return "pending"
         if key in self.terminated_pending_keys:
@@ -116,9 +115,7 @@ class RealtimeConnectionState:
         """Validate and apply a state transition."""
         valid = (self.state, new_state) in _VALID_TRANSITIONS
         if not valid:
-            raise SessionStateError(
-                f"Invalid realtime transition {self.state} -> {new_state}"
-            )
+            raise SessionStateError(f"Invalid realtime transition {self.state} -> {new_state}")
         old = self.state
         self.state = new_state
         logger.debug(

@@ -209,3 +209,40 @@ def test_session_spill_dirs_skips_traversal_legacy_id(tmp_path: Path) -> None:
     assert names == {"a___victim"}
     assert "victim" not in names
     assert (root / "victim" / "keep.txt").is_file()
+
+
+def test_write_spill_skips_uncontained_underscore_fallback(tmp_path: Path) -> None:
+    """A symlink at spill/_ must not become a write escape."""
+    from monkeybot.core.tools.spill_inventory import write_spill_with_inventory
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    spill = ws / ".monkeybot" / "spill"
+    spill.mkdir(parents=True)
+    (spill / "_").symlink_to(outside, target_is_directory=True)
+    # Force the sanitized dir itself to escape so the code takes the `_` fallback.
+    (spill / "thread-1").symlink_to(outside, target_is_directory=True)
+
+    out = write_spill_with_inventory("payload", ws, "thread-1", "call-1")
+    assert not list(outside.rglob("*.txt"))
+    assert "(unavailable)" in out or "payload" in out
+
+
+def test_session_spill_dirs_legacy_subagent_prefix(tmp_path: Path) -> None:
+    root = tmp_path / ".monkeybot" / "spill"
+    legacy_name = "sess*1"
+    (root / legacy_name).mkdir(parents=True)
+    (root / f"subagent:{legacy_name}:x").mkdir(parents=True)
+    (root / "sess_1").mkdir(parents=True)
+    (root / "subagent:sess_1:y").mkdir(parents=True)
+
+    dirs = session_spill_dirs(tmp_path, legacy_name)
+    names = {p.name for p in dirs}
+    assert names == {
+        "sess_1",
+        "subagent:sess_1:y",
+        legacy_name,
+        f"subagent:{legacy_name}:x",
+    }

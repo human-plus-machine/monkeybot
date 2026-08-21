@@ -457,10 +457,15 @@ async def _ensure_outbox_palace_id_column(conn: aiosqlite.Connection) -> None:
 
 
 async def open_connection(db_url: str | None = None) -> aiosqlite.Connection:
-    """Open aiosqlite connection, configure WAL, return ready connection."""
+    """Open aiosqlite connection, configure WAL, return ready connection.
+
+    ``isolation_level=None`` (autocommit) so manual ``BEGIN IMMEDIATE`` in
+    ``append_with_outbox`` / ``reset`` cannot nest inside an implicit
+    sqlite3 transaction. Same reason as ``observability/sqlite_exporter``.
+    """
     path = sqlite_path_from_db_url(db_url)
     if path != ":memory:":
         Path(path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
-    conn = await aiosqlite.connect(path)
+    conn = await aiosqlite.connect(path, isolation_level=None)
     await configure_connection(conn)
     return conn

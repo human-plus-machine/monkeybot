@@ -11,6 +11,10 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 - Local computer control: nine opt-in, macOS-only `computer_*` tools (`computer/`) let the agent open/reveal files and folders, launch apps, open URLs, read/write the clipboard, and list/find/move/trash files under the user's home directory. Off by default (`computer.enabled: false` / `MONKEYBOT_COMPUTER_TOOLS`); intended for the Monkeybot desktop app, never a server deployment. Every call asks for approval by default via a built-in ruleset baseline (not `permissions.yaml`, which is fail-open); "Always allow" is scoped to the exact `(tool, resource)` approved and persists durably to `monkeybot_config/approvals.json` (a new machine-written file — never hand-edit). Hard security limits (home-directory confinement, credential-path denylist, exec-surface refusal on `open`, trash-not-delete) live in the tool bodies and cannot be bypassed by permission rules. See `docs/features.md` §22.
 - `permissions.yaml`'s `tool-confirmations` approval now supports a durable `persist` hook (`remember_always_approval(..., persist=...)`) in addition to the existing in-session `SessionApprovals` cache; `resource_for_call` gained `url`/`app` argument lookups for readable permission resource strings on tools with no `path` arg.
 
+### Fixed
+
+- Stop during a tool confirmation sets the turn cancel Event in `POST /cancel` (and on realtime interrupt) before pending futures are cancelled, so completed tool results settle into history instead of racing a 50ms poller. Session DELETE and websocket teardown leave the Event unset and propagate cancellation. Spill writes refuse an uncontained `_` symlink fallback; transcript and attachment dirs reuse a safe pre-sanitization folder when it still exists on disk.
+
 ## [core v3.0.2] - 2026-08-18
 
 ### Fixed
@@ -44,7 +48,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 - Stop during a tool confirmation now settles completed tool results into history (and synthesizes cancel envelopes for the rest) instead of escaping before abort settlement; the realtime confirm path does the same. Cancel after a finished provider stream also persists already-shown assistant text so follow-ups match what the user saw, and settles any finalized tool calls with cancel envelopes.
 - SQLite `history.reset` (compaction / load-max truncate) runs delete+reinsert in one transaction, matching Postgres, so a crash mid-reset cannot wipe or partially rewrite a thread.
-- Tool spill paths sanitize client `session_id` / `thread_id` components and refuse to write or delete outside `.monkeybot/spill`; `POST /sessions` rejects path-traversal session ids; session DELETE quiesces the active turn before removing spill dirs. The same path-component sanitizer also applies to transcript and attachment directories, so legacy ids containing glob metacharacters map to a sanitized on-disk folder.
+- Tool spill paths sanitize client `session_id` / `thread_id` components and refuse to write or delete outside `.monkeybot/spill`; `POST /sessions` rejects path-traversal session ids; session DELETE quiesces the active turn before removing spill dirs. The same path-component sanitizer also applies to transcript and attachment directories, so legacy ids containing glob metacharacters map to a sanitized on-disk folder (reads still find a pre-sanitization folder when it exists).
 - Streamable HTTP MCP connects accept both 2-tuple and 3-tuple transport yields from the MCP Python SDK.
 - Stop mid-reply now cancels the in-flight provider token stream (instead of waiting for the full LLM call) and persists any already-streamed assistant text to history so follow-up turns keep matching what the user saw.
 - Chunking improvements now reach existing workspaces: a chunker version bump re-chunks indexed files even when their modification time never changed, so upgrades no longer require deleting `.monkeybot/knowledge/`.

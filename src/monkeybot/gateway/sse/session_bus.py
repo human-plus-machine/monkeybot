@@ -14,12 +14,12 @@ from pathlib import Path
 from typing import Any, Literal
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
-from monkeybot.gateway.pending_response_bus import TERMINATED_PENDING_KEYS_MAXLEN
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.persistence.transcript_analyzer import analyze_transcript
 from monkeybot.core.runtime.input_admission import InputAdmission
 from monkeybot.core.tools.permission import SessionApprovals
+from monkeybot.gateway.pending_response_bus import TERMINATED_PENDING_KEYS_MAXLEN
 from monkeybot.todo_list.store import TodoListStore
 
 from .sse import format_data_event
@@ -90,10 +90,9 @@ class SessionBus:
         self.model_name = model_name
         self.current_request_id: str | None = None
         self.cancel_requested_for: str | None = None
+        self.turn_cancel_event: asyncio.Event | None = None
         self._seq = 0
-        primary_maxlen = (
-            replay_maxlen if replay_maxlen is not None else _replay_maxlen_from_env()
-        )
+        primary_maxlen = replay_maxlen if replay_maxlen is not None else _replay_maxlen_from_env()
         nested_maxlen = (
             nested_replay_maxlen
             if nested_replay_maxlen is not None
@@ -104,9 +103,7 @@ class SessionBus:
         self._subscribers: set[asyncio.Queue[str]] = set()
         self._lock = asyncio.Lock()
         self.pending_responses: dict[str, asyncio.Future[Any]] = {}
-        self.terminated_pending_keys: deque[str] = deque(
-            maxlen=TERMINATED_PENDING_KEYS_MAXLEN
-        )
+        self.terminated_pending_keys: deque[str] = deque(maxlen=TERMINATED_PENDING_KEYS_MAXLEN)
         self.attachment_catalog: SessionAttachmentCatalog | None = None
         self.todo_store: TodoListStore | None = None
         """Process-local session todo list (not shared across gateway replicas)."""
@@ -120,6 +117,18 @@ class SessionBus:
         """Scheduled drain retry after a failed durable turn-lock acquire."""
         self.active_turn_task: asyncio.Task[None] | None = None
         """Background turn task scheduled by ``_schedule_turn``; awaited on DELETE."""
+
+    def request_cancel(self, request_id: str) -> None:
+        """Record user Stop and set the in-flight turn event before futures are cancelled.
+
+        POST /cancel used to only set ``cancel_requested_for``; a 50ms poller then
+        flipped the turn Event. Confirm ``CancelledError`` always won that race, so
+        Stop-during-HITL never settled. Set the bound Event here, synchronously.
+        """
+        self.cancel_requested_for = request_id
+        event = self.turn_cancel_event
+        if event is not None:
+            event.set()
 
     def cancel_follow_up_retry(self) -> None:
         """Cancel any pending follow-up lock-retry task."""
@@ -157,7 +166,9 @@ class SessionBus:
                 fut.cancel()
             self.terminated_pending_keys.append(pending_key)
 
-    def is_pending_or_terminal(self, pending_key: str) -> Literal["pending", "terminated", "unknown"]:
+    def is_pending_or_terminal(
+        self, pending_key: str
+    ) -> Literal["pending", "terminated", "unknown"]:
         if pending_key in self.pending_responses:
             return "pending"
         if pending_key in self.terminated_pending_keys:
@@ -198,9 +209,7 @@ class SessionBus:
         for q in subscribers:
             await q.put(comment_line)
 
-    async def subscribe(
-        self, last_event_id: int | None
-    ) -> tuple[list[str], asyncio.Queue[str]]:
+    async def subscribe(self, last_event_id: int | None) -> tuple[list[str], asyncio.Queue[str]]:
         """
         Register a subscriber and return buffered frames after last_event_id.
 
@@ -211,9 +220,7 @@ class SessionBus:
             q: asyncio.Queue[str] = asyncio.Queue()
             self._subscribers.add(q)
             cutoff = last_event_id if last_event_id is not None else 0
-            replay_frames = [
-                frame for seq, frame in self._merged_replay() if seq > cutoff
-            ]
+            replay_frames = [frame for seq, frame in self._merged_replay() if seq > cutoff]
         return replay_frames, q
 
     async def unsubscribe(self, queue: asyncio.Queue[str]) -> None:
@@ -239,9 +246,7 @@ class SessionBus:
             try:
                 await asyncio.wait_for(asyncio.shield(task), timeout=wait_sec)
             except TimeoutError:
-                logger.warning(
-                    "active turn did not finish before quiesce timeout; hard-cancelling"
-                )
+                logger.warning("active turn did not finish before quiesce timeout; hard-cancelling")
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, TimeoutError):
                     await asyncio.wait_for(task, timeout=_QUIESCE_HARD_CANCEL_TIMEOUT_SEC)
@@ -277,7 +282,9 @@ class SessionRegistry:
     """Process-local registry of SessionBus instances."""
 
     def __init__(self, *, workspace_root: Path | None = None) -> None:
-        self._sessions: dict[str, SessionBus] = {}  # ponytail: in-process registry, use Redis pub/sub for multi-instance deployments
+        self._sessions: dict[
+            str, SessionBus
+        ] = {}  # ponytail: in-process registry, use Redis pub/sub for multi-instance deployments
         self._workspace_root = workspace_root
 
     def get(self, session_id: str) -> SessionBus | None:

@@ -926,8 +926,31 @@ def test_confirm_wait_stopped_by_user_unknown_is_not_stop() -> None:
             del key
             return "unknown"
 
-    assert confirm_wait_stopped_by_user(UnknownBus(), "c1") is False
+    cancelled = asyncio.Event()
+    cancelled.set()
+    assert confirm_wait_stopped_by_user(UnknownBus(), "c1", cancelled=cancelled) is False
     assert confirm_wait_stopped_by_user(None, "c1") is False
+
+
+def test_confirm_wait_stopped_by_user_requires_cancelled_event() -> None:
+    from collections import deque
+
+    from monkeybot.core.runtime.tool_batch import confirm_wait_stopped_by_user
+
+    class TerminatedBus:
+        def __init__(self) -> None:
+            self.terminated_pending_keys: deque[str] = deque(["c1"])
+
+        def is_pending_or_terminal(self, key: str) -> str:
+            return "terminated" if key in self.terminated_pending_keys else "unknown"
+
+    bus = TerminatedBus()
+    unset = asyncio.Event()
+    set_evt = asyncio.Event()
+    set_evt.set()
+    assert confirm_wait_stopped_by_user(bus, "c1") is False
+    assert confirm_wait_stopped_by_user(bus, "c1", cancelled=unset) is False
+    assert confirm_wait_stopped_by_user(bus, "c1", cancelled=set_evt) is True
 
 
 @pytest.mark.asyncio
@@ -1030,6 +1053,7 @@ async def test_run_stop_during_confirm_settles_completed_tool_results() -> None:
         ):
             events.append(e)
             if isinstance(e, ToolConfirmationRequestEvent):
+                # Match POST /cancel: set the Event, then abandon pending futures.
                 cancel.set()
                 bus.abandon_pending_cancel_all()
 

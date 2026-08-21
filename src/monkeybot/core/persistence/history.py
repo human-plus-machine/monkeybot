@@ -276,9 +276,6 @@ class SQLiteHistoryStore:
         cannot leave the thread empty or only partially rewritten.
         """
         async with self._lock:
-            # Manual BEGIN IMMEDIATE (same shape as append_with_outbox). Safe because
-            # nothing else on this ConnLock leaves an implicit transaction open on the
-            # legacy default isolation_level connection — see observability/sqlite_exporter.
             await self._conn.execute("BEGIN IMMEDIATE")
             try:
                 await self._conn.execute(

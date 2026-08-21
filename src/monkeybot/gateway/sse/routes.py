@@ -879,7 +879,7 @@ def create_app(
                 "Unknown session",
                 uuid.uuid4().hex,
             )
-        bus.cancel_requested_for = body.request_id
+        bus.request_cancel(body.request_id)
         bus.admission.clear_steer()
         for fut in list(bus.pending_responses.values()):
             if not fut.done():
