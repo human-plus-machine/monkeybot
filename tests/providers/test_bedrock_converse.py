@@ -11,6 +11,7 @@ from monkeybot.core.llm.provider import (
     Done,
     Message,
     TextDelta,
+    ThinkingDelta,
     ToolCall,
     ToolInputDelta,
     UsageEvent,
@@ -18,6 +19,7 @@ from monkeybot.core.llm.provider import (
 from monkeybot.core.types.content_blocks import (
     File,
     Image,
+    RedactedThinking,
     Text,
     Thinking,
     ToolRequest,
@@ -25,6 +27,7 @@ from monkeybot.core.types.content_blocks import (
 )
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._bedrock_converse import (
+    _reasoning_delta,
     bedrock_vendor,
     converse_request_kwargs,
     converse_tools,
@@ -159,6 +162,34 @@ def test_consecutive_user_messages_merge() -> None:
     ]
 
 
+def test_reasoning_delta_reads_flat_streaming_members() -> None:
+    assert _reasoning_delta({"reasoningContent": {"text": "let me think"}}) == ThinkingDelta(
+        text="let me think",
+        signature=None,
+    )
+    assert _reasoning_delta({"reasoningContent": {"signature": "abc"}}) == ThinkingDelta(
+        text="",
+        signature="abc",
+    )
+    assert _reasoning_delta({"reasoningContent": {"reasoningText": {"text": "unused"}}}) is None
+
+
+def test_redacted_thinking_is_omitted_from_converse_history(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    messages = [
+        Message.text("user", "hi"),
+        Message(
+            role="assistant",
+            content=[RedactedThinking(data="opaque"), Text(text="visible")],
+        ),
+    ]
+    with caplog.at_level("WARNING", logger="monkeybot.providers._bedrock_converse"):
+        _, converse_msgs = messages_to_converse(messages)
+    assert converse_msgs[1]["content"] == [{"text": "visible"}]
+    assert any("RedactedThinking omitted" in rec.message for rec in caplog.records)
+
+
 def test_thinking_mapped_to_reasoning_content() -> None:
     messages = [
         Message.text("user", "hi"),
@@ -187,7 +218,7 @@ def test_document_name_sanitizes_and_deduplicates() -> None:
             role="user",
             content=[
                 File(mime_type="application/pdf", data="QQ==", metadata={"filename": "quarterly_report_v2.pdf"}),
-                File(mime_type="application/pdf", data="QQ==", metadata={"filename": "report v2.pdf"}),
+                File(mime_type="application/pdf", data="QQ==", metadata={"filename": "report  v2.pdf"}),
                 File(mime_type="application/pdf", data="QQ=="),
                 File(mime_type="application/pdf", data="QQ=="),
                 File(
@@ -287,6 +318,42 @@ def _converse_events() -> list[dict[str, object]]:
         {"contentBlockStop": {"contentBlockIndex": 0}},
         {"messageStop": {"stopReason": "tool_use"}},
         {"metadata": {"usage": {"inputTokens": 9, "outputTokens": 4}}},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_stream_emits_reasoning_delta_from_converse_events() -> None:
+    stream_events: list[dict[str, object]] = [
+        {
+            "contentBlockDelta": {
+                "contentBlockIndex": 0,
+                "delta": {"reasoningContent": {"text": "plan step"}},
+            }
+        },
+        {
+            "contentBlockDelta": {
+                "contentBlockIndex": 0,
+                "delta": {"reasoningContent": {"signature": "sig-1"}},
+            }
+        },
+        {"messageStop": {"stopReason": "end_turn"}},
+        {"metadata": {"usage": {"inputTokens": 2, "outputTokens": 1}}},
+    ]
+    client = MagicMock()
+    client.converse_stream.return_value = {"stream": iter(stream_events)}
+    events = [
+        e
+        async for e in iter_converse_stream(
+            client,
+            {"modelId": _GROK, "messages": [], "inferenceConfig": {"maxTokens": 16}},
+            provider="bedrock",
+            error_message="err %s",
+        )
+    ]
+    thinking = [e for e in events if isinstance(e, ThinkingDelta)]
+    assert thinking == [
+        ThinkingDelta(text="plan step", signature=None),
+        ThinkingDelta(text="", signature="sig-1"),
     ]
 
 

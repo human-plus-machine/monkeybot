@@ -192,7 +192,7 @@ def _tool_result_content(result: list[Any], *, names: _DocumentNames) -> list[di
     return out or [{"text": _EMPTY_TOOL_RESULT}]
 
 
-def _converse_block(block: Any, *, names: _DocumentNames) -> dict[str, Any]:
+def _converse_block(block: Any, *, names: _DocumentNames) -> dict[str, Any] | None:
     if isinstance(block, Thinking):
         inner: dict[str, Any] = {"text": block.thinking}
         if block.signature:
@@ -203,7 +203,7 @@ def _converse_block(block: Any, *, names: _DocumentNames) -> dict[str, Any]:
             "RedactedThinking omitted on Bedrock Converse path %s",
             kv(provider="bedrock"),
         )
-        return {"text": "(redacted thinking omitted)"}
+        return None
     if isinstance(block, Text):
         return {"text": block.text}
     if isinstance(block, Image):
@@ -239,7 +239,9 @@ def messages_to_converse(messages: Sequence[Message]) -> tuple[str, list[dict[st
             raise ValueError(f"unsupported role for Converse messages: {m.role!r}")
         content: list[dict[str, Any]] = []
         for block in m.content:
-            content.append(_converse_block(block, names=doc_names))
+            mapped = _converse_block(block, names=doc_names)
+            if mapped is not None:
+                content.append(mapped)
         if not content:
             continue
         if out and out[-1]["role"] == m.role:
@@ -331,11 +333,10 @@ def _reasoning_delta(delta: dict[str, Any]) -> ThinkingDelta | None:
             kv(provider="bedrock"),
         )
         return None
-    inner = rc.get("reasoningText")
-    if not isinstance(inner, dict):
-        return None
-    text = inner.get("text") or ""
-    signature = inner.get("signature")
+    # ReasoningContentBlockDelta streams flat text/signature members; reasoningText
+    # is only on the non-streaming ReasoningContentBlock (outbound history mapping).
+    text = rc.get("text") or ""
+    signature = rc.get("signature")
     if not text and not signature:
         return None
     return ThinkingDelta(text=str(text) if text else "", signature=signature)
