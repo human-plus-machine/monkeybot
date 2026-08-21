@@ -30,6 +30,7 @@ def test_pricing_for_bedrock_converse_models() -> None:
     assert pricing_for("us.amazon.nova-pro-v1:0") == pricing_for("nova-pro")
     assert pricing_for("us.meta.llama3-3-70b-instruct-v1:0") == pricing_for("llama3-3-70b-instruct")
     assert pricing_for("us.xai.grok-4.6")[0] > 0.0
+    assert pricing_for("jp.anthropic.claude-sonnet-4-6")[0] > 0.0
 
 
 def test_estimate_cost_input_output_only() -> None:

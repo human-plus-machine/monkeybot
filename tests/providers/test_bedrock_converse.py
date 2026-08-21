@@ -33,7 +33,7 @@ from monkeybot.providers._bedrock_converse import (
     messages_to_converse,
     uses_anthropic_bedrock,
 )
-from monkeybot.providers.bedrock import BedrockClaudeProvider, BedrockProvider
+from monkeybot.providers.bedrock import BedrockProvider
 from monkeybot.providers.model_capabilities import supports_param
 from tests.providers.conftest import make_anthropic_stream_mock
 
@@ -181,20 +181,34 @@ def test_assistant_first_history_prepends_user() -> None:
 
 
 def test_document_name_sanitizes_and_deduplicates() -> None:
+    shared_prefix = "a" * 250
     messages = [
         Message(
             role="user",
             content=[
                 File(mime_type="application/pdf", data="QQ==", metadata={"filename": "quarterly_report_v2.pdf"}),
+                File(mime_type="application/pdf", data="QQ==", metadata={"filename": "report v2.pdf"}),
                 File(mime_type="application/pdf", data="QQ=="),
                 File(mime_type="application/pdf", data="QQ=="),
+                File(
+                    mime_type="application/pdf",
+                    data="QQ==",
+                    metadata={"filename": f"{shared_prefix}one.pdf"},
+                ),
+                File(
+                    mime_type="application/pdf",
+                    data="QQ==",
+                    metadata={"filename": f"{shared_prefix}two.pdf"},
+                ),
             ],
         )
     ]
     _, converse_msgs = messages_to_converse(messages)
     names = [block["document"]["name"] for block in converse_msgs[0]["content"]]
     assert names[0] == "quarterlyreportv2"
-    assert len(set(names)) == 3
+    assert names[1] == "report v2"
+    assert len(set(names)) == len(names)
+    assert all(len(name) <= 200 for name in names)
 
 
 def test_empty_tool_result_uses_placeholder() -> None:
@@ -311,7 +325,7 @@ def _text_stream() -> list[dict[str, object]]:
 
 @pytest.mark.asyncio
 async def test_grok_stream_calls_converse_not_anthropic() -> None:
-    provider = BedrockClaudeProvider(temperature=0.2, max_tokens=2048, aws_region="us-east-1")
+    provider = BedrockProvider(temperature=0.2, max_tokens=2048, aws_region="us-east-1")
     runtime = MagicMock()
     runtime.converse_stream.return_value = {"stream": iter(_text_stream())}
     provider._runtime = runtime
@@ -331,7 +345,7 @@ async def test_grok_stream_calls_converse_not_anthropic() -> None:
 
 @pytest.mark.asyncio
 async def test_claude_stream_still_uses_anthropic_mock() -> None:
-    provider = BedrockClaudeProvider(temperature=0.2, max_tokens=8192, aws_region="us-east-1")
+    provider = BedrockProvider(temperature=0.2, max_tokens=8192, aws_region="us-east-1")
     events = [
         SimpleNamespace(
             type="message_start",
@@ -422,9 +436,18 @@ def test_estimate_with_image_does_not_raise() -> None:
     assert n >= 1
 
 
+def test_estimate_attachment_uses_char_count_not_payload() -> None:
+    big = "A" * 1_000_000
+    n = estimate_converse_input_tokens(
+        [Message(role="user", content=[File(mime_type="application/pdf", data=big)])],
+        [],
+    )
+    assert n < 400_000
+
+
 @pytest.mark.asyncio
 async def test_converse_count_skips_count_tokens_api() -> None:
-    provider = BedrockClaudeProvider(aws_region="us-east-1")
+    provider = BedrockProvider(aws_region="us-east-1")
     runtime = MagicMock()
     provider._runtime = runtime
     n = await provider.count_input_tokens([Message.text("user", "hi")], [], model=_GROK)
@@ -434,7 +457,7 @@ async def test_converse_count_skips_count_tokens_api() -> None:
 
 @pytest.mark.asyncio
 async def test_runtime_client_is_cached() -> None:
-    provider = BedrockClaudeProvider(aws_region="us-east-1")
+    provider = BedrockProvider(aws_region="us-east-1")
     runtime = MagicMock()
     builds: list[int] = []
 
@@ -513,7 +536,3 @@ async def test_converse_stream_is_closed() -> None:
     ):
         pass
     assert stream.closed
-
-
-def test_bedrock_provider_alias() -> None:
-    assert BedrockClaudeProvider is BedrockProvider

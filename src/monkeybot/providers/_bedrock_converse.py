@@ -21,7 +21,9 @@ from monkeybot.core.llm.provider import (
     UsageEvent,
 )
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.attachments.text import filename_from_metadata
 from monkeybot.core.types.content_blocks import (
+    ContentBlock,
     File,
     Image,
     RedactedThinking,
@@ -30,7 +32,6 @@ from monkeybot.core.types.content_blocks import (
     ToolRequest,
     ToolResponse,
 )
-from monkeybot.core.attachments.text import filename_from_metadata
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._utils import (
     estimate_anthropic_input_tokens,
@@ -85,8 +86,6 @@ def bedrock_vendor(model: str) -> str:
     parts = name.split(".")
     if len(parts) >= 2 and parts[0].lower() in BEDROCK_GEO_PREFIXES:
         return parts[1].lower()
-    if len(parts) >= 2:
-        return parts[0].lower()
     return parts[0].lower()
 
 
@@ -127,11 +126,14 @@ def _document_format(mime_type: str) -> str:
 
 
 _CONVERSE_DOC_NAME_RE = re.compile(r"[^A-Za-z0-9 \-\(\)\[\]]")
+_MAX_DOC_NAME_LEN = 200
+_DEDUPE_SUFFIX_RESERVE = 10
 
 
 def _sanitize_document_stem(raw: str) -> str:
     stem = raw.rsplit(".", 1)[0] if "." in raw else raw
     cleaned = _CONVERSE_DOC_NAME_RE.sub("", stem).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned or "document"
 
 
@@ -146,14 +148,15 @@ class _DocumentNames:
         att_id = meta.get("attachment_id") or meta.get("attachmentId")
         fallback = att_id.strip() if isinstance(att_id, str) and att_id.strip() else "document"
         raw = filename_from_metadata(block.metadata, fallback=fallback)
-        base = _sanitize_document_stem(raw)
+        base = _sanitize_document_stem(raw)[: _MAX_DOC_NAME_LEN - _DEDUPE_SUFFIX_RESERVE]
         name = base
         suffix = 2
         while name in self._used:
             name = f"{base}-{suffix}"
             suffix += 1
+        name = name[:_MAX_DOC_NAME_LEN]
         self._used.add(name)
-        return name[:200]
+        return name
 
 
 def _document_block(block: File, *, names: _DocumentNames) -> dict[str, Any]:
@@ -196,11 +199,11 @@ def _converse_block(block: Any, *, names: _DocumentNames) -> dict[str, Any]:
             inner["signature"] = block.signature
         return {"reasoningContent": {"reasoningText": inner}}
     if isinstance(block, RedactedThinking):
-        return {
-            "reasoningContent": {
-                "redactedContent": base64.b64decode(block.data),
-            }
-        }
+        _log.warning(
+            "RedactedThinking omitted on Bedrock Converse path %s",
+            kv(provider="bedrock"),
+        )
+        return {"text": "(redacted thinking omitted)"}
     if isinstance(block, Text):
         return {"text": block.text}
     if isinstance(block, Image):
@@ -322,19 +325,17 @@ def _reasoning_delta(delta: dict[str, Any]) -> ThinkingDelta | None:
     rc = delta.get("reasoningContent")
     if not isinstance(rc, dict):
         return None
-    text = rc.get("text") or ""
-    signature = rc.get("signature")
+    if rc.get("redactedContent") is not None:
+        _log.warning(
+            "converse redactedContent delta omitted %s",
+            kv(provider="bedrock"),
+        )
+        return None
     inner = rc.get("reasoningText")
-    if isinstance(inner, dict):
-        text = text or inner.get("text") or ""
-        signature = signature or inner.get("signature")
-    redacted = rc.get("redactedContent")
-    if redacted is not None:
-        if isinstance(redacted, (bytes, bytearray)):
-            encoded = base64.b64encode(bytes(redacted)).decode("ascii")
-        else:
-            encoded = str(redacted)
-        return ThinkingDelta(text="", signature=encoded)
+    if not isinstance(inner, dict):
+        return None
+    text = inner.get("text") or ""
+    signature = inner.get("signature")
     if not text and not signature:
         return None
     return ThinkingDelta(text=str(text) if text else "", signature=signature)
@@ -397,15 +398,13 @@ def _on_content_block_delta(
             yield ToolInputDelta(call_id=buf.call_id, name=buf.name, delta=fragment)
 
 
-def _on_content_block_stop(
-    stop_ev: Any,
-    tools: dict[int, _ToolBuf],
+def _emit_buffered_tool(
+    buf: _ToolBuf,
     *,
     provider: str,
+    truncated: bool,
 ) -> Iterator[ProviderEvent]:
-    idx = int(stop_ev.get("contentBlockIndex") or 0) if isinstance(stop_ev, dict) else 0
-    buf = tools.pop(idx, None)
-    if buf is None:
+    if not buf.call_id and not buf.name and not buf.buf:
         return
     if not buf.call_id:
         _log.warning(
@@ -418,33 +417,31 @@ def _on_content_block_stop(
         tool_name=buf.name,
         provider=provider,
     )
+    if truncated and parse_error is None:
+        parse_error = "truncated"
     yield ToolCall(call_id=buf.call_id, name=buf.name, args=args, parse_error=parse_error)
+
+
+def _on_content_block_stop(
+    stop_ev: Any,
+    tools: dict[int, _ToolBuf],
+    *,
+    provider: str,
+) -> Iterator[ProviderEvent]:
+    idx = int(stop_ev.get("contentBlockIndex") or 0) if isinstance(stop_ev, dict) else 0
+    buf = tools.pop(idx, None)
+    if buf is None:
+        return
+    yield from _emit_buffered_tool(buf, provider=provider, truncated=False)
 
 
 def _flush_buffered_tools(
     tools: dict[int, _ToolBuf],
     *,
     provider: str,
-    truncated: bool,
 ) -> Iterator[ProviderEvent]:
     for idx in sorted(tools):
-        buf = tools[idx]
-        if not buf.call_id and not buf.name and not buf.buf:
-            continue
-        if not buf.call_id:
-            _log.warning(
-                "converse toolUse missing toolUseId %s",
-                kv(provider=provider, name=buf.name),
-            )
-        args, parse_error = safe_parse_tool_args(
-            buf.buf,
-            call_id=buf.call_id,
-            tool_name=buf.name,
-            provider=provider,
-        )
-        if truncated and parse_error is None:
-            parse_error = "truncated"
-        yield ToolCall(call_id=buf.call_id, name=buf.name, args=args, parse_error=parse_error)
+        yield from _emit_buffered_tool(tools[idx], provider=provider, truncated=True)
     tools.clear()
 
 
@@ -513,7 +510,7 @@ async def _iter_converse_events(
             "converse stream ended with buffered toolUse %s",
             kv(provider=provider, n_tools=len(tools)),
         )
-        for item in _flush_buffered_tools(tools, provider=provider, truncated=True):
+        for item in _flush_buffered_tools(tools, provider=provider):
             yield item
     yield UsageEvent(
         input_tokens=input_tokens,
@@ -566,6 +563,29 @@ async def iter_converse_stream(
         yield event
 
 
+def _estimate_block(block: ContentBlock) -> dict[str, Any]:
+    if isinstance(block, Text):
+        return {"text": block.text}
+    if isinstance(block, Thinking):
+        return {"thinking": block.thinking}
+    if isinstance(block, RedactedThinking):
+        return {"redactedThinking": {"chars": len(block.data)}}
+    if isinstance(block, Image):
+        return {"image": block.mime_type, "chars": len(block.data)}
+    if isinstance(block, File):
+        return {"file": block.mime_type, "chars": len(block.data)}
+    if isinstance(block, ToolRequest):
+        return {"toolRequest": {"id": block.id, "name": block.name, "args": dict(block.args)}}
+    if isinstance(block, ToolResponse):
+        return {
+            "toolResponse": {
+                "id": block.id,
+                "result": [_estimate_block(b) for b in block.result],
+            }
+        }
+    return {"type": type(block).__name__}
+
+
 def estimate_converse_input_tokens(
     messages: Sequence[Message],
     tools: Sequence[ToolDef],
@@ -573,7 +593,7 @@ def estimate_converse_input_tokens(
     """Character estimate from harness messages. CountTokens is Anthropic-only."""
     system, rest = split_leading_system(messages)
     serializable = [
-        {"role": m.role, "content": [b.to_dict() for b in m.content]} for m in rest
+        {"role": m.role, "content": [_estimate_block(b) for b in m.content]} for m in rest
     ]
     tool_defs = [t.to_model_schema() for t in tools] if tools else None
     return estimate_anthropic_input_tokens(

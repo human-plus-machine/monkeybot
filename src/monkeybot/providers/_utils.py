@@ -143,6 +143,7 @@ async def iter_stream_with_param_retry(
     retry_message: str,
 ) -> AsyncIterator[ProviderEvent]:
     """Run ``stream_once``; if it fails before any event, strip a blamed param and retry."""
+    last_exc: Exception | None = None
     for _attempt in range(max_attempts):
         started = False
         try:
@@ -151,6 +152,7 @@ async def iter_stream_with_param_retry(
                 yield event
             return
         except Exception as exc:
+            last_exc = exc
             if not started:
                 dropped = strip_rejected(kwargs, exc)
                 if dropped:
@@ -172,7 +174,7 @@ async def iter_stream_with_param_retry(
             raise
     raise RuntimeError(
         f"{provider} stream exhausted {max_attempts} attempts without emitting events"
-    )
+    ) from last_exc
 
 
 async def iter_anthropic_sdk_stream(

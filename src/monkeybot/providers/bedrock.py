@@ -199,4 +199,4 @@ class BedrockProvider:
             yield event
 
 
-BedrockClaudeProvider = BedrockProvider
+__all__ = ["BedrockProvider"]
