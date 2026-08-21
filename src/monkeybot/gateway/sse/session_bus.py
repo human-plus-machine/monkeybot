@@ -127,7 +127,7 @@ class SessionBus:
         """
         self.cancel_requested_for = request_id
         event = self.turn_cancel_event
-        if event is not None:
+        if event is not None and request_id == self.current_request_id:
             event.set()
 
     def cancel_follow_up_retry(self) -> None:

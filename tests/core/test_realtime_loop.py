@@ -493,6 +493,7 @@ class TestRunRealtimeTurn:
             if m.role == "user" and any(isinstance(b, ToolResponse) for b in m.content)
         ]
         assert tool_msgs, "confirm-cancel must settle tool responses into history"
+        assert not cancel.is_set(), "settle path must clear sticky interrupt flag"
 
     async def test_tool_confirm_task_cancel_propagates(self) -> None:
         import asyncio
@@ -658,6 +659,10 @@ class TestRunRealtimeTurn:
         task = asyncio.create_task(_consume())
         await bus.confirm_event.wait()
         await asyncio.sleep(0.05)
+        # Earlier barge-in leaves cancelled set for the whole websocket session.
+        cancel.set()
+        # _close_session clears the sticky flag before abandoning pending keys.
+        cancel.clear()
         bus.abandon_pending_cancel_all()
         try:
             await task

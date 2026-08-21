@@ -26,6 +26,7 @@ from typing import Any
 
 from monkeybot.core.path_safety import (
     is_legacy_path_component_safe,
+    path_contained_under,
     sanitize_path_component,
 )
 from monkeybot.core.runtime.events import AgentEvent, event_to_json, is_durable_event
@@ -82,7 +83,11 @@ def _find_existing_session_dir(transcripts_root: Path, session_id: str) -> Path 
         key=lambda p: p.name,
         reverse=True,
     )
-    return matches[0] if matches else None
+    root = transcripts_root.resolve()
+    for match in matches:
+        if path_contained_under(root, match) is not None:
+            return match
+    return None
 
 
 def resolve_session_artifact_dir(

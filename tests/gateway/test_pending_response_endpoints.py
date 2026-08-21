@@ -241,6 +241,7 @@ async def test_cancel_post_sets_turn_cancel_event_before_abandoning(
     assert bus is not None
     cancel_event = asyncio.Event()
     bus.turn_cancel_event = cancel_event
+    bus.current_request_id = "rid"
     fut = bus.register_pending("hitl")
     r = await client.post(
         f"/sessions/{sid}/cancel",
@@ -250,6 +251,27 @@ async def test_cancel_post_sets_turn_cancel_event_before_abandoning(
     assert cancel_event.is_set()
     assert fut.cancelled() or fut.done()
     assert bus.cancel_requested_for == "rid"
+
+
+@pytest.mark.asyncio
+async def test_cancel_post_ignores_stale_request_id(
+    client: AsyncClient,
+    registry: SessionRegistry,
+) -> None:
+    cr = await client.post("/sessions", json={})
+    sid = cr.json()["session_id"]
+    bus = registry.get(sid)
+    assert bus is not None
+    cancel_event = asyncio.Event()
+    bus.turn_cancel_event = cancel_event
+    bus.current_request_id = "rid-current"
+    r = await client.post(
+        f"/sessions/{sid}/cancel",
+        json={"request_id": "rid-stale"},
+    )
+    assert r.status_code == 200
+    assert bus.cancel_requested_for == "rid-stale"
+    assert not cancel_event.is_set()
 
 
 @pytest.mark.asyncio

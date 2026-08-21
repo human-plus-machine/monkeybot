@@ -683,6 +683,8 @@ async def _close_session(
     manager: RealtimeSessionManager,
     reason: str = "session_end",
 ) -> None:
+    # Clear a sticky interrupt flag so teardown does not look like user Stop.
+    state.cancelled.clear()
     state.abandon_pending_cancel_all()
     state.close()
     try:

@@ -22,29 +22,44 @@ def sanitize_path_component(name: str) -> str:
     return sanitized
 
 
+def path_contained_under(root: Path, candidate: Path) -> Path | None:
+    """Return ``candidate`` when it resolves under ``root``; otherwise ``None``."""
+    try:
+        candidate.resolve().relative_to(root.resolve())
+    except ValueError:
+        return None
+    return candidate
+
+
 def is_legacy_path_component_safe(name: str) -> bool:
     """True when ``name`` is safe as a literal pre-sanitization directory name.
 
     Allows glob metacharacters (those ids used to land on disk as-is) but rejects
     separators, ``..`` runs, and reserved single-component names.
     """
-    if name in _RESERVED_PATH_COMPONENTS:
-        return False
     without_globs = name.translate(str.maketrans("", "", GLOB_METACHARACTERS))
+    if without_globs in _RESERVED_PATH_COMPONENTS:
+        return False
     return not _INVALID_PATH_COMPONENT_RE.search(without_globs)
 
 
 def resolve_legacy_or_sanitized_dir(parent: Path, name: str) -> Path:
     """Prefer the sanitized child dir; reuse a safe legacy folder when it exists."""
+    root = parent.resolve()
     safe = sanitize_path_component(name)
-    sanitized = parent / safe
-    if safe == name:
-        return sanitized
-    if is_legacy_path_component_safe(name):
-        legacy = parent / name
+    sanitized = root / safe
+    if safe != name and is_legacy_path_component_safe(name):
+        legacy = root / name
         if legacy.exists() and not sanitized.exists():
-            return legacy
-    return sanitized
+            contained = path_contained_under(root, legacy)
+            if contained is not None:
+                return contained
+    contained = path_contained_under(root, sanitized)
+    if contained is not None:
+        return contained
+    fallback = root / "_"
+    contained_fallback = path_contained_under(root, fallback)
+    return contained_fallback if contained_fallback is not None else sanitized
 
 
 def validate_session_id_component(value: str) -> str:
@@ -60,6 +75,7 @@ __all__ = [
     "GLOB_METACHARACTERS",
     "SESSION_ID_RE",
     "is_legacy_path_component_safe",
+    "path_contained_under",
     "resolve_legacy_or_sanitized_dir",
     "sanitize_path_component",
     "validate_session_id_component",

@@ -229,3 +229,19 @@ async def test_registry_remove_async_awaits_active_turn_before_analysis(
     report = json.loads((Path(result.transcript_report_dir) / "report.json").read_text())
     # Analysis ran after the late TurnComplete, so the turn is closed cleanly.
     assert report["scorecard"]["turn_count"] >= 1
+
+
+def test_request_cancel_ignores_stale_request_id() -> None:
+    import asyncio
+
+    from monkeybot.gateway.sse.session_bus import SessionBus
+
+    bus = SessionBus(created_at_ms=0, agent_md=None)
+    cancel = asyncio.Event()
+    bus.turn_cancel_event = cancel
+    bus.current_request_id = "rid-current"
+    bus.request_cancel("rid-stale")
+    assert bus.cancel_requested_for == "rid-stale"
+    assert not cancel.is_set()
+    bus.request_cancel("rid-current")
+    assert cancel.is_set()

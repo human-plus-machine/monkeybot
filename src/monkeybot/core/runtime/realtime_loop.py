@@ -320,6 +320,8 @@ async def _resolve_realtime_inspector_decision(
                 )
                 yield event
                 outcome.settled_responses.append(response)
+            if ctx.cancelled is not None:
+                ctx.cancelled.clear()
             return
         if payload.get("_timeout"):
             outcome.allowed = False
