@@ -177,6 +177,8 @@ async def test_stop_subagent_process_kills_group_after_leader_exits(
         signals.append(("killpg", pgid, int(sig)))
 
     monkeypatch.setattr(subprocess_groups, "SUPPORTS_PROCESS_GROUPS", True)
+    monkeypatch.setattr(subprocess_groups, "iter_process_tree", lambda root: [root])
+    monkeypatch.setattr(subprocess_groups.os, "getpgid", lambda pid: pid)
     monkeypatch.setattr(subprocess_groups.os, "killpg", _fake_killpg)
     monkeypatch.setattr(subprocess_groups.asyncio, "sleep", AsyncMock())
 
@@ -215,6 +217,8 @@ async def test_stop_subagent_process_kills_process_group(
         raise TimeoutError()
 
     monkeypatch.setattr(subprocess_groups, "SUPPORTS_PROCESS_GROUPS", True)
+    monkeypatch.setattr(subprocess_groups, "iter_process_tree", lambda root: [root])
+    monkeypatch.setattr(subprocess_groups.os, "getpgid", lambda pid: pid)
     monkeypatch.setattr(subprocess_groups.os, "killpg", _fake_killpg)
     monkeypatch.setattr(subprocess_groups.asyncio, "wait_for", _fake_wait_for)
 
@@ -222,6 +226,63 @@ async def test_stop_subagent_process_kills_process_group(
     await stop_subagent_process(proc, pgid=111)  # type: ignore[arg-type]
     assert ("killpg", 111, int(signal.SIGTERM)) in signals
     assert ("killpg", 111, int(signal.SIGKILL)) in signals
+
+
+def test_process_group_id_returns_none_when_pid_gone(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _boom(_pid: int) -> int:
+        raise ProcessLookupError()
+
+    monkeypatch.setattr(subprocess_groups, "SUPPORTS_PROCESS_GROUPS", True)
+    monkeypatch.setattr(subprocess_groups.os, "getpgid", _boom)
+    assert subprocess_groups.process_group_id(4242) is None
+
+
+@pytest.mark.asyncio
+async def test_stop_subagent_process_kills_nested_terminal_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nested run_command sessions (own pg) must die when the subagent is stopped."""
+    signals: list[tuple[int, int]] = []
+
+    class _FakeProc:
+        pid = 100
+        returncode = None
+
+        def terminate(self) -> None:
+            raise AssertionError("should signal the process tree")
+
+        def kill(self) -> None:
+            raise AssertionError("should signal the process tree")
+
+        async def wait(self) -> int:
+            self.returncode = -9
+            return -9
+
+    def _fake_killpg(pgid: int, sig: int) -> None:
+        signals.append((pgid, int(sig)))
+
+    def _fake_getpgid(pid: int) -> int:
+        return {100: 100, 200: 200, 300: 300}[pid]
+
+    async def _fake_wait_for(awaitable, timeout=None):  # noqa: ANN001, ARG001
+        if asyncio.iscoroutine(awaitable):
+            awaitable.close()
+        raise TimeoutError()
+
+    monkeypatch.setattr(subprocess_groups, "SUPPORTS_PROCESS_GROUPS", True)
+    monkeypatch.setattr(subprocess_groups, "iter_process_tree", lambda root: [100, 200, 300])
+    monkeypatch.setattr(subprocess_groups.os, "killpg", _fake_killpg)
+    monkeypatch.setattr(subprocess_groups.os, "getpgid", _fake_getpgid)
+    monkeypatch.setattr(subprocess_groups.asyncio, "wait_for", _fake_wait_for)
+
+    proc = _FakeProc()
+    await stop_subagent_process(proc, pgid=100)  # type: ignore[arg-type]
+    assert signals.count((300, int(signal.SIGTERM))) == 1
+    assert signals.count((200, int(signal.SIGTERM))) == 1
+    assert signals.count((100, int(signal.SIGTERM))) == 1
+    assert signals.count((300, int(signal.SIGKILL))) == 1
+    assert signals.count((200, int(signal.SIGKILL))) == 1
+    assert signals.count((100, int(signal.SIGKILL))) == 1
 
 
 @pytest.mark.asyncio

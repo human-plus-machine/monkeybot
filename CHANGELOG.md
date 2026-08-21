@@ -13,6 +13,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Subagent timeout/cancel now walks and kills the full process tree (including nested `run_command` sessions that use their own `start_new_session` process groups), not only the subagent leader's session. `process_group_id` returns `None` when the PID is gone instead of treating a recycled PID as a process group.
 - Stop during a tool confirmation sets the turn cancel Event in `POST /cancel` (and on realtime interrupt) before pending futures are cancelled, so completed tool results settle into history instead of racing a 50ms poller. Session DELETE and websocket teardown leave the Event unset and propagate cancellation. Spill writes refuse an uncontained `_` symlink fallback; transcript and attachment dirs reuse a safe pre-sanitization folder when it still exists on disk. Attachment reads also reject symlinked attachment ids that resolve outside the workspace.
 
 ## [core v3.0.2] - 2026-08-18
