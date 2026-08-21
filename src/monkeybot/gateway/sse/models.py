@@ -4,7 +4,9 @@ Pydantic models and API errors for the v2 SSE gateway.
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from monkeybot.core.path_safety import validate_session_id_component
 
 
 class ErrorBody(BaseModel):
@@ -50,6 +52,13 @@ class CreateSessionRequest(BaseModel):
         max_length=200,
         description="Model id for the chosen provider. None → server env default.",
     )
+
+    @field_validator("session_id")
+    @classmethod
+    def _reject_unsafe_session_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return validate_session_id_component(value)
 
 
 class CreateSessionResponse(BaseModel):

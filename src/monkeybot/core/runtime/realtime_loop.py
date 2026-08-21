@@ -9,6 +9,7 @@ is managed by the gateway.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import uuid
@@ -30,6 +31,7 @@ from monkeybot.core.memory.ingest import persist_message
 from monkeybot.core.llm.provider import Message, ToolCall
 from monkeybot.core.llm.realtime_provider import RealtimeToolCall
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.messages.tool_integrity import cancelled_tool_result_text
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.runtime.events import (
@@ -64,6 +66,7 @@ from .tool_batch import (
     _note_registry_mutation,
     _rejected_tool_batch_error,
     _should_reject_tool_batch,
+    confirm_wait_stopped_by_user,
 )
 
 logger = logging.getLogger("monkeybot.core.runtime.realtime_loop")
@@ -223,6 +226,155 @@ def _tool_outcome(
         is_error=is_error,
     )
     return event, response
+
+
+@dataclasses.dataclass
+class _RealtimeInspectorGate:
+    """Outcome of realtime inspector / HITL gating for one tool call."""
+
+    allowed: bool = True
+    denial_message: str | None = None
+    aborted: bool = False
+    settled_responses: list[ToolResponse] = dataclasses.field(default_factory=list)
+
+
+async def _resolve_realtime_inspector_decision(
+    *,
+    call: ToolCall,
+    call_index: int,
+    pending_calls: Sequence[ToolCall],
+    ctx: TurnContext,
+    inspectors: Sequence[Any] | None,
+    pending_bus: PendingResponseBusPort | None,
+    outcome: _RealtimeInspectorGate,
+) -> AsyncIterator[AgentEvent]:
+    """Run inspectors for one call; may yield ``ToolConfirmationRequestEvent``.
+
+    On confirm cancel, yields cancel envelopes for this call and any remaining
+    tools, sets ``outcome.aborted``, and returns. Otherwise fills ``outcome``
+    with the allow/deny decision.
+    """
+    inspector_call = InspectorToolCall(
+        call_id=call.call_id, name=call.name, args=dict(call.args)
+    )
+    for insp in inspectors or []:
+        decision = await insp.check(inspector_call, ctx)
+        if decision.kind == "deny":
+            outcome.allowed = False
+            outcome.denial_message = decision.message
+            return
+        if decision.kind != "confirm":
+            continue
+        if pending_bus is None:
+            outcome.allowed = False
+            outcome.denial_message = (
+                decision.message
+                or "Confirmation required but realtime HITL is unavailable"
+            )
+            logger.warning(
+                "realtime HITL unavailable %s",
+                kv(
+                    request_id=ctx.request_id,
+                    thread_id=ctx.thread_id,
+                    call_id=call.call_id,
+                    tool=call.name,
+                ),
+            )
+            return
+        fut = pending_bus.register_pending(call.call_id)
+        yield ToolConfirmationRequestEvent(
+            request_id=ctx.request_id,
+            tool_call_id=call.call_id,
+            tool_name=call.name,
+            arguments=dict(call.args),
+            prompt=decision.message,
+        )
+        try:
+            payload = await _await_user_response_any(
+                pending_bus, fut, call.call_id, timeout_sec=None
+            )
+        except asyncio.CancelledError:
+            if not confirm_wait_stopped_by_user(
+                pending_bus, call.call_id, cancelled=ctx.cancelled
+            ):
+                raise
+            yield Error(request_id=ctx.request_id, error="Request cancelled")
+            remaining = pending_calls[call_index:]
+            logger.info(
+                "realtime HITL cancelled %s",
+                kv(
+                    request_id=ctx.request_id,
+                    thread_id=ctx.thread_id,
+                    call_id=call.call_id,
+                    approved=False,
+                    reason="cancelled",
+                    cancelled_count=len(remaining),
+                ),
+            )
+            outcome.aborted = True
+            for pending in remaining:
+                event, response = _tool_outcome(
+                    pending,
+                    ctx.request_id,
+                    ToolExecutionResult.err(cancelled_tool_result_text(pending.name)),
+                )
+                yield event
+                outcome.settled_responses.append(response)
+            if ctx.cancelled is not None:
+                ctx.cancelled.clear()
+            return
+        if payload.get("_timeout"):
+            outcome.allowed = False
+            outcome.denial_message = "user did not respond in time"
+            logger.info(
+                "realtime HITL timeout %s",
+                kv(
+                    request_id=ctx.request_id,
+                    thread_id=ctx.thread_id,
+                    call_id=call.call_id,
+                    approved=False,
+                    reason="timeout",
+                ),
+            )
+            return
+        if payload.get("approved"):
+            outcome.allowed = True
+            if payload.get("always"):
+                remember_always_approval(
+                    pending_bus,
+                    call.name,
+                    resource_for_call(inspector_call),
+                    persist=ctx.approvals_persist,
+                )
+                logger.debug(
+                    "realtime HITL always %s",
+                    kv(
+                        request_id=ctx.request_id,
+                        thread_id=ctx.thread_id,
+                        call_id=call.call_id,
+                        tool=call.name,
+                        decision="confirm_always",
+                    ),
+                )
+            return
+        outcome.allowed = False
+        reason_raw = payload.get("reason")
+        outcome.denial_message = (
+            (reason_raw if isinstance(reason_raw, str) else None)
+            or decision.message
+            or "denied by user"
+        )
+        logger.info(
+            "realtime HITL denied %s",
+            kv(
+                request_id=ctx.request_id,
+                thread_id=ctx.thread_id,
+                call_id=call.call_id,
+                approved=False,
+                reason=outcome.denial_message,
+            ),
+        )
+        return
 
 
 async def _execute_tool(
@@ -419,7 +571,7 @@ async def run_realtime_turn(
                     n_calls=len(pending_calls),
                 ),
             )
-        for call in pending_calls:
+        for call_index, call in enumerate(pending_calls):
             if reject_batch:
                 err = _rejected_tool_batch_error(call, truncated=False)
                 yield ToolCallStarted(
@@ -454,107 +606,27 @@ async def run_realtime_turn(
                 tool_results.append(response)
                 continue
 
-            # Inspectors (tool confirmation / deny) are applied if provided.
-            allowed = True
-            denial_message: str | None = None
-            inspector_call = InspectorToolCall(
-                call_id=call.call_id, name=call.name, args=dict(call.args)
-            )
-            for insp in inspectors or []:
-                decision = await insp.check(inspector_call, ctx)
-                if decision.kind == "deny":
-                    allowed = False
-                    denial_message = decision.message
-                    break
-                if decision.kind == "confirm":
-                    if pending_bus is None:
-                        allowed = False
-                        denial_message = (
-                            decision.message
-                            or "Confirmation required but realtime HITL is unavailable"
-                        )
-                        logger.warning(
-                            "realtime HITL unavailable %s",
-                            kv(
-                                request_id=ctx.request_id,
-                                thread_id=ctx.thread_id,
-                                call_id=call.call_id,
-                                tool=call.name,
-                            ),
-                        )
-                        break
-                    fut = pending_bus.register_pending(call.call_id)
-                    yield ToolConfirmationRequestEvent(
-                        request_id=ctx.request_id,
-                        tool_call_id=call.call_id,
-                        tool_name=call.name,
-                        arguments=dict(call.args),
-                        prompt=decision.message,
-                    )
-                    try:
-                        payload = await _await_user_response_any(
-                            pending_bus, fut, call.call_id, timeout_sec=None
-                        )
-                    except asyncio.CancelledError:
-                        # Do not swallow cancellation into a normal deny path —
-                        # re-raise so the outer handler tears down the turn and
-                        # the generator stops (client disconnect / abort).
-                        raise
-                    if payload.get("_timeout"):
-                        allowed = False
-                        denial_message = "user did not respond in time"
-                        logger.info(
-                            "realtime HITL timeout %s",
-                            kv(
-                                request_id=ctx.request_id,
-                                thread_id=ctx.thread_id,
-                                call_id=call.call_id,
-                                approved=False,
-                                reason="timeout",
-                            ),
-                        )
-                        break
-                    if payload.get("approved"):
-                        allowed = True
-                        if payload.get("always"):
-                            remember_always_approval(
-                                pending_bus,
-                                call.name,
-                                resource_for_call(inspector_call),
-                                persist=ctx.approvals_persist,
-                            )
-                            logger.debug(
-                                "realtime HITL always %s",
-                                kv(
-                                    request_id=ctx.request_id,
-                                    thread_id=ctx.thread_id,
-                                    call_id=call.call_id,
-                                    tool=call.name,
-                                    decision="confirm_always",
-                                ),
-                            )
-                    else:
-                        allowed = False
-                        reason_raw = payload.get("reason")
-                        denial_message = (
-                            (reason_raw if isinstance(reason_raw, str) else None)
-                            or decision.message
-                            or "denied by user"
-                        )
-                        logger.info(
-                            "realtime HITL denied %s",
-                            kv(
-                                request_id=ctx.request_id,
-                                thread_id=ctx.thread_id,
-                                call_id=call.call_id,
-                                approved=False,
-                                reason=denial_message,
-                            ),
-                        )
-                    break
+            inspector_gate = _RealtimeInspectorGate()
+            async for evt in _resolve_realtime_inspector_decision(
+                call=call,
+                call_index=call_index,
+                pending_calls=pending_calls,
+                ctx=ctx,
+                inspectors=inspectors,
+                pending_bus=pending_bus,
+                outcome=inspector_gate,
+            ):
+                yield evt
+            if inspector_gate.aborted:
+                # Cancel envelopes still flow through tool_results_out so Gemini Live
+                # receives answers for unanswered tool calls after Stop.
+                tool_results.extend(inspector_gate.settled_responses)
+                break
 
-            if not allowed:
-                result = ToolExecutionResult.err(denial_message or "tool call denied")
+            if not inspector_gate.allowed:
+                result = ToolExecutionResult.err(
+                    inspector_gate.denial_message or "tool call denied"
+                )
                 inject_text = None
             else:
                 yield ToolCallStarted(

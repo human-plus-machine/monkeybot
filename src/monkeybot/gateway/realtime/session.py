@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -23,6 +24,7 @@ from monkeybot.core.llm.realtime_provider import (
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.runtime.utterance_buffer import UtteranceBuffer
+from monkeybot.gateway.pending_response_bus import TERMINATED_PENDING_KEYS_MAXLEN
 from monkeybot.todo_list.store import TodoListStore
 
 from .metrics import RealtimeMetrics
@@ -58,9 +60,13 @@ class RealtimeConnectionState:
     idle_delivery_queue: asyncio.Queue[Any] = field(default_factory=asyncio.Queue)
     metrics: RealtimeMetrics = field(init=False)
     pending_responses: dict[str, asyncio.Future[Any]] = field(default_factory=dict)
+    terminated_pending_keys: deque[str] = field(
+        default_factory=lambda: deque(maxlen=TERMINATED_PENDING_KEYS_MAXLEN)
+    )
     transcript_writer: TranscriptWriter | None = None
     todo_store: TodoListStore | None = None
     """Process-local session todo list (not shared across gateway replicas)."""
+    cancelled: asyncio.Event = field(default_factory=asyncio.Event)
     _closed: bool = False
 
     def __post_init__(self) -> None:
@@ -81,33 +87,35 @@ class RealtimeConnectionState:
         if fut is None or fut.done():
             return False
         fut.set_result(payload)
+        self.terminated_pending_keys.append(key)
         return True
 
     def abandon_pending_timeout(self, key: str) -> None:
         fut = self.pending_responses.pop(key, None)
         if fut is not None and not fut.done():
             fut.set_result({"_timeout": True})
+        if fut is not None:
+            self.terminated_pending_keys.append(key)
 
     def abandon_pending_cancel_all(self) -> None:
         for key in list(self.pending_responses):
             fut = self.pending_responses.pop(key, None)
             if fut is not None and not fut.done():
                 fut.cancel()
+            self.terminated_pending_keys.append(key)
 
-    def is_pending_or_terminal(
-        self, key: str
-    ) -> Literal["pending", "terminated", "unknown"]:
+    def is_pending_or_terminal(self, key: str) -> Literal["pending", "terminated", "unknown"]:
         if key in self.pending_responses:
             return "pending"
+        if key in self.terminated_pending_keys:
+            return "terminated"
         return "unknown"
 
     def transition(self, new_state: RealtimeSessionState) -> None:
         """Validate and apply a state transition."""
         valid = (self.state, new_state) in _VALID_TRANSITIONS
         if not valid:
-            raise SessionStateError(
-                f"Invalid realtime transition {self.state} -> {new_state}"
-            )
+            raise SessionStateError(f"Invalid realtime transition {self.state} -> {new_state}")
         old = self.state
         self.state = new_state
         logger.debug(

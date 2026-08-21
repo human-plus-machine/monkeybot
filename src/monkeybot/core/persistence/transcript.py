@@ -24,7 +24,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-from monkeybot.core.path_safety import sanitize_path_component
+from monkeybot.core.path_safety import (
+    is_legacy_path_component_safe,
+    path_contained_under,
+    sanitize_path_component,
+)
 from monkeybot.core.runtime.events import AgentEvent, event_to_json, is_durable_event
 
 logger = logging.getLogger(__name__)
@@ -62,17 +66,28 @@ def _utc_compact_from_iso(started_at: str) -> str:
     return f"{date_part.replace('-', '')}T{hhmmss.replace(':', '')}Z"
 
 
-def _find_existing_session_dir(transcripts_root: Path, safe_id: str) -> Path | None:
-    """Reuse an existing ``*_{safe_id}`` session folder when present."""
+def _find_existing_session_dir(transcripts_root: Path, session_id: str) -> Path | None:
+    """Reuse an existing ``*_{session_id}`` session folder when present."""
     if not transcripts_root.is_dir():
         return None
-    suffix = f"_{safe_id}"
+    safe_id = sanitize_path_component(session_id)
+    suffixes = [f"_{safe_id}"]
+    if safe_id != session_id and is_legacy_path_component_safe(session_id):
+        suffixes.append(f"_{session_id}")
     matches = sorted(
-        (p for p in transcripts_root.iterdir() if p.is_dir() and p.name.endswith(suffix)),
+        (
+            p
+            for p in transcripts_root.iterdir()
+            if p.is_dir() and any(p.name.endswith(sfx) for sfx in suffixes)
+        ),
         key=lambda p: p.name,
         reverse=True,
     )
-    return matches[0] if matches else None
+    root = transcripts_root.resolve()
+    for match in matches:
+        if path_contained_under(root, match) is not None:
+            return match
+    return None
 
 
 def resolve_session_artifact_dir(
@@ -89,7 +104,7 @@ def resolve_session_artifact_dir(
     """
     safe_id = sanitize_path_component(session_id)
     transcripts_root = workspace_root.resolve() / _TRANSCRIPT_REL_DIR
-    existing = _find_existing_session_dir(transcripts_root, safe_id)
+    existing = _find_existing_session_dir(transcripts_root, session_id)
     if existing is not None:
         return existing
     folder = f"{_utc_compact_from_iso(started_at or now_iso())}_{safe_id}"

@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from monkeybot.core.path_safety import sanitize_path_component
 from monkeybot.core.attachments.config import (
     ALLOWED_MIME_TYPES,
     IMAGE_MIME_TYPES,
@@ -18,6 +17,11 @@ from monkeybot.core.attachments.config import (
     max_attachments_per_session,
     max_image_bytes,
     max_pdf_bytes,
+)
+from monkeybot.core.path_safety import (
+    path_contained_under,
+    resolve_legacy_or_sanitized_dir,
+    sanitize_path_component,
 )
 
 
@@ -93,13 +97,17 @@ class FilesystemAttachmentStore:
         self._root = workspace_root.resolve()
 
     def _session_dir(self, session_id: str) -> Path:
-        return self._root / ".monkeybot" / "attachments" / sanitize_path_component(session_id)
+        return resolve_legacy_or_sanitized_dir(
+            self._root / ".monkeybot" / "attachments", session_id
+        )
 
-    def _path_for(self, session_id: str, attachment_id: str) -> Path:
-        return self._session_dir(session_id) / sanitize_path_component(attachment_id)
+    def _path_for(self, session_id: str, attachment_id: str) -> Path | None:
+        candidate = self._session_dir(session_id) / sanitize_path_component(attachment_id)
+        return path_contained_under(self._root, candidate)
 
     def exists(self, session_id: str, attachment_id: str) -> bool:
-        return self._path_for(session_id, attachment_id).is_file()
+        path = self._path_for(session_id, attachment_id)
+        return path is not None and path.is_file()
 
     def count_session(self, session_id: str) -> int:
         d = self._session_dir(session_id)
@@ -130,6 +138,8 @@ class FilesystemAttachmentStore:
 
         attachment_id = new_attachment_id()
         path = self._path_for(session_id, attachment_id)
+        if path is None:
+            raise AttachmentStoreError("attachment path is not contained in workspace")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
         created_at_ms = int(time.time() * 1000)
@@ -156,7 +166,7 @@ class FilesystemAttachmentStore:
 
     def read(self, session_id: str, attachment_id: str) -> tuple[bytes, str, str]:
         path = self._path_for(session_id, attachment_id)
-        if not path.is_file():
+        if path is None or not path.is_file():
             raise FileNotFoundError(f"attachment not found: {attachment_id}")
         self._check_ttl(path)
         meta = self._read_meta(path)

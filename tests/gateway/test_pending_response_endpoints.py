@@ -230,6 +230,51 @@ async def test_cancel_post_cancels_all_pending_futures(
 
 
 @pytest.mark.asyncio
+async def test_cancel_post_sets_turn_cancel_event_before_abandoning(
+    client: AsyncClient,
+    registry: SessionRegistry,
+) -> None:
+    """POST /cancel must set the bound Event in the same sync block as future cancel."""
+    cr = await client.post("/sessions", json={})
+    sid = cr.json()["session_id"]
+    bus = registry.get(sid)
+    assert bus is not None
+    cancel_event = asyncio.Event()
+    bus.turn_cancel_event = cancel_event
+    bus.current_request_id = "rid"
+    fut = bus.register_pending("hitl")
+    r = await client.post(
+        f"/sessions/{sid}/cancel",
+        json={"request_id": "rid"},
+    )
+    assert r.status_code == 200
+    assert cancel_event.is_set()
+    assert fut.cancelled() or fut.done()
+    assert bus.cancel_requested_for == "rid"
+
+
+@pytest.mark.asyncio
+async def test_cancel_post_ignores_stale_request_id(
+    client: AsyncClient,
+    registry: SessionRegistry,
+) -> None:
+    cr = await client.post("/sessions", json={})
+    sid = cr.json()["session_id"]
+    bus = registry.get(sid)
+    assert bus is not None
+    cancel_event = asyncio.Event()
+    bus.turn_cancel_event = cancel_event
+    bus.current_request_id = "rid-current"
+    r = await client.post(
+        f"/sessions/{sid}/cancel",
+        json={"request_id": "rid-stale"},
+    )
+    assert r.status_code == 200
+    assert bus.cancel_requested_for == "rid-stale"
+    assert not cancel_event.is_set()
+
+
+@pytest.mark.asyncio
 async def test_await_user_response_timeout_sentinel(registry: SessionRegistry) -> None:
     reg = registry
     created = reg.create("only", agent_md=None, created_at_ms=0)

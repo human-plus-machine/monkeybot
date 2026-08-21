@@ -139,6 +139,7 @@ async def _build_realtime_context(
     deps: RealtimeDependencies,
     *,
     todo_store: TodoListStore | None = None,
+    cancelled: asyncio.Event | None = None,
 ) -> TurnContext:
     if deps.mcp is None:
         raise RuntimeError("MCP client is not initialized")
@@ -164,6 +165,7 @@ async def _build_realtime_context(
         loops_advertised=loops_advertised,
         todo_store=todo_store,
         approvals_persist=deps.computer_approvals_persist,
+        cancelled=cancelled,
     )
 
 
@@ -581,6 +583,11 @@ async def _handle_client_frames(
             if state.is_idle():
                 await _flush_idle_deliveries(state)
         elif isinstance(frame, ClientInterruptFrame):
+            # Set the turn Event before abandoning HITL futures so Stop-during-confirm
+            # settles instead of looking like websocket teardown.
+            state.cancelled.set()
+            if state.pending_responses:
+                state.abandon_pending_cancel_all()
             state.handle_user_interrupt()
             await state.realtime_session.interrupt()
             await _send_frame(ws, ServerInterruptedFrame())
@@ -676,6 +683,8 @@ async def _close_session(
     manager: RealtimeSessionManager,
     reason: str = "session_end",
 ) -> None:
+    # Clear a sticky interrupt flag so teardown does not look like user Stop.
+    state.cancelled.clear()
     state.abandon_pending_cancel_all()
     state.close()
     try:
@@ -775,7 +784,14 @@ def create_realtime_router(
             history = storage.history()
             workspace_root, _skills_path = _resolved_workspace_paths()
             todo_store = await _maybe_todo_store(manager, session_id, workspace_root)
-            ctx = await _build_realtime_context(session_id, request_id, deps, todo_store=todo_store)
+            cancelled = asyncio.Event()
+            ctx = await _build_realtime_context(
+                session_id,
+                request_id,
+                deps,
+                todo_store=todo_store,
+                cancelled=cancelled,
+            )
             session_config = _make_realtime_session_config(ctx, manager.config)
             try:
                 realtime_session = await provider.connect(config=session_config)
@@ -792,6 +808,7 @@ def create_realtime_router(
                 opened_at=time.monotonic(),
                 last_activity_at=time.monotonic(),
                 todo_store=todo_store,
+                cancelled=cancelled,
             )
             try:
                 manager.register(session_id, state)
