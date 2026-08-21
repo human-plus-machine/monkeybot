@@ -183,11 +183,33 @@ def test_run_gateway_process_sigterm_exit_status_is_143() -> None:
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX signal forwarding")
 def test_run_gateway_process_kills_child_that_ignores_sigterm() -> None:
     inner = _ready_then_sleep("import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN);")
-    wrapper = _spawn_wrapper([sys.executable, "-c", inner], shutdown_timeout=0.4)
+    shutdown_timeout = 0.8
+    wrapper = _spawn_wrapper([sys.executable, "-c", inner], shutdown_timeout=shutdown_timeout)
+    try:
+        assert _wait_ready(wrapper) == "ready"
+        start = time.monotonic()
+        wrapper.send_signal(signal.SIGTERM)
+        rc = wrapper.wait(timeout=8)
+        elapsed = time.monotonic() - start
+        assert rc == 128 + signal.SIGKILL
+        assert elapsed >= shutdown_timeout * 0.75
+    finally:
+        if wrapper.poll() is None:
+            wrapper.kill()
+            wrapper.wait(timeout=5)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signal forwarding")
+def test_run_gateway_process_waits_for_graceful_shutdown() -> None:
+    inner = _ready_then_sleep(
+        "import signal, time;"
+        "signal.signal(signal.SIGTERM, lambda *_: (time.sleep(1.5), sys.exit(7)));"
+    )
+    wrapper = _spawn_wrapper([sys.executable, "-c", inner], shutdown_timeout=5.0)
     try:
         assert _wait_ready(wrapper) == "ready"
         wrapper.send_signal(signal.SIGTERM)
-        assert wrapper.wait(timeout=8) == 128 + signal.SIGKILL
+        assert wrapper.wait(timeout=8) == 7
     finally:
         if wrapper.poll() is None:
             wrapper.kill()

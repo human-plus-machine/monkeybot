@@ -7,12 +7,12 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from types import FrameType
 from typing import Any
 
-from monkeybot_cli.chat_local_shell import _kill_process_tree, _popen_kwargs_for_platform
 from monkeybot_cli.config_resolve import (
     load_agent_dotenv,
     load_config_doc,
@@ -24,9 +24,9 @@ from monkeybot_cli.opensandbox_lifecycle import (
     is_sandbox_enabled,
     server_url_from_config,
 )
+from monkeybot_cli.process_tree import IS_WINDOWS, kill_process_tree, popen_kwargs_for_platform
 from monkeybot_cli.runtime_python import gateway_argv, prepare_runtime_python
 
-_IS_WINDOWS = sys.platform == "win32"
 _SHUTDOWN_TIMEOUT_SECS = 5.0
 _KILL_TIMEOUT_SECS = 1.0
 _Handler = Callable[[int, FrameType | None], Any] | int | None
@@ -38,6 +38,9 @@ def _cli_exit_status(rc: int | None, received: int | None) -> int:
     ``wait()`` returns a negative signal number when the child dies from a
     signal; ``SystemExit(-15)`` becomes shell status 241. Unix convention is
     ``128 + signal`` (143 for SIGTERM, 130 for SIGINT).
+
+    When the shim received SIGINT, return 130 even if the child exited 0 —
+    that matches the conventional Ctrl-C exit status.
     """
     if received == signal.SIGINT:
         return 130
@@ -51,7 +54,7 @@ def _cli_exit_status(rc: int | None, received: int | None) -> int:
 def _signal_process_group(proc: subprocess.Popen[bytes], signum: int) -> None:
     if proc.poll() is not None:
         return
-    if _IS_WINDOWS:
+    if IS_WINDOWS:
         try:
             proc.send_signal(signum)
         except OSError as exc:
@@ -62,7 +65,7 @@ def _signal_process_group(proc: subprocess.Popen[bytes], signum: int) -> None:
         return
     except ProcessLookupError:
         return
-    except (PermissionError, OSError) as exc:
+    except OSError as exc:
         try:
             proc.send_signal(signum)
         except OSError:
@@ -80,9 +83,17 @@ def run_gateway_process(
     """Start the gateway and forward stop signals to its process group.
 
     Electron sends SIGTERM only to this CLI shim. ``subprocess.run`` dies on
-    that signal and leaves uvicorn holding the port. The child is started in a
-    new session so SIGTERM/SIGINT reach the whole tree (``uv run`` plus the
-    gateway grandchild), then escalate to SIGKILL if it ignores the signal.
+    that signal and leaves uvicorn holding the port. On POSIX the child is
+    started in a new session so SIGTERM/SIGINT reach the whole tree (``uv run``
+    plus the gateway grandchild), then escalate to SIGKILL if it ignores the
+    signal for ``shutdown_timeout`` seconds.
+
+    ``start_new_session`` also detaches the gateway from the terminal's
+    foreground process group (stdin reads would raise SIGTTIN). That is fine
+    for uvicorn today and required for ``killpg``.
+
+    On Windows, ``send_signal(SIGTERM)`` only terminates the immediate child;
+    grandchildren may still be orphaned.
 
     Interactive Ctrl-C already hits the foreground process group; forwarding
     SIGINT matters here because the child is in a new session and would
@@ -100,7 +111,7 @@ def run_gateway_process(
 
     restored: dict[int, _Handler] = {}
     forwarded = [signal.SIGINT, signal.SIGTERM]
-    if not _IS_WINDOWS:
+    if not IS_WINDOWS:
         forwarded.append(signal.SIGHUP)
     for sig in forwarded:
         try:
@@ -112,22 +123,24 @@ def run_gateway_process(
             cmd,
             env=env,
             cwd=cwd,
-            **_popen_kwargs_for_platform(),
+            **popen_kwargs_for_platform(),
         )
         if received is not None:
             _signal_process_group(proc, received)
+        deadline: float | None = None
         while True:
-            timeout = shutdown_timeout if received is not None else 0.25
+            if received is not None and deadline is None:
+                deadline = time.monotonic() + shutdown_timeout
             try:
-                rc = proc.wait(timeout=timeout)
+                rc = proc.wait(timeout=0.25)
             except subprocess.TimeoutExpired:
-                if received is None:
+                if deadline is None or time.monotonic() < deadline:
                     continue
                 print(
                     "gateway did not exit after signal; killing process tree",
                     file=sys.stderr,
                 )
-                _kill_process_tree(proc.pid)
+                kill_process_tree(proc.pid)
                 try:
                     proc.wait(timeout=kill_timeout)
                 except subprocess.TimeoutExpired:
@@ -138,8 +151,8 @@ def run_gateway_process(
         for sig, handler in restored.items():
             try:
                 signal.signal(sig, handler)
-            except (ValueError, OSError):
-                pass
+            except (ValueError, OSError) as exc:
+                print(f"failed to restore {sig.name} handler: {exc}", file=sys.stderr)
 
 
 def run_run(args: argparse.Namespace) -> int:
@@ -160,6 +173,7 @@ def run_run(args: argparse.Namespace) -> int:
             if not ensure_opensandbox_for_agent(
                 agent_root,
                 server_url=server_url_from_config(cfg_doc),
+                # Fail fast: Mac app health-checks the gateway immediately.
                 docker_wait_secs=2.0,
             ):
                 print(
@@ -168,10 +182,7 @@ def run_run(args: argparse.Namespace) -> int:
                 )
     runtime = prepare_runtime_python(agent_root, config_path)
     cmd = gateway_argv(runtime)
-    try:
-        return run_gateway_process(cmd, env=env, cwd=agent_root)
-    except KeyboardInterrupt:
-        return 130
+    return run_gateway_process(cmd, env=env, cwd=agent_root)
 
 
 def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
