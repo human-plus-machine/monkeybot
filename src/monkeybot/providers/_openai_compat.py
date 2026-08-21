@@ -718,6 +718,7 @@ async def iter_openai_compat_stream(
                     idx: int | str
                     if tc.index is not None:
                         idx = int(tc.index)
+                        fallback_open_idx = idx
                         if tc.id:
                             id_to_slot[tc.id] = idx
                     elif tc.id and tc.id in id_to_slot:
