@@ -202,7 +202,11 @@ async def _flatten_tool_response_text(block: ToolResponse) -> str:
             parts.append(_media_tool_placeholder("image", b))
         elif isinstance(b, File):
             extracted = await _extract_pdf_text(b)
-            parts.append(_extracted_file_text(b, extracted) if extracted else _media_tool_placeholder("file", b))
+            parts.append(
+                _extracted_file_text(b, extracted)
+                if extracted
+                else _media_tool_placeholder("file", b)
+            )
         else:
             raise ValueError(
                 f"unsupported ToolResponse block for OpenAI-compat: {type(b).__name__}"
@@ -342,9 +346,7 @@ def openai_messages_token_count(encoding: Any, oai_messages: list[dict[str, Any]
                 continue
             if key == "tool_calls" and isinstance(val, list):
                 for tc in val:
-                    total += len(
-                        encoding.encode(json.dumps(tc, ensure_ascii=False, default=str))
-                    )
+                    total += len(encoding.encode(json.dumps(tc, ensure_ascii=False, default=str)))
             elif isinstance(val, str):
                 total += len(encoding.encode(val))
             else:
@@ -384,6 +386,7 @@ def _rate_limit_retry_delay(attempt: int) -> float:
     base: float = _RATE_LIMIT_BASE_DELAY_S * (2 ** (attempt - 1))
     jitter: float = random.uniform(0, 0.5)
     return base + jitter
+
 
 # NVIDIA's free build.nvidia.com tier is low-throughput and returns its own
 # worker/quota text instead of a clean 429, so callers that fan out concurrent
@@ -662,7 +665,16 @@ async def iter_openai_compat_stream(
     input_tokens = 0
     output_tokens = 0
     cached_tokens = 0
-    tool_buf: dict[int, dict[str, Any]] = {}
+    tool_buf: dict[int | str, dict[str, Any]] = {}
+    # Some OpenAI-compat hosts (notably several DeepSeek/Qwen-family backends
+    # proxied through OpenRouter) omit `index` on tool_call deltas entirely.
+    # Falling back to a shared key (e.g. `0`) for all of them collapses
+    # parallel tool calls into one another. Since such hosts also don't
+    # interleave chunks across calls, treat a delta carrying `id` or
+    # `function.name` as the start of a new call and route argument-only
+    # deltas (no `id`/`name`) to whichever call most recently opened.
+    fallback_open_idx: str | None = None
+    fallback_counter = 0
     finish_reason: str | None = None
     # Only scan for literal <tool_call> text when tools were actually offered —
     # tool-less turns skip the scanner entirely (see _ToolCallSpanScanner).
@@ -696,7 +708,19 @@ async def iter_openai_compat_stream(
                 yield ThinkingDelta(text=reasoning)
             if delta.tool_calls:
                 for tc in delta.tool_calls:
-                    idx = int(tc.index or 0)
+                    idx: int | str
+                    if tc.index is not None:
+                        idx = int(tc.index)
+                    elif tc.id or (tc.function and tc.function.name):
+                        fallback_counter += 1
+                        idx = f"noidx:{fallback_counter}"
+                        fallback_open_idx = idx
+                    elif fallback_open_idx is not None:
+                        idx = fallback_open_idx
+                    else:
+                        fallback_counter += 1
+                        idx = f"noidx:{fallback_counter}"
+                        fallback_open_idx = idx
                     slot = tool_buf.setdefault(idx, {"id": "", "name": "", "args": ""})
                     if tc.id:
                         slot["id"] = tc.id
@@ -715,11 +739,11 @@ async def iter_openai_compat_stream(
                 )
                 yield TextDelta(text=leftover)
 
-        for slot in tool_buf.values():
+        for slot_key, slot in tool_buf.items():
             name = str(slot.get("name") or "")
             if not name:
                 continue
-            tid = str(slot.get("id") or "") or f"anon:{name}"
+            tid = str(slot.get("id") or "") or f"anon:{name}:{slot_key}"
             raw_args = str(slot.get("args") or "{}")
             parsed, parse_error = safe_parse_tool_args(
                 raw_args,

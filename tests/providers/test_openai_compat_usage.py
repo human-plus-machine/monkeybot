@@ -332,9 +332,7 @@ async def test_rate_limit_retries_with_backoff_then_succeeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A rate-limit error before any chunk is streamed retries and eventually succeeds."""
-    client = _flaky_client(
-        _NVIDIA_RESOURCE_EXHAUSTED, fail_times=1, chunks=[_text_chunk("hi")]
-    )
+    client = _flaky_client(_NVIDIA_RESOURCE_EXHAUSTED, fail_times=1, chunks=[_text_chunk("hi")])
     _install_fake_openai(monkeypatch, client)
 
     sleeps: list[float] = []
@@ -342,9 +340,7 @@ async def test_rate_limit_retries_with_backoff_then_succeeds(
     async def _fake_sleep(delay: float) -> None:
         sleeps.append(delay)
 
-    monkeypatch.setattr(
-        "monkeybot.providers._openai_compat.asyncio.sleep", _fake_sleep
-    )
+    monkeypatch.setattr("monkeybot.providers._openai_compat.asyncio.sleep", _fake_sleep)
 
     events = [
         ev
@@ -376,9 +372,7 @@ async def test_rate_limit_exhausted_raises_friendly_error_not_raw_text(
     async def _fake_sleep(_delay: float) -> None:
         return None
 
-    monkeypatch.setattr(
-        "monkeybot.providers._openai_compat.asyncio.sleep", _fake_sleep
-    )
+    monkeypatch.setattr("monkeybot.providers._openai_compat.asyncio.sleep", _fake_sleep)
 
     with pytest.raises(ProviderRateLimitError) as exc_info:
         [
@@ -408,9 +402,7 @@ async def test_rate_limit_backoff_sleeps_after_releasing_semaphore(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The concurrency slot must be released before backing off, not held idle."""
-    client = _flaky_client(
-        _NVIDIA_RESOURCE_EXHAUSTED, fail_times=1, chunks=[_text_chunk("hi")]
-    )
+    client = _flaky_client(_NVIDIA_RESOURCE_EXHAUSTED, fail_times=1, chunks=[_text_chunk("hi")])
     _install_fake_openai(monkeypatch, client)
 
     events: list[str] = []
@@ -430,9 +422,7 @@ async def test_rate_limit_backoff_sleeps_after_releasing_semaphore(
     async def _fake_sleep(_delay: float) -> None:
         events.append("sleep")
 
-    monkeypatch.setattr(
-        "monkeybot.providers._openai_compat.asyncio.sleep", _fake_sleep
-    )
+    monkeypatch.setattr("monkeybot.providers._openai_compat.asyncio.sleep", _fake_sleep)
 
     _ = [
         ev
@@ -471,9 +461,7 @@ async def test_mid_stream_rate_limit_does_not_retry(monkeypatch: pytest.MonkeyPa
     async def _fake_sleep(delay: float) -> None:
         sleeps.append(delay)
 
-    monkeypatch.setattr(
-        "monkeybot.providers._openai_compat.asyncio.sleep", _fake_sleep
-    )
+    monkeypatch.setattr("monkeybot.providers._openai_compat.asyncio.sleep", _fake_sleep)
 
     with pytest.raises(ProviderRateLimitError):
         [
@@ -577,9 +565,7 @@ async def test_server_error_retries_with_backoff_then_succeeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A bare 5xx before any chunk is streamed retries and eventually succeeds."""
-    client = _flaky_client(
-        _FakeAPIStatusError(500), fail_times=1, chunks=[_text_chunk("hi")]
-    )
+    client = _flaky_client(_FakeAPIStatusError(500), fail_times=1, chunks=[_text_chunk("hi")])
     _install_fake_openai_with_status_error(monkeypatch, client)
 
     sleeps: list[float] = []
@@ -689,9 +675,7 @@ def _tool_call_text_chunk(text: str) -> SimpleNamespace:
     return SimpleNamespace(
         usage=None,
         choices=[
-            SimpleNamespace(
-                delta=SimpleNamespace(content=text, reasoning=None, tool_calls=None)
-            )
+            SimpleNamespace(delta=SimpleNamespace(content=text, reasoning=None, tool_calls=None))
         ],
     )
 
@@ -914,3 +898,109 @@ async def test_does_not_recover_text_tool_call_when_structured_call_present() ->
     tool_calls = [ev for ev in events if isinstance(ev, ToolCall)]
     assert len(tool_calls) == 1
     assert tool_calls[0].name == "search_jobs"
+
+
+def _tool_call_delta_chunk(
+    *, id: str | None = None, name: str | None = None, arguments: str | None = None
+) -> SimpleNamespace:
+    """A structured tool_calls delta chunk with no `index` field at all.
+
+    Reproduces DeepSeek/Qwen-family backends proxied through OpenRouter,
+    which are known to omit `index` on tool_call deltas.
+    """
+    return SimpleNamespace(
+        usage=None,
+        choices=[
+            SimpleNamespace(
+                delta=SimpleNamespace(
+                    content=None,
+                    reasoning=None,
+                    tool_calls=[
+                        SimpleNamespace(
+                            index=None,
+                            id=id,
+                            function=SimpleNamespace(name=name, arguments=arguments),
+                        )
+                    ],
+                )
+            )
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_parallel_tool_calls_without_index_do_not_collapse() -> None:
+    """Two parallel tool calls with no `index` must not merge into one slot.
+
+    Before the fix, `int(tc.index or 0)` routed every deltas-without-index
+    chunk to the same buffer slot, clobbering the first call's name/args
+    with the second's and concatenating their argument strings into invalid
+    JSON.
+    """
+    chunks = [
+        _tool_call_delta_chunk(id="call_a", name="search_jobs"),
+        _tool_call_delta_chunk(arguments='{"keyword"'),
+        _tool_call_delta_chunk(arguments=': "python"}'),
+        _tool_call_delta_chunk(id="call_b", name="get_weather"),
+        _tool_call_delta_chunk(arguments='{"city": "Boston"}'),
+    ]
+    client = _fake_client(chunks)
+
+    events = [
+        ev
+        async for ev in iter_openai_compat_stream(
+            client,
+            {
+                "model": "m",
+                "tools": [
+                    {"type": "function", "function": {"name": "search_jobs"}},
+                    {"type": "function", "function": {"name": "get_weather"}},
+                ],
+            },
+            provider="openrouter",
+            n_tools=2,
+        )
+    ]
+
+    tool_calls = [ev for ev in events if isinstance(ev, ToolCall)]
+    assert len(tool_calls) == 2
+
+    search_call = next(tc for tc in tool_calls if tc.name == "search_jobs")
+    weather_call = next(tc for tc in tool_calls if tc.name == "get_weather")
+
+    assert search_call.call_id == "call_a"
+    assert search_call.args == {"keyword": "python"}
+    assert search_call.parse_error is None
+
+    assert weather_call.call_id == "call_b"
+    assert weather_call.args == {"city": "Boston"}
+    assert weather_call.parse_error is None
+
+
+@pytest.mark.asyncio
+async def test_parallel_tool_calls_without_index_or_id_get_unique_call_ids() -> None:
+    """Same-named parallel calls missing both `index` and `id` must not collide.
+
+    Before the fix, both fell back to the identical `anon:<name>` call_id,
+    so the second silently overwrote the first downstream (keyed by call_id).
+    """
+    chunks = [
+        _tool_call_delta_chunk(name="get_weather", arguments='{"city": "Boston"}'),
+        _tool_call_delta_chunk(name="get_weather", arguments='{"city": "Austin"}'),
+    ]
+    client = _fake_client(chunks)
+
+    events = [
+        ev
+        async for ev in iter_openai_compat_stream(
+            client,
+            {"model": "m", "tools": [{"type": "function", "function": {"name": "get_weather"}}]},
+            provider="openrouter",
+            n_tools=1,
+        )
+    ]
+
+    tool_calls = [ev for ev in events if isinstance(ev, ToolCall)]
+    assert len(tool_calls) == 2
+    assert len({tc.call_id for tc in tool_calls}) == 2
+    assert {tc.args["city"] for tc in tool_calls} == {"Boston", "Austin"}
