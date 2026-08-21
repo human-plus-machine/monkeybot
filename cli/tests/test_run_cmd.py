@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import pytest
 
-from monkeybot_cli.commands.run_cmd import _cli_exit_status, run_run
+from monkeybot_cli.commands.run_cmd import _cli_exit_status, run_gateway_process, run_run
 from monkeybot_cli.runtime_python import RuntimePython
 
 
@@ -192,11 +192,41 @@ def test_run_gateway_process_kills_child_that_ignores_sigterm() -> None:
         rc = wrapper.wait(timeout=8)
         elapsed = time.monotonic() - start
         assert rc == 128 + signal.SIGKILL
-        assert elapsed >= shutdown_timeout * 0.75
+        assert elapsed >= shutdown_timeout * 0.9
+        assert elapsed < shutdown_timeout + 0.35
     finally:
         if wrapper.poll() is None:
             wrapper.kill()
             wrapper.wait(timeout=5)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signal forwarding")
+def test_run_gateway_process_does_not_double_signal_on_popen_race() -> None:
+    """A signal during Popen must be forwarded exactly once on catch-up."""
+    inner = _ready_then_sleep("import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN);")
+    signal_calls: list[int] = []
+    real_popen = subprocess.Popen
+
+    def popen_with_immediate_sigterm(*args, **kwargs):  # type: ignore[no-untyped-def]
+        proc = real_popen(*args, **kwargs)
+        os.kill(os.getpid(), signal.SIGTERM)
+        return proc
+
+    def counting_signal(proc, signum):  # type: ignore[no-untyped-def]
+        signal_calls.append(signum)
+        os.killpg(proc.pid, signum)
+
+    with patch("monkeybot_cli.commands.run_cmd.subprocess.Popen", side_effect=popen_with_immediate_sigterm):
+        with patch("monkeybot_cli.commands.run_cmd._signal_process_group", side_effect=counting_signal):
+            run_gateway_process(
+                [sys.executable, "-c", inner],
+                env=os.environ.copy(),
+                cwd=Path("."),
+                shutdown_timeout=0.4,
+                kill_timeout=0.5,
+            )
+
+    assert signal_calls == [signal.SIGTERM]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX signal forwarding")

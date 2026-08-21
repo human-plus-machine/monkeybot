@@ -101,13 +101,18 @@ def run_gateway_process(
     """
     received: int | None = None
     proc: subprocess.Popen[bytes] | None = None
+    signal_forwarded = False
+    deadline: float | None = None
 
     def _forward(signum: int, _frame: object | None) -> None:
-        nonlocal received
+        nonlocal received, signal_forwarded, deadline
         if received is None:
             received = signum
         if proc is not None:
             _signal_process_group(proc, signum)
+            signal_forwarded = True
+            if deadline is None:
+                deadline = time.monotonic() + shutdown_timeout
 
     restored: dict[int, _Handler] = {}
     forwarded = [signal.SIGINT, signal.SIGTERM]
@@ -125,12 +130,11 @@ def run_gateway_process(
             cwd=cwd,
             **popen_kwargs_for_platform(),
         )
-        if received is not None:
+        if received is not None and not signal_forwarded:
             _signal_process_group(proc, received)
-        deadline: float | None = None
-        while True:
-            if received is not None and deadline is None:
+            if deadline is None:
                 deadline = time.monotonic() + shutdown_timeout
+        while True:
             try:
                 rc = proc.wait(timeout=0.25)
             except subprocess.TimeoutExpired:
