@@ -95,6 +95,52 @@ async def test_scheduler_requires_confirmation(scheduler_app) -> None:
 
 
 @pytest.mark.asyncio
+async def test_scheduler_rejects_reserved_session_id(scheduler_app) -> None:
+    """Regression for PR #179 review: scheduler-created sessions bypassed the
+    POST /sessions reserved-prefix check entirely, so a loop's session_id
+    could collide with the internal 'subagent:' namespace and silently
+    disappear from list_threads/--continue with no indication why.
+    """
+    app, open_storage = scheduler_app
+    await open_storage()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/scheduler/loops",
+            json={
+                "prompt": "BUSINESS: append status",
+                "interval": "5s",
+                "session_id": "subagent:hijacked",
+                "loop_id": "reserved-loop",
+                "max_ticks": 3,
+                "confirmed": True,
+            },
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "BAD_REQUEST"
+        assert "reserved prefix" in resp.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_scheduler_invoke_tick_rejects_reserved_session_id(scheduler_app) -> None:
+    app, open_storage = scheduler_app
+    await open_storage()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/scheduler/invoke-tick",
+            json={
+                "session_id": "subagent:direct-invoke",
+                "request_id": "req-1",
+                "message": "hi",
+            },
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "BAD_REQUEST"
+        assert "reserved prefix" in resp.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
 async def test_scheduler_get_loop_includes_usage(scheduler_app) -> None:
     app, open_storage = scheduler_app
     await open_storage()

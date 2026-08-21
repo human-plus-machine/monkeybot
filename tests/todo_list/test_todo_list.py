@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 from monkeybot.core.context import TurnContext, build_context
-from monkeybot.core.prompts.harness_prompt import harness_fixed_context
 from monkeybot.core.prompts.prompt import (
     TODO_LIST_HEADING,
     compose_system_prompt,
@@ -220,19 +219,6 @@ async def test_todo_list_add_many_rejects_blank_without_partial_write(tmp_path: 
     assert [item.text for item in store.items] == ["already there"]
 
 
-def test_harness_includes_todo_list_when_enabled() -> None:
-    out = harness_fixed_context(include_task_tool=False, include_todo_list=True)
-    assert "`todo_list`" in out
-    assert "`add` / `complete` / `remove`" in out
-    assert "list of strings" in out
-    assert "## Todo list" in out
-
-
-def test_harness_omits_todo_list_when_disabled() -> None:
-    out = harness_fixed_context(include_task_tool=False, include_todo_list=False)
-    assert "`todo_list`" not in out
-
-
 @pytest.mark.asyncio
 async def test_volatile_tail_includes_todo_list_when_non_empty(tmp_path: Path) -> None:
     store = TodoListStore("s", workspace_root=tmp_path, mirror_to_disk=False)
@@ -256,7 +242,6 @@ async def test_volatile_tail_includes_todo_list_when_non_empty(tmp_path: Path) -
     assert "1. [done] First" in parts["todos"]
     assert "2. [pending] Second" in parts["todos"]
     full = compose_system_prompt(ctx)
-    assert "`todo_list`" in full
     assert "## Todo list" in full
 
 

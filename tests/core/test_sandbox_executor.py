@@ -263,6 +263,18 @@ class TestSandboxExecutorAllowlist:
 
         mock_cls.create.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_mempalace_non_search_is_blocked(self, tmp_path):
+        executor = self._executor(tmp_path)
+        mock_cls, _ = _make_create_mock()
+        osb = _make_opensandbox_module(mock_cls)
+
+        with patch.dict(sys.modules, _opensandbox_sys_modules(osb)):
+            with pytest.raises(SecurityError, match="only 'search' is permitted"):
+                await executor.execute("mempalace", ["repair", "rebuild-index"])
+
+        mock_cls.create.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # SandboxExecutor — lazy creation and sandbox reuse
@@ -334,6 +346,53 @@ class TestSandboxExecutorLayoutMounts:
         ]
 
     @pytest.mark.asyncio
+    async def test_mounts_artifacts_rw_when_declared(self, tmp_path):
+        """artifacts_path is a writable extra root (like skills, but not read-only) —
+        the sandbox must actually see it, or run_command inside a shared
+        sandbox can't reach files write_file already wrote on the host.
+        """
+        workspace = tmp_path / "workspace"
+        skills = tmp_path / "skills"
+        artifacts = tmp_path / "artifacts"
+        workspace.mkdir()
+        skills.mkdir()
+        artifacts.mkdir()
+        cfg = SandboxConfig(True, "http://localhost:8080", None, "test", 30)
+        executor = SandboxExecutor(cfg, workspace, skills_path=skills, artifacts_path=artifacts)
+        mock_cls, _ = _make_create_mock()
+        osb = _make_opensandbox_module(mock_cls)
+
+        with patch.dict(sys.modules, _opensandbox_sys_modules(osb)):
+            await executor.execute("echo", ["ok"])
+
+        volumes = mock_cls.create.call_args.kwargs["volumes"]
+        assert [(v.host.path, v.readOnly) for v in volumes[:3]] == [
+            (str(workspace.resolve()), False),
+            (str(skills.resolve()), True),
+            (str(artifacts.resolve()), False),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_no_artifacts_volume_when_not_declared(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        skills = tmp_path / "skills"
+        workspace.mkdir()
+        skills.mkdir()
+        cfg = SandboxConfig(True, "http://localhost:8080", None, "test", 30)
+        executor = SandboxExecutor(cfg, workspace, skills_path=skills)
+        mock_cls, _ = _make_create_mock()
+        osb = _make_opensandbox_module(mock_cls)
+
+        with patch.dict(sys.modules, _opensandbox_sys_modules(osb)):
+            await executor.execute("echo", ["ok"])
+
+        volumes = mock_cls.create.call_args.kwargs["volumes"]
+        assert [(v.host.path, v.readOnly) for v in volumes] == [
+            (str(workspace.resolve()), False),
+            (str(skills.resolve()), True),
+        ]
+
+    @pytest.mark.asyncio
     async def test_remote_compute_mode_never_mounts_and_uses_tmp(self, tmp_path):
         workspace = tmp_path / "workspace"
         skills = tmp_path / "skills"
@@ -350,6 +409,24 @@ class TestSandboxExecutorLayoutMounts:
             await executor.execute("echo", ["ok"])
 
         assert mock_cls.create.call_args.kwargs["volumes"] == []
+        assert sandbox.commands.run.call_args.kwargs["opts"].working_directory == "/tmp"
+
+    @pytest.mark.asyncio
+    async def test_remote_compute_mode_allows_default_workspace_cwd(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        cfg = SandboxConfig(
+            True, "https://remote.example", None, "test", 30, shared_filesystem=False
+        )
+        executor = SandboxExecutor(cfg, workspace)
+        mock_cls, sandbox = _make_create_mock()
+        osb = _make_opensandbox_module(mock_cls)
+
+        with patch.dict(sys.modules, _opensandbox_sys_modules(osb)):
+            result = await executor.execute("python3", ["--version"], cwd=workspace)
+
+        assert result.exit_code == 0
+        mock_cls.create.assert_called_once()
         assert sandbox.commands.run.call_args.kwargs["opts"].working_directory == "/tmp"
 
     @pytest.mark.asyncio
@@ -575,7 +652,31 @@ class TestSandboxExecutorWorkspaceMount:
         return osb, _opensandbox_sys_modules(osb)
 
     @pytest.mark.asyncio
-    async def test_absolute_workspace_path_in_volume(self, tmp_path):
+    async def test_palace_is_not_mounted_into_sandbox(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MEMPALACE_PALACE_PATH", str(tmp_path / "memory" / "mempalace"))
+        abs_path = str(tmp_path.resolve())
+        cfg = SandboxConfig(
+            enabled=True, server_url="http://localhost:8080",
+            api_key=None, image="python:3.12", ttl_seconds=1800,
+        )
+        executor = SandboxExecutor(cfg, tmp_path)
+        mock_cls, _ = _make_create_mock()
+        osb, patches = self._patch_modules(mock_cls)
+
+        with patch.dict(sys.modules, patches):
+            await executor.execute("echo", [])
+
+        _, kwargs = mock_cls.create.call_args
+        volumes = kwargs.get("volumes", [])
+        assert len(volumes) == 1
+        assert volumes[0].host.path == abs_path
+        env = kwargs.get("env") or {}
+        assert "MEMPALACE_PALACE_PATH" not in env
+        assert "MEMORY_STORAGE_URI" not in env
+
+    @pytest.mark.asyncio
+    async def test_absolute_workspace_path_in_volume(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MEMPALACE_PALACE_PATH", raising=False)
         abs_path = str(tmp_path.resolve())
         cfg = SandboxConfig(
             enabled=True, server_url="http://localhost:8080",
@@ -601,6 +702,7 @@ class TestSandboxExecutorWorkspaceMount:
 
     @pytest.mark.asyncio
     async def test_gcp_credentials_mounted_when_present(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("MEMPALACE_PALACE_PATH", raising=False)
         creds = tmp_path / "gcp.json"
         creds.write_text('{"type":"service_account"}', encoding="utf-8")
         monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(creds))

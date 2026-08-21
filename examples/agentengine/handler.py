@@ -41,6 +41,7 @@ class MonkeybotReasoningEngine:
                 os.environ.get("MEMORY_STORAGE_URI"),
                 mcp_config_path=Path(mcp_path) if mcp_path else None,
                 open_mcp=open_mcp,
+                agent_scope=os.environ.get("MONKEYBOT_AGENT_ID", ""),
             )
         return self._deps
 

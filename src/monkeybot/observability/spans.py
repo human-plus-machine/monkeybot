@@ -371,6 +371,15 @@ async def span_tool(
         set_span_attribute_safe(span, "tool.call_id", tool_call_id)
         set_span_attribute_safe(span, "thread.id", thread_id)
         set_span_attribute_safe(span, "request.id", request_id)
+        if tool_name == "run_command" and args:
+            argv = args.get("argv")
+            if not isinstance(argv, list):
+                command = args.get("command")
+                argv = str(command).split() if isinstance(command, str) else []
+            if argv and str(argv[0]) == "mempalace":
+                set_span_attribute_safe(span, "memory.cli", True)
+                if len(argv) > 1 and not str(argv[1]).startswith("-"):
+                    set_span_attribute_safe(span, "memory.cli.subcommand", str(argv[1]))
         if args is not None:
             args_json = truncate(json.dumps(args, default=str))
             set_span_attribute_safe(span, "tool.input", args_json)

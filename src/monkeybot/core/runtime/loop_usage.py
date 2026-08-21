@@ -9,7 +9,6 @@ from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.attachments.store import AttachmentStore
 from monkeybot.core.context import TurnContext
 from monkeybot.core.context.epoch import ContextEpochTracker, fingerprint_text
-from monkeybot.core.context.memory_prompt import MemoryPromptSelection
 from monkeybot.core.llm.provider import (
     Message,
     Provider,
@@ -116,7 +115,6 @@ async def _prompt_input_tokens_for_history(
     provider: Provider,
     attachment_store: AttachmentStore | None,
     attachment_catalog: SessionAttachmentCatalog | None,
-    memory_selection: MemoryPromptSelection | None = None,
     extra_system_text: str | None = None,
     vertex_google_search: bool = False,
     epoch: ContextEpochTracker | None = None,
@@ -134,9 +132,7 @@ async def _prompt_input_tokens_for_history(
         attachment_catalog.list_records() if attachment_catalog is not None else None
     )
     stable = compose_stable_baseline(ctx, attachment_catalog=catalog)
-    volatile_parts = compose_volatile_tail_parts(
-        ctx, chat_messages=chat_messages, memory_selection=memory_selection
-    )
+    volatile_parts = compose_volatile_tail_parts(ctx, chat_messages=chat_messages)
     volatile = "".join(volatile_parts.values())
     mid_conversation_update = ""
     if epoch is not None:

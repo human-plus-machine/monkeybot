@@ -8,10 +8,9 @@ from pathlib import Path
 import pytest
 
 from monkeybot.core.context import SkillRef, TurnContext
-from monkeybot.core.llm.provider import Done, TextDelta, ToolCall, UsageEvent
+from monkeybot.core.llm.provider import ToolCall
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.runtime.context_budget import ContextBudgeter
-from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.tools.spill_inventory import (
     spill_budgets_from_window,
@@ -21,22 +20,12 @@ from monkeybot.core.tools.spill_inventory import (
 from monkeybot.core.tools.types import unwrap_tool_execution_result
 from monkeybot.core.tools.workspace_service import WorkspaceFileService
 from monkeybot.core.types.content_blocks import Text, ToolResponse
-from monkeybot.core.workspace import create_workspace_storage
+from tests.core.memory.helpers import make_memory_subsystem
 
 
 def _mem_sub(root: Path) -> MemorySubsystem:
-    p = Path(root)
-    p.mkdir(exist_ok=True)
-    uri = "local://" + str(p.resolve())
-    fake = ScriptedFakeProvider(
-        [TextDelta(text="x"), UsageEvent(input_tokens=1, output_tokens=1, cached_tokens=0), Done()]
-    )
-    return MemorySubsystem(
-        storage=create_workspace_storage(uri),
-        provider=fake,
-        model="gemini-2.5-flash",
-        memory_uri=uri,
-    )
+    resolved = Path(root).resolve()
+    return make_memory_subsystem(resolved.parent.parent / f"palace-{resolved.parent.name}-{resolved.name}")
 
 
 class _NoMCP:

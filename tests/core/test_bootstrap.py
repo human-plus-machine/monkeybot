@@ -14,6 +14,7 @@ from monkeybot.core.bootstrap import (
 )
 from monkeybot.core.llm.provider import Done, TextDelta, UsageEvent
 from monkeybot.core.memory.subsystem import MemorySubsystem
+from monkeybot.core.persistence.backends import create_storage_backend
 from monkeybot.core.runtime.events import Error, TurnComplete, UsageTotals
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.tools.terminal import ALLOWED_COMMANDS
@@ -54,14 +55,34 @@ async def test_create_harness_deps_memory_set_when_uri_given(tmp_path: Path) -> 
     mem_root = tmp_path / "mem"
     mem_root.mkdir()
     uri = "local://" + str(mem_root.resolve())
+    db = tmp_path / "monkeybot.db"
     deps = await create_harness_deps(
-        "sqlite:///:memory:",
+        f"sqlite:///{db}",
         uri,
         open_mcp=False,
         _provider_override=_fake(),
     )
     assert isinstance(deps.memory, MemorySubsystem)
     assert deps.memory.uri == uri
+    await deps.close()
+
+
+@pytest.mark.asyncio
+async def test_create_harness_deps_skips_memory_when_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MONKEYBOT_MEMORY_HOOK_ENABLED", "0")
+    mem_root = tmp_path / "mem"
+    mem_root.mkdir()
+    uri = "local://" + str(mem_root.resolve())
+    db = tmp_path / "monkeybot.db"
+    deps = await create_harness_deps(
+        f"sqlite:///{db}",
+        uri,
+        open_mcp=False,
+        _provider_override=_fake(),
+    )
+    assert deps.memory is None
     await deps.close()
 
 
@@ -106,7 +127,80 @@ async def test_create_harness_deps_open_mcp_true_empty_mcp_servers(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_create_harness_deps_closes_backend_on_memory_subsystem_failure(
+async def test_create_harness_deps_threads_agent_scope_to_storage_backend() -> None:
+    """Regression for PR #179 review: Pattern B/C embedders (e.g. multiple
+    tenants in one Lambda handler sharing a db_url) must be able to isolate
+    conversation history the same way the gateway does, by passing
+    agent_scope through to create_storage_backend — otherwise every embedded
+    agent shares one unscoped namespace and can read/resume each other's
+    threads.
+    """
+    with patch(
+        "monkeybot.core.bootstrap.create_storage_backend",
+        wraps=create_storage_backend,
+    ) as spy:
+        deps = await create_harness_deps(
+            "sqlite:///:memory:",
+            None,
+            open_mcp=False,
+            _provider_override=_fake(),
+            agent_scope="tenant-42",
+        )
+    spy.assert_called_once_with("sqlite:///:memory:", agent_scope="tenant-42")
+    assert await deps.storage.history().list_threads() == []
+    await deps.close()
+
+
+@pytest.mark.asyncio
+async def test_create_harness_deps_defaults_agent_scope_from_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for PR #179 review: isolation must not be opt-in-only —
+    when agent_scope isn't passed explicitly, create_harness_deps() should
+    pick up the same MONKEYBOT_AGENT_ID env var the gateway/subagent workers
+    already use (AgentLayout.export_environment), so an embedder that already
+    sets it for that reason gets isolation here for free.
+    """
+    monkeypatch.setenv("MONKEYBOT_AGENT_ID", "env-agent-id")
+    with patch(
+        "monkeybot.core.bootstrap.create_storage_backend",
+        wraps=create_storage_backend,
+    ) as spy:
+        deps = await create_harness_deps(
+            "sqlite:///:memory:",
+            None,
+            open_mcp=False,
+            _provider_override=_fake(),
+        )
+    spy.assert_called_once_with("sqlite:///:memory:", agent_scope="env-agent-id")
+    await deps.close()
+
+
+@pytest.mark.asyncio
+async def test_create_harness_deps_explicit_empty_agent_scope_overrides_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Passing agent_scope='' explicitly is a deliberate opt-out and must win
+    over MONKEYBOT_AGENT_ID, not be treated as "unset."
+    """
+    monkeypatch.setenv("MONKEYBOT_AGENT_ID", "env-agent-id")
+    with patch(
+        "monkeybot.core.bootstrap.create_storage_backend",
+        wraps=create_storage_backend,
+    ) as spy:
+        deps = await create_harness_deps(
+            "sqlite:///:memory:",
+            None,
+            open_mcp=False,
+            _provider_override=_fake(),
+            agent_scope="",
+        )
+    spy.assert_called_once_with("sqlite:///:memory:", agent_scope="")
+    await deps.close()
+
+
+@pytest.mark.asyncio
+async def test_create_harness_deps_continues_when_memory_subsystem_fails(
     tmp_path: Path,
 ) -> None:
     backend = MagicMock()
@@ -115,17 +209,23 @@ async def test_create_harness_deps_closes_backend_on_memory_subsystem_failure(
     mem_root = tmp_path / "mem"
     mem_root.mkdir()
     uri = "local://" + str(mem_root.resolve())
-    with patch("monkeybot.core.bootstrap.create_storage_backend", return_value=backend), patch(
-        "monkeybot.core.bootstrap.MemorySubsystem",
-        side_effect=RuntimeError("boom"),
-    ), pytest.raises(RuntimeError, match="boom"):
-        await create_harness_deps(
+    with (
+        patch("monkeybot.core.bootstrap.create_storage_backend", return_value=backend),
+        patch(
+            "monkeybot.core.bootstrap.MemorySubsystem",
+            side_effect=RuntimeError("boom"),
+        ),
+    ):
+        deps = await create_harness_deps(
             "sqlite:///:memory:",
             uri,
             open_mcp=False,
             _provider_override=_fake(),
         )
+    assert deps.memory is None
     backend.open.assert_awaited_once()
+    backend.close.assert_not_awaited()
+    await deps.close()
     backend.close.assert_awaited_once()
 
 
@@ -286,4 +386,9 @@ async def test_run_pattern_bc_turn_default_run_command_allowlist(tmp_path: Path,
 
     assert len(captured) == 1
     executor = captured[0]
-    assert tuple(executor._run_cmd_allowed_commands) == tuple(ALLOWED_COMMANDS)
+    # No memory URI was configured, so the memory capability is withheld while
+    # the rest of the default allowlist stays intact.
+    assert deps.memory is None
+    assert tuple(executor._run_cmd_allowed_commands) == tuple(
+        cmd for cmd in ALLOWED_COMMANDS if cmd != "mempalace"
+    )

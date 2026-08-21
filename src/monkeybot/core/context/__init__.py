@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
@@ -129,6 +129,13 @@ class TurnContext:
     """True when durable loop storage is wired (DB_URL); advertise ``enable_loops`` catalog hint."""
     todo_store: TodoListStore | None = None
     """Session-scoped todo list (parent agent only); mutable store held by frozen context."""
+    approvals_persist: Callable[[str, str], bool] | None = None
+    """Optional hook to durably persist an "Always allow" approval beyond the
+    in-memory session cache — e.g. the ``computer_*`` tools' ``approvals.json``
+    overlay (see ``monkeybot.computer.permissions.build_persist_hook``). Passed
+    to ``permission.remember_always_approval`` as its ``persist`` kwarg by
+    ``tool_dispatch.py`` / ``realtime_loop.py``. None when no such hook is wired
+    (the default for every deployment that doesn't enable computer tools)."""
 
 
 _log = logging.getLogger(__name__)
@@ -518,39 +525,6 @@ def _core_tool_defs(
         },
         "required": ["patch_text"],
     }
-    search_memory_schema: dict[str, object] = {
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "description": (
-                    "Past events, decisions, preferences, or prior-session facts. "
-                    "Not for code/workspace — use `search`. "
-                    "Hits include full note `body` plus `links` for graph hops."
-                ),
-            },
-            "q": {"type": "string"},
-            "path": {
-                "type": "string",
-                "description": (
-                    "Fetch one memory note by path (e.g. episodic/note.md) to follow "
-                    "a Related/supersedes link. Memory-relative — never use read_file."
-                ),
-            },
-            "folder": {
-                "type": "string",
-                "description": (
-                    "Optional type filter: episodic | semantic | procedural | working."
-                ),
-            },
-            "max_hits": {"type": "integer"},
-            "include_retired": {
-                "type": "boolean",
-                "description": "Include superseded/forgotten notes (default false).",
-            },
-        },
-        "required": [],
-    }
     search_schema: dict[str, object] = {
         "type": "object",
         "properties": {
@@ -559,7 +533,7 @@ def _core_tool_defs(
                 "description": (
                     "One focused conceptual query (distinctive nouns). "
                     "Avoid dumping many near-duplicate questions in parallel. "
-                    "Not for past conversations — use `search_memory`."
+                    "Not for past conversations — use `mempalace search`."
                 ),
             },
             "q": {"type": "string"},
@@ -580,12 +554,25 @@ def _core_tool_defs(
     run_schema: dict[str, object] = {
         "type": "object",
         "properties": {
-            "argv": {"type": "array", "items": {"type": "string"}},
+            "argv": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Command as [binary, ...args]. Preferred over a combined command string."
+                ),
+            },
             "command": {"type": "string"},
             "args": {"type": "array", "items": {"type": "string"}},
             "arguments": {"type": "array", "items": {"type": "string"}},
             "shell": {"type": "string"},
             "script": {"type": "string"},
+            "cwd": {
+                "type": "string",
+                "description": (
+                    "Optional workspace-relative working directory (defaults to workspace root). "
+                    "Use for subdirectory commands (npm, nested pytest, subrepo git) instead of cd."
+                ),
+            },
             "timeout": {"type": "integer"},
         },
         "required": [],
@@ -649,7 +636,14 @@ def _core_tool_defs(
     tools: list[ToolDef] = [
         ToolDef(
             "run_command",
-            "Run an allowlisted shell command with repo-scoped path checks (see TerminalExecutor).",
+            (
+                "Run an allowlisted shell command with optional timeout. "
+                'Pass argv as a list with the binary first (e.g. ["ls", "."]); '
+                "do not pass a combined string as the binary. Shell starts in "
+                "workspace root unless cwd (workspace-relative) is set. "
+                "cd is a builtin and is not a valid command — pass cwd or "
+                "workspace-relative paths to the binary instead."
+            ),
             run_schema,
         ),
         ToolDef(
@@ -665,7 +659,11 @@ def _core_tool_defs(
         ),
         ToolDef(
             "write_file",
-            "Write or replace a UTF-8 text file under the workspace root.",
+            (
+                "Write or replace a UTF-8 text file under the workspace root. "
+                "You have a writable workspace — do not claim you lack filesystem "
+                "access or are chat-only; use this tool for file deliverables."
+            ),
             write_schema,
         ),
         ToolDef(
@@ -700,55 +698,10 @@ def _core_tool_defs(
             apply_patch_schema,
         ),
         ToolDef(
-            "search_memory",
-            "Search durable memory notes for past events, decisions, user preferences, "
-            "or prior sessions. Returns full note body + links — do not use read_file on "
-            "memory paths (they are not workspace files). Follow Related links with "
-            "search_memory(path=…). Not for code/workspace content — use `search`. "
-            "Optional folder=episodic|semantic|procedural|working.",
-            search_memory_schema,
-            parallel_safe=True,
-        ),
-        ToolDef(
-            "edit_memory",
-            "Rewrite an active memory note in place (path + content). "
-            "Use when correcting wording without creating a superseding note.",
-            {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "content": {"type": "string"},
-                },
-                "required": ["path", "content"],
-            },
-        ),
-        ToolDef(
-            "update_memory",
-            "Supersede a stale memory note: marks the old path superseded and writes "
-            "a new active note. Use when a stored fact is wrong after reality changed.",
-            {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "content": {"type": "string"},
-                },
-                "required": ["path", "content"],
-            },
-        ),
-        ToolDef(
-            "forget",
-            "Retire a memory note (status=forgotten) and remove it from INDEX.md.",
-            {
-                "type": "object",
-                "properties": {"path": {"type": "string"}},
-                "required": ["path"],
-            },
-        ),
-        ToolDef(
             "search",
             "Search the local workspace index (source files + knowledge notes) via "
             "keyword FTS, link graph, and optional embeddings. Has no record of past "
-            "conversations — use `search_memory` for those. Default first step for "
+            "conversations — use `mempalace search` for those. Default first step for "
             "unfamiliar code / conceptual / paraphrased / cross-file questions. "
             "Hits return normalized score (top≈1.0), optional cosine/bm25/signals; "
             "read until the score drops sharply (top 3–5). For locate-a-file/asset "
@@ -770,7 +723,9 @@ def _core_tool_defs(
                 "Spawn a subprocess subagent with the same workspace, memory, and MCP configuration "
                 "to work on a delegated objective. Pass subagent_type to select a named persona "
                 "(see harness Subagent personas). Returns JSON with the subagent's streamed answer "
-                "summary, errors, and usage. Nested task calls are disabled inside the subagent.",
+                "summary, errors, and usage. When queue mode returns ok:false / error_kind:pending "
+                "/ queued:true, the child has not finished — do not treat that as completion. "
+                "Nested task calls are disabled inside the subagent.",
                 task_schema,
             ),
         )
@@ -897,6 +852,7 @@ async def build_context(
     scheduled_loops_available: bool = False,
     loops_advertised: bool = False,
     todo_store: TodoListStore | None = None,
+    approvals_persist: Callable[[str, str], bool] | None = None,
 ) -> TurnContext:
     """Assemble a TurnContext from filesystem paths and the MCP client snapshot.
 
@@ -904,7 +860,7 @@ async def build_context(
         thread_id: Conversation thread id.
         request_id: Per-request correlation id.
         agent_md_path: Path to AGENT.md (must be non-empty).
-        memory: Optional memory subsystem; when set, ``INDEX.md`` is loaded via storage.
+        memory: Optional memory subsystem; when set, L0+L1 wake-up is loaded.
         skills_path: Root directory for skill folders (each with ``SKILL.md``).
         mcp_client: Client exposing ``all_tools()`` for MCP-registered tools.
         user_id: Optional authenticated user.
@@ -923,11 +879,13 @@ async def build_context(
             Their ``tool_def`` is appended to the tool list advertised to the model and
             their ``execute`` method is dispatched by :class:`CoreToolExecutor`.
         subagent_registry: Optional map of named subagent personas from monkeybot.yaml.
-        scheduled_loops_available: True when durable loop storage is wired (shows harness hint).
+        scheduled_loops_available: True when durable loop storage is wired.
         loops_advertised: True when the caller's ``LoopsToolRegistry`` has ``enable_loops``
             active; includes scheduled-loop lifecycle tools immediately for this turn.
         todo_store: Optional session-scoped todo list store (parent agent); enables volatile
             ``## Todo list`` injection. Pass the same store to ``TodoListTool`` via ``extra_tools``.
+        approvals_persist: Optional hook to durably persist "Always allow" approvals
+            beyond the in-memory session cache; see ``TurnContext.approvals_persist``.
 
     Returns:
         Frozen :class:`TurnContext`.
@@ -947,9 +905,6 @@ async def build_context(
             subagent_type_names=type_names,
         )
     )
-    if not include_task_tool:
-        # Subagents may search memory but must not mutate it.
-        tools = [t for t in tools if t.name not in {"edit_memory", "update_memory", "forget"}]
     if attachments_enabled_from_env():
         tools.append(load_file_tool_def())
     tools.extend(mcp_client.all_tools())
@@ -982,11 +937,12 @@ async def build_context(
         catalog_mcp_servers=catalog_names,
         scheduled_loops_available=scheduled_loops_available,
         todo_store=todo_store,
+        approvals_persist=approvals_persist,
     )
 
 
 async def refresh_memory_index(ctx: TurnContext) -> TurnContext:
-    """Re-read ``INDEX.md`` via ``ctx.memory``; on failure return ``ctx`` unchanged."""
+    """Re-read MemPalace wake-up via ``ctx.memory``; on failure return ``ctx`` unchanged."""
     if ctx.memory is None:
         return ctx
 

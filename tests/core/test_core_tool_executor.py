@@ -13,27 +13,18 @@ from monkeybot.core.config.settings import SubagentConfig
 from monkeybot.core.context import LoopsToolRegistry, SkillRef, TurnContext, _discover_skills
 from monkeybot.core.llm.provider import Done, TextDelta, ToolCall, UsageEvent
 from monkeybot.core.memory.subsystem import MemorySubsystem
-from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.mcp.mcp_client import MCPDiagnosticError, MCPServerNotConnectedError
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
+from monkeybot.core.tools.fs_isolation import isolation_support
 from monkeybot.core.tools.types import unwrap_tool_execution_result
-from monkeybot.core.workspace import create_workspace_storage
+from monkeybot.core.types.types_tools import ToolDef
+from tests.core.memory.helpers import make_memory_subsystem
 
 
 def _mem_sub(root: Path) -> MemorySubsystem:
-    p = Path(root)
-    p.mkdir(exist_ok=True)
-    uri = "local://" + str(p.resolve())
-    fake = ScriptedFakeProvider(
-        [TextDelta(text="x"), UsageEvent(input_tokens=1, output_tokens=1, cached_tokens=0), Done()]
-    )
-    return MemorySubsystem(
-        storage=create_workspace_storage(uri),
-        provider=fake,
-        model="gemini-2.5-flash",
-        memory_uri=uri,
-    )
-from monkeybot.core.types.types_tools import ToolDef
+    # Palace sqlite files must not live inside the workspace under test (grep/glob).
+    resolved = Path(root).resolve()
+    return make_memory_subsystem(resolved.parent.parent / f"palace-{resolved.parent.name}-{resolved.name}")
 
 
 class _NoMCP:
@@ -603,6 +594,77 @@ async def test_grep_incomplete_scan_errors_with_rg(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_grep_rg_file_cap_uses_candidate_count_when_summary_undercounts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail-closed even when rg JSON begin/summary only cover matching files."""
+    import json
+    from types import SimpleNamespace
+
+    from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService, WorkspaceSettings
+
+    root = tmp_path
+    for i in range(5):
+        (root / f"f{i}.py").write_text(f"MARKER_{i}\n", encoding="utf-8")
+    (root / "hit.py").write_text("KNOWN_MATCH_TOKEN\n", encoding="utf-8")
+
+    undercount = "\n".join(
+        [
+            json.dumps({"type": "begin", "data": {"path": {"text": "hit.py"}}}),
+            json.dumps(
+                {
+                    "type": "match",
+                    "data": {
+                        "path": {"text": "hit.py"},
+                        "lines": {"text": "KNOWN_MATCH_TOKEN\n"},
+                        "line_number": 1,
+                        "submatches": [{"start": 0, "end": 17}],
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "summary",
+                    "data": {
+                        "stats": {
+                            "searches": 1,
+                            "searches_with_match": 1,
+                            "matched_lines": 1,
+                            "matches": 1,
+                        }
+                    },
+                }
+            ),
+        ]
+    )
+
+    def fake_run(*_args, **_kwargs):
+        return SimpleNamespace(returncode=0, stdout=undercount, stderr="")
+
+    monkeypatch.setattr(
+        "monkeybot.core.tools.workspace_service.shutil.which",
+        lambda _name: "/usr/bin/rg",
+    )
+    monkeypatch.setattr(
+        "monkeybot.core.tools.workspace_service.subprocess.run",
+        fake_run,
+    )
+    # Avoid accidental Python fallback if the fake run is mishandled.
+    monkeypatch.setattr(
+        WorkspaceFileService,
+        "_grep_python",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("should not fall back")),
+    )
+
+    svc = WorkspaceFileService(
+        root,
+        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILES=2, WORKSPACE_GREP_MAX_MATCHES=50),
+    )
+    with pytest.raises(WorkspaceError) as ei:
+        svc.grep("KNOWN_MATCH_TOKEN")
+    assert ei.value.code == "incomplete_scan"
+
+@pytest.mark.asyncio
 async def test_grep_skipped_oversized_is_incomplete(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1020,35 +1082,9 @@ async def test_apply_patch_tool(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_search_memory(tmp_path: Path) -> None:
-    root = tmp_path
-    mem = tmp_path / "mem"
-    mem.mkdir()
-    (mem / "a.md").write_text("hello alpha world", encoding="utf-8")
-    skills = tmp_path / "skills"
-    skills.mkdir()
-    ex = CoreToolExecutor(
-        workspace_root=root,
-        memory=_mem_sub(mem),
-        skills_path=skills,
-        mcp=_NoMCP(),
-    )
-    ctx = _ctx()
-    out, err = unwrap_tool_execution_result(await ex.execute(
-        call=ToolCall(call_id="1", name="search_memory", args={"query": "alpha"}),
-        ctx=ctx,
-    ))
-    assert err is None and out is not None
-    assert "alpha" in out
-    assert "a.md" in out
-
-
-@pytest.mark.asyncio
-async def test_search_memory_does_not_delegate_to_knowledge(tmp_path: Path) -> None:
+async def test_search_hits_knowledge_notes(tmp_path: Path) -> None:
     from monkeybot.core.knowledge import KnowledgeSubsystem
     from monkeybot.core.knowledge.types import KnowledgeSettings
-    from monkeybot.core.memory.subsystem import MemorySubsystem
-    from monkeybot.core.workspace.local import LocalWorkspaceStorage
 
     root = tmp_path / "ws"
     root.mkdir()
@@ -1077,38 +1113,16 @@ async def test_search_memory_does_not_delegate_to_knowledge(tmp_path: Path) -> N
         index_path=Path(settings.index_path),
     )
     await knowledge.ensure_ready()
-
-    mem_root = tmp_path / "memory"
-    mem_root.mkdir()
-    (mem_root / "semantic").mkdir()
-    (mem_root / "semantic" / "note.md").write_text(
-        "---\ntype: semantic\nstatus: active\n---\n"
-        "User prefers dark mode in the dashboard.\n",
-        encoding="utf-8",
-    )
-    storage = LocalWorkspaceStorage(mem_root)
-
-    class _FakeProvider:
-        async def complete(self, *args, **kwargs):  # noqa: ANN002, ANN003
-            raise AssertionError("should not call provider")
-
-    memory = MemorySubsystem(
-        storage=storage,
-        provider=_FakeProvider(),  # type: ignore[arg-type]
-        model="test",
-        memory_uri=f"local://{mem_root}",
-    )
     skills = tmp_path / "skills"
     skills.mkdir()
     try:
         ex = CoreToolExecutor(
             workspace_root=root,
-            memory=memory,
+            memory=_mem_sub(tmp_path / "memory"),
             knowledge=knowledge,
             skills_path=skills,
             mcp=_NoMCP(),
         )
-        ctx = _ctx()
         out, err = unwrap_tool_execution_result(
             await ex.execute(
                 call=ToolCall(
@@ -1116,96 +1130,15 @@ async def test_search_memory_does_not_delegate_to_knowledge(tmp_path: Path) -> N
                     name="search",
                     args={"query": "annual refund approval"},
                 ),
-                ctx=ctx,
+                ctx=_ctx(),
             )
         )
         assert err is None and out is not None
         payload = json.loads(out)
         assert payload["ok"] is True
         assert payload["hits"]
-
-        # search_memory must hit memory notes, not knowledge workspace hits
-        out2, err2 = unwrap_tool_execution_result(
-            await ex.execute(
-                call=ToolCall(
-                    call_id="2",
-                    name="search_memory",
-                    args={"query": "dark mode"},
-                ),
-                ctx=ctx,
-            )
-        )
-        assert err2 is None and out2 is not None
-        mem_payload = json.loads(out2)
-        assert mem_payload["ok"] is True
-        assert mem_payload["hits"]
-        assert any("dark mode" in h.get("snippet", "").lower() for h in mem_payload["hits"])
-        assert any("dark mode" in (h.get("body") or "").lower() for h in mem_payload["hits"])
-        assert all(
-            not str(h.get("path", "")).startswith("notes/")
-            and "policy.md" not in str(h.get("path", ""))
-            for h in mem_payload["hits"]
-        )
     finally:
         await knowledge.close()
-
-
-@pytest.mark.asyncio
-async def test_search_memory_path_lookup(tmp_path: Path) -> None:
-    from monkeybot.core.memory.note_format import format_memory_note
-
-    root = tmp_path
-    mem = tmp_path / "mem"
-    (mem / "episodic").mkdir(parents=True)
-    note = format_memory_note(
-        note_type="episodic",
-        status="active",
-        body="Vertex MCP image path details.",
-        related=["episodic/other.md"],
-    )
-    (mem / "episodic" / "vertex.md").write_text(note, encoding="utf-8")
-    skills = tmp_path / "skills"
-    skills.mkdir()
-    ex = CoreToolExecutor(
-        workspace_root=root,
-        memory=_mem_sub(mem),
-        skills_path=skills,
-        mcp=_NoMCP(),
-    )
-    ctx = _ctx()
-    out, err = unwrap_tool_execution_result(
-        await ex.execute(
-            call=ToolCall(
-                call_id="1",
-                name="search_memory",
-                args={"path": "episodic/vertex.md"},
-            ),
-            ctx=ctx,
-        )
-    )
-    assert err is None and out is not None
-    payload = json.loads(out)
-    assert payload["ok"] is True
-    assert len(payload["hits"]) == 1
-    hit = payload["hits"][0]
-    assert hit["path"] == "episodic/vertex.md"
-    assert "Vertex MCP" in hit["body"]
-    assert {"path": "episodic/other.md", "kind": "related"} in hit["links"]
-
-    out2, err2 = unwrap_tool_execution_result(
-        await ex.execute(
-            call=ToolCall(
-                call_id="2",
-                name="search_memory",
-                args={"path": "episodic/missing.md"},
-            ),
-            ctx=ctx,
-        )
-    )
-    assert err2 is None and out2 is not None
-    payload2 = json.loads(out2)
-    assert payload2["hits"] == []
-    assert "read_file" in (payload2.get("note") or "").lower()
 
 
 @pytest.mark.asyncio
@@ -1328,6 +1261,313 @@ async def test_run_command_cat_under_memory(tmp_path: Path, monkeypatch: pytest.
 
 
 @pytest.mark.asyncio
+async def test_run_command_mempalace_is_blocked_when_memory_unavailable(tmp_path: Path) -> None:
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=None,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="memory-disabled",
+                name="run_command",
+                args={"argv": ["mempalace", "search", "private"]},
+            ),
+            ctx=_ctx(),
+        )
+    )
+
+    assert out is None and err is not None
+    payload = json.loads(err)
+    assert payload["error_kind"] == "policy"
+    assert "unavailable" in payload["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_run_command_drops_mempalace_capability_when_memory_unavailable(
+    tmp_path: Path,
+) -> None:
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=None,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+
+    assert "mempalace" not in ex._run_cmd_allowed_commands
+    assert "mempalace" not in ex._terminal.allowed_commands
+
+
+@pytest.mark.skipif(
+    not isolation_support().available,
+    reason=f"host cannot isolate filesystems: {isolation_support().detail}",
+)
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("call_id", "argv_template"),
+    [
+        ("shell-variable", ["bash", "-c", 'p={secret}; cat "$p"']),
+        ("interpreter-io", ["python", "-c", "print(open({secret!r}).read())"]),
+        ("nested-launcher", ["bash", "-c", "cat {secret}"]),
+    ],
+)
+async def test_disabled_memory_is_unreachable_through_launchers(
+    tmp_path: Path, call_id: str, argv_template: list[str]
+) -> None:
+    """Shells and interpreters can build any path, so the palace must be hidden."""
+    workspace = tmp_path / "workspace"
+    skills = workspace / "skills"
+    skills.mkdir(parents=True)
+    secret = tmp_path / "memory" / "private.txt"
+    secret.parent.mkdir()
+    secret.write_text("PRIVATE-CONTENT", encoding="utf-8")
+    ex = CoreToolExecutor(
+        workspace_root=workspace,
+        memory=None,
+        skills_path=skills,
+        mcp=_NoMCP(),
+        run_command_allowed_path_prefixes=[str(tmp_path)],
+    )
+
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id=call_id,
+                name="run_command",
+                args={"argv": [part.format(secret=str(secret)) for part in argv_template]},
+            ),
+            ctx=dataclasses.replace(_ctx(), user_id="u"),
+        )
+    )
+
+    assert "PRIVATE-CONTENT" not in (out or "") + (err or "")
+
+
+@pytest.mark.skipif(
+    not isolation_support().available,
+    reason=f"host cannot isolate filesystems: {isolation_support().detail}",
+)
+@pytest.mark.asyncio
+async def test_disabled_memory_hides_faas_palace_under_temp_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Serverless deployments put the palace in /tmp, which is not a safe zone."""
+    workspace = tmp_path / "workspace"
+    skills = workspace / "skills"
+    skills.mkdir(parents=True)
+    faas_palace = tmp_path / "faas" / "memory"
+    faas_palace.mkdir(parents=True)
+    (faas_palace / "private.txt").write_text("PRIVATE-CONTENT", encoding="utf-8")
+    monkeypatch.setenv("MEMORY_STORAGE_URI", f"local://{faas_palace}")
+    ex = CoreToolExecutor(
+        workspace_root=workspace,
+        memory=None,
+        skills_path=skills,
+        mcp=_NoMCP(),
+        run_command_allowed_path_prefixes=[str(tmp_path)],
+    )
+
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="faas-palace",
+                name="run_command",
+                args={"argv": ["bash", "-c", f"cat {faas_palace}/private.txt"]},
+            ),
+            ctx=dataclasses.replace(_ctx(), user_id="u"),
+        )
+    )
+
+    assert "PRIVATE-CONTENT" not in (out or "") + (err or "")
+
+
+@pytest.mark.skipif(
+    not isolation_support().available,
+    reason=f"host cannot isolate filesystems: {isolation_support().detail}",
+)
+@pytest.mark.asyncio
+async def test_enabled_memory_remains_readable_through_launchers(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    skills = workspace / "skills"
+    skills.mkdir(parents=True)
+    secret = tmp_path / "memory" / "private.txt"
+    secret.parent.mkdir()
+    secret.write_text("PRIVATE-CONTENT", encoding="utf-8")
+    ex = CoreToolExecutor(
+        workspace_root=workspace,
+        memory=_mem_sub(tmp_path / "memory"),
+        skills_path=skills,
+        mcp=_NoMCP(),
+        run_command_allowed_path_prefixes=[str(tmp_path)],
+    )
+
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="memory-enabled-read",
+                name="run_command",
+                args={"argv": ["bash", "-c", f"cat {secret}"]},
+            ),
+            ctx=dataclasses.replace(_ctx(), user_id="u"),
+        )
+    )
+
+    assert err is None and out is not None
+    assert "PRIVATE-CONTENT" in out
+
+
+@pytest.mark.asyncio
+async def test_run_command_memory_path_is_blocked_when_memory_unavailable(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    private = tmp_path / "memory" / "private.txt"
+    private.parent.mkdir()
+    private.write_text("PRIVATE-CONTENT", encoding="utf-8")
+    skills = workspace / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=workspace,
+        memory=None,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="memory-path-disabled",
+                name="run_command",
+                args={"argv": ["cat", "../memory/private.txt"]},
+            ),
+            ctx=dataclasses.replace(_ctx(), user_id="u"),
+        )
+    )
+
+    assert out is None and err is not None
+    payload = json.loads(err)
+    assert payload["error_kind"] == "policy"
+    assert "PRIVATE-CONTENT" not in err
+    assert "../memory/private.txt" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_direct_mempalace_route_is_owned_by_each_executor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.tools.terminal import ExecutionResult, TerminalExecutor
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    skills = workspace / "skills"
+    skills.mkdir()
+    palace_a = _mem_sub(tmp_path / "memory-a")
+    palace_b = _mem_sub(tmp_path / "memory-b")
+    seen: list[dict[str, str]] = []
+
+    async def fake_execute(
+        self,
+        command,
+        args,
+        timeout=60,
+        *,
+        cwd=None,
+        env_overrides=None,
+    ):
+        del self, command, args, timeout, cwd
+        seen.append(dict(env_overrides or {}))
+        return ExecutionResult(stdout="ok", stderr="", exit_code=0)
+
+    monkeypatch.setattr(TerminalExecutor, "execute", fake_execute)
+    monkeypatch.setenv("MEMPALACE_PALACE_PATH", str(palace_b.palace_path))
+    executor_a = CoreToolExecutor(
+        workspace_root=workspace,
+        memory=palace_a,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    executor_b = CoreToolExecutor(
+        workspace_root=workspace,
+        memory=palace_b,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+
+    for executor, call_id in ((executor_a, "palace-a"), (executor_b, "palace-b")):
+        out, err = unwrap_tool_execution_result(
+            await executor.execute(
+                call=ToolCall(
+                    call_id=call_id,
+                    name="run_command",
+                    args={"argv": ["mempalace", "search", "query"]},
+                ),
+                ctx=dataclasses.replace(_ctx(), user_id="u"),
+            )
+        )
+        assert err is None and out is not None
+
+    assert [entry["MEMPALACE_PALACE_PATH"] for entry in seen] == [
+        str(palace_a.palace_path),
+        str(palace_b.palace_path),
+    ]
+    assert seen[0]["MEMPALACE_PALACE_PATH"] != str(palace_b.palace_path)
+
+
+@pytest.mark.skipif(
+    not isolation_support().available,
+    reason=f"host cannot isolate filesystems: {isolation_support().detail}",
+)
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["bash", "-c", "echo shell-ok"], "shell-ok"),
+        (["python", "-c", "print('python-ok')"], "python-ok"),
+        (["git", "--version"], "git version"),
+        (["uv", "--version"], "uv "),
+        (["gh", "--version"], "gh version"),
+    ],
+)
+async def test_run_command_launchers_remain_available_without_memory(
+    tmp_path: Path,
+    argv: list[str],
+    expected: str,
+) -> None:
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=None,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="memory-unavailable",
+                name="run_command",
+                args={"argv": argv},
+            ),
+            ctx=_ctx(),
+        )
+    )
+
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert payload["ok"] is True
+    assert expected in payload["stdout"]
+
+
+@pytest.mark.asyncio
 async def test_run_command_blocked_command_returns_policy_envelope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1445,6 +1685,81 @@ async def test_run_command_malformed_args_returns_validation_envelope(
     assert payload["ok"] is False
     assert payload["error_kind"] == "validation"
     assert "example" in payload["details"]
+
+
+@pytest.mark.asyncio
+async def test_run_command_cwd_forwards_workspace_subdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from monkeybot.core.tools.terminal import ExecutionResult
+
+    monkeypatch.chdir(tmp_path)
+    sub = tmp_path / "pkg"
+    sub.mkdir()
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    terminal = MagicMock()
+    terminal.allowed_commands = ("pwd",)
+    terminal.allowed_path_prefixes = ("./",)
+    terminal.execute = AsyncMock(
+        return_value=ExecutionResult(exit_code=0, stdout=str(sub), stderr="")
+    )
+    terminal.aclose = AsyncMock()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+        terminal=terminal,
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="1",
+                name="run_command",
+                args={"argv": ["pwd"], "cwd": "pkg"},
+            ),
+            ctx=_ctx(),
+        )
+    )
+    assert err is None and out is not None
+    terminal.execute.assert_awaited_once()
+    assert terminal.execute.await_args.kwargs["cwd"] == sub.resolve()
+
+
+@pytest.mark.asyncio
+async def test_run_command_cwd_escape_returns_validation_envelope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="1",
+                name="run_command",
+                args={"argv": ["pwd"], "cwd": "../outside"},
+            ),
+            ctx=_ctx(),
+        )
+    )
+    assert out is None and err is not None
+    payload = json.loads(err)
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "validation"
 
 
 @pytest.mark.asyncio
@@ -1827,29 +2142,6 @@ async def test_task_tool_spawns_without_memory(tmp_path: Path, monkeypatch: pyte
 
 
 @pytest.mark.asyncio
-async def test_search_memory_without_memory_returns_validation_error(tmp_path: Path) -> None:
-    skills = tmp_path / "skills"
-    skills.mkdir()
-    ex = CoreToolExecutor(
-        workspace_root=tmp_path,
-        memory=None,
-        skills_path=skills,
-        mcp=_NoMCP(),
-    )
-    out, err = unwrap_tool_execution_result(
-        await ex.execute(
-            call=ToolCall(call_id="1", name="search_memory", args={"query": "alpha"}),
-            ctx=_ctx(),
-        )
-    )
-    assert out is None and err is not None
-    payload = json.loads(err)
-    assert payload["ok"] is False
-    assert payload["error_kind"] == "validation"
-    assert "memory" in payload["message"].lower()
-
-
-@pytest.mark.asyncio
 async def test_task_tool_parent_cancel_stops_hanging_subagent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     hang = asyncio.Event()
 
@@ -2107,7 +2399,7 @@ import sys
 from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from monkeybot.core.tools.sandbox_executor import SandboxExecutor
+from monkeybot.core.tools.sandbox_executor import SandboxConfig, SandboxExecutor
 from monkeybot.core.tools.terminal import TerminalExecutor
 
 
@@ -2227,7 +2519,93 @@ class TestCoreToolExecutorSandboxSelection:
             mcp=_NoMCP(),
             terminal=injected,
         )
+        assert isinstance(ex._terminal, TerminalExecutor)
+        assert ex._host_terminal is None
+        # Memory is enabled here, so the injected policy is carried over intact.
+        assert ex._terminal.allowed_commands == injected.allowed_commands
+        assert ex._terminal.hidden_paths == ()
+
+    def test_injected_terminal_is_bound_by_memory_off_policy(self, tmp_path):
+        """A library caller's executor must not keep palace access we revoked."""
+        injected = TerminalExecutor()
+        skills = tmp_path / "skills"
+        skills.mkdir()
+
+        ex = CoreToolExecutor(
+            workspace_root=tmp_path,
+            memory=None,
+            skills_path=skills,
+            mcp=_NoMCP(),
+            terminal=injected,
+        )
+
+        assert "../memory" in injected.allowed_path_prefixes  # caller's object untouched
+        assert "mempalace" in injected.allowed_commands
+        assert not any(
+            prefix.startswith("../memory") for prefix in ex._terminal.allowed_path_prefixes
+        )
+        assert "mempalace" not in ex._terminal.allowed_commands
+        assert ex._terminal.hidden_paths
+
+    def test_injected_terminal_preserves_caller_path_policy(self, tmp_path):
+        """Injected executors keep the caller's path allowlist (no skills widening)."""
+        injected = TerminalExecutor(allowed_path_prefixes=["."])
+        skills = tmp_path / "skills"
+        skills.mkdir()
+        mem = tmp_path / "mem"
+        mem.mkdir()
+
+        ex = CoreToolExecutor(
+            workspace_root=tmp_path,
+            memory=_mem_sub(mem),
+            skills_path=skills,
+            mcp=_NoMCP(),
+            terminal=injected,
+        )
+
+        assert "." in injected.allowed_path_prefixes
+        assert str(skills) not in injected.allowed_path_prefixes
+        assert ex._terminal.allowed_path_prefixes == injected.allowed_path_prefixes
+
+    def test_injected_terminal_preserves_caller_hidden_paths_when_memory_on(self, tmp_path):
+        """Memory-on must pass None into restricted(), not () which would clear."""
+        extra = tmp_path / "extra-hidden"
+        extra.mkdir()
+        injected = TerminalExecutor(hidden_paths=[extra])
+        skills = tmp_path / "skills"
+        skills.mkdir()
+        mem = tmp_path / "mem"
+        mem.mkdir()
+
+        ex = CoreToolExecutor(
+            workspace_root=tmp_path,
+            memory=_mem_sub(mem),
+            skills_path=skills,
+            mcp=_NoMCP(),
+            terminal=injected,
+        )
+
+        assert ex._terminal.hidden_paths == (extra,)
+
+    def test_injected_sandbox_gets_host_terminal_for_memory(self, tmp_path, monkeypatch):
+        """Injected sandboxes need a host terminal; the palace is never mounted."""
+        monkeypatch.delenv("SANDBOX_ENABLED", raising=False)
+        mem = tmp_path / "mem"
+        mem.mkdir()
+        skills = tmp_path / "skills"
+        skills.mkdir()
+        injected = SandboxExecutor(SandboxConfig.from_env(), tmp_path, skills_path=skills)
+
+        ex = CoreToolExecutor(
+            workspace_root=tmp_path,
+            memory=_mem_sub(mem),
+            skills_path=skills,
+            mcp=_NoMCP(),
+            terminal=injected,
+        )
+
         assert ex._terminal is injected
+        assert isinstance(ex._host_terminal, TerminalExecutor)
 
 
 class TestCoreToolExecutorAclose:

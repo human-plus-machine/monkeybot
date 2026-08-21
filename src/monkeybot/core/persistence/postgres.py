@@ -6,27 +6,42 @@ import json
 import logging
 import os
 import time
-from typing import cast
+from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 
 import asyncpg
 
 from monkeybot.core.llm.provider import Message, Role
 from monkeybot.core.llm.usage import Usage, UsageBreakdown, UsageBucket, UsageSummary
+from monkeybot.core.memory.ids import outbox_id, utc_now_iso
+from monkeybot.core.memory.outbox import (
+    STATUS_COMMITTED,
+    STATUS_DEAD,
+    STATUS_PENDING,
+    OutboxRow,
+    backoff_iso,
+    is_permanent_error,
+)
 from monkeybot.core.persistence.durable_runs import (
     _SUBAGENT_COLUMNS,
     SubagentEnvelope,
     SubagentRunRow,
     _tuple_to_run_row,
 )
+from monkeybot.core.persistence.errors import AmbiguousCommitError
 from monkeybot.core.persistence.scheduled_loops import (
+    _SCHEDULED_LOOP_COLUMNS,
     ScheduledLoopCreate,
     ScheduledLoopRow,
-    _SCHEDULED_LOOP_COLUMNS,
     _loop_id_from_create,
     _row_from_tuple,
     validate_loop_guards,
 )
-from monkeybot.core.persistence.thread_summary import ChatThreadSummary, preview_from_content_blob
+from monkeybot.core.persistence.thread_summary import (
+    SUBAGENT_THREAD_ID_PREFIX,
+    ChatThreadSummary,
+    preview_from_content_blob,
+)
 from monkeybot.core.types.content_blocks import ContentBlock
 
 logger = logging.getLogger(__name__)
@@ -39,7 +54,8 @@ _SCHEMA_DDLS: tuple[str, ...] = (
     thread_id TEXT NOT NULL,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
-    created_at BIGINT NOT NULL
+    created_at BIGINT NOT NULL,
+    agent_scope TEXT NOT NULL DEFAULT ''
 )""",
     """CREATE TABLE IF NOT EXISTS subagent_runs (
     run_id TEXT PRIMARY KEY,
@@ -80,6 +96,12 @@ _SCHEMA_DDLS: tuple[str, ...] = (
     "ALTER TABLE turn_usage ADD COLUMN IF NOT EXISTS cache_creation_tokens INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE subagent_runs ADD COLUMN IF NOT EXISTS worker_id TEXT",
     "ALTER TABLE subagent_runs ADD COLUMN IF NOT EXISTS claimed_at BIGINT",
+    # IF NOT EXISTS (not a separate check-then-add) so concurrent startups from
+    # multiple agents against a freshly-upgraded, shared DB_URL can't race each
+    # other into a duplicate-column error.
+    "ALTER TABLE conversation_history ADD COLUMN IF NOT EXISTS agent_scope TEXT NOT NULL DEFAULT ''",
+    """CREATE INDEX IF NOT EXISTS idx_history_scope_thread
+    ON conversation_history(agent_scope, thread_id, created_at DESC, id DESC)""",
     """CREATE TABLE IF NOT EXISTS scheduled_loops (
     loop_id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL,
@@ -107,6 +129,28 @@ _SCHEMA_DDLS: tuple[str, ...] = (
     request_id TEXT,
     claimed_at_ms BIGINT
 )""",
+    """CREATE TABLE IF NOT EXISTS memory_outbox (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL DEFAULT '',
+    thread_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT,
+    workspace_id TEXT,
+    wing TEXT NOT NULL,
+    room TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    last_error TEXT,
+    traceparent TEXT,
+    lease_owner TEXT,
+    lease_expires_at TEXT,
+    palace_id TEXT NOT NULL DEFAULT ''
+)""",
+    "CREATE INDEX IF NOT EXISTS idx_memory_outbox_pending ON memory_outbox(agent_id, palace_id, status, created_at)",
 )
 
 
@@ -114,18 +158,79 @@ async def _apply_schema(pool: asyncpg.Pool) -> None:
     async with pool.acquire() as conn:
         for ddl in _SCHEMA_DDLS:
             await conn.execute(ddl)
+        await conn.execute(
+            "ALTER TABLE memory_outbox ADD COLUMN IF NOT EXISTS agent_id TEXT NOT NULL DEFAULT ''"
+        )
+        await conn.execute(
+            "ALTER TABLE memory_outbox ADD COLUMN IF NOT EXISTS palace_id TEXT NOT NULL DEFAULT ''"
+        )
+        await conn.execute("ALTER TABLE conversation_history ADD COLUMN IF NOT EXISTS turn_id TEXT")
+        await conn.execute(
+            "ALTER TABLE conversation_history ADD COLUMN IF NOT EXISTS message_id TEXT"
+        )
+        await conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_history_message_id "
+            "ON conversation_history(message_id) "
+            "WHERE message_id IS NOT NULL AND message_id != ''"
+        )
+
+
+async def _warn_if_legacy_unscoped_history(pool: asyncpg.Pool) -> None:
+    """Log once if pre-migration (``agent_scope = ''``) rows remain.
+
+    Unreachable via ``list_threads``/``load``/``reset`` until an operator
+    runs, per thread_id (see ``docs/migrations/agent-scope-namespacing.md``
+    for why there's no automatic backfill)::
+
+        UPDATE conversation_history SET agent_scope = '<agent-id>'
+        WHERE thread_id = '<thread-id>' AND agent_scope = '';
+    """
+    async with pool.acquire() as conn:
+        exists = await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM conversation_history WHERE agent_scope = '')"
+        )
+    if exists:
+        logger.warning(
+            "conversation_history has rows with agent_scope='' that this agent "
+            "did not write — they are not reachable via list_threads, load, or "
+            "reset until an operator backfills agent_scope for each legacy "
+            "thread_id by hand (see _warn_if_legacy_unscoped_history docstring "
+            "for the exact UPDATE statement)."
+        )
 
 
 class PostgresHistoryStore:
-    """asyncpg-backed conversation history store."""
+    """asyncpg-backed conversation history store, scoped to ``agent_scope``.
 
-    def __init__(self, pool: asyncpg.Pool) -> None:
+    ``agent_scope`` isolates threads when one DB_URL is shared across gateways
+    for different agent roots — without it, ``list_threads`` would surface
+    another agent's newest transcript. Defaults to ``''`` (unscoped) for
+    in-process/test callers; production gateways pass the resolved agent root.
+    """
+
+    def __init__(self, pool: asyncpg.Pool, agent_scope: str = "") -> None:
         self._pool = pool
+        self._agent_scope = agent_scope
 
-    async def _insert_message(self, conn: asyncpg.Connection, thread_id: str, message: Message) -> None:
+    async def _insert_message(
+        self,
+        conn: asyncpg.Connection,
+        thread_id: str,
+        message: Message,
+        *,
+        turn_id: str | None = None,
+        message_id: str | None = None,
+    ) -> None:
         role = message.role
         if role not in _VALID_ROLES:
             raise ValueError(f"invalid role: {role!r}")
+        if message_id:
+            existing = await conn.fetchval(
+                "SELECT 1 FROM conversation_history WHERE message_id = $1 LIMIT 1",
+                message_id,
+            )
+            if existing is not None:
+                return
         payload = json.dumps(
             [b.to_dict() for b in message.content],
             separators=(",", ":"),
@@ -134,18 +239,51 @@ class PostgresHistoryStore:
         created_at = int(time.time() * 1000)
         await conn.execute(
             """
-            INSERT INTO conversation_history(thread_id, role, content, created_at)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO conversation_history(
+                thread_id, role, content, created_at, agent_scope, turn_id, message_id
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             """,
             thread_id,
             message.role,
             payload,
             created_at,
+            self._agent_scope,
+            turn_id,
+            message_id,
         )
 
-    async def append(self, thread_id: str, message: Message) -> None:
+    async def append(
+        self,
+        thread_id: str,
+        message: Message,
+        *,
+        turn_id: str | None = None,
+        message_id: str | None = None,
+    ) -> None:
         async with self._pool.acquire() as conn:
-            await self._insert_message(conn, thread_id, message)
+            await self._insert_message(
+                conn, thread_id, message, turn_id=turn_id, message_id=message_id
+            )
+
+    async def append_with_outbox(
+        self,
+        thread_id: str,
+        message: Message,
+        *,
+        turn_id: str,
+        message_id: str,
+        outbox: dict[str, Any],
+    ) -> None:
+        """Insert history and a pending memory outbox row in one transaction."""
+        try:
+            async with self._pool.acquire() as conn, conn.transaction():
+                await self._insert_message(
+                    conn, thread_id, message, turn_id=turn_id, message_id=message_id
+                )
+                await _insert_outbox_pending(conn, **outbox)
+        except (TimeoutError, OSError, ConnectionError, asyncpg.InterfaceError) as extra:
+            raise AmbiguousCommitError(str(extra)) from extra
 
     async def load(self, thread_id: str, limit: int | None = None) -> list[Message]:
         async with self._pool.acquire() as conn:
@@ -154,10 +292,11 @@ class PostgresHistoryStore:
                     """
                     SELECT id, role, content
                     FROM conversation_history
-                    WHERE thread_id = $1
+                    WHERE thread_id = $1 AND agent_scope = $2
                     ORDER BY created_at ASC, id ASC
                     """,
                     thread_id,
+                    self._agent_scope,
                 )
                 rows_chrono = list(rows)
             else:
@@ -165,11 +304,12 @@ class PostgresHistoryStore:
                     """
                     SELECT id, role, content
                     FROM conversation_history
-                    WHERE thread_id = $1
+                    WHERE thread_id = $1 AND agent_scope = $2
                     ORDER BY created_at DESC, id DESC
-                    LIMIT $2
+                    LIMIT $3
                     """,
                     thread_id,
+                    self._agent_scope,
                     limit,
                 )
                 rows_chrono = list(reversed(rows))
@@ -199,19 +339,31 @@ class PostgresHistoryStore:
     async def clear(self, thread_id: str) -> None:
         async with self._pool.acquire() as conn:
             await conn.execute(
-                "DELETE FROM conversation_history WHERE thread_id = $1", thread_id
+                "DELETE FROM conversation_history WHERE thread_id = $1 AND agent_scope = $2",
+                thread_id,
+                self._agent_scope,
             )
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None:
         """Replace thread history atomically (single transaction)."""
         async with self._pool.acquire() as conn, conn.transaction():
             await conn.execute(
-                "DELETE FROM conversation_history WHERE thread_id = $1", thread_id
+                "DELETE FROM conversation_history WHERE thread_id = $1 AND agent_scope = $2",
+                thread_id,
+                self._agent_scope,
             )
             for msg in messages:
                 await self._insert_message(conn, thread_id, msg)
 
     async def list_threads(self, limit: int = 50) -> list[ChatThreadSummary]:
+        """Return recent threads, newest first, excluding subagent transcripts.
+
+        A subagent thread_id (prefixed ``SUBAGENT_THREAD_ID_PREFIX``) that
+        finishes after its parent's last turn would otherwise outrank the
+        parent as "newest," making ``--continue`` resume the subagent's
+        transcript under the main-agent prompt and tools instead of the
+        actual previous chat.
+        """
         cap = max(1, min(limit, 200))
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
@@ -223,16 +375,19 @@ class PostgresHistoryStore:
                     (
                         SELECT h2.content
                         FROM conversation_history h2
-                        WHERE h2.thread_id = h.thread_id
+                        WHERE h2.thread_id = h.thread_id AND h2.agent_scope = $1
                         ORDER BY h2.created_at DESC, h2.id DESC
                         LIMIT 1
                     ) AS last_content
                 FROM conversation_history h
+                WHERE h.agent_scope = $1 AND h.thread_id NOT LIKE $3
                 GROUP BY h.thread_id
                 ORDER BY last_message_at DESC
-                LIMIT $1
+                LIMIT $2
                 """,
+                self._agent_scope,
                 cap,
+                f"{SUBAGENT_THREAD_ID_PREFIX}%",
             )
         out: list[ChatThreadSummary] = []
         for row in rows:
@@ -374,7 +529,9 @@ class PostgresUsageStore:
             output_tokens=int(row["output_tokens"]),
             cached_tokens=int(row["cached_tokens"]),
             cost_usd=float(row["cost_usd"]),
-            period_start_ms=int(row["period_start_ms"]) if row["period_start_ms"] is not None else None,
+            period_start_ms=int(row["period_start_ms"])
+            if row["period_start_ms"] is not None
+            else None,
             period_end_ms=int(row["period_end_ms"]) if row["period_end_ms"] is not None else None,
             last_prompt_tokens=last_pt,
             last_estimated_prompt_tokens=last_est,
@@ -884,13 +1041,13 @@ class PostgresScheduledLoopStore:
             )
         return await self.get(loop_id)
 
-    async def defer_tick(self, loop_id: str, *, worker_id: str, reason: str) -> None:
+    async def defer_tick(self, loop_id: str, *, worker_id: str, reason: str) -> bool:
         row = await self.get(loop_id)
         if row is None or row.worker_id != worker_id or not row.tick_in_flight:
-            return
+            return False
         now_ms = int(time.time() * 1000)
         async with self._pool.acquire() as conn:
-            await conn.execute(
+            status = await conn.execute(
                 """
                 UPDATE scheduled_loops
                 SET tick_in_flight = 0, worker_id = NULL, claimed_at_ms = NULL,
@@ -902,6 +1059,7 @@ class PostgresScheduledLoopStore:
                 loop_id,
                 worker_id,
             )
+        return bool(status.split()[-1] == "1")
 
     async def renew_tick_claim(self, loop_id: str, worker_id: str) -> bool:
         now_ms = int(time.time() * 1000)
@@ -1041,31 +1199,351 @@ class PostgresSessionTurnLockStore:
         return row is not None
 
 
+async def _insert_outbox_pending(
+    conn: asyncpg.Connection,
+    *,
+    agent_id: str,
+    thread_id: str,
+    turn_id: str,
+    message_id: str,
+    role: str,
+    content: str,
+    workspace_id: str | None,
+    wing: str,
+    room: str,
+    created_at: str | None = None,
+    traceparent: str | None = None,
+    palace_id: str = "",
+) -> str | None:
+    row_id = outbox_id(agent_id=agent_id, thread_id=thread_id, message_id=message_id, role=role)
+    existing = await conn.fetchval("SELECT status FROM memory_outbox WHERE id = $1", row_id)
+    if existing is not None:
+        return None if str(existing) == STATUS_COMMITTED else row_id
+    await conn.execute(
+        """
+        INSERT INTO memory_outbox (
+          id, agent_id, thread_id, turn_id, message_id, role, content,
+          workspace_id, wing, room, created_at, status, attempts, traceparent,
+          palace_id
+        ) VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'pending', 0, $12, $13
+        )
+        """,
+        row_id,
+        agent_id,
+        thread_id,
+        turn_id,
+        message_id,
+        role,
+        content,
+        workspace_id,
+        wing,
+        room,
+        created_at or utc_now_iso(),
+        traceparent,
+        palace_id,
+    )
+    return row_id
+
+
+class PostgresOutboxStore:
+    """Postgres-backed memory outbox (same table shape as SQLite)."""
+
+    def __init__(self, pool: asyncpg.Pool) -> None:
+        self._pool = pool
+
+    async def insert_pending(
+        self,
+        *,
+        agent_id: str,
+        thread_id: str,
+        turn_id: str,
+        message_id: str,
+        role: str,
+        content: str,
+        workspace_id: str | None,
+        wing: str,
+        room: str,
+        created_at: str | None = None,
+        traceparent: str | None = None,
+        palace_id: str = "",
+        commit: bool = True,
+    ) -> str | None:
+        del commit
+        async with self._pool.acquire() as conn:
+            return await _insert_outbox_pending(
+                conn,
+                agent_id=agent_id,
+                thread_id=thread_id,
+                turn_id=turn_id,
+                message_id=message_id,
+                role=role,
+                content=content,
+                workspace_id=workspace_id,
+                wing=wing,
+                room=room,
+                created_at=created_at,
+                traceparent=traceparent,
+                palace_id=palace_id,
+            )
+
+    async def claim_batch(
+        self,
+        *,
+        agent_id: str,
+        lease_owner: str,
+        limit: int = 16,
+        lease_seconds: int = 30,
+        palace_id: str = "",
+    ) -> list[Any]:
+        now = datetime.now(UTC)
+        now_iso = now.isoformat(timespec="seconds")
+        expires = (now + timedelta(seconds=lease_seconds)).isoformat(timespec="seconds")
+        async with self._pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                """
+                    UPDATE memory_outbox
+                    SET status = 'pending', lease_owner = NULL, lease_expires_at = NULL
+                    WHERE status = 'processing'
+                      AND lease_expires_at IS NOT NULL AND lease_expires_at < $1
+                      AND agent_id = $2
+                    """,
+                now_iso,
+                agent_id,
+            )
+            rows = await conn.fetch(
+                """
+                    SELECT id, thread_id, turn_id, message_id, role, content, workspace_id,
+                           wing, room, created_at, status, attempts, next_attempt_at,
+                           last_error, traceparent, lease_owner, lease_expires_at, agent_id,
+                           palace_id
+                    FROM memory_outbox
+                    WHERE status = 'pending'
+                      AND agent_id = $1
+                      AND (palace_id = $2 OR palace_id = '' OR palace_id IS NULL)
+                      AND (next_attempt_at IS NULL OR next_attempt_at <= $3)
+                    ORDER BY created_at ASC
+                    LIMIT $4
+                    FOR UPDATE SKIP LOCKED
+                    """,
+                agent_id,
+                palace_id,
+                now_iso,
+                limit,
+            )
+            claimed: list[OutboxRow] = []
+            for raw in rows:
+                await conn.execute(
+                    """
+                        UPDATE memory_outbox
+                        SET status = 'processing', lease_owner = $1, lease_expires_at = $2,
+                            attempts = attempts + 1,
+                            palace_id = CASE
+                                WHEN palace_id IS NULL OR palace_id = '' THEN $3
+                                ELSE palace_id
+                            END
+                        WHERE id = $4
+                        """,
+                    lease_owner,
+                    expires,
+                    palace_id,
+                    raw["id"],
+                )
+                claimed.append(
+                    OutboxRow(
+                        id=str(raw["id"]),
+                        thread_id=str(raw["thread_id"]),
+                        turn_id=str(raw["turn_id"]),
+                        message_id=str(raw["message_id"]),
+                        role=str(raw["role"]),
+                        content=raw["content"],
+                        workspace_id=raw["workspace_id"],
+                        wing=str(raw["wing"]),
+                        room=str(raw["room"]),
+                        created_at=str(raw["created_at"]),
+                        status=str(raw["status"]),
+                        attempts=int(raw["attempts"] or 0),
+                        next_attempt_at=raw["next_attempt_at"],
+                        last_error=raw["last_error"],
+                        traceparent=raw["traceparent"],
+                        lease_owner=raw["lease_owner"],
+                        lease_expires_at=raw["lease_expires_at"],
+                        agent_id=str(raw["agent_id"] or ""),
+                        palace_id=str(raw["palace_id"] or ""),
+                    )
+                )
+        return claimed
+
+    async def mark_committed(self, row_ids: list[str], *, lease_owner: str | None = None) -> int:
+        if not row_ids:
+            return 0
+        async with self._pool.acquire() as conn:
+            if lease_owner:
+                result = await conn.execute(
+                    """
+                    UPDATE memory_outbox
+                    SET status = 'committed', lease_owner = NULL, lease_expires_at = NULL,
+                        last_error = NULL, next_attempt_at = NULL
+                    WHERE id = ANY($1::text[]) AND lease_owner = $2
+                    """,
+                    row_ids,
+                    lease_owner,
+                )
+            else:
+                result = await conn.execute(
+                    """
+                    UPDATE memory_outbox
+                    SET status = 'committed', lease_owner = NULL, lease_expires_at = NULL,
+                        last_error = NULL, next_attempt_at = NULL
+                    WHERE id = ANY($1::text[])
+                    """,
+                    row_ids,
+                )
+        try:
+            return int(str(result).split()[-1])
+        except (ValueError, IndexError):
+            return 0
+
+    async def mark_retry(
+        self,
+        row_id: str,
+        *,
+        error_class: str,
+        attempts: int,
+        permanent: bool | None = None,
+        lease_owner: str | None = None,
+    ) -> int:
+        dead = bool(permanent) if permanent is not None else is_permanent_error(error_class)
+        status = STATUS_DEAD if dead else STATUS_PENDING
+        next_at = None if status == STATUS_DEAD else backoff_iso(attempts)
+        async with self._pool.acquire() as conn:
+            if lease_owner:
+                result = await conn.execute(
+                    """
+                    UPDATE memory_outbox
+                    SET status = $1, last_error = $2, next_attempt_at = $3,
+                        lease_owner = NULL, lease_expires_at = NULL
+                    WHERE id = $4 AND lease_owner = $5
+                    """,
+                    status,
+                    error_class,
+                    next_at,
+                    row_id,
+                    lease_owner,
+                )
+            else:
+                result = await conn.execute(
+                    """
+                    UPDATE memory_outbox
+                    SET status = $1, last_error = $2, next_attempt_at = $3,
+                        lease_owner = NULL, lease_expires_at = NULL
+                    WHERE id = $4
+                    """,
+                    status,
+                    error_class,
+                    next_at,
+                    row_id,
+                )
+        try:
+            return int(str(result).split()[-1])
+        except (ValueError, IndexError):
+            return 0
+
+    async def gc_committed(self, *, days: int = 7) -> int:
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat(timespec="seconds")
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                DELETE FROM memory_outbox
+                WHERE status = 'committed' AND created_at < $1
+                """,
+                cutoff,
+            )
+        # asyncpg returns "UPDATE N"
+        try:
+            return int(str(result).split()[-1])
+        except (ValueError, IndexError):
+            return 0
+
+    async def pending_depth(self, *, agent_id: str | None = None) -> tuple[int, float]:
+        async with self._pool.acquire() as conn:
+            if agent_id:
+                row = await conn.fetchrow(
+                    """
+                    SELECT COUNT(*), MIN(created_at)
+                    FROM memory_outbox
+                    WHERE status IN ('pending', 'processing') AND agent_id = $1
+                    """,
+                    agent_id,
+                )
+            else:
+                row = await conn.fetchrow(
+                    """
+                    SELECT COUNT(*), MIN(created_at)
+                    FROM memory_outbox
+                    WHERE status IN ('pending', 'processing')
+                    """
+                )
+        count = int(row[0] or 0) if row else 0
+        oldest = row[1] if row else None
+        age = 0.0
+        if oldest:
+            try:
+                created = datetime.fromisoformat(str(oldest))
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=UTC)
+                age = max(0.0, (datetime.now(UTC) - created).total_seconds())
+            except ValueError:
+                age = 0.0
+        return count, age
+
+    async def dead_depth(self, *, agent_id: str | None = None) -> int:
+        async with self._pool.acquire() as conn:
+            if agent_id:
+                val = await conn.fetchval(
+                    "SELECT COUNT(*) FROM memory_outbox WHERE status = 'dead' AND agent_id = $1",
+                    agent_id,
+                )
+            else:
+                val = await conn.fetchval(
+                    "SELECT COUNT(*) FROM memory_outbox WHERE status = 'dead'"
+                )
+        return int(val or 0)
+
+    async def close(self) -> None:
+        return
+
+
 class PostgresStorageBackend:
     """Postgres-backed storage backend using an asyncpg connection pool."""
 
-    def __init__(self, db_url: str) -> None:
+    shares_outbox = True
+
+    def __init__(self, db_url: str, agent_scope: str = "") -> None:
         self._db_url = db_url
+        self._agent_scope = agent_scope
         self._pool: asyncpg.Pool | None = None
         self._history_store: PostgresHistoryStore | None = None
         self._usage_store: PostgresUsageStore | None = None
         self._runs_store: PostgresRunStore | None = None
         self._scheduled_loops_store: PostgresScheduledLoopStore | None = None
         self._session_turn_lock_store: PostgresSessionTurnLockStore | None = None
+        self._outbox_store: PostgresOutboxStore | None = None
 
     async def open(self, *, run_schema: bool = True) -> None:
         min_size = int(os.environ.get("POSTGRES_POOL_MIN", "1"))
         max_size = int(os.environ.get("POSTGRES_POOL_MAX", "5"))
-        self._pool = await asyncpg.create_pool(
-            self._db_url, min_size=min_size, max_size=max_size
-        )
+        self._pool = await asyncpg.create_pool(self._db_url, min_size=min_size, max_size=max_size)
         if run_schema:
             await _apply_schema(self._pool)
-        self._history_store = PostgresHistoryStore(self._pool)
+            if self._agent_scope:
+                await _warn_if_legacy_unscoped_history(self._pool)
+        self._history_store = PostgresHistoryStore(self._pool, self._agent_scope)
         self._usage_store = PostgresUsageStore(self._pool)
         self._runs_store = PostgresRunStore(self._pool)
         self._scheduled_loops_store = PostgresScheduledLoopStore(self._pool)
         self._session_turn_lock_store = PostgresSessionTurnLockStore(self._pool)
+        self._outbox_store = PostgresOutboxStore(self._pool)
 
     async def close(self) -> None:
         if self._pool is not None:
@@ -1076,6 +1554,7 @@ class PostgresStorageBackend:
             self._runs_store = None
             self._scheduled_loops_store = None
             self._session_turn_lock_store = None
+            self._outbox_store = None
 
     def history(self) -> PostgresHistoryStore:
         if self._history_store is None:
@@ -1101,3 +1580,8 @@ class PostgresStorageBackend:
         if self._session_turn_lock_store is None:
             raise RuntimeError("PostgresStorageBackend.open() has not been called")
         return self._session_turn_lock_store
+
+    def outbox(self) -> PostgresOutboxStore:
+        if self._outbox_store is None:
+            raise RuntimeError("PostgresStorageBackend.open() has not been called")
+        return self._outbox_store

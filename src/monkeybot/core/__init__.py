@@ -8,7 +8,7 @@ Subpackages (import concrete modules from these paths, e.g.
 - ``llm`` — streaming ``Provider`` protocol and per-turn usage; vendor backends in ``monkeybot.providers``
 - ``runtime`` — agent loop and typed streaming events
 - ``context`` — per-turn context assembly and curator
-- ``memory`` — filesystem memory, hook, organizer
+- ``memory`` — MemPalace wake-up, outbox writer, and drawer recall
 - ``persistence`` — SQLite schema, conversation history, run ids, durable runs
 - ``tools`` — tool executor, workspace I/O, sandbox, terminal, inspector
 - ``mcp`` — MCP client and port types

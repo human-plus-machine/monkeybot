@@ -113,7 +113,7 @@ uv sync
 | `huggingface` | `HF_TOKEN` (or `HUGGINGFACE_API_KEY`) | `monkeybot[huggingface]` |
 | `ollama` | None required — `OLLAMA_BASE_URL` (default `http://localhost:11434`) for a non-default server | `monkeybot[ollama]` |
 
-**Agent-first dependencies.** The CLI is thin — it does **not** install provider/storage extras globally. `monkeybot new` scaffolds a `pyproject.toml` with the selected provider (and any `--with` extras). Run plain `uv sync` in the agent directory. `monkeybot run` / `chat` spawn the gateway from that project's interpreter (`.venv/bin/python`, else `uv run python`), and `doctor` checks extras in that same interpreter. For a config-only tree (just `monkeybot_config/`, no `pyproject.toml`) the gateway falls back to the CLI's interpreter, so extras must be installed in the CLI env (`uv tool install --with 'monkeybot[<extra>]' monkeybot-cli`).
+**Agent-first dependencies.** The CLI is thin — it does **not** install provider/storage extras globally. `monkeybot new` scaffolds a `pyproject.toml` with the selected provider (and any `--with` extras). Run plain `uv sync` in the agent directory. `monkeybot run` / `chat` spawn the gateway from that project's interpreter (`.venv/bin/python`, else `uv run python`), and `doctor` checks extras in that same interpreter. For a config-only tree (just `monkeybot_config/`, no `pyproject.toml`) the gateway uses the CLI's interpreter when it already has MonkeyBot 3.x (and MemPalace if memory is on). If memory is enabled and that interpreter cannot import MemPalace, `run` / `chat` provision a cached CLI-managed venv under `~/.cache/monkeybot/runtimes/` holding `monkeybot[memory]` pinned to the running core (never rewrites a `pyproject.toml`). `doctor` reuses that cache when it is already present. Otherwise extras must be installed in the CLI env (`uv tool install --with 'monkeybot[<extra>]' monkeybot-cli`).
 
 `doctor` is the source of truth for credentials and extras — when in doubt, run it and read the `remediation` field (add `monkeybot[<extra>]` to agent deps + `uv sync`).
 
@@ -192,6 +192,7 @@ uv tool install --editable .
 | Command | Purpose |
 |---------|---------|
 | `new` | Scaffold `monkeybot_config/`, `workspace/`, `memory/`, `skills/`, `pyproject.toml`, `.env.example` |
+| `refresh` | Additive update of packaged YAML defaults on an existing agent (keeps AGENT.md, mcp.json, model) |
 | `validate` | Config + paths + MCP shape (`--check-mcp` for network) |
 | `doctor` | Python, provider extra, credentials, port |
 | `run` | Start SSE gateway subprocess |

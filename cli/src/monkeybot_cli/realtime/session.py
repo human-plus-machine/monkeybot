@@ -14,7 +14,11 @@ from monkeybot.core.logging_utils import normalize_log_level
 
 from monkeybot_cli.realtime.audio_io import AudioIOError, AudioPlayer, AudioRecorder
 from monkeybot_cli.realtime.push_to_talk import PushToTalkError, PushToTalkGate
-from monkeybot_cli.runtime_python import DEFAULT_PORT
+from monkeybot_cli.runtime_python import (
+    DEFAULT_PORT,
+    RuntimeUpgradeError,
+    report_runtime_upgrade_error,
+)
 
 app = typer.Typer(help="MonkeyBot realtime CLI helpers (prefer the monkeybot-cli package)")
 
@@ -159,6 +163,8 @@ def run_talk_session(
             audio_player=player,
             push_to_talk=ptt,
         )
+    except RuntimeUpgradeError as exc:
+        return report_runtime_upgrade_error(exc)
     finally:
         if recorder is not None:
             recorder.close()
@@ -249,7 +255,10 @@ def version() -> None:
 
 def main() -> None:
     """Console entrypoint for realtime helpers (prefer ``monkeybot`` from monkeybot-cli)."""
-    app()
+    try:
+        app()
+    except RuntimeUpgradeError as exc:
+        raise SystemExit(report_runtime_upgrade_error(exc)) from None
 
 
 if __name__ == "__main__":

@@ -2,25 +2,42 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from typing import cast
+from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 
+from google.api_core import exceptions as google_exceptions
 from google.cloud import firestore
 from google.cloud.firestore import AsyncClient
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from monkeybot.core.llm.provider import Message, Role
 from monkeybot.core.llm.usage import Usage, UsageBreakdown, UsageBucket, UsageSummary
+from monkeybot.core.memory.ids import outbox_id, utc_now_iso
+from monkeybot.core.memory.outbox import (
+    STATUS_COMMITTED,
+    STATUS_DEAD,
+    STATUS_PENDING,
+    OutboxRow,
+    backoff_iso,
+    is_permanent_error,
+)
 from monkeybot.core.persistence.backends import FirestoreConfig
-from monkeybot.core.persistence.firestore_scheduled_loops import FirestoreScheduledLoopStore
 from monkeybot.core.persistence.durable_runs import (
     SubagentEnvelope,
     SubagentRunRow,
 )
-from monkeybot.core.persistence.thread_summary import ChatThreadSummary, preview_from_content_blob
+from monkeybot.core.persistence.errors import AmbiguousCommitError
+from monkeybot.core.persistence.firestore_scheduled_loops import FirestoreScheduledLoopStore
+from monkeybot.core.persistence.thread_summary import (
+    SUBAGENT_THREAD_ID_PREFIX,
+    ChatThreadSummary,
+    preview_from_content_blob,
+)
 from monkeybot.core.types.content_blocks import ContentBlock
 
 logger = logging.getLogger(__name__)
@@ -32,6 +49,20 @@ def _collection_name(prefix: str, base: str) -> str:
     if not prefix:
         return base
     return f"{prefix}_{base}"
+
+
+def _memory_outbox_collection(client: AsyncClient, prefix: str) -> Any:
+    """Stable collection ID ``memory_outbox`` so shipped indexes apply to every prefix.
+
+    Path: ``{prefix or _default}/outbox/memory_outbox/{row_id}``.
+    """
+    parent = prefix.strip() or "_default"
+    return client.collection(parent).document("outbox").collection("memory_outbox")
+
+
+def _history_document_id(message_id: str) -> str:
+    """Stable Firestore document ID for idempotent message delivery."""
+    return "message_" + hashlib.sha256(message_id.encode()).hexdigest()
 
 
 def _int_value(raw: object, default: int = 0) -> int:
@@ -66,13 +97,93 @@ def _field_float(row: dict[str, object], key: str, default: float = 0.0) -> floa
     return _float_value(row.get(key, default), default)
 
 
-class FirestoreHistoryStore:
-    """Firestore-backed conversation history store."""
+_warned_legacy_unscoped_history = False
 
-    def __init__(self, client: AsyncClient, prefix: str) -> None:
+
+def _history_row(
+    thread_id: str,
+    role: str,
+    payload: str,
+    created_at: int,
+    agent_scope: str,
+    turn_id: str | None,
+    message_id: str | None,
+) -> dict[str, Any]:
+    return {
+        "thread_id": thread_id,
+        "role": role,
+        "content": payload,
+        "created_at": created_at,
+        "agent_scope": agent_scope,
+        "turn_id": turn_id,
+        "message_id": message_id,
+    }
+
+
+def _thread_summary_update(
+    thread_id: str, created_at: int, payload: str, agent_scope: str
+) -> dict[str, Any]:
+    return {
+        "thread_id": thread_id,
+        "last_message_at": created_at,
+        "message_count": firestore.Increment(1),
+        "last_content": payload,
+        "agent_scope": agent_scope,
+    }
+
+
+def firestore_summary_doc_id(agent_scope: str, thread_id: str) -> str:
+    """Canonical id of a thread's ``threads``-collection summary doc:
+    ``sha256(agent_scope + "\\0" + thread_id)``, hex-encoded. Public (not just
+    the equivalent private instance method) so a manual migration script can
+    compute the same id the store does — see
+    ``docs/migrations/agent-scope-namespacing.md``.
+    """
+    return hashlib.sha256(f"{agent_scope}\x00{thread_id}".encode()).hexdigest()
+
+
+def _warn_legacy_unscoped_history_possible() -> None:
+    """Log once per process that pre-migration Firestore documents may be
+    unreachable. See ``docs/migrations/agent-scope-namespacing.md``.
+    """
+    global _warned_legacy_unscoped_history
+    if _warned_legacy_unscoped_history:
+        return
+    _warned_legacy_unscoped_history = True
+    logger.warning(
+        "Firestore conversation_history/threads documents written before "
+        "agent_scope existed have no agent_scope field and are not reachable "
+        "by this (or any) agent-scoped store's load/list_threads/reset — "
+        "Firestore cannot query for a missing field, and this store makes no "
+        "attempt to guess it. See docs/migrations/agent-scope-namespacing.md "
+        "for the required manual migration."
+    )
+
+
+class FirestoreHistoryStore:
+    """Firestore-backed conversation history store, scoped to ``agent_scope``.
+
+    ``agent_scope`` isolates threads when one Firestore database is shared
+    across gateways for different agent roots — without it, ``list_threads``
+    would surface another agent's newest transcript. Defaults to ``''``
+    (unscoped) for in-process/test callers; production gateways pass the
+    resolved agent root.
+
+    The compound ``agent_scope`` equality + ``last_message_at``/``created_at``
+    order-by queries below require a Firestore composite index per collection;
+    Firestore raises a clear error with a console link to create it on first use.
+    """
+
+    def __init__(self, client: AsyncClient, prefix: str, agent_scope: str = "") -> None:
         self._client = client
+        self._prefix = prefix
         self._collection = _collection_name(prefix, "conversation_history")
         self._threads_collection = _collection_name(prefix, "threads")
+        self._agent_scope = agent_scope
+
+    def _summary_doc_id(self, thread_id: str) -> str:
+        """This store's summary doc id — see :func:`firestore_summary_doc_id`."""
+        return firestore_summary_doc_id(self._agent_scope, thread_id)
 
     async def _upsert_thread_summary(
         self,
@@ -81,22 +192,28 @@ class FirestoreHistoryStore:
         created_at: int,
         content: str,
     ) -> None:
-        """Maintain one summary doc per thread for indexed ``list_threads`` reads."""
-        thread_ref = self._client.collection(self._threads_collection).document(thread_id)
+        """Maintain one summary doc per (scope, thread) for indexed ``list_threads`` reads."""
+        thread_ref = self._client.collection(self._threads_collection).document(
+            self._summary_doc_id(thread_id)
+        )
         await thread_ref.set(
-            {
-                "thread_id": thread_id,
-                "last_message_at": created_at,
-                "message_count": firestore.Increment(1),
-                "last_content": content,
-            },
+            _thread_summary_update(thread_id, created_at, content, self._agent_scope),
             merge=True,
         )
 
     async def _delete_thread_summary(self, thread_id: str) -> None:
-        await self._client.collection(self._threads_collection).document(thread_id).delete()
+        await self._client.collection(self._threads_collection).document(
+            self._summary_doc_id(thread_id)
+        ).delete()
 
-    async def append(self, thread_id: str, message: Message) -> None:
+    async def append(
+        self,
+        thread_id: str,
+        message: Message,
+        *,
+        turn_id: str | None = None,
+        message_id: str | None = None,
+    ) -> None:
         role = message.role
         if role not in _VALID_ROLES:
             raise ValueError(f"invalid role: {role!r}")
@@ -106,15 +223,142 @@ class FirestoreHistoryStore:
             ensure_ascii=False,
         )
         created_at = int(time.time() * 1000)
-        await self._client.collection(self._collection).add(
-            {
-                "thread_id": thread_id,
-                "role": role,
-                "content": payload,
-                "created_at": created_at,
-            }
+        history_data = _history_row(
+            thread_id, role, payload, created_at, self._agent_scope, turn_id, message_id
         )
-        await self._upsert_thread_summary(thread_id, created_at=created_at, content=payload)
+        # Subagent transcripts (thread_id prefixed SUBAGENT_THREAD_ID_PREFIX) skip
+        # the summary doc entirely: list_threads() reads only threads_collection,
+        # so a subagent that finishes after its parent's last turn would otherwise
+        # outrank the parent as "newest," making --continue resume the subagent's
+        # transcript under the main-agent prompt and tools instead of the actual
+        # previous chat. append()/load() for the subagent's own thread_id are
+        # unaffected — only its visibility via list_threads is suppressed.
+        is_subagent = thread_id.startswith(SUBAGENT_THREAD_ID_PREFIX)
+        if not message_id:
+            await self._client.collection(self._collection).add(history_data)
+            if not is_subagent:
+                await self._upsert_thread_summary(thread_id, created_at=created_at, content=payload)
+            return
+
+        existing_query = (
+            self._client.collection(self._collection)
+            .where(filter=FieldFilter("message_id", "==", message_id))
+            .limit(1)
+        )
+        async for _existing in existing_query.stream():
+            return
+        hist_ref = self._client.collection(self._collection).document(
+            _history_document_id(message_id)
+        )
+        thread_ref = self._client.collection(self._threads_collection).document(thread_id)
+        summary_fields = _thread_summary_update(thread_id, created_at, payload, self._agent_scope)
+
+        async def _append_body(txn: firestore.AsyncTransaction) -> None:
+            snapshot = await hist_ref.get(transaction=txn)
+            if snapshot.exists:
+                return
+            txn.set(hist_ref, history_data)
+            if not is_subagent:
+                txn.set(thread_ref, summary_fields, merge=True)
+
+        append_txn = cast(
+            Callable[[firestore.AsyncTransaction], Awaitable[None]],
+            firestore.async_transactional(_append_body),
+        )
+        await append_txn(self._client.transaction())
+
+    async def append_with_outbox(
+        self,
+        thread_id: str,
+        message: Message,
+        *,
+        turn_id: str,
+        message_id: str,
+        outbox: dict[str, Any],
+    ) -> None:
+        """Insert history and a pending memory outbox row in one transaction."""
+        role = message.role
+        if role not in _VALID_ROLES:
+            raise ValueError(f"invalid role: {role!r}")
+        payload = json.dumps(
+            [b.to_dict() for b in message.content],
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        created_at = int(time.time() * 1000)
+        row_id = outbox_id(
+            agent_id=str(outbox.get("agent_id") or ""),
+            thread_id=str(outbox.get("thread_id") or thread_id),
+            message_id=str(outbox.get("message_id") or message_id),
+            role=str(outbox.get("role") or role),
+        )
+        history_data = _history_row(
+            thread_id, role, payload, created_at, self._agent_scope, turn_id, message_id
+        )
+        outbox_data = {
+            "id": row_id,
+            "agent_id": str(outbox.get("agent_id") or ""),
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "message_id": message_id,
+            "role": role,
+            "content": outbox.get("content"),
+            "workspace_id": outbox.get("workspace_id"),
+            "wing": outbox.get("wing") or "main",
+            "room": outbox.get("room") or "conversation",
+            "created_at": outbox.get("created_at") or utc_now_iso(),
+            "status": "pending",
+            "attempts": 0,
+            "next_attempt_at": None,
+            "last_error": None,
+            "traceparent": outbox.get("traceparent"),
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "palace_id": str(outbox.get("palace_id") or ""),
+        }
+        legacy_history_exists = False
+        existing_query = (
+            self._client.collection(self._collection)
+            .where(filter=FieldFilter("message_id", "==", message_id))
+            .limit(1)
+        )
+        async for _existing in existing_query.stream():
+            legacy_history_exists = True
+            break
+
+        hist_ref = self._client.collection(self._collection).document(
+            _history_document_id(message_id)
+        )
+        thread_ref = self._client.collection(self._threads_collection).document(thread_id)
+        summary_fields = _thread_summary_update(thread_id, created_at, payload, self._agent_scope)
+        outbox_ref = _memory_outbox_collection(self._client, self._prefix).document(row_id)
+
+        async def _append_body(txn: firestore.AsyncTransaction) -> None:
+            history_snapshot = await hist_ref.get(transaction=txn)
+            outbox_snapshot = await outbox_ref.get(transaction=txn)
+            if not legacy_history_exists and not history_snapshot.exists:
+                txn.set(hist_ref, history_data)
+                txn.set(thread_ref, summary_fields, merge=True)
+            if not outbox_snapshot.exists:
+                txn.set(outbox_ref, outbox_data)
+
+        append_txn = cast(
+            Callable[[firestore.AsyncTransaction], Awaitable[None]],
+            firestore.async_transactional(_append_body),
+        )
+        try:
+            await append_txn(self._client.transaction())
+        except (
+            TimeoutError,
+            OSError,
+            ConnectionError,
+            google_exceptions.DeadlineExceeded,
+            google_exceptions.ServiceUnavailable,
+            google_exceptions.InternalServerError,
+            google_exceptions.Aborted,
+            google_exceptions.Unknown,
+        ) as extra:
+            raise AmbiguousCommitError(str(extra)) from extra
 
     async def load(self, thread_id: str, limit: int | None = None) -> list[Message]:
         if limit is not None:
@@ -122,6 +366,7 @@ class FirestoreHistoryStore:
             query = (
                 self._client.collection(self._collection)
                 .where(filter=FieldFilter("thread_id", "==", thread_id))
+                .where(filter=FieldFilter("agent_scope", "==", self._agent_scope))
                 .order_by("created_at", direction=firestore.Query.DESCENDING)
                 .limit(limit)
             )
@@ -131,6 +376,7 @@ class FirestoreHistoryStore:
             query = (
                 self._client.collection(self._collection)
                 .where(filter=FieldFilter("thread_id", "==", thread_id))
+                .where(filter=FieldFilter("agent_scope", "==", self._agent_scope))
                 .order_by("created_at", direction=firestore.Query.ASCENDING)
             )
             rows = [doc async for doc in query.stream()]
@@ -167,8 +413,10 @@ class FirestoreHistoryStore:
         return out
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None:
-        query = self._client.collection(self._collection).where(
-            filter=FieldFilter("thread_id", "==", thread_id)
+        query = (
+            self._client.collection(self._collection)
+            .where(filter=FieldFilter("thread_id", "==", thread_id))
+            .where(filter=FieldFilter("agent_scope", "==", self._agent_scope))
         )
         batch = self._client.batch()
         count = 0
@@ -186,25 +434,55 @@ class FirestoreHistoryStore:
             await self.append(thread_id, msg)
 
     async def list_threads(self, limit: int = 50) -> list[ChatThreadSummary]:
+        """Return recent threads, newest first, excluding subagent transcripts.
+
+        Filtered here (client-side, not in the query) rather than only at
+        write time: an ``append()`` guard alone leaves *pre-existing* subagent
+        summary docs — written before that guard existed — still listable, so
+        a subagent that finished after its parent's last turn could still
+        outrank it as "newest" and get resumed by ``--continue`` instead of
+        the actual previous chat. Firestore has no server-side "does not
+        start with" filter to push this into the query itself.
+
+        Paginates past filtered-out docs rather than applying ``.limit(cap)``
+        before the filter: with a single unpaginated ``limit(1)`` query (what
+        ``--continue`` sends), a subagent summary ranked newest would consume
+        the entire page and get filtered out, returning nothing even though a
+        real thread is next in line.
+        """
         cap = max(1, min(limit, 200))
-        query = (
-            self._client.collection(self._threads_collection)
-            .order_by("last_message_at", direction=firestore.Query.DESCENDING)
-            .limit(cap)
-        )
         out: list[ChatThreadSummary] = []
-        async for doc in query.stream():
-            data = doc.to_dict() or {}
-            thread_id = str(data.get("thread_id") or doc.id)
-            preview = preview_from_content_blob(str(data.get("last_content", "")))
-            out.append(
-                ChatThreadSummary(
-                    thread_id=thread_id,
-                    last_message_at=_field_int(data, "last_message_at"),
-                    message_count=_field_int(data, "message_count"),
-                    preview=preview or "(empty)",
-                )
+        cursor: Any = None
+        while len(out) < cap:
+            query = (
+                self._client.collection(self._threads_collection)
+                .where(filter=FieldFilter("agent_scope", "==", self._agent_scope))
+                .order_by("last_message_at", direction=firestore.Query.DESCENDING)
             )
+            if cursor is not None:
+                query = query.start_after(cursor)
+            docs = [doc async for doc in query.limit(cap).stream()]
+            if not docs:
+                break
+            for doc in docs:
+                data = doc.to_dict() or {}
+                thread_id = str(data.get("thread_id") or doc.id)
+                if thread_id.startswith(SUBAGENT_THREAD_ID_PREFIX):
+                    continue
+                preview = preview_from_content_blob(str(data.get("last_content", "")))
+                out.append(
+                    ChatThreadSummary(
+                        thread_id=thread_id,
+                        last_message_at=_field_int(data, "last_message_at"),
+                        message_count=_field_int(data, "message_count"),
+                        preview=preview or "(empty)",
+                    )
+                )
+                if len(out) >= cap:
+                    break
+            cursor = docs[-1]
+            if len(docs) < cap:
+                break  # fewer than a full page came back — collection exhausted
         return out
 
 
@@ -252,9 +530,7 @@ class FirestoreUsageStore:
         if thread_id is None:
             doc_stream = collection.stream()
         else:
-            doc_stream = collection.where(
-                filter=FieldFilter("thread_id", "==", thread_id)
-            ).stream()
+            doc_stream = collection.where(filter=FieldFilter("thread_id", "==", thread_id)).stream()
         rows: list[dict[str, object]] = []
         async for doc in doc_stream:
             data = doc.to_dict() or {}
@@ -457,7 +733,9 @@ class FirestoreRunStore:
             return True
 
         claim_txn = cast(
-            Callable[[firestore.AsyncTransaction, firestore.AsyncDocumentReference], Awaitable[bool]],
+            Callable[
+                [firestore.AsyncTransaction, firestore.AsyncDocumentReference], Awaitable[bool]
+            ],
             firestore.async_transactional(_claim_body),
         )
         return bool(await claim_txn(transaction, doc_ref))
@@ -481,7 +759,9 @@ class FirestoreRunStore:
             return True
 
         renew_txn = cast(
-            Callable[[firestore.AsyncTransaction, firestore.AsyncDocumentReference], Awaitable[bool]],
+            Callable[
+                [firestore.AsyncTransaction, firestore.AsyncDocumentReference], Awaitable[bool]
+            ],
             firestore.async_transactional(_renew_body),
         )
         return bool(await renew_txn(transaction, doc_ref))
@@ -534,7 +814,9 @@ class FirestoreRunStore:
             return True
 
         reset_txn = cast(
-            Callable[[firestore.AsyncTransaction, firestore.AsyncDocumentReference], Awaitable[bool]],
+            Callable[
+                [firestore.AsyncTransaction, firestore.AsyncDocumentReference], Awaitable[bool]
+            ],
             firestore.async_transactional(_reset_body),
         )
         return bool(await reset_txn(transaction, doc_ref))
@@ -602,7 +884,9 @@ class FirestoreRunStore:
             return True
 
         complete_txn = cast(
-            Callable[[firestore.AsyncTransaction, firestore.AsyncDocumentReference], Awaitable[bool]],
+            Callable[
+                [firestore.AsyncTransaction, firestore.AsyncDocumentReference], Awaitable[bool]
+            ],
             firestore.async_transactional(_complete_body),
         )
         return bool(await complete_txn(transaction, doc_ref))
@@ -642,7 +926,9 @@ class FirestoreRunStore:
             return True
 
         fail_txn = cast(
-            Callable[[firestore.AsyncTransaction, firestore.AsyncDocumentReference], Awaitable[bool]],
+            Callable[
+                [firestore.AsyncTransaction, firestore.AsyncDocumentReference], Awaitable[bool]
+            ],
             firestore.async_transactional(_fail_body),
         )
         return bool(await fail_txn(transaction, doc_ref))
@@ -683,9 +969,8 @@ class FirestoreSessionTurnLockStore:
 
     async def release_stale_claims(self, stale_after_ms: int) -> int:
         cutoff = int(time.time() * 1000) - stale_after_ms
-        query = (
-            self._client.collection(self._collection)
-            .where(filter=FieldFilter("claimed_at_ms", "<", cutoff))
+        query = self._client.collection(self._collection).where(
+            filter=FieldFilter("claimed_at_ms", "<", cutoff)
         )
         reset = 0
         batch = self._client.batch()
@@ -734,7 +1019,9 @@ class FirestoreSessionTurnLockStore:
             return False
 
         claim_txn = cast(
-            Callable[[firestore.AsyncTransaction, firestore.AsyncDocumentReference], Awaitable[bool]],
+            Callable[
+                [firestore.AsyncTransaction, firestore.AsyncDocumentReference], Awaitable[bool]
+            ],
             firestore.async_transactional(_claim_body),
         )
         return bool(await claim_txn(transaction, doc_ref))
@@ -756,7 +1043,9 @@ class FirestoreSessionTurnLockStore:
             txn.update(ref, {"request_id": None, "claimed_at_ms": None})
 
         release_txn = cast(
-            Callable[[firestore.AsyncTransaction, firestore.AsyncDocumentReference], Awaitable[None]],
+            Callable[
+                [firestore.AsyncTransaction, firestore.AsyncDocumentReference], Awaitable[None]
+            ],
             firestore.async_transactional(_release_body),
         )
         await release_txn(transaction, doc_ref)
@@ -769,17 +1058,329 @@ class FirestoreSessionTurnLockStore:
         return data.get("request_id") is not None
 
 
+class FirestoreOutboxStore:
+    """Firestore-backed memory outbox (one document per row)."""
+
+    def __init__(self, client: AsyncClient, prefix: str) -> None:
+        self._client = client
+        self._col = _memory_outbox_collection(client, prefix)
+
+    def _ref(self, row_id: str) -> Any:
+        return self._col.document(row_id)
+
+    def _row_from_data(self, row_id: str, data: dict[str, Any]) -> Any:
+        return OutboxRow(
+            id=row_id,
+            thread_id=str(data.get("thread_id") or ""),
+            turn_id=str(data.get("turn_id") or ""),
+            message_id=str(data.get("message_id") or ""),
+            role=str(data.get("role") or ""),
+            content=data.get("content"),
+            workspace_id=data.get("workspace_id"),
+            wing=str(data.get("wing") or "main"),
+            room=str(data.get("room") or "conversation"),
+            created_at=str(data.get("created_at") or ""),
+            status=str(data.get("status") or "pending"),
+            attempts=int(data.get("attempts") or 0),
+            next_attempt_at=data.get("next_attempt_at"),
+            last_error=data.get("last_error"),
+            traceparent=data.get("traceparent"),
+            lease_owner=data.get("lease_owner"),
+            lease_expires_at=data.get("lease_expires_at"),
+            agent_id=str(data.get("agent_id") or ""),
+            palace_id=str(data.get("palace_id") or ""),
+        )
+
+    async def insert_pending(
+        self,
+        *,
+        agent_id: str,
+        thread_id: str,
+        turn_id: str,
+        message_id: str,
+        role: str,
+        content: str,
+        workspace_id: str | None,
+        wing: str,
+        room: str,
+        created_at: str | None = None,
+        traceparent: str | None = None,
+        palace_id: str = "",
+        commit: bool = True,
+    ) -> str | None:
+        del commit
+        row_id = outbox_id(agent_id=agent_id, thread_id=thread_id, message_id=message_id, role=role)
+        snap = await self._ref(row_id).get()
+        if snap.exists:
+            data = snap.to_dict() or {}
+            return None if str(data.get("status")) == STATUS_COMMITTED else row_id
+        await self._ref(row_id).set(
+            {
+                "id": row_id,
+                "agent_id": agent_id,
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+                "message_id": message_id,
+                "role": role,
+                "content": content,
+                "workspace_id": workspace_id,
+                "wing": wing,
+                "room": room,
+                "created_at": created_at or utc_now_iso(),
+                "status": "pending",
+                "attempts": 0,
+                "next_attempt_at": None,
+                "last_error": None,
+                "traceparent": traceparent,
+                "lease_owner": None,
+                "lease_expires_at": None,
+                "palace_id": palace_id,
+            }
+        )
+        return row_id
+
+    async def claim_batch(
+        self,
+        *,
+        agent_id: str,
+        lease_owner: str,
+        limit: int = 16,
+        lease_seconds: int = 30,
+        palace_id: str = "",
+    ) -> list[Any]:
+        now = datetime.now(UTC)
+        now_iso = now.isoformat(timespec="seconds")
+        expires = (now + timedelta(seconds=lease_seconds)).isoformat(timespec="seconds")
+        query = self._col.where(filter=FieldFilter("agent_id", "==", agent_id)).where(
+            filter=FieldFilter("status", "==", "pending")
+        )
+        if palace_id:
+            query = query.where(filter=FieldFilter("palace_id", "in", [palace_id, ""]))
+        query = query.order_by("created_at").limit(limit * 4)
+        docs = [doc async for doc in query.stream()]
+        claimed: list[Any] = []
+        for doc in docs:
+            if len(claimed) >= limit:
+                break
+            transaction = self._client.transaction()
+
+            async def _claim_body(
+                txn: firestore.AsyncTransaction,
+                ref: firestore.AsyncDocumentReference,
+            ) -> Any | None:
+                snapshot = await ref.get(transaction=txn)
+                if not snapshot.exists:
+                    return None
+                data = snapshot.to_dict() or {}
+                if str(data.get("status")) != "pending":
+                    return None
+                row_palace = str(data.get("palace_id") or "")
+                if palace_id and row_palace and row_palace != palace_id:
+                    return None
+                next_at = data.get("next_attempt_at")
+                if next_at and str(next_at) > now_iso:
+                    return None
+                txn.update(
+                    ref,
+                    {
+                        "status": "processing",
+                        "lease_owner": lease_owner,
+                        "lease_expires_at": expires,
+                        "attempts": int(data.get("attempts") or 0) + 1,
+                        "palace_id": row_palace or palace_id,
+                    },
+                )
+                return self._row_from_data(ref.id, data)
+
+            claim_txn = cast(
+                Callable[
+                    [firestore.AsyncTransaction, firestore.AsyncDocumentReference],
+                    Awaitable[Any | None],
+                ],
+                firestore.async_transactional(_claim_body),
+            )
+            row = await claim_txn(transaction, doc.reference)
+            if row is not None:
+                claimed.append(row)
+        expired_q = (
+            self._col.where(filter=FieldFilter("agent_id", "==", agent_id))
+            .where(filter=FieldFilter("status", "==", "processing"))
+            .where(filter=FieldFilter("lease_expires_at", "<", now_iso))
+        )
+        async for doc in expired_q.stream():
+            transaction = self._client.transaction()
+
+            async def _release_body(
+                txn: firestore.AsyncTransaction,
+                ref: firestore.AsyncDocumentReference,
+            ) -> None:
+                snapshot = await ref.get(transaction=txn)
+                if not snapshot.exists:
+                    return
+                data = snapshot.to_dict() or {}
+                if str(data.get("status")) != "processing":
+                    return
+                expires_at = data.get("lease_expires_at")
+                if not expires_at or str(expires_at) >= now_iso:
+                    return
+                txn.update(
+                    ref,
+                    {"status": "pending", "lease_owner": None, "lease_expires_at": None},
+                )
+
+            release_txn = cast(
+                Callable[
+                    [firestore.AsyncTransaction, firestore.AsyncDocumentReference],
+                    Awaitable[None],
+                ],
+                firestore.async_transactional(_release_body),
+            )
+            await release_txn(transaction, doc.reference)
+        return claimed
+
+    async def mark_committed(self, row_ids: list[str], *, lease_owner: str | None = None) -> int:
+        n = 0
+        for row_id in row_ids:
+            transaction = self._client.transaction()
+
+            async def _commit_body(
+                txn: firestore.AsyncTransaction,
+                ref: firestore.AsyncDocumentReference,
+            ) -> bool:
+                snapshot = await ref.get(transaction=txn)
+                if not snapshot.exists:
+                    return False
+                data = snapshot.to_dict() or {}
+                if lease_owner and str(data.get("lease_owner") or "") != lease_owner:
+                    return False
+                txn.update(
+                    ref,
+                    {
+                        "status": "committed",
+                        "lease_owner": None,
+                        "lease_expires_at": None,
+                        "last_error": None,
+                        "next_attempt_at": None,
+                    },
+                )
+                return True
+
+            commit_txn = cast(
+                Callable[
+                    [firestore.AsyncTransaction, firestore.AsyncDocumentReference],
+                    Awaitable[bool],
+                ],
+                firestore.async_transactional(_commit_body),
+            )
+            if await commit_txn(transaction, self._ref(row_id)):
+                n += 1
+        return n
+
+    async def mark_retry(
+        self,
+        row_id: str,
+        *,
+        error_class: str,
+        attempts: int,
+        permanent: bool | None = None,
+        lease_owner: str | None = None,
+    ) -> int:
+        dead = bool(permanent) if permanent is not None else is_permanent_error(error_class)
+        status = STATUS_DEAD if dead else STATUS_PENDING
+        next_at = None if status == STATUS_DEAD else backoff_iso(attempts)
+        transaction = self._client.transaction()
+
+        async def _retry_body(
+            txn: firestore.AsyncTransaction,
+            ref: firestore.AsyncDocumentReference,
+        ) -> bool:
+            snapshot = await ref.get(transaction=txn)
+            if not snapshot.exists:
+                return False
+            data = snapshot.to_dict() or {}
+            if lease_owner and str(data.get("lease_owner") or "") != lease_owner:
+                return False
+            txn.update(
+                ref,
+                {
+                    "status": status,
+                    "last_error": error_class,
+                    "next_attempt_at": next_at,
+                    "lease_owner": None,
+                    "lease_expires_at": None,
+                },
+            )
+            return True
+
+        retry_txn = cast(
+            Callable[
+                [firestore.AsyncTransaction, firestore.AsyncDocumentReference],
+                Awaitable[bool],
+            ],
+            firestore.async_transactional(_retry_body),
+        )
+        return 1 if await retry_txn(transaction, self._ref(row_id)) else 0
+
+    async def gc_committed(self, *, days: int = 7) -> int:
+        cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat(timespec="seconds")
+        query = self._col.where(filter=FieldFilter("status", "==", "committed"))
+        n = 0
+        async for doc in query.stream():
+            data = doc.to_dict() or {}
+            created = str(data.get("created_at") or "")
+            if created and created < cutoff:
+                await doc.reference.delete()
+                n += 1
+        return n
+
+    async def pending_depth(self, *, agent_id: str | None = None) -> tuple[int, float]:
+        query: Any = self._col.where(filter=FieldFilter("status", "in", ["pending", "processing"]))
+        if agent_id:
+            query = query.where(filter=FieldFilter("agent_id", "==", agent_id))
+        count = 0
+        oldest: str | None = None
+        async for doc in query.stream():
+            data = doc.to_dict() or {}
+            count += 1
+            created = str(data.get("created_at") or "")
+            if created and (oldest is None or created < oldest):
+                oldest = created
+        age = 0.0
+        if oldest:
+            try:
+                created_dt = datetime.fromisoformat(oldest)
+                if created_dt.tzinfo is None:
+                    created_dt = created_dt.replace(tzinfo=UTC)
+                age = max(0.0, (datetime.now(UTC) - created_dt).total_seconds())
+            except ValueError:
+                age = 0.0
+        return count, age
+
+    async def dead_depth(self, *, agent_id: str | None = None) -> int:
+        query: Any = self._col.where(filter=FieldFilter("status", "==", "dead"))
+        if agent_id:
+            query = query.where(filter=FieldFilter("agent_id", "==", agent_id))
+        return len([doc async for doc in query.stream()])
+
+    async def close(self) -> None:
+        return
+
+
 class FirestoreStorageBackend:
     """Firestore-backed storage backend using ``google.cloud.firestore.AsyncClient``."""
 
-    def __init__(self, config: FirestoreConfig) -> None:
+    shares_outbox = True
+
+    def __init__(self, config: FirestoreConfig, agent_scope: str = "") -> None:
         self._config = config
+        self._agent_scope = agent_scope
         self._client: AsyncClient | None = None
         self._history_store: FirestoreHistoryStore | None = None
         self._usage_store: FirestoreUsageStore | None = None
         self._runs_store: FirestoreRunStore | None = None
         self._scheduled_loops_store: FirestoreScheduledLoopStore | None = None
         self._session_turn_lock_store: FirestoreSessionTurnLockStore | None = None
+        self._outbox_store: FirestoreOutboxStore | None = None
 
     async def open(self, *, run_schema: bool = True) -> None:
         """Open the Firestore client.
@@ -791,12 +1392,15 @@ class FirestoreStorageBackend:
             project=self._config.project,
             database=self._config.database,
         )
+        if self._agent_scope:
+            _warn_legacy_unscoped_history_possible()
         prefix = self._config.prefix
-        self._history_store = FirestoreHistoryStore(self._client, prefix)
+        self._history_store = FirestoreHistoryStore(self._client, prefix, self._agent_scope)
         self._usage_store = FirestoreUsageStore(self._client, prefix)
         self._runs_store = FirestoreRunStore(self._client, prefix)
         self._scheduled_loops_store = FirestoreScheduledLoopStore(self._client, prefix)
         self._session_turn_lock_store = FirestoreSessionTurnLockStore(self._client, prefix)
+        self._outbox_store = FirestoreOutboxStore(self._client, prefix)
 
     async def close(self) -> None:
         if self._client is not None:
@@ -808,6 +1412,7 @@ class FirestoreStorageBackend:
             self._runs_store = None
             self._scheduled_loops_store = None
             self._session_turn_lock_store = None
+            self._outbox_store = None
 
     def history(self) -> FirestoreHistoryStore:
         if self._history_store is None:
@@ -833,3 +1438,8 @@ class FirestoreStorageBackend:
         if self._session_turn_lock_store is None:
             raise RuntimeError("FirestoreStorageBackend.open() has not been called")
         return self._session_turn_lock_store
+
+    def outbox(self) -> FirestoreOutboxStore:
+        if self._outbox_store is None:
+            raise RuntimeError("FirestoreStorageBackend.open() has not been called")
+        return self._outbox_store

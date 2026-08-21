@@ -203,16 +203,23 @@ async def _execute_claimed_tick(
     claim_heartbeat_interval_s: float,
 ) -> None:
     if row.skip_if_busy and await _session_is_busy(session_busy, row.session_id):
-        await store.defer_tick(
+        deferred = await store.defer_tick(
             row.loop_id,
             worker_id=worker_id,
             reason="session busy; deferred",
         )
-        logger.info(
-            "scheduler deferred tick loop_id=%s session_id=%s (busy)",
-            row.loop_id,
-            row.session_id,
-        )
+        if deferred:
+            logger.info(
+                "scheduler deferred tick loop_id=%s session_id=%s (busy)",
+                row.loop_id,
+                row.session_id,
+            )
+        else:
+            logger.warning(
+                "scheduler defer_tick no-op loop_id=%s session_id=%s (claim lost)",
+                row.loop_id,
+                row.session_id,
+            )
         return
 
     heartbeat_stop = asyncio.Event()
@@ -236,16 +243,23 @@ async def _execute_claimed_tick(
             [Text(text=tick_prompt)],
         )
         if result.status is TickInvokeStatus.SESSION_BUSY:
-            await store.defer_tick(
+            deferred = await store.defer_tick(
                 row.loop_id,
                 worker_id=worker_id,
                 reason="session busy; deferred",
             )
-            logger.info(
-                "scheduler deferred tick loop_id=%s session_id=%s (remote busy)",
-                row.loop_id,
-                row.session_id,
-            )
+            if deferred:
+                logger.info(
+                    "scheduler deferred tick loop_id=%s session_id=%s (remote busy)",
+                    row.loop_id,
+                    row.session_id,
+                )
+            else:
+                logger.warning(
+                    "scheduler defer_tick no-op loop_id=%s session_id=%s (claim lost)",
+                    row.loop_id,
+                    row.session_id,
+                )
             return
 
         error = result.error if result.status is TickInvokeStatus.ERROR else None

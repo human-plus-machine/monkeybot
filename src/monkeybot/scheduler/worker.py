@@ -46,6 +46,10 @@ def _gateway_base_url() -> str:
 async def _run() -> None:
     ensure_gateway_runtime_env()
     db_url = os.environ.get("DB_URL", "sqlite:///data/monkeybot.db")
+    # No agent_scope: this worker only reads/writes .scheduled_loops(), never
+    # .history() (ticks are invoked over HTTP against the gateway's own
+    # already-scoped backend) — conversation_history's agent-scope isolation
+    # (PR #179) doesn't apply to what this process touches.
     backend: StorageBackend = create_storage_backend(db_url)
     await backend.open(run_schema=auto_schema_enabled_from_config())
     settings = scheduler_settings()

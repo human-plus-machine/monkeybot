@@ -25,6 +25,7 @@ Validate/doctor: `doctor` → `runtime.port.free`.
 | `skills_path` | `./skills` | Point at a different skills tree |
 | `db_url` | `sqlite:///data/monkeybot.db` | **Postgres for parallel subagents** — SQLite hits `database is locked` under concurrency |
 | `auto_schema` | `true` | Set `false` when migrations own the schema (managed Postgres with DML-only runtime user) |
+| `agent_id` | resolved agent root path | **Set explicitly when this agent is relocatable** — moved to a new path, redeployed with a different mount point, or run as multiple replicas that must share one conversation history. Without it, conversation-history scoping (which agent owns which thread, on a shared `db_url`) keys off the filesystem path, so a path change strands existing history. Once set, keep the value stable across deploys. |
 | `mcp_config` | `./monkeybot_config/mcp.json` | Relocate MCP definitions |
 | `command_allowlist_config` | `./monkeybot_config/command_allowlist.yaml` | Relocate the shell allowlist |
 | `workspace_root` | `./workspace` (if present) | Change the file-tool sandbox root |
@@ -86,9 +87,15 @@ Recent window by default; LLM curator only when the index is token-heavy. On cur
 
 When the prompt shows fewer entries than exist, a structural confidence score triggers a `search_memory` nudge. Skill names are always shown in full in the prompt; use `list_skills` to get the skills root path.
 
-## `memory_hook`
+## `memory`
 
-`enabled: true` — automatic memory capture after turns. Disable to manage memory manually.
+MemPalace capture, wake-up, and search teaching are on by default. Turn them off with `memory.enabled: false` or `MONKEYBOT_MEMORY_HOOK_ENABLED=0`. The vector stack is the optional `monkeybot[memory]` extra — omit it (and set `enabled: false`) when you do not want chromadb/onnxruntime.
+
+| Field | Default | When to change |
+|---|---|---|
+| `enabled` | `true` | Set `false` to skip capture, wake-up, and prompt teaching |
+| `backend` | `chroma` | Alternate MemPalace vector backend |
+| `embedding_model` | `embeddinggemma-300m` | Match the embedder the palace was built with |
 
 ## `subagents`
 

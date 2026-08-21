@@ -9,7 +9,7 @@ Postgres implementation code loads until the factory is actually called.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from urllib.parse import parse_qs, unquote, urlparse
 
 if TYPE_CHECKING:
@@ -31,7 +31,14 @@ class HistoryStore(Protocol):
 
     async def load(self, thread_id: str, limit: int | None = None) -> list[Message]: ...
 
-    async def append(self, thread_id: str, message: Message) -> None: ...
+    async def append(
+        self,
+        thread_id: str,
+        message: Message,
+        *,
+        turn_id: str | None = None,
+        message_id: str | None = None,
+    ) -> None: ...
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None: ...
 
@@ -145,7 +152,7 @@ class ScheduledLoopStore(Protocol):
         error: str | None = None,
     ) -> ScheduledLoopRow | None: ...
 
-    async def defer_tick(self, loop_id: str, *, worker_id: str, reason: str) -> None: ...
+    async def defer_tick(self, loop_id: str, *, worker_id: str, reason: str) -> bool: ...
 
     async def renew_tick_claim(self, loop_id: str, worker_id: str) -> bool: ...
 
@@ -187,6 +194,10 @@ class StorageBackend(Protocol):
 
     def session_turns(self) -> SessionTurnLockStore: ...
 
+    def outbox(self) -> Any: ...
+
+    shares_outbox: bool
+
 
 @dataclass(frozen=True)
 class FirestoreConfig:
@@ -225,7 +236,9 @@ def _parse_firestore_config(db_url: str) -> FirestoreConfig | None:
     return FirestoreConfig(project=project, database=database, prefix=prefix)
 
 
-def create_storage_backend(db_url: str) -> StorageBackend:
+def create_storage_backend(
+    db_url: str, *, agent_scope: str = "", agent_root: Path | None = None
+) -> StorageBackend:
     """Factory that returns the right backend for ``db_url``.
 
     Neither SQLite nor Postgres implementation code is imported until this
@@ -237,29 +250,43 @@ def create_storage_backend(db_url: str) -> StorageBackend:
       (requires ``pip install 'monkeybot[postgres]'``)
     - ``firestore://PROJECT/DATABASE`` → :class:`~monkeybot.core.persistence.firestore.FirestoreStorageBackend`
       (requires ``pip install 'monkeybot[firestore]'``)
+
+    ``agent_scope`` namespaces conversation history so gateways for different
+    agent roots that happen to share one ``db_url`` (a shared Postgres/Firestore
+    backend, or an explicit shared SQLite path) can't read or resume each
+    other's threads via ``list_threads``/``load``. Callers that own a single
+    gateway process should pass the resolved agent root; leaving it unset keeps
+    the previous unscoped (single-tenant) behavior.
+
+    ``agent_root``, SQLite only: when the resolved db file lives under this
+    path (the default deployment — ``paths.db_url`` left relative, anchored by
+    :func:`~monkeybot.core.layout.resolve_sqlite_url`), ownership is
+    unambiguous by construction, so a first-time migration to ``agent_scope``
+    safely claims that file's pre-existing rows instead of stranding them (see
+    ``docs/migrations/agent-scope-namespacing.md``). Ignored for Postgres/
+    Firestore and for an explicit absolute SQLite path outside ``agent_root``
+    — those may be genuinely shared, where auto-claiming is not safe.
     """
     if db_url.startswith("sqlite://"):
         from monkeybot.core.persistence.sqlite_backend import SQLiteStorageBackend
 
-        return SQLiteStorageBackend(db_url)
+        return SQLiteStorageBackend(db_url, agent_scope, agent_root)
     pg_url = _normalize_postgres_db_url(db_url)
     if pg_url is not None:
         try:
             from monkeybot.core.persistence.postgres import PostgresStorageBackend
         except ImportError as exc:
             raise RuntimeError(
-                "asyncpg is not installed. "
-                "Run: pip install 'monkeybot[postgres]'"
+                "asyncpg is not installed. Run: pip install 'monkeybot[postgres]'"
             ) from exc
-        return PostgresStorageBackend(pg_url)
+        return PostgresStorageBackend(pg_url, agent_scope)
     fs_config = _parse_firestore_config(db_url)
     if fs_config is not None:
         try:
             from monkeybot.core.persistence.firestore import FirestoreStorageBackend
         except ImportError as exc:
             raise RuntimeError(
-                "google-cloud-firestore is not installed. "
-                "Run: pip install 'monkeybot[firestore]'"
+                "google-cloud-firestore is not installed. Run: pip install 'monkeybot[firestore]'"
             ) from exc
-        return FirestoreStorageBackend(fs_config)
+        return FirestoreStorageBackend(fs_config, agent_scope)
     raise ValueError(f"Unsupported DB URL scheme: {db_url!r}")

@@ -11,6 +11,7 @@ import fnmatch
 import json
 import logging
 import shlex
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, cast
@@ -80,6 +81,18 @@ def resource_for_call(call: InspectorToolCall) -> str:
     command = call.args.get("command")
     if isinstance(command, str) and command.strip():
         return " ".join(command.strip().split())
+    # Lowest-priority lookups, and scoped to computer_* tool names specifically
+    # (not any tool with a "url"/"app" arg — an MCP tool happening to use one of
+    # those names must not have its resource string silently change underneath
+    # it): computer_open_url / computer_open_app take a url/app arg instead of a
+    # path, and still deserve a readable resource string for permission rules.
+    if call.name.startswith("computer_"):
+        url = call.args.get("url")
+        if isinstance(url, str) and url.strip():
+            return url.strip()
+        app = call.args.get("app")
+        if isinstance(app, str) and app.strip():
+            return app.strip()
     # Stable fallback for tool calls with none of the recognized shapes above.
     # Sort keys so the same logical args produce the same resource string
     # regardless of dict insertion order (e.g. across provider round-trips).
@@ -175,14 +188,65 @@ class SessionApprovals:
     def remember(self, tool: str, resource: str) -> None:
         self._keys.add((tool, resource))
 
+    def clear(self) -> None:
+        """Drop all remembered approvals.
 
-def remember_always_approval(bus: object | None, tool: str, resource: str) -> None:
+        Used when a durable rule source backing this session changes underneath
+        it (e.g. the ``computer_*`` approvals overlay is revoked) — the session
+        cache would otherwise keep masking the ruleset until the gateway restarts.
+        """
+        self._keys.clear()
+
+    def clear_matching(self, predicate: Callable[[str], bool]) -> None:
+        """Drop only remembered approvals whose ``tool`` name satisfies ``predicate``.
+
+        Same purpose as :meth:`clear`, but scoped — a durable rule source that
+        only covers *some* tools (e.g. the ``computer_*`` approvals overlay)
+        must not discard unrelated approvals the user granted this session for
+        other tools when it reloads.
+        """
+        self._keys = {(tool, resource) for tool, resource in self._keys if not predicate(tool)}
+
+
+def remember_always_approval(
+    bus: object | None,
+    tool: str,
+    resource: str,
+    *,
+    persist: Callable[[str, str], bool] | None = None,
+) -> None:
     """Record a session "always allow" approval on ``bus.session_approvals`` if present.
 
-    Shared by the text (``loop.py``) and realtime (``realtime_loop.py``) HITL confirm
-    paths so the ``payload.get("always")`` handling isn't duplicated across both.
+    Shared by the text (``tool_dispatch.py``) and realtime (``realtime_loop.py``) HITL
+    confirm paths so the ``payload.get("always")`` handling isn't duplicated across both.
     No-op when ``bus`` is ``None`` or has no ``session_approvals`` attribute.
+
+    ``persist``, when given, is called with ``(tool, resource)`` and decides whether
+    this approval should be remembered **at all** — not just durably. Returning
+    ``False`` skips the in-memory ``session_approvals.remember`` too, not only the
+    durable write: a caller that must refuse a durable rule for some ``(tool,
+    resource)`` (e.g. the ``computer_*`` tools' mutating tools — see
+    ``computer/permissions.py``, whose resource is derived from a *source* path
+    only, so an in-session-only remember would just as wrongly let it act on any
+    destination for the rest of the session) needs that same refusal to hold for
+    the session cache, or the durable exclusion accomplishes nothing. A caller
+    that only ever wants durability (never a broader veto) should simply always
+    return ``True`` after writing. An exception from ``persist`` also skips the
+    remember (fail closed — the user is asked again next time; safer than
+    silently granting a standing approval a broken hook couldn't actually persist).
     """
+    should_remember = True
+    if persist is not None:
+        try:
+            should_remember = persist(tool, resource)
+        except Exception:
+            logger.exception(
+                "remember_always_approval: persist hook failed %s",
+                kv(tool=tool, resource=resource),
+            )
+            should_remember = False
+    if not should_remember:
+        return
     approvals = getattr(bus, "session_approvals", None)
     if approvals is not None:
         approvals.remember(tool, resource)

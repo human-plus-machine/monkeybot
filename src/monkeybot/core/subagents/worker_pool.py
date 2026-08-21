@@ -25,73 +25,15 @@ from monkeybot.core.subagents.subagent_proto import (
     resolve_subagent_script,
     spawn_subagent,
 )
+from monkeybot.core.subprocess_groups import (
+    SUPPORTS_PROCESS_GROUPS,
+    process_group_id,
+    stop_subagent_process,
+)
 
 logger = logging.getLogger(__name__)
 
 _SHUTDOWN_FAILURE_MESSAGE = "subagent run cancelled during worker shutdown"
-_SUPPORTS_PROCESS_GROUPS = sys.platform != "win32"
-
-
-def _process_group_id(pid: int | None) -> int | None:
-    if pid is None or not _SUPPORTS_PROCESS_GROUPS:
-        return None
-    try:
-        return os.getpgid(pid)
-    except ProcessLookupError:
-        return pid
-    except OSError:
-        return None
-
-
-def _kill_process_group(pgid: int | None, proc: asyncio.subprocess.Process | None = None) -> None:
-    """SIGKILL ``pgid`` when known so descendants die with the child.
-
-    Prefer the process group even when the direct child has already exited —
-    orphans can keep mutating the workspace or holding pipes open.
-    """
-    if pgid is not None and _SUPPORTS_PROCESS_GROUPS:
-        try:
-            os.killpg(pgid, signal.SIGKILL)
-            return
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
-    if proc is not None and proc.returncode is None:
-        with contextlib.suppress(ProcessLookupError):
-            proc.kill()
-
-
-async def _stop_subagent_process(
-    proc: asyncio.subprocess.Process | None,
-    *,
-    pgid: int | None = None,
-) -> None:
-    """SIGTERM/SIGKILL the process group (or direct child) on timeout/cancel.
-
-    Do not skip cleanup just because the direct child already exited — the
-    group may still have descendants.
-    """
-    if proc is None and pgid is None:
-        return
-    try:
-        if pgid is not None and _SUPPORTS_PROCESS_GROUPS:
-            os.killpg(pgid, signal.SIGTERM)
-        elif proc is not None and proc.returncode is None:
-            proc.terminate()
-    except (ProcessLookupError, PermissionError, OSError):
-        pass
-    if proc is not None and proc.returncode is None:
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=8.0)
-            return
-        except TimeoutError:
-            pass
-    else:
-        # Leader already gone; give group members a moment after SIGTERM.
-        await asyncio.sleep(0.05)
-    _kill_process_group(pgid, proc)
-    if proc is not None and proc.returncode is None:
-        with contextlib.suppress(ProcessLookupError):
-            await proc.wait()
 
 
 def _env_float(name: str, default: float) -> float:
@@ -193,7 +135,7 @@ def _process_identity(pid: int) -> str | None:
             return f"linux:{boot_id}:{starttime}"
         except OSError:
             return None
-    if not _SUPPORTS_PROCESS_GROUPS:
+    if not SUPPORTS_PROCESS_GROUPS:
         return None
     try:
         completed = subprocess.run(
@@ -263,7 +205,7 @@ def _kill_scratch_subagent(scratch: Path) -> None:
         )
         return
     # Leader may already be gone; killpg still reaches orphaned group members.
-    if _SUPPORTS_PROCESS_GROUPS:
+    if SUPPORTS_PROCESS_GROUPS:
         try:
             os.killpg(pid, signal.SIGKILL)
             return
@@ -366,10 +308,10 @@ async def execute_claimed_run(
             stderr=asyncio.subprocess.DEVNULL,
             env=env,
             limit=SUBAGENT_STDOUT_LINE_LIMIT,
-            start_new_session=_SUPPORTS_PROCESS_GROUPS,
+            start_new_session=SUPPORTS_PROCESS_GROUPS,
         )
         proc_holder[0] = proc
-        pgid_holder[0] = _process_group_id(proc.pid)
+        pgid_holder[0] = process_group_id(proc.pid)
         if proc.pid is not None:
             _write_subagent_pid(scratch, proc.pid)
         return proc
@@ -402,13 +344,13 @@ async def execute_claimed_run(
                 kv(run_id=row.run_id, timeout_sec=budget, progress=str(progress)),
             )
             errors.append(msg)
-            await _stop_subagent_process(proc_holder[0], pgid=pgid_holder[0])
+            await stop_subagent_process(proc_holder[0], pgid=pgid_holder[0])
             if not consume_task.done():
                 consume_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await consume_task
         except asyncio.CancelledError:
-            await _stop_subagent_process(proc_holder[0], pgid=pgid_holder[0])
+            await stop_subagent_process(proc_holder[0], pgid=pgid_holder[0])
             if not consume_task.done():
                 consume_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -418,7 +360,7 @@ async def execute_claimed_run(
         except Exception as exc:
             logger.exception("worker failed executing run_id=%s", row.run_id)
             errors.append(str(exc))
-            await _stop_subagent_process(proc_holder[0], pgid=pgid_holder[0])
+            await stop_subagent_process(proc_holder[0], pgid=pgid_holder[0])
             if not consume_task.done():
                 consume_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -617,6 +559,9 @@ async def run_worker_main() -> None:
         "subagent worker starting stale_claim_ms=%d (MONKEYBOT_WORKER_STALE_CLAIM_MS)",
         settings.stale_claim_ms,
     )
+    # No agent_scope: this worker only claims/records subagent_runs rows via
+    # .runs(), never .history() — conversation_history's agent-scope
+    # isolation (PR #179) doesn't apply to what this process touches.
     backend = create_storage_backend(db_url)
     await backend.open(run_schema=auto_schema_enabled_from_config())
     try:

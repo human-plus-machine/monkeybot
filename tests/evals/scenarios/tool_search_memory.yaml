@@ -1,17 +1,17 @@
-description: "Past-event query triggers search_memory tool"
+description: "Past-event query triggers mempalace search via run_command"
 user_message: "What did we do yesterday?"
 scripted_turns:
   - - type: tool_call
       call_id: c1
-      name: search_memory
+      name: run_command
       args:
-        query: "yesterday"
+        argv: ["mempalace", "search", "yesterday"]
     - type: done
   - - type: text_delta
       text: "Yesterday we..."
     - type: done
 assertions:
   tool_categories_used:
-    - memory
+    - shell
   turn_completed: true
   max_turns: 3

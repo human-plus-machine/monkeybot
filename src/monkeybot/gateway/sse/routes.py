@@ -556,6 +556,12 @@ def create_app(
         """Create a session and its event bus."""
         created_at_ms = int(time.time() * 1000)
         sid = body.session_id or str(uuid.uuid4())
+        if body.session_id:
+            from monkeybot.core.persistence.thread_summary import reserved_thread_id_error
+
+            error_message = reserved_thread_id_error(sid)
+            if error_message is not None:
+                raise APIError(400, "BAD_REQUEST", error_message, uuid.uuid4().hex)
         session_provider = None
         session_model = None
         if body.model_provider or body.model_name:
@@ -1095,98 +1101,6 @@ def create_app(
             "truncated": result["truncated"],
         }
 
-    @api.get("/api/memory/graph")
-    async def memory_graph(
-        request: Request,
-        refresh: bool = False,
-    ) -> dict[str, Any]:
-        """Export memory-note nodes + wiki/supersedes edges for visualization.
-
-        Pass ``refresh=true`` to rescan note files into the sidecar (used by the
-        Mac app Reload button after organizer/backfill writes new wiki links).
-        """
-        memory = getattr(request.app.state, "memory", None)
-        if memory is None:
-            raise APIError(
-                404,
-                "NOT_FOUND",
-                "Memory layer is disabled",
-                uuid.uuid4().hex,
-            )
-        try:
-            payload = await memory.export_graph(refresh=refresh)
-        except Exception as exc:
-            logger.exception("memory graph export failed refresh=%s: %r", refresh, exc)
-            raise
-        if not isinstance(payload, dict):
-            payload = {"nodes": [], "edges": [], "note": "invalid graph payload"}
-        nodes = payload.get("nodes")
-        edges = payload.get("edges")
-        logger.info(
-            "memory graph export refresh=%s nodes=%s edges=%s",
-            refresh,
-            len(nodes) if isinstance(nodes, list) else 0,
-            len(edges) if isinstance(edges, list) else 0,
-        )
-        return cast(dict[str, Any], payload)
-
-    @api.get("/api/memory/note")
-    async def memory_note(
-        request: Request,
-        path: str,
-    ) -> dict[str, Any]:
-        """Fetch one memory note's body for the Mac graph inspector panel."""
-        memory = getattr(request.app.state, "memory", None)
-        if memory is None:
-            raise APIError(
-                404,
-                "NOT_FOUND",
-                "Memory layer is disabled",
-                uuid.uuid4().hex,
-            )
-        path_norm = (path or "").replace("\\", "/").lstrip("./").strip()
-        if not path_norm:
-            raise APIError(
-                400,
-                "BAD_REQUEST",
-                "path is required",
-                uuid.uuid4().hex,
-            )
-        try:
-            payload = await memory.search_files(
-                "",
-                path=path_norm,
-                include_retired=True,
-            )
-        except Exception as exc:
-            logger.exception("memory note fetch failed path=%s: %r", path_norm, exc)
-            raise
-        hits = payload.get("hits") if isinstance(payload, dict) else None
-        if not isinstance(hits, list) or not hits:
-            raise APIError(
-                404,
-                "NOT_FOUND",
-                f"Memory note not found: {path_norm}",
-                uuid.uuid4().hex,
-            )
-        hit = hits[0] if isinstance(hits[0], dict) else {}
-        result = {
-            "path": hit.get("path") or path_norm,
-            "type": hit.get("type") or "semantic",
-            "status": hit.get("status") or "active",
-            "body": hit.get("body") or "",
-            "body_truncated": bool(hit.get("body_truncated")),
-            "links": hit.get("links") or [],
-        }
-        links = result["links"]
-        logger.info(
-            "memory note fetch path=%s type=%s links=%s",
-            result["path"],
-            result["type"],
-            len(links) if isinstance(links, list) else 0,
-        )
-        return result
-
     @api.get("/api/chat-history")
     async def chat_history_list(
         request: Request,
@@ -1275,8 +1189,19 @@ def create_app(
     app.include_router(build_scheduler_router(loop_port=loop, registry=reg))
 
     @app.get("/health", response_model=HealthResponse)
-    async def health() -> HealthResponse:
+    async def health(request: Request) -> HealthResponse:
         """Liveness probe without authentication."""
-        return HealthResponse(status="ok", version="2.0.0")
+        raw = getattr(request.app.state, "memory_status", "unknown")
+        memory = cast(
+            Literal["enabled", "disabled", "unavailable", "unknown"],
+            raw if raw in ("enabled", "disabled", "unavailable", "unknown") else "unknown",
+        )
+        detail = getattr(request.app.state, "memory_detail", None)
+        return HealthResponse(
+            status="ok",
+            version="2.0.0",
+            memory=memory,
+            memory_detail=detail if isinstance(detail, str) else None,
+        )
 
     return app

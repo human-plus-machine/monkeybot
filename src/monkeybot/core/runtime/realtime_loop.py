@@ -26,6 +26,7 @@ from monkeybot.core.context import (
     refresh_tools_after_mcp_change,
 )
 from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
+from monkeybot.core.memory.ingest import persist_message
 from monkeybot.core.llm.provider import Message, ToolCall
 from monkeybot.core.llm.realtime_provider import RealtimeToolCall
 from monkeybot.core.logging_utils import kv
@@ -347,7 +348,14 @@ async def run_realtime_turn(
     try:
         # 1. Commit user message to history (skip empty audio-only placeholders).
         if user_text or any(not isinstance(b, Text) for b in blocks):
-            await history.append(ctx.thread_id, Message(role="user", content=list(blocks)))
+            await persist_message(
+                history,
+                Message(role="user", content=list(blocks)),
+                thread_id=ctx.thread_id,
+                turn_id=ctx.request_id,
+                memory=ctx.memory,
+                ingest=True,
+            )
             await _fire_hook(
                 hook_manager,
                 event=HookEvent.USER_MESSAGE,
@@ -387,9 +395,13 @@ async def run_realtime_turn(
 
         if assistant_blocks:
             # Await the assistant write so tool-response rows are always ordered after it.
-            await history.append(
-                ctx.thread_id,
+            await persist_message(
+                history,
                 Message(role="assistant", content=assistant_blocks),
+                thread_id=ctx.thread_id,
+                turn_id=ctx.request_id,
+                memory=ctx.memory,
+                ingest=bool(assistant_text.strip()) and not assistant_tool_calls,
             )
 
         # 4. Dispatch tools sequentially (v1: no parallel subagent dispatch here).
@@ -506,7 +518,10 @@ async def run_realtime_turn(
                         allowed = True
                         if payload.get("always"):
                             remember_always_approval(
-                                pending_bus, call.name, resource_for_call(inspector_call)
+                                pending_bus,
+                                call.name,
+                                resource_for_call(inspector_call),
+                                persist=ctx.approvals_persist,
                             )
                             logger.debug(
                                 "realtime HITL always %s",

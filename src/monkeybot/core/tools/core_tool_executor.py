@@ -76,11 +76,12 @@ from monkeybot.core.subagents.subagent_proto import (
     resolve_task_agent_md_path,
     spawn_subagent,
 )
-from monkeybot.core.subagents.worker_pool import (
-    _SUPPORTS_PROCESS_GROUPS,
-    _process_group_id,
-    _stop_subagent_process,
+from monkeybot.core.subprocess_groups import (
+    SUPPORTS_PROCESS_GROUPS,
+    process_group_id,
+    stop_subagent_process,
 )
+from monkeybot.core.tools.fs_isolation import memory_hidden_paths
 from monkeybot.core.tools.inspector import coerce_run_command_argv
 from monkeybot.core.tools.sandbox_executor import SandboxConfig, SandboxExecutor
 from monkeybot.core.tools.spill_inventory import (
@@ -123,10 +124,6 @@ _CORE_TOOL_NAMES = frozenset(
         "glob",
         "grep",
         "apply_patch",
-        "search_memory",
-        "edit_memory",
-        "update_memory",
-        "forget",
         "search",
         "list_skills",
         "task",
@@ -209,6 +206,7 @@ def _task_child_env(
     agent_root: Path,
     memory_uri: str,
     skills_path: Path,
+    artifacts_path: Path | None,
 ) -> dict[str, str]:
     """Build subprocess env overlays for a nested task worker."""
     child_env = {
@@ -218,6 +216,8 @@ def _task_child_env(
         "MONKEYBOT_SUBAGENT_SKILLS_PATH": str(skills_path),
         "OTEL_SERVICE_NAME": _SUBAGENT_OTEL_SERVICE_NAME,
     }
+    if artifacts_path is not None:
+        child_env["MONKEYBOT_SUBAGENT_ARTIFACTS_PATH"] = str(artifacts_path)
     for env_key, raw_val in (
         ("MCP_CONFIG", os.environ.get("MCP_CONFIG", "")),
         ("COMMAND_ALLOWLIST_CONFIG", os.environ.get("COMMAND_ALLOWLIST_CONFIG", "")),
@@ -366,7 +366,7 @@ async def _await_subagent_drain(
             except TimeoutError:
                 errors.append(f"task: subagent exceeded {timeout:g}s timeout")
                 accum.note_exit_reason("timeout", force=True)
-                await _stop_subagent_process(proc_holder[0], pgid=pgid_holder[0])
+                await stop_subagent_process(proc_holder[0], pgid=pgid_holder[0])
                 if not drain_task.done():
                     drain_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
@@ -381,7 +381,7 @@ async def _await_subagent_drain(
         if not done:
             errors.append(f"task: subagent exceeded {timeout:g}s timeout")
             accum.note_exit_reason("timeout", force=True)
-            await _stop_subagent_process(proc_holder[0], pgid=pgid_holder[0])
+            await stop_subagent_process(proc_holder[0], pgid=pgid_holder[0])
             cancel_wait.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await cancel_wait
@@ -408,7 +408,7 @@ async def _await_subagent_drain(
         else:
             errors.append(_PARENT_CANCEL_TASK_ERR)
             accum.note_exit_reason("cancelled", force=True)
-            await _stop_subagent_process(proc_holder[0], pgid=pgid_holder[0])
+            await stop_subagent_process(proc_holder[0], pgid=pgid_holder[0])
             if not drain_task.done():
                 drain_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -500,10 +500,10 @@ async def _run_inline_subagent_with_progress(
             stderr=asyncio.subprocess.DEVNULL,
             env=env,
             limit=SUBAGENT_STDOUT_LINE_LIMIT,
-            start_new_session=_SUPPORTS_PROCESS_GROUPS,
+            start_new_session=SUPPORTS_PROCESS_GROUPS,
         )
         proc_holder[0] = p
-        pgid_holder[0] = _process_group_id(p.pid)
+        pgid_holder[0] = process_group_id(p.pid)
         return p
 
     logger.info(
@@ -827,6 +827,7 @@ class CoreToolExecutor(ToolExecutorPort):
         workspace_root: Path,
         memory: MemorySubsystem | None,
         skills_path: Path,
+        artifacts_path: Path | None = None,
         mcp: MCPClientPort,
         terminal: TerminalExecutor | SandboxExecutor | None = None,
         extra_tools: Sequence[CustomTool] | None = None,
@@ -841,8 +842,12 @@ class CoreToolExecutor(ToolExecutorPort):
     ) -> None:
         ws_settings = workspace_settings_from_config()
         self._skills_path = Path(skills_path).resolve()
+        self._artifacts_path = Path(artifacts_path).resolve() if artifacts_path is not None else None
         self._workspace = WorkspaceFileService(
-            Path(workspace_root).resolve(), settings=ws_settings, skills_root=self._skills_path
+            Path(workspace_root).resolve(),
+            settings=ws_settings,
+            skills_root=self._skills_path,
+            artifacts_root=self._artifacts_path,
         )
         self._memory = memory
         self._knowledge = knowledge
@@ -853,10 +858,10 @@ class CoreToolExecutor(ToolExecutorPort):
         self._loops_registry = loops_registry if loops_registry is not None else LoopsToolRegistry()
         self._subagent_registry = dict(subagent_registry or {})
         self._terminal: TerminalExecutor | SandboxExecutor
+        self._host_terminal: TerminalExecutor | None = None
         if terminal is not None:
-            self._terminal = terminal
-            self._run_cmd_allowed_commands = tuple(terminal.allowed_commands)
-            self._run_cmd_allowed_paths = tuple(terminal.allowed_path_prefixes)
+            cmds = tuple(terminal.allowed_commands)
+            paths = tuple(terminal.allowed_path_prefixes)
         else:
             cmds = (
                 tuple(run_command_allowed_commands)
@@ -868,21 +873,68 @@ class CoreToolExecutor(ToolExecutorPort):
                 if run_command_allowed_path_prefixes is not None
                 else tuple(ALLOWED_PATHS)
             )
+        # None preserves an injected TerminalExecutor's hidden_paths via
+        # restricted(); only memory-off supplies an explicit override.
+        hidden_paths: tuple[Path, ...] | None = None
+        if self._memory is None:
+            # Memory off is a capability decision, so it applies to whatever
+            # executor ends up running commands, including an injected one.
+            hidden_paths = memory_hidden_paths(self._workspace.repo_root)
+            paths = tuple(
+                path
+                for path in paths
+                if not self._under_hidden_path(
+                    (self._workspace.repo_root / path).resolve(), hidden_paths
+                )
+            )
+            cmds = tuple(cmd for cmd in cmds if cmd != "mempalace")
+        if terminal is None:
             # Allow absolute argv paths under the resolved skills root (list_skills
             # returns this path; scripts live outside the workspace cwd).
             skills = str(self._skills_path)
             paths = tuple(dict.fromkeys((*paths, skills, f"{skills}/")))
-            self._run_cmd_allowed_commands = cmds
-            self._run_cmd_allowed_paths = paths
-            _scfg = SandboxConfig.from_env()
+        self._run_cmd_allowed_commands = cmds
+        self._run_cmd_allowed_paths = paths
+        if terminal is not None:
             self._terminal = (
-                SandboxExecutor(
-                    _scfg, workspace_root, skills_path=self._skills_path, allowed_commands=cmds
+                terminal.restricted(
+                    allowed_commands=cmds,
+                    allowed_path_prefixes=paths,
+                    hidden_paths=hidden_paths,
                 )
-                if _scfg.enabled
-                else TerminalExecutor(allowed_commands=cmds, allowed_path_prefixes=paths)
+                if isinstance(terminal, TerminalExecutor)
+                else terminal
+            )
+        else:
+            _scfg = SandboxConfig.from_env()
+            if _scfg.enabled:
+                self._terminal = SandboxExecutor(
+                    _scfg,
+                    workspace_root,
+                    skills_path=self._skills_path,
+                    artifacts_path=self._artifacts_path,
+                    allowed_commands=cmds,
+                )
+            else:
+                self._terminal = TerminalExecutor(
+                    allowed_commands=cmds,
+                    allowed_path_prefixes=paths,
+                    hidden_paths=hidden_paths,
+                )
+        if isinstance(self._terminal, SandboxExecutor):
+            # The palace is deliberately not mounted into the sandbox, so
+            # authorized memory reads need a host terminal regardless of
+            # whether the sandbox was auto-created or injected.
+            self._host_terminal = TerminalExecutor(
+                allowed_commands=cmds,
+                allowed_path_prefixes=paths,
+                hidden_paths=hidden_paths,
             )
         self._extra_tools: dict[str, Any] = {ct.tool_def.name: ct for ct in (extra_tools or [])}
+
+    @staticmethod
+    def _under_hidden_path(candidate: Path, hidden_paths: Sequence[Path]) -> bool:
+        return any(candidate == root or root in candidate.parents for root in hidden_paths)
 
     @property
     def mcp(self) -> MCPClientPort:
@@ -929,8 +981,10 @@ class CoreToolExecutor(ToolExecutorPort):
         )
 
     async def aclose(self) -> None:
-        """Release resources held by the terminal executor for this session."""
+        """Release resources held by the terminal executors for this session."""
         await self._terminal.aclose()
+        if self._host_terminal is not None:
+            await self._host_terminal.aclose()
 
     async def execute(self, *, call: ToolCall, ctx: TurnContext) -> ToolExecutionResult:
         name = call.name
@@ -964,14 +1018,6 @@ class CoreToolExecutor(ToolExecutorPort):
                 result_text, err_text = self._tool_grep(args)
             elif name == "apply_patch":
                 result_text, err_text = self._tool_apply_patch(args)
-            elif name == "search_memory":
-                result_text, err_text = await self._tool_search_memory(args)
-            elif name == "edit_memory":
-                result_text, err_text = await self._tool_memory_mutate(args, action="edit")
-            elif name == "update_memory":
-                result_text, err_text = await self._tool_memory_mutate(args, action="update")
-            elif name == "forget":
-                result_text, err_text = await self._tool_memory_mutate(args, action="forget")
             elif name == "search":
                 result_text, err_text = await self._tool_search(args)
             elif name == "list_skills":
@@ -1097,8 +1143,7 @@ class CoreToolExecutor(ToolExecutorPort):
             skip_sanitize = skip_tool_result_sanitize(name)
             budgets = spill_budgets_from_window(ctx.context_window_tokens)
             should_spill = (
-                name not in _SPILL_SKIP_TOOLS
-                and len(result_text) >= budgets.spill_threshold
+                name not in _SPILL_SKIP_TOOLS and len(result_text) >= budgets.spill_threshold
             )
             if should_spill:
                 result_text = write_spill_with_inventory(
@@ -1227,7 +1272,9 @@ class CoreToolExecutor(ToolExecutorPort):
 
         return self._media_result(mime, data_b64, meta)
 
-    def _tool_read_file(self, args: dict[str, Any], ctx: TurnContext) -> tuple[str | None, str | None]:
+    def _tool_read_file(
+        self, args: dict[str, Any], ctx: TurnContext
+    ) -> tuple[str | None, str | None]:
         path = _str_arg(args, "path", "file_path", "file")
         if not path:
             return (
@@ -1464,116 +1511,6 @@ class CoreToolExecutor(ToolExecutorPort):
         except WorkspaceError as exc:
             return (None, _workspace_error_envelope(exc))
 
-    async def _tool_search_memory(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
-        query = _str_arg(args, "query", "q", "keyword", "phrase") or ""
-        path = _str_arg(args, "path")
-        if not query and not path:
-            return (
-                None,
-                _built_in_tool_error(
-                    "validation",
-                    "search_memory requires query or path.",
-                    'Keyword search: {"query": "deployment"}. '
-                    'Follow a Related link: {"path": "episodic/note.md"}.',
-                    {
-                        "field": "query",
-                        "example": {"query": "keyword"},
-                    },
-                ),
-            )
-        max_hits = _coerce_int(args.get("max_hits"), 40) or 40
-        if self._memory is None:
-            return (
-                None,
-                _built_in_tool_error(
-                    "validation",
-                    "search_memory requires memory to be configured.",
-                    "Enable the memory hook and set paths.memory_storage_uri in monkeybot.yaml.",
-                    {"field": "memory"},
-                ),
-            )
-        folder = _str_arg(args, "folder")
-        include_retired = bool(args.get("include_retired"))
-        payload = await self._memory.search_files(
-            query,
-            max_hits=max_hits,
-            skip_raw=True,
-            folder=folder,
-            include_retired=include_retired,
-            path=path,
-        )
-        if not payload.get("hits"):
-            note = payload.get("note") or ""
-            if path:
-                cross = (
-                    "memory path not found — paths are memory-relative "
-                    "(episodic|semantic|procedural|…), not workspace; "
-                    "do not use read_file"
-                )
-            else:
-                cross = "no memory matches — if this is about workspace content, use `search`"
-            payload["note"] = f"{note}; {cross}".strip("; ") if note else cross
-        return (_j(payload), None)
-
-    async def _tool_memory_mutate(
-        self,
-        args: dict[str, Any],
-        *,
-        action: str,
-    ) -> tuple[str | None, str | None]:
-        path = _str_arg(args, "path")
-        needs_content = action in ("edit", "update")
-        content = args.get("content") if needs_content else None
-        if not path or (needs_content and not isinstance(content, str)):
-            field = "path" if not path else "content"
-            examples = {
-                "edit": '{"path": "semantic/note.md", "content": "corrected fact"}',
-                "update": '{"path": "semantic/old.md", "content": "new fact"}',
-                "forget": '{"path": "semantic/stale.md"}',
-            }
-            tool_name = "forget" if action == "forget" else f"{action}_memory"
-            return (
-                None,
-                _built_in_tool_error(
-                    "validation",
-                    f"{tool_name} requires " + ("path and content." if needs_content else "path."),
-                    f"Example: {examples[action]}",
-                    {"field": field},
-                ),
-            )
-        if self._memory is None:
-            return (
-                None,
-                _built_in_tool_error(
-                    "validation",
-                    f"{action} requires memory to be configured.",
-                    "Enable the memory hook and set paths.memory_storage_uri.",
-                    {"field": "memory"},
-                ),
-            )
-        if action == "edit":
-            payload = await self._memory.edit_memory(path, str(content))
-        elif action == "update":
-            payload = await self._memory.update_memory(path, str(content))
-        else:
-            payload = await self._memory.forget(path)
-        if not payload.get("ok"):
-            logger.warning(
-                "memory mutate failed %s",
-                kv(action=action, path=path, error=payload.get("error")),
-            )
-            return (
-                None,
-                _built_in_tool_error(
-                    "validation",
-                    str(payload.get("error") or f"{action} failed"),
-                    "Use a path under episodic|semantic|procedural|working.",
-                    {"path": path},
-                ),
-            )
-        logger.info("memory mutate ok %s", kv(action=action, path=payload.get("path") or path))
-        return (_j(payload), None)
-
     async def _tool_search(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
         query = _str_arg(args, "query", "q")
         if not query:
@@ -1625,7 +1562,7 @@ class CoreToolExecutor(ToolExecutorPort):
             note = payload.get("note") or ""
             cross = (
                 "no knowledge matches — if this is about past sessions or preferences, "
-                "use `search_memory`"
+                "use `mempalace search` via `run_command`"
             )
             payload["note"] = f"{note}; {cross}".strip("; ") if note else cross
         return (_j(payload), None)
@@ -1779,6 +1716,7 @@ class CoreToolExecutor(ToolExecutorPort):
             agent_root=agent_root,
             memory_uri=memory_uri,
             skills_path=self._skills_path,
+            artifacts_path=self._artifacts_path,
         )
         payload = await _run_inline_subagent_with_progress(
             script=script,
@@ -1807,6 +1745,21 @@ class CoreToolExecutor(ToolExecutorPort):
                 await self._run_store.record_failed(run_id, "; ".join(str(e) for e in errors))
         return (_j(payload), None)
 
+    def _resolve_run_command_cwd(self, args: dict[str, Any]) -> Path:
+        """Workspace-relative cwd for ``run_command`` (defaults to repo root)."""
+        raw = args.get("cwd")
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            return self._workspace.repo_root
+        if not isinstance(raw, str):
+            raise WorkspaceError("cwd must be a string", code="invalid_cwd")
+        cwd = self._workspace._resolve_root_dir(raw)
+        if not cwd.is_dir():
+            raise WorkspaceError(
+                f"cwd is not an existing directory: {raw.strip()}",
+                code="invalid_cwd",
+            )
+        return cwd
+
     async def _tool_run_command(
         self,
         args: dict[str, Any],
@@ -1818,13 +1771,41 @@ class CoreToolExecutor(ToolExecutorPort):
             cmd, argv = _parse_run_command(args)
         except ValueError as exc:
             return None, _run_command_parse_envelope(exc)
-        timeout = _coerce_int(args.get("timeout"), 60) or 60
         try:
-            result = await self._terminal.execute(
+            cwd = self._resolve_run_command_cwd(args)
+        except WorkspaceError as exc:
+            return None, _workspace_error_envelope(exc)
+        timeout = _coerce_int(args.get("timeout"), 60) or 60
+        if cmd == "mempalace" and self._memory is None:
+            return (
+                None,
+                _built_in_tool_error(
+                    "policy",
+                    "Memory is unavailable; mempalace commands are disabled.",
+                    "Do not attempt memory recall when no memory subsystem is active.",
+                ),
+            )
+        executor = self._terminal
+        if cmd == "mempalace" and self._host_terminal is not None:
+            executor = self._host_terminal
+        try:
+            execute_kwargs: dict[str, Any] = {
+                "timeout": timeout,
+                "cwd": cwd,
+            }
+            if (
+                cmd == "mempalace"
+                and self._memory is not None
+                and isinstance(executor, TerminalExecutor)
+            ):
+                execute_kwargs["env_overrides"] = {
+                    "MEMPALACE_PALACE_PATH": str(self._memory.palace_path),
+                    "MEMPALACE_BACKEND": self._memory.backend,
+                }
+            result = await executor.execute(
                 cmd,
                 argv,
-                timeout=timeout,
-                cwd=self._workspace.repo_root,
+                **execute_kwargs,
             )
         except SecurityError as exc:
             return None, self._run_command_security_envelope(exc)

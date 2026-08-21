@@ -128,6 +128,22 @@ async def test_duplicate_session_returns_409(
 
 
 @pytest.mark.asyncio
+async def test_post_session_rejects_subagent_prefixed_id(
+    client: AsyncClient,
+) -> None:
+    """Regression for PR #179 review: a user-supplied session_id starting with
+    the reserved 'subagent:' prefix would be silently excluded from
+    list_threads/--continue (same filter that hides internal subagent
+    transcripts). Reject it at creation instead of accepting it silently.
+    """
+    r = await client.post("/sessions", json={"session_id": "subagent:foo"})
+    assert r.status_code == 400
+    err = r.json()["error"]
+    assert err["code"] == "BAD_REQUEST"
+    assert "reserved prefix" in err["message"]
+
+
+@pytest.mark.asyncio
 async def test_delete_session_returns_200_and_removes_it(
     client: AsyncClient,
     registry: SessionRegistry,
@@ -231,6 +247,19 @@ async def test_health_returns_200(app) -> None:
         body = r.json()
         assert body["status"] == "ok"
         assert body["version"] == "2.0.0"
+        assert body["memory"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_health_reports_memory_status(app) -> None:
+    app.state.memory_status = "unavailable"
+    app.state.memory_detail = "outbox requires sqlite:// DB_URL; got postgresql"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        r = await client.get("/health")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["memory"] == "unavailable"
+        assert body["memory_detail"] == "outbox requires sqlite:// DB_URL; got postgresql"
 
 
 def test_get_events_returns_404_for_unknown_session(registry: SessionRegistry) -> None:

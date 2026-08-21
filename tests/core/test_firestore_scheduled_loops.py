@@ -7,8 +7,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from monkeybot.core.persistence.firestore_scheduled_loops import FirestoreScheduledLoopStore
-from monkeybot.core.persistence.scheduled_loops import doc_to_scheduled_loop_row
+pytest.importorskip("google.cloud.firestore")
+
+from monkeybot.core.persistence.firestore_scheduled_loops import FirestoreScheduledLoopStore  # noqa: E402
+from monkeybot.core.persistence.scheduled_loops import doc_to_scheduled_loop_row  # noqa: E402
 
 
 def test_doc_to_scheduled_loop_row_roundtrip_fields() -> None:
@@ -59,9 +61,6 @@ class _FakeTransaction:
         self._pending: list[tuple[str, dict[str, Any]]] = []
 
     def update(self, ref: "_FakeDocRef", fields: dict[str, Any]) -> None:
-        self._pending.append((ref.id, fields))
-
-    def set(self, ref: "_FakeDocRef", fields: dict[str, Any]) -> None:
         self._pending.append((ref.id, fields))
 
     def commit(self) -> None:
@@ -132,9 +131,6 @@ class _FakeCollection:
     def where(self, *, filter: Any) -> _FakeQuery:  # noqa: A002
         return _FakeQuery(self._store, []).where(filter=filter)
 
-    def order_by(self, *_a: Any, **_k: Any) -> _FakeQuery:
-        return _FakeQuery(self._store, [])
-
 
 class _FakeClient:
     def __init__(self) -> None:
@@ -201,8 +197,9 @@ async def test_firestore_defer_tick_skips_when_claim_reclaimed(
     _seed_in_flight(client, worker_id="worker-new", claimed_at_ms=9_000)
     store = FirestoreScheduledLoopStore(client, prefix="t")  # type: ignore[arg-type]
 
-    await store.defer_tick("loop-1", worker_id="worker-old", reason="session busy")
+    deferred = await store.defer_tick("loop-1", worker_id="worker-old", reason="session busy")
 
+    assert deferred is False
     row = client.docs["loop-1"]
     assert row["worker_id"] == "worker-new"
     assert row["tick_in_flight"] == 1
@@ -218,8 +215,9 @@ async def test_firestore_defer_tick_releases_own_claim(
     _seed_in_flight(client, worker_id="worker-a", claimed_at_ms=1_000, interval_ms=5_000)
     store = FirestoreScheduledLoopStore(client, prefix="t")  # type: ignore[arg-type]
 
-    await store.defer_tick("loop-1", worker_id="worker-a", reason="session busy")
+    deferred = await store.defer_tick("loop-1", worker_id="worker-a", reason="session busy")
 
+    assert deferred is True
     row = client.docs["loop-1"]
     assert row["worker_id"] is None
     assert row["tick_in_flight"] == 0

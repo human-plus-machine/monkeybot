@@ -85,6 +85,23 @@ def extra_module(extra: str) -> str:
         "ollama": "openai",
         "nvidia": "openai",
         "openrouter": "openai",
+        "postgres": "asyncpg",
+        "firestore": "google.cloud.firestore",
+        "gcs": "google.cloud.storage",
+        "sandbox": "opensandbox",
+        "web-search": "ddgs",
+        "memory": "mempalace",
+        "observability": "opentelemetry",
+        "scheduler": "croniter",
+        "council": "google.cloud.storage",
+        "aws": "boto3",
+        "realtime": "websockets",
+        "realtime-gemini": "google.genai",
+        "cli": "typer",
+        "cli-realtime": "pyaudio",
+        "evals": "deepeval",
+        "knowledge-ast": "tree_sitter_language_pack",
+        "knowledge-media": "pypdf",
     }
     return mapping.get(extra, extra)
 
@@ -96,7 +113,11 @@ def extra_installed(extra: str) -> bool:
     (see ``monkeybot_cli.runtime_python``) so provider/storage extras declared
     on the agent project are detected, not the CLI's globals.
     """
-    return importlib.util.find_spec(extra_module(extra)) is not None
+    try:
+        return importlib.util.find_spec(extra_module(extra)) is not None
+    except ModuleNotFoundError:
+        # find_spec raises when a parent namespace (e.g. google.cloud) is absent.
+        return False
 
 
 def credentials_present(spec: ProviderSpec) -> bool:

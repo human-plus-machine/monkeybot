@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import signal
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -15,6 +16,8 @@ from monkeybot.core.persistence.durable_runs import SubagentEnvelope
 from monkeybot.core.persistence.sqlite_backend import SQLiteStorageBackend
 from monkeybot.core.runtime.events import TurnComplete, UsageTotals
 from monkeybot.core.subagents import worker_pool
+from monkeybot.core.subprocess_groups import stop_subagent_process
+from monkeybot.core import subprocess_groups
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.tools.types import unwrap_tool_execution_result
 from tests.core.test_core_tool_executor import _NoMCP, _ctx, _mem_sub, _stub_agent_md_for_tasks
@@ -51,7 +54,7 @@ async def test_kill_scratch_subagent_reads_pid_file(tmp_path: Path, monkeypatch:
     def _fake_killpg(pgid: int, sig: int) -> None:
         killpgs.append((pgid, sig))
 
-    monkeypatch.setattr(worker_pool, "_SUPPORTS_PROCESS_GROUPS", True)
+    monkeypatch.setattr(subprocess_groups, "SUPPORTS_PROCESS_GROUPS", True)
     monkeypatch.setattr(
         worker_pool,
         "_process_identity",
@@ -75,7 +78,7 @@ async def test_kill_scratch_subagent_skips_pid_reuse(
     )
     killpgs: list[tuple[int, int]] = []
 
-    monkeypatch.setattr(worker_pool, "_SUPPORTS_PROCESS_GROUPS", True)
+    monkeypatch.setattr(subprocess_groups, "SUPPORTS_PROCESS_GROUPS", True)
     monkeypatch.setattr(
         worker_pool,
         "_process_identity",
@@ -99,7 +102,7 @@ async def test_kill_scratch_subagent_skips_legacy_pid_only_file(
     (scratch / "subagent.pid").write_text("424242\n", encoding="utf-8")
     killpgs: list[tuple[int, int]] = []
 
-    monkeypatch.setattr(worker_pool, "_SUPPORTS_PROCESS_GROUPS", True)
+    monkeypatch.setattr(subprocess_groups, "SUPPORTS_PROCESS_GROUPS", True)
     monkeypatch.setattr(
         worker_pool,
         "_process_identity",
@@ -140,7 +143,7 @@ async def test_kill_scratch_subagent_kills_when_leader_gone(
     )
     killpgs: list[tuple[int, int]] = []
 
-    monkeypatch.setattr(worker_pool, "_SUPPORTS_PROCESS_GROUPS", True)
+    monkeypatch.setattr(subprocess_groups, "SUPPORTS_PROCESS_GROUPS", True)
     monkeypatch.setattr(worker_pool, "_process_identity", lambda pid: None)
     monkeypatch.setattr(
         worker_pool.os,
@@ -173,14 +176,14 @@ async def test_stop_subagent_process_kills_group_after_leader_exits(
     def _fake_killpg(pgid: int, sig: int) -> None:
         signals.append(("killpg", pgid, int(sig)))
 
-    monkeypatch.setattr(worker_pool, "_SUPPORTS_PROCESS_GROUPS", True)
-    monkeypatch.setattr(worker_pool.os, "killpg", _fake_killpg)
-    monkeypatch.setattr(worker_pool.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(subprocess_groups, "SUPPORTS_PROCESS_GROUPS", True)
+    monkeypatch.setattr(subprocess_groups.os, "killpg", _fake_killpg)
+    monkeypatch.setattr(subprocess_groups.asyncio, "sleep", AsyncMock())
 
     proc = _FakeProc()
-    await worker_pool._stop_subagent_process(proc, pgid=111)  # type: ignore[arg-type]
-    assert ("killpg", 111, int(worker_pool.signal.SIGTERM)) in signals
-    assert ("killpg", 111, int(worker_pool.signal.SIGKILL)) in signals
+    await stop_subagent_process(proc, pgid=111)  # type: ignore[arg-type]
+    assert ("killpg", 111, int(signal.SIGTERM)) in signals
+    assert ("killpg", 111, int(signal.SIGKILL)) in signals
 
 
 @pytest.mark.asyncio
@@ -211,14 +214,14 @@ async def test_stop_subagent_process_kills_process_group(
             awaitable.close()
         raise TimeoutError()
 
-    monkeypatch.setattr(worker_pool, "_SUPPORTS_PROCESS_GROUPS", True)
-    monkeypatch.setattr(worker_pool.os, "killpg", _fake_killpg)
-    monkeypatch.setattr(worker_pool.asyncio, "wait_for", _fake_wait_for)
+    monkeypatch.setattr(subprocess_groups, "SUPPORTS_PROCESS_GROUPS", True)
+    monkeypatch.setattr(subprocess_groups.os, "killpg", _fake_killpg)
+    monkeypatch.setattr(subprocess_groups.asyncio, "wait_for", _fake_wait_for)
 
     proc = _FakeProc()
-    await worker_pool._stop_subagent_process(proc, pgid=111)  # type: ignore[arg-type]
-    assert ("killpg", 111, int(worker_pool.signal.SIGTERM)) in signals
-    assert ("killpg", 111, int(worker_pool.signal.SIGKILL)) in signals
+    await stop_subagent_process(proc, pgid=111)  # type: ignore[arg-type]
+    assert ("killpg", 111, int(signal.SIGTERM)) in signals
+    assert ("killpg", 111, int(signal.SIGKILL)) in signals
 
 
 @pytest.mark.asyncio
