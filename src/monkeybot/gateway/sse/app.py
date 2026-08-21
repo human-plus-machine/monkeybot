@@ -56,7 +56,6 @@ from monkeybot.core.persistence.backends import (
     create_storage_backend,
 )
 from monkeybot.core.persistence.transcript import TranscriptWriter, transcript_enabled_from_env
-from monkeybot.core.persistence.usage_buckets import effective_since_ms
 from monkeybot.core.runtime.events import AgentEvent, TurnComplete, UsageTotals, event_to_json
 from monkeybot.core.runtime.events import Error as AgentError
 from monkeybot.core.runtime.loop import SUMMARY_TRIGGER_RATIO
@@ -174,7 +173,7 @@ class _UsageStoreAdapter(UsagePort):
         self, *, since: str | None, bucket: UsageGranularity | None = None
     ) -> dict[str, Any]:
         granularity: UsageGranularity = bucket or "day"
-        since_ms = effective_since_ms(self._parse_since(since), granularity)
+        since_ms = self._parse_since(since)
         try:
             s = await self._store.summary(thread_id=None, since_ms=since_ms)
             b = await self._store.breakdown(since_ms=since_ms, bucket=granularity)
@@ -195,10 +194,6 @@ class _UsageStoreAdapter(UsagePort):
             "by_day": [asdict(row) for row in b.by_day],
             "by_bucket_model": [asdict(row) for row in b.by_bucket_model],
         }
-
-
-def _zero_agent_usage() -> dict[str, Any]:
-    return AgentUsageResponse().model_dump()
 
 
 class _StaticUsagePortZeros(UsagePort):
@@ -224,7 +219,7 @@ class _StaticUsagePortZeros(UsagePort):
         self, *, since: str | None, bucket: UsageGranularity | None = None
     ) -> dict[str, Any]:
         del since, bucket
-        return _zero_agent_usage()
+        return AgentUsageResponse().model_dump()
 
 
 def _content_blocks_to_text(blocks: list[ContentBlock]) -> str:

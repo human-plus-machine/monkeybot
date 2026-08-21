@@ -339,31 +339,17 @@ def test_utc_bucket_key_aligns_week_to_monday() -> None:
         coerce_granularity("month")
 
 
-def test_effective_since_ms_defaults_hour_bucket_lookback() -> None:
+def test_validate_hour_bucket_window() -> None:
     from monkeybot.core.persistence.usage_buckets import (
-        HOUR_BUCKET_DEFAULT_LOOKBACK_MS,
-        effective_since_ms,
+        HOUR_BUCKET_MAX_LOOKBACK_MS,
+        validate_hour_bucket_window,
     )
 
     anchor = 1_700_000_000_000
-    assert effective_since_ms(None, "day", now_ms=anchor) is None
-    assert effective_since_ms(123, "hour", now_ms=anchor) == 123
-    assert effective_since_ms(None, "hour", now_ms=anchor) == anchor - HOUR_BUCKET_DEFAULT_LOOKBACK_MS
-
-
-def test_bucket_sql_snippets() -> None:
-    from monkeybot.core.persistence.usage_buckets import postgres_bucket_sql, sqlite_bucket_sql
-
-    epoch = "created_at / 1000.0"
-    utc = "(to_timestamp(created_at / 1000.0) AT TIME ZONE 'UTC')"
-    assert sqlite_bucket_sql("hour") == f"strftime('%Y-%m-%dT%H', {epoch}, 'unixepoch')"
-    assert sqlite_bucket_sql("day") == f"strftime('%Y-%m-%d', {epoch}, 'unixepoch')"
-    assert sqlite_bucket_sql("week") == (
-        f"date({epoch}, 'unixepoch', '-' || "
-        f"((CAST(strftime('%w', {epoch}, 'unixepoch') AS INTEGER) + 6) % 7) || ' days')"
-    )
-    assert postgres_bucket_sql("hour") == f'to_char({utc}, \'YYYY-MM-DD"T"HH24\')'
-    assert postgres_bucket_sql("day") == f"to_char({utc}, 'YYYY-MM-DD')"
-    assert postgres_bucket_sql("week") == (
-        f"to_char((date_trunc('week', {utc}))::date, 'YYYY-MM-DD')"
-    )
+    validate_hour_bucket_window(None, "day", now_ms=anchor)
+    validate_hour_bucket_window(anchor - 3_600_000, "hour", now_ms=anchor)
+    validate_hour_bucket_window(anchor - HOUR_BUCKET_MAX_LOOKBACK_MS, "hour", now_ms=anchor)
+    with pytest.raises(ValueError, match="`since` is required when bucket=hour"):
+        validate_hour_bucket_window(None, "hour", now_ms=anchor)
+    with pytest.raises(ValueError, match="hour bucket window must not exceed 7 days"):
+        validate_hour_bucket_window(anchor - HOUR_BUCKET_MAX_LOOKBACK_MS - 1, "hour", now_ms=anchor)

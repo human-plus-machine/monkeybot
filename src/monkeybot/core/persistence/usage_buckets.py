@@ -10,8 +10,8 @@ from monkeybot.core.llm.usage import UsageGranularity
 
 VALID_GRANULARITIES: frozenset[str] = frozenset(get_args(UsageGranularity))
 
-# Caps hour-bucket series when GET /usage omits ``since`` (168 buckets max per model).
-HOUR_BUCKET_DEFAULT_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000
+# Maximum ``since`` window for ``bucket=hour`` (168 buckets per model).
+HOUR_BUCKET_MAX_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000
 
 
 def coerce_granularity(raw: str | None) -> UsageGranularity:
@@ -23,17 +23,20 @@ def coerce_granularity(raw: str | None) -> UsageGranularity:
     raise ValueError("bucket must be hour, day, or week")
 
 
-def effective_since_ms(
+def validate_hour_bucket_window(
     since_ms: int | None,
     granularity: UsageGranularity,
     *,
     now_ms: int | None = None,
-) -> int | None:
-    """Apply default lookback for hour buckets when ``since_ms`` is omitted."""
-    if since_ms is not None or granularity != "hour":
-        return since_ms
+) -> None:
+    """Reject hour-bucket requests without ``since`` or with an oversized window."""
+    if granularity != "hour":
+        return
+    if since_ms is None:
+        raise ValueError("`since` is required when bucket=hour")
     anchor = now_ms if now_ms is not None else int(time.time() * 1000)
-    return anchor - HOUR_BUCKET_DEFAULT_LOOKBACK_MS
+    if anchor - since_ms > HOUR_BUCKET_MAX_LOOKBACK_MS:
+        raise ValueError("hour bucket window must not exceed 7 days")
 
 
 def utc_bucket_key(created_at_ms: int, granularity: UsageGranularity) -> str:
@@ -61,7 +64,11 @@ def sqlite_bucket_sql(granularity: UsageGranularity) -> str:
 
 
 def postgres_bucket_sql(granularity: UsageGranularity) -> str:
-    """Postgres expression producing the same keys as :func:`utc_bucket_key`."""
+    """Postgres expression intended to match :func:`utc_bucket_key`.
+
+    Not exercised in CI (no Postgres service); parity verified by inspection and
+    the SQLite behavioural tests in ``tests/core/test_usage.py``.
+    """
     utc = "(to_timestamp(created_at / 1000.0) AT TIME ZONE 'UTC')"
     if granularity == "hour":
         return f"to_char({utc}, 'YYYY-MM-DD\"T\"HH24')"

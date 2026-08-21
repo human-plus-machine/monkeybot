@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -499,6 +500,21 @@ async def test_get_agent_usage_rejects_malformed_since(client: AsyncClient) -> N
 @pytest.mark.asyncio
 async def test_get_agent_usage_rejects_unknown_bucket(client: AsyncClient) -> None:
     r = await client.get("/usage", params={"bucket": "month"})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "BAD_REQUEST"
+
+
+@pytest.mark.asyncio
+async def test_get_agent_usage_rejects_hour_bucket_without_since(client: AsyncClient) -> None:
+    r = await client.get("/usage", params={"bucket": "hour"})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "BAD_REQUEST"
+
+
+@pytest.mark.asyncio
+async def test_get_agent_usage_rejects_hour_bucket_window_over_7_days(client: AsyncClient) -> None:
+    eight_days_ms = str(int((datetime.now(tz=UTC).timestamp() - 8 * 24 * 3600) * 1000))
+    r = await client.get("/usage", params={"bucket": "hour", "since": eight_days_ms})
     assert r.status_code == 400
     assert r.json()["error"]["code"] == "BAD_REQUEST"
 

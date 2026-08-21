@@ -538,15 +538,14 @@ class FirestoreUsageStore:
     ) -> list[dict[str, object]]:
         collection = self._client.collection(self._collection)
         if thread_id is None:
-            doc_stream = collection.stream()
+            query: Any = collection
         else:
-            doc_stream = collection.where(filter=FieldFilter("thread_id", "==", thread_id)).stream()
+            query = collection.where(filter=FieldFilter("thread_id", "==", thread_id))
+        if since_ms is not None:
+            query = query.where(filter=FieldFilter("created_at", ">=", since_ms))
         rows: list[dict[str, object]] = []
-        async for doc in doc_stream:
+        async for doc in query.stream():
             data = doc.to_dict() or {}
-            created_at = _field_int(data, "created_at")
-            if since_ms is not None and created_at < since_ms:
-                continue
             rows.append(data)
         return rows
 
@@ -653,17 +652,10 @@ class FirestoreUsageStore:
         by_model = [_bucket(k, g) for k, g in by_model_map.items()]
         by_model.sort(key=lambda b: (-b.cost_usd, b.key))
         by_day = [_bucket(k, g) for k, g in sorted(by_day_map.items())]
-        series_items = sorted(
-            series_map.items(),
-            key=lambda item: (
-                item[0][0],
-                -sum(_field_float(r, "cost_usd") for r in item[1]),
-                item[0][1],
-            ),
-        )
         by_bucket_model = [
-            _series_point(bkey, model, group) for (bkey, model), group in series_items
+            _series_point(bkey, model, group) for (bkey, model), group in series_map.items()
         ]
+        by_bucket_model.sort(key=lambda p: (p.bucket, -p.cost_usd, p.model))
         return UsageBreakdown(by_model=by_model, by_day=by_day, by_bucket_model=by_bucket_model)
 
 
