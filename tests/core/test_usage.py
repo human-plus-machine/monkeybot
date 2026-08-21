@@ -263,19 +263,19 @@ async def test_usage_breakdown_by_model_and_day(usage_conn) -> None:
     assert [b.key for b in breakdown.by_day] == ["2026-07-25", "2026-07-26"]
     assert breakdown.by_day[0].turns == 2
     assert breakdown.by_day[1].cost_usd == pytest.approx(0.10)
-    assert [(p.bucket, p.model, p.turns) for p in breakdown.by_day_model] == [
+    assert [(p.bucket, p.model, p.turns) for p in breakdown.by_bucket_model] == [
         ("2026-07-25", "gemini-2.5-flash", 2),
         ("2026-07-26", "claude-sonnet-4", 1),
     ]
-    assert breakdown.by_day_model[0].cost_usd == pytest.approx(0.05)
+    assert breakdown.by_bucket_model[0].cost_usd == pytest.approx(0.05)
 
     filtered = await store.breakdown(since_ms=day2)
     assert len(filtered.by_model) == 1
     assert filtered.by_model[0].key == "claude-sonnet-4"
     assert len(filtered.by_day) == 1
     assert filtered.by_day[0].key == "2026-07-26"
-    assert len(filtered.by_day_model) == 1
-    assert filtered.by_day_model[0].model == "claude-sonnet-4"
+    assert len(filtered.by_bucket_model) == 1
+    assert filtered.by_bucket_model[0].model == "claude-sonnet-4"
 
 
 @pytest.mark.asyncio
@@ -306,18 +306,18 @@ async def test_usage_breakdown_hour_and_week_buckets(usage_conn) -> None:
     await usage_conn.commit()
 
     hourly = await store.breakdown(bucket="hour")
-    assert [p.bucket for p in hourly.by_day_model] == [
+    assert [p.bucket for p in hourly.by_bucket_model] == [
         "2026-07-26T09",
         "2026-07-26T18",
         "2026-08-03T12",
     ]
     weekly = await store.breakdown(bucket="week")
-    assert [p.bucket for p in weekly.by_day_model] == [
+    assert [p.bucket for p in weekly.by_bucket_model] == [
         "2026-07-20",
         "2026-07-20",
         "2026-08-03",
     ]
-    assert {p.model for p in weekly.by_day_model if p.bucket == "2026-07-20"} == {
+    assert {p.model for p in weekly.by_bucket_model if p.bucket == "2026-07-20"} == {
         "gemini-2.5-flash",
         "claude-sonnet-4",
     }
@@ -335,5 +335,35 @@ def test_utc_bucket_key_aligns_week_to_monday() -> None:
     assert utc_bucket_key(sunday, "hour") == "2026-07-26T12"
     assert utc_bucket_key(sunday, "day") == "2026-07-26"
     assert coerce_granularity(None) == "day"
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="bucket must be hour, day, or week"):
         coerce_granularity("month")
+
+
+def test_effective_since_ms_defaults_hour_bucket_lookback() -> None:
+    from monkeybot.core.persistence.usage_buckets import (
+        HOUR_BUCKET_DEFAULT_LOOKBACK_MS,
+        effective_since_ms,
+    )
+
+    anchor = 1_700_000_000_000
+    assert effective_since_ms(None, "day", now_ms=anchor) is None
+    assert effective_since_ms(123, "hour", now_ms=anchor) == 123
+    assert effective_since_ms(None, "hour", now_ms=anchor) == anchor - HOUR_BUCKET_DEFAULT_LOOKBACK_MS
+
+
+def test_bucket_sql_snippets() -> None:
+    from monkeybot.core.persistence.usage_buckets import postgres_bucket_sql, sqlite_bucket_sql
+
+    epoch = "created_at / 1000.0"
+    utc = "(to_timestamp(created_at / 1000.0) AT TIME ZONE 'UTC')"
+    assert sqlite_bucket_sql("hour") == f"strftime('%Y-%m-%dT%H', {epoch}, 'unixepoch')"
+    assert sqlite_bucket_sql("day") == f"strftime('%Y-%m-%d', {epoch}, 'unixepoch')"
+    assert sqlite_bucket_sql("week") == (
+        f"date({epoch}, 'unixepoch', '-' || "
+        f"((CAST(strftime('%w', {epoch}, 'unixepoch') AS INTEGER) + 6) % 7) || ' days')"
+    )
+    assert postgres_bucket_sql("hour") == f'to_char({utc}, \'YYYY-MM-DD"T"HH24\')'
+    assert postgres_bucket_sql("day") == f"to_char({utc}, 'YYYY-MM-DD')"
+    assert postgres_bucket_sql("week") == (
+        f"to_char((date_trunc('week', {utc}))::date, 'YYYY-MM-DD')"
+    )

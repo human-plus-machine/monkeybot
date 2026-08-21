@@ -17,6 +17,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from starlette.testclient import TestClient
 
+from monkeybot.core.llm.usage import UsageGranularity
 from monkeybot.core.runtime.events import AssistantDelta, Thinking, TurnComplete, UsageTotals
 from monkeybot.core.types.content_blocks import Text
 from monkeybot.gateway.sse.loop_port import UsagePort
@@ -338,7 +339,7 @@ class _PopulatedUsagePort:
         }
 
     async def agent_usage(
-        self, *, since: str | None, bucket: str | None = None
+        self, *, since: str | None, bucket: UsageGranularity | None = None
     ) -> dict[str, object]:
         _ = since, bucket
         return {
@@ -369,7 +370,7 @@ class _PopulatedUsagePort:
                     "cost_usd": 0.05,
                 }
             ],
-            "by_day_model": [
+            "by_bucket_model": [
                 {
                     "bucket": "2026-07-26",
                     "model": "gemini-2.5-flash",
@@ -461,7 +462,7 @@ async def test_get_agent_usage_returns_totals(client: AsyncClient) -> None:
     assert body["cost_usd"] == 0.0
     assert body["by_model"] == []
     assert body["by_day"] == []
-    assert body["by_day_model"] == []
+    assert body["by_bucket_model"] == []
     assert "input_tokens" in body
     assert "cache_read_tokens" in body
 
@@ -483,8 +484,8 @@ async def test_get_agent_usage_populated(
     assert body["cost_usd"] == 0.05
     assert body["by_model"][0]["key"] == "gemini-2.5-flash"
     assert body["by_day"][0]["key"] == "2026-07-26"
-    assert body["by_day_model"][0]["model"] == "gemini-2.5-flash"
-    assert body["by_day_model"][0]["bucket"] == "2026-07-26"
+    assert body["by_bucket_model"][0]["model"] == "gemini-2.5-flash"
+    assert body["by_bucket_model"][0]["bucket"] == "2026-07-26"
     assert "cached_tokens" not in body["by_model"][0]
 
 

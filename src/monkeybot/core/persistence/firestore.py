@@ -618,7 +618,7 @@ class FirestoreUsageStore:
         """
         rows = await self._fetch_usage_rows(None, since_ms)
         if not rows:
-            return UsageBreakdown(by_model=[], by_day=[], by_day_model=[])
+            return UsageBreakdown(by_model=[], by_day=[], by_bucket_model=[])
 
         by_model_map: dict[str, list[dict[str, object]]] = {}
         by_day_map: dict[str, list[dict[str, object]]] = {}
@@ -631,40 +631,28 @@ class FirestoreUsageStore:
             by_day_map.setdefault(day, []).append(row)
             series_map.setdefault((utc_bucket_key(created_at, bucket), model), []).append(row)
 
-        def _metrics(group: list[dict[str, object]]) -> tuple[int, int, int, float]:
-            return (
-                len(group),
-                sum(_field_int(r, "input_tokens") for r in group),
-                sum(_field_int(r, "output_tokens") for r in group),
-                sum(_field_float(r, "cost_usd") for r in group),
+        def _bucket(key: str, group: list[dict[str, object]]) -> UsageBucket:
+            return UsageBucket(
+                key=key,
+                turns=len(group),
+                input_tokens=sum(_field_int(r, "input_tokens") for r in group),
+                output_tokens=sum(_field_int(r, "output_tokens") for r in group),
+                cost_usd=sum(_field_float(r, "cost_usd") for r in group),
             )
 
-        by_model: list[UsageBucket] = []
-        for key, group in by_model_map.items():
-            turns, input_tokens, output_tokens, cost_usd = _metrics(group)
-            by_model.append(
-                UsageBucket(
-                    key=key,
-                    turns=turns,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    cost_usd=cost_usd,
-                )
+        def _series_point(bkey: str, model: str, group: list[dict[str, object]]) -> UsageSeriesPoint:
+            return UsageSeriesPoint(
+                bucket=bkey,
+                model=model,
+                turns=len(group),
+                input_tokens=sum(_field_int(r, "input_tokens") for r in group),
+                output_tokens=sum(_field_int(r, "output_tokens") for r in group),
+                cost_usd=sum(_field_float(r, "cost_usd") for r in group),
             )
+
+        by_model = [_bucket(k, g) for k, g in by_model_map.items()]
         by_model.sort(key=lambda b: (-b.cost_usd, b.key))
-        by_day: list[UsageBucket] = []
-        for key, group in sorted(by_day_map.items()):
-            turns, input_tokens, output_tokens, cost_usd = _metrics(group)
-            by_day.append(
-                UsageBucket(
-                    key=key,
-                    turns=turns,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    cost_usd=cost_usd,
-                )
-            )
-        by_day_model: list[UsageSeriesPoint] = []
+        by_day = [_bucket(k, g) for k, g in sorted(by_day_map.items())]
         series_items = sorted(
             series_map.items(),
             key=lambda item: (
@@ -673,19 +661,10 @@ class FirestoreUsageStore:
                 item[0][1],
             ),
         )
-        for (bkey, model), group in series_items:
-            turns, input_tokens, output_tokens, cost_usd = _metrics(group)
-            by_day_model.append(
-                UsageSeriesPoint(
-                    bucket=bkey,
-                    model=model,
-                    turns=turns,
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    cost_usd=cost_usd,
-                )
-            )
-        return UsageBreakdown(by_model=by_model, by_day=by_day, by_day_model=by_day_model)
+        by_bucket_model = [
+            _series_point(bkey, model, group) for (bkey, model), group in series_items
+        ]
+        return UsageBreakdown(by_model=by_model, by_day=by_day, by_bucket_model=by_bucket_model)
 
 
 def _doc_to_run_row(doc_id: str, data: dict[str, object]) -> SubagentRunRow:

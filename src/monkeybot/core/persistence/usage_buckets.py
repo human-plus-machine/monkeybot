@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime, timedelta
+from typing import get_args
 
 from monkeybot.core.llm.usage import UsageGranularity
 
-VALID_GRANULARITIES: frozenset[str] = frozenset({"hour", "day", "week"})
+VALID_GRANULARITIES: frozenset[str] = frozenset(get_args(UsageGranularity))
+
+# Caps hour-bucket series when GET /usage omits ``since`` (168 buckets max per model).
+HOUR_BUCKET_DEFAULT_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000
 
 
 def coerce_granularity(raw: str | None) -> UsageGranularity:
@@ -15,7 +20,20 @@ def coerce_granularity(raw: str | None) -> UsageGranularity:
         return "day"
     if raw in VALID_GRANULARITIES:
         return raw  # type: ignore[return-value]
-    raise ValueError(f"bucket must be hour, day, or week, got {raw!r}")
+    raise ValueError("bucket must be hour, day, or week")
+
+
+def effective_since_ms(
+    since_ms: int | None,
+    granularity: UsageGranularity,
+    *,
+    now_ms: int | None = None,
+) -> int | None:
+    """Apply default lookback for hour buckets when ``since_ms`` is omitted."""
+    if since_ms is not None or granularity != "hour":
+        return since_ms
+    anchor = now_ms if now_ms is not None else int(time.time() * 1000)
+    return anchor - HOUR_BUCKET_DEFAULT_LOOKBACK_MS
 
 
 def utc_bucket_key(created_at_ms: int, granularity: UsageGranularity) -> str:

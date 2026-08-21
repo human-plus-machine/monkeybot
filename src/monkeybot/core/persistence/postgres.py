@@ -604,7 +604,7 @@ class PostgresUsageStore:
         return UsageBreakdown(
             by_model=[_pg_usage_bucket(row, "model") for row in model_rows],
             by_day=[_pg_usage_bucket(row, "day") for row in day_rows],
-            by_day_model=[_pg_usage_series(row) for row in series_rows],
+            by_bucket_model=[_pg_usage_series(row) for row in series_rows],
         )
 
 

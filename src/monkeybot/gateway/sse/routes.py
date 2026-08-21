@@ -29,6 +29,7 @@ from monkeybot.core.attachments.store import (
     UnsupportedAttachmentTypeError,
 )
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.llm.usage import UsageGranularity
 from monkeybot.core.persistence.usage_buckets import coerce_granularity
 from monkeybot.core.runtime.context_budget import SUMMARY_TRIGGER_RATIO
 from monkeybot.core.runtime.events import QueuedInputAccepted, event_to_json
@@ -409,23 +410,10 @@ class _StaticUsagePort:
         }
 
     async def agent_usage(
-        self, *, since: str | None, bucket: str | None = None
+        self, *, since: str | None, bucket: UsageGranularity | None = None
     ) -> dict[str, Any]:
         _ = since, bucket
-        return {
-            "turns": 0,
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "cached_tokens": 0,
-            "cache_read_tokens": 0,
-            "cache_creation_tokens": 0,
-            "cost_usd": 0.0,
-            "period_start": 0,
-            "period_end": 0,
-            "by_model": [],
-            "by_day": [],
-            "by_day_model": [],
-        }
+        return AgentUsageResponse().model_dump()
 
 
 async def _ping_loop(bus: SessionBus) -> None:
@@ -457,10 +445,10 @@ def _validate_since(since: str | None, request_id: str) -> None:
         )
 
 
-def _validate_bucket(bucket: str | None, request_id: str) -> None:
+def _validate_bucket(bucket: str | None, request_id: str) -> UsageGranularity:
     """Reject an unknown ``bucket`` query param instead of silently defaulting."""
     try:
-        coerce_granularity(bucket)
+        return coerce_granularity(bucket)
     except ValueError as exc:
         raise APIError(400, "BAD_REQUEST", str(exc), request_id) from exc
 
@@ -1055,9 +1043,9 @@ def create_app(
         """Return agent-wide totals and spend split by model / time bucket."""
         rid = uuid.uuid4().hex
         _validate_since(since, rid)
-        _validate_bucket(bucket, rid)
+        granularity = _validate_bucket(bucket, rid)
         usage_ref: UsagePort = request.app.state.usage
-        raw = await usage_ref.agent_usage(since=since, bucket=bucket)
+        raw = await usage_ref.agent_usage(since=since, bucket=granularity)
         return AgentUsageResponse.model_validate(raw)
 
     @api.get("/api/workspace/tree")

@@ -4,6 +4,7 @@ Injectable ports between the SSE gateway and the agent loop / usage store.
 
 from typing import Any, Protocol
 
+from monkeybot.core.llm.usage import UsageGranularity
 from monkeybot.core.types.content_blocks import ContentBlock
 
 
@@ -30,5 +31,7 @@ class UsagePort(Protocol):
     ) -> dict[str, Any]:
         """Return JSON-serializable dict matching GET /sessions/{id}/usage body."""
 
-    async def agent_usage(self, *, since: str | None, bucket: str | None = None) -> dict[str, Any]:
+    async def agent_usage(
+        self, *, since: str | None, bucket: UsageGranularity | None = None
+    ) -> dict[str, Any]:
         """Return JSON-serializable dict matching GET /usage body (totals + breakdown)."""

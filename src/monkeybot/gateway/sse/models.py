@@ -195,7 +195,7 @@ class UsageBucketResponse(BaseModel):
 
 
 class UsageSeriesPointResponse(BaseModel):
-    """One (time bucket, model) cell in GET /usage ``by_day_model``."""
+    """One (time bucket, model) cell in GET /usage ``by_bucket_model``."""
 
     bucket: str
     model: str
@@ -219,7 +219,7 @@ class AgentUsageResponse(BaseModel):
     period_end: int = 0
     by_model: list[UsageBucketResponse] = Field(default_factory=list)
     by_day: list[UsageBucketResponse] = Field(default_factory=list)
-    by_day_model: list[UsageSeriesPointResponse] = Field(default_factory=list)
+    by_bucket_model: list[UsageSeriesPointResponse] = Field(default_factory=list)
 
 
 def error_payload_dict(code: str, message: str, request_id: str) -> dict[str, Any]:

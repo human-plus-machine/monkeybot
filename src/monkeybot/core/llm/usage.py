@@ -85,8 +85,8 @@ class UsageSeriesPoint:
 
 @dataclass(frozen=True)
 class UsageBreakdown:
-    """Per-model, per-day, and day×model aggregates for the usage dashboard."""
+    """Per-model, per-day, and bucket×model aggregates for the usage dashboard."""
 
     by_model: list[UsageBucket]
     by_day: list[UsageBucket]
-    by_day_model: list[UsageSeriesPoint] = field(default_factory=list)
+    by_bucket_model: list[UsageSeriesPoint] = field(default_factory=list)

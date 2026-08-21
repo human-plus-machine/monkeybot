@@ -214,8 +214,8 @@ class SQLiteUsageStore:
         """
         by_model = await self._buckets(model_sql, params)
         by_day = await self._buckets(day_sql, params)
-        by_day_model = await self._series(series_sql, params)
-        return UsageBreakdown(by_model=by_model, by_day=by_day, by_day_model=by_day_model)
+        by_bucket_model = await self._series(series_sql, params)
+        return UsageBreakdown(by_model=by_model, by_day=by_day, by_bucket_model=by_bucket_model)
 
     async def _buckets(self, sql: str, params: list[object]) -> list[UsageBucket]:
         out: list[UsageBucket] = []

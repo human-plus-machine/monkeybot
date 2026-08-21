@@ -45,7 +45,7 @@ from monkeybot.core.llm.provider import (
     ToolCall,
     UsageEvent,
 )
-from monkeybot.core.llm.usage import Usage as UsageRecord
+from monkeybot.core.llm.usage import Usage as UsageRecord, UsageGranularity
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.mcp.mcp_client import MCPClient
 from monkeybot.core.memory.config import memory_enabled_from_config
@@ -56,7 +56,7 @@ from monkeybot.core.persistence.backends import (
     create_storage_backend,
 )
 from monkeybot.core.persistence.transcript import TranscriptWriter, transcript_enabled_from_env
-from monkeybot.core.persistence.usage_buckets import coerce_granularity
+from monkeybot.core.persistence.usage_buckets import effective_since_ms
 from monkeybot.core.runtime.events import AgentEvent, TurnComplete, UsageTotals, event_to_json
 from monkeybot.core.runtime.events import Error as AgentError
 from monkeybot.core.runtime.loop import SUMMARY_TRIGGER_RATIO
@@ -170,9 +170,11 @@ class _UsageStoreAdapter(UsagePort):
             "context_window_tokens": context_window_tokens,
         }
 
-    async def agent_usage(self, *, since: str | None, bucket: str | None = None) -> dict[str, Any]:
-        since_ms = self._parse_since(since)
-        granularity = coerce_granularity(bucket)
+    async def agent_usage(
+        self, *, since: str | None, bucket: UsageGranularity | None = None
+    ) -> dict[str, Any]:
+        granularity: UsageGranularity = bucket or "day"
+        since_ms = effective_since_ms(self._parse_since(since), granularity)
         try:
             s = await self._store.summary(thread_id=None, since_ms=since_ms)
             b = await self._store.breakdown(since_ms=since_ms, bucket=granularity)
@@ -191,7 +193,7 @@ class _UsageStoreAdapter(UsagePort):
             "period_end": s.period_end_ms if s.period_end_ms is not None else 0,
             "by_model": [asdict(row) for row in b.by_model],
             "by_day": [asdict(row) for row in b.by_day],
-            "by_day_model": [asdict(row) for row in b.by_day_model],
+            "by_bucket_model": [asdict(row) for row in b.by_bucket_model],
         }
 
 
@@ -218,7 +220,9 @@ class _StaticUsagePortZeros(UsagePort):
             context_window_tokens=cw,
         ).model_dump()
 
-    async def agent_usage(self, *, since: str | None, bucket: str | None = None) -> dict[str, Any]:
+    async def agent_usage(
+        self, *, since: str | None, bucket: UsageGranularity | None = None
+    ) -> dict[str, Any]:
         del since, bucket
         return _zero_agent_usage()
 
