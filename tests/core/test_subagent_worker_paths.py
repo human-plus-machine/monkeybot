@@ -78,7 +78,7 @@ async def test_worker_resolves_relative_agent_md_from_project_root(
     backend.open = AsyncMock()
     backend.close = AsyncMock()
     backend.history.return_value = MagicMock()
-    monkeypatch.setattr(subagent_worker, "create_storage_backend", lambda _url: backend)
+    monkeypatch.setattr(subagent_worker, "create_storage_backend", lambda _url, **_kw: backend)
 
     mcp = MagicMock()
     mcp.load_from_config = AsyncMock()
@@ -182,7 +182,7 @@ async def _run_worker_capturing_vertex_google_search(
     backend.open = AsyncMock()
     backend.close = AsyncMock()
     backend.history.return_value = MagicMock()
-    monkeypatch.setattr(subagent_worker, "create_storage_backend", lambda _url: backend)
+    monkeypatch.setattr(subagent_worker, "create_storage_backend", lambda _url, **_kw: backend)
 
     mcp = MagicMock()
     mcp.load_from_config = AsyncMock()
@@ -328,7 +328,7 @@ async def _run_worker_capture_thread_id(
     backend.open = AsyncMock()
     backend.close = AsyncMock()
     backend.history.return_value = MagicMock()
-    monkeypatch.setattr(subagent_worker, "create_storage_backend", lambda _url: backend)
+    monkeypatch.setattr(subagent_worker, "create_storage_backend", lambda _url, **_kw: backend)
 
     mcp = MagicMock()
     mcp.load_from_config = AsyncMock()

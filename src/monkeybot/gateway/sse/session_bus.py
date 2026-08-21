@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
-from monkeybot.core.context import TERMINATED_PENDING_KEYS_MAXLEN
+from monkeybot.gateway.pending_response_bus import TERMINATED_PENDING_KEYS_MAXLEN
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.persistence.transcript_analyzer import analyze_transcript

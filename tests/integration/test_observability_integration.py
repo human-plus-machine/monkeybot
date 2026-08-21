@@ -256,7 +256,7 @@ async def test_integrated_run_task_subagent_shares_parent_trace_id(
         backend.open = AsyncMock()
         backend.close = AsyncMock()
         backend.history.return_value = MagicMock()
-        monkeypatch.setattr(subagent_worker, "create_storage_backend", lambda _url: backend)
+        monkeypatch.setattr(subagent_worker, "create_storage_backend", lambda _url, **_kw: backend)
 
         mcp = MagicMock()
         mcp.load_from_config = AsyncMock()

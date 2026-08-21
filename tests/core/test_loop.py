@@ -998,10 +998,12 @@ async def test_run_stop_during_confirm_settles_completed_tool_results() -> None:
         ToolDef("write_file", "Write a file", {}),
         ToolDef("run_command", "Run shell", {}),
     ]
+    cancel = asyncio.Event()
     ctx = dataclasses.replace(
         _ctx(),
         tools=tools,
         sse_bus=bus,
+        cancelled=cancel,
     )
     prov = FakeProvider(
         [
@@ -1023,13 +1025,13 @@ async def test_run_stop_during_confirm_settles_completed_tool_results() -> None:
             history=hist,
             inspectors=[ConfirmOnlyRunCommand()],
             tool_executor=WriteThenShellExecutor(),
+            cancelled=cancel,
             max_turns=3,
         ):
             events.append(e)
             if isinstance(e, ToolConfirmationRequestEvent):
-                fut = bus.pending_responses.get("c1")
-                if fut is not None and not fut.done():
-                    fut.cancel()
+                cancel.set()
+                bus.abandon_pending_cancel_all()
 
     await _consume()
 

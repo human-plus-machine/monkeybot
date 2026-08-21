@@ -681,9 +681,13 @@ class WorkspaceFileService:
         settings: object | None = None,
         *,
         skills_root: Path | None = None,
+        artifacts_root: Path | None = None,
     ) -> None:
         self._root = Path(repo_root).resolve()
         self._skills_root = Path(skills_root).resolve() if skills_root is not None else None
+        self._artifacts_root = (
+            Path(artifacts_root).resolve() if artifacts_root is not None else None
+        )
         self._settings = _coerce_workspace_settings(settings)
 
     @property
@@ -693,6 +697,10 @@ class WorkspaceFileService:
     @property
     def skills_root(self) -> Path | None:
         return self._skills_root
+
+    @property
+    def artifacts_root(self) -> Path | None:
+        return self._artifacts_root
 
     @staticmethod
     def _normalize_rel_segments(rel: str, *, label: str) -> tuple[str, ...]:
@@ -715,6 +723,9 @@ class WorkspaceFileService:
     def _path_root_and_segments(self, segments: tuple[str, ...]) -> tuple[Path, tuple[str, ...]]:
         if segments[:1] == ("skills",) and self._skills_root is not None:
             return self._skills_root, segments[1:]
+        if segments[:1] == ("artifacts",) and self._artifacts_root is not None:
+            # `artifacts/` is a mounted extra-root, same as `skills/` above.
+            return self._artifacts_root, segments[1:]
         return self._root, segments
 
     @staticmethod
@@ -1381,7 +1392,7 @@ class WorkspaceFileService:
             etype = event.get("type")
             data = event.get("data") or {}
             if etype == "begin":
-                # One begin event per searched file — use for the file-cap check.
+                # begin is emitted for files with ≥1 match (not every file searched).
                 files_begun += 1
             elif etype == "match":
                 total_match_count += 1
@@ -1436,13 +1447,18 @@ class WorkspaceFileService:
         if files_begun > files_scanned:
             files_scanned = files_begun
 
+        tallies = {"oversized": 0, "binary": 0, "unreadable": 0}
+        candidate_count = 0
+        for fp, _rel in self._iter_grep_candidates(base, globs):
+            candidate_count += 1
+            kind, _data = _grep_classify(fp, max_file_bytes)
+            _tally_grep_skip(kind, tallies)
+        # Candidate walk is authoritative for WORKSPACE_GREP_MAX_FILES: begin
+        # events only cover matches, and some rg builds omit/under-count searches.
+        files_scanned = max(files_scanned, candidate_count)
         if files_scanned > max_files:
             _raise_grep_max_files(files_scanned, max_files)
 
-        tallies = {"oversized": 0, "binary": 0, "unreadable": 0}
-        for fp, _rel in self._iter_grep_candidates(base, globs):
-            kind, _data = _grep_classify(fp, max_file_bytes)
-            _tally_grep_skip(kind, tallies)
         _raise_if_grep_files_skipped(
             oversized=tallies["oversized"],
             binary=tallies["binary"],
@@ -1467,6 +1483,12 @@ class WorkspaceFileService:
             try:
                 rel = p.resolve().relative_to(self._skills_root.resolve()).as_posix()
                 return "skills" if rel == "." else f"skills/{rel}"
+            except ValueError:
+                pass
+        if self._artifacts_root is not None:
+            try:
+                rel = p.resolve().relative_to(self._artifacts_root.resolve()).as_posix()
+                return "artifacts" if rel == "." else f"artifacts/{rel}"
             except ValueError:
                 pass
         try:

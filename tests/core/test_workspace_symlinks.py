@@ -65,3 +65,56 @@ def test_reject_parent_escape(tmp_path: Path) -> None:
     with pytest.raises(WorkspaceError) as exc:
         svc.read_file("../outside", offset=1, limit=10)
     assert exc.value.code == "invalid_path"
+
+
+def test_artifacts_symlink_writes_when_mounted_root_declared(tmp_path: Path) -> None:
+    """``artifacts/`` under the workspace is a legitimate symlink to a sibling
+    mount (see monkeyapp's ``ensureArtifactsLayout``), not an escape attempt —
+    a write should succeed once the real mount is declared via
+    ``artifacts_root``, mirroring the existing ``skills_root`` special-case.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (workspace / "artifacts").symlink_to(artifacts, target_is_directory=True)
+
+    svc = WorkspaceFileService(workspace, artifacts_root=artifacts)
+    result = svc.write_file("artifacts/report.md", "hello\n")
+    assert result["ok"] is True
+    assert result["path"] == "artifacts/report.md"
+    assert (artifacts / "report.md").read_text(encoding="utf-8") == "hello\n"
+
+    read_back = svc.read_file("artifacts/report.md", limit=10)
+    assert "hello" in read_back["content"]
+
+
+def test_artifacts_symlink_still_rejected_without_declared_root(tmp_path: Path) -> None:
+    """Without ``artifacts_root`` (older/other callers), a symlinked ``artifacts/``
+    still correctly escapes — this fix must not weaken the default-deny behavior.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (workspace / "artifacts").symlink_to(artifacts, target_is_directory=True)
+
+    svc = WorkspaceFileService(workspace)
+    with pytest.raises(WorkspaceError) as exc:
+        svc.write_file("artifacts/report.md", "hello\n")
+    assert exc.value.code == "path_escape"
+
+
+def test_expect_files_accepts_artifacts_path_when_mounted_root_declared(tmp_path: Path) -> None:
+    """The ``task`` tool's ``expect_files`` preflight reuses the same resolver —
+    it must accept ``artifacts/...`` too, not just ``write_file``.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (workspace / "artifacts").symlink_to(artifacts, target_is_directory=True)
+
+    svc = WorkspaceFileService(workspace, artifacts_root=artifacts)
+    resolved = svc.resolve_workspace_path("artifacts/report.md", label="expect_files")
+    assert resolved == (artifacts / "report.md").resolve()

@@ -20,12 +20,14 @@ def _clear_layout_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
         "MONKEYBOT_WORKSPACE_ROOT_OVERRIDE",
         "WORKSPACE_ROOT",
         "SKILLS_PATH",
+        "ARTIFACTS_PATH",
         "AGENT_MD",
         "MCP_CONFIG",
         "COMMAND_ALLOWLIST_CONFIG",
         "PERMISSION_CONFIG",
         "DB_URL",
         "MEMORY_STORAGE_URI",
+        "MONKEYBOT_AGENT_ID",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -74,6 +76,10 @@ def test_bootstrap_layout_is_identical_from_every_launch_cwd(
         assert layout.agent_root == agent.resolve()
         assert layout.workspace_root == (agent / "workspace").resolve()
         assert layout.skills_path == (agent / "skills").resolve()
+        # artifacts_path is opt-in only (ARTIFACTS_PATH) — no auto-derived
+        # default, unlike skills_path. See test_workspace_root_override_beats_yaml
+        # for the ARTIFACTS_PATH-set case.
+        assert layout.artifacts_path is None
         assert layout.db_url == f"sqlite:///{(agent / 'data' / 'monkeybot.db').resolve()}"
         assert layout.memory_storage_uri == f"local://{(agent / 'memory').resolve()}"
         assert os.environ["MODEL_NAME"] == "from-root-dotenv"
@@ -88,10 +94,55 @@ def test_bootstrap_layout_is_identical_from_every_launch_cwd(
         from monkeybot.gateway.realtime.routes import _resolved_workspace_paths as realtime_paths
         from monkeybot.gateway.sse.app import _resolved_workspace_paths as sse_paths
 
-        assert sse_paths() == (layout.workspace_root, layout.skills_path)
+        assert sse_paths() == (layout.workspace_root, layout.skills_path, layout.artifacts_path)
         assert realtime_paths() == (layout.workspace_root, layout.skills_path)
         assert cli_agent_root() == layout.agent_root
         assert subagent_worker.resolve_agent_project_root() == layout.agent_root
+    finally:
+        os.environ.clear()
+        os.environ.update(before)
+        runtime_env.reset_runtime_env_state_for_tests()
+
+
+def test_agent_id_defaults_to_agent_root_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no explicit identity set, agent_id falls back to the resolved
+    agent root path (PR #179 review: this default strands history if the
+    agent is later moved — paths.agent_id/MONKEYBOT_AGENT_ID is the escape
+    hatch, covered by test_agent_id_env_override_wins below).
+    """
+    agent = tmp_path / "agent"
+    _write_agent(agent)
+    before = dict(os.environ)
+    try:
+        runtime_env.reset_runtime_env_state_for_tests()
+        _clear_layout_overrides(monkeypatch)
+        monkeypatch.chdir(agent)
+        layout = bootstrap_agent_layout()
+        assert layout.agent_id == str(layout.agent_root)
+    finally:
+        os.environ.clear()
+        os.environ.update(before)
+        runtime_env.reset_runtime_env_state_for_tests()
+
+
+def test_agent_id_env_override_wins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``MONKEYBOT_AGENT_ID`` (or yaml ``paths.agent_id``) gives a durable
+    identity that survives moving the agent root or mounting it elsewhere.
+    """
+    agent = tmp_path / "agent"
+    _write_agent(agent)
+    before = dict(os.environ)
+    try:
+        runtime_env.reset_runtime_env_state_for_tests()
+        _clear_layout_overrides(monkeypatch)
+        monkeypatch.chdir(agent)
+        monkeypatch.setenv("MONKEYBOT_AGENT_ID", "stable-agent-id")
+        layout = bootstrap_agent_layout()
+        assert layout.agent_id == "stable-agent-id"
+        # Propagated to child processes (subagent workers), same as DB_URL etc.
+        assert os.environ["MONKEYBOT_AGENT_ID"] == "stable-agent-id"
     finally:
         os.environ.clear()
         os.environ.update(before)
@@ -165,6 +216,42 @@ def test_workspace_root_override_beats_yaml(
 
         assert layout.workspace_root == custom.resolve()
         assert os.environ["MONKEYBOT_WORKSPACE_ROOT"] == str(custom.resolve())
+        # artifacts_path is opt-in only — a workspace override alone grants no
+        # extra writable root.
+        assert layout.artifacts_path is None
+    finally:
+        os.environ.clear()
+        os.environ.update(before)
+        runtime_env.reset_runtime_env_state_for_tests()
+
+
+def test_artifacts_path_is_opt_in_via_env_and_follows_workspace_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ARTIFACTS_PATH must be set explicitly by the caller (e.g. the Mac app) —
+    it's a writable extra root, so there's no safe default to derive. The
+    caller is expected to compute it relative to the *actual* workspace root
+    it's overriding to (a sibling of the workspace-memory dir), not agent_root;
+    this test only confirms monkeybot honors whatever absolute path is given.
+    """
+    agent = tmp_path / "agent"
+    _write_agent(agent)
+    custom_workspace = tmp_path / "workspace-memory"
+    custom_workspace.mkdir()
+    custom_artifacts = tmp_path / "workspace-artifacts"
+    custom_artifacts.mkdir()
+    before = dict(os.environ)
+    try:
+        runtime_env.reset_runtime_env_state_for_tests()
+        _clear_layout_overrides(monkeypatch)
+        monkeypatch.chdir(agent)
+        monkeypatch.setenv("MONKEYBOT_WORKSPACE_ROOT_OVERRIDE", str(custom_workspace))
+        monkeypatch.setenv("ARTIFACTS_PATH", str(custom_artifacts))
+
+        layout = bootstrap_agent_layout()
+
+        assert layout.artifacts_path == custom_artifacts.resolve()
+        assert os.environ["ARTIFACTS_PATH"] == str(custom_artifacts.resolve())
     finally:
         os.environ.clear()
         os.environ.update(before)

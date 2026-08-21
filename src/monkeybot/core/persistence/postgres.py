@@ -37,7 +37,11 @@ from monkeybot.core.persistence.scheduled_loops import (
     _row_from_tuple,
     validate_loop_guards,
 )
-from monkeybot.core.persistence.thread_summary import ChatThreadSummary, preview_from_content_blob
+from monkeybot.core.persistence.thread_summary import (
+    SUBAGENT_THREAD_ID_PREFIX,
+    ChatThreadSummary,
+    preview_from_content_blob,
+)
 from monkeybot.core.types.content_blocks import ContentBlock
 
 logger = logging.getLogger(__name__)
@@ -50,7 +54,8 @@ _SCHEMA_DDLS: tuple[str, ...] = (
     thread_id TEXT NOT NULL,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
-    created_at BIGINT NOT NULL
+    created_at BIGINT NOT NULL,
+    agent_scope TEXT NOT NULL DEFAULT ''
 )""",
     """CREATE TABLE IF NOT EXISTS subagent_runs (
     run_id TEXT PRIMARY KEY,
@@ -91,6 +96,12 @@ _SCHEMA_DDLS: tuple[str, ...] = (
     "ALTER TABLE turn_usage ADD COLUMN IF NOT EXISTS cache_creation_tokens INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE subagent_runs ADD COLUMN IF NOT EXISTS worker_id TEXT",
     "ALTER TABLE subagent_runs ADD COLUMN IF NOT EXISTS claimed_at BIGINT",
+    # IF NOT EXISTS (not a separate check-then-add) so concurrent startups from
+    # multiple agents against a freshly-upgraded, shared DB_URL can't race each
+    # other into a duplicate-column error.
+    "ALTER TABLE conversation_history ADD COLUMN IF NOT EXISTS agent_scope TEXT NOT NULL DEFAULT ''",
+    """CREATE INDEX IF NOT EXISTS idx_history_scope_thread
+    ON conversation_history(agent_scope, thread_id, created_at DESC, id DESC)""",
     """CREATE TABLE IF NOT EXISTS scheduled_loops (
     loop_id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL,
@@ -164,11 +175,42 @@ async def _apply_schema(pool: asyncpg.Pool) -> None:
         )
 
 
-class PostgresHistoryStore:
-    """asyncpg-backed conversation history store."""
+async def _warn_if_legacy_unscoped_history(pool: asyncpg.Pool) -> None:
+    """Log once if pre-migration (``agent_scope = ''``) rows remain.
 
-    def __init__(self, pool: asyncpg.Pool) -> None:
+    Unreachable via ``list_threads``/``load``/``reset`` until an operator
+    runs, per thread_id (see ``docs/migrations/agent-scope-namespacing.md``
+    for why there's no automatic backfill)::
+
+        UPDATE conversation_history SET agent_scope = '<agent-id>'
+        WHERE thread_id = '<thread-id>' AND agent_scope = '';
+    """
+    async with pool.acquire() as conn:
+        exists = await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM conversation_history WHERE agent_scope = '')"
+        )
+    if exists:
+        logger.warning(
+            "conversation_history has rows with agent_scope='' that this agent "
+            "did not write — they are not reachable via list_threads, load, or "
+            "reset until an operator backfills agent_scope for each legacy "
+            "thread_id by hand (see _warn_if_legacy_unscoped_history docstring "
+            "for the exact UPDATE statement)."
+        )
+
+
+class PostgresHistoryStore:
+    """asyncpg-backed conversation history store, scoped to ``agent_scope``.
+
+    ``agent_scope`` isolates threads when one DB_URL is shared across gateways
+    for different agent roots — without it, ``list_threads`` would surface
+    another agent's newest transcript. Defaults to ``''`` (unscoped) for
+    in-process/test callers; production gateways pass the resolved agent root.
+    """
+
+    def __init__(self, pool: asyncpg.Pool, agent_scope: str = "") -> None:
         self._pool = pool
+        self._agent_scope = agent_scope
 
     async def _insert_message(
         self,
@@ -198,14 +240,15 @@ class PostgresHistoryStore:
         await conn.execute(
             """
             INSERT INTO conversation_history(
-                thread_id, role, content, created_at, turn_id, message_id
+                thread_id, role, content, created_at, agent_scope, turn_id, message_id
             )
-            VALUES ($1, $2, $3, $4, $5, $6)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             """,
             thread_id,
             message.role,
             payload,
             created_at,
+            self._agent_scope,
             turn_id,
             message_id,
         )
@@ -249,10 +292,11 @@ class PostgresHistoryStore:
                     """
                     SELECT id, role, content
                     FROM conversation_history
-                    WHERE thread_id = $1
+                    WHERE thread_id = $1 AND agent_scope = $2
                     ORDER BY created_at ASC, id ASC
                     """,
                     thread_id,
+                    self._agent_scope,
                 )
                 rows_chrono = list(rows)
             else:
@@ -260,11 +304,12 @@ class PostgresHistoryStore:
                     """
                     SELECT id, role, content
                     FROM conversation_history
-                    WHERE thread_id = $1
+                    WHERE thread_id = $1 AND agent_scope = $2
                     ORDER BY created_at DESC, id DESC
-                    LIMIT $2
+                    LIMIT $3
                     """,
                     thread_id,
+                    self._agent_scope,
                     limit,
                 )
                 rows_chrono = list(reversed(rows))
@@ -293,16 +338,32 @@ class PostgresHistoryStore:
 
     async def clear(self, thread_id: str) -> None:
         async with self._pool.acquire() as conn:
-            await conn.execute("DELETE FROM conversation_history WHERE thread_id = $1", thread_id)
+            await conn.execute(
+                "DELETE FROM conversation_history WHERE thread_id = $1 AND agent_scope = $2",
+                thread_id,
+                self._agent_scope,
+            )
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None:
         """Replace thread history atomically (single transaction)."""
         async with self._pool.acquire() as conn, conn.transaction():
-            await conn.execute("DELETE FROM conversation_history WHERE thread_id = $1", thread_id)
+            await conn.execute(
+                "DELETE FROM conversation_history WHERE thread_id = $1 AND agent_scope = $2",
+                thread_id,
+                self._agent_scope,
+            )
             for msg in messages:
                 await self._insert_message(conn, thread_id, msg)
 
     async def list_threads(self, limit: int = 50) -> list[ChatThreadSummary]:
+        """Return recent threads, newest first, excluding subagent transcripts.
+
+        A subagent thread_id (prefixed ``SUBAGENT_THREAD_ID_PREFIX``) that
+        finishes after its parent's last turn would otherwise outrank the
+        parent as "newest," making ``--continue`` resume the subagent's
+        transcript under the main-agent prompt and tools instead of the
+        actual previous chat.
+        """
         cap = max(1, min(limit, 200))
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
@@ -314,16 +375,19 @@ class PostgresHistoryStore:
                     (
                         SELECT h2.content
                         FROM conversation_history h2
-                        WHERE h2.thread_id = h.thread_id
+                        WHERE h2.thread_id = h.thread_id AND h2.agent_scope = $1
                         ORDER BY h2.created_at DESC, h2.id DESC
                         LIMIT 1
                     ) AS last_content
                 FROM conversation_history h
+                WHERE h.agent_scope = $1 AND h.thread_id NOT LIKE $3
                 GROUP BY h.thread_id
                 ORDER BY last_message_at DESC
-                LIMIT $1
+                LIMIT $2
                 """,
+                self._agent_scope,
                 cap,
+                f"{SUBAGENT_THREAD_ID_PREFIX}%",
             )
         out: list[ChatThreadSummary] = []
         for row in rows:
@@ -1454,8 +1518,9 @@ class PostgresStorageBackend:
 
     shares_outbox = True
 
-    def __init__(self, db_url: str) -> None:
+    def __init__(self, db_url: str, agent_scope: str = "") -> None:
         self._db_url = db_url
+        self._agent_scope = agent_scope
         self._pool: asyncpg.Pool | None = None
         self._history_store: PostgresHistoryStore | None = None
         self._usage_store: PostgresUsageStore | None = None
@@ -1470,7 +1535,9 @@ class PostgresStorageBackend:
         self._pool = await asyncpg.create_pool(self._db_url, min_size=min_size, max_size=max_size)
         if run_schema:
             await _apply_schema(self._pool)
-        self._history_store = PostgresHistoryStore(self._pool)
+            if self._agent_scope:
+                await _warn_if_legacy_unscoped_history(self._pool)
+        self._history_store = PostgresHistoryStore(self._pool, self._agent_scope)
         self._usage_store = PostgresUsageStore(self._pool)
         self._runs_store = PostgresRunStore(self._pool)
         self._scheduled_loops_store = PostgresScheduledLoopStore(self._pool)

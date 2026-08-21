@@ -81,7 +81,16 @@ async def test_apply_schema_creates_only_expected_history_columns() -> None:
         rows = await cursor.fetchall()
         await cursor.close()
         names = {str(r[1]) for r in rows}
-        assert names == {"id", "thread_id", "role", "content", "created_at", "turn_id", "message_id"}
+        assert names == {
+            "id",
+            "thread_id",
+            "role",
+            "content",
+            "created_at",
+            "agent_scope",
+            "turn_id",
+            "message_id",
+        }
     finally:
         await conn.close()
 
@@ -147,7 +156,16 @@ async def test_apply_schema_succeeds_after_wipe_simulated(tmp_path: Path) -> Non
         rows = await cursor.fetchall()
         await cursor.close()
         names = {str(r[1]) for r in rows}
-        assert names == {"id", "thread_id", "role", "content", "created_at", "turn_id", "message_id"}
+        assert names == {
+            "id",
+            "thread_id",
+            "role",
+            "content",
+            "created_at",
+            "agent_scope",
+            "turn_id",
+            "message_id",
+        }
     finally:
         await conn2.close()
 

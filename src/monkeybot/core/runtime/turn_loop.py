@@ -30,7 +30,10 @@ from monkeybot.core.llm.usage import Usage
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.memory.ingest import persist_message
 from monkeybot.core.messages import convert_to_provider
-from monkeybot.core.messages.tool_integrity import cancelled_tool_result_text
+from monkeybot.core.messages.tool_integrity import (
+    cancelled_tool_result_text,
+    interrupted_tool_result_text,
+)
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.prompts.prompt import latest_user_message_text
@@ -265,6 +268,7 @@ class _TurnState:
     thinking_signature: str | None = None
     stream_truncated: bool = False
     last_preflight_tokens: int = 0
+    provider_stream_failed: bool = False
 
 
 async def _prepare_turn_context(
@@ -915,7 +919,10 @@ async def _consume_provider_stream_body(
                 model=state.ctx.model,
                 text=state.assistant_text,
                 thinking=state.thinking_text,
-                tool_requests=[],
+                tool_requests=[
+                    {"call_id": tc.call_id, "name": tc.name, "args": tc.args}
+                    for tc in state.pending.values()
+                ],
                 usage={
                     "input_tokens": llm_input,
                     "output_tokens": llm_output,
@@ -959,6 +966,7 @@ async def _consume_provider_stream_body(
         )
         yield Error(request_id=state.ctx.request_id, error=str(exc))
         state.needs_followup_after_tools = False
+        state.provider_stream_failed = True
         state.action = "return"
         return
 
@@ -1026,12 +1034,19 @@ async def _persist_partial_assistant_on_abort(
         )
     if not assist_blocks:
         return
+    tool_text_fn = (
+        interrupted_tool_result_text
+        if state.provider_stream_failed
+        else cancelled_tool_result_text
+    )
     await persist_message(
         history,
         Message(role="assistant", content=assist_blocks),
         thread_id=state.ctx.thread_id,
         turn_id=state.ctx.request_id,
         memory=state.ctx.memory,
+        # Skip memory ingest when only tool-call blocks were finalized — the
+        # cancel/interrupt envelopes carry the durable tool facts for this turn.
         ingest=bool(cleaned) and not ordered,
     )
     if ordered:
@@ -1039,7 +1054,7 @@ async def _persist_partial_assistant_on_abort(
             ToolResponse(
                 id=c.call_id,
                 tool_name=c.name,
-                result=[Text(text=cancelled_tool_result_text(c.name))],
+                result=[Text(text=tool_text_fn(c.name))],
                 is_error=True,
             )
             for c in ordered

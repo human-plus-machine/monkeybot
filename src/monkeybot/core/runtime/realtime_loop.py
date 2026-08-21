@@ -294,7 +294,9 @@ async def _resolve_realtime_inspector_decision(
                 pending_bus, fut, call.call_id, timeout_sec=None
             )
         except asyncio.CancelledError:
-            if not confirm_wait_stopped_by_user(pending_bus, call.call_id):
+            if not confirm_wait_stopped_by_user(
+                pending_bus, call.call_id, cancelled=ctx.cancelled
+            ):
                 raise
             yield Error(request_id=ctx.request_id, error="Request cancelled")
             remaining = pending_calls[call_index:]
@@ -337,7 +339,10 @@ async def _resolve_realtime_inspector_decision(
             outcome.allowed = True
             if payload.get("always"):
                 remember_always_approval(
-                    pending_bus, call.name, resource_for_call(inspector_call)
+                    pending_bus,
+                    call.name,
+                    resource_for_call(inspector_call),
+                    persist=ctx.approvals_persist,
                 )
                 logger.debug(
                     "realtime HITL always %s",
@@ -611,6 +616,8 @@ async def run_realtime_turn(
             ):
                 yield evt
             if inspector_gate.aborted:
+                # Cancel envelopes still flow through tool_results_out so Gemini Live
+                # receives answers for unanswered tool calls after Stop.
                 tool_results.extend(inspector_gate.settled_responses)
                 break
 

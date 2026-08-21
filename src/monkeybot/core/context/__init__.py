@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
@@ -22,10 +22,6 @@ from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.tools.workspace_service import AGENT_READ_DEFAULT_LINES
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.todo_list.store import TodoListStore
-
-# Bounded ring of pending keys that have been resolved / abandoned / Stop-cancelled.
-TERMINATED_PENDING_KEYS_MAXLEN: int = 256
-
 
 @runtime_checkable
 class CustomTool(Protocol):
@@ -132,6 +128,13 @@ class TurnContext:
     """True when durable loop storage is wired (DB_URL); advertise ``enable_loops`` catalog hint."""
     todo_store: TodoListStore | None = None
     """Session-scoped todo list (parent agent only); mutable store held by frozen context."""
+    approvals_persist: Callable[[str, str], bool] | None = None
+    """Optional hook to durably persist an "Always allow" approval beyond the
+    in-memory session cache — e.g. the ``computer_*`` tools' ``approvals.json``
+    overlay (see ``monkeybot.computer.permissions.build_persist_hook``). Passed
+    to ``permission.remember_always_approval`` as its ``persist`` kwarg by
+    ``tool_dispatch.py`` / ``realtime_loop.py``. None when no such hook is wired
+    (the default for every deployment that doesn't enable computer tools)."""
 
 
 _log = logging.getLogger(__name__)
@@ -550,12 +553,25 @@ def _core_tool_defs(
     run_schema: dict[str, object] = {
         "type": "object",
         "properties": {
-            "argv": {"type": "array", "items": {"type": "string"}},
+            "argv": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Command as [binary, ...args]. Preferred over a combined command string."
+                ),
+            },
             "command": {"type": "string"},
             "args": {"type": "array", "items": {"type": "string"}},
             "arguments": {"type": "array", "items": {"type": "string"}},
             "shell": {"type": "string"},
             "script": {"type": "string"},
+            "cwd": {
+                "type": "string",
+                "description": (
+                    "Optional workspace-relative working directory (defaults to workspace root). "
+                    "Use for subdirectory commands (npm, nested pytest, subrepo git) instead of cd."
+                ),
+            },
             "timeout": {"type": "integer"},
         },
         "required": [],
@@ -619,7 +635,14 @@ def _core_tool_defs(
     tools: list[ToolDef] = [
         ToolDef(
             "run_command",
-            "Run an allowlisted shell command with repo-scoped path checks (see TerminalExecutor).",
+            (
+                "Run an allowlisted shell command with optional timeout. "
+                'Pass argv as a list with the binary first (e.g. ["ls", "."]); '
+                "do not pass a combined string as the binary. Shell starts in "
+                "workspace root unless cwd (workspace-relative) is set. "
+                "cd is a builtin and is not a valid command — pass cwd or "
+                "workspace-relative paths to the binary instead."
+            ),
             run_schema,
         ),
         ToolDef(
@@ -635,7 +658,11 @@ def _core_tool_defs(
         ),
         ToolDef(
             "write_file",
-            "Write or replace a UTF-8 text file under the workspace root.",
+            (
+                "Write or replace a UTF-8 text file under the workspace root. "
+                "You have a writable workspace — do not claim you lack filesystem "
+                "access or are chat-only; use this tool for file deliverables."
+            ),
             write_schema,
         ),
         ToolDef(
@@ -695,7 +722,9 @@ def _core_tool_defs(
                 "Spawn a subprocess subagent with the same workspace, memory, and MCP configuration "
                 "to work on a delegated objective. Pass subagent_type to select a named persona "
                 "(see harness Subagent personas). Returns JSON with the subagent's streamed answer "
-                "summary, errors, and usage. Nested task calls are disabled inside the subagent.",
+                "summary, errors, and usage. When queue mode returns ok:false / error_kind:pending "
+                "/ queued:true, the child has not finished — do not treat that as completion. "
+                "Nested task calls are disabled inside the subagent.",
                 task_schema,
             ),
         )
@@ -822,6 +851,7 @@ async def build_context(
     scheduled_loops_available: bool = False,
     loops_advertised: bool = False,
     todo_store: TodoListStore | None = None,
+    approvals_persist: Callable[[str, str], bool] | None = None,
 ) -> TurnContext:
     """Assemble a TurnContext from filesystem paths and the MCP client snapshot.
 
@@ -848,11 +878,13 @@ async def build_context(
             Their ``tool_def`` is appended to the tool list advertised to the model and
             their ``execute`` method is dispatched by :class:`CoreToolExecutor`.
         subagent_registry: Optional map of named subagent personas from monkeybot.yaml.
-        scheduled_loops_available: True when durable loop storage is wired (shows harness hint).
+        scheduled_loops_available: True when durable loop storage is wired.
         loops_advertised: True when the caller's ``LoopsToolRegistry`` has ``enable_loops``
             active; includes scheduled-loop lifecycle tools immediately for this turn.
         todo_store: Optional session-scoped todo list store (parent agent); enables volatile
             ``## Todo list`` injection. Pass the same store to ``TodoListTool`` via ``extra_tools``.
+        approvals_persist: Optional hook to durably persist "Always allow" approvals
+            beyond the in-memory session cache; see ``TurnContext.approvals_persist``.
 
     Returns:
         Frozen :class:`TurnContext`.
@@ -904,6 +936,7 @@ async def build_context(
         catalog_mcp_servers=catalog_names,
         scheduled_loops_available=scheduled_loops_available,
         todo_store=todo_store,
+        approvals_persist=approvals_persist,
     )
 
 

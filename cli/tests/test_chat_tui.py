@@ -759,10 +759,13 @@ def test_paste_inserts_without_submit(tmp_path: Path) -> None:
             app._send_user_message = lambda value: submitted.append(value)  # type: ignore[method-assign]
 
             await composer._on_paste(Paste("line1\nline2\nline3"))
-            await pilot.pause()
+            assert composer._paste_guard is True
             assert "line1\nline2\nline3" in composer.text
             assert submitted == []
-            assert composer._paste_guard is True
+            await pilot.pause()
+            # Timer may clear the guard during pause; paste must still not submit.
+            assert "line1\nline2\nline3" in composer.text
+            assert submitted == []
 
     asyncio.run(_run())
 
@@ -2332,5 +2335,49 @@ def test_single_esc_idle_does_not_clear_draft(tmp_path: Path) -> None:
             await pilot.press("escape")
             await pilot.pause()
             assert composer.text == "draft in progress"
+
+    asyncio.run(_run())
+
+
+def test_bye_prints_continue_hint_when_session_started(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            app._session_id = "sess-123"
+            app.query_one("#prompt", Composer).post_message(Composer.Submitted("/bye"))
+            await pilot.pause()
+            systems = [w.body for w in app.query(SystemLine)]
+            assert any("Goodbye" in body for body in systems)
+            assert any(
+                "monkeybot chat --continue" in body for body in systems
+            )
+
+    asyncio.run(_run())
+
+
+def test_bye_omits_continue_hint_without_session(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            app._session_id = None
+            app.query_one("#prompt", Composer).post_message(Composer.Submitted("/bye"))
+            await pilot.pause()
+            systems = [w.body for w in app.query(SystemLine)]
+            assert any("Goodbye" in body for body in systems)
+            assert not any("monkeybot chat --continue" in body for body in systems)
 
     asyncio.run(_run())

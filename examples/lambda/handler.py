@@ -11,6 +11,13 @@ Optional:
   MEMORY_STORAGE_URI  — local:// path (gcs:// and s3:// fall back to local:// under the agent root)
   MCP_CONFIG          — path to mcpServers JSON; if unset, MCP stays empty
   MONKEYBOT_OPEN_MCP  — set to "true" to load MCP_CONFIG (default: false for Lambda)
+  MONKEYBOT_AGENT_ID  — REQUIRED if this Lambda's DB_URL is ever shared with another
+                        deployment (e.g. one Postgres/Firestore instance serving several
+                        functions or tenants) — namespaces conversation history so this
+                        deployment can't read/resume another one's same-named sessions.
+                        create_harness_deps() also picks this up automatically from the
+                        environment when agent_scope isn't passed explicitly; it's passed
+                        explicitly below anyway so the requirement is obvious here.
   MONKEYBOT_MEMORY_HOOK_ENABLED — set to 0 to skip capture/wake-up (or omit monkeybot[memory])
 
 Model/provider: use MODEL_PROVIDER, MODEL_NAME, and provider secrets as in container deploys.
@@ -55,6 +62,7 @@ async def _ensure_deps() -> HarnessDeps:
             os.environ.get("MEMORY_STORAGE_URI"),
             mcp_config_path=Path(mcp_path) if mcp_path else None,
             open_mcp=open_mcp,
+            agent_scope=os.environ.get("MONKEYBOT_AGENT_ID", ""),
         )
     return _deps
 

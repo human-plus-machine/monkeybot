@@ -43,6 +43,14 @@ def test_extra_remediation_config_only_cli_env(tmp_path: Path) -> None:
     runtime = SimpleNamespace(source="cli")
     text = _extra_remediation("bedrock", tmp_path, runtime)
     assert "uv tool install --with 'monkeybot[bedrock]' monkeybot-cli" in text
+    assert "refresh the managed runtime" not in text
+
+
+def test_extra_remediation_config_only_managed_runtime(tmp_path: Path) -> None:
+    runtime = SimpleNamespace(source="cli-managed")
+    text = _extra_remediation("openai", tmp_path, runtime)
+    assert "uv tool install --with 'monkeybot[openai]' monkeybot-cli" in text
+    assert "refresh the managed runtime" in text
 
 
 def test_agent_defines_project_extra(tmp_path: Path) -> None:
@@ -55,9 +63,7 @@ def test_agent_defines_project_extra(tmp_path: Path) -> None:
     assert not _agent_defines_project_extra(tmp_path, "openai")
 
 
-def test_runtime_python_version_returns_zeros_when_uv_missing(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_runtime_python_version_returns_zeros_when_uv_missing(tmp_path: Path, monkeypatch) -> None:
     runtime = RuntimePython(["uv", "run", "python"], "uv", tmp_path)
 
     def fake_run(*args, **kwargs):
@@ -68,9 +74,7 @@ def test_runtime_python_version_returns_zeros_when_uv_missing(
     assert _runtime_python_version(runtime) == (0, 0, 0)
 
 
-def test_runtime_python_version_returns_zeros_on_timeout(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_runtime_python_version_returns_zeros_on_timeout(tmp_path: Path, monkeypatch) -> None:
     runtime = RuntimePython(["uv", "run", "python"], "uv", tmp_path)
 
     def fake_run(*args, **kwargs):

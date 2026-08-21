@@ -67,7 +67,7 @@ architecture guidance rather than a managed-cloud test claim.
 | Local Docker / Compose | configuration validated | baked into agent image | anonymous volume | SQLite volume or Postgres | Compose overlay | headless Chromium in image |
 | Cloud Run / ECS Fargate / Container Apps | pattern only | baked into image, read-only | ephemeral | managed DB + object memory | remote compute-only | in-image Chromium or Browser Use Cloud |
 | GKE / EKS / ECS-EC2 / VM | pattern only | baked into image | volume or `emptyDir` | managed DB + object memory, or PVC | co-located Docker-socket sidecar | Chromium sidecar or in-image |
-| AWS AgentCore | pattern only | handler bundle | ephemeral or platform file mount | managed session storage or URI overrides | none or remote compute-only | Browser Use Cloud |
+| AWS AgentCore | pattern only | handler bundle | ephemeral or platform file mount | managed session storage or URI overrides | none or remote compute-only | Browser Use Cloud or AgentCore Browser |
 | Vertex Agent Engine | pattern only | source artifact | ephemeral temporary storage | URI overrides | none or remote compute-only | Browser Use Cloud |
 
 ### Remote sandbox capability boundary

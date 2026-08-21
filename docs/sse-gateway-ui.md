@@ -46,12 +46,12 @@ Errors use a common envelope:
 | `POST` | `/sessions/{session_id}/attachments` | Upload a session attachment (multipart). Field `file` (required). **201** → `{ attachment_id, mime_type, size_bytes, filename, created_at }`. Disabled when `ATTACHMENTS_ENABLED=false`. See [Attachments upload](#attachments-upload). |
 | `POST` | `/sessions/{session_id}/cancel` | Request cancellation for a turn. Body: `{ "request_id": string }`. **200** empty body on success. |
 | `GET` | `/sessions/{session_id}/usage` | Session aggregates and **last-turn** context hints (see [Session usage endpoint](#session-usage-endpoint)). Optional query: `since` (Unix ms). |
-| `POST` | `/sessions/{session_id}/tool-confirmations/{tool_call_id}` | Approve/deny a tool. Body: `{ "approved": boolean, "reason"?: string }`. **202** `{ "ok": true }`. |
+| `POST` | `/sessions/{session_id}/tool-confirmations/{tool_call_id}` | Approve/deny a tool. Body: `{ "approved": boolean, "reason"?: string, "always"?: boolean }`. **202** `{ "ok": true }`. `always: true` with `approved: true` remembers this exact `(tool, resource)` pair for the rest of the session (`SessionApprovals`); for `computer_*` tools specifically it's also written durably to that agent's `monkeybot_config/approvals.json` so it survives a gateway restart — see [Features — Computer control](features.md#22-computer-control-desktop-only). |
 | `POST` | `/sessions/{session_id}/elicitations/{elicitation_id}` | Answer an elicitation. Body: `{ "user_data": any }`. **202** `{ "ok": true }`. |
 | `POST` | `/sessions/{session_id}/frontend-tool-results/{tool_call_id}` | Return a frontend tool result. Body: `{ "result": ContentBlock[], "is_error": boolean }` (blocks are JSON objects matching `ContentBlock` schema). **202** `{ "ok": true }`. |
 | `GET` | `/api/workspace/tree` | Optional directory listing under the gateway workspace. Query `path` (repo-relative). Disabled when `MONKEYBOT_WORKSPACE_API` is `0` / `false` / `no` / `off`. |
 | `GET` | `/api/workspace/file` | Optional file slice read. Query `path` (required), `offset` (1-based line, default 1), `limit` (default 200). Same env gate as tree. |
-| `GET` | `/api/chat-history` | Optional recent-threads listing. Disabled when `MONKEYBOT_CHAT_HISTORY_API` is `0` / `false` / `no` / `off`. |
+| `GET` | `/api/chat-history` | Optional recent-threads listing, newest first. Disabled when `MONKEYBOT_CHAT_HISTORY_API` is `0` / `false` / `no` / `off`. `monkeybot chat -c`/`--continue` uses this to auto-resume the most recent session for the current agent root. |
 | `GET` | `/api/chat-history/{session_id}` | Optional persisted user/assistant text for one thread. Same env gate as the list endpoint. |
 | `DELETE` | `/api/chat-history/{session_id}` | Clear one persisted transcript and any backend-specific thread summary. Same env gate; uses the configured `DB_URL` backend (SQLite, Postgres, or Firestore). Returns `{ "deleted": true }` as an idempotent wipe acknowledgment, even when no thread exists. |
 
@@ -106,7 +106,7 @@ Common types you will handle in a chat UI:
 | `Error` | Recoverable stream error string in `error`. |
 | `ImageBlock` | Inline image (`mime_type`, base64 `data`). |
 | `ThinkingBlockDelta` / `ThinkingBlockComplete` / `RedactedThinkingBlock` | Extended thinking blocks where the model exposes them. |
-| `ToolConfirmationRequest` | User must approve/deny; POST to `tool-confirmations` with `tool_call_id`. The reference Textual client can auto-answer these client-side in `auto-approve`/`deny-confirms` mode (`Shift+Tab` in `monkeybot chat`) — this is purely a UI convenience, no gateway change; `ActionRequiredEvent` elicitations are never auto-answered. |
+| `ToolConfirmationRequest` | User must approve/deny; POST to `tool-confirmations` with `tool_call_id`. Carries `tool_name`, `arguments` (the tool's raw call args — e.g. `path`/`url`/`app` for `computer_*` tools, useful for showing *what* is being approved), and an optional human-readable `prompt`. The reference Textual client can auto-answer these client-side in `auto-approve`/`deny-confirms` mode (`Shift+Tab` in `monkeybot chat`) — this is purely a UI convenience, no gateway change; `ActionRequiredEvent` elicitations are never auto-answered. |
 | `ActionRequiredEvent` | e.g. `action_type: "elicitation"` with `id` and `payload`; POST to `elicitations/{id}`. |
 | `FrontendToolRequest` | UI-executed tool; POST result to `frontend-tool-results/{tool_call_id}`. |
 | `SystemNotificationEvent` | Toasts / inline system messages (`notification_type`, `msg`). |

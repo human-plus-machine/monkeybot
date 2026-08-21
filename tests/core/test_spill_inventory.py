@@ -42,6 +42,35 @@ def test_session_spill_dirs_glob_metachar_does_not_match_other_sessions(
     assert "subagent:sess-1:bbb" not in names
 
 
+def test_session_spill_dirs_legacy_glob_metachar_id(tmp_path: Path) -> None:
+    root = tmp_path / ".monkeybot" / "spill"
+    legacy_name = "sess*1"
+    (root / legacy_name).mkdir(parents=True)
+    (root / legacy_name / "old.txt").write_text("legacy", encoding="utf-8")
+
+    dirs = session_spill_dirs(tmp_path, legacy_name)
+    names = {p.name for p in dirs}
+    assert legacy_name in names
+    assert "sess_1" in names
+
+
+def test_cleanup_session_spill_skips_symlink_target(tmp_path: Path) -> None:
+    root = tmp_path / ".monkeybot" / "spill"
+    victim = root / "victim"
+    victim.mkdir(parents=True)
+    (victim / "keep.txt").write_text("stay", encoding="utf-8")
+    link = root / "s1"
+    link.symlink_to(victim, target_is_directory=True)
+
+    import asyncio
+
+    asyncio.run(cleanup_session_spill_files(tmp_path, "s1"))
+
+    assert not link.exists()
+    assert victim.exists()
+    assert (victim / "keep.txt").read_text(encoding="utf-8") == "stay"
+
+
 @pytest.mark.asyncio
 async def test_cleanup_session_spill_files_concurrent(tmp_path: Path) -> None:
     root = tmp_path / ".monkeybot" / "spill"

@@ -124,6 +124,124 @@ async def test_postgres_open_run_schema_false_skips_apply_schema(
     await backend.close()
 
 
+def _require_asyncpg() -> None:
+    try:
+        import asyncpg  # noqa: F401
+    except ImportError:
+        pytest.skip("asyncpg is not installed")
+
+
+class _FakeAsyncpgConn:
+    """Records every SQL call and validates ``$N`` placeholder count vs. args passed.
+
+    A pure string-capture mock (recording the query but never checking arity)
+    would not have caught a real bug found while validating this fix against a
+    live Postgres: reset() passed 3 positional args against a 2-placeholder
+    query, which asyncpg rejects with "the server expects N arguments...".
+    Checking placeholder count here catches that class of bug without a live DB.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def _check_arity(self, query: str, args: tuple[object, ...]) -> None:
+        import re
+
+        placeholders = {int(m) for m in re.findall(r"\$(\d+)", query)}
+        expected = max(placeholders) if placeholders else 0
+        assert len(args) == expected, (
+            f"query expects {expected} args (placeholders {sorted(placeholders)}), "
+            f"got {len(args)}: {query!r}"
+        )
+
+    async def fetch(self, query: str, *args: object) -> list[object]:
+        self._check_arity(query, args)
+        self.calls.append((query, args))
+        return []
+
+    async def fetchval(self, query: str, *args: object) -> object:
+        self._check_arity(query, args)
+        self.calls.append((query, args))
+        return None
+
+    async def execute(self, query: str, *args: object) -> str:
+        self._check_arity(query, args)
+        self.calls.append((query, args))
+        return "OK"
+
+    def transaction(self) -> _FakeAsyncpgTransaction:
+        return _FakeAsyncpgTransaction()
+
+
+class _FakeAsyncpgTransaction:
+    async def __aenter__(self) -> None:
+        return None
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+
+class _FakeAsyncpgAcquire:
+    def __init__(self, conn: _FakeAsyncpgConn) -> None:
+        self._conn = conn
+
+    async def __aenter__(self) -> _FakeAsyncpgConn:
+        return self._conn
+
+    async def __aexit__(self, *exc: object) -> None:
+        return None
+
+
+class _FakeAsyncpgPool:
+    def __init__(self, conn: _FakeAsyncpgConn) -> None:
+        self._conn = conn
+
+    def acquire(self) -> _FakeAsyncpgAcquire:
+        return _FakeAsyncpgAcquire(self._conn)
+
+
+@pytest.mark.asyncio
+async def test_postgres_list_threads_query_does_not_reference_ungrouped_column() -> None:
+    """Regression for PR #179 review: PostgreSQL rejects a subquery that reads
+    an outer-query column (``h.agent_scope``) not present in GROUP BY, with
+    "subquery uses ungrouped column" — verified against a real local Postgres
+    instance. The scoped subquery must bind the scope as a query parameter
+    (``$1``) instead of correlating through ``h.agent_scope``.
+    """
+    _require_asyncpg()
+    from monkeybot.core.persistence.postgres import PostgresHistoryStore
+
+    fake_conn = _FakeAsyncpgConn()
+    store = PostgresHistoryStore(_FakeAsyncpgPool(fake_conn), "agent-a")  # type: ignore[arg-type]
+    await store.list_threads()
+
+    assert len(fake_conn.calls) == 1
+    query = fake_conn.calls[0][0]
+    assert "h2.agent_scope = h.agent_scope" not in query
+
+
+@pytest.mark.asyncio
+async def test_postgres_load_reset_clear_use_correct_arity() -> None:
+    """Regression: reset()/clear()/load() must pass exactly as many args as
+    their query has ``$N`` placeholders for — verified live against a real
+    Postgres instance (see test_storage_backends manual validation in the
+    PR #179 review response); this mock catches the same class of bug
+    without needing a live DB in CI.
+    """
+    _require_asyncpg()
+    from monkeybot.core.persistence.postgres import PostgresHistoryStore
+
+    fake_conn = _FakeAsyncpgConn()
+    store = PostgresHistoryStore(_FakeAsyncpgPool(fake_conn), "agent-a")  # type: ignore[arg-type]
+
+    await store.load("t1")
+    await store.load("t1", limit=5)
+    await store.clear("t1")
+    await store.reset("t1", [])
+
+    assert len(fake_conn.calls) == 4
+
+
 # ---------------------------------------------------------------------------
 # Factory tests
 # ---------------------------------------------------------------------------
@@ -297,6 +415,376 @@ async def test_history_reset_to_empty(sqlite_backend: SQLiteStorageBackend) -> N
 async def test_history_load_empty_thread_returns_empty(sqlite_backend: SQLiteStorageBackend) -> None:
     store = sqlite_backend.history()
     assert await store.load("nonexistent") == []
+
+
+# ---------------------------------------------------------------------------
+# agent_scope isolation — different agent roots sharing one DB_URL must not
+# see each other's threads (PR #179 review: chat.py:703).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_history_list_threads_isolated_by_agent_scope() -> None:
+    backend_a = SQLiteStorageBackend("sqlite:///:memory:", agent_scope="agent-a")
+    await backend_a.open()
+    try:
+        conn = backend_a._conn
+        assert conn is not None
+        # Share the same connection/db to simulate one DB_URL, two agent roots.
+        from monkeybot.core.persistence.history import SQLiteHistoryStore
+
+        store_a = backend_a.history()
+        store_b = SQLiteHistoryStore(conn, "agent-b")
+
+        await store_a.append("t1", Message.text("user", "agent a's secret"))
+        await store_b.append("t2", Message.text("user", "agent b's secret"))
+
+        threads_a = await store_a.list_threads()
+        threads_b = await store_b.list_threads()
+
+        assert [t.thread_id for t in threads_a] == ["t1"]
+        assert [t.thread_id for t in threads_b] == ["t2"]
+        # Neither agent can load the other's thread by id either.
+        assert await store_a.load("t2") == []
+        assert await store_b.load("t1") == []
+    finally:
+        await backend_a.close()
+
+
+@pytest.mark.asyncio
+async def test_history_list_threads_excludes_subagent_transcripts() -> None:
+    """Regression for PR #179 review: a subagent that finishes after its
+    parent's last turn must not outrank the parent as "newest" — otherwise
+    `monkeybot chat --continue` resumes the subagent's transcript under the
+    main-agent prompt and tools instead of the actual previous chat.
+    """
+    from monkeybot.core.persistence.thread_summary import SUBAGENT_THREAD_ID_PREFIX
+
+    backend = SQLiteStorageBackend("sqlite:///:memory:", agent_scope="agent-a")
+    await backend.open()
+    try:
+        store = backend.history()
+        await store.append("main-thread", Message.text("user", "hello"))
+        # Subagent finishes strictly after the parent's last message.
+        await store.append(
+            f"{SUBAGENT_THREAD_ID_PREFIX}main-thread:abc123",
+            Message.text("user", "subagent internal chatter"),
+        )
+
+        threads = await store.list_threads()
+        assert [t.thread_id for t in threads] == ["main-thread"]
+        # The subagent's own transcript is still fully readable by its exact id —
+        # only list_threads (auto-discovery / --continue) excludes it.
+        loaded = await store.load(f"{SUBAGENT_THREAD_ID_PREFIX}main-thread:abc123")
+        assert len(loaded) == 1
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_history_list_threads_case_variant_prefix_not_excluded() -> None:
+    """Regression for PR #179 review: SQLite's LIKE ASCII-folds case by
+    default, so a NOT LIKE 'subagent:%' exclusion also swallowed an ordinary
+    user session literally named e.g. 'Subagent:foo' — reproduced as
+    load=1, list_threads=[]. GLOB is case-sensitive and must not exclude it.
+    """
+    backend = SQLiteStorageBackend("sqlite:///:memory:", agent_scope="agent-a")
+    await backend.open()
+    try:
+        store = backend.history()
+        await store.append("Subagent:foo", Message.text("user", "a real user session"))
+        threads = await store.list_threads()
+        assert [t.thread_id for t in threads] == ["Subagent:foo"]
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_history_reset_does_not_cross_scope(tmp_path: Path) -> None:
+    from monkeybot.core.persistence.history import SQLiteHistoryStore
+
+    db_path = tmp_path / "shared.db"
+    backend_a = SQLiteStorageBackend(f"sqlite:///{db_path}", agent_scope="agent-a")
+    await backend_a.open()
+    try:
+        conn = backend_a._conn
+        assert conn is not None
+        store_a = backend_a.history()
+        store_b = SQLiteHistoryStore(conn, "agent-b")
+
+        await store_a.append("same-id", Message.text("user", "a's message"))
+        await store_b.append("same-id", Message.text("user", "b's message"))
+
+        await store_a.reset("same-id", [])
+
+        assert await store_a.load("same-id") == []
+        assert await store_b.load("same-id") == [Message.text("user", "b's message")]
+    finally:
+        await backend_a.close()
+
+
+@pytest.mark.asyncio
+async def test_history_migration_does_not_auto_claim_legacy_rows_when_not_owned(
+    tmp_path: Path,
+) -> None:
+    """Regression for PR #179 review: an earlier version of this fix claimed
+    every pre-migration (agent_scope='') row for whichever agent opened the DB
+    first. Reproduced directly here with two agents' legacy threads on one
+    file: that let the first opener read the second agent's secret and left
+    the second agent's own history empty. Migration must leave ambiguous
+    legacy rows unclaimed by anyone — only an explicit, per-thread operator
+    UPDATE (exercised below) may assign them.
+
+    No agent_root is passed here, so db_owned_by_agent_root() can't confirm
+    single ownership — this is the "could be a shared file" case (an explicit
+    absolute DB_URL pointing multiple agents at one file, or an unknown
+    agent_root). Contrast with
+    test_history_migration_auto_claims_legacy_rows_when_owned_by_agent_root
+    below, the default-deployment case where auto-claiming *is* safe.
+    """
+    import time
+
+    import aiosqlite
+
+    db_path = tmp_path / "legacy.db"
+    conn = await aiosqlite.connect(str(db_path))
+    await conn.execute(
+        """CREATE TABLE conversation_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        thread_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+    )"""
+    )
+    await conn.execute(
+        "INSERT INTO conversation_history(thread_id, role, content, created_at) VALUES (?,?,?,?)",
+        ("agent-a-legacy-thread", "user", '[{"type":"text","text":"a\'s secret"}]', int(time.time() * 1000)),
+    )
+    await conn.execute(
+        "INSERT INTO conversation_history(thread_id, role, content, created_at) VALUES (?,?,?,?)",
+        ("agent-b-legacy-thread", "user", '[{"type":"text","text":"b\'s secret"}]', int(time.time() * 1000)),
+    )
+    await conn.commit()
+    await conn.close()
+
+    backend_a = SQLiteStorageBackend(f"sqlite:///{db_path}", agent_scope="agent-a")
+    await backend_a.open(run_schema=True)
+    try:
+        # Migration must not have claimed either thread for agent-a.
+        assert await backend_a.history().list_threads() == []
+        assert await backend_a.history().load("agent-a-legacy-thread") == []
+        assert await backend_a.history().load("agent-b-legacy-thread") == []
+
+        # The documented manual path (see warn_if_legacy_unscoped_history) does
+        # restore access, scoped to exactly the thread an operator maps.
+        conn2 = backend_a._conn
+        assert conn2 is not None
+        await conn2.execute(
+            "UPDATE conversation_history SET agent_scope = ? WHERE thread_id = ? AND agent_scope = ''",
+            ("agent-a", "agent-a-legacy-thread"),
+        )
+        await conn2.commit()
+        assert [t.thread_id for t in await backend_a.history().list_threads()] == [
+            "agent-a-legacy-thread"
+        ]
+        # agent-b's still-unclaimed thread remains invisible to agent-a.
+        assert await backend_a.history().load("agent-b-legacy-thread") == []
+    finally:
+        await backend_a.close()
+
+
+@pytest.mark.asyncio
+async def test_history_migration_auto_claims_legacy_rows_when_owned_by_agent_root(
+    tmp_path: Path,
+) -> None:
+    """Regression for a later PR #179 review round: refusing to auto-claim is
+    right for a genuinely shared Postgres/Firestore backend or an explicit
+    shared SQLite path, but wrong for the *default* deployment — DB_URL left
+    relative, resolved under the agent root by resolve_sqlite_url — where
+    exactly one agent could ever sensibly own that file. Without this,
+    upgrading orphaned every existing local user's chat history: --continue,
+    explicit --session, and transcript backfill all silently returned empty.
+
+    Simulates the default layout: db file at <agent_root>/data/monkeybot.db,
+    passed with agent_root=<agent_root> as app.py/subagent_worker.py do.
+    """
+    import time
+
+    import aiosqlite
+
+    agent_root = tmp_path / "my-agent"
+    data_dir = agent_root / "data"
+    data_dir.mkdir(parents=True)
+    db_path = data_dir / "monkeybot.db"
+
+    conn = await aiosqlite.connect(str(db_path))
+    await conn.execute(
+        """CREATE TABLE conversation_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        thread_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+    )"""
+    )
+    await conn.execute(
+        "INSERT INTO conversation_history(thread_id, role, content, created_at) VALUES (?,?,?,?)",
+        ("my-old-chat", "user", '[{"type":"text","text":"pre-upgrade message"}]', int(time.time() * 1000)),
+    )
+    await conn.commit()
+    await conn.close()
+
+    backend = SQLiteStorageBackend(
+        f"sqlite:///{db_path}", agent_scope="my-agent-id", agent_root=agent_root
+    )
+    await backend.open(run_schema=True)
+    try:
+        assert [t.thread_id for t in await backend.history().list_threads()] == ["my-old-chat"]
+        assert len(await backend.history().load("my-old-chat")) == 1
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_history_migration_auto_claims_legacy_rows_when_unscoped_opener_ran_first(
+    tmp_path: Path,
+) -> None:
+    """Regression: backfill was gated on apply_schema() reporting that *this*
+    call added the agent_scope column, not on whether unclaimed legacy rows
+    exist. A worker that opens the shared default DB_URL unscoped (e.g.
+    subagents/worker.py, scheduler/worker.py) runs apply_schema() first and
+    consumes that one-shot signal; the scoped gateway then opens second, sees
+    the column already present, and silently takes the warn-only path —
+    orphaning the same pre-upgrade history
+    test_history_migration_auto_claims_legacy_rows_when_owned_by_agent_root
+    covers for the single-opener case.
+    """
+    import time
+
+    import aiosqlite
+
+    agent_root = tmp_path / "my-agent"
+    data_dir = agent_root / "data"
+    data_dir.mkdir(parents=True)
+    db_path = data_dir / "monkeybot.db"
+
+    conn = await aiosqlite.connect(str(db_path))
+    await conn.execute(
+        """CREATE TABLE conversation_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        thread_id TEXT NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+    )"""
+    )
+    await conn.execute(
+        "INSERT INTO conversation_history(thread_id, role, content, created_at) VALUES (?,?,?,?)",
+        (
+            "my-old-chat",
+            "user",
+            '[{"type":"text","text":"pre-upgrade message"}]',
+            int(time.time() * 1000),
+        ),
+    )
+    await conn.commit()
+    await conn.close()
+
+    # An unscoped worker opens (and migrates) the shared DB first.
+    unscoped = SQLiteStorageBackend(f"sqlite:///{db_path}")
+    await unscoped.open(run_schema=True)
+    await unscoped.close()
+
+    # The scoped gateway opens second, against an already-migrated schema.
+    backend = SQLiteStorageBackend(
+        f"sqlite:///{db_path}", agent_scope="my-agent-id", agent_root=agent_root
+    )
+    await backend.open(run_schema=True)
+    try:
+        assert [t.thread_id for t in await backend.history().list_threads()] == ["my-old-chat"]
+        assert len(await backend.history().load("my-old-chat")) == 1
+    finally:
+        await backend.close()
+
+
+def test_db_owned_by_agent_root() -> None:
+    from monkeybot.core.persistence.sqlite import db_owned_by_agent_root
+
+    root = Path("/agents/my-agent").resolve()
+    assert db_owned_by_agent_root(f"sqlite:///{root}/data/monkeybot.db", root) is True
+    assert db_owned_by_agent_root("sqlite:///:memory:", root) is True
+    assert db_owned_by_agent_root("sqlite:////shared/team.db", root) is False
+    assert db_owned_by_agent_root(f"sqlite:///{root}/data/monkeybot.db", None) is False
+    assert db_owned_by_agent_root("postgresql://localhost/db", root) is False
+
+
+@pytest.mark.asyncio
+async def test_history_warns_once_when_legacy_unscoped_rows_remain(tmp_path: Path) -> None:
+    from unittest.mock import patch
+
+    from monkeybot.core.persistence.sqlite import warn_if_legacy_unscoped_history
+
+    db_path = tmp_path / "legacy2.db"
+    backend = SQLiteStorageBackend(f"sqlite:///{db_path}", agent_scope="agent-a")
+    await backend.open(run_schema=True)
+    try:
+        conn = backend._conn
+        assert conn is not None
+        await conn.execute(
+            "INSERT INTO conversation_history(thread_id, role, content, created_at, agent_scope) "
+            "VALUES (?,?,?,?,?)",
+            ("stray-thread", "user", '[{"type":"text","text":"x"}]', 1, ""),
+        )
+        await conn.commit()
+        with patch("monkeybot.core.persistence.sqlite.logger") as mock_logger:
+            await warn_if_legacy_unscoped_history(conn)
+            mock_logger.warning.assert_called_once()
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_agent_scope_migration_does_not_crash(tmp_path: Path) -> None:
+    """Regression for PR #179 review: the column-exists check and the ALTER
+    ran as two separate statements with no locking, so two gateways sharing
+    one SQLite file could both see the column missing and both attempt to
+    add it — the second ALTER TABLE ADD COLUMN then fails outright with
+    "duplicate column name". Two real aiosqlite connections against the same
+    file, migrated concurrently via asyncio.gather, must not crash.
+    """
+    import asyncio
+
+    import aiosqlite
+
+    from monkeybot.core.persistence.sqlite import (
+        _ensure_conversation_history_agent_scope_column,
+        apply_schema,
+    )
+
+    db_path = tmp_path / "concurrent.db"
+    setup = await aiosqlite.connect(str(db_path))
+    await apply_schema(setup)
+    # Roll back to the pre-migration shape so both connections race a real ALTER.
+    await setup.execute("DROP INDEX IF EXISTS idx_history_scope_thread")
+    await setup.execute("ALTER TABLE conversation_history DROP COLUMN agent_scope")
+    await setup.commit()
+    await setup.close()
+
+    conn1 = await aiosqlite.connect(str(db_path))
+    conn2 = await aiosqlite.connect(str(db_path))
+    try:
+        await asyncio.gather(
+            _ensure_conversation_history_agent_scope_column(conn1),
+            _ensure_conversation_history_agent_scope_column(conn2),
+        )
+        cur = await conn1.execute("PRAGMA table_info(conversation_history)")
+        names = {str(row[1]) for row in await cur.fetchall()}
+        await cur.close()
+        assert "agent_scope" in names
+    finally:
+        await conn1.close()
+        await conn2.close()
 
 
 # ---------------------------------------------------------------------------

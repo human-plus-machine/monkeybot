@@ -266,6 +266,8 @@ async def _async_main() -> None:
     mem_uri = _subagent_memory_uri(envelope)
 
     skills = Path(os.environ["MONKEYBOT_SUBAGENT_SKILLS_PATH"]).resolve()
+    artifacts_env = os.environ.get("MONKEYBOT_SUBAGENT_ARTIFACTS_PATH")
+    artifacts = Path(artifacts_env).resolve() if artifacts_env else None
 
     if envelope.agent_md:
         agent_md_path = Path(envelope.agent_md).expanduser().resolve()
@@ -277,8 +279,10 @@ async def _async_main() -> None:
         except ValueError:
             agent_md_path = resolve_project_path("AGENT.md", agent_root)
 
-    db_url = AgentLayout.from_environment(agent_root=agent_root).db_url
-    backend = create_storage_backend(db_url)
+    layout = AgentLayout.from_environment(agent_root=agent_root)
+    backend = create_storage_backend(
+        layout.db_url, agent_scope=layout.agent_id, agent_root=layout.agent_root
+    )
     mcp: MCPClient | None = None
     executor: CoreToolExecutor | None = None
     knowledge: KnowledgeSubsystem | None = None
@@ -414,6 +418,7 @@ async def _async_main() -> None:
             workspace_root=ws,
             memory=memory,
             skills_path=skills,
+            artifacts_path=artifacts,
             mcp=mcp,
             extra_tools=extra_tools,
             run_command_allowed_commands=run_allow_cmds,

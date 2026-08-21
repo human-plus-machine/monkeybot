@@ -189,6 +189,29 @@ def test_paths_workspace_root_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert os.environ.get("MONKEYBOT_WORKSPACE_ROOT") == str((tmp_path / "agent-ws").resolve())
 
 
+def test_computer_enabled_yaml_applies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    (cfg_dir / "monkeybot.yaml").write_text("computer:\n  enabled: true\n", encoding="utf-8")
+    monkeypatch.delenv("MONKEYBOT_COMPUTER_TOOLS", raising=False)
+    runtime_env.apply_monkeybot_runtime_env()
+    assert os.environ.get("MONKEYBOT_COMPUTER_TOOLS") == "true"
+
+
+def test_paths_approvals_config_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    (cfg_dir / "monkeybot.yaml").write_text(
+        "paths:\n  approvals_config: ./monkeybot_config/approvals.json\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("MONKEYBOT_APPROVALS_CONFIG", raising=False)
+    runtime_env.apply_monkeybot_runtime_env()
+    assert os.environ.get("MONKEYBOT_APPROVALS_CONFIG") == "./monkeybot_config/approvals.json"
+
+
 def test_model_summarization_model_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     cfg_dir = tmp_path / "monkeybot_config"
@@ -200,6 +223,24 @@ def test_model_summarization_model_env(tmp_path: Path, monkeypatch: pytest.Monke
     monkeypatch.delenv("CONTEXT_SUMMARIZATION_MODEL", raising=False)
     runtime_env.apply_monkeybot_runtime_env()
     assert os.environ.get("CONTEXT_SUMMARIZATION_MODEL") == "flash-lite"
+
+
+def test_paths_agent_id_sets_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``paths.agent_id`` maps to MONKEYBOT_AGENT_ID as a plain passthrough
+    (not path-anchored, unlike workspace_root/db_url) — the durable identity
+    operators set for relocatable agents or multi-replica deployments (PR #179
+    review: the default path-based identity strands history on a move).
+    """
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    (cfg_dir / "monkeybot.yaml").write_text(
+        "paths:\n  agent_id: my-stable-agent\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("MONKEYBOT_AGENT_ID", raising=False)
+    runtime_env.apply_monkeybot_runtime_env()
+    assert os.environ.get("MONKEYBOT_AGENT_ID") == "my-stable-agent"
 
 
 def test_memory_storage_uri_sets_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

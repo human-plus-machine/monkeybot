@@ -292,7 +292,10 @@ async def _resolve_inspector_decision(
                     outcome.allowed = True
                     if payload.get("always"):
                         remember_always_approval(
-                            bus, call.name, resource_for_call(inspector_call)
+                            bus,
+                            call.name,
+                            resource_for_call(inspector_call),
+                            persist=ctx.approvals_persist,
                         )
                         logger.debug(
                             "tool inspector confirm %s",
@@ -334,17 +337,6 @@ async def _resolve_inspector_decision(
                 return
 
 
-def _abort_gate_chunk(
-    result: _GateChunkResult,
-    *,
-    allowed_exec: list[ToolCall],
-    chunk_responses: list[ContentBlock],
-) -> None:
-    result.allowed_exec = allowed_exec
-    result.chunk_responses = chunk_responses
-    result.aborted = True
-
-
 async def _gate_chunk_calls(
     *,
     chunk: Sequence[ToolCall],
@@ -368,9 +360,9 @@ async def _gate_chunk_calls(
     for call in chunk:
         if cancelled is not None and cancelled.is_set():
             yield Error(request_id=ctx.request_id, error="Request cancelled")
-            _abort_gate_chunk(
-                result, allowed_exec=allowed_exec, chunk_responses=chunk_responses
-            )
+            result.allowed_exec = allowed_exec
+            result.chunk_responses = chunk_responses
+            result.aborted = True
             return
 
         # A provider couldn't parse the streamed tool JSON: args are
@@ -404,14 +396,23 @@ async def _gate_chunk_calls(
                 yield evt
         except asyncio.CancelledError:
             bus = ctx.sse_bus
-            if confirm_wait_stopped_by_user(bus, call.call_id):
+            if confirm_wait_stopped_by_user(bus, call.call_id, cancelled=cancelled):
                 # Stop during confirm cancels the pending future. Settle like the
                 # cancelled-event abort path so earlier completed tools still land
                 # in history instead of escaping before _fill_abort_tool_responses.
-                yield Error(request_id=ctx.request_id, error="Request cancelled")
-                _abort_gate_chunk(
-                    result, allowed_exec=allowed_exec, chunk_responses=chunk_responses
+                logger.info(
+                    "SSE HITL cancelled %s",
+                    kv(
+                        request_id=ctx.request_id,
+                        thread_id=ctx.thread_id,
+                        call_id=call.call_id,
+                        tool=call.name,
+                    ),
                 )
+                yield Error(request_id=ctx.request_id, error="Request cancelled")
+                result.allowed_exec = allowed_exec
+                result.chunk_responses = chunk_responses
+                result.aborted = True
                 return
             raise
 

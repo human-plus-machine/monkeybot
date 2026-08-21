@@ -6,6 +6,7 @@ when a ``sqlite://`` URL is used — never loaded in Postgres-only deployments.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import aiosqlite
@@ -14,7 +15,14 @@ from monkeybot.core.persistence.durable_runs import SQLiteRunStore
 from monkeybot.core.persistence.history import SQLiteHistoryStore
 from monkeybot.core.persistence.scheduled_loops import SQLiteScheduledLoopStore
 from monkeybot.core.persistence.session_turn_locks import SQLiteSessionTurnLockStore
-from monkeybot.core.persistence.sqlite import TaskReentrantLock, apply_schema, open_connection
+from monkeybot.core.persistence.sqlite import (
+    TaskReentrantLock,
+    apply_schema,
+    backfill_legacy_agent_scope,
+    db_owned_by_agent_root,
+    open_connection,
+    warn_if_legacy_unscoped_history,
+)
 from monkeybot.core.persistence.usage import SQLiteUsageStore
 
 
@@ -23,8 +31,10 @@ class SQLiteStorageBackend:
 
     shares_outbox = False
 
-    def __init__(self, db_url: str) -> None:
+    def __init__(self, db_url: str, agent_scope: str = "", agent_root: Path | None = None) -> None:
         self._db_url = db_url
+        self._agent_scope = agent_scope
+        self._agent_root = agent_root
         self._conn: aiosqlite.Connection | None = None
         self._tx_lock = TaskReentrantLock()
         self._history_store: SQLiteHistoryStore | None = None
@@ -38,7 +48,14 @@ class SQLiteStorageBackend:
         self._conn = await open_connection(self._db_url)
         if run_schema:
             await apply_schema(self._conn)
-        self._history_store = SQLiteHistoryStore(self._conn, lock=self._tx_lock)
+            if self._agent_scope:
+                if db_owned_by_agent_root(self._db_url, self._agent_root):
+                    await backfill_legacy_agent_scope(self._conn, self._agent_scope)
+                else:
+                    await warn_if_legacy_unscoped_history(self._conn)
+        self._history_store = SQLiteHistoryStore(
+            self._conn, agent_scope=self._agent_scope, lock=self._tx_lock
+        )
         self._usage_store = SQLiteUsageStore(self._conn, lock=self._tx_lock)
         self._runs_store = SQLiteRunStore(self._conn, lock=self._tx_lock)
         self._scheduled_loops_store = SQLiteScheduledLoopStore(self._conn, lock=self._tx_lock)

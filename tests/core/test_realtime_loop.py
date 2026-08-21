@@ -398,6 +398,7 @@ class TestRunRealtimeTurn:
 
     async def test_tool_confirm_future_cancel_settles(self) -> None:
         import asyncio
+        import dataclasses
         from collections import deque
         from typing import Literal
 
@@ -453,7 +454,8 @@ class TestRunRealtimeTurn:
 
         bus = CancelOnConfirmBus()
         history = FakeHistory()
-        ctx = _ctx()
+        cancel = asyncio.Event()
+        ctx = dataclasses.replace(_ctx(), cancelled=cancel)
         agen = run_realtime_turn(
             "hi",
             "calling",
@@ -472,7 +474,8 @@ class TestRunRealtimeTurn:
 
         fut = bus.pending_responses.get("c1")
         assert fut is not None and not fut.done()
-        fut.cancel()
+        cancel.set()
+        bus.abandon_pending_cancel_all()
 
         events = [ev]
         async for trailing in agen:

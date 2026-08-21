@@ -429,7 +429,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Purpose:** Per-agent MemPalace drawers with durable outbox ingest (SQLite, Postgres, or Firestore) and wake-up + L2 recall in the prompt.
 
-**Key files:** `core/memory/subsystem.py`, `hook.py`, `outbox.py`, `palace.py`, `writer.py`, `ingest.py`, `core/persistence/{sqlite,postgres,firestore}.py`
+**Key files:** `core/memory/subsystem.py`, `hook.py`, `outbox.py`, `palace.py`, `writer.py`, `ingest.py`, `core/persistence/{sqlite,postgres,firestore}.py`, `core/tools/fs_isolation.py`
 
 **Storage URI:** `local://` only (object-store palaces are not supported in this release).
 
@@ -445,7 +445,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 **Invariants:**
 - Chat history is canonical; MemPalace drawers are an idempotent projection.
 - Recall is scoped to the current `thread_id` by default.
-- `memory.enabled: false` (or `MONKEYBOT_MEMORY_HOOK_ENABLED=0`) skips capture, wake-up, and prompt teaching. It is not a sandbox against shell access to palace files.
+- `memory.enabled: false` (or `MONKEYBOT_MEMORY_HOOK_ENABLED=0`) skips capture, wake-up, and prompt teaching. Host `run_command` children then cannot see palace files: Linux user+mount namespaces or macOS `sandbox-exec` hide those directories. If isolation cannot be established and at least one hidden palace path exists, the command is refused rather than run with palace files visible. If none of the hidden paths exist on disk, the command runs unwrapped (memory was never configured; nothing to hide). OpenSandbox does not mount the palace. The kill switch is not an argv denylist; `bash` remains allowed, and the OS hides the files.
 - Postgres/Firestore persist the memory outbox with replica `palace_id` claim partitioning. Replicated deployments must share a lock-capable palace volume.
 - MemPalace (chromadb / onnxruntime) is the optional `monkeybot[memory]` extra. Missing the extra disables memory instead of failing startup.
 - Subagents can read the palace but do not register duplicate automatic-ingest hooks.
@@ -568,7 +568,8 @@ session — no mid-session model swap exists), `/status`, `/config`. See
 
 1. `<agent>/.venv/bin/python` when a project venv exists
 2. `uv run python -m monkeybot.gateway.main` when `<agent>/pyproject.toml` exists but no `.venv`
-3. `sys.executable` (CLI interpreter) — legacy fallback for config-only trees
+3. `sys.executable` (CLI interpreter) — config-only trees, when that interpreter already has MonkeyBot 3.x (and MemPalace if memory is on)
+4. A CLI-managed cache venv (`~/.cache/monkeybot/runtimes/…`) — config-only trees with memory on when the CLI interpreter cannot import MemPalace. Pinned to `monkeybot[memory]==<running version>`; never rewrites an agent `pyproject.toml`.
 
 Before spawning the gateway, the CLI probes that interpreter for MonkeyBot `>=3.0.0,<4` and, when memory is enabled, MemPalace. A stale agent venv may be refreshed with `uv sync` against the existing lock; `pyproject.toml` pins are never rewritten. A failed probe prints an upgrade command and exits. `monkeybot doctor` reports the same check as `env.harness.compatible`.
 
@@ -656,6 +657,29 @@ Before spawning the gateway, the CLI probes that interpreter for MonkeyBot `>=3.
 - The agent-to-agent (Lever 3) sub-block appears **only** when the `task` tool is active.
 - Does not override the evidence rule, no-repeat rule, or tool-call protocol.
 - No ESO codec / `eso stash` handle system — reversible large-payload retrieval is the harness-level tool-artifact store's job (future work), not this feature.
+
+---
+
+### 22. Computer control (desktop-only)
+
+**Purpose:** Nine `computer_*` custom tools that act on the local machine on the user's behalf — open/reveal a file or folder, launch an app, open a URL, read/write the clipboard, list/find files, move/rename, trash. Built for the Monkeybot desktop app ("open my Downloads folder"); irrelevant to server/Cloud Run deployments.
+
+**Key files:** `computer/__init__.py` (env gate, tool registry), `computer/safety.py` (hard security boundary), `computer/tools.py` (the `CustomTool` implementations), `computer/approvals.py` (durable "Always allow" JSON store), `computer/permissions.py` (layered ruleset + `ComputerAwarePermissionInspector`).
+
+**How it works:**
+- Off by default, macOS-only: `computer.enabled: true` in `monkeybot.yaml` → `MONKEYBOT_COMPUTER_TOOLS` env, combined with a hard `sys.platform == "darwin"` check (`should_enable_computer_tools()`). The desktop app sets the env var when it spawns a gateway with the feature turned on in Settings; no other deployment should ever set it.
+- **Hard security boundary lives in the tool bodies, not in `permissions.yaml`** (`safety.py`): every path is resolved and validated against the user's home directory after following symlinks; a fixed denylist blocks credential directories (`.ssh`, `.aws`, keychains, browser profiles, the app's own config) both at their canonical location *and* by directory-name anywhere in the tree; filenames matching credential patterns (`.env`, `*.pem`, `id_rsa*`, …) are always refused; `computer_open` refuses any path/app that would make `open` execute code (`.command`, `.app`, `.sh`, Terminal, script editors, …); trash never hard-deletes. `permissions.yaml` is fail-open (a broken file silently disables it), so none of this can depend on it.
+- **Every `computer_*` call asks by default**, via a built-in baseline rule (`COMPUTER_BASELINE_RULES` in `permissions.py`) — not a line in `permissions.yaml`, so it can't be silently defeated by a missing/broken config file. `ComputerAwarePermissionInspector` layers, last-match-wins: baseline `ask` < durable approvals overlay `allow` < the user's `permissions.yaml` (highest authority — a hand-written `deny` always wins).
+- **"Always allow" is durable and narrow**: `monkeybot_config/approvals.json` (machine-written, JSON — deliberately *not* appended into `permissions.yaml`, which is a comment-heavy file the app's Advanced settings save wholesale) stores one exact `(tool, resource)` pair per rule. Mutating tools (`computer_move`, `computer_trash`) are excluded from `ALWAYS_SCOPE` — their resource is the *source* path only, so an "always" rule would cover any destination — every call to them asks. The inspector re-`stat`s the overlay file on every check and reloads on change; on a genuine change it also clears the session-level approval cache, so a revoke in the app's Settings takes effect immediately rather than waiting for a gateway restart.
+- Registered via the standard `extra_tools` extension point in both the SSE (`gateway/sse/app.py`) and realtime (`gateway/realtime/routes.py`) gateways — same mechanism as `web_search`/`todo_list`. Never registered for subagents (`subagent_worker.py` builds its own `extra_tools` independently and never imports this package).
+
+**Depends on:** `AgentLayout.approvals_path` (`MONKEYBOT_APPROVALS_CONFIG`, default `monkeybot_config/approvals.json`), `TurnContext.approvals_persist` (threaded from `build_context` into `tool_dispatch.py`/`realtime_loop.py`'s `remember_always_approval(..., persist=...)`).
+
+**Invariants:**
+- Default off; zero behavior change for any deployment that doesn't set `MONKEYBOT_COMPUTER_TOOLS`.
+- `resource_for_call` gained `url`/`app` argument lookups (lowest priority, after `path`) so `computer_open_url`/`computer_open_app` get readable permission resource strings; no existing tool's resource string changes.
+- A resource stored in `approvals.json` is `glob.escape`d before becoming an `fnmatch` pattern, so a literal `*`/`?`/`[` in a filename can't over-match.
+- `ComputerAwarePermissionInspector` is used **instead of** (not alongside) the plain `PermissionInspector` when computer tools are enabled; every other deployment's inspector chain is unchanged.
 
 ---
 

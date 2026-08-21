@@ -18,7 +18,7 @@ from monkeybot.core.context.tool_shapers import (
     shape_logs,
 )
 from monkeybot.core.logging_utils import kv
-from monkeybot.core.path_safety import GLOB_METACHARACTERS, sanitize_path_component
+from monkeybot.core.path_safety import sanitize_path_component
 from monkeybot.core.runtime.context_budget import diff_inventory_lines
 
 logger = logging.getLogger(__name__)
@@ -387,21 +387,33 @@ def _safe_spill_filename(call_id: str) -> str:
 
 
 def _spill_dir_for_thread(workspace_root: Path, thread_id: str) -> tuple[str, Path]:
-    """Return ``(relative posix dir, absolute resolved dir)`` under spill root.
+    """Return ``(relative posix dir, absolute dir)`` under spill root.
 
     ``thread_id`` / ``session_id`` may be client-supplied; sanitize and contain
     under ``.monkeybot/spill`` so path traversal cannot escape the workspace.
     """
-    safe_thread = sanitize_path_component(thread_id) or "thread"
-    rel = f"{_SPILL_DIR_REL.as_posix()}/{safe_thread}"
+    safe_thread = sanitize_path_component(thread_id)
     root = spill_root(workspace_root)
-    out_dir = (Path(workspace_root) / rel).resolve()
+    rel = f"{_SPILL_DIR_REL.as_posix()}/{safe_thread}"
+    out_dir = root / safe_thread
     try:
-        out_dir.relative_to(root)
-    except ValueError as exc:
-        raise ValueError(
-            f"spill path escapes spill root: thread_id={thread_id!r}"
-        ) from exc
+        out_dir.resolve().relative_to(root)
+    except ValueError:
+        logger.warning(
+            "spill path escapes spill root, using sanitized dir %s",
+            kv(thread_id=thread_id, safe_thread=safe_thread),
+        )
+        out_dir = root / safe_thread
+        try:
+            out_dir.resolve().relative_to(root)
+        except ValueError:
+            logger.warning(
+                "sanitized spill path still escapes spill root %s",
+                kv(thread_id=thread_id, safe_thread=safe_thread),
+            )
+            safe_thread = "_"
+            rel = f"{_SPILL_DIR_REL.as_posix()}/{safe_thread}"
+            out_dir = root / safe_thread
     return rel, out_dir
 
 
@@ -507,10 +519,10 @@ def spill_root(workspace_root: Path) -> Path:
 
 
 def _legacy_spill_id_safe(session_id: str) -> bool:
-    """True when a raw session id is safe as a single legacy spill directory name.
+    """True when a raw session id is safe as a literal legacy spill directory name.
 
-    Reject separators, ``..``, reserved names, and glob metacharacters so
-    ``root / session_id`` cannot resolve onto a sibling session directory.
+    Allows glob metacharacters (literal dir names pre-sanitization) but rejects
+    separators, ``..``, and reserved single-component names.
     """
     if session_id in ("", ".", ".."):
         return False
@@ -518,9 +530,20 @@ def _legacy_spill_id_safe(session_id: str) -> bool:
         return False
     if ".." in session_id:
         return False
-    if any(ch in session_id for ch in GLOB_METACHARACTERS):
-        return False
     return True
+
+
+def _spill_path_contained(root: Path, candidate: Path) -> Path | None:
+    """Return ``candidate`` when it resolves under ``root``; log and skip otherwise."""
+    try:
+        candidate.resolve().relative_to(root)
+    except ValueError:
+        logger.warning(
+            "skipping spill dir outside spill root %s",
+            kv(path=str(candidate)),
+        )
+        return None
+    return candidate
 
 
 def session_spill_dirs(workspace_root: Path, session_id: str) -> list[Path]:
@@ -531,39 +554,28 @@ def session_spill_dirs(workspace_root: Path, session_id: str) -> list[Path]:
     can remove both with one namespace.
     """
     root = spill_root(workspace_root)
-    safe_session = sanitize_path_component(session_id) or "session"
+    safe_session = sanitize_path_component(session_id)
     dirs: list[Path] = [root / safe_session]
     if root.is_dir():
         dirs.extend(sorted(root.glob(f"subagent:{safe_session}:*")))
         if safe_session != session_id and _legacy_spill_id_safe(session_id):
-            legacy = (root / session_id).resolve()
-            try:
-                legacy.relative_to(root)
-            except ValueError:
-                logger.warning(
-                    "skipping legacy spill dir outside spill root %s",
-                    kv(session_id=session_id, legacy=str(legacy)),
-                )
-            else:
+            legacy = root / session_id
+            if legacy.exists() and _spill_path_contained(root, legacy) is not None:
                 if legacy != root:
                     dirs.append(legacy)
     # De-dupe while preserving order; drop anything outside spill root.
     seen: set[Path] = set()
     contained: list[Path] = []
     for path in dirs:
-        resolved = path.resolve()
-        if resolved in seen:
+        if path in seen:
             continue
-        try:
-            resolved.relative_to(root)
-        except ValueError:
-            logger.warning(
-                "skipping spill dir outside spill root %s",
-                kv(session_id=session_id, path=str(resolved)),
-            )
+        contained_path = _spill_path_contained(root, path)
+        if contained_path is None:
             continue
-        seen.add(resolved)
-        contained.append(resolved)
+        if contained_path in seen:
+            continue
+        seen.add(contained_path)
+        contained.append(contained_path)
     return contained
 
 
@@ -572,7 +584,10 @@ def _rmtree_spill(path: Path) -> None:
     if not path.exists():
         return
     try:
-        shutil.rmtree(path)
+        if path.is_symlink():
+            path.unlink()
+        else:
+            shutil.rmtree(path)
     except OSError:
         logger.warning("failed to remove spill directory path=%s", path, exc_info=True)
         raise
