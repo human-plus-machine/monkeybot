@@ -654,6 +654,8 @@ async def _startup(fastapi_app: FastAPI) -> None:
                 settings=settings,
                 knowledge_root=Path(settings.knowledge_root),
                 index_path=Path(settings.index_path),
+                read_only=os.environ.get("MONKEYBOT_KNOWLEDGE_READ_ONLY", "").strip().lower()
+                in ("1", "true", "yes"),
             )
             hook_mgr = _deps.hook_manager
             if hook_mgr is None:

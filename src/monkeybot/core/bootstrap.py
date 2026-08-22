@@ -181,6 +181,8 @@ async def create_harness_deps(
                     settings=settings,
                     knowledge_root=Path(settings.knowledge_root),
                     index_path=Path(settings.index_path),
+                    read_only=os.environ.get("MONKEYBOT_KNOWLEDGE_READ_ONLY", "").strip().lower()
+                    in ("1", "true", "yes"),
                 )
                 await knowledge.ensure_ready()
             except Exception as exc:
