@@ -93,6 +93,13 @@ Clone only if you are changing the harness. Setup, checks, and the release workf
 
 Search or open an issue in the [GitHub issue tracker](https://github.com/human-plus-machine/monkeybot/issues).
 
+## Credits
+
+MonkeyBot builds on two open-source projects:
+
+- [Browser Use](https://github.com/browser-use/browser-use) — browser automation for the [browser MCP](docs/browser-mcp.md) (via [browser-harness](https://github.com/browser-use/browser-harness) and the interactive-element DOM walker). MIT licensed.
+- [OpenSandbox](https://github.com/opensandbox-group/OpenSandbox) — sandbox runtime used for isolated `run_command` / code execution. Apache-2.0 licensed.
+
 ## License
 
 MIT — see [`LICENSE`](LICENSE).
