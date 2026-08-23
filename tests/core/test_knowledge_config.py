@@ -9,6 +9,7 @@ import pytest
 from monkeybot.core.config import runtime_env
 from monkeybot.core.knowledge.config import (
     knowledge_enabled_from_config,
+    knowledge_read_only_from_env,
     resolve_knowledge_settings,
 )
 
@@ -27,10 +28,7 @@ def test_knowledge_paths_anchor_to_workspace(tmp_path: Path) -> None:
     cfg = agent / "monkeybot_config"
     cfg.mkdir()
     (cfg / "monkeybot.yaml").write_text(
-        "knowledge:\n"
-        "  enabled: true\n"
-        "  store:\n"
-        "    path: .monkeybot/knowledge/vectors.sqlite\n",
+        "knowledge:\n  enabled: true\n  store:\n    path: .monkeybot/knowledge/vectors.sqlite\n",
         encoding="utf-8",
     )
 
@@ -45,17 +43,13 @@ def test_knowledge_paths_anchor_to_workspace(tmp_path: Path) -> None:
     assert settings.store.path == str(
         (workspace / ".monkeybot" / "knowledge" / "vectors.sqlite").resolve()
     )
-    assert settings.knowledge_root == str(
-        (workspace / ".monkeybot" / "knowledge").resolve()
-    )
+    assert settings.knowledge_root == str((workspace / ".monkeybot" / "knowledge").resolve())
     assert settings.debounce_ms == 300
     assert settings.startup_scan is True
     assert settings.max_file_bytes == 5_000_000
 
 
-def test_env_does_not_override_index_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_env_does_not_override_index_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     agent = tmp_path / "agent"
     workspace = agent / "workspace"
     workspace.mkdir(parents=True)
@@ -85,10 +79,7 @@ def test_runtime_env_does_not_export_knowledge_keys(
     cfg_dir = tmp_path / "monkeybot_config"
     cfg_dir.mkdir()
     (cfg_dir / "monkeybot.yaml").write_text(
-        "knowledge:\n"
-        "  enabled: true\n"
-        "  search:\n"
-        "    default_limit: 12\n",
+        "knowledge:\n  enabled: true\n  search:\n    default_limit: 12\n",
         encoding="utf-8",
     )
     for key in (
@@ -160,6 +151,23 @@ def test_migrates_legacy_index_wal_and_shm_sidecars(tmp_path: Path) -> None:
     assert not legacy_shm.exists()
 
 
+def test_knowledge_read_only_from_env_defaults_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MONKEYBOT_KNOWLEDGE_READ_ONLY", raising=False)
+    assert knowledge_read_only_from_env() is False
+
+
+@pytest.mark.parametrize("value", ["1", "true", "True", "yes", "YES"])
+def test_knowledge_read_only_from_env_truthy(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("MONKEYBOT_KNOWLEDGE_READ_ONLY", value)
+    assert knowledge_read_only_from_env() is True
+
+
+@pytest.mark.parametrize("value", ["0", "false", "no", "off", ""])
+def test_knowledge_read_only_from_env_falsy(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("MONKEYBOT_KNOWLEDGE_READ_ONLY", value)
+    assert knowledge_read_only_from_env() is False
+
+
 def test_embeddings_provider_defaults_from_yaml(tmp_path: Path) -> None:
     agent = tmp_path / "agent"
     workspace = agent / "workspace"
@@ -167,11 +175,7 @@ def test_embeddings_provider_defaults_from_yaml(tmp_path: Path) -> None:
     cfg = agent / "monkeybot_config"
     cfg.mkdir()
     (cfg / "monkeybot.yaml").write_text(
-        "knowledge:\n"
-        "  enabled: true\n"
-        "  embeddings:\n"
-        "    enabled: true\n"
-        "    provider: openai\n",
+        "knowledge:\n  enabled: true\n  embeddings:\n    enabled: true\n    provider: openai\n",
         encoding="utf-8",
     )
     settings = resolve_knowledge_settings(

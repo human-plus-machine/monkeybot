@@ -37,6 +37,7 @@ def test_run_new_creates_bundle(tmp_path: Path) -> None:
     assert (tmp_path / "workspace" / ".gitkeep").is_file()
     assert (tmp_path / "workspace" / "browser" / "playbooks").is_dir()
     assert (tmp_path / "workspace" / "generated-media" / "images").is_dir()
+    assert (tmp_path / "workspace" / "generated-media" / "video").is_dir()
     assert not (tmp_path / "workspace" / "skills").exists()
     assert (tmp_path / "Dockerfile").is_file()
     assert (tmp_path / ".dockerignore").is_file()
