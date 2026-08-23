@@ -6,6 +6,8 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Core
+
 ### Added
 
 - Local computer control: nine opt-in, macOS-only `computer_*` tools (`computer/`) let the agent open/reveal files and folders, launch apps, open URLs, read/write the clipboard, and list/find/move/trash files under the user's home directory. Off by default (`computer.enabled: false` / `MONKEYBOT_COMPUTER_TOOLS`); intended for the Monkeybot desktop app, never a server deployment. Every call asks for approval by default via a built-in ruleset baseline (not `permissions.yaml`, which is fail-open); "Always allow" is scoped to the exact `(tool, resource)` approved and persists durably to `monkeybot_config/approvals.json` (a new machine-written file — never hand-edit). Hard security limits (home-directory confinement, credential-path denylist, exec-surface refusal on `open`, trash-not-delete) live in the tool bodies and cannot be bypassed by permission rules. See `docs/features.md` §22.
@@ -13,6 +15,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Anthropic SDK 1.0 removed `temperature` / `top_p` / `top_k` from `messages.stream()`. Filter stream kwargs to the callable signature and retry `TypeError: unexpected keyword argument` so Claude/Bedrock streams no longer die before the request.
 - Stop during a tool confirmation sets the turn cancel Event in `POST /cancel` (and on realtime interrupt) before pending futures are cancelled, so completed tool results settle into history instead of racing a 50ms poller. Session DELETE and websocket teardown leave the Event unset and propagate cancellation. Spill writes refuse an uncontained `_` symlink fallback; transcript and attachment dirs reuse a safe pre-sanitization folder when it still exists on disk. Attachment reads also reject symlinked attachment ids that resolve outside the workspace.
 
 ## [core v3.0.2] - 2026-08-18
