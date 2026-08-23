@@ -17,7 +17,10 @@ from monkeybot.core.config.settings import auto_schema_enabled_from_config, get_
 from monkeybot.core.context import build_context
 from monkeybot.core.hooks import HookManager
 from monkeybot.core.knowledge import KnowledgeSubsystem, resolve_knowledge_settings
-from monkeybot.core.knowledge.config import knowledge_enabled_from_config
+from monkeybot.core.knowledge.config import (
+    knowledge_enabled_from_config,
+    knowledge_read_only_from_env,
+)
 from monkeybot.core.llm.provider import Provider
 from monkeybot.core.llm.usage import usage_from_totals
 from monkeybot.core.mcp.mcp_client import MCPClient
@@ -181,8 +184,7 @@ async def create_harness_deps(
                     settings=settings,
                     knowledge_root=Path(settings.knowledge_root),
                     index_path=Path(settings.index_path),
-                    read_only=os.environ.get("MONKEYBOT_KNOWLEDGE_READ_ONLY", "").strip().lower()
-                    in ("1", "true", "yes"),
+                    read_only=knowledge_read_only_from_env(),
                 )
                 await knowledge.ensure_ready()
             except Exception as exc:

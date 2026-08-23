@@ -35,7 +35,10 @@ from monkeybot.core.config.settings import (
 from monkeybot.core.context import LoopsToolRegistry, build_context
 from monkeybot.core.hooks import HookManager
 from monkeybot.core.knowledge import KnowledgeSubsystem, resolve_knowledge_settings
-from monkeybot.core.knowledge.config import knowledge_enabled_from_config
+from monkeybot.core.knowledge.config import (
+    knowledge_enabled_from_config,
+    knowledge_read_only_from_env,
+)
 from monkeybot.core.layout import AgentLayout
 from monkeybot.core.llm.provider import (
     Done,
@@ -45,7 +48,8 @@ from monkeybot.core.llm.provider import (
     ToolCall,
     UsageEvent,
 )
-from monkeybot.core.llm.usage import Usage as UsageRecord, UsageGranularity
+from monkeybot.core.llm.usage import Usage as UsageRecord
+from monkeybot.core.llm.usage import UsageGranularity
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.mcp.mcp_client import MCPClient
 from monkeybot.core.memory.config import memory_enabled_from_config
@@ -647,6 +651,13 @@ async def _startup(fastapi_app: FastAPI) -> None:
     # Unified knowledge layer — FTS + ANN + links + search
     if knowledge_enabled_from_config():
         try:
+            if knowledge_read_only_from_env():
+                logger.warning(
+                    "MONKEYBOT_KNOWLEDGE_READ_ONLY is set but ignored here: the gateway "
+                    "process is the sole writer per workspace and always opens the "
+                    "knowledge index read-write. Set it on subagent/harness-as-library "
+                    "clients instead."
+                )
             layout = AgentLayout.from_environment()
             settings = resolve_knowledge_settings(workspace_root=layout.workspace_root)
             knowledge = await KnowledgeSubsystem.create(
@@ -654,8 +665,7 @@ async def _startup(fastapi_app: FastAPI) -> None:
                 settings=settings,
                 knowledge_root=Path(settings.knowledge_root),
                 index_path=Path(settings.index_path),
-                read_only=os.environ.get("MONKEYBOT_KNOWLEDGE_READ_ONLY", "").strip().lower()
-                in ("1", "true", "yes"),
+                read_only=False,
             )
             hook_mgr = _deps.hook_manager
             if hook_mgr is None:

@@ -267,7 +267,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 | `glob` / `grep` | Path discovery / content regex search (prefer over shell) |
 | `apply_patch` | Multi-file Codex-style Add/Update/Delete/Move; fail-closed before any write |
 | `search_memory` | Keyword search in memory tree |
-| `search` / `recall` | Local knowledge index (workspace + notes); **parallel-safe**. Gateway owns writes; subagents open the index **read-only** |
+| `search` / `recall` | Local knowledge index (workspace + notes); **parallel-safe**. Gateway owns writes; subagents open the index **read-only**. Harness-as-library (Pattern B/C) callers can opt into read-only via `MONKEYBOT_KNOWLEDGE_READ_ONLY=1`; the gateway always ignores this flag and stays the writer |
 | `list_skills` | Skill discovery |
 | `run_command` | Allowlisted shell (host or OpenSandbox) |
 | `task` | Subagent subprocess (parent only) |
@@ -292,6 +292,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - `task` omitted in subagent workers (`include_task_tool=False`).
 - Nested `task` disabled inside subagents.
 - Custom tools must not collide with core or MCP names.
+- `MONKEYBOT_KNOWLEDGE_READ_ONLY` (default off) opens the knowledge index read-only for `create_harness_deps` (Pattern B/C) callers; subagent workers are always read-only regardless of the flag. The gateway SSE app is the sole writer per workspace and ignores this flag, logging a warning if it is set.
 
 ---
 
