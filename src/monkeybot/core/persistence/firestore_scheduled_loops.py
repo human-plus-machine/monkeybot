@@ -42,6 +42,20 @@ class FirestoreScheduledLoopStore:
     def _doc(self, loop_id: str) -> firestore.AsyncDocumentReference:
         return self._client.collection(self._collection).document(loop_id)
 
+    @staticmethod
+    def _try_doc_to_row(doc_id: str, data: dict[str, object]) -> ScheduledLoopRow | None:
+        """Map a doc to a row, skipping (and logging) malformed documents.
+
+        A single bad doc (e.g. ``interval_ms <= 0`` from legacy/hand-edited
+        data) must not raise out of list_all/list_due and stall every other
+        loop's poll cycle.
+        """
+        try:
+            return doc_to_scheduled_loop_row(doc_id, data)
+        except ValueError as exc:
+            logger.error("skipping malformed scheduled loop doc_id=%s: %s", doc_id, exc)
+            return None
+
     async def _in_transaction(
         self,
         doc_ref: firestore.AsyncDocumentReference,
@@ -115,7 +129,9 @@ class FirestoreScheduledLoopStore:
             "started_at_ms", direction=firestore.Query.DESCENDING
         )
         async for doc in query.stream():
-            rows.append(doc_to_scheduled_loop_row(doc.id, doc.to_dict() or {}))
+            row = self._try_doc_to_row(doc.id, doc.to_dict() or {})
+            if row is not None:
+                rows.append(row)
         return rows
 
     async def list_due(self, now_ms: int) -> list[ScheduledLoopRow]:
@@ -128,7 +144,9 @@ class FirestoreScheduledLoopStore:
             .order_by("next_tick_at_ms")
         )
         async for doc in query.stream():
-            rows.append(doc_to_scheduled_loop_row(doc.id, doc.to_dict() or {}))
+            row = self._try_doc_to_row(doc.id, doc.to_dict() or {})
+            if row is not None:
+                rows.append(row)
         return rows
 
     async def claim_tick(self, loop_id: str, worker_id: str) -> ScheduledLoopRow | None:

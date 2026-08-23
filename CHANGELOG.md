@@ -13,7 +13,8 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- Subagent timeout/cancel now walks and kills the full process tree (including nested `run_command` sessions that use their own `start_new_session` process groups), not only the subagent leader's session. `process_group_id` returns `None` when the PID is gone instead of treating a recycled PID as a process group.
+- Subagent timeout/cancel now walks and kills the full process tree (including nested `run_command` sessions that use their own `start_new_session` process groups), not only the subagent leader's session. `process_group_id` returns `None` when the PID is gone instead of treating a recycled PID as a process group. The tree walk's non-`/proc` fallback (macOS) now uses `pgrep -P` instead of an invalid BSD `ps -P` invocation that silently returned no children. `stop_subagent_process` also `killpg`s the spawn-time `pgid` directly (in addition to the tree walk) so a leader that has already been reaped no longer leaves descendants orphaned.
+- Firestore scheduled loops: `list_all`/`list_due` skip (and log) a single malformed document — e.g. `interval_ms <= 0` from legacy/hand-edited data — instead of raising out of the mapper and stalling the scheduler poll loop for every other loop.
 - Stop during a tool confirmation sets the turn cancel Event in `POST /cancel` (and on realtime interrupt) before pending futures are cancelled, so completed tool results settle into history instead of racing a 50ms poller. Session DELETE and websocket teardown leave the Event unset and propagate cancellation. Spill writes refuse an uncontained `_` symlink fallback; transcript and attachment dirs reuse a safe pre-sanitization folder when it still exists on disk. Attachment reads also reject symlinked attachment ids that resolve outside the workspace.
 
 ## [core v3.0.2] - 2026-08-18

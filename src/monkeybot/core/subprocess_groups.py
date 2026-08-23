@@ -39,14 +39,12 @@ def _direct_child_pids(pid: int) -> list[int]:
             return []
     try:
         completed = subprocess.run(
-            ["ps", "-o", "pid=", "-P", str(pid)],
+            ["pgrep", "-P", str(pid)],
             capture_output=True,
             text=True,
             check=False,
         )
     except OSError:
-        return []
-    if completed.returncode != 0:
         return []
     out: list[int] = []
     for line in (completed.stdout or "").splitlines():
@@ -117,6 +115,21 @@ def kill_process_group(
             proc.kill()
 
 
+def _signal_group_and_tree(root_pid: int | None, pgid: int | None, sig: int) -> None:
+    """Signal the known ``pgid`` directly, plus walk the live tree from ``root_pid``.
+
+    ``root_pid`` staying set after the leader has already exited (or the tree
+    walk finding nothing new) must not skip the ``pgid``-based kill: it is the
+    only signal captured at spawn time that still reaches descendants once the
+    leader itself is gone.
+    """
+    if root_pid is not None:
+        signal_process_tree(root_pid, sig)
+    if pgid is not None:
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+            os.killpg(pgid, sig)
+
+
 async def stop_subagent_process(
     proc: asyncio.subprocess.Process | None,
     *,
@@ -126,15 +139,11 @@ async def stop_subagent_process(
     if proc is None and pgid is None:
         return
     root_pid = proc.pid if proc is not None else None
-    try:
-        if root_pid is not None and SUPPORTS_PROCESS_GROUPS:
-            signal_process_tree(root_pid, signal.SIGTERM)
-        elif pgid is not None and SUPPORTS_PROCESS_GROUPS:
-            os.killpg(pgid, signal.SIGTERM)
-        elif proc is not None and proc.returncode is None:
+    if SUPPORTS_PROCESS_GROUPS:
+        _signal_group_and_tree(root_pid, pgid, signal.SIGTERM)
+    elif proc is not None and proc.returncode is None:
+        with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
             proc.terminate()
-    except (ProcessLookupError, PermissionError, OSError):
-        pass
     if proc is not None and proc.returncode is None:
         try:
             await asyncio.wait_for(proc.wait(), timeout=8.0)
@@ -143,8 +152,8 @@ async def stop_subagent_process(
             pass
     else:
         await asyncio.sleep(0.05)
-    if root_pid is not None and SUPPORTS_PROCESS_GROUPS:
-        signal_process_tree(root_pid, signal.SIGKILL)
+    if SUPPORTS_PROCESS_GROUPS:
+        _signal_group_and_tree(root_pid, pgid, signal.SIGKILL)
     else:
         kill_process_group(pgid, proc)
     if proc is not None and proc.returncode is None:

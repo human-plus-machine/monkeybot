@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import signal
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -158,27 +161,34 @@ async def test_kill_scratch_subagent_kills_when_leader_gone(
 async def test_stop_subagent_process_kills_group_after_leader_exits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A pgid known at spawn time must still be killpg'd even once the leader
+    is already reaped, i.e. ``getpgid`` on the dead root pid raises and the
+    tree walk finds nothing new: the captured ``pgid`` is the only reliable
+    signal left that still reaches orphaned descendants."""
     signals: list[tuple[str, int, int]] = []
 
     class _FakeProc:
         pid = 111
-        returncode = 0  # leader already exited
+        returncode = 0  # leader already exited/reaped
 
         def terminate(self) -> None:
             raise AssertionError("should use killpg")
 
         def kill(self) -> None:
-            signals.append(("kill", self.pid, 9))
+            raise AssertionError("should use killpg")
 
         async def wait(self) -> int:
             return 0
+
+    def _fake_getpgid(pid: int) -> int:
+        raise ProcessLookupError()  # root_pid is dead; only pgid stays valid
 
     def _fake_killpg(pgid: int, sig: int) -> None:
         signals.append(("killpg", pgid, int(sig)))
 
     monkeypatch.setattr(subprocess_groups, "SUPPORTS_PROCESS_GROUPS", True)
     monkeypatch.setattr(subprocess_groups, "iter_process_tree", lambda root: [root])
-    monkeypatch.setattr(subprocess_groups.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(subprocess_groups.os, "getpgid", _fake_getpgid)
     monkeypatch.setattr(subprocess_groups.os, "killpg", _fake_killpg)
     monkeypatch.setattr(subprocess_groups.asyncio, "sleep", AsyncMock())
 
@@ -226,6 +236,24 @@ async def test_stop_subagent_process_kills_process_group(
     await stop_subagent_process(proc, pgid=111)  # type: ignore[arg-type]
     assert ("killpg", 111, int(signal.SIGTERM)) in signals
     assert ("killpg", 111, int(signal.SIGKILL)) in signals
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="posix-only process tree walk")
+def test_direct_child_pids_finds_real_child(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercise the non-``/proc`` fallback against a real child process.
+
+    Forces the ``/proc`` branch off so this also covers platforms without it
+    (e.g. macOS, where the old ``ps -o pid= -P`` invocation was invalid and
+    silently returned no children).
+    """
+    monkeypatch.setattr(subprocess_groups.Path, "exists", lambda self: False)
+    child = subprocess.Popen(["sleep", "5"])
+    try:
+        children = subprocess_groups._direct_child_pids(os.getpid())
+        assert child.pid in children
+    finally:
+        child.terminate()
+        child.wait(timeout=5)
 
 
 def test_process_group_id_returns_none_when_pid_gone(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -277,12 +305,16 @@ async def test_stop_subagent_process_kills_nested_terminal_sessions(
 
     proc = _FakeProc()
     await stop_subagent_process(proc, pgid=100)  # type: ignore[arg-type]
+    # Nested descendants (200, 300) must be signaled exactly once via the tree
+    # walk. The root's own pgid (100) is signaled by both the tree walk and
+    # the direct pgid kill (belt-and-suspenders for an already-dead leader),
+    # so it may appear more than once.
     assert signals.count((300, int(signal.SIGTERM))) == 1
     assert signals.count((200, int(signal.SIGTERM))) == 1
-    assert signals.count((100, int(signal.SIGTERM))) == 1
+    assert signals.count((100, int(signal.SIGTERM))) >= 1
     assert signals.count((300, int(signal.SIGKILL))) == 1
     assert signals.count((200, int(signal.SIGKILL))) == 1
-    assert signals.count((100, int(signal.SIGKILL))) == 1
+    assert signals.count((100, int(signal.SIGKILL))) >= 1
 
 
 @pytest.mark.asyncio

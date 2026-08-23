@@ -97,18 +97,27 @@ class _FakeDocRef:
 
 class _FakeQuery:
     def __init__(
-        self, store: dict[str, dict[str, Any]], filters: list[tuple[str, str, Any]]
+        self,
+        store: dict[str, dict[str, Any]],
+        filters: list[tuple[str, str, Any]],
+        order_field: str | None = None,
     ) -> None:
         self._store = store
         self._filters = filters
+        self._order_field = order_field
 
     def where(self, *, filter: Any) -> "_FakeQuery":  # noqa: A002
         return _FakeQuery(
             self._store,
             [*self._filters, (filter.field_path, filter.op_string, filter.value)],
+            self._order_field,
         )
 
+    def order_by(self, field: str, direction: Any = None) -> "_FakeQuery":
+        return _FakeQuery(self._store, self._filters, field)
+
     async def stream(self):
+        matched = []
         for doc_id, data in list(self._store.items()):
             ok = True
             for field_path, op, value in self._filters:
@@ -123,7 +132,11 @@ class _FakeQuery:
                     ok = False
                     break
             if ok:
-                yield _FakeSnapshot(doc_id, dict(data))
+                matched.append((doc_id, data))
+        if self._order_field is not None:
+            matched.sort(key=lambda kv: kv[1].get(self._order_field))
+        for doc_id, data in matched:
+            yield _FakeSnapshot(doc_id, dict(data))
 
 
 class _FakeCollection:
@@ -144,6 +157,9 @@ class _FakeCollection:
 
     def where(self, *, filter: Any) -> _FakeQuery:  # noqa: A002
         return _FakeQuery(self._store, []).where(filter=filter)
+
+    def order_by(self, field: str, direction: Any = None) -> _FakeQuery:
+        return _FakeQuery(self._store, []).order_by(field, direction)
 
 
 class _FakeClient:
@@ -283,6 +299,61 @@ async def test_firestore_release_stale_skips_renewed_heartbeat(
     assert row["tick_in_flight"] == 1
     assert row["worker_id"] == "worker-a"
     assert row["claimed_at_ms"] == 149_000
+
+
+def _seed_due(
+    client: _FakeClient,
+    loop_id: str,
+    *,
+    interval_ms: int = 5_000,
+    next_tick_at_ms: int = 100,
+    started_at_ms: int = 50,
+) -> None:
+    client.docs[loop_id] = {
+        "session_id": "loop-main",
+        "status": "active",
+        "prompt": "tick",
+        "interval_ms": interval_ms,
+        "max_ticks": 10,
+        "max_runtime_ms": None,
+        "skip_if_busy": 1,
+        "tick_index": 0,
+        "next_tick_at_ms": next_tick_at_ms,
+        "started_at_ms": started_at_ms,
+        "last_tick_at_ms": None,
+        "last_error": None,
+        "stop_reason": None,
+        "tick_in_flight": 0,
+        "worker_id": None,
+        "claimed_at_ms": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_firestore_list_due_skips_malformed_doc() -> None:
+    """A single doc with an invalid interval_ms must not stall list_due for
+    every other loop (would otherwise raise inside the scheduler poll loop
+    before any due loop gets claimed)."""
+    client = _FakeClient()
+    _seed_due(client, "loop-good")
+    _seed_due(client, "loop-bad", interval_ms=0)
+    store = FirestoreScheduledLoopStore(client, prefix="t")  # type: ignore[arg-type]
+
+    due = await store.list_due(now_ms=1_000)
+
+    assert [row.loop_id for row in due] == ["loop-good"]
+
+
+@pytest.mark.asyncio
+async def test_firestore_list_all_skips_malformed_doc() -> None:
+    client = _FakeClient()
+    _seed_due(client, "loop-good", started_at_ms=200)
+    _seed_due(client, "loop-bad", interval_ms=0, started_at_ms=100)
+    store = FirestoreScheduledLoopStore(client, prefix="t")  # type: ignore[arg-type]
+
+    rows = await store.list_all()
+
+    assert [row.loop_id for row in rows] == ["loop-good"]
 
 
 @pytest.mark.asyncio
