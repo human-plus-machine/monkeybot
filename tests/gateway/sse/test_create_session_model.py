@@ -203,7 +203,7 @@ async def test_start_turn_prefers_session_provider(
     monkeypatch.setattr(
         gateway_app,
         "_resolved_workspace_paths",
-        lambda: (tmp_path, tmp_path / "skills"),
+        lambda: (tmp_path, tmp_path / "skills", tmp_path / "artifacts"),
     )
 
     gateway_app._deps.mcp = MagicMock()
@@ -258,7 +258,7 @@ async def test_start_turn_falls_back_to_env(
     monkeypatch.setattr(
         gateway_app,
         "_resolved_workspace_paths",
-        lambda: (tmp_path, tmp_path / "skills"),
+        lambda: (tmp_path, tmp_path / "skills", tmp_path / "artifacts"),
     )
 
     gateway_app._deps.mcp = MagicMock()

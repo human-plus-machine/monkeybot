@@ -30,7 +30,7 @@ from monkeybot.providers._utils import (
     prepare_anthropic_cached_payload,
     split_system_prompt_for_cache,
 )
-from monkeybot.providers.bedrock import BedrockClaudeProvider
+from monkeybot.providers.bedrock import BedrockProvider
 from monkeybot.providers.claude import ClaudeProvider
 from monkeybot.providers.vertex_claude import VertexClaudeProvider
 from tests.providers.conftest import (
@@ -87,7 +87,7 @@ def _cache_usage_stream_events(
 
 
 async def _usage_from_stream(
-    provider: ClaudeProvider | VertexClaudeProvider | BedrockClaudeProvider,
+    provider: ClaudeProvider | VertexClaudeProvider | BedrockProvider,
     messages: list[Message],
     tools: list[Any],
     *,
@@ -501,12 +501,12 @@ async def test_vertex_usage_missing_cache_fields_reads_zero() -> None:
     assert usage.cached_tokens == 0
 
 
-# --- Task 4: BedrockClaudeProvider ---
+# --- Task 4: BedrockProvider ---
 
 
 @pytest.mark.asyncio
 async def test_bedrock_enabled_system_is_cached_block_list() -> None:
-    provider = BedrockClaudeProvider(aws_region="us-east-1")
+    provider = BedrockProvider(aws_region="us-east-1")
     client = make_anthropic_stream_mock(_minimal_stream_events())
     provider._client = lambda: client  # type: ignore[method-assign]
 
@@ -518,7 +518,7 @@ async def test_bedrock_enabled_system_is_cached_block_list() -> None:
 
 @pytest.mark.asyncio
 async def test_bedrock_enabled_last_tool_marked() -> None:
-    provider = BedrockClaudeProvider(aws_region="us-east-1")
+    provider = BedrockProvider(aws_region="us-east-1")
     client = make_anthropic_stream_mock(_minimal_stream_events())
     provider._client = lambda: client  # type: ignore[method-assign]
 
@@ -531,7 +531,7 @@ async def test_bedrock_enabled_last_tool_marked() -> None:
 
 @pytest.mark.asyncio
 async def test_bedrock_usage_maps_cache_read_and_creation() -> None:
-    provider = BedrockClaudeProvider(aws_region="us-east-1")
+    provider = BedrockProvider(aws_region="us-east-1")
     client = make_anthropic_stream_mock(_cache_usage_stream_events())
     provider._client = lambda: client  # type: ignore[method-assign]
 
@@ -546,7 +546,7 @@ async def test_bedrock_usage_maps_cache_read_and_creation() -> None:
 
 @pytest.mark.asyncio
 async def test_bedrock_usage_missing_cache_fields_reads_zero() -> None:
-    provider = BedrockClaudeProvider(aws_region="us-east-1")
+    provider = BedrockProvider(aws_region="us-east-1")
     client = make_anthropic_stream_mock(
         _cache_usage_stream_events(cache_read=None, cache_creation=None)
     )
@@ -566,12 +566,12 @@ async def test_bedrock_usage_missing_cache_fields_reads_zero() -> None:
 
 def _provider_factories(
     monkeypatch: pytest.MonkeyPatch,
-) -> dict[str, ClaudeProvider | VertexClaudeProvider | BedrockClaudeProvider]:
+) -> dict[str, ClaudeProvider | VertexClaudeProvider | BedrockProvider]:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
     return {
         "claude": ClaudeProvider(),
         "vertex": VertexClaudeProvider(project_id="p"),
-        "bedrock": BedrockClaudeProvider(aws_region="us-east-1"),
+        "bedrock": BedrockProvider(aws_region="us-east-1"),
     }
 
 

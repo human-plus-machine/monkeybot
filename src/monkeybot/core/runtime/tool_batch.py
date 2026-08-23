@@ -10,6 +10,7 @@ from typing import Any
 from monkeybot.core.context import (
     LOOPS_REGISTRY_MUTATING_TOOLS,
     MCP_REGISTRY_MUTATING_TOOLS,
+    PendingResponseBusPort,
 )
 from monkeybot.core.llm.provider import ToolCall
 from monkeybot.core.tools.types import ToolExecutionResult
@@ -137,7 +138,11 @@ async def _await_user_response_any(
 
     Used by the gateway :func:`_await_user_response` and the inspector confirm path.
     """
-    t = timeout_sec if timeout_sec is not None else float(os.environ.get("PENDING_RESPONSE_TIMEOUT_SEC", "300"))
+    t = (
+        timeout_sec
+        if timeout_sec is not None
+        else float(os.environ.get("PENDING_RESPONSE_TIMEOUT_SEC", "300"))
+    )
     try:
         return await asyncio.wait_for(asyncio.shield(fut), timeout=t)
     except TimeoutError:
@@ -145,3 +150,20 @@ async def _await_user_response_any(
         if callable(ap):
             ap(pending_key)
         return {"_timeout": True}
+
+
+def confirm_wait_stopped_by_user(
+    bus: PendingResponseBusPort | None,
+    pending_key: str,
+    *,
+    cancelled: asyncio.Event | None = None,
+) -> bool:
+    """True when user Stop abandoned the confirm future.
+
+    ``cancelled`` must already be set. Session DELETE and websocket teardown also
+    mark keys terminated via ``abandon_pending_cancel_all`` without setting the
+    Event; those paths re-raise instead of settling.
+    """
+    if bus is None or cancelled is None or not cancelled.is_set():
+        return False
+    return bus.is_pending_or_terminal(pending_key) == "terminated"

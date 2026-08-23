@@ -6,6 +6,7 @@ that the realtime app can be wired independently without modifying ``gateway/sse
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -40,6 +41,8 @@ class RealtimeDependencies:
     storage: StorageBackend | None = None
     attachment_store: AttachmentStore | None = None
     loops_registry: LoopsToolRegistry = field(default_factory=LoopsToolRegistry)
+    computer_tools: list[Any] = field(default_factory=list)
+    computer_approvals_persist: Callable[[str, str], bool] | None = None
     _frozen: bool = field(default=False, repr=False)
 
     def freeze(self) -> None:

@@ -346,6 +346,53 @@ class TestSandboxExecutorLayoutMounts:
         ]
 
     @pytest.mark.asyncio
+    async def test_mounts_artifacts_rw_when_declared(self, tmp_path):
+        """artifacts_path is a writable extra root (like skills, but not read-only) —
+        the sandbox must actually see it, or run_command inside a shared
+        sandbox can't reach files write_file already wrote on the host.
+        """
+        workspace = tmp_path / "workspace"
+        skills = tmp_path / "skills"
+        artifacts = tmp_path / "artifacts"
+        workspace.mkdir()
+        skills.mkdir()
+        artifacts.mkdir()
+        cfg = SandboxConfig(True, "http://localhost:8080", None, "test", 30)
+        executor = SandboxExecutor(cfg, workspace, skills_path=skills, artifacts_path=artifacts)
+        mock_cls, _ = _make_create_mock()
+        osb = _make_opensandbox_module(mock_cls)
+
+        with patch.dict(sys.modules, _opensandbox_sys_modules(osb)):
+            await executor.execute("echo", ["ok"])
+
+        volumes = mock_cls.create.call_args.kwargs["volumes"]
+        assert [(v.host.path, v.readOnly) for v in volumes[:3]] == [
+            (str(workspace.resolve()), False),
+            (str(skills.resolve()), True),
+            (str(artifacts.resolve()), False),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_no_artifacts_volume_when_not_declared(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        skills = tmp_path / "skills"
+        workspace.mkdir()
+        skills.mkdir()
+        cfg = SandboxConfig(True, "http://localhost:8080", None, "test", 30)
+        executor = SandboxExecutor(cfg, workspace, skills_path=skills)
+        mock_cls, _ = _make_create_mock()
+        osb = _make_opensandbox_module(mock_cls)
+
+        with patch.dict(sys.modules, _opensandbox_sys_modules(osb)):
+            await executor.execute("echo", ["ok"])
+
+        volumes = mock_cls.create.call_args.kwargs["volumes"]
+        assert [(v.host.path, v.readOnly) for v in volumes] == [
+            (str(workspace.resolve()), False),
+            (str(skills.resolve()), True),
+        ]
+
+    @pytest.mark.asyncio
     async def test_remote_compute_mode_never_mounts_and_uses_tmp(self, tmp_path):
         workspace = tmp_path / "workspace"
         skills = tmp_path / "skills"

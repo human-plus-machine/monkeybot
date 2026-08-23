@@ -5,52 +5,16 @@ Output is local-only — never sent to the agent.
 
 from __future__ import annotations
 
-import os
-import signal
 import subprocess
 import sys
 import threading
 from pathlib import Path
 
-_IS_WINDOWS = sys.platform == "win32"
+from monkeybot_cli.process_tree import IS_WINDOWS, kill_process_tree, popen_kwargs_for_platform
 
 # Cap capture before TUI truncation so `!yes`-style floods cannot OOM the process.
 _MAX_CAPTURE_CHARS = 100_000
 _READ_CHUNK = 4_096
-
-
-def _popen_kwargs_for_platform() -> dict[str, object]:
-    if _IS_WINDOWS:
-        # getattr fallback: this constant only exists on Windows builds of
-        # `subprocess`, so a plain attribute access breaks importing/testing
-        # this module on POSIX even though the branch never runs there.
-        return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
-    return {"start_new_session": True}
-
-
-def _kill_process_tree(pid: int) -> None:
-    """Best-effort kill of the shell process group/tree.
-
-    Swallow lookup/permission races — leader exit can make killpg raise
-    ``PermissionError`` even though descendants still need a signal.
-    """
-    if _IS_WINDOWS:
-        try:
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(pid)],
-                capture_output=True,
-                check=False,
-            )
-        except OSError:
-            pass
-        return
-    try:
-        os.killpg(pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
 
 
 def _append_capped(chunks: list[str], total: int, data: str) -> tuple[int, bool]:
@@ -84,7 +48,7 @@ def run_local_shell(command: str, cwd: Path, *, timeout: float = 120.0) -> tuple
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        **_popen_kwargs_for_platform(),
+        **popen_kwargs_for_platform(),
     )
     assert proc.stdout is not None
 
@@ -104,7 +68,7 @@ def run_local_shell(command: str, cwd: Path, *, timeout: float = 120.0) -> tuple
                 state["total"], hit = _append_capped(chunks, state["total"], chunk)
                 if hit:
                     state["capped"] = True
-                    _kill_process_tree(proc.pid)
+                    kill_process_tree(proc.pid)
                     break
         except (ValueError, OSError):
             # stdout closed from the main thread to unblock a stuck read.
@@ -119,12 +83,12 @@ def run_local_shell(command: str, cwd: Path, *, timeout: float = 120.0) -> tuple
             proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             timed_out = True
-            _kill_process_tree(proc.pid)
+            kill_process_tree(proc.pid)
 
         # Shell may have exited while a descendant still holds the pipe —
         # kill the tree and close stdout so the reader cannot block forever.
         if reader.is_alive():
-            _kill_process_tree(proc.pid)
+            kill_process_tree(proc.pid)
             stop_reader.set()
             try:
                 proc.stdout.close()
@@ -139,7 +103,7 @@ def run_local_shell(command: str, cwd: Path, *, timeout: float = 120.0) -> tuple
             reader.join(timeout=0.1)
     except Exception:
         timed_out = True
-        _kill_process_tree(proc.pid)
+        kill_process_tree(proc.pid)
         stop_reader.set()
         try:
             proc.stdout.close()
@@ -149,7 +113,7 @@ def run_local_shell(command: str, cwd: Path, *, timeout: float = 120.0) -> tuple
 
     try:
         if proc.poll() is None:
-            _kill_process_tree(proc.pid)
+            kill_process_tree(proc.pid)
             try:
                 proc.wait(timeout=1)
             except Exception:

@@ -11,7 +11,7 @@ import contextlib
 import json
 import logging
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -19,6 +19,8 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from monkeybot.computer import build_computer_tools, should_enable_computer_tools
+from monkeybot.computer.permissions import build_computer_permission_inspector, build_persist_hook
 from monkeybot.core.attachments.config import attachments_enabled_from_env
 from monkeybot.core.attachments.store import AttachmentStore, FilesystemAttachmentStore
 from monkeybot.core.config.settings import (
@@ -43,7 +45,8 @@ from monkeybot.core.llm.provider import (
     ToolCall,
     UsageEvent,
 )
-from monkeybot.core.llm.usage import Usage as UsageRecord
+from monkeybot.core.llm.usage import Usage as UsageRecord, UsageGranularity
+from monkeybot.core.logging_utils import kv
 from monkeybot.core.mcp.mcp_client import MCPClient
 from monkeybot.core.memory.config import memory_enabled_from_config
 from monkeybot.core.memory.subsystem import MemoryConfigurationError, MemorySubsystem
@@ -101,6 +104,8 @@ class _GatewayDeps:
     run_command_allowed_path_prefixes: list[str] | None = None
     subagent_registry: dict[str, SubagentConfig] = field(default_factory=dict)
     loops_registry: LoopsToolRegistry = field(default_factory=LoopsToolRegistry)
+    computer_tools: list[Any] = field(default_factory=list)
+    computer_approvals_persist: Callable[[str, str], bool] | None = None
 
 
 _deps = _GatewayDeps()
@@ -114,10 +119,10 @@ def _env_context_window_tokens() -> int:
         return 200_000
 
 
-def _resolved_workspace_paths() -> tuple[Path, Path]:
-    """Resolve writable workspace and read-only skills from the agent layout."""
+def _resolved_workspace_paths() -> tuple[Path, Path, Path | None]:
+    """Resolve writable workspace, read-only skills, and artifacts mount from the agent layout."""
     layout = AgentLayout.from_environment()
-    return layout.workspace_root, layout.skills_path
+    return layout.workspace_root, layout.skills_path, layout.artifacts_path
 
 
 def _memory_storage_uri() -> str:
@@ -164,10 +169,17 @@ class _UsageStoreAdapter(UsagePort):
             "context_window_tokens": context_window_tokens,
         }
 
-    async def agent_usage(self, *, since: str | None) -> dict[str, Any]:
+    async def agent_usage(
+        self, *, since: str | None, bucket: UsageGranularity | None = None
+    ) -> dict[str, Any]:
+        granularity: UsageGranularity = bucket or "day"
         since_ms = self._parse_since(since)
-        s = await self._store.summary(thread_id=None, since_ms=since_ms)
-        b = await self._store.breakdown(since_ms=since_ms)
+        try:
+            s = await self._store.summary(thread_id=None, since_ms=since_ms)
+            b = await self._store.breakdown(since_ms=since_ms, bucket=granularity)
+        except Exception:
+            logger.exception("agent usage query failed %s", kv(since=since, bucket=bucket))
+            raise
         return {
             "turns": s.turns,
             "input_tokens": s.input_tokens,
@@ -180,11 +192,8 @@ class _UsageStoreAdapter(UsagePort):
             "period_end": s.period_end_ms if s.period_end_ms is not None else 0,
             "by_model": [asdict(row) for row in b.by_model],
             "by_day": [asdict(row) for row in b.by_day],
+            "by_bucket_model": [asdict(row) for row in b.by_bucket_model],
         }
-
-
-def _zero_agent_usage() -> dict[str, Any]:
-    return AgentUsageResponse().model_dump()
 
 
 class _StaticUsagePortZeros(UsagePort):
@@ -206,9 +215,11 @@ class _StaticUsagePortZeros(UsagePort):
             context_window_tokens=cw,
         ).model_dump()
 
-    async def agent_usage(self, *, since: str | None) -> dict[str, Any]:
-        del since
-        return _zero_agent_usage()
+    async def agent_usage(
+        self, *, since: str | None, bucket: UsageGranularity | None = None
+    ) -> dict[str, Any]:
+        del since, bucket
+        return AgentUsageResponse().model_dump()
 
 
 def _content_blocks_to_text(blocks: list[ContentBlock]) -> str:
@@ -333,6 +344,7 @@ class GatewayLoopPort:
         usage_store = backend.usage()
 
         cancel_event = asyncio.Event()
+        bus.turn_cancel_event = cancel_event
 
         async def _watch_cancel() -> None:
             while True:
@@ -348,7 +360,7 @@ class GatewayLoopPort:
             model_name = bus.model_name or os.environ.get("MODEL_NAME", "gemini-2.5-flash")
             agent_path = _default_agent_path(bus)
 
-            workspace_root, skills_resolved = _resolved_workspace_paths()
+            workspace_root, skills_resolved, artifacts_resolved = _resolved_workspace_paths()
 
             transcript_writer: TranscriptWriter | None = None
             if transcript_enabled_from_env():
@@ -374,6 +386,7 @@ class GatewayLoopPort:
             extra_tools: list[Any] = (
                 [_deps.web_search_tool] if _deps.web_search_tool is not None else []
             )
+            extra_tools.extend(_deps.computer_tools)
             todo_store = None
             if todo_list_enabled_from_env():
                 if bus.todo_store is None:
@@ -405,6 +418,7 @@ class GatewayLoopPort:
                     scheduled_loops_available=loops_available,
                     loops_advertised=loops_advertised,
                     todo_store=todo_store,
+                    approvals_persist=_deps.computer_approvals_persist,
                 )
             except Exception as exc:
                 logger.exception("build_context failed")
@@ -421,6 +435,7 @@ class GatewayLoopPort:
                 memory=getattr(serving.state, "memory", None),
                 knowledge=getattr(serving.state, "knowledge", None),
                 skills_path=skills_resolved,
+                artifacts_path=artifacts_resolved,
                 mcp=mcp,
                 extra_tools=extra_tools,
                 run_command_allowed_commands=_deps.run_command_allowed_commands,
@@ -480,6 +495,7 @@ class GatewayLoopPort:
             with contextlib.suppress(asyncio.CancelledError):
                 await watcher
             bus.cancel_requested_for = None
+            bus.turn_cancel_event = None
 
 
 def _cors_allow_origins() -> list[str]:
@@ -560,9 +576,14 @@ async def _startup(fastapi_app: FastAPI) -> None:
         inspectors.append(RulesInspector(denied))
 
     perm_path = layout.permission_config_path
-    perm_insp = try_load_permission_inspector(perm_path)
-    if perm_insp is not None:
-        inspectors.append(perm_insp)
+    if should_enable_computer_tools():
+        _deps.computer_tools = build_computer_tools()
+        _deps.computer_approvals_persist = build_persist_hook(layout.approvals_path)
+        inspectors.append(build_computer_permission_inspector(perm_path, layout.approvals_path))
+    else:
+        perm_insp = try_load_permission_inspector(perm_path)
+        if perm_insp is not None:
+            inspectors.append(perm_insp)
 
     inspectors.append(LoopStartInspector())
     _deps.inspectors = inspectors

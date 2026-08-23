@@ -355,3 +355,81 @@ async def test_does_not_mutate_caller_kwargs() -> None:
         pass
 
     assert kwargs["temperature"] == 0.7
+
+
+# --- Anthropic SDK 1.0: temperature is no longer a stream() kwarg ---
+
+
+class _SucceedingCM:
+    def __init__(self, events: list[object]) -> None:
+        self._events = events
+
+    async def __aenter__(self) -> object:
+        events = self._events
+
+        async def _gen() -> object:
+            for event in events:
+                yield event
+
+        return _gen()
+
+    async def __aexit__(self, *_exc: object) -> bool:
+        return False
+
+
+@pytest.mark.asyncio
+async def test_omits_temperature_when_stream_signature_rejects_it() -> None:
+    """SDK 1.0 ``stream()`` has no ``temperature`` and no ``**kwargs``; filter before call."""
+
+    calls: list[dict[str, Any]] = []
+
+    def stream(*, model: str, max_tokens: int) -> Any:
+        calls.append({"model": model, "max_tokens": max_tokens})
+        return _SucceedingCM(_minimal_events())
+
+    client = MagicMock()
+    client.messages.stream = stream
+
+    events: list[object] = []
+    async for event in iter_anthropic_sdk_stream(
+        client,
+        {"model": "claude-sonnet-6-hypothetical", "temperature": 0.7, "max_tokens": 100},
+        provider="claude",
+        error_message="Claude stream error: %s",
+    ):
+        events.append(event)
+
+    assert len(calls) == 1
+    assert "temperature" not in calls[0]
+    assert any(isinstance(e, UsageEvent) for e in events)
+
+
+@pytest.mark.asyncio
+async def test_retries_without_temperature_on_unexpected_keyword_typeerror() -> None:
+    """If stream() raises TypeError naming temperature, drop it and retry."""
+
+    calls: list[dict[str, Any]] = []
+
+    def stream_fn(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise TypeError(
+                "AsyncMessages.stream() got an unexpected keyword argument 'temperature'"
+            )
+        return _SucceedingCM(_minimal_events())
+
+    client = MagicMock()
+    client.messages.stream = stream_fn
+
+    events: list[object] = []
+    async for event in iter_anthropic_sdk_stream(
+        client,
+        {"model": "claude-sonnet-6-hypothetical", "temperature": 0.7, "max_tokens": 100},
+        provider="claude",
+        error_message="Claude stream error: %s",
+    ):
+        events.append(event)
+
+    assert len(calls) == 2
+    assert "temperature" not in calls[1]
+    assert any(isinstance(e, UsageEvent) for e in events)

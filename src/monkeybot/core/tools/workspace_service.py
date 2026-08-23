@@ -681,9 +681,13 @@ class WorkspaceFileService:
         settings: object | None = None,
         *,
         skills_root: Path | None = None,
+        artifacts_root: Path | None = None,
     ) -> None:
         self._root = Path(repo_root).resolve()
         self._skills_root = Path(skills_root).resolve() if skills_root is not None else None
+        self._artifacts_root = (
+            Path(artifacts_root).resolve() if artifacts_root is not None else None
+        )
         self._settings = _coerce_workspace_settings(settings)
 
     @property
@@ -693,6 +697,10 @@ class WorkspaceFileService:
     @property
     def skills_root(self) -> Path | None:
         return self._skills_root
+
+    @property
+    def artifacts_root(self) -> Path | None:
+        return self._artifacts_root
 
     @staticmethod
     def _normalize_rel_segments(rel: str, *, label: str) -> tuple[str, ...]:
@@ -715,6 +723,9 @@ class WorkspaceFileService:
     def _path_root_and_segments(self, segments: tuple[str, ...]) -> tuple[Path, tuple[str, ...]]:
         if segments[:1] == ("skills",) and self._skills_root is not None:
             return self._skills_root, segments[1:]
+        if segments[:1] == ("artifacts",) and self._artifacts_root is not None:
+            # `artifacts/` is a mounted extra-root, same as `skills/` above.
+            return self._artifacts_root, segments[1:]
         return self._root, segments
 
     @staticmethod
@@ -1472,6 +1483,12 @@ class WorkspaceFileService:
             try:
                 rel = p.resolve().relative_to(self._skills_root.resolve()).as_posix()
                 return "skills" if rel == "." else f"skills/{rel}"
+            except ValueError:
+                pass
+        if self._artifacts_root is not None:
+            try:
+                rel = p.resolve().relative_to(self._artifacts_root.resolve()).as_posix()
+                return "artifacts" if rel == "." else f"artifacts/{rel}"
             except ValueError:
                 pass
         try:

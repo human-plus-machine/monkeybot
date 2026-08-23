@@ -30,6 +30,10 @@ from monkeybot.core.llm.usage import Usage
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.memory.ingest import persist_message
 from monkeybot.core.messages import convert_to_provider
+from monkeybot.core.messages.tool_integrity import (
+    cancelled_tool_result_text,
+    interrupted_tool_result_text,
+)
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.prompts.prompt import latest_user_message_text
@@ -264,6 +268,7 @@ class _TurnState:
     thinking_signature: str | None = None
     stream_truncated: bool = False
     last_preflight_tokens: int = 0
+    provider_stream_failed: bool = False
 
 
 async def _prepare_turn_context(
@@ -914,7 +919,10 @@ async def _consume_provider_stream_body(
                 model=state.ctx.model,
                 text=state.assistant_text,
                 thinking=state.thinking_text,
-                tool_requests=[],
+                tool_requests=[
+                    {"call_id": tc.call_id, "name": tc.name, "args": tc.args}
+                    for tc in state.pending.values()
+                ],
                 usage={
                     "input_tokens": llm_input,
                     "output_tokens": llm_output,
@@ -958,6 +966,7 @@ async def _consume_provider_stream_body(
         )
         yield Error(request_id=state.ctx.request_id, error=str(exc))
         state.needs_followup_after_tools = False
+        state.provider_stream_failed = True
         state.action = "return"
         return
 
@@ -979,15 +988,17 @@ def _thinking_block(state: _TurnState) -> ContentBlock | None:
 
 
 def _sync_stream_mapper_text(state: _TurnState, stream_mapper: ProviderStreamMapper) -> None:
-    """Copy streamed text/thinking into turn state after an abort mid-stream.
+    """Copy streamed text/thinking/pending into turn state after an abort mid-stream.
 
-    Does not copy ``pending`` tool calls — incomplete ToolRequests without
-    responses would break history integrity.
+    Pending tool calls are copied so ``_persist_partial_assistant_on_abort`` can
+    settle ToolRequest + cancel ToolResponse pairs and keep history consistent
+    with any tool-call deltas the client already saw.
     """
     state.assistant_text = stream_mapper.assistant_text
     state.thinking_text = stream_mapper.thinking_text
     state.thinking_signature = stream_mapper.thinking_signature
     state.stream_truncated = stream_mapper.stream_truncated
+    state.pending = dict(stream_mapper.pending)
 
 
 async def _persist_partial_assistant_on_abort(
@@ -996,29 +1007,67 @@ async def _persist_partial_assistant_on_abort(
     history: HistoryStore,
     last_assistant: list[str],
 ) -> None:
-    """Persist already-streamed assistant text so Stop/errors keep model context.
+    """Persist already-streamed assistant output so Stop/errors keep model context.
 
-    Early ``action=\"return\"`` skips ``_handle_empty_or_final_text``, so cancel
-    must write here — otherwise the user sees a partial reply that history
-    never records.
+    Early ``action=\"return\"`` and post-stream cancel skip the normal final-text /
+    tool-dispatch paths. Persist thinking + text the user already saw, and when
+    tool calls were finalized in the stream, settle matching cancel envelopes so
+    history never holds bare ``ToolRequest`` blocks.
     """
     cleaned = (state.assistant_text or "").strip()
+    ordered = list(state.pending.values())
     assist_blocks: list[ContentBlock] = []
     thinking = _thinking_block(state)
     if thinking is not None:
         assist_blocks.append(thinking)
     if cleaned:
         assist_blocks.append(Text(text=cleaned))
+    for c in ordered:
+        assist_blocks.append(
+            ToolRequest(
+                id=c.call_id,
+                name=c.name,
+                args=dict(c.args),
+                parse_error=c.parse_error,
+                metadata=dict(c.metadata) if c.metadata else None,
+            )
+        )
     if not assist_blocks:
         return
+    tool_text_fn = (
+        interrupted_tool_result_text
+        if state.provider_stream_failed
+        else cancelled_tool_result_text
+    )
     await persist_message(
         history,
         Message(role="assistant", content=assist_blocks),
         thread_id=state.ctx.thread_id,
         turn_id=state.ctx.request_id,
         memory=state.ctx.memory,
-        ingest=bool(cleaned),
+        # Skip memory ingest when only tool-call blocks were finalized — the
+        # cancel/interrupt envelopes carry the durable tool facts for this turn.
+        ingest=bool(cleaned) and not ordered,
     )
+    if ordered:
+        cancel_responses: list[ContentBlock] = [
+            ToolResponse(
+                id=c.call_id,
+                tool_name=c.name,
+                result=[Text(text=tool_text_fn(c.name))],
+                is_error=True,
+            )
+            for c in ordered
+        ]
+        await persist_message(
+            history,
+            Message(role="user", content=cancel_responses),
+            thread_id=state.ctx.thread_id,
+            turn_id=state.ctx.request_id,
+            memory=state.ctx.memory,
+            ingest=False,
+        )
+        state.pending.clear()
     if cleaned:
         last_assistant[0] = cleaned
         state.turn_output_text = cleaned
@@ -1351,8 +1400,14 @@ async def _run_inner_core(
             state.action = None
 
             if cancelled is not None and cancelled.is_set():
+                # Stream already finished (and may have been shown over SSE).
+                # Persist text and settle any finalized tool calls the same way
+                # mid-stream abort does.
                 yield Error(request_id=state.ctx.request_id, error="Request cancelled")
                 state.needs_followup_after_tools = False
+                await _persist_partial_assistant_on_abort(
+                    state, history=history, last_assistant=last_assistant
+                )
                 break
 
             if not state.pending:

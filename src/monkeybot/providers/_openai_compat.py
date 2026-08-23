@@ -19,6 +19,7 @@ import logging
 import random
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 from monkeybot.core.llm.provider import (
@@ -201,7 +202,11 @@ async def _flatten_tool_response_text(block: ToolResponse) -> str:
             parts.append(_media_tool_placeholder("image", b))
         elif isinstance(b, File):
             extracted = await _extract_pdf_text(b)
-            parts.append(_extracted_file_text(b, extracted) if extracted else _media_tool_placeholder("file", b))
+            parts.append(
+                _extracted_file_text(b, extracted)
+                if extracted
+                else _media_tool_placeholder("file", b)
+            )
         else:
             raise ValueError(
                 f"unsupported ToolResponse block for OpenAI-compat: {type(b).__name__}"
@@ -341,9 +346,7 @@ def openai_messages_token_count(encoding: Any, oai_messages: list[dict[str, Any]
                 continue
             if key == "tool_calls" and isinstance(val, list):
                 for tc in val:
-                    total += len(
-                        encoding.encode(json.dumps(tc, ensure_ascii=False, default=str))
-                    )
+                    total += len(encoding.encode(json.dumps(tc, ensure_ascii=False, default=str)))
             elif isinstance(val, str):
                 total += len(encoding.encode(val))
             else:
@@ -384,6 +387,7 @@ def _rate_limit_retry_delay(attempt: int) -> float:
     jitter: float = random.uniform(0, 0.5)
     return base + jitter
 
+
 # NVIDIA's free build.nvidia.com tier is low-throughput and returns its own
 # worker/quota text instead of a clean 429, so callers that fan out concurrent
 # requests (parallel tool calls, subagents) can self-inflict a rate limit. Cap
@@ -409,6 +413,82 @@ class ProviderRateLimitError(Exception):
         self.provider = provider
         self.model = model
         self.original = original
+
+
+_SERVER_ERROR_MAX_ATTEMPTS = 3
+
+
+class ProviderServerError(Exception):
+    """Raised when an upstream provider returns a persistent 5xx and retries are exhausted.
+
+    ``str(self)`` is a user-facing message; the raw upstream error is chained via
+    ``__cause__`` (see ``raise ... from exc``) for logs, not shown to the user.
+    """
+
+    def __init__(self, provider: str, model: str, original: BaseException) -> None:
+        super().__init__(
+            f"{provider} returned a server error for model {model!r}. "
+            "Please wait a moment and try again."
+        )
+        self.provider = provider
+        self.model = model
+        self.original = original
+
+
+def is_server_error(exc: BaseException) -> bool:
+    """Return True when *exc* is a transient upstream 5xx (not a client/config error).
+
+    Covers a clean HTTP 5xx (``APIStatusError`` with a ``status_code``) and a
+    mid-stream protocol failure — HTTP 200, then an error chunk inside the SSE
+    body, which the SDK surfaces as a bare ``APIError`` with no ``status_code``.
+    """
+    try:
+        from openai import APIError, APIStatusError  # noqa: PLC0415
+
+        if isinstance(exc, APIStatusError):
+            return exc.status_code is not None and exc.status_code >= 500
+        if isinstance(exc, APIError):
+            # No status_code on this shape — the failure is generic-server-ish
+            # text NVIDIA emits mid-stream, not a validation/client error.
+            msg = str(getattr(exc, "message", None) or exc).lower()
+            return "internal server error" in msg
+    except ImportError:
+        pass
+    return False
+
+
+def _retry_delay_or_raise(
+    *,
+    exc: BaseException,
+    provider: str,
+    model: str,
+    yielded_any: bool,
+    attempts: int,
+    max_attempts: int,
+    label: str,
+    error_cls: type[Exception],
+) -> tuple[int, float]:
+    """Shared backoff-or-raise policy for the rate-limit and server-error retry paths.
+
+    Returns ``(new_attempts, delay)`` to sleep before retrying. Raises
+    ``error_cls(provider, model, exc)`` — hiding the raw upstream text — once
+    output has already streamed this attempt (retrying would duplicate it) or
+    attempts are exhausted.
+    """
+    if yielded_any or attempts >= max_attempts - 1:
+        raise error_cls(provider, model, exc) from exc
+    attempts += 1
+    delay = _rate_limit_retry_delay(attempts)
+    _log.warning(
+        "%s %s (attempt %d/%d); retrying in %.1fs: %s",
+        provider,
+        label,
+        attempts,
+        max_attempts,
+        delay,
+        exc,
+    )
+    return attempts, delay
 
 
 def is_rate_limit_error(exc: BaseException) -> bool:
@@ -455,6 +535,116 @@ def _provider_semaphore(provider: str) -> asyncio.Semaphore | None:
     return _provider_semaphores[key]
 
 
+_TOOL_CALL_OPEN = "<tool_call>"
+_TOOL_CALL_CLOSE = "</tool_call>"
+
+
+def _tag_prefix_overlap(s: str, tag: str) -> int:
+    """Length of the longest suffix of *s* that is a proper prefix of *tag*.
+
+    Used to hold back a small tail of streamed content that might be the
+    start of *tag* split across two chunks, without delaying unrelated text.
+    """
+    for k in range(min(len(s), len(tag) - 1), 0, -1):
+        if s.endswith(tag[:k]):
+            return k
+    return 0
+
+
+def _parse_text_tool_call(span: str) -> tuple[str, dict[str, Any]] | None:
+    """Parse one Hermes-style ``<tool_call>{...}</tool_call>`` span.
+
+    Recovers tool calls some OpenAI-compat backends (NIM/vLLM-hosted OSS
+    models, e.g. NVIDIA's nemotron line) emit as inline text instead of a
+    structured ``delta.tool_calls`` field. Returns None on any malformed
+    input — callers are expected to fail open (treat the span as plain text)
+    and log, not silently drop it.
+    """
+    inner = span[len(_TOOL_CALL_OPEN) : -len(_TOOL_CALL_CLOSE)].strip()
+    try:
+        payload = json.loads(inner)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    name = payload.get("name")
+    if not isinstance(name, str) or not name:
+        return None
+    args = payload.get("arguments", {})
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except (json.JSONDecodeError, ValueError):
+            return None
+    if not isinstance(args, dict):
+        return None
+    return name, args
+
+
+@dataclass
+class _ToolCallSpanScanner:
+    """Incrementally splits streamed content into text vs. ``<tool_call>`` spans.
+
+    SSE deltas already sent to the caller can't be un-sent, so a model's raw
+    ``<tool_call>`` XML must never reach ``TextDelta`` in the first place —
+    only text outside a detected span is yielded live. Content inside a span
+    is withheld and collected in ``spans`` for the caller to resolve once the
+    stream ends (see ``iter_openai_compat_stream``). Only instantiated for
+    tool-enabled requests, so tool-less turns pay zero overhead.
+    """
+
+    held: str = ""
+    in_call: bool = False
+    call_buf: str = ""
+    spans: list[str] = field(default_factory=list)
+
+    def feed(self, chunk: str) -> list[str]:
+        """Return the text fragments (already outside any span) to yield now."""
+        out: list[str] = []
+        pending = self.held + chunk
+        self.held = ""
+        while True:
+            if not self.in_call:
+                if not pending:
+                    return out
+                idx = pending.find(_TOOL_CALL_OPEN)
+                if idx == -1:
+                    overlap = _tag_prefix_overlap(pending, _TOOL_CALL_OPEN)
+                    flush = pending[: len(pending) - overlap] if overlap else pending
+                    if flush:
+                        out.append(flush)
+                    self.held = pending[len(pending) - overlap :] if overlap else ""
+                    return out
+                before = pending[:idx]
+                if before:
+                    out.append(before)
+                self.in_call = True
+                self.call_buf = pending[idx:]
+                pending = ""
+                # Loop again — the close tag may already be in call_buf
+                # (whole span delivered in a single chunk).
+            else:
+                self.call_buf += pending
+                pending = ""
+                close_idx = self.call_buf.find(_TOOL_CALL_CLOSE)
+                if close_idx == -1:
+                    return out
+                end = close_idx + len(_TOOL_CALL_CLOSE)
+                self.spans.append(self.call_buf[:end])
+                pending = self.call_buf[end:]
+                self.in_call = False
+                self.call_buf = ""
+                # Loop again — leftover pending may hold more text or another span.
+
+    def flush_incomplete(self) -> str:
+        """At end of stream: anything held back or mid-span, as plain text (fail-open)."""
+        leftover = self.held + (self.call_buf if self.in_call else "")
+        self.held = ""
+        self.in_call = False
+        self.call_buf = ""
+        return leftover
+
+
 async def iter_openai_compat_stream(
     client: Any,
     kwargs: dict[str, Any],
@@ -475,8 +665,27 @@ async def iter_openai_compat_stream(
     input_tokens = 0
     output_tokens = 0
     cached_tokens = 0
-    tool_buf: dict[int, dict[str, Any]] = {}
+    tool_buf: dict[int | str, dict[str, Any]] = {}
+    # Some OpenAI-compat hosts (notably several DeepSeek/Qwen-family backends
+    # proxied through OpenRouter) omit `index` on tool_call deltas entirely —
+    # this is a real runtime possibility despite the SDK's `index: int` type
+    # hint, since streaming chunks are parsed via lenient `model_construct`,
+    # not validated. Falling back to a shared key (e.g. `0`) for all of them
+    # collapses parallel tool calls into one another.
+    #
+    # Without `index`, `id` is the only reliable correlation key — but hosts
+    # differ on whether they echo `id` on every delta for a call or only the
+    # first. `id_to_slot` makes both work: an `id` seen before reuses its
+    # slot; an unseen `id` (or, lacking any `id` at all, a `function.name`)
+    # opens a new one. Deltas with neither `id` nor `name` are pure argument
+    # continuations and attach to whichever call most recently opened.
+    id_to_slot: dict[str, int | str] = {}
+    fallback_open_idx: int | str | None = None
+    fallback_counter = 0
     finish_reason: str | None = None
+    # Only scan for literal <tool_call> text when tools were actually offered —
+    # tool-less turns skip the scanner entirely (see _ToolCallSpanScanner).
+    scanner = _ToolCallSpanScanner() if n_tools else None
 
     try:
         stream = await client.chat.completions.create(**req)
@@ -496,13 +705,52 @@ async def iter_openai_compat_stream(
             if delta is None:
                 continue
             if delta.content:
-                yield TextDelta(text=delta.content)
+                if scanner is not None:
+                    for text in scanner.feed(delta.content):
+                        yield TextDelta(text=text)
+                else:
+                    yield TextDelta(text=delta.content)
             reasoning = _delta_reasoning_text(delta)
             if reasoning:
                 yield ThinkingDelta(text=reasoning)
             if delta.tool_calls:
                 for tc in delta.tool_calls:
-                    idx = int(tc.index or 0)
+                    idx: int | str
+                    if tc.index is not None:
+                        idx = int(tc.index)
+                        fallback_open_idx = idx
+                        if tc.id:
+                            id_to_slot[tc.id] = idx
+                    elif tc.id and tc.id in id_to_slot:
+                        # A host that echoes `id` on every delta for a call —
+                        # reuse its slot rather than opening a new one each time.
+                        idx = id_to_slot[tc.id]
+                        fallback_open_idx = idx
+                    elif tc.id or (tc.function and tc.function.name):
+                        reuse_open = fallback_open_idx
+                        open_slot = tool_buf.get(reuse_open) if reuse_open is not None else None
+                        if (
+                            reuse_open is not None
+                            and open_slot is not None
+                            and not open_slot["id"]
+                            and not open_slot["name"]
+                        ):
+                            # Argument deltas arrived before this call's id/name —
+                            # attach to that already-open slot instead of orphaning
+                            # its buffered args in a second, nameless slot.
+                            idx = reuse_open
+                        else:
+                            fallback_counter += 1
+                            idx = f"noidx:{fallback_counter}"
+                            fallback_open_idx = idx
+                        if tc.id:
+                            id_to_slot[tc.id] = idx
+                    elif fallback_open_idx is not None:
+                        idx = fallback_open_idx
+                    else:
+                        fallback_counter += 1
+                        idx = f"noidx:{fallback_counter}"
+                        fallback_open_idx = idx
                     slot = tool_buf.setdefault(idx, {"id": "", "name": "", "args": ""})
                     if tc.id:
                         slot["id"] = tc.id
@@ -512,11 +760,20 @@ async def iter_openai_compat_stream(
                         if tc.function.arguments:
                             slot["args"] += tc.function.arguments
 
-        for slot in tool_buf.values():
+        if scanner is not None:
+            leftover = scanner.flush_incomplete()
+            if leftover:
+                _log.warning(
+                    "unterminated <tool_call> span at end of stream; flushing as text %s",
+                    kv(provider=provider, model=kwargs.get("model")),
+                )
+                yield TextDelta(text=leftover)
+
+        for slot_key, slot in tool_buf.items():
             name = str(slot.get("name") or "")
             if not name:
                 continue
-            tid = str(slot.get("id") or "") or f"anon:{name}"
+            tid = str(slot.get("id") or "") or f"anon:{name}:{slot_key}"
             raw_args = str(slot.get("args") or "{}")
             parsed, parse_error = safe_parse_tool_args(
                 raw_args,
@@ -525,6 +782,38 @@ async def iter_openai_compat_stream(
                 provider="openai_compat",
             )
             yield ToolCall(call_id=tid, name=name, args=parsed, parse_error=parse_error)
+
+        if scanner is not None and scanner.spans:
+            if tool_buf:
+                # A well-behaved structured tool call also arrived this turn —
+                # never override it. The literal span(s) become visible text;
+                # they land here rather than inline since a buffered span
+                # can't be retroactively spliced back into an already-
+                # streamed transcript.
+                for span in scanner.spans:
+                    yield TextDelta(text=span)
+            else:
+                for i, span in enumerate(scanner.spans):
+                    parsed_call = _parse_text_tool_call(span)
+                    if parsed_call is None:
+                        _log.warning(
+                            "recovered <tool_call> span failed to parse; flushing as text %s",
+                            kv(
+                                provider=provider,
+                                model=kwargs.get("model"),
+                                snippet=span[:80],
+                            ),
+                        )
+                        yield TextDelta(text=span)
+                        continue
+                    name, args = parsed_call
+                    _log.warning(
+                        "recovered literal <tool_call> text as a real tool call %s",
+                        kv(provider=provider, model=kwargs.get("model"), tool=name),
+                    )
+                    yield ToolCall(
+                        call_id=f"anon:{name}:{i}", name=name, args=args, parse_error=None
+                    )
     except Exception:
         _log.warning(
             "OpenAI-compat stream error %s",
@@ -616,9 +905,11 @@ async def stream_chat_completions_with_tool_fallback(
 
     n_tools = len(tools)
     sem = _provider_semaphore(provider)
-    # Counts rate-limit failures only, independent of tool-unsupported hops
-    # (switching to a tools-less request shouldn't burn a rate-limit retry).
+    # Each counts its own failure kind only, independent of the other retry
+    # paths (e.g. switching to a tools-less request shouldn't burn a
+    # rate-limit retry, and a rate limit shouldn't burn a server-error retry).
     rate_limit_attempts = 0
+    server_error_attempts = 0
     while True:
         yielded_any = False
         retry_delay: float | None = None
@@ -646,23 +937,30 @@ async def stream_chat_completions_with_tool_fallback(
                     kwargs.pop("tools", None)
                     n_tools = 0
                     continue
-                if not is_rate_limit_error(exc):
+                if is_rate_limit_error(exc):
+                    rate_limit_attempts, retry_delay = _retry_delay_or_raise(
+                        exc=exc,
+                        provider=provider,
+                        model=model,
+                        yielded_any=yielded_any,
+                        attempts=rate_limit_attempts,
+                        max_attempts=_RATE_LIMIT_MAX_ATTEMPTS,
+                        label="rate-limited",
+                        error_cls=ProviderRateLimitError,
+                    )
+                elif is_server_error(exc):
+                    server_error_attempts, retry_delay = _retry_delay_or_raise(
+                        exc=exc,
+                        provider=provider,
+                        model=model,
+                        yielded_any=yielded_any,
+                        attempts=server_error_attempts,
+                        max_attempts=_SERVER_ERROR_MAX_ATTEMPTS,
+                        label="server error",
+                        error_cls=ProviderServerError,
+                    )
+                else:
                     raise
-                if yielded_any or rate_limit_attempts >= _RATE_LIMIT_MAX_ATTEMPTS - 1:
-                    # Already streamed partial output this attempt, or retries
-                    # exhausted: can't safely retry, but still hide the raw
-                    # upstream text (e.g. NVIDIA's internal worker/quota string).
-                    raise ProviderRateLimitError(provider, model, exc) from exc
-                rate_limit_attempts += 1
-                retry_delay = _rate_limit_retry_delay(rate_limit_attempts)
-                _log.warning(
-                    "%s rate-limited (attempt %d/%d); retrying in %.1fs: %s",
-                    provider,
-                    rate_limit_attempts,
-                    _RATE_LIMIT_MAX_ATTEMPTS,
-                    retry_delay,
-                    exc,
-                )
         # Sleep outside the concurrency gate: a backing-off request must not
         # hold an in-flight slot idle, or a burst of rate-limited callers can
         # fill every slot with sleepers and starve everyone else.
@@ -702,9 +1000,11 @@ def is_tool_unsupported_error(exc: BaseException) -> bool:
 
 __all__ = [
     "ProviderRateLimitError",
+    "ProviderServerError",
     "count_input_tokens_tiktoken",
     "count_openai_compat_input_tokens",
     "is_rate_limit_error",
+    "is_server_error",
     "is_tool_unsupported_error",
     "iter_openai_compat_stream",
     "messages_to_openai",

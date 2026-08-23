@@ -17,6 +17,7 @@ from typing import Any, cast
 import aiosqlite
 
 from monkeybot.core.llm.provider import Message, Role
+from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.sqlite import ConnLock, with_conn_lock
 from monkeybot.core.persistence.thread_summary import (
     SUBAGENT_THREAD_ID_PREFIX,
@@ -121,6 +122,24 @@ class SQLiteHistoryStore:
         message_id: str | None = None,
     ) -> None:
         """Validate ``message``, JSON-encode content blocks, insert one row."""
+        async with self._lock:
+            await self._insert_message(
+                thread_id,
+                message,
+                turn_id=turn_id,
+                message_id=message_id,
+            )
+            await self._conn.commit()
+
+    async def _insert_message(
+        self,
+        thread_id: str,
+        message: Message,
+        *,
+        turn_id: str | None = None,
+        message_id: str | None = None,
+    ) -> None:
+        """Insert one history row without committing (caller owns the transaction)."""
         _validate_message(message)
         payload = json.dumps(
             [b.to_dict() for b in message.content],
@@ -128,16 +147,14 @@ class SQLiteHistoryStore:
             ensure_ascii=False,
         )
         created_at = int(time.time() * 1000)
-        async with self._lock:
-            await self._insert_history_row(
-                thread_id,
-                message.role,
-                payload,
-                created_at,
-                turn_id=turn_id,
-                message_id=message_id,
-            )
-            await self._conn.commit()
+        await self._insert_history_row(
+            thread_id,
+            message.role,
+            payload,
+            created_at,
+            turn_id=turn_id,
+            message_id=message_id,
+        )
 
     async def append_with_outbox(
         self,
@@ -253,15 +270,36 @@ class SQLiteHistoryStore:
             await self._conn.commit()
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None:
-        """Replace the thread transcript with ``messages`` (validated like ``append``)."""
+        """Replace the thread transcript with ``messages`` (validated like ``append``).
+
+        Delete + re-insert run in a single SQLite transaction so a crash mid-reset
+        cannot leave the thread empty or only partially rewritten.
+        """
         async with self._lock:
-            await self._conn.execute(
-                "DELETE FROM conversation_history WHERE thread_id = ? AND agent_scope = ?",
-                (thread_id, self._agent_scope),
-            )
-            await self._conn.commit()
-        for msg in messages:
-            await self.append(thread_id, msg)
+            await self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                await self._conn.execute(
+                    "DELETE FROM conversation_history WHERE thread_id = ? AND agent_scope = ?",
+                    (thread_id, self._agent_scope),
+                )
+                for msg in messages:
+                    await self._insert_message(thread_id, msg)
+                await self._conn.commit()
+            except Exception as exc:
+                await self._conn.rollback()
+                logger.warning(
+                    "history reset rolled back %s",
+                    kv(thread_id=thread_id),
+                    exc_info=True,
+                )
+                if isinstance(
+                    exc,
+                    (TimeoutError, OSError, ConnectionError, aiosqlite.OperationalError),
+                ):
+                    from monkeybot.core.persistence.errors import AmbiguousCommitError
+
+                    raise AmbiguousCommitError(str(exc)) from exc
+                raise
 
     @with_conn_lock
     async def list_threads(self, limit: int = 50) -> list[ChatThreadSummary]:
