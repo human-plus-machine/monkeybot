@@ -138,6 +138,7 @@ def ensure_workspace(dest: Path, *, force: bool) -> list[str]:
         "browser/playbooks",
         "browser/Screenshots",
         "generated-media/images",
+        "generated-media/video",
     ):
         path = workspace / rel
         path.mkdir(parents=True, exist_ok=True)

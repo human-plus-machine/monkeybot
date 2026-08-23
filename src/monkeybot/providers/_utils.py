@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import re
@@ -118,8 +119,41 @@ def _rejects_param(msg: str, param: str) -> bool:
     return re.search(rf"(?:^|[^a-z0-9_.]){re.escape(param)}(?:\.[a-z0-9_.]+)?:", msg) is not None
 
 
+_UNEXPECTED_KWARG = re.compile(r"unexpected keyword argument '([^']+)'")
+
+
+def _kwargs_accepted_by(fn: Callable[..., Any], kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Return ``kwargs`` filtered to names ``fn`` actually declares.
+
+    Used to drop sampling params Anthropic SDK 1.0 removed from
+    ``messages.stream()`` (``temperature``, ``top_p``, ``top_k``) before the
+    call, so we never raise ``TypeError: unexpected keyword argument``.
+    """
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return kwargs
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+        return kwargs
+    accepted = sig.parameters
+    return {k: v for k, v in kwargs.items() if k in accepted}
+
+
 def _strip_rejected_params(kwargs: dict[str, Any], exc: Exception) -> list[str]:
-    """Drop any of ``_STRIPPABLE_PARAMS`` blamed by ``exc``; return what was dropped."""
+    """Drop kwargs blamed by ``exc``; return what was dropped.
+
+    Handles SDK ``TypeError: unexpected keyword argument '…'`` (Anthropic 1.0
+    removed sampling kwargs from the callable) and HTTP 400 field-path errors
+    for ``_STRIPPABLE_PARAMS``.
+    """
+    if isinstance(exc, TypeError):
+        match = _UNEXPECTED_KWARG.search(str(exc))
+        if match:
+            param = match.group(1)
+            if param in kwargs:
+                del kwargs[param]
+                return [param]
+            return []
     msg = str(exc).lower()
     if "400" not in msg:
         return []
@@ -228,6 +262,7 @@ async def _stream_anthropic_once(
     cache_creation = 0
     stop_reason: str | None = None
 
+    stream_kwargs = _kwargs_accepted_by(client.messages.stream, stream_kwargs)
     async with client.messages.stream(**stream_kwargs) as stream:
         async for event in stream:
             match event.type:

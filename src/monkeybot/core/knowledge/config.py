@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,19 @@ def knowledge_enabled_from_config(config_path: str | None = None) -> bool:
     if isinstance(raw, bool):
         return raw
     raise ConfigError(f"knowledge.enabled must be true or false, got {raw!r}")
+
+
+def knowledge_read_only_from_env() -> bool:
+    """Opt-in only; default off (``MONKEYBOT_KNOWLEDGE_READ_ONLY``).
+
+    Intended for harness-as-library (Pattern B/C) and other reader-only
+    clients that want search without indexing writes. The gateway process
+    is the sole writer per workspace (see :class:`KnowledgeSubsystem`) and
+    ignores this flag rather than honoring it, so exporting it in a shared
+    env file cannot silently turn the writer into a reader.
+    """
+    raw = os.environ.get("MONKEYBOT_KNOWLEDGE_READ_ONLY", "").strip().lower()
+    return raw in ("1", "true", "yes")
 
 
 def resolve_knowledge_settings(
@@ -255,5 +269,6 @@ def _bool(yaml_raw: Any, default: bool) -> bool:
 
 __all__ = [
     "knowledge_enabled_from_config",
+    "knowledge_read_only_from_env",
     "resolve_knowledge_settings",
 ]

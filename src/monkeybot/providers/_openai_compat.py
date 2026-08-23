@@ -202,7 +202,11 @@ async def _flatten_tool_response_text(block: ToolResponse) -> str:
             parts.append(_media_tool_placeholder("image", b))
         elif isinstance(b, File):
             extracted = await _extract_pdf_text(b)
-            parts.append(_extracted_file_text(b, extracted) if extracted else _media_tool_placeholder("file", b))
+            parts.append(
+                _extracted_file_text(b, extracted)
+                if extracted
+                else _media_tool_placeholder("file", b)
+            )
         else:
             raise ValueError(
                 f"unsupported ToolResponse block for OpenAI-compat: {type(b).__name__}"
@@ -342,9 +346,7 @@ def openai_messages_token_count(encoding: Any, oai_messages: list[dict[str, Any]
                 continue
             if key == "tool_calls" and isinstance(val, list):
                 for tc in val:
-                    total += len(
-                        encoding.encode(json.dumps(tc, ensure_ascii=False, default=str))
-                    )
+                    total += len(encoding.encode(json.dumps(tc, ensure_ascii=False, default=str)))
             elif isinstance(val, str):
                 total += len(encoding.encode(val))
             else:
@@ -384,6 +386,7 @@ def _rate_limit_retry_delay(attempt: int) -> float:
     base: float = _RATE_LIMIT_BASE_DELAY_S * (2 ** (attempt - 1))
     jitter: float = random.uniform(0, 0.5)
     return base + jitter
+
 
 # NVIDIA's free build.nvidia.com tier is low-throughput and returns its own
 # worker/quota text instead of a clean 429, so callers that fan out concurrent
@@ -662,7 +665,23 @@ async def iter_openai_compat_stream(
     input_tokens = 0
     output_tokens = 0
     cached_tokens = 0
-    tool_buf: dict[int, dict[str, Any]] = {}
+    tool_buf: dict[int | str, dict[str, Any]] = {}
+    # Some OpenAI-compat hosts (notably several DeepSeek/Qwen-family backends
+    # proxied through OpenRouter) omit `index` on tool_call deltas entirely —
+    # this is a real runtime possibility despite the SDK's `index: int` type
+    # hint, since streaming chunks are parsed via lenient `model_construct`,
+    # not validated. Falling back to a shared key (e.g. `0`) for all of them
+    # collapses parallel tool calls into one another.
+    #
+    # Without `index`, `id` is the only reliable correlation key — but hosts
+    # differ on whether they echo `id` on every delta for a call or only the
+    # first. `id_to_slot` makes both work: an `id` seen before reuses its
+    # slot; an unseen `id` (or, lacking any `id` at all, a `function.name`)
+    # opens a new one. Deltas with neither `id` nor `name` are pure argument
+    # continuations and attach to whichever call most recently opened.
+    id_to_slot: dict[str, int | str] = {}
+    fallback_open_idx: int | str | None = None
+    fallback_counter = 0
     finish_reason: str | None = None
     # Only scan for literal <tool_call> text when tools were actually offered —
     # tool-less turns skip the scanner entirely (see _ToolCallSpanScanner).
@@ -696,7 +715,42 @@ async def iter_openai_compat_stream(
                 yield ThinkingDelta(text=reasoning)
             if delta.tool_calls:
                 for tc in delta.tool_calls:
-                    idx = int(tc.index or 0)
+                    idx: int | str
+                    if tc.index is not None:
+                        idx = int(tc.index)
+                        fallback_open_idx = idx
+                        if tc.id:
+                            id_to_slot[tc.id] = idx
+                    elif tc.id and tc.id in id_to_slot:
+                        # A host that echoes `id` on every delta for a call —
+                        # reuse its slot rather than opening a new one each time.
+                        idx = id_to_slot[tc.id]
+                        fallback_open_idx = idx
+                    elif tc.id or (tc.function and tc.function.name):
+                        reuse_open = fallback_open_idx
+                        open_slot = tool_buf.get(reuse_open) if reuse_open is not None else None
+                        if (
+                            reuse_open is not None
+                            and open_slot is not None
+                            and not open_slot["id"]
+                            and not open_slot["name"]
+                        ):
+                            # Argument deltas arrived before this call's id/name —
+                            # attach to that already-open slot instead of orphaning
+                            # its buffered args in a second, nameless slot.
+                            idx = reuse_open
+                        else:
+                            fallback_counter += 1
+                            idx = f"noidx:{fallback_counter}"
+                            fallback_open_idx = idx
+                        if tc.id:
+                            id_to_slot[tc.id] = idx
+                    elif fallback_open_idx is not None:
+                        idx = fallback_open_idx
+                    else:
+                        fallback_counter += 1
+                        idx = f"noidx:{fallback_counter}"
+                        fallback_open_idx = idx
                     slot = tool_buf.setdefault(idx, {"id": "", "name": "", "args": ""})
                     if tc.id:
                         slot["id"] = tc.id
@@ -715,11 +769,11 @@ async def iter_openai_compat_stream(
                 )
                 yield TextDelta(text=leftover)
 
-        for slot in tool_buf.values():
+        for slot_key, slot in tool_buf.items():
             name = str(slot.get("name") or "")
             if not name:
                 continue
-            tid = str(slot.get("id") or "") or f"anon:{name}"
+            tid = str(slot.get("id") or "") or f"anon:{name}:{slot_key}"
             raw_args = str(slot.get("args") or "{}")
             parsed, parse_error = safe_parse_tool_args(
                 raw_args,
