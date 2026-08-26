@@ -10,7 +10,7 @@ from typing import cast
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.attachments.store import AttachmentStore
-from monkeybot.core.config.snapshot import current_env
+from monkeybot.core.config.snapshot import env_value
 from monkeybot.core.context import (
     TurnContext,
     refresh_tools_after_loops_change,
@@ -278,14 +278,15 @@ async def _resolve_inspector_decision(
                     arguments=dict(call.args),
                     prompt=decision.message,
                 )
+                timeout_sec = float(
+                    env_value(ctx.config, "PENDING_RESPONSE_TIMEOUT_SEC", "300")
+                )
                 payload = await _await_user_response_any(
-                    bus, fut, call.call_id, timeout_sec=None
+                    bus, fut, call.call_id, timeout_sec=timeout_sec, config=ctx.config
                 )
                 if payload.get("_timeout"):
                     outcome.allowed = False
-                    to = int(
-                        float(current_env("PENDING_RESPONSE_TIMEOUT_SEC", "300"))
-                    )
+                    to = int(timeout_sec)
                     outcome.denial_message = f"user did not respond within {to}s"
                     return
                 if payload.get("approved"):

@@ -149,7 +149,7 @@ async def _resolve_elicitation_blocks(
         )
         try:
             payload = await _await_user_response_any(
-                pending_bus, fut, elicitation_id, timeout_sec=None
+                pending_bus, fut, elicitation_id, config=ctx.config
             )
         except asyncio.CancelledError:
             raise
@@ -291,7 +291,7 @@ async def _resolve_realtime_inspector_decision(
         )
         try:
             payload = await _await_user_response_any(
-                pending_bus, fut, call.call_id, timeout_sec=None
+                pending_bus, fut, call.call_id, config=ctx.config
             )
         except asyncio.CancelledError:
             if not confirm_wait_stopped_by_user(

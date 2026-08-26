@@ -18,10 +18,17 @@ from monkeybot.core.config import (
 )
 from monkeybot.core.config.runtime_env import ENV_MAP, SUBAGENTS_DIFF_KEY
 from monkeybot.core.config.snapshot import apply_reload_env_patch
+from monkeybot.core.layout import AgentLayout
 from monkeybot.core.mcp.mcp_client import MCPCatalogApplyResult, MCPClient
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
+from monkeybot.core.tools.inspector import CommandTierInspector
 from monkeybot.gateway.sse.app import GatewayRuntime
-from monkeybot.gateway.sse.reload import get_reload_lock, run_config_reload
+from monkeybot.gateway.sse.reload import (
+    begin_in_flight_turn,
+    end_in_flight_turn,
+    get_reload_lock,
+    run_config_reload,
+)
 from monkeybot.gateway.sse.routes import create_app
 from monkeybot.gateway.sse.session_bus import SessionRegistry
 
@@ -531,3 +538,145 @@ def test_relative_skills_path_env_resolves_against_agent_root(
     _workspace, skills, _artifacts = _resolved_workspace_paths()
     assert skills == (agent / "skills").resolve()
     assert skills != (elsewhere / "skills").resolve()
+
+
+def _write_allowlist(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "allowed_commands:\n  - ls\nallowed_path_prefixes:\n  - ./\n",
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.asyncio
+async def test_malformed_allowlist_reload_keeps_last_inspector(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    allow = tmp_path / "monkeybot_config" / "command_allowlist.yaml"
+    _write_allowlist(allow)
+    yaml_path = _boot_fake(tmp_path, monkeypatch, "model:\n  provider: fake\n")
+    runtime = GatewayRuntime()
+    runtime.build_inspectors(AgentLayout.from_environment(), get_config_store().current())
+    old_inspectors = runtime.inspectors
+    assert any(isinstance(i, CommandTierInspector) for i in old_inspectors)
+
+    allow.write_text("not: [valid: yaml", encoding="utf-8")
+    yaml_path.write_text("model:\n  provider: fake\n  name: after\n", encoding="utf-8")
+    report = await run_config_reload(
+        registry=SessionRegistry(), fastapi_app=_app_with_runtime(runtime)
+    )
+    assert report.error is not None
+    assert "inspector" in report.error.lower()
+    assert runtime.inspectors is old_inspectors
+    assert get_config_store().current().revision == 1
+
+
+def test_relative_allowlist_resolves_against_agent_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent = tmp_path / "agent"
+    allow = agent / "monkeybot_config" / "command_allowlist.yaml"
+    _write_allowlist(allow)
+    (agent / "monkeybot_config" / "monkeybot.yaml").write_text(
+        "model:\n  provider: fake\n",
+        encoding="utf-8",
+    )
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.setenv("MONKEYBOT_CONFIG", str(agent / "monkeybot_config" / "monkeybot.yaml"))
+    monkeypatch.setenv("COMMAND_ALLOWLIST_CONFIG", "monkeybot_config/command_allowlist.yaml")
+    monkeypatch.chdir(elsewhere)
+    apply_monkeybot_runtime_env()
+    runtime = GatewayRuntime()
+    runtime.build_inspectors(AgentLayout.from_environment(), get_config_store().current())
+    assert any(isinstance(i, CommandTierInspector) for i in runtime.inspectors)
+
+
+def test_relative_mcp_config_resolves_against_agent_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent = tmp_path / "agent"
+    mcp = agent / "monkeybot_config" / "mcp.json"
+    mcp.parent.mkdir(parents=True)
+    mcp.write_text('{"mcpServers": {}}', encoding="utf-8")
+    (agent / "monkeybot_config" / "monkeybot.yaml").write_text(
+        "model:\n  provider: fake\n",
+        encoding="utf-8",
+    )
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.setenv("MONKEYBOT_CONFIG", str(agent / "monkeybot_config" / "monkeybot.yaml"))
+    monkeypatch.setenv("MCP_CONFIG", "monkeybot_config/mcp.json")
+    monkeypatch.chdir(elsewhere)
+    apply_monkeybot_runtime_env()
+    runtime = GatewayRuntime()
+    resolved = runtime._mcp_config_path(
+        get_config_store().current(), AgentLayout.from_environment()
+    )
+    assert resolved == mcp.resolve()
+    assert resolved != (elsewhere / "monkeybot_config" / "mcp.json").resolve()
+
+
+@pytest.mark.asyncio
+async def test_failed_mcp_apply_restores_env_overlay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mcp_json = tmp_path / "monkeybot_config" / "mcp.json"
+    mcp_json.parent.mkdir(exist_ok=True)
+    mcp_json.write_text(
+        '{"mcpServers": {"echo": {"command": "true", "args": ["${MODEL_NAME}"]}}}',
+        encoding="utf-8",
+    )
+    yaml_path = _boot_fake(tmp_path, monkeypatch, "model:\n  provider: fake\n  name: first\n")
+    runtime = GatewayRuntime()
+    runtime.mcp = MCPClient()
+    runtime.mcp.set_env_overlay(get_config_store().current().env_values)
+    runtime.mcp.apply_catalog_diff = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError("catalog boom")
+    )
+    yaml_path.write_text(
+        "model:\n  provider: fake\n  name: second\n",
+        encoding="utf-8",
+    )
+    report = await run_config_reload(
+        registry=SessionRegistry(), fastapi_app=_app_with_runtime(runtime)
+    )
+    assert report.error is not None
+    assert "catalog boom" in report.error
+    assert runtime.mcp._env_overlay is not None
+    assert runtime.mcp._env_overlay["MODEL_NAME"] == "first"
+    assert get_config_store().current().revision == 1
+
+
+@pytest.mark.asyncio
+async def test_mcp_reload_times_out_while_turn_in_flight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("monkeybot.gateway.sse.reload.IDLE_TURN_WAIT_SEC", 0.05)
+    mcp_json = tmp_path / "monkeybot_config" / "mcp.json"
+    mcp_json.parent.mkdir(exist_ok=True)
+    mcp_json.write_text(
+        '{"mcpServers": {"echo": {"command": "true", "args": ["${MODEL_NAME}"]}}}',
+        encoding="utf-8",
+    )
+    yaml_path = _boot_fake(tmp_path, monkeypatch, "model:\n  provider: fake\n  name: first\n")
+    runtime = GatewayRuntime()
+    runtime.mcp = MCPClient()
+    runtime.mcp.apply_catalog_diff = AsyncMock(  # type: ignore[method-assign]
+        return_value=MCPCatalogApplyResult()
+    )
+    yaml_path.write_text(
+        "model:\n  provider: fake\n  name: second\n",
+        encoding="utf-8",
+    )
+    begin_in_flight_turn()
+    try:
+        report = await run_config_reload(
+            registry=SessionRegistry(), fastapi_app=_app_with_runtime(runtime)
+        )
+    finally:
+        end_in_flight_turn()
+    assert report.error is not None
+    assert "timed out" in report.error.lower()
+    runtime.mcp.apply_catalog_diff.assert_not_called()
+    assert get_config_store().current().revision == 1

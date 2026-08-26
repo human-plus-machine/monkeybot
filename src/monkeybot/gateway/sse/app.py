@@ -158,6 +158,17 @@ def _restore_app_memory(fastapi_app: FastAPI | None, prev: tuple[Any, Any, Any] 
     fastapi_app.state.memory_detail = prev[2]
 
 
+def _resolved_cfg_path(
+    cfg: RuntimeConfig | None,
+    key: str,
+    fallback: Path,
+    agent_root: Path,
+) -> Path:
+    """Resolve a snapshot path against ``agent_root``; keep ``fallback`` when unset."""
+    raw = env_value(cfg, key, "").strip()
+    return resolve_agent_path(raw, agent_root) if raw else fallback
+
+
 @dataclass
 class GatewayRuntime:
     """Process-level deps populated on startup; ``apply()`` rebuilds hot slices."""
@@ -178,8 +189,8 @@ class GatewayRuntime:
 
     def build_inspectors(self, layout: AgentLayout, cfg: RuntimeConfig | None) -> None:
         """Rebuild command-tier, rules, permission, and computer-tool inspectors."""
-        tiers_path = Path(
-            env_value(cfg, "COMMAND_ALLOWLIST_CONFIG", "") or str(layout.command_allowlist_path)
+        tiers_path = _resolved_cfg_path(
+            cfg, "COMMAND_ALLOWLIST_CONFIG", layout.command_allowlist_path, layout.agent_root
         )
         self.run_command_allowed_commands = None
         self.run_command_allowed_path_prefixes = None
@@ -191,20 +202,17 @@ class GatewayRuntime:
             self.run_command_allowed_path_prefixes = list(tier_insp.allowed_path_prefixes)
         except FileNotFoundError:
             logger.info("command tiers missing (%s); allowing all tool calls", tiers_path)
-        except Exception as exc:
-            logger.exception("command tier load failed: %s", exc)
 
         denied = _tool_denied_patterns(cfg)
         if denied:
             inspectors.append(RulesInspector(denied))
 
-        perm_path = Path(
-            env_value(cfg, "PERMISSION_CONFIG", "") or str(layout.permission_config_path)
+        perm_path = _resolved_cfg_path(
+            cfg, "PERMISSION_CONFIG", layout.permission_config_path, layout.agent_root
         )
-        approvals_path = layout.approvals_path
-        approvals_override = env_value(cfg, "MONKEYBOT_APPROVALS_CONFIG", "").strip()
-        if approvals_override:
-            approvals_path = Path(approvals_override)
+        approvals_path = _resolved_cfg_path(
+            cfg, "MONKEYBOT_APPROVALS_CONFIG", layout.approvals_path, layout.agent_root
+        )
         if _computer_tools_wanted(cfg):
             self.computer_tools = build_computer_tools()
             self.computer_approvals_persist = build_persist_hook(approvals_path)
@@ -272,8 +280,7 @@ class GatewayRuntime:
             fastapi_app.state.memory_detail = "memory.enabled=false"
 
     def _mcp_config_path(self, cfg: RuntimeConfig, layout: AgentLayout) -> Path:
-        mcp_path_raw = env_value(cfg, "MCP_CONFIG", "").strip()
-        return Path(mcp_path_raw) if mcp_path_raw else layout.mcp_config_path
+        return _resolved_cfg_path(cfg, "MCP_CONFIG", layout.mcp_config_path, layout.agent_root)
 
     def needs_mcp_apply(self, cfg: RuntimeConfig, diff: ConfigDiff) -> bool:
         """True when catalog file or interpolated ``${VAR}`` overlay values changed."""
@@ -320,7 +327,15 @@ class GatewayRuntime:
                 kv(slice="provider", revision=cfg.revision),
             )
         if diff.changed_env_keys & inspector_keys:
-            self.build_inspectors(layout, cfg)
+            try:
+                self.build_inspectors(layout, cfg)
+            except Exception as exc:
+                error = f"inspector config load failed: {exc}"
+                logger.exception(
+                    "inspector config load failed %s",
+                    kv(revision=cfg.revision, error=error),
+                )
+                return applied, error
             applied.extend(sorted(diff.changed_env_keys & inspector_keys))
             logger.info(
                 "config slice rebuilt %s",
@@ -387,16 +402,27 @@ class GatewayRuntime:
                 return RuntimeApplyResult(applied=applied, mcp=mcp_result, error=error)
         if self.needs_mcp_apply(cfg, diff) and self.mcp is not None:
             mcp_path = self._mcp_config_path(cfg, layout)
+            prev_overlay = self.mcp._env_overlay
+            overlay_committed = False
             try:
                 await wait_for_idle_turns()
                 self.mcp.set_env_overlay(cfg.env_values)
                 mcp_result = await self.mcp.apply_catalog_diff(mcp_path)
+                overlay_committed = True
                 if "MCP_CONFIG" in diff.changed_env_keys:
                     applied.append("MCP_CONFIG")
                 logger.info(
                     "config slice rebuilt %s",
                     kv(slice="mcp", revision=cfg.revision),
                 )
+            except TimeoutError:
+                error = "MCP reload timed out waiting for in-flight turns"
+                logger.warning(
+                    "MCP reload idle wait timed out %s",
+                    kv(path=str(mcp_path), revision=cfg.revision),
+                )
+                _restore_app_memory(fastapi_app, memory_prev)
+                return RuntimeApplyResult(applied=applied, mcp=mcp_result, error=error)
             except Exception as exc:
                 error = f"MCP catalog diff failed: {exc}"
                 logger.exception(
@@ -409,6 +435,9 @@ class GatewayRuntime:
                 )
                 _restore_app_memory(fastapi_app, memory_prev)
                 return RuntimeApplyResult(applied=applied, mcp=mcp_result, error=error)
+            finally:
+                if not overlay_committed:
+                    self.mcp.set_env_overlay(prev_overlay)
         self._install_live_slices(staging)
         return RuntimeApplyResult(applied=applied, mcp=mcp_result)
 

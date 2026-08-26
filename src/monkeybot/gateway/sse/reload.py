@@ -37,6 +37,7 @@ _reload_lock = asyncio.Lock()
 _in_flight_turns = 0
 _turns_idle = asyncio.Event()
 _turns_idle.set()
+IDLE_TURN_WAIT_SEC = 60.0
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "testclient"})
 _REDACT_ENV_KEYS = frozenset(
@@ -70,9 +71,15 @@ def end_in_flight_turn() -> None:
         _turns_idle.set()
 
 
-async def wait_for_idle_turns() -> None:
-    """Block until no turn is using pinned process-wide deps."""
-    await _turns_idle.wait()
+async def wait_for_idle_turns(*, timeout_sec: float | None = None) -> None:
+    """Block until no turn is using pinned process-wide deps.
+
+    Raises ``TimeoutError`` if turns stay in-flight past ``timeout_sec``
+    (default ``IDLE_TURN_WAIT_SEC``) so a hung model or HITL confirm cannot
+    stall admin reload indefinitely.
+    """
+    limit = IDLE_TURN_WAIT_SEC if timeout_sec is None else timeout_sec
+    await asyncio.wait_for(_turns_idle.wait(), timeout=limit)
 
 
 class ReloadRequest(BaseModel):
@@ -295,8 +302,6 @@ async def run_config_reload(
         mcp_result = MCPCatalogApplyResult()
         error: str | None = None
         if runtime is not None and needs_apply:
-            if ConfigTier.RECONNECT_MCP in diff.tiers or needs_mcp:
-                await wait_for_idle_turns()
             slice_result = await runtime.apply(
                 cfg, diff, fastapi_app=fastapi_app, registry=registry
             )
