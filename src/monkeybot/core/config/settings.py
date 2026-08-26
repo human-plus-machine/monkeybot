@@ -323,10 +323,13 @@ def _subagents_section(doc: dict[str, Any]) -> dict[str, Any]:
     return section
 
 
-def get_subagent_settings(config_path: str | None = None) -> SubagentSettings:
-    """Global ``task`` defaults from ``subagents:`` in monkeybot.yaml (config-file only)."""
-    _, doc = load_monkeybot_yaml_dict(config_path)
-    section = _subagents_section(doc)
+def subagent_settings_from_section(section: dict[str, Any]) -> SubagentSettings:
+    """Parse a ``subagents:`` mapping into :class:`SubagentSettings`.
+
+    Shared by :func:`get_subagent_settings` (reads the YAML file directly) and
+    the ``RuntimeConfig`` snapshot builder (parses the already-merged doc), so
+    the two never validate the section differently.
+    """
     if not section:
         return _DEFAULT_SUBAGENT_SETTINGS
 
@@ -369,6 +372,24 @@ def get_subagent_settings(config_path: str | None = None) -> SubagentSettings:
         max_turns=max_turns,
         vertex_google_search=vertex,
     )
+
+
+def get_subagent_settings(
+    config_path: str | None = None,
+    *,
+    config: RuntimeConfig | None = None,
+) -> SubagentSettings:
+    """Global ``task`` defaults from ``subagents:`` in monkeybot.yaml.
+
+    When ``config`` (a pinned ``RuntimeConfig`` snapshot) is given, its
+    ``subagent_settings`` field is returned instead of re-reading the YAML
+    file, so an in-flight turn spawning a subagent stays on the revision it
+    was pinned to rather than picking up a file edit mid-turn.
+    """
+    if config is not None:
+        return config.subagent_settings
+    _, doc = load_monkeybot_yaml_dict(config_path)
+    return subagent_settings_from_section(_subagents_section(doc))
 
 
 def get_subagent_configs(config_path: str | None = None) -> list[SubagentConfig]:

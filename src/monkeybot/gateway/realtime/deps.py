@@ -49,6 +49,39 @@ class RealtimeDependencies:
         """Lock dependency fields after startup wiring completes."""
         object.__setattr__(self, "_frozen", True)
 
+    # Fields the SSE ``GatewayRuntime.apply()`` replaces wholesale (rebinds a
+    # new object) rather than mutating in place. ``mcp``, ``storage``,
+    # ``realtime_provider``, and ``memory`` are excluded: they are either
+    # shared, mutated-in-place objects (so the existing reference stays
+    # valid) or intentionally restart-only for realtime.
+    _RELOADABLE_SLICES = (
+        "inspectors",
+        "hook_manager",
+        "web_search_tool",
+        "run_command_allowed_commands",
+        "run_command_allowed_path_prefixes",
+        "subagent_registry",
+        "computer_tools",
+        "computer_approvals_persist",
+    )
+
+    def sync_live_slices(self, source: Any) -> None:
+        """Refresh reload-affected slices from the SSE ``GatewayRuntime`` singleton.
+
+        Called after a successful ``POST /admin/config/reload`` so realtime
+        sessions opened afterward see the same inspectors, hooks, web-search
+        tool, and subagent registry as new SSE turns, instead of the copy
+        frozen at combined-app startup. Bypasses the freeze guard for exactly
+        these fields; provider/storage/audio wiring stays untouched.
+        """
+        for name in self._RELOADABLE_SLICES:
+            value = getattr(source, name, None)
+            if isinstance(value, list):
+                value = list(value)
+            elif isinstance(value, dict):
+                value = dict(value)
+            object.__setattr__(self, name, value)
+
     def __setattr__(self, name: str, value: Any) -> None:
         if name != "_frozen" and getattr(self, "_frozen", False):
             raise RuntimeError(

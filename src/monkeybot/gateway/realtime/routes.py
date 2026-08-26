@@ -179,7 +179,15 @@ def _create_tool_executor(
     attachment_store: Any | None = None,
     *,
     todo_store: TodoListStore | None = None,
+    config: Any | None = None,
 ) -> CoreToolExecutor:
+    """Build the tool executor for one assistant boundary.
+
+    ``config`` should be the connection-pinned ``ctx.config`` snapshot, not a
+    fresh ``get_config_store().current_or_none()`` read — a reload mid-connection
+    would otherwise let later boundaries use new sandbox/tool settings while the
+    connection context and provider session stay on the revision they opened with.
+    """
     if deps.mcp is None:
         raise RuntimeError("MCP client is not initialized")
     workspace_root, skills_path = _resolved_workspace_paths()
@@ -198,7 +206,7 @@ def _create_tool_executor(
         scheduled_loop_store=storage.scheduled_loops() if storage is not None else None,
         subagent_registry=deps.subagent_registry,
         loops_registry=deps.loops_registry,
-        config=get_config_store().current_or_none(),
+        config=config if config is not None else get_config_store().current_or_none(),
     )
 
 
@@ -324,7 +332,9 @@ async def _handle_assistant_boundary(
     if turn.is_empty:
         return
 
-    tool_executor = _create_tool_executor(deps, attachment_store, todo_store=state.todo_store)
+    tool_executor = _create_tool_executor(
+        deps, attachment_store, todo_store=state.todo_store, config=ctx.config
+    )
     tool_results: list[Any] = []
     inject_texts: list[str] = []
     # Consume once per utterance so tool-call then prose boundaries do not

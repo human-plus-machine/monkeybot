@@ -577,14 +577,16 @@ def create_app(
         session_model = None
         if body.model_provider or body.model_name:
             from monkeybot.core.config.settings import get_provider_config
+            from monkeybot.core.config.snapshot import get_config_store
 
             try:
-                cfg = get_provider_config(
+                provider_cfg = get_provider_config(
                     provider=body.model_provider,
                     model_name=body.model_name,
+                    config=get_config_store().current_or_none(),
                 )
-                session_provider = cfg.provider
-                session_model = cfg.model
+                session_provider = provider_cfg.provider
+                session_model = provider_cfg.model
             except Exception as exc:
                 raise APIError(
                     400,

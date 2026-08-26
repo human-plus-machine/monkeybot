@@ -416,6 +416,99 @@ async def test_admin_token_required_when_set(
 
 
 @pytest.mark.asyncio
+async def test_admin_token_does_not_bypass_loopback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A valid bearer token must not exempt a remote client from loopback-only."""
+    monkeypatch.setenv("MONKEYBOT_ADMIN_TOKEN", "s3cret")
+    _boot_fake(tmp_path, monkeypatch, "model:\n  provider: fake\n")
+    app = create_app()
+    async with AsyncClient(
+        transport=ASGITransport(app=app, client=("10.1.2.3", 9)),
+        base_url="http://test",
+    ) as client:
+        r = await client.post(
+            "/admin/config/reload",
+            json={},
+            headers={"Authorization": "Bearer s3cret"},
+        )
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "FORBIDDEN"
+
+
+@pytest.mark.asyncio
+async def test_failed_reload_rolls_back_staged_env_patch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A patch applied before a failed apply must not outlive the failed reload."""
+    monkeypatch.delenv("MONKEYBOT_TRANSCRIPT_ENABLED", raising=False)
+    yaml_path = _boot_fake(
+        tmp_path,
+        monkeypatch,
+        "model:\n  provider: fake\n"
+        "subagents:\n  personas:\n    - name: helper\n      description: helps\n",
+    )
+    runtime = GatewayRuntime()
+    runtime.build_provider(get_config_store().current())
+    runtime.build_subagents()
+    yaml_path.write_text(
+        "model:\n  provider: fake\n"
+        "subagents:\n  personas:\n"
+        "    - name: helper\n      description: helps\n"
+        "    - name: helper\n      description: duplicate\n",
+        encoding="utf-8",
+    )
+    report = await run_config_reload(
+        registry=SessionRegistry(),
+        fastapi_app=_app_with_runtime(runtime),
+        env={"MONKEYBOT_TRANSCRIPT_ENABLED": "true"},
+    )
+    assert report.error is not None
+    assert "Duplicate subagent" in report.error
+    # The staged patch must not survive a reload that never committed.
+    assert os.environ.get("MONKEYBOT_TRANSCRIPT_ENABLED") is None
+    assert get_config_store().current().revision == 1
+    assert get_config_store().current().env_values.get("MONKEYBOT_TRANSCRIPT_ENABLED") != "true"
+
+
+@pytest.mark.asyncio
+async def test_missing_allowlist_reload_rejects_when_policy_was_active(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deleting an active allowlist on reload must not fall open to allow-all."""
+    allow = tmp_path / "monkeybot_config" / "command_allowlist.yaml"
+    _write_allowlist(allow)
+    yaml_path = _boot_fake(tmp_path, monkeypatch, "model:\n  provider: fake\n")
+    runtime = GatewayRuntime()
+    runtime.build_inspectors(AgentLayout.from_environment(), get_config_store().current())
+    old_inspectors = runtime.inspectors
+    old_allowed = runtime.run_command_allowed_commands
+    assert any(isinstance(i, CommandTierInspector) for i in old_inspectors)
+
+    allow.unlink()
+    yaml_path.write_text("model:\n  provider: fake\n  name: after\n", encoding="utf-8")
+    report = await run_config_reload(
+        registry=SessionRegistry(), fastapi_app=_app_with_runtime(runtime)
+    )
+    assert report.error is not None
+    assert "command tier config missing" in report.error
+    assert runtime.inspectors is old_inspectors
+    assert runtime.run_command_allowed_commands is old_allowed
+    assert get_config_store().current().revision == 1
+
+
+def test_missing_allowlist_at_fresh_startup_allows_all(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing allowlist at first boot (no prior policy) still falls open."""
+    _boot_fake(tmp_path, monkeypatch, "model:\n  provider: fake\n")
+    runtime = GatewayRuntime()
+    runtime.build_inspectors(AgentLayout.from_environment(), get_config_store().current())
+    assert not any(isinstance(i, CommandTierInspector) for i in runtime.inspectors)
+    assert runtime.run_command_allowed_commands is None
+
+
+@pytest.mark.asyncio
 async def test_skills_path_hot_reload_updates_process_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

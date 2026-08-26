@@ -1733,7 +1733,7 @@ class CoreToolExecutor(ToolExecutorPort):
             envelope=envelope,
             scratch=scratch,
             child_env=child_env,
-            timeout=get_subagent_settings().timeout_sec,
+            timeout=get_subagent_settings(config=self._config).timeout_sec,
             ctx=ctx,
             call=call,
             run_id=run_id,

@@ -19,9 +19,11 @@ from monkeybot.core.config.snapshot import (
     ConfigDiff,
     RuntimeConfig,
     apply_reload_env_patch,
+    capture_reload_pins,
     get_config_store,
     load_into_store,
     pinned_env_names,
+    restore_reload_pins,
 )
 from monkeybot.core.context.tool_output_policy import invalidate_config_caches
 from monkeybot.core.layout import AgentLayout, resolve_agent_path
@@ -188,7 +190,20 @@ def _tokens_match(got: str, expected: str) -> bool:
 
 
 def require_admin(request: Request) -> None:
-    """Loopback-only admin surface; optional bearer token when configured."""
+    """Loopback-only admin surface; optional bearer token when configured.
+
+    Both checks are enforced unconditionally — a valid bearer token does not
+    exempt a remote client from the loopback restriction, and loopback alone
+    does not exempt a caller from a configured token.
+    """
+    host = request.client.host if request.client is not None else ""
+    if host not in _LOOPBACK_HOSTS:
+        raise APIError(
+            403,
+            "FORBIDDEN",
+            "Admin routes are loopback-only",
+            uuid.uuid4().hex,
+        )
     token = _admin_token()
     if token:
         auth = request.headers.get("authorization") or ""
@@ -201,21 +216,22 @@ def require_admin(request: Request) -> None:
                 "Admin authentication required",
                 uuid.uuid4().hex,
             )
-        return
-    host = request.client.host if request.client is not None else ""
-    if host not in _LOOPBACK_HOSTS:
-        raise APIError(
-            403,
-            "FORBIDDEN",
-            "Admin routes are loopback-only",
-            uuid.uuid4().hex,
-        )
 
 
 def _gateway_runtime(fastapi_app: Any | None) -> Any | None:
     if fastapi_app is None:
         return None
     return getattr(getattr(fastapi_app, "state", None), "gateway_runtime", None)
+
+
+def _sync_realtime_deps(fastapi_app: Any | None, runtime: Any | None) -> None:
+    """Propagate committed SSE slices into ``RealtimeDependencies`` when combined."""
+    if fastapi_app is None or runtime is None:
+        return
+    realtime_deps = getattr(getattr(fastapi_app, "state", None), "realtime_deps", None)
+    sync = getattr(realtime_deps, "sync_live_slices", None)
+    if callable(sync):
+        sync(runtime)
 
 
 def _export_hot_paths(cfg: RuntimeConfig) -> None:
@@ -268,54 +284,71 @@ async def run_config_reload(
     fastapi_app: Any | None,
     env: Mapping[str, str] | None = None,
 ) -> ConfigReloadResponse:
-    """Take the turn-boundary lock, rebuild the snapshot, apply live slices."""
+    """Take the turn-boundary lock, rebuild the snapshot, apply live slices.
+
+    An ``env`` patch is staged before the snapshot rebuild (so digest/pin
+    computation sees it) and rolled back on any early return or exception —
+    unless the store actually commits — so a failed apply cannot leave
+    subprocess-facing ``os.environ`` ahead of the (still old) committed
+    revision.
+    """
     async with _reload_lock:
-        if env:
-            apply_reload_env_patch(env)
         store = get_config_store()
-        if store.current_or_none() is None:
-            load_into_store()
-        cfg, diff = store.prepare_reload()
-        if diff.noop:
-            report = ConfigReloadResponse(revision=cfg.revision, digest=cfg.digest)
-            _log_reload(report, noop=True)
-            return report
-
-        needs_slices = bool(diff.tiers & {ConfigTier.REBUILD, ConfigTier.RECONNECT_MCP})
-        runtime = _gateway_runtime(fastapi_app)
-        needs_mcp = runtime is not None and runtime.needs_mcp_apply(cfg, diff)
-        needs_apply = needs_slices or needs_mcp
-        if needs_slices and runtime is None:
-            logger.error(
-                "config reload runtime not bound %s",
-                kv(revision=cfg.revision, digest=cfg.digest),
-            )
-            raise APIError(
-                503,
-                "GATEWAY_RUNTIME_NOT_BOUND",
-                "Gateway runtime is not bound",
-                uuid.uuid4().hex,
-            )
-
-        invalidate_config_caches()
-        applied: list[str] = []
-        mcp_result = MCPCatalogApplyResult()
-        error: str | None = None
-        if runtime is not None and needs_apply:
-            slice_result = await runtime.apply(
-                cfg, diff, fastapi_app=fastapi_app, registry=registry
-            )
-            applied = list(slice_result.applied)
-            mcp_result = slice_result.mcp
-            error = slice_result.error
-            if error:
-                report = _response_from_diff(
-                    cfg, diff, applied=applied, mcp=mcp_result, error=error
-                )
-                _log_reload(report, noop=False)
+        prev_pins: dict[str, str | None] | None = None
+        pins_committed = False
+        try:
+            if env:
+                prev_pins = capture_reload_pins(env.keys())
+                apply_reload_env_patch(env)
+            if store.current_or_none() is None:
+                load_into_store()
+                pins_committed = True
+            cfg, diff = store.prepare_reload()
+            if diff.noop:
+                report = ConfigReloadResponse(revision=cfg.revision, digest=cfg.digest)
+                _log_reload(report, noop=True)
                 return report
 
-        store.commit(cfg)
+            needs_slices = bool(diff.tiers & {ConfigTier.REBUILD, ConfigTier.RECONNECT_MCP})
+            runtime = _gateway_runtime(fastapi_app)
+            needs_mcp = runtime is not None and runtime.needs_mcp_apply(cfg, diff)
+            needs_apply = needs_slices or needs_mcp
+            if needs_slices and runtime is None:
+                logger.error(
+                    "config reload runtime not bound %s",
+                    kv(revision=cfg.revision, digest=cfg.digest),
+                )
+                raise APIError(
+                    503,
+                    "GATEWAY_RUNTIME_NOT_BOUND",
+                    "Gateway runtime is not bound",
+                    uuid.uuid4().hex,
+                )
+
+            invalidate_config_caches()
+            applied: list[str] = []
+            mcp_result = MCPCatalogApplyResult()
+            error: str | None = None
+            if runtime is not None and needs_apply:
+                slice_result = await runtime.apply(
+                    cfg, diff, fastapi_app=fastapi_app, registry=registry
+                )
+                applied = list(slice_result.applied)
+                mcp_result = slice_result.mcp
+                error = slice_result.error
+                if error:
+                    report = _response_from_diff(
+                        cfg, diff, applied=applied, mcp=mcp_result, error=error
+                    )
+                    _log_reload(report, noop=False)
+                    return report
+
+            store.commit(cfg)
+            pins_committed = True
+        finally:
+            if prev_pins is not None and not pins_committed:
+                restore_reload_pins(prev_pins)
+        _sync_realtime_deps(fastapi_app, runtime)
         _export_hot_paths(cfg)
         report = _response_from_diff(cfg, diff, applied=applied, mcp=mcp_result, error=error)
         await _publish_reloaded(registry, report)

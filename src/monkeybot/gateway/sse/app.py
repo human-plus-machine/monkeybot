@@ -187,21 +187,38 @@ class GatewayRuntime:
     computer_tools: list[Any] = field(default_factory=list)
     computer_approvals_persist: Callable[[str, str], bool] | None = None
 
-    def build_inspectors(self, layout: AgentLayout, cfg: RuntimeConfig | None) -> None:
-        """Rebuild command-tier, rules, permission, and computer-tool inspectors."""
+    def build_inspectors(
+        self, layout: AgentLayout, cfg: RuntimeConfig | None, *, fail_closed: bool = False
+    ) -> None:
+        """Rebuild command-tier, rules, permission, and computer-tool inspectors.
+
+        Startup (``fail_closed=False``) always falls open to allow-all when the
+        command-tier file is missing — there is no prior policy to protect yet.
+        Reload (``fail_closed=True``, from ``_rebuild_live_slices``) raises
+        instead when a policy was already active, so the caller keeps the last
+        known-good inspector and does not commit a config that silently widens
+        an active allowlist to allow-all.
+        """
         tiers_path = _resolved_cfg_path(
             cfg, "COMMAND_ALLOWLIST_CONFIG", layout.command_allowlist_path, layout.agent_root
         )
-        self.run_command_allowed_commands = None
-        self.run_command_allowed_path_prefixes = None
+        had_policy = self.run_command_allowed_commands is not None
         inspectors: list[ToolInspector] = []
         try:
             tier_insp = CommandTierInspector(tiers_path)
+        except FileNotFoundError as exc:
+            if fail_closed and had_policy:
+                raise ConfigError(
+                    f"command tier config missing ({tiers_path}); refusing to widen an "
+                    "active allowlist to allow-all on reload"
+                ) from exc
+            logger.info("command tiers missing (%s); allowing all tool calls", tiers_path)
+            self.run_command_allowed_commands = None
+            self.run_command_allowed_path_prefixes = None
+        else:
             inspectors.append(tier_insp)
             self.run_command_allowed_commands = list(tier_insp.allowed_commands)
             self.run_command_allowed_path_prefixes = list(tier_insp.allowed_path_prefixes)
-        except FileNotFoundError:
-            logger.info("command tiers missing (%s); allowing all tool calls", tiers_path)
 
         denied = _tool_denied_patterns(cfg)
         if denied:
@@ -328,7 +345,7 @@ class GatewayRuntime:
             )
         if diff.changed_env_keys & inspector_keys:
             try:
-                self.build_inspectors(layout, cfg)
+                self.build_inspectors(layout, cfg, fail_closed=True)
             except Exception as exc:
                 error = f"inspector config load failed: {exc}"
                 logger.exception(

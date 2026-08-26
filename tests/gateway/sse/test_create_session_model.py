@@ -130,6 +130,40 @@ async def test_create_session_with_model_stores_provider(
 
 
 @pytest.mark.asyncio
+async def test_create_session_with_model_passes_current_runtime_config(
+    client: AsyncClient,
+    registry: SessionRegistry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session-level provider override must resolve against the live snapshot.
+
+    Otherwise a hot-reloaded MODEL_PROVIDER change is invisible to sessions
+    created right after the reload, since ``get_provider_config`` would fall
+    back to the stale process environment instead of ``ConfigStore.current()``.
+    """
+    from monkeybot.core.config.snapshot import get_config_store
+
+    sentinel_cfg = get_config_store().current_or_none()
+    seen_configs: list[object] = []
+
+    def _fake_get_provider_config(**kwargs: object) -> ProviderConfig:
+        seen_configs.append(kwargs.get("config"))
+        return ProviderConfig(provider=object(), model="gpt-5")  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        "monkeybot.core.config.settings.get_provider_config",
+        _fake_get_provider_config,
+    )
+
+    r = await client.post(
+        "/sessions",
+        json={"model_provider": "openai", "model_name": "gpt-5"},
+    )
+    assert r.status_code == 201
+    assert seen_configs == [sentinel_cfg]
+
+
+@pytest.mark.asyncio
 async def test_create_session_model_unavailable_returns_400(
     client: AsyncClient,
     registry: SessionRegistry,

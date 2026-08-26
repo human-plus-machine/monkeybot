@@ -13,7 +13,7 @@ import json
 import logging
 import os
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
@@ -35,7 +35,15 @@ from monkeybot.core.config.runtime_env import (
     warn_retired_curation_keys,
     warn_retired_tools_keys,
 )
-from monkeybot.core.config.settings import SubagentConfig, _parse_subagent_entries
+from monkeybot.core.config.settings import (
+    SubagentConfig,
+    SubagentSettings,
+    _parse_subagent_entries,
+    _subagents_section,
+)
+from monkeybot.core.config.settings import (
+    subagent_settings_from_section as _subagent_settings_from_section,
+)
 from monkeybot.core.layout import (
     resolve_agent_path,
     resolve_agent_root,
@@ -190,6 +198,7 @@ class RuntimeConfig:
     curation: CurationConfig
     realtime: RealtimeConfig
     subagents: Mapping[str, SubagentConfig]
+    subagent_settings: SubagentSettings
     env_values: Mapping[str, str]
 
     def __post_init__(self) -> None:
@@ -392,6 +401,33 @@ def apply_reload_env_patch(patch: Mapping[str, str]) -> dict[str, str]:
     return applied
 
 
+def capture_reload_pins(keys: Iterable[str]) -> dict[str, str | None]:
+    """Snapshot current pin values for ``keys`` before staging an env patch.
+
+    Pair with :func:`restore_reload_pins` so a reload that fails after
+    :func:`apply_reload_env_patch` can roll pins (and ``os.environ``) back to
+    their pre-patch values instead of leaving subprocess transport ahead of
+    the (uncommitted) ``ConfigStore`` revision.
+    """
+    current = _PINNED_ENV or {}
+    return {key: current.get(key) for key in keys}
+
+
+def restore_reload_pins(prev: Mapping[str, str | None]) -> None:
+    """Undo a previously applied :func:`apply_reload_env_patch` on failure."""
+    global _PINNED_ENV
+    if _PINNED_ENV is None:
+        _PINNED_ENV = {}
+    for key, value in prev.items():
+        if value is None:
+            _PINNED_ENV.pop(key, None)
+            os.environ.pop(key, None)
+        else:
+            _PINNED_ENV[key] = value
+            os.environ[key] = value
+    logger.info("reload env patch rolled back %s", kv(keys=",".join(sorted(prev))))
+
+
 def reset_snapshot_state_for_tests() -> None:
     """Clear the process store and pin capture (tests only)."""
     global _PINNED_ENV
@@ -436,6 +472,7 @@ def build_runtime_config(
         curation=_curation_from_env(env_values),
         realtime=realtime_config_from_doc(merged, env_values),
         subagents=_subagents_from_doc(merged),
+        subagent_settings=_subagent_settings_from_doc(merged),
         env_values=env_values,
     )
 
@@ -458,6 +495,9 @@ def diff_runtime_configs(old: RuntimeConfig, new: RuntimeConfig) -> ConfigDiff:
                 changed_env.add(env_key)
     if dict(old.subagents) != dict(new.subagents):
         changed_content.add("subagents")
+        changed_env.add(SUBAGENTS_DIFF_KEY)
+    if old.subagent_settings != new.subagent_settings:
+        changed_content.add("subagent_settings")
         changed_env.add(SUBAGENTS_DIFF_KEY)
     tiers = {ENV_TIERS[k] for k in changed_env if k in ENV_TIERS}
     if SUBAGENTS_DIFF_KEY in changed_env:
@@ -709,6 +749,17 @@ def _subagents_from_doc(doc: Mapping[str, Any]) -> dict[str, SubagentConfig]:
     return out
 
 
+def _subagent_settings_from_doc(doc: Mapping[str, Any]) -> SubagentSettings:
+    """``subagents.timeout_sec`` / ``max_turns`` / ``vertex_google_search`` for the snapshot.
+
+    Parsed from the already-merged doc (not re-read from disk) so these join
+    the same digest/diff pipeline as every other tiered setting instead of
+    being read fresh from YAML at each subagent spawn, independent of which
+    ``RuntimeConfig`` revision the spawning turn is pinned to.
+    """
+    return _subagent_settings_from_section(_subagents_section(dict(doc)))
+
+
 __all__ = [
     "ConfigDiff",
     "ConfigStore",
@@ -721,7 +772,9 @@ __all__ = [
     "PathsConfig",
     "RuntimeConfig",
     "ToolsConfig",
+    "apply_reload_env_patch",
     "build_runtime_config",
+    "capture_reload_pins",
     "diff_runtime_configs",
     "env_field_value",
     "get_config_store",
@@ -731,4 +784,5 @@ __all__ = [
     "load_into_store",
     "pinned_env_names",
     "reset_snapshot_state_for_tests",
+    "restore_reload_pins",
 ]

@@ -347,6 +347,40 @@ def test_turn_context_keeps_pinned_config_across_reload(
     assert get_config_store().current().model.name == "turn-b"
 
 
+def test_subagent_settings_included_in_snapshot_and_diff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.config.settings import get_subagent_settings
+
+    monkeypatch.chdir(tmp_path)
+    yaml_path = _write_yaml(
+        tmp_path,
+        "model:\n  provider: fake\n"
+        "subagents:\n  timeout_sec: 30\n  max_turns: 5\n  vertex_google_search: true\n",
+    )
+    apply_monkeybot_runtime_env(config_path=yaml_path, agent_root=tmp_path)
+    pinned = get_config_store().current()
+    assert pinned.subagent_settings.timeout_sec == 30.0
+    assert pinned.subagent_settings.max_turns == 5
+    assert pinned.subagent_settings.vertex_google_search is True
+    # A turn holding the pinned snapshot keeps its subagent settings even
+    # after the file changes and the store reloads to a new revision.
+    assert get_subagent_settings(config=pinned).max_turns == 5
+
+    yaml_path.write_text(
+        "model:\n  provider: fake\n"
+        "subagents:\n  timeout_sec: 60\n  max_turns: 9\n  vertex_google_search: false\n",
+        encoding="utf-8",
+    )
+    reloaded, diff = get_config_store().reload(config_path=yaml_path, agent_root=tmp_path)
+    assert not diff.noop
+    assert "subagents.*" in diff.changed_env_keys
+    assert ConfigTier.REBUILD in diff.tiers
+    assert reloaded.subagent_settings.max_turns == 9
+    assert get_subagent_settings(config=pinned).max_turns == 5
+    assert get_subagent_settings(config=reloaded).max_turns == 9
+
+
 def test_effective_max_turns_uses_pinned_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
