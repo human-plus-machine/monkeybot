@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from monkeybot.core.config.settings import auto_schema_enabled_from_config, get_provider_config
+from monkeybot.core.config.snapshot import context_window_tokens, current_env
 from monkeybot.core.context import build_context
 from monkeybot.core.hooks import HookManager
 from monkeybot.core.knowledge import KnowledgeSubsystem, resolve_knowledge_settings
@@ -70,7 +71,7 @@ class HarnessDeps:
 
 def _resolve_run_command_allowlists() -> tuple[list[str] | None, list[str] | None]:
     """Load allowlists from ``COMMAND_ALLOWLIST_CONFIG`` when present; else executor defaults."""
-    path_str = os.environ.get("COMMAND_ALLOWLIST_CONFIG", "").strip()
+    path_str = current_env("COMMAND_ALLOWLIST_CONFIG", "").strip()
     if not path_str:
         return None, None
     path = Path(path_str)
@@ -86,11 +87,7 @@ def _resolve_run_command_allowlists() -> tuple[list[str] | None, list[str] | Non
 
 
 def _env_context_window_tokens() -> int:
-    cap_raw = os.environ.get("MODEL_CONTEXT_WINDOW", "200000").strip()
-    try:
-        return max(1, int(cap_raw))
-    except ValueError:
-        return 200_000
+    return context_window_tokens()
 
 
 async def create_harness_deps(
@@ -137,7 +134,7 @@ async def create_harness_deps(
     """
     override = provider_override if provider_override is not None else _provider_override
     resolved_agent_scope = (
-        os.environ.get("MONKEYBOT_AGENT_ID", "").strip() if agent_scope is None else agent_scope
+        current_env("MONKEYBOT_AGENT_ID", "").strip() if agent_scope is None else agent_scope
     )
     backend = create_storage_backend(db_url, agent_scope=resolved_agent_scope)
     await backend.open(run_schema=auto_schema_enabled_from_config())

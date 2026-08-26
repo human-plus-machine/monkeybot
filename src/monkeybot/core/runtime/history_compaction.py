@@ -5,11 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from collections.abc import AsyncIterator, Sequence
 from contextlib import aclosing
 from typing import Any, cast
 
+from monkeybot.core.config.snapshot import current_env
 from monkeybot.core.context import TurnContext
 from monkeybot.core.context.epoch import ContextEpochTracker
 from monkeybot.core.llm.provider import Done, Message, Provider, TextDelta
@@ -229,7 +229,7 @@ def _summarization_viable(
 
 def _summarization_model_id(ctx: TurnContext) -> str:
     """Model id for history compression; env overrides ``ctx.summarization_model``, then ``ctx.model``."""
-    from_env = os.getenv("CONTEXT_SUMMARIZATION_MODEL", "").strip()
+    from_env = current_env("CONTEXT_SUMMARIZATION_MODEL", "").strip()
     if from_env:
         return from_env
     ctx_sm = (ctx.summarization_model or "").strip()
@@ -338,9 +338,7 @@ async def _summarize_history(
     window_tokens: int,
 ) -> int:
     """Compress middle history into one assistant summary row. Returns middle row count."""
-    head, middle, tail = split_messages_for_compaction(
-        messages, window_tokens=window_tokens
-    )
+    head, middle, tail = split_messages_for_compaction(messages, window_tokens=window_tokens)
     if not middle:
         return 0
     logger.debug(
@@ -374,9 +372,7 @@ async def _summarize_history(
         ),
     ]
     summary_text = ""
-    async with aclosing(
-        cast(Any, provider.stream(summarize_messages, [], model=model))
-    ) as stream:
+    async with aclosing(cast(Any, provider.stream(summarize_messages, [], model=model))) as stream:
         async for ev in stream:
             if isinstance(ev, TextDelta):
                 summary_text += ev.text

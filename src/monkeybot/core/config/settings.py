@@ -103,10 +103,12 @@ class ProviderConfig:
 
 def _resolve_gcp_project_id() -> str:
     """GCP project for Vertex providers."""
+    from monkeybot.core.config.snapshot import current_env
+
     return (
         (os.getenv("GCP_PROJECT_ID") or "").strip()
-        or (os.getenv("VERTEX_AI_PROJECT_ID") or "").strip()
-        or (os.getenv("ANTHROPIC_VERTEX_PROJECT_ID") or "").strip()
+        or current_env("VERTEX_AI_PROJECT_ID").strip()
+        or current_env("ANTHROPIC_VERTEX_PROJECT_ID").strip()
         or (os.getenv("GOOGLE_CLOUD_PROJECT") or "").strip()
     )
 
@@ -119,19 +121,21 @@ def get_provider_config(
     thinking_budget: int | None = None,
 ) -> ProviderConfig:
     """Resolve a Provider and model id from environment or explicit parameters."""
-    raw_provider = str(provider or os.getenv("MODEL_PROVIDER") or "google_vertexai")
+    from monkeybot.core.config.snapshot import current_env
+
+    raw_provider = str(provider or current_env("MODEL_PROVIDER") or "google_vertexai")
     provider_key = normalize_model_provider(raw_provider)
     if provider_key == "fake":
         raise ValueError(
             "MODEL_PROVIDER=fake is for gateway/tests only; inject ScriptedFakeProvider directly "
             "or use the gateway fake provider path."
         )
-    resolved_model = str(model_name or os.getenv("MODEL_NAME") or "gemini-2.5-flash")
+    resolved_model = str(model_name or current_env("MODEL_NAME") or "gemini-2.5-flash")
     sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens)
     thinking_budget = (
         thinking_budget
         if thinking_budget is not None
-        else int(os.getenv("MODEL_THINKING_BUDGET", "-1"))
+        else int(current_env("MODEL_THINKING_BUDGET", "-1"))
     )
     if provider_key == "google_vertexai":
         return ProviderConfig(
@@ -182,12 +186,12 @@ def get_provider_config(
                 "Set GCP_PROJECT_ID, VERTEX_AI_PROJECT_ID, ANTHROPIC_VERTEX_PROJECT_ID, "
                 "or GOOGLE_CLOUD_PROJECT (or gcp.project_id in monkeybot.yaml)."
             )
-        if os.getenv("VERTEX_AI_LOCATION"):
+        if current_env("VERTEX_AI_LOCATION"):
             logger.warning(
                 "VERTEX_AI_LOCATION is no longer read for vertex_anthropic; "
                 "set ANTHROPIC_VERTEX_REGION instead"
             )
-        region = (os.getenv("ANTHROPIC_VERTEX_REGION") or "us-east5").strip() or "us-east5"
+        region = (current_env("ANTHROPIC_VERTEX_REGION") or "us-east5").strip() or "us-east5"
         return ProviderConfig(
             VertexClaudeProvider(
                 project_id=project,

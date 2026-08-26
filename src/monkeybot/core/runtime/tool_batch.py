@@ -7,6 +7,7 @@ import os
 from collections.abc import Sequence
 from typing import Any
 
+from monkeybot.core.config.snapshot import current_env
 from monkeybot.core.context import (
     LOOPS_REGISTRY_MUTATING_TOOLS,
     MCP_REGISTRY_MUTATING_TOOLS,
@@ -141,7 +142,7 @@ async def _await_user_response_any(
     t = (
         timeout_sec
         if timeout_sec is not None
-        else float(os.environ.get("PENDING_RESPONSE_TIMEOUT_SEC", "300"))
+        else float(current_env("PENDING_RESPONSE_TIMEOUT_SEC", "300"))
     )
     try:
         return await asyncio.wait_for(asyncio.shield(fut), timeout=t)

@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from monkeybot.core.config.realtime_config import RealtimeConfig, get_realtime_config
 from monkeybot.core.config.settings import normalize_model_provider
+from monkeybot.core.config.snapshot import current_env
 from monkeybot.gateway.sse.routes import create_app as build_sse_app
 from monkeybot.providers.gemini_live import GeminiLiveProvider
 
@@ -60,7 +61,7 @@ async def _combined_lifespan(app: FastAPI) -> AsyncIterator[None]:
     deps.computer_approvals_persist = sse_deps.computer_approvals_persist
 
     realtime_provider = normalize_model_provider(
-        config.model.provider or os.environ.get("MODEL_PROVIDER", "google_vertexai")
+        config.model.provider or current_env("MODEL_PROVIDER", "google_vertexai")
     )
     if realtime_provider == "google_genai":
         api_key = os.environ.get("GEMINI_API_KEY", "")
