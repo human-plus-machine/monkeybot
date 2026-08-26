@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import json
 import logging
 import os
@@ -53,7 +54,7 @@ from monkeybot.core.knowledge.config import (
     knowledge_enabled_from_config,
     knowledge_read_only_from_env,
 )
-from monkeybot.core.layout import AgentLayout
+from monkeybot.core.layout import AgentLayout, resolve_agent_path
 from monkeybot.core.llm.provider import (
     Done,
     Provider,
@@ -65,7 +66,7 @@ from monkeybot.core.llm.provider import (
 from monkeybot.core.llm.usage import Usage as UsageRecord
 from monkeybot.core.llm.usage import UsageGranularity
 from monkeybot.core.logging_utils import kv
-from monkeybot.core.mcp.mcp_client import MCPCatalogApplyResult, MCPClient
+from monkeybot.core.mcp.mcp_client import MCPCatalogApplyResult, MCPClient, mcp_file_env_refs
 from monkeybot.core.memory.config import memory_enabled_from_config
 from monkeybot.core.memory.subsystem import MemoryConfigurationError, MemorySubsystem
 from monkeybot.core.persistence.backends import (
@@ -91,6 +92,7 @@ from monkeybot.gateway.sse.reload import (
     begin_in_flight_turn,
     end_in_flight_turn,
     get_reload_lock,
+    wait_for_idle_turns,
 )
 from monkeybot.gateway.sse.routes import create_app as build_sse_app
 from monkeybot.gateway.sse.session_bus import SessionBus, SessionRegistry
@@ -119,6 +121,41 @@ class RuntimeApplyResult:
     applied: list[str] = field(default_factory=list)
     mcp: MCPCatalogApplyResult = field(default_factory=MCPCatalogApplyResult)
     error: str | None = None
+
+
+# Live slices ``apply()`` stages, then installs only after the whole apply succeeds.
+_LIVE_SLICE_ATTRS = (
+    "inspectors",
+    "provider",
+    "hook_manager",
+    "web_search_tool",
+    "run_command_allowed_commands",
+    "run_command_allowed_path_prefixes",
+    "subagent_registry",
+    "computer_tools",
+    "computer_approvals_persist",
+)
+
+
+def _app_memory_state(
+    fastapi_app: FastAPI | None,
+) -> tuple[Any, Any, Any] | None:
+    if fastapi_app is None:
+        return None
+    state = fastapi_app.state
+    return (
+        getattr(state, "memory", None),
+        getattr(state, "memory_status", None),
+        getattr(state, "memory_detail", None),
+    )
+
+
+def _restore_app_memory(fastapi_app: FastAPI | None, prev: tuple[Any, Any, Any] | None) -> None:
+    if fastapi_app is None or prev is None:
+        return
+    fastapi_app.state.memory = prev[0]
+    fastapi_app.state.memory_status = prev[1]
+    fastapi_app.state.memory_detail = prev[2]
 
 
 @dataclass
@@ -234,6 +271,95 @@ class GatewayRuntime:
             fastapi_app.state.memory_status = "disabled"
             fastapi_app.state.memory_detail = "memory.enabled=false"
 
+    def _mcp_config_path(self, cfg: RuntimeConfig, layout: AgentLayout) -> Path:
+        mcp_path_raw = env_value(cfg, "MCP_CONFIG", "").strip()
+        return Path(mcp_path_raw) if mcp_path_raw else layout.mcp_config_path
+
+    def needs_mcp_apply(self, cfg: RuntimeConfig, diff: ConfigDiff) -> bool:
+        """True when catalog file or interpolated ``${VAR}`` overlay values changed."""
+        if self.mcp is None:
+            return False
+        if ConfigTier.RECONNECT_MCP in diff.tiers:
+            return True
+        layout = AgentLayout.from_environment()
+        return bool(diff.changed_env_keys & mcp_file_env_refs(self._mcp_config_path(cfg, layout)))
+
+    def _rebuild_live_slices(
+        self,
+        cfg: RuntimeConfig,
+        diff: ConfigDiff,
+        layout: AgentLayout,
+        fastapi_app: FastAPI | None,
+    ) -> tuple[list[str], str | None]:
+        applied: list[str] = []
+        error: str | None = None
+        provider_keys = {
+            "MODEL_PROVIDER",
+            "MODEL_TEMPERATURE",
+            "MODEL_MAX_TOKENS",
+            "MODEL_THINKING_BUDGET",
+            "VERTEX_AI_PROJECT_ID",
+            "VERTEX_AI_LOCATION",
+            "ANTHROPIC_VERTEX_PROJECT_ID",
+            "ANTHROPIC_VERTEX_REGION",
+            "MONKEYBOT_FAKE_PROVIDER_EVENTS",
+        }
+        inspector_keys = {
+            "COMMAND_ALLOWLIST_CONFIG",
+            "PERMISSION_CONFIG",
+            "MONKEYBOT_TOOL_DENIED_PATTERNS",
+            "MONKEYBOT_COMPUTER_TOOLS",
+            "MONKEYBOT_APPROVALS_CONFIG",
+        }
+        web_search_keys = {"WEB_SEARCH_BACKEND", "WEB_SEARCH_MAX_RESULTS"}
+        if diff.changed_env_keys & provider_keys:
+            self.build_provider(cfg)
+            applied.extend(sorted(diff.changed_env_keys & provider_keys))
+            logger.info(
+                "config slice rebuilt %s",
+                kv(slice="provider", revision=cfg.revision),
+            )
+        if diff.changed_env_keys & inspector_keys:
+            self.build_inspectors(layout, cfg)
+            applied.extend(sorted(diff.changed_env_keys & inspector_keys))
+            logger.info(
+                "config slice rebuilt %s",
+                kv(slice="inspectors", revision=cfg.revision),
+            )
+        if diff.changed_env_keys & web_search_keys:
+            self.build_web_search(cfg)
+            applied.extend(sorted(diff.changed_env_keys & web_search_keys))
+            logger.info(
+                "config slice rebuilt %s",
+                kv(slice="web_search", revision=cfg.revision),
+            )
+        if SUBAGENTS_DIFF_KEY in diff.changed_env_keys or "subagents" in diff.changed_content:
+            try:
+                self.build_subagents()
+                applied.append(SUBAGENTS_DIFF_KEY)
+                logger.info(
+                    "config slice rebuilt %s",
+                    kv(slice="subagents", revision=cfg.revision),
+                )
+            except ConfigError as exc:
+                error = str(exc)
+                logger.error(
+                    "invalid subagents config on reload %s",
+                    kv(revision=cfg.revision, error=error),
+                )
+        if "MONKEYBOT_MEMORY_HOOK_ENABLED" in diff.changed_env_keys:
+            self.rebuild_memory_hooks(cfg, fastapi_app)
+            applied.append("MONKEYBOT_MEMORY_HOOK_ENABLED")
+            logger.info(
+                "config slice rebuilt %s",
+                kv(slice="memory_hooks", revision=cfg.revision),
+            )
+        return applied, error
+
+    def _install_live_slices(self, staging: GatewayRuntime) -> None:
+        for name in _LIVE_SLICE_ATTRS:
+            setattr(self, name, getattr(staging, name))
+
     async def apply(
         self,
         cfg: RuntimeConfig,
@@ -242,78 +368,27 @@ class GatewayRuntime:
         fastapi_app: FastAPI | None = None,
         registry: SessionRegistry | None = None,
     ) -> RuntimeApplyResult:
-        """Rebuild slices named in ``diff.tiers``. Does not touch SessionRegistry state."""
+        """Rebuild slices named in ``diff.tiers``. Does not touch SessionRegistry state.
+
+        Slice mutations land on a staging copy and are installed only after
+        rebuild and MCP apply both succeed, so a later subagent/MCP error cannot
+        leave live deps on the new config while ``RuntimeConfig`` stays old.
+        """
         del registry
         layout = AgentLayout.from_environment()
+        staging = copy.copy(self)
         applied: list[str] = []
         mcp_result = MCPCatalogApplyResult()
-        error: str | None = None
+        memory_prev = _app_memory_state(fastapi_app)
         if ConfigTier.REBUILD in diff.tiers:
-            provider_keys = {
-                "MODEL_PROVIDER",
-                "MODEL_TEMPERATURE",
-                "MODEL_MAX_TOKENS",
-                "MODEL_THINKING_BUDGET",
-                "VERTEX_AI_PROJECT_ID",
-                "VERTEX_AI_LOCATION",
-                "ANTHROPIC_VERTEX_PROJECT_ID",
-                "ANTHROPIC_VERTEX_REGION",
-                "MONKEYBOT_FAKE_PROVIDER_EVENTS",
-            }
-            inspector_keys = {
-                "COMMAND_ALLOWLIST_CONFIG",
-                "PERMISSION_CONFIG",
-                "MONKEYBOT_TOOL_DENIED_PATTERNS",
-                "MONKEYBOT_COMPUTER_TOOLS",
-                "MONKEYBOT_APPROVALS_CONFIG",
-            }
-            web_search_keys = {"WEB_SEARCH_BACKEND", "WEB_SEARCH_MAX_RESULTS"}
-            if diff.changed_env_keys & provider_keys:
-                self.build_provider(cfg)
-                applied.extend(sorted(diff.changed_env_keys & provider_keys))
-                logger.info(
-                    "config slice rebuilt %s",
-                    kv(slice="provider", revision=cfg.revision),
-                )
-            if diff.changed_env_keys & inspector_keys:
-                self.build_inspectors(layout, cfg)
-                applied.extend(sorted(diff.changed_env_keys & inspector_keys))
-                logger.info(
-                    "config slice rebuilt %s",
-                    kv(slice="inspectors", revision=cfg.revision),
-                )
-            if diff.changed_env_keys & web_search_keys:
-                self.build_web_search(cfg)
-                applied.extend(sorted(diff.changed_env_keys & web_search_keys))
-                logger.info(
-                    "config slice rebuilt %s",
-                    kv(slice="web_search", revision=cfg.revision),
-                )
-            if SUBAGENTS_DIFF_KEY in diff.changed_env_keys or "subagents" in diff.changed_content:
-                try:
-                    self.build_subagents()
-                    applied.append(SUBAGENTS_DIFF_KEY)
-                    logger.info(
-                        "config slice rebuilt %s",
-                        kv(slice="subagents", revision=cfg.revision),
-                    )
-                except ConfigError as exc:
-                    error = str(exc)
-                    logger.error(
-                        "invalid subagents config on reload %s",
-                        kv(revision=cfg.revision, error=error),
-                    )
-            if "MONKEYBOT_MEMORY_HOOK_ENABLED" in diff.changed_env_keys:
-                self.rebuild_memory_hooks(cfg, fastapi_app)
-                applied.append("MONKEYBOT_MEMORY_HOOK_ENABLED")
-                logger.info(
-                    "config slice rebuilt %s",
-                    kv(slice="memory_hooks", revision=cfg.revision),
-                )
-        if ConfigTier.RECONNECT_MCP in diff.tiers and self.mcp is not None:
-            mcp_path_raw = env_value(cfg, "MCP_CONFIG", "").strip()
-            mcp_path = Path(mcp_path_raw) if mcp_path_raw else layout.mcp_config_path
+            applied, error = staging._rebuild_live_slices(cfg, diff, layout, fastapi_app)
+            if error:
+                _restore_app_memory(fastapi_app, memory_prev)
+                return RuntimeApplyResult(applied=applied, mcp=mcp_result, error=error)
+        if self.needs_mcp_apply(cfg, diff) and self.mcp is not None:
+            mcp_path = self._mcp_config_path(cfg, layout)
             try:
+                await wait_for_idle_turns()
                 self.mcp.set_env_overlay(cfg.env_values)
                 mcp_result = await self.mcp.apply_catalog_diff(mcp_path)
                 if "MCP_CONFIG" in diff.changed_env_keys:
@@ -323,7 +398,7 @@ class GatewayRuntime:
                     kv(slice="mcp", revision=cfg.revision),
                 )
             except Exception as exc:
-                error = error or f"MCP catalog diff failed: {exc}"
+                error = f"MCP catalog diff failed: {exc}"
                 logger.exception(
                     "MCP catalog diff failed %s",
                     kv(
@@ -332,7 +407,10 @@ class GatewayRuntime:
                         error=str(exc),
                     ),
                 )
-        return RuntimeApplyResult(applied=applied, mcp=mcp_result, error=error)
+                _restore_app_memory(fastapi_app, memory_prev)
+                return RuntimeApplyResult(applied=applied, mcp=mcp_result, error=error)
+        self._install_live_slices(staging)
+        return RuntimeApplyResult(applied=applied, mcp=mcp_result)
 
 
 _deps = GatewayRuntime()
@@ -359,7 +437,7 @@ def _resolved_workspace_paths() -> tuple[Path, Path, Path | None]:
     cfg = get_config_store().current_or_none()
     raw = env_value(cfg, "SKILLS_PATH", "").strip()
     if raw:
-        skills = Path(raw)
+        skills = resolve_agent_path(raw, layout.agent_root)
     return layout.workspace_root, skills, layout.artifacts_path
 
 
@@ -671,9 +749,7 @@ class GatewayLoopPort:
                     todo_store=todo_store,
                     approvals_persist=approvals_persist,
                     config=cfg,
-                    enable_context_curation=env_flag(
-                        cfg, "CONTEXT_CURATION_ENABLED", default=True
-                    ),
+                    enable_context_curation=env_flag(cfg, "CONTEXT_CURATION_ENABLED", default=True),
                 )
             except Exception as exc:
                 logger.exception("build_context failed")

@@ -129,9 +129,7 @@ def interpolate_env_vars(value: Any, env: Mapping[str, str] | None = None) -> An
     ``os.environ`` so YAML-backed keys interpolate after in-process reload
     without waiting for process env to be overwritten.
     """
-    source: Mapping[str, str] = (
-        os.environ if env is None else {**os.environ, **dict(env)}
-    )
+    source: Mapping[str, str] = os.environ if env is None else {**os.environ, **dict(env)}
 
     if isinstance(value, str):
 
@@ -144,6 +142,17 @@ def interpolate_env_vars(value: Any, env: Mapping[str, str] | None = None) -> An
     if isinstance(value, list):
         return [interpolate_env_vars(item, env) for item in value]
     return value
+
+
+def mcp_file_env_refs(mcp_json_path: Path) -> frozenset[str]:
+    """Return ``${VAR}`` names in ``mcp.json`` (raw file, before interpolation)."""
+    if not mcp_json_path.is_file():
+        return frozenset()
+    try:
+        text = mcp_json_path.read_text(encoding="utf-8")
+    except OSError:
+        return frozenset()
+    return frozenset(name.strip() for name in _ENV_VAR_PATTERN.findall(text) if name.strip())
 
 
 def log_mcp_startup_diagnostic(
@@ -1324,7 +1333,9 @@ class MCPClient:
         old_connected = set(self._servers)
         removed = set(old_catalog) - set(new_catalog)
         added = set(new_catalog) - set(old_catalog)
-        changed = {n for n in set(old_catalog) & set(new_catalog) if old_catalog[n] != new_catalog[n]}
+        changed = {
+            n for n in set(old_catalog) & set(new_catalog) if old_catalog[n] != new_catalog[n]
+        }
 
         for name in sorted(removed | changed | disabled):
             if name in self._servers:

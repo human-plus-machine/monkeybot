@@ -61,8 +61,6 @@ ENV_MAP: dict[tuple[str, str], str] = {
     ("context_curation", "memory_window_lines"): "CONTEXT_CURATION_MEMORY_WINDOW_LINES",
     ("context_curation", "memory_index_cap"): "MEMORY_INDEX_CAP",
     ("context_curation", "memory_token_threshold"): "CONTEXT_CURATION_MEMORY_TOKEN_THRESHOLD",
-    ("context_curation", "curator_model"): "CONTEXT_CURATOR_MODEL",
-    ("context_curation", "timeout_sec"): "CONTEXT_CURATION_TIMEOUT_SEC",
     ("memory", "enabled"): "MONKEYBOT_MEMORY_HOOK_ENABLED",
     ("memory", "backend"): "MEMPALACE_BACKEND",
     ("memory", "embedding_model"): "MEMPALACE_EMBEDDING_MODEL",
@@ -132,8 +130,6 @@ ENV_TIERS: dict[str, ConfigTier] = {
     "CONTEXT_CURATION_MEMORY_WINDOW_LINES": ConfigTier.HOT,
     "MEMORY_INDEX_CAP": ConfigTier.HOT,
     "CONTEXT_CURATION_MEMORY_TOKEN_THRESHOLD": ConfigTier.HOT,
-    "CONTEXT_CURATOR_MODEL": ConfigTier.HOT,
-    "CONTEXT_CURATION_TIMEOUT_SEC": ConfigTier.HOT,
     "MONKEYBOT_TODO_LIST_ENABLED": ConfigTier.HOT,
     "MONKEYBOT_TODO_LIST_MIRROR_TO_DISK": ConfigTier.HOT,
     "MONKEYBOT_EMISSION_STYLE": ConfigTier.HOT,
@@ -243,8 +239,6 @@ ENV_FIELD_PATHS: dict[str, str] = {
     "CONTEXT_CURATION_MEMORY_WINDOW_LINES": "curation.memory_window_lines",
     "MEMORY_INDEX_CAP": "curation.memory_index_cap",
     "CONTEXT_CURATION_MEMORY_TOKEN_THRESHOLD": "curation.memory_token_threshold",
-    "CONTEXT_CURATOR_MODEL": "curation.curator_model",
-    "CONTEXT_CURATION_TIMEOUT_SEC": "curation.timeout_sec",
     "MONKEYBOT_MEMORY_HOOK_ENABLED": "memory.enabled",
     "MEMPALACE_BACKEND": "memory.backend",
     "MEMPALACE_EMBEDDING_MODEL": "memory.embedding_model",
@@ -269,15 +263,11 @@ ENV_FIELD_PATHS: dict[str, str] = {
     "MONKEYBOT_REALTIME_AUDIO_MAX_UTTERANCE_SEC": "realtime.audio.max_utterance_sec",
     "MONKEYBOT_REALTIME_SESSION_MAX_DURATION_SEC": "realtime.session.max_duration_sec",
     "MONKEYBOT_REALTIME_SESSION_IDLE_TIMEOUT_SEC": "realtime.session.idle_timeout_sec",
-    "MONKEYBOT_REALTIME_SESSION_MAX_RESPONSE_TURN_SEC": (
-        "realtime.session.max_response_turn_sec"
-    ),
+    "MONKEYBOT_REALTIME_SESSION_MAX_RESPONSE_TURN_SEC": ("realtime.session.max_response_turn_sec"),
     "MONKEYBOT_REALTIME_SESSION_MAX_CONCURRENT_SESSIONS": (
         "realtime.session.max_concurrent_sessions"
     ),
-    "MONKEYBOT_REALTIME_METRICS_EMIT_SUMMARY_ON_CLOSE": (
-        "realtime.metrics.emit_summary_on_close"
-    ),
+    "MONKEYBOT_REALTIME_METRICS_EMIT_SUMMARY_ON_CLOSE": ("realtime.metrics.emit_summary_on_close"),
 }
 
 # Content-addressed files tracked by digest, mapped to the ENV_MAP key whose tier applies.
@@ -299,6 +289,12 @@ RETIRED_TOOLS_KEYS: frozenset[str] = frozenset(
         "spill_min_chars",
         "spill_read_max_lines",
         "read_default_lines",
+    }
+)
+RETIRED_CONTEXT_CURATION_KEYS: frozenset[str] = frozenset(
+    {
+        "curator_model",
+        "timeout_sec",
     }
 )
 
@@ -329,6 +325,23 @@ def warn_retired_tools_keys(doc: Mapping[str, Any]) -> list[str]:
                 key
             ) or _SPILL_SIZING_RETIRED_MSG.format(key=key)
             logger.warning(message)
+    return found
+
+
+def warn_retired_curation_keys(doc: Mapping[str, Any]) -> list[str]:
+    """Log one warning per retired ``context_curation.*`` key; return the keys found."""
+    section = doc.get("context_curation")
+    if not isinstance(section, dict):
+        return []
+    found: list[str] = []
+    for key in sorted(RETIRED_CONTEXT_CURATION_KEYS):
+        if key in section:
+            found.append(key)
+            logger.warning(
+                "context_curation.%s is retired and ignored — the LLM curator "
+                "was removed; window and token knobs still apply",
+                key,
+            )
     return found
 
 

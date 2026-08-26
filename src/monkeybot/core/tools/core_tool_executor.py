@@ -915,7 +915,7 @@ class CoreToolExecutor(ToolExecutorPort):
                 else terminal
             )
         else:
-            _scfg = SandboxConfig.from_env()
+            _scfg = SandboxConfig.from_env(self._config)
             if _scfg.enabled:
                 self._terminal = SandboxExecutor(
                     _scfg,

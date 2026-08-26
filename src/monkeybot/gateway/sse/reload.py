@@ -24,6 +24,7 @@ from monkeybot.core.config.snapshot import (
     pinned_env_names,
 )
 from monkeybot.core.context.tool_output_policy import invalidate_config_caches
+from monkeybot.core.layout import AgentLayout, resolve_agent_path
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.mcp.mcp_client import MCPCatalogApplyResult
 from monkeybot.core.runtime.events import ConfigReloaded, event_to_json
@@ -213,12 +214,13 @@ def _gateway_runtime(fastapi_app: Any | None) -> Any | None:
 def _export_hot_paths(cfg: RuntimeConfig) -> None:
     """Push unpinned HOT path values into process env for subprocess transport."""
     pins = pinned_env_names()
+    layout = AgentLayout.from_environment()
     for key in _HOT_PATH_EXPORT:
         if key in pins:
             continue
         value = cfg.env_values.get(key)
         if value:
-            os.environ[key] = value
+            os.environ[key] = str(resolve_agent_path(value, layout.agent_root))
 
 
 async def _publish_reloaded(registry: SessionRegistry, report: ConfigReloadResponse) -> None:
@@ -272,9 +274,11 @@ async def run_config_reload(
             _log_reload(report, noop=True)
             return report
 
-        needs_apply = bool(diff.tiers & {ConfigTier.REBUILD, ConfigTier.RECONNECT_MCP})
+        needs_slices = bool(diff.tiers & {ConfigTier.REBUILD, ConfigTier.RECONNECT_MCP})
         runtime = _gateway_runtime(fastapi_app)
-        if needs_apply and runtime is None:
+        needs_mcp = runtime is not None and runtime.needs_mcp_apply(cfg, diff)
+        needs_apply = needs_slices or needs_mcp
+        if needs_slices and runtime is None:
             logger.error(
                 "config reload runtime not bound %s",
                 kv(revision=cfg.revision, digest=cfg.digest),
@@ -291,7 +295,7 @@ async def run_config_reload(
         mcp_result = MCPCatalogApplyResult()
         error: str | None = None
         if runtime is not None and needs_apply:
-            if ConfigTier.RECONNECT_MCP in diff.tiers:
+            if ConfigTier.RECONNECT_MCP in diff.tiers or needs_mcp:
                 await wait_for_idle_turns()
             slice_result = await runtime.apply(
                 cfg, diff, fastapi_app=fastapi_app, registry=registry
@@ -308,9 +312,7 @@ async def run_config_reload(
 
         store.commit(cfg)
         _export_hot_paths(cfg)
-        report = _response_from_diff(
-            cfg, diff, applied=applied, mcp=mcp_result, error=error
-        )
+        report = _response_from_diff(cfg, diff, applied=applied, mcp=mcp_result, error=error)
         await _publish_reloaded(registry, report)
         _log_reload(report, noop=False)
         return report

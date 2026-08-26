@@ -32,6 +32,7 @@ from monkeybot.core.config.runtime_env import (
     _load_yaml_file,
     _merge_with_includes,
     _resolve_config_path,
+    warn_retired_curation_keys,
     warn_retired_tools_keys,
 )
 from monkeybot.core.config.settings import SubagentConfig, _parse_subagent_entries
@@ -154,8 +155,6 @@ class CurationConfig:
     memory_window_lines: str | None = None
     memory_index_cap: str | None = None
     memory_token_threshold: str | None = None
-    curator_model: str | None = None
-    timeout_sec: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -419,6 +418,7 @@ def build_runtime_config(
     pinned = _capture_pins()
     source_path, merged = _load_merged_yaml(config_path=config_path, agent_root=agent_root)
     warn_retired_tools_keys(merged)
+    warn_retired_curation_keys(merged)
     anchor = agent_root or resolve_agent_root(config_path=source_path)
     env_values = _effective_env(_flatten_config(merged), pinned, anchor)
     content = _content_digests(env_values, anchor)
@@ -696,8 +696,6 @@ def _curation_from_env(env: Mapping[str, str]) -> CurationConfig:
         memory_window_lines=env.get("CONTEXT_CURATION_MEMORY_WINDOW_LINES"),
         memory_index_cap=env.get("MEMORY_INDEX_CAP"),
         memory_token_threshold=env.get("CONTEXT_CURATION_MEMORY_TOKEN_THRESHOLD"),
-        curator_model=env.get("CONTEXT_CURATOR_MODEL"),
-        timeout_sec=env.get("CONTEXT_CURATION_TIMEOUT_SEC"),
     )
 
 

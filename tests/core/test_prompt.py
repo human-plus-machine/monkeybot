@@ -243,6 +243,28 @@ def test_compose_harness_reflects_sandbox_env(monkeypatch: pytest.MonkeyPatch) -
     assert "OpenSandbox" in out_s
 
 
+def test_compose_harness_sandbox_follows_pinned_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.config import reset_runtime_env_state_for_tests
+    from monkeybot.core.config.snapshot import build_runtime_config
+
+    reset_runtime_env_state_for_tests()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("SANDBOX_ENABLED", raising=False)
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir(exist_ok=True)
+    (cfg_dir / "monkeybot.yaml").write_text(
+        "sandbox:\n  enabled: true\n",
+        encoding="utf-8",
+    )
+    cfg = build_runtime_config(agent_root=tmp_path)
+    monkeypatch.setenv("SANDBOX_ENABLED", "false")
+    ctx = replace(_minimal_ctx(), config=cfg)
+    assert "OpenSandbox" in compose_system_prompt(ctx)
+    reset_runtime_env_state_for_tests()
+
+
 def test_compose_harness_reflects_emission_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MONKEYBOT_EMISSION_STYLE", raising=False)
     ctx = _minimal_ctx()

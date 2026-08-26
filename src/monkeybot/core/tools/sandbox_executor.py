@@ -37,7 +37,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from monkeybot.core.config.snapshot import current_env
+from monkeybot.core.config.snapshot import RuntimeConfig, current_env, env_value
 from monkeybot.core.tools.terminal import (
     ALLOWED_COMMANDS,
     ALLOWED_PATHS,
@@ -68,24 +68,29 @@ class SandboxConfig:
     shared_filesystem: bool = True
 
     @classmethod
-    def from_env(cls) -> SandboxConfig:
-        raw_ttl = current_env("SANDBOX_TTL_SECONDS", "1800")
+    def from_env(cls, config: RuntimeConfig | None = None) -> SandboxConfig:
+        """Build from a pinned snapshot, else the process-wide current snapshot."""
+
+        def _get(key: str, default: str) -> str:
+            if config is not None:
+                return env_value(config, key, default)
+            return current_env(key, default)
+
+        raw_ttl = _get("SANDBOX_TTL_SECONDS", "1800")
         try:
             ttl = int(raw_ttl)
         except ValueError:
-            raise ValueError(
-                f"SANDBOX_TTL_SECONDS must be an integer, got: {raw_ttl!r}"
-            ) from None
+            raise ValueError(f"SANDBOX_TTL_SECONDS must be an integer, got: {raw_ttl!r}") from None
         api_key = os.getenv("SANDBOX_API_KEY") or os.getenv("SANDBOX_AUTH_TOKEN") or None
         proxy_raw = os.getenv("SANDBOX_USE_SERVER_PROXY", "true").strip().lower()
         use_server_proxy = proxy_raw not in ("0", "false", "no", "off")
-        shared_raw = current_env("SANDBOX_SHARED_FILESYSTEM", "true").strip().lower()
+        shared_raw = _get("SANDBOX_SHARED_FILESYSTEM", "true").strip().lower()
         shared_filesystem = shared_raw not in ("0", "false", "no", "off")
         return cls(
-            enabled=current_env("SANDBOX_ENABLED", "false").lower() == "true",
-            server_url=current_env("SANDBOX_SERVER_URL", "http://localhost:8080"),
+            enabled=_get("SANDBOX_ENABLED", "false").lower() == "true",
+            server_url=_get("SANDBOX_SERVER_URL", "http://localhost:8080"),
             api_key=api_key,
-            image=current_env("SANDBOX_IMAGE", "python:3.12"),
+            image=_get("SANDBOX_IMAGE", "python:3.12"),
             ttl_seconds=ttl,
             use_server_proxy=use_server_proxy,
             shared_filesystem=shared_filesystem,
@@ -241,9 +246,9 @@ class SandboxExecutor:
                 mounted_paths.add(skills_str)
             if self._artifacts_path is not None:
                 artifacts_str = str(self._artifacts_path)
-                artifacts_vol_name = (
-                    re.sub(r"[^a-z0-9-]", "-", artifacts_str.lower()).strip("-")[:63]
-                )
+                artifacts_vol_name = re.sub(r"[^a-z0-9-]", "-", artifacts_str.lower()).strip("-")[
+                    :63
+                ]
                 volumes.append(
                     Volume(
                         name=artifacts_vol_name or "artifacts",

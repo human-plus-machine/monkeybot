@@ -18,7 +18,7 @@ from monkeybot.core.config import (
 )
 from monkeybot.core.config.runtime_env import ENV_MAP, SUBAGENTS_DIFF_KEY
 from monkeybot.core.config.snapshot import apply_reload_env_patch
-from monkeybot.core.mcp.mcp_client import MCPClient
+from monkeybot.core.mcp.mcp_client import MCPCatalogApplyResult, MCPClient
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.gateway.sse.app import GatewayRuntime
 from monkeybot.gateway.sse.reload import get_reload_lock, run_config_reload
@@ -378,9 +378,7 @@ async def test_admin_get_config_redacts_db_url(
 
 
 @pytest.mark.asyncio
-async def test_admin_rejects_non_loopback(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_admin_rejects_non_loopback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _boot_fake(tmp_path, monkeypatch, "model:\n  provider: fake\n")
     app = create_app()
     async with AsyncClient(
@@ -428,3 +426,108 @@ async def test_skills_path_hot_reload_updates_process_env(
     assert os.environ["SKILLS_PATH"].endswith("skills-b")
     assert get_config_store().current().paths.skills_path is not None
     assert get_config_store().current().paths.skills_path.endswith("skills-b")
+
+
+@pytest.mark.asyncio
+async def test_failed_apply_leaves_live_slices_on_old_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    yaml_path = _boot_fake(
+        tmp_path,
+        monkeypatch,
+        "model:\n  provider: fake\n  temperature: 0.1\n"
+        "subagents:\n  personas:\n    - name: helper\n      description: helps\n",
+    )
+    runtime = GatewayRuntime()
+    runtime.build_provider(get_config_store().current())
+    runtime.build_subagents()
+    old_provider = runtime.provider
+    yaml_path.write_text(
+        "model:\n  provider: fake\n  temperature: 0.9\n"
+        "subagents:\n  personas:\n"
+        "    - name: helper\n      description: helps\n"
+        "    - name: helper\n      description: duplicate\n",
+        encoding="utf-8",
+    )
+    report = await run_config_reload(
+        registry=SessionRegistry(), fastapi_app=_app_with_runtime(runtime)
+    )
+    assert report.error is not None
+    assert "Duplicate subagent" in report.error
+    assert runtime.provider is old_provider
+    assert get_config_store().current().revision == 1
+    assert get_config_store().current().model.temperature == "0.1"
+
+
+@pytest.mark.asyncio
+async def test_yaml_env_change_reconnects_interpolated_mcp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mcp_json = tmp_path / "monkeybot_config" / "mcp.json"
+    mcp_json.parent.mkdir(exist_ok=True)
+    mcp_json.write_text(
+        '{"mcpServers": {"echo": {"command": "true", "args": ["${MODEL_NAME}"]}}}',
+        encoding="utf-8",
+    )
+    yaml_path = _boot_fake(tmp_path, monkeypatch, "model:\n  provider: fake\n  name: first\n")
+    runtime = GatewayRuntime()
+    runtime.mcp = MCPClient()
+    runtime.mcp.set_env_overlay(get_config_store().current().env_values)
+    runtime.mcp.apply_catalog_diff = AsyncMock(  # type: ignore[method-assign]
+        return_value=MCPCatalogApplyResult()
+    )
+    yaml_path.write_text(
+        "model:\n  provider: fake\n  name: second\n",
+        encoding="utf-8",
+    )
+    report = await run_config_reload(
+        registry=SessionRegistry(), fastapi_app=_app_with_runtime(runtime)
+    )
+    assert report.error is None
+    runtime.mcp.apply_catalog_diff.assert_awaited()
+    assert runtime.mcp._env_overlay is not None
+    assert runtime.mcp._env_overlay["MODEL_NAME"] == "second"
+
+
+@pytest.mark.asyncio
+async def test_hot_reload_skips_mcp_when_json_has_no_env_refs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mcp_json = tmp_path / "monkeybot_config" / "mcp.json"
+    mcp_json.parent.mkdir(exist_ok=True)
+    mcp_json.write_text('{"mcpServers": {}}', encoding="utf-8")
+    yaml_path = _boot_fake(tmp_path, monkeypatch, "model:\n  provider: fake\n  name: first\n")
+    runtime = GatewayRuntime()
+    runtime.mcp = MCPClient()
+    runtime.mcp.apply_catalog_diff = AsyncMock(  # type: ignore[method-assign]
+        return_value=MCPCatalogApplyResult()
+    )
+    yaml_path.write_text(
+        "model:\n  provider: fake\n  name: second\n",
+        encoding="utf-8",
+    )
+    await run_config_reload(registry=SessionRegistry(), fastapi_app=_app_with_runtime(runtime))
+    runtime.mcp.apply_catalog_diff.assert_not_called()
+
+
+def test_relative_skills_path_env_resolves_against_agent_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.gateway.sse.app import _resolved_workspace_paths
+
+    agent = tmp_path / "agent"
+    (agent / "monkeybot_config").mkdir(parents=True)
+    (agent / "skills").mkdir()
+    (agent / "monkeybot_config" / "monkeybot.yaml").write_text(
+        "model:\n  provider: fake\n",
+        encoding="utf-8",
+    )
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.setenv("MONKEYBOT_CONFIG", str(agent / "monkeybot_config" / "monkeybot.yaml"))
+    monkeypatch.setenv("SKILLS_PATH", "skills")
+    monkeypatch.chdir(elsewhere)
+    apply_monkeybot_runtime_env()
+    _workspace, skills, _artifacts = _resolved_workspace_paths()
+    assert skills == (agent / "skills").resolve()
+    assert skills != (elsewhere / "skills").resolve()

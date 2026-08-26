@@ -137,8 +137,7 @@ def _validate_harness_mode(doc: dict[str, Any]) -> None:
     if mode not in SUPPORTED_HARNESS_MODES:
         supported = ", ".join(sorted(SUPPORTED_HARNESS_MODES))
         raise ConfigError(
-            f"harness.mode is set to '{mode}' which is not supported.\n"
-            f"Supported modes: {supported}"
+            f"harness.mode is set to '{mode}' which is not supported.\nSupported modes: {supported}"
         )
 
 
@@ -245,11 +244,20 @@ def validate_monkeybot_yaml_doc(doc: dict[str, Any], *, env: dict[str, str] | No
     gcp = doc.get("gcp") if isinstance(doc.get("gcp"), dict) else {}
     if isinstance(gcp, dict) and gcp.get("project_id"):
         flat["GCP_PROJECT_ID"] = str(gcp["project_id"])
-    for key in ("GCP_PROJECT_ID", "VERTEX_AI_PROJECT_ID", "ANTHROPIC_VERTEX_PROJECT_ID", "GOOGLE_CLOUD_PROJECT"):
+    for key in (
+        "GCP_PROJECT_ID",
+        "VERTEX_AI_PROJECT_ID",
+        "ANTHROPIC_VERTEX_PROJECT_ID",
+        "GOOGLE_CLOUD_PROJECT",
+    ):
         if key in env and env[key]:
             flat[key] = env[key]
     validate_provider_env(flat)
 
-    from monkeybot.core.config.runtime_env import warn_retired_tools_keys
+    from monkeybot.core.config.runtime_env import (
+        warn_retired_curation_keys,
+        warn_retired_tools_keys,
+    )
 
     warn_retired_tools_keys(doc)
+    warn_retired_curation_keys(doc)

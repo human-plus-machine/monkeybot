@@ -185,7 +185,7 @@ def _harness_text(ctx: TurnContext) -> str:
         memory_on=ctx.memory is not None,
         workspace_root=str(ctx.workspace_root) if ctx.workspace_root is not None else "(not set)",
         memory_storage_uri=ctx.memory.uri if ctx.memory is not None else "(not set)",
-        run_command_opensandbox=SandboxConfig.from_env().enabled,
+        run_command_opensandbox=SandboxConfig.from_env(ctx.config).enabled,
         subagent_personas=ctx.subagent_personas,
         emission_style=emission_style_terse_from_env(ctx.config),
         catalog_mcp_servers=ctx.catalog_mcp_servers,

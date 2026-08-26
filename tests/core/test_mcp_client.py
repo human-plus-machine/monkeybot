@@ -18,6 +18,7 @@ from monkeybot.core.mcp.mcp_client import (
     MCPConnectionError,
     _mcp_auth_handler_cls,
     interpolate_env_vars,
+    mcp_file_env_refs,
 )
 
 
@@ -423,6 +424,16 @@ def test_interpolate_env_vars_overlay_beats_os_environ(
     monkeypatch.setenv("MODEL_NAME", "from-os")
     overlay = {"MODEL_NAME": "from-snapshot"}
     assert interpolate_env_vars("${MODEL_NAME}", overlay) == "from-snapshot"
+
+
+def test_mcp_file_env_refs(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        '{"mcpServers": {"s": {"command": "${CMD}", "args": ["${  TOKEN  }"]}}}',
+        encoding="utf-8",
+    )
+    assert mcp_file_env_refs(path) == frozenset({"CMD", "TOKEN"})
+    assert mcp_file_env_refs(tmp_path / "missing.json") == frozenset()
 
 
 @pytest.mark.asyncio
@@ -856,9 +867,7 @@ async def test_status_catalogued_connected_and_disabled(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_list_and_read_resources() -> None:
-    listing = SimpleNamespace(
-        tools=[SimpleNamespace(name="noop", description="", inputSchema={})]
-    )
+    listing = SimpleNamespace(tools=[SimpleNamespace(name="noop", description="", inputSchema={})])
     resource = SimpleNamespace(
         name="docs",
         uri="docs://readme",
@@ -882,7 +891,9 @@ async def test_list_and_read_resources() -> None:
     )
     sess.list_prompts = AsyncMock(
         return_value=SimpleNamespace(
-            prompts=[SimpleNamespace(name="summarize", description="Sum", arguments=None, title=None)]
+            prompts=[
+                SimpleNamespace(name="summarize", description="Sum", arguments=None, title=None)
+            ]
         )
     )
     sess.get_prompt = AsyncMock(
@@ -1108,4 +1119,3 @@ async def test_apply_catalog_diff_invalid_json_leaves_connections(tmp_path: Path
     result = await client.apply_catalog_diff(cfg)
     assert result.kept == ("keep",)
     assert client._servers["keep"] is rec
-
