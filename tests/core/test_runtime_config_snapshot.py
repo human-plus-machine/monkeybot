@@ -13,12 +13,8 @@ from monkeybot.core.config import (
     get_config_store,
     reset_runtime_env_state_for_tests,
 )
-from monkeybot.core.config.runtime_env import ENV_MAP, ENV_TIERS
-from monkeybot.core.config.snapshot import (
-    ENV_FIELD_PATHS,
-    build_runtime_config,
-    env_field_value,
-)
+from monkeybot.core.config.runtime_env import ENV_FIELD_PATHS, ENV_MAP, ENV_TIERS
+from monkeybot.core.config.snapshot import build_runtime_config, env_field_value
 
 
 @pytest.fixture(autouse=True)
@@ -349,3 +345,22 @@ def test_turn_context_keeps_pinned_config_across_reload(
     assert ctx.config is pinned
     assert ctx.config.model.name == "turn-a"
     assert get_config_store().current().model.name == "turn-b"
+
+
+def test_effective_max_turns_uses_pinned_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.runtime.loop_usage import _effective_max_turns
+
+    monkeypatch.chdir(tmp_path)
+    yaml_path = _write_yaml(tmp_path, "model:\n  max_turns: 7\n")
+    monkeypatch.delenv("MAX_TURNS", raising=False)
+    apply_monkeybot_runtime_env(config_path=yaml_path, agent_root=tmp_path)
+    pinned = get_config_store().current()
+    (tmp_path / "monkeybot_config" / "monkeybot.yaml").write_text(
+        "model:\n  max_turns: 99\n",
+        encoding="utf-8",
+    )
+    get_config_store().reload()
+    assert _effective_max_turns(None, pinned) == 7
+    assert _effective_max_turns(None, get_config_store().current()) == 99

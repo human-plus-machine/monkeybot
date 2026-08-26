@@ -415,7 +415,9 @@ async def _preflight_prompt_tokens(
     provider: Provider,
     vertex_google_search: bool,
 ) -> int:
-    state.stream_thinking = _stream_thinking_budget(provider, state.resolved_messages)
+    state.stream_thinking = _stream_thinking_budget(
+        provider, state.resolved_messages, state.ctx.config
+    )
     return await _provider_prompt_input_tokens(
         provider,
         state.provider_messages,
@@ -1296,7 +1298,7 @@ async def _run_inner_core(
     state = _TurnState(
         ctx=ctx,
         user_text=_user_text_from_content(user_content),
-        effective_max=_effective_max_turns(max_turns),
+        effective_max=_effective_max_turns(max_turns, ctx.config),
         doom_tracker=_DoomLoopTracker(
             threshold=_effective_doom_loop_threshold(),
             exempt_names=_doom_loop_exempt_names(ctx.tools),

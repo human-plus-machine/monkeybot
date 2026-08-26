@@ -417,6 +417,14 @@ def test_interpolate_env_vars_nested(monkeypatch: pytest.MonkeyPatch) -> None:
     assert interpolate_env_vars(["${MCP_TEST_TOKEN}", "x"]) == ["abc123", "x"]
 
 
+def test_interpolate_env_vars_overlay_beats_os_environ(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MODEL_NAME", "from-os")
+    overlay = {"MODEL_NAME": "from-snapshot"}
+    assert interpolate_env_vars("${MODEL_NAME}", overlay) == "from-snapshot"
+
+
 @pytest.mark.asyncio
 async def test_mcp_auth_client_credentials_fetches_token() -> None:
     from unittest.mock import patch

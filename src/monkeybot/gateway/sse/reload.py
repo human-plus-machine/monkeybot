@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
+import os
 import uuid
 from collections.abc import Mapping
 from typing import Any
+from urllib.parse import urlparse
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
 from monkeybot.core.config.runtime_env import ENV_TIERS, ConfigTier
@@ -18,6 +21,7 @@ from monkeybot.core.config.snapshot import (
     apply_reload_env_patch,
     get_config_store,
     load_into_store,
+    pinned_env_names,
 )
 from monkeybot.core.context.tool_output_policy import invalidate_config_caches
 from monkeybot.core.logging_utils import kv
@@ -29,11 +33,45 @@ from monkeybot.gateway.sse.session_bus import SessionRegistry
 logger = logging.getLogger(__name__)
 
 _reload_lock = asyncio.Lock()
+_in_flight_turns = 0
+_turns_idle = asyncio.Event()
+_turns_idle.set()
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "testclient"})
+_REDACT_ENV_KEYS = frozenset(
+    {
+        "DB_URL",
+        "MEMORY_STORAGE_URI",
+        "SANDBOX_SERVER_URL",
+    }
+)
+_HOT_PATH_EXPORT = ("SKILLS_PATH", "AGENT_MD")
+_ADMIN_TOKEN_ENV = "MONKEYBOT_ADMIN_TOKEN"
 
 
 def get_reload_lock() -> asyncio.Lock:
     """Lock shared by ``start_turn`` pin and ``POST /admin/config/reload``."""
     return _reload_lock
+
+
+def begin_in_flight_turn() -> None:
+    """Mark a turn as using pinned live deps (MCP transports, provider, …)."""
+    global _in_flight_turns
+    _in_flight_turns += 1
+    _turns_idle.clear()
+
+
+def end_in_flight_turn() -> None:
+    """Release the in-flight mark so MCP reconnect can proceed."""
+    global _in_flight_turns
+    _in_flight_turns = max(0, _in_flight_turns - 1)
+    if _in_flight_turns == 0:
+        _turns_idle.set()
+
+
+async def wait_for_idle_turns() -> None:
+    """Block until no turn is using pinned process-wide deps."""
+    await _turns_idle.wait()
 
 
 class ReloadRequest(BaseModel):
@@ -96,13 +134,28 @@ def _response_from_diff(
     )
 
 
+def _looks_secret_url(value: str) -> bool:
+    parsed = urlparse(value)
+    return bool(parsed.scheme and parsed.netloc and parsed.password)
+
+
+def _redact_env(env: Mapping[str, str]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for key, value in env.items():
+        if key in _REDACT_ENV_KEYS or _looks_secret_url(value):
+            out[key] = "***"
+        else:
+            out[key] = value
+    return out
+
+
 def _redacted_config(cfg: RuntimeConfig) -> AdminConfigResponse:
     return AdminConfigResponse(
         revision=cfg.revision,
         digest=cfg.digest,
         source_path=str(cfg.source_path) if cfg.source_path is not None else None,
         loaded_at=cfg.loaded_at,
-        env=dict(cfg.env_values),
+        env=_redact_env(cfg.env_values),
         subagents=sorted(cfg.subagents),
         content={
             "agent_md": cfg.paths.agent_md_digest,
@@ -114,10 +167,58 @@ def _redacted_config(cfg: RuntimeConfig) -> AdminConfigResponse:
     )
 
 
+def _admin_token() -> str:
+    return os.environ.get(_ADMIN_TOKEN_ENV, "").strip()
+
+
+def _tokens_match(got: str, expected: str) -> bool:
+    got_b = got.encode()
+    exp_b = expected.encode()
+    if len(got_b) != len(exp_b):
+        return False
+    return hmac.compare_digest(got_b, exp_b)
+
+
+def require_admin(request: Request) -> None:
+    """Loopback-only admin surface; optional bearer token when configured."""
+    token = _admin_token()
+    if token:
+        auth = request.headers.get("authorization") or ""
+        prefix = "Bearer "
+        presented = auth[len(prefix) :] if auth.startswith(prefix) else ""
+        if not _tokens_match(presented, token):
+            raise APIError(
+                401,
+                "UNAUTHORIZED",
+                "Admin authentication required",
+                uuid.uuid4().hex,
+            )
+        return
+    host = request.client.host if request.client is not None else ""
+    if host not in _LOOPBACK_HOSTS:
+        raise APIError(
+            403,
+            "FORBIDDEN",
+            "Admin routes are loopback-only",
+            uuid.uuid4().hex,
+        )
+
+
 def _gateway_runtime(fastapi_app: Any | None) -> Any | None:
     if fastapi_app is None:
         return None
     return getattr(getattr(fastapi_app, "state", None), "gateway_runtime", None)
+
+
+def _export_hot_paths(cfg: RuntimeConfig) -> None:
+    """Push unpinned HOT path values into process env for subprocess transport."""
+    pins = pinned_env_names()
+    for key in _HOT_PATH_EXPORT:
+        if key in pins:
+            continue
+        value = cfg.env_values.get(key)
+        if value:
+            os.environ[key] = value
 
 
 async def _publish_reloaded(registry: SessionRegistry, report: ConfigReloadResponse) -> None:
@@ -165,7 +266,7 @@ async def run_config_reload(
         store = get_config_store()
         if store.current_or_none() is None:
             load_into_store()
-        cfg, diff = store.reload()
+        cfg, diff = store.prepare_reload()
         if diff.noop:
             report = ConfigReloadResponse(revision=cfg.revision, digest=cfg.digest)
             _log_reload(report, noop=True)
@@ -190,12 +291,23 @@ async def run_config_reload(
         mcp_result = MCPCatalogApplyResult()
         error: str | None = None
         if runtime is not None and needs_apply:
+            if ConfigTier.RECONNECT_MCP in diff.tiers:
+                await wait_for_idle_turns()
             slice_result = await runtime.apply(
                 cfg, diff, fastapi_app=fastapi_app, registry=registry
             )
             applied = list(slice_result.applied)
             mcp_result = slice_result.mcp
             error = slice_result.error
+            if error:
+                report = _response_from_diff(
+                    cfg, diff, applied=applied, mcp=mcp_result, error=error
+                )
+                _log_reload(report, noop=False)
+                return report
+
+        store.commit(cfg)
+        _export_hot_paths(cfg)
         report = _response_from_diff(
             cfg, diff, applied=applied, mcp=mcp_result, error=error
         )
@@ -205,8 +317,8 @@ async def run_config_reload(
 
 
 def build_admin_router() -> APIRouter:
-    """127.0.0.1 admin config surface (no session auth; same as ``/health``)."""
-    router = APIRouter(prefix="/admin", tags=["admin"])
+    """Loopback admin config surface (optional ``MONKEYBOT_ADMIN_TOKEN``)."""
+    router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin)])
 
     @router.get("/config", response_model=AdminConfigResponse)
     async def get_config() -> AdminConfigResponse:

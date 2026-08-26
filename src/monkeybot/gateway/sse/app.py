@@ -24,7 +24,7 @@ from monkeybot.computer import build_computer_tools
 from monkeybot.computer.permissions import build_computer_permission_inspector, build_persist_hook
 from monkeybot.core.attachments.config import attachments_enabled_from_env
 from monkeybot.core.attachments.store import AttachmentStore, FilesystemAttachmentStore
-from monkeybot.core.config.runtime_env import ConfigTier, SUBAGENTS_DIFF_KEY
+from monkeybot.core.config.runtime_env import SUBAGENTS_DIFF_KEY, ConfigTier
 from monkeybot.core.config.settings import (
     ConfigError,
     SubagentConfig,
@@ -87,7 +87,11 @@ from monkeybot.core.types.content_blocks import ContentBlock, Text
 from monkeybot.gateway.bootstrap import ensure_gateway_runtime_env, log_gateway_startup
 from monkeybot.gateway.sse.loop_port import UsagePort
 from monkeybot.gateway.sse.models import AgentUsageResponse, SessionUsageResponse
-from monkeybot.gateway.sse.reload import get_reload_lock
+from monkeybot.gateway.sse.reload import (
+    begin_in_flight_turn,
+    end_in_flight_turn,
+    get_reload_lock,
+)
 from monkeybot.gateway.sse.routes import create_app as build_sse_app
 from monkeybot.gateway.sse.session_bus import SessionBus, SessionRegistry
 from monkeybot.todo_list import TodoListStore, TodoListTool
@@ -310,6 +314,7 @@ class GatewayRuntime:
             mcp_path_raw = env_value(cfg, "MCP_CONFIG", "").strip()
             mcp_path = Path(mcp_path_raw) if mcp_path_raw else layout.mcp_config_path
             try:
+                self.mcp.set_env_overlay(cfg.env_values)
                 mcp_result = await self.mcp.apply_catalog_diff(mcp_path)
                 if "MCP_CONFIG" in diff.changed_env_keys:
                     applied.append("MCP_CONFIG")
@@ -344,9 +349,18 @@ def _resolve_provider(cfg: RuntimeConfig | None = None) -> Provider:
 
 
 def _resolved_workspace_paths() -> tuple[Path, Path, Path | None]:
-    """Resolve writable workspace, read-only skills, and artifacts mount from the agent layout."""
+    """Resolve writable workspace, read-only skills, and artifacts mount.
+
+    ``SKILLS_PATH`` is HOT: prefer the pinned snapshot over process env so YAML
+    path changes apply on the next turn without overwriting spawn pins.
+    """
     layout = AgentLayout.from_environment()
-    return layout.workspace_root, layout.skills_path, layout.artifacts_path
+    skills = layout.skills_path
+    cfg = get_config_store().current_or_none()
+    raw = env_value(cfg, "SKILLS_PATH", "").strip()
+    if raw:
+        skills = Path(raw)
+    return layout.workspace_root, skills, layout.artifacts_path
 
 
 def _memory_storage_uri() -> str:
@@ -457,10 +471,10 @@ def _content_blocks_to_text(blocks: list[ContentBlock]) -> str:
     return "\n".join(parts)
 
 
-def _default_agent_path(bus: SessionBus, cfg: RuntimeConfig | None = None) -> Path:
+def _default_agent_path(bus: SessionBus) -> Path:
     if bus.agent_md:
         return Path(bus.agent_md)
-    snap = cfg if cfg is not None else get_config_store().current_or_none()
+    snap = get_config_store().current_or_none()
     env = env_value(snap, "AGENT_MD", "").strip()
     if not env:
         raise RuntimeError("AGENT_MD must be set when session has no agent_md path")
@@ -561,6 +575,7 @@ class GatewayLoopPort:
 
         executor: CoreToolExecutor | None = None
         transcript_writer: TranscriptWriter | None = None
+        in_flight = False
         try:
             async with get_reload_lock():
                 mcp = _deps.mcp
@@ -570,8 +585,10 @@ class GatewayLoopPort:
                 model_name = bus.model_name or (
                     env_value(cfg, "MODEL_NAME", "gemini-2.5-flash") or "gemini-2.5-flash"
                 )
-                agent_path = _default_agent_path(bus, cfg)
+                agent_path = _default_agent_path(bus)
                 workspace_root, skills_resolved, artifacts_resolved = _resolved_workspace_paths()
+                begin_in_flight_turn()
+                in_flight = True
                 web_search_tool = _deps.web_search_tool
                 computer_tools = list(_deps.computer_tools)
                 subagent_registry = dict(_deps.subagent_registry)
@@ -654,6 +671,9 @@ class GatewayLoopPort:
                     todo_store=todo_store,
                     approvals_persist=approvals_persist,
                     config=cfg,
+                    enable_context_curation=env_flag(
+                        cfg, "CONTEXT_CURATION_ENABLED", default=True
+                    ),
                 )
             except Exception as exc:
                 logger.exception("build_context failed")
@@ -726,6 +746,8 @@ class GatewayLoopPort:
                     await transcript_writer.write_event(evt)
                 await bus.publish_data(event_to_json(evt))
         finally:
+            if in_flight:
+                end_in_flight_turn()
             if executor is not None:
                 await executor.aclose()
             watcher.cancel()
@@ -796,13 +818,15 @@ async def _startup(fastapi_app: FastAPI) -> None:
     mcp = MCPClient()
     _deps.mcp = mcp
     mcp_config = layout.mcp_config_path
+    cfg = get_config_store().current_or_none()
+    if cfg is not None:
+        mcp.set_env_overlay(cfg.env_values)
     strict = os.environ.get("MCP_STRICT_LOAD", "").strip().lower() in ("1", "true", "yes")
     try:
         await mcp.load_from_config(mcp_config, raise_on_error=strict)
     except OSError as exc:
         logger.info("MCP config skipped (%s): %s", mcp_config, exc)
 
-    cfg = get_config_store().current_or_none()
     _deps.build_inspectors(layout, cfg)
     _deps.build_provider(cfg)
     _deps.build_web_search(cfg)

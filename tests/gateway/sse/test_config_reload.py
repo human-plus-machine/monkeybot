@@ -255,6 +255,8 @@ async def test_rebuild_without_runtime_raises_503(
         r = await client.post("/admin/config/reload", json={})
     assert r.status_code == 503
     assert r.json()["error"]["code"] == "GATEWAY_RUNTIME_NOT_BOUND"
+    assert get_config_store().current().model.temperature == "0.1"
+    assert get_config_store().current().revision == 1
 
 
 @pytest.mark.asyncio
@@ -283,6 +285,7 @@ async def test_invalid_subagents_surfaces_error(
     assert "Duplicate subagent" in report.error
     assert SUBAGENTS_DIFF_KEY not in report.applied
     assert "helper" in runtime.subagent_registry
+    assert get_config_store().current().revision == 1
 
 
 @pytest.mark.asyncio
@@ -308,6 +311,7 @@ async def test_mcp_catalog_exception_surfaces_error(
     assert report.error is not None
     assert "disconnect failed" in report.error
     assert "MCP_CONFIG" not in report.applied
+    assert get_config_store().current().revision == 1
 
 
 @pytest.mark.asyncio
@@ -351,3 +355,76 @@ async def test_reload_publishes_config_reloaded(
     yaml_path.write_text("model:\n  provider: fake\n  name: b\n", encoding="utf-8")
     await run_config_reload(registry=registry, fastapi_app=None)
     assert any('"type":"ConfigReloaded"' in item for item in published)
+
+
+@pytest.mark.asyncio
+async def test_admin_get_config_redacts_db_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("DB_URL", raising=False)
+    _boot_fake(
+        tmp_path,
+        monkeypatch,
+        "model:\n  provider: fake\n"
+        "paths:\n  db_url: postgresql://user:secret@db.example/monkeybot\n",
+    )
+    app = create_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        r = await client.get("/admin/config")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["env"]["DB_URL"] == "***"
+    assert "secret" not in r.text
+
+
+@pytest.mark.asyncio
+async def test_admin_rejects_non_loopback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _boot_fake(tmp_path, monkeypatch, "model:\n  provider: fake\n")
+    app = create_app()
+    async with AsyncClient(
+        transport=ASGITransport(app=app, client=("10.1.2.3", 9)),
+        base_url="http://test",
+    ) as client:
+        r = await client.post("/admin/config/reload", json={})
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "FORBIDDEN"
+
+
+@pytest.mark.asyncio
+async def test_admin_token_required_when_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MONKEYBOT_ADMIN_TOKEN", "s3cret")
+    _boot_fake(tmp_path, monkeypatch, "model:\n  provider: fake\n")
+    app = create_app()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        denied = await client.post("/admin/config/reload", json={})
+        assert denied.status_code == 401
+        ok = await client.post(
+            "/admin/config/reload",
+            json={},
+            headers={"Authorization": "Bearer s3cret"},
+        )
+    assert ok.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_skills_path_hot_reload_updates_process_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("SKILLS_PATH", raising=False)
+    yaml_path = _boot_fake(
+        tmp_path,
+        monkeypatch,
+        "model:\n  provider: fake\npaths:\n  skills_path: skills-a\n",
+    )
+    yaml_path.write_text(
+        "model:\n  provider: fake\npaths:\n  skills_path: skills-b\n",
+        encoding="utf-8",
+    )
+    await run_config_reload(registry=SessionRegistry(), fastapi_app=None)
+    assert os.environ["SKILLS_PATH"].endswith("skills-b")
+    assert get_config_store().current().paths.skills_path is not None
+    assert get_config_store().current().paths.skills_path.endswith("skills-b")

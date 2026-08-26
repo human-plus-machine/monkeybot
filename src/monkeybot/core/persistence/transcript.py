@@ -158,9 +158,14 @@ class TranscriptWriter:
         # Resume from the highest seq already on disk so reused session dirs
         # never emit duplicate evidence pointers.
         self._seq = _max_seq_in_transcript(self._path) if self._path.is_file() else 0
-        self._include_live = (
-            transcript_include_live_from_env() if include_live is None else include_live
-        )
+        self._include_live_override = include_live
+
+    @property
+    def _include_live(self) -> bool:
+        """HOT: re-read the snapshot each write so session reuse picks up reloads."""
+        if self._include_live_override is not None:
+            return self._include_live_override
+        return transcript_include_live_from_env()
 
     @property
     def path(self) -> Path:

@@ -96,7 +96,7 @@ async def run(
     t0 = time.monotonic()
     trace_id_capture: list[str | None] = [None]
     blocks = _normalize_user_content(user_content)
-    effective_max = _effective_max_turns(max_turns)
+    effective_max = _effective_max_turns(max_turns, ctx.config)
     logger.debug(
         "harness run start %s",
         kv(

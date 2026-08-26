@@ -198,6 +198,88 @@ ENV_TIERS: dict[str, ConfigTier] = {
     "MONKEYBOT_REALTIME_METRICS_EMIT_SUMMARY_ON_CLOSE": ConfigTier.RESTART,
 }
 
+# env var -> dotted attribute path on RuntimeConfig. Must cover ENV_MAP 1:1
+# (enforced with ENV_TIERS in tests). Lives next to ENV_MAP so a new setting
+# cannot be added to one map and forgotten in the other.
+ENV_FIELD_PATHS: dict[str, str] = {
+    "LOG_LEVEL": "gateway.log_level",
+    "PORT": "gateway.port",
+    "GATEWAY_PORT": "gateway.gateway_port",
+    "AGENT_MD": "paths.agent_md",
+    "MEMORY_PATH": "paths.memory_path",
+    "MEMORY_STORAGE_URI": "paths.memory_storage_uri",
+    "SKILLS_PATH": "paths.skills_path",
+    "DB_URL": "paths.db_url",
+    "MCP_CONFIG": "paths.mcp_config",
+    "COMMAND_ALLOWLIST_CONFIG": "paths.command_allowlist_config",
+    "PERMISSION_CONFIG": "paths.permission_config",
+    "MONKEYBOT_WORKSPACE_ROOT": "paths.workspace_root",
+    "MONKEYBOT_AGENT_ID": "paths.agent_id",
+    "MONKEYBOT_APPROVALS_CONFIG": "paths.approvals_config",
+    "MODEL_PROVIDER": "model.provider",
+    "MODEL_NAME": "model.name",
+    "MODEL_TEMPERATURE": "model.temperature",
+    "MODEL_MAX_TOKENS": "model.max_tokens",
+    "MODEL_THINKING_BUDGET": "model.thinking_budget",
+    "MODEL_CONTEXT_WINDOW": "model.context_window",
+    "CONTEXT_SUMMARIZATION_MODEL": "model.summarization_model",
+    "MAX_TURNS": "model.max_turns",
+    "MODEL_CACHE_RETENTION": "model.cache_retention",
+    "VERTEX_AI_PROJECT_ID": "model.vertex_project_id",
+    "VERTEX_AI_LOCATION": "model.vertex_location",
+    "ANTHROPIC_VERTEX_PROJECT_ID": "model.anthropic_vertex_project_id",
+    "ANTHROPIC_VERTEX_REGION": "model.anthropic_vertex_region",
+    "MONKEYBOT_FAKE_PROVIDER_EVENTS": "model.fake_provider_events",
+    "PENDING_RESPONSE_TIMEOUT_SEC": "gateway.pending_response_timeout_sec",
+    "SSE_REPLAY_MAX": "gateway.sse_replay_max",
+    "SSE_NESTED_REPLAY_MAX": "gateway.sse_nested_replay_max",
+    "GRACEFUL_SHUTDOWN_TIMEOUT_SEC": "gateway.graceful_shutdown_timeout_sec",
+    "MONKEYBOT_CORS_ALLOW_ORIGINS": "gateway.cors_allow_origins",
+    "MONKEYBOT_EMISSION_STYLE": "gateway.emission_style",
+    "MONKEYBOT_TRANSCRIPT_ENABLED": "gateway.transcript_enabled",
+    "MONKEYBOT_TRANSCRIPT_INCLUDE_LIVE": "gateway.transcript_include_live",
+    "MONKEYBOT_HARNESS_MODE": "gateway.harness_mode",
+    "CONTEXT_CURATION_ENABLED": "curation.enabled",
+    "CONTEXT_CURATION_MEMORY_WINDOW_LINES": "curation.memory_window_lines",
+    "MEMORY_INDEX_CAP": "curation.memory_index_cap",
+    "CONTEXT_CURATION_MEMORY_TOKEN_THRESHOLD": "curation.memory_token_threshold",
+    "CONTEXT_CURATOR_MODEL": "curation.curator_model",
+    "CONTEXT_CURATION_TIMEOUT_SEC": "curation.timeout_sec",
+    "MONKEYBOT_MEMORY_HOOK_ENABLED": "memory.enabled",
+    "MEMPALACE_BACKEND": "memory.backend",
+    "MEMPALACE_EMBEDDING_MODEL": "memory.embedding_model",
+    "MONKEYBOT_TOOL_DENIED_PATTERNS": "tools.denied_patterns",
+    "MONKEYBOT_RESUME_THINKING_BUDGET": "tools.resume_thinking_budget",
+    "WEB_SEARCH_BACKEND": "tools.web_search_backend",
+    "WEB_SEARCH_MAX_RESULTS": "tools.web_search_max_results",
+    "MONKEYBOT_TODO_LIST_ENABLED": "tools.todo_list_enabled",
+    "MONKEYBOT_TODO_LIST_MIRROR_TO_DISK": "tools.todo_list_mirror_to_disk",
+    "MONKEYBOT_COMPUTER_TOOLS": "tools.computer_enabled",
+    "SANDBOX_ENABLED": "tools.sandbox_enabled",
+    "SANDBOX_SERVER_URL": "tools.sandbox_server_url",
+    "SANDBOX_IMAGE": "tools.sandbox_image",
+    "SANDBOX_TTL_SECONDS": "tools.sandbox_ttl_seconds",
+    "SANDBOX_SHARED_FILESYSTEM": "tools.sandbox_shared_filesystem",
+    "MONKEYBOT_SCHEDULER_ENABLED": "tools.scheduler_enabled",
+    "MONKEYBOT_REALTIME_WS_ENABLED": "realtime.websocket.enabled",
+    "MONKEYBOT_REALTIME_WS_PORT": "realtime.websocket.port",
+    "MONKEYBOT_REALTIME_AUDIO_INPUT_FORMAT": "realtime.audio.input_format",
+    "MONKEYBOT_REALTIME_AUDIO_OUTPUT_FORMAT": "realtime.audio.output_format",
+    "MONKEYBOT_REALTIME_AUDIO_CHUNK_MS": "realtime.audio.chunk_ms",
+    "MONKEYBOT_REALTIME_AUDIO_MAX_UTTERANCE_SEC": "realtime.audio.max_utterance_sec",
+    "MONKEYBOT_REALTIME_SESSION_MAX_DURATION_SEC": "realtime.session.max_duration_sec",
+    "MONKEYBOT_REALTIME_SESSION_IDLE_TIMEOUT_SEC": "realtime.session.idle_timeout_sec",
+    "MONKEYBOT_REALTIME_SESSION_MAX_RESPONSE_TURN_SEC": (
+        "realtime.session.max_response_turn_sec"
+    ),
+    "MONKEYBOT_REALTIME_SESSION_MAX_CONCURRENT_SESSIONS": (
+        "realtime.session.max_concurrent_sessions"
+    ),
+    "MONKEYBOT_REALTIME_METRICS_EMIT_SUMMARY_ON_CLOSE": (
+        "realtime.metrics.emit_summary_on_close"
+    ),
+}
+
 # Content-addressed files tracked by digest, mapped to the ENV_MAP key whose tier applies.
 CONTENT_DIGEST_TIERS: dict[str, str] = {
     "agent_md": "AGENT_MD",

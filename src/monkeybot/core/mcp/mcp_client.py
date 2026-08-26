@@ -122,19 +122,27 @@ _BROWSER_STOP_TOOL = "browser_stop"
 _BROWSER_STOP_TIMEOUT_S = 10.0
 
 
-def interpolate_env_vars(value: Any) -> Any:
-    """Replace ``${VAR_NAME}`` substrings with ``os.environ`` values (missing → empty string)."""
+def interpolate_env_vars(value: Any, env: Mapping[str, str] | None = None) -> Any:
+    """Replace ``${VAR_NAME}`` with overlay+process env (missing → empty string).
+
+    ``env`` (typically a ``RuntimeConfig.env_values`` snapshot) wins over
+    ``os.environ`` so YAML-backed keys interpolate after in-process reload
+    without waiting for process env to be overwritten.
+    """
+    source: Mapping[str, str] = (
+        os.environ if env is None else {**os.environ, **dict(env)}
+    )
 
     if isinstance(value, str):
 
         def _sub(match: re.Match[str]) -> str:
-            return os.environ.get(match.group(1).strip(), "")
+            return source.get(match.group(1).strip(), "")
 
         return _ENV_VAR_PATTERN.sub(_sub, value)
     if isinstance(value, dict):
-        return {str(k): interpolate_env_vars(v) for k, v in value.items()}
+        return {str(k): interpolate_env_vars(v, env) for k, v in value.items()}
     if isinstance(value, list):
-        return [interpolate_env_vars(item) for item in value]
+        return [interpolate_env_vars(item, env) for item in value]
     return value
 
 
@@ -597,6 +605,12 @@ class MCPClient:
         self._seen_servers: set[str] = set()
         # Last-known status per server (catalogued / connected / failed / …).
         self._statuses: dict[str, dict[str, Any]] = {}
+        # Snapshot env overlay for ``${VAR}`` interpolation (YAML-backed keys).
+        self._env_overlay: Mapping[str, str] | None = None
+
+    def set_env_overlay(self, env: Mapping[str, str] | None) -> None:
+        """Use snapshot env values when interpolating ``mcp.json`` ``${VAR}`` refs."""
+        self._env_overlay = env
 
     def _set_status(self, name: str, status: str, **extra: Any) -> None:
         """Record lifecycle status for ``name`` (overwrites prior entry)."""
@@ -1030,7 +1044,7 @@ class MCPClient:
             return
         if not isinstance(raw, dict):
             return
-        raw = interpolate_env_vars(raw)
+        raw = interpolate_env_vars(raw, self._env_overlay)
         servers_any = raw.get("mcpServers")
         if not isinstance(servers_any, dict):
             return
@@ -1228,7 +1242,7 @@ class MCPClient:
             return None
 
         if isinstance(raw, dict):
-            raw = interpolate_env_vars(raw)
+            raw = interpolate_env_vars(raw, self._env_overlay)
         else:
             logger.error(
                 "mcp config invalid: expected top-level object %s",
