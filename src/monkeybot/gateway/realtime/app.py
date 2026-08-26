@@ -8,18 +8,14 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import os
 from collections.abc import AsyncIterator
 from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from monkeybot.core.config.realtime_config import RealtimeConfig, get_realtime_config
-from monkeybot.core.config.settings import normalize_model_provider
-from monkeybot.core.config.snapshot import current_env
+from monkeybot.core.config.realtime_config import get_realtime_config
 from monkeybot.gateway.sse.routes import create_app as build_sse_app
-from monkeybot.providers.gemini_live import GeminiLiveProvider
 
 from .deps import RealtimeDependencies
 from .manager import RealtimeSessionManager
@@ -41,7 +37,6 @@ async def _combined_lifespan(app: FastAPI) -> AsyncIterator[None]:
     from monkeybot.gateway.sse.app import _startup as sse_startup
 
     deps: RealtimeDependencies = app.state.realtime_deps
-    config: RealtimeConfig = app.state.realtime_config
 
     await sse_startup(app)
 
@@ -59,18 +54,7 @@ async def _combined_lifespan(app: FastAPI) -> AsyncIterator[None]:
     deps.loops_registry = sse_deps.loops_registry
     deps.computer_tools = sse_deps.computer_tools
     deps.computer_approvals_persist = sse_deps.computer_approvals_persist
-
-    realtime_provider = normalize_model_provider(
-        config.model.provider or current_env("MODEL_PROVIDER", "google_vertexai")
-    )
-    if realtime_provider == "google_genai":
-        api_key = os.environ.get("GEMINI_API_KEY", "")
-        if not api_key:
-            logger.warning("realtime MODEL_PROVIDER=google_genai but GEMINI_API_KEY is not set")
-        deps.realtime_provider = GeminiLiveProvider(api_key=api_key)
-    else:
-        deps.realtime_provider = GeminiLiveProvider()
-
+    deps.bind_realtime_provider()
     deps.freeze()
 
     try:
