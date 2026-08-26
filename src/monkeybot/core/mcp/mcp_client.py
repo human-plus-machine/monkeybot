@@ -122,20 +122,37 @@ _BROWSER_STOP_TOOL = "browser_stop"
 _BROWSER_STOP_TIMEOUT_S = 10.0
 
 
-def interpolate_env_vars(value: Any) -> Any:
-    """Replace ``${VAR_NAME}`` substrings with ``os.environ`` values (missing → empty string)."""
+def interpolate_env_vars(value: Any, env: Mapping[str, str] | None = None) -> Any:
+    """Replace ``${VAR_NAME}`` with overlay+process env (missing → empty string).
+
+    ``env`` (typically a ``RuntimeConfig.env_values`` snapshot) wins over
+    ``os.environ`` so YAML-backed keys interpolate after in-process reload
+    without waiting for process env to be overwritten.
+    """
+    source: Mapping[str, str] = os.environ if env is None else {**os.environ, **dict(env)}
 
     if isinstance(value, str):
 
         def _sub(match: re.Match[str]) -> str:
-            return os.environ.get(match.group(1).strip(), "")
+            return source.get(match.group(1).strip(), "")
 
         return _ENV_VAR_PATTERN.sub(_sub, value)
     if isinstance(value, dict):
-        return {str(k): interpolate_env_vars(v) for k, v in value.items()}
+        return {str(k): interpolate_env_vars(v, env) for k, v in value.items()}
     if isinstance(value, list):
-        return [interpolate_env_vars(item) for item in value]
+        return [interpolate_env_vars(item, env) for item in value]
     return value
+
+
+def mcp_file_env_refs(mcp_json_path: Path) -> frozenset[str]:
+    """Return ``${VAR}`` names in ``mcp.json`` (raw file, before interpolation)."""
+    if not mcp_json_path.is_file():
+        return frozenset()
+    try:
+        text = mcp_json_path.read_text(encoding="utf-8")
+    except OSError:
+        return frozenset()
+    return frozenset(name.strip() for name in _ENV_VAR_PATTERN.findall(text) if name.strip())
 
 
 def log_mcp_startup_diagnostic(
@@ -277,9 +294,7 @@ def _mcp_auth_handler_cls() -> Any:
             try:
                 async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
                     if basic is not None:
-                        resp = await client.post(
-                            token_url, data=data, headers=headers, auth=basic
-                        )
+                        resp = await client.post(token_url, data=data, headers=headers, auth=basic)
                     else:
                         resp = await client.post(token_url, data=data, headers=headers)
             except httpx.RequestError as exc:
@@ -385,6 +400,16 @@ class _ServerRecord:
     capabilities: dict[str, bool] | None = None
 
 
+@dataclass(frozen=True)
+class MCPCatalogApplyResult:
+    """Outcome of :meth:`MCPClient.apply_catalog_diff` (untouched children stay up)."""
+
+    reconnected: tuple[str, ...] = ()
+    kept: tuple[str, ...] = ()
+    removed: tuple[str, ...] = ()
+    added: tuple[str, ...] = ()
+
+
 # Status machine values (OpenCode-inspired; progressive-disclosure aware).
 MCP_STATUS_CONNECTED = "connected"
 MCP_STATUS_CATALOGUED = "catalogued"
@@ -455,7 +480,11 @@ def _normalize_resource_read(result: Any) -> dict[str, Any]:
             entry["text"] = text_val
         elif blob_val is not None:
             # Keep a short note rather than dumping large base64 into the turn.
-            mime = getattr(block, "mimeType", None) or entry.get("mimeType") or "application/octet-stream"
+            mime = (
+                getattr(block, "mimeType", None)
+                or entry.get("mimeType")
+                or "application/octet-stream"
+            )
             uri = str(getattr(block, "uri", "") or entry.get("uri") or "")
             note = f"[Binary MCP resource omitted: {uri} ({mime})]"
             text_chunks.append(note)
@@ -568,9 +597,7 @@ def _unpack_streamable_http_streams(streams: Any) -> tuple[Any, Any]:
     """Return ``(read, write)`` from an MCP 1.x 3-tuple or 2.x 2-tuple."""
     if isinstance(streams, tuple) and len(streams) in (2, 3):
         return streams[0], streams[1]
-    raise TypeError(
-        f"streamable_http_client must yield a 2-tuple or 3-tuple, got {streams!r}"
-    )
+    raise TypeError(f"streamable_http_client must yield a 2-tuple or 3-tuple, got {streams!r}")
 
 
 class MCPClient:
@@ -587,6 +614,12 @@ class MCPClient:
         self._seen_servers: set[str] = set()
         # Last-known status per server (catalogued / connected / failed / …).
         self._statuses: dict[str, dict[str, Any]] = {}
+        # Snapshot env overlay for ``${VAR}`` interpolation (YAML-backed keys).
+        self._env_overlay: Mapping[str, str] | None = None
+
+    def set_env_overlay(self, env: Mapping[str, str] | None) -> None:
+        """Use snapshot env values when interpolating ``mcp.json`` ``${VAR}`` refs."""
+        self._env_overlay = env
 
     def _set_status(self, name: str, status: str, **extra: Any) -> None:
         """Record lifecycle status for ``name`` (overwrites prior entry)."""
@@ -1001,9 +1034,7 @@ class MCPClient:
             raise MCPDiagnosticError(
                 name,
                 f"Unknown MCP server {name!r}. Known configured servers: {known_msg}",
-                remedy=(
-                    "Use a name from mcp.json (after load_from_config), then call enable_mcp."
-                ),
+                remedy=("Use a name from mcp.json (after load_from_config), then call enable_mcp."),
             )
         defs = await self._connect_from_spec(
             name, spec, mcp_json_path=self._config_path, raise_on_error=True
@@ -1022,7 +1053,7 @@ class MCPClient:
             return
         if not isinstance(raw, dict):
             return
-        raw = interpolate_env_vars(raw)
+        raw = interpolate_env_vars(raw, self._env_overlay)
         servers_any = raw.get("mcpServers")
         if not isinstance(servers_any, dict):
             return
@@ -1159,71 +1190,20 @@ class MCPClient:
         if not mcp_json_path.is_file():
             return
 
-        raw_text = mcp_json_path.read_text(encoding="utf-8")
-        try:
-            raw = json.loads(raw_text)
-        except json.JSONDecodeError as exc:
-            logger.error("invalid mcp JSON in %s", mcp_json_path)
-            if raise_on_error:
-                raise MCPDiagnosticError(
-                    "<mcp.json>",
-                    f"Invalid MCP JSON in {mcp_json_path}: {exc}",
-                    remedy="Fix mcp.json so it parses as JSON.",
-                ) from exc
-            return
-
-        if isinstance(raw, dict):
-            raw = interpolate_env_vars(raw)
-        else:
-            logger.error("mcp config invalid in %s: expected top-level object", mcp_json_path)
-            if raise_on_error:
-                raise MCPDiagnosticError(
-                    "<mcp.json>",
-                    f"MCP config in {mcp_json_path} must be a JSON object",
-                    remedy="Wrap servers under a top-level object with mcpServers.",
-                )
-            return
-
-        servers_any = raw.get("mcpServers")
-        if not isinstance(servers_any, dict):
-            logger.error(
-                "mcp config invalid in %s: expected object mcpServers",
-                mcp_json_path,
-            )
-            if raise_on_error:
-                raise MCPDiagnosticError(
-                    "<mcp.json>",
-                    f"MCP config in {mcp_json_path} must include an object mcpServers",
-                    remedy="Add a mcpServers object mapping server names to specs.",
-                )
+        servers_any = self._read_mcp_servers_file(mcp_json_path, raise_on_error=raise_on_error)
+        if servers_any is None:
             return
 
         self._config_path = mcp_json_path
         self._catalog.clear()
-
-        for server_name in sorted(servers_any.keys()):
-            spec = servers_any[server_name]
-            if not isinstance(spec, dict):
-                logger.error(
-                    "mcp config server %s in %s: expected object entry",
-                    server_name,
-                    mcp_json_path,
-                )
-                if raise_on_error:
-                    raise MCPDiagnosticError(
-                        server_name,
-                        f"MCP server {server_name!r} entry must be an object",
-                        remedy="Fix the server entry in mcp.json.",
-                    )
-                continue
-            if spec.get("enabled") is False:
-                logger.info(
-                    "mcp server skipped (enabled: false) %s",
-                    kv(server=server_name),
-                )
-                self._set_status(server_name, MCP_STATUS_DISABLED)
-                continue
-            self._catalog[server_name] = dict(spec)
+        new_catalog, disabled = self._parse_catalog_entries(
+            servers_any, mcp_json_path, raise_on_error=raise_on_error
+        )
+        for server_name in sorted(disabled):
+            logger.info("mcp server skipped (enabled: false) %s", kv(server=server_name))
+            self._set_status(server_name, MCP_STATUS_DISABLED)
+        for server_name, spec in new_catalog.items():
+            self._catalog[server_name] = spec
             self._seen_servers.add(server_name)
             if spec.get("autoConnect") is True:
                 logger.info(
@@ -1242,3 +1222,175 @@ class MCPClient:
                     "mcp catalog registered server=%s (connect via enable_mcp)",
                     server_name,
                 )
+
+    def _read_mcp_servers_file(
+        self,
+        mcp_json_path: Path,
+        *,
+        raise_on_error: bool,
+    ) -> dict[str, Any] | None:
+        """Parse interpolated ``mcpServers`` without mutating catalog/connections.
+
+        Returns ``None`` when the file is missing or invalid (and ``raise_on_error``
+        is False). An empty dict means a valid file with no servers.
+        """
+        if not mcp_json_path.is_file():
+            return None
+
+        raw_text = mcp_json_path.read_text(encoding="utf-8")
+        try:
+            raw = json.loads(raw_text)
+        except json.JSONDecodeError as exc:
+            logger.error("invalid mcp JSON %s", kv(path=str(mcp_json_path)))
+            if raise_on_error:
+                raise MCPDiagnosticError(
+                    "<mcp.json>",
+                    f"Invalid MCP JSON in {mcp_json_path}: {exc}",
+                    remedy="Fix mcp.json so it parses as JSON.",
+                ) from exc
+            return None
+
+        if isinstance(raw, dict):
+            raw = interpolate_env_vars(raw, self._env_overlay)
+        else:
+            logger.error(
+                "mcp config invalid: expected top-level object %s",
+                kv(path=str(mcp_json_path)),
+            )
+            if raise_on_error:
+                raise MCPDiagnosticError(
+                    "<mcp.json>",
+                    f"MCP config in {mcp_json_path} must be a JSON object",
+                    remedy="Wrap servers under a top-level object with mcpServers.",
+                )
+            return None
+
+        servers_any = raw.get("mcpServers")
+        if not isinstance(servers_any, dict):
+            logger.error(
+                "mcp config invalid: expected object mcpServers %s",
+                kv(path=str(mcp_json_path)),
+            )
+            if raise_on_error:
+                raise MCPDiagnosticError(
+                    "<mcp.json>",
+                    f"MCP config in {mcp_json_path} must include an object mcpServers",
+                    remedy="Add a mcpServers object mapping server names to specs.",
+                )
+            return None
+        return servers_any
+
+    def _parse_catalog_entries(
+        self,
+        servers_any: dict[str, Any],
+        mcp_json_path: Path,
+        *,
+        raise_on_error: bool,
+    ) -> tuple[dict[str, dict[str, Any]], set[str]]:
+        """Split interpolated ``mcpServers`` into enabled specs and disabled names."""
+        new_catalog: dict[str, dict[str, Any]] = {}
+        disabled: set[str] = set()
+        for server_name in sorted(servers_any.keys()):
+            spec = servers_any[server_name]
+            if not isinstance(spec, dict):
+                logger.error(
+                    "mcp config server expected object entry %s",
+                    kv(server=server_name, path=str(mcp_json_path)),
+                )
+                if raise_on_error:
+                    raise MCPDiagnosticError(
+                        server_name,
+                        f"MCP server {server_name!r} entry must be an object",
+                        remedy="Fix the server entry in mcp.json.",
+                    )
+                continue
+            if spec.get("enabled") is False:
+                disabled.add(server_name)
+                continue
+            new_catalog[server_name] = dict(spec)
+        return new_catalog, disabled
+
+    async def apply_catalog_diff(
+        self,
+        mcp_json_path: Path,
+        *,
+        raise_on_error: bool = False,
+    ) -> MCPCatalogApplyResult:
+        """Reconnect only added/changed/removed servers; leave untouched children running.
+
+        Invalid JSON leaves the live catalog and connections alone. A missing file
+        is treated as an empty catalog (every connected server is disconnected).
+        """
+        parsed = self._read_mcp_servers_file(mcp_json_path, raise_on_error=raise_on_error)
+        if parsed is None and mcp_json_path.is_file():
+            return MCPCatalogApplyResult(kept=tuple(sorted(self._servers)))
+        servers_any: dict[str, Any] = parsed if parsed is not None else {}
+        new_catalog, disabled = self._parse_catalog_entries(
+            servers_any, mcp_json_path, raise_on_error=raise_on_error
+        )
+
+        old_catalog = dict(self._catalog)
+        old_connected = set(self._servers)
+        removed = set(old_catalog) - set(new_catalog)
+        added = set(new_catalog) - set(old_catalog)
+        changed = {
+            n for n in set(old_catalog) & set(new_catalog) if old_catalog[n] != new_catalog[n]
+        }
+
+        for name in sorted(removed | changed | disabled):
+            if name in self._servers:
+                await self.disconnect(name)
+
+        self._config_path = mcp_json_path
+        for name in removed:
+            self._catalog.pop(name, None)
+            if name not in disabled:
+                self._set_status(name, MCP_STATUS_DISCONNECTED)
+        for name in disabled:
+            self._catalog.pop(name, None)
+            self._set_status(name, MCP_STATUS_DISABLED)
+        for name, spec in new_catalog.items():
+            self._catalog[name] = spec
+            self._seen_servers.add(name)
+            if name not in self._servers:
+                self._set_status(name, MCP_STATUS_CATALOGUED)
+
+        reconnected: list[str] = []
+        for name in sorted(changed | added):
+            spec = new_catalog[name]
+            if spec.get("autoConnect") is True or (name in old_connected and name in changed):
+                try:
+                    await self._connect_from_spec(
+                        name,
+                        spec,
+                        mcp_json_path=mcp_json_path,
+                        raise_on_error=raise_on_error,
+                    )
+                    if name in self._servers:
+                        reconnected.append(name)
+                except Exception:
+                    logger.exception(
+                        "mcp catalog diff reconnect failed %s",
+                        kv(server=name, path=str(mcp_json_path)),
+                    )
+                    if raise_on_error:
+                        raise
+
+        kept = tuple(
+            sorted(n for n in old_connected if n in self._servers and n not in reconnected)
+        )
+        result = MCPCatalogApplyResult(
+            reconnected=tuple(reconnected),
+            kept=kept,
+            removed=tuple(sorted(removed | disabled)),
+            added=tuple(sorted(added)),
+        )
+        logger.info(
+            "mcp catalog diff applied %s",
+            kv(
+                reconnected=",".join(result.reconnected),
+                kept=",".join(result.kept),
+                removed=",".join(result.removed),
+            ),
+        )
+        return result
