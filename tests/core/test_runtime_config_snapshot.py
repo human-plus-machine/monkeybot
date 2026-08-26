@@ -1,4 +1,4 @@
-"""Tests for the immutable RuntimeConfig snapshot and ConfigStore."""
+"""Tests for the immutable RuntimeConfig snapshot and ConfigStore (hot-reload Step 1)."""
 
 from __future__ import annotations
 
@@ -8,11 +8,13 @@ from pathlib import Path
 import pytest
 
 from monkeybot.core.config import (
+    ConfigTier,
     apply_monkeybot_runtime_env,
     get_config_store,
     reset_runtime_env_state_for_tests,
 )
-from monkeybot.core.config.runtime_env import ENV_MAP
+from monkeybot.core.config.runtime_env import ENV_FIELD_PATHS, ENV_MAP, ENV_TIERS
+from monkeybot.core.config.snapshot import build_runtime_config, env_field_value
 
 
 @pytest.fixture(autouse=True)
@@ -37,7 +39,21 @@ def _write_yaml(tmp_path: Path, body: str) -> Path:
     return path
 
 
-def test_pinned_env_beats_yaml_on_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_env_map_three_way_exhaustiveness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    env_names = set(ENV_MAP.values())
+    assert len(ENV_MAP) == len(env_names)
+    assert set(ENV_TIERS) == env_names
+    assert set(ENV_FIELD_PATHS) == env_names
+    cfg = build_runtime_config(agent_root=tmp_path)
+    for env_name in sorted(env_names):
+        assert ENV_TIERS[env_name] in ConfigTier
+        env_field_value(cfg, env_name)
+
+
+def test_pinned_env_beats_yaml_on_build_and_reload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.chdir(tmp_path)
     yaml_path = _write_yaml(tmp_path, "model:\n  name: from-yaml\nruntime:\n  port: 1111\n")
     monkeypatch.setenv("MODEL_NAME", "from-env")
@@ -51,9 +67,81 @@ def test_pinned_env_beats_yaml_on_build(tmp_path: Path, monkeypatch: pytest.Monk
     assert first.gateway.port == "1111"
     assert os.environ.get("MODEL_NAME") == "from-env"
     assert os.environ.get("PORT") == "1111"
+    first_revision = first.revision
+
+    yaml_path.write_text(
+        "model:\n  name: yaml-after-reload\nruntime:\n  port: 2222\n",
+        encoding="utf-8",
+    )
+    reloaded, diff = store.reload()
+    assert not diff.noop
+    assert reloaded.revision == first_revision + 1
+    assert reloaded.model.name == "from-env"
+    assert reloaded.gateway.port == "2222"
+    # Step 1 does not re-mutate process env on reload.
+    assert os.environ.get("MODEL_NAME") == "from-env"
+    assert os.environ.get("PORT") == "1111"
 
 
-def test_apply_second_call_keeps_revision_and_returns_path(
+def test_reload_unchanged_files_is_digest_noop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_yaml(tmp_path, "model:\n  name: stable\n")
+    monkeypatch.delenv("MODEL_NAME", raising=False)
+    apply_monkeybot_runtime_env()
+    store = get_config_store()
+    first = store.current()
+
+    reloaded, diff = store.reload()
+    assert diff.noop
+    assert reloaded is first
+    assert reloaded.revision == first.revision
+    assert reloaded.digest == first.digest
+
+
+def test_editing_monkeybot_yaml_bumps_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    yaml_path = _write_yaml(tmp_path, "model:\n  name: before\n")
+    monkeypatch.delenv("MODEL_NAME", raising=False)
+    apply_monkeybot_runtime_env()
+    store = get_config_store()
+    first = store.current()
+
+    yaml_path.write_text("model:\n  name: after\n", encoding="utf-8")
+    reloaded, diff = store.reload()
+    assert not diff.noop
+    assert reloaded.revision == first.revision + 1
+    assert reloaded.digest != first.digest
+    assert reloaded.model.name == "after"
+    assert "MODEL_NAME" in diff.changed_env_keys
+    assert ConfigTier.HOT in diff.tiers
+
+
+def test_editing_agent_md_content_bumps_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_yaml(tmp_path, "runtime:\n  log_level: INFO\n")
+    agent_md = tmp_path / "monkeybot_config" / "AGENT.md"
+    agent_md.write_text("persona v1\n", encoding="utf-8")
+    apply_monkeybot_runtime_env()
+    store = get_config_store()
+    first = store.current()
+    assert first.paths.agent_md_digest is not None
+
+    agent_md.write_text("persona v2\n", encoding="utf-8")
+    reloaded, diff = store.reload()
+    assert not diff.noop
+    assert reloaded.revision == first.revision + 1
+    assert reloaded.paths.agent_md_digest != first.paths.agent_md_digest
+    assert "agent_md" in diff.changed_content
+    assert ConfigTier.HOT in diff.tiers
+
+
+def test_apply_second_call_is_digest_noop_returns_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
@@ -147,6 +235,24 @@ def test_current_or_none_before_apply() -> None:
     assert get_config_store().current_or_none() is None
 
 
+def test_reload_does_not_mutate_pinned_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    path = _write_yaml(tmp_path, "model:\n  name: first-model\n")
+    monkeypatch.delenv("MODEL_NAME", raising=False)
+    apply_monkeybot_runtime_env(config_path=path, agent_root=tmp_path)
+    pinned = get_config_store().current()
+    assert pinned.model.name == "first-model"
+
+    path.write_text("model:\n  name: second-model\n", encoding="utf-8")
+    updated, diff = get_config_store().reload(config_path=path, agent_root=tmp_path)
+    assert not diff.noop
+    assert updated.model.name == "second-model"
+    assert pinned.model.name == "first-model"
+    assert pinned.revision != updated.revision
+
+
 def test_env_value_prefers_pinned_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from monkeybot.core.config.snapshot import env_value
 
@@ -209,9 +315,41 @@ def test_current_env_uses_snapshot_then_falls_back(
     assert current_env("MODEL_NAME") == "from-yaml"
 
 
-def test_subagent_settings_included_in_snapshot(
+def test_turn_context_keeps_pinned_config_across_reload(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from monkeybot.core.context import TurnContext
+    from monkeybot.core.types.types_tools import ToolDef
+
+    monkeypatch.chdir(tmp_path)
+    path = _write_yaml(tmp_path, "model:\n  name: turn-a\n")
+    monkeypatch.delenv("MODEL_NAME", raising=False)
+    apply_monkeybot_runtime_env(config_path=path, agent_root=tmp_path)
+    pinned = get_config_store().current()
+    ctx = TurnContext(
+        thread_id="t1",
+        request_id="r1",
+        agent_md="# Agent",
+        memory_index=[],
+        skills=[],
+        tools=[ToolDef("run_command", "Run shell", {})],
+        user_id=None,
+        parent_run_id=None,
+        model=pinned.model.name or "gemini-2.5-flash",
+        config=pinned,
+    )
+    path.write_text("model:\n  name: turn-b\n", encoding="utf-8")
+    get_config_store().reload(config_path=path, agent_root=tmp_path)
+    assert ctx.config is pinned
+    assert ctx.config.model.name == "turn-a"
+    assert get_config_store().current().model.name == "turn-b"
+
+
+def test_subagent_settings_included_in_snapshot_and_diff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.config.settings import get_subagent_settings
+
     monkeypatch.chdir(tmp_path)
     yaml_path = _write_yaml(
         tmp_path,
@@ -223,3 +361,38 @@ def test_subagent_settings_included_in_snapshot(
     assert pinned.subagent_settings.timeout_sec == 30.0
     assert pinned.subagent_settings.max_turns == 5
     assert pinned.subagent_settings.vertex_google_search is True
+    # A turn holding the pinned snapshot keeps its subagent settings even
+    # after the file changes and the store reloads to a new revision.
+    assert get_subagent_settings(config=pinned).max_turns == 5
+
+    yaml_path.write_text(
+        "model:\n  provider: fake\n"
+        "subagents:\n  timeout_sec: 60\n  max_turns: 9\n  vertex_google_search: false\n",
+        encoding="utf-8",
+    )
+    reloaded, diff = get_config_store().reload(config_path=yaml_path, agent_root=tmp_path)
+    assert not diff.noop
+    assert "subagents.*" in diff.changed_env_keys
+    assert ConfigTier.REBUILD in diff.tiers
+    assert reloaded.subagent_settings.max_turns == 9
+    assert get_subagent_settings(config=pinned).max_turns == 5
+    assert get_subagent_settings(config=reloaded).max_turns == 9
+
+
+def test_effective_max_turns_uses_pinned_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.runtime.loop_usage import _effective_max_turns
+
+    monkeypatch.chdir(tmp_path)
+    yaml_path = _write_yaml(tmp_path, "model:\n  max_turns: 7\n")
+    monkeypatch.delenv("MAX_TURNS", raising=False)
+    apply_monkeybot_runtime_env(config_path=yaml_path, agent_root=tmp_path)
+    pinned = get_config_store().current()
+    (tmp_path / "monkeybot_config" / "monkeybot.yaml").write_text(
+        "model:\n  max_turns: 99\n",
+        encoding="utf-8",
+    )
+    get_config_store().reload()
+    assert _effective_max_turns(None, pinned) == 7
+    assert _effective_max_turns(None, get_config_store().current()) == 99

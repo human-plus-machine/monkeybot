@@ -13,8 +13,8 @@ import json
 import logging
 import os
 import time
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -22,7 +22,12 @@ from typing import Any
 from monkeybot.core.config.realtime_config import RealtimeConfig, realtime_config_from_doc
 from monkeybot.core.config.runtime_env import (
     _GCP_PROJECT_ENV_KEYS,
+    CONTENT_DIGEST_TIERS,
+    ENV_FIELD_PATHS,
     ENV_MAP,
+    ENV_TIERS,
+    SUBAGENTS_DIFF_KEY,
+    ConfigTier,
     _flatten_config,
     _load_yaml_file,
     _merge_with_includes,
@@ -161,6 +166,25 @@ class CurationConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ConfigDiff:
+    """What changed between two snapshots. ``noop`` means digest was unchanged."""
+
+    noop: bool
+    changed_env_keys: frozenset[str]
+    changed_content: frozenset[str]
+    tiers: frozenset[ConfigTier]
+
+    @staticmethod
+    def unchanged() -> ConfigDiff:
+        return ConfigDiff(
+            noop=True,
+            changed_env_keys=frozenset(),
+            changed_content=frozenset(),
+            tiers=frozenset(),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeConfig:
     revision: int
     digest: str
@@ -180,6 +204,15 @@ class RuntimeConfig:
     def __post_init__(self) -> None:
         object.__setattr__(self, "env_values", MappingProxyType(dict(self.env_values)))
         object.__setattr__(self, "subagents", MappingProxyType(dict(self.subagents)))
+
+
+def env_field_value(cfg: RuntimeConfig, env_name: str) -> Any:
+    """Return the nested ``RuntimeConfig`` field backing an ``ENV_MAP`` key."""
+    path = ENV_FIELD_PATHS[env_name]
+    current: Any = cfg
+    for part in path.split("."):
+        current = getattr(current, part)
+    return current
 
 
 class ConfigStore:
@@ -202,6 +235,38 @@ class ConfigStore:
         """Return the current snapshot, or ``None`` when apply has not run."""
         return self._current
 
+    def prepare_reload(
+        self, *, config_path: Path | None = None, agent_root: Path | None = None
+    ) -> tuple[RuntimeConfig, ConfigDiff]:
+        """Rebuild from disk without swapping the process pointer.
+
+        Call :meth:`commit` after live slices apply successfully so a failed
+        apply cannot poison the digest into a no-op that never retries.
+        """
+        path = self._config_path if config_path is None else config_path
+        root = self._agent_root if agent_root is None else agent_root
+        built = build_runtime_config(config_path=path, agent_root=root, revision=0)
+        current = self._current
+        if current is not None and built.digest == current.digest:
+            logger.info(
+                "config snapshot prepared %s",
+                kv(revision=current.revision, digest=current.digest, noop=True),
+            )
+            return current, ConfigDiff.unchanged()
+        revision = 1 if current is None else current.revision + 1
+        prepared = replace(built, revision=revision)
+        diff = (
+            diff_runtime_configs(current, prepared)
+            if current is not None
+            else ConfigDiff(
+                noop=False,
+                changed_env_keys=frozenset(prepared.env_values),
+                changed_content=frozenset(),
+                tiers=frozenset(ENV_TIERS[k] for k in prepared.env_values if k in ENV_TIERS),
+            )
+        )
+        return prepared, diff
+
     def commit(
         self,
         cfg: RuntimeConfig,
@@ -219,6 +284,15 @@ class ConfigStore:
             "config snapshot published %s",
             kv(revision=cfg.revision, digest=cfg.digest, noop=False),
         )
+
+    def reload(
+        self, *, config_path: Path | None = None, agent_root: Path | None = None
+    ) -> tuple[RuntimeConfig, ConfigDiff]:
+        """Rebuild from disk. No-op (same object, no revision bump) when digest matches."""
+        cfg, diff = self.prepare_reload(config_path=config_path, agent_root=agent_root)
+        if not diff.noop:
+            self.commit(cfg, config_path=config_path, agent_root=agent_root)
+        return cfg, diff
 
     def _set(
         self,
@@ -294,11 +368,64 @@ def context_window_tokens(cfg: RuntimeConfig | None = None, default: int = 200_0
         return default
 
 
+# App-owned spawn keys the admin reload endpoint may patch. Pins *and* process
+# env are updated so subprocess transport (MCP / subagent workers) inherits them.
+RELOAD_PIN_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "MONKEYBOT_COMPUTER_TOOLS",
+        "MONKEYBOT_TRANSCRIPT_ENABLED",
+    }
+)
+
+
 def pinned_env_names() -> frozenset[str]:
     """ENV_MAP (and extra) keys captured as pins on first build."""
     if _PINNED_ENV is None:
         return frozenset()
     return frozenset(_PINNED_ENV)
+
+
+def apply_reload_env_patch(patch: Mapping[str, str]) -> dict[str, str]:
+    """Update allowlisted app-owned pins. Returns the keys actually applied."""
+    global _PINNED_ENV
+    if _PINNED_ENV is None:
+        _PINNED_ENV = {}
+    applied: dict[str, str] = {}
+    for key, value in patch.items():
+        if key not in RELOAD_PIN_ALLOWLIST or not isinstance(value, str):
+            continue
+        _PINNED_ENV[key] = value
+        os.environ[key] = value
+        applied[key] = value
+    logger.info("reload env patch applied %s", kv(keys=",".join(sorted(applied))))
+    return applied
+
+
+def capture_reload_pins(keys: Iterable[str]) -> dict[str, str | None]:
+    """Snapshot current pin values for ``keys`` before staging an env patch.
+
+    Pair with :func:`restore_reload_pins` so a reload that fails after
+    :func:`apply_reload_env_patch` can roll pins (and ``os.environ``) back to
+    their pre-patch values instead of leaving subprocess transport ahead of
+    the (uncommitted) ``ConfigStore`` revision.
+    """
+    current = _PINNED_ENV or {}
+    return {key: current.get(key) for key in keys}
+
+
+def restore_reload_pins(prev: Mapping[str, str | None]) -> None:
+    """Undo a previously applied :func:`apply_reload_env_patch` on failure."""
+    global _PINNED_ENV
+    if _PINNED_ENV is None:
+        _PINNED_ENV = {}
+    for key, value in prev.items():
+        if value is None:
+            _PINNED_ENV.pop(key, None)
+            os.environ.pop(key, None)
+        else:
+            _PINNED_ENV[key] = value
+            os.environ[key] = value
+    logger.info("reload env patch rolled back %s", kv(keys=",".join(sorted(prev))))
 
 
 def reset_snapshot_state_for_tests() -> None:
@@ -347,6 +474,39 @@ def build_runtime_config(
         subagents=_subagents_from_doc(merged),
         subagent_settings=_subagent_settings_from_doc(merged),
         env_values=env_values,
+    )
+
+
+def diff_runtime_configs(old: RuntimeConfig, new: RuntimeConfig) -> ConfigDiff:
+    if old.digest == new.digest:
+        return ConfigDiff.unchanged()
+    changed_env: set[str] = set()
+    for key in set(old.env_values) | set(new.env_values):
+        if old.env_values.get(key) != new.env_values.get(key):
+            changed_env.add(key)
+    changed_content: set[str] = set()
+    old_content = _paths_content(old.paths)
+    new_content = _paths_content(new.paths)
+    for name, digest in new_content.items():
+        if old_content.get(name) != digest:
+            changed_content.add(name)
+            env_key = CONTENT_DIGEST_TIERS.get(name)
+            if env_key is not None:
+                changed_env.add(env_key)
+    if dict(old.subagents) != dict(new.subagents):
+        changed_content.add("subagents")
+        changed_env.add(SUBAGENTS_DIFF_KEY)
+    if old.subagent_settings != new.subagent_settings:
+        changed_content.add("subagent_settings")
+        changed_env.add(SUBAGENTS_DIFF_KEY)
+    tiers = {ENV_TIERS[k] for k in changed_env if k in ENV_TIERS}
+    if SUBAGENTS_DIFF_KEY in changed_env:
+        tiers.add(ConfigTier.REBUILD)
+    return ConfigDiff(
+        noop=False,
+        changed_env_keys=frozenset(changed_env),
+        changed_content=frozenset(changed_content),
+        tiers=frozenset(tiers),
     )
 
 
@@ -459,6 +619,16 @@ def _content_digests(env_values: Mapping[str, str], anchor: Path) -> dict[str, s
         "permission_config": _hash_file(
             _resolved_content_path(env_values, "PERMISSION_CONFIG", anchor)
         ),
+    }
+
+
+def _paths_content(paths: PathsConfig) -> dict[str, str | None]:
+    return {
+        "agent_md": paths.agent_md_digest,
+        "skills": paths.skills_digest,
+        "mcp_config": paths.mcp_config_digest,
+        "command_allowlist": paths.command_allowlist_digest,
+        "permission_config": paths.permission_config_digest,
     }
 
 
@@ -591,15 +761,22 @@ def _subagent_settings_from_doc(doc: Mapping[str, Any]) -> SubagentSettings:
 
 
 __all__ = [
+    "ConfigDiff",
     "ConfigStore",
+    "ConfigTier",
     "CurationConfig",
+    "ENV_FIELD_PATHS",
     "GatewayConfig",
     "MemoryConfig",
     "ModelConfig",
     "PathsConfig",
     "RuntimeConfig",
     "ToolsConfig",
+    "apply_reload_env_patch",
     "build_runtime_config",
+    "capture_reload_pins",
+    "diff_runtime_configs",
+    "env_field_value",
     "get_config_store",
     "context_window_tokens",
     "env_flag",
@@ -607,4 +784,5 @@ __all__ = [
     "load_into_store",
     "pinned_env_names",
     "reset_snapshot_state_for_tests",
+    "restore_reload_pins",
 ]

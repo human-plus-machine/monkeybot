@@ -196,6 +196,19 @@ class SystemNotificationEvent:
 
 
 @dataclass(frozen=True)
+class ConfigReloaded:
+    """Live-only: gateway applied a new ``RuntimeConfig`` revision (not a restart)."""
+
+    kind: Literal["ConfigReloaded"] = "ConfigReloaded"
+    request_id: str = ""
+    revision: int = 0
+    digest: str = ""
+    hot: list[str] = field(default_factory=list)
+    applied: list[str] = field(default_factory=list)
+    restart_required: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class GroundingEvent:
     """Provider-native web-search grounding metadata (e.g. Gemini ``google_search``).
 
@@ -369,6 +382,7 @@ AgentEvent: TypeAlias = (
     | ActionRequiredEvent
     | FrontendToolRequestEvent
     | SystemNotificationEvent
+    | ConfigReloaded
     | AttachmentDescriptorEvent
     | GroundingEvent
     | UserSteered
@@ -595,6 +609,15 @@ def _story5_event_dict(event: AgentEvent) -> dict[str, object]:
             "msg": event.msg,
             "data": event.data,
         }
+    if isinstance(event, ConfigReloaded):
+        return {
+            **base,
+            "revision": event.revision,
+            "digest": event.digest,
+            "hot": list(event.hot),
+            "applied": list(event.applied),
+            "restart_required": list(event.restart_required),
+        }
     if isinstance(event, AttachmentDescriptorEvent):
         return {
             **base,
@@ -721,6 +744,7 @@ def event_to_json(event: AgentEvent) -> str:
             ActionRequiredEvent,
             FrontendToolRequestEvent,
             SystemNotificationEvent,
+            ConfigReloaded,
             AttachmentDescriptorEvent,
             GroundingEvent,
             UserSteered,
@@ -943,6 +967,26 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
         else:
             raise EventDecodeError("SystemNotificationEvent data must be an object or null")
         return SystemNotificationEvent(request_id=rid, notification_type=nt, msg=msg, data=data_obj)
+    if t == "ConfigReloaded":
+        rev_raw = payload.get("revision", 0)
+        revision = int(rev_raw) if isinstance(rev_raw, (int, float)) else 0
+        digest_raw = payload.get("digest", "")
+        digest = digest_raw if isinstance(digest_raw, str) else ""
+
+        def _str_list(key: str) -> list[str]:
+            raw = payload.get(key)
+            if not isinstance(raw, list):
+                return []
+            return [item for item in raw if isinstance(item, str)]
+
+        return ConfigReloaded(
+            request_id=rid,
+            revision=revision,
+            digest=digest,
+            hot=_str_list("hot"),
+            applied=_str_list("applied"),
+            restart_required=_str_list("restart_required"),
+        )
     if t == "GroundingEvent":
         sources_raw = payload.get("sources")
         sources: list[dict[str, str]] = []

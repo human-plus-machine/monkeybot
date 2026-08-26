@@ -13,6 +13,7 @@ from monkeybot.core.config.realtime_config import (
 )
 from monkeybot.core.config.runtime_env import (
     ENV_MAP,
+    ConfigTier,
     apply_monkeybot_runtime_env,
     reset_runtime_env_state_for_tests,
 )
@@ -32,6 +33,7 @@ from monkeybot.core.config.settings import (
     vertex_google_search_enabled_from_config,
 )
 from monkeybot.core.config.snapshot import (
+    ConfigDiff,
     ConfigStore,
     RuntimeConfig,
     context_window_tokens,
@@ -55,8 +57,10 @@ from monkeybot.core.config.yaml_loader import (
 
 __all__ = [
     "ENV_MAP",
+    "ConfigDiff",
     "ConfigError",
     "ConfigStore",
+    "ConfigTier",
     "RuntimeConfig",
     "CustomMemoryFolder",
     "ProviderConfig",
