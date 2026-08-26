@@ -18,7 +18,12 @@ from monkeybot.core.config.settings import (
     normalize_model_provider,
     subagent_vertex_google_search_from_config,
 )
-from monkeybot.core.config.snapshot import current_env, current_env_or_none
+from monkeybot.core.config.snapshot import (
+    context_window_tokens,
+    current_env,
+    current_env_or_none,
+    get_config_store,
+)
 from monkeybot.core.context import TurnContext, build_context
 from monkeybot.core.knowledge import KnowledgeSubsystem, resolve_knowledge_settings
 from monkeybot.core.knowledge.config import knowledge_enabled_from_config
@@ -192,9 +197,13 @@ def _event_for_ndjson_pipe(evt: AgentEvent) -> AgentEvent:
 
 
 def _resolve_provider() -> Provider:
-    mode = normalize_model_provider(current_env("MODEL_PROVIDER", "google_vertexai"))
+    cfg = get_config_store().current_or_none()
+    mode = normalize_model_provider(
+        (cfg.model.provider if cfg is not None and cfg.model.provider else None)
+        or current_env("MODEL_PROVIDER", "google_vertexai")
+    )
     if mode != "fake":
-        return get_provider_config(provider=mode).provider
+        return get_provider_config(provider=mode, config=cfg).provider
 
     import json
 
@@ -348,11 +357,8 @@ async def _async_main() -> None:
             thread_id = f"subagent:{spill_session}:{uuid.uuid4().hex[:10]}"
         request_id = f"sub-{uuid.uuid4().hex[:12]}"
 
-        cap_raw = current_env("MODEL_CONTEXT_WINDOW", "200000").strip()
-        try:
-            context_window_tokens = max(1, int(cap_raw))
-        except ValueError:
-            context_window_tokens = 200_000
+        cfg = get_config_store().current_or_none()
+        window = context_window_tokens(cfg)
 
         try:
             _ws_backend = _build_web_search_backend()
@@ -410,9 +416,10 @@ async def _async_main() -> None:
             model=envelope.model,
             include_task_tool=False,
             workspace_root=ws,
-            context_window_tokens=context_window_tokens,
+            context_window_tokens=window,
             enable_context_curation=False,
             extra_tools=extra_tools,
+            config=cfg,
         )
 
         executor = CoreToolExecutor(
@@ -425,6 +432,7 @@ async def _async_main() -> None:
             run_command_allowed_commands=run_allow_cmds,
             run_command_allowed_path_prefixes=run_allow_paths,
             knowledge=knowledge,
+            config=cfg,
         )
         history = backend.history()
 
@@ -483,9 +491,7 @@ async def _async_main() -> None:
 def main() -> None:
     from monkeybot.core.logging_utils import normalize_log_level
 
-    logging.basicConfig(
-        level=normalize_log_level(current_env_or_none("LOG_LEVEL"), default="WARNING")
-    )
+    logging.basicConfig(level=normalize_log_level(current_env("LOG_LEVEL"), default="WARNING"))
     try:
         asyncio.run(_async_main())
     except SystemExit:

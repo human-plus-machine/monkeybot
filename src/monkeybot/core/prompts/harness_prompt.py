@@ -10,8 +10,6 @@ second catalog of the same tools.
 
 from collections.abc import Sequence
 
-from monkeybot.core.config.snapshot import current_env
-
 HARNESS_TOOL_CALL_PROTOCOL = """
 ### Tool-call protocol (strict)
 - Invoke tools only through the provider's native function-call channel. Never emit tool invocations as JSON or pseudo-XML inside your assistant text; any such text is treated as a normal message and no tool will run.
@@ -104,9 +102,12 @@ When the reader is a subagent or orchestrator (`task` results, not user-facing a
 """
 
 
-def emission_style_terse_from_env() -> bool:
+def emission_style_terse_from_env(cfg: object | None = None) -> bool:
     """True when ``MONKEYBOT_EMISSION_STYLE`` opts into the terse emission block."""
-    raw = current_env("MONKEYBOT_EMISSION_STYLE", "").strip().lower()
+    from monkeybot.core.config.snapshot import RuntimeConfig, env_value
+
+    snap = cfg if isinstance(cfg, RuntimeConfig) else None
+    raw = env_value(snap, "MONKEYBOT_EMISSION_STYLE", "").strip().lower()
     return raw in {"terse", "true", "1", "on", "yes"}
 
 

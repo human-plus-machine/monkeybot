@@ -16,7 +16,15 @@ from fastapi.responses import JSONResponse
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.config.realtime_config import RealtimeConfig
-from monkeybot.core.config.snapshot import current_env
+from monkeybot.core.config.snapshot import (
+    context_window_tokens as snapshot_context_window_tokens,
+)
+from monkeybot.core.config.snapshot import (
+    current_env,
+    env_flag,
+    env_value,
+    get_config_store,
+)
 from monkeybot.core.context import TurnContext, build_context
 from monkeybot.core.layout import AgentLayout
 from monkeybot.core.llm.realtime_provider import (
@@ -45,7 +53,7 @@ from monkeybot.core.runtime.realtime_loop import run_realtime_turn
 from monkeybot.core.runtime.utterance_buffer import UtteranceBuffer
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.types.content_blocks import Text
-from monkeybot.todo_list import TodoListStore, TodoListTool, todo_list_enabled_from_env
+from monkeybot.todo_list import TodoListStore, TodoListTool
 
 from .deps import RealtimeDependencies
 from .errors import (
@@ -93,14 +101,6 @@ from .wire import (
 logger = logging.getLogger("monkeybot.gateway.realtime.routes")
 
 
-def _env_context_window_tokens() -> int:
-    cap_raw = current_env("MODEL_CONTEXT_WINDOW", "200000").strip()
-    try:
-        return max(1, int(cap_raw))
-    except ValueError:
-        return 200_000
-
-
 def _pending_response_timeout_sec() -> float:
     try:
         return max(1.0, float(current_env("PENDING_RESPONSE_TIMEOUT_SEC", "300")))
@@ -129,7 +129,9 @@ async def _maybe_todo_store(
     manager: RealtimeSessionManager, session_id: str, workspace_root: Path
 ) -> TodoListStore | None:
     """Reuse the manager-cached store while the session is live; reconnect rehydrates from disk."""
-    if not todo_list_enabled_from_env():
+    if not env_flag(
+        get_config_store().current_or_none(), "MONKEYBOT_TODO_LIST_ENABLED", default=True
+    ):
         return None
     return await manager.get_or_create_todo_store(session_id, workspace_root=workspace_root)
 
@@ -145,8 +147,9 @@ async def _build_realtime_context(
     if deps.mcp is None:
         raise RuntimeError("MCP client is not initialized")
     workspace_root, skills_path = _resolved_workspace_paths()
+    cfg = get_config_store().current_or_none()
     agent_path = AgentLayout.from_environment().agent_md_path
-    model = current_env("MODEL_NAME", "gemini-2.5-flash")
+    model = env_value(cfg, "MODEL_NAME", "gemini-2.5-flash") or "gemini-2.5-flash"
     loops_available = deps.storage is not None
     loops_advertised = loops_available and deps.loops_registry.advertised
     return await build_context(
@@ -157,7 +160,7 @@ async def _build_realtime_context(
         skills_path=skills_path,
         mcp_client=deps.mcp,
         model=model,
-        context_window_tokens=_env_context_window_tokens(),
+        context_window_tokens=snapshot_context_window_tokens(cfg),
         workspace_root=workspace_root,
         enable_context_curation=True,
         extra_tools=_parent_extra_tools(deps, todo_store),
@@ -167,6 +170,7 @@ async def _build_realtime_context(
         todo_store=todo_store,
         approvals_persist=deps.computer_approvals_persist,
         cancelled=cancelled,
+        config=cfg,
     )
 
 
@@ -175,7 +179,15 @@ def _create_tool_executor(
     attachment_store: Any | None = None,
     *,
     todo_store: TodoListStore | None = None,
+    config: Any | None = None,
 ) -> CoreToolExecutor:
+    """Build the tool executor for one assistant boundary.
+
+    ``config`` should be the connection-pinned ``ctx.config`` snapshot, not a
+    fresh ``get_config_store().current_or_none()`` read — a reload mid-connection
+    would otherwise let later boundaries use new sandbox/tool settings while the
+    connection context and provider session stay on the revision they opened with.
+    """
     if deps.mcp is None:
         raise RuntimeError("MCP client is not initialized")
     workspace_root, skills_path = _resolved_workspace_paths()
@@ -194,6 +206,7 @@ def _create_tool_executor(
         scheduled_loop_store=storage.scheduled_loops() if storage is not None else None,
         subagent_registry=deps.subagent_registry,
         loops_registry=deps.loops_registry,
+        config=config if config is not None else get_config_store().current_or_none(),
     )
 
 
@@ -315,7 +328,9 @@ async def _handle_assistant_boundary(
     if turn.is_empty:
         return
 
-    tool_executor = _create_tool_executor(deps, attachment_store, todo_store=state.todo_store)
+    tool_executor = _create_tool_executor(
+        deps, attachment_store, todo_store=state.todo_store, config=ctx.config
+    )
     tool_results: list[Any] = []
     inject_texts: list[str] = []
     # Consume once per utterance so tool-call then prose boundaries do not
@@ -504,7 +519,7 @@ async def _handle_provider_event(
                 ws,
                 ServerUsageFrame(
                     usage=state.metrics.to_usage_payload(
-                        context_window_tokens=_env_context_window_tokens()
+                        context_window_tokens=snapshot_context_window_tokens(ctx.config)
                     )
                 ),
             )
@@ -518,7 +533,7 @@ async def _handle_provider_event(
             ws,
             ServerUsageFrame(
                 usage=state.metrics.to_usage_payload(
-                    context_window_tokens=_env_context_window_tokens()
+                    context_window_tokens=snapshot_context_window_tokens(ctx.config)
                 )
             ),
         )

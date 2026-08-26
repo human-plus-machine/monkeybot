@@ -1,6 +1,8 @@
 """Tests for :mod:`monkeybot.core.prompts.prompt`."""
 
+from dataclasses import replace
 from datetime import date
+from pathlib import Path
 
 import pytest
 
@@ -63,6 +65,35 @@ def test_compose_uses_memory_index_lines() -> None:
     assert "a" in mem_section
     assert "b" in mem_section
     assert "\n\n## Skills\n- s1\n- s2" in out
+
+
+def test_compose_applies_snapshot_memory_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.config import reset_runtime_env_state_for_tests
+    from monkeybot.core.config.snapshot import build_runtime_config
+
+    reset_runtime_env_state_for_tests()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CONTEXT_CURATION_MEMORY_WINDOW_LINES", raising=False)
+    monkeypatch.delenv("CONTEXT_CURATION_ENABLED", raising=False)
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir(exist_ok=True)
+    (cfg_dir / "monkeybot.yaml").write_text(
+        "context_curation:\n  enabled: true\n  memory_window_lines: 2\n",
+        encoding="utf-8",
+    )
+    cfg = build_runtime_config(agent_root=tmp_path)
+    ctx = replace(
+        _minimal_ctx(memory_index=["l1", "l2", "l3", "l4"]),
+        config=cfg,
+    )
+    out = compose_system_prompt(ctx)
+    mem_section = out.split("## Memory wake-up", 1)[1].split("## Skills", 1)[0]
+    assert "l3" in mem_section
+    assert "l4" in mem_section
+    assert "l1" not in mem_section
+    reset_runtime_env_state_for_tests()
 
 
 def test_compose_no_chat_skips_current_request() -> None:
@@ -210,6 +241,28 @@ def test_compose_harness_reflects_sandbox_env(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setenv("SANDBOX_ENABLED", "true")
     out_s = compose_system_prompt(ctx)
     assert "OpenSandbox" in out_s
+
+
+def test_compose_harness_sandbox_follows_pinned_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.config import reset_runtime_env_state_for_tests
+    from monkeybot.core.config.snapshot import build_runtime_config
+
+    reset_runtime_env_state_for_tests()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("SANDBOX_ENABLED", raising=False)
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir(exist_ok=True)
+    (cfg_dir / "monkeybot.yaml").write_text(
+        "sandbox:\n  enabled: true\n",
+        encoding="utf-8",
+    )
+    cfg = build_runtime_config(agent_root=tmp_path)
+    monkeypatch.setenv("SANDBOX_ENABLED", "false")
+    ctx = replace(_minimal_ctx(), config=cfg)
+    assert "OpenSandbox" in compose_system_prompt(ctx)
+    reset_runtime_env_state_for_tests()
 
 
 def test_compose_harness_reflects_emission_env(monkeypatch: pytest.MonkeyPatch) -> None:

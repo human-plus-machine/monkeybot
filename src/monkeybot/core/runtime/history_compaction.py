@@ -228,7 +228,19 @@ def _summarization_viable(
 
 
 def _summarization_model_id(ctx: TurnContext) -> str:
-    """Model id for history compression; env overrides ``ctx.summarization_model``, then ``ctx.model``."""
+    """Model id for history compression.
+
+    When ``ctx.config`` is pinned, do not re-read process env (turn isolation).
+    Without a snapshot, env still overrides ``ctx.summarization_model`` as before.
+    """
+    if ctx.config is not None:
+        ctx_sm = (ctx.summarization_model or "").strip()
+        if ctx_sm:
+            return ctx_sm
+        from_cfg = (ctx.config.model.summarization_model or "").strip()
+        if from_cfg:
+            return from_cfg
+        return ctx.model
     from_env = current_env("CONTEXT_SUMMARIZATION_MODEL", "").strip()
     if from_env:
         return from_env
@@ -338,7 +350,9 @@ async def _summarize_history(
     window_tokens: int,
 ) -> int:
     """Compress middle history into one assistant summary row. Returns middle row count."""
-    head, middle, tail = split_messages_for_compaction(messages, window_tokens=window_tokens)
+    head, middle, tail = split_messages_for_compaction(
+        messages, window_tokens=window_tokens
+    )
     if not middle:
         return 0
     logger.debug(
@@ -372,7 +386,9 @@ async def _summarize_history(
         ),
     ]
     summary_text = ""
-    async with aclosing(cast(Any, provider.stream(summarize_messages, [], model=model))) as stream:
+    async with aclosing(
+        cast(Any, provider.stream(summarize_messages, [], model=model))
+    ) as stream:
         async for ev in stream:
             if isinstance(ev, TextDelta):
                 summary_text += ev.text

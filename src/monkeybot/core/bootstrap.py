@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from monkeybot.core.config.settings import auto_schema_enabled_from_config, get_provider_config
-from monkeybot.core.config.snapshot import context_window_tokens, current_env
+from monkeybot.core.config.snapshot import context_window_tokens, current_env, get_config_store
 from monkeybot.core.context import build_context
 from monkeybot.core.hooks import HookManager
 from monkeybot.core.knowledge import KnowledgeSubsystem, resolve_knowledge_settings
@@ -86,10 +86,6 @@ def _resolve_run_command_allowlists() -> tuple[list[str] | None, list[str] | Non
         return None, None
 
 
-def _env_context_window_tokens() -> int:
-    return context_window_tokens()
-
-
 async def create_harness_deps(
     db_url: str,
     memory_storage_uri: str | None = None,
@@ -143,7 +139,8 @@ async def create_harness_deps(
             prov = override
             model_str = str(model or "test-model")
         else:
-            pc = get_provider_config(provider=provider, model_name=model)
+            cfg = get_config_store().current_or_none()
+            pc = get_provider_config(provider=provider, model_name=model, config=cfg)
             prov = pc.provider
             model_str = pc.model
 
@@ -233,6 +230,7 @@ async def run_pattern_bc_turn(
     Raises:
         PatternBcTurnError: When the loop emits an :class:`~monkeybot.core.runtime.events.Error` event.
     """
+    cfg = get_config_store().current_or_none()
     ctx = await build_context(
         session_id,
         request_id,
@@ -244,7 +242,8 @@ async def run_pattern_bc_turn(
         include_task_tool=False,
         sse_bus=None,
         workspace_root=workspace_root,
-        context_window_tokens=_env_context_window_tokens(),
+        context_window_tokens=context_window_tokens(cfg),
+        config=cfg,
     )
 
     run_cmds, run_paths = _resolve_run_command_allowlists()
@@ -257,6 +256,7 @@ async def run_pattern_bc_turn(
         mcp=deps.mcp,
         run_command_allowed_commands=run_cmds,
         run_command_allowed_path_prefixes=run_paths,
+        config=cfg,
     )
 
     parts: list[str] = []

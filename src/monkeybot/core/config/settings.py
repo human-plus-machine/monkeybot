@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from monkeybot.core.config.yaml_loader import load_monkeybot_yaml_dict
 from monkeybot.core.llm.provider import Provider
@@ -18,6 +18,9 @@ from monkeybot.providers.openai import OpenAIProvider
 from monkeybot.providers.openrouter import OpenRouterProvider
 from monkeybot.providers.sampling import resolve_model_sampling
 from monkeybot.providers.vertex_claude import VertexClaudeProvider
+
+if TYPE_CHECKING:
+    from monkeybot.core.config.snapshot import RuntimeConfig
 
 logger = logging.getLogger(__name__)
 
@@ -101,14 +104,21 @@ class ProviderConfig:
     model: str
 
 
-def _resolve_gcp_project_id() -> str:
+def _resolve_gcp_project_id(config: RuntimeConfig | None = None) -> str:
     """GCP project for Vertex providers."""
-    from monkeybot.core.config.snapshot import current_env
+    from monkeybot.core.config.snapshot import env_value
 
+    if config is not None:
+        for candidate in (
+            config.model.vertex_project_id,
+            config.model.anthropic_vertex_project_id,
+        ):
+            if candidate and candidate.strip():
+                return candidate.strip()
     return (
         (os.getenv("GCP_PROJECT_ID") or "").strip()
-        or current_env("VERTEX_AI_PROJECT_ID").strip()
-        or current_env("ANTHROPIC_VERTEX_PROJECT_ID").strip()
+        or env_value(config, "VERTEX_AI_PROJECT_ID").strip()
+        or env_value(config, "ANTHROPIC_VERTEX_PROJECT_ID").strip()
         or (os.getenv("GOOGLE_CLOUD_PROJECT") or "").strip()
     )
 
@@ -119,24 +129,32 @@ def get_provider_config(
     temperature: float | None = None,
     max_tokens: int | None = None,
     thinking_budget: int | None = None,
+    config: RuntimeConfig | None = None,
 ) -> ProviderConfig:
-    """Resolve a Provider and model id from environment or explicit parameters."""
-    from monkeybot.core.config.snapshot import current_env
+    """Resolve a Provider and model id from a pinned snapshot, environment, or explicit parameters."""
+    from monkeybot.core.config.snapshot import env_value
 
-    raw_provider = str(provider or current_env("MODEL_PROVIDER") or "google_vertexai")
+    raw_provider = str(
+        provider or env_value(config, "MODEL_PROVIDER") or "google_vertexai"
+    )
     provider_key = normalize_model_provider(raw_provider)
     if provider_key == "fake":
         raise ValueError(
             "MODEL_PROVIDER=fake is for gateway/tests only; inject ScriptedFakeProvider directly "
             "or use the gateway fake provider path."
         )
-    resolved_model = str(model_name or current_env("MODEL_NAME") or "gemini-2.5-flash")
-    sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens)
-    thinking_budget = (
-        thinking_budget
-        if thinking_budget is not None
-        else int(current_env("MODEL_THINKING_BUDGET", "-1"))
+    resolved_model = str(
+        model_name or env_value(config, "MODEL_NAME") or "gemini-2.5-flash"
     )
+    sampling = resolve_model_sampling(
+        temperature=temperature, max_tokens=max_tokens, config=config
+    )
+    if thinking_budget is not None:
+        resolved_thinking = thinking_budget
+    else:
+        raw_thinking = env_value(config, "MODEL_THINKING_BUDGET", "-1")
+        resolved_thinking = int(raw_thinking)
+    thinking_budget = resolved_thinking
     if provider_key == "google_vertexai":
         return ProviderConfig(
             GeminiProvider(
@@ -179,19 +197,21 @@ def get_provider_config(
             resolved_model,
         )
     if provider_key == "vertex_anthropic":
-        project = _resolve_gcp_project_id()
+        project = _resolve_gcp_project_id(config)
         if not project:
             raise ValueError(
                 "vertex_anthropic provider requires a GCP project. "
                 "Set GCP_PROJECT_ID, VERTEX_AI_PROJECT_ID, ANTHROPIC_VERTEX_PROJECT_ID, "
                 "or GOOGLE_CLOUD_PROJECT (or gcp.project_id in monkeybot.yaml)."
             )
-        if current_env("VERTEX_AI_LOCATION"):
+        if env_value(config, "VERTEX_AI_LOCATION"):
             logger.warning(
                 "VERTEX_AI_LOCATION is no longer read for vertex_anthropic; "
                 "set ANTHROPIC_VERTEX_REGION instead"
             )
-        region = (current_env("ANTHROPIC_VERTEX_REGION") or "us-east5").strip() or "us-east5"
+        region = (
+            env_value(config, "ANTHROPIC_VERTEX_REGION", "us-east5").strip() or "us-east5"
+        )
         return ProviderConfig(
             VertexClaudeProvider(
                 project_id=project,
@@ -278,9 +298,7 @@ def _parse_subagent_entries(raw_entries: Any) -> list[SubagentConfig]:
                 name=entry["name"],
                 description=entry["description"],
                 skills=skills,
-                agent_md=agent_md.strip()
-                if isinstance(agent_md, str) and agent_md.strip()
-                else None,
+                agent_md=agent_md.strip() if isinstance(agent_md, str) and agent_md.strip() else None,
                 model=entry.get("model"),
                 vertex_location=vloc,
             )
@@ -299,7 +317,9 @@ def _subagents_section(doc: dict[str, Any]) -> dict[str, Any]:
             "a bare list is no longer supported"
         )
     if not isinstance(section, dict):
-        raise ConfigError(f"subagents must be a mapping, got {type(section).__name__}")
+        raise ConfigError(
+            f"subagents must be a mapping, got {type(section).__name__}"
+        )
     return section
 
 
@@ -317,14 +337,18 @@ def subagent_settings_from_section(section: dict[str, Any]) -> SubagentSettings:
     raw_timeout = section.get("timeout_sec")
     if raw_timeout is not None:
         if isinstance(raw_timeout, bool) or not isinstance(raw_timeout, (int, float)):
-            raise ConfigError(f"subagents.timeout_sec must be a number, got {raw_timeout!r}")
+            raise ConfigError(
+                f"subagents.timeout_sec must be a number, got {raw_timeout!r}"
+            )
         timeout = max(1.0, float(raw_timeout))
 
     max_turns = _DEFAULT_SUBAGENT_SETTINGS.max_turns
     raw_turns = section.get("max_turns")
     if raw_turns is not None:
         if isinstance(raw_turns, bool) or not isinstance(raw_turns, int):
-            raise ConfigError(f"subagents.max_turns must be an integer, got {raw_turns!r}")
+            raise ConfigError(
+                f"subagents.max_turns must be an integer, got {raw_turns!r}"
+            )
         max_turns = max(1, raw_turns)
 
     vertex_raw = section.get("vertex_google_search")
@@ -350,8 +374,20 @@ def subagent_settings_from_section(section: dict[str, Any]) -> SubagentSettings:
     )
 
 
-def get_subagent_settings(config_path: str | None = None) -> SubagentSettings:
-    """Global ``task`` defaults from ``subagents:`` in monkeybot.yaml (config-file only)."""
+def get_subagent_settings(
+    config_path: str | None = None,
+    *,
+    config: RuntimeConfig | None = None,
+) -> SubagentSettings:
+    """Global ``task`` defaults from ``subagents:`` in monkeybot.yaml.
+
+    When ``config`` (a pinned ``RuntimeConfig`` snapshot) is given, its
+    ``subagent_settings`` field is returned instead of re-reading the YAML
+    file, so an in-flight turn spawning a subagent stays on the revision it
+    was pinned to rather than picking up a file edit mid-turn.
+    """
+    if config is not None:
+        return config.subagent_settings
     _, doc = load_monkeybot_yaml_dict(config_path)
     return subagent_settings_from_section(_subagents_section(doc))
 
@@ -434,3 +470,4 @@ def subagent_vertex_google_search_from_config(config_path: str | None = None) ->
     when absent. Config-file only — not exposed via environment variables.
     """
     return get_subagent_settings(config_path).vertex_google_search
+

@@ -7,7 +7,7 @@ import os
 from collections.abc import Sequence
 from typing import Any
 
-from monkeybot.core.config.snapshot import current_env
+from monkeybot.core.config.snapshot import RuntimeConfig, env_value, get_config_store
 from monkeybot.core.context import (
     LOOPS_REGISTRY_MUTATING_TOOLS,
     MCP_REGISTRY_MUTATING_TOOLS,
@@ -134,15 +134,19 @@ async def _await_user_response_any(
     pending_key: str,
     *,
     timeout_sec: float | None = None,
+    config: RuntimeConfig | None = None,
 ) -> dict[str, Any]:
     """Wait for POST/resolve on ``fut`` with optional bus timeout bookkeeping.
 
     Used by the gateway :func:`_await_user_response` and the inspector confirm path.
+    ``config`` is the turn-pinned snapshot; when omitted, the process snapshot
+    (else ``os.environ``) is used.
     """
+    snap = config if config is not None else get_config_store().current_or_none()
     t = (
         timeout_sec
         if timeout_sec is not None
-        else float(current_env("PENDING_RESPONSE_TIMEOUT_SEC", "300"))
+        else float(env_value(snap, "PENDING_RESPONSE_TIMEOUT_SEC", "300"))
     )
     try:
         return await asyncio.wait_for(asyncio.shield(fut), timeout=t)

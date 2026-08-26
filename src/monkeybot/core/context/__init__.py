@@ -8,7 +8,7 @@ import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 import yaml
 
@@ -22,6 +22,9 @@ from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.tools.workspace_service import AGENT_READ_DEFAULT_LINES
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.todo_list.store import TodoListStore
+
+if TYPE_CHECKING:
+    from monkeybot.core.config.snapshot import RuntimeConfig
 
 
 @runtime_checkable
@@ -136,6 +139,9 @@ class TurnContext:
     to ``permission.remember_always_approval`` as its ``persist`` kwarg by
     ``tool_dispatch.py`` / ``realtime_loop.py``. None when no such hook is wired
     (the default for every deployment that doesn't enable computer tools)."""
+    config: RuntimeConfig | None = None
+    """Pinned ``RuntimeConfig`` for this turn. Mid-turn store reloads must not
+    change this object; ``None`` when the caller did not pin a snapshot."""
 
 
 _log = logging.getLogger(__name__)
@@ -853,6 +859,7 @@ async def build_context(
     loops_advertised: bool = False,
     todo_store: TodoListStore | None = None,
     approvals_persist: Callable[[str, str], bool] | None = None,
+    config: RuntimeConfig | None = None,
 ) -> TurnContext:
     """Assemble a TurnContext from filesystem paths and the MCP client snapshot.
 
@@ -886,6 +893,8 @@ async def build_context(
             ``## Todo list`` injection. Pass the same store to ``TodoListTool`` via ``extra_tools``.
         approvals_persist: Optional hook to durably persist "Always allow" approvals
             beyond the in-memory session cache; see ``TurnContext.approvals_persist``.
+        config: Optional pinned ``RuntimeConfig`` for this turn. When omitted the
+            turn is not snapshot-aware (tests / callers that only need env).
 
     Returns:
         Frozen :class:`TurnContext`.
@@ -938,6 +947,7 @@ async def build_context(
         scheduled_loops_available=scheduled_loops_available,
         todo_store=todo_store,
         approvals_persist=approvals_persist,
+        config=config,
     )
 
 

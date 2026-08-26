@@ -10,7 +10,7 @@ from typing import cast
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.attachments.store import AttachmentStore
-from monkeybot.core.config.snapshot import current_env
+from monkeybot.core.config.snapshot import env_value
 from monkeybot.core.context import (
     TurnContext,
     refresh_tools_after_loops_change,
@@ -102,7 +102,9 @@ def _tool_outcome(
                             budget=budget,
                             pressure_tier=None,
                         )
-                        shaped_blocks.append(Text(text=shaped) if shaped != block.text else block)
+                        shaped_blocks.append(
+                            Text(text=shaped) if shaped != block.text else block
+                        )
                     else:
                         shaped_blocks.append(block)
                 response_blocks = shaped_blocks
@@ -237,7 +239,9 @@ async def _resolve_inspector_decision(
     ``asyncio.CancelledError`` from the confirm wait so the gate can distinguish
     Stop (settle/abort) from turn-task cancellation (re-raise).
     """
-    inspector_call = InspectorToolCall(call_id=call.call_id, name=call.name, args=dict(call.args))
+    inspector_call = InspectorToolCall(
+        call_id=call.call_id, name=call.name, args=dict(call.args)
+    )
     for insp in inspectors:
         decision = await insp.check(inspector_call, ctx)
         match decision.kind:
@@ -261,7 +265,8 @@ async def _resolve_inspector_decision(
                 if ctx.sse_bus is None:
                     outcome.allowed = False
                     outcome.denial_message = (
-                        decision.message or "Confirmation required but no SSE session is available"
+                        decision.message
+                        or "Confirmation required but no SSE session is available"
                     )
                     return
                 bus = ctx.sse_bus
@@ -273,10 +278,15 @@ async def _resolve_inspector_decision(
                     arguments=dict(call.args),
                     prompt=decision.message,
                 )
-                payload = await _await_user_response_any(bus, fut, call.call_id, timeout_sec=None)
+                timeout_sec = float(
+                    env_value(ctx.config, "PENDING_RESPONSE_TIMEOUT_SEC", "300")
+                )
+                payload = await _await_user_response_any(
+                    bus, fut, call.call_id, timeout_sec=timeout_sec, config=ctx.config
+                )
                 if payload.get("_timeout"):
                     outcome.allowed = False
-                    to = int(float(current_env("PENDING_RESPONSE_TIMEOUT_SEC", "300")))
+                    to = int(timeout_sec)
                     outcome.denial_message = f"user did not respond within {to}s"
                     return
                 if payload.get("approved"):
@@ -312,8 +322,9 @@ async def _resolve_inspector_decision(
                     outcome.allowed = False
                     reason_raw = payload.get("reason")
                     outcome.denial_message = (
-                        reason_raw if isinstance(reason_raw, str) else None
-                    ) or "denied by user"
+                        (reason_raw if isinstance(reason_raw, str) else None)
+                        or "denied by user"
+                    )
                     logger.debug(
                         "tool inspector confirm %s",
                         kv(
@@ -368,7 +379,9 @@ async def _gate_chunk_calls(
                 parse_error=call.parse_error,
                 call_id=call.call_id,
             )
-            result_evt, tool_resp = finish_tool(call, ToolExecutionResult.err(call.parse_error))
+            result_evt, tool_resp = finish_tool(
+                call, ToolExecutionResult.err(call.parse_error)
+            )
             yield result_evt
             chunk_responses.append(tool_resp)
             continue
@@ -413,7 +426,9 @@ async def _gate_chunk_calls(
                 args=dict(call.args),
                 call_id=call.call_id,
             )
-            result_evt, tool_resp = finish_tool(call, ToolExecutionResult.err(msg))
+            result_evt, tool_resp = finish_tool(
+                call, ToolExecutionResult.err(msg)
+            )
             yield result_evt
             chunk_responses.append(tool_resp)
             continue
@@ -489,7 +504,9 @@ async def _execute_one_tool_call(
             )
             tool_result = ToolExecutionResult.err(str(exc))
         result_summary = (
-            _blocks_to_sse_summary(tool_result.blocks) if tool_result.error is None else None
+            _blocks_to_sse_summary(tool_result.blocks)
+            if tool_result.error is None
+            else None
         )
         record_tool_outcome(result_summary, tool_result.error)
         await _fire_hook(
@@ -671,8 +688,12 @@ async def _execute_allowed_chunk(
     """
     # ToolCallStarted already published via async-gen consumer;
     # PRE_TOOL is awaited inside _execute_one_tool_call.
-    parallel_chunk = all(c.name == "task" for c in allowed_exec) or (
-        len(allowed_exec) > 1 and all(c.name in safe_names for c in allowed_exec)
+    parallel_chunk = (
+        all(c.name == "task" for c in allowed_exec)
+        or (
+            len(allowed_exec) > 1
+            and all(c.name in safe_names for c in allowed_exec)
+        )
     )
     dispatch_mode = "parallel" if parallel_chunk else "serial"
     logger.debug(
@@ -780,7 +801,9 @@ async def _post_batch_budget_and_registry(
                 kv(request_id=ctx.request_id, thread_id=ctx.thread_id),
                 exc_info=True,
             )
-        usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, budget_used)
+        usage.estimated_prompt_tokens = max(
+            usage.estimated_prompt_tokens, budget_used
+        )
         budgeter = ContextBudgeter.for_window(
             window_tokens=ctx.context_window_tokens,
             used_tokens=budget_used,
@@ -804,7 +827,9 @@ async def _post_batch_budget_and_registry(
                 "MCP registry mutated but tool executor has no mcp client %s",
                 kv(request_id=ctx.request_id, thread_id=ctx.thread_id),
             )
-            raise RuntimeError("tool executor missing mcp client after MCP registry mutation")
+            raise RuntimeError(
+                "tool executor missing mcp client after MCP registry mutation"
+            )
         ctx = refresh_tools_after_mcp_change(ctx, mcp_client)
         state.ctx = ctx
         state.tools_dirty = True
@@ -852,7 +877,11 @@ def _fill_abort_tool_responses(
     if pending_chunk_responses:
         all_tool_responses.extend(pending_chunk_responses)
 
-    responded_ids = {block.id for block in all_tool_responses if isinstance(block, ToolResponse)}
+    responded_ids = {
+        block.id
+        for block in all_tool_responses
+        if isinstance(block, ToolResponse)
+    }
     completed_count = len(responded_ids)
     events: list[ToolCallResult] = []
     for call in ordered:
@@ -937,7 +966,9 @@ async def dispatch_tool_batch(
         ):
             yield evt
 
-    for chunk in () if reject_batch else _chunk_tool_calls(ordered, parallel_safe=safe_names):
+    for chunk in (() if reject_batch else _chunk_tool_calls(
+        ordered, parallel_safe=safe_names
+    )):
         if cancelled is not None and cancelled.is_set():
             yield Error(request_id=ctx.request_id, error="Request cancelled")
             state.aborted = True

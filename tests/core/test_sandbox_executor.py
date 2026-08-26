@@ -27,6 +27,7 @@ from monkeybot.core.tools.terminal import ExecutionResult, SecurityError
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_execution(exit_code=0, stdout_text="", stderr_text=""):
     """Build a mock opensandbox execution result."""
     stdout_entry = MagicMock()
@@ -120,10 +121,19 @@ def _opensandbox_sys_modules(osb):
 # SandboxConfig.from_env()
 # ---------------------------------------------------------------------------
 
+
 class TestSandboxConfigFromEnv:
     def test_defaults_when_no_env_vars_set(self, monkeypatch):
-        for key in ("SANDBOX_ENABLED", "SANDBOX_SERVER_URL", "SANDBOX_IMAGE",
-                    "SANDBOX_API_KEY", "SANDBOX_AUTH_TOKEN", "SANDBOX_TTL_SECONDS", "SANDBOX_USE_SERVER_PROXY", "SANDBOX_SHARED_FILESYSTEM"):
+        for key in (
+            "SANDBOX_ENABLED",
+            "SANDBOX_SERVER_URL",
+            "SANDBOX_IMAGE",
+            "SANDBOX_API_KEY",
+            "SANDBOX_AUTH_TOKEN",
+            "SANDBOX_TTL_SECONDS",
+            "SANDBOX_USE_SERVER_PROXY",
+            "SANDBOX_SHARED_FILESYSTEM",
+        ):
             monkeypatch.delenv(key, raising=False)
 
         cfg = SandboxConfig.from_env()
@@ -137,8 +147,13 @@ class TestSandboxConfigFromEnv:
         assert cfg.shared_filesystem is True
 
     def test_use_server_proxy_false_when_env_disabled(self, monkeypatch):
-        for key in ("SANDBOX_ENABLED", "SANDBOX_SERVER_URL", "SANDBOX_IMAGE",
-                    "SANDBOX_API_KEY", "SANDBOX_TTL_SECONDS"):
+        for key in (
+            "SANDBOX_ENABLED",
+            "SANDBOX_SERVER_URL",
+            "SANDBOX_IMAGE",
+            "SANDBOX_API_KEY",
+            "SANDBOX_TTL_SECONDS",
+        ):
             monkeypatch.delenv(key, raising=False)
         monkeypatch.setenv("SANDBOX_USE_SERVER_PROXY", "false")
         assert SandboxConfig.from_env().use_server_proxy is False
@@ -199,23 +214,46 @@ class TestSandboxConfigFromEnv:
         with pytest.raises(ValueError, match="SANDBOX_TTL_SECONDS"):
             SandboxConfig.from_env()
 
+    def test_from_env_reads_pinned_config_not_process_snapshot(self, tmp_path, monkeypatch):
+        from monkeybot.core.config import reset_runtime_env_state_for_tests
+        from monkeybot.core.config.snapshot import build_runtime_config
+
+        reset_runtime_env_state_for_tests()
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("SANDBOX_ENABLED", raising=False)
+        cfg_dir = tmp_path / "monkeybot_config"
+        cfg_dir.mkdir()
+        (cfg_dir / "monkeybot.yaml").write_text(
+            "sandbox:\n  enabled: true\n  image: python:3.11\n",
+            encoding="utf-8",
+        )
+        pinned = build_runtime_config(agent_root=tmp_path)
+        monkeypatch.setenv("SANDBOX_ENABLED", "false")
+        monkeypatch.setenv("SANDBOX_IMAGE", "python:3.12")
+        cfg = SandboxConfig.from_env(pinned)
+        assert cfg.enabled is True
+        assert cfg.image == "python:3.11"
+        reset_runtime_env_state_for_tests()
+
 
 # ---------------------------------------------------------------------------
 # SandboxExecutor — security: allowlist before sandbox creation
 # ---------------------------------------------------------------------------
 
+
 class TestSandboxExecutorAllowlist:
     def _executor(self, tmp_path):
         cfg = SandboxConfig(
-            enabled=True, server_url="http://localhost:8080",
-            api_key=None, image="python:3.12", ttl_seconds=1800,
+            enabled=True,
+            server_url="http://localhost:8080",
+            api_key=None,
+            image="python:3.12",
+            ttl_seconds=1800,
         )
         return SandboxExecutor(cfg, tmp_path)
 
     @pytest.mark.asyncio
-    async def test_blocked_command_raises_security_error_before_sandbox_create(
-        self, tmp_path
-    ):
+    async def test_blocked_command_raises_security_error_before_sandbox_create(self, tmp_path):
         executor = self._executor(tmp_path)
         mock_cls, _ = _make_create_mock()
         osb = _make_opensandbox_module(mock_cls)
@@ -280,11 +318,15 @@ class TestSandboxExecutorAllowlist:
 # SandboxExecutor — lazy creation and sandbox reuse
 # ---------------------------------------------------------------------------
 
+
 class TestSandboxExecutorLazyCreation:
     def _executor(self, tmp_path):
         cfg = SandboxConfig(
-            enabled=True, server_url="http://localhost:8080",
-            api_key=None, image="python:3.12", ttl_seconds=1800,
+            enabled=True,
+            server_url="http://localhost:8080",
+            api_key=None,
+            image="python:3.12",
+            ttl_seconds=1800,
         )
         return SandboxExecutor(cfg, tmp_path)
 
@@ -464,36 +506,48 @@ class TestSandboxExecutorLayoutMounts:
         input_file = workspace / "input.txt"
 
         assert executor._remote_requests_mounted_path(
-            ["-c", f'python -c \'open("{input_file}")\''], None
+            ["-c", f"python -c 'open(\"{input_file}\")'"], None
         )
-        assert executor._remote_requests_mounted_path(
-            ["-c", "cat ./skills/browser/SKILL.md"], None
-        ) is False
-        assert executor._remote_requests_mounted_path(
-            ["-c", f"cat {workspace}-extra/input.txt"], None
-        ) is False
+        assert (
+            executor._remote_requests_mounted_path(["-c", "cat ./skills/browser/SKILL.md"], None)
+            is False
+        )
+        assert (
+            executor._remote_requests_mounted_path(["-c", f"cat {workspace}-extra/input.txt"], None)
+            is False
+        )
 
 
 # ---------------------------------------------------------------------------
 # SandboxExecutor — SDK not installed
 # ---------------------------------------------------------------------------
 
+
 class TestSandboxExecutorSdkNotInstalled:
     @pytest.mark.asyncio
     async def test_missing_sdk_raises_runtime_error_with_install_hint(self, tmp_path):
         cfg = SandboxConfig(
-            enabled=True, server_url="http://localhost:8080",
-            api_key=None, image="python:3.12", ttl_seconds=1800,
+            enabled=True,
+            server_url="http://localhost:8080",
+            api_key=None,
+            image="python:3.12",
+            ttl_seconds=1800,
         )
         executor = SandboxExecutor(cfg, tmp_path)
 
         # Simulate opensandbox not being installed (all sub-modules also absent)
-        with patch.dict(sys.modules, {
-            "opensandbox": None,
-            "opensandbox.config": None,
-            "opensandbox.models.sandboxes": None,
-            "opensandbox.models.execd": None,
-        }), pytest.raises(RuntimeError) as exc_info:
+        with (
+            patch.dict(
+                sys.modules,
+                {
+                    "opensandbox": None,
+                    "opensandbox.config": None,
+                    "opensandbox.models.sandboxes": None,
+                    "opensandbox.models.execd": None,
+                },
+            ),
+            pytest.raises(RuntimeError) as exc_info,
+        ):
             await executor.execute("echo", ["hello"])
 
         msg = str(exc_info.value)
@@ -505,11 +559,15 @@ class TestSandboxExecutorSdkNotInstalled:
 # SandboxExecutor — execution result mapping
 # ---------------------------------------------------------------------------
 
+
 class TestSandboxExecutorResultMapping:
     def _executor(self, tmp_path):
         cfg = SandboxConfig(
-            enabled=True, server_url="http://localhost:8080",
-            api_key=None, image="python:3.12", ttl_seconds=1800,
+            enabled=True,
+            server_url="http://localhost:8080",
+            api_key=None,
+            image="python:3.12",
+            ttl_seconds=1800,
         )
         return SandboxExecutor(cfg, tmp_path)
 
@@ -587,11 +645,15 @@ class TestSandboxExecutorResultMapping:
 # SandboxExecutor — cleanup / aclose()
 # ---------------------------------------------------------------------------
 
+
 class TestSandboxExecutorCleanup:
     def _executor(self, tmp_path):
         cfg = SandboxConfig(
-            enabled=True, server_url="http://localhost:8080",
-            api_key=None, image="python:3.12", ttl_seconds=1800,
+            enabled=True,
+            server_url="http://localhost:8080",
+            api_key=None,
+            image="python:3.12",
+            ttl_seconds=1800,
         )
         return SandboxExecutor(cfg, tmp_path)
 
@@ -646,6 +708,7 @@ class TestSandboxExecutorCleanup:
 # SandboxExecutor — workspace mount
 # ---------------------------------------------------------------------------
 
+
 class TestSandboxExecutorWorkspaceMount:
     def _patch_modules(self, mock_cls):
         osb = _make_opensandbox_module(mock_cls)
@@ -656,8 +719,11 @@ class TestSandboxExecutorWorkspaceMount:
         monkeypatch.setenv("MEMPALACE_PALACE_PATH", str(tmp_path / "memory" / "mempalace"))
         abs_path = str(tmp_path.resolve())
         cfg = SandboxConfig(
-            enabled=True, server_url="http://localhost:8080",
-            api_key=None, image="python:3.12", ttl_seconds=1800,
+            enabled=True,
+            server_url="http://localhost:8080",
+            api_key=None,
+            image="python:3.12",
+            ttl_seconds=1800,
         )
         executor = SandboxExecutor(cfg, tmp_path)
         mock_cls, _ = _make_create_mock()
@@ -679,8 +745,11 @@ class TestSandboxExecutorWorkspaceMount:
         monkeypatch.delenv("MEMPALACE_PALACE_PATH", raising=False)
         abs_path = str(tmp_path.resolve())
         cfg = SandboxConfig(
-            enabled=True, server_url="http://localhost:8080",
-            api_key=None, image="python:3.12", ttl_seconds=1800,
+            enabled=True,
+            server_url="http://localhost:8080",
+            api_key=None,
+            image="python:3.12",
+            ttl_seconds=1800,
         )
         executor = SandboxExecutor(cfg, tmp_path)
         mock_cls, _ = _make_create_mock()
@@ -709,8 +778,11 @@ class TestSandboxExecutorWorkspaceMount:
         monkeypatch.setenv("VERTEX_AI_PROJECT_ID", "my-project")
 
         cfg = SandboxConfig(
-            enabled=True, server_url="http://localhost:8080",
-            api_key=None, image="python:3.12", ttl_seconds=1800,
+            enabled=True,
+            server_url="http://localhost:8080",
+            api_key=None,
+            image="python:3.12",
+            ttl_seconds=1800,
         )
         executor = SandboxExecutor(cfg, tmp_path)
         mock_cls, _ = _make_create_mock()
@@ -737,8 +809,11 @@ class TestSandboxExecutorWorkspaceMount:
         # would cause all file operations to fail silently.
         monkeypatch.chdir(tmp_path)
         cfg = SandboxConfig(
-            enabled=True, server_url="http://localhost:8080",
-            api_key=None, image="python:3.12", ttl_seconds=1800,
+            enabled=True,
+            server_url="http://localhost:8080",
+            api_key=None,
+            image="python:3.12",
+            ttl_seconds=1800,
         )
         executor = SandboxExecutor(cfg, Path("."))
         mock_cls, _ = _make_create_mock()
@@ -756,8 +831,11 @@ class TestSandboxExecutorWorkspaceMount:
         # SANDBOX_SERVER_URL must reach the SDK via ConnectionConfig(domain=...).
         # This was previously broken — server_url was stored but never forwarded.
         cfg = SandboxConfig(
-            enabled=True, server_url="http://custom-server:9999",
-            api_key=None, image="python:3.12", ttl_seconds=1800,
+            enabled=True,
+            server_url="http://custom-server:9999",
+            api_key=None,
+            image="python:3.12",
+            ttl_seconds=1800,
         )
         executor = SandboxExecutor(cfg, tmp_path)
         mock_cls, _ = _make_create_mock()
@@ -776,8 +854,11 @@ class TestSandboxExecutorWorkspaceMount:
     @pytest.mark.asyncio
     async def test_https_server_url_forwarded_correctly(self, tmp_path):
         cfg = SandboxConfig(
-            enabled=True, server_url="https://secure-server:443",
-            api_key=None, image="python:3.12", ttl_seconds=1800,
+            enabled=True,
+            server_url="https://secure-server:443",
+            api_key=None,
+            image="python:3.12",
+            ttl_seconds=1800,
         )
         executor = SandboxExecutor(cfg, tmp_path)
         mock_cls, _ = _make_create_mock()
@@ -794,8 +875,11 @@ class TestSandboxExecutorWorkspaceMount:
     @pytest.mark.asyncio
     async def test_invalid_server_url_raises_value_error(self, tmp_path):
         cfg = SandboxConfig(
-            enabled=True, server_url="not-a-url",
-            api_key=None, image="python:3.12", ttl_seconds=1800,
+            enabled=True,
+            server_url="not-a-url",
+            api_key=None,
+            image="python:3.12",
+            ttl_seconds=1800,
         )
         executor = SandboxExecutor(cfg, tmp_path)
         mock_cls, _ = _make_create_mock()
@@ -808,8 +892,11 @@ class TestSandboxExecutorWorkspaceMount:
     @pytest.mark.asyncio
     async def test_api_key_passed_via_connection_config(self, tmp_path):
         cfg = SandboxConfig(
-            enabled=True, server_url="http://localhost:8080",
-            api_key="mykey", image="python:3.12", ttl_seconds=1800,
+            enabled=True,
+            server_url="http://localhost:8080",
+            api_key="mykey",
+            image="python:3.12",
+            ttl_seconds=1800,
         )
         executor = SandboxExecutor(cfg, tmp_path)
         mock_cls, _ = _make_create_mock()
@@ -823,17 +910,18 @@ class TestSandboxExecutorWorkspaceMount:
         assert cc_kwargs.get("use_server_proxy") is True
 
     @pytest.mark.asyncio
-    async def test_cwd_forwarded_as_working_directory_in_shared_filesystem_mode(
-        self, tmp_path
-    ):
+    async def test_cwd_forwarded_as_working_directory_in_shared_filesystem_mode(self, tmp_path):
         # Only the remote compute-only branch (working_directory == "/tmp") was
         # covered before; the default shared-filesystem branch that forwards a
         # resolved cwd straight through to RunCommandOpts had zero coverage.
         subdir = tmp_path / "subdir"
         subdir.mkdir()
         cfg = SandboxConfig(
-            enabled=True, server_url="http://localhost:8080",
-            api_key=None, image="python:3.12", ttl_seconds=1800,
+            enabled=True,
+            server_url="http://localhost:8080",
+            api_key=None,
+            image="python:3.12",
+            ttl_seconds=1800,
         )
         executor = SandboxExecutor(cfg, tmp_path)
         mock_cls, sandbox = _make_create_mock()
@@ -848,8 +936,11 @@ class TestSandboxExecutorWorkspaceMount:
     @pytest.mark.asyncio
     async def test_api_key_none_when_not_set(self, tmp_path):
         cfg = SandboxConfig(
-            enabled=True, server_url="http://localhost:8080",
-            api_key=None, image="python:3.12", ttl_seconds=1800,
+            enabled=True,
+            server_url="http://localhost:8080",
+            api_key=None,
+            image="python:3.12",
+            ttl_seconds=1800,
         )
         executor = SandboxExecutor(cfg, tmp_path)
         mock_cls, _ = _make_create_mock()

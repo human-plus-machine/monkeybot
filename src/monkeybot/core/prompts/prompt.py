@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from datetime import date
 
 from monkeybot.core.attachments.catalog import AttachmentRecord
+from monkeybot.core.config.snapshot import env_flag, env_value
 from monkeybot.core.context import TurnContext
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.prompts.harness_prompt import (
@@ -24,6 +25,8 @@ from monkeybot.core.types.content_blocks import Text
 
 # Cap injected user text so long pastes do not dominate the context window.
 _MAX_CURRENT_REQUEST_CHARS = 8000
+_DEFAULT_MEMORY_WINDOW_LINES = 12
+_CHARS_PER_TOKEN_ESTIMATE = 4
 
 
 def _user_text_flat(m: Message) -> str:
@@ -105,8 +108,57 @@ def _current_date_block() -> str:
     return f"{CURRENT_DATE_HEADING}{date.today().isoformat()}"
 
 
+def _positive_int(raw: str | None, default: int) -> int:
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return max(0, int(raw.strip()))
+    except ValueError:
+        return default
+
+
+def _curated_memory_lines(ctx: TurnContext) -> list[str]:
+    """Apply snapshot curation knobs to the injected memory index.
+
+    No snapshot (tests / callers that did not pin config) leaves the index
+    unchanged. Subagents pass ``context_curation_enabled=False`` to skip.
+    """
+    lines = list(ctx.memory_index)
+    if not ctx.context_curation_enabled:
+        return lines
+    cfg = ctx.config
+    if cfg is None:
+        return lines
+    if not env_flag(cfg, "CONTEXT_CURATION_ENABLED", default=True):
+        return lines
+    cap = _positive_int(env_value(cfg, "MEMORY_INDEX_CAP", ""), 0)
+    if cap:
+        lines = lines[-cap:]
+    window = _positive_int(
+        env_value(cfg, "CONTEXT_CURATION_MEMORY_WINDOW_LINES", ""),
+        _DEFAULT_MEMORY_WINDOW_LINES,
+    )
+    threshold = _positive_int(
+        env_value(cfg, "CONTEXT_CURATION_MEMORY_TOKEN_THRESHOLD", ""), 0
+    )
+    over_window = window > 0 and len(lines) > window
+    text = "\n".join(lines)
+    over_tokens = (
+        threshold > 0 and (len(text) // _CHARS_PER_TOKEN_ESTIMATE) > threshold
+    )
+    if over_window or over_tokens:
+        if window > 0:
+            lines = lines[-window:]
+        if threshold > 0:
+            while lines and (
+                len("\n".join(lines)) // _CHARS_PER_TOKEN_ESTIMATE
+            ) > threshold:
+                lines = lines[1:]
+    return lines
+
+
 def _memory_block(ctx: TurnContext) -> str:
-    mem_lines = list(ctx.memory_index)
+    mem_lines = _curated_memory_lines(ctx)
     memory_text = "\n".join(mem_lines) if mem_lines else ""
     mem_block = f"{MEMORY_INDEX_HEADING}{memory_text}" if memory_text else ""
     return mem_block
@@ -133,9 +185,9 @@ def _harness_text(ctx: TurnContext) -> str:
         memory_on=ctx.memory is not None,
         workspace_root=str(ctx.workspace_root) if ctx.workspace_root is not None else "(not set)",
         memory_storage_uri=ctx.memory.uri if ctx.memory is not None else "(not set)",
-        run_command_opensandbox=SandboxConfig.from_env().enabled,
+        run_command_opensandbox=SandboxConfig.from_env(ctx.config).enabled,
         subagent_personas=ctx.subagent_personas,
-        emission_style=emission_style_terse_from_env(),
+        emission_style=emission_style_terse_from_env(ctx.config),
         catalog_mcp_servers=ctx.catalog_mcp_servers,
     )
 
