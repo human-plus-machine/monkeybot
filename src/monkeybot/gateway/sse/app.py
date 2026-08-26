@@ -94,7 +94,7 @@ class _SessionBusEventPublisher:
 
 
 @dataclass
-class _GatewayDeps:
+class GatewayRuntime:
     """Process-level deps populated on startup (mutable module singleton)."""
 
     mcp: MCPClient | None = None
@@ -111,8 +111,66 @@ class _GatewayDeps:
     computer_tools: list[Any] = field(default_factory=list)
     computer_approvals_persist: Callable[[str, str], bool] | None = None
 
+    def build_inspectors(self, layout: AgentLayout) -> None:
+        """Rebuild command-tier, rules, permission, and computer-tool inspectors."""
+        tiers_path = layout.command_allowlist_path
+        self.run_command_allowed_commands = None
+        self.run_command_allowed_path_prefixes = None
+        inspectors: list[ToolInspector] = []
+        try:
+            tier_insp = CommandTierInspector(tiers_path)
+            inspectors.append(tier_insp)
+            self.run_command_allowed_commands = list(tier_insp.allowed_commands)
+            self.run_command_allowed_path_prefixes = list(tier_insp.allowed_path_prefixes)
+        except FileNotFoundError:
+            logger.info("command tiers missing (%s); allowing all tool calls", tiers_path)
+        except Exception as exc:
+            logger.exception("command tier load failed: %s", exc)
 
-_deps = _GatewayDeps()
+        denied = _tool_denied_patterns()
+        if denied:
+            inspectors.append(RulesInspector(denied))
+
+        perm_path = layout.permission_config_path
+        if should_enable_computer_tools():
+            self.computer_tools = build_computer_tools()
+            self.computer_approvals_persist = build_persist_hook(layout.approvals_path)
+            inspectors.append(build_computer_permission_inspector(perm_path, layout.approvals_path))
+        else:
+            self.computer_tools = []
+            self.computer_approvals_persist = None
+            perm_insp = try_load_permission_inspector(perm_path)
+            if perm_insp is not None:
+                inspectors.append(perm_insp)
+
+        inspectors.append(LoopStartInspector())
+        self.inspectors = inspectors
+
+    def build_provider(self) -> None:
+        self.provider = _resolve_provider()
+
+    def build_web_search(self) -> None:
+        try:
+            backend_ws = _build_web_search_backend()
+            if backend_ws is not None:
+                self.web_search_tool = WebSearchTool(backend_ws)
+                logger.info("web search enabled: backend=%s", backend_ws.name)
+            else:
+                self.web_search_tool = None
+        except Exception as exc:
+            logger.warning("web search backend init failed — disabling: %s", exc)
+            self.web_search_tool = None
+
+    def build_subagents(self) -> None:
+        self.subagent_registry = get_subagent_registry()
+        if self.subagent_registry:
+            logger.info(
+                "subagent personas loaded: %s",
+                ", ".join(sorted(self.subagent_registry)),
+            )
+
+
+_deps = GatewayRuntime()
 
 
 def _env_context_window_tokens() -> int:
@@ -561,51 +619,11 @@ async def _startup(fastapi_app: FastAPI) -> None:
     except OSError as exc:
         logger.info("MCP config skipped (%s): %s", mcp_config, exc)
 
-    tiers_path = layout.command_allowlist_path
-    _deps.run_command_allowed_commands = None
-    _deps.run_command_allowed_path_prefixes = None
-    inspectors: list[ToolInspector] = []
-    try:
-        tier_insp = CommandTierInspector(tiers_path)
-        inspectors.append(tier_insp)
-        _deps.run_command_allowed_commands = list(tier_insp.allowed_commands)
-        _deps.run_command_allowed_path_prefixes = list(tier_insp.allowed_path_prefixes)
-    except FileNotFoundError:
-        logger.info("command tiers missing (%s); allowing all tool calls", tiers_path)
-    except Exception as exc:
-        logger.exception("command tier load failed: %s", exc)
-
-    denied = _tool_denied_patterns()
-    if denied:
-        inspectors.append(RulesInspector(denied))
-
-    perm_path = layout.permission_config_path
-    if should_enable_computer_tools():
-        _deps.computer_tools = build_computer_tools()
-        _deps.computer_approvals_persist = build_persist_hook(layout.approvals_path)
-        inspectors.append(build_computer_permission_inspector(perm_path, layout.approvals_path))
-    else:
-        perm_insp = try_load_permission_inspector(perm_path)
-        if perm_insp is not None:
-            inspectors.append(perm_insp)
-
-    inspectors.append(LoopStartInspector())
-    _deps.inspectors = inspectors
-
-    _deps.provider = _resolve_provider()
+    _deps.build_inspectors(layout)
+    _deps.build_provider()
+    _deps.build_web_search()
 
     vertex_gs = vertex_google_search_enabled_from_config()
-    try:
-        backend_ws = _build_web_search_backend()
-        if backend_ws is not None:
-            _deps.web_search_tool = WebSearchTool(backend_ws)
-            logger.info("web search enabled: backend=%s", backend_ws.name)
-        else:
-            _deps.web_search_tool = None
-    except Exception as exc:
-        logger.warning("web search backend init failed — disabling: %s", exc)
-        _deps.web_search_tool = None
-
     if vertex_gs:
         logger.info("vertex google_search grounding enabled")
     if _deps.web_search_tool is None and not vertex_gs:
@@ -706,15 +724,12 @@ async def _startup(fastapi_app: FastAPI) -> None:
         logger.info("attachments disabled via ATTACHMENTS_ENABLED")
 
     try:
-        _deps.subagent_registry = get_subagent_registry()
-        if _deps.subagent_registry:
-            logger.info(
-                "subagent personas loaded: %s",
-                ", ".join(sorted(_deps.subagent_registry)),
-            )
+        _deps.build_subagents()
     except ConfigError as exc:
         logger.error("invalid subagents config: %s", exc)
         raise
+
+    fastapi_app.state.gateway_runtime = _deps
 
     if otel_enabled:
         from monkeybot.observability.instrumentation import instrument_fastapi_app
@@ -758,6 +773,7 @@ async def _startup(fastapi_app: FastAPI) -> None:
 
 async def _shutdown(fastapi_app: FastAPI) -> None:
     """Tear down MCP sessions and storage backend."""
+    fastapi_app.state.gateway_runtime = None
     from monkeybot.observability import shutdown_observability
 
     try:
