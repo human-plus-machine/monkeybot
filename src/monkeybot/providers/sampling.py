@@ -7,7 +7,6 @@ direct provider construction falls back to ``MODEL_TEMPERATURE`` / ``MODEL_MAX_T
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
 DEFAULT_MODEL_TEMPERATURE = 0.7
@@ -28,15 +27,17 @@ def resolve_model_sampling(
     max_tokens: int | None = None,
 ) -> ModelSamplingConfig:
     """Resolve temperature and max output tokens from explicit args or environment."""
+    from monkeybot.core.config.snapshot import current_env
+
     resolved_temperature = (
         float(temperature)
         if temperature is not None
-        else float(os.getenv("MODEL_TEMPERATURE", str(DEFAULT_MODEL_TEMPERATURE)))
+        else float(current_env("MODEL_TEMPERATURE", str(DEFAULT_MODEL_TEMPERATURE)))
     )
     resolved_max_tokens = (
         int(max_tokens)
         if max_tokens is not None
-        else int(os.getenv("MODEL_MAX_TOKENS", str(DEFAULT_MODEL_MAX_TOKENS)))
+        else int(current_env("MODEL_MAX_TOKENS", str(DEFAULT_MODEL_MAX_TOKENS)))
     )
     return ModelSamplingConfig(
         temperature=resolved_temperature,

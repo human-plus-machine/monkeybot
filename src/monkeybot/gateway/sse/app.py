@@ -32,6 +32,7 @@ from monkeybot.core.config.settings import (
     normalize_model_provider,
     vertex_google_search_enabled_from_config,
 )
+from monkeybot.core.config.snapshot import current_env, current_env_or_none
 from monkeybot.core.context import LoopsToolRegistry, build_context
 from monkeybot.core.hooks import HookManager
 from monkeybot.core.knowledge import KnowledgeSubsystem, resolve_knowledge_settings
@@ -177,7 +178,7 @@ gateway_runtime = GatewayRuntime()
 
 
 def _env_context_window_tokens() -> int:
-    cap_raw = os.environ.get("MODEL_CONTEXT_WINDOW", "200000").strip()
+    cap_raw = current_env("MODEL_CONTEXT_WINDOW", "200000").strip()
     try:
         return max(1, int(cap_raw))
     except ValueError:
@@ -301,7 +302,7 @@ def _content_blocks_to_text(blocks: list[ContentBlock]) -> str:
 def _default_agent_path(bus: SessionBus) -> Path:
     if bus.agent_md:
         return Path(bus.agent_md)
-    env = os.environ.get("AGENT_MD")
+    env = current_env_or_none("AGENT_MD")
     if not env:
         raise RuntimeError("AGENT_MD must be set when session has no agent_md path")
     return Path(env)
@@ -309,7 +310,7 @@ def _default_agent_path(bus: SessionBus) -> Path:
 
 def _scripted_fake_provider() -> Provider:
     """Deterministic provider for ``MODEL_PROVIDER=fake`` (tests and local dev)."""
-    raw = os.environ.get("MONKEYBOT_FAKE_PROVIDER_EVENTS", "")
+    raw = current_env("MONKEYBOT_FAKE_PROVIDER_EVENTS", "")
     if not raw:
         return ScriptedFakeProvider(
             [
@@ -358,7 +359,7 @@ def _scripted_fake_provider() -> Provider:
 
 
 def _resolve_provider() -> Provider:
-    mode = normalize_model_provider(os.environ.get("MODEL_PROVIDER", "google_vertexai"))
+    mode = normalize_model_provider(current_env("MODEL_PROVIDER", "google_vertexai"))
     if mode == "fake":
         return _scripted_fake_provider()
     return get_provider_config(provider=mode).provider
@@ -422,7 +423,7 @@ class GatewayLoopPort:
 
         executor: CoreToolExecutor | None = None
         try:
-            model_name = bus.model_name or os.environ.get("MODEL_NAME", "gemini-2.5-flash")
+            model_name = bus.model_name or current_env("MODEL_NAME", "gemini-2.5-flash")
             agent_path = _default_agent_path(bus)
 
             workspace_root, skills_resolved, artifacts_resolved = _resolved_workspace_paths()
@@ -574,7 +575,7 @@ def _cors_allow_origins() -> list[str]:
 
     Set to ``*`` to allow any origin (credentials disabled by Starlette rules for ``*``).
     """
-    raw = os.environ.get("MONKEYBOT_CORS_ALLOW_ORIGINS", "").strip()
+    raw = current_env("MONKEYBOT_CORS_ALLOW_ORIGINS", "").strip()
     if not raw:
         return ["http://localhost:5173"]
     if raw == "*":
@@ -585,7 +586,7 @@ def _cors_allow_origins() -> list[str]:
 
 def _tool_denied_patterns() -> list[str]:
     """Substring deny list for :class:`RulesInspector`. Empty ``MONKEYBOT_TOOL_DENIED_PATTERNS`` disables."""
-    raw = os.environ.get("MONKEYBOT_TOOL_DENIED_PATTERNS")
+    raw = current_env_or_none("MONKEYBOT_TOOL_DENIED_PATTERNS")
     if raw is None:
         return ["rm -rf", "/etc/passwd", "DROP TABLE"]
     return [p.strip() for p in raw.split(",") if p.strip()]

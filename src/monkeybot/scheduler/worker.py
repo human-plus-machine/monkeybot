@@ -7,6 +7,7 @@ import logging
 import os
 
 from monkeybot.core.config.settings import auto_schema_enabled_from_config
+from monkeybot.core.config.snapshot import current_env
 from monkeybot.core.persistence.backends import StorageBackend, create_storage_backend
 from monkeybot.gateway.bootstrap import ensure_gateway_runtime_env
 from monkeybot.scheduler.engine import (
@@ -35,7 +36,7 @@ class _NoopSessionEnsurer:
 
 
 def _gateway_base_url() -> str:
-    port = os.environ.get("PORT", os.environ.get("GATEWAY_PORT", "8000"))
+    port = current_env("PORT") or current_env("GATEWAY_PORT", "8000")
     host = os.environ.get("MONKEYBOT_GATEWAY_HOST", "127.0.0.1")
     explicit = os.environ.get("MONKEYBOT_GATEWAY_URL", "").strip()
     if explicit:
@@ -45,7 +46,7 @@ def _gateway_base_url() -> str:
 
 async def _run() -> None:
     ensure_gateway_runtime_env()
-    db_url = os.environ.get("DB_URL", "sqlite:///data/monkeybot.db")
+    db_url = current_env("DB_URL", "sqlite:///data/monkeybot.db")
     # No agent_scope: this worker only reads/writes .scheduled_loops(), never
     # .history() (ticks are invoked over HTTP against the gateway's own
     # already-scoped backend) — conversation_history's agent-scope isolation
@@ -80,7 +81,7 @@ async def _run() -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
+    logging.basicConfig(level=current_env("LOG_LEVEL", "INFO"))
     try:
         asyncio.run(_run())
     except KeyboardInterrupt:

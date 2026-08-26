@@ -28,6 +28,7 @@ from monkeybot.core.attachments.store import (
     sniff_mime,
 )
 from monkeybot.core.config.settings import SubagentConfig, get_subagent_settings
+from monkeybot.core.config.snapshot import current_env
 from monkeybot.core.context import (
     SCHEDULED_LOOP_TOOL_DEFS,
     CustomTool,
@@ -231,12 +232,12 @@ def _task_child_env(
     if artifacts_path is not None:
         child_env["MONKEYBOT_SUBAGENT_ARTIFACTS_PATH"] = str(artifacts_path)
     for env_key, raw_val in (
-        ("MCP_CONFIG", os.environ.get("MCP_CONFIG", "")),
-        ("COMMAND_ALLOWLIST_CONFIG", os.environ.get("COMMAND_ALLOWLIST_CONFIG", "")),
+        ("MCP_CONFIG", current_env("MCP_CONFIG", "")),
+        ("COMMAND_ALLOWLIST_CONFIG", current_env("COMMAND_ALLOWLIST_CONFIG", "")),
     ):
         if raw_val.strip():
             child_env[env_key] = str(resolve_project_path(raw_val.strip(), agent_root))
-    db_raw = os.environ.get("DB_URL", "").strip()
+    db_raw = current_env("DB_URL", "").strip()
     if db_raw:
         child_env["DB_URL"] = normalize_sqlite_db_url(db_raw, agent_root)
     return child_env
@@ -847,7 +848,9 @@ class CoreToolExecutor(ToolExecutorPort):
     ) -> None:
         ws_settings = workspace_settings_from_config()
         self._skills_path = Path(skills_path).resolve()
-        self._artifacts_path = Path(artifacts_path).resolve() if artifacts_path is not None else None
+        self._artifacts_path = (
+            Path(artifacts_path).resolve() if artifacts_path is not None else None
+        )
         self._workspace = WorkspaceFileService(
             Path(workspace_root).resolve(),
             settings=ws_settings,

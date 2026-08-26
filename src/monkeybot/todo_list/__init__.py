@@ -9,8 +9,7 @@ under the session artifact directory for debugging unless
 
 from __future__ import annotations
 
-import os
-
+from monkeybot.core.config.snapshot import current_env_flag
 from monkeybot.todo_list.store import TodoItem, TodoListStore
 from monkeybot.todo_list.tool import TodoListTool
 
@@ -29,8 +28,7 @@ def todo_list_enabled_from_env() -> bool:
     Reads ``MONKEYBOT_TODO_LIST_ENABLED`` (mapped from ``todo_list.enabled`` in
     monkeybot.yaml). Recognized off values: ``0``, ``false``, ``no``, ``off``.
     """
-    raw = os.environ.get("MONKEYBOT_TODO_LIST_ENABLED", "true").strip().lower()
-    return raw not in {"0", "false", "no", "off"}
+    return current_env_flag("MONKEYBOT_TODO_LIST_ENABLED", default=True)
 
 
 def todo_list_mirror_to_disk_from_env() -> bool:
@@ -41,5 +39,4 @@ def todo_list_mirror_to_disk_from_env() -> bool:
     works in memory but never writes ``todos.json`` — useful for read-only or
     ephemeral filesystems. Recognized off values: ``0``, ``false``, ``no``, ``off``.
     """
-    raw = os.environ.get("MONKEYBOT_TODO_LIST_MIRROR_TO_DISK", "true").strip().lower()
-    return raw not in {"0", "false", "no", "off"}
+    return current_env_flag("MONKEYBOT_TODO_LIST_MIRROR_TO_DISK", default=True)
