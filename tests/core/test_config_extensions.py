@@ -26,7 +26,13 @@ from monkeybot.core.config import (
     validate_provider_env,
     vertex_google_search_enabled_from_config,
 )
-from monkeybot.core.config.runtime_env import ENV_MAP, RETIRED_TOOLS_KEYS, warn_retired_tools_keys
+from monkeybot.core.config.runtime_env import (
+    ENV_MAP,
+    RETIRED_CONTEXT_CURATION_KEYS,
+    RETIRED_TOOLS_KEYS,
+    warn_retired_curation_keys,
+    warn_retired_tools_keys,
+)
 from monkeybot.core.tools.workspace_service import AGENT_READ_DEFAULT_LINES
 
 
@@ -119,7 +125,9 @@ class TestVertexAnthropicProvider:
 
     def test_get_provider_config_huggingface(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("HF_TOKEN", "hf_test")
-        cfg = get_provider_config(provider="huggingface", model_name="meta-llama/Llama-3.1-8B-Instruct")
+        cfg = get_provider_config(
+            provider="huggingface", model_name="meta-llama/Llama-3.1-8B-Instruct"
+        )
         assert cfg.provider.name == "huggingface"
         assert cfg.model == "meta-llama/Llama-3.1-8B-Instruct"
 
@@ -129,7 +137,9 @@ class TestVertexAnthropicProvider:
         assert cfg.provider.name == "ollama"
         assert cfg.model == "llama3.1"
 
-    def test_get_provider_config_vertex_anthropic_happy_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_get_provider_config_vertex_anthropic_happy_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setenv("GCP_PROJECT_ID", "test-project")
         monkeypatch.setenv("ANTHROPIC_VERTEX_REGION", "us-central1")
         mock_instance = MagicMock()
@@ -150,7 +160,9 @@ class TestVertexAnthropicProvider:
                 max_tokens=60_000,
             )
 
-    def test_get_provider_config_vertex_anthropic_missing_project(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_get_provider_config_vertex_anthropic_missing_project(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         for key in (
             "GCP_PROJECT_ID",
             "VERTEX_AI_PROJECT_ID",
@@ -159,7 +171,9 @@ class TestVertexAnthropicProvider:
         ):
             monkeypatch.delenv(key, raising=False)
         with pytest.raises(ValueError, match="vertex_anthropic provider requires"):
-            get_provider_config(provider="vertex_anthropic", model_name="claude-3-5-sonnet@20240620")
+            get_provider_config(
+                provider="vertex_anthropic", model_name="claude-3-5-sonnet@20240620"
+            )
 
     def test_validate_provider_env_vertex_anthropic_accepted(self) -> None:
         validate_provider_env(
@@ -252,8 +266,7 @@ class TestSubagentSettings:
         monkeypatch.chdir(tmp_path)
         self._write_config(
             tmp_path,
-            "subagents:\n"
-            "  agent_md: ./monkeybot_config/agents/default.md\n",
+            "subagents:\n  agent_md: ./monkeybot_config/agents/default.md\n",
         )
         with pytest.raises(ConfigError, match="subagents.agent_md was removed"):
             get_subagent_settings()
@@ -267,7 +280,9 @@ class TestGetSubagentConfigs:
         path.write_text(yaml_text, encoding="utf-8")
         return path
 
-    def test_returns_empty_when_no_subagents(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_returns_empty_when_no_subagents(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.chdir(tmp_path)
         self._write_config(tmp_path, "model:\n  provider: gemini\n  name: test\n")
         assert get_subagent_configs() == []
@@ -289,7 +304,9 @@ class TestGetSubagentConfigs:
         assert configs[0].name == "content-intel"
         assert configs[0].skills == ["./skills/content-intelligence/"]
 
-    def test_skips_entry_missing_name(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_skips_entry_missing_name(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.chdir(tmp_path)
         self._write_config(
             tmp_path,
@@ -309,9 +326,7 @@ class TestGetSubagentConfigs:
         monkeypatch.chdir(tmp_path)
         self._write_config(
             tmp_path,
-            "subagents:\n"
-            "  - name: legacy\n"
-            "    description: Old shape.\n",
+            "subagents:\n  - name: legacy\n    description: Old shape.\n",
         )
         with pytest.raises(ConfigError, match="bare list is no longer supported"):
             get_subagent_configs()
@@ -369,7 +384,9 @@ class TestGetSubagentRegistry:
 
 
 class TestSandboxConfig:
-    def test_sandbox_from_monkeybot_yaml(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_sandbox_from_monkeybot_yaml(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         cfg_dir = tmp_path / "monkeybot_config"
         cfg_dir.mkdir(parents=True)
         (cfg_dir / "monkeybot.yaml").write_text(
@@ -446,9 +463,7 @@ class TestReadDefaultLinesFixed:
     def test_default_limit_clamped_to_read_max(self, tmp_path: Path) -> None:
         from monkeybot.core.tools.workspace_service import WorkspaceFileService, WorkspaceSettings
 
-        (tmp_path / "wide.txt").write_text(
-            "\n".join(f"L{i}" for i in range(100)), encoding="utf-8"
-        )
+        (tmp_path / "wide.txt").write_text("\n".join(f"L{i}" for i in range(100)), encoding="utf-8")
         svc = WorkspaceFileService(
             tmp_path,
             WorkspaceSettings(
@@ -458,6 +473,20 @@ class TestReadDefaultLinesFixed:
         )
         result = svc.read_file("wide.txt")
         assert result["end_line"] - result["start_line"] + 1 == 40
+
+
+class TestRetiredContextCurationKeys:
+    def test_curator_keys_retired_from_env_map(self) -> None:
+        assert "curator_model" in RETIRED_CONTEXT_CURATION_KEYS
+        assert "timeout_sec" in RETIRED_CONTEXT_CURATION_KEYS
+        assert ("context_curation", "curator_model") not in ENV_MAP
+        assert ("context_curation", "timeout_sec") not in ENV_MAP
+
+    def test_yaml_keys_warn_and_are_ignored(self) -> None:
+        found = warn_retired_curation_keys(
+            {"context_curation": {"curator_model": "x", "timeout_sec": 10, "enabled": True}}
+        )
+        assert found == ["curator_model", "timeout_sec"]
 
 
 class TestRealtimeConfig:
@@ -477,8 +506,7 @@ class TestRealtimeConfig:
     def test_parses_realtime_mode(self, tmp_path: Path) -> None:
         path = self._write_config(
             tmp_path,
-            "harness:\n  mode: realtime\n"
-            "realtime:\n  session:\n    max_duration_sec: 900\n",
+            "harness:\n  mode: realtime\nrealtime:\n  session:\n    max_duration_sec: 900\n",
         )
         cfg = get_realtime_config(str(path))
         assert cfg.enabled is True
@@ -549,6 +577,4 @@ class TestHarnessModeValidation:
 
     def test_rejects_non_positive_session_value(self) -> None:
         with pytest.raises(ConfigError, match="positive number"):
-            validate_monkeybot_yaml_doc(
-                {"realtime": {"session": {"max_duration_sec": -1}}}
-            )
+            validate_monkeybot_yaml_doc({"realtime": {"session": {"max_duration_sec": -1}}})

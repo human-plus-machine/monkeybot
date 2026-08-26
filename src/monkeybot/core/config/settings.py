@@ -129,7 +129,9 @@ def get_provider_config(
     resolved_model = str(model_name or os.getenv("MODEL_NAME") or "gemini-2.5-flash")
     sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens)
     thinking_budget = (
-        thinking_budget if thinking_budget is not None else int(os.getenv("MODEL_THINKING_BUDGET", "-1"))
+        thinking_budget
+        if thinking_budget is not None
+        else int(os.getenv("MODEL_THINKING_BUDGET", "-1"))
     )
     if provider_key == "google_vertexai":
         return ProviderConfig(
@@ -272,7 +274,9 @@ def _parse_subagent_entries(raw_entries: Any) -> list[SubagentConfig]:
                 name=entry["name"],
                 description=entry["description"],
                 skills=skills,
-                agent_md=agent_md.strip() if isinstance(agent_md, str) and agent_md.strip() else None,
+                agent_md=agent_md.strip()
+                if isinstance(agent_md, str) and agent_md.strip()
+                else None,
                 model=entry.get("model"),
                 vertex_location=vloc,
             )
@@ -291,16 +295,17 @@ def _subagents_section(doc: dict[str, Any]) -> dict[str, Any]:
             "a bare list is no longer supported"
         )
     if not isinstance(section, dict):
-        raise ConfigError(
-            f"subagents must be a mapping, got {type(section).__name__}"
-        )
+        raise ConfigError(f"subagents must be a mapping, got {type(section).__name__}")
     return section
 
 
-def get_subagent_settings(config_path: str | None = None) -> SubagentSettings:
-    """Global ``task`` defaults from ``subagents:`` in monkeybot.yaml (config-file only)."""
-    _, doc = load_monkeybot_yaml_dict(config_path)
-    section = _subagents_section(doc)
+def subagent_settings_from_section(section: dict[str, Any]) -> SubagentSettings:
+    """Parse a ``subagents:`` mapping into :class:`SubagentSettings`.
+
+    Shared by :func:`get_subagent_settings` (reads the YAML file directly) and
+    the ``RuntimeConfig`` snapshot builder (parses the already-merged doc), so
+    the two never validate the section differently.
+    """
     if not section:
         return _DEFAULT_SUBAGENT_SETTINGS
 
@@ -308,18 +313,14 @@ def get_subagent_settings(config_path: str | None = None) -> SubagentSettings:
     raw_timeout = section.get("timeout_sec")
     if raw_timeout is not None:
         if isinstance(raw_timeout, bool) or not isinstance(raw_timeout, (int, float)):
-            raise ConfigError(
-                f"subagents.timeout_sec must be a number, got {raw_timeout!r}"
-            )
+            raise ConfigError(f"subagents.timeout_sec must be a number, got {raw_timeout!r}")
         timeout = max(1.0, float(raw_timeout))
 
     max_turns = _DEFAULT_SUBAGENT_SETTINGS.max_turns
     raw_turns = section.get("max_turns")
     if raw_turns is not None:
         if isinstance(raw_turns, bool) or not isinstance(raw_turns, int):
-            raise ConfigError(
-                f"subagents.max_turns must be an integer, got {raw_turns!r}"
-            )
+            raise ConfigError(f"subagents.max_turns must be an integer, got {raw_turns!r}")
         max_turns = max(1, raw_turns)
 
     vertex_raw = section.get("vertex_google_search")
@@ -343,6 +344,12 @@ def get_subagent_settings(config_path: str | None = None) -> SubagentSettings:
         max_turns=max_turns,
         vertex_google_search=vertex,
     )
+
+
+def get_subagent_settings(config_path: str | None = None) -> SubagentSettings:
+    """Global ``task`` defaults from ``subagents:`` in monkeybot.yaml (config-file only)."""
+    _, doc = load_monkeybot_yaml_dict(config_path)
+    return subagent_settings_from_section(_subagents_section(doc))
 
 
 def get_subagent_configs(config_path: str | None = None) -> list[SubagentConfig]:
@@ -423,4 +430,3 @@ def subagent_vertex_google_search_from_config(config_path: str | None = None) ->
     when absent. Config-file only — not exposed via environment variables.
     """
     return get_subagent_settings(config_path).vertex_google_search
-
