@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import logging
-import os
 import time
 
+from monkeybot.core.config.snapshot import current_env_or_none
 from monkeybot.core.persistence.backends import SessionTurnLockStore, StorageBackend
 from monkeybot.core.types.content_blocks import ContentBlock
 from monkeybot.gateway.sse.loop_port import LoopPort
@@ -47,7 +47,7 @@ class GatewaySessionEnsurer:
     async def ensure_session(self, session_id: str) -> None:
         if self._registry.get(session_id) is not None:
             return
-        agent_md = os.environ.get("AGENT_MD")
+        agent_md = current_env_or_none("AGENT_MD")
         try:
             self._registry.create(
                 session_id,

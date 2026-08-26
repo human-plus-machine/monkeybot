@@ -28,6 +28,7 @@ from monkeybot.core.attachments.store import (
     sniff_mime,
 )
 from monkeybot.core.config.settings import SubagentConfig, get_subagent_settings
+from monkeybot.core.config.snapshot import RuntimeConfig, env_value
 from monkeybot.core.context import (
     SCHEDULED_LOOP_TOOL_DEFS,
     CustomTool,
@@ -219,6 +220,7 @@ def _task_child_env(
     memory_uri: str,
     skills_path: Path,
     artifacts_path: Path | None,
+    config: RuntimeConfig | None = None,
 ) -> dict[str, str]:
     """Build subprocess env overlays for a nested task worker."""
     child_env = {
@@ -231,12 +233,12 @@ def _task_child_env(
     if artifacts_path is not None:
         child_env["MONKEYBOT_SUBAGENT_ARTIFACTS_PATH"] = str(artifacts_path)
     for env_key, raw_val in (
-        ("MCP_CONFIG", os.environ.get("MCP_CONFIG", "")),
-        ("COMMAND_ALLOWLIST_CONFIG", os.environ.get("COMMAND_ALLOWLIST_CONFIG", "")),
+        ("MCP_CONFIG", env_value(config, "MCP_CONFIG", "")),
+        ("COMMAND_ALLOWLIST_CONFIG", env_value(config, "COMMAND_ALLOWLIST_CONFIG", "")),
     ):
         if raw_val.strip():
             child_env[env_key] = str(resolve_project_path(raw_val.strip(), agent_root))
-    db_raw = os.environ.get("DB_URL", "").strip()
+    db_raw = env_value(config, "DB_URL", "").strip()
     if db_raw:
         child_env["DB_URL"] = normalize_sqlite_db_url(db_raw, agent_root)
     return child_env
@@ -844,6 +846,7 @@ class CoreToolExecutor(ToolExecutorPort):
         subagent_registry: dict[str, SubagentConfig] | None = None,
         loops_registry: LoopsToolRegistry | None = None,
         knowledge: KnowledgeSubsystem | None = None,
+        config: RuntimeConfig | None = None,
     ) -> None:
         ws_settings = workspace_settings_from_config()
         self._skills_path = Path(skills_path).resolve()
@@ -862,6 +865,7 @@ class CoreToolExecutor(ToolExecutorPort):
         self._scheduled_loop_store = scheduled_loop_store
         self._loops_registry = loops_registry if loops_registry is not None else LoopsToolRegistry()
         self._subagent_registry = dict(subagent_registry or {})
+        self._config = config
         self._terminal: TerminalExecutor | SandboxExecutor
         self._host_terminal: TerminalExecutor | None = None
         if terminal is not None:
@@ -1722,6 +1726,7 @@ class CoreToolExecutor(ToolExecutorPort):
             memory_uri=memory_uri,
             skills_path=self._skills_path,
             artifacts_path=self._artifacts_path,
+            config=self._config,
         )
         payload = await _run_inline_subagent_with_progress(
             script=script,

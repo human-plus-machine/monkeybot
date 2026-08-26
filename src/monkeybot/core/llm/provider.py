@@ -130,9 +130,9 @@ class ProviderCallHints:
 
 def cache_retention_from_env() -> Literal["none", "short", "long"]:
     """Resolve ``MODEL_CACHE_RETENTION`` (default ``short``)."""
-    import os
+    from monkeybot.core.config.snapshot import current_env
 
-    raw = os.environ.get("MODEL_CACHE_RETENTION", "short").strip().lower()
+    raw = current_env("MODEL_CACHE_RETENTION", "short").strip().lower()
     if raw in ("none", "short", "long"):
         return raw  # type: ignore[return-value]
     return "short"

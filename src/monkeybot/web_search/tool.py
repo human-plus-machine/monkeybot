@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
-import os
 
+from monkeybot.core.config.snapshot import current_env
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.web_search.protocol import WebSearchBackend
 
@@ -24,8 +24,11 @@ _WEB_SEARCH_SCHEMA: dict[str, object] = {
 class WebSearchTool:
     """Adapts a :class:`WebSearchBackend` to the :class:`~monkeybot.core.context.CustomTool` protocol."""
 
-    def __init__(self, backend: WebSearchBackend) -> None:
+    def __init__(
+        self, backend: WebSearchBackend, *, default_max_results: int | None = None
+    ) -> None:
         self._backend = backend
+        self._default_max_results = default_max_results
         self.tool_def = ToolDef(
             "web_search",
             f"Search the web using {backend.name}. Returns titles, URLs, and text snippets.",
@@ -37,7 +40,10 @@ class WebSearchTool:
         if not query:
             return json.dumps({"ok": False, "error": "web_search requires a non-empty query."})
 
-        default_max = int(os.environ.get("WEB_SEARCH_MAX_RESULTS", "5"))
+        if self._default_max_results is not None:
+            default_max = self._default_max_results
+        else:
+            default_max = int(current_env("WEB_SEARCH_MAX_RESULTS", "5"))
         raw_max = args.get("max_results")
         if isinstance(raw_max, (int, float, str)):
             try:

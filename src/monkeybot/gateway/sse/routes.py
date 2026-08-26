@@ -28,6 +28,7 @@ from monkeybot.core.attachments.store import (
     AttachmentTooLargeError,
     UnsupportedAttachmentTypeError,
 )
+from monkeybot.core.config.snapshot import context_window_tokens
 from monkeybot.core.llm.usage import UsageGranularity
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.usage_buckets import coerce_granularity, validate_hour_bucket_window
@@ -59,6 +60,7 @@ from .models import (
     ToolConfirmationPOST,
     error_payload_dict,
 )
+from .reload import build_admin_router
 from .reply_body import ReplyBodyError, normalize_reply_to_user_content
 from .scheduler_routes import build_scheduler_router
 from .session_bus import SessionAlreadyExistsError, SessionBus, SessionRegistry
@@ -386,11 +388,7 @@ class _StaticUsagePort:
         since: str | None,
     ) -> dict[str, Any]:
         _ = since
-        cap_raw = os.environ.get("MODEL_CONTEXT_WINDOW", "200000").strip()
-        try:
-            cw = max(1, int(cap_raw))
-        except ValueError:
-            cw = 200_000
+        cw = context_window_tokens()
         st = max(1, int(cw * SUMMARY_TRIGGER_RATIO))
         return {
             "session_id": session_id,
@@ -1204,6 +1202,7 @@ def create_app(
 
     app.include_router(api)
     app.include_router(build_scheduler_router(loop_port=loop, registry=reg))
+    app.include_router(build_admin_router())
 
     @app.get("/health", response_model=HealthResponse)
     async def health(request: Request) -> HealthResponse:

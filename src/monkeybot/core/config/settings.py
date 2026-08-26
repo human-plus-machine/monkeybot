@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from monkeybot.core.config.yaml_loader import load_monkeybot_yaml_dict
 from monkeybot.core.llm.provider import Provider
@@ -18,6 +18,9 @@ from monkeybot.providers.openai import OpenAIProvider
 from monkeybot.providers.openrouter import OpenRouterProvider
 from monkeybot.providers.sampling import resolve_model_sampling
 from monkeybot.providers.vertex_claude import VertexClaudeProvider
+
+if TYPE_CHECKING:
+    from monkeybot.core.config.snapshot import RuntimeConfig
 
 logger = logging.getLogger(__name__)
 
@@ -101,12 +104,21 @@ class ProviderConfig:
     model: str
 
 
-def _resolve_gcp_project_id() -> str:
+def _resolve_gcp_project_id(config: RuntimeConfig | None = None) -> str:
     """GCP project for Vertex providers."""
+    from monkeybot.core.config.snapshot import env_value
+
+    if config is not None:
+        for candidate in (
+            config.model.vertex_project_id,
+            config.model.anthropic_vertex_project_id,
+        ):
+            if candidate and candidate.strip():
+                return candidate.strip()
     return (
         (os.getenv("GCP_PROJECT_ID") or "").strip()
-        or (os.getenv("VERTEX_AI_PROJECT_ID") or "").strip()
-        or (os.getenv("ANTHROPIC_VERTEX_PROJECT_ID") or "").strip()
+        or env_value(config, "VERTEX_AI_PROJECT_ID").strip()
+        or env_value(config, "ANTHROPIC_VERTEX_PROJECT_ID").strip()
         or (os.getenv("GOOGLE_CLOUD_PROJECT") or "").strip()
     )
 
@@ -117,20 +129,32 @@ def get_provider_config(
     temperature: float | None = None,
     max_tokens: int | None = None,
     thinking_budget: int | None = None,
+    config: RuntimeConfig | None = None,
 ) -> ProviderConfig:
-    """Resolve a Provider and model id from environment or explicit parameters."""
-    raw_provider = str(provider or os.getenv("MODEL_PROVIDER") or "google_vertexai")
+    """Resolve a Provider and model id from a pinned snapshot, environment, or explicit parameters."""
+    from monkeybot.core.config.snapshot import env_value
+
+    raw_provider = str(
+        provider or env_value(config, "MODEL_PROVIDER") or "google_vertexai"
+    )
     provider_key = normalize_model_provider(raw_provider)
     if provider_key == "fake":
         raise ValueError(
             "MODEL_PROVIDER=fake is for gateway/tests only; inject ScriptedFakeProvider directly "
             "or use the gateway fake provider path."
         )
-    resolved_model = str(model_name or os.getenv("MODEL_NAME") or "gemini-2.5-flash")
-    sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens)
-    thinking_budget = (
-        thinking_budget if thinking_budget is not None else int(os.getenv("MODEL_THINKING_BUDGET", "-1"))
+    resolved_model = str(
+        model_name or env_value(config, "MODEL_NAME") or "gemini-2.5-flash"
     )
+    sampling = resolve_model_sampling(
+        temperature=temperature, max_tokens=max_tokens, config=config
+    )
+    if thinking_budget is not None:
+        resolved_thinking = thinking_budget
+    else:
+        raw_thinking = env_value(config, "MODEL_THINKING_BUDGET", "-1")
+        resolved_thinking = int(raw_thinking)
+    thinking_budget = resolved_thinking
     if provider_key == "google_vertexai":
         return ProviderConfig(
             GeminiProvider(
@@ -173,19 +197,21 @@ def get_provider_config(
             resolved_model,
         )
     if provider_key == "vertex_anthropic":
-        project = _resolve_gcp_project_id()
+        project = _resolve_gcp_project_id(config)
         if not project:
             raise ValueError(
                 "vertex_anthropic provider requires a GCP project. "
                 "Set GCP_PROJECT_ID, VERTEX_AI_PROJECT_ID, ANTHROPIC_VERTEX_PROJECT_ID, "
                 "or GOOGLE_CLOUD_PROJECT (or gcp.project_id in monkeybot.yaml)."
             )
-        if os.getenv("VERTEX_AI_LOCATION"):
+        if env_value(config, "VERTEX_AI_LOCATION"):
             logger.warning(
                 "VERTEX_AI_LOCATION is no longer read for vertex_anthropic; "
                 "set ANTHROPIC_VERTEX_REGION instead"
             )
-        region = (os.getenv("ANTHROPIC_VERTEX_REGION") or "us-east5").strip() or "us-east5"
+        region = (
+            env_value(config, "ANTHROPIC_VERTEX_REGION", "us-east5").strip() or "us-east5"
+        )
         return ProviderConfig(
             VertexClaudeProvider(
                 project_id=project,

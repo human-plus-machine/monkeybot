@@ -44,6 +44,25 @@ class TestResolveModelSampling:
         assert sampling.temperature == 0.15
         assert sampling.max_tokens == 4096
 
+    def test_snapshot_beats_env(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        from monkeybot.core.config.snapshot import build_runtime_config
+
+        monkeypatch.chdir(tmp_path)
+        cfg_dir = tmp_path / "monkeybot_config"
+        cfg_dir.mkdir()
+        (cfg_dir / "monkeybot.yaml").write_text(
+            "model:\n  temperature: 0.3\n  max_tokens: 1111\n",
+            encoding="utf-8",
+        )
+        monkeypatch.delenv("MODEL_TEMPERATURE", raising=False)
+        monkeypatch.delenv("MODEL_MAX_TOKENS", raising=False)
+        cfg = build_runtime_config(agent_root=tmp_path)
+        monkeypatch.setenv("MODEL_TEMPERATURE", "0.9")
+        monkeypatch.setenv("MODEL_MAX_TOKENS", "9999")
+        sampling = resolve_model_sampling(config=cfg)
+        assert sampling.temperature == 0.3
+        assert sampling.max_tokens == 1111
+
 
 class TestProviderSamplingConstructors:
     def test_claude_stores_resolved_sampling(self, monkeypatch: pytest.MonkeyPatch) -> None:

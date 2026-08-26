@@ -991,3 +991,113 @@ async def test_connect_from_catalog_reconnects_when_env_changes(
     again = await client.connect_from_catalog("browser")
     assert any(t.name == "browser__goto" for t in again)
     assert client._servers["browser"] is not first_rec
+
+
+def _connected_session() -> SimpleNamespace:
+    sess = SimpleNamespace()
+    sess.initialize = AsyncMock()
+    sess.list_tools = AsyncMock(
+        return_value=SimpleNamespace(
+            tools=[SimpleNamespace(name="ping", description="", inputSchema={})]
+        )
+    )
+    sess.get_server_capabilities = lambda: SimpleNamespace(
+        tools={}, resources={}, prompts=None, logging=None, completions=None
+    )
+    return sess
+
+
+@pytest.mark.asyncio
+async def test_apply_catalog_diff_keeps_untouched_server_record(tmp_path: Path) -> None:
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "keep": {"command": "python", "args": ["keep.py"], "autoConnect": True},
+                    "drop": {"command": "python", "args": ["drop.py"], "autoConnect": True},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = MCPClient(hooks=_stub_hooks(_connected_session()))
+    await client.load_from_config(cfg)
+    kept_rec = client._servers["keep"]
+    assert "drop" in client._servers
+
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "keep": {"command": "python", "args": ["keep.py"], "autoConnect": True},
+                    "new": {"command": "python", "args": ["new.py"], "autoConnect": True},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = await client.apply_catalog_diff(cfg)
+    assert "keep" in result.kept
+    assert "new" in result.added
+    assert "drop" in result.removed
+    assert "new" in result.reconnected
+    assert client._servers["keep"] is kept_rec
+    assert "drop" not in client._servers
+    assert "new" in client._servers
+
+
+@pytest.mark.asyncio
+async def test_apply_catalog_diff_reconnects_changed_spec(tmp_path: Path) -> None:
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "srv": {"command": "python", "args": ["old.py"], "autoConnect": True},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = MCPClient(hooks=_stub_hooks(_connected_session()))
+    await client.load_from_config(cfg)
+    old_rec = client._servers["srv"]
+
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "srv": {"command": "python", "args": ["new.py"], "autoConnect": True},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = await client.apply_catalog_diff(cfg)
+    assert result.reconnected == ("srv",)
+    assert result.kept == ()
+    assert client._servers["srv"] is not old_rec
+
+
+@pytest.mark.asyncio
+async def test_apply_catalog_diff_invalid_json_leaves_connections(tmp_path: Path) -> None:
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "keep": {"command": "python", "args": ["keep.py"], "autoConnect": True},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = MCPClient(hooks=_stub_hooks(_connected_session()))
+    await client.load_from_config(cfg)
+    rec = client._servers["keep"]
+    cfg.write_text("{not json", encoding="utf-8")
+    result = await client.apply_catalog_diff(cfg)
+    assert result.kept == ("keep",)
+    assert client._servers["keep"] is rec
+

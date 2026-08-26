@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from monkeybot.core.config.settings import auto_schema_enabled_from_config, get_subagent_settings
+from monkeybot.core.config.snapshot import current_env
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.backends import RunStore, StorageBackend, create_storage_backend
 from monkeybot.core.persistence.durable_runs import SubagentRunRow
@@ -611,7 +612,7 @@ async def shutdown_worker_pool(handle: WorkerPoolHandle) -> None:
 
 async def run_worker_main() -> None:
     """CLI entry: open storage backend and run the worker loop until cancelled."""
-    db_url = os.environ.get("DB_URL", "sqlite:///data/monkeybot.db")
+    db_url = current_env("DB_URL", "sqlite:///data/monkeybot.db")
     settings = worker_env_settings()
     logger.info(
         "subagent worker starting stale_claim_ms=%d (MONKEYBOT_WORKER_STALE_CLAIM_MS)",
