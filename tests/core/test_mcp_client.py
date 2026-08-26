@@ -18,6 +18,7 @@ from monkeybot.core.mcp.mcp_client import (
     MCPConnectionError,
     _mcp_auth_handler_cls,
     interpolate_env_vars,
+    mcp_file_env_refs,
 )
 
 
@@ -415,6 +416,24 @@ def test_interpolate_env_vars_nested(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MCP_TEST_TOKEN", "abc123")
     assert interpolate_env_vars({"h": "Bearer ${MCP_TEST_TOKEN}"}) == {"h": "Bearer abc123"}
     assert interpolate_env_vars(["${MCP_TEST_TOKEN}", "x"]) == ["abc123", "x"]
+
+
+def test_interpolate_env_vars_overlay_beats_os_environ(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MODEL_NAME", "from-os")
+    overlay = {"MODEL_NAME": "from-snapshot"}
+    assert interpolate_env_vars("${MODEL_NAME}", overlay) == "from-snapshot"
+
+
+def test_mcp_file_env_refs(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        '{"mcpServers": {"s": {"command": "${CMD}", "args": ["${  TOKEN  }"]}}}',
+        encoding="utf-8",
+    )
+    assert mcp_file_env_refs(path) == frozenset({"CMD", "TOKEN"})
+    assert mcp_file_env_refs(tmp_path / "missing.json") == frozenset()
 
 
 @pytest.mark.asyncio
@@ -848,9 +867,7 @@ async def test_status_catalogued_connected_and_disabled(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_list_and_read_resources() -> None:
-    listing = SimpleNamespace(
-        tools=[SimpleNamespace(name="noop", description="", inputSchema={})]
-    )
+    listing = SimpleNamespace(tools=[SimpleNamespace(name="noop", description="", inputSchema={})])
     resource = SimpleNamespace(
         name="docs",
         uri="docs://readme",
@@ -874,7 +891,9 @@ async def test_list_and_read_resources() -> None:
     )
     sess.list_prompts = AsyncMock(
         return_value=SimpleNamespace(
-            prompts=[SimpleNamespace(name="summarize", description="Sum", arguments=None, title=None)]
+            prompts=[
+                SimpleNamespace(name="summarize", description="Sum", arguments=None, title=None)
+            ]
         )
     )
     sess.get_prompt = AsyncMock(
@@ -991,3 +1010,112 @@ async def test_connect_from_catalog_reconnects_when_env_changes(
     again = await client.connect_from_catalog("browser")
     assert any(t.name == "browser__goto" for t in again)
     assert client._servers["browser"] is not first_rec
+
+
+def _connected_session() -> SimpleNamespace:
+    sess = SimpleNamespace()
+    sess.initialize = AsyncMock()
+    sess.list_tools = AsyncMock(
+        return_value=SimpleNamespace(
+            tools=[SimpleNamespace(name="ping", description="", inputSchema={})]
+        )
+    )
+    sess.get_server_capabilities = lambda: SimpleNamespace(
+        tools={}, resources={}, prompts=None, logging=None, completions=None
+    )
+    return sess
+
+
+@pytest.mark.asyncio
+async def test_apply_catalog_diff_keeps_untouched_server_record(tmp_path: Path) -> None:
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "keep": {"command": "python", "args": ["keep.py"], "autoConnect": True},
+                    "drop": {"command": "python", "args": ["drop.py"], "autoConnect": True},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = MCPClient(hooks=_stub_hooks(_connected_session()))
+    await client.load_from_config(cfg)
+    kept_rec = client._servers["keep"]
+    assert "drop" in client._servers
+
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "keep": {"command": "python", "args": ["keep.py"], "autoConnect": True},
+                    "new": {"command": "python", "args": ["new.py"], "autoConnect": True},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = await client.apply_catalog_diff(cfg)
+    assert "keep" in result.kept
+    assert "new" in result.added
+    assert "drop" in result.removed
+    assert "new" in result.reconnected
+    assert client._servers["keep"] is kept_rec
+    assert "drop" not in client._servers
+    assert "new" in client._servers
+
+
+@pytest.mark.asyncio
+async def test_apply_catalog_diff_reconnects_changed_spec(tmp_path: Path) -> None:
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "srv": {"command": "python", "args": ["old.py"], "autoConnect": True},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = MCPClient(hooks=_stub_hooks(_connected_session()))
+    await client.load_from_config(cfg)
+    old_rec = client._servers["srv"]
+
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "srv": {"command": "python", "args": ["new.py"], "autoConnect": True},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = await client.apply_catalog_diff(cfg)
+    assert result.reconnected == ("srv",)
+    assert result.kept == ()
+    assert client._servers["srv"] is not old_rec
+
+
+@pytest.mark.asyncio
+async def test_apply_catalog_diff_invalid_json_leaves_connections(tmp_path: Path) -> None:
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "keep": {"command": "python", "args": ["keep.py"], "autoConnect": True},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = MCPClient(hooks=_stub_hooks(_connected_session()))
+    await client.load_from_config(cfg)
+    rec = client._servers["keep"]
+    cfg.write_text("{not json", encoding="utf-8")
+    result = await client.apply_catalog_diff(cfg)
+    assert result.kept == ("keep",)
+    assert client._servers["keep"] is rec
