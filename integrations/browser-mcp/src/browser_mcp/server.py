@@ -7,6 +7,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import signal
 import sys
 import urllib.error
@@ -58,18 +59,23 @@ mcp = FastMCP(
         "\n"
         "Check browser_list_playbooks / browser_read_playbook before improvising on a site; "
         "call browser_write_playbook after learning non-obvious flows. "
-        "If the user asked to sign in and a Spaces-saved password exists, call "
-        "browser_login() — never read or type the password yourself. "
+        "If the user asked to sign in on the Spaces in-app browser and a saved "
+        "password exists, call browser_login() — never read or type the password "
+        "yourself. "
         "Call browser_stop when done with remote/cloud sessions."
     ),
 )
 
 
+# Matches monkeyapp BROWSER_TARGET_ID ('monkeybot'). The Spaces upgrade handler
+# accepts any /devtools/browser/* path, so this only has to stay in sync for the
+# URL we advertise, not for routing.
 _IN_APP_BROWSER_WS_PATH = "/devtools/browser/monkeybot"
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 _LOGIN_PUBLIC_ERRORS = frozenset(
     {
         "in-app browser is not available",
+        "in-app browser token is missing",
         "no tab",
         "not a web page",
         "no saved password for this site",
@@ -83,6 +89,12 @@ _IN_APP_CDP_REJECTED = (
     "not Google Chrome — there is no Allow-remote-debugging popup to click. "
     "Open the Browser panel in Spaces and retry."
 )
+# Passing ProxyHandler({}) makes urllib skip its default env-based proxy
+# handler. The empty handler itself is then dropped (no *_open methods),
+# so loopback requests never honor HTTP_PROXY.
+_LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+_LOGIN_TIMEOUT_S = 90
+_TOKEN_QUERY_RE = re.compile(r"([?&]token=)[^&\s]*", re.IGNORECASE)
 
 
 def _read_in_app_cdp_file() -> str | None:
@@ -104,7 +116,14 @@ def _read_in_app_cdp_token() -> str | None:
     token_file = _IN_APP_CDP_URL_FILE.parent / "in-app-cdp-token"
     try:
         raw = token_file.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
     except OSError:
+        logger.warning(
+            "browser-mcp: failed reading in-app CDP token file %s",
+            token_file,
+            exc_info=True,
+        )
         return None
     return raw or None
 
@@ -131,7 +150,7 @@ def _with_query_token(url: str, token: str | None) -> str:
         for key, value in parse_qsl(parsed.query, keep_blank_values=True)
         if key != "token"
     ]
-    pairs.append(("token", _query_token(parsed.query) or token))
+    pairs.append(("token", token))
     return urlunparse(parsed._replace(query=urlencode(pairs)))
 
 
@@ -141,17 +160,24 @@ def _in_app_ws_url(url: str, token: str | None) -> str:
     The in-app bridge requires a bearer/query token on every request, including
     ``/json/version``. Point the daemon at the tokenized WebSocket URL so it
     never does that unauthenticated HTTP probe. The local token is only ever
-    attached to a loopback URL.
+    attached to a loopback URL. File token wins over a query token already on
+    the published URL.
     """
     parsed = urlparse(url)
     if not _is_loopback_host(parsed.hostname):
         return url
+    attached = token or _query_token(parsed.query)
     if parsed.scheme in {"http", "https"}:
         host = parsed.hostname or "127.0.0.1"
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
         scheme = "wss" if parsed.scheme == "https" else "ws"
         url = f"{scheme}://{host}:{port}{_IN_APP_BROWSER_WS_PATH}"
-    return _with_query_token(url, token)
+    return _with_query_token(url, attached)
+
+
+def _redact_cdp_token(message: str) -> str:
+    """Strip query tokens so harness log tails cannot leak into agent transcripts."""
+    return _TOKEN_QUERY_RE.sub(r"\1[redacted]", message)
 
 
 def _bind_in_app_endpoint(url: str, token: str | None) -> str:
@@ -180,7 +206,9 @@ def _raise_rewritten_in_app_cdp_error(exc: BaseException) -> None:
         return
     if not (_read_in_app_cdp_file() or _env_set_from_in_app_file):
         return
-    raise RuntimeError(_IN_APP_CDP_REJECTED) from exc
+    # Drop the cause chain so a tokenized WS URL in the original message
+    # cannot leak into the agent transcript.
+    raise RuntimeError(_IN_APP_CDP_REJECTED) from None
 
 
 def _apply_in_app_cdp_url() -> str | None:
@@ -308,8 +336,8 @@ def _browser_harness() -> tuple[Any, Any]:
     if admin.daemon_alive() and _bound_cdp != cdp:
         logger.info(
             "browser-mcp: replacing harness daemon for CDP %s (was %s)",
-            cdp,
-            _bound_cdp,
+            _redact_cdp_token(str(cdp)) if cdp else cdp,
+            _redact_cdp_token(str(_bound_cdp)) if _bound_cdp else _bound_cdp,
         )
         admin.restart_daemon()
         _bh = None
@@ -318,6 +346,9 @@ def _browser_harness() -> tuple[Any, Any]:
         admin.ensure_daemon()
     except Exception as exc:
         _raise_rewritten_in_app_cdp_error(exc)
+        message = _redact_cdp_token(str(exc))
+        if message != str(exc):
+            raise RuntimeError(message) from None
         raise
     _bh = (helpers, admin)
     _bound_cdp = cdp
@@ -543,7 +574,7 @@ def _in_app_http_and_token() -> tuple[str | None, str | None]:
     http = _in_app_http_origin(file_url)
     if not http:
         return None, None
-    token = _query_token(urlparse(file_url).query) or _read_in_app_cdp_token()
+    token = _read_in_app_cdp_token() or _query_token(urlparse(file_url).query)
     return http, token
 
 
@@ -559,10 +590,16 @@ def _public_login_result(body: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _loopback_open(req: urllib.request.Request, timeout: float = _LOGIN_TIMEOUT_S) -> Any:
+    return _LOOPBACK_OPENER.open(req, timeout=timeout)
+
+
 def _sealed_login(username: str | None) -> dict[str, Any]:
     http, token = _in_app_http_and_token()
-    if not http or not token:
+    if not http:
         return {"ok": False, "loggedIn": False, "error": "in-app browser is not available"}
+    if not token:
+        return {"ok": False, "loggedIn": False, "error": "in-app browser token is missing"}
     payload = json.dumps({"username": username} if username else {}).encode("utf-8")
     headers = {
         "Content-Type": "application/json",
@@ -570,7 +607,7 @@ def _sealed_login(username: str | None) -> dict[str, Any]:
     }
     req = urllib.request.Request(f"{http}/json/login", data=payload, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with _loopback_open(req, timeout=_LOGIN_TIMEOUT_S) as resp:
             body = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         try:

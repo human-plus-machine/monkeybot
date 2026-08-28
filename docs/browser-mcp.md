@@ -182,7 +182,7 @@ synchronization layer.
 
 ## Tools
 
-Navigation, interaction, screenshots, tabs, waits, playbooks (`browser_list_playbooks`, `browser_read_playbook`, `browser_write_playbook`), and `browser_stop` for daemon cleanup.
+Navigation, interaction, screenshots, tabs, waits, playbooks (`browser_list_playbooks`, `browser_read_playbook`, `browser_write_playbook`), `browser_login` for Spaces-saved passwords (returns `{ok, loggedIn}` — never the password), and `browser_stop` for daemon cleanup.
 
 ### Default: indexed DOM interaction (no screenshots needed)
 
@@ -216,6 +216,6 @@ uv run browser-harness --doctor
 
 Common issues:
 
-- **403 / permission-blocked** — use `BU_CDP_URL` with a dedicated automation Chrome instead of desktop Chrome with the inspect checkbox.
+- **403 / permission-blocked** — on desktop Chrome, use `BU_CDP_URL` with a dedicated automation Chrome instead of the inspect checkbox. On Spaces, this is the in-app browser, not Google Chrome: there is no Allow-remote-debugging popup. Open the Browser panel and retry; a leftover token file is not enough — the published `in-app-cdp-url` file must be present.
 - **DevToolsActivePort not found** — Chrome not running or wrong `BU_CDP_URL` / `BU_CDP_WS`.
 - **MCP connects but navigation fails** — verify CDP endpoint from the same host/network namespace as the MCP subprocess.
