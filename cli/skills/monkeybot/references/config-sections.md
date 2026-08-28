@@ -45,7 +45,7 @@ Validate check ids: `paths.agent_md.exists`, `paths.skills_path.exists`, `paths.
 | `max_turns` | `1000` | Hard cap on turns per run |
 | `summarization_model` | (main model) | Cheaper model for history summarization (env `CONTEXT_SUMMARIZATION_MODEL`) |
 
-Validate check ids: `model.provider.supported`, `model.name.present`. Supported YAML providers: `gemini`/`vertex`, `openai`, `anthropic`, `vertex-claude`, `huggingface`, `ollama`, `aws_bedrock`, `fake`.
+Validate check ids: `model.provider.supported`, `model.name.present`. Supported YAML providers: `gemini`/`vertex`, `openai`, `anthropic`, `vertex-claude`, `huggingface`, `ollama-cloud`, `ollama-local`, `ollama`, `aws_bedrock`, `fake`.
 
 ## `gcp` / `anthropic_vertex` (non-secret identifiers)
 
