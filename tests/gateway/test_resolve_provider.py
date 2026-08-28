@@ -9,7 +9,10 @@ from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.gateway.sse import app as gateway_app
 from monkeybot.providers.gemini import GeminiProvider
 from monkeybot.providers.huggingface import HuggingFaceProvider
-from monkeybot.providers.ollama import OllamaProvider
+from monkeybot.providers.ollama import (
+    _DUMMY_API_KEY,
+    OllamaProvider,
+)
 from monkeybot.providers.openrouter import OpenRouterProvider
 
 
@@ -52,6 +55,7 @@ def test_resolve_provider_ollama_local(monkeypatch: pytest.MonkeyPatch) -> None:
     provider = gateway_app._resolve_provider()
     assert isinstance(provider, OllamaProvider)
     assert provider.name == "ollama-local"
+    assert provider._api_key == _DUMMY_API_KEY
     assert provider._resolve_base_url("llama3.1") == "http://localhost:11434/v1"
 
 

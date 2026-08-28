@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from monkeybot.core.config.yaml_loader import load_monkeybot_yaml_dict
 from monkeybot.core.llm.provider import Provider
@@ -27,8 +27,16 @@ _MODEL_PROVIDER_ALIASES: dict[str, str] = {
     "google-vertexai": "google_vertexai",
     "vertex-claude": "vertex_anthropic",
     "vertex_claude": "vertex_anthropic",
+    # Hyphen form is the YAML / desktop-app id (unlike vertex-claude, which
+    # maps onto a different internal id).
     "ollama_cloud": "ollama-cloud",
     "ollama_local": "ollama-local",
+}
+
+_OLLAMA_MODES: dict[str, Literal["auto", "cloud", "local"]] = {
+    "ollama": "auto",
+    "ollama-cloud": "cloud",
+    "ollama-local": "local",
 }
 
 
@@ -205,29 +213,11 @@ def get_provider_config(
             ),
             resolved_model,
         )
-    if provider_key == "ollama-cloud":
+    ollama_mode = _OLLAMA_MODES.get(provider_key)
+    if ollama_mode is not None:
         return ProviderConfig(
             OllamaProvider(
-                mode="cloud",
-                temperature=sampling.temperature,
-                max_tokens=sampling.max_tokens,
-                thinking_budget=thinking_budget,
-            ),
-            resolved_model,
-        )
-    if provider_key == "ollama-local":
-        return ProviderConfig(
-            OllamaProvider(
-                mode="local",
-                temperature=sampling.temperature,
-                max_tokens=sampling.max_tokens,
-                thinking_budget=thinking_budget,
-            ),
-            resolved_model,
-        )
-    if provider_key == "ollama":
-        return ProviderConfig(
-            OllamaProvider(
+                mode=ollama_mode,
                 temperature=sampling.temperature,
                 max_tokens=sampling.max_tokens,
                 thinking_budget=thinking_budget,

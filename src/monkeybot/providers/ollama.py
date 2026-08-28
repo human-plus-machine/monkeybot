@@ -74,19 +74,37 @@ def _resolve_host_and_key(mode: OllamaMode = "auto") -> tuple[str, str]:
     """Pick local vs cloud host from env and provider mode.
 
     ``cloud`` ignores a leftover localhost URL so a prior local-runtime persist
-    cannot steal cloud traffic. ``local`` ignores a cloud URL. ``auto`` keeps
-    the legacy rule: an explicit URL always wins.
+    cannot steal cloud traffic. ``local`` ignores a cloud URL and never forwards
+    ``OLLAMA_API_KEY`` (an authenticating reverse proxy uses legacy ``ollama``
+    plus an explicit URL). ``auto`` keeps the legacy rule: an explicit URL
+    always wins.
     """
     api_key = (os.environ.get("OLLAMA_API_KEY") or "").strip()
     base = (os.environ.get("OLLAMA_BASE_URL") or "").strip().rstrip("/")
     if mode == "cloud":
+        if not api_key:
+            raise ValueError(
+                "OLLAMA_API_KEY is not set. Create a key at "
+                "https://ollama.com/settings/keys and add it to your .env or "
+                "environment (required for model.provider ollama-cloud)."
+            )
         if base and _is_cloud_host(base):
-            return base, api_key or _DUMMY_API_KEY
-        return _DEFAULT_CLOUD_URL, api_key or _DUMMY_API_KEY
+            return base, api_key
+        if base:
+            _log.warning(
+                "ollama-cloud ignoring non-cloud OLLAMA_BASE_URL %s",
+                kv(ignored=base, host=_DEFAULT_CLOUD_URL),
+            )
+        return _DEFAULT_CLOUD_URL, api_key
     if mode == "local":
         if base and not _is_cloud_host(base):
-            return base, api_key or _DUMMY_API_KEY
-        return _DEFAULT_LOCAL_URL, api_key or _DUMMY_API_KEY
+            return base, _DUMMY_API_KEY
+        if base:
+            _log.warning(
+                "ollama-local ignoring cloud OLLAMA_BASE_URL %s",
+                kv(ignored=base, host=_DEFAULT_LOCAL_URL),
+            )
+        return _DEFAULT_LOCAL_URL, _DUMMY_API_KEY
     if base:
         return base, api_key or _DUMMY_API_KEY
     if api_key:
@@ -152,6 +170,7 @@ class OllamaProvider:
     ) -> None:
         self._mode = mode
         self._base_url, self._api_key = _resolve_host_and_key(mode)
+        _log.info("ollama host resolved %s", kv(mode=self._mode, host=self._base_url))
         sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens)
         self._temperature = sampling.temperature
         self._max_tokens = sampling.max_tokens
@@ -202,7 +221,7 @@ class OllamaProvider:
         async for event in stream_chat_completions_with_tool_fallback(
             base_url=self._resolve_base_url(model),
             api_key=self._api_key,
-            provider="ollama",
+            provider=self.name,
             messages=messages,
             tools=tools,
             model=model,

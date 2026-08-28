@@ -76,13 +76,18 @@ def test_explicit_url_wins_over_cloud_default(monkeypatch: pytest.MonkeyPatch) -
     assert provider._resolve_base_url("m") == "http://localhost:11434/v1"
 
 
-def test_cloud_mode_ignores_local_url(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cloud_mode_ignores_local_url(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
     monkeypatch.setenv("OLLAMA_API_KEY", "ollama-cloud-key")
-    provider = OllamaProvider(mode="cloud")
+    with caplog.at_level(logging.WARNING, logger="monkeybot.providers.ollama"):
+        provider = OllamaProvider(mode="cloud")
     assert provider.name == "ollama-cloud"
     assert provider._api_key == "ollama-cloud-key"
     assert provider._resolve_base_url("glm-5.3-flash") == "https://ollama.com/v1"
+    assert "ignoring non-cloud OLLAMA_BASE_URL" in caplog.text
+    assert "ignored=http://127.0.0.1:11434" in caplog.text
 
 
 def test_cloud_mode_keeps_explicit_cloud_host(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -92,18 +97,44 @@ def test_cloud_mode_keeps_explicit_cloud_host(monkeypatch: pytest.MonkeyPatch) -
     assert provider._resolve_base_url("m") == "https://ollama.com/v1"
 
 
-def test_local_mode_ignores_cloud_url_and_key(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cloud_mode_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+    with pytest.raises(ValueError, match="OLLAMA_API_KEY is not set"):
+        OllamaProvider(mode="cloud")
+
+
+def test_local_mode_ignores_cloud_url_and_key(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     monkeypatch.setenv("OLLAMA_BASE_URL", "https://ollama.com")
     monkeypatch.setenv("OLLAMA_API_KEY", "ollama-cloud-key")
-    provider = OllamaProvider(mode="local")
+    with caplog.at_level(logging.WARNING, logger="monkeybot.providers.ollama"):
+        provider = OllamaProvider(mode="local")
     assert provider.name == "ollama-local"
+    assert provider._api_key == _DUMMY_API_KEY
     assert provider._resolve_base_url("llama3.1") == "http://localhost:11434/v1"
+    assert "ignoring cloud OLLAMA_BASE_URL" in caplog.text
 
 
 def test_local_mode_uses_custom_host(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://my-server:11434")
+    monkeypatch.setenv("OLLAMA_API_KEY", "ollama-cloud-key")
     provider = OllamaProvider(mode="local")
+    assert provider._api_key == _DUMMY_API_KEY
     assert provider._resolve_base_url("m") == "http://my-server:11434/v1"
+
+
+def test_provider_logs_resolved_host(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    with caplog.at_level(logging.INFO, logger="monkeybot.providers.ollama"):
+        OllamaProvider(mode="local")
+    assert "ollama host resolved" in caplog.text
+    assert "mode=local" in caplog.text
+    assert "host=http://localhost:11434" in caplog.text
 
 
 def test_ollama_stores_thinking_budget() -> None:
@@ -133,6 +164,7 @@ async def test_ollama_stream_passes_reasoning_effort_none(monkeypatch: pytest.Mo
     provider = OllamaProvider(thinking_budget=0)
     _ = [ev async for ev in provider.stream([], [], model="gemma4:12b")]
     assert captured[0]["reasoning_effort"] == "none"
+    assert captured[0]["provider"] == "ollama"
 
 
 @pytest.mark.asyncio
@@ -153,3 +185,23 @@ async def test_ollama_stream_omits_reasoning_effort_by_default(
     provider = OllamaProvider(thinking_budget=-1)
     _ = [ev async for ev in provider.stream([], [], model="gemma4:12b")]
     assert "reasoning_effort" not in captured[0]
+    assert captured[0]["provider"] == "ollama"
+
+
+@pytest.mark.asyncio
+async def test_cloud_stream_passes_provider_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[dict[str, Any]] = []
+
+    async def _fake_stream(**kwargs: Any):
+        captured.append(kwargs)
+        if False:  # pragma: no cover
+            yield
+
+    monkeypatch.setenv("OLLAMA_API_KEY", "ollama-cloud-key")
+    monkeypatch.setattr(
+        "monkeybot.providers.ollama.stream_chat_completions_with_tool_fallback",
+        _fake_stream,
+    )
+    provider = OllamaProvider(mode="cloud")
+    _ = [ev async for ev in provider.stream([], [], model="glm-5.3-flash")]
+    assert captured[0]["provider"] == "ollama-cloud"
