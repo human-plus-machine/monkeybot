@@ -6,9 +6,13 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Core
+
 ### Added
 
 - Explicit `ollama-cloud` and `ollama-local` provider ids so Cloud always hits `https://ollama.com` even when a leftover local `OLLAMA_BASE_URL` is set. Legacy `ollama` still auto-routes from env.
+
+### CLI
 
 ### Changed
 
