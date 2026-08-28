@@ -221,6 +221,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 | `vertex_anthropic` | vertex-claude | anthropic-messages | `cache_control` |
 | `aws_bedrock` | — | anthropic-messages | `cache_control` |
 | `huggingface` / `nvidia` / `ollama` | — | openai-compat | none |
+| `ollama-cloud` / `ollama-local` | ollama_cloud, ollama_local | openai-compat | none |
 | `fake` | — | fake | gateway/test only |
 
 **Auth:** see CLI `monkeybot doctor` and `cli/.../providers.py` (`PROVIDER_SPECS`).
@@ -232,7 +233,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - `count_input_tokens()` must match the same payload shape as `stream()` (summarization triggers, tool budgets).
 - Provider resolution via `MODEL_PROVIDER` aliases (`gemini` → `google_vertexai`, `vertex-claude` → `vertex_anthropic`).
 - Optional extras in `pyproject.toml`: `gemini`, `openai`, `claude`, `vertex-claude`, `bedrock`, `huggingface`, `ollama`, `nvidia`.
-- `ollama`, `huggingface`, and `nvidia` share the OpenAI-compatible streaming core (`providers/_openai_compat.py`) and only differ in base URL / auth; `ollama` runs against a local server (`OLLAMA_BASE_URL`, default `http://localhost:11434`) and needs no API key; `nvidia` hits `https://integrate.api.nvidia.com/v1` and needs a free `NVIDIA_API_KEY` from build.nvidia.com.
+- `ollama`, `huggingface`, and `nvidia` share the OpenAI-compatible streaming core (`providers/_openai_compat.py`) and only differ in base URL / auth. Prefer explicit ids: `ollama-cloud` always hits `https://ollama.com` and requires `OLLAMA_API_KEY`; `ollama-local` always uses the local/self-hosted host (`OLLAMA_BASE_URL`, default `http://localhost:11434`) and needs no API key. Legacy `ollama` still auto-routes (a key with no URL means cloud; an explicit URL always wins). `nvidia` hits `https://integrate.api.nvidia.com/v1` and needs a free `NVIDIA_API_KEY` from build.nvidia.com.
 - `MODEL_PROVIDER=fake` is gateway/test-only; unit tests inject `ScriptedFakeProvider` directly.
 
 **Prompt-cache session hints (`ProviderCallHints`):**
@@ -267,7 +268,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 | `glob` / `grep` | Path discovery / content regex search (prefer over shell) |
 | `apply_patch` | Multi-file Codex-style Add/Update/Delete/Move; fail-closed before any write |
 | `search_memory` | Keyword search in memory tree |
-| `search` / `recall` | Local knowledge index (workspace + notes); **parallel-safe**. Gateway owns writes; subagents open the index **read-only** |
+| `search` / `recall` | Local knowledge index (workspace + notes); **parallel-safe**. Gateway owns writes; subagents open the index **read-only**. Harness-as-library (Pattern B/C) callers can opt into read-only via `MONKEYBOT_KNOWLEDGE_READ_ONLY=1`; the gateway always ignores this flag and stays the writer |
 | `list_skills` | Skill discovery |
 | `run_command` | Allowlisted shell (host or OpenSandbox) |
 | `task` | Subagent subprocess (parent only) |
@@ -292,6 +293,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - `task` omitted in subagent workers (`include_task_tool=False`).
 - Nested `task` disabled inside subagents.
 - Custom tools must not collide with core or MCP names.
+- `MONKEYBOT_KNOWLEDGE_READ_ONLY` (default off) opens the knowledge index read-only for `create_harness_deps` (Pattern B/C) callers; subagent workers are always read-only regardless of the flag. The gateway SSE app is the sole writer per workspace and ignores this flag, logging a warning if it is set.
 
 ---
 

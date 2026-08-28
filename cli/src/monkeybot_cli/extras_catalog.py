@@ -24,7 +24,8 @@ PROVIDER_CHOICES: tuple[ExtraChoice, ...] = (
     ExtraChoice("vertex-claude", "Claude on Vertex AI"),
     ExtraChoice("aws_bedrock", "AWS Bedrock"),
     ExtraChoice("huggingface", "Hugging Face"),
-    ExtraChoice("ollama", "Ollama (local)"),
+    ExtraChoice("ollama-cloud", "Ollama Cloud"),
+    ExtraChoice("ollama-local", "Ollama (local)"),
     ExtraChoice("nvidia", "NVIDIA NIM"),
     ExtraChoice("openrouter", "OpenRouter"),
 )
