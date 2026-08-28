@@ -13,7 +13,7 @@ from browser_mcp import server
 
 
 @pytest.fixture(autouse=True)
-def _reset_bh_state(monkeypatch: pytest.MonkeyPatch):
+def _reset_bh_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     original_bh = server._bh
     original_bound = server._bound_cdp
     original_env_flag = server._env_set_from_in_app_file
@@ -22,6 +22,7 @@ def _reset_bh_state(monkeypatch: pytest.MonkeyPatch):
     server._env_set_from_in_app_file = False
     monkeypatch.delenv("BU_CDP_URL", raising=False)
     monkeypatch.delenv("BU_CDP_WS", raising=False)
+    monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", tmp_path / "in-app-cdp-url")
     yield
     server._bh = original_bh
     server._bound_cdp = original_bound
@@ -48,8 +49,10 @@ def test_apply_in_app_cdp_url_prefers_file_over_env(
     monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", cdp_file)
     monkeypatch.setenv("BU_CDP_URL", "http://127.0.0.1:9222")
 
-    assert server._apply_in_app_cdp_url() == "http://127.0.0.1:9333"
-    assert server.os.environ.get("BU_CDP_URL") == "http://127.0.0.1:9333"
+    bound = server._apply_in_app_cdp_url()
+    assert bound == "ws://127.0.0.1:9333/devtools/browser/monkeybot"
+    assert server.os.environ.get("BU_CDP_WS") == bound
+    assert "BU_CDP_URL" not in server.os.environ
 
 
 def test_apply_in_app_cdp_url_reads_http_file(
@@ -59,8 +62,10 @@ def test_apply_in_app_cdp_url_reads_http_file(
     cdp_file.write_text("http://127.0.0.1:9333\n", encoding="utf-8")
     monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", cdp_file)
 
-    assert server._apply_in_app_cdp_url() == "http://127.0.0.1:9333"
-    assert server.os.environ.get("BU_CDP_URL") == "http://127.0.0.1:9333"
+    bound = server._apply_in_app_cdp_url()
+    assert bound == "ws://127.0.0.1:9333/devtools/browser/monkeybot"
+    assert server.os.environ.get("BU_CDP_WS") == bound
+    assert "BU_CDP_URL" not in server.os.environ
 
 
 def test_apply_in_app_cdp_url_reads_ws_file(
@@ -73,6 +78,48 @@ def test_apply_in_app_cdp_url_reads_ws_file(
     assert server._apply_in_app_cdp_url() == "ws://127.0.0.1:9333/devtools"
     assert server.os.environ.get("BU_CDP_WS") == "ws://127.0.0.1:9333/devtools"
     assert "BU_CDP_URL" not in server.os.environ
+
+
+def test_apply_in_app_cdp_url_attaches_token_to_ws(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cdp_file = tmp_path / "in-app-cdp-url"
+    cdp_file.write_text("ws://127.0.0.1:9333/devtools/browser/monkeybot", encoding="utf-8")
+    (tmp_path / "in-app-cdp-token").write_text("secret-token\n", encoding="utf-8")
+    monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", cdp_file)
+
+    bound = server._apply_in_app_cdp_url()
+    assert bound == "ws://127.0.0.1:9333/devtools/browser/monkeybot?token=secret-token"
+    assert server.os.environ.get("BU_CDP_WS") == bound
+    assert "BU_CDP_URL" not in server.os.environ
+
+
+def test_apply_in_app_cdp_url_token_file_upgrades_baked_http_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """mcp.json often freezes the HTTP origin without a token; use the token file."""
+    monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", tmp_path / "in-app-cdp-url")
+    (tmp_path / "in-app-cdp-token").write_text("secret-token", encoding="utf-8")
+    monkeypatch.setenv("BU_CDP_URL", "http://127.0.0.1:9333")
+
+    bound = server._apply_in_app_cdp_url()
+    assert bound == "ws://127.0.0.1:9333/devtools/browser/monkeybot?token=secret-token"
+    assert "BU_CDP_URL" not in server.os.environ
+
+
+def test_rewrite_in_app_cdp_error_replaces_chrome_popup_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", tmp_path / "in-app-cdp-url")
+    (tmp_path / "in-app-cdp-token").write_text("secret-token", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="Spaces browser"):
+        server._rewrite_in_app_cdp_error(
+            RuntimeError(
+                "permission-blocked: Chrome is reachable, but the per-session "
+                "Allow remote debugging popup has not been accepted"
+            )
+        )
 
 
 def test_apply_in_app_cdp_url_missing_file_is_silent(
@@ -93,8 +140,9 @@ def test_apply_in_app_cdp_url_clears_env_once_in_app_file_disappears(
     cdp_file.write_text("http://127.0.0.1:9333", encoding="utf-8")
     monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", cdp_file)
 
-    assert server._apply_in_app_cdp_url() == "http://127.0.0.1:9333"
-    assert server.os.environ.get("BU_CDP_URL") == "http://127.0.0.1:9333"
+    bound = server._apply_in_app_cdp_url()
+    assert bound == "ws://127.0.0.1:9333/devtools/browser/monkeybot"
+    assert server.os.environ.get("BU_CDP_WS") == bound
 
     cdp_file.unlink()
 
@@ -114,7 +162,7 @@ def test_apply_in_app_cdp_url_preserves_operator_env_once_in_app_file_disappears
     cdp_file.write_text("http://127.0.0.1:9333", encoding="utf-8")
     monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", cdp_file)
 
-    assert server._apply_in_app_cdp_url() == "http://127.0.0.1:9333"
+    assert server._apply_in_app_cdp_url() == "ws://127.0.0.1:9333/devtools/browser/monkeybot"
 
     cdp_file.unlink()
 

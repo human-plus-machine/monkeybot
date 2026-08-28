@@ -9,8 +9,11 @@ import logging
 import os
 import signal
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 from mcp.server.fastmcp import FastMCP
 
@@ -55,8 +58,17 @@ mcp = FastMCP(
         "\n"
         "Check browser_list_playbooks / browser_read_playbook before improvising on a site; "
         "call browser_write_playbook after learning non-obvious flows. "
+        "To sign in with a user-saved password, call browser_login() — never read or type "
+        "the password yourself. "
         "Call browser_stop when done with remote/cloud sessions."
     ),
+)
+
+
+_IN_APP_BROWSER_WS_PATH = "/devtools/browser/monkeybot"
+_CHROME_PERMISSION_MARKERS = (
+    "permission-blocked",
+    "allow remote debugging",
 )
 
 
@@ -73,6 +85,69 @@ def _read_in_app_cdp_file() -> str | None:
         )
         return None
     return raw or None
+
+
+def _read_in_app_cdp_token() -> str | None:
+    token_file = _IN_APP_CDP_URL_FILE.parent / "in-app-cdp-token"
+    try:
+        raw = token_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return raw or None
+
+
+def _with_query_token(url: str, token: str | None) -> str:
+    if not token:
+        return url
+    parsed = urlparse(url)
+    if parse_qs(parsed.query).get("token"):
+        return url
+    sep = "&" if parsed.query else "?"
+    return f"{url}{sep}token={token}"
+
+
+def _in_app_ws_url(url: str, token: str | None) -> str:
+    """browser-harness treats HTTP 403 as Chrome's Allow-debugging popup.
+
+    The in-app bridge requires a bearer/query token on every request, including
+    ``/json/version``. Point the daemon at the tokenized WebSocket URL so it
+    never does that unauthenticated HTTP probe.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme in {"http", "https"}:
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        scheme = "wss" if parsed.scheme == "https" else "ws"
+        url = f"{scheme}://{host}:{port}{_IN_APP_BROWSER_WS_PATH}"
+    return _with_query_token(url, token)
+
+
+def _bind_in_app_endpoint(url: str, token: str | None) -> str:
+    global _env_set_from_in_app_file
+    endpoint = _in_app_ws_url(url, token)
+    os.environ["BU_CDP_WS"] = endpoint
+    os.environ.pop("BU_CDP_URL", None)
+    _env_set_from_in_app_file = True
+    return endpoint
+
+
+def _looks_like_chrome_permission_error(message: str) -> bool:
+    lower = message.lower()
+    return any(marker in lower for marker in _CHROME_PERMISSION_MARKERS)
+
+
+def _rewrite_in_app_cdp_error(exc: BaseException) -> None:
+    """Replace Chrome-popup copy when the 403 actually came from Spaces."""
+    message = str(exc)
+    if not _looks_like_chrome_permission_error(message):
+        return
+    if not (_read_in_app_cdp_file() or _read_in_app_cdp_token() or _env_set_from_in_app_file):
+        return
+    raise RuntimeError(
+        "in-app browser CDP rejected the connection. This is the Spaces browser, "
+        "not Google Chrome — there is no Allow-remote-debugging popup to click. "
+        "Open the Browser panel in Spaces and retry."
+    ) from exc
 
 
 def _apply_in_app_cdp_url() -> str | None:
@@ -95,17 +170,9 @@ def _apply_in_app_cdp_url() -> str | None:
     global _env_set_from_in_app_file
 
     file_url = _read_in_app_cdp_file()
+    token = _read_in_app_cdp_token()
     if file_url:
-        if file_url.startswith("ws://") or file_url.startswith("wss://"):
-            os.environ["BU_CDP_WS"] = file_url
-            os.environ.pop("BU_CDP_URL", None)
-            _env_set_from_in_app_file = True
-            return file_url
-        if file_url.startswith("http://") or file_url.startswith("https://"):
-            os.environ["BU_CDP_URL"] = file_url
-            os.environ.pop("BU_CDP_WS", None)
-            _env_set_from_in_app_file = True
-            return file_url
+        return _bind_in_app_endpoint(file_url, token)
 
     if _env_set_from_in_app_file:
         os.environ.pop("BU_CDP_WS", None)
@@ -114,6 +181,10 @@ def _apply_in_app_cdp_url() -> str | None:
 
     ws = (os.environ.get("BU_CDP_WS") or "").strip()
     http = (os.environ.get("BU_CDP_URL") or "").strip()
+    # mcp.json often freezes the in-app HTTP origin without the token. If the
+    # token file is present, treat that loopback URL as the Spaces bridge.
+    if token and (ws or http):
+        return _bind_in_app_endpoint(ws or http, token)
     if ws:
         return ws
     if http:
@@ -214,7 +285,11 @@ def _browser_harness() -> tuple[Any, Any]:
         admin.restart_daemon()
         _bh = None
 
-    admin.ensure_daemon()
+    try:
+        admin.ensure_daemon()
+    except Exception as exc:
+        _rewrite_in_app_cdp_error(exc)
+        raise
     _bh = (helpers, admin)
     _bound_cdp = cdp
     return _bh
@@ -410,6 +485,73 @@ def browser_switch_tab(target_id: str) -> str:
     helpers, _ = _browser_harness()
     sid = helpers.switch_tab(target_id)
     return _json_text({"ok": True, "session_id": sid})
+
+
+def _in_app_http_and_token() -> tuple[str | None, str | None]:
+    """HTTP origin + bearer token for the in-app CDP bridge."""
+    _apply_in_app_cdp_url()
+    file_url = _read_in_app_cdp_file()
+    token: str | None = None
+    http: str | None = None
+    for raw in (file_url, os.environ.get("BU_CDP_WS"), os.environ.get("BU_CDP_URL")):
+        value = (raw or "").strip()
+        if not value:
+            continue
+        parsed = urlparse(value)
+        if parsed.query:
+            token = parse_qs(parsed.query).get("token", [None])[0] or token
+        if parsed.scheme in {"ws", "wss", "http", "https"} and parsed.hostname:
+            http = f"http://{parsed.hostname}:{parsed.port or 80}"
+            break
+    token_file = _IN_APP_CDP_URL_FILE.parent / "in-app-cdp-token"
+    if not token:
+        try:
+            token = token_file.read_text(encoding="utf-8").strip() or None
+        except OSError:
+            token = None
+    return http, token
+
+
+def _sealed_login(username: str | None) -> dict[str, Any]:
+    http, token = _in_app_http_and_token()
+    if not http:
+        return {"ok": False, "loggedIn": False, "error": "in-app browser is not available"}
+    payload = json.dumps({"username": username} if username else {}).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "Host": "127.0.0.1",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+        login_url = f"{http}/json/login?token={token}"
+    else:
+        login_url = f"{http}/json/login"
+    req = urllib.request.Request(login_url, data=payload, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        try:
+            body = json.loads(exc.read().decode("utf-8"))
+        except Exception:
+            return {"ok": False, "loggedIn": False, "error": str(exc)}
+    except Exception as exc:
+        logger.warning("browser_login failed: %s", exc)
+        return {"ok": False, "loggedIn": False, "error": str(exc)}
+    if not isinstance(body, dict):
+        return {"ok": False, "loggedIn": False, "error": "unexpected login response"}
+    return body
+
+
+@mcp.tool()
+def browser_login(username: str | None = None) -> str:
+    """Log in with a saved Spaces password without revealing the credential.
+
+    Call this on a login page instead of typing or reading the password.
+    Returns only {ok, loggedIn} — never the password value.
+    """
+    result = _sealed_login(username)
+    return _json_text(result)
 
 
 @mcp.tool()

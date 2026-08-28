@@ -2346,7 +2346,7 @@ wheels = [
 
 [[package]]
 name = "monkeybot"
-version = "3.0.3"
+version = "3.0.4"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
@@ -2603,7 +2603,7 @@ dev = [{ name = "pytest", specifier = ">=8.0.0" }]
 
 [[package]]
 name = "monkeybot-cli"
-version = "0.5.0"
+version = "0.5.1"
 source = { editable = "cli" }
 dependencies = [
     { name = "httpx" },
