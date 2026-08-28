@@ -160,13 +160,13 @@ def _in_app_ws_url(url: str, token: str | None) -> str:
     The in-app bridge requires a bearer/query token on every request, including
     ``/json/version``. Point the daemon at the tokenized WebSocket URL so it
     never does that unauthenticated HTTP probe. The local token is only ever
-    attached to a loopback URL. File token wins over a query token already on
-    the published URL.
+    attached to a loopback URL. A query token already on the published URL
+    wins over a leftover token file — Spaces writes the URL first.
     """
     parsed = urlparse(url)
     if not _is_loopback_host(parsed.hostname):
         return url
-    attached = token or _query_token(parsed.query)
+    attached = _query_token(parsed.query) or token
     if parsed.scheme in {"http", "https"}:
         host = parsed.hostname or "127.0.0.1"
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
@@ -209,6 +209,18 @@ def _raise_rewritten_in_app_cdp_error(exc: BaseException) -> None:
     # Drop the cause chain so a tokenized WS URL in the original message
     # cannot leak into the agent transcript.
     raise RuntimeError(_IN_APP_CDP_REJECTED) from None
+
+
+def _reraise_public_harness_error(exc: BaseException) -> None:
+    """Rewrite in-app 403s and strip query tokens before they reach the agent.
+
+    Call only from an ``except`` block. Unchanged messages are re-raised as-is.
+    """
+    _raise_rewritten_in_app_cdp_error(exc)
+    message = _redact_cdp_token(str(exc))
+    if message != str(exc):
+        raise RuntimeError(message) from None
+    raise
 
 
 def _apply_in_app_cdp_url() -> str | None:
@@ -273,7 +285,10 @@ def _teardown_bound_backend() -> None:
     else:
         from browser_harness import admin as bh_admin
 
-        bh_admin.restart_daemon()
+        try:
+            bh_admin.restart_daemon()
+        except Exception as exc:
+            _reraise_public_harness_error(exc)
 
 
 def _reconnect_agentcore() -> tuple[str, dict[str, str]]:
@@ -333,23 +348,18 @@ def _browser_harness() -> tuple[Any, Any]:
     # Fresh process: _bound_cdp is None while an external local-Chrome daemon may
     # still be alive. Restart whenever the desired CDP differs from what we last
     # ensured (browser-harness 0.1.3 has no daemon_browser_kind() to query).
-    if admin.daemon_alive() and _bound_cdp != cdp:
-        logger.info(
-            "browser-mcp: replacing harness daemon for CDP %s (was %s)",
-            _redact_cdp_token(str(cdp)) if cdp else cdp,
-            _redact_cdp_token(str(_bound_cdp)) if _bound_cdp else _bound_cdp,
-        )
-        admin.restart_daemon()
-        _bh = None
-
     try:
+        if admin.daemon_alive() and _bound_cdp != cdp:
+            logger.info(
+                "browser-mcp: replacing harness daemon for CDP %s (was %s)",
+                _redact_cdp_token(str(cdp)) if cdp else cdp,
+                _redact_cdp_token(str(_bound_cdp)) if _bound_cdp else _bound_cdp,
+            )
+            admin.restart_daemon()
+            _bh = None
         admin.ensure_daemon()
     except Exception as exc:
-        _raise_rewritten_in_app_cdp_error(exc)
-        message = _redact_cdp_token(str(exc))
-        if message != str(exc):
-            raise RuntimeError(message) from None
-        raise
+        _reraise_public_harness_error(exc)
     _bh = (helpers, admin)
     _bound_cdp = cdp
     return _bh
@@ -574,7 +584,7 @@ def _in_app_http_and_token() -> tuple[str | None, str | None]:
     http = _in_app_http_origin(file_url)
     if not http:
         return None, None
-    token = _read_in_app_cdp_token() or _query_token(urlparse(file_url).query)
+    token = _query_token(urlparse(file_url).query) or _read_in_app_cdp_token()
     return http, token
 
 
@@ -595,6 +605,8 @@ def _loopback_open(req: urllib.request.Request, timeout: float = _LOGIN_TIMEOUT_
 
 
 def _sealed_login(username: str | None) -> dict[str, Any]:
+    if _bound_cdp == "agentcore":
+        return {"ok": False, "loggedIn": False, "error": "in-app browser is not available"}
     http, token = _in_app_http_and_token()
     if not http:
         return {"ok": False, "loggedIn": False, "error": "in-app browser is not available"}
@@ -610,6 +622,8 @@ def _sealed_login(username: str | None) -> dict[str, Any]:
         with _loopback_open(req, timeout=_LOGIN_TIMEOUT_S) as resp:
             body = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
+        if getattr(exc, "code", None) in {401, 403}:
+            return {"ok": False, "loggedIn": False, "error": "in-app browser token is missing"}
         try:
             body = json.loads(exc.read().decode("utf-8"))
         except Exception:
@@ -692,7 +706,10 @@ def _stop_active_backend_best_effort() -> None:
     _bh = None
     from browser_harness import admin
 
-    admin.restart_daemon()
+    try:
+        admin.restart_daemon()
+    except Exception as exc:
+        _reraise_public_harness_error(exc)
 
 
 @mcp.tool()
@@ -704,7 +721,7 @@ def browser_stop() -> str:
     except Exception as exc:
         _bound_cdp = None
         logger.warning("browser_stop: failed to stop browser backend", exc_info=True)
-        return _json_text({"ok": False, "error": str(exc)})
+        return _json_text({"ok": False, "error": _redact_cdp_token(str(exc))})
     _bound_cdp = None
     return _json_text({"ok": True, "message": "browser backend stopped"})
 

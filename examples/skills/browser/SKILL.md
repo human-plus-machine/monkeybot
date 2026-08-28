@@ -48,7 +48,7 @@ Text-only models should never rely on screenshots for page understanding — use
 - Clicking / typing (default): `browser_get_elements` → `browser_click_by_index` / `browser_input_by_index` / `browser_select_by_index` → `browser_get_elements` again if the page changed.
 - Clicking (fallback only): `browser_screenshot` → `load_file(path)` → `browser_click(x, y)`.
 - Ad hoc DOM extraction: `browser_js(expression)` when you need custom page text or attributes.
-- Login walls: stop and ask the user. Use SSO only when Chrome is already signed in; still stop for passwords, MFA, or consent.
+- Login walls: if the user asked to sign in on the Spaces in-app browser, call `browser_login()` (optionally with `username`). It uses a saved password and returns `{ok, loggedIn}` only — never read or type the password yourself. If it returns `this password is not allowed for agent use`, stop and ask the user. Still stop for MFA, consent, or a password the user must type themselves.
 
 ## After learning something non-obvious
 

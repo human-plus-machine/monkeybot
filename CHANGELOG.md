@@ -6,6 +6,10 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- browser-mcp `browser_login`: sign in with a Spaces-saved password without exposing the credential. In-app CDP uses a tokenized WebSocket URL so a 403 is not misreported as Chrome's Allow-remote-debugging popup.
+
 ## [cli v0.5.1] - 2026-08-28
 
 ### Changed
