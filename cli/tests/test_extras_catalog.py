@@ -21,6 +21,8 @@ def test_normalize_extra_token_features_and_providers() -> None:
     assert normalize_extra_token("anthropic") == "claude"
     assert normalize_extra_token("aws_bedrock") == "bedrock"
     assert normalize_extra_token("claude") == "claude"
+    assert normalize_extra_token("ollama-cloud") == "ollama"
+    assert normalize_extra_token("ollama-local") == "ollama"
     assert normalize_extra_token("fake") is None
     assert normalize_extra_token("not-a-real-extra") is None
 
@@ -42,6 +44,9 @@ def test_extra_module_covers_catalog_extras() -> None:
 def test_provider_extra_name() -> None:
     assert provider_extra_name("openai") == "openai"
     assert provider_extra_name("anthropic") == "claude"
+    assert provider_extra_name("ollama-cloud") == "ollama"
+    assert provider_extra_name("ollama-local") == "ollama"
+    assert provider_extra_name("ollama") == "ollama"
     assert provider_extra_name("fake") is None
 
 

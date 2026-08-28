@@ -76,6 +76,36 @@ def test_explicit_url_wins_over_cloud_default(monkeypatch: pytest.MonkeyPatch) -
     assert provider._resolve_base_url("m") == "http://localhost:11434/v1"
 
 
+def test_cloud_mode_ignores_local_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+    monkeypatch.setenv("OLLAMA_API_KEY", "ollama-cloud-key")
+    provider = OllamaProvider(mode="cloud")
+    assert provider.name == "ollama-cloud"
+    assert provider._api_key == "ollama-cloud-key"
+    assert provider._resolve_base_url("glm-5.3-flash") == "https://ollama.com/v1"
+
+
+def test_cloud_mode_keeps_explicit_cloud_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OLLAMA_BASE_URL", "https://ollama.com/v1")
+    monkeypatch.setenv("OLLAMA_API_KEY", "ollama-cloud-key")
+    provider = OllamaProvider(mode="cloud")
+    assert provider._resolve_base_url("m") == "https://ollama.com/v1"
+
+
+def test_local_mode_ignores_cloud_url_and_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OLLAMA_BASE_URL", "https://ollama.com")
+    monkeypatch.setenv("OLLAMA_API_KEY", "ollama-cloud-key")
+    provider = OllamaProvider(mode="local")
+    assert provider.name == "ollama-local"
+    assert provider._resolve_base_url("llama3.1") == "http://localhost:11434/v1"
+
+
+def test_local_mode_uses_custom_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://my-server:11434")
+    provider = OllamaProvider(mode="local")
+    assert provider._resolve_base_url("m") == "http://my-server:11434/v1"
+
+
 def test_ollama_stores_thinking_budget() -> None:
     provider = OllamaProvider(thinking_budget=0)
     assert provider._thinking_budget == 0

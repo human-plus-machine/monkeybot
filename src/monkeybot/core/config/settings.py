@@ -27,6 +27,8 @@ _MODEL_PROVIDER_ALIASES: dict[str, str] = {
     "google-vertexai": "google_vertexai",
     "vertex-claude": "vertex_anthropic",
     "vertex_claude": "vertex_anthropic",
+    "ollama_cloud": "ollama-cloud",
+    "ollama_local": "ollama-local",
 }
 
 
@@ -203,6 +205,26 @@ def get_provider_config(
             ),
             resolved_model,
         )
+    if provider_key == "ollama-cloud":
+        return ProviderConfig(
+            OllamaProvider(
+                mode="cloud",
+                temperature=sampling.temperature,
+                max_tokens=sampling.max_tokens,
+                thinking_budget=thinking_budget,
+            ),
+            resolved_model,
+        )
+    if provider_key == "ollama-local":
+        return ProviderConfig(
+            OllamaProvider(
+                mode="local",
+                temperature=sampling.temperature,
+                max_tokens=sampling.max_tokens,
+                thinking_budget=thinking_budget,
+            ),
+            resolved_model,
+        )
     if provider_key == "ollama":
         return ProviderConfig(
             OllamaProvider(
@@ -243,7 +265,7 @@ def get_provider_config(
     raise ValueError(
         f"Unsupported model provider: {provider_key}. "
         "Supported providers: google_vertexai, openai, anthropic, vertex_anthropic, "
-        "huggingface, ollama, nvidia, openrouter, aws_bedrock"
+        "huggingface, ollama, ollama-cloud, ollama-local, nvidia, openrouter, aws_bedrock"
     )
 
 

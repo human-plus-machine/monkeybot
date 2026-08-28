@@ -129,6 +129,20 @@ class TestVertexAnthropicProvider:
         assert cfg.provider.name == "ollama"
         assert cfg.model == "llama3.1"
 
+    def test_get_provider_config_ollama_cloud(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("OLLAMA_API_KEY", "cloud-key")
+        monkeypatch.setenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+        cfg = get_provider_config(provider="ollama-cloud", model_name="glm-5.3-flash")
+        assert cfg.provider.name == "ollama-cloud"
+        assert cfg.model == "glm-5.3-flash"
+        assert cfg.provider._resolve_base_url("glm-5.3-flash") == "https://ollama.com/v1"
+
+    def test_get_provider_config_ollama_local(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+        cfg = get_provider_config(provider="ollama-local", model_name="llama3.1")
+        assert cfg.provider.name == "ollama-local"
+        assert cfg.model == "llama3.1"
+
     def test_get_provider_config_vertex_anthropic_happy_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("GCP_PROJECT_ID", "test-project")
         monkeypatch.setenv("ANTHROPIC_VERTEX_REGION", "us-central1")
