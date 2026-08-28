@@ -97,6 +97,26 @@ def test_cloud_mode_keeps_explicit_cloud_host(monkeypatch: pytest.MonkeyPatch) -
     assert provider._resolve_base_url("m") == "https://ollama.com/v1"
 
 
+def test_cloud_mode_normalizes_schemeless_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OLLAMA_BASE_URL", "ollama.com")
+    monkeypatch.setenv("OLLAMA_API_KEY", "ollama-cloud-key")
+    provider = OllamaProvider(mode="cloud")
+    assert provider._resolve_base_url("m") == "https://ollama.com/v1"
+
+
+def test_cloud_mode_upgrades_http_to_https(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://ollama.com")
+    monkeypatch.setenv("OLLAMA_API_KEY", "ollama-cloud-key")
+    with caplog.at_level(logging.WARNING, logger="monkeybot.providers.ollama"):
+        provider = OllamaProvider(mode="cloud")
+    assert provider._resolve_base_url("m") == "https://ollama.com/v1"
+    assert "upgrading plaintext OLLAMA_BASE_URL" in caplog.text
+    assert "ignored=http://ollama.com" in caplog.text
+    assert "host=https://ollama.com" in caplog.text
+
+
 def test_cloud_mode_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")

@@ -38,6 +38,15 @@ def test_resolve_provider_huggingface(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(provider, HuggingFaceProvider)
 
 
+def test_resolve_provider_ollama_legacy(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MODEL_PROVIDER", "ollama")
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    provider = gateway_app._resolve_provider()
+    assert isinstance(provider, OllamaProvider)
+    assert provider.name == "ollama"
+
+
 def test_resolve_provider_ollama_cloud(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MODEL_PROVIDER", "ollama-cloud")
     monkeypatch.setenv("OLLAMA_API_KEY", "ollama-cloud-key")

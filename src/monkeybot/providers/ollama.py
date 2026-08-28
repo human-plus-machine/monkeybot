@@ -70,6 +70,25 @@ def _is_cloud_host(url: str) -> bool:
     return host == "ollama.com" or host.endswith(".ollama.com")
 
 
+def _normalize_cloud_base(url: str) -> str:
+    """Return a usable https URL for an Ollama Cloud host.
+
+    Scheme-less values get ``https://``. Plaintext ``http://`` is upgraded so
+    the API key never travels in the clear.
+    """
+    if "://" not in url:
+        return f"https://{url}"
+    parsed = urlparse(url)
+    if parsed.scheme == "http":
+        upgraded = parsed._replace(scheme="https").geturl()
+        _log.warning(
+            "ollama-cloud upgrading plaintext OLLAMA_BASE_URL %s",
+            kv(ignored=url, host=upgraded),
+        )
+        return upgraded
+    return url
+
+
 def _resolve_host_and_key(mode: OllamaMode = "auto") -> tuple[str, str]:
     """Pick local vs cloud host from env and provider mode.
 
@@ -89,7 +108,7 @@ def _resolve_host_and_key(mode: OllamaMode = "auto") -> tuple[str, str]:
                 "environment (required for model.provider ollama-cloud)."
             )
         if base and _is_cloud_host(base):
-            return base, api_key
+            return _normalize_cloud_base(base), api_key
         if base:
             _log.warning(
                 "ollama-cloud ignoring non-cloud OLLAMA_BASE_URL %s",
