@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import functools
 import json
 import logging
 import os
@@ -12,8 +13,9 @@ import signal
 import sys
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn, ParamSpec
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from mcp.server.fastmcp import FastMCP
@@ -60,8 +62,8 @@ mcp = FastMCP(
         "Check browser_list_playbooks / browser_read_playbook before improvising on a site; "
         "call browser_write_playbook after learning non-obvious flows. "
         "If the user asked to sign in on the Spaces in-app browser and a saved "
-        "password exists, call browser_login() — never read or type the password "
-        "yourself. "
+        "password exists, call browser_login(expected_origin=...) — never read or "
+        "type the password yourself, and check the returned origin. "
         "Call browser_stop when done with remote/cloud sessions."
     ),
 )
@@ -76,8 +78,10 @@ _LOGIN_PUBLIC_ERRORS = frozenset(
     {
         "in-app browser is not available",
         "in-app browser token is missing",
+        "in-app browser could not verify the origin",
         "no tab",
         "not a web page",
+        "focused tab is on a different origin",
         "no saved password for this site",
         "this password is not allowed for agent use",
         "unexpected login response",
@@ -95,6 +99,7 @@ _IN_APP_CDP_REJECTED = (
 _LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 _LOGIN_TIMEOUT_S = 90
 _TOKEN_QUERY_RE = re.compile(r"([?&]token=)[^&\s]*", re.IGNORECASE)
+_P = ParamSpec("_P")
 
 
 def _read_in_app_cdp_file() -> str | None:
@@ -211,7 +216,7 @@ def _raise_rewritten_in_app_cdp_error(exc: BaseException) -> None:
     raise RuntimeError(_IN_APP_CDP_REJECTED) from None
 
 
-def _reraise_public_harness_error(exc: BaseException) -> None:
+def _reraise_public_harness_error(exc: BaseException) -> NoReturn:
     """Rewrite in-app 403s and strip query tokens before they reach the agent.
 
     Call only from an ``except`` block. Unchanged messages are re-raised as-is.
@@ -221,6 +226,25 @@ def _reraise_public_harness_error(exc: BaseException) -> None:
     if message != str(exc):
         raise RuntimeError(message) from None
     raise
+
+
+def _public_tool(fn: Callable[_P, str]) -> Callable[_P, str]:
+    """Register-time wrapper that keeps CDP tokens out of tool failures.
+
+    ``BU_CDP_WS`` carries the in-app bridge token, browser-harness logs the
+    endpoint it connects to, and FastMCP turns any raised exception into
+    agent-visible ``ToolError`` text. Redacting inside individual helpers only
+    covers the call sites someone remembered, so every tool goes through here.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> str:
+        try:
+            return fn(*args, **kwargs)
+        except Exception as exc:
+            _reraise_public_harness_error(exc)
+
+    return wrapper
 
 
 def _apply_in_app_cdp_url() -> str | None:
@@ -285,10 +309,7 @@ def _teardown_bound_backend() -> None:
     else:
         from browser_harness import admin as bh_admin
 
-        try:
-            bh_admin.restart_daemon()
-        except Exception as exc:
-            _reraise_public_harness_error(exc)
+        bh_admin.restart_daemon()
 
 
 def _reconnect_agentcore() -> tuple[str, dict[str, str]]:
@@ -348,18 +369,15 @@ def _browser_harness() -> tuple[Any, Any]:
     # Fresh process: _bound_cdp is None while an external local-Chrome daemon may
     # still be alive. Restart whenever the desired CDP differs from what we last
     # ensured (browser-harness 0.1.3 has no daemon_browser_kind() to query).
-    try:
-        if admin.daemon_alive() and _bound_cdp != cdp:
-            logger.info(
-                "browser-mcp: replacing harness daemon for CDP %s (was %s)",
-                _redact_cdp_token(str(cdp)) if cdp else cdp,
-                _redact_cdp_token(str(_bound_cdp)) if _bound_cdp else _bound_cdp,
-            )
-            admin.restart_daemon()
-            _bh = None
-        admin.ensure_daemon()
-    except Exception as exc:
-        _reraise_public_harness_error(exc)
+    if admin.daemon_alive() and _bound_cdp != cdp:
+        logger.info(
+            "browser-mcp: replacing harness daemon for CDP %s (was %s)",
+            _redact_cdp_token(str(cdp)) if cdp else cdp,
+            _redact_cdp_token(str(_bound_cdp)) if _bound_cdp else _bound_cdp,
+        )
+        admin.restart_daemon()
+        _bh = None
+    admin.ensure_daemon()
     _bh = (helpers, admin)
     _bound_cdp = cdp
     return _bh
@@ -370,6 +388,7 @@ def _json_text(payload: object) -> str:
 
 
 @mcp.tool()
+@_public_tool
 def browser_goto(url: str) -> str:
     """Navigate to a URL in the browser (opens or reuses a tab). Returns page info and matching playbook filenames."""
     helpers, _ = _browser_harness()
@@ -381,6 +400,7 @@ def browser_goto(url: str) -> str:
 
 
 @mcp.tool()
+@_public_tool
 def browser_get_elements(viewport_only: bool = False) -> str:
     """Return interactive elements as an indexed text tree — the default way to see the page.
 
@@ -400,6 +420,7 @@ def browser_get_elements(viewport_only: bool = False) -> str:
 
 
 @mcp.tool()
+@_public_tool
 def browser_click_by_index(index: int) -> str:
     """Click an interactive element by index from browser_get_elements. Prefer this over
     browser_click(x, y) — no pixel-guessing, resilient to layout shifts."""
@@ -413,6 +434,7 @@ def browser_click_by_index(index: int) -> str:
 
 
 @mcp.tool()
+@_public_tool
 def browser_input_by_index(index: int, text: str, clear_first: bool = True) -> str:
     """Click and type text into an indexed input/textarea/contenteditable element from
     browser_get_elements. Prefer this over screenshot + coordinate typing."""
@@ -428,6 +450,7 @@ def browser_input_by_index(index: int, text: str, clear_first: bool = True) -> s
 
 
 @mcp.tool()
+@_public_tool
 def browser_select_by_index(index: int, text: str) -> str:
     """Select a <select> dropdown option by visible text, using the index from
     browser_get_elements."""
@@ -440,6 +463,7 @@ def browser_select_by_index(index: int, text: str) -> str:
 
 
 @mcp.tool()
+@_public_tool
 def browser_screenshot(full: bool = False, max_dim: int | None = 1800) -> str:
     """Capture a PNG of the current viewport.
 
@@ -474,6 +498,7 @@ def browser_screenshot(full: bool = False, max_dim: int | None = 1800) -> str:
 
 
 @mcp.tool()
+@_public_tool
 def browser_click(x: float, y: float, button: str = "left", clicks: int = 1) -> str:
     """Click at viewport coordinates (x, y).
 
@@ -488,6 +513,7 @@ def browser_click(x: float, y: float, button: str = "left", clicks: int = 1) -> 
 
 
 @mcp.tool()
+@_public_tool
 def browser_fill(selector: str, text: str, clear_first: bool = True, timeout: float = 0.0) -> str:
     """Fill a form input (works with React/Vue controlled inputs)."""
     helpers, _ = _browser_harness()
@@ -496,6 +522,7 @@ def browser_fill(selector: str, text: str, clear_first: bool = True, timeout: fl
 
 
 @mcp.tool()
+@_public_tool
 def browser_press_key(key: str, modifiers: int = 0) -> str:
     """Press a key. Modifiers bitfield: 1=Alt, 2=Ctrl, 4=Meta(Cmd), 8=Shift."""
     helpers, _ = _browser_harness()
@@ -504,6 +531,7 @@ def browser_press_key(key: str, modifiers: int = 0) -> str:
 
 
 @mcp.tool()
+@_public_tool
 def browser_scroll(x: float, y: float, dy: float = -300, dx: float = 0) -> str:
     """Scroll the page at viewport position (x, y)."""
     helpers, _ = _browser_harness()
@@ -512,6 +540,7 @@ def browser_scroll(x: float, y: float, dy: float = -300, dx: float = 0) -> str:
 
 
 @mcp.tool()
+@_public_tool
 def browser_js(expression: str) -> str:
     """Evaluate JavaScript in the attached tab and return the result (DOM read/extraction)."""
     helpers, _ = _browser_harness()
@@ -520,6 +549,7 @@ def browser_js(expression: str) -> str:
 
 
 @mcp.tool()
+@_public_tool
 def browser_wait_for(selector: str, visible: bool = False, timeout: float = 10.0) -> str:
     """Wait until an element matching selector exists (optionally visible)."""
     helpers, _ = _browser_harness()
@@ -528,6 +558,7 @@ def browser_wait_for(selector: str, visible: bool = False, timeout: float = 10.0
 
 
 @mcp.tool()
+@_public_tool
 def browser_wait_idle(timeout: float = 10.0, idle_ms: float = 500) -> str:
     """Wait until network activity is idle (useful after SPA navigation or form submit)."""
     helpers, _ = _browser_harness()
@@ -536,6 +567,7 @@ def browser_wait_idle(timeout: float = 10.0, idle_ms: float = 500) -> str:
 
 
 @mcp.tool()
+@_public_tool
 def browser_page_info() -> str:
     """Return current page url, title, viewport size, and scroll position."""
     helpers, _ = _browser_harness()
@@ -543,6 +575,7 @@ def browser_page_info() -> str:
 
 
 @mcp.tool()
+@_public_tool
 def browser_tabs() -> str:
     """List open browser tabs."""
     helpers, _ = _browser_harness()
@@ -550,6 +583,7 @@ def browser_tabs() -> str:
 
 
 @mcp.tool()
+@_public_tool
 def browser_switch_tab(target_id: str) -> str:
     """Switch to a tab by target_id (from browser_tabs)."""
     helpers, _ = _browser_harness()
@@ -589,11 +623,23 @@ def _in_app_http_and_token() -> tuple[str | None, str | None]:
 
 
 def _public_login_result(body: dict[str, Any]) -> dict[str, Any]:
+    """Copy only the non-secret fields out of the bridge response.
+
+    Built by allowlist rather than by stripping keys, so a future bridge field
+    cannot introduce a credential leak here.
+    """
     error = body.get("error")
+    origin = body.get("origin")
     result: dict[str, Any] = {
         "ok": bool(body.get("ok")),
         "loggedIn": bool(body.get("loggedIn")),
     }
+    # The origin the bridge actually acted on. The agent cannot otherwise tell:
+    # the bridge logs in to the tab the *user* has focused, while harness tool
+    # calls address tabs by CDP session, so browser_switch_tab (or the user
+    # clicking another tab) makes the two diverge.
+    if isinstance(origin, str) and origin:
+        result["origin"] = origin
     if error:
         message = str(error)
         result["error"] = message if message in _LOGIN_PUBLIC_ERRORS else "login failed"
@@ -604,7 +650,7 @@ def _loopback_open(req: urllib.request.Request, timeout: float = _LOGIN_TIMEOUT_
     return _LOOPBACK_OPENER.open(req, timeout=timeout)
 
 
-def _sealed_login(username: str | None) -> dict[str, Any]:
+def _sealed_login(username: str | None, expected_origin: str | None) -> dict[str, Any]:
     if _bound_cdp == "agentcore":
         return {"ok": False, "loggedIn": False, "error": "in-app browser is not available"}
     http, token = _in_app_http_and_token()
@@ -612,7 +658,12 @@ def _sealed_login(username: str | None) -> dict[str, Any]:
         return {"ok": False, "loggedIn": False, "error": "in-app browser is not available"}
     if not token:
         return {"ok": False, "loggedIn": False, "error": "in-app browser token is missing"}
-    payload = json.dumps({"username": username} if username else {}).encode("utf-8")
+    request_body: dict[str, str] = {}
+    if username:
+        request_body["username"] = username
+    if expected_origin:
+        request_body["expectedOrigin"] = expected_origin
+    payload = json.dumps(request_body).encode("utf-8")
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {token}",
@@ -634,21 +685,38 @@ def _sealed_login(username: str | None) -> dict[str, Any]:
         return {"ok": False, "loggedIn": False, "error": "login failed"}
     if not isinstance(body, dict):
         return {"ok": False, "loggedIn": False, "error": "unexpected login response"}
-    return _public_login_result(body)
+    result = _public_login_result(body)
+    if expected_origin and "origin" not in result:
+        # A Spaces build older than expectedOrigin support ignores it and echoes
+        # no origin, so the login it just performed is unverifiable. Report that
+        # rather than letting the agent treat an unchecked login as confirmed.
+        result = {
+            "ok": False,
+            "loggedIn": result["loggedIn"],
+            "error": "in-app browser could not verify the origin",
+        }
+    return result
 
 
 @mcp.tool()
-def browser_login(username: str | None = None) -> str:
+@_public_tool
+def browser_login(username: str | None = None, expected_origin: str | None = None) -> str:
     """Log in with a saved Spaces password without revealing the credential.
 
     Call this only when the user asked to sign in. Do not type or read the
-    password. Returns only {ok, loggedIn} — never the password value.
+    password. Returns {ok, loggedIn, origin} — never the password value.
+
+    This signs in to the tab the user has focused, which is not necessarily the
+    tab your other browser_* calls address. Pass expected_origin (e.g.
+    "https://example.com") to make the bridge refuse rather than sign in to a
+    different site; always check the returned origin before reporting success.
     """
-    result = _sealed_login(username)
+    result = _sealed_login(username, expected_origin)
     return _json_text(result)
 
 
 @mcp.tool()
+@_public_tool
 def browser_upload(selector: str, path: str) -> str:
     """Set files on a file input. path must be an absolute filepath on the host."""
     helpers, _ = _browser_harness()
@@ -657,6 +725,7 @@ def browser_upload(selector: str, path: str) -> str:
 
 
 @mcp.tool()
+@_public_tool
 def browser_list_playbooks(host: str | None = None) -> str:
     """List playbook markdown filenames, optionally filtered by host or URL."""
     return _json_text(
@@ -669,6 +738,7 @@ def browser_list_playbooks(host: str | None = None) -> str:
 
 
 @mcp.tool()
+@_public_tool
 def browser_read_playbook(host: str) -> str:
     """Read the playbook markdown for a host or URL."""
     try:
@@ -680,6 +750,7 @@ def browser_read_playbook(host: str) -> str:
 
 
 @mcp.tool()
+@_public_tool
 def browser_write_playbook(host: str, content: str, append: bool = False) -> str:
     """Write or append a site playbook under the playbooks directory only (host slug filename)."""
     try:
@@ -706,13 +777,11 @@ def _stop_active_backend_best_effort() -> None:
     _bh = None
     from browser_harness import admin
 
-    try:
-        admin.restart_daemon()
-    except Exception as exc:
-        _reraise_public_harness_error(exc)
+    admin.restart_daemon()
 
 
 @mcp.tool()
+@_public_tool
 def browser_stop() -> str:
     """Stop the active browser backend (cleanup after browsing; important for cloud/AgentCore browsers)."""
     global _bound_cdp
@@ -720,8 +789,11 @@ def browser_stop() -> str:
         _stop_active_backend_best_effort()
     except Exception as exc:
         _bound_cdp = None
-        logger.warning("browser_stop: failed to stop browser backend", exc_info=True)
-        return _json_text({"ok": False, "error": _redact_cdp_token(str(exc))})
+        # Log the message rather than exc_info: a harness traceback carries the
+        # tokenized endpoint, and this log is not necessarily private.
+        message = _redact_cdp_token(str(exc))
+        logger.warning("browser_stop: failed to stop browser backend: %s", message)
+        return _json_text({"ok": False, "error": message})
     _bound_cdp = None
     return _json_text({"ok": True, "message": "browser backend stopped"})
 
@@ -741,8 +813,11 @@ def _stop_daemon_for_shutdown() -> None:
     global _bound_cdp
     try:
         _stop_active_backend_best_effort()
-    except Exception:
-        logger.warning("browser-mcp shutdown: failed to stop browser backend", exc_info=True)
+    except Exception as exc:
+        logger.warning(
+            "browser-mcp shutdown: failed to stop browser backend: %s",
+            _redact_cdp_token(str(exc)),
+        )
     _bound_cdp = None
 
 

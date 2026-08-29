@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import sys
@@ -372,7 +373,7 @@ def test_redact_cdp_token_strips_query_value() -> None:
     assert "token=[redacted]" in redacted
 
 
-def test_browser_harness_redacts_token_in_ensure_daemon_error(
+def test_tool_redacts_token_in_ensure_daemon_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("BU_CDP_WS", "ws://127.0.0.1:9333/devtools/browser/monkeybot?token=secret")
@@ -384,14 +385,14 @@ def test_browser_harness_redacts_token_in_ensure_daemon_error(
     )
 
     with pytest.raises(RuntimeError) as excinfo:
-        server._browser_harness()
+        server.browser_page_info()
 
     assert "secret" not in str(excinfo.value)
     assert "token=[redacted]" in str(excinfo.value)
     assert excinfo.value.__cause__ is None
 
 
-def test_browser_harness_redacts_token_in_restart_daemon_error(
+def test_tool_redacts_token_in_restart_daemon_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("BU_CDP_WS", "ws://127.0.0.1:9333/devtools/browser/monkeybot?token=secret")
@@ -403,11 +404,50 @@ def test_browser_harness_redacts_token_in_restart_daemon_error(
     )
 
     with pytest.raises(RuntimeError) as excinfo:
-        server._browser_harness()
+        server.browser_page_info()
 
     assert "secret" not in str(excinfo.value)
     assert "token=[redacted]" in str(excinfo.value)
     assert excinfo.value.__cause__ is None
+
+
+def test_tool_redacts_token_raised_after_daemon_is_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The daemon can hand back a tokenized endpoint long after ensure_daemon()."""
+    monkeypatch.setenv("BU_CDP_WS", "ws://127.0.0.1:9333/devtools/browser/monkeybot?token=secret")
+    admin, helpers = _install_fake_harness(monkeypatch)
+    admin.daemon_alive.return_value = False
+    helpers.page_info.side_effect = RuntimeError(
+        "cdp disconnected: ws://127.0.0.1:9333/devtools/browser/monkeybot?token=secret"
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        server.browser_page_info()
+
+    assert "secret" not in str(excinfo.value)
+    assert "token=[redacted]" in str(excinfo.value)
+    assert excinfo.value.__cause__ is None
+
+
+def test_every_registered_tool_is_wrapped_for_redaction() -> None:
+    """New tools must not be able to opt out of redaction by forgetting a decorator."""
+    unwrapped = [
+        name
+        for name, obj in vars(server).items()
+        if name.startswith("browser_")
+        and callable(obj)
+        and getattr(obj, "__wrapped__", None) is None
+    ]
+    assert unwrapped == []
+
+
+def test_public_tool_preserves_tool_schema() -> None:
+    """FastMCP builds the arg schema from the signature, so wrapping must be transparent."""
+    sig = inspect.signature(server.browser_login)
+    assert list(sig.parameters) == ["username", "expected_origin"]
+    assert server.browser_login.__name__ == "browser_login"
+    assert server.browser_login.__doc__ is not None
 
 
 def test_loopback_opener_ignores_http_proxy() -> None:
@@ -450,7 +490,7 @@ def test_sealed_login_posts_bearer_without_query_token_or_host_spoof(
 
     monkeypatch.setattr(server, "_loopback_open", fake_open)
 
-    result = server._sealed_login("alice")
+    result = server._sealed_login("alice", None)
 
     req = captured["req"]
     assert isinstance(req, Request)
@@ -477,6 +517,107 @@ def test_browser_login_tool_returns_json_without_password(
     assert json.loads(server.browser_login("alice")) == {"ok": True, "loggedIn": True}
 
 
+def test_sealed_login_returns_origin_the_bridge_acted_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The agent drives tabs by CDP session, so it needs the origin to verify."""
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        return _FakeHttpResponse(
+            {"ok": True, "loggedIn": True, "origin": "https://example.com", "password": "leaked"}
+        )
+
+    monkeypatch.setattr(server, "_loopback_open", fake_open)
+
+    assert server._sealed_login(None, None) == {
+        "ok": True,
+        "loggedIn": True,
+        "origin": "https://example.com",
+    }
+
+
+def test_sealed_login_forwards_expected_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+    captured: dict[str, object] = {}
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        captured["req"] = req
+        return _FakeHttpResponse({"ok": True, "loggedIn": True, "origin": "https://example.com"})
+
+    monkeypatch.setattr(server, "_loopback_open", fake_open)
+
+    server._sealed_login("alice", "https://example.com")
+
+    req = captured["req"]
+    assert isinstance(req, Request)
+    assert req.data is not None
+    assert json.loads(req.data.decode("utf-8")) == {
+        "username": "alice",
+        "expectedOrigin": "https://example.com",
+    }
+
+
+def test_sealed_login_surfaces_origin_mismatch_with_actual_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A mismatch must stay verbatim, not collapse to the generic 'login failed'."""
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+    payload = json.dumps(
+        {
+            "ok": False,
+            "loggedIn": False,
+            "origin": "https://other.example",
+            "error": "focused tab is on a different origin",
+        }
+    ).encode("utf-8")
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        raise HTTPError(req.full_url, 400, "Bad Request", hdrs=None, fp=BytesIO(payload))
+
+    monkeypatch.setattr(server, "_loopback_open", fake_open)
+
+    assert server._sealed_login(None, "https://example.com") == {
+        "ok": False,
+        "loggedIn": False,
+        "origin": "https://other.example",
+        "error": "focused tab is on a different origin",
+    }
+
+
+def test_sealed_login_fails_when_bridge_cannot_verify_expected_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An older Spaces build drops expectedOrigin — never report that as verified."""
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        return _FakeHttpResponse({"ok": True, "loggedIn": True})
+
+    monkeypatch.setattr(server, "_loopback_open", fake_open)
+
+    assert server._sealed_login(None, "https://example.com") == {
+        "ok": False,
+        "loggedIn": True,
+        "error": "in-app browser could not verify the origin",
+    }
+
+
+def test_sealed_login_ignores_non_string_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        return _FakeHttpResponse({"ok": True, "loggedIn": True, "origin": {"nested": "junk"}})
+
+    monkeypatch.setattr(server, "_loopback_open", fake_open)
+
+    assert server._sealed_login(None, None) == {"ok": True, "loggedIn": True}
+
+
 def test_sealed_login_refuses_non_loopback_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -490,7 +631,7 @@ def test_sealed_login_refuses_non_loopback_file(
 
     monkeypatch.setattr(server, "_loopback_open", fail_open)
 
-    assert server._sealed_login(None) == {
+    assert server._sealed_login(None, None) == {
         "ok": False,
         "loggedIn": False,
         "error": "in-app browser is not available",
@@ -509,7 +650,7 @@ def test_sealed_login_missing_token_is_actionable(
 
     monkeypatch.setattr(server, "_loopback_open", fail_open)
 
-    assert server._sealed_login(None) == {
+    assert server._sealed_login(None, None) == {
         "ok": False,
         "loggedIn": False,
         "error": "in-app browser token is missing",
@@ -524,7 +665,7 @@ def test_sealed_login_maps_unknown_errors(tmp_path: Path, monkeypatch: pytest.Mo
 
     monkeypatch.setattr(server, "_loopback_open", fake_open)
 
-    assert server._sealed_login(None) == {
+    assert server._sealed_login(None, None) == {
         "ok": False,
         "loggedIn": False,
         "error": "login failed",
@@ -549,7 +690,7 @@ def test_sealed_login_reads_allowlisted_error_from_http_400(
 
     monkeypatch.setattr(server, "_loopback_open", fake_open)
 
-    assert server._sealed_login(None) == {
+    assert server._sealed_login(None, None) == {
         "ok": False,
         "loggedIn": False,
         "error": "this password is not allowed for agent use",
@@ -572,7 +713,7 @@ def test_sealed_login_maps_http_403_to_missing_token(
 
     monkeypatch.setattr(server, "_loopback_open", fake_open)
 
-    assert server._sealed_login(None) == {
+    assert server._sealed_login(None, None) == {
         "ok": False,
         "loggedIn": False,
         "error": "in-app browser token is missing",
@@ -590,7 +731,7 @@ def test_sealed_login_refuses_when_agentcore_is_bound(
 
     monkeypatch.setattr(server, "_loopback_open", fail_open)
 
-    assert server._sealed_login(None) == {
+    assert server._sealed_login(None, None) == {
         "ok": False,
         "loggedIn": False,
         "error": "in-app browser is not available",
@@ -615,7 +756,7 @@ def test_sealed_login_prefers_query_token_over_file(
 
     monkeypatch.setattr(server, "_loopback_open", fake_open)
 
-    assert server._sealed_login(None) == {"ok": True, "loggedIn": True}
+    assert server._sealed_login(None, None) == {"ok": True, "loggedIn": True}
     req = captured["req"]
     assert isinstance(req, Request)
     assert req.get_header("Authorization") == "Bearer from-url"
@@ -633,7 +774,7 @@ def test_sealed_login_keeps_allowlisted_bridge_error(
 
     monkeypatch.setattr(server, "_loopback_open", fake_open)
 
-    assert server._sealed_login(None) == {
+    assert server._sealed_login(None, None) == {
         "ok": False,
         "loggedIn": False,
         "error": "this password is not allowed for agent use",

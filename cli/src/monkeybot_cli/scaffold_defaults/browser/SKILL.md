@@ -14,6 +14,8 @@ playbooks are workspace data: `browser/Screenshots/` and `browser/playbooks/`.
 They are not trusted skills and may be discarded with an ephemeral workspace.
 
 When the user asked to sign in on the Spaces in-app browser, call
-`browser_login` instead of typing a password. It returns `{ok, loggedIn}` only.
+`browser_login` instead of typing a password. It returns `{ok, loggedIn, origin}`
+only. Pass `expected_origin` so a login cannot land on the wrong site, and check
+the returned `origin` before reporting success.
 
 Finish browser sessions with `browser_stop`.

@@ -182,7 +182,17 @@ synchronization layer.
 
 ## Tools
 
-Navigation, interaction, screenshots, tabs, waits, playbooks (`browser_list_playbooks`, `browser_read_playbook`, `browser_write_playbook`), `browser_login` for Spaces-saved passwords (returns `{ok, loggedIn}` — never the password), and `browser_stop` for daemon cleanup.
+Navigation, interaction, screenshots, tabs, waits, playbooks (`browser_list_playbooks`, `browser_read_playbook`, `browser_write_playbook`), `browser_login` for Spaces-saved passwords (returns `{ok, loggedIn, origin}` — never the password), and `browser_stop` for daemon cleanup.
+
+### `browser_login` targets the focused tab
+
+A sealed login runs in the tab the **user** has focused, because typing the credential requires Spaces to detach CDP from that tab first. Ordinary `browser_*` calls address tabs by CDP session id, so after `browser_switch_tab` — or if the user clicks another tab — the tab the agent is driving and the tab that receives the password are different ones.
+
+Pass `expected_origin` to make the bridge refuse (`focused tab is on a different origin`) instead of signing in somewhere unintended, and check the returned `origin`. A saved credential is scoped to its own origin and must be marked for agent use, so a mismatch can never disclose another site's password — but it can still submit a login the user did not ask for.
+
+A Spaces build predating `expectedOrigin` support ignores it and echoes no `origin`. Since that login cannot be verified after the fact, `browser_login` reports `in-app browser could not verify the origin` rather than a confirmed success; update Spaces to get the check.
+
+Errors raised by browser tools are scrubbed of `?token=` values before they reach the agent: the in-app CDP token grants full control of the user's browser, and browser-harness echoes its endpoint in daemon log tails.
 
 ### Default: indexed DOM interaction (no screenshots needed)
 
