@@ -6,13 +6,15 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Browser MCP
+
 ### Added
 
-- browser-mcp `browser_login`: sign in with a Spaces-saved password without exposing the credential. Returns the `origin` it acted on and accepts `expected_origin`, so a login cannot silently land on a tab other than the one the agent is driving. In-app CDP uses a tokenized WebSocket URL so a 403 is not misreported as Chrome's Allow-remote-debugging popup.
+- `browser_login`: sign in with a Spaces-saved password without exposing the credential. Returns the `origin` it acted on and accepts `expected_origin`, so a login cannot silently land on a tab other than the one the agent is driving. In-app CDP uses a tokenized WebSocket URL so a 403 is not misreported as Chrome's Allow-remote-debugging popup.
 
 ### Fixed
 
-- browser-mcp scrubs `?token=` values from every browser tool error rather than only daemon startup, so the in-app CDP token cannot reach the agent transcript through a mid-session harness failure.
+- Scrubs `?token=` values from every browser tool error rather than only daemon startup, so the in-app CDP token cannot reach the agent transcript through a mid-session harness failure.
 
 ## [cli v0.5.1] - 2026-08-28
 
