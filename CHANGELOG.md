@@ -6,6 +6,10 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `Provider.supports_tool_result_media` capability: an image inside a tool result (e.g. `load_file`) now reaches OpenAI-compatible models (OpenAI, Ollama, NVIDIA, HuggingFace, OpenRouter) as a real `image_url` promoted into a synthetic user turn after the tool row, instead of a text placeholder telling the model to guess at content it never saw. Anthropic-family, Bedrock, and Gemini already carried this media natively and are unaffected. Also fixes Gemini replaying a media-only tool result as an empty `functionResponse`, and fixes OpenAI-compat prompt-token counting tokenizing an image's base64 data URL as JSON text (a 1MB image previously counted as ~340K tokens and could trigger spurious compaction).
+
 ## [browser v0.4.0] - 2026-08-29
 
 ### Added

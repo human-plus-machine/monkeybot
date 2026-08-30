@@ -24,9 +24,7 @@ class Message:
             raise ValueError(f"invalid role: {self.role!r}")
         for i, block in enumerate(self.content):
             if not isinstance(block, ContentBlock):
-                raise ValueError(
-                    f"content[{i}] must be ContentBlock, got {type(block).__name__}"
-                )
+                raise ValueError(f"content[{i}] must be ContentBlock, got {type(block).__name__}")
 
     def to_dict(self) -> dict[str, object]:
         return {"role": self.role, "content": [b.to_dict() for b in self.content]}
@@ -171,9 +169,7 @@ async def provider_count_input_tokens(
     kwargs.update(gemini_extra_kwargs(provider, vertex_google_search=vertex_google_search))
     kwargs.update(provider_call_hints_kwargs(provider, hints))
     if kwargs.keys() - {"model", "thinking_budget"}:
-        return int(
-            await cast(Any, provider).count_input_tokens(messages, tools, **kwargs)
-        )
+        return int(await cast(Any, provider).count_input_tokens(messages, tools, **kwargs))
     return await provider.count_input_tokens(messages, tools, **kwargs)
 
 
@@ -217,13 +213,7 @@ class Done:
 
 
 ProviderEvent: TypeAlias = (
-    TextDelta
-    | ThinkingDelta
-    | ToolCall
-    | ToolInputDelta
-    | GroundingEvent
-    | UsageEvent
-    | Done
+    TextDelta | ThinkingDelta | ToolCall | ToolInputDelta | GroundingEvent | UsageEvent | Done
 )
 
 
@@ -245,6 +235,18 @@ class Provider(Protocol):
     @property
     def supports_streaming(self) -> bool:
         """Whether partial output is exposed as incremental deltas."""
+
+    @property
+    def supports_tool_result_media(self) -> bool:
+        """Whether an ``Image``/``File`` block inside a ``ToolResponse`` reaches the
+        model in place, without a synthetic user-turn promotion.
+
+        True for Anthropic-family and Bedrock (native ``image``/``document`` tool-result
+        content) and Gemini (``inline_data`` parts appended alongside the
+        ``functionResponse``). False for OpenAI-compatible providers, whose Chat
+        Completions tool messages are text-only — see
+        ``providers._openai_compat.messages_to_openai``.
+        """
 
     def stream(
         self,

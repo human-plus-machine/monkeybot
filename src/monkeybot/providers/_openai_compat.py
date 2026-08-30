@@ -79,11 +79,25 @@ def _file_label(block: Image | File) -> str:
     return str(label) if label else ""
 
 
-def _media_tool_placeholder(kind: str, block: Image | File) -> str:
-    """Text stand-in for image/file tool results on text-only OpenAI-compat models.
+def _image_tool_result_stub(block: Image) -> str:
+    """Short tool-row stub for an image tool result whose pixels are promoted.
 
-    Chat Completions tool messages are text-only; pixels are already delivered to
-    the UI via ``ImageBlock`` SSE. Keep a short path/filename hint for the model.
+    Chat Completions tool messages are text-only, so the actual pixels are
+    promoted into a synthetic user turn appended right after this tool row —
+    see ``messages_to_openai``. This stub just names the call; the framing that
+    used to tell the model to "describe this media" is wrong once real pixels
+    follow, so it's dropped here.
+    """
+    label = _file_label(block)
+    label_bit = f", path={label}" if label else ""
+    return f"[image loaded: mime={block.mime_type}{label_bit}; see the image below.]"
+
+
+def _media_tool_placeholder(kind: str, block: Image | File) -> str:
+    """Text stand-in for a tool-result block that is never promoted to real pixels.
+
+    Used for ``File`` (PDF) tool results — Chat Completions has no document wire
+    type, so unlike an ``Image`` these pixels never reach the model.
     """
     label = _file_label(block)
     label_bit = f", path={label}" if label else ""
@@ -199,7 +213,7 @@ async def _flatten_tool_response_text(block: ToolResponse) -> str:
         if isinstance(b, Text):
             parts.append(b.text)
         elif isinstance(b, Image):
-            parts.append(_media_tool_placeholder("image", b))
+            parts.append(_image_tool_result_stub(b))
         elif isinstance(b, File):
             extracted = await _extract_pdf_text(b)
             parts.append(
@@ -300,6 +314,12 @@ async def messages_to_openai(
             raise ValueError(f"unsupported role for OpenAI-compat: {m.role!r}")
 
         buf: list[ContentBlock] = []
+        # Images from this message's tool results, promoted into one merged user
+        # row appended after every tool row below. Deferred (not appended inline
+        # per ToolResponse) because a message can fan out to N "tool" rows and
+        # OpenAI requires every tool_call_id be answered before a non-tool row —
+        # inserting a user row between two tool rows is a 400.
+        promoted_images: list[tuple[str, Image]] = []
         for block in m.content:
             if isinstance(block, ToolResponse):
                 await flush_user_blocks(buf)
@@ -311,12 +331,29 @@ async def messages_to_openai(
                         "content": await _flatten_tool_response_text(block),
                     }
                 )
+                promoted_images.extend((block.id, b) for b in block.result if isinstance(b, Image))
             else:
                 buf.append(block)
         await flush_user_blocks(buf)
+        if promoted_images:
+            out.append(_promoted_media_row(promoted_images))
 
     joined_system = "\n\n".join(system_parts).strip()
     return (joined_system or None, out)
+
+
+def _promoted_media_row(promoted: list[tuple[str, Image]]) -> dict[str, Any]:
+    """One synthetic user row carrying real pixels for every image promoted this message."""
+    content: list[dict[str, Any]] = []
+    for call_id, img in promoted:
+        content.append({"type": "text", "text": f"Image result from tool call {call_id}:"})
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:{img.mime_type};base64,{img.data}"},
+            }
+        )
+    return {"role": "user", "content": content}
 
 
 def openai_tools(tools: Sequence[ToolDef]) -> list[dict[str, Any]]:
@@ -336,6 +373,23 @@ def openai_tools(tools: Sequence[ToolDef]) -> list[dict[str, Any]]:
     return out
 
 
+# Flat per-image token estimate for `image_url` content parts. Not exact vendor
+# tokenization, but bounds it: tokenizing the base64 data URL as JSON text (the
+# fallback below) counts ~1 token per 4 base64 chars, so a 1MB screenshot would
+# count as ~340K tokens and trigger spurious compaction.
+_IMAGE_URL_TOKEN_ESTIMATE = 200
+
+
+def _content_list_token_count(encoding: Any, content: list[Any]) -> int:
+    total = 0
+    for item in content:
+        if isinstance(item, dict) and item.get("type") == "image_url":
+            total += _IMAGE_URL_TOKEN_ESTIMATE
+        else:
+            total += len(encoding.encode(json.dumps(item, ensure_ascii=False, default=str)))
+    return total
+
+
 def openai_messages_token_count(encoding: Any, oai_messages: list[dict[str, Any]]) -> int:
     """tiktoken-based estimate for Chat Completions-shaped message dicts."""
     total = 0
@@ -347,6 +401,8 @@ def openai_messages_token_count(encoding: Any, oai_messages: list[dict[str, Any]
             if key == "tool_calls" and isinstance(val, list):
                 for tc in val:
                     total += len(encoding.encode(json.dumps(tc, ensure_ascii=False, default=str)))
+            elif key == "content" and isinstance(val, list):
+                total += _content_list_token_count(encoding, val)
             elif isinstance(val, str):
                 total += len(encoding.encode(val))
             else:

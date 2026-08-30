@@ -15,7 +15,11 @@ from monkeybot.core.types.content_blocks import (
     ToolResponse,
 )
 from monkeybot.providers.openai import _messages_to_openai
-from tests.providers.conftest import typed_messages_four_turn, typed_messages_turn_2b_tool_only
+from tests.providers.conftest import (
+    typed_messages_four_turn,
+    typed_messages_four_turn_image_tool_result,
+    typed_messages_turn_2b_tool_only,
+)
 
 
 def _pdf_bytes(text: str | None = "Hello World") -> bytes:
@@ -141,8 +145,8 @@ async def test_openai_skips_thinking_blocks() -> None:
     ]
 
 
-async def test_openai_tool_response_image_becomes_text_placeholder() -> None:
-    """NVIDIA/OpenAI-compat tool rows are text-only; Image blocks must not raise."""
+async def test_openai_tool_response_image_promotes_pixels_to_synthetic_user_row() -> None:
+    """Tool rows are text-only; the pixels ride a synthetic user row appended after."""
     from monkeybot.core.types.content_blocks import Image
     from monkeybot.providers._openai_compat import messages_to_openai
 
@@ -163,14 +167,55 @@ async def test_openai_tool_response_image_becomes_text_placeholder() -> None:
         ],
     )
     _sys, rows = await messages_to_openai([msg])
+    assert len(rows) == 2
     assert rows[0]["role"] == "tool"
     assert rows[0]["tool_call_id"] == "c1"
-    content = rows[0]["content"]
-    assert "image loaded" in content
-    assert "generated-media/images/x.png" in content
-    assert "aW1n" not in content
-    assert "do not invent a different subject" in content
-    assert "pixels omitted" in content
+    tool_content = rows[0]["content"]
+    assert "image loaded" in tool_content
+    assert "generated-media/images/x.png" in tool_content
+    assert "aW1n" not in tool_content
+    assert "pixels omitted" not in tool_content
+    assert "do not invent a different subject" not in tool_content
+
+    assert rows[1]["role"] == "user"
+    assert rows[1]["content"] == [
+        {"type": "text", "text": "Image result from tool call c1:"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,aW1n"}},
+    ]
+
+
+async def test_openai_tool_response_fan_out_promotes_one_merged_row() -> None:
+    """Two image tool results in one message must not insert a user row between the tool rows."""
+    from monkeybot.core.types.content_blocks import Image
+    from monkeybot.providers._openai_compat import messages_to_openai
+
+    msg = Message(
+        role="user",
+        content=[
+            ToolResponse(id="x", tool_name="load_file", result=[Text(text="ok")]),
+            ToolResponse(
+                id="y",
+                tool_name="load_file",
+                result=[Image(mime_type="image/png", data="eQ==")],
+            ),
+            ToolResponse(
+                id="z",
+                tool_name="load_file",
+                result=[Image(mime_type="image/jpeg", data="eg==")],
+            ),
+        ],
+    )
+    _sys, rows = await messages_to_openai([msg])
+    assert len(rows) == 4
+    assert [r["role"] for r in rows] == ["tool", "tool", "tool", "user"]
+    assert [r["tool_call_id"] for r in rows[:3]] == ["x", "y", "z"]
+    promoted = rows[3]
+    assert promoted["content"] == [
+        {"type": "text", "text": "Image result from tool call y:"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,eQ=="}},
+        {"type": "text", "text": "Image result from tool call z:"},
+        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,eg=="}},
+    ]
 
 
 async def test_openai_user_image_becomes_image_url() -> None:
@@ -307,9 +352,7 @@ async def test_openai_user_image_only_message() -> None:
     _sys, rows = await messages_to_openai([msg])
     assert rows[0] == {
         "role": "user",
-        "content": [
-            {"type": "image_url", "image_url": {"url": "data:image/png;base64,aW1n"}}
-        ],
+        "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,aW1n"}}],
     }
 
 
@@ -342,6 +385,44 @@ async def test_openai_canonical_four_turn() -> None:
     assert rows[2]["role"] == "tool"
     assert rows[2]["tool_call_id"] == "c1"
     assert rows[3] == {"role": "assistant", "content": "all set"}
+
+
+async def test_openai_token_count_bounded_for_promoted_image() -> None:
+    """A promoted image_url must not be tokenized as JSON text — that would count a
+    1MB screenshot's base64 data URL at ~1 token per 4 chars (~340K tokens) and
+    trigger spurious compaction."""
+    import tiktoken
+
+    from monkeybot.providers._openai_compat import openai_messages_token_count
+
+    huge_b64 = "A" * 1_000_000
+    rows = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Image result from tool call c1:"},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{huge_b64}"}},
+            ],
+        }
+    ]
+    enc = tiktoken.get_encoding("cl100k_base")
+    count = openai_messages_token_count(enc, rows)
+    assert count < 1_000
+
+
+async def test_openai_canonical_four_turn_image_tool_result_inserts_promoted_row() -> None:
+    """The canonical four-turn shape, but the tool result is an image: five OpenAI
+    rows (one more than the text-result variant) because the promoted media row
+    is appended after the tool row, before the closing assistant turn."""
+    msgs = typed_messages_four_turn_image_tool_result()
+    _sys, rows = await _messages_to_openai(msgs)
+    assert [r["role"] for r in rows] == ["user", "assistant", "tool", "user", "assistant"]
+    assert rows[2]["tool_call_id"] == "c1"
+    assert rows[3]["content"] == [
+        {"type": "text", "text": "Image result from tool call c1:"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,aW1n"}},
+    ]
+    assert rows[4] == {"role": "assistant", "content": "a screenshot"}
 
 
 async def test_openai_tool_only_assistant() -> None:

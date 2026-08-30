@@ -77,6 +77,60 @@ async def test_fake_provider_supports_streaming_false() -> None:
     assert len(out) == 3
 
 
+def test_fake_provider_supports_tool_result_media_default_true() -> None:
+    p = ScriptedFakeProvider([Done()])
+    assert p.supports_tool_result_media is True
+
+
+def test_fake_provider_supports_tool_result_media_override() -> None:
+    p = ScriptedFakeProvider([Done()], supports_tool_result_media=False)
+    assert p.supports_tool_result_media is False
+
+
+def test_observing_provider_forwards_supports_tool_result_media() -> None:
+    from monkeybot.observability.instrumentation import ObservingProvider
+
+    inner = ScriptedFakeProvider([Done()], supports_tool_result_media=False)
+    assert ObservingProvider(inner).supports_tool_result_media is False
+
+
+@pytest.mark.parametrize(
+    "module_name,class_name,env,expected",
+    [
+        ("claude", "ClaudeProvider", {"ANTHROPIC_API_KEY": "k"}, True),
+        ("vertex_claude", "VertexClaudeProvider", {"ANTHROPIC_VERTEX_PROJECT_ID": "p"}, True),
+        ("bedrock", "BedrockProvider", {}, True),
+        ("openai", "OpenAIProvider", {"OPENAI_API_KEY": "k"}, False),
+        ("openrouter", "OpenRouterProvider", {"OPENROUTER_API_KEY": "k"}, False),
+        ("nvidia", "NvidiaProvider", {"NVIDIA_API_KEY": "k"}, False),
+        ("huggingface", "HuggingFaceProvider", {"HF_TOKEN": "k"}, False),
+        ("ollama", "OllamaProvider", {}, False),
+    ],
+)
+def test_provider_supports_tool_result_media_matrix(
+    monkeypatch: pytest.MonkeyPatch,
+    module_name: str,
+    class_name: str,
+    env: dict[str, str],
+    expected: bool,
+) -> None:
+    """Pins the corrected provider matrix: only providers that carry tool-result
+    media natively (Anthropic-family, Bedrock, Gemini) report True; the
+    OpenAI-compat family reports False and relies on message-level promotion."""
+    import importlib
+
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    mod = importlib.import_module(f"monkeybot.providers.{module_name}")
+    cls = getattr(mod, class_name)
+    provider = cls()
+    assert provider.supports_tool_result_media is expected
+
+
+def test_gemini_provider_supports_tool_result_media_true() -> None:
+    assert GeminiProvider().supports_tool_result_media is True
+
+
 @pytest.mark.asyncio
 async def test_fake_provider_count_input_tokens_non_negative() -> None:
     p = ScriptedFakeProvider([Done()])
@@ -129,14 +183,18 @@ def test_normalize_vertex_model_strips_models_prefix() -> None:
 def test_suppress_thinking_curator_and_summarize_shapes() -> None:
     cur_sys = Message(
         role="system",
-        content=[Text(text="You narrow context for another assistant. Reply with ONLY a JSON object.")],
+        content=[
+            Text(text="You narrow context for another assistant. Reply with ONLY a JSON object.")
+        ],
     )
     cur_user = Message(role="user", content=[Text(text="x")])
     assert gemini_mod._suppress_thinking_for_auxiliary_call([cur_sys, cur_user], []) is True
 
     sum_sys = Message(
         role="system",
-        content=[Text(text="You compress prior agent conversation turns into one dense factual summary.")],
+        content=[
+            Text(text="You compress prior agent conversation turns into one dense factual summary.")
+        ],
     )
     sum_user = Message(role="user", content=[Text(text="blob")])
     assert gemini_mod._suppress_thinking_for_auxiliary_call([sum_sys, sum_user], []) is True
@@ -181,9 +239,7 @@ def test_vertex_location_embedded_in_full_resource_name(
     monkeypatch.delenv("VERTEX_AI_LOCATION", raising=False)
     monkeypatch.delenv("GOOGLE_CLOUD_LOCATION", raising=False)
     monkeypatch.setenv("GCP_PROJECT_ID", "p")
-    full = (
-        "projects/p/locations/us-east1/publishers/google/models/gemini-2.5-flash"
-    )
+    full = "projects/p/locations/us-east1/publishers/google/models/gemini-2.5-flash"
     _project, loc = gemini_mod._vertex_project_and_location(full)
     assert loc == "us-east1"
 
@@ -196,7 +252,9 @@ async def test_gemini_stream_requires_vertex_project_env() -> None:
     keys = ("GCP_PROJECT_ID", "VERTEX_AI_PROJECT_ID", "GOOGLE_CLOUD_PROJECT")
     saved = {k: os.environ.pop(k, None) for k in keys}
     try:
-        with pytest.raises(LLMError, match="VERTEX_AI_PROJECT_ID|GOOGLE_CLOUD_PROJECT|GCP_PROJECT_ID"):
+        with pytest.raises(
+            LLMError, match="VERTEX_AI_PROJECT_ID|GOOGLE_CLOUD_PROJECT|GCP_PROJECT_ID"
+        ):
             async for _ in p.stream(
                 [Message(role="user", content=[Text(text="hi")])],
                 [tool],
@@ -219,7 +277,9 @@ async def test_gemini_stream_smoke_integration() -> None:
     p = GeminiProvider()
     tool = ToolDef(name="noop", description="noop", input_schema={})
     chunks: list[ProviderEvent] = []
-    async for ev in p.stream([Message(role="user", content="Say only: ok.")], [tool], model="gemini-2.5-flash"):
+    async for ev in p.stream(
+        [Message(role="user", content="Say only: ok.")], [tool], model="gemini-2.5-flash"
+    ):
         chunks.append(ev)
     assert chunks
     assert isinstance(chunks[-1], Done)

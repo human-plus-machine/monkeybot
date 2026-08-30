@@ -58,6 +58,10 @@ class HuggingFaceProvider:
     def supports_streaming(self) -> bool:
         return True
 
+    @property
+    def supports_tool_result_media(self) -> bool:
+        return False
+
     def __init__(
         self,
         *,

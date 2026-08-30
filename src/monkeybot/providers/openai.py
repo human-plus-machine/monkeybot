@@ -49,6 +49,12 @@ class OpenAIProvider:
     def supports_streaming(self) -> bool:
         return True
 
+    @property
+    def supports_tool_result_media(self) -> bool:
+        # Chat Completions tool messages are text-only; see
+        # providers._openai_compat.messages_to_openai's promotion path.
+        return False
+
     def __init__(
         self,
         *,
