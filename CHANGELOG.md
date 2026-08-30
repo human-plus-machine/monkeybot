@@ -6,6 +6,10 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Local Ollama prefix-cache knobs: `ollama-local` sends `keep_alive` (default 24h, `model.keep_alive`) and optional pinned `num_ctx` (`model.num_ctx`) via OpenAI-compat `extra_body`. YAML-only — not mapped from the runtime env. `model.context_window` is never mapped to `num_ctx`. `doctor` warns on `*-mlx` tags, default thinking, and huge `num_ctx`. See `docs/ollama-local.md` and `examples/ollama/PrefixStable.Modelfile`.
+
 ## [browser v0.4.0] - 2026-08-29
 
 ### Added

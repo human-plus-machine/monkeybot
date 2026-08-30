@@ -192,6 +192,107 @@ def _add_layout_checks(report: CommandReport, layout: AgentLayout) -> None:
     )
 
 
+_OLLAMA_LOCAL_DOCS = "docs/ollama-local.md"
+_OLLAMA_NUM_CTX_LARGE = 32_768
+
+
+def _is_local_ollama_provider(provider: str) -> bool:
+    """True for ollama-local and legacy ``ollama`` (not ollama-cloud)."""
+    key = provider.strip().lower().replace("_", "-")
+    return key in {"ollama-local", "ollama"}
+
+
+def _parse_int(raw: object) -> int | None:
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _add_ollama_local_checks(
+    report: CommandReport,
+    *,
+    provider: str,
+    model_name: str,
+    thinking_budget: object,
+    num_ctx: object,
+) -> None:
+    """Warn on local-Ollama prefix-cache traps. Always emit the three check ids."""
+    local = _is_local_ollama_provider(provider)
+    mlx = "-mlx" in model_name.lower()
+    check(
+        report,
+        id="ollama.local.mlx_runner",
+        category="provider",
+        severity="warning",
+        passed=not mlx,
+        skip=not local,
+        message=(
+            f"model.name {model_name!r} looks like an MLX pack; prefix KV cache "
+            "often does not reuse between agent steps"
+            if mlx
+            else "model.name is not an MLX pack"
+        ),
+        field="model.name",
+        value=model_name or None,
+        remediation=(
+            f"Prefer a GGUF tag for tool-calling loops. See {_OLLAMA_LOCAL_DOCS}." if mlx else None
+        ),
+        docs=_OLLAMA_LOCAL_DOCS,
+    )
+    budget = _parse_int(thinking_budget)
+    if budget is None:
+        budget = -1
+    thinking_on_default = budget == -1
+    check(
+        report,
+        id="ollama.local.thinking_default",
+        category="provider",
+        severity="warning",
+        passed=not thinking_on_default,
+        skip=not local,
+        message=(
+            "thinking_budget is -1 (server default); reasoning models generate "
+            "thinking tokens before the first visible reply"
+            if thinking_on_default
+            else f"thinking_budget is {budget}"
+        ),
+        field="model.thinking_budget",
+        value=budget,
+        remediation=(
+            f"Set thinking_budget: 0 to send reasoning_effort: none. See {_OLLAMA_LOCAL_DOCS}."
+            if thinking_on_default
+            else None
+        ),
+        docs=_OLLAMA_LOCAL_DOCS,
+    )
+    ctx = _parse_int(num_ctx)
+    large = ctx is not None and ctx > _OLLAMA_NUM_CTX_LARGE
+    check(
+        report,
+        id="ollama.local.num_ctx_large",
+        category="provider",
+        severity="warning",
+        passed=not large,
+        skip=not local or ctx is None,
+        message=(
+            f"num_ctx {ctx} is large for a local runner; prefill will be slow"
+            if large
+            else (f"num_ctx is {ctx}" if ctx is not None else "num_ctx is unset")
+        ),
+        field="model.num_ctx",
+        value=ctx,
+        remediation=(
+            f"Pin a modest num_ctx (e.g. 8192). Do not copy context_window. See {_OLLAMA_LOCAL_DOCS}."
+            if large
+            else None
+        ),
+        docs=_OLLAMA_LOCAL_DOCS,
+    )
+
+
 def run_doctor(args: argparse.Namespace) -> int:
     cwd = Path(args.cwd).expanduser().resolve() if args.cwd else None
     config_path = resolve_config(args.config, cwd=cwd)
@@ -323,6 +424,19 @@ def run_doctor(args: argparse.Namespace) -> int:
             passed=False,
             skip=True,
         )
+
+    thinking_raw = model.get("thinking_budget") if isinstance(model, dict) else None
+    if thinking_raw is None:
+        thinking_raw = os.environ.get("MODEL_THINKING_BUDGET", "-1")
+    num_ctx_raw = model.get("num_ctx") if isinstance(model, dict) else None
+    model_name = str(model.get("name", "")).strip() if isinstance(model, dict) else ""
+    _add_ollama_local_checks(
+        report,
+        provider=provider,
+        model_name=model_name,
+        thinking_budget=thinking_raw,
+        num_ctx=num_ctx_raw,
+    )
 
     runtime_cfg = doc.get("runtime") if isinstance(doc.get("runtime"), dict) else {}
     port = int(runtime_cfg.get("port", 8080)) if isinstance(runtime_cfg, dict) else 8080

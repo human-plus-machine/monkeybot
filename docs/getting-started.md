@@ -4,7 +4,7 @@ Create an agent anywhere on your machine with the global CLI — no monkeybot re
 
 Session routes are **not** authenticated; do not expose the gateway to the public internet without putting auth or a private network in front of it.
 
-**Cloud note:** Walkthroughs often mention Gemini/Vertex because our **GCP paths are the most documented**, but the same gateway runs on OpenAI, Anthropic, Bedrock, Ollama, and other shipped providers — set `model.provider` in `monkeybot.yaml`, add the matching `monkeybot[<extra>]` dependency to the agent `pyproject.toml` and run `uv sync`, then put credentials in `.env`. See [Cloud deployment — Positioning](cloud-deployment-design.md#positioning).
+**Cloud note:** Walkthroughs often mention Gemini/Vertex because our **GCP paths are the most documented**, but the same gateway runs on OpenAI, Anthropic, Bedrock, Ollama, and other shipped providers — set `model.provider` in `monkeybot.yaml`, add the matching `monkeybot[<extra>]` dependency to the agent `pyproject.toml` and run `uv sync`, then put credentials in `.env`. See [Cloud deployment — Positioning](cloud-deployment-design.md#positioning). For **local Ollama** (keep_alive, `num_ctx`, prefix-stable templates), see [Local Ollama prefix cache](ollama-local.md).
 
 ---
 

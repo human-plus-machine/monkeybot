@@ -139,7 +139,9 @@ def get_provider_config(
     resolved_model = str(model_name or os.getenv("MODEL_NAME") or "gemini-2.5-flash")
     sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens)
     thinking_budget = (
-        thinking_budget if thinking_budget is not None else int(os.getenv("MODEL_THINKING_BUDGET", "-1"))
+        thinking_budget
+        if thinking_budget is not None
+        else int(os.getenv("MODEL_THINKING_BUDGET", "-1"))
     )
     if provider_key == "google_vertexai":
         return ProviderConfig(
@@ -215,12 +217,15 @@ def get_provider_config(
         )
     ollama_mode = _OLLAMA_MODES.get(provider_key)
     if ollama_mode is not None:
+        keep_alive, num_ctx = ollama_options_from_config()
         return ProviderConfig(
             OllamaProvider(
                 mode=ollama_mode,
                 temperature=sampling.temperature,
                 max_tokens=sampling.max_tokens,
                 thinking_budget=thinking_budget,
+                keep_alive=keep_alive,
+                num_ctx=num_ctx,
             ),
             resolved_model,
         )
@@ -284,7 +289,9 @@ def _parse_subagent_entries(raw_entries: Any) -> list[SubagentConfig]:
                 name=entry["name"],
                 description=entry["description"],
                 skills=skills,
-                agent_md=agent_md.strip() if isinstance(agent_md, str) and agent_md.strip() else None,
+                agent_md=agent_md.strip()
+                if isinstance(agent_md, str) and agent_md.strip()
+                else None,
                 model=entry.get("model"),
                 vertex_location=vloc,
             )
@@ -303,9 +310,7 @@ def _subagents_section(doc: dict[str, Any]) -> dict[str, Any]:
             "a bare list is no longer supported"
         )
     if not isinstance(section, dict):
-        raise ConfigError(
-            f"subagents must be a mapping, got {type(section).__name__}"
-        )
+        raise ConfigError(f"subagents must be a mapping, got {type(section).__name__}")
     return section
 
 
@@ -320,18 +325,14 @@ def get_subagent_settings(config_path: str | None = None) -> SubagentSettings:
     raw_timeout = section.get("timeout_sec")
     if raw_timeout is not None:
         if isinstance(raw_timeout, bool) or not isinstance(raw_timeout, (int, float)):
-            raise ConfigError(
-                f"subagents.timeout_sec must be a number, got {raw_timeout!r}"
-            )
+            raise ConfigError(f"subagents.timeout_sec must be a number, got {raw_timeout!r}")
         timeout = max(1.0, float(raw_timeout))
 
     max_turns = _DEFAULT_SUBAGENT_SETTINGS.max_turns
     raw_turns = section.get("max_turns")
     if raw_turns is not None:
         if isinstance(raw_turns, bool) or not isinstance(raw_turns, int):
-            raise ConfigError(
-                f"subagents.max_turns must be an integer, got {raw_turns!r}"
-            )
+            raise ConfigError(f"subagents.max_turns must be an integer, got {raw_turns!r}")
         max_turns = max(1, raw_turns)
 
     vertex_raw = section.get("vertex_google_search")
@@ -393,6 +394,51 @@ def _bool_config_flag(
     raise ConfigError(f"{label} must be true or false, got {raw!r}")
 
 
+def ollama_options_from_config(config_path: str | None = None) -> tuple[str | None, int | None]:
+    """``model.keep_alive`` and ``model.num_ctx`` from monkeybot.yaml only (not env).
+
+    ``keep_alive`` is ``None`` when absent (provider default ``24h``). Present
+    values are stripped strings (including ``"0"`` to omit the request field).
+    ``num_ctx`` is ``None`` when absent and must be a positive int when set.
+    Never mapped from ``model.context_window``.
+    """
+    _, doc = load_monkeybot_yaml_dict(config_path)
+    model = doc.get("model")
+    if not isinstance(model, dict):
+        return None, None
+
+    raw_keep_alive = model.get("keep_alive")
+    keep_alive: str | None
+    if raw_keep_alive is None:
+        keep_alive = None
+    elif isinstance(raw_keep_alive, bool):
+        raise ConfigError(f"model.keep_alive must be a duration string, got {raw_keep_alive!r}")
+    else:
+        s = str(raw_keep_alive).strip()
+        keep_alive = s if s else "0"
+
+    raw_num_ctx = model.get("num_ctx")
+    num_ctx: int | None
+    if raw_num_ctx is None:
+        num_ctx = None
+    elif isinstance(raw_num_ctx, bool) or (
+        isinstance(raw_num_ctx, str) and not raw_num_ctx.strip()
+    ):
+        raise ConfigError(f"model.num_ctx must be a positive integer, got {raw_num_ctx!r}")
+    else:
+        try:
+            n = int(raw_num_ctx)
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(
+                f"model.num_ctx must be a positive integer, got {raw_num_ctx!r}"
+            ) from exc
+        if n < 1:
+            raise ConfigError(f"model.num_ctx must be a positive integer, got {raw_num_ctx!r}")
+        num_ctx = n
+
+    return keep_alive, num_ctx
+
+
 def auto_schema_enabled_from_config(config_path: str | None = None) -> bool:
     """Whether storage backends should apply DDL on ``open()`` (``paths.auto_schema``).
 
@@ -435,4 +481,3 @@ def subagent_vertex_google_search_from_config(config_path: str | None = None) ->
     when absent. Config-file only — not exposed via environment variables.
     """
     return get_subagent_settings(config_path).vertex_google_search
-
