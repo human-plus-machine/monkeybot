@@ -21,6 +21,8 @@ def test_harness_is_protocol_not_tool_catalog() -> None:
     assert "active JSON tool list" in out
     assert "`enable_mcp`" in out
     assert "appear only after `enable_mcp`" in out
+    assert "Do not read or search for MCP config files" in out
+    assert "mcp.json" not in out
     assert "`enable_loops`" in out
     assert "before scheduled-loop tools appear" in out
     assert "`mcp_status`" not in out
@@ -160,3 +162,19 @@ def test_emission_style_terse_from_env_recognizes_opt_in_values(
 
     monkeypatch.delenv("MONKEYBOT_EMISSION_STYLE", raising=False)
     assert emission_style_terse_from_env() is False
+
+
+def test_harness_lists_catalog_mcp_names_without_config_paths() -> None:
+    out = harness_fixed_context(
+        include_task_tool=False,
+        catalog_mcp_servers=("browser", "docs"),
+    )
+    assert "Configured MCP servers: `browser`, `docs`." in out
+    assert "mcp.json" not in out
+    assert "monkeybot_config" not in out
+
+
+def test_harness_empty_catalog_says_none_configured() -> None:
+    out = harness_fixed_context(include_task_tool=False)
+    assert "No MCP servers are configured." in out
+    assert "Configured MCP servers:" not in out

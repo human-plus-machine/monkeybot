@@ -215,6 +215,44 @@ def test_core_tool_defs_keep_hot_path_and_moved_policy() -> None:
     assert "cwd" in tools["run_command"].input_schema.get("properties", {})
     assert "writable workspace" in tools["write_file"].description
     assert "queued:true" in tools["task"].description
+    assert "mcp.json" not in tools["enable_mcp"].description
+    assert "Do not read config files" in tools["enable_mcp"].description
+    name_schema = tools["enable_mcp"].input_schema["properties"]["name"]
+    assert "enum" not in name_schema
+
+
+def test_core_tool_defs_enable_mcp_enums_catalog_names() -> None:
+    tools = {t.name: t for t in _core_tool_defs(catalog_mcp_servers=("browser", "docs"))}
+    name_schema = tools["enable_mcp"].input_schema["properties"]["name"]
+    assert name_schema["enum"] == ["browser", "docs"]
+    assert "mcp.json" not in tools["enable_mcp"].description
+    assert "mcp.json" not in str(name_schema)
+
+
+@pytest.mark.asyncio
+async def test_build_context_enable_mcp_enums_catalog(tmp_path: Path) -> None:
+    agent_path = tmp_path / "AGENT.md"
+    agent_path.write_text("You are a helpful assistant.\n", encoding="utf-8")
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+
+    class _CatalogFake(FakeMCPClient):
+        def catalog_names(self) -> list[str]:
+            return ["browser"]
+
+    ctx = await build_context(
+        "thread-1",
+        "req-1",
+        agent_md_path=agent_path,
+        memory=_memory_subsystem(mem),
+        skills_path=skills,
+        mcp_client=_CatalogFake([]),
+    )
+    enable = next(t for t in ctx.tools if t.name == "enable_mcp")
+    assert enable.input_schema["properties"]["name"]["enum"] == ["browser"]
+    assert ctx.catalog_mcp_servers == ("browser",)
 
 
 @pytest.mark.asyncio

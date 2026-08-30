@@ -387,6 +387,7 @@ def _core_tool_defs(
     *,
     include_task_tool: bool = True,
     subagent_type_names: Sequence[str] | None = None,
+    catalog_mcp_servers: Sequence[str] | None = None,
 ) -> list[ToolDef]:
     """Static core tools always available before MCP extensions."""
     default_lines = AGENT_READ_DEFAULT_LINES
@@ -577,13 +578,19 @@ def _core_tool_defs(
         },
         "required": [],
     }
+    catalog_names = sorted(
+        {n.strip() for n in (catalog_mcp_servers or []) if n and str(n).strip()}
+    )
+    enable_name_schema: dict[str, object] = {
+        "type": "string",
+        "description": "Catalogued MCP server name from the harness list.",
+    }
+    if catalog_names:
+        enable_name_schema["enum"] = catalog_names
     enable_mcp_schema: dict[str, object] = {
         "type": "object",
         "properties": {
-            "name": {
-                "type": "string",
-                "description": "Server name from mcp.json (e.g. browser).",
-            },
+            "name": enable_name_schema,
         },
         "required": ["name"],
     }
@@ -733,10 +740,11 @@ def _core_tool_defs(
         [
             ToolDef(
                 "enable_mcp",
-                "Connect a configured MCP server by name from mcp.json (e.g. browser). "
-                "On success returns connection status and discovered tools; on failure "
-                "returns the error (no separate status check needed). New server tools "
-                "and MCP resource/prompt tools appear on the next model step this turn.",
+                "Connect a catalogued MCP server by name from the harness MCP list. "
+                "Do not read config files to discover servers. On success returns "
+                "connection status and discovered tools; on failure returns the error "
+                "(no separate status check needed). New server tools and MCP "
+                "resource/prompt tools appear on the next model step this turn.",
                 enable_mcp_schema,
             ),
             ToolDef(
@@ -899,10 +907,12 @@ async def build_context(
     registry = subagent_registry or {}
     type_names = sorted(registry)
     personas = tuple((name, registry[name].description) for name in type_names)
+    catalog_names = tuple(mcp_client.catalog_names())
     tools = list(
         _core_tool_defs(
             include_task_tool=include_task_tool,
             subagent_type_names=type_names,
+            catalog_mcp_servers=catalog_names,
         )
     )
     if attachments_enabled_from_env():
@@ -914,7 +924,6 @@ async def build_context(
         tools.extend(SCHEDULED_LOOP_TOOL_DEFS)
     for ct in extra_tools or []:
         tools.append(ct.tool_def)
-    catalog_names = tuple(mcp_client.catalog_names())
     return TurnContext(
         thread_id=thread_id,
         request_id=request_id,
