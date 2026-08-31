@@ -30,7 +30,7 @@ from monkeybot.computer.tools import (
     ComputerOpenURLTool,
     ComputerTrashTool,
 )
-from monkeybot.core.config.snapshot import current_env_flag
+from monkeybot.core.config.snapshot import RuntimeConfig, current_env_flag, env_flag
 from monkeybot.core.context import CustomTool
 
 __all__ = [
@@ -81,18 +81,21 @@ def is_computer_tool_name(name: str) -> bool:
     return name in COMPUTER_TOOL_NAMES
 
 
-def computer_tools_enabled_from_env() -> bool:
+def computer_tools_enabled_from_env(cfg: RuntimeConfig | None = None) -> bool:
     """True only when explicitly opted in (default OFF — unlike ``todo_list``).
 
     Reads ``MONKEYBOT_COMPUTER_TOOLS`` (mapped from ``computer.enabled`` in
     monkeybot.yaml). Recognized on values: ``1``, ``true``, ``yes``, ``on``.
+    When ``cfg`` is given, the pinned snapshot is used instead of process env.
     """
+    if cfg is not None:
+        return env_flag(cfg, "MONKEYBOT_COMPUTER_TOOLS", default=False)
     return current_env_flag("MONKEYBOT_COMPUTER_TOOLS", default=False)
 
 
-def should_enable_computer_tools() -> bool:
+def should_enable_computer_tools(cfg: RuntimeConfig | None = None) -> bool:
     """Combines the env opt-in with the hard macOS-only platform gate."""
-    return computer_tools_enabled_from_env() and sys.platform == "darwin"
+    return computer_tools_enabled_from_env(cfg) and sys.platform == "darwin"
 
 
 def build_computer_tools() -> list[CustomTool]:

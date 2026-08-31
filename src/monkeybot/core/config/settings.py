@@ -397,8 +397,20 @@ def get_subagent_configs(config_path: str | None = None) -> list[SubagentConfig]
     return _parse_subagent_entries(section.get("personas"))
 
 
-def get_subagent_registry(config_path: str | None = None) -> dict[str, SubagentConfig]:
-    """Named subagent personas keyed by ``name``; raises :class:`ConfigError` on duplicates."""
+def get_subagent_registry(
+    config_path: str | None = None,
+    *,
+    config: RuntimeConfig | None = None,
+) -> dict[str, SubagentConfig]:
+    """Named subagent personas keyed by ``name``; raises :class:`ConfigError` on duplicates.
+
+    When ``config`` (a pinned ``RuntimeConfig`` snapshot) is given, its
+    ``subagents`` field is returned instead of re-reading the YAML file, so
+    ``GatewayRuntime.apply`` cannot pick up a third disk state written between
+    ``prepare_reload`` and ``apply``.
+    """
+    if config is not None:
+        return dict(config.subagents)
     registry: dict[str, SubagentConfig] = {}
     for cfg in get_subagent_configs(config_path):
         if cfg.name in registry:

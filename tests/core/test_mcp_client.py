@@ -439,11 +439,13 @@ def test_mcp_file_env_refs(tmp_path: Path) -> None:
 def test_set_env_overlay_stores_a_copy() -> None:
     client = MCPClient(hooks=_CrashHooks())
     overlay = {"MODEL_NAME": "from-snapshot"}
-    client.set_env_overlay(overlay)
+    prev = client.set_env_overlay(overlay)
     overlay["MODEL_NAME"] = "mutated"
-    assert client._env_overlay == {"MODEL_NAME": "from-snapshot"}
-    client.set_env_overlay(None)
-    assert client._env_overlay is None
+    assert prev is None
+    assert client.env_overlay == {"MODEL_NAME": "from-snapshot"}
+    restored = client.set_env_overlay(None)
+    assert restored == {"MODEL_NAME": "from-snapshot"}
+    assert client.env_overlay is None
 
 
 @pytest.mark.asyncio

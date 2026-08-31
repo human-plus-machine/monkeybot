@@ -115,8 +115,9 @@ class FakeMCPClient:
     async def load_from_config(self, path: Path, *, raise_on_error: bool = False) -> None:
         del path, raise_on_error
 
-    def set_env_overlay(self, env: Mapping[str, str] | None) -> None:
+    def set_env_overlay(self, env: Mapping[str, str] | None) -> dict[str, str] | None:
         del env
+        return None
 
     async def apply_catalog_diff(
         self,

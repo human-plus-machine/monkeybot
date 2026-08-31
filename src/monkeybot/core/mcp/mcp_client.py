@@ -612,9 +612,19 @@ class MCPClient:
         # Snapshot env overlay for ``${VAR}`` interpolation (YAML-backed keys).
         self._env_overlay: dict[str, str] | None = None
 
-    def set_env_overlay(self, env: Mapping[str, str] | None) -> None:
-        """Use a copied snapshot of env values when interpolating ``mcp.json`` ``${VAR}`` refs."""
+    @property
+    def env_overlay(self) -> dict[str, str] | None:
+        """Copied snapshot env used for ``mcp.json`` ``${VAR}`` interpolation, or ``None``."""
+        return None if self._env_overlay is None else dict(self._env_overlay)
+
+    def set_env_overlay(self, env: Mapping[str, str] | None) -> dict[str, str] | None:
+        """Use a copied snapshot of env values when interpolating ``mcp.json`` ``${VAR}`` refs.
+
+        Returns the previous overlay (also a copy) so callers can restore on failure.
+        """
+        prev = self.env_overlay
         self._env_overlay = None if env is None else dict(env)
+        return prev
 
     def _set_status(self, name: str, status: str, **extra: Any) -> None:
         """Record lifecycle status for ``name`` (overwrites prior entry)."""
@@ -1050,9 +1060,7 @@ class MCPClient:
         servers_any = self._read_mcp_servers_file(path, raise_on_error=False)
         if servers_any is None:
             return
-        new_catalog, disabled = self._parse_catalog_entries(
-            servers_any, path, raise_on_error=False
-        )
+        new_catalog, disabled = self._parse_catalog_entries(servers_any, path, raise_on_error=False)
         if name in disabled or name not in new_catalog:
             self._catalog.pop(name, None)
             return
@@ -1347,8 +1355,7 @@ class MCPClient:
         pending_connect = {
             n
             for n in (changed | added)
-            if new_catalog[n].get("autoConnect") is True
-            or (n in old_connected and n in changed)
+            if new_catalog[n].get("autoConnect") is True or (n in old_connected and n in changed)
         }
 
         for name in sorted(removed | changed | disabled):

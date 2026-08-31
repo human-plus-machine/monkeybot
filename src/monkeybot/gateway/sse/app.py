@@ -12,16 +12,15 @@ import copy
 import json
 import logging
 import os
-import sys
 from collections.abc import AsyncIterator, Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from monkeybot.computer import build_computer_tools
+from monkeybot.computer import build_computer_tools, should_enable_computer_tools
 from monkeybot.computer.permissions import build_computer_permission_inspector, build_persist_hook
 from monkeybot.core.attachments.config import attachments_enabled_from_env
 from monkeybot.core.attachments.store import AttachmentStore, FilesystemAttachmentStore
@@ -111,7 +110,9 @@ def begin_in_flight_turn() -> None:
 def end_in_flight_turn() -> None:
     """Release the in-flight mark so MCP reconnect can proceed."""
     global _in_flight_turns
-    _in_flight_turns = max(0, _in_flight_turns - 1)
+    if _in_flight_turns <= 0:
+        raise RuntimeError("end_in_flight_turn without matching begin_in_flight_turn")
+    _in_flight_turns -= 1
     if _in_flight_turns == 0:
         _turns_idle.set()
 
@@ -142,18 +143,11 @@ class RuntimeApplyResult:
     error: str | None = None
 
 
-# Live slices ``apply()`` stages, then installs only after the whole apply succeeds.
-_LIVE_SLICE_ATTRS = (
-    "inspectors",
-    "provider",
-    "hook_manager",
-    "web_search_tool",
-    "run_command_allowed_commands",
-    "run_command_allowed_path_prefixes",
-    "subagent_registry",
-    "computer_tools",
-    "computer_approvals_persist",
-)
+# Restart-only GatewayRuntime fields. Everything else is a live slice that
+# ``apply()`` stages and installs. Derived so adding a field cannot be silently
+# dropped from ``_install_live_slices``.
+_RESTART_ONLY_ATTRS = frozenset({"mcp", "memory", "knowledge", "loops_registry"})
+_LIVE_SLICE_ATTRS: tuple[str, ...] = ()
 
 
 def _app_memory_state(
@@ -214,12 +208,14 @@ class GatewayRuntime:
     ) -> None:
         """Rebuild command-tier, rules, permission, and computer-tool inspectors.
 
-        Startup (``fail_closed=False``) always falls open to allow-all when the
-        command-tier file is missing — there is no prior policy to protect yet.
-        Reload (``fail_closed=True``, from ``_rebuild_live_slices``) raises
-        instead when a policy was already active, so the caller keeps the last
-        known-good inspector and does not commit a config that silently widens
-        an active allowlist to allow-all.
+        Startup (``fail_closed=False``) falls open to allow-all when the
+        command-tier file is *missing* — there is no prior policy to protect yet.
+        A malformed (not missing) allowlist still raises, including at boot:
+        silently widening to allow-all would hide a broken policy. Reload
+        (``fail_closed=True``, from ``_rebuild_live_slices``) also raises when a
+        policy was already active and the file is now missing, so the caller
+        keeps the last known-good inspector and does not commit a config that
+        silently widens an active allowlist to allow-all.
         """
         tiers_path = _resolved_cfg_path(
             cfg, "COMMAND_ALLOWLIST_CONFIG", layout.command_allowlist_path, layout.agent_root
@@ -252,7 +248,7 @@ class GatewayRuntime:
         approvals_path = _resolved_cfg_path(
             cfg, "MONKEYBOT_APPROVALS_CONFIG", layout.approvals_path, layout.agent_root
         )
-        if _computer_tools_wanted(cfg):
+        if should_enable_computer_tools(cfg):
             self.computer_tools = build_computer_tools()
             self.computer_approvals_persist = build_persist_hook(approvals_path)
             inspectors.append(build_computer_permission_inspector(perm_path, approvals_path))
@@ -281,8 +277,8 @@ class GatewayRuntime:
             logger.warning("web search backend init failed — disabling: %s", exc)
             self.web_search_tool = None
 
-    def build_subagents(self) -> None:
-        self.subagent_registry = get_subagent_registry()
+    def build_subagents(self, cfg: RuntimeConfig | None = None) -> None:
+        self.subagent_registry = get_subagent_registry(config=cfg)
         if self.subagent_registry:
             logger.info(
                 "subagent personas loaded: %s",
@@ -383,7 +379,7 @@ class GatewayRuntime:
             )
         if SUBAGENTS_DIFF_KEY in diff.changed_env_keys or "subagents" in diff.changed_content:
             try:
-                self.build_subagents()
+                self.build_subagents(cfg)
                 applied.append(SUBAGENTS_DIFF_KEY)
                 logger.info(
                     "config slice rebuilt %s",
@@ -395,6 +391,7 @@ class GatewayRuntime:
                     "invalid subagents config on reload %s",
                     kv(revision=cfg.revision, error=error),
                 )
+                return applied, error
         if "MONKEYBOT_MEMORY_HOOK_ENABLED" in diff.changed_env_keys:
             self.rebuild_memory_hooks(cfg, fastapi_app)
             applied.append("MONKEYBOT_MEMORY_HOOK_ENABLED")
@@ -432,10 +429,10 @@ class GatewayRuntime:
             applied, error = staging._rebuild_live_slices(cfg, diff, layout, fastapi_app)
             if error:
                 _restore_app_memory(fastapi_app, memory_prev)
-                return RuntimeApplyResult(applied=applied, mcp=mcp_result, error=error)
+                return RuntimeApplyResult(applied=[], mcp=mcp_result, error=error)
         if self.needs_mcp_apply(cfg, diff) and self.mcp is not None:
             mcp_path = self._mcp_config_path(cfg, layout)
-            prev_overlay = self.mcp._env_overlay
+            prev_overlay = self.mcp.env_overlay
             overlay_committed = False
             try:
                 await wait_for_idle_turns()
@@ -455,7 +452,7 @@ class GatewayRuntime:
                     kv(path=str(mcp_path), revision=cfg.revision),
                 )
                 _restore_app_memory(fastapi_app, memory_prev)
-                return RuntimeApplyResult(applied=applied, mcp=mcp_result, error=error)
+                return RuntimeApplyResult(applied=[], mcp=mcp_result, error=error)
             except Exception as exc:
                 error = f"MCP catalog diff failed: {exc}"
                 logger.exception(
@@ -467,7 +464,7 @@ class GatewayRuntime:
                     ),
                 )
                 _restore_app_memory(fastapi_app, memory_prev)
-                return RuntimeApplyResult(applied=applied, mcp=mcp_result, error=error)
+                return RuntimeApplyResult(applied=[], mcp=mcp_result, error=error)
             finally:
                 if not overlay_committed:
                     self.mcp.set_env_overlay(prev_overlay)
@@ -476,6 +473,9 @@ class GatewayRuntime:
 
 
 gateway_runtime = GatewayRuntime()
+_LIVE_SLICE_ATTRS = tuple(
+    f.name for f in fields(GatewayRuntime) if f.name not in _RESTART_ONLY_ATTRS
+)
 
 
 def _env_context_window_tokens() -> int:
@@ -921,10 +921,6 @@ def _tool_denied_patterns(cfg: RuntimeConfig | None = None) -> list[str]:
     return [p.strip() for p in raw.split(",") if p.strip()]
 
 
-def _computer_tools_wanted(cfg: RuntimeConfig | None) -> bool:
-    return env_flag(cfg, "MONKEYBOT_COMPUTER_TOOLS", default=False) and sys.platform == "darwin"
-
-
 async def _startup(fastapi_app: FastAPI) -> None:
     """Wire storage backend, MCP, inspectors, and provider."""
     # The root .env and YAML defaults must be available before any optional
@@ -1066,7 +1062,7 @@ async def _startup(fastapi_app: FastAPI) -> None:
         logger.info("attachments disabled via ATTACHMENTS_ENABLED")
 
     try:
-        gateway_runtime.build_subagents()
+        gateway_runtime.build_subagents(cfg)
     except ConfigError as exc:
         logger.error("invalid subagents config: %s", exc)
         raise
