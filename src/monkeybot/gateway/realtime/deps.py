@@ -1,6 +1,6 @@
 """Process-level dependencies for the realtime gateway.
 
-This mirrors the SSE gateway's ``_GatewayDeps`` but is owned by the realtime package so
+This mirrors the SSE gateway's ``GatewayRuntime`` but is owned by the realtime package so
 that the realtime app can be wired independently without modifying ``gateway/sse/app.py``.
 """
 
@@ -51,7 +51,5 @@ class RealtimeDependencies:
 
     def __setattr__(self, name: str, value: Any) -> None:
         if name != "_frozen" and getattr(self, "_frozen", False):
-            raise RuntimeError(
-                f"RealtimeDependencies is frozen; cannot set {name!r} after startup"
-            )
+            raise RuntimeError(f"RealtimeDependencies is frozen; cannot set {name!r} after startup")
         object.__setattr__(self, name, value)

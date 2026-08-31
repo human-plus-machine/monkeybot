@@ -22,6 +22,7 @@ from monkeybot.core.config.snapshot import (
     context_window_tokens,
     current_env,
     current_env_or_none,
+    env_value,
     get_config_store,
 )
 from monkeybot.core.context import TurnContext, build_context
@@ -199,8 +200,7 @@ def _event_for_ndjson_pipe(evt: AgentEvent) -> AgentEvent:
 def _resolve_provider() -> Provider:
     cfg = get_config_store().current_or_none()
     mode = normalize_model_provider(
-        (cfg.model.provider if cfg is not None and cfg.model.provider else None)
-        or current_env("MODEL_PROVIDER", "google_vertexai")
+        env_value(cfg, "MODEL_PROVIDER", "google_vertexai") or "google_vertexai"
     )
     if mode != "fake":
         return get_provider_config(provider=mode, config=cfg).provider
@@ -358,7 +358,7 @@ async def _async_main() -> None:
         request_id = f"sub-{uuid.uuid4().hex[:12]}"
 
         cfg = get_config_store().current_or_none()
-        window = context_window_tokens(cfg)
+        window_tokens = context_window_tokens(cfg)
 
         try:
             _ws_backend = _build_web_search_backend()
@@ -416,7 +416,7 @@ async def _async_main() -> None:
             model=envelope.model,
             include_task_tool=False,
             workspace_root=ws,
-            context_window_tokens=window,
+            context_window_tokens=window_tokens,
             enable_context_curation=False,
             extra_tools=extra_tools,
             config=cfg,
@@ -491,7 +491,9 @@ async def _async_main() -> None:
 def main() -> None:
     from monkeybot.core.logging_utils import normalize_log_level
 
-    logging.basicConfig(level=normalize_log_level(current_env("LOG_LEVEL"), default="WARNING"))
+    logging.basicConfig(
+        level=normalize_log_level(current_env_or_none("LOG_LEVEL"), default="WARNING")
+    )
     try:
         asyncio.run(_async_main())
     except SystemExit:

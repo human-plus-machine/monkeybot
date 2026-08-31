@@ -96,6 +96,31 @@ def test_compose_applies_snapshot_memory_window(
     reset_runtime_env_state_for_tests()
 
 
+def test_compose_pinned_snapshot_keeps_full_memory_index_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.config import reset_runtime_env_state_for_tests
+    from monkeybot.core.config.snapshot import build_runtime_config
+
+    reset_runtime_env_state_for_tests()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CONTEXT_CURATION_MEMORY_WINDOW_LINES", raising=False)
+    monkeypatch.delenv("CONTEXT_CURATION_ENABLED", raising=False)
+    monkeypatch.delenv("MEMORY_INDEX_CAP", raising=False)
+    monkeypatch.delenv("CONTEXT_CURATION_MEMORY_TOKEN_THRESHOLD", raising=False)
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir(exist_ok=True)
+    (cfg_dir / "monkeybot.yaml").write_text("model:\n  name: test-model\n", encoding="utf-8")
+    cfg = build_runtime_config(agent_root=tmp_path)
+    lines = [f"l{i}" for i in range(1, 21)]
+    ctx = replace(_minimal_ctx(memory_index=lines), config=cfg)
+    out = compose_system_prompt(ctx)
+    mem_section = out.split("## Memory wake-up", 1)[1].split("## Skills", 1)[0]
+    assert "l1" in mem_section
+    assert "l20" in mem_section
+    reset_runtime_env_state_for_tests()
+
+
 def test_compose_no_chat_skips_current_request() -> None:
     ctx = _minimal_ctx()
     out = compose_system_prompt(ctx, chat_messages=None)

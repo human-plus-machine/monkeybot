@@ -54,14 +54,14 @@ def _wire_start_turn_deps(
     monkeypatch.setattr(
         gateway_app,
         "_resolved_workspace_paths",
-        lambda: (tmp_path, tmp_path / "skills", tmp_path / "artifacts"),
+        lambda *_a, **_k: (tmp_path, tmp_path / "skills", tmp_path / "artifacts"),
     )
 
-    gateway_app._deps.mcp = MagicMock()
-    gateway_app._deps.provider = provider
-    gateway_app._deps.inspectors = []
-    gateway_app._deps.hook_manager = None
-    gateway_app._deps.web_search_tool = None
+    gateway_app.gateway_runtime.mcp = MagicMock()
+    gateway_app.gateway_runtime.provider = provider
+    gateway_app.gateway_runtime.inspectors = []
+    gateway_app.gateway_runtime.hook_manager = None
+    gateway_app.gateway_runtime.web_search_tool = None
 
     mock_usage = AsyncMock()
     mock_history = MagicMock()

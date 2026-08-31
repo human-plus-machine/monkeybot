@@ -41,7 +41,7 @@ __all__ = [
 ]
 
 
-def build_backend(backend_name: str | None = None) -> WebSearchBackend | None:
+def build_backend() -> WebSearchBackend | None:
     """Construct the configured backend from environment variables.
 
     ``WEB_SEARCH_BACKEND`` selects the implementation:
@@ -52,11 +52,8 @@ def build_backend(backend_name: str | None = None) -> WebSearchBackend | None:
     * ``none`` — disables web search entirely.
 
     Returns ``None`` when ``WEB_SEARCH_BACKEND=none``.
-    ``backend_name`` overrides the env var (config-reload snapshot).
     """
-    if backend_name is None:
-        backend_name = current_env("WEB_SEARCH_BACKEND", "duckduckgo")
-    backend_name = backend_name.lower().strip()
+    backend_name = current_env("WEB_SEARCH_BACKEND", "duckduckgo").lower().strip()
 
     if backend_name == "none":
         return None
