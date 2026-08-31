@@ -3,20 +3,23 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
 from monkeybot.core.config import (
+    ConfigError,
     apply_monkeybot_runtime_env,
     get_config_store,
     reset_runtime_env_state_for_tests,
 )
 from monkeybot.core.config.runtime_env import ENV_MAP
+from monkeybot.core.config.settings import SubagentSettings
 
 
 @pytest.fixture(autouse=True)
-def _reset_runtime_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def _reset_runtime_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     reset_runtime_env_state_for_tests()
     monkeypatch.delenv("MONKEYBOT_CONFIG", raising=False)
     env_before = {k: os.environ.get(k) for k in ENV_MAP.values()}
@@ -47,23 +50,30 @@ def test_pinned_env_beats_yaml_on_build(tmp_path: Path, monkeypatch: pytest.Monk
     assert applied == yaml_path.resolve()
     store = get_config_store()
     first = store.current()
-    assert first.model.name == "from-env"
-    assert first.gateway.port == "1111"
+    assert first.env_values.get("MODEL_NAME") == "from-env"
+    assert first.env_values.get("PORT") == "1111"
     assert os.environ.get("MODEL_NAME") == "from-env"
     assert os.environ.get("PORT") == "1111"
 
 
 def test_apply_second_call_keeps_revision_and_returns_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.chdir(tmp_path)
     yaml_path = _write_yaml(tmp_path, "runtime:\n  port: 3333\n")
     monkeypatch.delenv("PORT", raising=False)
     first = apply_monkeybot_runtime_env()
     assert first == yaml_path.resolve()
-    assert apply_monkeybot_runtime_env() == yaml_path.resolve()
+    with caplog.at_level("INFO"):
+        assert apply_monkeybot_runtime_env() == yaml_path.resolve()
     assert os.environ.get("PORT") == "3333"
     assert get_config_store().current().revision == 1
+    applied_lines = [
+        r.message for r in caplog.records if "Applied runtime config from" in r.message
+    ]
+    assert applied_lines
+    assert "(0 keys)" not in applied_lines[-1]
+    assert "(1 keys)" in applied_lines[-1]
 
 
 def test_apply_sets_same_env_keys_as_today(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -120,8 +130,8 @@ def test_apply_sets_same_env_keys_as_today(tmp_path: Path, monkeypatch: pytest.M
     assert os.environ.get("MONKEYBOT_REALTIME_METRICS_EMIT_SUMMARY_ON_CLOSE") == "false"
 
     cfg = get_config_store().current()
-    assert cfg.gateway.port == "2222"
-    assert cfg.model.name == "test-model-x"
+    assert cfg.env_values.get("PORT") == "2222"
+    assert cfg.env_values.get("MODEL_NAME") == "test-model-x"
     assert cfg.realtime.websocket.port == 9090
     assert cfg.realtime.enabled is True
 
@@ -135,7 +145,7 @@ def test_workspace_root_legacy_env_blocks_yaml_workspace(
     monkeypatch.delenv("MONKEYBOT_WORKSPACE_ROOT", raising=False)
     apply_monkeybot_runtime_env()
     assert "MONKEYBOT_WORKSPACE_ROOT" not in os.environ
-    assert get_config_store().current().paths.workspace_root is None
+    assert "MONKEYBOT_WORKSPACE_ROOT" not in get_config_store().current().env_values
 
 
 def test_current_raises_before_apply() -> None:
@@ -178,21 +188,6 @@ def test_env_value_missing_snapshot_key_does_not_read_os_environ(
     assert current_env_or_none("SANDBOX_ENABLED") is None
 
 
-def test_context_window_tokens_warns_on_invalid_value(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    from monkeybot.core.config.snapshot import context_window_tokens
-
-    monkeypatch.chdir(tmp_path)
-    path = _write_yaml(tmp_path, "model:\n  context_window: not-a-number\n")
-    monkeypatch.delenv("MODEL_CONTEXT_WINDOW", raising=False)
-    apply_monkeybot_runtime_env(config_path=path, agent_root=tmp_path)
-    cfg = get_config_store().current()
-    with caplog.at_level("WARNING"):
-        assert context_window_tokens(cfg) == 200_000
-    assert "invalid MODEL_CONTEXT_WINDOW" in caplog.text
-
-
 def test_current_env_uses_snapshot_then_falls_back(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -223,3 +218,56 @@ def test_subagent_settings_included_in_snapshot(
     assert pinned.subagent_settings.timeout_sec == 30.0
     assert pinned.subagent_settings.max_turns == 5
     assert pinned.subagent_settings.vertex_google_search is True
+
+
+def test_legacy_subagents_list_does_not_abort_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    yaml_path = _write_yaml(
+        tmp_path,
+        "runtime:\n  port: 4444\nsubagents:\n  - name: legacy\n    description: Old shape.\n",
+    )
+    monkeypatch.delenv("PORT", raising=False)
+    with caplog.at_level("WARNING"):
+        applied = apply_monkeybot_runtime_env(config_path=yaml_path, agent_root=tmp_path)
+    assert applied == yaml_path
+    assert os.environ.get("PORT") == "4444"
+    cfg = get_config_store().current()
+    assert cfg.subagents == {}
+    assert cfg.subagent_settings == SubagentSettings()
+    assert "Ignoring invalid subagents section" in caplog.text
+    assert "bare list is no longer supported" in caplog.text
+
+
+def test_second_apply_warns_on_ignored_config_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    first = _write_yaml(tmp_path, "runtime:\n  port: 5555\n")
+    other_dir = tmp_path / "other"
+    other_dir.mkdir()
+    other = other_dir / "monkeybot.yaml"
+    other.write_text("runtime:\n  port: 6666\n", encoding="utf-8")
+    monkeypatch.delenv("PORT", raising=False)
+    apply_monkeybot_runtime_env(config_path=first, agent_root=tmp_path)
+    with caplog.at_level("WARNING"):
+        returned = apply_monkeybot_runtime_env(config_path=other, agent_root=other_dir)
+    assert returned == first.resolve()
+    assert os.environ.get("PORT") == "5555"
+    assert "already loaded from" in caplog.text
+    assert str(other.resolve()) in caplog.text
+
+
+def test_env_overlay_invalid_harness_mode_raises() -> None:
+    from monkeybot.core.config.realtime_config import realtime_config_from_doc
+
+    with pytest.raises(ConfigError, match="not supported"):
+        realtime_config_from_doc({}, {"MONKEYBOT_HARNESS_MODE": "both"})
+
+
+def test_env_overlay_invalid_audio_format_raises() -> None:
+    from monkeybot.core.config.realtime_config import realtime_config_from_doc
+
+    with pytest.raises(ConfigError, match="not supported"):
+        realtime_config_from_doc({}, {"MONKEYBOT_REALTIME_AUDIO_INPUT_FORMAT": "mp3"})

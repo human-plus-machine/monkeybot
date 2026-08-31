@@ -314,6 +314,8 @@ def apply_monkeybot_runtime_env(
         cfg = store.current_or_none()
         if cfg is None:
             cfg = load_into_store(config_path=config_path, agent_root=agent_root)
+        else:
+            _warn_if_config_path_ignored(cfg.source_path, config_path)
     except Exception as exc:
         path = config_path or _resolve_config_path(agent_root=agent_root)
         logger.error("Failed to load %s: %s", path, exc)
@@ -321,17 +323,15 @@ def apply_monkeybot_runtime_env(
 
     google_cloud_project = (os.environ.get("GOOGLE_CLOUD_PROJECT") or "").strip()
     pins = pinned_env_names()
-    yaml_key_count = 0
-    for env_key, env_val in cfg.env_values.items():
-        if env_key in pins:
-            continue
+    yaml_keys = [env_key for env_key in cfg.env_values if env_key not in pins]
+    for env_key in yaml_keys:
+        env_val = cfg.env_values[env_key]
         # Existing process env wins; WORKSPACE_ROOT blocks YAML workspace_root.
         if env_key in os.environ or (
             env_key == "MONKEYBOT_WORKSPACE_ROOT" and os.environ.get("WORKSPACE_ROOT")
         ):
             continue
         os.environ[env_key] = env_val
-        yaml_key_count += 1
         if env_key in _GCP_PROJECT_ENV_KEYS and google_cloud_project:
             logger.debug("Set from GOOGLE_CLOUD_PROJECT: %s=%s", env_key, google_cloud_project)
         else:
@@ -343,5 +343,20 @@ def apply_monkeybot_runtime_env(
         )
         return None
 
-    logger.info("Applied runtime config from %s (%d keys)", cfg.source_path, yaml_key_count)
+    logger.info("Applied runtime config from %s (%d keys)", cfg.source_path, len(yaml_keys))
     return cfg.source_path
+
+
+def _warn_if_config_path_ignored(loaded: Path | None, config_path: Path | None) -> None:
+    """Warn when a later apply asks for a different YAML than the loaded snapshot."""
+    if config_path is None:
+        return
+    requested = config_path.expanduser().resolve()
+    resolved = loaded.resolve() if loaded is not None else None
+    if resolved == requested:
+        return
+    logger.warning(
+        "RuntimeConfig already loaded from %s; ignoring %s",
+        resolved if resolved is not None else "<none>",
+        requested,
+    )

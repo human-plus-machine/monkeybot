@@ -4,6 +4,9 @@ Built behind the existing env surface: ``apply_monkeybot_runtime_env`` fills
 unset ``os.environ`` keys for subprocess transport. In-process readers use
 :func:`current_env` / :func:`env_value`. Layering happens at build time, never
 import time: code defaults, merged YAML, then pinned process env.
+
+Section dataclasses (``ModelConfig``, ``PathsConfig``, …) and content-file
+digests land in later PRs that have in-process readers / reload tiers.
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ from monkeybot.core.config.runtime_env import (
     warn_retired_tools_keys,
 )
 from monkeybot.core.config.settings import (
+    ConfigError,
     SubagentConfig,
     SubagentSettings,
     _parse_subagent_entries,
@@ -45,7 +49,6 @@ from monkeybot.core.layout import (
     resolve_memory_storage_uri,
     resolve_sqlite_url,
 )
-from monkeybot.core.logging_utils import kv
 
 logger = logging.getLogger(__name__)
 
@@ -63,101 +66,7 @@ _PATH_KEYS = frozenset(
 
 _PINNED_EXTRA_KEYS = ("GOOGLE_CLOUD_PROJECT", "WORKSPACE_ROOT")
 
-_DEFAULT_CONTENT_PATHS: dict[str, str] = {
-    "AGENT_MD": "monkeybot_config/AGENT.md",
-    "SKILLS_PATH": "skills",
-    "MCP_CONFIG": "monkeybot_config/mcp.json",
-    "COMMAND_ALLOWLIST_CONFIG": "monkeybot_config/command_allowlist.yaml",
-    "PERMISSION_CONFIG": "monkeybot_config/permissions.yaml",
-}
-
 _PINNED_ENV: dict[str, str] | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class ModelConfig:
-    provider: str | None = None
-    name: str | None = None
-    temperature: str | None = None
-    max_tokens: str | None = None
-    thinking_budget: str | None = None
-    context_window: str | None = None
-    summarization_model: str | None = None
-    max_turns: str | None = None
-    cache_retention: str | None = None
-    vertex_project_id: str | None = None
-    vertex_location: str | None = None
-    anthropic_vertex_project_id: str | None = None
-    anthropic_vertex_region: str | None = None
-    fake_provider_events: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class PathsConfig:
-    agent_md: str | None = None
-    memory_path: str | None = None
-    memory_storage_uri: str | None = None
-    skills_path: str | None = None
-    db_url: str | None = None
-    mcp_config: str | None = None
-    command_allowlist_config: str | None = None
-    permission_config: str | None = None
-    workspace_root: str | None = None
-    agent_id: str | None = None
-    approvals_config: str | None = None
-    agent_md_digest: str | None = None
-    skills_digest: str | None = None
-    mcp_config_digest: str | None = None
-    command_allowlist_digest: str | None = None
-    permission_config_digest: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class GatewayConfig:
-    log_level: str | None = None
-    port: str | None = None
-    gateway_port: str | None = None
-    pending_response_timeout_sec: str | None = None
-    sse_replay_max: str | None = None
-    sse_nested_replay_max: str | None = None
-    graceful_shutdown_timeout_sec: str | None = None
-    cors_allow_origins: str | None = None
-    emission_style: str | None = None
-    transcript_enabled: str | None = None
-    transcript_include_live: str | None = None
-    harness_mode: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class ToolsConfig:
-    denied_patterns: str | None = None
-    resume_thinking_budget: str | None = None
-    web_search_backend: str | None = None
-    web_search_max_results: str | None = None
-    todo_list_enabled: str | None = None
-    todo_list_mirror_to_disk: str | None = None
-    computer_enabled: str | None = None
-    sandbox_enabled: str | None = None
-    sandbox_server_url: str | None = None
-    sandbox_image: str | None = None
-    sandbox_ttl_seconds: str | None = None
-    sandbox_shared_filesystem: str | None = None
-    scheduler_enabled: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class MemoryConfig:
-    enabled: str | None = None
-    backend: str | None = None
-    embedding_model: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class CurationConfig:
-    enabled: str | None = None
-    memory_window_lines: str | None = None
-    memory_index_cap: str | None = None
-    memory_token_threshold: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,12 +75,6 @@ class RuntimeConfig:
     digest: str
     source_path: Path | None
     loaded_at: float
-    model: ModelConfig
-    paths: PathsConfig
-    gateway: GatewayConfig
-    tools: ToolsConfig
-    memory: MemoryConfig
-    curation: CurationConfig
     realtime: RealtimeConfig
     subagents: Mapping[str, SubagentConfig]
     subagent_settings: SubagentSettings
@@ -201,24 +104,6 @@ class ConfigStore:
     def current_or_none(self) -> RuntimeConfig | None:
         """Return the current snapshot, or ``None`` when apply has not run."""
         return self._current
-
-    def commit(
-        self,
-        cfg: RuntimeConfig,
-        *,
-        config_path: Path | None = None,
-        agent_root: Path | None = None,
-    ) -> None:
-        """Atomically publish ``cfg`` as the process current snapshot."""
-        path = self._config_path if config_path is None else config_path
-        root = self._agent_root if agent_root is None else agent_root
-        self._current = cfg
-        self._config_path = path
-        self._agent_root = root
-        logger.info(
-            "config snapshot published %s",
-            kv(revision=cfg.revision, digest=cfg.digest, noop=False),
-        )
 
     def _set(
         self,
@@ -250,7 +135,10 @@ def env_value(cfg: RuntimeConfig | None, key: str, default: str = "") -> str:
 
     When ``cfg`` is set, missing snapshot keys return ``default`` and do not
     fall through to process env. An empty store (``cfg is None``) reads
-    ``os.environ``.
+    ``os.environ``. Layout-resolved paths (``SKILLS_PATH``, ``AGENT_MD``, …)
+    are exported to ``os.environ`` *after* apply, so they are not in the
+    snapshot unless they were also in YAML or pinned env — read those from
+    process env or ``AgentLayout``, not from a snapshot key.
     """
     if cfg is not None:
         val = cfg.env_values.get(key)
@@ -258,22 +146,9 @@ def env_value(cfg: RuntimeConfig | None, key: str, default: str = "") -> str:
     return os.environ.get(key, default)
 
 
-def env_flag(cfg: RuntimeConfig | None, key: str, *, default: bool) -> bool:
-    """Boolean env flag. Opt-out keys use ``default=True``; opt-in use ``default=False``."""
-    raw = env_value(cfg, key, "true" if default else "false").strip().lower()
-    if default:
-        return raw not in {"0", "false", "no", "off"}
-    return raw in {"1", "true", "yes", "on"}
-
-
 def current_env(key: str, default: str = "") -> str:
     """Read an ENV_MAP key from the process snapshot, else ``os.environ``."""
     return env_value(get_config_store().current_or_none(), key, default)
-
-
-def current_env_flag(key: str, *, default: bool) -> bool:
-    """Boolean ENV_MAP flag from the process snapshot, else ``os.environ``."""
-    return env_flag(get_config_store().current_or_none(), key, default=default)
 
 
 def current_env_or_none(key: str) -> str | None:
@@ -282,16 +157,6 @@ def current_env_or_none(key: str) -> str | None:
     if cfg is not None:
         return cfg.env_values.get(key)
     return os.environ.get(key)
-
-
-def context_window_tokens(cfg: RuntimeConfig | None = None, default: int = 200_000) -> int:
-    """Effective ``MODEL_CONTEXT_WINDOW`` from a pinned snapshot or process env."""
-    raw = env_value(cfg, "MODEL_CONTEXT_WINDOW", str(default)).strip()
-    try:
-        return max(1, int(raw))
-    except ValueError:
-        logger.warning("invalid MODEL_CONTEXT_WINDOW %s", kv(value=raw))
-        return default
 
 
 def pinned_env_names() -> frozenset[str]:
@@ -330,22 +195,16 @@ def build_runtime_config(
     warn_retired_curation_keys(merged)
     anchor = agent_root or resolve_agent_root(config_path=source_path)
     env_values = _effective_env(_flatten_config(merged), pinned, anchor)
-    content = _content_digests(env_values, anchor)
-    digest = _compute_digest(merged=merged, pinned=pinned, content=content)
+    digest = _compute_digest(merged=merged, pinned=pinned)
+    subagents, subagent_settings = _parse_subagents(merged)
     return RuntimeConfig(
         revision=revision,
         digest=digest,
         source_path=source_path,
         loaded_at=time.time(),
-        model=_model_from_env(env_values),
-        paths=_paths_from_env(env_values, content),
-        gateway=_gateway_from_env(env_values),
-        tools=_tools_from_env(env_values),
-        memory=_memory_from_env(env_values),
-        curation=_curation_from_env(env_values),
         realtime=realtime_config_from_doc(merged, env_values),
-        subagents=_subagents_from_doc(merged),
-        subagent_settings=_subagent_settings_from_doc(merged),
+        subagents=subagents,
+        subagent_settings=subagent_settings,
         env_values=env_values,
     )
 
@@ -409,201 +268,45 @@ def _effective_env(
     return out
 
 
-_HASH_CHUNK = 65536
-
-
-def _update_digest_from_file(digest: Any, path: Path) -> None:
-    with path.open("rb") as fh:
-        for chunk in iter(lambda: fh.read(_HASH_CHUNK), b""):
-            digest.update(chunk)
-
-
-def _hash_file(path: Path) -> str | None:
-    if not path.is_file():
-        return None
-    digest = hashlib.sha256()
-    _update_digest_from_file(digest, path)
-    return digest.hexdigest()
-
-
-def _hash_tree(path: Path) -> str | None:
-    if path.is_file():
-        return _hash_file(path)
-    if not path.is_dir():
-        return None
-    digest = hashlib.sha256()
-    for child in sorted(path.rglob("*")):
-        if not child.is_file():
-            continue
-        rel = child.relative_to(path).as_posix().encode()
-        digest.update(rel)
-        digest.update(b"\0")
-        _update_digest_from_file(digest, child)
-        digest.update(b"\0")
-    return digest.hexdigest()
-
-
-def _resolved_content_path(env_values: Mapping[str, str], env_key: str, anchor: Path) -> Path:
-    raw = env_values.get(env_key) or _DEFAULT_CONTENT_PATHS[env_key]
-    return resolve_agent_path(raw, anchor)
-
-
-def _content_digests(env_values: Mapping[str, str], anchor: Path) -> dict[str, str | None]:
-    return {
-        "agent_md": _hash_file(_resolved_content_path(env_values, "AGENT_MD", anchor)),
-        "skills": _hash_tree(_resolved_content_path(env_values, "SKILLS_PATH", anchor)),
-        "mcp_config": _hash_file(_resolved_content_path(env_values, "MCP_CONFIG", anchor)),
-        "command_allowlist": _hash_file(
-            _resolved_content_path(env_values, "COMMAND_ALLOWLIST_CONFIG", anchor)
-        ),
-        "permission_config": _hash_file(
-            _resolved_content_path(env_values, "PERMISSION_CONFIG", anchor)
-        ),
-    }
-
-
-def _compute_digest(
-    *,
-    merged: Mapping[str, Any],
-    pinned: Mapping[str, str],
-    content: Mapping[str, str | None],
-) -> str:
+def _compute_digest(*, merged: Mapping[str, Any], pinned: Mapping[str, str]) -> str:
     payload = {
         "yaml": merged,
         "pinned": {k: pinned[k] for k in sorted(pinned)},
-        "content": content,
     }
     blob = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha256(blob.encode()).hexdigest()
 
 
-def _model_from_env(env: Mapping[str, str]) -> ModelConfig:
-    return ModelConfig(
-        provider=env.get("MODEL_PROVIDER"),
-        name=env.get("MODEL_NAME"),
-        temperature=env.get("MODEL_TEMPERATURE"),
-        max_tokens=env.get("MODEL_MAX_TOKENS"),
-        thinking_budget=env.get("MODEL_THINKING_BUDGET"),
-        context_window=env.get("MODEL_CONTEXT_WINDOW"),
-        summarization_model=env.get("CONTEXT_SUMMARIZATION_MODEL"),
-        max_turns=env.get("MAX_TURNS"),
-        cache_retention=env.get("MODEL_CACHE_RETENTION"),
-        vertex_project_id=env.get("VERTEX_AI_PROJECT_ID"),
-        vertex_location=env.get("VERTEX_AI_LOCATION"),
-        anthropic_vertex_project_id=env.get("ANTHROPIC_VERTEX_PROJECT_ID"),
-        anthropic_vertex_region=env.get("ANTHROPIC_VERTEX_REGION"),
-        fake_provider_events=env.get("MONKEYBOT_FAKE_PROVIDER_EVENTS"),
-    )
+def _parse_subagents(
+    doc: Mapping[str, Any],
+) -> tuple[dict[str, SubagentConfig], SubagentSettings]:
+    """Parse ``subagents:`` for the snapshot.
 
-
-def _paths_from_env(env: Mapping[str, str], content: Mapping[str, str | None]) -> PathsConfig:
-    return PathsConfig(
-        agent_md=env.get("AGENT_MD"),
-        memory_path=env.get("MEMORY_PATH"),
-        memory_storage_uri=env.get("MEMORY_STORAGE_URI"),
-        skills_path=env.get("SKILLS_PATH"),
-        db_url=env.get("DB_URL"),
-        mcp_config=env.get("MCP_CONFIG"),
-        command_allowlist_config=env.get("COMMAND_ALLOWLIST_CONFIG"),
-        permission_config=env.get("PERMISSION_CONFIG"),
-        workspace_root=env.get("MONKEYBOT_WORKSPACE_ROOT"),
-        agent_id=env.get("MONKEYBOT_AGENT_ID"),
-        approvals_config=env.get("MONKEYBOT_APPROVALS_CONFIG"),
-        agent_md_digest=content.get("agent_md"),
-        skills_digest=content.get("skills"),
-        mcp_config_digest=content.get("mcp_config"),
-        command_allowlist_digest=content.get("command_allowlist"),
-        permission_config_digest=content.get("permission_config"),
-    )
-
-
-def _gateway_from_env(env: Mapping[str, str]) -> GatewayConfig:
-    return GatewayConfig(
-        log_level=env.get("LOG_LEVEL"),
-        port=env.get("PORT"),
-        gateway_port=env.get("GATEWAY_PORT"),
-        pending_response_timeout_sec=env.get("PENDING_RESPONSE_TIMEOUT_SEC"),
-        sse_replay_max=env.get("SSE_REPLAY_MAX"),
-        sse_nested_replay_max=env.get("SSE_NESTED_REPLAY_MAX"),
-        graceful_shutdown_timeout_sec=env.get("GRACEFUL_SHUTDOWN_TIMEOUT_SEC"),
-        cors_allow_origins=env.get("MONKEYBOT_CORS_ALLOW_ORIGINS"),
-        emission_style=env.get("MONKEYBOT_EMISSION_STYLE"),
-        transcript_enabled=env.get("MONKEYBOT_TRANSCRIPT_ENABLED"),
-        transcript_include_live=env.get("MONKEYBOT_TRANSCRIPT_INCLUDE_LIVE"),
-        harness_mode=env.get("MONKEYBOT_HARNESS_MODE"),
-    )
-
-
-def _tools_from_env(env: Mapping[str, str]) -> ToolsConfig:
-    return ToolsConfig(
-        denied_patterns=env.get("MONKEYBOT_TOOL_DENIED_PATTERNS"),
-        resume_thinking_budget=env.get("MONKEYBOT_RESUME_THINKING_BUDGET"),
-        web_search_backend=env.get("WEB_SEARCH_BACKEND"),
-        web_search_max_results=env.get("WEB_SEARCH_MAX_RESULTS"),
-        todo_list_enabled=env.get("MONKEYBOT_TODO_LIST_ENABLED"),
-        todo_list_mirror_to_disk=env.get("MONKEYBOT_TODO_LIST_MIRROR_TO_DISK"),
-        computer_enabled=env.get("MONKEYBOT_COMPUTER_TOOLS"),
-        sandbox_enabled=env.get("SANDBOX_ENABLED"),
-        sandbox_server_url=env.get("SANDBOX_SERVER_URL"),
-        sandbox_image=env.get("SANDBOX_IMAGE"),
-        sandbox_ttl_seconds=env.get("SANDBOX_TTL_SECONDS"),
-        sandbox_shared_filesystem=env.get("SANDBOX_SHARED_FILESYSTEM"),
-        scheduler_enabled=env.get("MONKEYBOT_SCHEDULER_ENABLED"),
-    )
-
-
-def _memory_from_env(env: Mapping[str, str]) -> MemoryConfig:
-    return MemoryConfig(
-        enabled=env.get("MONKEYBOT_MEMORY_HOOK_ENABLED"),
-        backend=env.get("MEMPALACE_BACKEND"),
-        embedding_model=env.get("MEMPALACE_EMBEDDING_MODEL"),
-    )
-
-
-def _curation_from_env(env: Mapping[str, str]) -> CurationConfig:
-    return CurationConfig(
-        enabled=env.get("CONTEXT_CURATION_ENABLED"),
-        memory_window_lines=env.get("CONTEXT_CURATION_MEMORY_WINDOW_LINES"),
-        memory_index_cap=env.get("MEMORY_INDEX_CAP"),
-        memory_token_threshold=env.get("CONTEXT_CURATION_MEMORY_TOKEN_THRESHOLD"),
-    )
-
-
-def _subagents_from_doc(doc: Mapping[str, Any]) -> dict[str, SubagentConfig]:
-    section = doc.get("subagents")
-    if not isinstance(section, dict):
-        return {}
-    out: dict[str, SubagentConfig] = {}
-    for cfg in _parse_subagent_entries(section.get("personas")):
-        out[cfg.name] = cfg
-    return out
-
-
-def _subagent_settings_from_doc(doc: Mapping[str, Any]) -> SubagentSettings:
-    """``subagents.timeout_sec`` / ``max_turns`` / ``vertex_google_search`` for the snapshot.
-
-    Parsed from the already-merged doc (not re-read from disk) so these join
-    the same digest/diff pipeline as every other tiered setting instead of
-    being read fresh from YAML at each subagent spawn, independent of which
-    ``RuntimeConfig`` revision the spawning turn is pinned to.
+    Invalid or legacy shapes (bare list, bad types) warn and fall back to
+    defaults so a malformed section cannot abort ``apply_monkeybot_runtime_env``
+    / ``bootstrap_agent_layout``. ``get_subagent_settings`` still raises when
+    the task tool actually asks for subagents.
     """
-    return _subagent_settings_from_section(_subagents_section(dict(doc)))
+    try:
+        section = _subagents_section(dict(doc))
+        settings = _subagent_settings_from_section(section)
+    except ConfigError as exc:
+        logger.warning("Ignoring invalid subagents section during snapshot load: %s", exc)
+        return {}, SubagentSettings()
+    personas: dict[str, SubagentConfig] = {}
+    for cfg in _parse_subagent_entries(section.get("personas")):
+        personas[cfg.name] = cfg
+    return personas, settings
 
 
 __all__ = [
     "ConfigStore",
-    "CurationConfig",
-    "GatewayConfig",
-    "MemoryConfig",
-    "ModelConfig",
-    "PathsConfig",
     "RuntimeConfig",
-    "ToolsConfig",
     "build_runtime_config",
-    "get_config_store",
-    "context_window_tokens",
-    "env_flag",
+    "current_env",
+    "current_env_or_none",
     "env_value",
+    "get_config_store",
     "load_into_store",
     "pinned_env_names",
     "reset_snapshot_state_for_tests",

@@ -124,17 +124,34 @@ def validate_provider_env(config: dict[str, str]) -> None:
         )
 
 
+def require_harness_mode(mode: str) -> None:
+    """Raise if ``mode`` is not a supported harness mode."""
+    normalized = str(mode).strip().lower()
+    if normalized not in SUPPORTED_HARNESS_MODES:
+        supported = ", ".join(sorted(SUPPORTED_HARNESS_MODES))
+        raise ConfigError(
+            f"harness.mode is set to '{normalized}' which is not supported.\n"
+            f"Supported modes: {supported}"
+        )
+
+
+def require_realtime_audio_format(fmt_key: str, fmt: str) -> None:
+    """Raise if a realtime audio format string is set and unsupported."""
+    normalized = str(fmt).strip().lower()
+    if normalized and normalized not in SUPPORTED_REALTIME_AUDIO_FORMATS:
+        supported = ", ".join(sorted(SUPPORTED_REALTIME_AUDIO_FORMATS))
+        raise ConfigError(
+            f"realtime.audio.{fmt_key} is set to '{normalized}' which is not supported.\n"
+            f"Supported formats: {supported}"
+        )
+
+
 def _validate_harness_mode(doc: dict[str, Any]) -> None:
     """Validate ``harness.mode`` if present. Defaults to ``turn_based``."""
     harness = doc.get("harness")
     if not isinstance(harness, dict):
         return
-    mode = str(harness.get("mode", "turn_based")).strip().lower()
-    if mode not in SUPPORTED_HARNESS_MODES:
-        supported = ", ".join(sorted(SUPPORTED_HARNESS_MODES))
-        raise ConfigError(
-            f"harness.mode is set to '{mode}' which is not supported.\nSupported modes: {supported}"
-        )
+    require_harness_mode(str(harness.get("mode", "turn_based")))
 
 
 def _validate_realtime_config(doc: dict[str, Any]) -> None:
@@ -166,13 +183,7 @@ def _validate_realtime_config(doc: dict[str, Any]) -> None:
     audio_raw = realtime_raw.get("audio")
     audio: dict[str, Any] = audio_raw if isinstance(audio_raw, dict) else {}
     for fmt_key in ("input_format", "output_format"):
-        fmt = str(audio.get(fmt_key, "pcm_s16le_24khz_mono")).strip().lower()
-        if fmt and fmt not in SUPPORTED_REALTIME_AUDIO_FORMATS:
-            supported = ", ".join(sorted(SUPPORTED_REALTIME_AUDIO_FORMATS))
-            raise ConfigError(
-                f"realtime.audio.{fmt_key} is set to '{fmt}' which is not supported.\n"
-                f"Supported formats: {supported}"
-            )
+        require_realtime_audio_format(fmt_key, str(audio.get(fmt_key, "pcm_s16le_24khz_mono")))
 
     chunk_ms = audio.get("chunk_ms")
     if chunk_ms is not None and (not isinstance(chunk_ms, int) or chunk_ms <= 0):
