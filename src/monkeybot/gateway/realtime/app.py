@@ -7,7 +7,6 @@ WebSocket endpoint. The existing ``gateway/sse/app.py`` is left untouched.
 from __future__ import annotations
 
 import contextlib
-import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -21,20 +20,19 @@ from .deps import RealtimeDependencies
 from .manager import RealtimeSessionManager
 from .routes import create_realtime_router
 
-logger = logging.getLogger(__name__)
-
 
 @contextlib.asynccontextmanager
 async def _combined_lifespan(app: FastAPI) -> AsyncIterator[None]:
     """SSE startup (turn-based /reply) plus realtime Live provider wiring.
 
-    Chat and talk share this process. SSE ``GatewayLoopPort`` reads module-level
-    ``_deps`` from ``gateway.sse.app``, so we must run SSE ``_startup`` here —
-    not only the realtime-only lifespan (which left /reply with a no-op loop).
+    Chat and talk share this process. SSE ``GatewayLoopPort`` reads the module
+    ``gateway_runtime`` singleton from ``gateway.sse.app``, so we must run SSE
+    ``_startup`` here — not only the realtime-only lifespan (which left /reply
+    with a no-op loop).
     """
-    from monkeybot.gateway.sse.app import _deps as sse_deps
     from monkeybot.gateway.sse.app import _shutdown as sse_shutdown
     from monkeybot.gateway.sse.app import _startup as sse_startup
+    from monkeybot.gateway.sse.app import gateway_runtime as sse_runtime
 
     deps: RealtimeDependencies = app.state.realtime_deps
 
@@ -42,18 +40,18 @@ async def _combined_lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Bridge shared process deps into RealtimeDependencies (no second DB open).
     deps.storage = app.state.storage
-    deps.mcp = sse_deps.mcp
-    deps.inspectors = list(sse_deps.inspectors)
-    deps.memory = sse_deps.memory
-    deps.hook_manager = sse_deps.hook_manager
-    deps.web_search_tool = sse_deps.web_search_tool
-    deps.run_command_allowed_commands = sse_deps.run_command_allowed_commands
-    deps.run_command_allowed_path_prefixes = sse_deps.run_command_allowed_path_prefixes
-    deps.subagent_registry = sse_deps.subagent_registry
+    deps.mcp = sse_runtime.mcp
+    deps.inspectors = list(sse_runtime.inspectors)
+    deps.memory = sse_runtime.memory
+    deps.hook_manager = sse_runtime.hook_manager
+    deps.web_search_tool = sse_runtime.web_search_tool
+    deps.run_command_allowed_commands = sse_runtime.run_command_allowed_commands
+    deps.run_command_allowed_path_prefixes = sse_runtime.run_command_allowed_path_prefixes
+    deps.subagent_registry = sse_runtime.subagent_registry
     deps.attachment_store = getattr(app.state, "attachment_store", None)
-    deps.loops_registry = sse_deps.loops_registry
-    deps.computer_tools = sse_deps.computer_tools
-    deps.computer_approvals_persist = sse_deps.computer_approvals_persist
+    deps.loops_registry = sse_runtime.loops_registry
+    deps.computer_tools = sse_runtime.computer_tools
+    deps.computer_approvals_persist = sse_runtime.computer_approvals_persist
     deps.bind_realtime_provider()
     deps.freeze()
 

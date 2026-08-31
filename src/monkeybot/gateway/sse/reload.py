@@ -6,6 +6,7 @@ import asyncio
 import hmac
 import logging
 import os
+import re
 import uuid
 from collections.abc import Mapping
 from typing import Any
@@ -15,6 +16,7 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
 from monkeybot.core.config.runtime_env import ENV_TIERS, ConfigTier
+from monkeybot.core.config.settings import ConfigError
 from monkeybot.core.config.snapshot import (
     ConfigDiff,
     RuntimeConfig,
@@ -28,7 +30,7 @@ from monkeybot.core.config.snapshot import (
 from monkeybot.core.context.tool_output_policy import invalidate_config_caches
 from monkeybot.core.layout import AgentLayout, resolve_agent_path
 from monkeybot.core.logging_utils import kv
-from monkeybot.core.mcp.mcp_client import MCPCatalogApplyResult
+from monkeybot.core.mcp.ports_mcp import MCPCatalogApplyResult
 from monkeybot.core.runtime.events import ConfigReloaded, event_to_json
 from monkeybot.gateway.sse.models import APIError
 from monkeybot.gateway.sse.session_bus import SessionRegistry
@@ -41,7 +43,7 @@ _turns_idle = asyncio.Event()
 _turns_idle.set()
 IDLE_TURN_WAIT_SEC = 60.0
 
-_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "testclient"})
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1"})
 _REDACT_ENV_KEYS = frozenset(
     {
         "DB_URL",
@@ -49,6 +51,7 @@ _REDACT_ENV_KEYS = frozenset(
         "SANDBOX_SERVER_URL",
     }
 )
+_SECRET_KEY_RE = re.compile(r"(^|_)(KEY|TOKEN|SECRET|CREDENTIAL)$|PASSWORD", re.IGNORECASE)
 _HOT_PATH_EXPORT = ("SKILLS_PATH", "AGENT_MD")
 _ADMIN_TOKEN_ENV = "MONKEYBOT_ADMIN_TOKEN"
 
@@ -68,7 +71,9 @@ def begin_in_flight_turn() -> None:
 def end_in_flight_turn() -> None:
     """Release the in-flight mark so MCP reconnect can proceed."""
     global _in_flight_turns
-    _in_flight_turns = max(0, _in_flight_turns - 1)
+    if _in_flight_turns <= 0:
+        raise RuntimeError("end_in_flight_turn without matching begin_in_flight_turn")
+    _in_flight_turns -= 1
     if _in_flight_turns == 0:
         _turns_idle.set()
 
@@ -152,7 +157,11 @@ def _looks_secret_url(value: str) -> bool:
 def _redact_env(env: Mapping[str, str]) -> dict[str, str]:
     out: dict[str, str] = {}
     for key, value in env.items():
-        if key in _REDACT_ENV_KEYS or _looks_secret_url(value):
+        if (
+            key in _REDACT_ENV_KEYS
+            or _SECRET_KEY_RE.search(key) is not None
+            or _looks_secret_url(value)
+        ):
             out[key] = "***"
         else:
             out[key] = value
@@ -224,14 +233,20 @@ def _gateway_runtime(fastapi_app: Any | None) -> Any | None:
     return getattr(getattr(fastapi_app, "state", None), "gateway_runtime", None)
 
 
-def _sync_realtime_deps(fastapi_app: Any | None, runtime: Any | None) -> None:
-    """Propagate committed SSE slices into ``RealtimeDependencies`` when combined."""
-    if fastapi_app is None or runtime is None:
+def _sync_realtime_live_slices(fastapi_app: Any | None, runtime: Any) -> None:
+    """Copy SSE live slices into RealtimeDependencies after a successful reload.
+
+    SSE-only processes have no ``realtime_deps`` and are skipped. In-flight
+    WebSocket sessions keep the provider they opened with; the next connect
+    rebuilds from the committed snapshot.
+    """
+    if fastapi_app is None:
         return
-    realtime_deps = getattr(getattr(fastapi_app, "state", None), "realtime_deps", None)
-    sync = getattr(realtime_deps, "sync_live_slices", None)
-    if callable(sync):
-        sync(runtime)
+    deps = getattr(getattr(fastapi_app, "state", None), "realtime_deps", None)
+    sync = getattr(deps, "sync_live_slices", None)
+    if not callable(sync):
+        return
+    sync(runtime)
 
 
 def _export_hot_paths(cfg: RuntimeConfig) -> None:
@@ -286,24 +301,41 @@ async def run_config_reload(
 ) -> ConfigReloadResponse:
     """Take the turn-boundary lock, rebuild the snapshot, apply live slices.
 
-    An ``env`` patch is staged before the snapshot rebuild (so digest/pin
-    computation sees it) and rolled back on any early return or exception —
-    unless the store actually commits — so a failed apply cannot leave
-    subprocess-facing ``os.environ`` ahead of the (still old) committed
+    An ``env`` patch is staged after the store has a snapshot (so first-load
+    pin capture sees operator env) and before the rebuild (so digest/pin
+    computation sees the patch). It is rolled back on any early return or
+    exception unless the store actually commits, so a failed apply cannot
+    leave subprocess-facing ``os.environ`` ahead of the (still old) committed
     revision.
     """
     async with _reload_lock:
         store = get_config_store()
-        prev_pins: dict[str, str | None] | None = None
+        prev_pins: dict[str, tuple[str | None, str | None]] | None = None
         pins_committed = False
+        runtime: Any | None = None
+        needs_apply = False
         try:
+            if store.current_or_none() is None:
+                load_into_store()
             if env:
                 prev_pins = capture_reload_pins(env.keys())
                 apply_reload_env_patch(env)
-            if store.current_or_none() is None:
-                load_into_store()
-                pins_committed = True
-            cfg, diff = store.prepare_reload()
+            try:
+                cfg, diff = store.prepare_reload()
+            except ConfigError as exc:
+                current = store.current_or_none()
+                report = ConfigReloadResponse(
+                    revision=current.revision if current is not None else 0,
+                    digest=current.digest if current is not None else "",
+                    error=str(exc),
+                )
+                _log_reload(report, noop=False)
+                raise APIError(
+                    400,
+                    "INVALID_CONFIG",
+                    str(exc),
+                    uuid.uuid4().hex,
+                ) from exc
             if diff.noop:
                 report = ConfigReloadResponse(revision=cfg.revision, digest=cfg.digest)
                 _log_reload(report, noop=True)
@@ -343,13 +375,14 @@ async def run_config_reload(
                     _log_reload(report, noop=False)
                     return report
 
-            store.commit(cfg)
+            cfg = store.commit(cfg)
             pins_committed = True
         finally:
             if prev_pins is not None and not pins_committed:
                 restore_reload_pins(prev_pins)
-        _sync_realtime_deps(fastapi_app, runtime)
         _export_hot_paths(cfg)
+        if runtime is not None and needs_apply:
+            _sync_realtime_live_slices(fastapi_app, runtime)
         report = _response_from_diff(cfg, diff, applied=applied, mcp=mcp_result, error=error)
         await _publish_reloaded(registry, report)
         _log_reload(report, noop=False)
@@ -378,10 +411,18 @@ def build_admin_router() -> APIRouter:
     ) -> ConfigReloadResponse:
         payload = body or ReloadRequest()
         registry = request.app.state.registry
-        return await run_config_reload(
+        report = await run_config_reload(
             registry=registry,
             fastapi_app=request.app,
             env=payload.env,
         )
+        if report.error is not None:
+            raise APIError(
+                500,
+                "RELOAD_APPLY_FAILED",
+                report.error,
+                uuid.uuid4().hex,
+            )
+        return report
 
     return router

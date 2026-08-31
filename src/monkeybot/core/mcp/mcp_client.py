@@ -32,6 +32,7 @@ from monkeybot.core.context.tool_result_ingress import (
     sanitize_tool_result_text,
 )
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.mcp.ports_mcp import MCPCatalogApplyResult
 from monkeybot.core.types.types_tools import ToolDef
 
 logger = logging.getLogger(__name__)
@@ -130,7 +131,11 @@ def interpolate_env_vars(value: Any, env: Mapping[str, str] | None = None) -> An
     without waiting for process env to be overwritten.
     """
     source: Mapping[str, str] = os.environ if env is None else {**os.environ, **dict(env)}
+    return _interpolate_with_source(value, source)
 
+
+def _interpolate_with_source(value: Any, source: Mapping[str, str]) -> Any:
+    """Recurse on ``value`` using a pre-merged env mapping."""
     if isinstance(value, str):
 
         def _sub(match: re.Match[str]) -> str:
@@ -138,9 +143,9 @@ def interpolate_env_vars(value: Any, env: Mapping[str, str] | None = None) -> An
 
         return _ENV_VAR_PATTERN.sub(_sub, value)
     if isinstance(value, dict):
-        return {str(k): interpolate_env_vars(v, env) for k, v in value.items()}
+        return {str(k): _interpolate_with_source(v, source) for k, v in value.items()}
     if isinstance(value, list):
-        return [interpolate_env_vars(item, env) for item in value]
+        return [_interpolate_with_source(item, source) for item in value]
     return value
 
 
@@ -400,16 +405,6 @@ class _ServerRecord:
     capabilities: dict[str, bool] | None = None
 
 
-@dataclass(frozen=True)
-class MCPCatalogApplyResult:
-    """Outcome of :meth:`MCPClient.apply_catalog_diff` (untouched children stay up)."""
-
-    reconnected: tuple[str, ...] = ()
-    kept: tuple[str, ...] = ()
-    removed: tuple[str, ...] = ()
-    added: tuple[str, ...] = ()
-
-
 # Status machine values (OpenCode-inspired; progressive-disclosure aware).
 MCP_STATUS_CONNECTED = "connected"
 MCP_STATUS_CATALOGUED = "catalogued"
@@ -615,11 +610,21 @@ class MCPClient:
         # Last-known status per server (catalogued / connected / failed / …).
         self._statuses: dict[str, dict[str, Any]] = {}
         # Snapshot env overlay for ``${VAR}`` interpolation (YAML-backed keys).
-        self._env_overlay: Mapping[str, str] | None = None
+        self._env_overlay: dict[str, str] | None = None
 
-    def set_env_overlay(self, env: Mapping[str, str] | None) -> None:
-        """Use snapshot env values when interpolating ``mcp.json`` ``${VAR}`` refs."""
-        self._env_overlay = env
+    @property
+    def env_overlay(self) -> dict[str, str] | None:
+        """Copied snapshot env used for ``mcp.json`` ``${VAR}`` interpolation, or ``None``."""
+        return None if self._env_overlay is None else dict(self._env_overlay)
+
+    def set_env_overlay(self, env: Mapping[str, str] | None) -> dict[str, str] | None:
+        """Use a copied snapshot of env values when interpolating ``mcp.json`` ``${VAR}`` refs.
+
+        Returns the previous overlay (also a copy) so callers can restore on failure.
+        """
+        prev = self.env_overlay
+        self._env_overlay = None if env is None else dict(env)
+        return prev
 
     def _set_status(self, name: str, status: str, **extra: Any) -> None:
         """Record lifecycle status for ``name`` (overwrites prior entry)."""
@@ -851,8 +856,13 @@ class MCPClient:
                 exc,
             )
 
-    async def disconnect(self, name: str) -> None:
-        """Tear down one server session; harmless if already disconnected."""
+    async def disconnect(self, name: str, *, record_status: bool = True) -> None:
+        """Tear down one server session; harmless if already disconnected.
+
+        ``record_status=False`` leaves the last status in place so a follow-up
+        reconnect can set ``failed`` / ``connected`` without flashing
+        ``catalogued``.
+        """
         rec = self._servers.pop(name, None)
         if rec is None:
             return
@@ -874,10 +884,11 @@ class MCPClient:
                 else:
                     raise
         finally:
-            if name in self._catalog:
-                self._set_status(name, MCP_STATUS_CATALOGUED)
-            else:
-                self._set_status(name, MCP_STATUS_DISCONNECTED)
+            if record_status:
+                if name in self._catalog:
+                    self._set_status(name, MCP_STATUS_CATALOGUED)
+                else:
+                    self._set_status(name, MCP_STATUS_DISCONNECTED)
 
     async def disconnect_all(self) -> None:
         """Disconnect every connected MCP server."""
@@ -1044,27 +1055,16 @@ class MCPClient:
     async def _reload_catalog_entry(self, name: str) -> None:
         """Re-parse mcp.json and replace one catalog entry (env interpolation included)."""
         path = self._config_path
-        if path is None or not path.is_file():
+        if path is None:
             return
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            logger.warning("mcp catalog refresh failed reading %s", path, exc_info=True)
+        servers_any = self._read_mcp_servers_file(path, raise_on_error=False)
+        if servers_any is None:
             return
-        if not isinstance(raw, dict):
-            return
-        raw = interpolate_env_vars(raw, self._env_overlay)
-        servers_any = raw.get("mcpServers")
-        if not isinstance(servers_any, dict):
-            return
-        spec = servers_any.get(name)
-        if not isinstance(spec, dict):
+        new_catalog, disabled = self._parse_catalog_entries(servers_any, path, raise_on_error=False)
+        if name in disabled or name not in new_catalog:
             self._catalog.pop(name, None)
             return
-        if spec.get("enabled") is False:
-            self._catalog.pop(name, None)
-            return
-        self._catalog[name] = dict(spec)
+        self._catalog[name] = new_catalog[name]
 
     def _log_connect_failure(
         self,
@@ -1132,12 +1132,14 @@ class MCPClient:
                 server_name,
                 config_path,
             )
+            err = MCPDiagnosticError(
+                server_name,
+                f"MCP server {server_name!r} is missing command or url",
+                remedy="Add a stdio command/args or a Streamable HTTP url in mcp.json.",
+            )
+            self._record_connect_failure(server_name, err)
             if raise_on_error:
-                raise MCPDiagnosticError(
-                    server_name,
-                    f"MCP server {server_name!r} is missing command or url",
-                    remedy="Add a stdio command/args or a Streamable HTTP url in mcp.json.",
-                )
+                raise err
             return []
         args_raw = spec.get("args")
         args_list = list(args_raw) if isinstance(args_raw, list) else []
@@ -1231,13 +1233,24 @@ class MCPClient:
     ) -> dict[str, Any] | None:
         """Parse interpolated ``mcpServers`` without mutating catalog/connections.
 
-        Returns ``None`` when the file is missing or invalid (and ``raise_on_error``
-        is False). An empty dict means a valid file with no servers.
+        Returns ``None`` when the file is missing, unreadable, or invalid (and
+        ``raise_on_error`` is False). An empty dict means a valid file with no
+        servers.
         """
         if not mcp_json_path.is_file():
             return None
 
-        raw_text = mcp_json_path.read_text(encoding="utf-8")
+        try:
+            raw_text = mcp_json_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            logger.error("mcp config unreadable %s", kv(path=str(mcp_json_path)))
+            if raise_on_error:
+                raise MCPDiagnosticError(
+                    "<mcp.json>",
+                    f"Cannot read MCP JSON in {mcp_json_path}: {exc}",
+                    remedy="Check that mcp.json exists and is readable.",
+                ) from exc
+            return None
         try:
             raw = json.loads(raw_text)
         except json.JSONDecodeError as exc:
@@ -1318,15 +1331,18 @@ class MCPClient:
     ) -> MCPCatalogApplyResult:
         """Reconnect only added/changed/removed servers; leave untouched children running.
 
-        Invalid JSON leaves the live catalog and connections alone. A missing file
-        is treated as an empty catalog (every connected server is disconnected).
+        Invalid JSON, an unreadable file, or a missing file leave the live catalog
+        and connections alone. A valid empty ``mcpServers`` object disconnects
+        every catalogued server. ``reconnected`` is only previously-connected
+        servers whose spec changed and came back up; first-time connects of
+        ``added`` servers are not listed there. Failed reconnects land in
+        ``failed`` with status ``failed`` (or ``needs_auth``).
         """
         parsed = self._read_mcp_servers_file(mcp_json_path, raise_on_error=raise_on_error)
-        if parsed is None and mcp_json_path.is_file():
+        if parsed is None:
             return MCPCatalogApplyResult(kept=tuple(sorted(self._servers)))
-        servers_any: dict[str, Any] = parsed if parsed is not None else {}
         new_catalog, disabled = self._parse_catalog_entries(
-            servers_any, mcp_json_path, raise_on_error=raise_on_error
+            parsed, mcp_json_path, raise_on_error=raise_on_error
         )
 
         old_catalog = dict(self._catalog)
@@ -1336,10 +1352,15 @@ class MCPClient:
         changed = {
             n for n in set(old_catalog) & set(new_catalog) if old_catalog[n] != new_catalog[n]
         }
+        pending_connect = {
+            n
+            for n in (changed | added)
+            if new_catalog[n].get("autoConnect") is True or (n in old_connected and n in changed)
+        }
 
         for name in sorted(removed | changed | disabled):
             if name in self._servers:
-                await self.disconnect(name)
+                await self.disconnect(name, record_status=name not in pending_connect)
 
         self._config_path = mcp_json_path
         for name in removed:
@@ -1352,29 +1373,26 @@ class MCPClient:
         for name, spec in new_catalog.items():
             self._catalog[name] = spec
             self._seen_servers.add(name)
-            if name not in self._servers:
+            if name not in self._servers and name not in pending_connect:
                 self._set_status(name, MCP_STATUS_CATALOGUED)
 
+        failed: list[str] = []
         reconnected: list[str] = []
-        for name in sorted(changed | added):
-            spec = new_catalog[name]
-            if spec.get("autoConnect") is True or (name in old_connected and name in changed):
-                try:
-                    await self._connect_from_spec(
-                        name,
-                        spec,
-                        mcp_json_path=mcp_json_path,
-                        raise_on_error=raise_on_error,
-                    )
-                    if name in self._servers:
-                        reconnected.append(name)
-                except Exception:
-                    logger.exception(
-                        "mcp catalog diff reconnect failed %s",
-                        kv(server=name, path=str(mcp_json_path)),
-                    )
-                    if raise_on_error:
-                        raise
+        for name in sorted(pending_connect):
+            await self._connect_from_spec(
+                name,
+                new_catalog[name],
+                mcp_json_path=mcp_json_path,
+                raise_on_error=raise_on_error,
+            )
+            if name in self._servers:
+                if name in changed:
+                    reconnected.append(name)
+            else:
+                failed.append(name)
+                status = (self._statuses.get(name) or {}).get("status")
+                if status not in (MCP_STATUS_FAILED, MCP_STATUS_NEEDS_AUTH):
+                    self._set_status(name, MCP_STATUS_FAILED)
 
         kept = tuple(
             sorted(n for n in old_connected if n in self._servers and n not in reconnected)
@@ -1382,8 +1400,9 @@ class MCPClient:
         result = MCPCatalogApplyResult(
             reconnected=tuple(reconnected),
             kept=kept,
-            removed=tuple(sorted(removed | disabled)),
+            removed=tuple(sorted(removed)),
             added=tuple(sorted(added)),
+            failed=tuple(failed),
         )
         logger.info(
             "mcp catalog diff applied %s",
@@ -1391,6 +1410,8 @@ class MCPClient:
                 reconnected=",".join(result.reconnected),
                 kept=",".join(result.kept),
                 removed=",".join(result.removed),
+                added=",".join(result.added),
+                failed=",".join(result.failed),
             ),
         )
         return result

@@ -6,6 +6,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from monkeybot.core.config.validation import (
+    require_harness_mode,
+    require_realtime_audio_format,
+)
 from monkeybot.core.config.yaml_loader import load_monkeybot_yaml_dict
 
 
@@ -114,12 +118,22 @@ def realtime_config_from_doc(
     mode = str(harness.get("mode", "turn_based")).strip().lower()
     if "MONKEYBOT_HARNESS_MODE" in env:
         mode = env["MONKEYBOT_HARNESS_MODE"].strip().lower()
+    require_harness_mode(mode)
     realtime_raw = doc.get("realtime")
     realtime: dict[str, Any] = realtime_raw if isinstance(realtime_raw, dict) else {}
 
     ws_port_raw = _to_int(_nested_get(realtime, "websocket", "port"), default=0)
     if "MONKEYBOT_REALTIME_WS_PORT" in env:
         ws_port_raw = _to_int(env["MONKEYBOT_REALTIME_WS_PORT"], default=ws_port_raw)
+
+    input_format = env.get("MONKEYBOT_REALTIME_AUDIO_INPUT_FORMAT") or str(
+        _nested_get(realtime, "audio", "input_format", default="pcm_s16le_24khz_mono")
+    )
+    output_format = env.get("MONKEYBOT_REALTIME_AUDIO_OUTPUT_FORMAT") or str(
+        _nested_get(realtime, "audio", "output_format", default="pcm_s16le_24khz_mono")
+    )
+    require_realtime_audio_format("input_format", input_format)
+    require_realtime_audio_format("output_format", output_format)
 
     return RealtimeConfig(
         enabled=mode == "realtime",
@@ -132,18 +146,8 @@ def realtime_config_from_doc(
             port=ws_port_raw or None,
         ),
         audio=RealtimeAudioConfig(
-            input_format=(
-                env.get("MONKEYBOT_REALTIME_AUDIO_INPUT_FORMAT")
-                or str(
-                    _nested_get(realtime, "audio", "input_format", default="pcm_s16le_24khz_mono")
-                )
-            ),
-            output_format=(
-                env.get("MONKEYBOT_REALTIME_AUDIO_OUTPUT_FORMAT")
-                or str(
-                    _nested_get(realtime, "audio", "output_format", default="pcm_s16le_24khz_mono")
-                )
-            ),
+            input_format=input_format,
+            output_format=output_format,
             chunk_ms=_overlay_int(
                 env,
                 "MONKEYBOT_REALTIME_AUDIO_CHUNK_MS",

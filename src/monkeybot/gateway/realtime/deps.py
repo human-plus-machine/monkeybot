@@ -1,14 +1,15 @@
 """Process-level dependencies for the realtime gateway.
 
-This mirrors the SSE gateway's ``_GatewayDeps`` but is owned by the realtime package so
+This mirrors the SSE gateway's ``GatewayRuntime`` but is owned by the realtime package so
 that the realtime app can be wired independently without modifying ``gateway/sse/app.py``.
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 from monkeybot.core.attachments.store import AttachmentStore
 from monkeybot.core.config.settings import SubagentConfig
@@ -19,6 +20,25 @@ from monkeybot.core.mcp.ports_mcp import MCPClientPort
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.persistence.backends import StorageBackend
 from monkeybot.core.tools.inspector import ToolInspector
+
+logger = logging.getLogger(__name__)
+
+
+class LivePolicySlices(Protocol):
+    """Hot-reloadable policy read by a realtime turn (inspectors, tools, allowlists).
+
+    Shared by :class:`RealtimeDependencies` and SSE ``GatewayRuntime`` so a
+    rename on either side fails at type-check instead of at runtime.
+    """
+
+    inspectors: list[ToolInspector]
+    hook_manager: HookManager | None
+    web_search_tool: Any | None
+    run_command_allowed_commands: list[str] | None
+    run_command_allowed_path_prefixes: list[str] | None
+    subagent_registry: dict[str, SubagentConfig]
+    computer_tools: list[Any]
+    computer_approvals_persist: Callable[[str, str], bool] | None
 
 
 @dataclass
@@ -77,6 +97,8 @@ class RealtimeDependencies:
         mode = normalize_model_provider(current_env("MODEL_PROVIDER", "google_vertexai"))
         if mode == "google_genai":
             api_key = os.environ.get("GEMINI_API_KEY", "")
+            if not api_key:
+                logger.warning("realtime MODEL_PROVIDER=google_genai but GEMINI_API_KEY is not set")
             provider: RealtimeProvider = GeminiLiveProvider(api_key=api_key)
         else:
             provider = GeminiLiveProvider()

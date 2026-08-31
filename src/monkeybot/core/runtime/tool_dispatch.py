@@ -10,7 +10,7 @@ from typing import cast
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.attachments.store import AttachmentStore
-from monkeybot.core.config.snapshot import env_value
+from monkeybot.core.config.snapshot import env_value_or_current
 from monkeybot.core.context import (
     TurnContext,
     refresh_tools_after_loops_change,
@@ -279,7 +279,7 @@ async def _resolve_inspector_decision(
                     prompt=decision.message,
                 )
                 timeout_sec = float(
-                    env_value(ctx.config, "PENDING_RESPONSE_TIMEOUT_SEC", "300")
+                    env_value_or_current(ctx.config, "PENDING_RESPONSE_TIMEOUT_SEC", "300")
                 )
                 payload = await _await_user_response_any(
                     bus, fut, call.call_id, timeout_sec=timeout_sec, config=ctx.config
