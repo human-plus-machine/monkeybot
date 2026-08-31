@@ -133,7 +133,9 @@ async def _prompt_input_tokens_for_history(
     (e.g. summarizer/curator calls that have no epoch of their own). Either way,
     the live tracker is never mutated by a budget recount.
     """
-    catalog = attachment_catalog.list_records() if attachment_catalog is not None else None
+    catalog = (
+        attachment_catalog.list_records() if attachment_catalog is not None else None
+    )
     stable = compose_stable_baseline(ctx, attachment_catalog=catalog)
     volatile_parts = compose_volatile_tail_parts(ctx, chat_messages=chat_messages)
     volatile = "".join(volatile_parts.values())
@@ -163,10 +165,7 @@ async def _prompt_input_tokens_for_history(
         system, resolved_messages, mid_conversation_update=mid_conversation_update
     )
     return await _provider_prompt_input_tokens(
-        provider,
-        provider_messages,
-        ctx.tools,
-        model=ctx.model,
+        provider, provider_messages, ctx.tools, model=ctx.model,
         vertex_google_search=vertex_google_search,
         hints=_provider_call_hints(ctx),
     )

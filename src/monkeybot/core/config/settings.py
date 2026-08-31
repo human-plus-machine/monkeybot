@@ -116,10 +116,10 @@ def _resolve_gcp_project_id() -> str:
     from monkeybot.core.config.snapshot import current_env
 
     return (
-        (os.getenv("GCP_PROJECT_ID") or "").strip()
+        current_env("GCP_PROJECT_ID").strip()
         or current_env("VERTEX_AI_PROJECT_ID").strip()
         or current_env("ANTHROPIC_VERTEX_PROJECT_ID").strip()
-        or (os.getenv("GOOGLE_CLOUD_PROJECT") or "").strip()
+        or current_env("GOOGLE_CLOUD_PROJECT").strip()
     )
 
 

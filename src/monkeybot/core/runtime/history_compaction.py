@@ -338,7 +338,9 @@ async def _summarize_history(
     window_tokens: int,
 ) -> int:
     """Compress middle history into one assistant summary row. Returns middle row count."""
-    head, middle, tail = split_messages_for_compaction(messages, window_tokens=window_tokens)
+    head, middle, tail = split_messages_for_compaction(
+        messages, window_tokens=window_tokens
+    )
     if not middle:
         return 0
     logger.debug(
@@ -372,7 +374,9 @@ async def _summarize_history(
         ),
     ]
     summary_text = ""
-    async with aclosing(cast(Any, provider.stream(summarize_messages, [], model=model))) as stream:
+    async with aclosing(
+        cast(Any, provider.stream(summarize_messages, [], model=model))
+    ) as stream:
         async for ev in stream:
             if isinstance(ev, TextDelta):
                 summary_text += ev.text

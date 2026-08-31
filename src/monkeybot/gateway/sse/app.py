@@ -32,7 +32,7 @@ from monkeybot.core.config.settings import (
     normalize_model_provider,
     vertex_google_search_enabled_from_config,
 )
-from monkeybot.core.config.snapshot import current_env, current_env_or_none
+from monkeybot.core.config.snapshot import context_window_tokens, current_env, current_env_or_none
 from monkeybot.core.context import LoopsToolRegistry, build_context
 from monkeybot.core.hooks import HookManager
 from monkeybot.core.knowledge import KnowledgeSubsystem, resolve_knowledge_settings
@@ -178,11 +178,7 @@ gateway_runtime = GatewayRuntime()
 
 
 def _env_context_window_tokens() -> int:
-    cap_raw = current_env("MODEL_CONTEXT_WINDOW", "200000").strip()
-    try:
-        return max(1, int(cap_raw))
-    except ValueError:
-        return 200_000
+    return context_window_tokens()
 
 
 def _resolved_workspace_paths() -> tuple[Path, Path, Path | None]:

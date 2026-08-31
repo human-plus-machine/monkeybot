@@ -313,10 +313,6 @@ class SessionRegistry:
         self._sessions[session_id] = bus
         return bus
 
-    def iter_buses(self) -> list[SessionBus]:
-        """Snapshot of live session buses (does not mutate the registry)."""
-        return list(self._sessions.values())
-
     def _workspace_for_spill(self) -> Path:
         """Workspace root for spill cleanup: injected path or ``paths.workspace_root`` from yaml."""
         if self._workspace_root is not None:

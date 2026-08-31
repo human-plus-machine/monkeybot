@@ -18,7 +18,7 @@ from monkeybot.core.config.settings import (
     normalize_model_provider,
     subagent_vertex_google_search_from_config,
 )
-from monkeybot.core.config.snapshot import current_env, current_env_or_none
+from monkeybot.core.config.snapshot import context_window_tokens, current_env, current_env_or_none
 from monkeybot.core.context import TurnContext, build_context
 from monkeybot.core.knowledge import KnowledgeSubsystem, resolve_knowledge_settings
 from monkeybot.core.knowledge.config import knowledge_enabled_from_config
@@ -348,11 +348,7 @@ async def _async_main() -> None:
             thread_id = f"subagent:{spill_session}:{uuid.uuid4().hex[:10]}"
         request_id = f"sub-{uuid.uuid4().hex[:12]}"
 
-        cap_raw = current_env("MODEL_CONTEXT_WINDOW", "200000").strip()
-        try:
-            context_window_tokens = max(1, int(cap_raw))
-        except ValueError:
-            context_window_tokens = 200_000
+        window_tokens = context_window_tokens()
 
         try:
             _ws_backend = _build_web_search_backend()
@@ -410,7 +406,7 @@ async def _async_main() -> None:
             model=envelope.model,
             include_task_tool=False,
             workspace_root=ws,
-            context_window_tokens=context_window_tokens,
+            context_window_tokens=window_tokens,
             enable_context_curation=False,
             extra_tools=extra_tools,
         )

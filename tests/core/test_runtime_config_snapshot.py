@@ -20,7 +20,14 @@ from monkeybot.core.config.settings import SubagentSettings
 
 @pytest.fixture(autouse=True)
 def _reset_runtime_env() -> Iterator[None]:
-    keys = (*ENV_MAP.values(), "MONKEYBOT_CONFIG", "GOOGLE_CLOUD_PROJECT", "WORKSPACE_ROOT")
+    keys = (
+        *ENV_MAP.values(),
+        "MONKEYBOT_CONFIG",
+        "GOOGLE_CLOUD_PROJECT",
+        "GOOGLE_CLOUD_LOCATION",
+        "GCP_PROJECT_ID",
+        "WORKSPACE_ROOT",
+    )
     before = {key: os.environ.get(key) for key in keys}
     for key in keys:
         os.environ.pop(key, None)
@@ -316,3 +323,38 @@ def test_layout_export_overlays_resolved_paths(
     assert current_env("DB_URL") == layout.db_url
     assert current_env("SKILLS_PATH") == os.environ["SKILLS_PATH"]
     assert get_config_store().current().revision == 1
+
+
+def test_overlay_env_values_updates_digest_keeps_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.config.snapshot import current_env, overlay_env_values
+
+    monkeypatch.chdir(tmp_path)
+    _write_yaml(tmp_path, "runtime:\n  port: 1\n")
+    apply_monkeybot_runtime_env()
+    before = get_config_store().current()
+    overlay_env_values({"SKILLS_PATH": "/tmp/skills-overlay"})
+    after = get_config_store().current()
+    assert after.revision == before.revision == 1
+    assert after.digest != before.digest
+    assert current_env("SKILLS_PATH") == "/tmp/skills-overlay"
+
+
+def test_extra_gcp_pins_are_visible_to_current_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.config.snapshot import current_env
+
+    monkeypatch.chdir(tmp_path)
+    _write_yaml(tmp_path, "runtime:\n  port: 1\n")
+    monkeypatch.setenv("GCP_PROJECT_ID", "gcp-pin")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "gcloud-pin")
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "us-east1")
+    apply_monkeybot_runtime_env()
+    cfg = get_config_store().current()
+    assert cfg.env_values["GCP_PROJECT_ID"] == "gcp-pin"
+    assert cfg.env_values["GOOGLE_CLOUD_PROJECT"] == "gcloud-pin"
+    assert cfg.env_values["GOOGLE_CLOUD_LOCATION"] == "us-east1"
+    monkeypatch.setenv("GCP_PROJECT_ID", "later")
+    assert current_env("GCP_PROJECT_ID") == "gcp-pin"

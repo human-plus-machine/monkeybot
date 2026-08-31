@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.config.realtime_config import RealtimeConfig
-from monkeybot.core.config.snapshot import current_env
+from monkeybot.core.config.snapshot import context_window_tokens, current_env
 from monkeybot.core.context import TurnContext, build_context
 from monkeybot.core.layout import AgentLayout
 from monkeybot.core.llm.realtime_provider import (
@@ -94,11 +94,7 @@ logger = logging.getLogger("monkeybot.gateway.realtime.routes")
 
 
 def _env_context_window_tokens() -> int:
-    cap_raw = current_env("MODEL_CONTEXT_WINDOW", "200000").strip()
-    try:
-        return max(1, int(cap_raw))
-    except ValueError:
-        return 200_000
+    return context_window_tokens()
 
 
 def _pending_response_timeout_sec() -> float:
