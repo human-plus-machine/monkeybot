@@ -262,6 +262,7 @@ def invalidate_config_caches() -> None:
     — that tracks live connections, not file contents.
     """
     cached_tool_output_policies.cache_clear()
+    # Function-local: core_tool_executor → spill_inventory → tool_shapers → this module.
     from monkeybot.core.tools.core_tool_executor import workspace_settings_from_config
     from monkeybot.core.tools.spill_inventory import spill_budgets_from_window
 

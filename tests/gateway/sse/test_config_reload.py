@@ -16,7 +16,7 @@ from monkeybot.core.config import (
     get_config_store,
     reset_runtime_env_state_for_tests,
 )
-from monkeybot.core.config.runtime_env import ENV_MAP, SUBAGENTS_DIFF_KEY
+from monkeybot.core.config.runtime_env import ENV_MAP
 from monkeybot.core.config.settings import ConfigError
 from monkeybot.core.config.snapshot import apply_reload_env_patch
 from monkeybot.core.layout import AgentLayout
@@ -28,6 +28,7 @@ from monkeybot.gateway.sse.app import (
     _RESTART_ONLY_ATTRS,
     GatewayRuntime,
 )
+from monkeybot.gateway.sse.models import APIError
 from monkeybot.gateway.sse.reload import (
     begin_in_flight_turn,
     end_in_flight_turn,
@@ -79,6 +80,10 @@ def _app_with_runtime(runtime: GatewayRuntime) -> FastAPI:
     return app
 
 
+def _loopback_transport(app: FastAPI, *, host: str = "127.0.0.1") -> ASGITransport:
+    return ASGITransport(app=app, client=(host, 0))
+
+
 @pytest.mark.asyncio
 async def test_admin_reload_digest_noop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _boot_fake(tmp_path, monkeypatch, "model:\n  provider: fake\n  name: stable\n")
@@ -86,7 +91,7 @@ async def test_admin_reload_digest_noop(tmp_path: Path, monkeypatch: pytest.Monk
     first = store.current()
     registry = SessionRegistry()
     app = create_app(registry=registry)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(transport=_loopback_transport(app), base_url="http://test") as client:
         r = await client.post("/admin/config/reload", json={})
     assert r.status_code == 200
     body = r.json()
@@ -113,7 +118,7 @@ async def test_admin_reload_reports_restart_required(
     )
     registry = SessionRegistry()
     app = create_app(registry=registry)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(transport=_loopback_transport(app), base_url="http://test") as client:
         r = await client.post("/admin/config/reload", json={})
     assert r.status_code == 200
     body = r.json()
@@ -125,7 +130,7 @@ async def test_admin_reload_reports_restart_required(
 async def test_admin_get_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _boot_fake(tmp_path, monkeypatch, "model:\n  provider: fake\n  name: flash\n")
     app = create_app()
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(transport=_loopback_transport(app), base_url="http://test") as client:
         r = await client.get("/admin/config")
     assert r.status_code == 200
     body = r.json()
@@ -267,7 +272,7 @@ async def test_rebuild_without_runtime_raises_503(
         encoding="utf-8",
     )
     app = create_app()
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(transport=_loopback_transport(app), base_url="http://test") as client:
         r = await client.post("/admin/config/reload", json={})
     assert r.status_code == 503
     assert r.json()["error"]["code"] == "GATEWAY_RUNTIME_NOT_BOUND"
@@ -294,14 +299,38 @@ async def test_invalid_subagents_surfaces_error(
         "    - name: helper\n      description: duplicate\n",
         encoding="utf-8",
     )
-    report = await run_config_reload(
-        registry=SessionRegistry(), fastapi_app=_app_with_runtime(runtime)
-    )
-    assert report.error is not None
-    assert "Duplicate subagent" in report.error
-    assert SUBAGENTS_DIFF_KEY not in report.applied
+    with pytest.raises(APIError) as exc_info:
+        await run_config_reload(
+            registry=SessionRegistry(), fastapi_app=_app_with_runtime(runtime)
+        )
+    assert exc_info.value.status_code == 400
+    assert "Duplicate subagent" in exc_info.value.message
     assert "helper" in runtime.subagent_registry
     assert get_config_store().current().revision == 1
+
+
+@pytest.mark.asyncio
+async def test_admin_reload_invalid_config_returns_400(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    yaml_path = _boot_fake(
+        tmp_path,
+        monkeypatch,
+        "model:\n  provider: fake\nsubagents:\n  personas:\n"
+        "    - name: helper\n      description: helps\n",
+    )
+    yaml_path.write_text(
+        "model:\n  provider: fake\nsubagents:\n  personas:\n"
+        "    - name: helper\n      description: helps\n"
+        "    - name: helper\n      description: duplicate\n",
+        encoding="utf-8",
+    )
+    app = create_app()
+    async with AsyncClient(transport=_loopback_transport(app), base_url="http://test") as client:
+        r = await client.post("/admin/config/reload", json={})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "INVALID_CONFIG"
+    assert "Duplicate subagent" in r.json()["error"]["message"]
 
 
 @pytest.mark.asyncio
@@ -331,6 +360,33 @@ async def test_mcp_catalog_exception_surfaces_error(
 
 
 @pytest.mark.asyncio
+async def test_admin_reload_apply_failure_returns_500(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mcp_json = tmp_path / "monkeybot_config" / "mcp.json"
+    mcp_json.parent.mkdir(exist_ok=True)
+    mcp_json.write_text('{"mcpServers": {}}', encoding="utf-8")
+    _boot_fake(tmp_path, monkeypatch, "model:\n  provider: fake\n")
+    mcp_json.write_text(
+        '{"mcpServers": {"srv": {"command": "true"}}}',
+        encoding="utf-8",
+    )
+    runtime = GatewayRuntime()
+    runtime.mcp = MCPClient()
+    runtime.mcp.apply_catalog_diff = AsyncMock(  # type: ignore[method-assign]
+        side_effect=RuntimeError("disconnect failed")
+    )
+    app = create_app()
+    app.state.gateway_runtime = runtime
+    async with AsyncClient(transport=_loopback_transport(app), base_url="http://test") as client:
+        r = await client.post("/admin/config/reload", json={})
+    assert r.status_code == 500
+    body = r.json()
+    assert "disconnect failed" in body["error"]
+    assert get_config_store().current().revision == 1
+
+
+@pytest.mark.asyncio
 async def test_env_patch_computer_tools_allowlist(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -344,7 +400,7 @@ async def test_env_patch_computer_tools_allowlist(
     registry = SessionRegistry()
     app = create_app(registry=registry)
     app.state.gateway_runtime = GatewayRuntime()
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(transport=_loopback_transport(app), base_url="http://test") as client:
         r = await client.post(
             "/admin/config/reload",
             json={"env": {"MONKEYBOT_TRANSCRIPT_ENABLED": "true"}},
@@ -385,12 +441,31 @@ async def test_admin_get_config_redacts_db_url(
         "paths:\n  db_url: postgresql://user:secret@db.example/monkeybot\n",
     )
     app = create_app()
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(transport=_loopback_transport(app), base_url="http://test") as client:
         r = await client.get("/admin/config")
     assert r.status_code == 200
     body = r.json()
     assert body["env"]["DB_URL"] == "***"
     assert "secret" not in r.text
+
+
+def test_redact_env_fails_closed_on_secret_names() -> None:
+    from monkeybot.gateway.sse.reload import _redact_env
+
+    out = _redact_env(
+        {
+            "MODEL_NAME": "flash",
+            "OPENAI_API_KEY": "sk-secret",
+            "MONKEYBOT_ADMIN_TOKEN": "s3cret",
+            "DB_PASSWORD": "hunter2",
+            "DB_URL": "sqlite:///local.db",
+        }
+    )
+    assert out["MODEL_NAME"] == "flash"
+    assert out["OPENAI_API_KEY"] == "***"
+    assert out["MONKEYBOT_ADMIN_TOKEN"] == "***"
+    assert out["DB_PASSWORD"] == "***"
+    assert out["DB_URL"] == "***"
 
 
 @pytest.mark.asyncio
@@ -407,13 +482,28 @@ async def test_admin_rejects_non_loopback(tmp_path: Path, monkeypatch: pytest.Mo
 
 
 @pytest.mark.asyncio
+async def test_admin_rejects_testclient_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _boot_fake(tmp_path, monkeypatch, "model:\n  provider: fake\n")
+    app = create_app()
+    async with AsyncClient(
+        transport=ASGITransport(app=app, client=("testclient", 0)),
+        base_url="http://test",
+    ) as client:
+        r = await client.post("/admin/config/reload", json={})
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "FORBIDDEN"
+
+
+@pytest.mark.asyncio
 async def test_admin_token_required_when_set(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("MONKEYBOT_ADMIN_TOKEN", "s3cret")
     _boot_fake(tmp_path, monkeypatch, "model:\n  provider: fake\n")
     app = create_app()
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(transport=_loopback_transport(app), base_url="http://test") as client:
         denied = await client.post("/admin/config/reload", json={})
         assert denied.status_code == 401
         ok = await client.post(
@@ -467,17 +557,39 @@ async def test_failed_reload_rolls_back_staged_env_patch(
         "    - name: helper\n      description: duplicate\n",
         encoding="utf-8",
     )
-    report = await run_config_reload(
-        registry=SessionRegistry(),
-        fastapi_app=_app_with_runtime(runtime),
-        env={"MONKEYBOT_TRANSCRIPT_ENABLED": "true"},
-    )
-    assert report.error is not None
-    assert "Duplicate subagent" in report.error
+    with pytest.raises(APIError) as exc_info:
+        await run_config_reload(
+            registry=SessionRegistry(),
+            fastapi_app=_app_with_runtime(runtime),
+            env={"MONKEYBOT_TRANSCRIPT_ENABLED": "true"},
+        )
+    assert exc_info.value.status_code == 400
+    assert "Duplicate subagent" in exc_info.value.message
     # The staged patch must not survive a reload that never committed.
     assert os.environ.get("MONKEYBOT_TRANSCRIPT_ENABLED") is None
     assert get_config_store().current().revision == 1
     assert get_config_store().current().env_values.get("MONKEYBOT_TRANSCRIPT_ENABLED") != "true"
+
+
+@pytest.mark.asyncio
+async def test_first_load_env_patch_keeps_operator_pins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.config.snapshot import pinned_env_names
+
+    monkeypatch.chdir(tmp_path)
+    _write_yaml(tmp_path, "model:\n  provider: fake\n  name: yaml-name\n")
+    monkeypatch.setenv("MODEL_NAME", "from-env")
+    monkeypatch.delenv("MONKEYBOT_TRANSCRIPT_ENABLED", raising=False)
+    reset_runtime_env_state_for_tests()
+    report = await run_config_reload(
+        registry=SessionRegistry(),
+        fastapi_app=None,
+        env={"MONKEYBOT_TRANSCRIPT_ENABLED": "true"},
+    )
+    assert report.error is None
+    assert "MODEL_NAME" in pinned_env_names()
+    assert get_config_store().current().model.name == "from-env"
 
 
 @pytest.mark.asyncio

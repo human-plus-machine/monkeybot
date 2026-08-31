@@ -6,12 +6,14 @@ import asyncio
 import hmac
 import logging
 import os
+import re
 import uuid
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from monkeybot.core.config.runtime_env import ENV_TIERS, ConfigTier
@@ -42,7 +44,7 @@ _turns_idle = asyncio.Event()
 _turns_idle.set()
 IDLE_TURN_WAIT_SEC = 60.0
 
-_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "testclient"})
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1"})
 _REDACT_ENV_KEYS = frozenset(
     {
         "DB_URL",
@@ -50,6 +52,7 @@ _REDACT_ENV_KEYS = frozenset(
         "SANDBOX_SERVER_URL",
     }
 )
+_SECRET_KEY_RE = re.compile(r"KEY|TOKEN|SECRET|PASSWORD", re.IGNORECASE)
 _HOT_PATH_EXPORT = ("SKILLS_PATH", "AGENT_MD")
 _ADMIN_TOKEN_ENV = "MONKEYBOT_ADMIN_TOKEN"
 
@@ -155,7 +158,11 @@ def _looks_secret_url(value: str) -> bool:
 def _redact_env(env: Mapping[str, str]) -> dict[str, str]:
     out: dict[str, str] = {}
     for key, value in env.items():
-        if key in _REDACT_ENV_KEYS or _looks_secret_url(value):
+        if (
+            key in _REDACT_ENV_KEYS
+            or _SECRET_KEY_RE.search(key) is not None
+            or _looks_secret_url(value)
+        ):
             out[key] = "***"
         else:
             out[key] = value
@@ -227,16 +234,6 @@ def _gateway_runtime(fastapi_app: Any | None) -> Any | None:
     return getattr(getattr(fastapi_app, "state", None), "gateway_runtime", None)
 
 
-def _sync_realtime_deps(fastapi_app: Any | None, runtime: Any | None) -> None:
-    """Propagate committed SSE slices into ``RealtimeDependencies`` when combined."""
-    if fastapi_app is None or runtime is None:
-        return
-    realtime_deps = getattr(getattr(fastapi_app, "state", None), "realtime_deps", None)
-    sync = getattr(realtime_deps, "sync_live_slices", None)
-    if callable(sync):
-        sync(runtime)
-
-
 def _export_hot_paths(cfg: RuntimeConfig) -> None:
     """Push unpinned HOT path values into process env for subprocess transport."""
     pins = pinned_env_names()
@@ -289,23 +286,23 @@ async def run_config_reload(
 ) -> ConfigReloadResponse:
     """Take the turn-boundary lock, rebuild the snapshot, apply live slices.
 
-    An ``env`` patch is staged before the snapshot rebuild (so digest/pin
-    computation sees it) and rolled back on any early return or exception —
-    unless the store actually commits — so a failed apply cannot leave
-    subprocess-facing ``os.environ`` ahead of the (still old) committed
+    An ``env`` patch is staged after the store has a snapshot (so first-load
+    pin capture sees operator env) and before the rebuild (so digest/pin
+    computation sees the patch). It is rolled back on any early return or
+    exception unless the store actually commits, so a failed apply cannot
+    leave subprocess-facing ``os.environ`` ahead of the (still old) committed
     revision.
     """
     async with _reload_lock:
         store = get_config_store()
-        prev_pins: dict[str, str | None] | None = None
+        prev_pins: dict[str, tuple[str | None, str | None]] | None = None
         pins_committed = False
         try:
+            if store.current_or_none() is None:
+                load_into_store()
             if env:
                 prev_pins = capture_reload_pins(env.keys())
                 apply_reload_env_patch(env)
-            if store.current_or_none() is None:
-                load_into_store()
-                pins_committed = True
             try:
                 cfg, diff = store.prepare_reload()
             except ConfigError as exc:
@@ -316,7 +313,12 @@ async def run_config_reload(
                     error=str(exc),
                 )
                 _log_reload(report, noop=False)
-                return report
+                raise APIError(
+                    400,
+                    "INVALID_CONFIG",
+                    str(exc),
+                    uuid.uuid4().hex,
+                ) from exc
             if diff.noop:
                 report = ConfigReloadResponse(revision=cfg.revision, digest=cfg.digest)
                 _log_reload(report, noop=True)
@@ -361,7 +363,6 @@ async def run_config_reload(
         finally:
             if prev_pins is not None and not pins_committed:
                 restore_reload_pins(prev_pins)
-        _sync_realtime_deps(fastapi_app, runtime)
         _export_hot_paths(cfg)
         report = _response_from_diff(cfg, diff, applied=applied, mcp=mcp_result, error=error)
         await _publish_reloaded(registry, report)
@@ -388,13 +389,16 @@ def build_admin_router() -> APIRouter:
     @router.post("/config/reload", response_model=ConfigReloadResponse)
     async def post_reload(
         request: Request, body: ReloadRequest | None = None
-    ) -> ConfigReloadResponse:
+    ) -> ConfigReloadResponse | JSONResponse:
         payload = body or ReloadRequest()
         registry = request.app.state.registry
-        return await run_config_reload(
+        report = await run_config_reload(
             registry=registry,
             fastapi_app=request.app,
             env=payload.env,
         )
+        if report.error is not None:
+            return JSONResponse(status_code=500, content=report.model_dump())
+        return report
 
     return router

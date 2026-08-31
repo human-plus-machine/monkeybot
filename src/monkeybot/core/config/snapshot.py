@@ -514,45 +514,49 @@ def pinned_env_names() -> frozenset[str]:
 
 
 def apply_reload_env_patch(patch: Mapping[str, str]) -> dict[str, str]:
-    """Update allowlisted app-owned pins. Returns the keys actually applied."""
-    global _PINNED_ENV
-    if _PINNED_ENV is None:
-        _PINNED_ENV = {}
+    """Update allowlisted app-owned pins. Returns the keys actually applied.
+
+    Captures operator env pins first so a patch cannot initialize ``_PINNED_ENV``
+    to ``{}`` and permanently skip :func:`_capture_pins`.
+    """
+    pinned = _capture_pins()
     applied: dict[str, str] = {}
     for key, value in patch.items():
         if key not in RELOAD_PIN_ALLOWLIST or not isinstance(value, str):
             continue
-        _PINNED_ENV[key] = value
+        pinned[key] = value
         os.environ[key] = value
         applied[key] = value
     logger.info("reload env patch applied %s", kv(keys=",".join(sorted(applied))))
     return applied
 
 
-def capture_reload_pins(keys: Iterable[str]) -> dict[str, str | None]:
-    """Snapshot current pin values for ``keys`` before staging an env patch.
+def capture_reload_pins(keys: Iterable[str]) -> dict[str, tuple[str | None, str | None]]:
+    """Snapshot pin *and* ``os.environ`` values for ``keys`` before an env patch.
 
-    Pair with :func:`restore_reload_pins` so a reload that fails after
-    :func:`apply_reload_env_patch` can roll pins (and ``os.environ``) back to
-    their pre-patch values instead of leaving subprocess transport ahead of
-    the (uncommitted) ``ConfigStore`` revision.
+    The two stores are not always in sync: an operator env var can be present
+    in ``os.environ`` while absent from ``_PINNED_ENV``. Pair with
+    :func:`restore_reload_pins` so rollback restores each independently
+    instead of ``pop``-ing a real env var that was never a pin.
     """
     current = _PINNED_ENV or {}
-    return {key: current.get(key) for key in keys}
+    return {key: (current.get(key), os.environ.get(key)) for key in keys}
 
 
-def restore_reload_pins(prev: Mapping[str, str | None]) -> None:
+def restore_reload_pins(prev: Mapping[str, tuple[str | None, str | None]]) -> None:
     """Undo a previously applied :func:`apply_reload_env_patch` on failure."""
     global _PINNED_ENV
     if _PINNED_ENV is None:
         _PINNED_ENV = {}
-    for key, value in prev.items():
-        if value is None:
+    for key, (pin_value, environ_value) in prev.items():
+        if pin_value is None:
             _PINNED_ENV.pop(key, None)
+        else:
+            _PINNED_ENV[key] = pin_value
+        if environ_value is None:
             os.environ.pop(key, None)
         else:
-            _PINNED_ENV[key] = value
-            os.environ[key] = value
+            os.environ[key] = environ_value
     logger.info("reload env patch rolled back %s", kv(keys=",".join(sorted(prev))))
 
 
