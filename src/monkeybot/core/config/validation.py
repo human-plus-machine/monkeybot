@@ -17,6 +17,8 @@ SUPPORTED_MODEL_PROVIDERS = frozenset(
         "vertex_anthropic",
         "huggingface",
         "ollama",
+        "ollama-cloud",
+        "ollama-local",
         "nvidia",
         "openrouter",
         "fake",
@@ -24,23 +26,17 @@ SUPPORTED_MODEL_PROVIDERS = frozenset(
     }
 )
 
-SUPPORTED_YAML_MODEL_PROVIDERS = frozenset(
+# Canonical ids plus YAML aliases (gemini → google_vertexai, ollama_cloud →
+# ollama-cloud, …). Env validation uses SUPPORTED_MODEL_PROVIDERS after
+# normalize_model_provider; YAML validation checks the raw string.
+SUPPORTED_YAML_MODEL_PROVIDERS = SUPPORTED_MODEL_PROVIDERS | frozenset(
     {
         "gemini",
         "vertex",
-        "google_vertexai",
-        "google_genai",
-        "openai",
-        "anthropic",
         "vertex-claude",
         "vertex_claude",
-        "vertex_anthropic",
-        "huggingface",
-        "ollama",
-        "nvidia",
-        "openrouter",
-        "fake",
-        "aws_bedrock",
+        "ollama_cloud",
+        "ollama_local",
     }
 )
 
