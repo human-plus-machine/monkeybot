@@ -244,7 +244,7 @@ async def test_reload_syncs_realtime_live_slices(
 
     rebuilt = object()
     monkeypatch.setattr(
-        "monkeybot.providers.gemini_live.GeminiLiveProvider",
+        "monkeybot.gateway.realtime.deps.GeminiLiveProvider",
         lambda *args, **kwargs: rebuilt,
     )
 
