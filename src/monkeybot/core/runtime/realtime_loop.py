@@ -27,10 +27,10 @@ from monkeybot.core.context import (
     refresh_tools_after_mcp_change,
 )
 from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
-from monkeybot.core.memory.ingest import persist_message
 from monkeybot.core.llm.provider import Message, ToolCall
 from monkeybot.core.llm.realtime_provider import RealtimeToolCall
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.memory.ingest import persist_message
 from monkeybot.core.messages.tool_integrity import cancelled_tool_result_text
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.persistence.transcript import TranscriptWriter
@@ -88,9 +88,7 @@ _REALTIME_LOOPS_NEW_SESSION_NOTE = (
 
 
 def _user_text_from_content(blocks: Sequence[ContentBlock]) -> str:
-    return " ".join(
-        b.text.strip() for b in blocks if isinstance(b, Text) and b.text.strip()
-    )
+    return " ".join(b.text.strip() for b in blocks if isinstance(b, Text) and b.text.strip())
 
 
 def _elicitation_user_data_text(user_data: object) -> str:
@@ -117,9 +115,7 @@ async def _resolve_elicitation_blocks(
     """
     out: list[ContentBlock] = []
     for block in blocks:
-        if not (
-            isinstance(block, ActionRequired) and isinstance(block.data, ElicitationAction)
-        ):
+        if not (isinstance(block, ActionRequired) and isinstance(block.data, ElicitationAction)):
             out.append(block)
             continue
         action = block.data
@@ -133,9 +129,7 @@ async def _resolve_elicitation_blocks(
                     elicitation_id=elicitation_id,
                 ),
             )
-            out.append(
-                Text(text=f"{action.message} (elicitation unavailable)")
-            )
+            out.append(Text(text=f"{action.message} (elicitation unavailable)"))
             continue
         fut = pending_bus.register_pending(elicitation_id)
         yield ActionRequiredEvent(
@@ -149,7 +143,7 @@ async def _resolve_elicitation_blocks(
         )
         try:
             payload = await _await_user_response_any(
-                pending_bus, fut, elicitation_id, timeout_sec=None
+                pending_bus, fut, elicitation_id, config=ctx.config
             )
         except asyncio.CancelledError:
             raise
@@ -254,9 +248,7 @@ async def _resolve_realtime_inspector_decision(
     tools, sets ``outcome.aborted``, and returns. Otherwise fills ``outcome``
     with the allow/deny decision.
     """
-    inspector_call = InspectorToolCall(
-        call_id=call.call_id, name=call.name, args=dict(call.args)
-    )
+    inspector_call = InspectorToolCall(call_id=call.call_id, name=call.name, args=dict(call.args))
     for insp in inspectors or []:
         decision = await insp.check(inspector_call, ctx)
         if decision.kind == "deny":
@@ -268,8 +260,7 @@ async def _resolve_realtime_inspector_decision(
         if pending_bus is None:
             outcome.allowed = False
             outcome.denial_message = (
-                decision.message
-                or "Confirmation required but realtime HITL is unavailable"
+                decision.message or "Confirmation required but realtime HITL is unavailable"
             )
             logger.warning(
                 "realtime HITL unavailable %s",
@@ -291,12 +282,10 @@ async def _resolve_realtime_inspector_decision(
         )
         try:
             payload = await _await_user_response_any(
-                pending_bus, fut, call.call_id, timeout_sec=None
+                pending_bus, fut, call.call_id, config=ctx.config
             )
         except asyncio.CancelledError:
-            if not confirm_wait_stopped_by_user(
-                pending_bus, call.call_id, cancelled=ctx.cancelled
-            ):
+            if not confirm_wait_stopped_by_user(pending_bus, call.call_id, cancelled=ctx.cancelled):
                 raise
             yield Error(request_id=ctx.request_id, error="Request cancelled")
             remaining = pending_calls[call_index:]
@@ -422,9 +411,7 @@ async def _execute_tool(
             exc_info=True,
         )
         result = ToolExecutionResult.err(str(exc))
-    result_summary = (
-        _blocks_to_sse_summary(result.blocks) if result.error is None else None
-    )
+    result_summary = _blocks_to_sse_summary(result.blocks) if result.error is None else None
     await _fire_hook(
         hook_manager,
         event=HookEvent.POST_TOOL,
@@ -581,9 +568,7 @@ async def run_realtime_turn(
                     args=dict(call.args),
                     parse_error=call.parse_error,
                 )
-                event, response = _tool_outcome(
-                    call, ctx.request_id, ToolExecutionResult.err(err)
-                )
+                event, response = _tool_outcome(call, ctx.request_id, ToolExecutionResult.err(err))
                 yield event
                 tool_results.append(response)
                 continue
@@ -677,9 +662,7 @@ async def run_realtime_turn(
                     "MCP registry mutated but tool executor has no mcp client %s",
                     kv(request_id=ctx.request_id, thread_id=ctx.thread_id),
                 )
-                raise RuntimeError(
-                    "tool executor missing mcp client after MCP registry mutation"
-                )
+                raise RuntimeError("tool executor missing mcp client after MCP registry mutation")
             ctx = refresh_tools_after_mcp_change(ctx, mcp_client)
             logger.info(
                 "refreshed ctx.tools after MCP registry change (realtime) %s",

@@ -2,12 +2,17 @@
 
 All providers resolve sampling once at construction via :func:`resolve_model_sampling`.
 :func:`~monkeybot.core.config.settings.get_provider_config` is the primary entry point;
-direct provider construction falls back to ``MODEL_TEMPERATURE`` / ``MODEL_MAX_TOKENS``.
+direct provider construction falls back to a pinned ``RuntimeConfig`` or
+``MODEL_TEMPERATURE`` / ``MODEL_MAX_TOKENS``.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from monkeybot.core.config.snapshot import RuntimeConfig
 
 DEFAULT_MODEL_TEMPERATURE = 0.7
 DEFAULT_MODEL_MAX_TOKENS = 60_000
@@ -25,19 +30,22 @@ def resolve_model_sampling(
     *,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    config: RuntimeConfig | None = None,
 ) -> ModelSamplingConfig:
-    """Resolve temperature and max output tokens from explicit args or environment."""
-    from monkeybot.core.config.snapshot import current_env
+    """Resolve temperature and max output tokens from args, snapshot, or environment."""
+    from monkeybot.core.config.snapshot import env_value_or_current
 
     resolved_temperature = (
         float(temperature)
         if temperature is not None
-        else float(current_env("MODEL_TEMPERATURE", str(DEFAULT_MODEL_TEMPERATURE)))
+        else float(
+            env_value_or_current(config, "MODEL_TEMPERATURE", str(DEFAULT_MODEL_TEMPERATURE))
+        )
     )
     resolved_max_tokens = (
         int(max_tokens)
         if max_tokens is not None
-        else int(current_env("MODEL_MAX_TOKENS", str(DEFAULT_MODEL_MAX_TOKENS)))
+        else int(env_value_or_current(config, "MODEL_MAX_TOKENS", str(DEFAULT_MODEL_MAX_TOKENS)))
     )
     return ModelSamplingConfig(
         temperature=resolved_temperature,

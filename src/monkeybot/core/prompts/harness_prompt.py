@@ -8,9 +8,13 @@ Tool names, parameters, and when-to-use guidance live in the JSON ``tools`` payl
 second catalog of the same tools.
 """
 
-from collections.abc import Sequence
+from __future__ import annotations
 
-from monkeybot.core.config.snapshot import current_env
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from monkeybot.core.config.snapshot import RuntimeConfig
 
 HARNESS_TOOL_CALL_PROTOCOL = """
 ### Tool-call protocol (strict)
@@ -104,9 +108,11 @@ When the reader is a subagent or orchestrator (`task` results, not user-facing a
 """
 
 
-def emission_style_terse_from_env() -> bool:
+def emission_style_terse_from_env(cfg: RuntimeConfig | None = None) -> bool:
     """True when ``MONKEYBOT_EMISSION_STYLE`` opts into the terse emission block."""
-    raw = current_env("MONKEYBOT_EMISSION_STYLE", "").strip().lower()
+    from monkeybot.core.config.snapshot import env_value_or_current
+
+    raw = env_value_or_current(cfg, "MONKEYBOT_EMISSION_STYLE", "").strip().lower()
     return raw in {"terse", "true", "1", "on", "yes"}
 
 

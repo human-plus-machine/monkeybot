@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import aclosing
 from typing import Any, cast
 
-from monkeybot.core.config.snapshot import current_env
+from monkeybot.core.config.snapshot import current_env, env_value
 from monkeybot.core.context import TurnContext
 from monkeybot.core.context.epoch import ContextEpochTracker
 from monkeybot.core.llm.provider import Done, Message, Provider, TextDelta
@@ -228,7 +228,19 @@ def _summarization_viable(
 
 
 def _summarization_model_id(ctx: TurnContext) -> str:
-    """Model id for history compression; env overrides ``ctx.summarization_model``, then ``ctx.model``."""
+    """Model id for history compression.
+
+    When ``ctx.config`` is pinned, do not re-read process env (turn isolation).
+    Without a snapshot, env still overrides ``ctx.summarization_model`` as before.
+    """
+    if ctx.config is not None:
+        ctx_sm = (ctx.summarization_model or "").strip()
+        if ctx_sm:
+            return ctx_sm
+        from_cfg = env_value(ctx.config, "CONTEXT_SUMMARIZATION_MODEL", "").strip()
+        if from_cfg:
+            return from_cfg
+        return ctx.model
     from_env = current_env("CONTEXT_SUMMARIZATION_MODEL", "").strip()
     if from_env:
         return from_env

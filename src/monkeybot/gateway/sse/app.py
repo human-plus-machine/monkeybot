@@ -32,7 +32,15 @@ from monkeybot.core.config.settings import (
     normalize_model_provider,
     vertex_google_search_enabled_from_config,
 )
-from monkeybot.core.config.snapshot import context_window_tokens, current_env, current_env_or_none
+from monkeybot.core.config.snapshot import (
+    RuntimeConfig,
+    context_window_tokens,
+    current_env,
+    current_env_or_none,
+    env_flag,
+    env_value,
+    get_config_store,
+)
 from monkeybot.core.context import LoopsToolRegistry, build_context
 from monkeybot.core.hooks import HookManager
 from monkeybot.core.knowledge import KnowledgeSubsystem, resolve_knowledge_settings
@@ -40,7 +48,7 @@ from monkeybot.core.knowledge.config import (
     knowledge_enabled_from_config,
     knowledge_read_only_from_env,
 )
-from monkeybot.core.layout import AgentLayout
+from monkeybot.core.layout import AgentLayout, resolve_agent_path
 from monkeybot.core.llm.provider import (
     Done,
     Provider,
@@ -60,7 +68,7 @@ from monkeybot.core.persistence.backends import (
     UsageStore,
     create_storage_backend,
 )
-from monkeybot.core.persistence.transcript import TranscriptWriter, transcript_enabled_from_env
+from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.runtime.events import AgentEvent, TurnComplete, UsageTotals, event_to_json
 from monkeybot.core.runtime.events import Error as AgentError
 from monkeybot.core.runtime.loop import SUMMARY_TRIGGER_RATIO
@@ -76,7 +84,7 @@ from monkeybot.gateway.sse.loop_port import UsagePort
 from monkeybot.gateway.sse.models import AgentUsageResponse, SessionUsageResponse
 from monkeybot.gateway.sse.routes import create_app as build_sse_app
 from monkeybot.gateway.sse.session_bus import SessionBus, SessionRegistry
-from monkeybot.todo_list import TodoListStore, TodoListTool, todo_list_enabled_from_env
+from monkeybot.todo_list import TodoListStore, TodoListTool
 from monkeybot.web_search import WebSearchTool
 from monkeybot.web_search import build_backend as _build_web_search_backend
 
@@ -181,10 +189,22 @@ def _env_context_window_tokens() -> int:
     return context_window_tokens()
 
 
-def _resolved_workspace_paths() -> tuple[Path, Path, Path | None]:
-    """Resolve writable workspace, read-only skills, and artifacts mount from the agent layout."""
+def _resolved_workspace_paths(
+    cfg: RuntimeConfig | None = None,
+) -> tuple[Path, Path, Path | None]:
+    """Resolve writable workspace, read-only skills, and artifacts mount.
+
+    ``SKILLS_PATH`` is HOT: prefer the turn-pinned snapshot (or the process
+    snapshot when called outside a turn) over process env so YAML path changes
+    apply on the next turn without overwriting spawn pins.
+    """
     layout = AgentLayout.from_environment()
-    return layout.workspace_root, layout.skills_path, layout.artifacts_path
+    skills = layout.skills_path
+    snap = cfg if cfg is not None else get_config_store().current_or_none()
+    raw = env_value(snap, "SKILLS_PATH", "").strip()
+    if raw:
+        skills = resolve_agent_path(raw, layout.agent_root)
+    return layout.workspace_root, skills, layout.artifacts_path
 
 
 def _memory_storage_uri() -> str:
@@ -354,11 +374,14 @@ def _scripted_fake_provider() -> Provider:
     return ScriptedFakeProvider(flat)
 
 
-def _resolve_provider() -> Provider:
-    mode = normalize_model_provider(current_env("MODEL_PROVIDER", "google_vertexai"))
+def _resolve_provider(cfg: RuntimeConfig | None = None) -> Provider:
+    snap = cfg if cfg is not None else get_config_store().current_or_none()
+    mode = normalize_model_provider(
+        env_value(snap, "MODEL_PROVIDER", "google_vertexai") or "google_vertexai"
+    )
     if mode == "fake":
         return _scripted_fake_provider()
-    return get_provider_config(provider=mode).provider
+    return get_provider_config(provider=mode, config=snap).provider
 
 
 class GatewayLoopPort:
@@ -389,6 +412,7 @@ class GatewayLoopPort:
         mcp = gateway_runtime.mcp
         inspectors = gateway_runtime.inspectors
         provider = bus.provider or gateway_runtime.provider
+        cfg = get_config_store().current_or_none()
 
         if mcp is None or provider is None:
             logger.error("gateway deps not initialized")
@@ -419,13 +443,15 @@ class GatewayLoopPort:
 
         executor: CoreToolExecutor | None = None
         try:
-            model_name = bus.model_name or current_env("MODEL_NAME", "gemini-2.5-flash")
+            model_name = bus.model_name or (
+                env_value(cfg, "MODEL_NAME", "gemini-2.5-flash") or "gemini-2.5-flash"
+            )
             agent_path = _default_agent_path(bus)
 
-            workspace_root, skills_resolved, artifacts_resolved = _resolved_workspace_paths()
+            workspace_root, skills_resolved, artifacts_resolved = _resolved_workspace_paths(cfg)
 
             transcript_writer: TranscriptWriter | None = None
-            if transcript_enabled_from_env():
+            if env_flag(cfg, "MONKEYBOT_TRANSCRIPT_ENABLED", default=False):
                 if bus.transcript_writer is None:
                     bus.transcript_writer = TranscriptWriter(
                         session_id, workspace_root=workspace_root
@@ -452,7 +478,7 @@ class GatewayLoopPort:
             )
             extra_tools.extend(gateway_runtime.computer_tools)
             todo_store = None
-            if todo_list_enabled_from_env():
+            if env_flag(cfg, "MONKEYBOT_TODO_LIST_ENABLED", default=True):
                 if bus.todo_store is None:
                     bus.todo_store = TodoListStore(session_id, workspace_root=workspace_root)
                     await bus.todo_store.hydrate_from_disk()
@@ -462,6 +488,7 @@ class GatewayLoopPort:
             storage_backend = getattr(serving.state, "storage", None)
             loops_available = storage_backend is not None
             loops_advertised = loops_available and gateway_runtime.loops_registry.advertised
+            summarization_model = env_value(cfg, "CONTEXT_SUMMARIZATION_MODEL", "").strip() or None
 
             try:
                 ctx = await build_context(
@@ -472,8 +499,9 @@ class GatewayLoopPort:
                     skills_path=skills_resolved,
                     mcp_client=mcp,
                     model=model_name,
+                    summarization_model=summarization_model,
                     cancelled=cancel_event,
-                    context_window_tokens=_env_context_window_tokens(),
+                    context_window_tokens=context_window_tokens(cfg),
                     workspace_root=workspace_root,
                     sse_bus=bus,
                     event_publisher=_SessionBusEventPublisher(bus),
@@ -483,6 +511,8 @@ class GatewayLoopPort:
                     loops_advertised=loops_advertised,
                     todo_store=todo_store,
                     approvals_persist=gateway_runtime.computer_approvals_persist,
+                    config=cfg,
+                    enable_context_curation=env_flag(cfg, "CONTEXT_CURATION_ENABLED", default=True),
                 )
             except Exception as exc:
                 logger.exception("build_context failed")
@@ -511,6 +541,7 @@ class GatewayLoopPort:
                 ),
                 subagent_registry=gateway_runtime.subagent_registry,
                 loops_registry=gateway_runtime.loops_registry,
+                config=cfg,
             )
             if transcript_writer is not None:
                 await transcript_writer.write_user_message(

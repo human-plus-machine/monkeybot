@@ -18,7 +18,13 @@ from monkeybot.core.config.settings import (
     normalize_model_provider,
     subagent_vertex_google_search_from_config,
 )
-from monkeybot.core.config.snapshot import context_window_tokens, current_env, current_env_or_none
+from monkeybot.core.config.snapshot import (
+    context_window_tokens,
+    current_env,
+    current_env_or_none,
+    env_value,
+    get_config_store,
+)
 from monkeybot.core.context import TurnContext, build_context
 from monkeybot.core.knowledge import KnowledgeSubsystem, resolve_knowledge_settings
 from monkeybot.core.knowledge.config import knowledge_enabled_from_config
@@ -192,9 +198,12 @@ def _event_for_ndjson_pipe(evt: AgentEvent) -> AgentEvent:
 
 
 def _resolve_provider() -> Provider:
-    mode = normalize_model_provider(current_env("MODEL_PROVIDER", "google_vertexai"))
+    cfg = get_config_store().current_or_none()
+    mode = normalize_model_provider(
+        env_value(cfg, "MODEL_PROVIDER", "google_vertexai") or "google_vertexai"
+    )
     if mode != "fake":
-        return get_provider_config(provider=mode).provider
+        return get_provider_config(provider=mode, config=cfg).provider
 
     import json
 
@@ -348,7 +357,8 @@ async def _async_main() -> None:
             thread_id = f"subagent:{spill_session}:{uuid.uuid4().hex[:10]}"
         request_id = f"sub-{uuid.uuid4().hex[:12]}"
 
-        window_tokens = context_window_tokens()
+        cfg = get_config_store().current_or_none()
+        window_tokens = context_window_tokens(cfg)
 
         try:
             _ws_backend = _build_web_search_backend()
@@ -409,6 +419,7 @@ async def _async_main() -> None:
             context_window_tokens=window_tokens,
             enable_context_curation=False,
             extra_tools=extra_tools,
+            config=cfg,
         )
 
         executor = CoreToolExecutor(
@@ -421,6 +432,7 @@ async def _async_main() -> None:
             run_command_allowed_commands=run_allow_cmds,
             run_command_allowed_path_prefixes=run_allow_paths,
             knowledge=knowledge,
+            config=cfg,
         )
         history = backend.history()
 

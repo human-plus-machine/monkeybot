@@ -40,6 +40,7 @@ from monkeybot.core.config.snapshot import (
     current_env_or_none,
     env_flag,
     env_value,
+    env_value_or_current,
     get_config_store,
 )
 from monkeybot.core.config.validation import (
@@ -73,6 +74,7 @@ __all__ = [
     "current_env_or_none",
     "env_flag",
     "env_value",
+    "env_value_or_current",
     "get_provider_config",
     "get_subagent_configs",
     "get_subagent_registry",
