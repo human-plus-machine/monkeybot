@@ -17,10 +17,12 @@ from fastapi.responses import JSONResponse
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.config.realtime_config import RealtimeConfig
 from monkeybot.core.config.snapshot import (
+    RuntimeConfig,
     context_window_tokens,
     current_env,
     env_flag,
     env_value,
+    env_value_or_current,
     get_config_store,
 )
 from monkeybot.core.context import TurnContext, build_context
@@ -99,9 +101,12 @@ from .wire import (
 logger = logging.getLogger("monkeybot.gateway.realtime.routes")
 
 
-def _pending_response_timeout_sec() -> float:
+def _pending_response_timeout_sec(cfg: RuntimeConfig | None = None) -> float:
     try:
-        return max(1.0, float(current_env("PENDING_RESPONSE_TIMEOUT_SEC", "300")))
+        return max(
+            1.0,
+            float(env_value_or_current(cfg, "PENDING_RESPONSE_TIMEOUT_SEC", "300")),
+        )
     except ValueError:
         return 300.0
 
@@ -374,7 +379,7 @@ async def _handle_assistant_boundary(
                         tool_name=event.tool_name,
                         prompt=event.prompt or f"Allow tool `{event.tool_name}`?",
                         arguments=dict(event.arguments or {}),
-                        timeout_sec=_pending_response_timeout_sec(),
+                        timeout_sec=_pending_response_timeout_sec(ctx.config),
                     ),
                 )
             elif isinstance(event, ActionRequiredEvent) and event.action_type == "elicitation":
@@ -397,7 +402,7 @@ async def _handle_assistant_boundary(
                         elicitation_id=event.id,
                         prompt=prompt,
                         schema=schema,
-                        timeout_sec=_pending_response_timeout_sec(),
+                        timeout_sec=_pending_response_timeout_sec(ctx.config),
                     ),
                 )
     except Exception:
@@ -530,9 +535,9 @@ async def _handle_provider_event(
         await _send_frame(
             ws,
             ServerUsageFrame(
-                    usage=state.metrics.to_usage_payload(
-                        context_window_tokens=context_window_tokens(ctx.config)
-                    )
+                usage=state.metrics.to_usage_payload(
+                    context_window_tokens=context_window_tokens(ctx.config)
+                )
             ),
         )
     elif isinstance(event, RealtimeInterrupted):

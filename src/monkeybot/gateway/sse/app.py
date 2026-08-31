@@ -189,16 +189,19 @@ def _env_context_window_tokens() -> int:
     return context_window_tokens()
 
 
-def _resolved_workspace_paths() -> tuple[Path, Path, Path | None]:
+def _resolved_workspace_paths(
+    cfg: RuntimeConfig | None = None,
+) -> tuple[Path, Path, Path | None]:
     """Resolve writable workspace, read-only skills, and artifacts mount.
 
-    ``SKILLS_PATH`` is HOT: prefer the pinned snapshot over process env so YAML
-    path changes apply on the next turn without overwriting spawn pins.
+    ``SKILLS_PATH`` is HOT: prefer the turn-pinned snapshot (or the process
+    snapshot when called outside a turn) over process env so YAML path changes
+    apply on the next turn without overwriting spawn pins.
     """
     layout = AgentLayout.from_environment()
     skills = layout.skills_path
-    cfg = get_config_store().current_or_none()
-    raw = env_value(cfg, "SKILLS_PATH", "").strip()
+    snap = cfg if cfg is not None else get_config_store().current_or_none()
+    raw = env_value(snap, "SKILLS_PATH", "").strip()
     if raw:
         skills = resolve_agent_path(raw, layout.agent_root)
     return layout.workspace_root, skills, layout.artifacts_path
@@ -445,7 +448,7 @@ class GatewayLoopPort:
             )
             agent_path = _default_agent_path(bus)
 
-            workspace_root, skills_resolved, artifacts_resolved = _resolved_workspace_paths()
+            workspace_root, skills_resolved, artifacts_resolved = _resolved_workspace_paths(cfg)
 
             transcript_writer: TranscriptWriter | None = None
             if env_flag(cfg, "MONKEYBOT_TRANSCRIPT_ENABLED", default=False):

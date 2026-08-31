@@ -203,6 +203,18 @@ def current_env(key: str, default: str = "") -> str:
     return env_value(get_config_store().current_or_none(), key, default)
 
 
+def env_value_or_current(cfg: RuntimeConfig | None, key: str, default: str = "") -> str:
+    """Read from a pinned snapshot, else the process store (else ``os.environ``).
+
+    ``env_value(None, …)`` skips the store and reads ``os.environ`` directly.
+    Call sites that used to go through ``current_env`` when unpinned should use
+    this helper so a live ``ConfigStore`` snapshot is not bypassed.
+    """
+    if cfg is not None:
+        return env_value(cfg, key, default)
+    return current_env(key, default)
+
+
 def current_env_flag(key: str, *, default: bool) -> bool:
     """Boolean ENV_MAP flag from the process snapshot, else ``os.environ``."""
     return env_flag(get_config_store().current_or_none(), key, default=default)
@@ -406,6 +418,7 @@ __all__ = [
     "context_window_tokens",
     "env_flag",
     "env_value",
+    "env_value_or_current",
     "get_config_store",
     "load_into_store",
     "overlay_env_values",

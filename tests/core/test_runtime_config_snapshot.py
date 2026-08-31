@@ -179,6 +179,22 @@ def test_env_value_prefers_pinned_snapshot(tmp_path: Path, monkeypatch: pytest.M
     assert env_value(None, "MODEL_NAME") == "env-later"
 
 
+def test_env_value_or_current_uses_store_when_unpinned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.config.snapshot import env_value, env_value_or_current
+
+    monkeypatch.chdir(tmp_path)
+    path = _write_yaml(tmp_path, "model:\n  name: snap-name\n")
+    monkeypatch.delenv("MODEL_NAME", raising=False)
+    apply_monkeybot_runtime_env(config_path=path, agent_root=tmp_path)
+    monkeypatch.setenv("MODEL_NAME", "env-later")
+    assert env_value(None, "MODEL_NAME") == "env-later"
+    assert env_value_or_current(None, "MODEL_NAME") == "snap-name"
+    cfg = get_config_store().current()
+    assert env_value_or_current(cfg, "MODEL_NAME") == "snap-name"
+
+
 def test_env_value_missing_snapshot_key_does_not_read_os_environ(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
